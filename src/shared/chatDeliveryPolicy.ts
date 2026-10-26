@@ -243,3 +243,11 @@ function withoutFencedCode(content: string): string {
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
+
+/** The options the desktop resolves a typed message with (ChatService):
+ *  the administrator role and its two handles. Shared so the phone and the
+ *  User's server resolve a draft the same way. */
+export const CHAT_DELIVERY_POLICY_OPTIONS: ChatDeliveryPolicyOptions = {
+  administratorRoleId: "administrator",
+  administratorHandles: ["assistant", "admin"]
+};

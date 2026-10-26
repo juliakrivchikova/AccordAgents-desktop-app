@@ -19,3 +19,10 @@ export { isChatMessageHiddenFromTimeline } from "./chatTimelineVisibility";
 // block becomes a card, so the bubble must not print it as well. One rule for
 // the desktop bubble and the phone's.
 export { stripChatControlBlocks } from "./chatControlBlocks";
+// Who a message is for, by the rules the desktop resolves a typed message
+// with: the phone resolves its own message the same way, over what it showed
+// the User, and the message carries the result to every member's home.
+export { CHAT_DELIVERY_POLICY_OPTIONS, resolveChatDeliveryTargets } from "./chatDeliveryPolicy";
+// `/goal` from the phone: the same parse and objective the desktop's composer
+// makes, carried on the message.
+export { nativeGoalObjective, parseNativeGoalCommand } from "./nativeGoalCommand";

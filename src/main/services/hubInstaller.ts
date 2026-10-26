@@ -118,6 +118,14 @@ export interface HubInstallerOptions {
   currentLink: () => Promise<HubLinkConfig | undefined>;
   /** Whether the desktop reaches the hub now (undefined: not linked). */
   reachable?: () => boolean | undefined;
+  /** Plain lines about the server's readers for Settings (a device that has
+   *  not read for long, changes held for long). */
+  notices?: () => Promise<string[]>;
+  /** Lines the User may dismiss (changes a device gave up on). */
+  dismissableNotices?: () => Promise<Array<{ id: string; text: string }>>;
+  /** Dismissable lines shown with or without a server (what the shared
+   *  relay's removal took off this desktop). */
+  standingNotices?: () => Promise<Array<{ id: string; text: string }>>;
   defaultRegion?: () => Promise<string | undefined>;
   run?: Run;
   fetchImpl?: typeof fetch;
@@ -155,9 +163,16 @@ export class HubInstaller {
     if (this.current) return this.withVersion({ ...this.snapshot, ...extra });
     const linked = await this.options.currentLink();
     const reachable = this.options.reachable?.();
-    const link = linked?.url ? { url: linked.url, ...(linked.server ? { server: linked.server } : {}), ...(reachable !== undefined ? { reachable } : {}) } : {};
-    if (this.snapshot.status === "failed") return this.withVersion({ ...this.snapshot, ...link, ...extra });
-    return this.withVersion(linked?.url ? { status: "ready", ...link, ...extra } : { status: "none", ...extra });
+    const notices = linked?.url ? await this.options.notices?.().catch(() => []) ?? [] : [];
+    const standing = await this.options.standingNotices?.().catch(() => []) ?? [];
+    const dismissable = [...standing, ...(linked?.url ? await this.options.dismissableNotices?.().catch(() => []) ?? [] : [])];
+    const lines = dismissable.length ? { dismissableNotices: dismissable } : {};
+    const link = linked?.url ? {
+      url: linked.url, ...(linked.server ? { server: linked.server } : {}), ...(reachable !== undefined ? { reachable } : {}),
+      ...(notices.length ? { notices } : {})
+    } : {};
+    if (this.snapshot.status === "failed") return this.withVersion({ ...this.snapshot, ...link, ...lines, ...extra });
+    return this.withVersion(linked?.url ? { status: "ready", ...link, ...lines, ...extra } : { status: "none", ...lines, ...extra });
   }
 
   /** The command for Settings; it names this desktop's key for the server

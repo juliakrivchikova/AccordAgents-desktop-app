@@ -3,14 +3,14 @@ import { CheckCircle2, Copy, Loader2, QrCode, ShieldX } from "lucide-react";
 import QRCode from "qrcode";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { CreateMobilePairingResult, MobileControlSettings } from "../../../shared/types";
+import type { CreatePhoneInviteResult, MobileControlSettings } from "../../../shared/types";
 import { writeClipboardText } from "../../../shared/clipboard";
 
 // The Revoke button is the only way to kill a pairing, and it needs the handle
 // returned when the pairing was created. Settings unmounts as soon as the user
 // leaves the screen, so the handle is kept here for the life of the app session
 // instead of dying with the component.
-let lastPairing: { result: CreateMobilePairingResult; qrDataUrl?: string } | undefined;
+let lastPairing: { result: CreatePhoneInviteResult; qrDataUrl?: string } | undefined;
 
 // The handle above outlives every render, so a test that wants the untouched
 // section has to clear it rather than rely on running first.
@@ -21,10 +21,8 @@ export function forgetDevicePairingForTests(): void {
 export function DevicePairingSection(props: {
   mobileControl?: MobileControlSettings;
 }): JSX.Element {
-  const [relayUrl, setRelayUrl] = useState("");
   const [staticOriginUrl, setStaticOriginUrl] = useState("");
-  const [outboxUrl, setOutboxUrl] = useState("");
-  const [result, setResult] = useState<CreateMobilePairingResult | undefined>(lastPairing?.result);
+  const [result, setResult] = useState<CreatePhoneInviteResult | undefined>(lastPairing?.result);
   const [qrDataUrl, setQrDataUrl] = useState<string | undefined>(lastPairing?.qrDataUrl);
   const [status, setStatus] = useState<"idle" | "busy" | "copied" | "revoked" | "error">("idle");
   const [confirmingRevoke, setConfirmingRevoke] = useState(false);
@@ -40,13 +38,12 @@ export function DevicePairingSection(props: {
   }, []);
 
   const defaults = props.mobileControl?.defaults;
-  const effectiveRelayUrl = relayUrl.trim() || defaults?.relayUrl || "";
   const effectiveStaticOriginUrl = staticOriginUrl.trim() || defaults?.staticOriginUrl || "";
-  const effectiveOutboxUrl = outboxUrl.trim() || defaults?.outboxUrl || "";
-  const canCreate = serverReady === true && effectiveRelayUrl.startsWith("wss://") && effectiveStaticOriginUrl.startsWith("https://") && status !== "busy";
+  // The phone pairs with the User's server; only the phone app's own address
+  // can differ from the usual one.
+  const canCreate = serverReady === true && /^https?:\/\//.test(effectiveStaticOriginUrl) && status !== "busy";
   const mobileUrl = result?.pwaUrl ?? result?.qrPayload;
-  const hasManagedDefaults = props.mobileControl?.provider === "accord-managed" && Boolean(defaults?.relayUrl && defaults.staticOriginUrl);
-  const showEndpointFields = !hasManagedDefaults;
+  const showEndpointFields = !defaults?.staticOriginUrl;
 
   async function createPairing(): Promise<void> {
     if (!canCreate) {
@@ -55,15 +52,11 @@ export function DevicePairingSection(props: {
     setStatus("busy");
     setError(undefined);
     try {
-      // Phone control is a device-scoped pairing: it is not tied to the chat
-      // it used to be started from, which is why it lives in Settings.
-      const next = await window.consensus.createMobilePairing({
-        purpose: "phone-control",
-        canRunCloudParticipants: true,
-        canInviteOthers: false,
-        relayUrl: relayUrl.trim() || undefined,
-        staticOriginUrl: staticOriginUrl.trim() || undefined,
-        outboxUrl: outboxUrl.trim() || undefined
+      // Phone control covers every chat: it is not tied to the chat it used
+      // to be started from, which is why it lives in Settings. The code is
+      // for the User's server: the phone pairs with it, not with this Mac.
+      const next = await window.consensus.createPhoneInvite({
+        staticOriginUrl: staticOriginUrl.trim() || undefined
       });
       setResult(next);
       const nextQrDataUrl = await QRCode.toDataURL(next.pwaUrl ?? next.qrPayload, {
@@ -80,8 +73,9 @@ export function DevicePairingSection(props: {
     }
   }
 
-  // W-J: revocation is terminal — the mailbox is destroyed and the same link
-  // can never be reactivated, so recovery from a misclick is a full re-pair.
+  // W-J: revocation is terminal — the code stops working on the User's server
+  // and a phone paired with it is removed, so recovery from a misclick is a
+  // full re-pair.
   // The first click asks; only the second revokes.
   async function revokePairing(): Promise<void> {
     if (!result || status === "busy") {
@@ -96,11 +90,7 @@ export function DevicePairingSection(props: {
     setStatus("busy");
     setError(undefined);
     try {
-      await window.consensus.revokeMobilePairing({
-        stableRoutingId: result.package.stableRoutingId,
-        rendezvousId: result.package.rendezvousId,
-        reason: "desktop-user"
-      });
+      await window.consensus.revokePhoneInvite({ inviteId: result.inviteId });
       lastPairing = undefined;
       setStatus("revoked");
     } catch (revokeError) {
@@ -162,26 +152,12 @@ export function DevicePairingSection(props: {
               <div className={`device-pairing-grid${showEndpointFields ? "" : " is-managed"}`}>
                 {showEndpointFields ? (
                   <div className="device-pairing-fields">
-                    <Label htmlFor="mobile-relay-url">Relay WSS URL</Label>
-                    <Input
-                      id="mobile-relay-url"
-                      value={relayUrl}
-                      placeholder={defaults?.relayUrl ?? "wss://relay.example.com/v1/relay"}
-                      onChange={(event) => setRelayUrl(event.target.value)}
-                    />
                     <Label htmlFor="mobile-static-origin">PWA origin</Label>
                     <Input
                       id="mobile-static-origin"
                       value={staticOriginUrl}
-                      placeholder={defaults?.staticOriginUrl ?? "https://app.example.com/mobile/"}
+                      placeholder="https://app.example.com/mobile/"
                       onChange={(event) => setStaticOriginUrl(event.target.value)}
-                    />
-                    <Label htmlFor="mobile-outbox-url">Mailbox outbox URL</Label>
-                    <Input
-                      id="mobile-outbox-url"
-                      value={outboxUrl}
-                      placeholder={effectiveOutboxUrl || "https://mailbox.example.com/v1/mailbox/events"}
-                      onChange={(event) => setOutboxUrl(event.target.value)}
                     />
                   </div>
                 ) : null}
@@ -189,9 +165,9 @@ export function DevicePairingSection(props: {
                   <div
                     className="device-pairing-qr"
                     aria-live="polite"
-                    data-pairing-purpose={result.package.purpose ?? ""}
+                    data-pairing-purpose="phone-control"
                     data-mobile-url={mobileUrl ?? ""}
-                    data-expires-at={result.package.expiresAt ?? ""}
+                    data-expires-at={result.expiresAt ?? ""}
                     data-revoked={status === "revoked" ? "true" : "false"}
                   >
                     {qrDataUrl ? (
@@ -206,7 +182,7 @@ export function DevicePairingSection(props: {
               {error ? <div className="device-pairing-error">{error}</div> : null}
               {confirmingRevoke ? (
                 <div className="device-pairing-error">
-                  This cannot be undone. The link stops working for good and the phone has to be paired again.
+                  This cannot be undone. The code stops working for good, a phone paired with it is removed, and it has to be paired again.
                 </div>
               ) : null}
               <div className="gen-actions">

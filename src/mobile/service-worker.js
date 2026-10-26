@@ -1,24 +1,21 @@
-const ASSET_VERSION = "2026-10-20-wake-in-settings";
+const ASSET_VERSION = "2026-10-26-phone-fixes";
 // Tied to the marker the documented deploy step bumps, so a new shell really
 // replaces the cached one rather than living beside it.
-const CACHE_NAME = `accordagents-mobile-shell-v70-${ASSET_VERSION}`;
+const CACHE_NAME = `accordagents-mobile-shell-v72-${ASSET_VERSION}`;
 const APP_SHELL = [
   "./",
   "./index.html",
   `./mobile-app.css?v=${ASSET_VERSION}`,
   `./mobile-app.js?v=${ASSET_VERSION}`,
   `./jsqr.js?v=${ASSET_VERSION}`,
-  // Everything the page loads before it can do anything. These were left out,
-  // so offline the phone had a shell and no journal, no signing key and no way
-  // to reach a machine. The worker imports the first of them itself.
+  // Everything the page loads before it can do anything: left out, offline
+  // the phone had a shell and no database description, no signing client and
+  // no shared rules. The worker imports two of them itself, unversioned.
   "./mobile-db.js",
   `./mobile-db.js?v=${ASSET_VERSION}`,
-  `./mobile-event-log.js?v=${ASSET_VERSION}`,
-  `./mobile-machine-wake.js?v=${ASSET_VERSION}`,
-  `./mobile-machine-command.js?v=${ASSET_VERSION}`,
-  "./mobile-machine-sealing.js?v=2026-09-07-pair-sealing-v1",
-  `./mobile-machine-channel.js?v=${ASSET_VERSION}`,
   `./mobile-shared.js?v=${ASSET_VERSION}`,
+  `./mobile-hub-client.js?v=${ASSET_VERSION}`,
+  "./mobile-hub-client.js",
   `./mobile-activity.js?v=${ASSET_VERSION}`,
   "./manifest.webmanifest",
   "./assets/accordagents-mark.png"
@@ -56,8 +53,8 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) {
     return;
   }
-  // Sync API responses must never be cached: serving a cached mailbox poll
-  // freezes the timeline at the first response for the whole session.
+  // API responses must never be cached: serving a cached read freezes the
+  // timeline at the first response for the whole session.
   if (url.pathname.startsWith("/v1/")) {
     return;
   }
@@ -92,36 +89,39 @@ self.addEventListener("fetch", (event) => {
   );
 });
 
-// W5 doorbell: a push is a wake signal and nothing more. The handler never
-// reads the push payload — routing comes only from device storage — and it
-// never decrypts: envelopes are stored sealed and the page opens them with
-// the seal key it alone holds. The notification stays opaque.
+// The doorbell: a push is a wake signal and nothing more. The handler never
+// reads the push payload — what it is about is read from the User's server,
+// with a request signed by this phone's own key — and the notification names
+// the chat and what happened in it, never the message text.
 // The page's description of this database, loaded rather than copied. The
 // worker used to carry its own version number, the page moved past it, and
 // IndexedDB refuses a version older than the one on disk -- so every
 // push-woken sync failed at the open, silently, because a push handler has
 // nobody to tell. Neither side can move alone now.
 importScripts("./mobile-db.js");
+// A phone paired with the User's server reads what a push is about from the
+// server, with a request signed by the phone's own key (the page made it and
+// keeps it in this database). Signing proves who asks; it opens nothing: the
+// server answers with which chat and what kind, and the page reads the rest.
+importScripts("./mobile-hub-client.js");
 const SCHEMA = self.AccordMobileDb;
 const META_STORE = SCHEMA.STORES.meta;
-const SEALED_STORE = SCHEMA.STORES.sealed;
-const MAILBOX_ACCESS_META_KEY = "mailboxAccess";
 // Mirrors the page keeps for this worker: chat titles, so a notification can
 // name the chat, and the chats the phone has not looked at, for the icon.
 const CHAT_TITLES_META_KEY = "chatTitles";
 const UNREAD_META_KEY = "unreadConversations";
-// The desktop appends one of these beside the batch it rings for: a reply
-// that finished, or a member that started waiting on a permission or a
-// choice. The kind is plaintext and is the only thing read here; a batch
-// without a notice says nothing about what happened in it.
+// What a notice the server keeps is about: a reply that finished, or a
+// member that started waiting on a permission or a choice.
 const REPLY_NOTICE_KIND = "mobile.notice.reply";
 const APPROVAL_NOTICE_KIND = "mobile.notice.approval";
+const HUB_PAIRING_META_KEY = "hub-pairing";
+const HUB_IDENTITY_META_KEY = "hub-identity";
 
-/** Only the two stores a push-woken sync actually touches: a worker that is a
+/** Only the store a push-woken sync actually touches: a worker that is a
  *  build behind must still deliver, not force a version for a store it will
  *  never open. */
 function openControlDb() {
-  return SCHEMA.openControlDb(indexedDB, [META_STORE, SEALED_STORE]);
+  return SCHEMA.openControlDb(indexedDB, [META_STORE]);
 }
 
 function dbRequest(request) {
@@ -131,106 +131,71 @@ function dbRequest(request) {
   });
 }
 
-async function backgroundMailboxSync() {
+/** What a push from the User's server is about: the notices this phone has
+ *  not seen, read from the server. Not synced when this phone is not paired
+ *  with a server. */
+async function backgroundHubSync() {
   let db;
+  let pairing;
+  let identity;
   try {
     db = await openControlDb();
-    const access = await dbRequest(db.transaction(META_STORE).objectStore(META_STORE).get(MAILBOX_ACCESS_META_KEY));
-    if (!access || !access.endpointUrl || !access.mailboxId || !access.token) {
-      return { synced: false, reason: "no mirrored credentials" };
-    }
-    // Hard rule: endpoint and mailbox id come only from device storage.
-    const url = new URL(access.endpointUrl);
-    url.searchParams.set("mailboxId", access.mailboxId);
-    url.searchParams.set("limit", "500");
-    url.searchParams.set("afterArrival", String(Math.max(0, Number(access.cursor) || 0)));
-    // The worker is the reader that shows the notification, so it is the one
-    // whose cursor the relay may believe: the doorbell must not ring again for
-    // what this device has already stored. The cursor sent here is the one
-    // committed by the previous sync — an acknowledgement of what is on the
-    // device, not of what is on the way.
-    url.searchParams.set("reader", "phone");
-    const response = await fetch(url.toString(), {
-      headers: { accept: "application/json", authorization: "Bearer " + access.token },
-      // Bound the background fetch: a stalled connection must not eat the push
-      // budget, because iOS revokes a subscription that repeatedly fails to
-      // show a notification.
-      signal: AbortSignal.timeout(10_000)
-    });
-    if (!response.ok) {
-      return { synced: false, reason: "HTTP " + response.status };
-    }
-    const body = await response.json();
-    const events = Array.isArray(body && body.events) ? body.events : [];
-    const epoch = typeof (body && body.epoch) === "string" ? body.epoch : "";
-    if (epoch && access.epoch && epoch !== access.epoch) {
-      // Box recreated: numbering restarted. Reset the cursor and let the
-      // page re-read and reconcile on next open. The write is awaited like
-      // the cursor-advance path below: returning into db.close() with the
-      // transaction still open risks losing the reset, and a stale cursor
-      // against renumbered storage is a silent gap. (W-B)
-      const resetTx = db.transaction(META_STORE, "readwrite");
-      resetTx.objectStore(META_STORE).put({ ...access, key: MAILBOX_ACCESS_META_KEY, epoch, cursor: 0 });
-      await new Promise((resolve, reject) => {
-        resetTx.oncomplete = resolve;
-        resetTx.onerror = () => reject(resetTx.error);
-      });
-      return { synced: false, reason: "epoch reset" };
-    }
-    let cursor = Math.max(0, Number(access.cursor) || 0);
-    const tx = db.transaction([SEALED_STORE, META_STORE], "readwrite");
-    const sealedStore = tx.objectStore(SEALED_STORE);
-    let storedCount = 0;
-    // What arrived, by chat, in plaintext metadata only: the sealed payload is
-    // never opened here. Enough to say "which chat" and "reply or approval".
-    const arrivals = [];
-    for (const envelope of events) {
-      if (!envelope || typeof envelope.eventId !== "string") {
-        continue;
-      }
-      sealedStore.put(envelope);
-      storedCount += 1;
-      arrivals.push({
-        conversationId: typeof envelope.conversationId === "string" ? envelope.conversationId : "",
-        kind: typeof envelope.kind === "string" ? envelope.kind : ""
-      });
-      if (Number.isFinite(envelope.arrivalSeq) && envelope.arrivalSeq > cursor) {
-        cursor = envelope.arrivalSeq;
-      }
-    }
-    tx.objectStore(META_STORE).put({ ...access, key: MAILBOX_ACCESS_META_KEY, epoch: epoch || access.epoch, cursor });
-    await new Promise((resolve, reject) => {
-      tx.oncomplete = resolve;
-      tx.onerror = () => reject(tx.error);
-    });
-    // What the relay may be told once the notification is on screen: see
-    // acknowledgeStored. Never before it — the notification is the whole point
-    // of the wake-up, and iOS gives the handler little time.
-    const acknowledge = cursor > Math.max(0, Number(access.cursor) || 0)
-      ? { endpointUrl: access.endpointUrl, mailboxId: access.mailboxId, token: access.token, cursor: cursor }
-      : undefined;
-    return { synced: true, stored: storedCount, cursor, arrivals, acknowledge };
+    pairing = await dbRequest(db.transaction(META_STORE).objectStore(META_STORE).get(HUB_PAIRING_META_KEY));
+    identity = await dbRequest(db.transaction(META_STORE).objectStore(META_STORE).get(HUB_IDENTITY_META_KEY));
   } catch (error) {
     return { synced: false, reason: String(error && error.message || error) };
   } finally {
-    if (db) {
-      db.close();
-    }
+    if (db) db.close();
+  }
+  if (!pairing || !pairing.hubUrl || !identity || !identity.privateKeyDerBase64 || !self.AccordHubClient) {
+    return { synced: false, reason: "not paired with a server" };
+  }
+  try {
+    const client = self.AccordHubClient.createHubDeviceClient({ hubUrl: pairing.hubUrl, identity: async () => identity });
+    const answer = await client.getJson("/v1/phone/notices", {}, { timeoutMs: 8_000 });
+    const notices = Array.isArray(answer && answer.notices) ? answer.notices : [];
+    return {
+      synced: true,
+      stored: notices.length,
+      arrivals: notices.map((notice) => ({
+        conversationId: typeof notice.conversationId === "string" ? notice.conversationId : "",
+        kind: notice.kind === "approval" ? APPROVAL_NOTICE_KIND : REPLY_NOTICE_KIND,
+        title: typeof notice.title === "string" ? notice.title : ""
+      })),
+      hubAcknowledge: Number.isSafeInteger(answer && answer.head) ? { hubUrl: pairing.hubUrl, through: answer.head, identity } : undefined
+    };
+  } catch (error) {
+    return { synced: false, reason: String(error && error.message || error) };
+  }
+}
+
+/** Tells the server this phone has shown what it was rung for. */
+async function acknowledgeHubNotices(result) {
+  const ack = result && result.hubAcknowledge;
+  if (!ack || !self.AccordHubClient) return;
+  try {
+    const client = self.AccordHubClient.createHubDeviceClient({ hubUrl: ack.hubUrl, identity: async () => ack.identity });
+    await client.postJson("/v1/phone/seen", { through: ack.through }, { timeoutMs: 5_000 });
+  } catch {
+    // The next push reads them again; a repeated notice replaces the old one.
   }
 }
 
 /** Names the chats that just moved and what happened in each, from the
- *  titles the page mirrored. Message text never reaches a notification: the
- *  payloads are sealed and stay sealed. Also grows the unread mirror so the
- *  icon number is right before the page next opens. Returns one notification
- *  per chat, or nothing when the arrivals name no known chat. */
+ *  titles the page mirrored (or the title the server gave). Message text
+ *  never reaches a notification. Also grows the unread mirror so the icon
+ *  number is right before the page next opens. Returns one notification per
+ *  chat, or nothing when the arrivals name no known chat. */
 async function describeArrivals(arrivals) {
   const byConversation = new Map();
   const touched = new Set();
+  // A server names the chat itself; the page's mirror wins when it has one.
+  const named = new Map();
   for (const arrival of arrivals) {
     if (!arrival.conversationId) {
       continue;
     }
+    if (typeof arrival.title === "string" && arrival.title.trim()) named.set(arrival.conversationId, arrival.title.trim());
     touched.add(arrival.conversationId);
     if (arrival.kind !== REPLY_NOTICE_KIND && arrival.kind !== APPROVAL_NOTICE_KIND) {
       continue;
@@ -277,14 +242,13 @@ async function describeArrivals(arrivals) {
   await tellPagesUnreadChanged();
   const notifications = [];
   for (const [conversationId, entry] of byConversation) {
-    const title = typeof titles[conversationId] === "string" ? titles[conversationId].trim() : "";
+    const title = typeof titles[conversationId] === "string" && titles[conversationId].trim() ? titles[conversationId].trim() : named.get(conversationId) || "";
     if (!title) {
       continue;
     }
     // Read on a lock screen, in one glance: what happened, and where. The
-    // name of whoever wrote it stays out — it lives inside the sealed payload
-    // this worker deliberately never opens. An approval outranks a reply: it
-    // is the one that is waiting on the User.
+    // name of whoever wrote it stays out, as the message text does. An
+    // approval outranks a reply: it is the one that is waiting on the User.
     const body = entry.approval ? `Approval needed in ${title}` : `New message in ${title}`;
     notifications.push({ conversationId, body, approval: entry.approval });
   }
@@ -356,36 +320,13 @@ async function showArrivalNotifications(result, namedOnly) {
   return true;
 }
 
-/** Tells the relay what this device now holds, so its doorbell does not ring
- *  again for it. Sent after the notification, never before: the wake-up exists
- *  to show that notification, and an extra request in front of it spends the
- *  handler's time. Best effort — losing it costs one extra ring, never a
- *  missing one. */
-async function acknowledgeStored(result) {
-  const ack = result && result.acknowledge;
-  if (!ack) return;
-  try {
-    const url = new URL(ack.endpointUrl);
-    url.searchParams.set("mailboxId", ack.mailboxId);
-    url.searchParams.set("limit", "1");
-    url.searchParams.set("afterArrival", String(ack.cursor));
-    url.searchParams.set("reader", "phone");
-    await fetch(url.toString(), {
-      headers: { accept: "application/json", authorization: "Bearer " + ack.token },
-      signal: AbortSignal.timeout(5_000)
-    });
-  } catch {
-    // The next sync says it again.
-  }
-}
-
 self.addEventListener("push", (event) => {
   event.waitUntil((async () => {
     // Always show a notification, even if the background sync fails: a push
     // that does not surface a notification counts against the subscription on
     // iOS. The page catches up on open regardless.
     let result;
-    const sync = backgroundMailboxSync();
+    const sync = backgroundHubSync();
     try {
       // A sync that takes too long is the same thing to iOS as no sync at all:
       // the handler is cut off with nothing shown, and that counts against the
@@ -418,13 +359,13 @@ self.addEventListener("push", (event) => {
         }
       }
     }
-    await acknowledgeStored(settled);
+    await acknowledgeHubNotices(settled);
   })());
 });
 
 // Harness hook: runs the same background sync as a push, with no arguments —
-// anything the message carries (including an endpoint) is ignored by
-// construction, which is exactly what the payload-isolation test proves.
+// anything the message carries (including a server address) is ignored by
+// construction: what is read, and from where, comes only from device storage.
 self.addEventListener("message", (event) => {
   if (!event.data || (event.data.type !== "accord-test-push" && event.data.type !== "accord-test-describe")) {
     return;
@@ -439,9 +380,9 @@ self.addEventListener("message", (event) => {
       }
       return;
     }
-    const result = await backgroundMailboxSync();
+    const result = await backgroundHubSync();
     if (event.source) {
-      event.source.postMessage({ type: "accord-test-push-done", result });
+      event.source.postMessage({ type: "accord-test-push-done", result: result && result.hubAcknowledge ? { ...result, hubAcknowledge: { through: result.hubAcknowledge.through } } : result });
     }
   })());
 });

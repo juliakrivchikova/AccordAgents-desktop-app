@@ -31,13 +31,8 @@ export const DEVICE_EVENT_SCHEMA_SQL = `
     stamp text not null,
     primary key(channel_id, conversation_id, message_id)
   );
-  create table if not exists device_event_mailbox_cursors (
-    channel_id text not null,
-    reader_id text not null,
-    epoch text not null,
-    arrival_seq integer not null,
-    primary key(channel_id, reader_id)
-  );
+  -- Where each relay mailbox was read to, from before the relay was removed.
+  drop table if exists device_event_mailbox_cursors;
   create table if not exists device_event_outbox (
     event_id text not null references chat_events(event_id),
     device_id text not null,
@@ -115,25 +110,6 @@ export class DeviceEventStorage {
     await this.database.execute(durable(`
       insert into schema_meta(key, value) values (${quote(`device-channel-home:${channelId}`)}, ${quote(machineId)})
       on conflict(key) do update set value = case when value = excluded.value then value else null end;
-    `));
-  }
-
-  async mailboxCursor(channelId: string, readerId: string): Promise<{ epoch: string; arrivalSeq: number }> {
-    await this.database.init();
-    return (await this.database.query<{ epoch: string; arrivalSeq: number }>(`
-      select epoch, arrival_seq as arrivalSeq from device_event_mailbox_cursors
-      where channel_id = ${quote(channelId)} and reader_id = ${quote(readerId)};
-    `))[0] ?? { epoch: "", arrivalSeq: 0 };
-  }
-
-  async saveMailboxCursor(channelId: string, readerId: string, cursor: { epoch: string; arrivalSeq: number }): Promise<void> {
-    requireCursor(cursor.arrivalSeq);
-    await this.database.init();
-    await this.database.execute(durable(`
-      insert into device_event_mailbox_cursors(channel_id, reader_id, epoch, arrival_seq)
-        values (${quote(channelId)}, ${quote(readerId)}, ${quote(cursor.epoch)}, ${cursor.arrivalSeq})
-      on conflict(channel_id, reader_id) do update set epoch = excluded.epoch,
-        arrival_seq = case when epoch = excluded.epoch then max(arrival_seq, excluded.arrival_seq) else excluded.arrival_seq end;
     `));
   }
 
@@ -472,6 +448,72 @@ export class DeviceEventStorage {
     return { events, blobs };
   }
 
+  /**
+   * Forgets this device's own events of the channels the User's hub carries
+   * once the hub has them (at or before `pushedThroughRowid`) and they are
+   * older than the cutoff. The hub's order is where every reader reads them;
+   * this device keeps the newest event of each chain (the next one continues
+   * it) and anything a relay recipient still waits for. Bodies are left to
+   * the search for unreferenced ones (collectOrphans), which looks at every
+   * event that might still point to them.
+   */
+  async pruneOwnDeviceEvents(localOriginId: string, options: { pushedThroughRowid: number; cutoffIso: string; scopePrefixes: readonly string[]; exactScopes?: readonly string[]; limit?: number }): Promise<number> {
+    const prefixes = options.scopePrefixes.filter((prefix) => prefix.startsWith("device:") && prefix.length <= 512);
+    // Whole scopes of this device's own that are not channels (the approval
+    // cards a desktop publishes for the phone).
+    const exact = (options.exactScopes ?? []).filter((scope) => scope.length > 0 && scope.length <= 512 && !scope.startsWith("device:"));
+    if ((prefixes.length === 0 && exact.length === 0) || options.pushedThroughRowid <= 0) return 0;
+    await this.database.init();
+    const channel = prefixes.length
+      ? `(e.log_scope_id >= 'device:' and e.log_scope_id < 'device;' and (${prefixes.map((prefix) => `substr(e.log_scope_id, 1, ${prefix.length}) = ${quote(prefix)}`).join(" or ")}))`
+      : "0";
+    const scopes = exact.length ? `${channel} or e.log_scope_id in (${exact.map(quote).join(", ")})` : channel;
+    const rows = await this.database.query<{ events: number }>(durable(`
+      begin immediate;
+      create temp table if not exists device_events_pruned(event_id text primary key);
+      delete from temp.device_events_pruned;
+      insert into temp.device_events_pruned(event_id)
+        select e.event_id from chat_events e
+        where e.origin_id = ${quote(localOriginId)} and (${scopes})
+          and e.rowid <= ${Math.floor(options.pushedThroughRowid)} and e.received_at < ${quote(options.cutoffIso)}
+          and e.kind not in (${OWN_EVENTS_KEPT_KINDS.map(quote).join(", ")})
+          and e.origin_seq < (select max(n.origin_seq) from chat_events n where n.origin_id = e.origin_id and n.log_scope_id = e.log_scope_id)
+          and not exists (select 1 from device_event_outbox o where o.event_id = e.event_id and o.acknowledged_at is null)
+        limit ${Math.max(1, Math.floor(options.limit ?? 2_000))};
+      delete from device_event_outbox where event_id in (select event_id from temp.device_events_pruned);
+      delete from device_event_inbox where event_id in (select event_id from temp.device_events_pruned);
+      delete from chat_events where event_id in (select event_id from temp.device_events_pruned);
+      select count(*) as events from temp.device_events_pruned;
+      delete from temp.device_events_pruned;
+      commit;
+    `));
+    return Number(rows[0]?.events ?? 0) || 0;
+  }
+
+  /**
+   * A stretch of a chain the User's hub forgot by design (both ends had read
+   * it, or it was a run's live progress): this device continues the chain
+   * after it. Events of that stretch received here but not applied are
+   * recorded as superseded. False when this device was already past it.
+   */
+  async skipTo(originId: string, logScopeId: string, originSeq: number, eventHash: string, at: string): Promise<boolean> {
+    requireCursor(originSeq);
+    await this.database.init();
+    const rows = await this.database.query<{ moved: number }>(durable(`
+      begin immediate;
+      insert into device_event_applied_heads(origin_id, log_scope_id, origin_seq, event_hash)
+        values (${quote(originId)}, ${quote(logScopeId)}, ${Math.floor(originSeq)}, ${quote(eventHash)})
+      on conflict(origin_id, log_scope_id) do update set origin_seq = excluded.origin_seq, event_hash = excluded.event_hash
+        where excluded.origin_seq > device_event_applied_heads.origin_seq;
+      select changes() as moved;
+      update device_event_inbox set applied_at = ${quote(at)}, outcome = 'superseded'
+        where applied_at is null and event_id in (select event_id from chat_events
+          where origin_id = ${quote(originId)} and log_scope_id = ${quote(logScopeId)} and origin_seq <= ${Math.floor(originSeq)});
+      commit;
+    `));
+    return Number(rows[0]?.moved ?? 0) > 0;
+  }
+
   async gaps(channelId: string, deviceId?: string): Promise<DeviceEventGap[]> {
     await this.database.init();
     return this.database.query<DeviceEventGap>(`
@@ -682,6 +724,12 @@ export class DeviceEventStorage {
     return events;
   }
 }
+
+/** Own events that are looked up by their id later, as proof that something
+ *  was already sent or done (a turn's command while its run is pending, a
+ *  stop, an approval's or a choice's result): they are never forgotten here,
+ *  or a late repeat would be taken for a first time. */
+const OWN_EVENTS_KEPT_KINDS = ["machine.turn.request", "machine.turn.cancel", "machine.approval.result", "machine.choice.result"] as const;
 
 function quote(value: string): string {
   // The sqlite3 shell reads statements line by line and a NUL ends a line:

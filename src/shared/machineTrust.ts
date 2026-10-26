@@ -2,6 +2,8 @@
  * information. Content keys are derived locally by each pair of devices;
  * no symmetric key belongs in a roster or access response. */
 
+import type { HubPhoneScope } from "./hubProtocol";
+
 export type TrustedPeerRole = "desktop" | "phone" | "machine";
 
 export interface TrustedPeerAccess {
@@ -9,13 +11,12 @@ export interface TrustedPeerAccess {
   publicKeyDerBase64: string;
   role: TrustedPeerRole;
   name?: string;
-  /** The room this peer listens in, and the key that seals it. */
+  /** Where the room this peer listens in is: its socket on the User's
+   *  server. (Named from the shared relay the rooms were once on; the name
+   *  stays because installed machine runtimes read it.) */
   relayUrl: string;
   rendezvousId: string;
-  relaySealKeyBase64?: string;
-  outboxUrl?: string;
-  /** The room's capability fingerprint: the relay admits a connection only
-   *  when it presents the one the room was opened with. */
+  /** The room's capability fingerprint, as the room was opened with. */
   fingerprint?: string;
   /** For a machine peer: the id members carry as `homeMachineId`. */
   machineId?: string;
@@ -30,6 +31,11 @@ export interface MachineTrustRoster {
   issuerDeviceId: string;
   updatedAt: string;
   peers: TrustedPeerAccess[];
+  /** Phone invites this roster settles: a phone that enrolled with one of
+   *  them is trusted only while it is among the peers. A phone that enrolled
+   *  with an invite not named here (while the desktop was away) is trusted by
+   *  its certificate, which the owner's key signed. */
+  resolvedInviteIds?: string[];
 }
 
 function nonEmpty(value: unknown): value is string {
@@ -48,7 +54,8 @@ export function isMachineTrustRoster(value: unknown): value is MachineTrustRoste
   if (!value || typeof value !== "object") return false;
   const roster = value as Partial<MachineTrustRoster>;
   return roster.version === 1 && nonEmpty(roster.issuerDeviceId) && nonEmpty(roster.updatedAt)
-    && Array.isArray(roster.peers) && roster.peers.every(isTrustedPeerAccess);
+    && Array.isArray(roster.peers) && roster.peers.every(isTrustedPeerAccess)
+    && (roster.resolvedInviteIds === undefined || (Array.isArray(roster.resolvedInviteIds) && roster.resolvedInviteIds.every(nonEmpty)));
 }
 
 /** The roster as this machine should hold it. The enrollment separately keeps
@@ -59,7 +66,8 @@ export function normalizeMachineTrustRoster(roster: MachineTrustRoster, selfDevi
     if (peer.deviceId === selfDeviceId) continue;
     peers.set(peer.deviceId, peer);
   }
-  return { version: 1, issuerDeviceId: roster.issuerDeviceId, updatedAt: roster.updatedAt, peers: [...peers.values()] };
+  return { version: 1, issuerDeviceId: roster.issuerDeviceId, updatedAt: roster.updatedAt, peers: [...peers.values()],
+    ...(roster.resolvedInviteIds?.length ? { resolvedInviteIds: [...roster.resolvedInviteIds] } : {}) };
 }
 
 /** Rooms to join, with the peers expected in each. A device is reached in its
@@ -74,7 +82,6 @@ export function trustedPeerRooms(peers: readonly TrustedPeerAccess[]): Array<{
   const rooms = new Map<string, {
     relayUrl: string;
     rendezvousId: string;
-    relaySealKeyBase64?: string;
     fingerprint?: string;
     peers: TrustedPeerAccess[];
   }>();
@@ -83,7 +90,6 @@ export function trustedPeerRooms(peers: readonly TrustedPeerAccess[]): Array<{
     const room = rooms.get(key) ?? {
       relayUrl: peer.relayUrl,
       rendezvousId: peer.rendezvousId,
-      relaySealKeyBase64: peer.relaySealKeyBase64,
       ...(peer.fingerprint ? { fingerprint: peer.fingerprint } : {}),
       peers: []
     };
@@ -107,6 +113,10 @@ export interface TrustedDeviceRecord {
   addedAt: string;
   /** Legacy stored field, ignored by identity-derived machine channels. */
   channelSealKeyBase64?: string;
+  /** A phone paired with the User's server: the invite it enrolled with. */
+  inviteId?: string;
+  /** A phone paired with the User's server: what it may read there. */
+  phoneScope?: HubPhoneScope;
 }
 
 export function isTrustedDeviceRecord(value: unknown): value is TrustedDeviceRecord {

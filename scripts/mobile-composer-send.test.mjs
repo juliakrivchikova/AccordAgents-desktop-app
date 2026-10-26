@@ -11,98 +11,28 @@
  * retry tick half a minute later, because the flush in flight had read the
  * queue before it was written.
  *
- * This holds the mailbox's answer for a while, sends twice inside that wait,
- * and expects both messages queued and both handed over promptly. Desktop
- * Chrome, not the installed phone.
+ * This holds the server's answer for a while, sends twice inside that wait,
+ * and expects both messages queued and both handed over promptly. The phone
+ * is paired with a real hub (the User's own server) and sends to it exactly as
+ * it does on her phone. Desktop Chrome, not the installed phone.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createRequire } from "node:module";
-import { createServer } from "node:http";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
-import { spawn, execSync } from "node:child_process";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { rm } from "node:fs/promises";
+import { attachApp, launchChrome, member, pairPage, serveMobileShell, sleep, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
 
-const require = createRequire(import.meta.url);
-const { attach } = require("./cdp.cjs");
-const { loadMobileOriginHeaders, mobileOriginHeadersForPath } = require("./mobile-origin-headers.cjs");
-
-const repoRoot = path.resolve(import.meta.dirname, "..");
-const root = path.join(repoRoot, "dist/mobile");
 const SITE_PORT = 8275;
 const CDP_PORT = 9425;
-const CHROME = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const CHAT = "chat-send";
-// How long the mailbox holds each append: long enough to send again inside it.
+// How long the server holds each push: long enough to send again inside it.
 const APPEND_HOLD_MS = 2_000;
 
-const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".webmanifest": "application/manifest+json" };
-const originHeaders = loadMobileOriginHeaders(root);
-/** Every event the phone appended, in the order the mailbox answered them. */
-const appended = [];
-const site = createServer(async (req, res) => {
-  const url = new URL(req.url || "/", "http://localhost");
-  if (url.pathname === "/v1/mailbox/events" && req.method === "POST") {
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-    const ids = (body.events || []).map((event) => event.eventId);
-    await new Promise((r) => setTimeout(r, APPEND_HOLD_MS));
-    appended.push(...ids);
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, eventIds: ids, appendedEventIds: ids }));
-    return;
-  }
-  if (url.pathname === "/v1/mailbox/events") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ events: [], epoch: "e1", oldestArrivalSeq: 1, maxArrivalSeq: 0 }));
-    return;
-  }
-  if (url.pathname.startsWith("/v1/")) {
-    res.writeHead(404, { "content-type": "application/json" });
-    res.end("{}");
-    return;
-  }
-  const rel = url.pathname;
-  const file = path.join(root, rel === "/" ? "index.html" : rel);
-  try {
-    const body = await readFile(file);
-    res.writeHead(200, { "content-type": TYPES[path.extname(file)] || "application/octet-stream", ...mobileOriginHeadersForPath(originHeaders, rel) });
-    res.end(body);
-  } catch {
-    res.writeHead(404).end("not found");
-  }
-});
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const killStaleCdp = () => {
-  try { execSync(`lsof -ti tcp:${CDP_PORT} -sTCP:LISTEN | xargs kill -9`, { stdio: "ignore" }); } catch { /* nothing listening */ }
-};
-
 test("a message sent while the previous one is still going out is queued and handed over", { timeout: 120_000 }, async (t) => {
-  await new Promise((r) => site.listen(SITE_PORT, "127.0.0.1", r));
-  killStaleCdp();
-  const profile = await mkdtemp(path.join(tmpdir(), "aa-mobile-composer-send-"));
-  const chrome = spawn(CHROME, [
-    "--headless=new", "--no-first-run", "--no-default-browser-check",
-    `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${profile}`,
-    "--window-size=390,844", `http://127.0.0.1:${SITE_PORT}/`
-  ], { stdio: "ignore" });
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: SITE_PORT, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-composer-send-");
+  const chrome = launchChrome({ port: CDP_PORT, profile, url: `${site.origin}/` });
   let app;
-  const attachWithRetry = async () => {
-    app?.close();
-    app = undefined;
-    for (let i = 0; i < 40 && !app; i += 1) {
-      try { app = await attach({ port: CDP_PORT, title: "AccordAgents" }); } catch { await sleep(500); }
-    }
-    assert.ok(app, "could not attach to Chrome");
-  };
-  const evaluate = async (expr) => {
-    const result = await app.evaluate(expr);
-    if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
-    return result.result.value;
-  };
   const waitFor = async (read, accept, what, timeoutMs = 10_000) => {
     const end = Date.now() + timeoutMs;
     let last;
@@ -114,52 +44,139 @@ test("a message sent while the previous one is still going out is queued and han
     assert.fail(`${what}: last saw ${JSON.stringify(last)}`);
   };
   try {
-    await attachWithRetry();
-    // A mailbox-only pairing: no relay, so every send goes over plain HTTPS
-    // to the mailbox this test holds.
-    await evaluate(`(() => {
-      localStorage.setItem("accordagents.mobile.pairing.v1", JSON.stringify({ endpoint: "http://127.0.0.1:${SITE_PORT}/", pairedAt: new Date(0).toISOString() }));
-      localStorage.setItem("accordagents.mobile.chatList.v1", JSON.stringify([
-        { id: ${JSON.stringify(CHAT)}, title: "Send", group: "AccordAgents", snippet: "…", updatedAt: new Date(0).toISOString(), participants: ["@drew"] }
-      ]));
-      localStorage.setItem("accordagents.mobile.activeConversationId.v1", ${JSON.stringify(CHAT)});
-      return true;
-    })()`);
-    await evaluate("location.reload()");
-    await sleep(1500);
-    await attachWithRetry();
-    await waitFor(
-      () => evaluate(`Boolean(globalThis.AccordAgentsMobile && document.getElementById("composer-input") && document.getElementById("composer-form"))`),
-      (ready) => ready === true,
-      "the chat came up with its composer"
-    );
+    await hub.createChat(CHAT, { title: "Send", participants: [member("drew")] });
+    app = await attachApp({ port: CDP_PORT });
+    await pairPage(app, { hub, siteOrigin: site.origin });
+    // Pairing writes one entry of its own (the certificate); it is handed
+    // over before the messages, so the hold below meets only them.
+    await app.waitFor(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.length > 0 && entries.every((entry) => entry.status === "acked"))`,
+      "the pairing certificate was handed over");
+    await app.evaluate(`document.querySelector('.mobile-chat-row[data-conversation-id=${JSON.stringify(CHAT)}]').click()`);
+    await app.waitFor(`Boolean(globalThis.AccordAgentsMobile && document.getElementById("composer-input") && document.getElementById("composer-form")) && document.getElementById("timeline-screen").classList.contains("is-active")`,
+      "the chat came up with its composer");
 
-    const send = (text) => evaluate(`(() => {
+    // Every push of the phone's events is held by the server for a while.
+    const pushed = [];
+    hub.setGate(async (request) => {
+      if (request.method === "POST" && request.path === "/v1/events") {
+        pushed.push(request.at);
+        return { delayMs: APPEND_HOLD_MS };
+      }
+      return undefined;
+    });
+
+    const send = (text) => app.evaluate(`(() => {
       const input = document.getElementById("composer-input");
       input.value = ${JSON.stringify(text)};
       document.getElementById("composer-form").dispatchEvent(new Event("submit", { cancelable: true }));
       return true;
     })()`);
-    const queued = () => evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries
+    const queued = () => app.evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries
       .filter((entry) => !entry.kind || entry.kind === "message.created")
       .map((entry) => entry.payload.content + ":" + entry.status).sort())`);
 
     await send("first");
     await waitFor(queued, (rows) => rows.length === 1, "the first message is queued");
-    // Inside the mailbox's hold on the first: the second is typed and sent.
+    // Inside the server's hold on the first: the second is typed and sent.
     await sleep(400);
     await send("second");
-    assert.equal(await evaluate(`document.getElementById("composer-input").value`), "", "the second message left the field");
+    assert.equal(await app.evaluate(`document.getElementById("composer-input").value`), "", "the second message left the field");
     await waitFor(queued, (rows) => rows.length === 2, "the second message is queued while the first is still going out");
     // Both handed over: the second right behind the first, not on the retry
-    // tick half a minute later.
-    await waitFor(queued, (rows) => rows.every((row) => row.endsWith(":acked")), "both messages are handed over", APPEND_HOLD_MS * 3);
-    assert.deepEqual(appended.map((id) => String(id).length > 0), [true, true], "the mailbox received both");
-    t.diagnostic(`appended: ${appended.length}, queue: ${JSON.stringify(await queued())}`);
+    // tick half a minute later. Each hand-over is a signed push the server
+    // writes before it answers, so the budget is the two holds and the
+    // server's own work, well inside the half minute.
+    await waitFor(queued, (rows) => rows.every((row) => row.endsWith(":acked")), "both messages are handed over", APPEND_HOLD_MS * 2 + 10_000);
+    await hub.settle();
+    const messages = hub.phoneEvents("chat.changes");
+    assert.equal(messages.length, 2, "the server received both");
+    t.diagnostic(`pushes: ${pushed.length}, queue: ${JSON.stringify(await queued())}`);
   } finally {
     app?.close();
     chrome.kill("SIGKILL");
-    await new Promise((resolve) => site.close(resolve));
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true });
+  }
+});
+
+// A send went out only after the chat had been drawn again: every row read
+// and checked, in one go, before the message was handed to the server. On a
+// long chat that was most of the 0.8 to 2.5 seconds between Send and the
+// server having it. Here drawing the chat is made slow on purpose, and the
+// message must reach the server before the chat is drawn with it.
+test("a sent message goes to the server before the chat is drawn again", { timeout: 120_000 }, async () => {
+  const CHAT_LONG = "chat-send-long";
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: 8277, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-send-first-");
+  const chrome = launchChrome({ port: 9427, profile, url: `${site.origin}/` });
+  let app;
+  try {
+    const drew = member("drew");
+    const history = Array.from({ length: 40 }, (_, index) => ({
+      id: "h" + index, role: index % 2 ? "participant" : "user",
+      ...(index % 2 ? { participantId: drew.id, participantLabel: "@drew" } : {}),
+      content: "Earlier line " + index, status: "done", createdAt: new Date(Date.now() - (60 - index) * 60_000).toISOString()
+    }));
+    await hub.createChat(CHAT_LONG, { title: "Long chat", participants: [drew], messages: history });
+    app = await attachApp({ port: 9427 });
+    await pairPage(app, { hub, siteOrigin: site.origin });
+    await app.waitFor(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.length > 0 && entries.every((entry) => entry.status === "acked"))`,
+      "the pairing certificate was handed over");
+    await app.evaluate(`document.querySelector('.mobile-chat-row[data-conversation-id=${JSON.stringify(CHAT_LONG)}]').click()`);
+    await app.waitFor(`document.getElementById("message-list").innerText.includes("Earlier line 39")`, "the long chat is drawn");
+    await hub.quiet();
+    // Every row's time costs 25 ms from here on: one redraw of this chat
+    // takes a second or more, the phone's own sending work does not.
+    const timing = await app.evaluate(`(async () => {
+      const descriptor = Object.getOwnPropertyDescriptor(Intl.DateTimeFormat.prototype, "format");
+      Object.defineProperty(Intl.DateTimeFormat.prototype, "format", { configurable: true, get() {
+        const format = descriptor.get.call(this);
+        return function (date) { const end = performance.now() + 25; while (performance.now() < end) {} return format(date); };
+      } });
+      const fetchBefore = window.fetch;
+      let postAt;
+      window.fetch = function (input, init) {
+        if (postAt === undefined && init && init.method === "POST" && String(input && input.url || input).includes("/v1/events")) postAt = performance.now();
+        return fetchBefore.call(this, input, init);
+      };
+      let drawnAt;
+      const list = document.getElementById("message-list");
+      const observer = new MutationObserver(() => {
+        if (drawnAt === undefined && list.innerText.includes("first thing after the history")) drawnAt = performance.now();
+      });
+      observer.observe(list, { childList: true, subtree: true, characterData: true });
+      const sentAt = performance.now();
+      const input = document.getElementById("composer-input");
+      input.value = "first thing after the history";
+      document.getElementById("composer-form").dispatchEvent(new Event("submit", { cancelable: true }));
+      const end = Date.now() + 20_000;
+      while ((postAt === undefined || drawnAt === undefined) && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 20));
+      observer.disconnect();
+      window.fetch = fetchBefore;
+      Object.defineProperty(Intl.DateTimeFormat.prototype, "format", descriptor);
+      return { post: postAt === undefined ? null : Math.round(postAt - sentAt), drawn: drawnAt === undefined ? null : Math.round(drawnAt - sentAt) };
+    })()`);
+    assert.ok(timing.post !== null && timing.drawn !== null, `the message was sent and drawn: ${JSON.stringify(timing)}`);
+    assert.ok(timing.post < timing.drawn, `the message went to the server before the slow redraw drew it: ${JSON.stringify(timing)}`);
+    await hub.settle();
+    assert.equal(hub.phoneEvents("chat.changes").length, 1, "the server received it");
+
+    // The stamp every event carries is read and advanced in one transaction:
+    // asked for twenty times at once, it still gives twenty different stamps,
+    // each after the one asked for before it.
+    const stamps = await app.evaluate(`(() => {
+      const deviceId = AccordAgentsMobile.loadHubPairing().deviceId;
+      return Promise.all(Array.from({ length: 20 }, () => AccordAgentsMobile.hubLogicalTs(deviceId)));
+    })()`);
+    assert.equal(new Set(stamps).size, 20, `twenty distinct stamps: ${JSON.stringify(stamps)}`);
+    assert.deepEqual(stamps, [...stamps].sort(), "each later than the one asked for before it");
+  } finally {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
     await rm(profile, { recursive: true, force: true });
   }
 });

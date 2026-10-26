@@ -9,23 +9,35 @@ import {
   HUB_AUTH_MAX_SKEW_MS,
   HUB_MAX_BODY_BYTES,
   HUB_MAX_SMALL_BODY_BYTES,
+  HUB_PROGRESS_PATH,
   HUB_PROTOCOL_VERSION,
   HUB_ROOM_MAX_MESSAGE_BYTES,
   HUB_ROOM_REPLACED_CLOSE_CODE,
   HUB_ROSTER_ROLES,
+  hubPhoneEnrollmentSigningText,
+  hubPhoneInviteSigningText,
+  HUB_PHONE_INVITE_MAX_LIFETIME_MS,
   hubRoomRole,
+  isHubPhoneInviteId,
+  isHubPhoneScope,
   type HubDevice,
   type HubHealth,
   type HubLiveHead,
+  type HubPhoneCertificate,
+  type HubPhoneEnrollRequest,
+  type HubPhoneEnrollResponse,
+  type HubPhoneEnrollment,
+  type HubPhoneInvite,
+  type HubProgressPost,
+  type HubReadReport,
+  type HubResyncRequired,
   type HubRosterRequest
 } from "../shared/hubProtocol";
-import { HubNonceCache, deviceIdForPublicKey, parseHubAuthorization, verifyHubRequest, type ParsedHubAuthorization } from "../main/services/hubAuth";
-import { HUB_RELAY_MANIFEST } from "../shared/relayProtocol";
-import { HubRelayRooms, RELAY_BODY_BYTES_IN_FLIGHT_MAX, RELAY_HEALTH_PATH, RELAY_MAILBOX_APPEND_MAX_BYTES, RELAY_MAILBOX_PATHS, RELAY_MAILBOX_SMALL_MAX_BYTES, RELAY_MAILBOX_TINY_MAX_BYTES, RELAY_MANIFEST_PATH, RELAY_ROOM_PATH, type HubRelayMailboxes } from "./hubRelay";
-import { MAILBOX_HUB_AUTHORIZATION_HEADER } from "../shared/mailboxSealedPayload";
+import type { MachineProgressFrame } from "../shared/machineProgress";
+import { HubNonceCache, deviceIdForPublicKey, parseHubAuthorization, sha256Hex, verifyHubRequest, verifyHubText, type ParsedHubAuthorization } from "../main/services/hubAuth";
 import type { ChatSearchService } from "../main/services/chatSearch";
 import type { StorageService } from "../main/services/storage";
-import { HubRequestError, type HubLog } from "./hubLog";
+import { HubRequestError, HubResyncRequiredError, type HubLog } from "./hubLog";
 import { isAllowedPushEndpoint } from "./hubPush";
 import { HUB_PHONE_PATHS, type HubPhoneApi } from "./hubPhone";
 
@@ -38,15 +50,19 @@ export interface HubServerOptions {
   vapidPublicKey: string;
   /** Files Let's Encrypt validation reads over plain HTTP. */
   acmeWebroot?: string;
-  /** The relay the phone and machines speak (sealed mailboxes, live rooms). */
-  relay?: { mailboxes: HubRelayMailboxes; rooms: HubRelayRooms };
   /** The phone's reads: chat list, pages and changes from the server's copy. */
   phone?: HubPhoneApi;
+  /** The owner published the composer catalog. */
+  onCatalogChanged?: () => void;
+  /** The owner's members' live progress (kept in memory, never stored). */
+  onProgress?: (frames: MachineProgressFrame[]) => void;
   now?: () => number;
   debugLog?: (event: string, payload: Record<string, unknown>) => void;
 }
 
 const BLOB_PATH = /^\/v1\/blobs\/(sha256:[0-9a-f]{64})$/;
+/** A pairing request is a key, a signature and a token. */
+const ENROLL_MAX_BODY_BYTES = 16 * 1024;
 
 /** The little of `ws` the live socket uses (the package ships no types here). */
 interface LiveSocket {
@@ -67,6 +83,8 @@ const HEARTBEAT_MS = 30_000;
 /** A device that cannot keep up with its room is disconnected rather than
  *  buffered without end; it reconnects and continues. */
 const ROOM_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+/** Pages of the chat copy (/v1/snapshot?copy=1) built at the same time. */
+const COPY_PAGES_IN_FLIGHT_MAX = 1;
 /** Requests slower than this are logged; the rest only count. */
 const SLOW_REQUEST_MS = 500;
 /** Search text and cursors are plain text. */
@@ -92,10 +110,21 @@ const { WebSocketServer } = require("ws") as { WebSocketServer: new (options: { 
  * order's head is, and devices read the rest over HTTP; rooms forward live
  * messages between the User's devices without keeping them.
  */
+/** How long a body a phone put up is kept before a message names it. */
+const PHONE_UPLOAD_PIN_MS = 30 * 24 * 60 * 60_000;
+const UPLOAD_PIN_MS = 24 * 60 * 60_000;
+
+/** Pairing attempts per address, and from everywhere, in a minute. */
+const ENROLL_ATTEMPTS_PER_ADDRESS = 10;
+const ENROLL_ATTEMPTS_ALL = 600;
+
+/** What the hub answers a signed request from a device not on its roster. */
+export const HUB_NOT_ON_ROSTER = "This device is not on the hub's roster.";
+
 export class HubServer {
   private readonly nonces = new HubNonceCache();
-  /** Relay request bodies being read now, by their declared size. */
-  private relayBodyBytes = 0;
+  /** Pages of the chat copy being built now. */
+  private copyPagesInFlight = 0;
   /** Live head sockets and the device each one belongs to. */
   private readonly live = new Map<LiveSocket, string>();
   private readonly sockets: LiveSocketServer = new WebSocketServer({ noServer: true, maxPayload: 1024 });
@@ -211,16 +240,22 @@ export class HubServer {
     }
   }
 
+  /**
+   * Stops listening and closes every connection now: a phone's long wait
+   * for news, a keep-alive connection, a live socket. A request waiting on
+   * one of them would otherwise keep the program running long after a stop
+   * (the service manager then waits for its kill timeout).
+   */
   async close(): Promise<void> {
-    this.options.relay?.mailboxes.close();
-    this.options.relay?.rooms.close();
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = undefined;
     for (const socket of this.live.keys()) socket.terminate();
     this.live.clear();
     for (const members of this.rooms.values()) for (const member of members.values()) member.socket.terminate();
     this.rooms.clear();
-    await Promise.all(this.servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+    const closed = Promise.all(this.servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+    for (const server of this.servers) (server as Server & { closeAllConnections?: () => void }).closeAllConnections?.();
+    await closed;
     this.servers = [];
   }
 
@@ -238,7 +273,10 @@ export class HubServer {
     const auth = parseHubAuthorization(header);
     if (!auth) throw new HubRequestError(401, "The request is not signed.");
     const device = await this.device(auth.deviceId);
-    if (!device || Math.abs(this.now() - auth.timestampMs) > HUB_AUTH_MAX_SKEW_MS) throw new HubRequestError(401, "The request's signature is not accepted.");
+    // Said apart: a phone taken off the roster asks to be paired again, one
+    // whose clock is off does not.
+    if (!device) throw new HubRequestError(401, HUB_NOT_ON_ROSTER);
+    if (Math.abs(this.now() - auth.timestampMs) > HUB_AUTH_MAX_SKEW_MS) throw new HubRequestError(401, "The request's clock is more than five minutes off.");
     return { auth, device };
   }
 
@@ -257,7 +295,6 @@ export class HubServer {
   private async upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     try {
       const url = new URL(request.url ?? "/", "http://hub");
-      if (url.pathname === RELAY_ROOM_PATH && this.options.relay) return this.options.relay.rooms.handleUpgrade(request, socket, head, url, request.socket.remoteAddress ?? "");
       if (url.pathname === "/v1/room") return await this.joinRoom(request, socket, head, url);
       if (url.pathname !== "/v1/live") throw new HubRequestError(404, "Not found.");
       // A browser cannot set headers on a WebSocket: the signature of
@@ -302,7 +339,9 @@ export class HubServer {
       if (previous) previous.socket.close(HUB_ROOM_REPLACED_CLOSE_CODE, "replaced");
       const others = [...members.values()].filter((item) => item !== member);
       ws.send(JSON.stringify({ type: "ready", deviceId: device.deviceId, peers: others.map((item) => ({ deviceId: item.deviceId, role: item.role })) }));
-      if (!previous) for (const other of others) sendJson(other.socket, { type: "peer-connected", peer: { deviceId: device.deviceId, role } });
+      // Also when it took the seat of an older connection of its own: the
+      // others learn it came back (a restart, a new link), and greet it again.
+      for (const other of others) sendJson(other.socket, { type: "peer-connected", peer: { deviceId: device.deviceId, role } });
       ws.on("message", (data) => this.roomMessage(rid, member, data));
       const leave = () => {
         if (members.get(device.deviceId) !== member) return;
@@ -367,78 +406,101 @@ export class HubServer {
         return json(response, 200, { ok: true, publicKey: this.options.vapidPublicKey });
       }
       if (openOnly) throw new HubRequestError(403, "Use HTTPS.");
-      if (this.options.phone && HUB_PHONE_PATHS.has(url.pathname)) {
-        status = await this.options.phone.handle(request, response, url);
-        return;
+      if (request.method === "POST" && url.pathname === "/v1/phone/enroll") {
+        // Unsigned: the phone is not on the roster yet. Its body proves the
+        // key it enrolls, and the invite's token proves the owner sent it.
+        this.limitEnrollments(request.socket.remoteAddress ?? "");
+        const body = await readBody(request, ENROLL_MAX_BODY_BYTES);
+        return json(response, 200, await this.enroll(parseJson(body)));
       }
-      const relay = this.options.relay;
-      if (relay) {
-        // The relay's own paths answer as the relay did, with its own keys.
-        if (request.method === "GET" && url.pathname === RELAY_HEALTH_PATH) return json(response, 200, { ok: true, provider: HUB_RELAY_MANIFEST.provider });
-        if (request.method === "GET" && url.pathname === RELAY_MANIFEST_PATH) return json(response, 200, { ok: true, manifest: HUB_RELAY_MANIFEST });
-        if (url.pathname === RELAY_ROOM_PATH) {
-          const answer = HubRelayRooms.plainRequestAnswer(url);
-          status = answer.status;
-          return json(response, answer.status, answer.body);
-        }
-        if (RELAY_MAILBOX_PATHS.has(url.pathname)) {
-          const mailboxId = url.searchParams.get("mailboxId");
-          // Only the mailbox's owner makes the hub read a body.
-          const refused = await relay.mailboxes.preauthorize(url.pathname, mailboxId, request.headers.authorization);
-          if (refused) {
-            status = refused.status;
-            return json(response, refused.status, refused.body);
-          }
-          const append = request.method === "POST" && url.pathname === "/v1/mailbox/events";
-          // Registration and revocation are a few bytes; nobody makes the
-          // hub hold more for them.
-          const tiny = url.pathname === "/v1/mailbox/register" || url.pathname === "/v1/mailbox/revoke";
-          const limit = append ? RELAY_MAILBOX_APPEND_MAX_BYTES : tiny ? RELAY_MAILBOX_TINY_MAX_BYTES : RELAY_MAILBOX_SMALL_MAX_BYTES;
-          const lengthHeader = request.headers["content-length"];
-          const declared = lengthHeader === undefined ? undefined : Number(lengthHeader);
-          if (declared !== undefined && (!Number.isFinite(declared) || declared > limit)) throw new HubRequestError(413, "The request is too large.");
-          // A read has no body: anything sent with one is let through unread.
-          // A body of unstated length counts as the most it may be.
-          const reading = request.method === "GET";
-          const reserved = reading ? 0 : declared ?? limit;
-          if (this.relayBodyBytes + reserved > RELAY_BODY_BYTES_IN_FLIGHT_MAX) throw new HubRequestError(503, "The hub is busy; try again.");
-          this.relayBodyBytes += reserved;
-          let body: Buffer;
-          try {
-            if (reading) {
-              request.resume();
-              body = Buffer.alloc(0);
-            } else {
-              body = await readBody(request, limit);
-            }
-          } finally {
-            this.relayBodyBytes -= reserved;
-          }
-          const answer = await relay.mailboxes.handle(request.method ?? "GET", url.pathname, mailboxId, request.headers.authorization, body, url.searchParams, async () => {
-            const header = request.headers[MAILBOX_HUB_AUTHORIZATION_HEADER];
-            if (typeof header !== "string") return undefined;
-            // Any device the User's server knows: her desktop (pairings),
-            // her machines (their rooms with each other and the phone).
-            const device = await this.authenticate(request.method ?? "POST", body, header, pathWithQuery).catch(() => undefined);
-            return device?.role === "owner" || device?.role === "desktop" || device?.role === "machine" ? device.role : undefined;
-          });
-          status = answer.status;
-          return json(response, answer.status, answer.body);
-        }
+      // A phone app from before (a mailbox token) is told it was removed, so
+      // it asks to be paired again instead of going quiet.
+      if (this.options.phone && HUB_PHONE_PATHS.has(url.pathname) && /^Bearer /i.test(request.headers.authorization ?? "")) {
+        status = 401;
+        return json(response, 401, { ok: false, error: "phone_revoked" });
       }
       const checked = await this.preauthenticate(request.headers.authorization);
-      const large = (request.method === "POST" && url.pathname === "/v1/events") || (request.method === "PUT" && BLOB_PATH.test(url.pathname));
+      const large = (request.method === "POST" && url.pathname === "/v1/events") || (request.method === "PUT" && BLOB_PATH.test(url.pathname)) ||
+        (request.method === "PUT" && url.pathname === "/v1/catalog") || (request.method === "POST" && url.pathname === HUB_PROGRESS_PATH);
       const body = await readBody(request, large ? HUB_MAX_BODY_BYTES : HUB_MAX_SMALL_BODY_BYTES);
       const device = await this.authenticate(request.method ?? "GET", body, request.headers.authorization, pathWithQuery, checked);
+      if (this.options.phone && HUB_PHONE_PATHS.has(url.pathname)) {
+        // Only a phone reads the phone's views, as what its invite allowed.
+        if (device.role !== "phone") throw new HubRequestError(403, "Only a phone reads this.");
+        status = await this.options.phone.handle(request, response, url, device, body);
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/v1/events") {
-        const parsed = parseJson(body) as { events?: unknown };
-        return json(response, 200, await this.options.log.push(device, parsed?.events));
+        const parsed = parseJson(body) as { events?: unknown; anchor?: unknown };
+        const anchor = parsed?.anchor;
+        if (anchor !== undefined && (!Array.isArray(anchor) || anchor.length > 200 ||
+            !anchor.every((scope) => typeof scope === "string" && scope.length > 0 && scope.length <= 512 && !CONTROL_CHARACTER.test(scope)))) {
+          throw new HubRequestError(400, "Invalid anchor.");
+        }
+        return json(response, 200, await this.options.log.push(device, parsed?.events, anchor as string[] | undefined));
       }
       if (request.method === "GET" && url.pathname === "/v1/events") {
         const after = Number(url.searchParams.get("after") ?? "0");
         const limit = Number(url.searchParams.get("limit") ?? "200");
         if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1) throw new HubRequestError(400, "Invalid position.");
-        return json(response, 200, { ...await this.options.log.pull(device, after, limit), hubId: this.options.hubId });
+        const report = readReport(url.searchParams);
+        try {
+          return json(response, 200, { ...await this.options.log.pull(device, after, limit, report), hubId: this.options.hubId });
+        } catch (error) {
+          if (!(error instanceof HubResyncRequiredError)) throw error;
+          status = 410;
+          this.options.debugLog?.("hub.resync.required", { deviceId: device.deviceId, after, prunedThrough: error.prunedThrough });
+          return json(response, 410, { ok: false, error: error.message, resync: true, prunedThrough: error.prunedThrough, hubId: this.options.hubId } satisfies HubResyncRequired & { hubId: string });
+        }
+      }
+      if (request.method === "GET" && url.pathname === "/v1/chain") {
+        if (device.role === "phone") throw new HubRequestError(403, "A phone reads the server's copy, not the order.");
+        const origin = url.searchParams.get("origin") ?? "";
+        const scope = url.searchParams.get("scope") ?? "";
+        const from = Number(url.searchParams.get("from"));
+        const to = Number(url.searchParams.get("to"));
+        if (!origin || !scope || origin.length > 512 || scope.length > 512 || CONTROL_CHARACTER.test(origin) || CONTROL_CHARACTER.test(scope) ||
+            !Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from) throw new HubRequestError(400, "Invalid chain range.");
+        return json(response, 200, await this.options.log.chain(origin, scope, from, to));
+      }
+      if (request.method === "GET" && url.pathname === "/v1/snapshot") {
+        if (device.role === "phone") throw new HubRequestError(403, "A phone reads the server's copy, not the order.");
+        const page = url.searchParams.get("page") ?? undefined;
+        const scopes = (url.searchParams.get("scopes") ?? "").split(",").filter(Boolean);
+        const atMostText = url.searchParams.get("atMost");
+        const atMost = atMostText === null ? undefined : Number(atMostText);
+        const sinceText = url.searchParams.get("since");
+        const since = sinceText === null ? undefined : Number(sinceText);
+        if (since !== undefined && (!Number.isSafeInteger(since) || since < 0)) throw new HubRequestError(400, "Invalid snapshot request.");
+        if ((page && (page.length > 2048 || CONTROL_CHARACTER.test(page))) || scopes.length > 200 ||
+            scopes.some((scope) => scope.length > 512 || CONTROL_CHARACTER.test(scope)) ||
+            (atMost !== undefined && (!Number.isSafeInteger(atMost) || atMost < 0))) throw new HubRequestError(400, "Invalid snapshot request.");
+        const chat = url.searchParams.get("chat") ?? undefined;
+        if (chat !== undefined && (!chat || chat.length > 256 || CONTROL_CHARACTER.test(chat))) throw new HubRequestError(400, "Invalid snapshot request.");
+        const copy = url.searchParams.get("copy") === "1";
+        // A page of the copy costs the small server about a hundred MB while
+        // it is built: one at a time, the others asked to come back.
+        if (copy && this.copyPagesInFlight >= COPY_PAGES_IN_FLIGHT_MAX) throw new HubRequestError(503, "The hub is busy; try again.");
+        if (copy) this.copyPagesInFlight += 1;
+        let snapshot;
+        try {
+          snapshot = await this.options.log.snapshot(device, {
+            ...(page ? { page } : {}), scopes, ...(atMost !== undefined ? { atMost } : {}), ...(since !== undefined ? { since } : {}), copy, ...(chat ? { chat } : {})
+          });
+        } finally {
+          if (copy) this.copyPagesInFlight -= 1;
+        }
+        if (!page) this.options.debugLog?.("hub.snapshot.started", { deviceId: device.deviceId, hubSeq: snapshot.hubSeq, copy: url.searchParams.get("copy") === "1", ...(chat ? { chat } : {}) });
+        return json(response, 200, { ...snapshot, hubId: this.options.hubId });
+      }
+      if (request.method === "GET" && url.pathname === "/v1/devices/known") {
+        const ids = (url.searchParams.get("ids") ?? "").split(",").filter(Boolean);
+        if (ids.length > 200 || ids.some((id) => id.length > 128 || CONTROL_CHARACTER.test(id))) throw new HubRequestError(400, "Invalid devices.");
+        return json(response, 200, await this.options.log.known(ids));
+      }
+      if (request.method === "GET" && url.pathname === "/v1/readers") {
+        if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub reads where its devices stand.");
+        return json(response, 200, await this.options.log.readers());
       }
       const blob = BLOB_PATH.exec(url.pathname);
       if (blob) {
@@ -446,6 +508,11 @@ export class HubServer {
         const index = Number(url.searchParams.get("index"));
         if (!reference || !Number.isSafeInteger(index) || index < 0 || index >= reference.fragments) throw new HubRequestError(400, "Invalid blob fragment.");
         if (request.method === "PUT") {
+          // A body is put up before what names it reaches the server: a
+          // phone's picture (it may be offline in between) is kept a month
+          // for it, anyone else's (a catalog's avatar, an event's body) a day.
+          await this.options.storage.deviceEventBlobs().pin([reference.blobHash], device.role === "phone" ? "phone-upload" : "upload",
+            this.now() + (device.role === "phone" ? PHONE_UPLOAD_PIN_MS : UPLOAD_PIN_MS));
           await this.options.log.putBlobFragment(reference, index, body).catch((error: unknown) => {
             throw new HubRequestError(400, error instanceof Error ? error.message : String(error));
           });
@@ -474,30 +541,64 @@ export class HubServer {
         if (!isAllowedPushEndpoint(endpoint)) throw new HubRequestError(400, "That push endpoint is not accepted.");
         // Stored as the URL parser wrote it, never as sent.
         const normalized = new URL(endpoint).href;
-        await this.options.storage.hub().savePushSubscription(device.deviceId, normalized, JSON.stringify({ ...parsed.subscription, endpoint: normalized }), new Date(this.now()).toISOString());
-        return json(response, 200, { ok: true });
-      }
-      if (url.pathname === "/v1/phone-links") {
-        if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub says which phones may read it.");
-        if (request.method !== "PUT" || !this.options.relay) throw new HubRequestError(404, "Not found.");
-        const parsed = parseJson(body) as { mailboxIds?: unknown };
-        const ids = Array.isArray(parsed?.mailboxIds) ? parsed.mailboxIds : undefined;
-        if (!ids || ids.length > 10_000 || !ids.every((id) => typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id))) {
-          throw new HubRequestError(400, "Invalid phone links.");
+        const hub = this.options.storage.hub();
+        await hub.savePushSubscription(device.deviceId, normalized, JSON.stringify({ ...parsed.subscription, endpoint: normalized }), new Date(this.now()).toISOString());
+        // One endpoint is one browser: a phone paired again under a new key
+        // is rung once, as itself, not again for the key it had before.
+        for (const other of (await hub.pushSubscriptions()).filter((item) => item.endpoint === normalized && item.deviceId !== device.deviceId)) {
+          await hub.deletePushSubscription(other.deviceId, other.endpoint);
         }
-        const known = await this.options.relay.mailboxes.setKnownPhoneLinks(ids as string[]);
-        return json(response, 200, { ok: true, known });
+        return json(response, 200, { ok: true });
       }
       if (url.pathname === "/v1/roster") {
         if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub changes its devices.");
         if (request.method === "GET") return json(response, 200, { devices: await this.options.storage.hub().devices() });
         if (request.method === "PUT") {
-          const devices = validRoster(parseJson(body));
-          await this.options.storage.hub().replaceRoster(devices, new Date(this.now()).toISOString());
+          const parsed = parseJson(body);
+          const devices = validRoster(parsed);
+          const resolved = validInviteIds((parsed as HubRosterRequest | undefined)?.resolvedInviteIds);
+          await this.options.storage.hub().replaceRoster(devices, new Date(this.now()).toISOString(), resolved);
           this.invalidateRoster();
           await this.disconnectRemoved();
           return json(response, 200, { devices: await this.options.storage.hub().devices() });
         }
+      }
+      if (url.pathname === "/v1/phone-invites" && request.method === "PUT") {
+        if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub invites phones.");
+        const parsed = parseJson(body) as { invite?: HubPhoneInvite; signature?: unknown };
+        const invite = this.validInvite(parsed?.invite, device);
+        if (typeof parsed?.signature !== "string" || !verifyHubText(device.publicKeyDerBase64, hubPhoneInviteSigningText(invite), parsed.signature)) {
+          throw new HubRequestError(400, "The invite's signature does not verify.");
+        }
+        await this.options.storage.hub().savePhoneInvite(invite, parsed.signature, new Date(this.now()).toISOString());
+        return json(response, 200, { ok: true, inviteId: invite.inviteId });
+      }
+      if (url.pathname === "/v1/catalog" && request.method === "PUT") {
+        if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub publishes its catalog.");
+        const parsed = parseJson(body) as { catalog?: unknown };
+        if (!parsed?.catalog || typeof parsed.catalog !== "object") throw new HubRequestError(400, "Invalid catalog.");
+        await this.options.storage.hub().setDocument("composer-catalog", parsed.catalog, new Date(this.now()).toISOString());
+        // The avatars it names stay on the server while it names them.
+        const avatars = Object.values((parsed.catalog as { avatars?: Record<string, { blob?: unknown }> }).avatars ?? {})
+          .map((entry) => entry?.blob).filter(isDeviceEventBlobReference).map((blob) => blob.blobHash);
+        await this.options.storage.deviceEventBlobs().pinOnly(avatars, "catalog");
+        this.options.onCatalogChanged?.();
+        return json(response, 200, { ok: true });
+      }
+      if (url.pathname === "/v1/machine-wake" && request.method === "PUT") {
+        if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub gives it start keys.");
+        const entries = validMachineWake(parseJson(body));
+        await this.options.storage.hub().replaceMachineWake(entries.map((entry) => ({ machineId: entry.machineId, configJson: JSON.stringify(entry) })), new Date(this.now()).toISOString());
+        return json(response, 200, { ok: true, machines: entries.length });
+      }
+      if (url.pathname === HUB_PROGRESS_PATH && request.method === "POST") {
+        // The desktop's own members run there; a machine's progress travels
+        // in its channel, a phone runs nothing.
+        if (device.role !== "owner" && device.role !== "desktop") throw new HubRequestError(403, "Only a desktop posts its members' progress.");
+        const frames = (parseJson(body) as Partial<HubProgressPost> | undefined)?.frames;
+        if (!Array.isArray(frames) || frames.length > 100) throw new HubRequestError(400, "Invalid progress.");
+        this.options.onProgress?.(frames);
+        return json(response, 200, { ok: true });
       }
       throw new HubRequestError(404, "Not found.");
     } catch (error) {
@@ -510,6 +611,110 @@ export class HubServer {
       // A phone's wait for news is long on purpose.
       if (status >= 500 || (ms > SLOW_REQUEST_MS && path !== "/v1/phone/changes")) this.options.debugLog?.("hub.request", { method: request.method, path, status, ms });
     }
+  }
+
+  /** Enrollment attempts per address in the last minute, and all together:
+   *  nobody can make the hub check tokens without end. */
+  private readonly enrollAttempts = new Map<string, number[]>();
+  private enrollQueue: Promise<unknown> = Promise.resolve();
+
+  private limitEnrollments(address: string): void {
+    const now = this.now();
+    const recent = (this.enrollAttempts.get(address) ?? []).filter((at) => now - at < 60_000);
+    const all = [...this.enrollAttempts.values()].reduce((count, list) => count + list.filter((at) => now - at < 60_000).length, 0);
+    // Per address against guessing (a code is 256 bits: nobody guesses it);
+    // all together only against load, high enough that strangers cannot
+    // keep the User's own phone from pairing.
+    if (recent.length >= ENROLL_ATTEMPTS_PER_ADDRESS || all >= ENROLL_ATTEMPTS_ALL) throw new HubRequestError(429, "Too many pairing attempts; try again in a minute.");
+    recent.push(now);
+    this.enrollAttempts.set(address, recent);
+    if (this.enrollAttempts.size > 1_000) {
+      for (const [key, list] of this.enrollAttempts) if (!list.some((at) => now - at < 60_000)) this.enrollAttempts.delete(key);
+    }
+  }
+
+  private validInvite(value: unknown, owner: HubDevice): HubPhoneInvite {
+    const invite = value as Partial<HubPhoneInvite> | undefined;
+    const now = this.now();
+    const expiresAt = Date.parse(invite?.expiresAt ?? "");
+    const issuedAt = Date.parse(invite?.issuedAt ?? "");
+    if (!invite || invite.version !== 1 || !isHubPhoneInviteId(invite.inviteId) ||
+        invite.hubId !== this.options.hubId || invite.issuerDeviceId !== owner.deviceId ||
+        typeof invite.tokenHash !== "string" || !/^[0-9a-f]{64}$/.test(invite.tokenHash) ||
+        // Every chat: the order has no per-chat fences for a phone's writes.
+        !isHubPhoneScope(invite.scope) || invite.scope.scope !== "device" ||
+        typeof invite.name !== "string" || invite.name.length > 200 || CONTROL_CHARACTER.test(invite.name) ||
+        !Number.isFinite(expiresAt) || !Number.isFinite(issuedAt) || expiresAt <= now || expiresAt - now > HUB_PHONE_INVITE_MAX_LIFETIME_MS) {
+      throw new HubRequestError(400, "Invalid invite.");
+    }
+    return {
+      version: 1, inviteId: invite.inviteId, hubId: invite.hubId, issuerDeviceId: invite.issuerDeviceId, tokenHash: invite.tokenHash,
+      scope: invite.scope, name: invite.name, issuedAt: invite.issuedAt!, expiresAt: invite.expiresAt!
+    };
+  }
+
+  /** A phone shows an invite's token and signs its acceptance with its key:
+   *  it is on the roster from then on, as the invite said. One at a time, so
+   *  a token is spent once. */
+  private enroll(value: unknown): Promise<HubPhoneEnrollResponse> {
+    const run = this.enrollQueue.then(() => this.enrollNow(value));
+    this.enrollQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async enrollNow(value: unknown): Promise<HubPhoneEnrollResponse> {
+    const request = value as Partial<HubPhoneEnrollRequest> | undefined;
+    const enrollment = request?.enrollment as Partial<HubPhoneEnrollment> | undefined;
+    const refused = (message: string) => new HubRequestError(400, message);
+    if (!request || typeof request.token !== "string" || !/^[A-Za-z0-9_-]{20,200}$/.test(request.token) || typeof request.signature !== "string" ||
+        !enrollment || enrollment.version !== 1 || enrollment.hubId !== this.options.hubId || typeof enrollment.publicKeyDerBase64 !== "string" ||
+        enrollment.publicKeyDerBase64.length > 200 || typeof enrollment.deviceId !== "string" || deviceIdForPublicKey(enrollment.publicKeyDerBase64) !== enrollment.deviceId ||
+        typeof enrollment.name !== "string" || enrollment.name.length > 100 || CONTROL_CHARACTER.test(enrollment.name) ||
+        typeof enrollment.enrolledAt !== "string" || !Number.isFinite(Date.parse(enrollment.enrolledAt))) {
+      throw refused("Invalid pairing request.");
+    }
+    const tokenHash = sha256Hex(request.token);
+    if (enrollment.tokenHash !== tokenHash) throw refused("Invalid pairing request.");
+    const accepted: HubPhoneEnrollment = {
+      version: 1, hubId: enrollment.hubId, tokenHash, deviceId: enrollment.deviceId, publicKeyDerBase64: enrollment.publicKeyDerBase64,
+      name: enrollment.name, enrolledAt: enrollment.enrolledAt
+    };
+    if (!verifyHubText(accepted.publicKeyDerBase64, hubPhoneEnrollmentSigningText(accepted), request.signature)) throw refused("The pairing request's signature does not verify.");
+    const hub = this.options.storage.hub();
+    const stored = await hub.phoneInviteByTokenHash(tokenHash);
+    const gone = new HubRequestError(410, "This pairing code was already used or has expired. Make a new one on your Mac.");
+    if (!stored || stored.cancelledAt) throw gone;
+    const answer = (enrollmentJson: string, enrollmentSignature: string): HubPhoneEnrollResponse => {
+      const kept = JSON.parse(enrollmentJson) as HubPhoneEnrollment;
+      const certificate: HubPhoneCertificate = {
+        invite: stored.invite, inviteSignature: stored.signature, enrollment: kept, enrollmentSignature, token: request.token!
+      };
+      return { ok: true, hubId: this.options.hubId, deviceId: kept.deviceId, scope: stored.invite.scope, certificate, protocol: HUB_PROTOCOL_VERSION };
+    };
+    if (stored.usedAt) {
+      // The same phone asking again (its answer was lost on the way) is told
+      // again; anyone else is refused.
+      if (stored.deviceId === accepted.deviceId && stored.enrollment) return answer(stored.enrollment.json, stored.enrollment.signature);
+      throw gone;
+    }
+    const now = new Date(this.now()).toISOString();
+    if (Date.parse(stored.invite.expiresAt) <= this.now()) throw gone;
+    // Checked as every device checks the certificate later: a phone whose
+    // clock is far off is told now, not admitted here and refused elsewhere.
+    const enrolledAt = Date.parse(accepted.enrolledAt);
+    if (enrolledAt > Date.parse(stored.invite.expiresAt) + HUB_AUTH_MAX_SKEW_MS || enrolledAt < Date.parse(stored.invite.issuedAt) - HUB_AUTH_MAX_SKEW_MS ||
+        Math.abs(enrolledAt - this.now()) > HUB_AUTH_MAX_SKEW_MS) {
+      throw refused("This phone's clock is off. Set it to update automatically, then scan the code again.");
+    }
+    const enrollmentJson = JSON.stringify(accepted);
+    const taken = await hub.enrollPhone(stored.invite.inviteId, {
+      deviceId: accepted.deviceId, publicKeyDerBase64: accepted.publicKeyDerBase64, role: "phone", name: accepted.name || stored.invite.name,
+      addedAt: now, scope: stored.invite.scope
+    }, { json: enrollmentJson, signature: request.signature }, now);
+    if (!taken) throw gone;
+    this.invalidateRoster();
+    this.options.debugLog?.("hub.phone.enrolled", { deviceId: accepted.deviceId, inviteId: stored.invite.inviteId });
+    return answer(enrollmentJson, request.signature);
   }
 
   private serveChallenge(pathname: string, response: ServerResponse): void {
@@ -574,17 +779,72 @@ function blobReference(blobHash: string, params: URLSearchParams): DeviceEventBl
   return isDeviceEventBlobReference(reference) ? reference : undefined;
 }
 
+/** What a device says it holds on a read (absent: a device that does not
+ *  report, which is read as before and never told to start again). */
+function readReport(params: URLSearchParams): (HubReadReport & { peek?: boolean }) | undefined {
+  if (!params.has("held")) return undefined;
+  const held = Number(params.get("held"));
+  const heldSince = Number(params.get("heldSince") ?? "0");
+  const heldCount = Number(params.get("heldCount") ?? "0");
+  // heldSince is a time: no later than any date can be.
+  if (![held, heldSince, heldCount].every((value) => Number.isSafeInteger(value) && value >= 0) || heldSince > MAX_DATE_MS) throw new HubRequestError(400, "Invalid read report.");
+  const gaveUp = params.has("gaveUp") ? Number(params.get("gaveUp")) : undefined;
+  const gaveUpAt = params.has("gaveUpAt") ? Number(params.get("gaveUpAt")) : undefined;
+  if (gaveUp !== undefined && (!Number.isSafeInteger(gaveUp) || gaveUp < 1 || !Number.isSafeInteger(gaveUpAt) || (gaveUpAt as number) < 1 || (gaveUpAt as number) > MAX_DATE_MS)) {
+    throw new HubRequestError(400, "Invalid read report.");
+  }
+  return { held, heldSince, heldCount, ...(gaveUp !== undefined ? { gaveUp, gaveUpAt } : {}), ...(params.get("peek") === "1" ? { peek: true } : {}) };
+}
+
+const RENDEZVOUS_ID = /^[A-Za-z0-9._-]{1,128}$/;
+const MAX_DATE_MS = 8_640_000_000_000_000;
+
 function validRoster(value: unknown): HubDevice[] {
   const devices = (value as HubRosterRequest | undefined)?.devices;
   if (!Array.isArray(devices) || devices.length > 200) throw new HubRequestError(400, "Invalid roster.");
   return devices.map((device) => {
     if (!device || typeof device.publicKeyDerBase64 !== "string" || deviceIdForPublicKey(device.publicKeyDerBase64) !== device.deviceId ||
         !(HUB_ROSTER_ROLES as readonly string[]).includes(device.role) || typeof device.name !== "string" || device.name.length > 200 || CONTROL_CHARACTER.test(device.name) ||
-        (device.machineId !== undefined && (typeof device.machineId !== "string" || device.machineId.length > 128))) {
+        (device.machineId !== undefined && (typeof device.machineId !== "string" || device.machineId.length > 128)) ||
+        (device.rendezvousId !== undefined && (typeof device.rendezvousId !== "string" || !RENDEZVOUS_ID.test(device.rendezvousId)))) {
+      throw new HubRequestError(400, "Invalid roster entry.");
+    }
+    // A phone is on the roster for every chat (see validInvite).
+    if ((device.scope !== undefined && (device.role !== "phone" || !isHubPhoneScope(device.scope) || device.scope.scope !== "device")) ||
+        (device.inviteId !== undefined && !isHubPhoneInviteId(device.inviteId))) {
       throw new HubRequestError(400, "Invalid roster entry.");
     }
     return { deviceId: device.deviceId, publicKeyDerBase64: device.publicKeyDerBase64, role: device.role, name: device.name, addedAt: "",
-      ...(device.machineId ? { machineId: device.machineId } : {}) };
+      ...(device.machineId ? { machineId: device.machineId } : {}),
+      ...(device.scope ? { scope: device.scope } : {}),
+      ...(device.inviteId ? { inviteId: device.inviteId } : {}),
+      ...(device.role === "machine" && device.reader === true ? { reader: true } : {}),
+      ...(device.role === "machine" && device.rendezvousId ? { rendezvousId: device.rendezvousId } : {}) };
+  });
+}
+
+function validInviteIds(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 1_000 || !value.every(isHubPhoneInviteId)) {
+    throw new HubRequestError(400, "Invalid settled invites.");
+  }
+  return value as string[];
+}
+
+function validMachineWake(value: unknown): import("../shared/hubProtocol").HubMachineWakeRequest["machines"] {
+  const machines = (value as { machines?: unknown } | undefined)?.machines;
+  const text = (item: unknown, pattern: RegExp) => typeof item === "string" && pattern.test(item);
+  if (!Array.isArray(machines) || machines.length > 50) throw new HubRequestError(400, "Invalid start keys.");
+  return machines.map((entry) => {
+    const machine = entry as { machineId?: unknown; instanceId?: unknown; region?: unknown; credentials?: { accessKeyId?: unknown; secretAccessKey?: unknown; region?: unknown } };
+    if (!text(machine?.machineId, /^[A-Za-z0-9._:-]{1,128}$/) || !text(machine.instanceId, /^i-[0-9a-f]{8,32}$/) || !text(machine.region, /^[a-z]{2}(-[a-z]+)+-\d$/) ||
+        !text(machine.credentials?.accessKeyId, /^[A-Z0-9]{16,128}$/) || !text(machine.credentials?.secretAccessKey, /^[A-Za-z0-9/+=]{20,128}$/) || machine.credentials?.region !== machine.region) {
+      throw new HubRequestError(400, "Invalid start key.");
+    }
+    return {
+      machineId: machine.machineId as string, instanceId: machine.instanceId as string, region: machine.region as string,
+      credentials: { accessKeyId: machine.credentials!.accessKeyId as string, secretAccessKey: machine.credentials!.secretAccessKey as string, region: machine.region as string }
+    };
   });
 }
 

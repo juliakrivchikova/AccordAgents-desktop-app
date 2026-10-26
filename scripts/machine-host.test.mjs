@@ -1,21 +1,29 @@
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
 import test from "node:test";
 import { desktopEvents, hostEvents, DESKTOP_ID, MACHINE_ID, DESKTOP_ISSUER } from "./machine-test-events.mjs";
 
-const require = createRequire(import.meta.url);
-const SEAL_KEY = Buffer.from(new Uint8Array(32).map((_, index) => index + 1)).toString("base64url");
+const { sealMachinePayload, openMachinePayload } = await import("../dist/main/main/services/machineChannelSealing.js");
+const { isMachineDurableMessage } = await import("../dist/main/shared/machineLink.js");
+const { signMachineControl } = await import("../dist/main/main/services/machineControlAuthentication.js");
 
+const SEAL_KEY = Buffer.from(new Uint8Array(32).map((_, index) => index + 1)).toString("base64url");
+let pairings = 0;
+
+/** An enrollment that names the User's server (the only place a machine
+ *  meets its devices now). Nothing connects to it: the room is the stub
+ *  client below, and the server's order is played by the test itself. */
 function pairing() {
   const now = Date.now();
+  pairings += 1;
   return {
     version: 1,
     purpose: "machine-host",
     issuer: DESKTOP_ISSUER,
-    rendezvousId: "rv-host-test-" + now,
+    // Unique per enrollment: the event storage is shared by every test here.
+    rendezvousId: `rv-host-test-${now}-${pairings}`,
     stableRoutingId: "route-host-test",
     relaySealKeyBase64: SEAL_KEY,
-    relayUrl: "ws://127.0.0.1:1/v1/relay",
+    hubUrl: "http://127.0.0.1:1",
     capabilities: [{ scope: "device", canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }],
     fingerprint: "TEST-CAP",
     createdAt: new Date(now).toISOString(),
@@ -23,7 +31,7 @@ function pairing() {
   };
 }
 
-/** A relay client stand-in: the test injects inbound messages and reads what the machine sends. */
+/** A room client stand-in: the test injects inbound messages and reads what the machine sends. */
 function stubClient() {
   const listeners = new Map();
   const sent = [];
@@ -49,44 +57,78 @@ function stubClient() {
   };
 }
 
-async function envelope(body, enrollment) {
-  const { sealMachineRelayPayload } = await import("../dist/main/main/services/machineRelaySealing.js");
-  const { isMachineDurableMessage } = await import("../dist/main/shared/machineLink.js");
-  const { signMachineControl } = await import("../dist/main/main/services/machineControlAuthentication.js");
-  let payload;
-  if (isMachineDurableMessage(body)) {
-    const conversationId = body.type === "machine.conversation.sync" ? body.conversation.id : body.conversationId;
-    const { event } = await desktopEvents.eventLog.appendLocalEvent({ conversationId,
-      logScopeId: `device:${enrollment.rendezvousId}:${JSON.stringify([conversationId, "actions"])}`, kind: body.type, payload: body,
-      ...(body.type === "machine.turn.request" ? { eventId: `machine-command:${body.runId}` } : {}) });
-    payload = { protocol: "accord-device-events-v1", type: "event", from: DESKTOP_ID, to: MACHINE_ID, event };
-  } else {
-    payload = signMachineControl({ protocol: "accord-machine-link-v1", messageId: `m-${Math.random()}`,
-      sentAt: new Date().toISOString(), body }, desktopEvents.identity, enrollment.rendezvousId, MACHINE_ID);
-  }
-  return sealMachineRelayPayload(payload, desktopEvents.identity, hostEvents.identity.publicKeyDerBase64, enrollment.rendezvousId);
+/** A durable message from the desktop (a turn, a stop, an acknowledgement),
+ *  as the desktop writes it: one signed event in its own log, on its channel
+ *  with this machine. */
+async function desktopEvent(body, enrollment) {
+  const conversationId = body.type === "machine.conversation.sync" ? body.conversation.id : body.conversationId;
+  const { event } = await desktopEvents.eventLog.appendLocalEvent({ conversationId,
+    logScopeId: `device:${enrollment.rendezvousId}:${JSON.stringify([conversationId, "actions"])}`, kind: body.type, payload: body,
+    ...(body.type === "machine.turn.request" ? { eventId: `machine-command:${body.runId}` } : {}) });
+  return event;
 }
 
-async function sentBodies(client, enrollment) {
-  const { openMachineRelayPayload } = await import("../dist/main/main/services/machineRelaySealing.js");
-  const { openMobileRelayPayload } = await import("../dist/main/main/services/mobileRelaySealing.js");
+/** A control message from the desktop (hello, query, a picture's parts),
+ *  signed and sealed to this machine for the room. */
+async function controlFrame(body, enrollment) {
+  const payload = signMachineControl({ protocol: "accord-machine-link-v1", messageId: `m-${Math.random()}`,
+    sentAt: new Date().toISOString(), body }, desktopEvents.identity, enrollment.rendezvousId, MACHINE_ID);
+  return sealMachinePayload(payload, desktopEvents.identity, hostEvents.identity.publicKeyDerBase64, enrollment.rendezvousId);
+}
+
+/** Hands the machine what its desktop sends, the way it travels with only the
+ *  User's server between them: a durable event goes into the desktop's log
+ *  and reaches the machine in the server's order (HubSync hands it in through
+ *  `receiveFromHub`, as here); a control message arrives through the room. */
+async function deliver(host, client, body) {
+  if (isMachineDurableMessage(body)) {
+    const outcome = await host.receiveFromHub(await desktopEvent(body, host.options.pairing));
+    assert.equal(outcome, "delivered", `the machine takes the desktop's ${body.type} from the server's order`);
+    return;
+  }
+  client.emit("message", { ciphertext: await controlFrame(body, host.options.pairing) });
+  await host.inbound;
+}
+
+/** What the machine sent through the room: only control messages, each sealed
+ *  to the desktop. Nothing durable travels there; through the server it goes
+ *  in the server's order (see machineEvents). */
+async function controlBodies(client, enrollment) {
   const bodies = [];
   for (const request of client.sent) {
-    await assert.rejects(() => openMobileRelayPayload(request.ciphertext, SEAL_KEY), "the enrolling desktop channel never emits future content under the legacy room seal");
-    const payload = await openMachineRelayPayload(request.ciphertext, desktopEvents.identity, [hostEvents.identity.publicKeyDerBase64], enrollment.rendezvousId);
-    if (payload.protocol === "accord-device-events-v1") {
-      if (payload.type === "event") bodies.push(await hostEvents.eventStorage.deviceEventBlobs().hydrate(payload.event.payload));
-    } else bodies.push(payload.body);
+    const payload = await openMachinePayload(request.ciphertext, desktopEvents.identity, [hostEvents.identity.publicKeyDerBase64], enrollment.rendezvousId);
+    assert.notEqual(payload.protocol, "accord-device-events-v1", "through the server no device event, receipt or repair request goes over the room");
+    bodies.push(payload.body);
   }
   return bodies;
 }
 
-/** The shared test storage as a machine with no native work left over
- *  from earlier tests sees it (a pending one rightly keeps it busy). */
-function withoutNativeCommands(storage) {
-  const view = Object.create(storage);
-  view.nativeCommands = () => ({ ...storage.nativeCommands(), pending: async () => [] });
-  return view;
+/** The machine's own durable events on its channel with the desktop, in the
+ *  order it wrote them: what HubSync pushes to the server, and so what the
+ *  desktop receives. Only this enrollment's (the storage is shared). */
+async function machineEvents(enrollment) {
+  const prefix = `device:${enrollment.rendezvousId}:`;
+  const events = [];
+  let cursor = 0;
+  for (;;) {
+    const page = await hostEvents.eventStorage.hub().ownEventsAfter(MACHINE_ID, cursor, 1000, [prefix]);
+    for (const { rowid, event } of page) {
+      cursor = rowid;
+      events.push({ event, body: await hostEvents.eventStorage.deviceEventBlobs().hydrate(event.payload) });
+    }
+    if (page.length < 1000) return events;
+  }
+}
+
+async function durableBodies(enrollment) {
+  return (await machineEvents(enrollment)).map(({ body }) => body);
+}
+
+/** Delivery rows this machine keeps for its desktop channel: through the
+ *  server there are none (a reader's place in the server's order is its only
+ *  acknowledgement). */
+async function deliveryRows(enrollment, kind) {
+  return (await hostEvents.eventStorage.deviceEvents().listPending(enrollment.rendezvousId)).filter((row) => row.event.kind === kind);
 }
 
 function settle(ms = 150) {
@@ -114,8 +156,7 @@ test("a turn waiting for its chat state counts as held, and a stop removes it be
   await host.start();
   await settle();
   const inbound = async (body) => {
-    client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
-    await host.inbound;
+    await deliver(host, client, body);
     await host.outbound;
     await host.eventChannel.flush();
   };
@@ -128,12 +169,11 @@ test("a turn waiting for its chat state counts as held, and a stop removes it be
   assert.ok(logs.some((entry) => entry.event === "machine-host.turn.awaiting-chat" && entry.payload?.runId === "run-wait"));
   // Asked about it, the machine holds it: no "unknown".
   await inbound({ type: "machine.turn.query", conversationId: "conv-1", runId: "run-wait" });
-  let bodies = await sentBodies(client, host.options.pairing);
-  assert.ok(!bodies.some((body) => body.type === "machine.turn.unknown"), "a waiting turn is held, not unknown");
+  assert.ok(!(await controlBodies(client, host.options.pairing)).some((body) => body.type === "machine.turn.unknown"), "a waiting turn is held, not unknown");
   // Stop while waiting: a confirmed interruption is stored and reported, and the copy completing must not start it.
   await inbound({ type: "machine.turn.cancel", conversationId: "conv-1", runId: "run-wait" });
-  bodies = await sentBodies(client, host.options.pairing);
-  const terminal = bodies.find((body) => body.type === "machine.turn.finished" && body.runId === "run-wait");
+  // Reported in the machine's own log: the server's order takes it to the desktop.
+  const terminal = (await durableBodies(host.options.pairing)).find((body) => body.type === "machine.turn.finished" && body.runId === "run-wait");
   assert.ok(terminal, "a stopped waiting turn reports a result");
   assert.equal(terminal.status, "interrupted");
   await settle(1_500);
@@ -163,8 +203,7 @@ test("a run the chat stopped on the User's stop action is reported as interrupte
   await host.start();
   await settle();
   const inbound = async (body) => {
-    client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
-    await host.inbound;
+    await deliver(host, client, body);
     await host.outbound;
     await host.eventChannel.flush();
   };
@@ -177,7 +216,7 @@ test("a run the chat stopped on the User's stop action is reported as interrupte
   for (let attempt = 0; attempt < 40 && !terminal; attempt += 1) {
     await settle(50);
     await host.eventChannel.flush();
-    terminal = (await sentBodies(client, host.options.pairing)).find((body) => body.type === "machine.turn.finished" && body.runId === "run-stop-action");
+    terminal = (await durableBodies(host.options.pairing)).find((body) => body.type === "machine.turn.finished" && body.runId === "run-stop-action");
   }
   assert.ok(terminal, "the stopped run reports a result");
   assert.equal(terminal.status, "interrupted", "a stop the chat confirmed is an interruption");
@@ -203,14 +242,13 @@ test("a picture arrives in parts and is reassembled; a desktop that leaves fails
   await host.start();
   await settle();
   const inbound = async (body) => {
-    client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
-    await host.inbound;
+    await deliver(host, client, body);
   };
   await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
 
   const answered = host.requestAttachment("conv-1", "att-1", 5000);
   await settle();
-  const request = (await sentBodies(client, host.options.pairing)).find((body) => body.type === "machine.attachment.request");
+  const request = (await controlBodies(client, host.options.pairing)).find((body) => body.type === "machine.attachment.request");
   assert.ok(request, "the machine asks the desktop");
   const reply = (extra) => ({ type: "machine.attachment.result", requestId: request.requestId, conversationId: "conv-1", attachmentId: "att-1", ok: true, parts: 2, ...extra });
   // A stale answer for another request is ignored; parts may arrive out of order.
@@ -223,7 +261,7 @@ test("a picture arrives in parts and is reassembled; a desktop that leaves fails
 
   const refused = host.requestAttachment("conv-1", "att-2", 5000);
   await settle();
-  const second = (await sentBodies(client, host.options.pairing)).filter((body) => body.type === "machine.attachment.request").at(-1);
+  const second = (await controlBodies(client, host.options.pairing)).filter((body) => body.type === "machine.attachment.request").at(-1);
   await inbound({ type: "machine.attachment.result", requestId: second.requestId, conversationId: "conv-1", attachmentId: "att-2", ok: false, error: "This chat has no member on this machine." });
   await assert.rejects(refused, /no member on this machine/);
 
@@ -254,8 +292,7 @@ test("the machine's hello lists turns waiting for their chat as active", async (
   await host.start();
   await settle();
   const inbound = async (body) => {
-    client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
-    await host.inbound;
+    await deliver(host, client, body);
     await host.outbound;
     await host.eventChannel.flush();
   };
@@ -266,7 +303,7 @@ test("the machine's hello lists turns waiting for their chat as active", async (
   // A fresh link announces itself again; the hello must list the waiting turn.
   client.emit("peer", { type: "ready", deviceId: MACHINE_ID, peerConnected: true, peers: [{ role: "desktop", deviceId: DESKTOP_ID }] });
   await settle();
-  const bodies = await sentBodies(client, host.options.pairing);
+  const bodies = await controlBodies(client, host.options.pairing);
   const hello = bodies.filter((body) => body.type === "machine.hello").pop();
   assert.ok(hello.activeRunIds.includes("run-listed"));
   host.close();
@@ -296,7 +333,8 @@ test("a turn waits for the chat change it names and then runs on the whole chat"
   const at = "2026-09-24T12:00:00.000Z";
   const change = async (changes) => (await desktopEvents.eventLog.appendLocalEvent({ conversationId, logScopeId: scope, kind: chatChanges.CHAT_CHANGES_EVENT_KIND,
     payload: { version: 1, conversationId, updatedAt: at, changes } })).event;
-  const receive = (event) => host.eventChannel.receive({ protocol: "accord-device-events-v1", from: DESKTOP_ID, to: MACHINE_ID, type: "event", event });
+  // The desktop's chat changes reach the machine in the server's order (HubSync's delivery).
+  const receive = async (event) => assert.equal(await host.receiveFromHub(event), "delivered");
   try {
     await host.start();
     await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, machineId: "head-home", appVersion: "test" });
@@ -324,7 +362,7 @@ test("a ChatService native resume is listed, stopped and delivered through the h
   const logs = { write: async () => undefined };
   const chat = Object.create(ChatService.prototype);
   Object.assign(chat, {
-    chatRunMeta: new Map(), chatRunControllers: new Map(), activeConversationRunIds: new Map(), activeRunIds: new Set(),
+    chatRunMeta: new Map(), chatRunControllers: new Map(), activeConversationRunIds: new Map(), activeRunIds: new Set(), pendingPhoneRuns: new Map(), phoneStartsInFlight: new Map(),
     participantRequestRunners: new Map(), remoteRunHandlesByRun: new Map(), participantRunSettledListeners: new Set(),
     appSendMessageCountsByRun: new Map(), appSendMessageImageBytesByRun: new Map(), debugLogs: logs,
     memberBackgroundTasks: new Map(), backgroundTaskListeners: new Set(),
@@ -337,15 +375,13 @@ test("a ChatService native resume is listed, stopped and delivered through the h
   await host.start();
   client.emit("peer", { type: "ready", peers: [{ role: "desktop", deviceId: DESKTOP_ID }] });
   await settle();
-  let bodies = await sentBodies(client, host.options.pairing);
-  assert.ok(bodies.find((body) => body.type === "machine.hello").activeRunIds.includes("native-resume"));
-  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.query", conversationId: "native-chat", runId: "native-resume" }, host.options.pairing) });
-  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.cancel", conversationId: "native-chat", runId: "native-resume" }, host.options.pairing) });
+  assert.ok((await controlBodies(client, host.options.pairing)).find((body) => body.type === "machine.hello").activeRunIds.includes("native-resume"));
+  await deliver(host, client, { type: "machine.turn.query", conversationId: "native-chat", runId: "native-resume" });
+  await deliver(host, client, { type: "machine.turn.cancel", conversationId: "native-chat", runId: "native-resume" });
   await settle();
   assert.equal(controller.signal.aborted, true, "Stop reaches the actual ChatService controller");
-  bodies = await sentBodies(client, host.options.pairing);
-  assert.equal(bodies.filter((body) => body.type === "machine.turn.unknown").length, 0);
-  assert.equal(bodies.filter((body) => body.type === "machine.turn.finished").length, 0, "abort is not completion");
+  assert.equal((await controlBodies(client, host.options.pairing)).filter((body) => body.type === "machine.turn.unknown").length, 0);
+  assert.equal((await durableBodies(host.options.pairing)).filter((body) => body.type === "machine.turn.finished").length, 0, "abort is not completion");
   chat.unregisterTargetRun("native-resume", controller);
   const finishDeadline = Date.now() + 5000;
   while (!host.pendingTerminals.has("native-resume")) {
@@ -354,17 +390,16 @@ test("a ChatService native resume is listed, stopped and delivered through the h
   }
   await host.outbound;
   await host.eventChannel.flush();
-  bodies = await sentBodies(client, host.options.pairing);
-  const terminal = bodies.find((body) => body.type === "machine.turn.finished");
+  const terminal = (await durableBodies(host.options.pairing)).find((body) => body.type === "machine.turn.finished");
   assert.equal(terminal.status, "interrupted");
   assert.equal(terminal.messages[0].content, "partial");
   assert.ok(host.pendingTerminals.has("native-resume"), "result stays until the desktop acknowledges its saved copy");
   const newer = { ...terminal, receiptId: "newer-receipt", messages: [{ ...terminal.messages[0], content: "new result" }] };
   host.pendingTerminals.set("native-resume", newer);
-  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.finished.ack", conversationId: "native-chat", runId: "native-resume", receiptId: terminal.receiptId, finishedAt: terminal.finishedAt }, host.options.pairing) });
+  await deliver(host, client, { type: "machine.turn.finished.ack", conversationId: "native-chat", runId: "native-resume", receiptId: terminal.receiptId, finishedAt: terminal.finishedAt });
   await settle();
   assert.equal(host.pendingTerminals.get("native-resume"), newer, "an old ACK cannot remove a newer result, even with an equal finish timestamp");
-  client.emit("message", { ciphertext: await envelope({ type: "machine.turn.finished.ack", conversationId: "native-chat", runId: "native-resume", receiptId: newer.receiptId, finishedAt: newer.finishedAt }, host.options.pairing) });
+  await deliver(host, client, { type: "machine.turn.finished.ack", conversationId: "native-chat", runId: "native-resume", receiptId: newer.receiptId, finishedAt: newer.finishedAt });
   await settle();
   assert.equal(host.pendingTerminals.has("native-resume"), false);
   host.close();
@@ -396,8 +431,11 @@ test("runtime shutdown stores the final outcome before closing its device channe
     finishRun({ messages: [{id:"reply",role:"participant",participantId:"p",status:"error",content:"The provider closed.",createdAt:new Date().toISOString()}], warnings:[] });
   });
   assert.equal(closed, true);
-  const pending = await hostEvents.eventStorage.deviceEvents().listPending(enrollment.rendezvousId);
-  assert.ok(pending.some(row => row.event.kind === "machine.turn.finished"));
+  // Stored in the machine's own log, which the server's order takes to the
+  // desktop; no delivery row waits for anyone.
+  assert.ok((await durableBodies(enrollment)).some(body => body.type === "machine.turn.finished" && body.runId === "shutdown-run"),
+    "the final outcome is stored before the channel closes");
+  assert.deepEqual(await deliveryRows(enrollment, "machine.turn.finished"), [], "through the server no delivery row is kept for it");
   assert.equal(host.pendingTerminals.get("shutdown-run").status, "failed", "runtime closure must not be presented as User Stop");
 });
 
@@ -424,10 +462,11 @@ test("a member request from this machine reaches the desktop as one durable dele
     await host.outbound;
     await host.eventChannel.flush();
 
-    const pending = await hostEvents.eventStorage.deviceEvents().listPending(enrollment.rendezvousId);
-    const delegations = pending.filter((row) => row.event.kind === "machine.participants.delegate");
+    // In the machine's own log, which the server's order takes to the desktop.
+    const delegations = (await machineEvents(enrollment)).filter(({ event }) => event.kind === "machine.participants.delegate");
     assert.equal(delegations.length, 1, "one request message is one delegation, however often it is retried");
-    const body = await hostEvents.eventStorage.deviceEventBlobs().hydrate(delegations[0].event.payload);
+    assert.deepEqual(await deliveryRows(enrollment, "machine.participants.delegate"), [], "through the server no delivery row is kept for it");
+    const body = delegations[0].body;
     assert.equal(body.conversationId, "delegating-chat");
     assert.equal(body.requestMessageId, "request-1");
     assert.equal(body.batchId, "batch-1");
@@ -467,8 +506,7 @@ test("a Claude member's turns on a machine run as soon as they are admitted; ano
     await host.start();
     await settle();
     const inbound = async (body) => {
-      client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
-      await host.inbound;
+      await deliver(host, client, body);
       await host.outbound;
       await host.eventChannel.flush();
     };
@@ -529,8 +567,7 @@ test("the desktop's script requests are answered by the machine's scripts, off t
   await host.start();
   await settle();
   const inbound = async (body) => {
-    client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
-    await host.inbound;
+    await deliver(host, client, body);
     await host.outbound;
     await host.eventChannel.flush();
   };
@@ -545,7 +582,7 @@ test("the desktop's script requests are answered by the machine's scripts, off t
   await inbound({ type: "machine.scripts.request", requestId: "r1", instanceId, expiresAt, operation: { op: "list" } });
   await settle(50);
   assert.deepEqual(handled, ["releaseHeld", "list"], "a read does not wait behind a slow change");
-  assert.ok((await sentBodies(client, host.options.pairing)).some((body) => body.type === "machine.scripts.result" && body.requestId === "r1"),
+  assert.ok((await controlBodies(client, host.options.pairing)).some((body) => body.type === "machine.scripts.result" && body.requestId === "r1"),
     "the list is answered while held messages are still being posted");
   releaseSlow();
   await inbound({ type: "machine.scripts.request", requestId: "r2", instanceId, expiresAt, operation: { op: "runNow", scriptId: "s1" } });
@@ -554,7 +591,7 @@ test("the desktop's script requests are answered by the machine's scripts, off t
   // And one the desktop already gave up on is not done late.
   await inbound({ type: "machine.scripts.request", requestId: "late", instanceId, expiresAt: new Date(Date.now() - 120_000).toISOString(), operation: { op: "setEnabled", scriptId: "s1", enabled: true } });
   await settle();
-  let bodies = await sentBodies(client, host.options.pairing);
+  let bodies = await controlBodies(client, host.options.pairing);
   const results = bodies.filter((body) => body.type === "machine.scripts.result");
   assert.deepEqual(results.map((body) => [body.requestId, body.ok]).sort(), [["late", false], ["r1", true], ["r2", false], ["slow", true], ["stale", false]]);
   const byId = Object.fromEntries(results.map((body) => [body.requestId, body]));
@@ -572,7 +609,7 @@ test("the desktop's script requests are answered by the machine's scripts, off t
   host.noteScriptsChanged();
   host.noteScriptsChanged();
   await settle(400);
-  bodies = await sentBodies(client, host.options.pairing);
+  bodies = await controlBodies(client, host.options.pairing);
   const hello = bodies.filter((body) => body.type === "machine.hello").pop();
   assert.equal(hello.keepAwake, true);
   assert.deepEqual(hello.activeRunIds ?? [], [], "keeping awake is not a run: the update gate does not wait for it");
@@ -592,14 +629,13 @@ test("a runtime without scheduled scripts answers the desktop instead of leaving
   );
   await host.start();
   await settle();
-  client.emit("message", { ciphertext: await envelope({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" }, host.options.pairing) });
-  client.emit("message", { ciphertext: await envelope({ type: "machine.scripts.request", requestId: "r1", instanceId: host.instanceId, expiresAt: new Date(Date.now() + 20_000).toISOString(), operation: { op: "list" } }, host.options.pairing) });
-  await host.inbound;
+  await deliver(host, client, { type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
+  await deliver(host, client, { type: "machine.scripts.request", requestId: "r1", instanceId: host.instanceId, expiresAt: new Date(Date.now() + 20_000).toISOString(), operation: { op: "list" } });
   await settle();
-  const result = (await sentBodies(client, host.options.pairing)).find((body) => body.type === "machine.scripts.result");
+  const result = (await controlBodies(client, host.options.pairing)).find((body) => body.type === "machine.scripts.result");
   assert.equal(result.ok, false);
   assert.match(result.error, /does not host scheduled scripts/);
-  assert.equal((await sentBodies(client, host.options.pairing)).find((body) => body.type === "machine.hello").scriptsSupported, undefined);
+  assert.equal((await controlBodies(client, host.options.pairing)).find((body) => body.type === "machine.hello").scriptsSupported, undefined);
   host.close();
 });
 
@@ -659,26 +695,52 @@ test("through the hub two machines name their channel after the pair, never afte
   const otherRoom = "rv-other-machine";
   const other = { deviceId: DESKTOP_ID, publicKeyDerBase64: desktopEvents.identity.publicKeyDerBase64, role: "machine", name: "Other",
     machineId: "machine-2", relayUrl: "ws://127.0.0.1:1/v1/room", rendezvousId: otherRoom, fingerprint: "F", chatChanges: true };
-  const fabric = (hubMode) => new MachinePeerFabric({
-    ...(hubMode ? { hubMode: true } : {}),
+  const fabric = new MachinePeerFabric({
     selfDeviceId: MACHINE_ID, storage: hostEvents.eventStorage, eventLog: hostEvents.eventLog, home,
     homeClient: stubClient(), createClient: () => stubClient(), isPeerConnected: () => false,
     apply: async () => "applied", onError: () => undefined, logger: () => undefined
   });
-  const viaRelay = fabric(false);
-  await viaRelay.reconcile([other]);
-  const viaHub = fabric(true);
-  await viaHub.reconcile([other]);
+  await fabric.reconcile([other]);
   try {
-    const relayName = viaRelay.roomFor(DESKTOP_ID);
-    const hubName = viaHub.roomFor(DESKTOP_ID);
-    assert.ok([home.rendezvousId, otherRoom].includes(relayName), "through a relay, the room they meet in");
-    assert.ok(hubName.startsWith("pair-"), "through the hub, a name of the pair");
-    assert.notEqual(hubName, home.rendezvousId);
-    assert.notEqual(hubName, otherRoom);
+    const name = fabric.roomFor(DESKTOP_ID);
+    assert.ok(name.startsWith("pair-"), "through the hub, a name of the pair");
+    assert.notEqual(name, home.rendezvousId);
+    assert.notEqual(name, otherRoom);
   } finally {
-    viaRelay.close();
-    viaHub.close();
+    fabric.close();
+  }
+});
+
+test("through the hub a machine owes nothing to anyone: no delivery rows for devices that may never come", async () => {
+  const { MachinePeerFabric } = await import("../dist/main/main/services/machinePeerFabric.js");
+  const home = pairing();
+  // A device that never comes (a phone that does not read this machine) and
+  // another machine: neither is owed anything, both read the server's order.
+  const { createChatEventDeviceIdentity } = await import("../dist/main/main/services/chatEventLog.js");
+  const phone = createChatEventDeviceIdentity(new Date().toISOString());
+  const absentPhone = { deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone", name: "Phone",
+    relayUrl: "ws://127.0.0.1:1/v1/room", rendezvousId: home.rendezvousId, fingerprint: "F" };
+  const otherMachine = { deviceId: DESKTOP_ID, publicKeyDerBase64: desktopEvents.identity.publicKeyDerBase64, role: "machine", name: "Other",
+    machineId: "machine-2", relayUrl: "ws://127.0.0.1:1/v1/room", rendezvousId: "rv-other-machine", fingerprint: "F", chatChanges: true };
+  const fabric = new MachinePeerFabric({
+    selfDeviceId: MACHINE_ID, storage: hostEvents.eventStorage, eventLog: hostEvents.eventLog, home,
+    homeClient: stubClient(), createClient: () => stubClient(), isPeerConnected: () => true,
+    apply: async () => "applied", onError: () => undefined, logger: () => undefined
+  });
+  try {
+    await fabric.reconcile([absentPhone, otherMachine]);
+    fabric.start();
+    assert.equal(fabric.peerDeviceIds().length, 2, "the devices are still trusted: their events from the hub are taken");
+    // Even named as recipients, the devices are owed nothing.
+    const recipients = [absentPhone, otherMachine].map((peer) => ({ deviceId: peer.deviceId, channelId: fabric.roomFor(peer.deviceId) }));
+    const published = await fabric.channel(absentPhone.deviceId).publish({ conversationId: "chat", kind: "machine.turn.finished", payload: { runId: "r" },
+      recipients });
+    assert.ok(await hostEvents.eventStorage.getChatEvent(published.eventId));
+    for (const recipient of recipients) {
+      assert.equal((await hostEvents.eventStorage.deviceEvents().pressure(recipient.channelId)).events, 0, "a result keeps no delivery row");
+    }
+  } finally {
+    fabric.close();
   }
 });
 
@@ -704,8 +766,8 @@ test("a member's background work on the machine is reported to the desktop as it
   );
   await host.start();
   await settle();
-  const backgroundBodies = async () => (await sentBodies(client, host.options.pairing)).filter((body) => body.type === "machine.member.background");
-  const snapshots = (await sentBodies(client, host.options.pairing)).filter((body) => body.type === "machine.member.background.snapshot");
+  const backgroundBodies = async () => (await controlBodies(client, host.options.pairing)).filter((body) => body.type === "machine.member.background");
+  const snapshots = (await controlBodies(client, host.options.pairing)).filter((body) => body.type === "machine.member.background.snapshot");
   assert.deepEqual(snapshots.at(-1)?.members, [{ conversationId: "conv-bg", participantId: "p1", labels: ["long build"] }], "the hello is followed by the full list of what is running now");
   assert.equal(typeof notify, "function");
   notify({ conversationId: "conv-bg", participantId: "p1", labels: [] });
@@ -715,182 +777,88 @@ test("a member's background work on the machine is reported to the desktop as it
   assert.deepEqual(bodies.at(-1), { type: "machine.member.background", conversationId: "conv-bg", participantId: "p1", labels: [] });
   // A desktop back from a network blip asks; the machine answers with the full list.
   live.length = 0;
-  client.emit("message", { ciphertext: await envelope({ type: "machine.member.background.request" }, host.options.pairing) });
-  await host.inbound;
+  await deliver(host, client, { type: "machine.member.background.request" });
   await host.outbound;
   await settle(50);
-  const snapshotsAfterRequest = (await sentBodies(client, host.options.pairing)).filter((body) => body.type === "machine.member.background.snapshot");
+  const snapshotsAfterRequest = (await controlBodies(client, host.options.pairing)).filter((body) => body.type === "machine.member.background.snapshot");
   assert.equal(snapshotsAfterRequest.length, 2);
   assert.deepEqual(snapshotsAfterRequest.at(-1).members, [], "nothing is running any more");
   host.close();
   assert.equal(notify, undefined, "closing the host stops reporting");
 });
 
-test("a machine moves to the User's server only when idle and only to a relay's addresses, then starts again", async () => {
+test("a machine whose enrollment names no server of the User's is not started", async () => {
   const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
-  const client = stubClient();
-  const moved = [];
-  let restarted = 0;
-  let busy = false;
-  let scriptRunning = false;
-  const fencedDuringProbe = [];
-  const host = new MachineHostService(
-    {
-      runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
-      applyReplicatedConversation: async () => undefined,
-      liveRunIds: () => busy ? ["run-live"] : []
-    },
-    { getConversation: async () => undefined },
-    { importMachineSettingsSnapshot: async () => undefined },
-    { write: async () => undefined },
-    {
-      ...hostEvents, eventStorage: withoutNativeCommands(hostEvents.eventStorage), pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client,
-      moveTransport: async (addresses) => { moved.push(addresses); },
-      restartRuntime: () => { restarted += 1; },
-      // A switched-on script keeps the machine awake but does not stop a
-      // move; one running now does.
-      scripts: { handle: async () => undefined, keepsHostAwake: () => true, scheduledCount: () => 1, runningNow: () => scriptRunning },
-      probeRelay: async (relayUrl) => {
-        fencedDuringProbe.push(!host.canApplyNativeEffects());
-        if (relayUrl.includes("starts")) scriptRunning = true;
-        return !relayUrl.includes("unreachable");
-      }
-    }
-  );
-  await host.start();
-  await settle();
-  const inbound = async (body) => {
-    client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
-    await host.inbound;
-    await settle();
-  };
-  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
-  let bodies = await sentBodies(client, host.options.pairing);
-  assert.equal(bodies.filter((body) => body.type === "machine.hello").pop().transportMoveSupported, true);
-  const move = (requestId, overrides = {}) => ({ type: "machine.transport.move", requestId, instanceId: host.instanceId,
-    expiresAt: new Date(Date.now() + 20_000).toISOString(), relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events", ...overrides });
-  busy = true;
-  await inbound(move("busy"));
-  busy = false;
-  await inbound(move("elsewhere", { outboxUrl: "https://other.example/v1/mailbox/events" }));
-  await inbound(move("plain", { relayUrl: "ws://52.72.175.0/v1/relay", outboxUrl: "http://52.72.175.0/v1/mailbox/events" }));
-  await inbound(move("stale", { instanceId: "an-earlier-run" }));
-  await inbound(move("unreachable", { relayUrl: "wss://unreachable.example/v1/relay", outboxUrl: "https://unreachable.example/v1/mailbox/events" }));
-  scriptRunning = true;
-  await inbound(move("script"));
-  scriptRunning = false;
-  await inbound(move("script-starts", { relayUrl: "wss://starts.example/v1/relay", outboxUrl: "https://starts.example/v1/mailbox/events" }));
-  scriptRunning = false;
-  assert.deepEqual(moved, [], "nothing is saved for a refused move");
-  assert.equal(host.canApplyNativeEffects(), true, "a refused move lets work in again");
-  assert.ok(fencedDuringProbe.length > 0 && fencedDuringProbe.every(Boolean), "no new work starts while the machine checks the server");
-  await inbound(move("ok"));
-  await settle(700);
-  bodies = await sentBodies(client, host.options.pairing);
-  const answers = Object.fromEntries(bodies.filter((body) => body.type === "machine.transport.moved").map((body) => [body.requestId, body]));
-  assert.match(answers.busy.error, /busy/);
-  assert.match(answers.elsewhere.error, /not a relay's addresses/);
-  assert.match(answers.plain.error, /not a relay's addresses/);
-  assert.match(answers.stale.error, /restarted/);
-  assert.match(answers.unreachable.error, /cannot reach the server/);
-  assert.match(answers.script.error, /busy/, "a script running now is not cut off");
-  assert.match(answers["script-starts"].error, /busy/, "nor one that started while the server was asked");
-  assert.equal(answers.ok.ok, true);
-  assert.equal(host.canApplyNativeEffects(), false, "a machine that moved takes no new work before it starts again");
-  assert.deepEqual(moved, [{ relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" }]);
-  assert.equal(restarted, 1, "it starts again on its new address after answering");
-  host.close();
-});
-
-test("a machine away from this computer refuses to move onto it", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
-  const client = stubClient();
-  const moved = [];
-  const host = new MachineHostService(
-    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined, applyReplicatedConversation: async () => undefined },
+  const { hubUrl: _hub, ...relayEra } = { ...pairing(), relayUrl: "wss://relay.accordagents.com/v1/relay" };
+  assert.throws(() => new MachineHostService(
+    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async () => undefined },
     { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
-    { ...hostEvents, eventStorage: withoutNativeCommands(hostEvents.eventStorage), pairing: { ...pairing(), relayUrl: "wss://relay.accordagents.com/v1/relay" }, deviceId: MACHINE_ID, appVersion: "test", createClient: () => client,
-      moveTransport: async (addresses) => { moved.push(addresses); }, restartRuntime: () => undefined, probeRelay: async () => true }
-  );
-  await host.start();
-  await settle();
-  client.emit("message", { ciphertext: await envelope({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" }, host.options.pairing) });
-  await host.inbound;
-  await settle();
-  client.emit("message", { ciphertext: await envelope({ type: "machine.transport.move", requestId: "local", instanceId: host.instanceId,
-    expiresAt: new Date(Date.now() + 20_000).toISOString(), relayUrl: "ws://127.0.0.1:18310/v1/relay", outboxUrl: "http://127.0.0.1:18310/v1/mailbox/events" }, host.options.pairing) });
-  await host.inbound;
-  await settle();
-  const answer = (await sentBodies(client, host.options.pairing)).find((body) => body.type === "machine.transport.moved");
-  assert.equal(answer.ok, false);
-  assert.match(answer.error, /not a relay's addresses/);
-  assert.deepEqual(moved, []);
-  host.close();
+    { ...hostEvents, pairing: relayEra, deviceId: MACHINE_ID, appVersion: "test", createClient: () => stubClient() }
+  ), /does not name the User's server/);
 });
 
-test("a machine that cannot settle before the desktop stops waiting refuses the move rather than moving unseen", async () => {
+test("the desktop's new connection in the seat of its old one is greeted again, and events sent in the room are not taken", async () => {
   const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const { sealMachinePayload } = await import("../dist/main/main/services/machineChannelSealing.js");
   const client = stubClient();
-  const moved = [];
+  const logs = [];
+  const enrollment = pairing();
   const host = new MachineHostService(
-    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined, applyReplicatedConversation: async () => undefined },
-    { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
-    { ...hostEvents, eventStorage: withoutNativeCommands(hostEvents.eventStorage), pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client,
-      moveTransport: async (addresses) => { moved.push(addresses); }, restartRuntime: () => undefined,
-      probeRelay: async (relayUrl) => {
-        if (relayUrl.includes("slowprobe")) await new Promise((resolve) => setTimeout(resolve, 1_000));
-        return true;
-      } }
+    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async () => undefined },
+    { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined },
+    { write: async (event, payload) => { logs.push({ event, payload }); } },
+    { ...hostEvents, pairing: enrollment, deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
   );
   await host.start();
   await settle();
-  const inbound = async (body, waitMs = 50) => {
-    client.emit("message", { ciphertext: await envelope(body, host.options.pairing) });
-    await host.inbound;
-    await settle(waitMs);
-  };
-  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
-  const move = (requestId, overrides = {}) => ({ type: "machine.transport.move", requestId, instanceId: host.instanceId,
-    expiresAt: new Date(Date.now() + 60_000).toISOString(), relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events", ...overrides });
-  // What it owes takes longer to send than the desktop waits (counted on the
-  // machine's own clock, whatever the expiry says).
-  const flush = host.eventChannel.flush.bind(host.eventChannel);
-  host.eventChannel.flush = () => new Promise((resolve) => setTimeout(resolve, 1_500));
-  await inbound(move("slow", { answerWithinMs: 1_000 }), 1_800);
-  host.eventChannel.flush = flush;
-  assert.equal(host.canApplyNativeEffects(), true, "work is let in again");
-  // Settled in time, but the server answered too close to the deadline.
-  await inbound(move("late", { answerWithinMs: 1_000, relayUrl: "wss://slowprobe.example/v1/relay", outboxUrl: "https://slowprobe.example/v1/mailbox/events" }), 1_300);
-  const answers = Object.fromEntries((await sentBodies(client, host.options.pairing)).filter((body) => body.type === "machine.transport.moved").map((body) => [body.requestId, body]));
-  assert.match(answers.slow.error, /still sending what it owes/);
-  assert.match(answers.late.error, /too old/);
-  assert.deepEqual(moved, [], "nothing was changed");
-  assert.equal(host.canApplyNativeEffects(), true);
+  const hellos = async () => (await controlBodies(client, enrollment)).filter((body) => body.type === "machine.hello").length;
+  const first = await hellos();
+  assert.ok(first >= 1, "greeted on its own link");
+  // The server seated the desktop's new connection (it had not seen the old
+  // one close) and says so: the desktop is greeted again.
+  client.emit("peer", { type: "peer-connected", peer: { role: "desktop", deviceId: DESKTOP_ID } });
+  for (let i = 0; i < 80 && await hellos() < first + 1; i += 1) { await settle(25); await host.outbound; }
+  assert.equal(await hellos(), first + 1);
+  // A device event the desktop sent in the room (an old runtime would) is not taken.
+  let received = 0;
+  host.eventChannel.receive = async () => { received += 1; };
+  const packet = { protocol: "accord-device-events-v1", type: "event", from: DESKTOP_ID, to: MACHINE_ID, channelId: enrollment.rendezvousId, event: {} };
+  client.emit("message", { logicalMessageId: "x", ciphertext: await sealMachinePayload(packet, desktopEvents.identity, hostEvents.identity.publicKeyDerBase64, enrollment.rendezvousId) });
+  for (let i = 0; i < 80 && !logs.some((entry) => entry.event === "machine-host.room-event-dropped"); i += 1) await settle(25);
+  assert.ok(logs.some((entry) => entry.event === "machine-host.room-event-dropped"));
+  assert.equal(received, 0, "durable events come only through the server's order");
   host.close();
 });
 
-test("a moved enrollment keeps everything but the relay's addresses, in one step, readable only by its account", async () => {
-  const { mkdtemp, readFile, readdir, rm, stat, writeFile } = await import("node:fs/promises");
-  const { tmpdir } = await import("node:os");
-  const path = await import("node:path");
-  const { execFileSync } = await import("node:child_process");
-  const { moveEnrollment, shellCommandLine } = await import("../dist/main/machine/transportMove.js");
-  const dir = await mkdtemp(path.join(tmpdir(), "accord-move-"));
+test("an event another machine sends in its room is not taken: durable events come only through the server's order", async () => {
+  const { MachinePeerFabric } = await import("../dist/main/main/services/machinePeerFabric.js");
+  const { sealMachinePayload } = await import("../dist/main/main/services/machineChannelSealing.js");
+  const home = pairing();
+  // The other machine is the desktop's identity here only for its keys.
+  const other = { deviceId: DESKTOP_ID, publicKeyDerBase64: desktopEvents.identity.publicKeyDerBase64, role: "machine", name: "Other",
+    machineId: "machine-2", relayUrl: "ws://127.0.0.1:1/v1/room", rendezvousId: "rv-other-room", fingerprint: "F", chatChanges: true };
+  const peerRoom = stubClient();
+  const logs = [];
+  const fabric = new MachinePeerFabric({
+    selfDeviceId: MACHINE_ID, storage: hostEvents.eventStorage, eventLog: hostEvents.eventLog, home,
+    homeClient: stubClient(), createClient: () => peerRoom, isPeerConnected: () => true,
+    apply: async () => "applied", onError: () => undefined, logger: (event, payload) => logs.push({ event, payload })
+  });
   try {
-    const file = path.join(dir, "enrollment.json");
-    const before = { ...pairing(), relayUrl: "wss://relay.accordagents.com/v1/relay", outboxUrl: "https://relay.accordagents.com/v1/mailbox/events?mailboxId=mb-x" };
-    await writeFile(file, JSON.stringify(before), { mode: 0o644 });
-    await moveEnrollment(file, { relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" });
-    const after = JSON.parse(await readFile(file, "utf8"));
-    assert.deepEqual(after, { ...before, relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" });
-    assert.equal((await stat(file)).mode & 0o777, 0o600);
-    assert.deepEqual(await readdir(dir), ["enrollment.json"], "no half-written file is left");
-    await writeFile(file, JSON.stringify({ not: "a pairing" }));
-    await assert.rejects(moveEnrollment(file, { relayUrl: "wss://52.72.175.0/v1/relay", outboxUrl: "https://52.72.175.0/v1/mailbox/events" }));
-    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { not: "a pairing" }, "an unreadable one is left as it was");
-    const parts = ["/usr/bin/printf", "%s|", "it's", "a b", "$HOME", "`x`"];
-    assert.equal(execFileSync("/bin/sh", ["-c", shellCommandLine(parts)], { encoding: "utf8" }), "it's|a b|$HOME|`x`|");
+    await fabric.reconcile([other]);
+    let received = 0;
+    fabric.channel(DESKTOP_ID).receive = async () => { received += 1; };
+    const packet = { protocol: "accord-device-events-v1", type: "event", from: DESKTOP_ID, to: MACHINE_ID, channelId: "rv-other-room", event: {} };
+    const ciphertext = await sealMachinePayload(packet, desktopEvents.identity, hostEvents.identity.publicKeyDerBase64, "rv-other-room");
+    peerRoom.emit("message", { logicalMessageId: "x", ciphertext });
+    peerRoom.emit("message", { logicalMessageId: "y", ciphertext });
+    for (let i = 0; i < 40 && !logs.some((entry) => entry.event === "machine-host.room-event-dropped"); i += 1) await settle(25);
+    await settle(50);
+    assert.equal(received, 0);
+    assert.equal(logs.filter((entry) => entry.event === "machine-host.room-event-dropped").length, 1, "said once per sender and kind");
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    fabric.close();
   }
 });

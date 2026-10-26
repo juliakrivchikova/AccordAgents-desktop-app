@@ -9,7 +9,7 @@ import { StorageService } from "./storage";
 import { DeviceEventStorage } from "./deviceEventStorage";
 import { isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { DeviceEventPacket } from "../../shared/deviceEventChannel";
-import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
+import { openChannelPayload, sealChannelPayload } from "./machineChannelSealing";
 
 test("a sealed device event survives sender restart, gap repair, receiver apply failure and a lost ACK without a second application", async () => {
   const pair = await devices();
@@ -58,7 +58,7 @@ test("a body larger than 10 MiB uses bounded sealed fragments and cannot apply o
     assert.ok(fragments.length > 30);
     const sealKey = Buffer.alloc(32, 4).toString("base64url");
     for (const fragment of fragments) {
-      const sealed = await sealMobileRelayPayload(fragment, sealKey);
+      const sealed = await sealChannelPayload(fragment, sealKey);
       assert.ok(Buffer.byteLength(sealed) < 1024 * 1024, "each sealed packet fits below the mailbox page and relay logical limit");
     }
     await pair.b.receive(message); // Referencing event can arrive first.
@@ -68,8 +68,8 @@ test("a body larger than 10 MiB uses bounded sealed fragments and cannot apply o
     pair.b.close();
     pair.reopenReceiver();
     const last = fragments.at(-1)!;
-    const sealed = await sealMobileRelayPayload(last, sealKey);
-    await pair.b.receive(await openMobileRelayPayload(sealed, sealKey));
+    const sealed = await sealChannelPayload(last, sealKey);
+    await pair.b.receive(await openChannelPayload(sealed, sealKey));
     assert.equal(pair.applied.length, 1);
     assert.deepEqual(pair.lastPayload.value, payload);
     assert.equal(pair.sentB.filter((packet) => packet.type === "ack").length, 1);
@@ -414,6 +414,83 @@ test("from the hub's order a second-hand event is taken only when it is a chat c
       assert.equal(channel.accepts(change), true, "another machine's chat change, forwarded");
       assert.equal(channel.accepts(command), false, "never a command at second hand");
       await assert.rejects(channel.receiveFromHub(command), /signature or channel scope/);
+    } finally { channel.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("through the hub a channel publishes without delivery rows, whoever the caller names, and never sends or re-offers the event itself", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-device-channel-hub-publish-"));
+  try {
+    const storage = new StorageService({ dbPath: path.join(directory, "writer.sqlite3") });
+    const eventLog = new ChatEventLogService(storage);
+    const peerLog = new ChatEventLogService(new StorageService({ dbPath: path.join(directory, "peer.sqlite3") }));
+    const local = await eventLog.getOrCreateDeviceIdentity();
+    const peer = await peerLog.getOrCreateDeviceIdentity();
+    const sent: DeviceEventPacket[] = [];
+    const channel = new DeviceEventChannel({ storage, eventLog, channelId: "room", hubMode: true,
+      localDeviceId: local.originId, peerDeviceId: peer.originId, peerPublicKeyDerBase64: peer.publicKeyDerBase64,
+      isPeerConnected: () => true,
+      send: async (packet) => { sent.push(packet); }, apply: async () => "applied", onError: () => undefined });
+    try {
+      channel.start();
+      const own = await channel.publish({ conversationId: "chat", kind: "machine.turn.request", payload: { runId: "r1" } });
+      const named = await channel.publish({ conversationId: "chat", kind: "machine.turn.finished", payload: { runId: "r1" },
+        recipients: [{ deviceId: peer.originId, channelId: "room" }, { deviceId: "device-phone", channelId: "room" }] });
+      const shared = await channel.publish({ conversationId: "chat", kind: "permission.decided", payload: { targetKey: "t" }, sharedScope: true });
+      await channel.flush();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      for (const event of [own, named, shared]) assert.ok(await storage.getChatEvent(event.eventId), "the event is written for the hub to carry");
+      assert.equal((await storage.deviceEvents().listPending("room")).length, 0, "nobody is waited on");
+      assert.deepEqual(await storage.deviceEvents().pressure("room"), { events: 0, bytes: 0, recipients: 0 });
+      assert.deepEqual(sent, [], "the channel itself sends nothing; the hub's order carries it");
+    } finally { channel.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("a hub reader's chat change taken from the hub is not passed on: a machine on the relay could not check it", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-device-channel-hub-forward-"));
+  try {
+    const storage = new StorageService({ dbPath: path.join(directory, "desktop.sqlite3") });
+    const peerStorage = new StorageService({ dbPath: path.join(directory, "hub-machine.sqlite3") });
+    const peerLog = new ChatEventLogService(peerStorage);
+    const local = await new ChatEventLogService(storage).getOrCreateDeviceIdentity();
+    const peer = await peerLog.getOrCreateDeviceIdentity();
+    const relayMachine = { deviceId: "device-relay-machine", channelId: "rv-relay-machine" };
+    const channel = new DeviceEventChannel({ storage, eventLog: new ChatEventLogService(storage), channelId: "rv-hub-machine", hubMode: true,
+      localDeviceId: local.originId, peerDeviceId: peer.originId, peerPublicKeyDerBase64: peer.publicKeyDerBase64,
+      forwardTo: () => [relayMachine],
+      send: async () => undefined, apply: async () => "applied", onError: () => undefined });
+    try {
+      const change = (await peerLog.appendLocalEvent({ conversationId: "chat", logScopeId: "chat-changes:chat", kind: "chat.changes", payload: { version: 1 } })).event;
+      assert.equal(await channel.receiveFromHub(change), "stored");
+      assert.equal((await storage.deviceEvents().listPending(relayMachine.channelId, 0, relayMachine.deviceId)).length, 0, "no row for the relay machine");
+      assert.equal((await storage.deviceEvents().listPending("rv-hub-machine")).length, 0, "and none for the hub reader");
+    } finally { channel.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("through the hub a channel's gap is asked of the hub, never of the peer, and not again at once", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accord-device-channel-gap-"));
+  try {
+    const storage = new StorageService({ dbPath: path.join(directory, "receiver.sqlite3") });
+    const peerLog = new ChatEventLogService(new StorageService({ dbPath: path.join(directory, "peer.sqlite3") }));
+    const local = await new ChatEventLogService(storage).getOrCreateDeviceIdentity();
+    const peer = await peerLog.getOrCreateDeviceIdentity();
+    const asked: Array<{ fromSeq: number; toSeq: number }> = [];
+    const sent: unknown[] = [];
+    const channel = new DeviceEventChannel({ storage, eventLog: new ChatEventLogService(storage), channelId: "room", hubMode: true,
+      localDeviceId: local.originId, peerDeviceId: peer.originId, peerPublicKeyDerBase64: peer.publicKeyDerBase64,
+      hubRepair: (gap) => { asked.push({ fromSeq: gap.fromSeq, toSeq: gap.toSeq }); },
+      send: async (packet) => { sent.push(packet); }, apply: async () => "applied", onError: () => undefined });
+    try {
+      const scope = `device:room:${JSON.stringify(["chat", "actions"])}`;
+      await peerLog.appendLocalEvent({ conversationId: "chat", logScopeId: scope, kind: "message.created", payload: { n: 1 } });
+      const second = (await peerLog.appendLocalEvent({ conversationId: "chat", logScopeId: scope, kind: "message.created", payload: { n: 2 } })).event;
+      assert.equal(await channel.receiveFromHub(second), "stored");
+      const third = (await peerLog.appendLocalEvent({ conversationId: "chat", logScopeId: scope, kind: "message.created", payload: { n: 3 } })).event;
+      assert.equal(await channel.receiveFromHub(third), "stored");
+      assert.deepEqual(asked, [{ fromSeq: 1, toSeq: 1 }], "asked once");
+      assert.equal(sent.length, 0, "nothing sent to the peer");
     } finally { channel.close(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

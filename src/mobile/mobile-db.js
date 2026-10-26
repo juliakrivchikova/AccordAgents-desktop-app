@@ -27,6 +27,10 @@
   // Raise this only together with a store or an index added in upgradeControlDb.
   const DB_VERSION = 6;
 
+  // `sealed`, `events` and the three machine stores held what a pairing made
+  // the old way (through the desktop's relay) kept. Nothing reads them any
+  // more and the app empties them; they stay here because the upgrade only
+  // ever adds, and a build a version behind may still ask for them.
   const STORES = {
     outbox: "outbox",
     timeline: "timeline",

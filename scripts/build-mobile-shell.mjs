@@ -12,10 +12,12 @@ const rendererAssets = path.join(repoRoot, "src/renderer/assets");
 
 await rm(target, { recursive: true, force: true });
 await cp(source, target, { recursive: true });
-// One crypto implementation for native devices and the offline PWA.
-await build({ entryPoints: [path.join(repoRoot, "src/shared/machineChannelKey.ts")],
-  outfile: path.join(target, "mobile-machine-sealing.js"), bundle: true,
-  format: "iife", globalName: "AccordMachineSealing", platform: "browser", target: "es2022" });
+// How the phone and its service worker talk to the User's server: signed
+// requests, its own signed events, bodies by hash. The same bytes every other
+// device signs, from the same module the tests check against the desktop's.
+await build({ entryPoints: [path.join(repoRoot, "src/shared/hubDeviceClient.ts")],
+  outfile: path.join(target, "mobile-hub-client.js"), bundle: true,
+  format: "iife", globalName: "AccordHubClient", platform: "browser", target: "es2022" });
 // The rules the phone must share with the desktop verbatim: which avatar a
 // member shows, which messages are internal and stay off the timeline.
 await build({ entryPoints: [path.join(repoRoot, "src/shared/mobileSharedRules.ts")],

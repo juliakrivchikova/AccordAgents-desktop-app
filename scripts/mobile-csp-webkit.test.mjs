@@ -2,12 +2,12 @@
 //
 // Every other gate we own runs Chromium while the field runs iOS Safari. That
 // gap has already cost us once in this workstream — a policy omitting `wss:`
-// would have passed every check we had and killed the phone's live transport —
-// so the directives the app actually depends on are proved on a WebKit engine
-// here, not argued about.
+// would have passed every check we had and killed the phone's then live
+// transport — so the directives the app actually depends on are proved on a
+// WebKit engine here, not argued about.
 //
 // Bound deliberately: page boot under the applied policy, service-worker
-// registration, and the two connect-src forms. This is not a second behavioural
+// registration, and the connect-src form. This is not a second behavioural
 // suite; the behaviour lives in the Chromium harness, which also runs under the
 // same policy.
 import assert from "node:assert/strict";
@@ -141,44 +141,22 @@ test("the shipped CSP boots the phone shell on a WebKit engine", async (t) => {
       assert.equal(registration, "ready", "the service worker registered under worker-src 'self'");
     }
 
-    // 3. Both connect-src forms the app depends on. `https:` and `wss:` are
-    //    listed separately in the policy precisely because whether one implies
-    //    the other is engine-dependent — this is the check that settles it on
-    //    the engine that matters.
+    // 3. The connect-src form the app depends on: every read and write is a
+    //    signed HTTPS request to the User's own server, at whatever address
+    //    her pairing names, so `https:` must admit any host on the engine
+    //    that matters. The phone opens no WebSocket any more (the shell
+    //    contract pins that the policy no longer allows one).
     const probes = await page.evaluate(async () => {
-      const out = { https: "", wss: "" };
+      const out = { https: "" };
       try {
         await fetch("https://fcm.googleapis.com/accord-csp-probe", { mode: "no-cors" });
         out.https = "allowed";
       } catch (error) {
         out.https = `blocked: ${error?.message ?? error}`;
       }
-      out.wss = await new Promise((resolve) => {
-        let socket;
-        try {
-          socket = new WebSocket("wss://relay.accordagents.com/v1/relay?rid=csp-probe");
-        } catch (error) {
-          resolve(`blocked: ${error?.message ?? error}`);
-          return;
-        }
-        const done = (value) => {
-          try {
-            socket.close();
-          } catch {
-            // already closing
-          }
-          resolve(value);
-        };
-        socket.addEventListener("open", () => done("allowed"));
-        // A refused handshake is fine: a CSP block shows up as a construction
-        // or security error, not as a server-side rejection.
-        socket.addEventListener("error", () => done("allowed"));
-        setTimeout(() => done("timeout"), 8000);
-      });
       return out;
     });
     assert.equal(probes.https, "allowed", `connect-src must permit https on WebKit: ${JSON.stringify(probes)}`);
-    assert.equal(probes.wss, "allowed", `connect-src must permit wss on WebKit: ${JSON.stringify(probes)}`);
 
     assert.deepEqual(violations, [], "the policy must not refuse anything the app does on boot");
   } finally {

@@ -92,6 +92,8 @@ const MAX_CLI_ERROR_CHARS = 500;
 const MAX_CLI_ERROR_LINES = 8;
 const MAX_CLI_EVENT_SUMMARIES = 2;
 const CLI_AGENT_COMPACT_TIMEOUT_MS = 5 * 60_000;
+/** How long the CLI gets to answer `get_context_usage`. */
+const CLAUDE_CONTEXT_USAGE_TIMEOUT_MS = 15_000;
 const WARM_AGENT_KILL_GRACE_MS = 1500;
 const WINDOWS_WARM_AGENT_KILL_GRACE_MS = 750;
 const CLAUDE_BACKGROUND_PROCESS_CAPTURE_INTERVAL_MS = 100;
@@ -160,6 +162,13 @@ const ANTIGRAVITY_GOAL_CANCEL_GRACE_MS = 2_500;
 const ANTIGRAVITY_CONVERSATION_RE = /agy --conversation=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 // eslint-disable-next-line no-control-regex
 const ANSI_ESCAPE_RE = /[\u001b\u009b][[\]()#;?]*(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*)?\u0007|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
+/** What a compaction stopped before it started says; a member on a machine
+ *  stopped before its compaction was sent says the same. */
+export const COMPACTION_CANCELLED_BEFORE_START = "Compaction was cancelled before native execution started.";
+/** A compaction Stop ended once it had started (in the member's process or
+ *  while it waited there for a reply in progress). */
+export const COMPACTION_CANCELLED = "Compaction was cancelled.";
+
 export function antigravityExpectProgram(): string {
   return `
   set timeout -1
@@ -404,10 +413,20 @@ interface WarmAgentEntry {
   isIdle?: () => boolean;
   /** Claude only: settles once isIdle() holds (or the process is gone). */
   whenIdle?: (signal?: AbortSignal) => Promise<void>;
+  /** Claude only: settles once no reply is waiting, running or about to
+   *  start on its own (or the process is gone); background tasks may still
+   *  be running. */
+  whenReplyIdle?: (signal?: AbortSignal) => Promise<void>;
   /** Claude only: the idle timeout of the last run, re-armed when the process
    *  becomes idle after work it did on its own. */
   idleTimeoutMs?: number;
   compact?: (instructions?: string, signal?: AbortSignal, onSessionId?: CliAgentSessionIdCallback) => Promise<CliAgentCompactResult>;
+  /** Claude only: the context the live session holds now, as the CLI's own
+   *  `/context` counts it (`get_context_usage`); after a `/compact`, the
+   *  compacted figure. Undefined when the CLI does not answer it. */
+  contextUsage?: (signal?: AbortSignal) => Promise<AgentContextUsage | undefined>;
+  /** Claude only: the CLI's figures for the last compaction it ran. */
+  lastCompactBoundary?: () => ClaudeCompactBoundary | undefined;
   queue: Promise<void>;
   idleTimer?: NodeJS.Timeout;
   closed: boolean;
@@ -439,6 +458,10 @@ interface ClaudeWarmRunContext {
   onPromptSuggestion?: (suggestion: string) => void;
   allowEmptyContent?: boolean;
   roleRuntime?: ParticipantRunResult["roleRuntime"];
+  /** The reply answers a slash command (`/compact`): it reports no usage of
+   *  its own and none is read from the session log (the caller asks the CLI),
+   *  and what the CLI printed counts as its text although the result is empty. */
+  localCommand?: boolean;
 }
 
 /** One reply of a warm Claude process: the model output of the step that
@@ -473,6 +496,7 @@ interface ClaudeWarmReply {
   origin?: CliAgentReplyOrigin;
   roleRuntime?: ParticipantRunResult["roleRuntime"];
   allowEmptyContent: boolean;
+  localCommand?: boolean;
   timer?: NodeJS.Timeout;
   stopTimer?: NodeJS.Timeout;
   detachSignal?: () => void;
@@ -538,6 +562,17 @@ interface ClaudeWarmProcessState {
    *  on its way) is reported as stopped with it, not as a failure. */
   interruptTarget?: ClaudeWarmReply;
   interruptRequestId?: string;
+  /** control_request ids of our own questions to the CLI, and who waits. */
+  controlWaiters: Map<string, (response: Record<string, unknown> | undefined) => void>;
+  /** What the CLI said about the last compaction of this session, numbered,
+   *  so a /compact that compacted nothing is told from one that did. */
+  lastCompactBoundary?: ClaudeCompactBoundary;
+}
+
+interface ClaudeCompactBoundary {
+  /** How many compactions this process has reported. */
+  count: number;
+  postTokens?: number;
 }
 
 interface ClaudeWarmProcessHooks {
@@ -1369,7 +1404,7 @@ export class CliAgentRunner {
     try {
       const compactionRefusal = await this.hostRefusal("compaction");
       if (shutdownGeneration !== this.nativeShutdownGeneration) return this.failedCompact(participant, new Error("Native sessions shut down while compaction waited; it did not start."));
-      if (signal?.aborted) return this.failedCompact(participant, new Error("Compaction was cancelled before native execution started."));
+      if (signal?.aborted) return this.failedCompact(participant, new Error(COMPACTION_CANCELLED_BEFORE_START));
       if (options.warm && this.conversationClosing(options.warm.conversationId)) return this.failedCompact(participant, new Error("This chat is closing; compaction did not start."));
       if (compactionRefusal || this.nativeAdmissionsFenced) return { participant, ok: false, error: compactionRefusal ?? "Native admission is fenced." };
       if (participant.kind === "codex-cli") {
@@ -5017,6 +5052,24 @@ export class CliAgentRunner {
     return this.runClaudeOneShot(participant, prompt, repoPath, kind, signal, options);
   }
 
+  /**
+   * `/compact` as the dedicated CLI runs it: in the member's live session.
+   *
+   * The member's warm process holds the whole conversation in memory and
+   * appends every turn to the session file, so the command goes to that
+   * process. With none alive, the member's live process is started for it
+   * exactly as its next turn would start it (same tools, app MCP connection,
+   * role, model, resume) and stays the member's process afterwards, so the
+   * figure shown is the one that process holds and the next turn continues in
+   * it. The CLI's own count of the compacted context (`get_context_usage`,
+   * what its `/context` shows) is what is reported.
+   *
+   * As in the dedicated CLI, a reply in progress finishes first, while work the
+   * member runs in the background keeps running through the compaction. A
+   * process started with other settings is replaced as a turn replaces it,
+   * only once nothing runs in it; while it carries background work, the
+   * compaction runs in it instead of waiting for that work.
+   */
   private async compactClaudeSession(
     participant: ParticipantConfig,
     repoPath: string | undefined,
@@ -5024,36 +5077,131 @@ export class CliAgentRunner {
     signal: AbortSignal | undefined,
     options: CliAgentRunOptions
   ): Promise<CliAgentCompactResult> {
+    const warm = options.warm;
+    if (!warm) {
+      return { participant, ok: false, error: `${participant.label} has no chat session to compact.` };
+    }
+    const cancelled: CliAgentCompactResult = { participant, ok: false, error: COMPACTION_CANCELLED };
     const compactPrompt = options.compactInstructions?.trim()
       ? `/compact ${options.compactInstructions.trim()}`
       : "/compact";
-    // Compaction rewrites the session in its own process; wait until the
-    // member's warm process has nothing running on that session.
-    const idle = await this.waitForClaudeWarmScopeIdle(options.warm, undefined, participant, "compacting", signal, undefined);
-    if (!idle || signal?.aborted) {
-      return { participant, ok: false, error: "Compaction was cancelled." };
+    const key = this.warmAgentKey(participant, repoPath, kind, options);
+    const scopeKey = this.warmAgentScopeKey(warm);
+    const usable = (entry: WarmAgentEntry): boolean => !entry.closed && !entry.unusable && entry.process.exitCode === null;
+    let member = this.warmAgents.get(key);
+    if (!member || !usable(member)) {
+      // A process the member's turns started with other settings (a one-time
+      // approval, say) that still carries background work: the compaction
+      // runs in it now, as the dedicated CLI's /compact does in its one live
+      // session, instead of waiting for that work. The member's next turn
+      // replaces it once nothing runs in it, as turns always do.
+      member = Array.from(this.warmAgents.values()).find((entry) =>
+        entry.scopeKey === scopeKey && entry.key !== key && usable(entry) && entry.hasLiveBackgroundWork?.() === true);
     }
-    // Run one-shot (no warm process): the one-shot result parses the final
-    // result JSON, whose usage reflects the post-compaction summary size. The
-    // warm streaming path does not surface usage for the /compact local command,
-    // so it would leave the stale pre-compact figure on the hover.
-    const result = await this.runClaude(participant, compactPrompt, repoPath, kind, signal, {
-      ...options,
-      warm: undefined,
-      role: undefined,
-      appMcp: undefined,
-      onOutput: undefined,
-      timeoutMs: options.timeoutMs ?? CLI_AGENT_COMPACT_TIMEOUT_MS,
-      allowEmptyContent: true
+    if (!member) {
+      const acquired = await this.acquireClaudeMemberProcess(participant, repoPath, kind, options, warm, signal, "compacting", undefined);
+      if ("error" in acquired) {
+        return acquired.cancelled ? cancelled : this.failedCompact(participant, acquired.error);
+      }
+      member = acquired.entry;
+    }
+    const live = member;
+    live.idleTimeoutMs = warm.idleTimeoutMs;
+    // Held from here, so the idle timer cannot retire it before /compact.
+    this.clearWarmIdleTimer(live);
+    try {
+      return await this.trackWarmRun(live, async () => {
+        this.clearWarmIdleTimer(live);
+        try {
+          // A reply in progress, or one the CLI is about to start for finished
+          // work, ends first; background tasks keep running.
+          await live.whenReplyIdle?.(signal);
+          if (signal?.aborted) {
+            return cancelled;
+          }
+          // The member's own process: its turns' timeout, and Stop.
+          return await this.compactClaudeThroughProcess(live, participant, compactPrompt, signal, options, options.timeoutMs ?? this.runTimeoutMs);
+        } finally {
+          if (!live.closed && this.warmAgents.get(live.key) === live) {
+            if (live.unusable) {
+              this.warmAgents.delete(live.key);
+              await this.closeWarmAgent(live, "unusable");
+            } else {
+              this.scheduleWarmIdleTimer(live, warm.idleTimeoutMs);
+            }
+          }
+        }
+      });
+    } catch (error) {
+      // Refused before it ran (a fence, a host refusal): the process stays the
+      // member's, with its idle timer.
+      if (!live.closed && this.warmAgents.get(live.key) === live && !live.idleTimer) {
+        this.scheduleWarmIdleTimer(live, warm.idleTimeoutMs);
+      }
+      return signal?.aborted || (error instanceof Error && error.message === CLAUDE_WARM_CANCELLED_MESSAGE)
+        ? cancelled
+        : this.failedCompact(participant, error);
+    }
+  }
+
+  private async compactClaudeThroughProcess(
+    entry: WarmAgentEntry,
+    participant: ParticipantConfig,
+    compactPrompt: string,
+    signal: AbortSignal | undefined,
+    options: CliAgentRunOptions,
+    timeoutMs: number
+  ): Promise<CliAgentCompactResult> {
+    const boundaryBefore = entry.lastCompactBoundary?.()?.count ?? 0;
+    let result: ParticipantRunResult;
+    try {
+      // The member's observers, as on its turns: a process started for this
+      // compaction reports the background work and the replies it starts on
+      // its own later exactly as one a turn started.
+      result = await entry.run(compactPrompt, signal, undefined, options.onSessionId, timeoutMs,
+        undefined, undefined, {
+          allowEmptyContent: true,
+          localCommand: true,
+          onSelfResumedTurn: options.warm?.onSelfResumedTurn,
+          onBackgroundTasksChanged: options.warm?.onBackgroundTasksChanged
+        });
+    } catch (error) {
+      return signal?.aborted || (error instanceof Error && error.message === CLAUDE_WARM_CANCELLED_MESSAGE)
+        ? { participant, ok: false, error: COMPACTION_CANCELLED }
+        : this.failedCompact(participant, error);
+    }
+    const boundary = entry.lastCompactBoundary?.();
+    const compacted = (boundary?.count ?? 0) > boundaryBefore;
+    if (!compacted && signal?.aborted) {
+      // Stopped: the CLI ends the command with its own "Compaction canceled."
+      // as a successful reply; the outcome is the one every Stop of a
+      // compaction gives, whenever it lands.
+      return { participant, ok: false, sessionId: result.sessionId, error: COMPACTION_CANCELLED, providerNative: true };
+    }
+    if (!result.ok) {
+      return { participant, ok: false, sessionId: result.sessionId, error: result.error, providerNative: true };
+    }
+    if (!compacted) {
+      // The CLI answered without compacting ("Error: No messages to
+      // compact", say): what it said is the outcome, as in its own terminal.
+      const said = (result.content ?? "").trim().replace(/^error:\s*/i, "");
+      return { participant, ok: false, sessionId: result.sessionId, error: said || "The CLI did not compact the conversation", providerNative: true };
+    }
+    // The CLI's own count after compacting; failing that, its compaction
+    // figure for the conversation (which leaves out the system prompt).
+    const contextUsage = await entry.contextUsage?.(signal) ?? buildAgentContextUsage({
+      usedTokens: boundary?.postTokens,
+      contextWindowTokens: contextWindowForModel(participant.kind, participant.model),
+      source: "claude-code",
+      model: participant.model
     });
     return {
       participant,
-      ok: result.ok,
+      ok: true,
       sessionId: result.sessionId,
-      contextUsage: result.contextUsage,
-      providerNative: false,
-      content: result.content,
-      error: result.error
+      ...(contextUsage ? { contextUsage } : {}),
+      providerNative: true,
+      content: result.content
     };
   }
 
@@ -5245,68 +5393,13 @@ export class CliAgentRunner {
       return this.runClaudeOneShot(participant, prompt, repoPath, kind, signal, options);
     }
     const key = this.warmAgentKey(participant, repoPath, kind, options);
-    const scopeKey = this.warmAgentScopeKey(warm);
-    // A process started with other settings is replaced, but never while it
-    // still answers a message or carries background work: that work would be
-    // lost, which the dedicated CLI never does to it. The wait is visible and
-    // Stop ends it; it is not part of the preparation shutdown waits for.
-    // Counted as native work from the first moment (idle power and fencing
-    // see it), but not as a preparation: shutdown closes the busy process,
-    // which ends this wait, instead of waiting for it.
-    this.claudeScopeWaits++;
-    let settled: boolean;
-    try {
-      settled = await this.waitForClaudeWarmScopeIdle(warm, key, participant, "applying the changed settings", signal, options.onOutput);
-    } finally {
-      this.claudeScopeWaits--;
+    const acquired = await this.acquireClaudeMemberProcess(participant, repoPath, kind, options, warm, signal, "applying the changed settings", options.onOutput);
+    if ("error" in acquired) {
+      return this.failed(participant, acquired.error);
     }
-    if (!settled || signal?.aborted) {
-      return this.failed(participant, new Error(CLAUDE_WARM_CANCELLED_MESSAGE));
-    }
-    if (this.nativeAdmissionsFenced || this.warmShutdown || this.conversationClosing(warm.conversationId)) {
-      return this.failed(participant, new Error("Native sessions are shutting down; this command did not start."));
-    }
-    let entry: WarmAgentEntry | undefined;
-    let freshProcess = false;
-    const finishPreparation = this.beginWarmPreparation(key);
-    try {
-      await this.closeStaleWarmAgents(scopeKey, key, (stale) => stale.isIdle?.() !== false);
-      if (signal?.aborted) {
-        return this.failed(participant, new Error(CLAUDE_WARM_CANCELLED_MESSAGE));
-      }
-      entry = this.warmAgents.get(key);
-      if (!entry || entry.closed || entry.unusable || entry.process.exitCode !== null) {
-        if (entry) {
-          this.warmAgents.delete(key);
-          await this.closeWarmAgent(entry, entry.unusable ? "unusable" : "stale");
-        }
-        try {
-          await ensureLoginShellEnvPrimed();
-          const claudeExecutable = await this.providerExecutableForRun("claude", options, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
-          // Nothing can be running on a process that does not exist yet: the
-          // run's app tool grant applies from the start, before the CLI
-          // connects its MCP servers.
-          freshProcess = true;
-          this.notifyClaudeReplyStarted(warm);
-          entry = await this.createClaudeWarmAgent(key, scopeKey, participant, repoPath, kind, options, claudeExecutable);
-          void this.writeDebugLog("cli-agent-warm-started", {
-            providerKind: participant.kind,
-            participantId: participant.id,
-            conversationId: warm.conversationId
-          });
-        } catch (error) {
-          void this.writeDebugLog("cli-agent-warm-start-failed", {
-            providerKind: participant.kind,
-            participantId: participant.id,
-            conversationId: warm.conversationId,
-            error: this.errorText(error)
-          });
-          return this.failed(participant, error);
-        }
-      }
-    } finally { finishPreparation(); }
+    const { entry, fresh: freshProcess } = acquired;
 
-    const claudeEntry = entry as WarmAgentEntry;
+    const claudeEntry = entry;
     claudeEntry.idleTimeoutMs = warm.idleTimeoutMs;
     // Messages are not serialized here: the CLI queues them itself and hands a
     // message sent mid-step to the running step, as the dedicated CLI does.
@@ -5368,6 +5461,83 @@ export class CliAgentRunner {
         return this.failed(participant, error);
       }
     });
+  }
+
+  /**
+   * The member's live Claude Code process for this key, as its turns and its
+   * compaction get it: a process started with other settings is replaced, but
+   * never while it still answers a message or carries background work (that
+   * work would be lost, which the dedicated CLI never does to it); with none
+   * alive, the member's process is started. The wait is visible and Stop ends
+   * it; it is counted as native work from the first moment (idle power and
+   * fencing see it), but not as a preparation: shutdown closes the busy
+   * process, which ends this wait, instead of waiting for it.
+   */
+  private async acquireClaudeMemberProcess(
+    participant: ParticipantConfig,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    options: CliAgentRunOptions,
+    warm: CliAgentWarmOptions,
+    signal: AbortSignal | undefined,
+    purpose: string,
+    onOutput: CliAgentOutputCallback | undefined
+  ): Promise<{ entry: WarmAgentEntry; fresh: boolean } | { error: Error; cancelled: boolean }> {
+    const cancelled = { error: new Error(CLAUDE_WARM_CANCELLED_MESSAGE), cancelled: true };
+    const shuttingDown = { error: new Error("Native sessions are shutting down; this command did not start."), cancelled: false };
+    const key = this.warmAgentKey(participant, repoPath, kind, options);
+    const scopeKey = this.warmAgentScopeKey(warm);
+    this.claudeScopeWaits++;
+    let settled: boolean;
+    try {
+      settled = await this.waitForClaudeWarmScopeIdle(warm, key, participant, purpose, signal, onOutput);
+    } finally {
+      this.claudeScopeWaits--;
+    }
+    if (!settled || signal?.aborted) {
+      return cancelled;
+    }
+    if (this.nativeAdmissionsFenced || this.warmShutdown || this.conversationClosing(warm.conversationId)) {
+      return shuttingDown;
+    }
+    const finishPreparation = this.beginWarmPreparation(key);
+    try {
+      await this.closeStaleWarmAgents(scopeKey, key, (stale) => stale.isIdle?.() !== false);
+      if (signal?.aborted) {
+        return cancelled;
+      }
+      const live = this.warmAgents.get(key);
+      if (live && !live.closed && !live.unusable && live.process.exitCode === null) {
+        return { entry: live, fresh: false };
+      }
+      if (live) {
+        this.warmAgents.delete(key);
+        await this.closeWarmAgent(live, live.unusable ? "unusable" : "stale");
+      }
+      try {
+        await ensureLoginShellEnvPrimed();
+        const claudeExecutable = await this.providerExecutableForRun("claude", options, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
+        // Nothing can be running on a process that does not exist yet: the
+        // member's app tool grant applies from the start, before the CLI
+        // connects its MCP servers.
+        this.notifyClaudeReplyStarted(warm);
+        const entry = await this.createClaudeWarmAgent(key, scopeKey, participant, repoPath, kind, options, claudeExecutable);
+        void this.writeDebugLog("cli-agent-warm-started", {
+          providerKind: participant.kind,
+          participantId: participant.id,
+          conversationId: warm.conversationId
+        });
+        return { entry, fresh: true };
+      } catch (error) {
+        void this.writeDebugLog("cli-agent-warm-start-failed", {
+          providerKind: participant.kind,
+          participantId: participant.id,
+          conversationId: warm.conversationId,
+          error: this.errorText(error)
+        });
+        return { error: error instanceof Error ? error : new Error(String(error)), cancelled: false };
+      }
+    } finally { finishPreparation(); }
   }
 
   /** Waits until the member's warm Claude processes (other than `exceptKey`)
@@ -5491,10 +5661,12 @@ export class CliAgentRunner {
       cancelRequests: new Map(),
       reportedBackgroundTasks: "[]",
       lastTaskEventAt: 0,
-      selfResumeExpectedUntil: 0
+      selfResumeExpectedUntil: 0,
+      controlWaiters: new Map()
     };
     const capturedBackgroundProcesses = new Map<string, CapturedPosixProcess>();
-    const idleWaiters = new Set<() => void>();
+    /** Each waiter settles once its condition holds (or the process is gone). */
+    const idleWaiters = new Map<() => void, () => boolean>();
 
     const captureBackgroundProcesses = (rows: Map<number, PosixProcessRow>): void => {
       if (!processIdentity && child.exitCode === null && !child.killed) {
@@ -5522,15 +5694,17 @@ export class CliAgentRunner {
       this.ensureClaudeBackgroundProcessCapture();
     };
 
-    const isIdle = (): boolean => closed
-      || (state.replies.length === 0 && !state.stepActive && state.backgroundTasks.size === 0
-        && Date.now() >= state.selfResumeExpectedUntil);
+    /** No reply is waiting or running, and none is about to start on its own
+     *  (a finished task the CLI is expected to answer). */
+    const isReplyIdle = (): boolean => closed
+      || (state.replies.length === 0 && !state.stepActive && Date.now() >= state.selfResumeExpectedUntil);
+    const isIdle = (): boolean => isReplyIdle() && (closed || state.backgroundTasks.size === 0);
     const notifyIfIdle = (): void => {
+      for (const [waiter, holds] of Array.from(idleWaiters)) {
+        if (holds()) waiter();
+      }
       if (!isIdle()) {
         return;
-      }
-      for (const waiter of Array.from(idleWaiters)) {
-        waiter();
       }
       // Work the CLI did on its own (a reply it started when background work
       // finished) has no run of ours to re-arm the idle timer afterwards.
@@ -5538,6 +5712,28 @@ export class CliAgentRunner {
         this.scheduleWarmIdleTimer(entry, entry.idleTimeoutMs);
       }
     };
+
+    const waitUntil = (holds: () => boolean, signal?: AbortSignal): Promise<void> => new Promise<void>((resolve, reject) => {
+      if (holds()) {
+        resolve();
+        return;
+      }
+      const onAbort = (): void => {
+        idleWaiters.delete(done);
+        reject(new Error(CLAUDE_WARM_CANCELLED_MESSAGE));
+      };
+      const done = (): void => {
+        idleWaiters.delete(done);
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      idleWaiters.set(done, holds);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
 
     // If the step the CLI is expected to start for a finished task never comes,
     // re-check idleness when that expectation lapses.
@@ -5570,6 +5766,8 @@ export class CliAgentRunner {
     /** The process itself failed (exit, stdin error): every reply still open
      *  fails with it. */
     const failProcess = (error: Error): void => {
+      for (const waiter of Array.from(state.controlWaiters.values())) waiter(undefined);
+      state.controlWaiters.clear();
       const replies = Array.from(state.replies);
       state.replies = [];
       state.active = undefined;
@@ -5696,29 +5894,35 @@ export class CliAgentRunner {
       hasLiveBackgroundWork: () => state.backgroundTasks.size > 0,
       captureUrgent: () => state.stepActive || Date.now() - state.lastTaskEventAt < CLAUDE_BACKGROUND_PROCESS_URGENT_WINDOW_MS,
       isIdle,
-      whenIdle: (signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
-        if (isIdle()) {
-          resolve();
-          return;
-        }
-        const onAbort = (): void => {
-          idleWaiters.delete(done);
-          reject(new Error(CLAUDE_WARM_CANCELLED_MESSAGE));
-        };
-        const done = (): void => {
-          idleWaiters.delete(done);
-          signal?.removeEventListener("abort", onAbort);
-          resolve();
-        };
-        if (signal?.aborted) {
-          onAbort();
-          return;
-        }
-        idleWaiters.add(done);
-        signal?.addEventListener("abort", onAbort, { once: true });
-      }),
+      whenIdle: (signal?: AbortSignal) => waitUntil(isIdle, signal),
+      whenReplyIdle: (signal?: AbortSignal) => waitUntil(isReplyIdle, signal),
       capturedBackgroundProcesses: () => Array.from(capturedBackgroundProcesses.values()),
       refreshCapturedBackgroundProcesses: captureBackgroundProcesses,
+      contextUsage: async (signal?: AbortSignal) => {
+        if (closed || child.exitCode !== null || child.killed || signal?.aborted) return undefined;
+        const response = await new Promise<Record<string, unknown> | undefined>((resolve) => {
+          const requestId = this.sendClaudeWarmControl(hooks, { subtype: "get_context_usage" });
+          const timer = setTimeout(() => finish(undefined), CLAUDE_CONTEXT_USAGE_TIMEOUT_MS);
+          timer.unref();
+          const onAbort = (): void => finish(undefined);
+          const finish = (value: Record<string, unknown> | undefined): void => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", onAbort);
+            state.controlWaiters.delete(requestId);
+            resolve(value);
+          };
+          state.controlWaiters.set(requestId, finish);
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
+        const answer = response && this.stringField(response, "subtype") === "success" ? this.asRecord(response.response) : undefined;
+        return buildAgentContextUsage({
+          usedTokens: typeof answer?.totalTokens === "number" ? answer.totalTokens : undefined,
+          contextWindowTokens: typeof answer?.maxTokens === "number" ? answer.maxTokens : undefined,
+          source: "claude-code",
+          model: state.model ?? participant.model
+        });
+      },
+      lastCompactBoundary: () => state.lastCompactBoundary,
       run: (
         turnPrompt: string,
         signal?: AbortSignal,
@@ -5750,6 +5954,7 @@ export class CliAgentRunner {
             onPromptSuggestion: claude?.onPromptSuggestion,
             roleRuntime: claude?.roleRuntime,
             allowEmptyContent: claude?.allowEmptyContent ?? false,
+            localCommand: claude?.localCommand,
             sessionId: state.sessionId,
             model: state.model ?? participant.model,
             onOutput,
@@ -5919,6 +6124,13 @@ export class CliAgentRunner {
       return;
     }
     if (type === "system") {
+      if (subtype === "compact_boundary") {
+        const metadata = this.asRecord(record.compact_metadata) ?? {};
+        state.lastCompactBoundary = {
+          count: (state.lastCompactBoundary?.count ?? 0) + 1,
+          ...(typeof metadata.post_tokens === "number" ? { postTokens: metadata.post_tokens } : {})
+        };
+      }
       if (subtype === "init") {
         this.startClaudeWarmStep(state, participant, hooks);
       } else {
@@ -6038,12 +6250,18 @@ export class CliAgentRunner {
   private activateClaudeWarmReply(state: ClaudeWarmProcessState, reply: ClaudeWarmReply): void {
     reply.started = true;
     state.active = reply;
-    state.selfResumeExpectedUntil = 0;
     try {
       reply.onStarted?.();
     } catch {
       // A failing observer must not stop the reply from being routed.
     }
+    if (reply.localCommand) {
+      // A command the CLI runs itself (`/compact`) never hands the model a
+      // finished task's notification: the step the CLI starts for it after
+      // the command still gets its row and the thread that started the task.
+      return;
+    }
+    state.selfResumeExpectedUntil = 0;
     state.lastOrigin = reply.origin ?? state.lastOrigin;
     state.idleOrigin = undefined;
     const notices = state.pendingNotices.splice(0);
@@ -6203,6 +6421,11 @@ export class CliAgentRunner {
   ): void {
     const response = this.asRecord(record.response) ?? {};
     const requestId = this.stringField(response, "request_id");
+    const waiter = requestId ? state.controlWaiters.get(requestId) : undefined;
+    if (waiter) {
+      waiter(response);
+      return;
+    }
     if (requestId && requestId === state.interruptRequestId) {
       // The CLI has taken the interrupt. With no step running it stopped
       // nothing, and must not be blamed for a later step's failure.
@@ -6391,7 +6614,7 @@ export class CliAgentRunner {
 
   private claudeWarmSegmentText(reply: ClaudeWarmReply, event: unknown): string {
     const resultText = event === undefined ? undefined : this.extractClaudeWarmResultText(event);
-    if (resultText !== undefined) {
+    if (resultText !== undefined && !(reply.localCommand && !resultText.trim() && reply.messages.length > 0)) {
       return resultText;
     }
     if (reply.messages.length > 0) {
@@ -6434,7 +6657,7 @@ export class CliAgentRunner {
     for (const raw of reply.resultEvents) {
       result = this.withClaudePermissionDenialWarning(result, raw, participant, "warm");
     }
-    if (contextUsage || !sessionId) {
+    if (contextUsage || !sessionId || reply.localCommand) {
       reply.resolve(result);
       return;
     }
@@ -6632,7 +6855,7 @@ export class CliAgentRunner {
       activityKind: "status",
       activityStatus: completed ? "completed" : "failed"
     };
-    if (state.stepActive && state.active && !state.active.settled) {
+    if (state.stepActive && state.active && !state.active.settled && !state.active.localCommand) {
       // The running step receives the notification with its next tool result.
       this.emitLiveOutput(this.claudeWarmReplyOutput(state.active), notice.kind, notice.text, undefined, notice);
       return;
@@ -6863,11 +7086,11 @@ export class CliAgentRunner {
     }
   }
 
-  private async closeStaleWarmAgents(scopeKey: string, nextKey: string, closable: (entry: WarmAgentEntry) => boolean = () => true): Promise<void> {
+  private async closeStaleWarmAgents(scopeKey: string, nextKey: string, closable: (entry: WarmAgentEntry) => boolean = () => true, reason = "context-changed"): Promise<void> {
     const stale = Array.from(this.warmAgents.values()).filter((entry) => entry.scopeKey === scopeKey && entry.key !== nextKey && closable(entry));
     for (const entry of stale) {
       this.warmAgents.delete(entry.key);
-      await this.closeWarmAgent(entry, "context-changed");
+      await this.closeWarmAgent(entry, reason);
     }
   }
 

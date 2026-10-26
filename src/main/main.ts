@@ -5,9 +5,9 @@ import { HUB_COPY_TEMP_PREFIX, HubInstaller, removeStaleHubTemp } from "./servic
 import { exportChatCopy } from "./services/chatCopy";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { app, autoUpdater, BrowserWindow, dialog, ipcMain, powerMonitor, shell } from "electron";
-import { parseCustomAvatarId, type AvatarStudioTurnRequest, type SaveCustomAvatarRequest } from "../shared/avatarStudio";
+import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
 import type {
   AddChatParticipantRequest,
   AgentDetectionRequest,
@@ -23,10 +23,6 @@ import type {
   CloudRunWorkerDoctorReport,
   CloudRunWorkerSettings,
   ConnectAwsWorkerRequest,
-  CreateMobilePairingRequest,
-  RevokeMobilePairingRequest,
-  RevokeMobilePairingResult,
-  StoredPendingMailboxRevocation,
   AwsWorkerStartRequest,
   AwsDiskCleanCategory,
   SetAwsAutoStopRequest,
@@ -35,7 +31,6 @@ import type {
   ChatRoleConfigUpdate,
   ComposeImplementationPlanRequest,
   ContinueReviewRequest,
-  Conversation,
   ConversationMessagePageRequest,
   CreateChatConversationRequest,
   DeleteChatConversationRequest,
@@ -69,10 +64,8 @@ import type {
   UserSkillDiagnosticsRequest,
   UserSkillListRequest,
   UserSkillSearchRequest,
-  UserSkillSummary,
-  UserSkillTargetSummary
+  UserSkillSummary
 } from "../shared/types";
-import { matchingChatSavedPrompts } from "../shared/chatSavedPrompts";
 import type {
   CreateArtifactRequest,
   DiffArtifactRequest,
@@ -101,20 +94,36 @@ import { ArtifactService } from "./services/artifacts";
 import { ArtifactStore } from "./services/artifactStore";
 import { artifactEventWriter, artifactProjectionPort } from "./services/artifactReplication";
 import { createChatChangeTransport, scheduleChatChangePruning } from "./services/chatChangeTransport";
+import { scheduleHubDeviceRetention } from "./services/deviceRetention";
 import { machineChatCopyProvider } from "./services/chatCopy";
 import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "./appToolWiring";
 import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
 import { HubClient } from "./services/hubClient";
-import { HUB_ID_KEY, HUB_SHARED_SCOPE_PREFIXES, HubSync, PULLED_KEY, PUSHED_KEY, hubChatChangeApplier, hubPushedThrough } from "./services/hubSync";
-import { deviceIdForPublicKey, signHubRequest } from "./services/hubAuth";
+import { HUB_ID_KEY, HUB_SHARED_SCOPE_PREFIXES, HubSync, PULLED_KEY, PUSHED_KEY, hubChatChangeApplier, hubPushedThrough, readGivenUp } from "./services/hubSync";
+import { deviceIdForPublicKey, hubCertificateCrypto, signHubText } from "./services/hubAuth";
+import { HubPhonePublisher } from "./services/hubPhonePublisher";
+import { isDeviceEventBlobReference } from "../shared/deviceEventBlobs";
+import { phoneTurnsSince } from "./services/phoneTurnClaims";
+import {
+  HUB_PHONE_ENROLLED_EVENT_KIND,
+  HUB_PHONE_ENROLLMENT_SCOPE,
+  HUB_PHONE_PROTOCOL_VERSION,
+  PHONE_TURN_RESUME_EVERY_MS,
+  PHONE_TURN_RESUME_WINDOW_MS,
+  hubPhoneInviteSigningText,
+  verifyHubPhoneCertificate,
+  type HubPhoneCertificate,
+  type HubPhoneInvite
+} from "./../shared/hubProtocol";
+import { isChatActionKind } from "../shared/chatActionEvents";
 import { machineSigningKey } from "../shared/machineLink";
 import { HubTunnelClient } from "./services/hubTunnelClient";
 import { ScriptSecretStore, ScriptStore } from "./services/scriptStore";
 import { hostPlatform } from "./platform";
 import {
   SCRIPT_DESKTOP_HOST_ID,
-  approvalInstallsScriptCode,
+  phoneAnswerApprovesScriptCode,
   type DeleteScriptSecretRequest,
   type GetScriptRevisionRequest,
   type ScriptIdRequest,
@@ -128,9 +137,9 @@ import { MobilePairingService } from "./services/mobilePairing";
 import { MachineLinkService } from "./services/machineLink";
 import { MachineInstallerService, machinePowerNeedsDelivery } from "./services/machineInstaller";
 import { MACHINE_POWER_MAX_ATTEMPTS, MACHINE_POWER_RETRY_MS, compareVersions } from "../shared/machineInstall";
-import { HUB_RELAY_FIRST_VERSION } from "../shared/hubSetup";
+import type { HubReadersResponse } from "../shared/hubProtocol";
 import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
-import type { MachinePowerHandoff } from "../shared/machinePowerHandoff";
+import { relayRemovalNotice, removeRelayEraRecords } from "./services/relayRemoval";
 import { ChatActionApplier } from "./services/chatActionApplier";
 import { ChatActionEmitter, permissionDecisionAction, choiceDecisionAction, chatActionEventId } from "./services/chatActionEmitter";
 import { MachineApprovalExecutor, machineApprovalResultId } from "./services/machineApprovalExecutor";
@@ -150,45 +159,12 @@ import type {
   MachineUpgradeRequest
 } from "../shared/machineInstall";
 import type { MachineRuntimePayloadLocation } from "./services/machineInstaller";
-import { MobileProgressEnvelopeTracker } from "./services/mobileProgressEnvelopeTracker";
-import {
-  MobileRelayControlService,
-  timelineEventsFromSnapshot,
-  type MobileComposerOptions,
-  type MobileNoticeKind,
-  type MobileRelayChatCatalog,
-  type MobileTimelineEvents,
-  type MobileTimelinePage,
-  type MobileTimelineSink
-} from "./services/mobileRelayControl";
-import {
-  collectMobileMailboxOutboxEvents,
-  fulfilledMobileEventKeysFromMailboxEvents,
-  mobileMailboxEventScopeKey
-} from "./services/mobileMailboxOutbox";
-import { mobilePairingRequestWithEndpointDefaults, mobilePairingWithStartKey, mobilePhoneScopeOfPairing, type MobilePairingPackage } from "../shared/mobilePairing";
+import { type CreateMobilePairingResult, type MobilePairingPackage } from "../shared/mobilePairing";
 import type { ChatEventEnvelope } from "../shared/chatEvents";
 import { CHAT_ACTION_LOG_SCOPE } from "../shared/chatActionEvents";
-import { readActiveRunIds } from "../shared/chatRunState";
-import type { ChatDeviceCapabilityGrantPayload, ChatDeviceCapabilityRevokedPayload } from "../shared/chatDeviceCapabilities";
 import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
-import { acquireMobileMailboxExecutionClaim } from "./services/mobileMailboxClaims";
-import { controlCardFromChoiceMessage, controlCardsFromConversation } from "../shared/mobileControlCards";
-import {
-  deleteMailboxEvents,
-  mailboxAccessForSealKey,
-  mailboxAuthHeaders,
-  mailboxEndpointForSealKey,
-  openMailboxEventPayloads,
-  classifyMailboxRegistrationFailure,
-  registerMailboxForSealKey,
-  setMailboxRegistrationSigner,
-  revokeMailboxForSealKey,
-  revokeMailboxWithToken,
-  sealMailboxEventPayloads
-} from "./services/mailboxAccess";
 import { AppSkillsService } from "./services/appSkills";
 import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
@@ -196,8 +172,6 @@ import { CRASH_REPORTS_ACTIVE_ARG, crashReportingActive, startCrashReporting, st
 import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "./services/crashReportPreferences";
 import { ACTIVITY_RECHECK_MS, appHiddenForUpdate, bootstrapAppUpdater, createUpdateRestart, createUpdateRestartGate, currentUpdateWindows, quitAndInstallUpdate, showUpdateRestartPrompt, updatePromptWindowShown } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
-import { MachineTransportMover } from "./services/machineTransportMoves";
-import { buildMobileChatList, buildMobileTimelinePage, mobileRelayChatMembers } from "./services/mobileChatCatalog";
 import { MachineRecoveryService } from "./services/machineRecovery";
 import { MachineInactivityCheck, type MachineInactivityOutcome } from "./services/machineInactivity";
 import { isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase, isMachineRecoveryOperation } from "../shared/machineInstall";
@@ -347,63 +321,26 @@ const mobilePairingService = new MobilePairingService(chatEventLogService);
 const consensusService = new ConsensusService(gitService, storageService, providerRunner, cliAgentRunner, debugLogService, (conversation) => {
   sendToMainWindow("conversations:updated", conversation);
 });
-const MOBILE_RELAY_CONNECT_TIMEOUT_MS = 8_000;
-const MOBILE_MAILBOX_POLL_INTERVAL_MS = 2_500;
-const MOBILE_MAILBOX_OWNER_ACTION_BACKOFF_MS = 5 * 60_000;
-const MOBILE_EVENT_EXECUTION_CLAIM_TTL_MS = 45_000;
-const mobileRelayControls = new Map<string, MobileRelayControlService>();
 // Machines transport: enrolled machines that host participants.
 let machineLinkService: MachineLinkService | undefined;
 /** When this desktop started connecting to its machines. */
 let machineLinkStartedAt: number | undefined;
 const DESKTOP_LINK_STARTUP_GRACE_MS = 60_000;
-const mobileMailboxPollers = new Map<string, NodeJS.Timeout>();
-const mobilePairingsByKey = new Map<string, MobilePairingPackage>();
-/** When a used link was last said to be used to the User's server. */
-const mobileClaimResentAt = new Map<string, number>();
-/** Whether the stored phones were all restored this session. */
-let mobilePairingsRestoreComplete = false;
-let phoneLinksQueue: Promise<void> = Promise.resolve();
-let phoneLinksRetry: ReturnType<typeof setTimeout> | undefined;
-// W1 arrival cursors, per pairing. Persisted with paired devices so a restart
-// does not re-read the whole mailbox.
-const mobileMailboxCursors = new Map<string, { epoch: string; cursor: number }>();
-// W3/W-A bookkeeping: which published envelopes may be deleted early, decided
-// per envelope rather than per run. See mobileProgressEnvelopeTracker.
-const mobileProgressEnvelopes = new MobileProgressEnvelopeTracker();
-// Phones that have actually connected, mapped to when they first connected.
-// These survive restarts and never expire on a timer; only an explicit revoke
-// removes them.
-const mobileClaimedPairingKeys = new Map<string, string>();
-const mobilePairingExpiryTimers = new Map<string, NodeJS.Timeout>();
-const mobileRevokedPairingKeys = new Set<string>();
-let mobileMailboxOwnerActionBackoffUntil = 0;
 const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation, update) => {
   // The renderer receives the delta form — the messages that changed plus the
   // newest window — because on a chat with thousands of messages the full
-  // snapshot is tens of megabytes per update. The phone paths keep the full
-  // snapshot they were written against.
+  // snapshot is tens of megabytes per update.
   sendToMainWindow("conversations:updated", update);
-  for (const control of mobileRelayControls.values()) {
-    control.pushConversationSnapshot(conversation);
-  }
-}, userSkillsService, (progress) => emitReviewProgress(progress), chatEventMirrorService, (conversation, messages) => {
-  // W-C: an interrupted run's recovered terminals are the only thing that will
-  // ever tell a paired phone that run is over.
-  for (const control of mobileRelayControls.values()) {
-    control.pushRecoveredRunTerminals(conversation, messages);
-  }
-});
-// W-M: every progress path must reach the paired phones, not only the
-// renderer. Interactive runs (chat:send, accord, compaction) pass their own
-// per-run callback, which used to carry only the window delivery — the
-// constructor-level fan-out was bypassed and phones went silent for every
-// interactively started run, which is all of them.
+  // The phone reads the cards of this desktop's own members from the server.
+  hubPhonePublisher.noteConversation(conversation);
+}, userSkillsService, (progress) => emitReviewProgress(progress), chatEventMirrorService);
+// Every progress path reaches the phone (through the server), not only the
+// renderer: interactive runs (chat:send, accord, compaction) pass their own
+// per-run callback.
 function emitReviewProgress(progress: ReviewProgress): void {
   sendToMainWindow("conversations:review-progress", progress);
-  for (const control of mobileRelayControls.values()) {
-    control.noteExternalChatProgress(progress);
-  }
+  // A local member's live text, for the phone to show from the server.
+  hubPhonePublisher.noteProgress(progress, chatService.conversationIdForRun(progress.runId));
 }
 
 const cloudRunDoctorService: CloudRunDoctorService = new CloudRunDoctorService({
@@ -435,6 +372,112 @@ let hubRosterRetryMs = 5_000;
 /** The server took this desktop's device list, which only its owner may set. */
 let hubOwnerConfirmed = false;
 
+/** Phones paired with the User's server (the ones it admits). */
+async function hubPhones(): Promise<import("../shared/machineTrust").TrustedDeviceRecord[]> {
+  return (await settingsService.listTrustedDevices().catch(() => [])).filter((device) => device.role === "phone" && device.inviteId && device.phoneScope);
+}
+
+const hubPhonePublisher: HubPhonePublisher = new HubPhonePublisher({
+  storage: storageService,
+  eventLog: chatEventLogService,
+  client: () => hubOwnerConfirmed ? hubClient : undefined,
+  hasPhones: async () => (await hubPhones()).length > 0,
+  machineMembersOf: async (conversationId) => {
+    const opened = await storageService.openConversation(conversationId, 1);
+    const participants = Array.isArray(opened?.conversation.metadata?.participants) ? opened!.conversation.metadata.participants as Array<{ id?: string; homeMachineId?: string }> : [];
+    return new Set(participants.filter((participant) => participant?.id && participant.homeMachineId).map((participant) => participant.id as string));
+  },
+  buildCatalog: async (upload) => {
+    const settings = await settingsService.getPublicSettings();
+    for (const avatar of settings.chatCustomAvatars ?? []) {
+      await upload(`custom:${avatar.id}`, `${avatar.id}:${avatar.createdAt}`, async () => {
+        const read = await settingsService.readCustomAvatar(avatar.id);
+        return { mimeType: read.mediaType, bytes: Buffer.from(read.dataBase64, "base64") };
+      }).catch(() => undefined);
+    }
+    const skills = await userSkillsService.listAll({ limit: 300 }).catch(() => ({ skills: [] as import("../shared/types").UserSkillSummary[] }));
+    return {
+      roles: Object.fromEntries(settings.chatRoleConfigs.map((role) => [role.id,
+        role.id === "generic-participant" && role.label === "Generic Participant" ? "Generic Member" : role.label])),
+      prompts: (settings.chatSavedPrompts ?? []).slice(0, 200).map((prompt) => ({ id: prompt.id, label: prompt.label, trigger: prompt.trigger, body: prompt.body.slice(0, 20_000) })),
+      skills: skills.skills
+        .filter((skill) => skill.capabilityState === "invocable" && !skill.ambiguous)
+        .map(({ scopeKinds: _scopeKinds, statusMessage: _statusMessage, ambiguous: _ambiguous, ...skill }) => ({ ...skill, description: skill.description?.slice(0, 400) }))
+    };
+  },
+  wakeKeys: async () => {
+    const wake = await cloudRunAwsService.deviceWakePower().catch(() => undefined);
+    if (!wake?.machineId) return [];
+    return [{ machineId: wake.machineId, instanceId: wake.config.instanceId, region: wake.config.credentials.region, credentials: wake.config.credentials }];
+  },
+  log: (event, payload) => { void debugLogService.write(event, payload); }
+});
+
+/**
+ * A phone that enrolled with one of this desktop's invites writes its
+ * certificate first: checked with this desktop's own key, the phone is
+ * trusted here, on the server's roster and on every machine. A certificate
+ * for an invite this desktop revoked admits nobody.
+ */
+async function admitEnrolledPhone(event: ChatEventEnvelope, fetchBody: () => Promise<void>): Promise<string | undefined> {
+  if (event.kind !== HUB_PHONE_ENROLLED_EVENT_KIND || event.logScopeId !== HUB_PHONE_ENROLLMENT_SCOPE) return undefined;
+  if (isDeviceEventBlobReference(event.payload)) await fetchBody().catch(() => undefined);
+  const identity = await chatEventLogService.getOrCreateDeviceIdentity();
+  const certificate = await storageService.deviceEventBlobs().hydrate(event.payload).catch(() => undefined) as HubPhoneCertificate | undefined;
+  if (!verifyHubPhoneCertificate(certificate, { issuerDeviceId: identity.originId, issuerPublicKeyDerBase64: identity.publicKeyDerBase64, ...hubCertificateCrypto }) ||
+      certificate.enrollment.deviceId !== event.originId) {
+    void debugLogService.write("hub.phone.certificate-refused", { originId: event.originId });
+    return undefined;
+  }
+  // The same certificate read again (a gap filled, a copy taken again)
+  // changes nothing, and nobody is told again.
+  const known = (await settingsService.listTrustedDevices().catch(() => [])).find((device) => device.deviceId === certificate.enrollment.deviceId);
+  if (known && known.inviteId === certificate.invite.inviteId && known.publicKeyDerBase64 === certificate.enrollment.publicKeyDerBase64) {
+    return certificate.enrollment.publicKeyDerBase64;
+  }
+  const admitted = await settingsService.admitInvitedPhone({
+    deviceId: certificate.enrollment.deviceId,
+    publicKeyDerBase64: certificate.enrollment.publicKeyDerBase64,
+    role: "phone",
+    name: certificate.enrollment.name || certificate.invite.name || "Phone",
+    addedAt: certificate.enrollment.enrolledAt,
+    inviteId: certificate.invite.inviteId,
+    phoneScope: certificate.invite.scope
+  });
+  void debugLogService.write("hub.phone.admitted", { deviceId: certificate.enrollment.deviceId, inviteId: certificate.invite.inviteId, admitted });
+  if (!admitted) return undefined;
+  publishHubRoster();
+  await machineLinkService?.refreshTrustRosters().catch(() => undefined);
+  hubPhonePublisher.phonesChanged();
+  hubPhonePublisher.scheduleCatalog(0);
+  hubPhonePublisher.publishWakeKeys();
+  hubPhonePublisher.flushApprovals();
+  return certificate.enrollment.publicKeyDerBase64;
+}
+
+/**
+ * A card answer, an approval or a Stop the User gave on her phone, read from
+ * the server: recorded here, then acted on by whichever device holds what it
+ * answers (for this desktop's own members, this desktop). One that names what
+ * has not arrived here yet is held and offered again.
+ */
+async function applyPhoneChatAction(event: ChatEventEnvelope, fetchBody: () => Promise<void>): Promise<"delivered" | "waiting" | "refused"> {
+  // A body too large to travel inline is fetched for an event taken here.
+  if (isDeviceEventBlobReference(event.payload)) await fetchBody();
+  const payload = await storageService.deviceEventBlobs().hydrate(event.payload);
+  if (await phoneApprovesScriptCode(event.conversationId, event.kind, payload)) {
+    void debugLogService.write("mobile.decision.refused", { conversationId: event.conversationId, kind: event.kind, reason: "script-code-on-phone" });
+    return "refused";
+  }
+  const [stored] = await storageService.appendChatEvents([event]);
+  if (stored?.status === "conflict") return "refused";
+  const outcome = await chatActionApplier.apply(event, payload);
+  void debugLogService.write("mobile.decision.applied", {
+    conversationId: event.conversationId, kind: event.kind, targetKey: outcome.targetKey, status: outcome.status, detail: outcome.detail ?? "", via: "hub"
+  });
+  return outcome.status === "deferred" ? "waiting" : "delivered";
+}
+
 /**
  * Tells the hub which devices are the User's: this desktop and every machine
  * whose key it knows. The hub admits nobody else, so a machine set up here
@@ -463,15 +506,36 @@ function publishHubRoster(): void {
       }
       return [{ deviceId: machine.deviceId, publicKeyDerBase64, role: "machine" as const, name: machine.name, machineId: machine.id }];
     });
+    // Which of them read the hub's order (enrolled with it), and their
+    // channel: the hub keeps what they have not read yet.
+    const records = new Map((await settingsService.listMachines()).map((machine) => [machine.id, machine]));
+    for (const entry of machines) {
+      const machine = records.get(entry.machineId);
+      const pairing = machine ? await settingsService.getMachinePairing(machine.pairingKey).catch(() => undefined) : undefined;
+      if (pairing?.hubUrl) Object.assign(entry, { reader: true, rendezvousId: pairing.rendezvousId });
+    }
+    // The phones paired with the server, as their invites allowed; and the
+    // invites this desktop has settled, so a phone it removed stays out.
+    const phones = (await hubPhones()).map((phone) => ({
+      deviceId: phone.deviceId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone" as const, name: phone.name,
+      scope: phone.phoneScope!, inviteId: phone.inviteId!
+    }));
     await client.setRoster([
       { deviceId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64, role: "desktop", name: "This computer" },
-      ...machines
-    ]);
+      ...machines,
+      ...phones
+    ], await settingsService.resolvedPhoneInviteIds());
     hubRosterRetryMs = 5_000;
     hubOwnerConfirmed = true;
-    void debugLogService.write("hub.roster.published", { machines: machines.length });
-    publishPhoneLinks();
+    void debugLogService.write("hub.roster.published", { machines: machines.length, phones: phones.length });
     hubSync?.nudgeHeld();
+    hubPhonePublisher.scheduleCatalog();
+    hubPhonePublisher.publishWakeKeys();
+    // Cards that waited while there was no link (a restart, another server).
+    void storageService.recentChatsWithPendingApprovals(100).then((chats) => {
+      for (const chat of chats) hubPhonePublisher.noteConversation(chat);
+      hubPhonePublisher.flushApprovals();
+    }).catch(() => hubPhonePublisher.flushApprovals());
   })().catch((error: unknown) => {
     // A machine set up while the hub was away would be refused by it: the
     // list goes up again until the hub has it.
@@ -488,12 +552,160 @@ function publishHubRoster(): void {
   });
 }
 
+/** The channels of the machines that read the hub (`device:<room>:`). A
+ *  pairing that cannot be read fails the caller rather than pass that
+ *  machine's events over. */
+async function hubMachineScopes(): Promise<string[]> {
+  const rooms: string[] = [];
+  for (const machine of await settingsService.listMachines()) {
+    const pairing = await settingsService.getMachinePairing(machine.pairingKey);
+    if (pairing?.hubUrl) rooms.push(`device:${pairing.rendezvousId}:`);
+  }
+  return rooms;
+}
+
+/** Where the hub's readers stand, asked at most once a minute (Settings and
+ *  the inactive-machine question read it). */
+let hubReadersCache: { at: number; value?: HubReadersResponse; pending?: Promise<HubReadersResponse | undefined> } = { at: 0 };
+const HUB_READERS_MAX_AGE_MS = 60_000;
+function hubReaders(): Promise<HubReadersResponse | undefined> {
+  const client = hubClient;
+  if (!client) return Promise.resolve(undefined);
+  if (Date.now() - hubReadersCache.at < HUB_READERS_MAX_AGE_MS) return Promise.resolve(hubReadersCache.value);
+  hubReadersCache.pending ??= client.readers().then((value) => {
+    hubReadersCache = { at: Date.now(), value };
+    return value;
+  }, () => {
+    // An older server cannot say; asked again later.
+    hubReadersCache = { at: Date.now(), ...(hubReadersCache.value ? { value: hubReadersCache.value } : {}) };
+    return hubReadersCache.value;
+  });
+  return hubReadersCache.pending;
+}
+
+/** A reader that has not read for this long, or holds something this long,
+ *  is named in Settings (it is never dropped: the hub keeps what it needs). */
+const HUB_STUCK_READER_MS = (() => {
+  const value = Number(process.env.ACCORDAGENTS_HUB_STUCK_READER_MS);
+  return Number.isSafeInteger(value) && value > 0 ? value : 7 * 24 * 60 * 60_000;
+})();
+
+function noticeDate(iso: string): string {
+  return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/**
+ * Plain lines for Settings → Your server: a device that has not read from
+ * the server for a long time (the server keeps everything it has not read,
+ * so it is the User's to start or remove), and changes a device has held for
+ * a long time because it cannot take them yet.
+ */
+async function hubReaderNotices(): Promise<string[]> {
+  if (!hubClient) return [];
+  const now = Date.now();
+  const lines: string[] = [];
+  const own = (await chatEventLogService.getOrCreateDeviceIdentity()).originId;
+  // What was last heard: Settings never waits on the server for these lines
+  // (an unreachable one would hold its whole status for the request's timeout).
+  void hubReaders();
+  const status = hubReadersCache.value;
+  for (const reader of status?.readers ?? []) {
+    if (reader.deviceId === own) continue;
+    const readAt = reader.readAt ? Date.parse(reader.readAt) : NaN;
+    if (Number.isFinite(readAt) && now - readAt > HUB_STUCK_READER_MS) {
+      lines.push(reader.neverRead
+        ? `${reader.name} hasn't read from your server since it was set up on ${noticeDate(reader.readAt!)}: start it or remove it.`
+        : `${reader.name} hasn't read from your server since ${noticeDate(reader.readAt!)}: start it or remove it.`);
+      continue;
+    }
+    const heldSince = reader.heldSince ? Date.parse(reader.heldSince) : NaN;
+    if (Number.isFinite(heldSince) && now - heldSince > HUB_STUCK_READER_MS) {
+      const count = reader.heldCount ?? 0;
+      lines.push(`${reader.name} has ${count} change${count === 1 ? "" : "s"} from your server it can't apply yet, the oldest since ${noticeDate(reader.heldSince!)}.`);
+    }
+  }
+  const held = await storageService.hub().heldSummary().catch(() => undefined);
+  const heldAt = held?.oldestAt ? Date.parse(held.oldestAt) : NaN;
+  if (held && held.count > 0 && Number.isFinite(heldAt) && now - heldAt > HUB_STUCK_READER_MS) {
+    lines.push(`This computer has ${held.count} change${held.count === 1 ? "" : "s"} from your server it can't apply yet, the oldest since ${noticeDate(held.oldestAt!)}.`);
+  }
+  return lines;
+}
+
+/** Notices the User dismissed (kept on this desktop, the last hundred). */
+const DISMISSED_HUB_NOTICES_KEY = "dismissed-notices";
+
+async function dismissedHubNotices(): Promise<string[]> {
+  try {
+    const parsed = JSON.parse(await storageService.hub().clientState(DISMISSED_HUB_NOTICES_KEY) ?? "[]") as unknown;
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+let dismissingHubNotice: Promise<void> = Promise.resolve();
+/** One dismissal at a time: two quick clicks must not lose one. */
+function dismissHubNotice(id: string): Promise<void> {
+  if (typeof id !== "string" || !id || id.length > 512) return Promise.reject(new Error("Invalid notice."));
+  const run = dismissingHubNotice.then(async () => {
+    const dismissed = (await dismissedHubNotices()).filter((item) => item !== id);
+    await storageService.hub().setClientState(DISMISSED_HUB_NOTICES_KEY, JSON.stringify([...dismissed, id].slice(-100)));
+  });
+  dismissingHubNotice = run.catch(() => undefined);
+  return run;
+}
+
+/**
+ * Lines the User can dismiss: changes a device could not apply for two
+ * weeks and gave up on. This desktop's own (by who wrote them), and each
+ * machine's as it reports them to the server. One line per device and date.
+ */
+async function hubGivenUpNotices(): Promise<Array<{ id: string; text: string }>> {
+  if (!hubClient) return [];
+  const dismissed = new Set(await dismissedHubNotices());
+  const machines = await settingsService.listMachines().catch(() => []);
+  const trusted = await settingsService.listTrustedDevices().catch(() => []);
+  const nameOf = (deviceId: string): string => machines.find((item) => item.deviceId === deviceId)?.name
+    ?? trusted.find((item) => item.deviceId === deviceId)?.name ?? "another of your devices";
+  const notices: Array<{ id: string; text: string }> = [];
+  for (const [originId, entry] of Object.entries(await readGivenUp(storageService))) {
+    notices.push({ id: `given-up:${originId}:${entry.at}`, text: `Some changes from ${nameOf(originId)} could not be applied and were given up on ${noticeDate(entry.at)}.` });
+  }
+  const own = (await chatEventLogService.getOrCreateDeviceIdentity()).originId;
+  for (const reader of hubReadersCache.value?.readers ?? []) {
+    if (reader.deviceId === own || !reader.givenUpAt) continue;
+    notices.push({ id: `given-up-on:${reader.deviceId}:${reader.givenUpAt}`, text: `Some changes could not be applied on ${reader.name} and were given up on ${noticeDate(reader.givenUpAt)}.` });
+  }
+  return notices.filter((notice) => !dismissed.has(notice.id));
+}
+
+/** Where this desktop stands in its hub's order: everything at or before it
+ *  that concerns it was taken (or is held, and the lowest held place comes
+ *  before it). A machine's first copy of the chats starts there. */
+async function hubCopyPosition(): Promise<{ hubId: string; hubSeq: number } | undefined> {
+  if (!await settingsService.getHubConfig()) return undefined;
+  const hub = storageService.hub();
+  const hubId = await hub.clientState(HUB_ID_KEY);
+  const pulled = await hub.clientState(PULLED_KEY);
+  if (!hubId || pulled === undefined) return undefined;
+  // A phone's answer waiting for its member is not a chat change a new
+  // machine's copy lacks: it does not move the copy's position back.
+  const held = await hub.heldSummary({ exceptReasons: ["deferred-action"] });
+  const hubSeq = Math.max(0, held.lowest > 0 ? Math.min(Number(pulled) || 0, held.lowest - 1) : Number(pulled) || 0);
+  return { hubId, hubSeq };
+}
+
 async function startHubLink(): Promise<void> {
   const config = await settingsService.getHubConfig();
   if (!config || hubSync) return;
   hubOwnerConfirmed = false;
   const identity = () => chatEventLogService.getOrCreateDeviceIdentity();
   hubClient = new HubClient({ url: config.url, identity, storage: storageService });
+  const blobClient = hubClient;
+  // A picture the User sent from the phone is read from the server.
+  chatService.setHubBlobReader((reference) => blobClient.downloadBytes(reference));
+  hubPhonePublisher.reset();
   hubSync = new HubSync({
     client: hubClient,
     storage: storageService,
@@ -505,28 +717,32 @@ async function startHubLink(): Promise<void> {
       if (machineKey) return machineKey;
       return (await settingsService.listTrustedDevices()).find((device) => device.deviceId === originId)?.publicKeyDerBase64;
     },
+    // A phone proves itself with its first event, its certificate.
+    admit: (event, fetchBody) => admitEnrolledPhone(event, fetchBody),
     // A machine's event goes to that machine's channel, which applies it as
-    // if the machine had sent it; a phone's chat change is applied here.
+    // if the machine had sent it; a phone's chat change is applied here, and
+    // so is its answer to a card or its Stop.
     // Without the machine link (it failed to start) nothing is passed over:
     // the event is held until it is there.
-    deliver: async (event) => machineLinkService ? machineLinkService.receiveFromHub(event) : "not-ready",
-    applyChatChange: hubChatChangeApplier(storageService, chatService),
-    // Only machines that read the hub stop waiting; one still on the relay
-    // is sent the event the relay way.
-    onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString(), machineLinkService?.hubReaders() ?? []),
-    // A machine on the relay is sent its channel the relay way: only the
-    // channels of machines that read the hub go there. Read from settings,
-    // so a machine whose link has not started yet is not passed over.
-    // A pairing that cannot be read fails the pass (and the cursor stays):
-    // taking that machine for a relay one would pass its events over.
-    scopePrefixes: async () => {
-      const rooms: string[] = [];
-      for (const machine of await settingsService.listMachines()) {
-        const pairing = await settingsService.getMachinePairing(machine.pairingKey);
-        if (pairing?.hubUrl) rooms.push(`device:${pairing.rendezvousId}:`);
-      }
-      return [...HUB_SHARED_SCOPE_PREFIXES, ...rooms];
+    deliver: async (event, fetchBody) => {
+      if (isChatActionKind(event.kind) && (await hubPhones()).some((phone) => phone.deviceId === event.originId)) return applyPhoneChatAction(event, fetchBody);
+      return machineLinkService ? machineLinkService.receiveFromHub(event, fetchBody) : "not-ready";
     },
+    applyChatChange: hubChatChangeApplier(storageService, chatService),
+    // Where it starts again after the hub forgot what it needed: before
+    // anything of its machines' channels, from the hub's copy of the chats.
+    ownScopes: hubMachineScopes,
+    mergeCopy: async (copied) => {
+      const originId = (await identity()).originId;
+      await chatService.mergeServerCopy(copied, { desktopOriginId: originId, localOriginId: originId, ownsSharedFields: true });
+    },
+    // A machine is never given a delivery row; one that an older version
+    // wrote lets go when its event is pushed.
+    onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString(), machineLinkService?.hubReaders() ?? []),
+    // Each machine's channel, read from settings, so a machine whose link
+    // has not started yet is not passed over. A pairing that cannot be read
+    // fails the pass (and the cursor stays) rather than pass its events over.
+    scopePrefixes: async () => [...HUB_SHARED_SCOPE_PREFIXES, ...await hubMachineScopes()],
     log: (event, payload) => { void debugLogService.write(event, payload); }
   });
   // What this desktop writes goes up at once; reading waits for the
@@ -553,7 +769,6 @@ async function startHubLink(): Promise<void> {
  *  minute after the link starts, and again later if it did not work (a few
  *  times per version at most). Settings shows its progress like a press. */
 let hubProgramUpdateTimer: ReturnType<typeof setTimeout> | undefined;
-const MAILBOX_REVOKE_RETRY_MS = 5 * 60_000;
 const hubProgramUpdateTries = new Map<string, number>();
 const HUB_PROGRAM_UPDATE_DELAY_MS = 60_000;
 const HUB_PROGRAM_UPDATE_RETRY_MS = 30 * 60_000;
@@ -697,33 +912,19 @@ const hubInstaller = new HubInstaller({
     }
     await startHubLink();
     resumeHubReading();
-    // Machines set up before the server move to it now.
-    void moveMachinesToHub();
   },
   currentLink: () => settingsService.getHubConfig().catch(() => undefined),
   reachable: () => hubSync ? hubSync.isReachable() : undefined,
+  notices: () => hubReaderNotices(),
+  dismissableNotices: () => hubGivenUpNotices(),
+  standingNotices: () => relayRemovalNotices(),
   defaultRegion: async () => (await settingsService.getPublicSettings()).cloudRuns.awsRegion,
   log: (event, payload) => { void debugLogService.write(event, payload); }
-});
-// The User's server takes a new mailbox only from her desktop: a pairing's
-// mailbox there is registered with this desktop's hub signature.
-setMailboxRegistrationSigner(async ({ url, method, pathWithQuery, body }) => {
-  const hub = await settingsService.getHubConfig().catch(() => undefined);
-  if (!hub || new URL(hub.url).origin !== url.origin) return undefined;
-  const identity = await chatEventLogService.getOrCreateDeviceIdentity();
-  return signHubRequest(identity, { method, pathWithQuery, body });
 });
 hubInstaller.onProgress((state) => {
   // A setup that ended (linked, or stopped before) no longer needs every
   // save to emit: a running link does that by itself.
   if (state.status !== "installing") hubLinking = false;
-  // A program just put on the server (set up, updated by the button or by
-  // this desktop) may not have kept what each phone may read: told again,
-  // so the phones read their chats from the server from here on.
-  if (state.status === "ready" && state.phase === "ready") {
-    for (const pairing of mobilePairingsByKey.values()) void ensureMailboxRegisteredForPairing(pairing);
-    publishPhoneLinks();
-  }
   sendToMainWindow("hub:setup-progress", state);
 });
 void removeStaleHubTemp().then((removed) => {
@@ -856,6 +1057,28 @@ async function removeMachine(id: string): Promise<MachineListResult> {
   return result;
 }
 
+/** What the shared relay set up is taken off this desktop once (see
+ *  relayRemoval.ts); the other machines' rosters follow. */
+async function removeRelayEra(): Promise<void> {
+  const recorded = await removeRelayEraRecords({
+    settings: settingsService,
+    removeMachine: (machineId) => removeMachine(machineId),
+    handoffs: machinePowerHandoffService
+  });
+  if (!recorded) return;
+  void debugLogService.write("relay.removed", { machines: recorded.machines.length, phones: recorded.phones.length, startKeyHanded: recorded.startKeyHanded });
+  await machineLinkService?.refreshTrustRosters().catch(() => undefined);
+}
+
+/** The one line about what the relay's removal took off this desktop. */
+async function relayRemovalNotices(): Promise<Array<{ id: string; text: string }>> {
+  const notice = relayRemovalNotice(await settingsService.relayRemoval(), {
+    hasServer: Boolean(await settingsService.getHubConfig().catch(() => undefined)),
+    serverPhones: (await hubPhones().catch(() => [])).length
+  });
+  return notice ? [notice] : [];
+}
+
 /** Drops what this desktop kept for a removed machine, and stops offering the
  *  machines that remain what it wrote. Errors are logged; the next start tries
  *  again from the record settings keeps of the removal. */
@@ -870,78 +1093,23 @@ async function forgetRemovedMachineOutbox(outbox: { pairingKey: string; deviceId
   }
 }
 
-/** Whether the User's server serves the relay (an older hub program does
- *  not): until it does, new pairings and machines stay where they were. */
-async function hubServesRelay(): Promise<boolean> {
-  const hub = await settingsService.getHubConfig().catch(() => undefined);
-  if (!hub) return false;
-  const installed = hub.server?.installedVersion;
-  return !installed || compareVersions(installed, HUB_RELAY_FIRST_VERSION) >= 0;
+/** A machine's enrollment with the User's own server: its rooms and its one
+ *  order, nothing else. */
+function createHubMachinePairing(hubUrl: string): Promise<CreateMobilePairingResult> {
+  return mobilePairingService.createPairing({ purpose: "machine-host", ttlMinutes: MACHINE_ENROLLMENT_TTL_MINUTES, hubUrl });
 }
-
-/** Tells the phones the machines' addresses changed. */
-function resendMachineAccessToPhones(): void {
-  for (const control of mobileRelayControls.values()) void control.resendMachineAccess().catch(() => undefined);
-}
-
-/** Whether an automatic update of this machine is running (set once the
- *  updater exists): a move and an update never start on one machine at once. */
-let machineUpdateRunning: (machineId: string) => boolean = () => false;
-
-/** Machines set up before the User's own server move to it once it serves
- *  the relay; a move whose answer never came is settled by where the
- *  machine is found, also after this desktop restarts. */
-const machineTransportMover = new MachineTransportMover({
-  link: () => machineLinkService,
-  listMachines: () => settingsService.listMachines(),
-  getMachinePairing: (pairingKey) => settingsService.getMachinePairing(pairingKey),
-  listMoves: () => settingsService.listMachineMoves(),
-  saveMove: (record) => settingsService.saveMachineMove(record),
-  finishMove: (machineId, adopt) => settingsService.finishMachineMove(machineId, adopt),
-  target: async () => {
-    if (!await hubServesRelay()) return undefined;
-    const defaults = (await settingsService.getPublicSettings()).mobileControl.defaults;
-    return defaults.relayUrl && defaults.outboxUrl ? { relayUrl: defaults.relayUrl, outboxUrl: defaults.outboxUrl } : undefined;
-  },
-  busyElsewhere: (machineId) => Boolean(machineInstallerService.activeOperation(machineId)) || machineUpdateRunning(machineId),
-  ensureMailboxRegistered: (pairing) => ensureMailboxRegisteredForPairing(pairing),
-  onMoved: () => {
-    resendMachineAccessToPhones();
-    void machineListResult().then((result) => sendToMainWindow("machines:updated", result)).catch(() => undefined);
-  },
-  log: (event, payload) => { void debugLogService.write(event, payload); }
-});
-
-function moveMachinesToHub(): Promise<void> {
-  return machineTransportMover.run();
-}
-
 
 async function createMachine(request: CreateMachineRequest, awsInstanceId?: string): Promise<CreateMachineResult> {
   const name = typeof request?.name === "string" ? request.name.trim() : "";
   if (!name) {
     throw new Error("A machine needs a name.");
   }
-  const settings = await settingsService.getPublicSettings();
-  // The machine meets this desktop and the phone in the relay's room and
-  // sealed mailbox: on the User's own server once it is set up (the
-  // defaults name it then), otherwise on the shared relay.
-  const pairing = await mobilePairingService.createPairing({
-    purpose: "machine-host",
-    ttlMinutes: MACHINE_ENROLLMENT_TTL_MINUTES,
-    relayUrl: settings.mobileControl.defaults.relayUrl,
-    outboxUrl: settings.mobileControl.defaults.outboxUrl
-  });
-  if (!pairing.package.relayUrl) {
-    throw new Error("Machines need a relay URL; set the mobile control relay in Settings first.");
-  }
-  if (!pairing.package.outboxUrl) {
-    throw new Error("Machines need a sealed mailbox URL; set the mobile control mailbox in Settings first.");
-  }
-  // Reserve the sealed mailbox before exposing its enrollment credentials.
-  if (!await ensureMailboxRegisteredForPairing(pairing.package)) {
-    throw new Error("The machine's relay mailbox could not be registered. Try adding the machine again.");
-  }
+  // A machine talks only to the User's own server: it meets this desktop in
+  // the server's rooms and every durable event goes through the server's one
+  // order. Without a server there are no machines.
+  const hub = await settingsService.getHubConfig();
+  if (!hub) throw new Error(SET_UP_SERVER_FOR_MACHINES);
+  const pairing = await createHubMachinePairing(hub.url);
   const record = {
     id: randomUUID(),
     name,
@@ -957,6 +1125,9 @@ async function createMachine(request: CreateMachineRequest, awsInstanceId?: stri
   void machineListResult().then((result) => sendToMainWindow("machines:updated", result));
   return { machine: record, enrollmentJson: JSON.stringify(pairing.package, null, 2) };
 }
+
+/** What Settings says where a machine would start without the User's server. */
+const SET_UP_SERVER_FOR_MACHINES = "Set up your server first (Settings → Your server): cloud machines connect through it.";
 
 const machineProfileSync = new DefaultRemoteAgentSetupSync();
 const prepareMachineProfile = async (record: MachineInstallRecord): Promise<void> => {
@@ -980,10 +1151,10 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
     desktopOriginId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
     adoptMachineIdentity: (machineId, identity) => requireMachineLink().adoptMachineIdentity(machineId, identity),
     settleChatSaves: () => chatService.settleChatSaves(),
-    shareAfterCopy: (machineId, marks) => requireMachineLink().shareChatChangesAfterCopy(machineId, marks),
-    confirmCopied: (machineId, marks) => requireMachineLink().confirmChatCopy(machineId, marks),
     attachmentsDir: path.join(app.getPath("userData"), "chats"),
-    tempDir: app.getPath("temp")
+    tempDir: app.getPath("temp"),
+    hubPosition: hubCopyPosition,
+    otherAuthors: async () => (await hubPhones()).map((phone) => phone.deviceId)
   }),
   // Minutes pass between the preflight and the drain; a member may have
   // started on the machine meanwhile. Asked afresh, and a stale answer is not
@@ -1032,6 +1203,9 @@ const cloudRunPreparation = new CloudRunPreparationService({
   listMachines: () => settingsService.listMachines(),
   listInstalls: () => settingsService.listMachineInstalls(),
   createMachine: async (name, instanceId) => (await createMachine({ name }, instanceId)).machine,
+  requireServer: async () => {
+    if (!await settingsService.getHubConfig()) throw new Error(SET_UP_SERVER_FOR_MACHINES);
+  },
   install: (request, progress) => machineInstallerService.install(request, progress),
   awaitActiveInstall: async (machineId) => { await machineInstallerService.activeOperation(machineId)?.catch(() => undefined); },
   isConnected: (machineId) => Boolean(machineLinkService?.isMachineConnected(machineId)),
@@ -1058,42 +1232,37 @@ const cloudRunPreparation = new CloudRunPreparationService({
   }
 });
 void machineInstallerService.recoverInterruptedOperation();
-// Rule 3: a device wakes a stopped AWS machine itself with a narrowly scoped
-// key handed to it at pairing, inside the pairing link and nowhere else. The
-// key is the phone's own start key from the setup command (it cannot stop or
-// delete anything), not the machine's stop key. Revoking a pairing goes
-// through here so the User is told what the device keeps.
+// Phones paired through the shared relay were handed the key that starts the
+// AWS machine. Nothing hands it out any more (a phone talks only to the
+// User's server); the records say who kept a copy, and a removed machine
+// settles them.
 const machinePowerHandoffService = new MachinePowerHandoffService({
   getDeviceStartKey: async () => (await cloudRunAwsService.deviceWakePower())?.config,
   listMachinePowerHandoffs: () => settingsService.listMachinePowerHandoffs(),
   saveMachinePowerHandoffs: (records) => settingsService.saveMachinePowerHandoffs(records)
 });
 
-/** The start-key handoff a new phone pairing carries, or undefined when the
- *  setup command has made no start key. A failure to mint one never blocks
- *  pairing: the phone still controls the desktop, it just cannot wake the
- *  machine. */
-async function machinePowerHandoffForPairing(pairing: MobilePairingPackage): Promise<MachinePowerHandoff | undefined> {
-  if (pairing.purpose !== "phone-control") return undefined;
-  try {
-    const wake = await cloudRunAwsService.deviceWakePower();
-    return await machinePowerHandoffService.issue({
-      machineId: wake?.machineId ?? "aws-machine",
-      issuedTo: pairing.stableRoutingId
-    });
-  } catch (error) {
-    void debugLogService.write("machine.power.handoff.skipped", {
-      reason: error instanceof Error ? error.message : String(error)
-    });
-    return undefined;
-  }
-}
 chatService.setCloudRunPreparation(async (selection, provider, progress) => {
   if (provider !== "codex-cli" && provider !== "claude-code") throw new Error("This provider does not support Cloud run.");
   const result = await cloudRunPreparation.prepare({ operationId: randomUUID(), provider, instanceId: selection.instanceId }, progress);
   return result.machine.id;
 });
 chatService.setCloudRunAwsService(cloudRunAwsService);
+// A message the User wrote on her phone starts this desktop's own members.
+const isUsersPhone = async (originId: string): Promise<boolean> => (await hubPhones()).some((phone) => phone.deviceId === originId);
+void phoneTurnsSince(storageService.hub(), PULLED_KEY, Date.now(), PHONE_TURN_RESUME_WINDOW_MS)
+  .then((since) => chatService.setPhoneOrigins(isUsersPhone, since))
+  .catch(() => chatService.setPhoneOrigins(isUsersPhone, new Date().toISOString()));
+// Phone messages taken in but never started here (a quit between the two)
+// start once the link has settled, and again now and then.
+const resumePhoneTurns = (): void => {
+  void (async () => {
+    if (!await settingsService.getHubConfig().catch(() => undefined)) return;
+    await chatService.resumePhoneTurns(new Date(Date.now() - PHONE_TURN_RESUME_WINDOW_MS).toISOString());
+  })().catch((error) => { void debugLogService.write("chat.phone-turns.resume-error", { message: error instanceof Error ? error.message : String(error) }); });
+};
+setTimeout(resumePhoneTurns, 20_000).unref?.();
+setInterval(resumePhoneTurns, PHONE_TURN_RESUME_EVERY_MS).unref?.();
 chatService.setPromptSuggestionsListener((update) => sendToMainWindow("chat:prompt-suggestions", update));
 chatService.onBackgroundTasksChanged((event) => sendToMainWindow("chat:background-tasks", event));
 chatService.setMachineProjectPreparation((machineId, localPath, signal, progress) => cloudRunPreparation.prepareProject(machineId, localPath, signal, progress));
@@ -1222,63 +1391,15 @@ async function publishChatAction(action: { conversationId: string; kind: string;
   }
 }
 
-/**
- * A card answered on the phone.
- *
- * It takes exactly the path a desktop answer takes: the decision becomes a
- * durable event first, then the peer that holds the request acts on it once.
- * Delivery from the phone is not the answer being applied, and this is where
- * that distinction is kept.
- */
-async function applyMobileDecision(request: {
-  conversationId: string;
-  kind: "permission.decided" | "choice.answered";
-  payload: { operationId: string; targetKey: string; stateId?: string; detail?: Record<string, unknown> };
-}): Promise<void> {
-  await refuseScriptInstallFromPhone(request);
-  // Re-signed by this desktop, so the answer says where it was given: a
-  // machine refuses a phone's approval of code it never showed, even when
-  // this desktop could not yet see that the card is one (a machine's card
-  // that has not replicated here).
-  const payload = { ...request.payload, detail: { ...request.payload.detail, decidedOn: "phone" } };
-  await publishChatAction({ conversationId: request.conversationId, kind: request.kind, payload });
-  const event = await storageService.getChatEvent(`chat-action:${request.payload.operationId}`);
-  if (!event) {
-    throw new Error("The answer from the phone could not be recorded.");
-  }
-  const outcome = await chatActionApplier.apply(event);
-  if (outcome.status === "deferred") {
-    // Kept for retry rather than reported as answered: the peer that holds the
-    // request could not act on it yet.
-    void debugLogService.write("mobile.decision.deferred", {
-      conversationId: request.conversationId, targetKey: request.payload.targetKey
-    });
-  }
-  // What became of it, every time: an answer that was recorded but had no
-  // effect here (a member on a machine, a request already closed) used to
-  // leave no trace at all.
-  void debugLogService.write("mobile.decision.applied", {
-    conversationId: request.conversationId, kind: request.kind, targetKey: request.payload.targetKey,
-    status: outcome.status, detail: outcome.detail ?? ""
-  });
-}
-
 /** The phone cannot show a script's code yet, so it may decline a script
- *  that installs code but never approve one; the desktop card shows the code. */
-async function refuseScriptInstallFromPhone(request: {
-  conversationId: string;
-  kind: "permission.decided" | "choice.answered";
-  payload: { targetKey: string; stateId?: string; detail?: Record<string, unknown> };
-}): Promise<void> {
-  const approving = request.payload.stateId === "approved" || request.payload.detail?.approve === true;
-  if (request.kind !== "permission.decided" || !approving || !request.payload.targetKey.startsWith("approval:")) return;
-  const approvalId = request.payload.targetKey.slice("approval:".length);
-  const conversation = await storageService.getConversation(request.conversationId);
-  const approvals = (conversation?.metadata?.pendingAppToolApprovals ?? []) as import("../shared/types").ChatAppToolApproval[];
-  const approval = approvals.find((item) => item.id === approvalId);
-  if (approvalInstallsScriptCode(approval)) {
-    throw new Error("Approve scheduled scripts on the desktop, where the card shows their code. You can decline them on the phone.");
-  }
+ *  that installs code but never approve one; the desktop card shows the code
+ *  (and the phone shows that card as one to answer on the desktop). Read from
+ *  the chat's record without its messages. */
+async function phoneApprovesScriptCode(conversationId: string, kind: string, payload: unknown): Promise<boolean> {
+  if (kind !== "permission.decided") return false;
+  const opened = await storageService.openConversation(conversationId, 1);
+  const approvals = (opened?.conversation.metadata?.pendingAppToolApprovals ?? []) as import("../shared/types").ChatAppToolApproval[];
+  return phoneAnswerApprovesScriptCode(kind, payload, approvals);
 }
 
 async function chatActionEventExists(eventId: string): Promise<boolean> {
@@ -1616,715 +1737,6 @@ async function withCloudRunWorker<T>(
   });
 }
 
-// W-I: a registration the relay refused outright can never succeed on retry —
-// registration is trust-on-first-use, so the scope id is already taken. The
-// lockout set stops the self-heal loop; the warning names the fix.
-const mobileRegistrationLockouts = new Set<string>();
-// W-G(e): remote-revoked handling runs once per pairing; the teardown below
-// is not idempotent against concurrent poll/publish failures.
-const mobileRemoteRevokedHandled = new Set<string>();
-
-function mobilePairingConversationId(pairing: MobilePairingPackage): string | undefined {
-  return pairing.capabilities.find((capability) => capability.scope === "conversation")?.conversationId;
-}
-
-/** W-G(e): the relay reports this mailbox as tombstoned. Terminal by design —
- *  polling and self-heal registration stop, the pairing is dropped and
- *  persisted as gone, and the paired conversation carries the warning. A
- *  desktop restored from an old backup must not silently resurrect a revoked
- *  mailbox. */
-async function handleRemoteMailboxRevoked(pairing: MobilePairingPackage): Promise<void> {
-  const key = mobilePairingKey(pairing);
-  if (mobileRemoteRevokedHandled.has(key)) {
-    return;
-  }
-  mobileRemoteRevokedHandled.add(key);
-  mobileRevokedPairingKeys.add(key);
-  mobileClaimedPairingKeys.delete(key);
-  mobilePairingsByKey.delete(key);
-  mobileMailboxCursors.delete(key);
-  mobileRelayControls.get(pairing.rendezvousId)?.close();
-  mobileRelayControls.delete(pairing.rendezvousId);
-  const poller = mobileMailboxPollers.get(key);
-  if (poller) {
-    clearInterval(poller);
-    mobileMailboxPollers.delete(key);
-  }
-  await persistMobilePairedDevices();
-  await debugLogService.write("mobile.pairing.revoked-remote", {
-    routingId: pairing.stableRoutingId,
-    rendezvousId: pairing.rendezvousId
-  });
-  const conversationId = mobilePairingConversationId(pairing);
-  if (conversationId) {
-    await chatService.recordConversationWarning(
-      conversationId,
-      "The relay reports the paired phone's mailbox as revoked, so the pairing was stopped. Create a new pairing link to reconnect the phone."
-    );
-  }
-}
-
-function isRemoteRevokedMailboxBody(body: string): boolean {
-  return body.includes("mailbox_revoked");
-}
-
-async function ensureMailboxRegisteredForPairing(pairing: MobilePairingPackage): Promise<boolean> {
-  if (!pairing.outboxUrl) {
-    return false;
-  }
-  const key = mobilePairingKey(pairing);
-  if (mobileRegistrationLockouts.has(key) || mobileRevokedPairingKeys.has(key)) {
-    return false;
-  }
-  try {
-    // On the User's own server a phone pairing also says what the phone may
-    // read there, until when an unused link is good, and whether a phone has
-    // used it (said again once one has).
-    const phoneScope = mobilePhoneScopeOfPairing(pairing);
-    const result = await registerMailboxForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64, fetch, phoneScope ? {
-      phoneScope,
-      phoneExpiresAt: pairing.expiresAt,
-      phoneClaimed: mobileClaimedPairingKeys.has(key)
-    } : {});
-    if (!result.ok) {
-      await debugLogService.write("mobile.mailbox.register-error", {
-        routingId: pairing.stableRoutingId,
-        status: result.status,
-        message: result.error ?? ""
-      });
-      const failure = classifyMailboxRegistrationFailure(result);
-      if (failure === "revoked") {
-        await handleRemoteMailboxRevoked(pairing);
-      } else if (failure === "lockout") {
-        mobileRegistrationLockouts.add(key);
-        await debugLogService.write("mobile.mailbox.register-lockout", {
-          routingId: pairing.stableRoutingId
-        });
-        const conversationId = mobilePairingConversationId(pairing);
-        if (conversationId) {
-          await chatService.recordConversationWarning(
-            conversationId,
-            "The relay refused this pairing's mailbox registration, which can happen when the mailbox was claimed while the relay was unreachable. The phone cannot connect on this link; re-pair it with a fresh link."
-          );
-        }
-      }
-    }
-    return result.ok;
-  } catch (error) {
-    await debugLogService.write("mobile.mailbox.register-error", {
-      routingId: pairing.stableRoutingId,
-      message: error instanceof Error ? error.message : String(error)
-    });
-    return false;
-  }
-}
-
-async function startMobileRelayControlForPairing(pairing: MobilePairingPackage): Promise<void> {
-  if (!pairing.relayUrl) {
-    return;
-  }
-  // Idempotent re-register: covers pairings created while the relay was
-  // unreachable and pairings persisted before mailboxes required a lock.
-  void ensureMailboxRegisteredForPairing(pairing);
-  const conversationCapability = pairing.capabilities.find((capability) => capability.scope === "conversation");
-  mobileRelayControls.get(pairing.rendezvousId)?.close();
-  mobilePairingsByKey.set(mobilePairingKey(pairing), pairing);
-  scheduleMobilePairingExpiry(pairing);
-  const timelineSink = mobileTimelineSinkForPairing(pairing);
-  const control = new MobileRelayControlService(
-    {
-      relayUrl: pairing.relayUrl,
-      rendezvousId: pairing.rendezvousId,
-      relayCapability: pairing.fingerprint,
-      relaySealKeyBase64: pairing.relaySealKeyBase64,
-      ...(conversationCapability ? { conversationId: conversationCapability.conversationId } : {}),
-      streamId: `${pairing.stableRoutingId}:phone`,
-      isActive: () => isMobilePairingActive(pairing),
-      onPhoneActivity: () => {
-        void noteMobilePairingClaimed(pairing);
-      },
-      // The phone's own signing key: stored here and named to every machine,
-      // so a machine answers the phone when this desktop is closed.
-      onPhoneIdentity: async (identity) => {
-        // Named with the pairing it arrived on. Without this the stored rules
-        // never ran, and a device the owner had just removed re-granted itself
-        // simply by announcing its key again on the pairing it still held.
-        await settingsService.saveTrustedDevice({
-          deviceId: identity.deviceId,
-          publicKeyDerBase64: identity.publicKeyDerBase64,
-          role: "phone",
-          name: identity.name,
-          addedAt: new Date().toISOString()
-        }, { key: mobilePairingKey(pairing), createdAt: pairing.createdAt });
-        await machineLinkService?.refreshTrustRosters();
-        await debugLogService.write("mobile.device.identity", { deviceId: identity.deviceId });
-      },
-      // Where the phone can reach each machine directly.
-      machineAccess: async (deviceId?: string) => {
-        const machines = await settingsService.listMachines();
-        const trusted = deviceId
-          ? (await settingsService.listTrustedDevices()).find((device) => device.deviceId === deviceId)
-          : undefined;
-        if (!trusted) return [];
-        const access = [];
-        for (const machine of machines) {
-          const machinePairing = await settingsService.getMachinePairing(machine.pairingKey);
-          const publicKeyDerBase64 = machine.lastHello?.publicKeyDerBase64;
-          if (!machinePairing?.relayUrl || !machine.deviceId || !publicKeyDerBase64) continue;
-          access.push({
-            machineId: machine.id,
-            name: machine.name,
-            deviceId: machine.deviceId,
-            publicKeyDerBase64,
-            relayUrl: machinePairing.relayUrl,
-            rendezvousId: machinePairing.rendezvousId,
-            fingerprint: machinePairing.fingerprint,
-            ...(machinePairing.outboxUrl ? { outboxUrl: machinePairing.outboxUrl } : {})
-          });
-        }
-        return access;
-      }
-    },
-    {
-      sendMessage: (request, signal, progress) => chatService.sendMessage(request, signal, progress),
-      readChatAttachment: (request) => chatService.readChatAttachment(request),
-      hasAcceptedMobileEvent: (conversationId, eventId) => chatService.hasAcceptedMobileEvent(conversationId, eventId),
-      hasMobileMailboxResultForMobileEvent: (conversationId, eventId) =>
-        hasFulfilledMobileMailboxEvent(pairing, conversationId, eventId),
-      tryAcquireMobileEventExecution: (event, runId) =>
-        acquireDesktopMobileExecutionClaim(pairing, event.conversationId, event.eventId, runId),
-      cancelRun: (conversationId, runId) => cancelMobileChatRun(conversationId, runId),
-      applyMobileDecision: (request) => applyMobileDecision(request),
-      conversationIdForRun: (runId) => chatService.conversationIdForRun(runId)
-    },
-    mobileRelayChatCatalog(),
-    (progress) => emitReviewProgress(progress),
-    timelineSink
-  );
-  control.onSnapshotDiagnostic = (detail) => {
-    void debugLogService.write("mobile.snapshot.run-state", {
-      routingId: pairing.stableRoutingId,
-      ...detail
-    });
-  };
-  control.onLiveDiagnostic = (detail) => {
-    void debugLogService.write("mobile.live.frame", {
-      routingId: pairing.stableRoutingId,
-      ...detail
-    });
-  };
-  control.onDecisionDiagnostic = (detail) => {
-    void debugLogService.write("mobile.decision.delivery", {
-      routingId: pairing.stableRoutingId,
-      ...detail
-    });
-  };
-  mobileRelayControls.set(pairing.rendezvousId, control);
-  startMobileMailboxPollingForPairing(pairing, control);
-  const connect = control.connect();
-  connect.catch(() => undefined);
-  try {
-    await promiseWithTimeout(connect, MOBILE_RELAY_CONNECT_TIMEOUT_MS, "Mobile relay tunnel connection timed out.");
-  } catch (error) {
-    await debugLogService.write("mobile.relay.connect-error", {
-      routingId: pairing.stableRoutingId,
-      message: error instanceof Error ? error.message : String(error)
-    });
-  }
-}
-
-async function recordMobilePairingCapabilityGrant(pairing: MobilePairingPackage): Promise<void> {
-  const conversationCapabilities = pairing.capabilities.filter((capability) => capability.scope === "conversation");
-  if (conversationCapabilities.length === 0) {
-    return;
-  }
-  const deviceOriginId = mobileOriginIdForPairing(pairing);
-  const grantId = mobilePairingGrantId(pairing);
-  const payload: ChatDeviceCapabilityGrantPayload = {
-    grantId,
-    deviceOriginId,
-    deviceKeyId: `mobile:${deviceOriginId}`,
-    capabilities: pairing.capabilities,
-    grantedAt: pairing.createdAt,
-    expiresAt: pairing.expiresAt
-  };
-  for (const capability of conversationCapabilities) {
-    await chatEventLogService.appendLocalEvent({
-      conversationId: capability.conversationId,
-      logScopeId: capability.conversationId,
-      kind: "device.capability.granted",
-      payload
-    });
-  }
-}
-
-/** Takes back the power handoff this pairing carried. It cannot make the copy
- *  the device kept stop working — only rotating the key does — so the outcome
- *  is returned to the caller instead of being swallowed. */
-async function revokeMachinePowerForPairing(
-  pairing: MobilePairingPackage,
-  reason: string
-): Promise<{ required: boolean; detail?: string }> {
-  const handoffId = pairing.powerHandoffId ?? pairing.power?.handoffId;
-  if (!handoffId) return { required: false };
-  try {
-    const outcome = await machinePowerHandoffService.revoke(handoffId, reason);
-    return { required: outcome.keyRotationRequired, detail: outcome.detail };
-  } catch (error) {
-    void debugLogService.write("machine.power.handoff.revoke-error", {
-      message: error instanceof Error ? error.message : String(error)
-    });
-    return { required: false };
-  }
-}
-
-async function revokeMobilePairingInternal(
-  pairing: MobilePairingPackage,
-  reason: string
-): Promise<RevokeMobilePairingResult> {
-  const key = mobilePairingKey(pairing);
-  const revokedAt = new Date().toISOString();
-  const powerRevocation = await revokeMachinePowerForPairing(pairing, reason);
-  mobileRevokedPairingKeys.add(key);
-  mobileClaimedPairingKeys.delete(key);
-  mobilePairingsByKey.delete(key);
-  mobileMailboxCursors.delete(key);
-  mobileProgressEnvelopes.forgetPairing(key);
-  mobileRelayControls.get(pairing.rendezvousId)?.close();
-  mobileRelayControls.delete(pairing.rendezvousId);
-  const poller = mobileMailboxPollers.get(key);
-  if (poller) {
-    clearInterval(poller);
-    mobileMailboxPollers.delete(key);
-  }
-  const expiry = mobilePairingExpiryTimers.get(key);
-  if (expiry) {
-    clearTimeout(expiry);
-    mobilePairingExpiryTimers.delete(key);
-  }
-  await persistMobilePairedDevices();
-  await revokeMailboxForPairing(pairing);
-  publishPhoneLinks();
-  await recordMobilePairingCapabilityRevocation(pairing, revokedAt, reason);
-  await debugLogService.write("mobile.pairing.revoked", {
-    routingId: pairing.stableRoutingId,
-    rendezvousId: pairing.rendezvousId,
-    reason
-  });
-  return {
-    revoked: true,
-    stableRoutingId: pairing.stableRoutingId,
-    rendezvousId: pairing.rendezvousId,
-    revokedAt,
-    reason,
-    ...(powerRevocation.required
-      ? { powerKeyRotationRequired: true, powerKeyRotationDetail: powerRevocation.detail }
-      : {})
-  };
-}
-
-async function recordMobilePairingCapabilityRevocation(
-  pairing: MobilePairingPackage,
-  revokedAt: string,
-  reason: string
-): Promise<void> {
-  const conversationCapabilities = pairing.capabilities.filter((capability) => capability.scope === "conversation");
-  if (conversationCapabilities.length === 0) {
-    return;
-  }
-  const payload: ChatDeviceCapabilityRevokedPayload = {
-    grantId: mobilePairingGrantId(pairing),
-    deviceOriginId: mobileOriginIdForPairing(pairing),
-    revokedAt,
-    reason
-  };
-  for (const capability of conversationCapabilities) {
-    await chatEventLogService.appendLocalEvent({
-      conversationId: capability.conversationId,
-      logScopeId: capability.conversationId,
-      kind: "device.capability.revoked",
-      payload
-    });
-  }
-}
-
-// Destroying the relay mailbox is what makes revocation real for the link
-// holder: local bookkeeping alone leaves the mailbox readable with the old
-// token. If the relay is unreachable the revoke is persisted and retried on
-// startup until the relay confirms.
-async function revokeMailboxForPairing(pairing: MobilePairingPackage): Promise<void> {
-  if (!pairing.outboxUrl) {
-    return;
-  }
-  try {
-    const result = await revokeMailboxForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64);
-    if (result.ok) {
-      return;
-    }
-    await debugLogService.write("mobile.mailbox.revoke-error", {
-      routingId: pairing.stableRoutingId,
-      status: result.status,
-      message: result.error ?? ""
-    });
-  } catch (error) {
-    await debugLogService.write("mobile.mailbox.revoke-error", {
-      routingId: pairing.stableRoutingId,
-      message: error instanceof Error ? error.message : String(error)
-    });
-  }
-  try {
-    const access = mailboxAccessForSealKey(pairing.relaySealKeyBase64);
-    const secret = settingsService.encodeMobilePairingSecret(access.token);
-    const outboxUrl = pairing.outboxUrl;
-    await withPendingMailboxRevocations(async () => {
-      const pending = await settingsService.readPendingMailboxRevocations();
-      if (!pending.some((item) => item.mailboxScopeId === access.scopeId)) {
-        await settingsService.writePendingMailboxRevocations([...pending, {
-          outboxUrl,
-          mailboxScopeId: access.scopeId,
-          encryptedToken: secret.encryptedValue,
-          tokenProtection: secret.protection,
-          revokedAt: new Date().toISOString()
-        }]);
-      }
-    });
-  } catch (error) {
-    await debugLogService.write("mobile.mailbox.revoke-persist-error", {
-      routingId: pairing.stableRoutingId,
-      message: error instanceof Error ? error.message : String(error)
-    });
-  }
-}
-
-/** The pending revocations file is read and rewritten whole: one writer at a
- *  time (a revoke adding to it, a retry taking from it), or one loses the
- *  other's change. */
-let pendingMailboxRevocationsQueue: Promise<unknown> = Promise.resolve();
-function withPendingMailboxRevocations<T>(work: () => Promise<T>): Promise<T> {
-  const run = pendingMailboxRevocationsQueue.then(work, work);
-  pendingMailboxRevocationsQueue = run.catch(() => undefined);
-  return run;
-}
-
-function retryPendingMailboxRevocations(): Promise<void> {
-  return withPendingMailboxRevocations(retryPendingMailboxRevocationsNow);
-}
-
-async function retryPendingMailboxRevocationsNow(): Promise<void> {
-  const pending = await settingsService.readPendingMailboxRevocations();
-  if (pending.length === 0) {
-    return;
-  }
-  const remaining: StoredPendingMailboxRevocation[] = [];
-  for (const item of pending) {
-    try {
-      const token = settingsService.decodeMobilePairingSecret(item.encryptedToken, item.tokenProtection);
-      if (!token) {
-        // decode returns undefined when safeStorage is merely unavailable
-        // right now, not only for corrupt records. Dropping the entry here
-        // would forget the revoke forever and leave the revoked phone's
-        // mailbox alive, so keep it for the next retry.
-        remaining.push(item);
-        continue;
-      }
-      const result = await revokeMailboxWithToken(item.outboxUrl, item.mailboxScopeId, token);
-      if (!result.ok) {
-        remaining.push(item);
-      }
-    } catch {
-      remaining.push(item);
-    }
-  }
-  if (remaining.length !== pending.length) {
-    await settingsService.writePendingMailboxRevocations(remaining);
-  }
-}
-
-function findMobilePairingForRevoke(request: RevokeMobilePairingRequest): MobilePairingPackage | undefined {
-  const stableRoutingId = request.stableRoutingId?.trim();
-  const rendezvousId = request.rendezvousId?.trim();
-  if (!stableRoutingId) {
-    throw new Error("Mobile pairing revoke requires stableRoutingId.");
-  }
-  if (rendezvousId) {
-    return mobilePairingsByKey.get(mobilePairingKeyFromIds(stableRoutingId, rendezvousId));
-  }
-  return [...mobilePairingsByKey.values()].find((pairing) => pairing.stableRoutingId === stableRoutingId);
-}
-
-/** Whether the User's own server says the phone read through this pairing
- *  within its link's window: "yes", "no" (a shared relay, which says
- *  nothing, is "no"), or "unknown" when the box could not be asked. */
-async function phoneUsedPairingOnServer(pairing: MobilePairingPackage): Promise<"yes" | "no" | "unknown"> {
-  if (!pairing.outboxUrl) return "no";
-  try {
-    const url = new URL(mailboxEndpointForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64));
-    url.searchParams.set("limit", "1");
-    url.searchParams.set("afterArrival", String(Number.MAX_SAFE_INTEGER));
-    const response = await fetch(url.toString(), { headers: mailboxAuthHeaders(pairing.relaySealKeyBase64), signal: AbortSignal.timeout(8_000) });
-    // A box the relay no longer has (revoked) is a "no"; any other refusal
-    // or a failure to reach it says nothing.
-    if (response.status === 401) return "no";
-    if (!response.ok) return "unknown";
-    const body = await response.json() as { phoneSeenAt?: unknown };
-    const seenAt = typeof body.phoneSeenAt === "string" ? Date.parse(body.phoneSeenAt) : Number.NaN;
-    return Number.isFinite(seenAt) && seenAt < Date.parse(pairing.expiresAt) ? "yes" : "no";
-  } catch {
-    return "unknown";
-  }
-}
-
-/** How long an expiry waits to ask again when the box could not be asked. */
-const MOBILE_EXPIRY_RECHECK_MS = 2 * 60_000;
-
-function scheduleMobilePairingExpiry(pairing: MobilePairingPackage): void {
-  const key = mobilePairingKey(pairing);
-  // A device that already connected is remembered until revoked. Re-arming the
-  // invitation timer on restore killed it instantly, because expiresAt is the
-  // long-past moment the original link was minted.
-  if (mobileClaimedPairingKeys.has(key)) {
-    return;
-  }
-  const existing = mobilePairingExpiryTimers.get(key);
-  if (existing) {
-    clearTimeout(existing);
-  }
-  const expiresAtMs = Date.parse(pairing.expiresAt);
-  if (!Number.isFinite(expiresAtMs)) {
-    return;
-  }
-  const timer = setTimeout(() => {
-    void (async () => {
-      // A phone that read through the User's own server within the window has
-      // used the link; this desktop may have slept through it (no poll ran).
-      const used = await phoneUsedPairingOnServer(pairing);
-      // Used meanwhile by another way (the room, the box), or revoked.
-      if (mobileClaimedPairingKeys.has(key) || mobileRevokedPairingKeys.has(key)) return;
-      if (used === "yes") {
-        await noteMobilePairingClaimed(pairing);
-        return;
-      }
-      if (used === "unknown") {
-        // Asked again later rather than revoking a link the phone may be
-        // using: the server itself stops serving an unused link at its end.
-        mobilePairingExpiryTimers.delete(key);
-        const retry = setTimeout(() => scheduleMobilePairingExpiry(pairing), MOBILE_EXPIRY_RECHECK_MS);
-        retry.unref?.();
-        mobilePairingExpiryTimers.set(key, retry);
-        return;
-      }
-      await revokeMobilePairingInternal(pairing, "expired");
-    })().catch((error) => {
-      void debugLogService.write("mobile.pairing.expire-error", {
-        routingId: pairing.stableRoutingId,
-        rendezvousId: pairing.rendezvousId,
-        message: error instanceof Error ? error.message : String(error)
-      });
-    });
-  }, Math.max(0, expiresAtMs - Date.now()));
-  timer.unref?.();
-  mobilePairingExpiryTimers.set(key, timer);
-}
-
-/**
- * Brings the durable record of revoked pairings into this process.
- *
- * The in-memory set alone forgets everything on restart, so a pairing the
- * owner revoked came back the next time the app started.
- */
-async function applyStoredMobilePairingRevocations(): Promise<void> {
-  const trust = await settingsService.machinePairingTrust().catch(() => undefined);
-  if (!trust) return;
-  for (const key of trust.revokedKeys) {
-    if (mobileRevokedPairingKeys.has(key)) continue;
-    mobileRevokedPairingKeys.add(key);
-    mobileClaimedPairingKeys.delete(key);
-    const pairing = mobilePairingsByKey.get(key);
-    if (!pairing) continue;
-    mobileRelayControls.get(pairing.rendezvousId)?.close();
-    mobileRelayControls.delete(pairing.rendezvousId);
-    mobilePairingsByKey.delete(key);
-    // The removed phone's mailbox goes too: on the User's own server the
-    // mailbox key also reads her chats, so a removed (or lost) phone must
-    // not keep it. Kept for a retry when the server cannot be reached.
-    await persistMobilePairedDevices();
-    await revokeMailboxForPairing(pairing);
-    publishPhoneLinks();
-  }
-}
-
-function isMobilePairingActive(pairing: MobilePairingPackage): boolean {
-  return !isMobilePairingExpired(pairing) && !mobileRevokedPairingKeys.has(mobilePairingKey(pairing));
-}
-
-function isMobilePairingExpired(pairing: MobilePairingPackage): boolean {
-  // expiresAt bounds how long an unused link is good for, not how long a phone
-  // stays paired. Once the phone has connected, only a revoke ends it.
-  if (mobileClaimedPairingKeys.has(mobilePairingKey(pairing))) {
-    return false;
-  }
-  const expiresAtMs = Date.parse(pairing.expiresAt);
-  return Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now();
-}
-
-async function noteMobilePairingClaimed(pairing: MobilePairingPackage): Promise<void> {
-  const key = mobilePairingKey(pairing);
-  if (mobileClaimedPairingKeys.has(key) || mobileRevokedPairingKeys.has(key)) {
-    return;
-  }
-  mobileClaimedPairingKeys.set(key, new Date().toISOString());
-  const expiry = mobilePairingExpiryTimers.get(key);
-  if (expiry) {
-    clearTimeout(expiry);
-    mobilePairingExpiryTimers.delete(key);
-  }
-  await persistMobilePairedDevices();
-  // The User's own server serves an unused link only within its window; it
-  // is told this one is in use, so the phone keeps reading after it.
-  void ensureMailboxRegisteredForPairing(pairing);
-  await debugLogService.write("mobile.pairing.claimed", {
-    routingId: pairing.stableRoutingId,
-    rendezvousId: pairing.rendezvousId
-  });
-}
-
-async function persistMobilePairedDevices(): Promise<void> {
-  try {
-    const devices = [...mobilePairingsByKey.entries()]
-      .filter(([key]) => mobileClaimedPairingKeys.has(key) && !mobileRevokedPairingKeys.has(key))
-      .map(([key, pairing]) => {
-        // The phone's start key never goes to this file; only which handoff it was.
-        const { relaySealKeyBase64, power, ...rest } = pairing;
-        if (power && !rest.powerHandoffId) rest.powerHandoffId = power.handoffId;
-        const secret = settingsService.encodeMobilePairingSecret(relaySealKeyBase64);
-        const cursor = mobileMailboxCursors.get(key);
-        return {
-          stableRoutingId: pairing.stableRoutingId,
-          rendezvousId: pairing.rendezvousId,
-          pairingJson: JSON.stringify(rest),
-          encryptedSealKey: secret.encryptedValue,
-          sealKeyProtection: secret.protection,
-          // The moment this phone first connected, carried across restarts.
-          // Stamping "now" on every rewrite would silently turn this into a
-          // last-saved timestamp.
-          claimedAt: mobileClaimedPairingKeys.get(key) ?? new Date().toISOString(),
-          ...(cursor ? { mailboxEpoch: cursor.epoch, mailboxCursor: cursor.cursor } : {})
-        };
-      });
-    await settingsService.writeMobilePairedDevices(devices);
-  } catch (error) {
-    await debugLogService.write("mobile.pairing.persist-error", {
-      message: error instanceof Error ? error.message : String(error)
-    });
-  }
-}
-
-async function restoreMobilePairedDevices(): Promise<void> {
-  // A file that could not be read is not "no phones": the list of phones
-  // this desktop knows is then not whole, and is not sent to the server.
-  const stored = await settingsService.readMobilePairedDevicesState();
-  const devices = stored.devices;
-  // Each relay connect can burn its full timeout, so devices come back
-  // together rather than in turn, and one unreadable record cannot strand the
-  // phones behind it.
-  const restored = await Promise.all(devices.map(async (device) => {
-    try {
-      const sealKey = settingsService.decodeMobilePairingSecret(device.encryptedSealKey, device.sealKeyProtection);
-      if (!sealKey) {
-        return false;
-      }
-      // A start key must never come back from this file, whatever wrote it.
-      const { power, ...stored } = JSON.parse(device.pairingJson) as MobilePairingPackage;
-      const pairing = { ...stored, ...(power && !stored.powerHandoffId ? { powerHandoffId: power.handoffId } : {}), relaySealKeyBase64: sealKey } as MobilePairingPackage;
-      mobileClaimedPairingKeys.set(
-        mobilePairingKey(pairing),
-        typeof device.claimedAt === "string" && device.claimedAt ? device.claimedAt : new Date().toISOString()
-      );
-      if (typeof device.mailboxEpoch === "string" && Number.isFinite(device.mailboxCursor)) {
-        mobileMailboxCursors.set(mobilePairingKey(pairing), {
-          epoch: device.mailboxEpoch,
-          cursor: device.mailboxCursor ?? 0
-        });
-      }
-      await startMobileRelayControlForPairing(pairing);
-      return true;
-    } catch (error) {
-      await debugLogService.write("mobile.pairing.restore-device-error", {
-        routingId: device.stableRoutingId,
-        message: error instanceof Error ? error.message : String(error)
-      });
-      return false;
-    }
-  }));
-  const count = restored.filter(Boolean).length;
-  if (count > 0) {
-    await debugLogService.write("mobile.pairing.restored", { count });
-  }
-  // Every stored phone came back: the list of phones this desktop knows is
-  // whole, and the User's server may hear it. One that did not come back
-  // (its key unreadable just now) keeps the list from being sent at all.
-  mobilePairingsRestoreComplete = !stored.readFailed && count === devices.length;
-  publishPhoneLinks();
-}
-
-
-/** Tells the User's own server which phone links this desktop knows; it
- *  serves chats to those only. A link whose record this desktop lost (and so
- *  could never revoke) stops reading there. Sent only when the list is whole
- *  and the server took this desktop as its owner. */
-function publishPhoneLinks(): void {
-  // A build run from a checkout and pointed at the User's real server (no
-  // test server named) never tells it which phones may read.
-  if (!app.isPackaged && !process.env.ACCORDAGENTS_HUB_URL?.trim()) return;
-  if (!hubClient || !hubOwnerConfirmed || !mobilePairingsRestoreComplete) return;
-  // One list at a time, each built when it is sent: an older list can never
-  // land after a newer one.
-  phoneLinksQueue = phoneLinksQueue.then(async () => {
-    const client = hubClient;
-    const hub = await settingsService.getHubConfig().catch(() => undefined);
-    if (!client || !hub || !hubOwnerConfirmed || !mobilePairingsRestoreComplete) return;
-    const origin = new URL(hub.url).origin;
-    const key = (pairing: MobilePairingPackage) => mobilePairingKey(pairing);
-    // Every link not revoked: the server itself ends an unused link at its
-    // window, and a used one this desktop has not noticed yet stays listed.
-    const mailboxIds = [...mobilePairingsByKey.values()]
-      .filter((pairing) => !mobileRevokedPairingKeys.has(key(pairing)) && pairing.outboxUrl && new URL(pairing.outboxUrl).origin === origin && mobilePhoneScopeOfPairing(pairing))
-      .map((pairing) => mailboxAccessForSealKey(pairing.relaySealKeyBase64).scopeId);
-    const answer = await client.setPhoneLinks(mailboxIds);
-    void debugLogService.write("hub.phone-links.published", { listed: mailboxIds.length, known: answer.known });
-  }).catch((error: unknown) => {
-    void debugLogService.write("hub.phone-links.error", { message: error instanceof Error ? error.message : String(error) });
-    // Sent again later (an older server program, the server away).
-    if (!phoneLinksRetry) {
-      phoneLinksRetry = setTimeout(() => { phoneLinksRetry = undefined; publishPhoneLinks(); }, 5 * 60_000);
-      phoneLinksRetry.unref?.();
-    }
-  });
-}
-
-function acceptsMobileOutboxEnvelopeForPairing(pairing: MobilePairingPackage, event: ChatEventEnvelope): boolean {
-  if (!isMobilePairingActive(pairing)) {
-    return false;
-  }
-  if (event.originId !== mobileOriginIdForPairing(pairing)) {
-    return false;
-  }
-  // Traffic from the phone proves it holds the key, so the device is now
-  // remembered and the invitation window stops applying to it.
-  if (mobileClaimedPairingKeys.has(mobilePairingKey(pairing))) {
-    return true;
-  }
-  const eventCreatedAtMs = Date.parse(event.createdAt);
-  const expiresAtMs = Date.parse(pairing.expiresAt);
-  const withinWindow = !Number.isFinite(eventCreatedAtMs) ||
-    !Number.isFinite(expiresAtMs) ||
-    eventCreatedAtMs < expiresAtMs;
-  if (withinWindow) {
-    void noteMobilePairingClaimed(pairing);
-  }
-  return withinWindow;
-}
-
 // A machine enrollment is durable: it is installed once on the machine and
 // revoked by removing the machine, not by a clock.
 const MACHINE_ENROLLMENT_TTL_MINUTES = 60 * 24 * 365 * 10;
@@ -2393,647 +1805,54 @@ async function machineListResult(): Promise<MachineListResult> {
   };
 }
 
-function mobilePairingKey(pairing: MobilePairingPackage): string {
-  return mobilePairingKeyFromIds(pairing.stableRoutingId, pairing.rendezvousId);
-}
-
-function mobilePairingKeyFromIds(stableRoutingId: string, rendezvousId: string): string {
-  return `${stableRoutingId}\0${rendezvousId}`;
-}
-
-function mobilePairingGrantId(pairing: MobilePairingPackage): string {
-  return `grant-${sha256Hex(mobilePairingKey(pairing)).slice(0, 32)}`;
-}
-
-function mobileOriginIdForPairing(pairing: MobilePairingPackage): string {
-  return `mobile-${sha256Hex([
-    pairing.stableRoutingId,
-    pairing.rendezvousId,
-    pairing.fingerprint,
-    "mobile"
-  ].filter(Boolean).join(":")).slice(0, 32)}`;
-}
-
 function sha256Hex(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function prepareMobileControlForPairing(pairing: MobilePairingPackage): void {
-  void startMobileRelayControlForPairing(pairing).catch((error) => {
-    void debugLogService.write("mobile.pairing.background-start-error", {
-      routingId: pairing.stableRoutingId,
-      message: error instanceof Error ? error.message : String(error)
-    });
-  });
-}
+/** How long a phone pairing code may wait to be scanned. */
+const PHONE_INVITE_TTL_MS = 10 * 60_000;
 
-function pairingCanRunCloudParticipants(pairing: MobilePairingPackage): boolean {
-  return pairing.capabilities.some((capability) => capability.canRunCloudParticipants === true);
-}
-
-function pairingCanAccessConversation(pairing: MobilePairingPackage, conversationId: string): boolean {
-  return pairing.capabilities.some((capability) =>
-    capability.scope === "device"
-      ? capability.canRead === true
-      : capability.conversationId === conversationId && capability.canRead === true
-  );
-}
-
-function mobileTimelineSinkForPairing(pairing: MobilePairingPackage): MobileTimelineSink | undefined {
-  if (!pairing.outboxUrl) {
-    return undefined;
+/**
+ * A one-time code for a phone: the desktop signs an invite with its own key,
+ * registers it with the User's server, and shows the address of the server,
+ * the token and the server's id as a QR code. The phone pairs with the server
+ * itself, so the desktop may be closed by then.
+ */
+async function createPhoneInvite(request: import("../shared/types").CreatePhoneInviteRequest): Promise<import("../shared/types").CreatePhoneInviteResult> {
+  const hub = await settingsService.getHubConfig().catch(() => undefined);
+  if (!hub || !hubClient) throw new Error("Set up your server first (Your server, above): the phone connects through it.");
+  const health = await hubClient.health();
+  if (!Number.isSafeInteger(health.protocol) || health.protocol < HUB_PHONE_PROTOCOL_VERSION) {
+    throw new Error("Your server runs an older program. Update it from Settings → Your server, then pair the phone.");
   }
-  const pairingKey = mobilePairingKey(pairing);
-  return {
-    async publishTimeline(timeline: MobileTimelineEvents, publishOptions?: { runFinished?: boolean; notices?: MobileNoticeKind[] }) {
-      const conversationId = timeline.conversationId?.trim();
-      // A batch that carries only cards is news too: a choice cancelled or a
-      // permission answered on the desktop changes no message row, and this
-      // early return used to drop exactly that batch — so the phone never
-      // heard that the card had closed (the User's screenshot, 2026-09-20).
-      const carriesCards = Array.isArray(timeline.cards);
-      if (!conversationId || (timeline.events.length === 0 && !carriesCards) || !pairing.outboxUrl) {
-        return;
-      }
-      const append = await chatEventLogService.appendLocalEvent({
-        conversationId,
-        logScopeId: conversationId,
-        kind: "mobile.timeline.events",
-        payload: timeline
-      });
-      // What the ring is about, as its own tiny envelope beside the batch. Its
-      // plaintext kind is all a push-woken phone reads: it names the chat and
-      // says "reply" or "approval" without opening anything sealed. The phone's
-      // page ignores the kind; the batch itself carries the content.
-      const notices = (publishOptions?.notices ?? []).filter((notice) => notice === "reply" || notice === "approval");
-      const noticeEvents = [];
-      for (const notice of notices) {
-        const noticeAppend = await chatEventLogService.appendLocalEvent({
-          conversationId,
-          logScopeId: conversationId,
-          kind: `mobile.notice.${notice}`,
-          payload: { type: "mobile.notice", notice }
-        });
-        noticeEvents.push(noticeAppend.event);
-      }
-      const runFinished = publishOptions?.runFinished === true;
-      // W-C diagnostics: the marker has now been wrong in both directions, so
-      // record what was actually decided for each publication rather than
-      // reasoning about it from the outside.
-      await debugLogService.write("mobile.mailbox.ring-marker", {
-        routingId: pairing.stableRoutingId,
-        conversationId,
-        runFinished,
-        eventCount: timeline.events.length,
-        statuses: timeline.events.map((event) => `${event.role ?? "?"}:${event.status ?? "?"}`).slice(0, 10)
-      });
-      await postMailboxEvents(pairing, [append.event, ...noticeEvents], { runFinished });
-      // W3/W-A: remember which envelopes carried nothing but pending progress,
-      // and once every run they were waiting on has a durable terminal
-      // snapshot, delete them so no reader can replay superseded progress. An
-      // envelope carrying any terminal event is never tracked.
-      const pendingRunIds = new Set<string>();
-      const terminalRunIds = new Set<string>();
-      for (const event of timeline.events) {
-        const runId = typeof event.runId === "string" ? event.runId.trim() : "";
-        if (!runId) {
-          continue;
-        }
-        (event.status === "pending" ? pendingRunIds : terminalRunIds).add(runId);
-      }
-      const superseded = mobileProgressEnvelopes.recordAppend(pairingKey, {
-        eventId: append.event.eventId,
-        pendingRunIds: [...pendingRunIds],
-        terminalRunIds: [...terminalRunIds]
-      });
-      if (superseded.length > 0) {
-        try {
-          await deleteMailboxEvents(pairing.outboxUrl, pairing.relaySealKeyBase64, superseded);
-        } catch (error) {
-          // Deletion is cleanup, not delivery: TTL remains the backstop.
-          await debugLogService.write("mobile.mailbox.progress-delete-error", {
-            routingId: pairing.stableRoutingId,
-            eventIds: superseded,
-            message: error instanceof Error ? error.message : String(error)
-          });
-        }
-      }
-    }
+  if (!hubOwnerConfirmed) throw new Error("Your server has not confirmed this computer yet. Try again in a moment.");
+  const identity = await chatEventLogService.getOrCreateDeviceIdentity();
+  const token = randomBytes(32).toString("base64url");
+  const issuedAt = new Date();
+  const invite: HubPhoneInvite = {
+    version: 1,
+    inviteId: `invite-${randomUUID()}`,
+    hubId: health.hubId,
+    issuerDeviceId: identity.originId,
+    tokenHash: sha256Hex(token),
+    // A phone reads and writes every chat, as the desktop does: the server's
+    // order carries no per-chat fences, so a one-chat phone is not offered.
+    scope: { scope: "device" },
+    name: "Phone",
+    issuedAt: issuedAt.toISOString(),
+    expiresAt: new Date(issuedAt.getTime() + PHONE_INVITE_TTL_MS).toISOString()
   };
-}
-
-function startMobileMailboxPollingForPairing(
-  pairing: MobilePairingPackage,
-  control: MobileRelayControlService
-): void {
-  if (!pairing.outboxUrl) {
-    return;
-  }
-  const pollerKey = mobilePairingKey(pairing);
-  const existing = mobileMailboxPollers.get(pollerKey);
-  if (existing) {
-    clearInterval(existing);
-  }
-  let active = false;
-  let backoffUntil = 0;
-  const poll = async () => {
-    if (active) {
-      return;
-    }
-    if (Date.now() < backoffUntil || isMobileMailboxOwnerActionBackoffActive()) {
-      return;
-    }
-    active = true;
-    try {
-      await pollMobileMailboxOutbox(pairing, control);
-    } catch (error) {
-      if (isOwnerActionMailboxError(error)) {
-        backoffUntil = Date.now() + MOBILE_MAILBOX_OWNER_ACTION_BACKOFF_MS;
-        recordMobileMailboxOwnerActionBackoff();
-      }
-      await debugLogService.write("mobile.mailbox.poll-error", {
-        routingId: pairing.stableRoutingId,
-        message: error instanceof Error ? error.message : String(error)
-      });
-    } finally {
-      active = false;
-    }
-  };
-  const timer = setInterval(() => {
-    void poll();
-  }, MOBILE_MAILBOX_POLL_INTERVAL_MS);
-  timer.unref?.();
-  mobileMailboxPollers.set(pollerKey, timer);
-  void poll();
-}
-
-async function pollMobileMailboxOutbox(
-  pairing: MobilePairingPackage,
-  control: MobileRelayControlService
-): Promise<void> {
-  if (!pairing.outboxUrl || !isMobilePairingActive(pairing)) {
-    return;
-  }
-  const pairingKey = mobilePairingKey(pairing);
-  const fetchPage = async (afterArrival: number) => {
-    const url = new URL(mailboxEndpointForSealKey(pairing.outboxUrl ?? "", pairing.relaySealKeyBase64));
-    url.searchParams.set("limit", "1000");
-    url.searchParams.set("afterArrival", String(Math.max(0, afterArrival)));
-    const response = await fetch(url.toString(), {
-      headers: {
-        accept: "application/json",
-        ...mailboxAuthHeaders(pairing.relaySealKeyBase64)
-      },
-      signal: AbortSignal.timeout(8_000)
-    });
-    if (!response.ok) {
-      const body = await response.text();
-      if (isOwnerActionMailboxMessage(response.status, body)) {
-        recordMobileMailboxOwnerActionBackoff();
-      }
-      // An unregistered mailbox means this pairing was created or restored
-      // while the relay was unreachable; registering now lets the next poll
-      // succeed without waiting for an app restart.
-      if (response.status === 401 && body.includes("mailbox_unregistered")) {
-        void ensureMailboxRegisteredForPairing(pairing);
-      }
-      // W-G(e): a tombstoned mailbox is terminal — stop instead of self-heal.
-      if (isRemoteRevokedMailboxBody(body)) {
-        void handleRemoteMailboxRevoked(pairing);
-      }
-      throw new Error(`Mailbox poll failed with HTTP ${response.status}: ${body}`);
-    }
-    return await response.json() as { events?: unknown; epoch?: unknown; phoneSeenAt?: unknown; phoneClaimed?: unknown; phoneKnown?: unknown };
-  };
-  const stored = mobileMailboxCursors.get(pairingKey) ?? { epoch: "", cursor: 0 };
-  const startedCursor = stored.cursor;
-  const startedEpoch = stored.epoch;
-  let body = await fetchPage(stored.cursor);
-  // The User's own server says when the phone last read through it: a phone
-  // that only reads there has used its link as surely as one that wrote, so
-  // the link is kept rather than expired. Only a use within the link's
-  // window counts.
-  const phoneSeenAtMs = typeof body.phoneSeenAt === "string" ? Date.parse(body.phoneSeenAt) : Number.NaN;
-  if (Number.isFinite(phoneSeenAtMs) && phoneSeenAtMs < Date.parse(pairing.expiresAt)) {
-    void noteMobilePairingClaimed(pairing);
-  }
-  // A used link the server does not know as used yet (the one registration
-  // that says so was lost): said again, at most once a minute.
-  // Likewise a link this desktop knows that the server was told it does not
-  // (a list that missed it): registering it again says it is known.
-  if ((body.phoneClaimed === false && mobileClaimedPairingKeys.has(pairingKey)) ||
-    (body.phoneKnown === false && !mobileRevokedPairingKeys.has(pairingKey))) {
-    const last = mobileClaimResentAt.get(pairingKey) ?? 0;
-    if (Date.now() - last > 60_000) {
-      mobileClaimResentAt.set(pairingKey, Date.now());
-      void ensureMailboxRegisteredForPairing(pairing);
-    }
-  }
-  const epoch = typeof body.epoch === "string" ? body.epoch : "";
-  if (epoch && epoch !== stored.epoch) {
-    // Box recreated: arrival numbering restarted. Re-read from zero and let
-    // the accepted-event dedupe absorb the replay. The desktop never refills
-    // — it is the system of record, not a reader with a gap.
-    stored.epoch = epoch;
-    stored.cursor = 0;
-    body = await fetchPage(0);
-  }
-  if (!Array.isArray(body.events)) {
-    return;
-  }
-  const opened = await openMailboxEventPayloads(body.events, pairing.relaySealKeyBase64);
-  if (opened.unreadableEventIds.length > 0) {
-    await debugLogService.write("mobile.mailbox.unreadable-events", {
-      routingId: pairing.stableRoutingId,
-      eventIds: opened.unreadableEventIds.slice(0, 20)
-    });
-  }
-  const catalog = mobileRelayChatCatalog();
-  const events = await collectMobileMailboxOutboxEvents(opened.events, {
-    acceptMailboxMessageEvent,
-    acceptMobileOutboxEnvelope: (event) => acceptsMobileOutboxEnvelopeForPairing(pairing, event),
-    acceptFulfilledMobileOutboxEvent: (event) => chatService.acceptMobileMailboxOutboxEvent(event),
-    hasAcceptedMobileEvent: (conversationId, eventId) => chatService.hasAcceptedMobileEvent(conversationId, eventId),
-    hasMobileMailboxResultForMobileEvent: (conversationId, eventId) =>
-      chatService.hasMobileMailboxResultForMobileEvent(conversationId, eventId),
-    tryAcquireMobileEventExecution: (event) =>
-      acquireDesktopMobileExecutionClaim(pairing, event.conversationId, event.eventId, `mobile-${event.eventId}`),
-    isConversationAllowed: (conversationId) => catalog.isConversationAllowed
-      ? catalog.isConversationAllowed(conversationId)
-      : false
-  });
-  // Answers an earlier page could not apply are tried again first: the page
-  // they came on is consumed, and nothing else would offer them.
-  try {
-    await control.retryFailedDecisions(`mailbox:retry:${Date.now()}`);
-  } catch (error) {
-    // A retry that fails is logged where the answers' own diagnostics go; it
-    // must never cost this poll its page.
-    await debugLogService.write("mobile.decision.retry-error", {
-      routingId: pairing.stableRoutingId,
-      message: error instanceof Error ? error.message : String(error)
-    });
-  }
-  if (events.length > 0) {
-    const accepted = await control.acceptMobileOutboxEvents(events, `mailbox:${Date.now()}`);
-    const acceptedEventIds = new Set(accepted.eventIds);
-    for (const event of opened.events) {
-      if (
-        event.kind === "run.cancel.requested" &&
-        acceptedEventIds.has(event.eventId)
-      ) {
-        await chatService.acceptMobileMailboxOutboxEvent(event);
-      }
-    }
-  }
-  // Advance the cursor only after this page is durably processed. Persisting it
-  // before decrypt/collection/delivery — or letting a mid-poll crash intervene —
-  // would skip these events forever; here, any failure above leaves the cursor
-  // and the next poll re-fetches, deduped by the accepted-event and
-  // execution-claim layers.
-  let advanced = stored.cursor;
-  for (const event of body.events) {
-    const arrivalSeq = (event as { arrivalSeq?: unknown }).arrivalSeq;
-    if (typeof arrivalSeq === "number" && arrivalSeq > advanced) {
-      advanced = arrivalSeq;
-    }
-  }
-  stored.cursor = advanced;
-  mobileMailboxCursors.set(pairingKey, stored);
-  if (stored.cursor !== startedCursor || stored.epoch !== startedEpoch) {
-    await persistMobilePairedDevices();
-  }
-}
-
-async function hasFulfilledMobileMailboxEvent(
-  pairing: MobilePairingPackage,
-  conversationId: string,
-  eventId: string
-): Promise<boolean> {
-  if (await chatService.hasMobileMailboxResultForMobileEvent(conversationId, eventId)) {
-    return true;
-  }
-  if (!pairing.outboxUrl) {
-    return false;
-  }
-  try {
-    const url = new URL(mailboxEndpointForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64));
-    url.searchParams.set("conversationId", conversationId);
-    url.searchParams.set("logScopeId", conversationId);
-    url.searchParams.set("limit", "100");
-    const response = await fetch(url.toString(), {
-      headers: {
-        accept: "application/json",
-        ...mailboxAuthHeaders(pairing.relaySealKeyBase64)
-      },
-      signal: AbortSignal.timeout(8_000)
-    });
-    if (!response.ok) {
-      return false;
-    }
-    const body = await response.json() as { events?: unknown };
-    if (!Array.isArray(body.events)) {
-      return false;
-    }
-    const opened = await openMailboxEventPayloads(body.events, pairing.relaySealKeyBase64);
-    return fulfilledMobileEventKeysFromMailboxEvents(opened.events)
-      .has(mobileMailboxEventScopeKey(conversationId, eventId));
-  } catch {
-    return false;
-  }
-}
-
-async function acquireDesktopMobileExecutionClaim(
-  pairing: MobilePairingPackage,
-  conversationId: string,
-  eventId: string,
-  runId: string
-): Promise<boolean> {
-  if (!pairing.outboxUrl || !pairingCanRunCloudParticipants(pairing)) {
-    return true;
-  }
-  const result = await acquireMobileMailboxExecutionClaim(
-    mailboxEndpointForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64),
-    {
-      conversationId,
-      eventId,
-      ownerId: `desktop:${pairing.stableRoutingId}`,
-      ownerRole: "desktop",
-      runId,
-      ttlMs: MOBILE_EVENT_EXECUTION_CLAIM_TTL_MS
-    },
-    AbortSignal.timeout(8_000),
-    mailboxAuthHeaders(pairing.relaySealKeyBase64)
-  );
-  if (!result.acquired) {
-    await debugLogService.write("mobile.execution-claim.skipped", {
-      routingId: pairing.stableRoutingId,
-      conversationId,
-      eventId,
-      runId,
-      ownerId: result.claim?.ownerId,
-      ownerRole: result.claim?.ownerRole,
-      expiresAt: result.claim?.expiresAt
-    });
-  }
-  return result.acquired;
-}
-
-async function acceptMailboxMessageEvent(value: unknown): Promise<boolean> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const event = value as Partial<ChatEventEnvelope>;
-  if (event.kind !== "message.created") {
-    return false;
-  }
-  const payload = event.payload;
-  const message = payload && typeof payload === "object" && !Array.isArray(payload)
-    ? (payload as { message?: unknown }).message
-    : undefined;
-  if (!message || typeof message !== "object" || Array.isArray(message)) {
-    return false;
-  }
-  return chatService.acceptMobileMailboxMessageEvent(value as ChatEventEnvelope);
-}
-
-// W-C: runFinished is stated by the caller that knows a run finished, never
-// inferred from the batch. Inference rang twice per run — a phone-originated
-// user message comes back carrying the run's own id and a "done" status, and a
-// conversation snapshot is full of finished messages.
-async function postMailboxEvents(
-  pairing: MobilePairingPackage,
-  events: unknown[],
-  options?: { runFinished?: boolean }
-): Promise<void> {
-  if (events.length === 0 || !pairing.outboxUrl) {
-    return;
-  }
-  if (isMobileMailboxOwnerActionBackoffActive()) {
-    throw new Error("Mobile mailbox is temporarily suspended after an owner-action response.");
-  }
-  // The relay stores ciphertext only: payloads are sealed with the pairing
-  // key before they leave this process, and the request carries the derived
-  // mailbox bearer token for the pairing's own locked mailbox.
-  const runFinished = options?.runFinished === true;
-  const sealed = await sealMailboxEventPayloads(events, pairing.relaySealKeyBase64);
-  const response = await fetch(mailboxEndpointForSealKey(pairing.outboxUrl, pairing.relaySealKeyBase64), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...mailboxAuthHeaders(pairing.relaySealKeyBase64)
-    },
-    // The marker is computed from the cleartext batch before sealing: the
-    // relay never sees which envelope is terminal, only that this append
-    // finished a run — the same bit it can already infer from append timing,
-    // size, and silence.
-    body: JSON.stringify({ events: sealed, ...(runFinished ? { runFinished: true } : {}) }),
-    signal: AbortSignal.timeout(8_000)
-  });
-  if (!response.ok) {
-    const body = await response.text();
-    if (isOwnerActionMailboxMessage(response.status, body)) {
-      recordMobileMailboxOwnerActionBackoff();
-    }
-    if (response.status === 401 && body.includes("mailbox_unregistered")) {
-      void ensureMailboxRegisteredForPairing(pairing);
-    }
-    // W-G(e): a tombstoned mailbox is terminal — stop instead of self-heal.
-    if (isRemoteRevokedMailboxBody(body)) {
-      void handleRemoteMailboxRevoked(pairing);
-    }
-    throw new Error(`Mailbox append failed with HTTP ${response.status}: ${body}`);
-  }
-}
-
-function isMobileMailboxOwnerActionBackoffActive(): boolean {
-  return Date.now() < mobileMailboxOwnerActionBackoffUntil;
-}
-
-function recordMobileMailboxOwnerActionBackoff(): void {
-  mobileMailboxOwnerActionBackoffUntil = Math.max(
-    mobileMailboxOwnerActionBackoffUntil,
-    Date.now() + MOBILE_MAILBOX_OWNER_ACTION_BACKOFF_MS
-  );
-}
-
-function isOwnerActionMailboxError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return isOwnerActionMailboxMessage(/HTTP 429/.test(message) ? 429 : 0, message);
-}
-
-function isOwnerActionMailboxMessage(status: number, message: string): boolean {
-  return status === 429 && (
-    /workers_daily_limit/.test(message) ||
-    /owner_action_required/.test(message) ||
-    /Do not retry/.test(message)
-  );
-}
-
-function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-    promise.then((value) => {
-      clearTimeout(timer);
-      resolve(value);
-    }, (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-  });
-}
-
-/** How many newest messages the chat list reads per chat to find the last
- *  line with text: a pending or empty row at the end must not blank the
- *  snippet, and the whole history must never be read for it. */
-/** The window the "/" menu resolves a draft's target in. The desktop composer
- *  resolves against the whole chat; the newest participant message is what
- *  the no-mention rule looks for, and it is in this window unless the last
- *  two hundred messages are all the User's own. */
-const MOBILE_COMPOSER_TARGET_WINDOW = 200;
-
-function mobileRelayChatCatalog(): MobileRelayChatCatalog {
-  return {
-    async listChats() {
-      const settings = await settingsService.getPublicSettings();
-      const roleLabels = new Map(settings.chatRoleConfigs.map((role) => [
-        role.id,
-        role.id === "generic-participant" && role.label === "Generic Participant"
-          ? "Generic Member"
-          : role.label
-      ]));
-      const machineNames = new Map((await settingsService.listMachines()).map((machine) => [machine.id, machine.name]));
-      return buildMobileChatList(storageService, {
-        roleLabels,
-        machineNames,
-        pendingCards: true,
-        onPendingCardsTruncated: (listed) => { void debugLogService.write("mobile.chat-list.pending-cards-truncated", { chats: listed }); }
-      });
-    },
-    async readMemberAvatar(request: { conversationId: string; avatarId: string }) {
-      const customId = parseCustomAvatarId(request.avatarId);
-      if (!customId) {
-        return undefined;
-      }
-      // Members only: the chat is opened for its metadata, with the smallest
-      // message page storage allows rather than its history. The same read
-      // answers that this is a chat at all; the pairing's scope is the
-      // service's check, and an archived chat a scoped pairing still shows
-      // keeps its members' pictures.
-      const opened = await storageService.openConversation(request.conversationId, 1);
-      const conversation = opened?.conversation;
-      if (!conversation || conversation.kind !== "chat") {
-        return undefined;
-      }
-      const owned = mobileRelayChatMembers(conversation).some((participant) => participant.avatarId === request.avatarId);
-      if (!owned) {
-        return undefined;
-      }
-      const read = await settingsService.readCustomAvatar(customId);
-      return { mediaType: read.mediaType, dataBase64: read.dataBase64 };
-    },
-    async listControlCards(conversationId: string) {
-      // Straight from the stored conversation, so a card cannot exist on the
-      // phone that does not exist on the machine that raised it — but never
-      // the whole chat through the sqlite CLI: on the User's largest chat that
-      // read was tens of megabytes of hex per phone open. What waits comes
-      // from the metadata and one indexed-by-chat query; the choices of the
-      // newest page come with it, and an answered choice outside the page
-      // stays on the phone from when its page was delivered.
-      const opened = await storageService.openConversation(conversationId, 80);
-      const conversation = opened?.conversation;
-      if (!conversation || conversation.kind !== "chat") {
-        return [];
-      }
-      const cards = controlCardsFromConversation(conversation);
-      const seen = new Set(cards.map((card) => card.id));
-      const pending = await storageService.listPendingChoiceMessages([conversationId]);
-      for (const row of pending.rows) {
-        const card = controlCardFromChoiceMessage(conversationId, row.message);
-        if (card && !seen.has(card.id)) {
-          seen.add(card.id);
-          cards.push(card);
-        }
-      }
-      return cards;
-    },
-    async listTimeline(conversationId: string) {
-      const opened = await storageService.openConversation(conversationId, 80);
-      // Opening/reconnecting must project the same waiting rows as live saves.
-      // Keep the existing 80-message page; never load full history per token.
-      return opened ? timelineEventsFromSnapshot(opened.conversation, 80) : [];
-    },
-    async listTimelinePage(conversationId: string, options: { beforeMessageId?: string }): Promise<MobileTimelinePage> {
-      return buildMobileTimelinePage(storageService, conversationId, options);
-    },
-    async composerOptions(request: { conversationId: string; query: string; content: string }): Promise<MobileComposerOptions> {
-      const opened = await storageService.openConversation(request.conversationId, MOBILE_COMPOSER_TARGET_WINDOW);
-      const conversation = opened?.conversation;
-      if (!conversation || conversation.kind !== "chat") {
-        return { commands: [], prompts: [], skills: [] };
-      }
-      // Exactly what the desktop composer asks for the same draft: the skill
-      // search with the draft's resolved target, the saved prompts, and the
-      // two commands offered for one clear member.
-      const search = await userSkillsService.search(
-        { conversationId: conversation.id, query: request.query, content: request.content, limit: 8 },
-        chatService.userSkillRunContext(conversation, request.content)
-      );
-      const settings = await settingsService.getPublicSettings();
-      return {
-        commands: mobileComposerCommandOptions(request.query, search.target),
-        prompts: matchingChatSavedPrompts(settings.chatSavedPrompts ?? [], request.query, { includeBody: false })
-          .slice(0, 8)
-          .map((prompt) => ({ id: prompt.id, label: prompt.label, trigger: prompt.trigger, body: prompt.body })),
-        skills: search.skills
-          .filter((skill) => skill.capabilityState === "invocable" && !skill.ambiguous)
-          .map(({ providerKinds: _providerKinds, scopeKinds: _scopeKinds, statusMessage: _statusMessage, ambiguous: _ambiguous, ...mention }) => mention)
-      };
-    },
-    async isConversationAllowed(conversationId: string, snapshot?: Conversation) {
-      const conversation = snapshot ?? await storageService.getConversation(conversationId);
-      return conversation?.kind === "chat" && conversation.metadata.archived !== true;
-    }
-  };
-}
-
-async function cancelMobileChatRun(conversationId: string, runId: string): Promise<boolean> {
-  const targetRunId = runId.trim();
-  if (chatService.hasActiveRunForConversation(conversationId, targetRunId)) {
-    return chatService.cancelRun(targetRunId);
-  }
-  const conversation = await storageService.getConversation(conversationId);
-  if (!targetRunId || !conversation || conversation.kind !== "chat") {
-    return false;
-  }
-  const belongsToConversation = readActiveRunIds(conversation.metadata).includes(targetRunId) ||
-    conversation.metadata.runId === targetRunId ||
-    conversation.messages.some((message) =>
-      message.status === "pending" && message.metadata?.runId === targetRunId
-    ) ||
-    Boolean((conversation.metadata.remoteRunHandles as Record<string, unknown> | undefined)?.[targetRunId]);
-  return belongsToConversation ? chatService.cancelRun(targetRunId) : false;
-}
-
-/** The same rule as the desktop composer's `compactCommandOption` and
- *  `goalCommandOption`: both commands exist only for one clearly addressed
- *  member, and are offered while the typed word is still a prefix of them. */
-function mobileComposerCommandOptions(
-  query: string,
-  target: UserSkillTargetSummary
-): MobileComposerOptions["commands"] {
-  if (!target.hasClearTargets || target.participantIds.length !== 1) {
-    return [];
-  }
-  const needle = query.trim().toLowerCase();
-  const options: MobileComposerOptions["commands"] = [];
-  if ("compact".startsWith(needle)) {
-    options.push({ id: "compact", label: "/compact", description: "Compact the mentioned member context" });
-  }
-  if ("goal".startsWith(needle)) {
-    options.push({ id: "goal", label: "/goal", description: "Run the mentioned member until the goal is finished" });
-  }
-  return options;
+  await hubClient.putPhoneInvite(invite, signHubText(identity, hubPhoneInviteSigningText(invite)));
+  await settingsService.savePhoneInvite({ inviteId: invite.inviteId, issuedAt: invite.issuedAt, expiresAt: invite.expiresAt });
+  const settings = await settingsService.getPublicSettings();
+  const origin = request.staticOriginUrl?.trim() || settings.mobileControl.defaults.staticOriginUrl;
+  if (!origin) throw new Error("The phone app's address is not set.");
+  const pwaUrl = new URL(origin);
+  pwaUrl.searchParams.set("pair", "server");
+  // All three only in the fragment: the phone's app site never sees them.
+  pwaUrl.hash = new URLSearchParams({ hub: hub.url, t: token, id: health.hubId }).toString();
+  void debugLogService.write("hub.phone.invite-created", { inviteId: invite.inviteId, scope: invite.scope.scope });
+  return { inviteId: invite.inviteId, expiresAt: invite.expiresAt, pwaUrl: pwaUrl.toString(), qrPayload: pwaUrl.toString() };
 }
 
 function registerIpc(): void {
@@ -3728,11 +2547,6 @@ function registerIpc(): void {
   });
   ipcMain.handle("machines:untrust-device", async (_event, deviceId: string): Promise<MachineTrustedDevicesResult> => {
     await settingsService.removeTrustedDevice(String(deviceId ?? "").trim());
-    // Removing the device also closes the pairing it was speaking on. Leaving
-    // it open meant a revoked phone kept receiving this desktop's timeline and
-    // could re-announce itself; the store records the revocation, and this
-    // makes it true for the connection that is live right now.
-    await applyStoredMobilePairingRevocations();
     await machineLinkService?.refreshTrustRosters();
     return trustedDevicesResult();
   });
@@ -3750,6 +2564,13 @@ function registerIpc(): void {
     return { machine, enrollmentJson: JSON.stringify(pairing, null, 2) };
   });
   ipcMain.handle("hub:setup-state", () => hubInstaller.state());
+  ipcMain.handle("hub:dismiss-notice", async (_event, id: string) => {
+    // The relay's one line is kept dismissed with its record, not in the
+    // list of the server's own lines (which keeps only the last hundred).
+    if (typeof id === "string" && id.startsWith("relay-removed:")) await settingsService.dismissRelayRemoval();
+    else await dismissHubNotice(id);
+    return hubInstaller.state();
+  });
   ipcMain.handle("hub:setup-command", async (_event, request: import("../shared/hubSetup").HubSetupCommandRequest) => {
     const region = typeof request?.region === "string" ? request.region.trim() : "";
     return { command: await hubInstaller.command(region), region };
@@ -3758,46 +2579,17 @@ function registerIpc(): void {
     ...(typeof request?.blob === "string" ? { blob: request.blob } : {}),
     ...(request?.startOver === true ? { startOver: true } : {})
   }));
-  ipcMain.handle("mobile:create-pairing", async (_event, request: CreateMobilePairingRequest) => {
-    // A phone connects through the User's own server, not a shared relay.
-    if (!await settingsService.getHubConfig().catch(() => undefined)) {
-      throw new Error("Set up your server first (Your server, above): the phone connects through it.");
-    }
-    const settings = await settingsService.getPublicSettings();
-    const minted = await mobilePairingService.createPairing(
-      mobilePairingRequestWithEndpointDefaults(request, settings.mobileControl.defaults)
-    );
-    // The phone's start key travels inside the pairing link and nowhere else:
-    // in the link's fragment, which never leaves the phone, never the relay.
-    // What this desktop keeps of the pairing names the handoff, not the key.
-    const result = mobilePairingWithStartKey(minted, await machinePowerHandoffForPairing(minted.package));
-    // Lock the mailbox before the link leaves this machine: registration is
-    // trust-on-first-use, and only this process knows the scope id until the
-    // link is shown. A failure is surfaced on the result and retried both
-    // when the pairing reconnects and whenever mailbox traffic reports the
-    // mailbox as unregistered.
-    const mailboxRegistered = await ensureMailboxRegisteredForPairing(result.package);
-    await recordMobilePairingCapabilityGrant(result.package);
-    prepareMobileControlForPairing(result.package);
-    return { ...result, mailboxRegistered };
-  });
-  ipcMain.handle("mobile:revoke-pairing", async (_event, request: RevokeMobilePairingRequest): Promise<RevokeMobilePairingResult> => {
-    const stableRoutingId = request.stableRoutingId?.trim();
-    const reason = request.reason?.trim() || "desktop-user";
-    if (!stableRoutingId) {
-      throw new Error("Mobile pairing revoke requires stableRoutingId.");
-    }
-    const pairing = findMobilePairingForRevoke(request);
-    if (!pairing) {
-      return {
-        revoked: false,
-        stableRoutingId,
-        ...(request.rendezvousId?.trim() ? { rendezvousId: request.rendezvousId.trim() } : {}),
-        revokedAt: new Date().toISOString(),
-        reason
-      };
-    }
-    return revokeMobilePairingInternal(pairing, reason);
+  ipcMain.handle("mobile:create-phone-invite", async (_event, request: import("../shared/types").CreatePhoneInviteRequest | undefined) => createPhoneInvite(request ?? {}));
+  ipcMain.handle("mobile:revoke-phone-invite", async (_event, request: { inviteId?: string } | undefined) => {
+    const inviteId = typeof request?.inviteId === "string" ? request.inviteId.trim() : "";
+    if (!inviteId) throw new Error("Revoking a phone needs its invite.");
+    const removed = await settingsService.revokePhoneInvite(inviteId);
+    hubPhonePublisher.phonesChanged();
+    // The last phone gone: the server keeps no start key for it.
+    hubPhonePublisher.publishWakeKeys();
+    publishHubRoster();
+    await machineLinkService?.refreshTrustRosters().catch(() => undefined);
+    return { revoked: true, inviteId, ...(removed ? { deviceId: removed } : {}) };
   });
   ipcMain.handle("conversations:start-review", async (_event, request: ReviewRequest) => {
     const runId = request.runId ?? randomUUID();
@@ -4136,24 +2928,20 @@ void app.whenReady().then(async () => {
   powerMonitor.on("resume", () => {
     void scriptService.tick();
   });
-  // Before any pairing is restored: a revocation the owner made is a fact
-  // about this device, not about the process that was running when it happened.
-  await applyStoredMobilePairingRevocations().catch(error => {
-    void debugLogService.write("mobile.pairing.revocation-restore-error",
-      { message: error instanceof Error ? error.message : String(error) });
+  // Before any machine connects: what the shared relay set up goes first.
+  await removeRelayEra().catch((error: unknown) => {
+    void debugLogService.write("relay.remove-error", { message: error instanceof Error ? error.message : String(error) });
   });
   try {
     const desktopIdentity = await chatEventLogService.getOrCreateDeviceIdentity();
     machineLinkService = new MachineLinkService(settingsService, debugLogService, {
-      // A machine enrolled with the User's hub is met in its rooms; one
-      // enrolled with the relay keeps the relay until it is moved. Decided per
-      // machine by its enrollment, so a hub set up while the app runs is used
-      // by the machines made after it without a restart.
-      hubMode: true,
+      // A channel's gap is asked of the hub, which holds the order.
+      hubRepair: (gap) => { void hubSync?.repairGap(gap); },
       onDevicesChanged: () => {
         publishHubRoster();
         hubSync?.nudgeHeld();
       },
+      onChannelReady: () => hubSync?.nudgeHeld(),
       createClient: (pairing: MobilePairingPackage) => pairing.hubUrl ? new HubTunnelClient({
         hubUrl: pairing.hubUrl, rendezvousId: pairing.rendezvousId, role: "desktop",
         identity: () => chatEventLogService.getOrCreateDeviceIdentity()
@@ -4178,6 +2966,7 @@ void app.whenReady().then(async () => {
       // Every device the User has trusted is named to each machine, in the
       // room that machine is met in. That is what lets a machine keep working
       // when this desktop is closed.
+      resolvedInviteIds: () => settingsService.resolvedPhoneInviteIds(),
       trustedDevices: async (room) => (await settingsService.listTrustedDevices()).map((device) => ({
         deviceId: device.deviceId,
         publicKeyDerBase64: device.publicKeyDerBase64,
@@ -4188,11 +2977,10 @@ void app.whenReady().then(async () => {
         fingerprint: room.fingerprint
       }))
     });
-    // Every chat goes to every enrolled machine, as one change event per save.
-    // The machines are read before any chat is saved, so a save made while
-    // they are still connecting is addressed to them too.
-    // Until they are read, a save has no machine to go to and what it changed
-    // never reaches them; a passing failure to read is tried again first.
+    // Every chat goes to every enrolled machine, as one change event per save
+    // in the server's order. The machines are read before any chat is saved,
+    // so the server is told who reads it before anything is written for them;
+    // a passing failure to read is tried again first.
     for (let attempt = 1; ; attempt += 1) {
       try {
         await machineLinkService.loadMachines();
@@ -4222,7 +3010,10 @@ void app.whenReady().then(async () => {
         machineLinkService?.nudgeEventChannels();
       },
       machineOriginId: (machineId) => machineLinkService?.machineDeviceId(machineId),
-      alwaysEmit: () => Boolean(hubSync) || hubLinking
+      // A machine that reads the hub is addressed by no delivery row: its
+      // changes are written for the hub to carry, also while the link to the
+      // hub is not up yet (they go once it is).
+      alwaysEmit: () => Boolean(hubSync) || hubLinking || (machineLinkService?.hubReaders().length ?? 0) > 0
     }));
     await startHubLink().catch((error: unknown) => {
       void debugLogService.write("hub.link.start-error", { message: error instanceof Error ? error.message : String(error) });
@@ -4234,11 +3025,22 @@ void app.whenReady().then(async () => {
       unpushedAfter: async () => (await settingsService.getHubConfig()) ? hubPushedThrough(storageService) : undefined,
       log: (event, payload) => { void debugLogService.write(event, payload); }
     });
+    // With the hub: this desktop's own events of its hub machines' channels
+    // go once the hub has them and they are a week old; bodies nothing
+    // refers to go too. A relay machine's channel keeps its own retention.
+    scheduleHubDeviceRetention({
+      storage: storageService,
+      originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
+      hubScopes: async () => (await settingsService.getHubConfig()) ? hubMachineScopes() : undefined,
+      pushedThrough: () => hubPushedThrough(storageService),
+      log: (event, payload) => { void debugLogService.write(event, payload); }
+    });
     // A saved setting (an environment value, a role, a rule, a prompt, a
     // member preset) reaches the machines at once, not only on their next
     // connection. Bursts of writes are sent once.
     let machineSettingsSync: ReturnType<typeof setTimeout> | undefined;
     settingsService.onStoredChange(() => {
+      hubPhonePublisher.scheduleCatalog();
       if (machineSettingsSync) clearTimeout(machineSettingsSync);
       machineSettingsSync = setTimeout(() => {
         machineSettingsSync = undefined;
@@ -4311,6 +3113,9 @@ void app.whenReady().then(async () => {
         throw error;
       })
     );
+    // A member on a machine asked to compact its own context: it runs here,
+    // as a compaction the User started, and is dispatched back to it.
+    machineLinkService.onCompactionDelegate((event) => chatService.runDelegatedCompaction(event));
     machineLinkService.onRunStarted((event) => chatService.applyMachineRunStarted(event));
     machineLinkService.onMemberBackgroundTasks((event) => {
       if (event.member) {
@@ -4336,7 +3141,11 @@ void app.whenReady().then(async () => {
         error: event.error,
         finishedAt: event.finishedAt,
         receiptId: event.receiptId,
-        machineName: event.machineName
+        machineName: event.machineName,
+        machineId: event.machineId,
+        participantId: event.participantId,
+        contextUsage: event.contextUsage,
+        compaction: event.compaction
       })
     );
     machineLinkService.setConversationLoader((conversationId) => storageService.getConversation(conversationId));
@@ -4379,25 +3188,20 @@ void app.whenReady().then(async () => {
       powerRetryMs: MACHINE_POWER_RETRY_MS + 60_000,
       powerMaxAttempts: MACHINE_POWER_MAX_ATTEMPTS,
       holdTurns: (machineId, reason) => link.holdTurns(machineId, reason),
-      isMoving: (machineId) => machineTransportMover.isMoving(machineId),
       onProgress: (snapshot) => sendToMainWindow("machines:install-progress", snapshot),
       onChanged: async () => { sendToMainWindow("machines:updated", await machineListResult()); },
       logger: (event, payload) => { void debugLogService.write(event, payload); }
     });
-    machineUpdateRunning = (machineId) => autoUpgrade.isRunning(machineId);
     // A hello the desktop itself asked for (machineActivity) is not announced
     // here, so evaluating on every hello cannot feed itself.
     link.onHello((event) => { void autoUpgrade.evaluate(event.machineId); });
     evaluateMachineUpdates = () => { void autoUpgrade.evaluate(); };
-    // Machines move to the User's own server once it is set up.
-    link.onHello(() => { void moveMachinesToHub(); });
-    const machineMoveTimer = setInterval(() => { void moveMachinesToHub(); }, 60_000);
-    machineMoveTimer.unref?.();
     machineRecovery = new MachineRecoveryService({
       now: () => Date.now(),
       linkStartedAt: () => machineLinkStartedAt,
-      linkState: (machineId) => link.isMachineConnected(machineId) ? "connected"
-        : link.reachesRelay(machineId) ? "out-of-touch" : "unknown",
+      // Where the machine is met says whether it is there: its room on the
+      // relay, or on the User's server for a machine that talks only to it.
+      linkState: (machineId) => link.presenceState(machineId),
       machineOnInstance: () => cloudRunAwsService.autoStopMachineRecord(),
       instanceRunningSince: () => cloudRunAwsService.instanceRunningSince(),
       setupRunning: (machineId) => Boolean(machineInstallerService.activeOperation(machineId)),
@@ -4448,9 +3252,16 @@ void app.whenReady().then(async () => {
     new MachineInactivityCheck({
       listMachines: () => settingsService.listMachines(),
       isConnected: (machineId) => link.isMachineConnected(machineId),
-      lastAcknowledgedAt: async (machine) => machine.deviceId
-        ? storageService.deviceEvents().lastAcknowledgedAt(machine.pairingKey, machine.deviceId)
-        : undefined,
+      // A machine on the relay confirms what it was sent; one on the hub
+      // confirms nothing, and its last read of the hub is its activity (the
+      // hub keeps everything it has not read, which is why it is asked about).
+      lastAcknowledgedAt: async (machine) => {
+        if (!machine.deviceId) return undefined;
+        const acknowledged = await storageService.deviceEvents().lastAcknowledgedAt(machine.pairingKey, machine.deviceId);
+        const reader = (await hubReaders())?.readers.find((item) => item.deviceId === machine.deviceId);
+        const read = reader && !reader.neverRead ? reader.readAt : undefined;
+        return [acknowledged, read].filter((value): value is string => Boolean(value)).sort().pop();
+      },
       lastCheckAt: () => settingsService.getMachineInactivityCheckAt(),
       saveLastCheckAt: (at) => settingsService.saveMachineInactivityCheckAt(at),
       ask: (machine) => new Promise((resolve) => {
@@ -4492,25 +3303,6 @@ void app.whenReady().then(async () => {
       });
     }
   })();
-  // Deliberately not awaited: each paired phone reconnects through the relay
-  // with its own connect timeout, and blocking here left the app with no
-  // window at all while the relay was slow or unreachable.
-  void restoreMobilePairedDevices().catch((error) => {
-    void debugLogService.write("mobile.pairing.restore-error", {
-      message: error instanceof Error ? error.message : String(error)
-    });
-  });
-  void retryPendingMailboxRevocations().catch((error) => {
-    void debugLogService.write("mobile.mailbox.revoke-retry-error", {
-      message: error instanceof Error ? error.message : String(error)
-    });
-  });
-  // And every few minutes after: a phone removed while the server was away
-  // (stopped, updating) loses its access as soon as the server is back, not
-  // at the next start of this desktop.
-  setInterval(() => {
-    void retryPendingMailboxRevocations().catch(() => undefined);
-  }, MAILBOX_REVOKE_RETRY_MS).unref?.();
   await artifactService.flushPendingArtifactEvents().catch((error) => {
     void debugLogService.write("artifacts.outbox.startup-error", {
       message: error instanceof Error ? error.message : String(error)

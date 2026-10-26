@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
 import { applyChatChanges, applyHeldReactions, CHAT_CHANGES_VERSION, chatChangeBaseline, diffChatChanges, isSupportedChatChangesVersion, type ChatChangeApplyPolicy, type ChatChangeBaseline, type ChatChangeDiffPolicy, type ChatChangesPayload, isSafeChatId } from "./chatChanges";
+import { mergeCopiedConversation, type CopiedConversation } from "./chatCopy";
 import type {
   AgentContextUsage,
   AgentHealth,
@@ -118,6 +119,8 @@ import type {
 } from "../../shared/types";
 import { isAutoWatchStableMessage, isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import { isMachineCompactionLine, normalizeMachineTurnCompaction, type MachineCompactionDelegateRequest, type MachineTurnCompaction } from "../../shared/machineLink";
+import { machineStopPendingText, machineWaitingText } from "../../shared/machineWaitingText";
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES,
@@ -168,6 +171,7 @@ import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
 import { buildChatParticipantActivitySnapshot } from "../../shared/chatParticipantActivity";
 import { chatParticipantHome, chatParticipantHomeUnassignedMessage, preservedRemoteExecution } from "../../shared/chatParticipantHome";
 import {
+  CHAT_DELIVERY_POLICY_OPTIONS,
   chatParticipantForMentionHandle,
   extractChatMentions,
   mentionHandlesForChatParticipant,
@@ -175,9 +179,11 @@ import {
   resolveChatMentionTargets
 } from "../../shared/chatDeliveryPolicy";
 import { chatActionOperationId } from "./chatActionEmitter";
+import { parsePhoneTurnRunId, phoneTurnRunId } from "../../shared/hubProtocol";
+import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { ChatEventMirrorService } from "./chatEventMirror";
 import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
-import { CliAgentRunner, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
+import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
@@ -378,7 +384,6 @@ type InferredParticipantRequestSuppressionScope =
   | "tool-source-segment"
   | "final-source-tool-origin-run"
   | "final-source-tool-origin-segment";
-const CHAT_LEGACY_ADMINISTRATOR_HANDLE = "admin";
 const CHAT_ROLE_LABEL_MAX_CHARS = 80;
 const CHAT_ROLE_INSTRUCTIONS_MAX_CHARS = 40_000;
 const CHAT_COMPACT_INSTRUCTIONS_MAX_CHARS = 20_000;
@@ -407,11 +412,10 @@ const PARTICIPANT_REQUEST_SCRUTINY_APPENDIX =
 const CHAT_CONTEXT_READ_DEFAULT_LIMIT = 50;
 const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
 
+/** The options shared with the phone and the User's server, so a draft
+ *  is routed the same way wherever it is resolved. */
 function chatDeliveryPolicyOptions() {
-  return {
-    administratorRoleId: CHAT_ADMINISTRATOR_ROLE_ID,
-    administratorHandles: [CHAT_ADMINISTRATOR_HANDLE, CHAT_LEGACY_ADMINISTRATOR_HANDLE]
-  };
+  return { ...CHAT_DELIVERY_POLICY_OPTIONS, administratorHandles: [...CHAT_DELIVERY_POLICY_OPTIONS.administratorHandles] };
 }
 const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 2_000_000;
 const CHAT_ACTIVITY_EVENT_MAX_COUNT = 500;
@@ -470,6 +474,18 @@ interface ChatAppMcpGateway {
 }
 
 type ChatAppMcpTokenGrant = Parameters<ChatAppMcpGateway["issueToken"]>[0];
+
+/** The line a compaction that did not happen leaves, local or on a machine,
+ *  whatever punctuation the reason ends with. */
+function compactionFailureLine(handle: string, error: string | undefined): string {
+  return `Could not compact @${handle} context: ${(error ?? "").replace(/[.\s]+$/, "") || "unknown error"}.`;
+}
+
+/** The same line for a compaction a machine ran (or never got to run): a
+ *  Stop before it started reads as a local one that never started. */
+function machineCompactionFailureLine(handle: string, status: string | undefined, error: string | undefined): string {
+  return compactionFailureLine(handle, status === "interrupted" && !error ? COMPACTION_CANCELLED_BEFORE_START : error);
+}
 
 /** The scheduled-scripts service on this host, as the chat side uses it. */
 export interface ChatScriptHost {
@@ -725,7 +741,8 @@ export interface MachineTurnDispatchRequest {
    *  honest state instead of a silent wait. */
   onStopPending?: (machineName: string) => void;
   /** The machine is not ready to take the turn: not connected, or its
-   *  runtime is being updated (`reason`). Shown on the pending bubble. */
+   *  runtime is being updated (`reason`). Shown on the pending bubble (on a
+   *  compaction's status line for a compaction). */
   onMachineWaiting?: (machineName: string, reason?: string) => Promise<void>;
 }
 
@@ -747,6 +764,25 @@ export interface MachineTurnDispatchResult {
   /** False when the turn never left this desktop (refused, or stopped while
    *  being prepared): the member's home only ever had its empty bubble. */
   sent?: boolean;
+  /** The member's context use as its CLI reported it on the machine after
+   *  this run, shown here exactly as a local member's. */
+  contextUsage?: AgentContextUsage;
+}
+
+/** Compacts a member on the machine that hosts it, through the same command
+ *  path as its turns (no message to answer, no bubble, no progress frames). */
+export type MachineCompactionDispatchRequest = Omit<MachineTurnDispatchRequest, "triggerMessage" | "pendingMessageId" | "progress"> & {
+  compaction: MachineTurnCompaction;
+};
+
+/** Machine side. Hands a compaction a member here asked for itself to the
+ *  desktop, which runs it as one the User started (and so shows it and can
+ *  stop it), and sends it back here as a compaction command. */
+export interface ChatCompactionDelegate {
+  /** False when the desktop cannot take it now; the compaction then runs
+   *  here directly, as it would without a desktop. */
+  canDelegateCompaction(): boolean;
+  delegateCompaction(request: MachineCompactionDelegateRequest): Promise<void>;
 }
 
 /** Machine side. Hands one prepared member request to the desktop; the answers
@@ -770,6 +806,7 @@ export interface ChatParticipantRequestDelegate {
 
 export interface MachineTurnDispatcher {
   runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult>;
+  compactOnMachine?(request: MachineCompactionDispatchRequest): Promise<MachineTurnDispatchResult>;
   cancelMachineRun?(request: { machineId: string; conversationId: string; runId: string; onStopPending?: (machineName: string) => Promise<void> }): Promise<void>;
   /** The bytes of a picture this copy does not hold on disk. Only a machine
    *  supplies this: replication brings an attachment's metadata here without
@@ -877,7 +914,7 @@ export class ChatService {
     return () => { this.participantRunSettledListeners.delete(listener); };
   }
 
-  async settledParticipantRunResult(run: ChatParticipantRun): Promise<{ messages: ChatMessage[]; warnings: string[] }> {
+  async settledParticipantRunResult(run: ChatParticipantRun): Promise<{ messages: ChatMessage[]; warnings: string[]; contextUsage?: AgentContextUsage }> {
     // A native resume releases its provider controller before its caller
     // appends the returned messages. endChatRun is the end of that lifecycle.
     if (this.activeRunIds.has(run.runId)) {
@@ -894,9 +931,11 @@ export class ChatService {
     if (!conversation || conversation.kind !== "chat") {
       throw new Error("The run's chat is unavailable.");
     }
+    const contextUsage = this.agentContextUsageByParticipant(conversation)[run.participantId];
     return {
       messages: conversation.messages.filter((message) => message.metadata?.runId === run.runId),
-      warnings: Array.isArray(conversation.metadata.warnings) ? conversation.metadata.warnings.filter((warning): warning is string => typeof warning === "string") : []
+      warnings: Array.isArray(conversation.metadata.warnings) ? conversation.metadata.warnings.filter((warning): warning is string => typeof warning === "string") : [],
+      ...(contextUsage ? { contextUsage } : {})
     };
   }
 
@@ -934,6 +973,18 @@ export class ChatService {
   /** Chat changes waiting for desktop changes they were written after: the
    *  applied head seen when each was last tried (see applyRemoteChatChanges). */
   private readonly waitingChatChanges = new Map<string, number>();
+  /** Which devices are the User's phones (their messages start turns here). */
+  private phoneOrigin?: (originId: string) => boolean | Promise<boolean>;
+  private hubBlobReader?: (reference: DeviceEventBlobReference) => Promise<Buffer>;
+  /** Turns for a phone's message this device is starting: the turn's run id
+   *  is known before its run begins, so a Stop for it is not lost. */
+  private readonly pendingPhoneRuns = new Map<string, { conversationId: string; controller: AbortController; started: boolean }>();
+  /** Chats with a phone's message whose members are being claimed. */
+  private readonly phoneStartsInFlight = new Map<string, number>();
+  /** When this device began reading the User's server: a phone's message
+   *  from before then is not this device's to start (a new or recreated
+   *  machine reads the whole order, turns other homes ran long ago). */
+  private phoneTurnsSince?: number;
   private static readonly CHAT_CHANGE_BASELINE_LIMIT = 256;
   private chatChangeTransport?: ChatChangeTransport;
   private readonly chatSavesInFlight = new Set<Promise<void>>();
@@ -999,6 +1050,12 @@ export class ChatService {
   private machineLink?: MachineTurnDispatcher;
   private scriptHost?: ChatScriptHost;
   private participantRequestDelegate?: ChatParticipantRequestDelegate;
+  private compactionDelegate?: ChatCompactionDelegate;
+  /** Machine compactions in flight here: puts their status line back to
+   *  "Compacting" once the machine has started them. */
+  private readonly machineCompactionStatus = new Map<string, () => void>();
+  /** Run ids of compactions machines delegated here, so a redelivery is one run. */
+  private readonly delegatedCompactionRunIds = new Set<string>();
   private cloudRunAws?: CloudRunAwsResolver;
   private cloudRunDoctor?: CloudRunDoctorProbe;
   private artifactCleanup?: (conversationId: string) => Promise<void>;
@@ -1202,6 +1259,12 @@ export class ChatService {
    *  which owns the roster and runs each target where that member lives. */
   setParticipantRequestDelegate(delegate: ChatParticipantRequestDelegate | undefined): void {
     this.participantRequestDelegate = delegate;
+  }
+
+  /** Machine side: where a member's own compaction request goes (see
+   *  ChatCompactionDelegate). */
+  setCompactionDelegate(delegate: ChatCompactionDelegate | undefined): void {
+    this.compactionDelegate = delegate;
   }
 
   setCloudRunAwsService(service: CloudRunAwsResolver): void {
@@ -1947,7 +2010,8 @@ export class ChatService {
     let ingest: {
       conversation: Conversation;
       participant: ChatParticipant;
-      session: ChatParticipantSession;
+      /** Undefined for a member on a machine: its session is there. */
+      session?: ChatParticipantSession;
       runStarted: boolean;
     };
     try {
@@ -1957,9 +2021,13 @@ export class ChatService {
         if (!participant) {
           throw new Error("Chat member was not found.");
         }
-        this.assertOwnsParticipant(participant);
-        const sessionState = await this.sessionForParticipant(conversation, participant);
-        if (!sessionState.session.sessionId) {
+        // A member on a machine is compacted there, through the same command
+        // path as its turns; its session is known only there. One whose
+        // machine has not been prepared yet has never run, so has none.
+        const onMachine = this.compactsOnMachine(participant);
+        if (!onMachine) this.assertOwnsParticipant(participant);
+        const session = onMachine ? undefined : (await this.sessionForParticipant(conversation, participant)).session;
+        if (onMachine ? !participant.homeMachineId : !session?.sessionId) {
           await this.withChatMutation(conversation, async () => {
             conversation.messages.push(this.message(
               "system",
@@ -1970,11 +2038,11 @@ export class ChatService {
             conversation.updatedAt = new Date().toISOString();
             await this.saveConversation(conversation);
           });
-          return { conversation, participant, session: sessionState.session, runStarted: false };
+          return { conversation, participant, session, runStarted: false };
         }
         await this.beginChatParticipantCompactionRun(conversation, runId, participant.id);
         await this.waitForQueuedSave(conversation.id);
-        return { conversation, participant, session: sessionState.session, runStarted: true };
+        return { conversation, participant, session, runStarted: true };
       });
     } catch (error) {
       await this.debugLogs.write("chat.compaction.finished", {
@@ -2004,6 +2072,9 @@ export class ChatService {
       const conversation = ingest.conversation;
       const participant = ingest.participant;
       const session = ingest.session;
+      if (!session) {
+        return await this.compactParticipantOnMachine(conversation, participant, request, runId, compactInstructions, warnings, auditBase, signal, progress);
+      }
       const workspacePath = await this.ensureHistoryFiles(conversation);
       const agentMode = this.agentModeForSession(session, participant);
       const permissions = normalizeChatAgentPermissions(participant.permissions);
@@ -2012,31 +2083,18 @@ export class ChatService {
       const baseCliParticipant = this.cliParticipantForSession(participant, session);
       const agentEnvironment = await this.agentEnvironmentForParticipant(participant, baseCliParticipant.model);
       const cliParticipant = this.cliParticipantWithHost(baseCliParticipant, agentEnvironment.codexConfigOverrides);
-      const appMcpToolInventoryKey = this.appMcpToolInventoryKey(
-        this.appMcpToolNames(this.appToolCapabilitiesForRun(session, permissions))
-      );
       if (agentEnvironment.problem) {
         await this.closeWarmAgentsForParticipant(conversation.id, participant.id);
       }
       const result: CliAgentCompactResult = agentEnvironment.problem
         ? { participant: cliParticipant, ok: false, error: agentEnvironment.problem }
         : await this.cliRunner.compactSession(cliParticipant, runPath, undefined, "chat", signal, {
-            persistSession: true,
-            sessionId: session.sessionId,
-            extraReadableDirs: [workspacePath],
-            agentMode,
-            permissions,
+            ...this.memberProcessOptionsForCompaction(conversation, participant, session, request, runId, runPath, workspacePath, agentMode, permissions),
             agentEnv: agentEnvironment.env,
             agentEnvKey: agentEnvironment.version,
             ...(compactInstructions ? { compactInstructions } : {}),
             onSessionId: (sessionId) => {
               this.persistParticipantSessionId(conversation, session, sessionId);
-            },
-            warm: {
-              conversationId: conversation.id,
-              participantId: participant.id,
-              contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey),
-              idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS
             }
           });
       await this.refreshStoredChatState(conversation);
@@ -2069,7 +2127,7 @@ export class ChatService {
       await this.withChatMutation(conversation, async () => {
         const content = result.ok
           ? this.compactSuccessMessage(participant.handle, compactInstructions)
-          : `Could not compact @${participant.handle} context: ${result.error ?? "unknown error"}.`;
+          : compactionFailureLine(participant.handle, result.error);
         conversation.messages.push(this.message(
           "system",
           content,
@@ -2105,6 +2163,252 @@ export class ChatService {
     } finally {
       reservation.release();
       await this.endChatRun(ingest.conversation, runId);
+    }
+  }
+
+  /**
+   * What the member's live process is started with when a compaction finds
+   * none alive: what its turn would start it with (session, role, app MCP
+   * connection and tools, permissions, observers), so the process stays the
+   * member's and serves its next turn. The app tool grant follows the turn's
+   * rules for each CLI: a Claude Code process that is alive keeps the grant
+   * its own replies act for, and one started for the compaction gets the
+   * member's current grant before it connects; Codex is granted before it
+   * runs. Gemini's compaction runs no app tools.
+   */
+  private memberProcessOptionsForCompaction(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    session: ChatParticipantSession,
+    request: CompactChatParticipantRequest,
+    runId: string,
+    runPath: string,
+    workspacePath: string,
+    agentMode: ChatAgentMode,
+    permissions: ChatAgentPermissions
+  ): CliAgentRunOptions {
+    const appToolCapabilities = this.appToolCapabilitiesForRun(session, permissions);
+    const appMcpToolNames = this.appMcpToolNames(appToolCapabilities);
+    const appMcpToolInventoryKey = this.appMcpToolInventoryKey(appMcpToolNames);
+    const appMcpClientGenerationId = this.appMcpClientGenerationId(conversation, participant, session, appMcpToolInventoryKey);
+    const memberKey = `${conversation.id}:${participant.id}`;
+    const grant: ChatAppMcpTokenGrant = {
+      conversationId: conversation.id,
+      participantId: participant.id,
+      roleConfigId: session.roleConfigId,
+      roleConfigVersion: session.roleConfigVersion,
+      capabilities: appToolCapabilities,
+      clientGenerationId: appMcpClientGenerationId,
+      expectedToolNames: appMcpToolNames,
+      triggerMessageId: request.parentMessageId,
+      triggerThreadId: request.threadId ?? request.parentMessageId,
+      triggerParentMessageId: request.parentMessageId,
+      triggerChatThreadRootId: request.chatThreadRootId,
+      continuation: false,
+      runId,
+      turnSegmentId: randomUUID(),
+      agentMode,
+      runPermissions: effectiveChatAgentPermissionsForProvider(participant.kind, agentMode, permissions),
+      participantRequestDepth: 0,
+      historyMarkdownPath: path.join(workspacePath, "history.md"),
+      historyJsonPath: path.join(workspacePath, "history.json")
+    };
+    const grantCompaction = (): { url: string; token: string } | undefined => {
+      const issued = this.issueAppMcpConnection(conversation, participant, grant);
+      if (issued && participant.kind === "claude-code") {
+        this.lastAppMcpGrants.set(memberKey, grant);
+      }
+      return issued;
+    };
+    let appMcp: { url: string; token: string } | undefined;
+    let grantBeforeStart: (() => void) | undefined;
+    if (participant.kind === "claude-code") {
+      const existingConnection = this.appMcpTokens.has(memberKey) ? this.appMcpConnections.get(memberKey) : undefined;
+      appMcp = existingConnection ?? grantCompaction();
+      grantBeforeStart = existingConnection ? () => { grantCompaction(); } : undefined;
+    } else if (participant.kind === "codex-cli") {
+      appMcp = grantCompaction();
+    }
+    return {
+      persistSession: true,
+      sessionId: session.sessionId,
+      extraReadableDirs: [workspacePath],
+      // A resumed session keeps the role it started with; the prompt fallback
+      // is never sent for it.
+      role: session.roleRuntime === "prompt-fallback" ? undefined : this.cliRoleOptions(participant, session, ""),
+      appMcp: appMcp
+        ? {
+            ...appMcp,
+            toolNames: appMcpToolNames,
+            autoPreauthorizedToolNames: this.autoPreauthorizedAppMcpToolNames(appMcpToolNames),
+            clientGenerationId: appMcpClientGenerationId,
+            clientStatus: (clientGenerationId: string) => this.appMcp?.clientStatus?.(clientGenerationId)
+          }
+        : undefined,
+      agentMode,
+      permissions,
+      warm: {
+        conversationId: conversation.id,
+        participantId: participant.id,
+        contextKey: this.warmAgentContextKey(conversation, participant, session, runPath, workspacePath, permissions, appMcpToolInventoryKey),
+        idleTimeoutMs: CHAT_WARM_AGENT_IDLE_TIMEOUT_MS,
+        // Called only before a process is started for the compaction.
+        onReplyStarted: grantBeforeStart,
+        onSelfResumedTurn: (turn) => this.handleSelfResumedTurn(conversation.id, participant.id, turn),
+        onBackgroundTasksChanged: (tasks) => this.handleBackgroundTasksChanged(conversation.id, participant.id, tasks),
+        // Started with suggestions on, as a turn starts it; the compaction
+        // itself is not a reply a suggestion follows.
+        onPromptSuggestion: (text) => this.receiveMemberPromptSuggestion({
+          conversationId: conversation.id,
+          participantId: participant.id,
+          runId,
+          text
+        })
+      }
+    };
+  }
+
+  /** A member whose home is a machine (or will be one, once its cloud
+   *  machine is prepared) is compacted there, exactly as its turns run there. */
+  private compactsOnMachine(participant: ChatParticipant): boolean {
+    return !this.machineRuntime && Boolean(participant.cloudRun || participant.homeMachineId);
+  }
+
+  /**
+   * Desktop side of compacting a member that runs on a machine. The machine
+   * runs this service's own compactParticipant for the member's session there
+   * and returns the outcome line it wrote; this desktop shows that same line,
+   * the same progress and the member's new context use. Whatever kept the
+   * machine from running it (not connected, an older runtime, stopped before
+   * it was sent) ends exactly as a local compaction that could not start.
+   */
+  private async compactParticipantOnMachine(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    request: CompactChatParticipantRequest,
+    runId: string,
+    compactInstructions: string | undefined,
+    warnings: string[],
+    auditBase: Record<string, unknown>,
+    signal?: AbortSignal,
+    progress?: ProgressCallback
+  ): Promise<StartReviewResult> {
+    const link = this.machineLink;
+    let result: MachineTurnDispatchResult;
+    if (signal?.aborted) {
+      result = { status: "interrupted", messages: [], warnings: [], sent: false };
+    } else if (!link?.compactOnMachine) {
+      result = { status: "failed", messages: [], warnings: [], sent: false, error: `@${participant.handle} is hosted on a machine, but the machine link is not available` };
+    } else {
+      // The compaction's own status line says what a turn's bubble says
+      // while its machine is away, and returns to "Compacting" once it runs.
+      const compacting = `Compacting @${participant.handle}.`;
+      const status = (message: string): void => {
+        this.emitProgress(runId, progress, "initial", message, { participantLabel: `@${participant.handle}` });
+      };
+      // Once Stop is waiting for the machine, that stays until the outcome,
+      // as on a turn's bubble.
+      let stopPending = false;
+      this.machineCompactionStatus.set(runId, () => { if (!stopPending) status(compacting); });
+      try {
+        result = await link.compactOnMachine({
+          conversation,
+          participant,
+          runId,
+          signal,
+          compaction: normalizeMachineTurnCompaction({ ...request, instructions: compactInstructions }),
+          onMachineWaiting: async (machineName, reason) => {
+            if (!stopPending) status(`${compacting} ${machineWaitingText(machineName, reason)}`);
+          },
+          onStopPending: (machineName) => {
+            void this.debugLogs.write("chat.compaction.stop-pending", { conversationId: conversation.id, runId, machineName });
+            stopPending = true;
+            status(`${compacting} ${machineStopPendingText(machineName)}`);
+          }
+        });
+      } finally {
+        this.machineCompactionStatus.delete(runId);
+      }
+    }
+    // Only the lines the machine's compaction of this run wrote are taken.
+    const compactionLines = result.messages.filter((message) => isMachineCompactionLine(message, runId, participant.id));
+    const outcomeMessage = compactionLines.at(-1);
+    const reported = outcomeMessage?.metadata?.compaction?.outcome;
+    let outcome: "completed" | "failed" | "no-active-session" = reported === "completed" || reported === "no-active-session" ? reported : "failed";
+    await this.withChatMutation(conversation, async () => {
+      if (outcomeMessage) {
+        for (const message of compactionLines) {
+          if (!conversation.messages.some((existing) => existing.id === message.id)) {
+            conversation.messages.push(message);
+          }
+        }
+        for (const warning of result.warnings) {
+          if (!warnings.includes(warning)) warnings.push(warning);
+        }
+      } else {
+        // It never ran on the machine: the same line a local compaction that
+        // could not start writes (a Stop before it started: word for word).
+        const content = machineCompactionFailureLine(participant.handle, result.status, result.error);
+        conversation.messages.push(this.message("system", content, undefined, this.compactMessageMetadata(request, participant.id, "failed")));
+        warnings.push(content);
+        outcome = "failed";
+      }
+      this.updateParticipantContextUsage(conversation, participant.id, normalizeAgentContextUsage(result.contextUsage));
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+    });
+    // The machine keeps its result until this desktop has stored it.
+    if (await this.waitForQueuedSaveResult(conversation.id)) {
+      try { await result.acknowledge?.(); }
+      catch (error) {
+        void this.debugLogs.write("chat.compaction.ack-pending", { conversationId: conversation.id, runId, message: error instanceof Error ? error.message : String(error) });
+      }
+    } else {
+      void this.debugLogs.write("chat.compaction.not-stored", { conversationId: conversation.id, runId });
+    }
+    if (outcome !== "no-active-session") {
+      this.emitProgress(runId, progress, outcome === "completed" ? "done" : "error", outcome === "completed" ? `Compacted @${participant.handle}.` : `Could not compact @${participant.handle}.`, {
+        participantLabel: `@${participant.handle}`
+      });
+    }
+    await this.debugLogs.write("chat.compaction.finished", {
+      ...auditBase,
+      participantId: participant.id,
+      participantHandle: participant.handle,
+      outcome,
+      homeMachineId: participant.homeMachineId,
+      machineStatus: result.status
+    });
+    return { conversation, warnings };
+  }
+
+  /** Machines transport, machine side: compacts one of this machine's members
+   *  for the desktop, with the run id the desktop chose. Returns the outcome
+   *  line written here and the member's context use after it. */
+  async runMachineHostedCompaction(
+    request: { conversationId: string; participantId: string; runId: string } & MachineTurnCompaction,
+    signal?: AbortSignal
+  ): Promise<{ messages: ChatMessage[]; warnings: string[]; contextUsage?: AgentContextUsage }> {
+    // Stop reaches it by run id as it reaches a turn (cancelRun), not only
+    // through the command's own controller.
+    const run = this.registerBackgroundRunController(request.runId, signal);
+    try {
+      const result = await this.compactParticipant({
+        conversationId: request.conversationId,
+        participantId: request.participantId,
+        runId: request.runId,
+        triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
+        ...(request.instructions ? { instructions: request.instructions } : {}),
+        ...(request.threadId ? { threadId: request.threadId } : {}),
+        ...(request.parentMessageId ? { parentMessageId: request.parentMessageId } : {}),
+        ...(request.chatThreadRootId ? { chatThreadRootId: request.chatThreadRootId } : {})
+      }, run.signal);
+      const conversation = result.conversation;
+      const messages = conversation.messages.filter((message) => isMachineCompactionLine(message, request.runId, request.participantId));
+      const contextUsage = this.agentContextUsageByParticipant(conversation)[request.participantId];
+      return { messages, warnings: result.warnings, ...(contextUsage ? { contextUsage } : {}) };
+    } finally {
+      run.cleanup();
     }
   }
 
@@ -5686,116 +5990,6 @@ export class ChatService {
     return Boolean(conversation && this.hasMobileEventMessage(conversation, mobileEventId));
   }
 
-  async hasMobileMailboxResultForMobileEvent(conversationId: string, eventId: string): Promise<boolean> {
-    const mobileEventId = this.normalizedMobileEventId(eventId);
-    if (!mobileEventId) {
-      return false;
-    }
-    const conversation = await this.storage.getConversation(conversationId);
-    return Boolean(conversation && this.hasMobileMailboxResultMessage(conversation, mobileEventId));
-  }
-
-  async acceptMobileMailboxOutboxEvent(event: ChatEventEnvelope): Promise<boolean> {
-    if (event.kind !== "message.created" && event.kind !== "run.cancel.requested") {
-      return false;
-    }
-    const mobileEventId = this.normalizedMobileEventId(event.eventId);
-    if (!mobileEventId) {
-      return false;
-    }
-    const append = await this.storage.appendChatEvent(event);
-    if (append.status === "conflict") {
-      await this.debugLogs.write("mobile.mailbox.outbox-event-conflict", {
-        conversationId: event.conversationId,
-        eventId: event.eventId,
-        conflictReason: append.conflictReason
-      });
-      return false;
-    }
-    if (event.kind === "run.cancel.requested") {
-      return append.status === "appended";
-    }
-    const content = this.mobileMailboxOutboxPayload(event.payload);
-    if (!content) {
-      return false;
-    }
-    const conversation = await this.storage.getConversation(event.conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      return false;
-    }
-    return this.withChatMutation(conversation, async () => {
-      if (this.hasMobileEventMessage(conversation, mobileEventId)) {
-        return false;
-      }
-      const createdAt = typeof event.createdAt === "string" && event.createdAt.trim()
-        ? event.createdAt
-        : new Date().toISOString();
-      const messageId = `mobile-${mobileEventId}`;
-      const userMessage: ChatMessage = {
-        id: messageId,
-        role: "user",
-        content,
-        createdAt,
-        status: "done",
-        metadata: {
-          appMessageSource: "mobile-relay",
-          mobileEventId,
-          threadId: messageId
-        }
-      };
-      const messageTime = this.lastMessageTimestamp(createdAt);
-      const insertIndex = messageTime === undefined
-        ? -1
-        : conversation.messages.findIndex((message) => {
-          const existingTime = this.lastMessageTimestamp(message.createdAt);
-          return existingTime !== undefined && existingTime > messageTime;
-        });
-      if (insertIndex >= 0) {
-        conversation.messages.splice(insertIndex, 0, userMessage);
-      } else {
-        conversation.messages.push(userMessage);
-      }
-      conversation.updatedAt = this.maxIsoTimestamp(conversation.updatedAt, createdAt, event.createdAt);
-      await this.saveConversation(conversation);
-      return true;
-    });
-  }
-
-  async acceptMobileMailboxMessageEvent(event: ChatEventEnvelope): Promise<boolean> {
-    if (event.kind !== "message.created") {
-      return false;
-    }
-    const message = this.mobileMailboxMessagePayload(event.payload);
-    if (!message) {
-      return false;
-    }
-    const append = await this.storage.appendChatEvent(event);
-    if (append.status === "conflict") {
-      await this.debugLogs.write("mobile.mailbox.message-event-conflict", {
-        conversationId: event.conversationId,
-        eventId: event.eventId,
-        conflictReason: append.conflictReason
-      });
-      return false;
-    }
-    const conversation = await this.storage.getConversation(event.conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      return false;
-    }
-    return this.withChatMutation(conversation, async () => {
-      if (conversation.messages.some((item) => item.id === message.id)) {
-        return false;
-      }
-      conversation.messages.push(JSON.parse(JSON.stringify(message)) as ChatMessage);
-      if (message.role === "participant") {
-        this.recordLastMessageByParticipant(conversation, message);
-      }
-      conversation.updatedAt = this.maxIsoTimestamp(conversation.updatedAt, message.createdAt, event.createdAt);
-      await this.saveConversation(conversation);
-      return true;
-    });
-  }
-
   async sendMessage(request: SendChatMessageRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
     const runId = request.runId ?? randomUUID();
     const compactCommand = this.compactCommand(request.content);
@@ -6758,6 +6952,7 @@ export class ChatService {
             conversation.messages.push(message);
           }
         }
+        this.updateParticipantContextUsage(conversation, participant.id, normalizeAgentContextUsage(result.contextUsage));
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
       });
@@ -7188,6 +7383,8 @@ export class ChatService {
 
   async applyMachineRunStarted(request: { conversationId: string; runId: string }): Promise<void> {
     if (this.deletedConversationIds.has(request.conversationId) || await this.storage.conversationTombstones?.().isDeleted(request.conversationId)) return;
+    // A compaction that waited for its machine is running now.
+    this.machineCompactionStatus.get(request.runId)?.();
     const conversation = await this.requireChat(request.conversationId);
     await this.withChatMutation(conversation, async () => {
       for (const message of conversation.messages) {
@@ -7215,6 +7412,13 @@ export class ChatService {
     finishedAt?: string;
     receiptId?: string;
     machineName: string;
+    /** The machine that sent it: context use is taken only for its own member. */
+    machineId?: string;
+    participantId?: string;
+    contextUsage?: AgentContextUsage;
+    /** A compaction of `participantId`: one that never wrote its outcome
+     *  line (stopped or failed before it ran) gets the line it would have. */
+    compaction?: { triggeredBy: "user" | "agent" };
   }): Promise<void> {
     // The tombstone is a durable disposition of a late result: acknowledge it
     // without reviving a deleted chat or retaining its delivery forever.
@@ -7251,6 +7455,19 @@ export class ChatService {
       for (const warning of request.warnings ?? []) {
         this.addConversationWarning(conversation, warning);
       }
+      const usageParticipantId = bubble?.participantId ?? request.participantId;
+      const usageMember = usageParticipantId ? this.chatParticipants(conversation).find((item) => item.id === usageParticipantId) : undefined;
+      const ownMember = usageMember && request.machineId && usageMember.homeMachineId === request.machineId ? usageMember : undefined;
+      if (ownMember) {
+        this.updateParticipantContextUsage(conversation, ownMember.id, normalizeAgentContextUsage(request.contextUsage));
+      }
+      if (ownMember && request.compaction && !bubble && request.status !== "completed" &&
+          !conversation.messages.some((message) => isMachineCompactionLine(message, request.runId, ownMember.id))) {
+        const line = machineCompactionFailureLine(ownMember.handle, request.status, request.error);
+        conversation.messages.push(this.message("system", line, undefined,
+          { ...this.compactMessageMetadata({ runId: request.runId, triggeredBy: request.compaction.triggeredBy }, ownMember.id, "failed"),
+            ...(request.compaction.triggeredBy === "agent" ? { threadId: "system" } : {}) }));
+      }
       // A late result has no local run's finally block to clear its status.
       // Publish and store that same final state, preserving other machines'
       // concurrent runs rather than relying on a later storage read to sweep it.
@@ -7286,7 +7503,7 @@ export class ChatService {
     request: { conversationId: string; participantId: string; messageId: string; runId: string; pendingMessageId: string },
     signal?: AbortSignal,
     progress?: ProgressCallback
-  ): Promise<{ messages: ChatMessage[]; warnings: string[] }> {
+  ): Promise<{ messages: ChatMessage[]; warnings: string[]; contextUsage?: AgentContextUsage }> {
     // The desktop's pending bubble for this run is already in the copy; the
     // run must count as live before the stale-run sweep in requireChat sees
     // it, or the bubble is marked interrupted before the turn even starts.
@@ -7333,7 +7550,9 @@ export class ChatService {
     const messages = refreshed.messages.filter((message) =>
       message.participantId === participantId && message.metadata?.runId === request.runId && message.status !== "pending"
     );
-    return { messages, warnings };
+    // The desktop shows the member's context use from what its CLI reported here.
+    const contextUsage = this.agentContextUsageByParticipant(refreshed)[participantId];
+    return { messages, warnings, ...(contextUsage ? { contextUsage } : {}) };
   }
 
   private async discardStoppedTargetRun(
@@ -9376,73 +9595,6 @@ export class ChatService {
   private normalizedMobileEventId(value: string | undefined): string | undefined {
     const eventId = value?.trim();
     return eventId || undefined;
-  }
-
-  private mobileMailboxMessagePayload(payload: unknown): ChatMessage | undefined {
-    const message = payload && typeof payload === "object" && !Array.isArray(payload)
-      ? (payload as { message?: unknown }).message
-      : undefined;
-    if (!message || typeof message !== "object" || Array.isArray(message)) {
-      return undefined;
-    }
-    const candidate = message as Partial<ChatMessage>;
-    if (
-      typeof candidate.id !== "string" ||
-      typeof candidate.role !== "string" ||
-      typeof candidate.content !== "string" ||
-      typeof candidate.createdAt !== "string"
-    ) {
-      return undefined;
-    }
-    if (!["user", "participant", "system"].includes(candidate.role)) {
-      return undefined;
-    }
-    return JSON.parse(JSON.stringify(candidate)) as ChatMessage;
-  }
-
-  private mobileMailboxOutboxPayload(payload: unknown): string | undefined {
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-      return undefined;
-    }
-    const content = (payload as { content?: unknown }).content;
-    return typeof content === "string" && content.trim() ? content.trim() : undefined;
-  }
-
-  private hasMobileMailboxResultMessage(conversation: Conversation, mobileEventId: string): boolean {
-    return conversation.messages.some((message) => {
-      if (message.role !== "participant" || (message.status !== "done" && message.status !== "error")) {
-        return false;
-      }
-      const metadata = message.metadata;
-      if (!metadata) {
-        return false;
-      }
-      if (metadata.mobileEventId === mobileEventId) {
-        return true;
-      }
-      return metadata.sourceMessageId === mobileEventId &&
-        metadata.runId === `mobile-${mobileEventId}` &&
-        (
-          metadata.appMessageSource === "remote-run-provider-output" ||
-          metadata.appMessageSource === "remote-run-provider"
-        );
-    });
-  }
-
-  private maxIsoTimestamp(...values: Array<string | undefined>): string {
-    let selected = "";
-    let selectedTime = -Infinity;
-    for (const value of values) {
-      if (!value) {
-        continue;
-      }
-      const time = Date.parse(value);
-      if (Number.isFinite(time) && time > selectedTime) {
-        selected = value;
-        selectedTime = time;
-      }
-    }
-    return selected || new Date().toISOString();
   }
 
   private hasMobileEventMessage(conversation: Conversation, mobileEventId: string): boolean {
@@ -16485,6 +16637,103 @@ export class ChatService {
     request: ChatSelfCompactionRequest,
     runId: string
   ): void {
+    // A member on a machine asked for it there: the desktop runs it as one
+    // the User asked for, so it is shown and can be stopped the same way.
+    // Without a desktop to take it now, it runs here as before.
+    const delegate = this.machineRuntime ? this.compactionDelegate : undefined;
+    if (delegate?.canDelegateCompaction()) {
+      void delegate.delegateCompaction({
+        conversationId,
+        participantId: participant.id,
+        runId,
+        ...(request.instructions ? { instructions: request.instructions } : {})
+      }).then(() => this.debugLogs.write("chat.self-compaction.delegated", { conversationId, participantId: participant.id, runId }), async (error) => {
+        await this.debugLogs.write("chat.self-compaction.delegate-error", {
+          conversationId, participantId: participant.id, runId, message: error instanceof Error ? error.message : String(error)
+        });
+        this.runQueuedSelfCompaction(conversationId, participant, request, runId);
+      });
+      return;
+    }
+    this.runQueuedSelfCompaction(conversationId, participant, request, runId);
+  }
+
+  /** Desktop side: a member on a machine asked to compact its own context.
+   *  Only the member's own machine may ask for it. */
+  async runDelegatedCompaction(request: MachineCompactionDelegateRequest & { machineId: string }): Promise<void> {
+    if (this.machineRuntime) return;
+    const refuse = (reason: string): Promise<void> => this.debugLogs.write("chat.self-compaction.delegation-refused", {
+      conversationId: request.conversationId, participantId: request.participantId, runId: request.runId, machineId: request.machineId, reason
+    });
+    // A run id becomes this desktop's own (run state, the machine's record):
+    // only a plain token is taken.
+    if (!isSafeChatId(request.runId)) return refuse("invalid-run-id");
+    if (this.deletedConversationIds.has(request.conversationId)) return refuse("deleted");
+    // Delivered again while this process runs it or ran it: one run.
+    if (this.delegatedCompactionRunIds.has(request.runId) || this.activeRunIds.has(request.runId) || this.chatRunControllers.has(request.runId)) {
+      return refuse("already-run");
+    }
+    // What a compaction just started here wrote must be read back.
+    await this.waitForQueuedSave(request.conversationId);
+    // Read without its messages: this runs in the machine's ordered event
+    // stream, and the chat can be thousands of messages long.
+    const stored = typeof this.storage.openConversation === "function"
+      ? (await this.storage.openConversation(request.conversationId, 1))?.conversation
+      : await this.storage.getConversation(request.conversationId);
+    if (!stored || stored.kind !== "chat") return refuse("no-chat");
+    const participant = this.chatParticipants(stored).find((item) => item.id === request.participantId);
+    if (!participant || participant.homeMachineId !== request.machineId) return refuse("not-its-member");
+    let instructions: string | undefined;
+    try {
+      instructions = this.normalizeCompactInstructions(request.instructions);
+    } catch (error) {
+      return refuse(error instanceof Error ? error.message : String(error));
+    }
+    // A compaction of this member already queued or running here (the User's)
+    // covers it, as it does for a local member asking at the same time.
+    if (readParticipantCompactions(stored.metadata)[participant.id]) return refuse("already-compacting");
+    this.delegatedCompactionRunIds.add(request.runId);
+    if (this.delegatedCompactionRunIds.size > 1_000) {
+      this.delegatedCompactionRunIds.delete(this.delegatedCompactionRunIds.values().next().value as string);
+    }
+    // The User's choice on this desktop holds, even before it reached the machine.
+    const permission = normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(participant.permissions).requestCompaction);
+    if (permission === "deny") {
+      await refuse("denied");
+      // Written off the machine's event stream, as a compaction would run.
+      void this.recordSelfCompactionFailure(request.conversationId, participant, request.runId, instructions, `Context compaction requests are disabled for @${participant.handle}`)
+        .catch((error) => this.debugLogs.write("chat.self-compaction.denied-line-error", { conversationId: request.conversationId, runId: request.runId, message: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
+    this.runQueuedSelfCompaction(stored.id, participant, { type: "self_compaction", instructions }, request.runId);
+  }
+
+  /** The line a member's own compaction that could not run leaves. */
+  private async recordSelfCompactionFailure(conversationId: string, participant: ChatParticipant, runId: string, instructions: string | undefined, message: string): Promise<void> {
+    const latest = await this.requireChat(conversationId).catch(() => undefined);
+    if (!latest) return;
+    await this.withChatMutation(latest, async () => {
+      latest.messages.push(this.message(
+        "system",
+        compactionFailureLine(participant.handle, message),
+        undefined,
+        {
+          ...this.compactMessageMetadata({ runId, triggeredBy: "agent", instructions }, participant.id, "failed"),
+          threadId: "system"
+        }
+      ));
+      latest.updatedAt = new Date().toISOString();
+      await this.saveConversation(latest);
+      this.queueSnapshot(latest);
+    });
+  }
+
+  private runQueuedSelfCompaction(
+    conversationId: string,
+    participant: ChatParticipant,
+    request: ChatSelfCompactionRequest,
+    runId: string
+  ): void {
     const backgroundController = this.registerBackgroundRunController(runId, undefined);
     void this.compactParticipant({
       conversationId,
@@ -16503,28 +16752,7 @@ export class ChatService {
       if (backgroundController.signal.aborted) {
         return;
       }
-      const latest = await this.requireChat(conversationId).catch(() => undefined);
-      if (!latest) {
-        return;
-      }
-      await this.withChatMutation(latest, async () => {
-        latest.messages.push(this.message(
-          "system",
-          `Could not compact @${participant.handle} context: ${message}.`,
-          undefined,
-          {
-            ...this.compactMessageMetadata(
-              { runId, triggeredBy: "agent", instructions: request.instructions },
-              participant.id,
-              "failed"
-            ),
-            threadId: "system"
-          }
-        ));
-        latest.updatedAt = new Date().toISOString();
-        await this.saveConversation(latest);
-        this.queueSnapshot(latest);
-      });
+      await this.recordSelfCompactionFailure(conversationId, participant, runId, request.instructions, message);
     }).finally(() => backgroundController.cleanup());
   }
 
@@ -16807,7 +17035,7 @@ export class ChatService {
   }
 
   private chatImageAttachmentForTool(attachment: ChatImageAttachment): Omit<ChatImageAttachment, "storageKey"> {
-    const { storageKey: _storageKey, ...safeAttachment } = attachment;
+    const { storageKey: _storageKey, hubBlob: _hubBlob, ...safeAttachment } = attachment as ChatImageAttachment & { hubBlob?: unknown };
     return safeAttachment;
   }
 
@@ -17369,11 +17597,21 @@ export class ChatService {
    *  machine's own store so one fetch serves every later read. A copy that is
    *  not a machine has no owner to ask and simply reports it missing. */
   private async fetchAttachmentFromOwner(conversationId: string, attachment: ChatImageAttachment): Promise<string | undefined> {
+    // A picture the User sent from her phone is on her server, named by its
+    // body: every device reads it from there, the desktop too.
+    const hubBlob = (attachment as ChatImageAttachment & { hubBlob?: unknown }).hubBlob;
+    // A server that cannot answer now leaves the machine link to try.
+    const fromHub = this.hubBlobReader && isDeviceEventBlobReference(hubBlob)
+      ? await this.hubBlobReader(hubBlob).then((bytes) => bytes.toString("base64"), (error: unknown) => {
+        void this.debugLogs.write("chat.attachment.hub-read-error", { conversationId, attachmentId: attachment.id, message: error instanceof Error ? error.message : String(error) });
+        return undefined;
+      })
+      : undefined;
     const fetch = this.machineLink?.fetchAttachment;
-    if (!fetch) {
+    if (!fromHub && !fetch) {
       return undefined;
     }
-    const result = await fetch.call(this.machineLink, conversationId, attachment.id);
+    const result = fromHub ? { dataBase64: fromHub } : await fetch!.call(this.machineLink, conversationId, attachment.id);
     const dataBase64 = typeof result?.dataBase64 === "string" ? result.dataBase64 : "";
     if (!dataBase64) {
       return undefined;
@@ -19238,6 +19476,8 @@ export class ChatService {
     if (!targetRunId) {
       return false;
     }
+    // A phone's turn that is still being claimed: stopped before it starts.
+    this.pendingPhoneRuns.get(targetRunId)?.controller.abort();
     const controllers = this.chatRunControllers.get(targetRunId);
     void this.debugLogs.write("chat.cancel.requested", {
       runId: targetRunId,
@@ -19275,6 +19515,10 @@ export class ChatService {
     const fromMeta = this.chatRunMeta.get(targetRunId)?.conversationId;
     if (fromMeta) {
       return fromMeta;
+    }
+    const pendingPhone = this.pendingPhoneRuns.get(targetRunId)?.conversationId;
+    if (pendingPhone) {
+      return pendingPhone;
     }
     for (const [conversationId, runIds] of this.activeConversationRunIds) {
       if (runIds.has(targetRunId)) {
@@ -19858,7 +20102,11 @@ export class ChatService {
   private chatHasLiveWork(conversationId: string): boolean {
     return (
       (this.activeConversationRunIds.get(conversationId)?.size ?? 0) > 0 ||
-      (this.backgroundRunnerCounts.get(conversationId) ?? 0) > 0
+      (this.backgroundRunnerCounts.get(conversationId) ?? 0) > 0 ||
+      // A phone's message whose members are still being claimed: their runs
+      // are not registered yet (a started one is, or has ended).
+      (this.phoneStartsInFlight.get(conversationId) ?? 0) > 0 ||
+      [...this.pendingPhoneRuns.values()].some((pending) => pending.conversationId === conversationId && !pending.started)
     );
   }
 
@@ -20123,9 +20371,14 @@ export class ChatService {
     if (existing.kind !== "chat") return "applied";
     let waiting = false;
     const dropped: ChatParticipant[] = [];
+    // The phone's messages this application adds (one applied before, a
+    // redelivery, starts nothing again).
+    let addedMessageIds = new Set<string>();
     await this.withChatMutation(existing, async () => {
       const result = applyChatChanges(existing, payload, event.originId, transport.applyPolicy(existing));
       if (result.status !== "applied") return;
+      const held = new Set(existing.messages.map((message) => message.id));
+      addedMessageIds = new Set(result.conversation.messages.filter((message) => !held.has(message.id)).map((message) => message.id));
       if (!dependencyMet && result.ignored.length) {
         waiting = true;
         return;
@@ -20164,7 +20417,400 @@ export class ChatService {
     if (waiting) return wait();
     this.waitingChatChanges.delete(event.eventId);
     this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
+    this.notePhoneMessages(event.originId, conversationId, payload, addedMessageIds);
     return "applied";
+  }
+
+  /** Reads a body from the User's server by its reference (a picture sent
+   *  from the phone). */
+  setHubBlobReader(reader: ((reference: DeviceEventBlobReference) => Promise<Buffer>) | undefined): void {
+    this.hubBlobReader = reader;
+  }
+
+  /** Says which devices are the User's phones. A message one of them wrote
+   *  starts its members here when they live here (see startPhoneTurns). */
+  setPhoneOrigins(resolver: ((originId: string) => boolean | Promise<boolean>) | undefined, since?: string): void {
+    this.phoneOrigin = resolver;
+    const at = since ? Date.parse(since) : NaN;
+    this.phoneTurnsSince = Number.isFinite(at) ? at : undefined;
+  }
+
+  private notePhoneMessages(originId: string, conversationId: string, payload: ChatChangesPayload, added: Set<string>): void {
+    const resolver = this.phoneOrigin;
+    if (!resolver) return;
+    const messages = payload.changes.flatMap((change) =>
+      change.type === "message.created" && change.message.role === "user" && added.has(change.message.id) ? [change.message] : []);
+    if (messages.length === 0) return;
+    // Until its members are claimed the chat counts as busy, so a watcher
+    // evaluating meanwhile does not take the same message as well.
+    this.phoneStartsInFlight.set(conversationId, (this.phoneStartsInFlight.get(conversationId) ?? 0) + 1);
+    void Promise.resolve(resolver(originId)).then((phone) => {
+      if (phone) return this.startPhoneTurns(conversationId, messages);
+      return undefined;
+    }).catch((error) => {
+      void this.debugLogs.write("chat.phone-turns.error", { conversationId, message: error instanceof Error ? error.message : String(error) });
+    }).finally(() => {
+      const left = (this.phoneStartsInFlight.get(conversationId) ?? 1) - 1;
+      if (left > 0) this.phoneStartsInFlight.set(conversationId, left);
+      else this.phoneStartsInFlight.delete(conversationId);
+    });
+  }
+
+  /**
+   * Phone messages this device took in recently whose members living here
+   * were never started: the device stopped (a quit, a crash, an update)
+   * between taking a message in and claiming its turns, or this program is
+   * newer than the one that took it in. Their claims keep the ones that did
+   * start from starting again.
+   */
+  async resumePhoneTurns(sinceIso: string): Promise<void> {
+    const resolver = this.phoneOrigin;
+    if (!resolver) return;
+    const claims = this.storage.phoneTurnClaims();
+    const phones: string[] = [];
+    for (const originId of await claims.chatChangeOriginsSince(sinceIso)) {
+      if (await Promise.resolve(resolver(originId)).catch(() => false)) phones.push(originId);
+    }
+    if (phones.length === 0) return;
+    const byChat = new Map<string, ChatMessage[]>();
+    for (const row of await claims.chatChangesFrom(phones, sinceIso, 500)) {
+      try {
+        const envelope = JSON.parse(Buffer.from(row.envelopeHex, "hex").toString("utf8")) as ChatEventEnvelope;
+        const payload = await this.storage.deviceEventBlobs().hydrate(envelope.payload) as ChatChangesPayload;
+        for (const change of Array.isArray(payload?.changes) ? payload.changes : []) {
+          if (change.type !== "message.created" || change.message.role !== "user") continue;
+          byChat.set(envelope.conversationId, [...(byChat.get(envelope.conversationId) ?? []), change.message]);
+        }
+      } catch {
+        // An event this device cannot read back is not one it can start.
+      }
+    }
+    for (const [conversationId, messages] of byChat) {
+      await this.startPhoneTurns(conversationId, messages).catch((error) => {
+        void this.debugLogs.write("chat.phone-turns.error", { conversationId, message: error instanceof Error ? error.message : String(error) });
+      });
+    }
+  }
+
+  /** Whether this device starts this member's turns: the desktop starts its
+   *  own members (and prepares cloud ones), a machine the members it hosts. */
+  private startsPhoneTurnFor(participant: ChatParticipant): boolean {
+    const home = chatParticipantHome(participant);
+    return this.machineRuntime
+      ? Boolean(this.hostMachineId) && home.kind === "machine" && home.machineId === this.hostMachineId
+      : home.kind !== "machine";
+  }
+
+  /** The members a phone's message is for: the ones the phone resolved when
+   *  the User sent it (by the desktop's rules, from what the phone showed),
+   *  or, for a message that names none, the same rules here. */
+  private phoneMessageTargets(conversation: Conversation, message: ChatMessage): ChatParticipant[] {
+    const participants = this.chatParticipants(conversation);
+    const named = (message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets;
+    if (Array.isArray(named)) {
+      return named.flatMap((id) => {
+        const participant = typeof id === "string" ? participants.find((item) => item.id === id) : undefined;
+        return participant ? [participant] : [];
+      });
+    }
+    return this.resolveDispatchTargetsForContent(conversation, message.content, this.replyContextFromMessage(message)).targets;
+  }
+
+  /**
+   * The User wrote a message on her phone; it reached this device through the
+   * hub. The members it is for whose home is here start now, as they would for
+   * a message typed here; members that live elsewhere are started by their own
+   * home. Each turn is claimed under its run id before it starts (the same id
+   * on every device), so applying the message again — a redelivery, a
+   * restart — never runs a member twice, and a Stop that came first keeps it
+   * from starting.
+   */
+  async startPhoneTurns(conversationId: string, messages: ChatMessage[]): Promise<void> {
+    const presence = await this.storage.conversationPresence(conversationId);
+    if (!presence || presence.kind !== "chat") return;
+    // The chat's body names its members; the whole chat is read only when a
+    // member of this message lives here.
+    const opened = await this.storage.openConversation(conversationId, 1);
+    if (!opened || opened.conversation.metadata.archived === true) return;
+    let conversation: Conversation | undefined;
+    for (const message of messages) {
+      if (message.role !== "user") continue;
+      // Written before this device read the server: another home's.
+      if (this.phoneTurnsSince !== undefined && Date.parse(message.createdAt) < this.phoneTurnsSince - PHONE_TURN_CLOCK_SKEW_MS) continue;
+      const named = Array.isArray((message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets);
+      if (named) {
+        const here = this.phoneMessageTargets(opened.conversation, message).filter((participant) => this.startsPhoneTurnFor(participant));
+        if (here.length === 0) continue;
+        // Every turn here claimed already (the sweep finds most so): the
+        // whole chat is not read for them.
+        const claimed = await this.storage.phoneTurnClaims().claimedRunIds(here.map((participant) => phoneTurnRunId(message.id, participant.id)));
+        if (here.every((participant) => claimed.has(phoneTurnRunId(message.id, participant.id)))) continue;
+      }
+      conversation ??= await this.requireChat(conversationId);
+      const stored = conversation.messages.find((item) => item.id === message.id && item.role === "user");
+      if (!stored) continue;
+      const everyTarget = this.phoneMessageTargets(conversation, stored);
+      // What the desktop refuses to send it refuses here too, said once (by
+      // the home of the first member named) and nobody starts.
+      const goal = parseNativeGoalCommand(stored.content);
+      const refusal = goal.kind === "invalid" ? goal.error
+        : goal.kind === "valid" && everyTarget.length !== 1 ? "/goal requires exactly one resolved chat member." : undefined;
+      if (refusal) {
+        // Said by the first member's home, or by the desktop when it names none.
+        if (everyTarget[0] ? this.startsPhoneTurnFor(everyTarget[0]) : !this.machineRuntime) await this.notePhoneMessageRefused(conversation, stored, refusal);
+        continue;
+      }
+      const targets = everyTarget.filter((participant) => this.startsPhoneTurnFor(participant));
+      if (targets.length === 0) continue;
+      await this.startPhoneTurnsFor(conversation, stored, targets);
+    }
+  }
+
+  private async startPhoneTurnsFor(conversation: Conversation, message: ChatMessage, targets: ChatParticipant[]): Promise<void> {
+    const conversationId = conversation.id;
+    // A watcher member addressed directly has seen this message, as for a
+    // message typed here.
+    if (targets.some((participant) => participant.autoWatch === true)) {
+      await this.withChatMutation(conversation, async () => {
+        const before = JSON.stringify(conversation.metadata.participantWatchers ?? null);
+        this.advanceAutoWatchCursorForDirectTargets(conversation, targets, message);
+        if (JSON.stringify(conversation.metadata.participantWatchers ?? null) === before) return;
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+    }
+    const compact = this.compactCommand(message.content);
+    for (const participant of targets) {
+      const runId = phoneTurnRunId(message.id, participant.id);
+      if (this.pendingPhoneRuns.has(runId) || this.conversationIdForRun(runId)) continue;
+      // Its turn already shows in the chat (another home ran or stopped it,
+      // the member moved since): not again here.
+      if (this.phoneTurnShown(conversation, message, participant, runId)) continue;
+      const controller = new AbortController();
+      // Registered before anything is awaited, so a second start (the live
+      // one and a sweep) finds it, and a Stop arriving meanwhile stops the
+      // turn before it starts.
+      const pending = { conversationId, controller, started: false };
+      this.pendingPhoneRuns.set(runId, pending);
+      const release = (): void => {
+        if (this.pendingPhoneRuns.get(runId) === pending) this.pendingPhoneRuns.delete(runId);
+      };
+      let outcome: Awaited<ReturnType<ReturnType<StorageService["phoneTurnClaims"]>["claim"]>>;
+      try {
+        outcome = await this.storage.phoneTurnClaims().claim({ runId, conversationId, messageId: message.id, participantId: participant.id, at: new Date().toISOString() });
+      } catch (error) {
+        // Not claimed: the next resume tries again. The other members go on.
+        release();
+        void this.debugLogs.write("chat.phone-turn.claim-error", { conversationId, runId, message: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
+      if (outcome === "taken") {
+        release();
+        continue;
+      }
+      void this.debugLogs.write("chat.phone-turn", { conversationId, runId, participantId: participant.id, outcome });
+      if (outcome === "cancelled" || controller.signal.aborted) {
+        release();
+        await this.notePhoneTurnStoppedBeforeStart(conversation, message, participant);
+        continue;
+      }
+      const warnings: string[] = [];
+      pending.started = true;
+      const started = (async () => {
+        const settings = await this.settings.getPublicSettings();
+        // What a message typed here checks before it starts a member.
+        this.assertParticipantProvidersEnabled([participant], settings.providers ?? []);
+        if (compact && compact.handle.toLowerCase() === participant.handle.toLowerCase()) {
+          await this.compactParticipant({
+            conversationId, participantId: participant.id, handle: participant.handle, instructions: compact.instructions, triggeredBy: "user", runId,
+            threadId: message.metadata?.threadId ?? message.id, parentMessageId: message.id, chatThreadRootId: message.metadata?.chatThreadRootId
+          }, controller.signal, this.onReviewProgress);
+          return;
+        }
+        await this.runParticipantBatch(conversation, [participant], message, runId, controller.signal, this.onReviewProgress, warnings, {
+          targetRunIds: new Map([[participant.id, runId]])
+        });
+      })();
+      void started.catch(async (error) => {
+        const reason = error instanceof Error ? error.message : String(error);
+        void this.debugLogs.write("chat.phone-turn.error", { conversationId, runId, message: reason });
+        // Said in the chat, where the User sees it on her phone too.
+        warnings.push(`@${participant.handle} could not start for your message: ${reason}`);
+      }).finally(async () => {
+        release();
+        if (warnings.length > 0) await this.appendConversationWarnings(conversation, warnings).catch(() => undefined);
+      });
+    }
+  }
+
+  /** A phone's message the desktop would not have sent: the reason, under
+   *  it, once (a claim keeps a redelivery from saying it again). */
+  private async notePhoneMessageRefused(conversation: Conversation, message: ChatMessage, reason: string): Promise<void> {
+    const outcome = await this.storage.phoneTurnClaims().claim({ runId: `phone-refused-${message.id}`, conversationId: conversation.id, messageId: message.id,
+      participantId: "", at: new Date().toISOString() });
+    if (outcome !== "claimed") return;
+    await this.withChatMutation(conversation, async () => {
+      conversation.messages.push(this.message("system", reason, undefined, {
+        threadId: message.metadata?.threadId ?? message.id,
+        parentMessageId: message.id,
+        chatThreadRootId: message.metadata?.chatThreadRootId
+      }));
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
+  }
+
+  private phoneTurnShown(conversation: Conversation, message: ChatMessage, participant: ChatParticipant, runId: string): boolean {
+    const stopped = `@${participant.handle} stopped by user.`;
+    return conversation.messages.some((item) => item.metadata?.runId === runId ||
+      (item.role === "system" && item.content === stopped && item.metadata?.parentMessageId === message.id));
+  }
+
+  /** A member stopped before its turn for a phone's message started: the
+   *  line a member stopped while queued gets. */
+  private async notePhoneTurnStoppedBeforeStart(conversation: Conversation, message: ChatMessage, participant: ChatParticipant): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      conversation.messages.push(this.message("system", `@${participant.handle} stopped by user.`, undefined, {
+        threadId: message.metadata?.threadId ?? message.id,
+        parentMessageId: message.id,
+        chatThreadRootId: message.metadata?.chatThreadRootId
+      }));
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
+  }
+
+  /** A Stop for a phone's turn that is not running here. True when this
+   *  device is that member's home: the turn is then recorded as stopped and
+   *  never starts (or was stopped while starting). */
+  async stopUnstartedPhoneRun(conversationId: string, runId: string): Promise<boolean> {
+    const parsed = parsePhoneTurnRunId(runId);
+    if (!parsed) return false;
+    const pending = this.pendingPhoneRuns.get(runId);
+    if (pending) {
+      // Still being claimed: it never starts. Started: a Stop like any other.
+      if (pending.started) return false;
+      pending.controller.abort();
+      return true;
+    }
+    // The chat's newest messages: a turn the Stop names is a recent one.
+    const opened = await this.storage.openConversation(conversationId, PHONE_TURN_STOP_WINDOW);
+    if (!opened || opened.conversation.kind !== "chat") return false;
+    const participant = this.chatParticipants(opened.conversation).find((item) => item.id === parsed.participantId);
+    if (!participant || !this.startsPhoneTurnFor(participant)) return false;
+    // It ran already (on the member's earlier home): not stopped here.
+    if (opened.conversation.messages.some((item) => item.metadata?.runId === runId)) return false;
+    const cancelled = await this.storage.phoneTurnClaims().cancelUnstarted({
+      runId, conversationId, messageId: parsed.messageId, participantId: participant.id, at: new Date().toISOString()
+    });
+    // Claimed before: it ran (or runs, and the ordinary Stop reaches it).
+    if (!cancelled) return false;
+    // The message is here already but the start had not decided yet: it reads
+    // the cancelled claim and writes the stopped line itself.
+    return true;
+  }
+
+  /** Whether a run named in a Stop is a phone turn whose member lives here;
+   *  undefined while this copy of the chat does not know the member yet (the
+   *  Stop waits for it rather than being lost). */
+  async ownsPhoneRun(conversationId: string, runId: string): Promise<boolean | undefined> {
+    const parsed = parsePhoneTurnRunId(runId);
+    if (!parsed) return false;
+    if (this.pendingPhoneRuns.has(runId)) return true;
+    // The chat's body names its members: no need to read every message.
+    const opened = await this.storage.openConversation(conversationId, 1);
+    if (!opened || opened.conversation.kind !== "chat") return false;
+    const participant = this.chatParticipants(opened.conversation).find((item) => item.id === parsed.participantId);
+    if (!participant) return undefined;
+    return this.startsPhoneTurnFor(participant);
+  }
+
+  /**
+   * One chat of the User's server's copy, for a device that starts again
+   * from it (events it needed were forgotten while it was away, or a chain
+   * of this chat's changes was): merged the way a machine merges its first
+   * copy. The copy's shared content wins; this device keeps its own run
+   * bookkeeping, sessions and what it wrote itself. Saved without being
+   * announced (it is nobody's new change), and a chat deleted here stays
+   * deleted.
+   */
+  async mergeServerCopy(copied: CopiedConversation, options: {
+    desktopOriginId: string;
+    localOriginId?: string;
+    /** The desktop: the device a chat's own fields (title, members and their
+     *  permissions, the project) come from. From the copy it takes only the
+     *  messages it does not have yet, into chats it has, never those fields:
+     *  its own changes the server has not folded yet would be rolled back. */
+    ownsSharedFields?: boolean;
+  }): Promise<void> {
+    if (this.deletedConversationIds.has(copied.id) || await this.storage.conversationTombstones?.().isDeleted(copied.id)) return;
+    const merge = (local: Conversation | undefined): Conversation => mergeCopiedConversation(local, copied, {
+      desktopOriginId: options.desktopOriginId,
+      ...(options.localOriginId ? { localOriginId: options.localOriginId } : {}),
+      ...(this.hostMachineId ? { hostMachineId: this.hostMachineId } : {})
+    });
+    const existing = await this.storage.getConversation(copied.id);
+    if (existing && existing.kind !== "chat") return;
+    const held = new Set((existing?.messages ?? []).map((message) => message.id));
+    // A phone's messages this copy brings (they reached the server while this
+    // device could not read them) start their members here as if read in
+    // order; the same guards keep an old or already-run turn from starting.
+    const startPhoneMessagesFrom = (conversation: Conversation): void => {
+      const byOrigin = new Map<string, string[]>();
+      for (const message of conversation.messages) {
+        const author = copied.authors?.[message.id];
+        if (message.role !== "user" || held.has(message.id) || !author) continue;
+        byOrigin.set(author, [...(byOrigin.get(author) ?? []), message.id]);
+      }
+      for (const [author, ids] of byOrigin) {
+        const changes = conversation.messages.filter((message) => ids.includes(message.id)).map((message) => ({ type: "message.created" as const, message }));
+        this.notePhoneMessages(author, conversation.id, { version: CHAT_CHANGES_VERSION, conversationId: conversation.id, updatedAt: conversation.updatedAt, changes }, new Set(ids));
+      }
+    };
+    if (!existing) {
+      if (options.ownsSharedFields) return;
+      const created = merge(undefined);
+      await this.saveConversation(created, { emitChanges: false });
+      startPhoneMessagesFrom(created);
+      return;
+    }
+    await this.withChatMutation(existing, async () => {
+      if (options.ownsSharedFields) {
+        // Messages it lacks, and the copy's version of those another device
+        // wrote (a machine member's finished reply); its own stay as they are.
+        const merged = new Map(merge(existing).messages.map((message) => [message.id, message]));
+        const theirs = (id: string): boolean => {
+          const author = copied.authors?.[id];
+          return Boolean(author) && author !== options.localOriginId && author !== options.desktopOriginId;
+        };
+        let changed = false;
+        const messages = existing.messages.map((message) => {
+          const incoming = merged.get(message.id);
+          if (!incoming || !theirs(message.id) || JSON.stringify(incoming) === JSON.stringify(message)) return message;
+          changed = true;
+          return incoming;
+        });
+        const known = new Set(existing.messages.map((message) => message.id));
+        const added = [...merged.values()].filter((message) => !known.has(message.id));
+        if (!changed && added.length === 0) return;
+        existing.messages = [...messages, ...added]
+          .map((message, index) => ({ message, index }))
+          .sort((left, right) => left.message.createdAt.localeCompare(right.message.createdAt) || left.index - right.index)
+          .map((entry) => entry.message);
+        await this.saveConversation(existing, { emitChanges: false });
+        startPhoneMessagesFrom(existing);
+        return;
+      }
+      const merged = merge(existing);
+      existing.title = merged.title;
+      existing.messages = merged.messages;
+      existing.metadata = merged.metadata;
+      existing.updatedAt = merged.updatedAt;
+      if (merged.repoPath) existing.repoPath = merged.repoPath;
+      else delete existing.repoPath;
+      await this.saveConversation(existing, { emitChanges: false });
+      startPhoneMessagesFrom(existing);
+    });
   }
 
   private clone(conversation: Conversation): Conversation {
@@ -20480,6 +21126,12 @@ export class ChatService {
     });
   }
 }
+
+/** How far a phone's clock may be off from this device's. */
+const PHONE_TURN_CLOCK_SKEW_MS = 10 * 60_000;
+/** The newest messages a Stop for a phone turn not running here is checked
+ *  against. */
+const PHONE_TURN_STOP_WINDOW = 200;
 
 function mobileEventIdFromChatTrigger(triggerMessage: ChatMessage): string | undefined {
   if (triggerMessage.metadata?.appMessageSource !== "mobile-relay") {

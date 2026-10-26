@@ -50,7 +50,7 @@ async function cdpUp() {
   console.log(stamp(), "desktop closed; relaunching");
   const child = spawn("npx", ["electron", ".", "--remote-debugging-port=9223"], {
     cwd: repo, detached: true, stdio: "ignore",
-    env: { ...process.env, ACCORDAGENTS_USER_DATA_DIR: "/private/tmp/accordagents-qa-machines", ACCORDAGENTS_MOBILE_RELAY_URL: "ws://127.0.0.1:18099/v1/relay", ACCORD_AGENTS_DEBUG_LOGS: "1" }
+    env: { ...process.env, ACCORDAGENTS_USER_DATA_DIR: "/private/tmp/accordagents-qa-machines", ACCORD_AGENTS_DEBUG_LOGS: "1" }
   });
   child.unref();
   for (let i = 0; i < 60 && !(await cdpUp()); i += 1) await sleep(500);

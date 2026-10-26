@@ -3,46 +3,12 @@
 // never exercise the focus guard. The post-release menu assertions make that
 // guard load-bearing because losing focus closes the menu on blur.
 import assert from "node:assert/strict";
-import { execSync, spawn } from "node:child_process";
-import { createRequire } from "node:module";
-import { createServer } from "node:http";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { rm } from "node:fs/promises";
 import test from "node:test";
+import { attachApp, launchChrome, member, pairPage, serveMobileShell, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
 
-const require = createRequire(import.meta.url);
-const { attach } = require("./cdp.cjs");
-const { loadMobileOriginHeaders, mobileOriginHeadersForPath } = require("./mobile-origin-headers.cjs");
-
-const repoRoot = path.resolve(import.meta.dirname, "..");
-const root = path.join(repoRoot, "dist/mobile");
 const SITE_PORT = 8195;
 const CDP_PORT = 9353;
-const CHROME = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const TYPES = {
-  ".html": "text/html",
-  ".js": "text/javascript",
-  ".css": "text/css",
-  ".png": "image/png",
-  ".webmanifest": "application/manifest+json"
-};
-
-const originHeaders = loadMobileOriginHeaders(root);
-const site = createServer(async (req, res) => {
-  const rel = (req.url || "/").split("?")[0];
-  const file = path.join(root, rel === "/" ? "index.html" : rel);
-  try {
-    const body = await readFile(file);
-    res.writeHead(200, {
-      "content-type": TYPES[path.extname(file)] || "application/octet-stream",
-      ...mobileOriginHeadersForPath(originHeaders, rel)
-    });
-    res.end(body);
-  } catch {
-    res.writeHead(404).end("not found");
-  }
-});
 
 const waitFor = async (read, predicate, description) => {
   let value;
@@ -54,40 +20,21 @@ const waitFor = async (read, predicate, description) => {
   assert.fail(`${description}: ${JSON.stringify(value)}`);
 };
 
-const killStaleCdp = () => {
-  try {
-    execSync(`lsof -ti tcp:${CDP_PORT} -sTCP:LISTEN | xargs kill -9`, { stdio: "ignore" });
-  } catch {
-    // Nothing is listening on this test's dedicated port.
-  }
-};
-
-test("mention shortcut opens the wired menu without taking pointer focus", async () => {
-  await new Promise((resolve) => site.listen(SITE_PORT, "127.0.0.1", resolve));
-  killStaleCdp();
-  const profile = await mkdtemp(path.join(tmpdir(), "aa-mobile-mention-"));
-  const chrome = spawn(CHROME, [
-    "--headless=new",
-    "--disable-gpu",
-    "--no-first-run",
-    "--no-default-browser-check",
-    `--remote-debugging-port=${CDP_PORT}`,
-    `--user-data-dir=${profile}`,
-    "--window-size=430,860",
-    `http://127.0.0.1:${SITE_PORT}/`
-  ], { stdio: "ignore" });
+test("mention shortcut opens the wired menu without taking pointer focus", { timeout: 120_000 }, async () => {
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: SITE_PORT, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-mention-");
+  const chrome = launchChrome({ port: CDP_PORT, profile, url: `${site.origin}/`, width: 430, height: 860 });
 
   let app;
   try {
-    for (let attempt = 0; attempt < 40 && !app; attempt += 1) {
-      try {
-        app = await attach({ port: CDP_PORT, title: "AccordAgents" });
-      } catch {
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
-    }
-    assert.ok(app, "could not attach to Chrome");
-    const evaluate = async (expression) => (await app.evaluate(expression)).result.value;
+    // Paired with the User's server for real; then its reads are held off,
+    // so the members the composer offers are the ones this test hands it.
+    await hub.createChat("mention-qa", { title: "Mention QA", participants: [member("taylor-claude-engineer", { id: "taylor" }), member("drew-codex-engineer", { id: "drew", kind: "codex-cli" })] });
+    app = await attachApp({ port: CDP_PORT });
+    await pairPage(app, { hub, siteOrigin: site.origin });
+    hub.setGate(async (request) => request.method === "GET" && request.path.startsWith("/v1/phone/") ? { status: 503, body: { ok: false } } : undefined);
+    const evaluate = async (expression) => app.evaluate(expression);
 
     await waitFor(
       () => evaluate(`Boolean(globalThis.AccordAgentsMobile && document.querySelector("#mention-button"))`),
@@ -96,12 +43,6 @@ test("mention shortcut opens the wired menu without taking pointer focus", async
     );
 
     await evaluate(`(() => {
-      localStorage.setItem("accordagents.mobile.pairing.v1", JSON.stringify({
-        endpoint: "ws://127.0.0.1:9",
-        conversationId: "mention-qa",
-        relaySealKeyBase64: "${"a".repeat(43)}",
-        pairedAt: new Date(0).toISOString()
-      }));
       localStorage.setItem("accordagents.mobile.chatList.v1", JSON.stringify([{
         id: "mention-qa",
         title: "Mention QA",
@@ -299,8 +240,8 @@ test("mention shortcut opens the wired menu without taking pointer focus", async
   } finally {
     app?.close();
     chrome.kill("SIGKILL");
-    killStaleCdp();
-    await new Promise((resolve) => site.close(resolve));
+    await site.close();
+    await hub.close();
     await rm(profile, { recursive: true, force: true }).catch(() => undefined);
   }
 });

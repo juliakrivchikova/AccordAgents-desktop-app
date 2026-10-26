@@ -1,4 +1,4 @@
-// What the phone's Activity tab lists, worked out from rows the relay
+// What the phone's Activity tab lists, worked out from rows the server
 // delivered. Pure: the same module the shell loads, run under node.
 import assert from "node:assert/strict";
 import test from "node:test";

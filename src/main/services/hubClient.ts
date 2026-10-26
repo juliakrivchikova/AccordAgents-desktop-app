@@ -1,7 +1,13 @@
-import { isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
+import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
+import { BLOB_FRAGMENT_MAX_BYTES } from "../../shared/machineEvents";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import { HUB_PULL_MAX_EVENTS, hubBlobFragmentPath, hubWebSocketUrl, type HubDevice, type HubEventPullResponse, type HubEventPushResponse, type HubHealth, type HubLiveHead } from "../../shared/hubProtocol";
-import { signHubRequest, type HubSigningIdentity } from "./hubAuth";
+import {
+  HUB_PROGRESS_PATH, HUB_PULL_MAX_EVENTS, hubBlobFragmentPath, hubWebSocketUrl,
+  type HubChainResponse, type HubComposerCatalog, type HubDevice, type HubEventPullResponse, type HubEventPushResponse, type HubHealth, type HubKnownDevicesResponse,
+  type HubLiveHead, type HubMachineWakeRequest, type HubPhoneInvite, type HubProgressPost, type HubReadReport, type HubReadersResponse, type HubSnapshotResponse
+} from "../../shared/hubProtocol";
+import type { MachineProgressFrame } from "../../shared/machineProgress";
+import { sha256Hex, signHubRequest, type HubSigningIdentity } from "./hubAuth";
 import type { StorageService } from "./storage";
 
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -25,9 +31,15 @@ const LIVE_PING_MS = 25_000;
 const WebSocketClient = require("ws") as new (url: string) => LiveSocket;
 
 export class HubHttpError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly detail: Record<string, unknown> = {}) {
     super(message);
   }
+}
+
+/** The hub forgot events this device would need after its position: the
+ *  device starts again from the hub's copy (HubSync.resync). */
+export function isHubResyncRequired(error: unknown): error is HubHttpError {
+  return error instanceof HubHttpError && error.status === 410 && error.detail.resync === true;
 }
 
 /** The hub or the network was not there (no answer, a timeout): nothing is
@@ -56,6 +68,8 @@ async function reach(fetchImpl: typeof fetch, url: string, init: RequestInit): P
  */
 export class HubClient {
   private readonly base: string;
+  /** Response bytes read from the hub so far (as their length says). */
+  receivedBytes = 0;
 
   constructor(private readonly options: {
     url: string;
@@ -78,9 +92,10 @@ export class HubClient {
       ...(body !== undefined ? { body } : {}),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
     });
+    this.receivedBytes += Number(response.headers.get("content-length")) || 0;
     if (!response.ok) {
-      const detail = await response.json().catch(() => ({})) as { error?: string };
-      throw new HubHttpError(response.status, detail.error || `The hub answered ${response.status}.`);
+      const detail = await response.json().catch(() => ({})) as { error?: string } & Record<string, unknown>;
+      throw new HubHttpError(response.status, detail.error || `The hub answered ${response.status}.`, detail);
     }
     return await response.json() as T;
   }
@@ -93,8 +108,8 @@ export class HubClient {
 
   /** Pushes this device's events in order. A large body is uploaded only
    *  when the hub answers that it lacks it (`uploadBlob`). */
-  push(events: ChatEventEnvelope[]): Promise<HubEventPushResponse> {
-    return this.request<HubEventPushResponse>("POST", "/v1/events", JSON.stringify({ events }), "application/json");
+  push(events: ChatEventEnvelope[], options: { anchor?: string[] } = {}): Promise<HubEventPushResponse> {
+    return this.request<HubEventPushResponse>("POST", "/v1/events", JSON.stringify({ events, ...(options.anchor?.length ? { anchor: options.anchor } : {}) }), "application/json");
   }
 
   /** Uploads the fragments of one event's large body; false when this
@@ -115,8 +130,44 @@ export class HubClient {
     return true;
   }
 
-  pull(after: number, limit = HUB_PULL_MAX_EVENTS): Promise<HubEventPullResponse> {
-    return this.request<HubEventPullResponse>("GET", `/v1/events?after=${after}&limit=${limit}`);
+  /** The order after `after`. With `report` (what this device holds) the
+   *  hub keeps what it still needs, and answers 410 when it no longer has
+   *  it (isHubResyncRequired); `peek` reads without moving this device's place. */
+  pull(after: number, limit = HUB_PULL_MAX_EVENTS, report?: HubReadReport & { peek?: boolean }): Promise<HubEventPullResponse> {
+    const gaveUp = report?.gaveUp && report.gaveUpAt ? `&gaveUp=${Math.floor(report.gaveUp)}&gaveUpAt=${Math.floor(report.gaveUpAt)}` : "";
+    const reported = report
+      ? `&held=${Math.max(0, Math.floor(report.held))}&heldSince=${Math.max(0, Math.floor(report.heldSince))}&heldCount=${Math.max(0, Math.floor(report.heldCount))}${gaveUp}${report.peek ? "&peek=1" : ""}`
+      : "";
+    return this.request<HubEventPullResponse>("GET", `/v1/events?after=${after}&limit=${limit}${reported}`);
+  }
+
+  /** Where to start reading again (and, with `copy`, the hub's copy of the
+   *  chats), one page per call; see HubSnapshotResponse. */
+  snapshot(request: { page?: string; scopes?: readonly string[]; atMost?: number; since?: number; copy: boolean; chat?: string }): Promise<HubSnapshotResponse> {
+    const params = new URLSearchParams();
+    params.set("copy", request.copy ? "1" : "0");
+    if (request.chat) params.set("chat", request.chat);
+    if (request.page) params.set("page", request.page);
+    if (request.scopes?.length) params.set("scopes", request.scopes.join(","));
+    if (request.atMost !== undefined) params.set("atMost", String(Math.max(0, Math.floor(request.atMost))));
+    if (request.since !== undefined) params.set("since", String(Math.max(0, Math.floor(request.since))));
+    return this.request<HubSnapshotResponse>("GET", `/v1/snapshot?${params.toString()}`);
+  }
+
+  /** One chain's events in a range (a gap this device found). */
+  chain(originId: string, logScopeId: string, fromSeq: number, toSeq: number): Promise<HubChainResponse> {
+    const params = new URLSearchParams({ origin: originId, scope: logScopeId, from: String(fromSeq), to: String(toSeq) });
+    return this.request<HubChainResponse>("GET", `/v1/chain?${params.toString()}`);
+  }
+
+  /** Which of these devices are on the roster now. */
+  known(deviceIds: readonly string[]): Promise<HubKnownDevicesResponse> {
+    return this.request<HubKnownDevicesResponse>("GET", `/v1/devices/known?ids=${deviceIds.map(encodeURIComponent).join(",")}`);
+  }
+
+  /** The owner only: every reader, where it stands and what it holds. */
+  readers(): Promise<HubReadersResponse> {
+    return this.request<HubReadersResponse>("GET", "/v1/readers");
   }
 
   /** Stores a pulled event's large body locally before the event is applied
@@ -134,18 +185,70 @@ export class HubClient {
       });
       if (!response.ok) throw new HubHttpError(response.status, `The hub could not give a fragment (${response.status}).`);
       const bytes = Buffer.from(await response.arrayBuffer());
+      this.receivedBytes += bytes.length;
       await this.options.storage.deviceEventBlobs().store({ reference, index, bytesBase64: bytes.toString("base64") });
     }
   }
 
-  /** The phone links this desktop knows (their mailbox ids): the server
-   *  serves chats to those only. */
-  setPhoneLinks(mailboxIds: string[]): Promise<{ ok: boolean; known: number }> {
-    return this.request("PUT", "/v1/phone-links", JSON.stringify({ mailboxIds }), "application/json");
+  setRoster(devices: Array<Omit<HubDevice, "addedAt">>, resolvedInviteIds?: string[]): Promise<{ devices: HubDevice[] }> {
+    return this.request("PUT", "/v1/roster", JSON.stringify({ devices, ...(resolvedInviteIds ? { resolvedInviteIds } : {}) }), "application/json");
   }
 
-  setRoster(devices: Array<Omit<HubDevice, "addedAt">>): Promise<{ devices: HubDevice[] }> {
-    return this.request("PUT", "/v1/roster", JSON.stringify({ devices }), "application/json");
+  /** Registers a phone invite this desktop signed (owner only). */
+  putPhoneInvite(invite: HubPhoneInvite, signature: string): Promise<{ ok: boolean; inviteId: string }> {
+    return this.request("PUT", "/v1/phone-invites", JSON.stringify({ invite, signature }), "application/json");
+  }
+
+  /** The composer's catalog the phone reads (owner only). */
+  setCatalog(catalog: HubComposerCatalog): Promise<{ ok: boolean }> {
+    return this.request("PUT", "/v1/catalog", JSON.stringify({ catalog }), "application/json");
+  }
+
+  /** This desktop's members' live progress, for the phone to show while
+   *  they run (held in the hub's memory only). */
+  postProgress(frames: MachineProgressFrame[]): Promise<{ ok: boolean }> {
+    return this.request("POST", HUB_PROGRESS_PATH, JSON.stringify({ frames } satisfies HubProgressPost), "application/json");
+  }
+
+  /** The start-only keys the hub may wake the machines with (owner only). */
+  setMachineWake(machines: HubMachineWakeRequest["machines"]): Promise<{ ok: boolean; machines: number }> {
+    return this.request("PUT", "/v1/machine-wake", JSON.stringify({ machines } satisfies HubMachineWakeRequest), "application/json");
+  }
+
+  /** Puts bytes on the hub as a blob (a picture, an avatar) that an event or
+   *  a message names by its reference; fragments already there are sent
+   *  again harmlessly. */
+  async uploadBytes(bytes: Buffer): Promise<DeviceEventBlobReference> {
+    const reference: DeviceEventBlobReference = {
+      type: "device.event.blob",
+      blobHash: `sha256:${sha256Hex(bytes)}`,
+      byteLength: bytes.length,
+      fragments: Math.max(1, Math.ceil(bytes.length / BLOB_FRAGMENT_MAX_BYTES))
+    };
+    for (let index = 0; index < reference.fragments; index += 1) {
+      const part = bytes.subarray(index * BLOB_FRAGMENT_MAX_BYTES, Math.min(bytes.length, (index + 1) * BLOB_FRAGMENT_MAX_BYTES));
+      await this.request("PUT", hubBlobFragmentPath(reference, index), part, "application/octet-stream");
+    }
+    return reference;
+  }
+
+  /** Reads a blob's bytes from the hub (a picture a phone posted). */
+  async downloadBytes(reference: DeviceEventBlobReference): Promise<Buffer> {
+    if (!isDeviceEventBlobReference(reference)) throw new Error("Not a blob reference.");
+    const identity = await this.options.identity();
+    const parts: Buffer[] = [];
+    for (let index = 0; index < reference.fragments; index += 1) {
+      const pathWithQuery = hubBlobFragmentPath(reference, index);
+      const response = await reach(this.options.fetchImpl ?? fetch, `${this.base}${pathWithQuery}`, {
+        headers: { authorization: signHubRequest(identity, { method: "GET", pathWithQuery }) },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      });
+      if (!response.ok) throw new HubHttpError(response.status, `The hub could not give a fragment (${response.status}).`);
+      parts.push(Buffer.from(await response.arrayBuffer()));
+    }
+    const bytes = Buffer.concat(parts);
+    if (`sha256:${sha256Hex(bytes)}` !== reference.blobHash || bytes.length !== reference.byteLength) throw new Error("The hub's copy of that body does not match its name.");
+    return bytes;
   }
 
   /**

@@ -1,113 +1,157 @@
-// W-G(a,b): pairing credentials leave the address bar once the pairing
-// persists, and the seal key is accepted from the URL fragment only.
+// W-G(a): pairing credentials leave the address bar once the pairing is
+// read, and a pairing made the old way (through the desktop's relay) is used
+// for nothing.
 //
 // (a) A pairing URL surviving in history, screenshots or share sheets must
-// not be able to pair anyone else: after bootstrap the query credentials and
-// the fragment are gone, while non-credential params (the qa debug flag)
-// survive. (b) A key in the query string reaches server logs and referrers,
-// so the legacy query path must refuse it — the app never issued such links.
+// not be able to pair anyone else: after the phone pairs with the User's
+// server from the code the desktop shows, the code (the fragment and the
+// `pair` parameter) is gone from the address, while non-credential params
+// (the qa debug flag) survive. A link made the old way is scrubbed the same
+// way and pairs nothing.
+// (b) A phone that still holds an old pairing says once, plainly, that it has
+// to pair again, and what that pairing kept on the phone is cleared; pairing
+// with the server takes the note away. A phone already paired with the server
+// drops an old pairing it still holds without a word.
 //
-// Runs the real built PWA in Chrome, like the other mobile harnesses.
+// Runs the real built PWA in Chrome against a real hub, like the other mobile
+// harnesses.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createRequire } from "node:module";
-import { createServer } from "node:http";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
-import { spawn, execSync } from "node:child_process";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { rm } from "node:fs/promises";
+import { HUB_PAIRING_KEY, attachApp, launchChrome, member, pairPage, serveMobileShell, sleep, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
 
-const require = createRequire(import.meta.url);
-const { attach } = require("./cdp.cjs");
-const { loadMobileOriginHeaders, mobileOriginHeadersForPath } = require("./mobile-origin-headers.cjs");
-
-const repoRoot = path.resolve(import.meta.dirname, "..");
-const root = path.join(repoRoot, "dist/mobile");
 const SITE_PORT = 8181;
 const CDP_PORT = 9349;
-const CHROME = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const OLD_PAIRING_KEY = "accordagents.mobile.pairing.v1";
+const OLD_NOTICE = "This phone was paired the old way. Pair it again from Settings on your Mac.";
 
-const TYPES = {
-  ".html": "text/html", ".js": "text/javascript", ".css": "text/css",
-  ".png": "image/png", ".webmanifest": "application/manifest+json"
-};
-
-const originHeaders = loadMobileOriginHeaders(root);
-const site = createServer(async (req, res) => {
-  const rel = (req.url || "/").split("?")[0];
-  const file = path.join(root, rel === "/" ? "index.html" : rel);
-  try {
-    const body = await readFile(file);
-    res.writeHead(200, {
-      "content-type": TYPES[path.extname(file)] || "application/octet-stream",
-      ...mobileOriginHeadersForPath(originHeaders, rel)
-    });
-    res.end(body);
-  } catch {
-    res.writeHead(404).end("not found");
-  }
-});
-
-const killStaleCdp = () => {
-  try {
-    execSync(`lsof -ti tcp:${CDP_PORT} -sTCP:LISTEN | xargs kill -9`, { stdio: "ignore" });
-  } catch {
-    // nothing listening
-  }
-};
-
-test("pairing credentials leave the URL and a query-string key is refused", async () => {
-  await new Promise((r) => site.listen(SITE_PORT, "127.0.0.1", r));
-  killStaleCdp();
-  const profile = await mkdtemp(path.join(tmpdir(), "aa-mobile-hygiene-"));
-  const KEY = "a".repeat(43);
-  const bootUrl = `http://127.0.0.1:${SITE_PORT}/?rid=rv-hyg&route=route-hyg&cap=CAP-HYG&qa=1#k=${KEY}`;
-  const chrome = spawn(CHROME, [
-    "--headless=new", "--no-first-run", "--no-default-browser-check",
-    `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${profile}`,
-    "--window-size=430,860", bootUrl
-  ], { stdio: "ignore" });
-
+test("pairing credentials leave the URL; an old pairing is cleared and said once", { timeout: 180_000 }, async () => {
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: SITE_PORT, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-hygiene-");
+  const chrome = launchChrome({ port: CDP_PORT, profile, url: `${site.origin}/`, width: 430, height: 860 });
   let app;
   try {
-    for (let i = 0; i < 40 && !app; i += 1) {
-      try {
-        app = await attach({ port: CDP_PORT, title: "AccordAgents" });
-      } catch {
-        await new Promise((r) => setTimeout(r, 500));
-      }
+    await hub.createChat("chat-hygiene", { title: "Hygiene", participants: [member("drew")] });
+    app = await attachApp({ port: CDP_PORT });
+    const evaluate = app.evaluate;
+    const state = () => evaluate(`(async () => {
+      const db = await self.AccordMobileDb.openControlDb(indexedDB);
+      const all = (name) => new Promise((resolve) => { const request = db.transaction(name).objectStore(name).getAll(); request.onsuccess = () => resolve(request.result); request.onerror = () => resolve([]); });
+      const stores = {};
+      for (const name of ["sealedEnvelopes", "events", "machineEvents", "machineOutbox", "machineBlobs"]) stores[name] = (await all(name)).length;
+      const meta = (await all("meta")).map((record) => record.key);
+      const outbox = (await all("outbox")).map((entry) => entry.eventId + (entry.hub ? ":hub" : ""));
+      db.close();
+      const notices = [...document.querySelectorAll("#chat-list .mobile-empty")].map((node) => node.textContent.trim());
+      return {
+        href: location.href,
+        old: localStorage.getItem(${JSON.stringify(OLD_PAIRING_KEY)}),
+        hub: localStorage.getItem(${JSON.stringify(HUB_PAIRING_KEY)}),
+        notices, stores, meta, outbox,
+        chats: document.querySelectorAll(".mobile-chat-row").length,
+        dock: !document.getElementById("home-dock").hidden
+      };
+    })()`);
+
+    // --- a link made the old way pairs nothing and leaves the address ------
+    const KEY = "a".repeat(43);
+    await app.send("Page.navigate", { url: `${site.origin}/?rid=rv-hyg&route=route-hyg&cap=CAP-HYG&qa=1#k=${KEY}` });
+    await app.waitFor(`Boolean(globalThis.AccordAgentsMobile) && Boolean(document.querySelector("#chat-list .mobile-empty"))`, "the app came up");
+    await sleep(1000);
+    let now = await state();
+    assert.equal(now.old, null, "an old-way link is not kept as a pairing");
+    assert.equal(now.hub, null, "and pairs nothing");
+    for (const secret of ["rid=", "route=", "cap=", KEY, "#"]) {
+      assert.ok(!now.href.includes(secret), `${secret} must leave the URL: ${now.href}`);
     }
-    assert.ok(app, "could not attach to Chrome");
-    const evaluate = async (expr) => (await app.evaluate(expr)).result.value;
-    await new Promise((r) => setTimeout(r, 3000));
+    assert.ok(now.href.includes("qa=1"), "non-credential params survive the scrub: " + now.href);
+    assert.deepEqual(now.notices.map((text) => text.startsWith("Scan the code from your Mac")), [true], `the phone asks to be paired: ${JSON.stringify(now.notices)}`);
+    assert.equal(now.dock, false, "and shows no bar before it is");
 
-    const afterBoot = JSON.parse(await evaluate(`(() => JSON.stringify({
-      href: location.href,
-      pairing: JSON.parse(localStorage.getItem("accordagents.mobile.pairing.v1") || "null")
-    }))()`));
-    assert.equal(afterBoot.pairing?.relaySealKeyBase64, KEY, "the fragment key pairs the device");
-    assert.equal(afterBoot.pairing?.rendezvousId, "rv-hyg");
-    assert.ok(!afterBoot.href.includes("rid="), "rendezvous id must leave the URL: " + afterBoot.href);
-    assert.ok(!afterBoot.href.includes("cap="), "capability must leave the URL: " + afterBoot.href);
-    assert.ok(!afterBoot.href.includes(KEY), "the seal key must leave the URL: " + afterBoot.href);
-    assert.ok(afterBoot.href.includes("qa=1"), "non-credential params survive the scrub: " + afterBoot.href);
+    // --- an old pairing held on the phone: one plain notice, data cleared ---
+    await evaluate(`(async () => {
+      localStorage.setItem(${JSON.stringify(OLD_PAIRING_KEY)}, JSON.stringify({ endpoint: "wss://relay.accordagents.com/v1/relay", relaySealKeyBase64: ${JSON.stringify(KEY)},
+        rendezvousId: "rv-old", routingId: "route-old", fingerprint: "CAP-OLD", pairedAt: new Date(0).toISOString() }));
+      localStorage.setItem("accordagents.mobile.mailboxCursor.v1", JSON.stringify({ epoch: "e1", cursor: 7 }));
+      const db = await self.AccordMobileDb.openControlDb(indexedDB);
+      const tx = db.transaction(["meta", "sealedEnvelopes", "events", "machineEvents", "machineOutbox", "machineBlobs", "outbox"], "readwrite");
+      tx.objectStore("meta").put({ key: "mailboxAccess", endpointUrl: "https://relay.accordagents.com/v1/mailbox/events", mailboxId: "mb-x", token: "t", cursor: 7 });
+      tx.objectStore("meta").put({ key: "machine-command-identity", deviceId: "d" });
+      tx.objectStore("meta").put({ key: "machine-access", machines: [] });
+      tx.objectStore("meta").put({ key: "machine-change-order:o:c", seq: 1 });
+      tx.objectStore("meta").put({ key: "chatTitles", titles: { kept: "Kept" } });
+      tx.objectStore("sealedEnvelopes").put({ eventId: "env-1" });
+      tx.objectStore("events").put({ eventId: "ev-1", originId: "o", logScopeId: "s", originSeq: 1, conversationId: "c" });
+      tx.objectStore("machineEvents").put({ eventId: "mev-1", originId: "o", logScopeId: "s", originSeq: 1 });
+      tx.objectStore("machineOutbox").put({ eventId: "mout-1" });
+      tx.objectStore("machineBlobs").put({ key: "blob:1" });
+      tx.objectStore("outbox").put({ eventId: "relay-entry", conversationId: "c", kind: "message.created", payload: { content: "old" }, status: "waiting-to-sync", createdAt: new Date(0).toISOString(), attempts: 0 });
+      await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); });
+      db.close();
+      return true;
+    })()`);
+    await app.send("Page.reload", {});
+    await app.waitFor(`Boolean(globalThis.AccordAgentsMobile) && Boolean(document.querySelector("#chat-list .mobile-empty"))`, "the app came up again");
+    await sleep(1000);
+    now = await state();
+    assert.deepEqual(now.notices, [OLD_NOTICE], `one plain notice says why: ${JSON.stringify(now.notices)}`);
+    assert.equal(now.old, null, "the old pairing is gone");
+    assert.equal(await evaluate(`localStorage.getItem("accordagents.mobile.mailboxCursor.v1")`), null, "with its mailbox cursor");
+    assert.deepEqual(now.stores, { sealedEnvelopes: 0, events: 0, machineEvents: 0, machineOutbox: 0, machineBlobs: 0 }, "what the old way kept is cleared");
+    for (const key of ["mailboxAccess", "machine-command-identity", "machine-access", "machine-change-order:o:c"]) {
+      assert.ok(!now.meta.includes(key), `${key} is cleared: ${JSON.stringify(now.meta)}`);
+    }
+    assert.ok(now.meta.includes("chatTitles"), "what is not the old pairing's is kept");
+    assert.deepEqual(now.outbox, [], "the queue in the relay's form is cleared");
+    assert.equal(now.dock, false, "no bar while unpaired");
+    // The note stays until the phone is paired again, across a launch.
+    await app.send("Page.reload", {});
+    await app.waitFor(`Boolean(globalThis.AccordAgentsMobile) && Boolean(document.querySelector("#chat-list .mobile-empty"))`, "the app came up a third time");
+    await sleep(500);
+    assert.deepEqual((await state()).notices, [OLD_NOTICE], "the note survives a relaunch");
 
-    // (b) The legacy long-form branch must refuse a key riding in the query.
-    await evaluate(`(() => { localStorage.clear(); sessionStorage.clear(); return true; })()`);
-    await app.send("Page.navigate", {
-      url: `http://127.0.0.1:${SITE_PORT}/?rendezvousId=rv-hyg2&routingId=route-hyg2&fingerprint=CAP2&relaySealKey=${KEY}&endpoint=wss%3A%2F%2Frelay.accordagents.com%2Fv1%2Frelay`
-    });
-    await new Promise((r) => setTimeout(r, 3000));
-    const afterQueryKey = JSON.parse(await evaluate(`(() => JSON.stringify({
-      pairing: JSON.parse(localStorage.getItem("accordagents.mobile.pairing.v1") || "null")
-    }))()`));
-    assert.ok(afterQueryKey.pairing, "the long-form pairing still bootstraps");
-    assert.ok(!afterQueryKey.pairing.relaySealKeyBase64, "a query-string seal key is refused");
+    // --- pairing with the server: the code leaves the address --------------
+    await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+    await app.waitFor(`document.querySelectorAll(".mobile-chat-row").length === 1`, "the chats from the server");
+    now = await state();
+    assert.ok(now.hub, "the phone is paired with the server");
+    assert.equal((await hub.phones()).length, 1, "and the server knows it");
+    for (const secret of ["pair=", "hub=", "t=", "#"]) {
+      assert.ok(!now.href.includes(secret), `${secret} must leave the URL: ${now.href}`);
+    }
+    assert.ok(now.href.includes("qa=1"), "non-credential params survive the scrub: " + now.href);
+    assert.deepEqual(now.notices, [], "the old-pairing note is gone once paired again");
+    assert.equal(await evaluate(`localStorage.getItem("accordagents.mobile.oldPairingCleared.v1")`), null);
+    assert.ok(now.meta.includes("hub-identity"), "the phone keeps its own key for the server");
+
+    // --- paired again with a new code: the same phone, not a second one -----
+    const firstId = JSON.parse(now.hub).deviceId;
+    await pairPage(app, { hub, siteOrigin: site.origin });
+    await app.waitFor(`document.querySelectorAll(".mobile-chat-row").length === 1`, "the chats after pairing again");
+    const again = JSON.parse((await state()).hub);
+    assert.equal(again.deviceId, firstId, "the phone keeps its key when it pairs with the same server again");
+    const phones = await hub.phones();
+    assert.equal(phones.length, 1, `the server knows one phone, on the new code: ${JSON.stringify(phones.map((phone) => phone.deviceId))}`);
+    assert.equal(phones[0].deviceId, firstId);
+
+    // --- a phone paired with the server drops an old pairing silently -------
+    await evaluate(`(() => {
+      localStorage.setItem(${JSON.stringify(OLD_PAIRING_KEY)}, JSON.stringify({ endpoint: "wss://relay.accordagents.com/v1/relay", relaySealKeyBase64: ${JSON.stringify(KEY)}, pairedAt: new Date(0).toISOString() }));
+      return true;
+    })()`);
+    await app.send("Page.reload", {});
+    await app.waitFor(`Boolean(globalThis.AccordAgentsMobile) && document.querySelectorAll(".mobile-chat-row").length === 1`, "the chats after the relaunch");
+    now = await state();
+    assert.equal(now.old, null, "the old pairing is dropped");
+    assert.deepEqual(now.notices, [], "without a notice: this phone is paired");
+    assert.ok(now.hub, "and its server pairing stands");
+    assert.ok(now.outbox.every((entry) => entry.endsWith(":hub")), `only the server's queue is kept: ${JSON.stringify(now.outbox)}`);
   } finally {
     app?.close();
     chrome.kill("SIGKILL");
-    killStaleCdp();
-    site.close();
+    await site.close();
+    await hub.close();
     await rm(profile, { recursive: true, force: true }).catch(() => undefined);
   }
 });

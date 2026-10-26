@@ -1,6 +1,6 @@
 # Machines transport — step 1: event contract (ids, delivery states, merge)
 
-Companion to `01-native-control-probes.md`. This is the contract work items 3–5 of the resolution implement. Everything here builds on what exists: the signed `ChatEventEnvelope` (`src/shared/chatEvents.ts`), the projector with per-origin gap and fork detection (`src/shared/chatEventProjection.ts`), device capability grants (`src/shared/chatDeviceCapabilities.ts`), residency (`src/shared/chatEventResidency.ts`), the sealed mailbox with server-stamped `arrivalSeq` and TTL retention (`cloudflare/relay/src/index.ts`), and per-device ed25519 identities (`ChatEventLogService`).
+Companion to `01-native-control-probes.md`. This is the contract work items 3–5 of the resolution implement. Everything here builds on what exists: the signed `ChatEventEnvelope` (`src/shared/chatEvents.ts`), the projector with per-origin gap and fork detection (`src/shared/chatEventProjection.ts`), the User's own server with its one order of signed events (`src/hub/hubLog.ts`, `src/shared/hubProtocol.ts`), and per-device ed25519 identities (`ChatEventLogService`). Since 2026-10-26 there is no relay: no sealed mailbox, no relay room and no device capability grants; every device talks only to the User's server (`docs/parity-requirements.md`).
 
 ## 1. Identities
 
@@ -12,7 +12,7 @@ Companion to `01-native-control-probes.md`. This is the contract work items 3–
 | logical session id | `${conversationId}:${participantId}`; the provider session/thread id (`sessionId`) is a property of it and may change on native resume. | existing `participantSessions` |
 | `runId` / `turnId` | One turn of one participant. Codex: `turn.id` from `turn/start`; Claude: assigned by the home machine per `user` message it writes (`turn-<uuid>`), correlated by `session_id` and order. | existing `runId` |
 | `commandId` / `operationId` | Idempotency key of a request-like event (turn request, Stop, decision, draft op). Retries reuse it; receivers dedupe on it. | new |
-| `eventId` | `evt-<uuid>`; unique per event; the outbox and the mailbox dedupe on it. | existing |
+| `eventId` | `evt-<uuid>`; unique per event; the outbox and the User's server dedupe on it. | existing |
 | `executorGeneration` | Monotonic counter per logical session on its home machine, bumped when a provider process is (re)started; every receipt carries it. | new |
 
 ## 2. Envelope and clocks
@@ -67,7 +67,7 @@ This browser check does not replace the physical-phone cutover gate.
 
 ## 3. Event kinds
 
-Existing kinds stay (`message.created`, `message.updated`, `conversation.metadata.updated`, `device.capability.granted|revoked`, legacy import kinds). New kinds, all in the same envelope:
+Existing kinds stay (`message.created`, `message.updated`, `conversation.metadata.updated`, legacy import kinds; `device.capability.granted|revoked` went with the relay). New kinds, all in the same envelope:
 
 | Kind | Emitted by | Payload (essentials) | Precondition at apply |
 |---|---|---|---|
@@ -83,8 +83,8 @@ Existing kinds stay (`message.created`, `message.updated`, `conversation.metadat
 | `request.created` / `request.answered` / `request.cancelled` | any | participant-request lifecycle (existing metadata as payload) | lifecycle order per `requestId` |
 | `artifact.created` / `artifact.revised` / `artifact.signed` / `artifact.access.changed` / `artifact.draft.saved` / `artifact.draft.submitted` / `artifact.draft.withdrawn` / `artifact.published` | any | `artifactId`, `versionEventId` (= this event's id for created/revised/published), `contentHash`, `expectedHeadVersionEventId` for revise/sign/access, `operationId` for drafts | see §6 |
 | `blob.fragment` | any | `blobHash`, `index`, `total`, bytes (≤ 384 KiB, the existing scheme) | an event referencing `blobHash` is applied only after all fragments are stored |
-| `ack` | every roster machine | `forOriginId`, `upToOriginSeq`, `logScopeId` | drives outbox retention (§4) |
-| `sync.resend.requested` | any machine | `forOriginId`, `fromSeq`, `toSeq`, `logScopeId` | the origin re-appends the same events (idempotent by `eventId`) |
+| `ack` | every roster machine | `forOriginId`, `upToOriginSeq`, `logScopeId` | not sent through the User's server: each reader's place in its order is the only acknowledgement (§4) |
+| `sync.resend.requested` | any machine | `forOriginId`, `fromSeq`, `toSeq`, `logScopeId` | not sent through the User's server: a gap is asked of the server (§5) |
 
 Presence (`machine.hello`, heartbeat) is live-room traffic, not a durable event.
 
@@ -93,13 +93,19 @@ Presence (`machine.hello`, heartbeat) is live-room traffic, not a durable event.
 States of one event as seen by its emitter, all visible on the sending surface:
 
 1. **local-applied** — folded into the emitter's own copy; App MCP tool results are returned at this point.
-2. **delivered** — the relay mailbox accepted it (`arrivalSeq`); the live room may have fanned it out earlier, which never counts as delivery.
-3. **acknowledged by \<machine\>** — that machine appended an `ack` covering this `originSeq`.
-4. **applied / superseded there** — derived from the machine's own projection; shown when the machine reports it (acks carry the projection outcome for precondition-bearing events).
+2. **on the server** — the User's server holds it at its place in the one order (the push was answered `accepted` or `duplicate`). This is the only acknowledgement a writer waits for; a live room may have passed it on earlier, which never counts.
+3. **read by \<device\>** — that device's place in the server's order is past it. Nobody sends a separate acknowledgement.
+4. **applied / superseded there** — derived from that device's own projection.
 
-The **outbox** persists every event before the first send (Electron: SQLite; PWA: IndexedDB; headless machine: SQLite) and keeps it until every machine in the chat's roster has acknowledged it, independent of relay retention (72 h). Roster machines = home machines of the chat's participants plus machines that opened the chat. Outbox pressure (a roster machine absent for long) is visible in Machines settings.
+The **outbox** persists every event before the first send (Electron: SQLite; PWA: IndexedDB; headless machine: SQLite) and keeps it until the server holds it. A device then forgets its own events a week after the server has them (the newest of each chain stays, so the next one continues it), and the server forgets after its own grace periods (`docs/parity-requirements.md`, phase 2). A device that stops reading keeps everything after its place on the server, and Settings → Your server names it after a week.
 
 ### Implemented delivery foundation, 2026-09-06
+
+(Since 2026-10-26 every channel runs through the User's server: it keeps no
+recipient rows, sends no acknowledgements, repair requests or mailbox traffic
+itself, and the server's order delivers every event. What follows about
+recipient outboxes, the relay's cursor and mailbox acceptance describes the
+relay path, which is gone.)
 
 `DeviceEventChannel` now carries machine conversation copies, deltas, copy
 boundaries, back deltas (retired 2026-10-01 for chat change events, below),
@@ -165,8 +171,10 @@ ACK for origin repair. No relay deployment is needed for these changes.
 Machines hold every chat of their owner, whether or not a member of that chat
 runs on them, so their members can search every chat of a project (the User's
 decision of 2026-09-22; it replaces "local-only conversations stay outside
-sync"). The only way a machine gets chat state is events through the relay,
-plus one direct copy at setup (below).
+sync"). The only way a machine gets chat state is events through the User's
+server, plus one direct copy at setup (below); a device that was away while
+what the server kept for it was forgotten starts again from the server's copy
+of the chats.
 
 - **One event per save.** Every chat save writes one signed `chat.changes`
   event in the same SQLite transaction as the save (`chatChanges.ts`,
@@ -199,28 +207,19 @@ plus one direct copy at setup (below).
   the desktop's changes have arrived (trying means reading the whole chat). A
   change of a newer version than a device folds waits there, unapplied, until
   that device is updated.
-- **Recipients.** The desktop addresses every enrolled machine, online or not,
-  and keeps each change until that machine confirms it. One whose runtime
-  cannot fold chat changes yet (its hello says so) is sent none of them, by
-  the desktop or by another machine (the roster says which can), and gets
-  them all, in order, once it can: no machine is ever left with a gap. Kept
-  changes are left out of what is sent at all, not read and skipped on each
-  pass, and those a setup copy already contains are confirmed once the
-  machine has imported it rather than sent after it. The list is read from
-  the stored machines before any chat is saved, so a save made while machines
-  are still connecting reaches them too, and a machine stays on it through a
-  disconnect until it is removed. A machine addresses the desktop and every
-  machine in its trust roster; the roster says which machines can read chat
-  changes, and is sent again when that changes (at setup, or in a hello). The
-  desktop also forwards each change a machine wrote to every other machine,
-  unchanged and signed by its author; a machine accepts such a forward only
-  when the author is one of the owner's machines. A missing change can be
-  served by any device that holds it, so an author that is off does not hold
-  the others back.
+- **Through the server.** Every device pushes the chat changes it writes into
+  the User's server's one order and reads everyone else's back from its own
+  place there. Nobody addresses, keeps or forwards a change for another
+  device, and a writer is done once the server holds it. The server checks
+  each change against its author's key and the chain it extends, and folds it
+  into its own copy of the chat. A gap is asked of the server
+  (`HubSync.repairGap`), so an author that is off does not hold the others
+  back.
 - **Turns.** A turn request names the newest chat change the machine must have
   applied first. The machine waits for it, and fails the turn honestly after
-  10 minutes instead of running on stale messages. A phone's request names no
-  change; the machine waits for the message the turn answers. A machine whose
+  10 minutes instead of running on stale messages. A phone sends no turn
+  request: the member's home starts the turn once when it reads the phone's
+  message, claiming its run id first (`phoneTurnClaims.ts`). A machine whose
   runtime cannot fold chat changes yet is sent no turn: the turn fails, saying
   that the machine is updated the next time it is connected and idle.
 - **First copy.** At setup, and at the first upgrade of a machine that never
@@ -237,43 +236,33 @@ plus one direct copy at setup (below).
   itself (its members' replies, a phone's messages typed into it) and the
   reactions its members made; a member that watches a chat from the machine
   starts caught up rather than answering what was said before the copy.
-- **Cleanup.** A chat change every recipient has confirmed (and this device
-  applied, if it came from elsewhere) is forgotten after a day; the newest
-  event of each chat and author stays, because the next one continues its
-  sequence. A machine that never confirms keeps its share waiting: once every
-  10 days the User is asked about each machine inactive for 10 days or more,
-  and "Remove" takes it out of the app, drops what was kept for it, and stops
-  offering the other machines what it wrote (they no longer trust its
-  signature). A removal the app stopped in the middle of is finished at the
-  next start. A machine that connects while the question is open is in use,
-  and the question is withdrawn. Known limit: what the removed machine wrote
-  that another machine had not received yet stays missing on that machine
-  (seen in QA as an empty reply bubble there); the desktop's chat, the one
-  the User sees, has it. Closing it would make the desktop the writer of a
-  removed machine's members' messages. A machine whose runtime is never
-  updated keeps its share of every change on this desktop until it is updated
-  or removed.
+- **Cleanup.** The server forgets a chat change a week after it has folded it
+  into its copy; a device forgets its own events a week after the server has
+  them (the newest of each chain stays, because the next one continues its
+  sequence). A device that stops reading keeps everything after its place on
+  the server and is never dropped automatically: Settings → Your server names
+  it after a week, and once every 10 days the User is asked about each
+  machine that has not read for 10 days or more; "Remove" takes it out of the
+  app. A machine that connects while the question is open is in use, and the
+  question is withdrawn. The grace periods are in `docs/parity-requirements.md`
+  (phase 2).
 - **Retired.** `machine.conversation.sync`, `.delta` from the desktop,
   `.sync.done` and `.resync` are no longer sent; one that still arrives from an
   older peer is logged and ignored. A `.backdelta` from a runtime that has not
   been updated (or one it queued before its update) is stored, limited to that
   machine's own members' messages and what it created itself.
-- **Phone.** A phone that talks to a machine while the desktop is away still
-  sends its message as a `.delta`, which may carry only the User's own
-  message; a machine that does not hold that chat yet keeps it (and the turn
-  behind it) until the chat arrives. The phone receives the machine's own
-  chat changes (shared in the machine's room while the desktop has not
-  confirmed them) to show its members' messages and choices, in the order
-  they arrive: what it missed went to the desktop, so no gap holds them. A
-  change that arrives after a newer one for the same message (a late copy, a
-  resend) does not put the older text back.
+- **Phone.** The phone talks only to the User's server. Its messages, card
+  answers and Stops are signed events in the server's order, and it reads
+  chats from the server's copy; it has no channel to a machine. The member's
+  home (the desktop for its own members, the machine for the members it
+  hosts) starts the turn for a phone's message once.
 
 ## 5. Channel and repair
 
-- The relay room is extended from `desktop | phone` to addressed enrolled devices (any number), with per-connection generations and fan-out to all peers; the mailbox stays the delivery buffer with cursor reads; the relay assigns no order and applies no rules (the `arrivalSeq` is a cursor, never an ordering key).
-- Catch-up on reconnect: mailbox cursor read (`afterArrival`), then per-origin `afterSeq` reads for detected gaps, then `sync.resend.requested` to the origin when the mailbox no longer holds the range.
-- Resend reproduces the identical events (same `eventId`, `originSeq`, `logicalTs`), so merge order is identical however an event arrived.
-- Sealing, enrollment, revocation (`device.capability.revoked` with `effectiveAfterLogicalTs`), and tombstones stay as today. Every chat goes to every enrolled machine (§4, chat change events).
+- Devices meet in the User's server's rooms (`/v1/room`; each machine has its own) for live traffic only: sealed frames such as `machine.hello` pass through and nothing is kept. The newest connection of a device takes its seat.
+- Every durable event goes into the server's one order. A device reads it from its own place; a gap is asked of the server (`HubSync.repairGap`), and a device the server no longer holds enough for starts again from the server's copy of the chats.
+- The server serves the identical events (same `eventId`, `originSeq`, `logicalTs`), so merge order is identical however an event arrived.
+- Sealing and tombstones stay as before. Enrollment and revocation are the roster: the desktop that set up the server decides which devices it answers and which devices each machine trusts. Every chat goes to every enrolled machine (§4, chat change events).
 
 ## 6. Merge, supersede, receipts, signatures
 
@@ -289,4 +278,4 @@ plus one direct copy at setup (below).
 
 ## Relay tunnel client note (2026-09-06)
 
-A socket the tunnel client has already moved on from (replaced by a newer connection, or closed and reconnected before the old close arrived) must never start another dial: the second dial evicts the live socket at the relay with code 4001, whose close dials again, and the two sockets evict each other forever. `RelayTunnelClient` now ignores the close of a socket that is no longer current (`scripts/relay-tunnel-client.test.mjs`, "does not dial again for a socket it already replaced"). The phone↔desktop tunnel uses the same client, so this fix applies there too.
+`RelayTunnelClient` went with the relay on 2026-10-26. `HubTunnelClient`, which reaches the server's rooms, keeps its rule: the close of a socket it has already moved on from starts no new dial, and a socket the server closed because a newer connection of the same device took its seat (`HUB_ROOM_REPLACED_CLOSE_CODE`) is not dialed again.

@@ -7,7 +7,7 @@ interface PendingProgress { structure: string; frame: MachineProgressFrame; froz
 
 /** Text snapshots coalesce before the next flush; observed state changes do
  * not. A failed write retains the identical frame/id ahead of later updates. */
-export class MachineProgressSender {
+export class MachineProgressSender<Published = ChatEventEnvelope> {
   private readonly streamId = randomUUID();
   private readonly pending: PendingProgress[] = [];
   private latest?: ReviewProgress;
@@ -22,10 +22,13 @@ export class MachineProgressSender {
 
   constructor(private readonly options: {
     conversationId: string;
-    publish(frame: MachineProgressFrame): Promise<ChatEventEnvelope>;
-    stored(event: ChatEventEnvelope, frame: MachineProgressFrame): Promise<unknown>;
+    publish(frame: MachineProgressFrame): Promise<Published>;
+    stored(published: Published, frame: MachineProgressFrame): Promise<unknown>;
     onError(error: unknown): void;
     onRecovered(): void;
+    /** How long text-only updates gather before they are written (a
+     *  structural change is written at once). */
+    textFlushMs?: number;
   }) {}
 
   note(progress: ReviewProgress): void {
@@ -45,7 +48,7 @@ export class MachineProgressSender {
     // Retain only two full snapshots; a slow/full disk queues deltas, not a
     // cumulative answer copy for every observed tool transition.
     this.latest = value;
-    this.schedule(last && last.structure === structure ? 100 : 0);
+    this.schedule(last && last.structure === structure ? this.options.textFlushMs ?? 100 : 0);
   }
 
   hasPending(): boolean { return this.pending.length > 0; }

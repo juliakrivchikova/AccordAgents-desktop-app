@@ -1,7 +1,7 @@
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation, ConversationSummary } from "../../shared/types";
 import { chatMessageHiddenFromTimeline } from "../../shared/chatParticipantRequestThreads";
 import { controlCardFromApproval, controlCardFromChoiceMessage, type MobileControlCard } from "../../shared/mobileControlCards";
-import { timelineEventsFromSnapshot, type MobileRelayChatListItem, type MobileTimelinePage } from "./mobileRelayControl";
+import { phoneActivityEvents, timelineEventsFromSnapshot, type MobileChatListItem, type MobileTimelinePage } from "./mobileTimeline";
 
 /** The phone's chat list and a chat's page, built the same way wherever the
  *  chats are read: by the desktop from its own store, and by the User's
@@ -37,12 +37,15 @@ export interface MobileChatListOptions {
   runningFromMessages?: boolean;
   /** Only chats this returns true for are listed (a pairing's scope). */
   include?: (summary: ConversationSummary) => boolean;
+  /** Where a chat's approvals are read when they are not on the chat itself
+   *  (the server folds them from the devices that hold them). */
+  approvalsFor?: (conversationId: string) => ChatAppToolApproval[];
   onPendingCardsTruncated?: (listed: number) => void;
   /** The chat summaries when the caller already read them. */
   summaries?: ConversationSummary[];
 }
 
-export async function buildMobileChatList(store: MobileCatalogStore, options: MobileChatListOptions): Promise<MobileRelayChatListItem[]> {
+export async function buildMobileChatList(store: MobileCatalogStore, options: MobileChatListOptions): Promise<MobileChatListItem[]> {
   const summaries = options.summaries ?? await store.listConversations();
   const listed = summaries
     .filter((summary) => summary.kind === "chat" && summary.archived !== true && (options.include?.(summary) ?? true))
@@ -71,12 +74,13 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
   // drop every card it does not name.
   const pendingCardsFor = (conversationId: string, conversation: Conversation | undefined): MobileControlCard[] | undefined =>
     !options.pendingCards || pendingTruncated ? undefined : [
-      ...((conversation?.metadata as { pendingAppToolApprovals?: ChatAppToolApproval[] } | undefined)?.pendingAppToolApprovals ?? [])
+      ...(options.approvalsFor ? options.approvalsFor(conversationId)
+        : (conversation?.metadata as { pendingAppToolApprovals?: ChatAppToolApproval[] } | undefined)?.pendingAppToolApprovals ?? [])
         .filter((approval) => approval.status === "pending")
         .map((approval) => controlCardFromApproval(conversationId, approval)),
       ...(pendingChoicesByConversation.get(conversationId) ?? [])
     ].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-  const items: MobileRelayChatListItem[] = [];
+  const items: MobileChatListItem[] = [];
   for (const summary of listed) {
     // The list needs each chat's members and its last line, not its
     // history. Reading whole conversations here pulled the newest hundred
@@ -93,8 +97,9 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
     const newest = conversation?.messages.slice().reverse().filter((message) => message.content.trim()) ?? [];
     const lastMessage = newest.find((message) => !chatMessageHiddenFromTimeline(conversation as Conversation, message)) ??
       newest.find((message) => message.role === "participant" && message.metadata?.hiddenFromTimeline !== true);
-    const members = mobileRelayChatMembers(conversation);
+    const members = mobileChatMembers(conversation);
     const pendingCards = pendingCardsFor(summary.id, conversation);
+    const activity = conversation ? phoneActivityEvents(conversation) : [];
     items.push({
       id: summary.id,
       title: summary.title || "Chat",
@@ -108,12 +113,15 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
         .map((participant) => participant.handle.startsWith("@") ? participant.handle : `@${participant.handle}`)
         .slice(0, 4),
       ...(pendingCards ? { pendingCards } : {}),
+      ...(activity.length ? { activity } : {}),
       members: members.map((participant) => ({
         id: participant.id,
         handle: participant.handle,
         mentionHandle: mobileParticipantMentionHandle(participant, members),
         displayName: mobileParticipantDisplayName(participant),
         roleLabel: options.roleLabels.get(participant.roleConfigId) ?? participant.roleConfigId,
+        // What the phone resolves a draft's member with, as the desktop does.
+        roleConfigId: participant.roleConfigId,
         kind: participant.kind,
         ...(participant.avatarId ? { avatarId: participant.avatarId } : {}),
         ...(mobileParticipantIsAssistant(participant) ? { isAssistant: true } : {}),
@@ -139,7 +147,7 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
  *  already holds. The cursor is the oldest stored message of the page, not
  *  the oldest visible row: a page of rows the phone does not show would
  *  otherwise be asked for again and again. */
-export async function buildMobileTimelinePage(store: MobileCatalogStore, conversationId: string, options: { beforeMessageId?: string } = {}): Promise<MobileTimelinePage> {
+export async function buildMobileTimelinePage(store: MobileCatalogStore, conversationId: string, options: { beforeMessageId?: string } = {}): Promise<MobileTimelinePage & { conversation?: Conversation }> {
   const opened = await store.openConversation(conversationId, MOBILE_TIMELINE_PAGE_SIZE, options.beforeMessageId
     ? { beforeMessageId: options.beforeMessageId }
     : undefined);
@@ -150,11 +158,14 @@ export async function buildMobileTimelinePage(store: MobileCatalogStore, convers
   return {
     events: timelineEventsFromSnapshot(opened.conversation, MOBILE_TIMELINE_PAGE_SIZE),
     hasMoreBefore: opened.messagePage.hasMoreBefore,
-    ...(oldest ? { beforeMessageId: oldest.id } : {})
+    ...(oldest ? { beforeMessageId: oldest.id } : {}),
+    // The page itself, for a reader that needs more of it than the events
+    // (the server's cards); never sent as it is.
+    conversation: opened.conversation
   };
 }
 
-export function mobileRelayChatMembers(conversation: Conversation | undefined): ChatParticipant[] {
+export function mobileChatMembers(conversation: Conversation | undefined): ChatParticipant[] {
   const participants = conversation?.metadata.participants;
   return Array.isArray(participants)
     ? participants.filter((participant): participant is ChatParticipant => Boolean(

@@ -57,8 +57,6 @@ import type {
   CloudRunWorkerSettings,
   CloudRunWorkerSetupProgress,
   ConnectAwsWorkerRequest,
-  CreateMobilePairingRequest,
-  RevokeMobilePairingRequest,
   AwsWorkerOperationSnapshot,
   AwsWorkerStartRequest,
   SetAwsAutoStopRequest,
@@ -223,16 +221,17 @@ const bridge: AppBridge = {
   respondToChatMentions: (request: RespondToChatMentionsRequest) => ipcRenderer.invoke("chat:respond-to-mentions", request),
   respondToChatChoice: (request: RespondToChatChoiceRequest) => ipcRenderer.invoke("chat:respond-to-choice", request),
   respondToChatAppToolApproval: (request: RespondToChatAppToolApprovalRequest) => ipcRenderer.invoke("chat:respond-to-app-tool-approval", request),
-  createMobilePairing: (request: CreateMobilePairingRequest) => ipcRenderer.invoke("mobile:create-pairing", request),
+  createPhoneInvite: (request?: import("../shared/types").CreatePhoneInviteRequest) => ipcRenderer.invoke("mobile:create-phone-invite", request ?? {}),
+  revokePhoneInvite: (request: { inviteId: string }) => ipcRenderer.invoke("mobile:revoke-phone-invite", request),
   getHubSetupState: () => ipcRenderer.invoke("hub:setup-state"),
   getHubSetupCommand: (request: HubSetupCommandRequest) => ipcRenderer.invoke("hub:setup-command", request),
   installHub: (request: HubInstallRequest) => ipcRenderer.invoke("hub:install", request),
+  dismissHubNotice: (id: string) => ipcRenderer.invoke("hub:dismiss-notice", id),
   onHubSetupProgress: (callback: (state: HubSetupState) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, state: HubSetupState) => callback(state);
     ipcRenderer.on("hub:setup-progress", listener);
     return () => ipcRenderer.removeListener("hub:setup-progress", listener);
   },
-  revokeMobilePairing: (request: RevokeMobilePairingRequest) => ipcRenderer.invoke("mobile:revoke-pairing", request),
   startReview: (request: ReviewRequest) => ipcRenderer.invoke("conversations:start-review", request),
   continueReview: (request: ContinueReviewRequest) => ipcRenderer.invoke("conversations:continue-review", request),
   askPlanDecisionClarification: (request: PlanDecisionClarificationRequest) => ipcRenderer.invoke("conversations:ask-plan-decision-clarification", request),

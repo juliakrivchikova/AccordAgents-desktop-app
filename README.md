@@ -155,12 +155,14 @@ make clean      # Remove dist, out, and signed
 - Prompts, diffs, and repository content go to the provider behind each CLI,
   exactly as they do when you use that CLI directly.
 - Cloud run mirrors the selected project and a snapshot of your settings
-  (including environment values you configured) to your own machine, and every
-  message between the desktop, a machine, and the phone is sealed end to end.
-  The relay at `relay.accordagents.com` (source in `cloudflare/relay/`) stores
-  message bodies only as ciphertext, keeps routing metadata (chat id, event
-  kind, sender id, timestamps) in the clear, and drops events after 72 hours by
-  default; phone push notifications carry no content.
+  (including environment values you configured) to your own machine. The
+  desktop, your machines and your phone talk only to your own server (a small
+  Lightsail server in your AWS account, set up from Settings → Your server):
+  it keeps the text of your chats and their search, every change as an event
+  signed by the device that made it, and forgets what every device has read
+  after a grace period; phone push notifications carry no content. Without
+  that server there is no phone control and no cloud machine; local members
+  work as before.
 - Diagnostic logs (progress events and raw CLI output) are written to
   `userData/debug-logs/<date>.jsonl` when running unpackaged; force them on or
   off with `ACCORD_AGENTS_DEBUG_LOGS=1` / `=0`. The CLI readiness probe logs
@@ -196,8 +198,8 @@ make build                   # for renderer changes
 npm run test:permissions     # chat permissions, cancellation, repo-file mentions, CLI behavior
 npm run test:app-skills      # bundled app skills
 npm run test:artifacts       # artifacts
-npm run test:machines        # machine runtime and relay link
-npm run test:mobile-control  # phone pairing, relay control, push
+npm run test:machines        # machine runtime and its link through your server
+npm run test:mobile-control  # phone control cards, pairing settings, push
 ```
 
 `npm run | grep test:` lists every focused suite. Known open defects are
