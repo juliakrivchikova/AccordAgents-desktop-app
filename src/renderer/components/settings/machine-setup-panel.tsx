@@ -10,8 +10,8 @@ import { CloudProviderAuth } from "../cloud-provider-auth";
  * Installing and upgrading the runtime on a machine, from Settings.
  *
  * This is the one place in the product that reaches a machine over SSH, and it
- * only ever does setup: everything a member does travels over the relay. The
- * panel shows the steps the desktop is walking, the provider sign-in the
+ * only ever does setup: everything a member does travels through the User's
+ * own server. The panel shows the steps the desktop is walking, the provider sign-in the
  * machine performs itself, and — when something fails — what is true on the
  * machine right now.
  */

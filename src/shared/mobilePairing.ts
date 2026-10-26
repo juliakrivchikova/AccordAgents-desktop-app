@@ -1,11 +1,9 @@
-import { assertMachinePowerHandoff, type MachinePowerHandoff } from "./machinePowerHandoff";
 import { isAcceptableHubUrl } from "./hubProtocol";
 export const MOBILE_PAIRING_VERSION = 1;
 
-/** phone-control: a phone drives this desktop; person-invite: another person
- *  joins one conversation; machine-host: a machine that hosts participants
- *  (machines transport) enrolls with this desktop. */
-export type MobilePairingPurpose = "phone-control" | "person-invite" | "machine-host";
+/** machine-host: a machine that hosts participants enrolls with this
+ *  desktop. A phone pairs with the User's server instead (hubProtocol). */
+export type MobilePairingPurpose = "machine-host";
 
 export interface MobilePairingIssuer {
   originId: string;
@@ -39,104 +37,36 @@ export interface MobilePairingPackage {
   issuer: MobilePairingIssuer;
   rendezvousId: string;
   stableRoutingId: string;
+  /** The key the machine's first hello is sealed with (and the settings it
+   *  is sent before it has keys of its own with this desktop). The name is
+   *  kept from the enrollments already installed on machines. */
   relaySealKeyBase64: string;
-  relayUrl?: string;
-  mailboxUrl?: string;
-  outboxUrl?: string;
-  staticOriginUrl?: string;
-  /** The User's own server: when set, rooms and every durable event go
-   *  through it instead of the relay and its mailboxes. */
+  /** The User's own server: the machine meets its devices in the server's
+   *  rooms, and every durable event goes through the server's one order.
+   *  Every enrollment made now names it; one without it is from the shared
+   *  relay, which is gone. */
   hubUrl?: string;
   capabilities: MobilePairingCapability[];
-  /** Rule 3: the phone's start key, which lets this device start a stopped
-   *  AWS machine by itself. Only while the link is built: the key reaches the
-   *  phone in the link's fragment (`w=`) and nowhere else, never the relay,
-   *  and the package the desktop keeps holds only `powerHandoffId`. Absent
-   *  when the setup command has made no start key for the instance. */
-  power?: MachinePowerHandoff;
-  /** Which start-key handoff this pairing carried, so revoking the pairing
-   *  revokes that record. The desktop keeps this, never the key itself. */
-  powerHandoffId?: string;
   fingerprint: string;
   createdAt: string;
   expiresAt: string;
 }
 
-/** What a phone pairing may read on the User's own server: every chat, or
- *  one. Machines' pairings read nothing there (they have their own way). */
-export type MobilePhoneScope = { scope: "device" } | { scope: "conversation"; conversationId: string };
-
-export function mobilePhoneScopeOfPairing(pairing: Pick<MobilePairingPackage, "purpose" | "capabilities">): MobilePhoneScope | undefined {
-  if (pairing.purpose === "machine-host") return undefined;
-  const capabilities = Array.isArray(pairing.capabilities) ? pairing.capabilities : [];
-  if (capabilities.some((capability) => capability.scope === "device" && capability.canRead && capability.canListConversations)) {
-    return { scope: "device" };
-  }
-  const conversation = capabilities.find((capability): capability is MobilePairingConversationCapability =>
-    capability.scope === "conversation" && capability.canRead && typeof capability.conversationId === "string" && capability.conversationId.length > 0);
-  return conversation ? { scope: "conversation", conversationId: conversation.conversationId } : undefined;
-}
-
-/** A scope as the server stores and checks it; anything else is none. */
-export function parseMobilePhoneScope(value: unknown): MobilePhoneScope | undefined {
-  const parsed = typeof value === "string" ? (() => { try { return JSON.parse(value) as unknown; } catch { return undefined; } })() : value;
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-  const record = parsed as { scope?: unknown; conversationId?: unknown };
-  if (record.scope === "device") return { scope: "device" };
-  if (record.scope === "conversation" && typeof record.conversationId === "string" && record.conversationId.length > 0 && record.conversationId.length <= 200 &&
-    !/[\u0000-\u001f\u007f]/.test(record.conversationId)) {
-    return { scope: "conversation", conversationId: record.conversationId };
-  }
-  return undefined;
-}
-
 export interface CreateMobilePairingRequest {
-  conversationId?: string;
   purpose?: MobilePairingPurpose;
   hubUrl?: string;
-  relayUrl?: string;
-  mailboxUrl?: string;
-  outboxUrl?: string;
-  staticOriginUrl?: string;
   ttlMinutes?: number;
   canRunCloudParticipants?: boolean;
-  canInviteOthers?: boolean;
 }
 
 export interface CreateMobilePairingResult {
   package: MobilePairingPackage;
   qrPayload: string;
-  pwaUrl?: string;
-  /** False when the relay could not be reached to register the mailbox lock
-   *  at creation time; the link starts working once registration succeeds
-   *  (retried on reconnect and on unregistered mailbox responses). */
-  mailboxRegistered?: boolean;
 }
 
-export interface RevokeMobilePairingRequest {
-  stableRoutingId: string;
-  rendezvousId?: string;
-  reason?: string;
-}
-
-export interface RevokeMobilePairingResult {
-  revoked: boolean;
-  stableRoutingId: string;
-  rendezvousId?: string;
-  revokedAt: string;
-  reason: string;
-  /** Set when this device had been handed the machine's scoped power key.
-   *  Revoking the pairing stops this desktop offering it again, but the device
-   *  kept a copy of a key every device shares: only rotating it in AWS ends
-   *  that access, and this says so rather than implying the revoke was enough. */
-  powerKeyRotationRequired?: boolean;
-  powerKeyRotationDetail?: string;
-}
-
+/** Where the phone's app is loaded from. The phone itself talks only to
+ *  the User's own server. */
 export interface MobileControlEndpointDefaults {
-  relayUrl?: string;
-  mailboxUrl?: string;
-  outboxUrl?: string;
   staticOriginUrl?: string;
 }
 
@@ -146,9 +76,6 @@ export interface MobileControlSettings {
 }
 
 export const ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS: MobileControlEndpointDefaults = {
-  relayUrl: "wss://relay.accordagents.com/v1/relay",
-  mailboxUrl: "https://relay.accordagents.com/",
-  outboxUrl: "https://relay.accordagents.com/v1/mailbox/events",
   staticOriginUrl: "https://mobile.accordagents.com/"
 };
 
@@ -162,128 +89,19 @@ export function mobileControlSettingsFromEnvironment(env: Record<string, string 
     env.ACCORDAGENTS_DISABLE_MANAGED_MOBILE_DEFAULTS === "1"
       ? {}
       : { ...ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS };
-  const relayUrl = normalizedOptionalEnvironmentUrl(env.ACCORDAGENTS_MOBILE_RELAY_URL, "wss:");
-  const mailboxUrl = normalizedOptionalEnvironmentUrl(env.ACCORDAGENTS_MOBILE_MAILBOX_URL, "https:");
-  const outboxUrl = normalizedOptionalEnvironmentUrl(env.ACCORDAGENTS_MOBILE_OUTBOX_URL, "https:");
-  const staticOriginUrl = normalizedOptionalEnvironmentUrl(env.ACCORDAGENTS_MOBILE_STATIC_ORIGIN_URL, "https:");
-  if (relayUrl) {
-    defaults.relayUrl = relayUrl;
-  }
-  if (mailboxUrl) {
-    defaults.mailboxUrl = mailboxUrl;
-  }
-  if (outboxUrl) {
-    defaults.outboxUrl = outboxUrl;
-  }
+  const staticOriginUrl = normalizedOptionalHttpsUrl(env.ACCORDAGENTS_MOBILE_STATIC_ORIGIN_URL);
   if (staticOriginUrl) {
     defaults.staticOriginUrl = staticOriginUrl;
   }
-  const hasManagedRelay = defaults.relayUrl === ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS.relayUrl;
-  const hasManagedStatic = defaults.staticOriginUrl === ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS.staticOriginUrl;
   return {
-    provider: defaults.relayUrl && defaults.staticOriginUrl ? "accord-managed" : EMPTY_MOBILE_CONTROL_SETTINGS.provider,
-    defaults: hasManagedRelay && hasManagedStatic
-      ? { ...ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS, ...defaults }
-      : defaults
-  };
-}
-
-/** With the User's own hub, the relay a new pairing names is the hub: its
- *  rooms and sealed mailboxes are the relay's, served from her server. The
- *  phone's app is still loaded from the same site. */
-export function mobileControlForHub(settings: MobileControlSettings, hubUrl: string | undefined): MobileControlSettings {
-  if (!hubUrl) return settings;
-  let origin: URL;
-  try {
-    origin = new URL(hubUrl);
-  } catch {
-    return settings;
-  }
-  const socket = origin.protocol === "https:" ? "wss:" : "ws:";
-  return {
-    provider: settings.provider,
-    defaults: {
-      ...settings.defaults,
-      relayUrl: `${socket}//${origin.host}/v1/relay`,
-      mailboxUrl: `${origin.origin}/`,
-      outboxUrl: `${origin.origin}/v1/mailbox/events`
-    }
-  };
-}
-
-export function mobilePairingRequestWithEndpointDefaults(
-  request: CreateMobilePairingRequest,
-  defaults: MobileControlEndpointDefaults | undefined
-): CreateMobilePairingRequest {
-  return {
-    ...request,
-    relayUrl: nonEmptyOrDefault(request.relayUrl, defaults?.relayUrl),
-    mailboxUrl: nonEmptyOrDefault(request.mailboxUrl, defaults?.mailboxUrl),
-    outboxUrl: nonEmptyOrDefault(request.outboxUrl, defaults?.outboxUrl),
-    staticOriginUrl: nonEmptyOrDefault(request.staticOriginUrl, defaults?.staticOriginUrl)
+    provider: defaults.staticOriginUrl ? "accord-managed" : EMPTY_MOBILE_CONTROL_SETTINGS.provider,
+    defaults
   };
 }
 
 export function mobilePairingPayloadForQr(pairing: MobilePairingPackage): string {
   assertMobilePairingPackage(pairing);
   return JSON.stringify(pairing);
-}
-
-export function mobilePairingPwaUrl(pairing: MobilePairingPackage, staticOriginUrl: string | undefined = pairing.staticOriginUrl): string {
-  assertMobilePairingPackage(pairing);
-  if (!staticOriginUrl) {
-    throw new Error("Mobile pairing PWA URL requires staticOriginUrl.");
-  }
-  assertHttpsUrl(staticOriginUrl, "staticOriginUrl");
-  const url = new URL(staticOriginUrl);
-  const conversationCapability = pairing.capabilities.find(
-    (capability): capability is MobilePairingConversationCapability => capability.scope === "conversation"
-  );
-  url.searchParams.set("v", String(pairing.version));
-  url.searchParams.set("rid", pairing.rendezvousId);
-  url.searchParams.set("route", pairing.stableRoutingId);
-  url.searchParams.set("cap", pairing.fingerprint);
-  if (conversationCapability) {
-    url.searchParams.set("conversationId", conversationCapability.conversationId);
-  }
-  if (pairing.relayUrl && pairing.relayUrl !== ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS.relayUrl) {
-    url.searchParams.set("relay", pairing.relayUrl);
-  }
-  if (pairing.mailboxUrl) {
-    url.searchParams.set("mailbox", pairing.mailboxUrl);
-  }
-  if (pairing.outboxUrl) {
-    url.searchParams.set("outbox", pairing.outboxUrl);
-  }
-  // Keep the sealing key, and the phone's start key, in the URL fragment so
-  // neither is ever sent to the static origin or through the relay.
-  url.hash = `k=${pairing.relaySealKeyBase64}${pairing.power ? `&w=${mobileWakeFragment(pairing.power)}` : ""}`;
-  return url.toString();
-}
-
-/** What a phone needs to start its machine, and nothing more, as one short
- *  fragment value, so the QR code stays easy to scan: the instance, its
- *  region, the key id and the secret, each URI-encoded and joined by dots. */
-export function mobileWakeFragment(power: MachinePowerHandoff): string {
-  return [power.instanceId, power.region, power.credentials.accessKeyId, power.credentials.secretAccessKey]
-    .map(encodeURIComponent).join(".");
-}
-
-/** The pairing as the phone gets it, and as the desktop keeps it: the link
- *  carries the start key; the package kept (in memory, on disk, in the
- *  renderer) names only the handoff, never the secret. */
-export function mobilePairingWithStartKey(
-  minted: CreateMobilePairingResult,
-  power: MachinePowerHandoff | undefined
-): CreateMobilePairingResult {
-  const { power: _ignored, ...kept } = minted.package;
-  if (!power) return { ...minted, package: kept };
-  const staticOriginUrl = kept.staticOriginUrl;
-  return {
-    ...minted,
-    package: { ...kept, powerHandoffId: power.handoffId },
-    ...(minted.pwaUrl && staticOriginUrl ? { pwaUrl: mobilePairingPwaUrl({ ...kept, power }, staticOriginUrl) } : {})
-  };
 }
 
 export function parseMobilePairingPayload(payload: string, now: Date = new Date()): MobilePairingPackage {
@@ -304,7 +122,7 @@ export function assertMobilePairingPackage(value: unknown, now?: Date): asserts 
   if (value.version !== MOBILE_PAIRING_VERSION) {
     throw new Error("Unsupported mobile pairing package version.");
   }
-  if (value.purpose !== "phone-control" && value.purpose !== "person-invite" && value.purpose !== "machine-host") {
+  if (value.purpose !== "machine-host") {
     throw new Error("Mobile pairing package purpose is invalid.");
   }
   assertRecord(value.issuer, "Mobile pairing issuer");
@@ -326,23 +144,8 @@ export function assertMobilePairingPackage(value: unknown, now?: Date): asserts 
   if (now && Date.parse(expiresAt) <= now.getTime()) {
     throw new Error("Mobile pairing package is expired.");
   }
-  if (typeof value.relayUrl === "string") {
-    assertWssUrl(value.relayUrl, "relayUrl");
-  }
-  if (typeof value.mailboxUrl === "string") {
-    assertHttpsUrl(value.mailboxUrl, "mailboxUrl");
-  }
-  if (typeof value.outboxUrl === "string") {
-    assertHttpsUrl(value.outboxUrl, "outboxUrl");
-  }
-  if (typeof value.staticOriginUrl === "string") {
-    assertHttpsUrl(value.staticOriginUrl, "staticOriginUrl");
-  }
   if (value.hubUrl !== undefined && (typeof value.hubUrl !== "string" || !/^https?:\/\/[^\s]+$/.test(value.hubUrl) || !isAcceptableHubUrl(value.hubUrl))) {
     throw new Error("Mobile pairing hubUrl must be an https URL (plain http only on this computer).");
-  }
-  if (value.power !== undefined) {
-    assertMachinePowerHandoff(value.power);
   }
   if (!Array.isArray(value.capabilities) || value.capabilities.length === 0) {
     throw new Error("Mobile pairing package requires at least one capability.");
@@ -381,23 +184,14 @@ function assertRecord(value: unknown, label: string): asserts value is Record<st
   }
 }
 
-function nonEmptyOrDefault(value: string | undefined, fallback: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed || fallback;
-}
-
-function normalizedOptionalEnvironmentUrl(value: string | undefined, protocol: "https:" | "wss:"): string | undefined {
+function normalizedOptionalHttpsUrl(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed) {
     return undefined;
   }
   try {
     const parsed = new URL(trimmed);
-    // A relay on this computer (wrangler dev, the reference relay) speaks
-    // plain ws:; anything that leaves the machine must be wss:.
-    const loopbackPlainWs = protocol === "wss:" && parsed.protocol === "ws:" &&
-      (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "[::1]");
-    return parsed.protocol === protocol || loopbackPlainWs ? parsed.toString() : undefined;
+    return parsed.protocol === "https:" ? parsed.toString() : undefined;
   } catch {
     return undefined;
   }
@@ -419,25 +213,6 @@ function assertIsoDate(value: unknown, label: string): asserts value is string {
 function assertBase64Url(value: string, label: string): void {
   if (!/^[A-Za-z0-9_-]+$/.test(value)) {
     throw new Error(`Mobile pairing package ${label} must be base64url.`);
-  }
-}
-
-function assertWssUrl(value: unknown, label: string): void {
-  assertNonEmptyString(value, label);
-  const parsed = new URL(value);
-  // A relay on this computer (wrangler dev, the reference relay) speaks plain
-  // ws:; anything that leaves the machine must be wss:.
-  const loopbackPlainWs = parsed.protocol === "ws:" &&
-    (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "[::1]");
-  if (parsed.protocol !== "wss:" && !loopbackPlainWs) {
-    throw new Error(`Mobile pairing ${label} must use wss.`);
-  }
-}
-
-function assertHttpsUrl(value: string, label: string): void {
-  const parsed = new URL(value);
-  if (parsed.protocol !== "https:") {
-    throw new Error(`Mobile pairing ${label} must use https.`);
   }
 }
 

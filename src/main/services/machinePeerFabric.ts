@@ -6,8 +6,8 @@
  * that enrolled the machine, so with that desktop closed nothing could reach
  * it. This holds one channel per device in the trust roster instead.
  *
- * Two shapes of connection, both over the same relay and the same event
- * protocol:
+ * Two shapes of connection, both in rooms on the User's server and with the
+ * same event protocol (the events themselves travel in the server's order):
  *
  * - Devices that come to this machine (the owner's desktops, the phone) are
  *   met in this machine's own room, on the connection it already has.
@@ -28,18 +28,18 @@ import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type { TrustedPeerAccess } from "../../shared/machineTrust";
 import { DeviceEventChannel, type DeferredWithDependency } from "./deviceEventChannel";
 import type { ChatEventLogService } from "./chatEventLog";
-import type { TunnelClient } from "./relayTunnelClient";
+import type { TunnelClient } from "./hubTunnelClient";
 import { deliverToChannel, type HubDeliverOutcome } from "./hubSync";
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
-import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelaySealing";
+import { openMachinePayload, sealMachinePayload } from "./machineChannelSealing";
 import type { StorageService } from "./storage";
 import { CHAT_CHANGES_EVENT_KIND } from "./chatChanges";
 import { hubPairChannelId } from "./hubChannels";
+import { hubWebSocketUrl } from "../../shared/hubProtocol";
 
 export interface MachinePeerFabricOptions {
-  /** The User's hub carries every channel's events (see DeviceEventChannel). */
-  hubMode?: boolean;
-  /** Through the hub: a channel's gap is asked of the hub (HubSync.repairGap). */
+  /** The User's server carries every channel's events (its one order); a
+   *  channel's gap is asked of the hub (HubSync.repairGap). */
   hubRepair?: (gap: DeviceEventGap) => void;
   selfDeviceId: string;
   storage: StorageService;
@@ -58,9 +58,6 @@ export interface MachinePeerFabricOptions {
   logger(event: string, payload: Record<string, unknown>): void;
 }
 
-/** How often a machine re-offers what it still owes to each trusted device. */
-const SHARE_INTERVAL_MS = 2_000;
-
 interface PeerConnection {
   peer: TrustedPeerAccess;
   channel: DeviceEventChannel;
@@ -74,8 +71,6 @@ export class MachinePeerFabric {
   /** The roster's devices, including those whose channel is being set up. */
   private wanted = new Map<string, TrustedPeerAccess>();
   private started = false;
-  private shareTimer?: ReturnType<typeof setInterval>;
-  private sharing?: Promise<void>;
 
   constructor(private readonly options: MachinePeerFabricOptions) {}
 
@@ -95,45 +90,20 @@ export class MachinePeerFabric {
     return connection ? this.channelIdFor(connection.peer) : undefined;
   }
 
-  /** Everyone a result should be delivered to, as outbox recipients. */
-  recipients(): Array<{ deviceId: string; channelId: string }> {
-    return [...this.connections.values()].map((connection) => ({
-      deviceId: connection.peer.deviceId,
-      channelId: this.channelIdFor(connection.peer)
-    }));
-  }
-
   /** Sends what was just committed for the peers without waiting for the timer. */
   nudge(): void {
     for (const connection of this.connections.values()) connection.channel.nudge();
   }
 
-  /** The owner's other machines among them, each in the room it is met in. */
-  machineRecipients(): Array<{ deviceId: string; channelId: string }> {
-    return [...this.connections.values()]
-      .filter((connection) => connection.peer.role === "machine")
-      .map((connection) => ({ deviceId: connection.peer.deviceId, channelId: this.channelIdFor(connection.peer) }));
-  }
-
   start(): void {
     this.started = true;
+    // Nothing is owed to anyone: every device reads the server's order from
+    // its own place.
     for (const connection of this.connections.values()) connection.channel.start();
-    // Through the hub nothing is owed to anyone: every device reads the
-    // hub's order from its own place, so there is nothing to share.
-    if (this.options.hubMode) return;
-    // Whatever this machine still owes anyone in a room is owed to every
-    // trusted device in it. Keeping that true on a timer, rather than only at
-    // the moment an event is published, is what makes it independent of which
-    // device happened to be known when a turn started.
-    this.shareTimer ??= setInterval(() => { void this.shareOutstanding(); }, SHARE_INTERVAL_MS);
-    this.shareTimer.unref?.();
-    void this.shareOutstanding();
   }
 
   close(): void {
     this.started = false;
-    if (this.shareTimer) clearInterval(this.shareTimer);
-    this.shareTimer = undefined;
     for (const connection of this.connections.values()) connection.channel.close();
     for (const client of this.rooms.values()) client.close();
     this.rooms.clear();
@@ -151,10 +121,9 @@ export class MachinePeerFabric {
       if (!wanted.has(deviceId) || stableJson(wanted.get(deviceId)) !== stableJson(connection.peer)) {
         connection.channel.close();
         this.connections.delete(deviceId);
-        // A device taken off the roster stops being owed the room's history.
-        // Leaving its rows in place would keep re-offering them on every
-        // reconnect and serving them from the mailbox to a device the owner
-        // has revoked. Nothing the remaining devices are owed is touched.
+        // A device taken off the roster stops being owed the room's history:
+        // rows an older runtime kept for it are dropped. Nothing the
+        // remaining devices are owed is touched.
         const forgotten = wanted.has(deviceId) ? 0 : await this.options.storage.deviceEvents()
           .forgetRecipient(this.channelIdFor(connection.peer), deviceId)
           .catch(() => 0);
@@ -208,40 +177,12 @@ export class MachinePeerFabric {
         this.options.logger("machine-host.trust.connect-retrying", { rendezvousId: room.rendezvousId,
           message: error instanceof Error ? error.message : String(error) });
       });
-      // Whatever this room still owes anyone is owed to this device too:
-      // a result published while it was not yet trusted must still reach it.
-      // Through the hub it reads that from the hub's order instead.
-      const shared = this.options.hubMode ? 0 : await this.options.storage.deviceEvents()
-        .shareUnacknowledged(this.channelIdFor(peer), peer.deviceId)
-        .catch(() => 0);
+      // A result published before it was trusted it reads from the server's
+      // order.
       this.options.logger("machine-host.trust.peer-added", {
-        deviceId: peer.deviceId, role: peer.role, room: room.rendezvousId, pending: shared
+        deviceId: peer.deviceId, role: peer.role, room: room.rendezvousId
       });
       if (this.started) this.connections.get(peer.deviceId)!.channel.start();
-    }
-  }
-
-  /** Every trusted device gets a delivery row for everything its room has not
-   *  acknowledged, and then a flush. Idempotent: rows are inserted or ignored. */
-  private shareOutstanding(): Promise<void> {
-    if (this.sharing) return this.sharing;
-    const run = this.shareOutstandingNow();
-    this.sharing = run;
-    return run.finally(() => { if (this.sharing === run) this.sharing = undefined; });
-  }
-
-  private async shareOutstandingNow(): Promise<void> {
-    for (const connection of this.connections.values()) {
-      try {
-        const pending = await this.options.storage.deviceEvents()
-          .shareUnacknowledged(this.channelIdFor(connection.peer), connection.peer.deviceId);
-        if (pending > 0) await connection.channel.flush();
-      } catch (error) {
-        this.options.logger("machine-host.trust.share-error", {
-          deviceId: connection.peer.deviceId,
-          message: error instanceof Error ? error.message : String(error)
-        });
-      }
     }
   }
 
@@ -261,14 +202,14 @@ export class MachinePeerFabric {
   }
 
   private async receiveSealed(ciphertext: string, room: string): Promise<void> {
-    const payload = await openMachineRelayPayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
+    const payload = await openMachinePayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
       [...this.connections.values()].map(connection => connection.peer.publicKeyDerBase64), room);
     if (isDeviceEventPacket(payload)) await this.receive(payload);
   }
 
   async openHomeFrame(ciphertext: string, _legacyRoomKey?: string): Promise<DeviceEventPacket | undefined> {
     try {
-      const payload = await openMachineRelayPayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
+      const payload = await openMachinePayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
         [...this.connections.values()].map(connection => connection.peer.publicKeyDerBase64), this.options.home.rendezvousId);
       return isDeviceEventPacket(payload) ? payload : undefined;
     } catch { return undefined; }
@@ -288,22 +229,19 @@ export class MachinePeerFabric {
   }
 
   /**
-   * The name of this pair's events. Through a relay it is the room they meet
-   * in, since the relay delivers by address. The hub's order reaches every
-   * device, so there no two pairs may share a name: the room of a machine
-   * also names its channel with the enrolling desktop, and any other peer's
-   * channel (a machine, a phone, another desktop) named after it would take
-   * that desktop's traffic as its own. Every peer met here gets the name of
-   * the pair, which both ends compute alike.
+   * The name of this pair's events. The server's order reaches every device,
+   * so no two pairs may share a name: the room of a machine also names its
+   * channel with the enrolling desktop, and any other peer's channel (a
+   * machine, a phone, another desktop) named after it would take that
+   * desktop's traffic as its own. Every peer met here gets the name of the
+   * pair, which both ends compute alike.
    */
   private channelIdFor(peer: TrustedPeerAccess): string {
-    if (!this.options.hubMode) return this.meetingRoomFor(peer);
     return hubPairChannelId(this.options.selfDeviceId, peer.deviceId);
   }
 
-  /** Through the hub: the scopes of this machine's channels with its peers. */
+  /** The scopes of this machine's channels with its peers on the server. */
   hubChannelScopes(): string[] {
-    if (!this.options.hubMode) return [];
     return [...this.connections.values()].map((connection) => `device:${this.channelIdFor(connection.peer)}:`);
   }
 
@@ -323,7 +261,7 @@ export class MachinePeerFabric {
     const here = room === this.options.home.rendezvousId;
     return {
       rendezvousId: room,
-      relayUrl: here ? this.options.home.relayUrl ?? peer.relayUrl : peer.relayUrl,
+      relayUrl: here && this.options.home.hubUrl ? hubWebSocketUrl(this.options.home.hubUrl, "") : peer.relayUrl,
       sealKeyBase64: deriveMachineChannelKey(await this.options.eventLog.getOrCreateDeviceIdentity(), peer.publicKeyDerBase64, room),
       fingerprint: here ? this.options.home.fingerprint : peer.fingerprint,
       here
@@ -336,18 +274,16 @@ export class MachinePeerFabric {
     client: TunnelClient | undefined
   ): DeviceEventChannel {
     const send = async (packet: DeviceEventPacket): Promise<void> => {
-      const ciphertext = await sealMachineRelayPayload(packet, await this.options.eventLog.getOrCreateDeviceIdentity(), peer.publicKeyDerBase64, room.rendezvousId);
+      const ciphertext = await sealMachinePayload(packet, await this.options.eventLog.getOrCreateDeviceIdentity(), peer.publicKeyDerBase64, room.rendezvousId);
       const transport = client ?? this.options.homeClient;
       await transport.sendCiphertext({ logicalMessageId: randomUUID(), ciphertext, to: peer.deviceId });
     };
     return new DeviceEventChannel({
       storage: this.options.storage,
       eventLog: this.options.eventLog,
-      // The mailbox of the room this peer is met in, so a device that is not
-      // online right now still receives what it was sent.
+      // The room this peer is met in.
       pairing: { ...this.options.home, rendezvousId: room.rendezvousId, relaySealKeyBase64: room.sealKeyBase64,
-        relayUrl: room.relayUrl, fingerprint: room.fingerprint ?? "",
-        outboxUrl: room.here ? this.options.home.outboxUrl : peer.outboxUrl },
+        fingerprint: room.fingerprint ?? "" },
       channelId: this.channelIdFor(peer),
       localDeviceId: this.options.selfDeviceId,
       peerDeviceId: peer.deviceId,
@@ -359,7 +295,8 @@ export class MachinePeerFabric {
       // Another machine whose runtime cannot fold chat changes yet keeps them
       // queued here until the roster says it can.
       heldKinds: () => peer.role === "machine" && peer.chatChanges !== true ? [CHAT_CHANGES_EVENT_KIND] : [],
-      ...(this.options.hubMode ? { hubMode: true, ...(this.options.hubRepair ? { hubRepair: this.options.hubRepair } : {}) } : {}),
+      hubMode: true,
+      ...(this.options.hubRepair ? { hubRepair: this.options.hubRepair } : {}),
       send,
       apply: (event, payload) => {
         if (this.connections.get(peer.deviceId)?.peer !== peer) throw new Error("Machine peer authorization changed.");

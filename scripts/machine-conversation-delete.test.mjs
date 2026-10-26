@@ -25,14 +25,16 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const { MachineHostService } = require(path.join(repoRoot, "dist/main/main/services/machineHost.js"));
 const { StorageService } = require(path.join(repoRoot, "dist/main/main/services/storage.js"));
 const { ChatEventLogService } = require(path.join(repoRoot, "dist/main/main/services/chatEventLog.js"));
-const { sealMachineRelayPayload } = require(path.join(repoRoot, "dist/main/main/services/machineRelaySealing.js"));
+const { hubPairChannelId } = require(path.join(repoRoot, "dist/main/main/services/hubChannels.js"));
+const { HUB_SCOPE_PREFIXES } = require(path.join(repoRoot, "dist/main/main/services/hubSync.js"));
 const { MachineLinkService } = require(path.join(repoRoot, "dist/main/main/services/machineLink.js"));
 const { ChatService } = require(path.join(repoRoot, "dist/main/main/services/chat.js"));
 const { machineCommandId } = require(path.join(repoRoot, "dist/main/shared/machineLink.js"));
 const chatChanges = require(path.join(repoRoot, "dist/main/main/services/chatChanges.js"));
-const phone = require(path.join(repoRoot, "src/mobile/mobile-machine-command.js"));
 
 const CONVERSATION = "delete-chat";
+/** Where the owner's devices meet on the User's server; the stub clients never dial it. */
+const MEETING_PLACE = "ws://127.0.0.1:1";
 const PARTICIPANT = { id: "p1", handle: "one", kind: "codex-cli", roleConfigId: "engineer", homeMachineId: "machine-one" };
 
 function stubClient(sent) {
@@ -40,6 +42,25 @@ function stubClient(sent) {
     on: () => () => undefined, connect: async () => undefined, close: () => undefined,
     sendCiphertext: async (request) => { sent.push(request); return []; }
   };
+}
+
+/** Another of the owner's devices: its own database and signing identity. */
+async function device(dir, name) {
+  const storage = new StorageService({ dbPath: path.join(dir, `${name}.sqlite3`) });
+  const eventLog = new ChatEventLogService(storage);
+  const identity = await eventLog.getOrCreateDeviceIdentity();
+  return { storage, eventLog, identity, deviceId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64 };
+}
+
+/** A roster entry for that device, met in the machine's room on the server. */
+function rosterPeer(peer, box, role = "phone") {
+  return { deviceId: peer.deviceId, publicKeyDerBase64: peer.publicKeyDerBase64, role, name: "Phone",
+    relayUrl: MEETING_PLACE, rendezvousId: box.pairing.rendezvousId, fingerprint: box.pairing.fingerprint };
+}
+
+/** The machine's own signed events in the scopes it pushes to the server. */
+async function ownHubEvents(box) {
+  return (await box.storage.hub().ownEventsAfter(box.identity.originId, 0, 10_000, [...HUB_SCOPE_PREFIXES])).map((row) => row.event);
 }
 
 async function machine(dir, controls = {}) {
@@ -54,7 +75,8 @@ async function machine(dir, controls = {}) {
     issuer: { originId: desktop.originId, keyId: desktop.keyId, publicKeyDerBase64: desktop.publicKeyDerBase64 },
     rendezvousId: "delete-room", stableRoutingId: "delete-route",
     relaySealKeyBase64: Buffer.alloc(32, 31).toString("base64url"),
-    relayUrl: "ws://127.0.0.1:1/v1/relay",
+    // The User's server; the stub client never dials it.
+    hubUrl: "http://127.0.0.1:1",
     capabilities: [{ scope: "device", canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }],
     fingerprint: "DELETE-TEST", createdAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 3_600_000).toISOString()
@@ -97,30 +119,30 @@ async function machine(dir, controls = {}) {
   await host.start();
   await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: desktop.originId, appVersion: "t", machineId: "machine-one" });
 
-  /** The desktop's own signed durable event, through the real ingress. A
-   *  chat's copy and later messages travel as the desktop's chat changes. */
-  const deliver = async (body, options = {}) => {
+  /** The desktop's own signed durable event, through the real ingress: the
+   *  server's order hands it in (HubSync -> receiveFromHub); the room never
+   *  carries it. A chat's copy and later messages travel as the desktop's
+   *  chat changes. Returns the event. */
+  const deliver = async (body) => {
+    let event;
     if (body.type === "machine.conversation.sync" || body.type === "machine.conversation.delta") {
       const id = body.type === "machine.conversation.sync" ? body.conversation.id : body.conversationId;
       const changes = body.type === "machine.conversation.sync"
         ? chatChanges.diffChatChanges(undefined, body.conversation, { emitsConversationFields: true, ownsMessage: () => true }).changes
         : body.messages.map((message) => ({ type: "message.created", message }));
-      const { event } = await desktopLog.appendLocalEvent({ conversationId: id, logScopeId: chatChanges.chatChangesLogScope(id),
-        kind: chatChanges.CHAT_CHANGES_EVENT_KIND, payload: { version: 1, conversationId: id, updatedAt: new Date().toISOString(), changes } });
-      const packet = { protocol: "accord-device-events-v1", from: desktop.originId, to: identity.originId, type: "event", event };
-      return host.handleMessage(await sealMachineRelayPayload(packet, desktop, identity.publicKeyDerBase64, pairing.rendezvousId));
+      ({ event } = await desktopLog.appendLocalEvent({ conversationId: id, logScopeId: chatChanges.chatChangesLogScope(id),
+        kind: chatChanges.CHAT_CHANGES_EVENT_KIND, payload: { version: 1, conversationId: id, updatedAt: new Date().toISOString(), changes } }));
+    } else {
+      ({ event } = await desktopLog.appendLocalEvent({
+        conversationId: body.conversationId,
+        logScopeId: `device:${pairing.rendezvousId}:${JSON.stringify([body.conversationId, "actions"])}`,
+        kind: body.type, payload: body,
+        // A turn request is named by its run, the way every device names it.
+        ...(body.type === "machine.turn.request" ? { eventId: machineCommandId(body.runId) } : {})
+      }));
     }
-    const { event } = await desktopLog.appendLocalEvent({
-      conversationId: body.type === "machine.conversation.sync" ? body.conversation.id : body.conversationId,
-      logScopeId: `device:${pairing.rendezvousId}:${JSON.stringify([
-        body.type === "machine.conversation.sync" ? body.conversation.id : body.conversationId, "actions"])}`,
-      kind: body.type, payload: body,
-      // A turn request is named by its run, the way every device names it.
-      ...(body.type === "machine.turn.request" ? { eventId: machineCommandId(body.runId) } : {})
-    });
-    const packet = { protocol: "accord-device-events-v1", from: desktop.originId, to: identity.originId, type: "event", event };
-    if (options.raw) return host.handleMessage(await sealMachineRelayPayload(packet, desktop, identity.publicKeyDerBase64, pairing.rendezvousId));
-    return host.handleMessage(await sealMachineRelayPayload(packet, desktop, identity.publicKeyDerBase64, pairing.rendezvousId));
+    assert.equal(await host.receiveFromHub(event), "delivered");
+    return event;
   };
 
   return {
@@ -131,9 +153,7 @@ async function machine(dir, controls = {}) {
       const { event } = await desktopLog.appendLocalEvent({ conversationId: body.conversationId,
         logScopeId: `device:${pairing.rendezvousId}:${JSON.stringify([body.conversationId, "actions"])}`,
         kind: body.type, payload: body });
-      await host.handleMessage(await sealMachineRelayPayload(
-        { protocol: "accord-device-events-v1", from: desktop.originId, to: identity.originId, type: "event", event },
-        desktop, identity.publicKeyDerBase64, pairing.rendezvousId));
+      assert.equal(await host.receiveFromHub(event), "delivered");
     },
     close: async () => { host.close(); await new Promise((resolve) => setTimeout(resolve, 200)); }
   };
@@ -218,41 +238,31 @@ test("a device the owner trusts can delete a chat from the machine, like any oth
 
   // Every device in the roster drives members: sends a turn, stops one,
   // answers a card, deletes a chat. Only the machine's own settings, identity
-  // and roster are narrower, and a conversation is none of those. Making
-  // deletion desktop-only would be a control the User has on one device and
-  // not another, which is not a restriction anyone approved.
-  const phoneIdentity = await phone.createIdentity();
-  await box.trust([{
-    deviceId: phoneIdentity.deviceId, publicKeyDerBase64: phoneIdentity.publicKeyDerBase64,
-    role: "phone", name: "Phone", relayUrl: box.pairing.relayUrl, rendezvousId: box.pairing.rendezvousId,
-    relaySealKeyBase64: box.pairing.relaySealKeyBase64, fingerprint: box.pairing.fingerprint
-  }]);
+  // and roster are narrower, and a conversation is none of those. This is
+  // the machine's rule for whatever a trusted device writes on its pair's
+  // channel; the phone itself no longer writes machine commands (it reads
+  // the server and writes chat changes and card answers only).
+  const trusted = await device(dir, "trusted");
+  await box.trust([rosterPeer(trusted, box)]);
 
   const body = { type: "machine.conversation.deleted", conversationId: CONVERSATION, deletedAt: new Date().toISOString() };
-  const event = await phone.mintEvent(phoneIdentity, {
-    eventId: "phone-delete-1", conversationId: CONVERSATION,
-    logScopeId: phone.deviceEventScope(box.pairing.rendezvousId, CONVERSATION, "actions"),
-    kind: body.type, originSeq: 1, payload: body
+  const { event } = await trusted.eventLog.appendLocalEvent({
+    conversationId: CONVERSATION, kind: body.type, payload: body,
+    logScopeId: `device:${hubPairChannelId(box.identity.originId, trusted.deviceId)}:${JSON.stringify([CONVERSATION, "actions"])}`
   });
-  await box.host.handleMessage(await sealMachineRelayPayload(
-    phone.eventPacket(phoneIdentity.deviceId, box.identity.originId, event), phoneIdentity, box.identity.publicKeyDerBase64, box.pairing.rendezvousId));
-  await new Promise((resolve) => setTimeout(resolve, 600));
+  assert.equal(await box.host.receiveFromHub(event), "delivered", "the server's order hands it to that device's channel");
 
   assert.equal(await box.storage.getConversation(CONVERSATION), undefined,
     "a device the owner trusts deletes the chat, wherever the User happens to be");
   assert.equal(await box.storage.conversationTombstones().isDeleted(CONVERSATION), true);
 
   // A device that is not in the roster still cannot.
-  const stranger = await phone.createIdentity();
-  const strangerEvent = await phone.mintEvent(stranger, {
-    eventId: "stranger-delete-1", conversationId: "other-chat",
-    logScopeId: phone.deviceEventScope(box.pairing.rendezvousId, "other-chat", "actions"),
-    kind: body.type, originSeq: 1,
-    payload: { ...body, conversationId: "other-chat" }
+  const stranger = await device(dir, "stranger");
+  const { event: strangerEvent } = await stranger.eventLog.appendLocalEvent({
+    conversationId: "other-chat", kind: body.type, payload: { ...body, conversationId: "other-chat" },
+    logScopeId: `device:${hubPairChannelId(box.identity.originId, stranger.deviceId)}:${JSON.stringify(["other-chat", "actions"])}`
   });
-  await box.host.handleMessage(await sealMachineRelayPayload(
-    phone.eventPacket(stranger.deviceId, box.identity.originId, strangerEvent), stranger, box.identity.publicKeyDerBase64, box.pairing.rendezvousId)).catch(() => undefined);
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(await box.host.receiveFromHub(strangerEvent), "not-mine", "no channel of this machine takes it");
   assert.equal(await box.storage.conversationTombstones().isDeleted("other-chat"), false,
     "a device the owner never trusted deletes nothing");
 });
@@ -268,7 +278,7 @@ test("a machine that was off when the chat was deleted is told when it comes bac
   t.after(async () => { await second.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5 }); });
   assert.ok(await second.storage.getConversation(CONVERSATION), "it still holds the chat when it returns");
 
-  // The desktop's channel retained the command and delivers it on reconnect.
+  // The server's order kept the command and hands it in once the machine is back.
   await second.deliver({ type: "machine.conversation.deleted", conversationId: CONVERSATION, deletedAt: new Date().toISOString() });
   assert.equal(await second.storage.getConversation(CONVERSATION), undefined,
     "a deletion is not lost because the machine was off when it was made");
@@ -294,22 +304,23 @@ test("a device trusted after a result was published still receives it", async (t
   });
   await new Promise((resolve) => setTimeout(resolve, 800));
 
-  const owedBefore = await box.storage.deviceEvents().pressure(box.pairing.rendezvousId);
-  assert.ok(owedBefore.events > 0, "the machine holds what it published until it is acknowledged");
+  // Through the server nobody is addressed: the result is in the machine's
+  // own log, which it pushes to the server, and no row waits on any device.
+  const published = (await ownHubEvents(box)).find((event) => event.kind === "machine.approval.requested");
+  assert.ok(published, "the machine's log holds what it published, for the server's order");
+  assert.equal((await box.storage.deviceEvents().pressure(box.pairing.rendezvousId)).events, 0, "no delivery row for anyone");
 
-  // A phone joins the roster afterwards. What the room already owes is owed to
-  // it too: a result published before it was trusted still has to reach it.
-  const phoneIdentity = await phone.createIdentity();
-  await box.trust([{
-    deviceId: phoneIdentity.deviceId, publicKeyDerBase64: phoneIdentity.publicKeyDerBase64,
-    role: "phone", name: "Phone", relayUrl: box.pairing.relayUrl, rendezvousId: box.pairing.rendezvousId,
-    relaySealKeyBase64: box.pairing.relaySealKeyBase64, fingerprint: box.pairing.fingerprint
-  }]);
+  // A phone joins the roster afterwards. It reads the server's order from its
+  // own place, so a result published before it was trusted reaches it with
+  // nothing re-addressed here: the event is still there, unchanged.
+  const later = await device(dir, "later");
+  await box.trust([rosterPeer(later, box)]);
   await new Promise((resolve) => setTimeout(resolve, 500));
 
-  const owedAfter = await box.storage.deviceEvents().pressure(box.pairing.rendezvousId);
-  assert.ok(owedAfter.recipients > owedBefore.recipients,
-    `the newly trusted device is owed what the room already held (${owedBefore.recipients} -> ${owedAfter.recipients})`);
+  assert.ok((await ownHubEvents(box)).some((event) => event.eventId === published.eventId && event.eventHash === published.eventHash),
+    "what the machine published stays in its log for the device trusted later");
+  assert.equal((await box.storage.deviceEvents().pressure(box.pairing.rendezvousId)).events, 0, "still no delivery row");
+  assert.deepEqual(await box.storage.deviceEvents().listPending(hubPairChannelId(box.identity.originId, later.deviceId), 0, later.deviceId), []);
 });
 
 test("a device taken off the roster stops being owed the room's history", async (t) => {
@@ -318,13 +329,9 @@ test("a device taken off the roster stops being owed the room's history", async 
   t.after(async () => { await box.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5 }); });
 
   await box.deliver({ type: "machine.conversation.sync", conversation: conversation() });
-  const phoneIdentity = await phone.createIdentity();
-  const peer = {
-    deviceId: phoneIdentity.deviceId, publicKeyDerBase64: phoneIdentity.publicKeyDerBase64,
-    role: "phone", name: "Phone", relayUrl: box.pairing.relayUrl, rendezvousId: box.pairing.rendezvousId,
-    relaySealKeyBase64: box.pairing.relaySealKeyBase64, fingerprint: box.pairing.fingerprint
-  };
-  await box.trust([peer]);
+  const phone = await device(dir, "phone");
+  await box.trust([rosterPeer(phone, box)]);
+  assert.ok(box.host.peers.channel(phone.deviceId), "while trusted, the phone has a channel here");
 
   box.host.noteConversationSnapshot({
     ...conversation(),
@@ -336,18 +343,29 @@ test("a device taken off the roster stops being owed the room's history", async 
   });
   await new Promise((resolve) => setTimeout(resolve, 800));
   const events = box.storage.deviceEvents();
-  const owedToPhone = async () => (await events.listPending(box.pairing.rendezvousId, 0, phoneIdentity.deviceId)).length;
-  assert.ok(await owedToPhone() > 0, "while trusted, the phone is owed what the room published");
+  const owedToPhone = async () => (await events.listPending(box.pairing.rendezvousId, 0, phone.deviceId)).length +
+    (await events.listPending(hubPairChannelId(box.identity.originId, phone.deviceId), 0, phone.deviceId)).length;
+  const published = (await ownHubEvents(box)).find((event) => event.kind === "machine.approval.requested");
+  assert.ok(published, "what the machine published is in its own log, for the server's order");
+  // Nothing is kept per device, so there is no history to re-offer anyone.
+  assert.equal(await owedToPhone(), 0, "no delivery row is kept for the phone, even while trusted");
 
-  // The owner removes it. Its authority ends at once, and so does its claim on
-  // what this machine is holding for it.
+  // The owner removes it. Its authority ends at once.
   await box.trust([]);
   await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(box.host.peers.channel(phone.deviceId), undefined, "its channel is gone");
+  const { event: late } = await phone.eventLog.appendLocalEvent({
+    conversationId: CONVERSATION, kind: "machine.conversation.deleted",
+    payload: { type: "machine.conversation.deleted", conversationId: CONVERSATION, deletedAt: new Date().toISOString() },
+    logScopeId: `device:${hubPairChannelId(box.identity.originId, phone.deviceId)}:${JSON.stringify([CONVERSATION, "actions"])}`
+  });
+  assert.equal(await box.host.receiveFromHub(late), "not-mine", "a revoked device's command is nobody's here");
+  assert.ok(await box.storage.getConversation(CONVERSATION), "and changes nothing");
   assert.equal(await owedToPhone(), 0,
     "a revoked device is not re-offered the room's history on every reconnect");
-  // What the enrolling desktop is owed is untouched.
-  const owedToDesktop = await events.listPending(box.pairing.rendezvousId, 0, box.desktop.originId);
-  assert.ok(owedToDesktop.length > 0, "revoking one device does not discard another's retention");
+  // What the enrolling desktop reads is untouched: still in the machine's log.
+  assert.ok((await ownHubEvents(box)).some((event) => event.eventId === published.eventId),
+    "revoking one device does not discard what the others read");
 });
 
 function desktopChat(storage, dir, close = async () => undefined) {
@@ -389,7 +407,10 @@ test("desktop row deletion and remote intent commit together; failed outbox writ
   const channel = new DeviceEventChannel({ storage: restarted, eventLog: new ChatEventLogService(restarted),
     channelId: "delete-intent-room", localDeviceId: identity.originId,
     peerDeviceId: peer.originId, peerPublicKeyDerBase64: peer.publicKeyDerBase64,
-    send: async () => undefined, apply: async () => "applied", isPeerConnected: () => false });
+    send: async () => undefined, apply: async () => "applied", isPeerConnected: () => false,
+    // As the desktop's link builds it (src/main/services/machineLink.ts): the
+    // User's server carries the channel's events.
+    hubMode: true });
   const connection = { record: { id: "machine-one" }, eventChannel: channel, outbound: Promise.resolve() };
   second.connections.set("machine-one", connection);
   const publish = channel.publish.bind(channel);
@@ -399,9 +420,14 @@ test("desktop row deletion and remote intent commit together; failed outbox writ
   channel.publish = publish;
   assert.equal(await second.deliverPendingConversationDeletions(), 1);
   const eventId = `machine-delete:${JSON.stringify([identity.originId, "machine-one", CONVERSATION])}`;
-  assert.ok(await restarted.getChatEvent(eventId), "outbox owns the immutable delete before intent removal");
+  assert.ok(await restarted.getChatEvent(eventId), "the desktop's log owns the immutable delete before intent removal");
   assert.equal((await restarted.conversationTombstones().pendingDeliveries()).length, 0);
-  assert.equal((await restarted.deviceEvents().listPending("delete-intent-room", 0, peer.originId)).length, 1);
+  // It reaches the machine through the server's order: it is among the
+  // desktop's own events in the machine's channel scope, which the desktop
+  // pushes, and no delivery row waits on the machine.
+  const own = await restarted.hub().ownEventsAfter(identity.originId, 0, 10_000, ["device:delete-intent-room:"]);
+  assert.ok(own.some((row) => row.event.eventId === eventId), "the delete is in a scope the desktop pushes to the server");
+  assert.deepEqual(await restarted.deviceEvents().listPending("delete-intent-room", 0, peer.originId), []);
   second.connections.clear(); channel.close();
 });
 
@@ -443,7 +469,11 @@ test("a failed provider closure is unacknowledged and retries after machine rest
   const dir = await mkdtemp(path.join(tmpdir(), "accord-delete-close-"));
   const first = await machine(dir, { close: async () => { throw new Error("native descendants still live"); } });
   await first.deliver({ type: "machine.conversation.sync", conversation: conversation() });
-  await assert.rejects(first.deliver({ type: "machine.conversation.deleted", conversationId: CONVERSATION, deletedAt: new Date().toISOString() }), /native descendants still live/);
+  // The server's order moves on once the machine stored the command; the
+  // machine's channel holds it unapplied (no receipt) and retries it itself.
+  const deletion = await first.deliver({ type: "machine.conversation.deleted", conversationId: CONVERSATION, deletedAt: new Date().toISOString() });
+  assert.ok(await first.storage.getChatEvent(deletion.eventId), "the command is kept on the machine");
+  assert.equal(await first.storage.deviceEvents().receipt(deletion.eventId), undefined, "and not acknowledged as applied");
   assert.ok(await first.storage.getConversation(CONVERSATION), "rows survive until closure can be proved");
   assert.equal(await first.storage.conversationTombstones().isDeleted(CONVERSATION), true);
   await first.close();

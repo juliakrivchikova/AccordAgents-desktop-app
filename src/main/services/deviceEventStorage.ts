@@ -31,13 +31,8 @@ export const DEVICE_EVENT_SCHEMA_SQL = `
     stamp text not null,
     primary key(channel_id, conversation_id, message_id)
   );
-  create table if not exists device_event_mailbox_cursors (
-    channel_id text not null,
-    reader_id text not null,
-    epoch text not null,
-    arrival_seq integer not null,
-    primary key(channel_id, reader_id)
-  );
+  -- Where each relay mailbox was read to, from before the relay was removed.
+  drop table if exists device_event_mailbox_cursors;
   create table if not exists device_event_outbox (
     event_id text not null references chat_events(event_id),
     device_id text not null,
@@ -115,25 +110,6 @@ export class DeviceEventStorage {
     await this.database.execute(durable(`
       insert into schema_meta(key, value) values (${quote(`device-channel-home:${channelId}`)}, ${quote(machineId)})
       on conflict(key) do update set value = case when value = excluded.value then value else null end;
-    `));
-  }
-
-  async mailboxCursor(channelId: string, readerId: string): Promise<{ epoch: string; arrivalSeq: number }> {
-    await this.database.init();
-    return (await this.database.query<{ epoch: string; arrivalSeq: number }>(`
-      select epoch, arrival_seq as arrivalSeq from device_event_mailbox_cursors
-      where channel_id = ${quote(channelId)} and reader_id = ${quote(readerId)};
-    `))[0] ?? { epoch: "", arrivalSeq: 0 };
-  }
-
-  async saveMailboxCursor(channelId: string, readerId: string, cursor: { epoch: string; arrivalSeq: number }): Promise<void> {
-    requireCursor(cursor.arrivalSeq);
-    await this.database.init();
-    await this.database.execute(durable(`
-      insert into device_event_mailbox_cursors(channel_id, reader_id, epoch, arrival_seq)
-        values (${quote(channelId)}, ${quote(readerId)}, ${quote(cursor.epoch)}, ${cursor.arrivalSeq})
-      on conflict(channel_id, reader_id) do update set epoch = excluded.epoch,
-        arrival_seq = case when epoch = excluded.epoch then max(arrival_seq, excluded.arrival_seq) else excluded.arrival_seq end;
     `));
   }
 

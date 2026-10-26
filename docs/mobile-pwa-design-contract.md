@@ -6,9 +6,9 @@ The mobile PWA must match `design_handoff/Mobile (packed).html` exactly at the c
 
 For v1, Mobile control is device-level access to the current desktop/app instance:
 
-- the QR flow must use the managed AccordAgents relay/static origin by default, with no endpoint setup required from the user;
+- the QR flow must use the managed AccordAgents static origin by default and pair the phone with the User's own server (a one-time code from Settings → Device Pairing), with no endpoint setup required from the user; without a server Device Pairing says "Set up your server first";
 - the PWA must show the available chat list and let the user open and work with any existing chat in that app instance;
-- the v1 UI must not present "Invite person", per-chat invite setup, or custom relay/static/outbox endpoint fields on the managed-default path.
+- the v1 UI must not present "Invite person", per-chat invite setup, or custom endpoint fields on the managed-default path.
 
 The pairing/package architecture may keep future extension points for scoped chat invites and different participants, but those are not v1 acceptance behavior.
 
@@ -49,7 +49,7 @@ glyph or photo, the hashed default when nothing was chosen, a drawn avatar by
 id, the app mark for the chat assistant); the desktop renderer derives its
 options from it and the phone loads it verbatim as `mobile-shared.js`, with
 every built-in avatar copied under its catalog id by the mobile build. A drawn
-avatar's bytes are asked for once per session (`mobile.avatar.request`); initials
+avatar's bytes are asked of the User's server (`/v1/phone/avatar`); initials
 stand in until they arrive, as on the desktop. The phone never guesses a picture
 from a handle. The disc contract is the desktop's too: one frame, a glyph at
 75 % or a photo at 100 %, per-kind disc colours stated once.
@@ -105,12 +105,12 @@ lag behind until the chat is left is the count of finished updates. The number
 is the same one the home screens show, the open chat's own waiting cards
 included — it is one count of what waits, not a count of elsewhere.
 
-Activity is built on the phone from what the relay already delivered — the
-timeline rows every `mobile.timeline.events` batch stores and the cards riding
-with them (`src/mobile/mobile-activity.js`). Nothing new is asked of the desktop.
-Only chats in the desktop's chat list are shown; a batch for a chat the phone's
-list does not have yet asks for the list again. Its three lists follow the
-desktop's Activity:
+Activity is built on the phone from what it has already read from the User's
+server — the timeline rows every `mobile.timeline.events` page stores and the
+cards riding with them (`src/mobile/mobile-activity.js`). Nothing more is asked
+of the server for it. Only chats in the chat list are shown; a page for a chat
+the phone's list does not have yet asks for the list again. Its three lists
+follow the desktop's Activity:
 
 - Running — a member run still in progress, one row per run and member, with a
   small round stop (44px to tap). A row that reached the phone well before a
@@ -147,7 +147,7 @@ A pick or a note being typed survives the chat being drawn again, and an answer
 sent keeps them until the card is answered or withdrawn. An answer on its way
 folds the card at once to what was answered ("Your answer: …") and fades it, or
 its Activity row, a little, and says nothing about how far it has got; once the
-desktop confirms it the card reads "Answered: …" at full strength. A failure, or
+chat on the server states it answered the card reads "Answered: …" at full strength. A failure, or
 that the answer can be given again, still opens the card and says so (the User,
 2026-09-24). A message sent from the phone and not yet delivered is faded the
 same way, with its time and no "Waiting to sync", and the header does not report
@@ -174,49 +174,49 @@ machine's own channel — and for a while nothing reconciled that replica with
 the desktop. A card closed on the desktop stayed "waiting" on the phone for
 days (the User's screenshot of 2026-09-20), because the batch that closed it
 was lost, or was never written: a cancelled choice changes no message row, and
-a batch with cards and no rows was dropped before it reached the mailbox. Now:
+a batch with cards and no rows was dropped before it reached the mailbox.
+Since 2026-10-26 the phone has one source, the User's server: the chat list,
+a chat's pages, its cards and what changed are all read from the server's copy.
+Now:
 
-- The desktop's chat list carries, per chat, the cards still waiting there and
-  when the list was built. The phone drops a pending card it holds that the
-  list no longer names, unless the card is younger than the list (it may have
-  missed it) or was learned from a machine directly (the desktop cannot vouch
-  for it). Answered cards are kept: they are the record under their messages.
+- The chat list carries, per chat, the cards still waiting there and when the
+  list was built. The phone drops a pending card it holds that the list no
+  longer names, unless the card is younger than the list (it may have missed
+  it). Answered cards are kept: they are the record under their messages.
 - The page a chat is opened with carries the chat's cards, so opening a chat
-  reconciles it too. A batch of cards with no rows is written to the mailbox
-  like any other, and the desktop remembers cards as delivered only once the
-  mailbox has taken them.
+  reconciles it too.
 - After a phone's answer, whatever became of it, the desktop sends the chat's
   cards as it holds them now — "still pending" included — so a card the
   desktop could not act on is never answered on the phone for ever.
 - An answer sent is a mark the phone keeps across launches, named after the
   queue entry that carries the answer; while it holds, the card is faded and
-  says nothing more (whether the entry has reached the desktop yet is not
-  spelled out, the User, 2026-09-24). The mark goes when the desktop states the
-  card answered or withdraws it. A mark older than ten minutes with the card
-  still waiting has stopped meaning anything — the answer was lost on its way
+  says nothing more (whether the entry has reached the server yet is not
+  spelled out, the User, 2026-09-24). The mark goes when the chat on the
+  server states the card answered or withdrawn. A mark older than ten minutes
+  with the card still waiting has stopped meaning anything — the answer was lost on its way
   or refused — so the card unlocks and says "Answer sent, but not applied yet.
-  You can answer again."; an answer the desktop refused five times unlocks at
-  once ("The desktop did not take this answer. You can answer again."). A
-  second answer replaces the first one still on its way rather than racing
-  it: the earlier queue entry is set aside, never sent. An answer the desktop
-  or the mailbox has already taken is not lost, only waiting for the desktop
-  to be up: that card stays locked for an hour, because a second answer given
-  meanwhile only raced the first, and the older one won on the desktop. An
-  hour and not longer, because the desktop can take an answer and then give
-  it up (five failed applies) without the phone hearing of it.
-- A choice answer the desktop refuses (an option it does not have, a member no
-  longer in the chat, an archived chat) is kept on the choice, by the operation
-  it was sent under, while the choice still waits; the last few are kept. The
-  card the phone is sent names them, and the phone that sent one of them stops
-  waiting at once: the card opens again with the desktop's reason and what was
+  You can answer again."; an answer the server refused unlocks at once ("The
+  desktop did not take this answer. You can answer again."). A second answer
+  replaces the first one still on its way rather than racing it: the earlier queue entry is set aside, never sent. An answer the server
+  has already taken is not lost, only waiting for the member's home (the
+  desktop, or the machine that hosts the member) to apply it: that card stays
+  locked for an hour, because a second answer given meanwhile only raced the
+  first, and the older one won. An hour and not longer, because a home can
+  hold an answer it cannot apply without the phone hearing of it.
+- A choice answer the member's home refuses (an option it does not have, a
+  member no longer in the chat, an archived chat) is kept on the choice, by the
+  operation it was sent under, while the choice still waits; the last few are
+  kept. The card the phone reads names them, and the phone that sent one of
+  them stops waiting at once: the card opens again with the reason and what was
   picked and typed (the User, 2026-10-01: an own answer refused this way stayed
   "on its way" for an hour). An own answer goes out under the desktop's
   own-answer option, `__custom__`.
-- The desktop answers a refused batch with an empty ack only when it refuses
-  it for good (a chat outside the pairing's scope, a malformed event). A
-  failure of its own — storage that did not answer — gets no ack, so the
-  phone keeps the event and tries the mailbox; counted as refusals, five bad
-  minutes on the desktop set a message aside for good.
+- The server refuses an event for good only when it rejects it (malformed,
+  too large, something a phone may not write, a signature that does not
+  verify, or a conflict in its chain); the entry then reads "Not taken by your
+  server". Any other failure — the server not answering, a dropped
+  connection — leaves the entry waiting to sync, and it is offered again; the
+  server keeps one copy of whatever arrives twice.
 - Sending twice in a row works: the second message is queued while the first
   is still going out, and goes out right behind it. A tap on a row in
   Activity is dropped only for half a second after rows have actually moved,
@@ -226,27 +226,24 @@ a batch with cards and no rows was dropped before it reached the mailbox. Now:
   offers a thread on every message but those, and the phone offers exactly
   what the desktop does. The way back returns to the place the chat was being
   read, as Slack's message screen does; the pill says whether anything new
-  waits below. A reply written with a thread open is placed by that thread on
-  the desktop, over the tunnel and over the mailbox alike; a thread root the
-  chat does not hold sends the message to the chat itself, with a warning,
-  rather than into a thread nobody can open.
+  waits below. A reply written with a thread open is placed in that thread; a
+  thread root the chat does not hold sends the message to the chat itself,
+  with a warning, rather than into a thread nobody can open.
 - A tapped notification lands on the Activity list it was about: Pending for
   an approval, Finished for a reply. A batch that carries only cards does not
   mark its chat unread: the refresh the desktop sends after the phone's own
   answer said nothing new.
-- A launch that cannot reach the relay keeps the push subscription it has: the
-  relay's key is fetched before the old subscription is given up, and a launch
-  that could not register tries again on the next return to the foreground.
-- On the desktop, an answer read from the mailbox that cannot be applied is
-  tried again on the following polls, five times, then given up — and the
-  chat's cards are sent again either way, so the phone hears the state the
-  desktop actually holds. A refused batch on the live tunnel is answered with
-  an empty ack rather than silence, so it cannot hold other chats' sends
-  behind the ack timeout.
-- The queue is offered to the desktop for every chat, on launch, on return to
-  the foreground and while the app is open — never for what a member's own
-  machine already holds. Clearing a finished row in Activity names the update
-  under every identity it goes by (its run and its message), so a later copy
+- A launch that cannot reach the User's server keeps the push subscription it
+  has: the server's key is fetched before the old subscription is given up,
+  and a launch that could not register tries again at the next launch. The
+  server rings the phone itself, desktop or no desktop; a push carries no
+  message text.
+- A change the desktop or a machine cannot apply is held and tried again;
+  after two weeks it is given up, never in silence (Settings → Your server
+  says so; `docs/parity-requirements.md`).
+- The queue is offered to the server for every chat, on launch, on return to
+  the foreground and while the app is open. Clearing a finished row in
+  Activity names the update under every identity it goes by (its run and its message), so a later copy
   of the same message from another path cannot bring it back.
 - The timeline store is read by chat, through an index: applying one delivered
   batch used to scan the whole store per row (2.5 s for forty rows on a store
@@ -256,4 +253,6 @@ a batch with cards and no rows was dropped before it reached the mailbox. Now:
 Settings holds only what the phone can do about itself: the pairing, message
 alerts (offered while undecided, otherwise described — iOS does not let a web
 app switch its own alerts off, so there is no switch), and waking the cloud
-machine when the pairing carries the key for it.
+machine through the User's server when the server holds a start key for it
+(the server also wakes a machine by itself when work waits for it; the phone
+holds no key).

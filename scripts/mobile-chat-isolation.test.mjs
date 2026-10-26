@@ -1,55 +1,42 @@
 // Browser regression for chat switching and delivery into the PWA's real IDB.
 // This deliberately delays an IDB read, not application code: a render that
-// started for A must never replace B after the user navigates away.
+// started for A must never replace B after the user navigates away. The
+// phone is paired with a real hub (the User's own server) that holds both
+// chats; the deliveries go through the app's own ingest path.
 // Supporting browser evidence only; this is not an installed-iPhone check.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createRequire } from "node:module";
-import { createServer } from "node:http";
 import { readFile, mkdtemp, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { CHROME, attachApp, member, pairPage, serveMobileShell, startMobileHub } from "./mobile-hub-fixture.mjs";
 
-const require = createRequire(import.meta.url);
-const { attach } = require("./cdp.cjs");
-const { loadMobileOriginHeaders, mobileOriginHeadersForPath } = require("./mobile-origin-headers.cjs");
-const root = path.resolve(import.meta.dirname, "../dist/mobile");
-const chromeBin = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 const event = (id, content) => ({ id, messageId: id, role: "participant", participantLabel: "Drew", content,
   status: "done", createdAt: "2026-09-11T22:00:00.000Z" });
 const batch = (conversationId, events) => ({ type: "mobile.timeline.events", conversationId, events });
-const chats = ["A", "B"].map(id => ({ id, title: "Chat " + id, group: "QA", participants: ["Drew"], updatedAt: "2026-09-11T22:00:00.000Z" }));
 
-test("the PWA keeps persisted and rendered messages in their own chat", { timeout: 60_000 }, async t => {
-  const headers = loadMobileOriginHeaders(root);
-  const site = createServer(async (req, res) => {
-    const pathname = new URL(req.url, "http://localhost").pathname;
-    const relative = pathname === "/" ? "/index.html" : pathname;
-    try {
-      const body = await readFile(path.join(root, relative));
-      res.writeHead(200, { "content-type": types[path.extname(relative)] || "application/octet-stream",
-        ...mobileOriginHeadersForPath(headers, relative) });
-      res.end(body);
-    } catch { res.writeHead(404).end(); }
-  });
-  await new Promise(resolve => site.listen(0, "127.0.0.1", resolve));
-  const origin = `http://127.0.0.1:${site.address().port}`;
+test("the PWA keeps persisted and rendered messages in their own chat", { timeout: 90_000 }, async t => {
+  const hub = await startMobileHub();
+  for (const id of ["A", "B"]) {
+    await hub.createChat(id, { title: "Chat " + id, repoPath: "/work/QA", participants: [member("drew")], createdAt: "2026-09-11T22:00:00.000Z" });
+  }
+  const shell = await serveMobileShell({ hubOrigins: [hub.base] });
+  const origin = shell.origin;
   const profile = await mkdtemp(path.join(tmpdir(), "aa-chat-isolation-"));
-  const chrome = spawn(chromeBin, ["--headless=new", "--no-first-run", "--no-default-browser-check",
+  const chrome = spawn(CHROME, ["--headless=new", "--no-first-run", "--no-default-browser-check",
     "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--window-size=430,860", origin], { stdio: "ignore" });
   let app;
   try {
     for (let i = 0; i < 60 && !app; i++) {
       try {
         const port = Number((await readFile(path.join(profile, "DevToolsActivePort"), "utf8")).split("\n")[0]);
-        app = await attach({ port, title: "AccordAgents" });
+        app = await attachApp({ port, attempts: 1 });
       } catch { await new Promise(resolve => setTimeout(resolve, 100)); }
     }
     assert.ok(app, "Chrome did not expose the PWA");
-    const evaluate = async code => (await app.evaluate(code)).result.value;
+    const evaluate = async code => (await app.rawEvaluate(code)).result.value;
     const until = async expression => evaluate(`new Promise((resolve, reject) => {
       const end = Date.now() + 5000;
       function check() {
@@ -67,11 +54,8 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
     };
     const shown = () => evaluate(`({ title: document.getElementById("chat-title").textContent,
       body: document.getElementById("message-list").textContent })`);
-    await until("Boolean(globalThis.AccordAgentsMobile)");
-    await evaluate(`(() => {
-      AccordAgentsMobile.savePairing({ endpoint: ${JSON.stringify(origin)}, pairedAt: new Date().toISOString() });
-      AccordAgentsMobile.handleRelayChatListPayload({ type: "mobile.chat-list", chats: ${JSON.stringify(chats)} });
-    })()`);
+    await pairPage(app, { hub, siteOrigin: origin });
+    await until("document.querySelectorAll('.mobile-chat-row').length === 2");
     await ingest(batch("A", [event("a", "ONLY_CHAT_A")]));
     await ingest(batch("B", [event("b", "ONLY_CHAT_B")]));
     await select("A");
@@ -84,8 +68,8 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
       assert.equal(rows.find(row => row.messageId === "waiting-a").status, "pending");
       await ingest(batch("A", [{ ...waiting, content: "LIVE_PROGRESS_CONTENT" }]));
       await until('document.getElementById("message-list").textContent.includes("LIVE_PROGRESS_CONTENT")');
-      // A saved chat snapshot/mailbox refill carries the durable waiting row,
-      // while the growing text arrives separately over the live socket.
+      // The chat's page carries the durable waiting row, while the growing
+      // text arrives separately with the server's live progress.
       await ingest(batch("A", [waiting]));
       assert.ok((await shown()).body.includes("LIVE_PROGRESS_CONTENT"));
       await ingest(batch("B", [waiting]));
@@ -111,30 +95,26 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
       await ingest(batch("A", [{ ...waiting, status: "done", content: "Thread finished" }]));
     });
 
-    await t.test("cached live rows can be opened while initial relay synchronization is still waiting", async () => {
+    await t.test("cached live rows can be opened while initial synchronization with the server is still waiting", async () => {
       const pending = { ...event("startup-live", "CACHED_STARTUP_PROGRESS"), status: "pending", runId: "startup-live-run" };
       await ingest(batch("A", [pending]));
-      await evaluate(`AccordAgentsMobile.savePairing({ endpoint: ${JSON.stringify(origin)}, pairedAt: new Date().toISOString(),
-        relayUrl: "wss://relay-wait.invalid/", rendezvousId: "startup", routingId: "startup",
-        fingerprint: "QA", relaySealKeyBase64: "${Buffer.alloc(32, 1).toString("base64url")}" })`);
-      // Hold the transport, not application callbacks: the page must remain
-      // interactive throughout the real initialization await chain.
-      const script = await app.send("Page.addScriptToEvaluateOnNewDocument", { source: `
-        globalThis.WebSocket = class extends EventTarget {
-          static CONNECTING = 0; static OPEN = 1; static CLOSED = 3;
-          readyState = 0; send() {} close() { this.readyState = 3; }
-        };
-      ` });
+      // Hold the transport, not application callbacks: the server answers
+      // nothing until released, and the page must remain interactive
+      // throughout the real initialization await chain.
+      let release;
+      const held = new Promise(resolve => { release = resolve; });
+      hub.setGate(() => held);
       try {
         await app.send("Page.reload", { ignoreCache: true });
         await until('Boolean(globalThis.AccordAgentsMobile) && document.getElementById("message-list").textContent.includes("CACHED_STARTUP_PROGRESS")');
         await app.click('.message-row[data-streamable="1"]');
         await until('!document.getElementById("stream-view").hidden');
         assert.ok(await evaluate('document.getElementById("stream-body").textContent.includes("CACHED_STARTUP_PROGRESS")'));
+        assert.ok(hub.requests.some(request => request.path === "/v1/phone/chats" && request.at > Date.now() - 30_000), "the page did ask the server");
         await app.click("#stream-close");
       } finally {
-        await app.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: script.identifier });
-        await evaluate(`AccordAgentsMobile.savePairing({ endpoint: ${JSON.stringify(origin)}, pairedAt: new Date().toISOString() })`);
+        hub.setGate(undefined);
+        release();
         await app.send("Page.reload", { ignoreCache: true });
         await until('Boolean(globalThis.AccordAgentsMobile) && document.getElementById("message-list").textContent.includes("CACHED_STARTUP_PROGRESS")');
         await ingest(batch("A", [{ ...pending, status: "done" }]));
@@ -146,8 +126,20 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
     // database contents, and every later read retain their normal behavior.
     // The timeline is read by chat through its index, and the whole store
     // only when no chat is named; a held read has to catch either.
-    const holdRead = () => evaluate(`(() => {
+    //
+    // The held read must be the one the step under test makes. Two other
+    // readers share the store with it: a read the server's answer to an
+    // earlier step is still bringing in (waited out first), and the open
+    // chat's live-progress poll, which reads it every second and a half while
+    // the app is in front. The poll is paused while a read is held by having
+    // the page read as hidden to it; drawing does not ask, so nothing under
+    // test changes.
+    const holdRead = async () => {
+      await hub.quiet();
+      return evaluate(`(() => {
       const originals = { store: IDBObjectStore.prototype.getAll, index: IDBIndex.prototype.getAll };
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+      const resume = () => { delete document.visibilityState; };
       const restore = () => {
         IDBObjectStore.prototype.getAll = originals.store;
         IDBIndex.prototype.getAll = originals.index;
@@ -161,19 +153,21 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
         const held = window.heldRead;
         const proxy = { get result() { return request.result; }, get error() { return request.error; } };
         request.onsuccess = event => {
-          held.release = () => { proxy.onsuccess?.(event); held.released = true; };
+          held.release = () => { resume(); proxy.onsuccess?.(event); held.released = true; };
           held.fail = () => {
+            resume();
             Object.defineProperty(proxy, "error", { value: new DOMException("QA read failed", "UnknownError") });
             proxy.onerror?.(event);
           };
           held.ready = true;
         };
-        request.onerror = event => proxy.onerror?.(event);
+        request.onerror = event => { resume(); proxy.onerror?.(event); };
         return proxy;
       };
       IDBObjectStore.prototype.getAll = hold(originals.store, (target) => target);
       IDBIndex.prototype.getAll = hold(originals.index, (target) => target.objectStore);
     })()`);
+    };
 
     await t.test("late reads cannot replace the newly selected chat", async () => {
       await holdRead();
@@ -323,7 +317,8 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
   } finally {
     app?.close();
     if (chrome.exitCode === null) { const exited = once(chrome, "exit"); chrome.kill("SIGTERM"); await exited; }
-    await new Promise(resolve => site.close(resolve));
+    await shell.close();
+    await hub.close();
     await rm(profile, { recursive: true, force: true });
   }
 });

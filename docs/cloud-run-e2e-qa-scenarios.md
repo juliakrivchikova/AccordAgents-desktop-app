@@ -21,9 +21,13 @@
 >   than here.
 > - **Stop on an unreachable machine** became an approved exception; it is
 >   recorded in `docs/parity-requirements.md`, not here.
-> - **The phone with the desktop closed** is proven by
->   `scripts/mobile-phone-machine-e2e.mjs` against a real relay, a built
->   machine runtime and the shipped PWA in a browser.
+> - **The phone with the desktop closed** was proven by
+>   `scripts/mobile-phone-machine-e2e.mjs` against the relay; that script went
+>   with the relay on 2026-10-26. Through the User's server,
+>   `scripts/machine-hub-order.test.mjs` covers a machine whose reply the
+>   server folds with the desktop away, and `scripts/hub-phone-http.test.mjs`
+>   the phone's pairing and reads. A run of the shipped PWA with a real server,
+>   a machine and the desktop closed has not been redone.
 > - **Durable native admission for approvals and choices, machine deletion,
 >   roster fanout and all-peer retention** are proven by the focused checks
 >   named in those commits.
@@ -254,7 +258,7 @@ New on this branch. Nothing here is QA-proven beyond Drew's single live PASS, an
 | W-09 | Idle stop with lease renewal failing | Run not silently killed; no stop with live work; the lease expires rather than pinning the box up forever. | SMALL-FIX |
 | W-10 | **`authorize-stop` retry is idempotent** | A retry after a lost reply is recognized as the same request — no orphan drain lease bouncing real turns for 30 s and skipping idle-stop. | SMALL-FIX |
 | W-11 | **App closed with a run in flight** | Defined behavior. The idle timer currently dies with the Electron process; on relaunch it must be re-scheduled and must not stop an in-flight run. | REAL-WORK — the timer must not live only in the desktop |
-| W-12 | Phone wakes a stopped machine | Idle stop is unchanged (run-count based); the phone starts a stopped machine itself with the scoped AWS key received at pairing; the relay never sees keys. | REBASED — Rule 3 of the resolution; the previous CODE-OK claim ("idle-stop holds a reference while the phone is paired") was false: the idle logic only counts runs |
+| W-12 | The server wakes a stopped machine | Idle stop is unchanged (run-count based); the User's server starts a stopped machine when work for one of its members waits unread, and when the phone's Wake button asks, with the start-only key the desktop gave it; the phone holds no key. | REBASED again 2026-10-26 — `HubWaker` (`src/hub/hubPhoneState.ts`); not verified on the User's instance. Earlier: Rule 3 of the resolution had the phone start the machine itself; the previous CODE-OK claim ("idle-stop holds a reference while the phone is paired") was false: the idle logic only counts runs |
 | W-13 | Spec mismatch decision | `keep` / `grow-disk` / `recreate` with staleness checks; no silent resize. | CODE-OK |
 | W-14 | Disk exhaustion message | rsync ENOSPC → the actionable message, not a raw rsync error. | CODE-OK — confirmed live |
 | W-15 | **Desired vs Actual disk** | Settings shows both, warns when a change is unapplied, `Refresh status` only refreshes, and the primary CTA is `Apply disk resize to 20 GB`. | CODE-OK — Drew implemented; unverified end to end |
@@ -291,18 +295,23 @@ New on this branch. Nothing here is QA-proven beyond Drew's single live PASS, an
 
 ## 9. P — PWA control plane
 
+Since 2026-10-26 the phone talks only to the User's server: it pairs by a
+one-time code the desktop shows, reads chats from the server's copy, writes
+signed events there, and the server rings it. Evidence below dated before then
+was gathered over the relay and its mailbox, so a `VERIFIED` row holds for that
+path until it is run again against the server.
+
 ### 9.1 Pairing and identity
 
 | ID | Scenario | Must be true | Status |
 |---|---|---|---|
 | P-01 | QR pairing | Paired; chat list loads; survives app restart and phone reboot. | CODE-OK |
 | P-02 | Install to home screen | Standalone launch works; pairing survives; Web Push offered only after install. | CODE-OK |
-| P-03 | **Stable URL** | `https://mobile.accordagents.com/` keeps working for one desktop profile. Breaks only on profile reset, pairing revoke, relay/domain change, or reinstall as a different profile. | CODE-OK — you asked this directly; worth an explicit regression test |
-| P-04 | Pairing secret hygiene | No long-lived unrotatable bearer token in a URL; rendezvous id and stable routing id are separate. | CODE-OK |
+| P-03 | **Stable URL** | `https://mobile.accordagents.com/` keeps working for one desktop profile. Breaks only on profile reset, pairing revoke, a change of the User's server or of the domain, or reinstall as a different profile. | CODE-OK — you asked this directly; worth an explicit regression test |
+| P-04 | Pairing secret hygiene | No long-lived unrotatable bearer token in a URL; the pairing code is spent once, by one phone, inside its window, and the phone then signs every request with its own key. | CODE-OK |
 | P-05 | Second phone | Both work; each separately revocable; the desktop lists paired devices. | CODE-OK |
 | P-06 | Unpair / revoke | Access lost immediately; a queued outbox on the revoked phone never later flushes. | SMALL-FIX |
 | P-07 | Empty or missing token | Denied. A check that returns `true` for an empty token is a security failure. | SMALL-FIX |
-| P-08 | Relay holds no plaintext | Only sealed ciphertext transits; relay history is never a durability path. | CODE-OK |
 
 ### 9.2 Reading and sending
 
@@ -313,12 +322,12 @@ New on this branch. Nothing here is QA-proven beyond Drew's single live PASS, an
 | P-12 | Live update without manual refresh | The timeline updates while a cloud member produces output. | VERIFIED — stand scenarios 1–12. Was broken outright until the phone set `binaryType = "arraybuffer"`: browsers deliver binary frames as a `Blob`, and every live frame was silently dropped. |
 | P-13 | Resume from background | Refreshes on resume after 5 min backgrounded. | PARTLY VERIFIED — stand scenario 12 proves a turn finishing with **no relay at all** resolves through the mailbox and clears its row, and a live device pass on 2026-08-19 confirmed a ~1 minute background. The stated 5 minute case is still unverified on a device. |
 | P-14 | Send to a cloud member, lid closed | Member runs on the box; the reply appears on the phone. | CODE-OK — Drew reports one live PASS |
-| P-15 | **Send to a local-only member** | The phone says `waiting for desktop` **at compose time** and queues. Never a silent failure or a false "sent". | CODE-OK |
-| P-16 | Queue drains on desktop wake | Runs exactly once; no duplicate. | CODE-OK |
+| P-15 | **Send to a local-only member** | The message goes to the server; under it the member's row reads "Waiting for your Mac to start it…" until the desktop starts the turn. Never a silent failure. | CODE-OK |
+| P-16 | The waiting turn starts on desktop wake | Runs exactly once; no duplicate. | CODE-OK |
 | P-17 | Offline send | Airplane mode → send → app restart → network back: visibly queued throughout, flushes once with the same event id. | CODE-OK |
 | P-18 | Cold load with everything unreachable | The installed PWA renders its cached projection. | CODE-OK — verify the service worker actually caches the shell |
-| P-19 | Duplicate replay | Cursor dedupe; no duplicates. | VERIFIED — stand scenarios 4 and 10 assert every answer appears exactly once across sequential and overlapping turns. Note the render layer had its own duplicate: two DOM nodes under one row key survived the stale-row sweep forever, showing text the store no longer held. |
-| P-20 | Oversize message | Chunking and reassembly work; no truncation, no `1009` close killing the session. | CODE-OK |
+| P-19 | Duplicate replay | The server keeps one copy of an event that arrives twice; no duplicates on the phone. | VERIFIED — stand scenarios 4 and 10 assert every answer appears exactly once across sequential and overlapping turns. Note the render layer had its own duplicate: two DOM nodes under one row key survived the stale-row sweep forever, showing text the store no longer held. |
+| P-20 | Oversize message | Chunking and reassembly work; no truncation. | CODE-OK |
 
 ### 9.3 Missing control surfaces
 
@@ -341,7 +350,7 @@ New on this branch. Nothing here is QA-proven beyond Drew's single live PASS, an
 | P-43 | Two desktop windows | No lost updates; Stop works from either. | CODE-OK |
 | P-44 | Rollback to an older build | Refuses cleanly rather than corrupting. | SMALL-FIX — no schema version floor exists |
 | P-45 | Inactivity semantics | 11 min of heartbeats only → flagged inactive. 30 min awaiting approval → surfaced as *awaiting approval*, not inactive. | CODE-OK — `remoteRunStall.ts` |
-| P-46 | Push triggers | Approval pending / terminal / stall each fire once, dedupe, redact secrets, pad to fixed buckets. Tapping the notification **opens and focuses** the PWA. | SMALL-FIX — no `notificationclick` handler |
+| P-46 | Push triggers | An approval pending and a finished reply each ring the phone once, from the User's server, with the desktop closed too; the push carries no content. Tapping the notification **opens and focuses** the PWA. | CODE-OK — empty push from `src/hub/hubPush.ts`; `notificationclick` in `src/mobile/service-worker.js` |
 | P-47 | Push subscription expiry | HTTP 410 removes the subscription and the user is told notifications stopped. | SMALL-FIX |
 
 ### 9.5 Timeline row lifecycle
@@ -351,9 +360,12 @@ User actually hit from her phone. Reading and sending were covered; what a row
 *does* between the send and the answer was not covered at all, and five separate
 defects lived there.
 
-All twelve run against the real publisher, a real relay and mailbox, and the
-built PWA in a real browser that sends by typing into its own composer:
+The stand's twelve scenarios ran against the real publisher, a real relay and
+mailbox, and the built PWA in a real browser that sends by typing into its own
+composer:
 `scripts/mobile-e2e-phone-turn.test.mjs`, wired as `npm run test:mobile-e2e`.
+That stand is built on the relay, which went on 2026-10-26; until it is rebuilt
+on the User's server these rows are verified for the relay path only.
 Every one was proven red on the build before its fix — a scenario that passes
 both ways proves nothing, and one of these silently did until its message was
 made realistically tall.
@@ -371,7 +383,6 @@ made realistically tall.
 | P-58 | Following and parking | A reader at the end is carried along by arriving rows; a reader who scrolled into history does not move by a pixel and is offered the way back. | VERIFIED — stand 9 + live pass |
 | P-59 | Overlapping turns | Two phone messages in flight with interleaved terminals: both clear, neither cross-clears the other. | VERIFIED — stand 10 + live pass |
 | P-60 | A run that fails | The failure is stated once and the row ends. | VERIFIED — stand 11. Was broken: a dead run has no terminal of its own, and the one written on its behalf matched no row, so "Thinking" stood over a dead run forever. |
-| P-61 | Finish with no relay | A turn resolving through the mailbox alone still clears its row — the phone's normal state, since iOS backgrounds the socket. | VERIFIED — stand 12 + live pass |
 
 ---
 
@@ -487,7 +498,7 @@ made realistically tall.
 | AC-12 | Termination output | `Consensus: approved by …on [the resolution](#artifact:ID).` — link only, never the body. | REAL-WORK (B2) |
 | AC-13 | No `@handle` in accord messages | None present — a plain handle can trigger an unintended extra run. | CODE-OK |
 | AC-14 | Rate limits | >4 targets or >8 requests/min → clear errors. | CODE-OK |
-| AC-15 | Local-member fallback, lid closed | Members queue as `waiting for desktop`, the phone says so, and the accord resumes on wake without duplicating drafts. | CODE-OK |
+| AC-15 | Local-member fallback, lid closed | Members wait for the desktop, the phone shows "Waiting for your Mac to start it…", and the accord resumes on wake without duplicating drafts. | CODE-OK |
 
 ---
 

@@ -17,68 +17,18 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createRequire } from "node:module";
-import { createServer } from "node:http";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
-import { spawn, execSync } from "node:child_process";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { rm } from "node:fs/promises";
+import { attachApp, launchChrome, member, pairPage, serveMobileShell, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
 
-const require = createRequire(import.meta.url);
-const { attach } = require("./cdp.cjs");
-const { loadMobileOriginHeaders, mobileOriginHeadersForPath } = require("./mobile-origin-headers.cjs");
-
-const repoRoot = path.resolve(import.meta.dirname, "..");
-const root = path.join(repoRoot, "dist/mobile");
 const SITE_PORT = 8301;
 const CDP_PORT = 9441;
-const CHROME = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const CHAT = "chat-tap";
-
-const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".webmanifest": "application/manifest+json" };
-const originHeaders = loadMobileOriginHeaders(root);
-// The phone reaches no mailbox while this is set: every connection drops.
-let mailboxDown = false;
-const site = createServer(async (req, res) => {
-  const url = new URL(req.url || "/", "http://localhost");
-  if (url.pathname.startsWith("/v1/") && mailboxDown) {
-    req.socket.destroy();
-    return;
-  }
-  if (url.pathname === "/v1/mailbox/events" && req.method === "POST") {
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-    const ids = (body.events || []).map((event) => event.eventId);
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, eventIds: ids, appendedEventIds: ids }));
-    return;
-  }
-  if (url.pathname === "/v1/mailbox/events") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ events: [], epoch: "e1", oldestArrivalSeq: 1, maxArrivalSeq: 0 }));
-    return;
-  }
-  if (url.pathname.startsWith("/v1/")) {
-    res.writeHead(404, { "content-type": "application/json" });
-    res.end("{}");
-    return;
-  }
-  const rel = url.pathname;
-  const file = path.join(root, rel === "/" ? "index.html" : rel);
-  try {
-    const body = await readFile(file);
-    res.writeHead(200, { "content-type": TYPES[path.extname(file)] || "application/octet-stream", ...mobileOriginHeadersForPath(originHeaders, rel) });
-    res.end(body);
-  } catch {
-    res.writeHead(404).end("not found");
-  }
-});
+// The phone reaches no server while this is set: every connection drops.
+let serverDown = false;
+// While this is set the server answers but takes nothing the phone sends.
+let holdPushes = false;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const killStaleCdp = () => {
-  try { execSync(`lsof -ti tcp:${CDP_PORT} -sTCP:LISTEN | xargs kill -9`, { stdio: "ignore" }); } catch { /* nothing listening */ }
-};
 
 // No message of its own unless a test gives it one: drawn at the chat's end,
 // where what a card's fields do is the same as under a message.
@@ -97,29 +47,13 @@ function card(id, overrides = {}) {
   };
 }
 
-test("a tap above the composer while the keyboard is up lands the first time", { timeout: 120_000 }, async (t) => {
-  await new Promise((r) => site.listen(SITE_PORT, "127.0.0.1", r));
-  killStaleCdp();
-  const profile = await mkdtemp(path.join(tmpdir(), "aa-mobile-tap-typing-"));
-  const chrome = spawn(CHROME, [
-    "--headless=new", "--no-first-run", "--no-default-browser-check",
-    `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${profile}`,
-    "--window-size=390,844", `http://127.0.0.1:${SITE_PORT}/`
-  ], { stdio: "ignore" });
+test("a tap above the composer while the keyboard is up lands the first time", { timeout: 180_000 }, async (t) => {
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: SITE_PORT, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-tap-typing-");
+  const chrome = launchChrome({ port: CDP_PORT, profile, url: `${site.origin}/` });
   let app;
-  const attachWithRetry = async () => {
-    app?.close();
-    app = undefined;
-    for (let i = 0; i < 40 && !app; i += 1) {
-      try { app = await attach({ port: CDP_PORT, title: "AccordAgents" }); } catch { await sleep(500); }
-    }
-    assert.ok(app, "could not attach to Chrome");
-  };
-  const evaluate = async (expr) => {
-    const result = await app.evaluate(expr);
-    if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
-    return result.result.value;
-  };
+  const evaluate = async (expr) => app.evaluate(expr);
   const waitFor = async (expr, what, timeoutMs = 10_000) => {
     const end = Date.now() + timeoutMs;
     let last;
@@ -150,7 +84,6 @@ test("a tap above the composer while the keyboard is up lands the first time", {
   })()`;
   const seed = async (cards) => {
     await evaluate(`(() => {
-      localStorage.setItem("accordagents.mobile.pairing.v1", JSON.stringify({ endpoint: "http://127.0.0.1:${SITE_PORT}/", pairedAt: new Date(0).toISOString() }));
       localStorage.setItem("accordagents.mobile.chatList.v1", JSON.stringify([
         { id: ${JSON.stringify(CHAT)}, title: "Tap test", group: "AccordAgents", snippet: "…", updatedAt: new Date(0).toISOString(), participants: ["@drew"] }
       ]));
@@ -158,9 +91,8 @@ test("a tap above the composer while the keyboard is up lands the first time", {
       localStorage.setItem("accordagents.mobile.controlCards.v1", JSON.stringify({ ${JSON.stringify(CHAT)}: ${JSON.stringify(cards)} }));
       return true;
     })()`);
-    await evaluate("location.reload()");
+    await app.send("Page.reload", {});
     await sleep(1500);
-    await attachWithRetry();
     await waitFor(`Boolean(globalThis.AccordAgentsMobile && document.querySelector("#control-cards .control-card"))`, "the chat came up with its card");
   };
   // Which of a card's fields get focused from script, and how. A note opened
@@ -178,7 +110,18 @@ test("a tap above the composer while the keyboard is up lands the first time", {
   })()`;
 
   try {
-    await attachWithRetry();
+    // Paired with the User's server for real; then its reads are held off,
+    // so what the page shows is the cards and rows this test hands it, while
+    // what the phone sends still reaches the server.
+    await hub.createChat(CHAT, { title: "Tap test", participants: [member("drew")] });
+    app = await attachApp({ port: CDP_PORT });
+    await pairPage(app, { hub, siteOrigin: site.origin });
+    hub.setGate(async (request) => {
+      if (serverDown) return { drop: true };
+      if (holdPushes && request.method === "POST" && request.path === "/v1/events") return { status: 503, body: { ok: false } };
+      if (request.method === "GET" && request.path.startsWith("/v1/phone/")) return { status: 503, body: { ok: false } };
+      return undefined;
+    });
 
     // --- a choice looks and answers like the desktop's ----------------------
     // The User, 2026-09-22: the phone showed bare option pills, no
@@ -265,14 +208,6 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     const sentChoice = await evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.filter((entry) => entry.kind === "choice.answered").map((entry) => entry.payload.detail))`);
     assert.deepEqual(sentChoice.map((detail) => [detail.selectedOptionId, detail.note]), [["yes", "after lunch"]], "the pick goes with its note");
     await waitFor(dockShown, "the bar to come back once Submit has landed");
-
-    // A choice a machine raised is built on the phone: it carries the
-    // recommendation the same way, and only when it names one of the options.
-    const machineCards = await evaluate(`[
-      AccordAgentsMobile.machineChoiceCard("c", { id: "m1", createdAt: "2026-09-23T00:00:00.000Z", metadata: { pendingChoice: { id: "q1", title: "T", question: "Q", status: "pending", recommendedOptionId: "b", options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] } } }).recommendedOptionId,
-      AccordAgentsMobile.machineChoiceCard("c", { id: "m2", createdAt: "2026-09-23T00:00:00.000Z", metadata: { pendingChoice: { id: "q2", title: "T", question: "Q", status: "pending", recommendedOptionId: "gone", options: [{ id: "a", label: "A" }] } } }).recommendedOptionId ?? null
-    ]`);
-    assert.deepEqual(machineCards, ["b", null], "a machine's choice carries its recommendation as the desktop's does");
 
     // --- Cancel on the card cancels the choice --------------------------------
     await seed([card("card-cancel", { allowsCancel: true, recommendedOptionId: "yes" })]);
@@ -452,7 +387,9 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     // --- a message on its way fades and says nothing about it -------------
     // "Waiting to sync" under the message and in the header was detail the
     // User does not need; the message fades until it is delivered (the User,
-    // 2026-09-24).
+    // 2026-09-24). The server takes nothing for now, so the message stays on
+    // its way while it is looked at.
+    holdPushes = true;
     await evaluate(`AccordAgentsMobile.enqueueMessage({ conversationId: ${JSON.stringify(CHAT)}, content: "still on its way" }).then(() => { document.dispatchEvent(new Event("visibilitychange")); return true; })`);
     const pendingMessage = await waitFor(`(() => {
       const row = [...document.querySelectorAll("#message-list .message-row")].find((node) => node.innerText.includes("still on its way"));
@@ -467,19 +404,20 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     // nothing else would say it.
     assert.deepEqual(await evaluate(`["waiting-to-sync", undefined].map(AccordAgentsMobile.connectionStatusText)`), ["Synced", "Synced"],
       "a send on its way is not the chat's state");
+    holdPushes = false;
     await evaluate(`AccordAgentsMobile.flushOutbox().then(() => { document.dispatchEvent(new Event("visibilitychange")); return true; })`);
     await waitFor(`(() => { const row = [...document.querySelectorAll("#message-list .message-row")].find((node) => node.innerText.includes("still on its way")); return row && !row.classList.contains("is-on-its-way"); })()`,
       "the delivered message at full strength");
     // "Not connected" stays from a send that reached nothing until one gets
     // through, not only on the render right after it (review, 2026-10-01).
     const header = `document.getElementById("connection-state").textContent`;
-    mailboxDown = true;
+    serverDown = true;
     assert.equal(await evaluate(`AccordAgentsMobile.enqueueMessage({ conversationId: ${JSON.stringify(CHAT)}, content: "sent with nothing to reach" }).then(() => AccordAgentsMobile.flushOutbox()).then((result) => result.status)`),
       "unreachable");
     await evaluate(`(() => { document.dispatchEvent(new Event("visibilitychange")); return true; })()`);
     await sleep(500);
     await waitFor(`${header} === "Not connected"`, "the header to keep saying a send reaches nothing after a later redraw");
-    mailboxDown = false;
+    serverDown = false;
     await evaluate(`AccordAgentsMobile.flushOutbox().then(() => { document.dispatchEvent(new Event("visibilitychange")); return true; })`);
     await waitFor(`${header} === "Synced"`, "the header to say Synced once a send got through");
 
@@ -662,7 +600,8 @@ test("a tap above the composer while the keyboard is up lands the first time", {
   } finally {
     app?.close();
     chrome.kill("SIGKILL");
-    await new Promise((resolve) => site.close(resolve));
+    await site.close();
+    await hub.close();
     await rm(profile, { recursive: true, force: true });
   }
 });

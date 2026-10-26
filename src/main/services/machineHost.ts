@@ -24,17 +24,16 @@ import {
   type MachineTurnFinishedBody,
   type MachineTurnRequestBody
 } from "../../shared/machineLink";
-import type { MachineAttachmentResultBody, MachineCompactionDelegateRequest, MachineScriptsOperation, MachineScriptsRequestBody, MachineTransportMoveBody } from "../../shared/machineLink";
+import type { MachineAttachmentResultBody, MachineCompactionDelegateRequest, MachineScriptsOperation, MachineScriptsRequestBody } from "../../shared/machineLink";
 import { normalizeMachineTurnCompaction } from "../../shared/machineLink";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type { AgentHealth, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatBackgroundTasksEvent, ChatMessage, Conversation, ReviewProgress } from "../../shared/types";
 import type { ChatParticipantRun, ChatService } from "./chat";
 import type { DebugLogService } from "./debugLogs";
 import { advanceInstanceSequence, isStoredTerminal } from "./machineTurnOutcome";
-import { openMobileRelayPayload } from "./mobileRelaySealing";
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
-import { openMachineRelayPayload, sealMachineRelayPayload } from "./machineRelaySealing";
-import { RelayTunnelClient, type TunnelClient } from "./relayTunnelClient";
+import { openChannelPayload, openMachinePayload, sealMachinePayload } from "./machineChannelSealing";
+import type { TunnelClient } from "./hubTunnelClient";
 import { deliverToChannel, type HubDeliverOutcome } from "./hubSync";
 import { MachinePeerFabric } from "./machinePeerFabric";
 import { MachineTrustStore } from "./machineTrustStore";
@@ -99,7 +98,6 @@ export interface MachineHostOptions {
   /** File that keeps finished turns until the desktop acknowledges them, so
    *  a result survives a restart of this runtime. In-memory only when unset. */
   outboxPath?: string;
-  reconnectDelayMs?: number;
   createClient?: (pairing: MobilePairingPackage) => TunnelClient;
   now?: () => Date;
   nativeProcessDbPath?: string;
@@ -108,9 +106,6 @@ export interface MachineHostOptions {
   idleStopWarning?: () => string | undefined;
   /** The User's automatic-stop switch as this machine has it. */
   autoStopEnabled?: () => boolean | undefined;
-  /** The User's hub carries this machine's events instead of the relay's
-   *  per-peer delivery (see DeviceEventChannel.hubMode). */
-  hubMode?: boolean;
   /** Through the hub: a channel's gap is asked of the hub (HubSync.repairGap). */
   hubRepair?: (gap: DeviceEventGap) => void;
   /** Scheduled scripts on this machine, operated by the enrolling desktop. */
@@ -121,17 +116,7 @@ export interface MachineHostOptions {
     keepsHostAwake(): boolean;
     /** How many switched-on scripts keep it awake, for the desktop to show. */
     scheduledCount?(): number;
-    /** True while a script runs now (a move would cut it off). */
-    runningNow?(): boolean;
   };
-  /** Moves this machine to another relay address: writes it into the
-   *  enrollment. Absent where the runtime cannot (it then says so). */
-  moveTransport?: (addresses: { relayUrl: string; outboxUrl: string }) => Promise<void>;
-  /** Starts this runtime again, reading the enrollment anew. */
-  restartRuntime?: () => void;
-  /** Whether the relay at this address answers (asked before a move, so a
-   *  machine never rewrites its enrollment to a place it cannot reach). */
-  probeRelay?: (relayUrl: string) => Promise<boolean>;
   /** Folds a `chat.changes` event into this machine's copy of the chat.
    *  "missing-conversation" holds the event until the chat arrives. */
   applyChatChanges?: (event: ChatEventEnvelope, payload: ChatChangesPayload) => Promise<"applied" | "missing-conversation" | "waiting">;
@@ -147,13 +132,6 @@ const ATTACHMENT_PART_TIMEOUT_MS = 120_000;
 const SCRIPTS_CHANGED_COALESCE_MS = 250;
 /** How far the desktop's clock may be ahead of this machine's when it dates a request. */
 const SCRIPTS_REQUEST_CLOCK_SKEW_MS = 30_000;
-/** A move's settling ends this long before the desktop's deadline (or 40%
- *  of a shorter wait), leaving time to ask the server (up to 10 s) and to
- *  answer; the move itself is not made later than the second margin (or 10%)
- *  before it. */
-const TRANSPORT_MOVE_SETTLE_MARGIN_MS = 25_000;
-const TRANSPORT_MOVE_ANSWER_MARGIN_MS = 5_000;
-const TRANSPORT_MOVE_ANSWER_MAX_MS = 5 * 60_000;
 
 function changesScripts(operation: MachineScriptsOperation): boolean {
   return operation.op !== "list" && operation.op !== "revision" && operation.op !== "runs";
@@ -365,7 +343,7 @@ export class MachineHostService {
       publicKeyDerBase64: certificate.enrollment.publicKeyDerBase64,
       role: "phone",
       name: certificate.enrollment.name || "Phone",
-      relayUrl: home.relayUrl ?? (home.hubUrl ? hubWebSocketUrl(home.hubUrl, "") : ""),
+      relayUrl: home.hubUrl ? hubWebSocketUrl(home.hubUrl, "") : "",
       rendezvousId: home.rendezvousId,
       fingerprint: home.fingerprint,
       inviteId: certificate.invite.inviteId
@@ -439,11 +417,7 @@ export class MachineHostService {
   private closed = false;
   private draining = false;
   private idleFenced = false;
-  /** Held by a move to another address from its check until the restart
-   *  (or its refusal); kept apart from the idle stop's, so neither releases
-   *  the other's. */
-  private moveFenced = false;
-  private get fenced(): boolean { return this.idleFenced || this.moveFenced; }
+  private get fenced(): boolean { return this.idleFenced; }
   private readonly turnTasks = new Set<Promise<void>>();
   private readonly deletingConversationIds = new Set<string>();
   private readonly activeTurnConversations = new Map<string, string>();
@@ -484,18 +458,10 @@ export class MachineHostService {
     }
     this.loadOutbox();
     const pairing = options.pairing;
-    if (!pairing.relayUrl && !pairing.hubUrl) {
-      throw new Error("Machine enrollment names neither a relay nor a hub.");
-    }
-    this.client = options.createClient?.(pairing) ?? new RelayTunnelClient({
-      relayUrl: pairing.relayUrl ?? "",
-      rendezvousId: pairing.rendezvousId,
-      role: "machine",
-      deviceId: options.deviceId,
-      capability: pairing.fingerprint,
-      streamId: `${pairing.stableRoutingId}:machine`,
-      reconnectDelayMs: options.reconnectDelayMs
-    });
+    const client = options.createClient?.(pairing);
+    // A machine meets its devices on the User's server, nowhere else.
+    if (!pairing.hubUrl || !client) throw new Error("This machine's enrollment does not name the User's server; set it up again from the desktop (Cloud run in a member's settings).");
+    this.client = client;
     this.trust = new MachineTrustStore(
       options.trustRosterPath ?? path.join(userDataPath(), "machine-trust-roster.json"),
       options.deviceId,
@@ -504,23 +470,17 @@ export class MachineHostService {
     // The owner's other devices reach this machine here. Each gets its own
     // sealed channel with its own signing key; anyone else is not answered.
     this.peers = new MachinePeerFabric({
-      ...(options.hubMode ? { hubMode: true, ...(options.hubRepair ? { hubRepair: options.hubRepair } : {}) } : {}),
+      ...(options.hubRepair ? { hubRepair: options.hubRepair } : {}),
       selfDeviceId: options.deviceId,
       storage: options.eventStorage,
       eventLog: options.eventLog,
       home: pairing,
       homeClient: this.client,
-      createClient: (room) => options.createPeerClient?.({ ...room, deviceId: options.deviceId }) ?? new RelayTunnelClient({
-        relayUrl: room.relayUrl,
-        rendezvousId: room.rendezvousId,
-        role: "machine",
-        deviceId: options.deviceId,
-        // The room's own fingerprint: the relay admits a connection only with
-        // the capability the room was opened with.
-        capability: room.fingerprint ?? pairing.fingerprint,
-        streamId: `${room.rendezvousId}:machine-peer`,
-        reconnectDelayMs: options.reconnectDelayMs
-      }),
+      createClient: (room) => {
+        const peer = options.createPeerClient?.({ ...room, deviceId: options.deviceId });
+        if (!peer) throw new Error("A room with another device opens only on the User's server.");
+        return peer;
+      },
       isPeerConnected: () => true,
       apply: (event, body, peer) => this.applyDeviceEvent(event, body, this.peers.channel(peer.deviceId), peer),
       ...(options.serveChatActionDependency ? {
@@ -606,11 +566,12 @@ export class MachineHostService {
       storage: options.eventStorage, eventLog: options.eventLog,
       pairing: { ...pairing, relaySealKeyBase64: deriveMachineChannelKey(identity, pairing.issuer.publicKeyDerBase64, pairing.rendezvousId) },
       isPeerConnected: () => Boolean(this.desktopDeviceId),
-      ...(options.hubMode ? { hubMode: true, ...(options.hubRepair ? { hubRepair: options.hubRepair } : {}) } : {}),
+      hubMode: true,
+      ...(options.hubRepair ? { hubRepair: options.hubRepair } : {}),
       channelId: pairing.rendezvousId, localDeviceId: options.deviceId,
       peerDeviceId: pairing.issuer.originId, peerPublicKeyDerBase64: pairing.issuer.publicKeyDerBase64,
       send: async (packet) => {
-        const ciphertext = await sealMachineRelayPayload(packet, identity, pairing.issuer.publicKeyDerBase64, pairing.rendezvousId);
+        const ciphertext = await sealMachinePayload(packet, identity, pairing.issuer.publicKeyDerBase64, pairing.rendezvousId);
         await this.client.sendCiphertext({ logicalMessageId: randomUUID(), ciphertext, to: pairing.issuer.originId });
       },
       serveDependency: async (dependency) => {
@@ -718,21 +679,6 @@ export class MachineHostService {
     return Boolean(this.desktopDeviceId);
   }
 
-  /** Work a move would cut off: everything the idle stop waits for except
-   *  a scheduled script's next run (it runs after the restart), and a
-   *  member's background work besides. */
-  private async hasWorkForMove(): Promise<boolean> {
-    if (this.options.scripts?.runningNow?.()) return true;
-    if ((this.chat.localBackgroundTasks?.() ?? []).length > 0) return true;
-    if (this.queuedRunIds().length > 0 || (this.chat.liveRunIds?.() ?? []).length > 0) return true;
-    if (this.closed || this.draining || this.activeTurns.size || this.turnTasks.size || this.commandTasks.size ||
-        this.settlingRuns.size || this.settlingInFlight.size || this.turnsAwaitingChat.size ||
-        (this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork()) || (this.chat.activeParticipantRuns?.().length ?? 0) ||
-        this.outboxError || this.progressErrors.size || [...this.progressSenders.values()].some(sender => sender.hasPending())) return true;
-    if ([...this.pendingTerminals.values()].some(terminal => !this.durableTerminalIds.has(terminalEventId(terminal)))) return true;
-    return (await this.options.eventStorage.nativeCommands().pending()).length > 0;
-  }
-
   /** All work owned by this runtime, including native continuations and
    * incomplete copies. Stored, acknowledged-later results do not keep an idle
    * EC2 box running indefinitely; an unpersisted result does. */
@@ -758,7 +704,7 @@ export class MachineHostService {
     commitHostStop?(prepareLocal: () => Promise<boolean>): Promise<boolean>;
   }): Promise<(() => Promise<void>) | undefined> {
     if (this.fenced || await this.hasWorkForIdleStop()) return undefined;
-    // A move may have taken the machine while that was asked.
+    // Another stop may have taken the machine while that was asked.
     if (this.fenced) return undefined;
     this.idleFenced = true;
     let releaseNative: (() => void) | undefined;
@@ -924,7 +870,6 @@ export class MachineHostService {
       ...((this.outboxError || this.progressErrors.size) ? { outboxError: [this.outboxError, ...this.progressErrors.values()].filter(Boolean).join("; ") } : {}),
       ...(this.options.idleStopWarning?.() ? { idleStopWarning: this.options.idleStopWarning() } : {}),
       ...(typeof this.options.autoStopEnabled?.() === "boolean" ? { autoStopEnabled: this.options.autoStopEnabled() } : {}),
-      ...(this.options.moveTransport ? { transportMoveSupported: true } : {}),
       ...(this.options.scripts ? {
         scriptsSupported: true,
         keepAwake: this.options.scripts.keepsHostAwake(),
@@ -979,77 +924,6 @@ export class MachineHostService {
   private scriptsChangedTimer?: ReturnType<typeof setTimeout>;
   /** Script operations run one at a time, in order, off the inbound chain. */
   private scriptsQueue: Promise<void> = Promise.resolve();
-
-  /** The desktop moves this machine to the User's own server: the new
-   *  addresses go into the enrollment, the answer goes back, and the runtime
-   *  starts again from it. Refused while anything runs here, so no turn is
-   *  cut off; the desktop asks again once this machine is idle. */
-  private async answerTransportMove(body: MachineTransportMoveBody, replyTo: string | undefined): Promise<void> {
-    const fail = (error: string) => this.send({ type: "machine.transport.moved", requestId: body.requestId, ok: false, error }, replyTo).catch(() => undefined);
-    const expiresAt = typeof body.expiresAt === "string" ? Date.parse(body.expiresAt) : Number.NaN;
-    if (!this.options.moveTransport || !this.options.restartRuntime) return void await fail("This machine runtime cannot move; upgrade it.");
-    if (body.instanceId !== this.instanceId) return void await fail("The machine restarted since this was asked; try again.");
-    if (!Number.isFinite(expiresAt) || this.now().getTime() > expiresAt + SCRIPTS_REQUEST_CLOCK_SKEW_MS) return void await fail("This request is too old; nothing was changed.");
-    const addresses = relayAddresses(body.relayUrl, body.outboxUrl, this.options.pairing.relayUrl);
-    if (!addresses) return void await fail("These are not a relay's addresses.");
-    if (this.fenced) return void await fail("The machine is busy; it moves once it is idle.");
-    // From here no new work starts: what arrives waits in the durable inbox
-    // (for this runtime if the move does not happen, the next one if it does).
-    this.moveFenced = true;
-    const refuse = async (error: string): Promise<void> => {
-      this.moveFenced = false;
-      this.retryHeldEventsNow();
-      void this.eventChannel.flush().catch(error => { void this.debugLogs.write("machine-host.move.resume-error", { message: errorMessage(error) }); });
-      await fail(error);
-    };
-    // The desktop stops waiting for the answer at its deadline, counted here
-    // from receipt on this machine's own clock: past it, the machine refuses
-    // rather than moving unseen.
-    const budget = typeof body.answerWithinMs === "number" && Number.isFinite(body.answerWithinMs) && body.answerWithinMs > 0
-      ? Math.min(body.answerWithinMs, TRANSPORT_MOVE_ANSWER_MAX_MS)
-      : Math.max(0, expiresAt - this.now().getTime());
-    const answerBy = this.now().getTime() + budget;
-    const late = () => this.now().getTime() > answerBy - Math.min(TRANSPORT_MOVE_ANSWER_MARGIN_MS, budget * 0.1);
-    try {
-      // What was already taken in (a message being read, a script request,
-      // an event being applied) settles before the machine says it is idle.
-      const settled = (async () => {
-        await this.inbound;
-        await this.scriptsQueue;
-        await this.eventChannel.flush();
-        return true;
-      })();
-      const remaining = Math.max(0, answerBy - Math.min(TRANSPORT_MOVE_SETTLE_MARGIN_MS, budget * 0.4) - this.now().getTime());
-      let deadline: ReturnType<typeof setTimeout> | undefined;
-      const inTime = await Promise.race([settled, new Promise<false>((resolve) => { deadline = setTimeout(() => resolve(false), remaining); })]);
-      clearTimeout(deadline);
-      if (!inTime) return void await refuse("The machine is still sending what it owes; it moves once that is done.");
-    } catch (error) {
-      return void await refuse(`The machine could not settle its current work: ${errorMessage(error)}`);
-    }
-    if (await this.hasWorkForMove().catch(() => true)) return void await refuse("The machine is busy; it moves once it is idle.");
-    if (!await (this.options.probeRelay ?? probeRelayManifest)(addresses.relayUrl).catch(() => false)) {
-      return void await refuse("This machine cannot reach the server at that address.");
-    }
-    // Asked again after the server answered: a scheduled script may have
-    // started meanwhile.
-    if (await this.hasWorkForMove().catch(() => true)) return void await refuse("The machine is busy; it moves once it is idle.");
-    if (late()) return void await refuse("This request is too old; nothing was changed.");
-    try {
-      await this.options.moveTransport(addresses);
-    } catch (error) {
-      return void await refuse(`The machine could not save its new address: ${errorMessage(error)}`);
-    }
-    void this.debugLogs.write("machine.transport.moved", { relayHost: new URL(addresses.relayUrl).host });
-    // The answer leaves first; then the runtime starts again on its new
-    // address, also when the answer cannot leave: its enrollment names the
-    // new one already, and staying here would only look like it stayed.
-    const answered = this.send({ type: "machine.transport.moved", requestId: body.requestId, ok: true }, replyTo).catch(() => undefined);
-    let waited: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([answered, new Promise((resolve) => { waited = setTimeout(resolve, 5_000); })]);
-    clearTimeout(waited);
-    setTimeout(() => this.options.restartRuntime?.(), 500).unref?.();
-  }
 
   /** One desktop request on this machine's scripts, always answered. Served
    *  off the inbound chain, like a picture request on the desktop: releasing
@@ -1232,11 +1106,11 @@ export class MachineHostService {
   private async openHomeFrame(ciphertext: string): Promise<unknown> {
     const header = JSON.parse(ciphertext) as { senderPublicKeyDerBase64?: unknown };
     if (!header.senderPublicKeyDerBase64) {
-      const bootstrap = await openMobileRelayPayload<unknown>(ciphertext, this.options.pairing.relaySealKeyBase64);
+      const bootstrap = await openChannelPayload<unknown>(ciphertext, this.options.pairing.relaySealKeyBase64);
       if (isMachineLinkEnvelope(bootstrap) && bootstrap.body.type === "machine.hello.request") return bootstrap;
       throw new Error("Legacy machine content sealing is unsupported; update this device to reconnect.");
     }
-    return openMachineRelayPayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
+    return openMachinePayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
       [this.options.pairing.issuer.publicKeyDerBase64, ...this.trust.peers().map(peer => peer.publicKeyDerBase64)],
       this.options.pairing.rendezvousId);
   }
@@ -1247,13 +1121,13 @@ export class MachineHostService {
   }
 
   private async openRetainedSettings(ciphertext: string): Promise<unknown> {
-    try { return await openMobileRelayPayload(ciphertext, await this.ownerSealKey()); }
+    try { return await openChannelPayload(ciphertext, await this.ownerSealKey()); }
     catch {
       // Pre-upgrade immutable signed events may retain an inner settings
       // cipher. Their outer transport is already pair-sealed and authenticated;
       // reading the historical inner cipher prevents pinning the event stream.
       // Newly emitted settings never use this legacy key.
-      return openMobileRelayPayload(ciphertext, this.options.pairing.relaySealKeyBase64);
+      return openChannelPayload(ciphertext, this.options.pairing.relaySealKeyBase64);
     }
   }
 
@@ -1262,7 +1136,7 @@ export class MachineHostService {
     // Old, ephemeral frames cannot bypass the idle fence either. Current
     // peers use the durable inbox and retain these actions until apply.
     if (this.fenced && (isMachineDurableMessage(body) || body.type === "machine.settings.sync")) {
-      throw new Error(this.moveFenced ? "The machine is moving to another address; this action must remain queued." : "The machine is stopping after idle; this action must remain queued.");
+      throw new Error("The machine is stopping after idle; this action must remain queued.");
     }
     void this.debugLogs.write("machine-host.message", {
       type: body.type,
@@ -1396,12 +1270,6 @@ export class MachineHostService {
         return;
       case "machine.scripts.result":
       case "machine.scripts.changed":
-        return;
-      case "machine.transport.move":
-        // Only the enrolling desktop reaches here (see above).
-        void this.answerTransportMove(body, replyTo);
-        return;
-      case "machine.transport.moved":
         return;
       case "machine.turn.query":
         if (await this.options.eventStorage.nativeCommands().forRun(body.runId)) {
@@ -2302,34 +2170,16 @@ export class MachineHostService {
     return peers.filter((peer) => peer.deviceId !== this.options.pairing.issuer.originId);
   }
 
-  /**
-   * Who a result is delivered to: the enrolling desktop and every other device
-   * of the owner that is met in this machine's own room.
-   *
-   * A machine in another room is deliberately not on this list. An event is
-   * scoped to the room it was minted in, and another machine is a peer for
-   * asking members to run, not an audience for this machine's results.
-   */
+  /** Who a result is addressed to: nobody. Every device reads the User's
+   *  server's order, and nobody keeps a delivery row for a reader of it. */
   private resultRecipients(): Array<{ deviceId: string; channelId: string }> {
-    // Through the hub nobody is waited on: each device reads the hub's order.
-    if (this.options.hubMode) return [];
-    const room = this.options.pairing.rendezvousId;
-    const issuer = { deviceId: this.options.pairing.issuer.originId, channelId: room };
-    const peers = this.peers.recipients()
-      .filter((peer) => peer.channelId === room && peer.deviceId !== issuer.deviceId);
-    return [issuer, ...peers];
+    return [];
   }
 
-  /** Where this machine's own chat changes go: the desktop that installed it,
-   *  and every other machine of the owner it knows (each holds every chat).
-   *  Phones are not addressed; they read the chat from the desktop. Through
-   *  the hub nobody is addressed: every device reads the hub's order. */
+  /** Where this machine's own chat changes are addressed: nowhere, for the
+   *  same reason. */
   chatChangeRecipients(): Array<{ deviceId: string; channelId: string }> {
-    if (this.options.hubMode) return [];
-    return [
-      { deviceId: this.options.pairing.issuer.originId, channelId: this.options.pairing.rendezvousId },
-      ...this.peers.machineRecipients()
-    ];
+    return [];
   }
 
   /** The device identity of another of the owner's machines, by machine id:
@@ -2459,7 +2309,7 @@ export class MachineHostService {
     const peerKey = to === this.options.pairing.issuer.originId
       ? this.options.pairing.issuer.publicKeyDerBase64 : this.trust.peer(to)?.publicKeyDerBase64;
     if (!peerKey) throw new Error("That device is no longer trusted.");
-    const ciphertext = await sealMachineRelayPayload(signed, await this.options.eventLog.getOrCreateDeviceIdentity(),
+    const ciphertext = await sealMachinePayload(signed, await this.options.eventLog.getOrCreateDeviceIdentity(),
       peerKey, this.options.pairing.rendezvousId);
     await this.client.sendCiphertext({ logicalMessageId: envelope.messageId, ciphertext, to });
   }
@@ -2482,33 +2332,4 @@ function rememberBounded(set: Set<string>, value: string, limit = 5_000): void {
   set.delete(value);
   set.add(value);
   if (set.size > limit) set.delete(set.values().next().value as string);
-}
-
-/** A relay's two addresses as a move names them: the room socket and the
- *  mailbox, on one host, over TLS (plain only on this computer). */
-function relayAddresses(relayUrl: unknown, outboxUrl: unknown, currentRelayUrl: string | undefined): { relayUrl: string; outboxUrl: string } | undefined {
-  if (typeof relayUrl !== "string" || typeof outboxUrl !== "string") return undefined;
-  try {
-    const room = new URL(relayUrl);
-    const mailbox = new URL(outboxUrl);
-    const local = (url: URL) => url.hostname === "127.0.0.1" || url.hostname === "localhost";
-    // This computer is a place only for a machine already on it (a test).
-    const alreadyLocal = (() => { try { return local(new URL(currentRelayUrl ?? "")); } catch { return false; } })();
-    if (local(room) && !alreadyLocal) return undefined;
-    const secure = (room.protocol === "wss:" && mailbox.protocol === "https:") || (local(room) && room.protocol === "ws:" && mailbox.protocol === "http:");
-    if (!secure || room.host !== mailbox.host || room.pathname !== "/v1/relay" || mailbox.pathname !== "/v1/mailbox/events") return undefined;
-    return { relayUrl: room.toString(), outboxUrl: mailbox.toString() };
-  } catch {
-    return undefined;
-  }
-}
-
-/** The relay at this room address answers with its manifest. */
-async function probeRelayManifest(relayUrl: string): Promise<boolean> {
-  const room = new URL(relayUrl);
-  const manifest = new URL("/v1/relay/manifest", `${room.protocol === "wss:" ? "https:" : "http:"}//${room.host}`);
-  const response = await fetch(manifest, { signal: AbortSignal.timeout(10_000) });
-  if (!response.ok) return false;
-  const body = await response.json() as { ok?: unknown; manifest?: { provider?: unknown } };
-  return body.ok === true && typeof body.manifest?.provider === "string";
 }

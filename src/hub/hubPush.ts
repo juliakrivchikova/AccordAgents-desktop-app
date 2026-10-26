@@ -11,7 +11,7 @@ const ACTIVE_RECHECKS_MAX = 4;
 /** After a restart, notices this recent that a phone has not seen ring it. */
 const REARM_WITHIN_MS = 10 * 60_000;
 
-/** Push services a phone may name (same list the relay allowed). */
+/** Push services a phone may name. */
 const PUSH_ENDPOINT_HOSTS = [
   /(^|\.)fcm\.googleapis\.com$/,
   /(^|\.)android\.googleapis\.com$/,

@@ -1,13 +1,14 @@
 /**
  * Activity on the phone, driven through the real PWA in a browser.
  *
- * The desktop's part is played the way the desktop plays it: sealed
- * `mobile.timeline.events` batches for two chats, posted to the reference
- * mailbox the phone drains. Nothing is written into the phone's storage by
- * hand except the pairing and the chat list. Then the bottom bar is used: the
- * Activity tab lists what the relay delivered, a permission is allowed and a
- * choice answered from it, a run is stopped from it, a finished update opens
- * its chat, and a card the desktop withdraws leaves the list.
+ * The desktop's part is played the way the desktop plays it now: its chat
+ * changes and cards, signed and published on the User's own server (a real
+ * hub here), which the paired phone reads. Nothing is written into the
+ * phone's storage by hand but the age of its cards. Then the bottom bar is
+ * used: the Activity tab lists what the server delivered, a permission is
+ * allowed and a choice answered from it, a run is stopped from it, a
+ * finished update opens its chat, and a card the desktop settles leaves the
+ * list.
  *
  * This is a browser check, not the installed phone: it runs the same files the
  * phone runs, under the same origin headers, but a physically installed PWA is
@@ -16,158 +17,74 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createRequire } from "node:module";
-import { createServer } from "node:http";
-import { createCipheriv, createHash, createHmac, randomBytes } from "node:crypto";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
-import { spawn, execSync } from "node:child_process";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { rm } from "node:fs/promises";
+import { attachApp, launchChrome, member, pairPage, serveMobileShell, sleep, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
 
 const require = createRequire(import.meta.url);
-const { attach } = require("./cdp.cjs");
-const { createReferenceMailboxServer } = require("./mailbox-reference-server.cjs");
-const { loadMobileOriginHeaders, mobileOriginHeadersForPath } = require("./mobile-origin-headers.cjs");
-
-const repoRoot = path.resolve(import.meta.dirname, "..");
-const root = path.join(repoRoot, "dist/mobile");
 const SITE_PORT = 8215;
-const MAILBOX_PORT = 8216;
 const CDP_PORT = 9385;
-const CHROME = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const CHAT_POLISH = "conv-activity-polish";
 const CHAT_CLOUD = "conv-activity-cloud";
-
-const SEAL_KEY = randomBytes(32).toString("base64url");
-const sealKeyBuffer = Buffer.from(SEAL_KEY, "base64url");
-const MAILBOX_TOKEN = createHmac("sha256", sealKeyBuffer).update("accord-mailbox-auth-v1", "utf8").digest("base64url");
-const MAILBOX_ID = "mb-" + createHmac("sha256", sealKeyBuffer).update("accord-mailbox-scope-v1", "utf8").digest("base64url").slice(0, 32);
-
-const sealPayload = (payload) => {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", sealKeyBuffer, iv);
-  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(payload), "utf8"), cipher.final()]);
-  const tagged = Buffer.concat([ciphertext, cipher.getAuthTag()]);
-  return { v: 1, alg: "A256GCM", iv: iv.toString("base64url"), ct: tagged.toString("base64url") };
-};
-
-const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".webmanifest": "application/manifest+json" };
-const originHeaders = loadMobileOriginHeaders(root);
-const site = createServer(async (req, res) => {
-  const url = req.url || "/";
-  if (url.startsWith("/v1/mailbox/") || url.startsWith("/v1/push/")) {
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const upstream = await fetch(`http://127.0.0.1:${MAILBOX_PORT}${url}`, {
-      method: req.method,
-      headers: {
-        "content-type": req.headers["content-type"] || "application/json",
-        ...(req.headers.authorization ? { authorization: req.headers.authorization } : {})
-      },
-      body: req.method === "GET" || req.method === "HEAD" ? undefined : Buffer.concat(chunks)
-    });
-    const body = Buffer.from(await upstream.arrayBuffer());
-    res.writeHead(upstream.status, { "content-type": "application/json" });
-    res.end(body);
-    return;
-  }
-  const rel = url.split("?")[0];
-  const file = path.join(root, rel === "/" ? "index.html" : rel);
-  try {
-    const body = await readFile(file);
-    res.writeHead(200, {
-      "content-type": TYPES[path.extname(file)] || "application/octet-stream",
-      ...mobileOriginHeadersForPath(originHeaders, rel)
-    });
-    res.end(body);
-  } catch {
-    res.writeHead(404).end("not found");
-  }
-});
-
-const mailbox = createReferenceMailboxServer({ locked: true });
-const mailboxServer = mailbox.server ?? mailbox;
-
-let seq = 0;
-const postEnvelope = async (payload) => {
-  seq += 1;
-  const res = await fetch(`http://127.0.0.1:${MAILBOX_PORT}/v1/mailbox/events?mailboxId=${MAILBOX_ID}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${MAILBOX_TOKEN}` },
-    body: JSON.stringify({
-      events: [{
-        eventId: `activity-envelope-${seq}`,
-        conversationId: payload.conversationId,
-        logScopeId: payload.conversationId,
-        originId: "desktop-origin",
-        originSeq: seq,
-        eventHash: `hash-${seq}`,
-        kind: "mobile.timeline.events",
-        payload: sealPayload(payload)
-      }]
-    })
-  });
-  const ack = await res.json();
-  assert.ok(res.ok && ack.appendedEventIds.length === 1, `mailbox did not append: ${JSON.stringify(ack)}`);
-};
+const DREW = member("drew");
+const TAYLOR = member("taylor");
+const MORGAN = member("morgan", { kind: "codex-cli" });
 
 const minutesAgo = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
-const doneMessage = (id, label, content, minutes) => ({
-  id, messageId: id, role: "participant", participantLabel: label, content, status: "done", createdAt: minutesAgo(minutes)
+const doneMessage = (id, author, content, minutes, metadata) => ({
+  id, role: "participant", participantId: author.id, participantLabel: `@${author.handle}`, content, status: "done", createdAt: minutesAgo(minutes),
+  ...(metadata ? { metadata } : {})
 });
-
-const polishEvents = [
-  { id: "u1", messageId: "u1", role: "you", content: "@drew can you check the unread dot?", status: "done", createdAt: minutesAgo(12) },
-  doneMessage("m1", "@drew", "Found it. The dot was only cleared on list taps.", 10),
+const pendingChoice = (id, title, question, options, status) => ({
+  id, title, question, options, status,
+  ...(status === "selected" ? { selectedOptionId: options[0].id, selectedAt: new Date().toISOString() } : {}),
+  ...(status === "cancelled" ? { cancelledAt: new Date().toISOString() } : {})
+});
+const question = (status) => doneMessage("q1", TAYLOR, "Review is green. Which target should the deploy go to?", 1, { pendingChoice: pendingChoice("choice-deploy", "Deploy target", "Where should this deploy go?", [
+  { id: "staging", label: "Deploy to staging now — the phone picks it up the next time it opens" },
+  { id: "preview", label: "Publish a preview from main first" }
+], status) });
+// A run still in progress: the member's message while it works.
+const taylorRun = {
+  id: "t-run", role: "participant", participantId: TAYLOR.id, participantLabel: "@taylor",
+  content: "Reviewing the diff now.", status: "pending", createdAt: minutesAgo(0.5), metadata: { runId: "run-taylor-1" }
+};
+const polishMessages = [
+  { id: "u1", role: "user", content: "@drew can you check the unread dot?", status: "done", createdAt: minutesAgo(12) },
+  doneMessage("m1", DREW, "Found it. The dot was only cleared on list taps.", 10),
   // A reply in the thread under @drew's first message.
-  { ...doneMessage("m2", "@drew", "Fixed. The badge clears too now.", 6), threadRootId: "m1" },
-  doneMessage("q1", "@taylor", "Review is green. Which target should the deploy go to?", 1),
-  // A run still in progress: the row the desktop publishes while it works.
-  {
-    id: "run-taylor-1:@taylor", role: "participant", participantLabel: "@taylor",
-    content: "Reviewing the diff now.", status: "pending", runId: "run-taylor-1", createdAt: minutesAgo(2)
-  }
+  doneMessage("m2", DREW, "Fixed. The badge clears too now.", 6, { chatThreadRootId: "m1" }),
+  question("pending"),
+  taylorRun
 ];
-const choiceCard = {
-  id: "choice-deploy", kind: "choice", conversationId: CHAT_POLISH, title: "Deploy target",
-  summary: "Where should this deploy go?", requesterLabel: "@taylor",
-  options: [
-    { id: "staging", label: "Deploy to staging now — the phone picks it up the next time it opens" },
-    { id: "preview", label: "Publish a preview from main first" }
-  ],
-  allowsCustomAnswer: true, allowsCancel: true, status: "pending", createdAt: minutesAgo(1), sourceMessageId: "q1"
-};
-const permissionCard = {
-  id: "perm-deploy", kind: "permission", conversationId: CHAT_POLISH,
-  title: "Grant @drew shell allow prefix \"npm run deploy:mobile\"",
-  summary: "Grant @drew shell allow prefix \"npm run deploy:mobile\"", requesterLabel: "@drew",
-  options: [{ id: "allow", label: "Allow" }, { id: "deny", label: "Deny" }],
-  allowsCustomAnswer: false, allowsCancel: false, status: "pending", createdAt: minutesAgo(3),
-  codexDecisionId: "native-decision-9"
-};
-const cloudEvents = [doneMessage("c1", "@morgan", "The machine is up and the runtime connected.", 18)];
+const swipeQuestion = (status) => doneMessage("q2", TAYLOR, "Cancel me from the list?", 0, { pendingChoice: pendingChoice("choice-swipe", "Swipe target", "Cancel me from the list?", [
+  { id: "yes", label: "Yes" }, { id: "no", label: "No" }
+], status) });
+const cloudQuestion = (status) => doneMessage("c-question", MORGAN, "Which region should the machine move to?", 5, { pendingChoice: pendingChoice("choice-cloud", "Region", "Which region should the machine move to?", [
+  { id: "eu", label: "Stay in eu-west-1" }, { id: "us", label: "Move to us-east-1" }
+], status) });
+const cloudMessages = [doneMessage("c1", MORGAN, "The machine is up and the runtime connected.", 18), cloudQuestion("pending")];
+const approvalOf = (fields) => ({
+  conversationId: CHAT_POLISH, requesterRoleConfigId: "software-engineer", toolName: "Bash", capability: "shell", status: "pending",
+  request: { command: "npm run deploy:mobile" }, updatedAt: new Date().toISOString(), ...fields
+});
+const deployApproval = approvalOf({
+  id: "perm-deploy", requesterParticipantId: DREW.id, requesterHandle: "drew",
+  summary: "Grant @drew shell allow prefix \"npm run deploy:mobile\"", createdAt: minutesAgo(3), codexDecisionId: "native-decision-9"
+});
 // A permission whose summary is long and multi-line: answered in the row, so
 // every word of it has to be on screen, the end included.
 const longCommand = "Codex wants to run: " + "echo checking; ".repeat(30) + "\nrm -rf build/cache";
-const cloudPermission = {
-  id: "perm-cloud", kind: "permission", conversationId: CHAT_CLOUD, title: "Run a command", summary: longCommand,
-  requesterLabel: "@morgan", machineName: "Cloud · eu-west-1",
-  options: [{ id: "allow", label: "Allow" }, { id: "deny", label: "Deny" }],
-  allowsCustomAnswer: false, allowsCancel: false, status: "pending", createdAt: minutesAgo(4)
-};
-const cloudChoice = {
-  id: "choice-cloud", kind: "choice", conversationId: CHAT_CLOUD, title: "Region",
-  summary: "Which region should the machine move to?", requesterLabel: "@morgan",
-  options: [{ id: "eu", label: "Stay in eu-west-1" }, { id: "us", label: "Move to us-east-1" }],
-  allowsCustomAnswer: true, allowsCancel: true, status: "pending", createdAt: minutesAgo(5), sourceMessageId: "c-question"
-};
+const cloudApproval = approvalOf({
+  id: "perm-cloud", conversationId: CHAT_CLOUD, requesterParticipantId: MORGAN.id, requesterHandle: "morgan",
+  summary: longCommand, machineName: "Cloud · eu-west-1", createdAt: minutesAgo(4), request: { command: "rm -rf build/cache" }
+});
+const chatBarApproval = approvalOf({
+  id: "perm-chat-bar", conversationId: CHAT_CLOUD, requesterParticipantId: MORGAN.id, requesterHandle: "morgan",
+  summary: "Codex wants to run: npm run build:mobile", createdAt: new Date().toISOString(), request: { command: "npm run build:mobile" }
+});
+
 // Taps within this long of a redraw are ignored by the shell.
 const TAP_SETTLE_MS = 600;
-
-const killStaleCdp = () => {
-  try { execSync(`lsof -ti tcp:${CDP_PORT} -sTCP:LISTEN | xargs kill -9`, { stdio: "ignore" }); } catch { /* nothing listening */ }
-};
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** A left swipe on a row: the finger travels far enough for the list to hand
  *  the gesture over, and the row settles open. */
@@ -187,53 +104,50 @@ async function swipeLeft(app, selector) {
   await sleep(300);
 }
 
-test("Activity lists what the relay delivered and acts on it from the bottom bar", async (t) => {
-  await new Promise((r) => site.listen(SITE_PORT, "127.0.0.1", r));
-  await new Promise((r) => mailboxServer.listen(MAILBOX_PORT, "127.0.0.1", r));
-  killStaleCdp();
-  const profile = await mkdtemp(path.join(tmpdir(), "aa-mobile-activity-"));
-  const chrome = spawn(CHROME, [
-    "--headless=new", "--no-first-run", "--no-default-browser-check",
-    `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${profile}`,
-    "--window-size=390,844", `http://127.0.0.1:${SITE_PORT}/`
-  ], { stdio: "ignore" });
-
+test("Activity lists what the server delivered and acts on it from the bottom bar", { timeout: 300_000 }, async (t) => {
+  const { createChatEventDeviceIdentity } = require("../dist/main/main/services/chatEventLog.js");
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const hub = await startMobileHub({ rosterDevices: [
+    { deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Cloud machine", machineId: "m1" }
+  ] });
+  const site = await serveMobileShell({ port: SITE_PORT, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-activity-");
+  const chrome = launchChrome({ port: CDP_PORT, profile, url: `${site.origin}/` });
   let app;
   try {
-    const registered = await fetch(`http://127.0.0.1:${MAILBOX_PORT}/v1/mailbox/register?mailboxId=${MAILBOX_ID}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${MAILBOX_TOKEN}` },
-      body: JSON.stringify({ tokenHashBase64Url: createHash("sha256").update(MAILBOX_TOKEN, "utf8").digest("base64url") })
-    });
-    assert.ok(registered.ok, "mailbox registration failed");
-    await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_POLISH, events: polishEvents, cards: [choiceCard, permissionCard] });
-    await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_CLOUD, events: cloudEvents, cards: [cloudPermission, cloudChoice] });
-
-    const attachWithRetry = async () => {
-      app?.close();
-      app = undefined;
-      for (let i = 0; i < 40 && !app; i += 1) {
-        try { app = await attach({ port: CDP_PORT, title: "AccordAgents" }); } catch { await sleep(500); }
-      }
-      assert.ok(app, "could not attach to Chrome");
-    };
-    await attachWithRetry();
-    const evaluate = async (expr) => (await app.evaluate(expr)).result.value;
+    await hub.createChat(CHAT_POLISH, { title: "PWA polish round", participants: [DREW, TAYLOR], createdAt: minutesAgo(30), messages: polishMessages });
+    await hub.createChat(CHAT_CLOUD, { title: "Cloud machine setup", participants: [MORGAN], createdAt: minutesAgo(30), messages: cloudMessages });
+    await hub.raiseApproval(CHAT_POLISH, deployApproval);
+    await hub.raiseApproval(CHAT_CLOUD, cloudApproval);
+    app = await attachApp({ port: CDP_PORT });
+    const evaluate = app.evaluate;
     const waitFor = async (expr, label, tries = 60) => {
       let value;
       for (let i = 0; i < tries; i += 1) {
-        value = await evaluate(expr);
+        value = await evaluate(expr).catch(() => null);
         if (value) return value;
         await sleep(500);
       }
       assert.fail(`timed out waiting for ${label}`);
     };
     const reload = async () => {
-      await evaluate("location.reload()");
+      await app.send("Page.reload", {});
       await sleep(800);
-      await attachWithRetry();
-      await waitFor(`document.readyState === "complete" ? true : null`, "the reloaded page");
+      await waitFor(`document.readyState === "complete" && Boolean(globalThis.AccordAgentsMobile) ? true : null`, "the reloaded page");
     };
+    // Any change to a chat on the server: the phone hears of it and reads
+    // the chat again.
+    const touchChat = (conversationId) => hub.changeChat(conversationId, [{ type: "conversation.updated", metadata: { autoTitle: false } }]);
+    // A card the server stops listing leaves the phone once it has been on
+    // the phone for a while (a list read just before the card arrived must
+    // not close it). These cards are minutes old for the purpose: what the
+    // User's phone holds when the desktop settles one.
+    const ageCards = () => evaluate(`(() => {
+      const all = JSON.parse(localStorage.getItem("accordagents.mobile.controlCards.v1") || "{}");
+      for (const list of Object.values(all)) for (const card of list) card.receivedAt = new Date(Date.now() - 10 * 60000).toISOString();
+      localStorage.setItem("accordagents.mobile.controlCards.v1", JSON.stringify(all));
+      return true;
+    })()`);
     const storedEvents = (store, kind) => evaluate(`(async () => {
       const db = await new Promise((resolve, reject) => {
         const request = indexedDB.open("accordagents-mobile-control");
@@ -257,24 +171,18 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
       }));
     })()`;
 
-    // A device-level pairing: no chat is preselected, so the phone opens on
+    // A chat's rows reach this phone when it reads that chat's page from the
+    // server. It reads the open chat's page itself; a chat it is not showing
+    // is read here the same way (the app's own read, as opening the chat
+    // does it, without opening it). Activity lists what the phone holds.
+    // NOTE: the phone does not read a chat it is not showing by itself yet,
+    // so without these reads Running and Finished stay empty for such chats.
+    const readChat = (conversationId) => evaluate(`AccordAgentsMobile.requestTimelineViaRelay(AccordAgentsMobile.loadPairing(), ${JSON.stringify(conversationId)}).then(() => true)`);
+    // Paired for every chat: no chat is preselected, so the phone opens on
     // its home screens.
-    await evaluate(`(() => {
-      localStorage.setItem("accordagents.mobile.pairing.v1", JSON.stringify({
-        endpoint: "http://127.0.0.1:${SITE_PORT}/",
-        outboxUrl: "http://127.0.0.1:${SITE_PORT}/v1/mailbox/events",
-        relaySealKeyBase64: "${SEAL_KEY}",
-        pairedAt: new Date(0).toISOString()
-      }));
-      localStorage.setItem("accordagents.mobile.chatList.v1", JSON.stringify([
-        { id: "${CHAT_POLISH}", title: "PWA polish round", group: "AccordAgents", snippet: "…", updatedAt: new Date().toISOString(), participants: ["@drew", "@taylor"], running: true },
-        { id: "${CHAT_CLOUD}", title: "Cloud machine setup", group: "AccordAgents", snippet: "…", updatedAt: new Date().toISOString(), participants: ["@morgan"] }
-      ]));
-      localStorage.removeItem("accordagents.mobile.activeConversationId.v1");
-      return true;
-    })()`);
-    await reload();
-
+    await pairPage(app, { hub, siteOrigin: site.origin });
+    await readChat(CHAT_POLISH);
+    await readChat(CHAT_CLOUD);
     // The bar is there on the home screen, on Chats.
     assert.equal(await waitFor(`(() => {
       const dock = document.getElementById("home-dock");
@@ -282,7 +190,7 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     })()`, "the bottom bar on Chats"), "chats");
 
     // The Activity tab's number counts what waits for the User and the
-    // unseen updates, once the relay's batches have landed.
+    // unseen updates, once the server's chats have been read.
     const badge = await waitFor(`(() => {
       const badge = document.getElementById("activity-badge");
       return badge && !badge.hidden && Number(badge.textContent) >= 4 ? badge.textContent : null;
@@ -320,15 +228,19 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
       return true;
     })()`);
     await waitFor(`document.querySelector('[data-card-id="perm-deploy"]')?.classList.contains("is-on-its-way") || null`, "the row to fade once answered");
-    const decisions = await storedEvents("events", "permission.decided");
+    const decisions = await storedEvents("outbox", "permission.decided");
     assert.equal(decisions.length, 1, "one answer per card");
     assert.equal(decisions[0].conversationId, CHAT_POLISH);
     assert.equal(decisions[0].payload.targetKey, "approval:perm-deploy");
     assert.equal(decisions[0].payload.detail.approve, true);
     assert.equal(decisions[0].payload.detail.codexDecisionId, "native-decision-9");
 
+    for (let i = 0; i < 40 && hub.phoneEvents("permission.decided").length === 0; i += 1) await sleep(250);
+    assert.equal(hub.phoneEvents("permission.decided").length, 1, "the one answer reached the server");
+
     // Another chat's cards changing does not make that answer answerable again.
-    await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_CLOUD, events: cloudEvents, cards: [cloudChoice] });
+    await ageCards();
+    await hub.raiseApproval(CHAT_CLOUD, { ...cloudApproval, status: "denied", updatedAt: new Date().toISOString() });
     await waitFor(`document.querySelector('[data-card-id="perm-cloud"]') ? null : true`, "the other chat's permission withdrawn");
     assert.equal(await evaluate(`document.querySelector('[data-card-id="perm-deploy"] [data-option-id="allow"]').disabled`), true,
       "an answer already sent stays sent when another chat's cards change");
@@ -365,20 +277,17 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     assert.equal(underKeyboard, heldHeight, "the keyboard coming up does not shrink the screen under the focused note");
     // Picking selects; Submit answers, as on the desktop.
     await evaluate(`document.querySelector('#activity-item .control-card-submit').click()`);
-    await waitFor(`(async () => {
-      const db = await new Promise((resolve) => { const r = indexedDB.open("accordagents-mobile-control"); r.onsuccess = () => resolve(r.result); });
-      const rows = await new Promise((resolve) => { const all = db.transaction("events").objectStore("events").getAll(); all.onsuccess = () => resolve(all.result); });
-      db.close();
-      return rows.some((row) => row.kind === "choice.answered") ? true : null;
-    })()`, "the choice answer in the phone's event log");
-    const answers = await storedEvents("events", "choice.answered");
+    await waitFor(`globalThis.AccordAgentsMobile.listOutboxEntries().then((rows) => rows.some((row) => row.kind === "choice.answered") ? true : null)`,
+      "the choice answer in the phone's queue");
+    const answers = await storedEvents("outbox", "choice.answered");
     assert.equal(answers.length, 1);
     assert.equal(answers[0].payload.targetKey, "choice:choice-deploy");
     assert.equal(answers[0].payload.detail.selectedOptionId, "staging");
     assert.equal(answers[0].payload.detail.sourceMessageId, "q1");
     // The desktop takes the answer and stops listing the card: the opened
     // choice goes by itself, and the bar comes back.
-    await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_POLISH, events: polishEvents, cards: [permissionCard] });
+    await ageCards();
+    await hub.updateMessages(CHAT_POLISH, [question("selected")]);
     await waitFor(`document.getElementById("activity-item").hidden && !document.getElementById("home-dock").hidden ? true : null`,
       "the withdrawn choice to close");
 
@@ -399,12 +308,8 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     assert.match(running, /Reviewing the diff now/);
     await sleep(TAP_SETTLE_MS);
     await evaluate(`document.querySelector('#activity-list .act-stop').click()`);
-    await waitFor(`(async () => {
-      const db = await new Promise((resolve) => { const r = indexedDB.open("accordagents-mobile-control"); r.onsuccess = () => resolve(r.result); });
-      const rows = await new Promise((resolve) => { const all = db.transaction("outbox").objectStore("outbox").getAll(); all.onsuccess = () => resolve(all.result); });
-      db.close();
-      return rows.some((row) => row.kind === "run.cancel.requested") ? true : null;
-    })()`, "the stop request queued for the desktop");
+    await waitFor(`globalThis.AccordAgentsMobile.listOutboxEntries().then((rows) => rows.some((row) => row.kind === "run.cancel.requested") ? true : null)`,
+      "the stop request queued for the server");
     const cancels = await storedEvents("outbox", "run.cancel.requested");
     assert.equal(cancels[0].conversationId, CHAT_POLISH, "a stop from Activity names the run's own chat");
     assert.equal(cancels[0].payload.runId, "run-taylor-1");
@@ -481,17 +386,7 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     const badgeBefore = Number(await evaluate(`document.getElementById("activity-badge").textContent`));
     const chatBeforeBadge = await evaluate(`document.getElementById("message-list").childElementCount + ":" +
       document.getElementById("message-list").innerText.length`);
-    await postEnvelope({
-      type: "mobile.timeline.events",
-      conversationId: CHAT_CLOUD,
-      events: cloudEvents,
-      cards: [cloudPermission, {
-        id: "perm-chat-bar", kind: "permission", conversationId: CHAT_CLOUD, title: "Run a command",
-        summary: "Codex wants to run: npm run build:mobile", requesterLabel: "@morgan",
-        options: [{ id: "allow", label: "Allow" }, { id: "deny", label: "Deny" }],
-        allowsCustomAnswer: false, allowsCancel: false, status: "pending", createdAt: new Date().toISOString()
-      }]
-    });
+    await hub.raiseApproval(CHAT_CLOUD, chatBarApproval);
     const countedInChat = await waitFor(`(() => {
       const badge = document.getElementById("activity-badge");
       return document.getElementById("timeline-screen").classList.contains("is-active") &&
@@ -560,13 +455,8 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
 
     // @taylor's run, stamped by the desktop before the chat was opened just
     // now, reaches the phone after it: that is news, whatever the stamp says.
-    const taylorFinalStamp = minutesAgo(0.5);
-    await postEnvelope({
-      type: "mobile.timeline.events", conversationId: CHAT_POLISH, events: [{
-        id: "t-final", messageId: "t-final", role: "participant", participantLabel: "@taylor",
-        content: "Review done: two nits, both in the thread.", status: "done", runId: "run-taylor-1", createdAt: taylorFinalStamp
-      }]
-    });
+    await hub.updateMessages(CHAT_POLISH, [{ ...taylorRun, status: "done", content: "Review done: two nits, both in the thread." }]);
+    await readChat(CHAT_POLISH);
     const settled = await waitFor(`(() => {
       const rows = ${listRows("finished")};
       const taylor = rows && rows.find((row) => row.text.includes("Review done"));
@@ -577,11 +467,14 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     assert.match(settled.text, /Review done/);
     await waitFor(`${tabCounts}.startsWith("Running 0") ? true : null`, "Running to empty");
     // The same message delivered again, and under another id, keeps what the
-    // phone knows about it: still unseen.
-    const tFinal = { messageId: "t-final", role: "participant", participantLabel: "@taylor",
-      content: "Review done: two nits, both in the thread.", status: "done", runId: "run-taylor-1", createdAt: taylorFinalStamp };
-    await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_POLISH, events: [{ ...tFinal, id: "t-final" }] });
-    await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_POLISH, events: [{ ...tFinal, id: "page:t-final" }] });
+    // phone knows about it: still unseen. Again from the server (any change
+    // to the chat has its page read again), and once by hand under another
+    // row id, as a copy that names the message differently would arrive.
+    await touchChat(CHAT_POLISH);
+    await readChat(CHAT_POLISH);
+    const tFinal = { messageId: taylorRun.id, role: "participant", participantLabel: "@taylor",
+      content: "Review done: two nits, both in the thread.", status: "done", runId: "run-taylor-1", createdAt: taylorRun.createdAt };
+    await evaluate(`AccordAgentsMobile.handleRelayTimelinePayload(${JSON.stringify({ type: "mobile.timeline.events", conversationId: CHAT_POLISH, events: [{ ...tFinal, id: "page:" + taylorRun.id }] })})`);
     await sleep(3500);
     const again = await evaluate(`(() => {
       const rows = ${listRows("finished")};
@@ -594,15 +487,11 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     await sleep(TAP_SETTLE_MS);
     await evaluate(`[...document.querySelectorAll("#activity-list .act-row")].find((row) => row.innerText.includes("by @morgan")).click()`);
     await waitFor(`document.getElementById("chat-title").textContent === "Cloud machine setup" ? true : null`, "the cloud chat");
-    await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_CLOUD, events: [{
-      id: "run-morgan-2:@morgan", role: "participant", participantLabel: "@morgan", content: "Checking the region.",
-      status: "pending", runId: "run-morgan-2", createdAt: minutesAgo(0)
-    }] });
+    const morganRun = { id: "m-region", role: "participant", participantId: MORGAN.id, participantLabel: "@morgan", content: "Checking the region.",
+      status: "pending", createdAt: minutesAgo(0), metadata: { runId: "run-morgan-2" } };
+    await hub.addMessages(CHAT_CLOUD, [morganRun]);
     await waitFor(`document.getElementById("message-list").innerText.includes("Checking the region") ? true : null`, "the live row in the chat");
-    await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_CLOUD, events: [{
-      id: "m-region", messageId: "m-region", role: "participant", participantLabel: "@morgan", content: "Region checked: eu-west-1 is fine.",
-      status: "done", runId: "run-morgan-2", createdAt: minutesAgo(0)
-    }] });
+    await hub.updateMessages(CHAT_CLOUD, [{ ...morganRun, content: "Region checked: eu-west-1 is fine.", status: "done" }]);
     await waitFor(`document.getElementById("message-list").innerText.includes("Region checked") ? true : null`, "the answer in the chat");
     await evaluate(`document.getElementById("back-to-chats").click()`);
     const watched = await waitFor(`(() => {
@@ -633,9 +522,9 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
       "the swipe did not open the chat behind the row");
     assert.equal(await evaluate(`localStorage.getItem("accordagents.mobile.activeConversationId.v1")`), null,
       "and no chat was opened by it");
-    // A batch landing between the swipe and the tap rebuilds the list; the
+    // A change landing between the swipe and the tap rebuilds the list; the
     // action must still be there under the finger.
-    await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_POLISH, events: polishEvents, cards: [permissionCard] });
+    await touchChat(CHAT_POLISH);
     await sleep(1200);
     assert.equal(await evaluate(`(() => {
       const wrap = document.querySelector('#activity-list .act-swipe[data-activity-key="${clearedKey}"]');
@@ -648,7 +537,7 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     })()`, "the cleared row to go");
     await reload();
     await evaluate(`document.querySelector('[data-home-tab="activity"]').click()`);
-    await waitFor(`document.getElementById("activity-screen").classList.contains("is-active") ? true : null`, "Activity after the reload");
+    await waitFor(`document.getElementById("activity-screen").classList.contains("is-active") && document.querySelector('[data-activity-tab="finished"]') ? true : null`, "Activity after the reload");
     await evaluate(`document.querySelector('[data-activity-tab="finished"]').click()`);
     await sleep(1500);
     const stillCleared = await evaluate(`(() => {
@@ -658,10 +547,9 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     assert.equal(stillCleared, false, "a cleared row stays cleared across a launch");
     // A newer update from the same member in the same chat is not covered by
     // what was cleared: the row comes back.
-    await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_CLOUD, events: [{
-      id: "m-region-2", messageId: "m-region-2", role: "participant", participantLabel: "@morgan",
-      content: "Region moved: eu-central-1 now.", status: "done", runId: "run-morgan-3", createdAt: minutesAgo(0)
-    }] });
+    await hub.addMessages(CHAT_CLOUD, [{ id: "m-region-2", role: "participant", participantId: MORGAN.id, participantLabel: "@morgan",
+      content: "Region moved: eu-central-1 now.", status: "done", createdAt: minutesAgo(0), metadata: { runId: "run-morgan-3" } }]);
+    await readChat(CHAT_CLOUD);
     await waitFor(`(() => {
       const rows = ${listRows("finished")};
       return rows && rows.some((row) => row.text.includes("Region moved")) ? true : null;
@@ -669,18 +557,7 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
 
     // Swipe left on a waiting choice and it can be cancelled from the list,
     // the way the desktop's "Cancel pending card" does.
-    await postEnvelope({
-      type: "mobile.timeline.events",
-      conversationId: CHAT_POLISH,
-      events: polishEvents,
-      cards: [permissionCard, {
-        id: "choice-swipe", kind: "choice", conversationId: CHAT_POLISH, title: "Swipe target",
-        summary: "Cancel me from the list?", requesterLabel: "@taylor",
-        options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }],
-        allowsCustomAnswer: true, allowsCancel: true, status: "pending",
-        createdAt: minutesAgo(0), sourceMessageId: "m1"
-      }]
-    });
+    await hub.addMessages(CHAT_POLISH, [swipeQuestion("pending")]);
     await evaluate(`document.querySelector('[data-activity-tab="pending"]').click()`);
     await waitFor(`document.querySelector('#activity-list .act-row[data-card-id="choice-swipe"]') ? true : null`,
       "the new waiting choice in Pending");
@@ -698,18 +575,18 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     assert.equal(cancelVisible, "Cancel", "the swipe opens the row's Cancel action");
     await sleep(TAP_SETTLE_MS);
     await evaluate(`document.querySelector('#activity-list .act-swipe[data-activity-key="${cancelKey}"] .act-swipe-cancel').click()`);
-    const cancelled = await waitFor(`(async () => {
-      const db = await new Promise((resolve) => { const r = indexedDB.open("accordagents-mobile-control"); r.onsuccess = () => resolve(r.result); });
-      const rows = await new Promise((resolve) => { const all = db.transaction("events").objectStore("events").getAll(); all.onsuccess = () => resolve(all.result); });
-      db.close();
+    const cancelled = await waitFor(`globalThis.AccordAgentsMobile.listOutboxEntries().then((rows) => {
       const row = rows.filter((entry) => entry.kind === "choice.answered").find((entry) => entry.payload && entry.payload.detail && entry.payload.detail.cancel);
       return row ? row.payload.targetKey : null;
-    })()`, "the cancel in the phone's event log");
+    })`, "the cancel in the phone's queue");
     assert.match(cancelled, /^choice:/, "the cancel is recorded against the choice card");
 
-    // The desktop withdraws the last card: Pending empties.
-    await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_POLISH, events: polishEvents, cards: [] });
-    await postEnvelope({ type: "mobile.timeline.events", conversationId: CHAT_CLOUD, events: cloudEvents, cards: [] });
+    // The desktop settles the last cards: Pending empties.
+    await ageCards();
+    await hub.updateMessages(CHAT_POLISH, [swipeQuestion("cancelled")]);
+    await hub.raiseApproval(CHAT_POLISH, { ...deployApproval, status: "approved", updatedAt: new Date().toISOString() });
+    await hub.raiseApproval(CHAT_CLOUD, { ...chatBarApproval, status: "approved", updatedAt: new Date().toISOString() });
+    await hub.updateMessages(CHAT_CLOUD, [cloudQuestion("cancelled")]);
     await evaluate(`document.querySelector('[data-activity-tab="pending"]').click()`);
     const emptied = await waitFor(`(() => {
       const list = document.getElementById("activity-list");
@@ -720,24 +597,19 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     // Settings says what this phone can do about itself, and nothing it cannot.
     await evaluate(`document.querySelector('[data-home-tab="settings"]').click()`);
     const settings = await waitFor(`document.getElementById("settings-screen").classList.contains("is-active") ? document.getElementById("settings-list").innerText : null`, "Settings");
-    assert.match(settings, /Paired with your desktop/);
+    assert.match(settings, /Paired with your server/);
     assert.match(settings, /Message alerts/);
-    assert.doesNotMatch(settings, /Cloud machine/, "no wake without the key for a machine");
+    assert.equal(await evaluate(`[...document.querySelectorAll("#settings-list button")].some((button) => button.innerText.trim() === "Wake")`), false,
+      "no wake while the server holds no start key for the machine");
 
-    // With the key for a machine, waking it is offered here, in Settings: it
-    // is not a chat's business (the User, 2026-10-20).
-    await evaluate(`(() => {
-      const pairing = JSON.parse(localStorage.getItem("accordagents.mobile.pairing.v1"));
-      pairing.power = {
-        version: 1, handoffId: "handoff-qa", machineId: "m1",
-        instanceId: "i-0943b28f7231ab93c", region: "us-east-1",
-        credentials: { accessKeyId: "AKIAEXAMPLEWAKEKEY001", secretAccessKey: "synthetic", region: "us-east-1" },
-        issuedTo: "route", issuedAt: new Date(0).toISOString()
-      };
-      localStorage.setItem("accordagents.mobile.pairing.v1", JSON.stringify(pairing));
-      return true;
-    })()`);
-    await evaluate(`document.querySelector('[data-home-tab="chats"]').click()`);
+    // With a start key for the machine on the server, waking it is offered
+    // here, in Settings: it is not a chat's business (the User, 2026-10-20).
+    // The phone holds no key of its own; it asks the server.
+    await hub.call("PUT", "/v1/machine-wake", { machines: [{
+      machineId: "m1", instanceId: "i-0943b28f7231ab93c", region: "us-east-1",
+      credentials: { accessKeyId: "AKIAEXAMPLEWAKEKEY001", secretAccessKey: "syntheticSecretKeyForQaOnly00000", region: "us-east-1" }
+    }] });
+    await reload();
     await evaluate(`document.querySelector('[data-home-tab="settings"]').click()`);
     const withKey = await waitFor(`(() => {
       const list = document.getElementById("settings-list");
@@ -756,7 +628,7 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     // A phone that is not paired shows the pairing screen and no bar, whatever
     // tab it was left on.
     await evaluate(`(() => {
-      localStorage.removeItem("accordagents.mobile.pairing.v1");
+      localStorage.removeItem("accordagents.mobile.hub.v1");
       localStorage.setItem("accordagents.mobile.homeTab.v1", "activity");
       return true;
     })()`);
@@ -769,8 +641,8 @@ test("Activity lists what the relay delivered and acts on it from the bottom bar
     const exited = new Promise((resolve) => chrome.once("exit", resolve));
     chrome.kill("SIGKILL");
     await exited;
-    site.close();
-    mailboxServer.close();
+    await site.close();
+    await hub.close();
     // Chrome's helpers can still be writing into the profile as it goes.
     await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }

@@ -9,7 +9,7 @@ import { StorageService } from "./storage";
 import { DeviceEventStorage } from "./deviceEventStorage";
 import { isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { DeviceEventPacket } from "../../shared/deviceEventChannel";
-import { openMobileRelayPayload, sealMobileRelayPayload } from "./mobileRelaySealing";
+import { openChannelPayload, sealChannelPayload } from "./machineChannelSealing";
 
 test("a sealed device event survives sender restart, gap repair, receiver apply failure and a lost ACK without a second application", async () => {
   const pair = await devices();
@@ -58,7 +58,7 @@ test("a body larger than 10 MiB uses bounded sealed fragments and cannot apply o
     assert.ok(fragments.length > 30);
     const sealKey = Buffer.alloc(32, 4).toString("base64url");
     for (const fragment of fragments) {
-      const sealed = await sealMobileRelayPayload(fragment, sealKey);
+      const sealed = await sealChannelPayload(fragment, sealKey);
       assert.ok(Buffer.byteLength(sealed) < 1024 * 1024, "each sealed packet fits below the mailbox page and relay logical limit");
     }
     await pair.b.receive(message); // Referencing event can arrive first.
@@ -68,8 +68,8 @@ test("a body larger than 10 MiB uses bounded sealed fragments and cannot apply o
     pair.b.close();
     pair.reopenReceiver();
     const last = fragments.at(-1)!;
-    const sealed = await sealMobileRelayPayload(last, sealKey);
-    await pair.b.receive(await openMobileRelayPayload(sealed, sealKey));
+    const sealed = await sealChannelPayload(last, sealKey);
+    await pair.b.receive(await openChannelPayload(sealed, sealKey));
     assert.equal(pair.applied.length, 1);
     assert.deepEqual(pair.lastPayload.value, payload);
     assert.equal(pair.sentB.filter((packet) => packet.type === "ack").length, 1);

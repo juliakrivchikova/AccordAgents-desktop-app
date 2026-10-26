@@ -1,9 +1,52 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { signHubRequest, type HubSigningIdentity } from "./hubAuth";
-import type { RelayTunnelEvents as Events, RelayTunnelMessage, RelayTunnelPeer, RelayTunnelPeerEvent, RelayTunnelRole, RelayTunnelState, TunnelClient } from "./relayTunnelClient";
-import type { RelayChunkFrame } from "../../shared/relayProtocol";
 import { HUB_ROOM_REPLACED_CLOSE_CODE, hubWebSocketUrl } from "../../shared/hubProtocol";
+
+export type TunnelRole = "desktop" | "phone" | "machine";
+
+export interface TunnelPeer {
+  deviceId: string;
+  role: string;
+}
+
+export type TunnelPeerEvent =
+  | { type: "ready"; deviceId: string; peerConnected: boolean; peers: TunnelPeer[] }
+  | { type: "peer-connected"; peer: TunnelPeer }
+  | { type: "peer-disconnected"; peer: TunnelPeer }
+  | { type: "peer-not-connected"; to?: string };
+
+export type TunnelState =
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "tunnel-reconnecting"
+  | "closed";
+
+export interface TunnelMessage {
+  logicalMessageId: string;
+  ciphertext: string;
+}
+
+export interface TunnelEvents {
+  message: [TunnelMessage];
+  state: [TunnelState];
+  peer: [TunnelPeerEvent];
+  error: [Error];
+}
+
+/** What the machine link and the machine host use of a room on the User's
+ *  server (a stand-in in tests). */
+export interface TunnelClient {
+  on<EventName extends keyof TunnelEvents>(event: EventName, listener: (...args: TunnelEvents[EventName]) => void): () => void;
+  currentState(): TunnelState;
+  connect(): Promise<void>;
+  close(): void;
+  sendCiphertext(request: { logicalMessageId: string; ciphertext: string; cursor?: string; to?: string }): Promise<unknown>;
+  deviceId(): string;
+}
+
+type Events = TunnelEvents;
 
 interface MinimalWebSocket {
   readyState: number;
@@ -23,16 +66,15 @@ const WebSocketClient = require("ws") as new (url: string) => MinimalWebSocket;
 const ROOM_PING_MS = 25_000;
 
 /**
- * The same room a relay gave, served by the User's own hub: a device joins a
- * room with its signature, sees who else is there, and passes messages that
- * the hub forwards without keeping. Drop-in for RelayTunnelClient, so the
- * sealing and signing above it do not change.
+ * A room on the User's own server: a device joins it with its signature,
+ * sees who else is there, and passes messages that the server forwards
+ * without keeping.
  */
 export class HubTunnelClient implements TunnelClient {
   private readonly emitter = new EventEmitter();
   private socket?: MinimalWebSocket;
   private heartbeat?: ReturnType<typeof setInterval>;
-  private state: RelayTunnelState = "idle";
+  private state: TunnelState = "idle";
   private closed = false;
   private attempt = 0;
   private timer?: ReturnType<typeof setTimeout>;
@@ -41,7 +83,7 @@ export class HubTunnelClient implements TunnelClient {
   constructor(private readonly options: {
     hubUrl: string;
     rendezvousId: string;
-    role: RelayTunnelRole;
+    role: TunnelRole;
     identity: () => Promise<HubSigningIdentity>;
     reconnectDelayMs?: number;
   }) {}
@@ -51,7 +93,7 @@ export class HubTunnelClient implements TunnelClient {
     return () => this.emitter.off(event, listener as (...args: unknown[]) => void);
   }
 
-  currentState(): RelayTunnelState {
+  currentState(): TunnelState {
     return this.state;
   }
 
@@ -75,7 +117,7 @@ export class HubTunnelClient implements TunnelClient {
     this.setState("closed");
   }
 
-  async sendCiphertext(request: { logicalMessageId: string; ciphertext: string; cursor?: string; to?: string }): Promise<RelayChunkFrame[]> {
+  async sendCiphertext(request: { logicalMessageId: string; ciphertext: string; cursor?: string; to?: string }): Promise<[]> {
     const socket = this.socket;
     if (!socket || socket.readyState !== OPEN) throw new Error("The hub room is not connected.");
     if (this.options.role === "machine" && !request.to?.trim()) throw new Error("A machine must target a device id on every message.");
@@ -142,7 +184,7 @@ export class HubTunnelClient implements TunnelClient {
   }
 
   private handle(data: unknown): void {
-    let frame: { type?: string; deviceId?: string; peers?: RelayTunnelPeer[]; peer?: RelayTunnelPeer; from?: string; id?: string; data?: string; code?: string; to?: string };
+    let frame: { type?: string; deviceId?: string; peers?: TunnelPeer[]; peer?: TunnelPeer; from?: string; id?: string; data?: string; code?: string; to?: string };
     try {
       frame = JSON.parse(String(data)) as typeof frame;
     } catch {
@@ -150,19 +192,19 @@ export class HubTunnelClient implements TunnelClient {
     }
     if (frame.type === "ready") {
       const peers = Array.isArray(frame.peers) ? frame.peers.filter((peer) => typeof peer?.deviceId === "string" && typeof peer?.role === "string") : [];
-      this.emitter.emit("peer", { type: "ready", deviceId: frame.deviceId ?? this.ownId, peerConnected: peers.length > 0, peers } satisfies RelayTunnelPeerEvent);
+      this.emitter.emit("peer", { type: "ready", deviceId: frame.deviceId ?? this.ownId, peerConnected: peers.length > 0, peers } satisfies TunnelPeerEvent);
     } else if (frame.type === "peer-connected" && frame.peer) {
-      this.emitter.emit("peer", { type: "peer-connected", peer: frame.peer } satisfies RelayTunnelPeerEvent);
+      this.emitter.emit("peer", { type: "peer-connected", peer: frame.peer } satisfies TunnelPeerEvent);
     } else if (frame.type === "peer-disconnected" && frame.peer) {
-      this.emitter.emit("peer", { type: "peer-disconnected", peer: frame.peer } satisfies RelayTunnelPeerEvent);
+      this.emitter.emit("peer", { type: "peer-disconnected", peer: frame.peer } satisfies TunnelPeerEvent);
     } else if (frame.type === "error" && frame.code === "peer-not-connected") {
-      this.emitter.emit("peer", { type: "peer-not-connected", ...(frame.to ? { to: frame.to } : {}) } satisfies RelayTunnelPeerEvent);
+      this.emitter.emit("peer", { type: "peer-not-connected", ...(frame.to ? { to: frame.to } : {}) } satisfies TunnelPeerEvent);
     } else if (frame.type === "message" && typeof frame.data === "string") {
-      this.emitter.emit("message", { logicalMessageId: frame.id ?? "", ciphertext: frame.data } satisfies RelayTunnelMessage);
+      this.emitter.emit("message", { logicalMessageId: frame.id ?? "", ciphertext: frame.data } satisfies TunnelMessage);
     }
   }
 
-  private setState(next: RelayTunnelState): void {
+  private setState(next: TunnelState): void {
     if (this.state === next) return;
     this.state = next;
     this.emitter.emit("state", next);

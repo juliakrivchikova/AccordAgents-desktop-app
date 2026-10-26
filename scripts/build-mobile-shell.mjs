@@ -12,10 +12,6 @@ const rendererAssets = path.join(repoRoot, "src/renderer/assets");
 
 await rm(target, { recursive: true, force: true });
 await cp(source, target, { recursive: true });
-// One crypto implementation for native devices and the offline PWA.
-await build({ entryPoints: [path.join(repoRoot, "src/shared/machineChannelKey.ts")],
-  outfile: path.join(target, "mobile-machine-sealing.js"), bundle: true,
-  format: "iife", globalName: "AccordMachineSealing", platform: "browser", target: "es2022" });
 // How the phone and its service worker talk to the User's server: signed
 // requests, its own signed events, bodies by hash. The same bytes every other
 // device signs, from the same module the tests check against the desktop's.

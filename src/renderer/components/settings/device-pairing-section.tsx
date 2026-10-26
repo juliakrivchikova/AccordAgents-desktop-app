@@ -73,8 +73,9 @@ export function DevicePairingSection(props: {
     }
   }
 
-  // W-J: revocation is terminal — the mailbox is destroyed and the same link
-  // can never be reactivated, so recovery from a misclick is a full re-pair.
+  // W-J: revocation is terminal — the code stops working on the User's server
+  // and a phone paired with it is removed, so recovery from a misclick is a
+  // full re-pair.
   // The first click asks; only the second revokes.
   async function revokePairing(): Promise<void> {
     if (!result || status === "busy") {

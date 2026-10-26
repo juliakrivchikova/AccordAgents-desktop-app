@@ -21,7 +21,7 @@
 import { compareVersions, isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase, MACHINE_POWER_MAX_ATTEMPTS, MACHINE_POWER_RETRY_MS } from "../../shared/machineInstall";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
+import { recoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
 import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
 import { withMachineRsyncPath } from "./machineMaintenanceRsync";
 import fs from "node:fs";
@@ -333,7 +333,9 @@ export class MachineInstallerService {
     try {
       if (Buffer.byteLength(installed) > 65_536) throw new Error();
       recovered = JSON.parse(installed);
-      assertRecoverableMachineEnrollment(JSON.parse(requested), recovered.enrollment);
+      // One set up for the shared relay comes back in the server's form,
+      // and that is what is written to the machine below.
+      recovered = { ...recovered, enrollment: recoverableMachineEnrollment(JSON.parse(requested), recovered.enrollment) };
       if (recovered.machineId != null && (typeof recovered.machineId !== "string" || !recovered.machineId.trim() || recovered.machineId.length > 256)) throw new Error();
     } catch { throw new Error("The saved machine connection is invalid; nothing was replaced."); }
     if (recovered.machineId && recovered.machineId !== record.machineId && !restoreIdentity) {

@@ -432,11 +432,6 @@ export class ScriptService {
     return this.scheduledIds.size > 0 || this.running.size > 0 || this.starting.size > 0;
   }
 
-  /** True while a script is starting or running now. */
-  isRunningNow(): boolean {
-    return this.running.size > 0 || this.starting.size > 0;
-  }
-
   /** How many switched-on scripts keep the host awake, for "Kept on by …". */
   scheduledCount(): number {
     return this.scheduledIds.size;

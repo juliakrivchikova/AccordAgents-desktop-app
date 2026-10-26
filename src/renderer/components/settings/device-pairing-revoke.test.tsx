@@ -24,14 +24,10 @@ const PAIRING = {
   qrPayload: "https://mobile.example.com/?pair=server#hub=https%3A%2F%2Fhub.example&t=token&id=hub-1"
 };
 
-const MOBILE_CONTROL = {
+const MOBILE_CONTROL: MobileControlSettings = {
   provider: "accord-managed",
-  defaults: {
-    relayUrl: "wss://relay.example.com/v1/relay",
-    staticOriginUrl: "https://mobile.example.com/",
-    outboxUrl: "https://relay.example.com/v1/mailbox/events"
-  }
-} as unknown as MobileControlSettings;
+  defaults: { staticOriginUrl: "https://mobile.example.com/" }
+};
 
 function buttonByText(text: string): HTMLButtonElement | undefined {
   return [...document.querySelectorAll("button")].find(
@@ -92,8 +88,8 @@ test("the untouched section shows no QR panel and no copy or revoke", async () =
   });
 });
 
-// W-J: revocation is terminal — the mailbox is destroyed and the same link can
-// never be reactivated — so one click must not be enough to fire it.
+// W-J: revocation is terminal — the code stops working on the User's server and
+// a phone paired with it is removed — so one click must not be enough to fire it.
 test("device pairing does not revoke until the confirmation is accepted", async () => {
   const revokeCalls: unknown[] = [];
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
@@ -199,7 +195,7 @@ test("without the User's server the phone cannot be paired, and the section says
   document.body.append(host);
   const root = createRoot(host);
   await act(async () => {
-    root.render(<DevicePairingSection mobileControl={{ provider: "accord-managed", defaults: { relayUrl: "wss://relay.accordagents.com/v1/relay", staticOriginUrl: "https://mobile.accordagents.com/", outboxUrl: "https://relay.accordagents.com/v1/mailbox/events" } }} />);
+    root.render(<DevicePairingSection mobileControl={{ provider: "accord-managed", defaults: { staticOriginUrl: "https://mobile.accordagents.com/" } }} />);
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
   const generate = host.querySelector("[data-device-pairing-action=generate]") as HTMLButtonElement;

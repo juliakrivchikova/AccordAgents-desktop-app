@@ -35,9 +35,6 @@ import {
 } from "../shared/hubProtocol";
 import type { MachineProgressFrame } from "../shared/machineProgress";
 import { HubNonceCache, deviceIdForPublicKey, parseHubAuthorization, sha256Hex, verifyHubRequest, verifyHubText, type ParsedHubAuthorization } from "../main/services/hubAuth";
-import { HUB_RELAY_MANIFEST } from "../shared/relayProtocol";
-import { HubRelayRooms, RELAY_BODY_BYTES_IN_FLIGHT_MAX, RELAY_HEALTH_PATH, RELAY_MAILBOX_APPEND_MAX_BYTES, RELAY_MAILBOX_PATHS, RELAY_MAILBOX_SMALL_MAX_BYTES, RELAY_MAILBOX_TINY_MAX_BYTES, RELAY_MANIFEST_PATH, RELAY_ROOM_PATH, type HubRelayMailboxes } from "./hubRelay";
-import { MAILBOX_HUB_AUTHORIZATION_HEADER } from "../shared/mailboxSealedPayload";
 import type { ChatSearchService } from "../main/services/chatSearch";
 import type { StorageService } from "../main/services/storage";
 import { HubRequestError, HubResyncRequiredError, type HubLog } from "./hubLog";
@@ -53,8 +50,6 @@ export interface HubServerOptions {
   vapidPublicKey: string;
   /** Files Let's Encrypt validation reads over plain HTTP. */
   acmeWebroot?: string;
-  /** The relay the phone and machines speak (sealed mailboxes, live rooms). */
-  relay?: { mailboxes: HubRelayMailboxes; rooms: HubRelayRooms };
   /** The phone's reads: chat list, pages and changes from the server's copy. */
   phone?: HubPhoneApi;
   /** The owner published the composer catalog. */
@@ -128,8 +123,6 @@ export const HUB_NOT_ON_ROSTER = "This device is not on the hub's roster.";
 
 export class HubServer {
   private readonly nonces = new HubNonceCache();
-  /** Relay request bodies being read now, by their declared size. */
-  private relayBodyBytes = 0;
   /** Pages of the chat copy being built now. */
   private copyPagesInFlight = 0;
   /** Live head sockets and the device each one belongs to. */
@@ -254,8 +247,6 @@ export class HubServer {
    * (the service manager then waits for its kill timeout).
    */
   async close(): Promise<void> {
-    this.options.relay?.mailboxes.close();
-    this.options.relay?.rooms.close();
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = undefined;
     for (const socket of this.live.keys()) socket.terminate();
@@ -304,7 +295,6 @@ export class HubServer {
   private async upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     try {
       const url = new URL(request.url ?? "/", "http://hub");
-      if (url.pathname === RELAY_ROOM_PATH && this.options.relay) return this.options.relay.rooms.handleUpgrade(request, socket, head, url, request.socket.remoteAddress ?? "");
       if (url.pathname === "/v1/room") return await this.joinRoom(request, socket, head, url);
       if (url.pathname !== "/v1/live") throw new HubRequestError(404, "Not found.");
       // A browser cannot set headers on a WebSocket: the signature of
@@ -420,61 +410,6 @@ export class HubServer {
         this.limitEnrollments(request.socket.remoteAddress ?? "");
         const body = await readBody(request, ENROLL_MAX_BODY_BYTES);
         return json(response, 200, await this.enroll(parseJson(body)));
-      }
-      const relay = this.options.relay;
-      if (relay) {
-        // The relay's own paths answer as the relay did, with its own keys.
-        if (request.method === "GET" && url.pathname === RELAY_HEALTH_PATH) return json(response, 200, { ok: true, provider: HUB_RELAY_MANIFEST.provider });
-        if (request.method === "GET" && url.pathname === RELAY_MANIFEST_PATH) return json(response, 200, { ok: true, manifest: HUB_RELAY_MANIFEST });
-        if (url.pathname === RELAY_ROOM_PATH) {
-          const answer = HubRelayRooms.plainRequestAnswer(url);
-          status = answer.status;
-          return json(response, answer.status, answer.body);
-        }
-        if (RELAY_MAILBOX_PATHS.has(url.pathname)) {
-          const mailboxId = url.searchParams.get("mailboxId");
-          // Only the mailbox's owner makes the hub read a body.
-          const refused = await relay.mailboxes.preauthorize(url.pathname, mailboxId, request.headers.authorization);
-          if (refused) {
-            status = refused.status;
-            return json(response, refused.status, refused.body);
-          }
-          const append = request.method === "POST" && url.pathname === "/v1/mailbox/events";
-          // Registration and revocation are a few bytes; nobody makes the
-          // hub hold more for them.
-          const tiny = url.pathname === "/v1/mailbox/register" || url.pathname === "/v1/mailbox/revoke";
-          const limit = append ? RELAY_MAILBOX_APPEND_MAX_BYTES : tiny ? RELAY_MAILBOX_TINY_MAX_BYTES : RELAY_MAILBOX_SMALL_MAX_BYTES;
-          const lengthHeader = request.headers["content-length"];
-          const declared = lengthHeader === undefined ? undefined : Number(lengthHeader);
-          if (declared !== undefined && (!Number.isFinite(declared) || declared > limit)) throw new HubRequestError(413, "The request is too large.");
-          // A read has no body: anything sent with one is let through unread.
-          // A body of unstated length counts as the most it may be.
-          const reading = request.method === "GET";
-          const reserved = reading ? 0 : declared ?? limit;
-          if (this.relayBodyBytes + reserved > RELAY_BODY_BYTES_IN_FLIGHT_MAX) throw new HubRequestError(503, "The hub is busy; try again.");
-          this.relayBodyBytes += reserved;
-          let body: Buffer;
-          try {
-            if (reading) {
-              request.resume();
-              body = Buffer.alloc(0);
-            } else {
-              body = await readBody(request, limit);
-            }
-          } finally {
-            this.relayBodyBytes -= reserved;
-          }
-          const answer = await relay.mailboxes.handle(request.method ?? "GET", url.pathname, mailboxId, request.headers.authorization, body, url.searchParams, async () => {
-            const header = request.headers[MAILBOX_HUB_AUTHORIZATION_HEADER];
-            if (typeof header !== "string") return undefined;
-            // Any device the User's server knows: her desktop (pairings),
-            // her machines (their rooms with each other and the phone).
-            const device = await this.authenticate(request.method ?? "POST", body, header, pathWithQuery).catch(() => undefined);
-            return device?.role === "owner" || device?.role === "desktop" || device?.role === "machine" ? device.role : undefined;
-          });
-          status = answer.status;
-          return json(response, answer.status, answer.body);
-        }
       }
       // A phone app from before (a mailbox token) is told it was removed, so
       // it asks to be paired again instead of going quiet.
@@ -612,17 +547,6 @@ export class HubServer {
           await hub.deletePushSubscription(other.deviceId, other.endpoint);
         }
         return json(response, 200, { ok: true });
-      }
-      if (url.pathname === "/v1/phone-links") {
-        if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub says which phones may read it.");
-        if (request.method !== "PUT" || !this.options.relay) throw new HubRequestError(404, "Not found.");
-        const parsed = parseJson(body) as { mailboxIds?: unknown };
-        const ids = Array.isArray(parsed?.mailboxIds) ? parsed.mailboxIds : undefined;
-        if (!ids || ids.length > 10_000 || !ids.every((id) => typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id))) {
-          throw new HubRequestError(400, "Invalid phone links.");
-        }
-        const known = await this.options.relay.mailboxes.setKnownPhoneLinks(ids as string[]);
-        return json(response, 200, { ok: true, known });
       }
       if (url.pathname === "/v1/roster") {
         if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub changes its devices.");

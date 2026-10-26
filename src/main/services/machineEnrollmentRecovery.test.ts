@@ -7,13 +7,13 @@ import test from "node:test";
 import { SettingsService } from "./settings";
 import { MachineLinkService } from "./machineLink";
 import { createHeadlessPlatform, setHostPlatform } from "../platform";
-import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
+import { assertRecoverableMachineEnrollment, recoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 
 function recoveryPairing(room: string): MobilePairingPackage {
   return { version: 1, purpose: "machine-host", issuer: { originId: "desktop", keyId: "key", publicKeyDerBase64: "public-key" },
     rendezvousId: room, stableRoutingId: "stable-owner-route", relaySealKeyBase64: Buffer.alloc(32, 3).toString("base64url"),
-    relayUrl: "wss://relay.example/v1/relay", fingerprint: "capability", createdAt: "2026-09-01T00:00:00.000Z",
+    hubUrl: "https://hub.example/", fingerprint: "capability", createdAt: "2026-09-01T00:00:00.000Z",
     expiresAt: "2036-09-01T00:00:00.000Z", capabilities: [{ scope: "device", canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }] };
 }
 
@@ -99,7 +99,7 @@ test("a failed enrollment save retains the old in-memory and on-disk route for r
 test("connection recovery rejects another key and non-machine capabilities", () => {
   const expected = recoveryPairing("new"), installed = recoveryPairing("old");
   assert.throws(() => assertRecoverableMachineEnrollment(expected, { ...installed, issuer: { ...installed.issuer, publicKeyDerBase64: "foreign-key" } }), /another environment/);
-  assert.throws(() => assertRecoverableMachineEnrollment(expected, { ...installed, purpose: "phone-control" }), /another environment/);
+  assert.throws(() => assertRecoverableMachineEnrollment(expected, { ...installed, purpose: "phone-control" } as unknown as MobilePairingPackage), /purpose is invalid/);
 });
 
 test("a never-connected replacement restores the original immutable home id and install record atomically", async () => {
@@ -128,15 +128,21 @@ test("a never-connected replacement restores the original immutable home id and 
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
 });
 
-test("an installation that talks only to the User's server is recovered like a relay one, only on the server this desktop uses", () => {
-  const { relayUrl: _requestedRelay, ...requestedServerOnly } = { ...recoveryPairing("recreated"), hubUrl: "https://hub.example" };
-  const { relayUrl: _relay, ...serverOnly } = { ...recoveryPairing("installed"), hubUrl: "https://hub.example/" };
-  assert.doesNotThrow(() => assertRecoverableMachineEnrollment(requestedServerOnly, serverOnly));
+test("an installation is recovered only on the server this desktop uses; one set up for the shared relay moves to it", () => {
+  const requested = { ...recoveryPairing("recreated"), hubUrl: "https://hub.example" };
+  const installed = recoveryPairing("installed");
+  assert.doesNotThrow(() => assertRecoverableMachineEnrollment(requested, installed));
   // Set up on a server this desktop no longer uses, or by a desktop with none.
-  assert.throws(() => assertRecoverableMachineEnrollment({ ...requestedServerOnly, hubUrl: "https://new-hub.example" }, serverOnly), /another server/);
-  assert.throws(() => assertRecoverableMachineEnrollment(recoveryPairing("recreated"), serverOnly), /another server/);
-  // An installation on the relay is still recovered for a desktop with a server.
-  assert.doesNotThrow(() => assertRecoverableMachineEnrollment(requestedServerOnly, recoveryPairing("installed")));
-  const { hubUrl: _hub, ...nowhere } = serverOnly;
-  assert.throws(() => assertRecoverableMachineEnrollment(requestedServerOnly, nowhere), /neither a relay nor a server/);
+  assert.throws(() => assertRecoverableMachineEnrollment({ ...requested, hubUrl: "https://new-hub.example" }, installed), /another server/);
+  const { hubUrl: _requestedHub, ...noServer } = requested;
+  assert.throws(() => assertRecoverableMachineEnrollment(noServer, installed), /another server/);
+  // One set up for the shared relay keeps its identity and moves to the
+  // server this desktop uses; stored or connected as it is, it is refused.
+  const { hubUrl: _hub, ...relayEra } = { ...installed, relayUrl: "wss://relay.example/v1/relay" } as typeof installed & { relayUrl: string };
+  const moved = recoverableMachineEnrollment(requested, relayEra);
+  assert.equal(moved.rendezvousId, "installed");
+  assert.equal(moved.hubUrl, "https://hub.example");
+  assert.equal("relayUrl" in moved, false);
+  assert.throws(() => assertRecoverableMachineEnrollment(requested, relayEra), /shared relay/);
+  assert.throws(() => recoverableMachineEnrollment(noServer, relayEra), /another server/);
 });

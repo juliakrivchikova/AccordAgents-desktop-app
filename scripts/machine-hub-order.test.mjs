@@ -106,7 +106,6 @@ test("through the User's hub a machine runs turns, streams, answers approvals an
     exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: new Date().toISOString(), settingsJson: JSON.stringify({ chatRoleConfigs: [{ id: "engineer" }] }), agentEnvironment: [] })
   }, debugLogs, {
     eventStorage: desktop.eventStorage, eventLog: desktop.eventLog, appVersion: "test", desktopDeviceId: DESKTOP_ID, reconnectDelayMs: 50,
-    hubMode: true,
     createClient: (enrollment) => enrollment.hubUrl ? new HubTunnelClient({ hubUrl: enrollment.hubUrl, rendezvousId: enrollment.rendezvousId, role: "desktop",
       identity: () => desktop.eventLog.getOrCreateDeviceIdentity(), reconnectDelayMs: 50 }) : undefined,
     chatChangeHead: async (id) => ({ originId: DESKTOP_ID, logScopeId: chatChanges.chatChangesLogScope(id), originSeq: chatHeads.get(id) ?? 0 }),
@@ -187,7 +186,6 @@ test("through the User's hub a machine runs turns, streams, answers approvals an
       pairing, deviceId: MACHINE_ID, machineName: "test-box", appVersion: "test", reconnectDelayMs: 50,
       trustRosterPath: path.join(directory, "machine-trust-roster.json"),
       outboxPath: path.join(directory, "machine-outbox.json"),
-      hubMode: true,
       createClient: (enrollment) => new HubTunnelClient({ hubUrl, rendezvousId: enrollment.rendezvousId, role: "machine",
         identity: () => machine.eventLog.getOrCreateDeviceIdentity(), reconnectDelayMs: 50 }),
       createPeerClient: (room) => new HubTunnelClient({ hubUrl, rendezvousId: room.rendezvousId, role: "machine",

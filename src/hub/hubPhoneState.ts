@@ -92,8 +92,8 @@ export class HubProgress {
   }
 }
 
-/** The pending row a live run shows on the phone: the same event the desktop
- *  sent over the relay for it, built from the hub's copy and progress. */
+/** The pending row a live run shows on the phone, built from the hub's copy
+ *  and the progress the desktop and the machines report. */
 export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgress[]): Array<Record<string, unknown>> {
   const byRun = new Map(runs.map((progress) => [progress.runId, progress]));
   const events: Array<Record<string, unknown>> = [];

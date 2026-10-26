@@ -839,3 +839,18 @@ test("Run now while the service is stopping says so instead of silently doing no
   await h.service.stop();
   await assert.rejects(h.service.runNow(request.scriptId), /stopping/);
 });
+
+test("a phone may decline a card that installs a script's code, never approve it", async () => {
+  const { phoneAnswerApprovesScriptCode } = await import("../../shared/scripts");
+  const { APP_SCRIPTS_REQUEST_CHANGE_TOOL } = await import("../../shared/appMcpToolContracts");
+  // A card too damaged to tell what it installs counts as one that does.
+  const installs = { id: "a-install", toolName: APP_SCRIPTS_REQUEST_CHANGE_TOOL, request: { kind: "script-change", op: "create" } };
+  const other = { id: "a-other", toolName: "app_chat_send_message", request: {} };
+  const approvals = [installs, other];
+  const approve = (id: string) => ({ operationId: "o", targetKey: `approval:${id}`, stateId: "approved", detail: { approve: true, decidedOn: "phone" } });
+  assert.equal(phoneAnswerApprovesScriptCode("permission.decided", approve("a-install"), approvals), true);
+  assert.equal(phoneAnswerApprovesScriptCode("permission.decided", { ...approve("a-install"), stateId: "denied", detail: { approve: false } }, approvals), false, "declining is the phone's to do");
+  assert.equal(phoneAnswerApprovesScriptCode("permission.decided", approve("a-other"), approvals), false, "other cards are the phone's to approve");
+  assert.equal(phoneAnswerApprovesScriptCode("choice.answered", approve("a-install"), approvals), false);
+  assert.equal(phoneAnswerApprovesScriptCode("permission.decided", approve("a-unknown"), approvals), false, "a card this desktop does not hold is its home's to refuse");
+});

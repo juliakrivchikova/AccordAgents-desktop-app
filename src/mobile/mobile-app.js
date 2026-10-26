@@ -1,19 +1,21 @@
 (function () {
   const META_STORE = "meta";
-  const SEALED_STORE = "sealedEnvelopes";
-  const MAILBOX_ACCESS_META_KEY = "mailboxAccess";
   const OUTBOX_STORE = "outbox";
-  // W: this device's own durable event log. The phone is an emitter, not a
-  // remote control, so what it did has to survive being closed mid-action.
-  const EVENT_STORE = "events";
-  // The machine journal is kept apart from the desktop mailbox queue: the two
-  // have different recipients and different acknowledgements, and a flush of
-  // one must never pick up the other's work.
-  const MACHINE_EVENT_STORE = "machineEvents";
-  const MACHINE_OUTBOX_STORE = "machineOutbox";
-  const MACHINE_BLOB_STORE = "machineBlobs";
   const TIMELINE_STORE = "timeline";
-  const PAIRING_KEY = "accordagents.mobile.pairing.v1";
+  // A pairing made the old way, through the desktop's relay. Nothing reads or
+  // writes through it any more: a phone that still holds one is told to pair
+  // again with the User's server, and what that pairing kept is cleared.
+  const OLD_PAIRING_KEY = "accordagents.mobile.pairing.v1";
+  const OLD_MAILBOX_CURSOR_KEY = "accordagents.mobile.mailboxCursor.v1";
+  // Set when an old pairing was cleared and no server pairing replaced it yet,
+  // so the notice that says why stays until the phone pairs again.
+  const OLD_PAIRING_CLEARED_KEY = "accordagents.mobile.oldPairingCleared.v1";
+  // What the old way kept on this phone, in stores and meta records nothing
+  // reads any more. The stores stay in the database's description (it only
+  // ever adds); their contents go with the old pairing.
+  const OLD_PAIRING_STORES = ["sealedEnvelopes", "events", "machineEvents", "machineOutbox", "machineBlobs"];
+  const OLD_PAIRING_META_KEYS = ["mailboxAccess", "machine-command-identity", "machine-access", "machine-run-terminals"];
+  const OLD_PAIRING_META_PREFIXES = ["machine-change-order:", "conversation-deleted:"];
   const ACTIVE_CONVERSATION_KEY = "accordagents.mobile.activeConversationId.v1";
   const OPEN_THREAD_KEY = "accordagents.mobile.openThreadRootId.v1";
   // W-M: which run's reply is being watched. Session-scoped like the open
@@ -22,7 +24,6 @@
   const OPEN_STREAM_KEY = "accordagents.mobile.openStreamRunId.v1";
   const SYNC_WAIT_KEY = "accordagents.mobile.syncWaitStartedAt.v1";
   const CHAT_LIST_KEY = "accordagents.mobile.chatList.v1";
-  const MAILBOX_CURSOR_KEY = "accordagents.mobile.mailboxCursor.v1";
   const TERMINAL_RUNS_KEY = "accordagents.mobile.terminalRuns.v1";
   // Cards a member is waiting on, per chat, as the desktop last stated them.
   // Kept so closing the app does not lose a question that is still open.
@@ -53,34 +54,10 @@
   // list saying nothing runs in that chat: a run the phone never saw end.
   const CHAT_LIST_AT_KEY = "accordagents.mobile.chatListAt.v1";
   const TERMINAL_RUNS_MAX = 600;
-  const DEFAULT_MANAGED_RELAY_URL = "wss://relay.accordagents.com/v1/relay";
-  const RELAY_PROTOCOL = "accord-relay-v1";
-  const RELAY_FRAME_MAX_BYTES = 10_240;
-  const RELAY_FRAME_OVERHEAD_BYTES = 512;
-  const RELAY_ACK_TIMEOUT_MS = 20_000;
-  const RELAY_TIMELINE_IDLE_MS = 15 * 60_000;
-  // Re-attach well inside the idle window so pushed messages never stop
-  // arriving after a quiet stretch.
-  const RELAY_TIMELINE_KEEPALIVE_MS = 60_000;
-  const MAILBOX_TIMELINE_POLL_MS = 2_500;
-  // What one read of the box brings back, and how much of a backlog the
-  // catch-up after opening will work through before it draws what it has.
-  const MAILBOX_PAGE_SIZE = 500;
-  // How long one mailbox request may take before it counts as failed. The
-  // worker's background read allows ten seconds; the page can afford more.
-  const MAILBOX_FETCH_TIMEOUT_MS = 15_000;
-  const CATCH_UP_PAGE_BUDGET = 25;
-  const CATCH_UP_BUDGET_MS = 8_000;
   let activeFlushOutboxPromise;
   // The status of every queue entry this phone has seen, by event id, so a
   // card can say whether the answer it sent was handed over without a read.
   const outboxStatusById = new Map();
-  let activeRelaySocket;
-  let activeRelaySocketKey;
-  let activeRelaySocketPromise;
-  let activeRelayTimelineCollectorSocket;
-  let activeMailboxTimelinePollTimer;
-  let activeRelayTimelineKeepAliveTimer;
   // Held so a second bootstrap replaces the ticker instead of stacking another
   // one on top of it.
   let activeThinkingClockTimer;
@@ -113,21 +90,8 @@
     return new Date().toISOString();
   }
 
-  // A relay frame arrives as text or as bytes depending on how the peer sent
-  // it. Both are the same JSON.
-  function relayFrameText(data) {
-    if (typeof data === "string") {
-      return data;
-    }
-    if (data instanceof ArrayBuffer) {
-      return new TextDecoder().decode(data);
-    }
-    if (data && typeof data.byteLength === "number") {
-      return new TextDecoder().decode(data);
-    }
-    return String(data);
-  }
-
+  // What this phone did and was handed, kept in memory when the page is opened
+  // with `?qa` (the harnesses read it); nothing otherwise.
   function recordRelayDebug(entry) {
     try {
       if (!new URL(globalThis.location.href).searchParams.has("qa")) {
@@ -169,14 +133,6 @@
     ].join("-");
   }
 
-  function bytesToBase64Url(bytes) {
-    let binary = "";
-    for (const byte of bytes) {
-      binary += String.fromCharCode(byte);
-    }
-    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-  }
-
   function base64UrlToBytes(value) {
     const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
     const binary = atob(padded);
@@ -185,10 +141,6 @@
       bytes[index] = binary.charCodeAt(index);
     }
     return bytes;
-  }
-
-  function base64UrlToText(value) {
-    return new TextDecoder().decode(base64UrlToBytes(value));
   }
 
   function textToBytes(value) {
@@ -222,161 +174,15 @@
     }).join(",") + "}";
   }
 
-  // >>> generated: mailbox-crypto (edit src/shared/mailboxCryptoContract.js, then run scripts/generate-mailbox-crypto.mjs)
-  // Canonical mailbox crypto contract (W4). THIS FILE IS THE SINGLE SOURCE:
-  // scripts/generate-mailbox-crypto.mjs copies it verbatim into the PWA
-  // (src/mobile/mobile-app.js, between the generated markers)
-  // and regenerates the known-answer fixture
-  // (scripts/mailbox-contract-vectors.json). Edit here, run the generator, and
-  // commit the regenerated outputs together — a stale copy is a review failure.
-  //
-  // Plain JS with zero imports so the same text runs in the browser page, the
-  // phone's service worker and the desktop (Node >= 18.17 exposes
-  // globalThis.crypto). Constants must match src/shared/mailboxSealedPayload.ts;
-  // the generator refuses to run when they drift.
-  (function () {
-    var MAILBOX_AUTH_TOKEN_INFO = "accord-mailbox-auth-v1";
-    var MAILBOX_SCOPE_ID_INFO = "accord-mailbox-scope-v1";
-    var MAILBOX_SCOPE_ID_PREFIX = "mb-";
-    var MAILBOX_SCOPE_ID_LENGTH = 32;
-
-    function subtle() {
-      if (!globalThis.crypto || !globalThis.crypto.subtle) {
-        throw new Error("Mailbox crypto requires WebCrypto.");
-      }
-      return globalThis.crypto.subtle;
-    }
-
-    function textToBytesC(value) {
-      return new TextEncoder().encode(value);
-    }
-
-    function base64UrlToBytesC(value) {
-      var normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-      var padded = normalized + "===".slice((normalized.length + 3) % 4);
-      var binary = atob(padded);
-      var bytes = new Uint8Array(binary.length);
-      for (var i = 0; i < binary.length; i += 1) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-      return bytes;
-    }
-
-    function bytesToBase64UrlC(bytes) {
-      var binary = "";
-      for (var i = 0; i < bytes.length; i += 1) {
-        binary += String.fromCharCode(bytes[i]);
-      }
-      return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-    }
-
-    async function importSealKey(sealKeyBase64Url, usages) {
-      return subtle().importKey("raw", base64UrlToBytesC(sealKeyBase64Url), "AES-GCM", false, usages);
-    }
-
-    // Seals a payload into the shared envelope: AES-256-GCM, 12-byte iv,
-    // WebCrypto layout (auth tag appended to the ciphertext), base64url fields.
-    async function sealToEnvelope(payload, sealKeyBase64Url) {
-      var iv = new Uint8Array(12);
-      globalThis.crypto.getRandomValues(iv);
-      var key = await importSealKey(sealKeyBase64Url, ["encrypt"]);
-      var ciphertext = await subtle().encrypt({ name: "AES-GCM", iv: iv }, key, textToBytesC(JSON.stringify(payload)));
-      return {
-        v: 1,
-        alg: "A256GCM",
-        iv: bytesToBase64UrlC(iv),
-        ct: bytesToBase64UrlC(new Uint8Array(ciphertext))
-      };
-    }
-
-    async function openEnvelope(envelope, sealKeyBase64Url) {
-      if (!envelope || envelope.v !== 1 || envelope.alg !== "A256GCM") {
-        throw new Error("Unsupported sealed mailbox payload.");
-      }
-      var key = await importSealKey(sealKeyBase64Url, ["decrypt"]);
-      var plaintext = await subtle().decrypt(
-        { name: "AES-GCM", iv: base64UrlToBytesC(envelope.iv) },
-        key,
-        base64UrlToBytesC(envelope.ct)
-      );
-      return JSON.parse(new TextDecoder().decode(plaintext));
-    }
-
-    // Both mailbox credentials are one-way HMAC-SHA256 derivations from the
-    // pairing seal key; the relay can never recover the key from either.
-    async function deriveAccess(sealKeyBase64Url) {
-      var key = await subtle().importKey(
-        "raw",
-        base64UrlToBytesC(sealKeyBase64Url),
-        { name: "HMAC", hash: "SHA-256" },
-        false,
-        ["sign"]
-      );
-      var token = bytesToBase64UrlC(new Uint8Array(
-        await subtle().sign("HMAC", key, textToBytesC(MAILBOX_AUTH_TOKEN_INFO))
-      ));
-      var scopeDigest = bytesToBase64UrlC(new Uint8Array(
-        await subtle().sign("HMAC", key, textToBytesC(MAILBOX_SCOPE_ID_INFO))
-      ));
-      return {
-        token: token,
-        scopeId: MAILBOX_SCOPE_ID_PREFIX + scopeDigest.slice(0, MAILBOX_SCOPE_ID_LENGTH)
-      };
-    }
-
-    globalThis.AccordMailboxCrypto = {
-      MAILBOX_AUTH_TOKEN_INFO: MAILBOX_AUTH_TOKEN_INFO,
-      MAILBOX_SCOPE_ID_INFO: MAILBOX_SCOPE_ID_INFO,
-      MAILBOX_SCOPE_ID_PREFIX: MAILBOX_SCOPE_ID_PREFIX,
-      MAILBOX_SCOPE_ID_LENGTH: MAILBOX_SCOPE_ID_LENGTH,
-      sealToEnvelope: sealToEnvelope,
-      openEnvelope: openEnvelope,
-      deriveAccess: deriveAccess
-    };
-  })();
-  // <<< generated: mailbox-crypto
-
-  // Thin adapters over the generated contract keep the app's existing
-  // string-based seal/open signatures (shared by the relay socket path).
-  async function sealRelayPayload(payload, keyBase64) {
-    return JSON.stringify(await globalThis.AccordMailboxCrypto.sealToEnvelope(payload, keyBase64));
-  }
-
-  async function openRelayPayload(sealed, keyBase64) {
-    return globalThis.AccordMailboxCrypto.openEnvelope(JSON.parse(sealed), keyBase64);
-  }
-
-  // The mailbox is locked per pairing: both the mailbox id and the bearer
-  // token are one-way HMAC derivations from the pairing seal key (see the
-  // generated contract above), so a pasted or scanned link is all the phone
-  // needs. The relay never sees the seal key itself.
-  let mailboxAccessCache;
-  let mailboxAuthRejected = false;
-
-  async function mailboxAccessForPairing(pairing) {
-    const sealKey = pairing?.relaySealKeyBase64;
-    if (!sealKey || !globalThis.crypto?.subtle) {
-      return undefined;
-    }
-    if (mailboxAccessCache && mailboxAccessCache.sealKey === sealKey) {
-      return mailboxAccessCache.value;
-    }
-    const value = await globalThis.AccordMailboxCrypto.deriveAccess(sealKey);
-    mailboxAccessCache = { sealKey, value };
-    return value;
-  }
-
-  // W5 doorbell subscription: the phone registers its Web Push subscription
-  // with its own locked mailbox (bearer-authenticated), including its own
-  // event origin so its writes do not ring its own bell. The relay sends
-  // empty pushes; iOS requires a user gesture before Notification permission,
+  // Doorbell subscription: the phone registers its Web Push subscription with
+  // the User's server, signed with its own key. The server's pushes carry no
+  // message text; iOS requires a user gesture before Notification permission,
   // hence the explicit enable button.
   let pushSubscriptionEnsured = false;
-  // W-K: the relay refuses push endpoints outside its allowlist (W-D). That
-  // refusal must be said out loud — a phone that silently never rings looks
-  // identical to one that is simply quiet, and the user waits forever.
+  // The server refuses push endpoints it does not ring. That refusal must be
+  // said out loud: a phone that silently never rings looks identical to one
+  // that is simply quiet, and the user waits forever.
   let pushEndpointRejected = false;
-  const PUSH_ENDPOINT_REJECTED_ERROR = "mailbox_push_endpoint_rejected";
 
   // One subscription attempt at a time: the launch and a tap on "Enable"
   // can ask together, and two attempts post two subscriptions (and undo
@@ -384,14 +190,17 @@
   let pushSubscriptionInFlight;
 
   /** The push subscription goes to the User's server, signed: the server
-   *  rings this phone itself, desktop or no desktop. Replaced on each launch
-   *  for the reason ensurePushSubscriptionNow gives. */
+   *  rings this phone itself, desktop or no desktop. Replaced on each launch:
+   *  a subscription can stop being delivered without ever being reported
+   *  gone, and from in here the two cases look identical. The server's key is
+   *  read before anything is given up: a phone that cannot reach the server
+   *  just now keeps the subscription it has rather than trading it for a
+   *  replacement it cannot make. */
   async function ensureHubPushSubscription() {
     const client = hubClient();
     if (!client) return;
     const registration = await navigator.serviceWorker.ready;
     let subscription = await registration.pushManager.getSubscription();
-    // The server's key before anything is given up (see below).
     const publicKey = await client.vapidKey();
     if (subscription) {
       try {
@@ -438,75 +247,12 @@
       if (!navigator.serviceWorker || !("PushManager" in globalThis)) {
         return;
       }
-      const pairing = loadPairing();
-      if (isHubPairing(pairing)) {
-        await ensureHubPushSubscription();
+      if (!isHubPairing(loadPairing())) {
         return;
       }
-      const endpoint = outboxEndpoint();
-      if (!pairing?.relaySealKeyBase64 || !endpoint) {
-        return;
-      }
-      const registration = await navigator.serviceWorker.ready;
-      let subscription = await registration.pushManager.getSubscription();
-      // The relay's key before anything is given up: a phone that cannot
-      // reach the relay just now (opened offline, on a poor connection) keeps
-      // the subscription it has rather than trading it for a replacement it
-      // cannot make — which left it with none until the next launch.
-      const vapidUrl = new URL("/v1/push/vapid", endpoint);
-      const vapidBody = await (await fetch(vapidUrl.toString())).json();
-      if (!vapidBody?.publicKey) {
-        return;
-      }
-      // A subscription can stop being delivered without ever being reported
-      // gone: the push service keeps accepting rings for it, the phone hears
-      // nothing, and from in here the two cases look identical. Nothing
-      // available to this page can tell them apart, so the first check of each
-      // launch replaces the subscription instead of trusting it. That is one
-      // extra round trip when the app opens, against notifications silently
-      // stopping until the User notices and says so.
-      if (subscription) {
-        try {
-          await subscription.unsubscribe();
-          subscription = undefined;
-        } catch {
-          // Keeping a subscription that might be dead beats having none.
-        }
-      }
-      if (!subscription) {
-        subscription = await registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: base64UrlToBytes(vapidBody.publicKey)
-        });
-      }
-      const request = await authorizedMailboxRequest(endpoint);
-      const url = new URL(request.url);
-      url.pathname = "/v1/mailbox/push-subscription";
-      url.search = "";
-      url.searchParams.set("mailboxId", new URL(request.url).searchParams.get("mailboxId") || "");
-      const response = await fetch(url.toString(), {
-        method: "POST",
-        headers: Object.assign({ "content-type": "application/json" }, request.headers),
-        body: JSON.stringify({
-          subscription: subscription.toJSON(),
-          suppressOriginId: await mobileOriginId(pairing)
-        })
-      });
-      if (response.ok) {
-        pushSubscriptionEnsured = true;
-        return;
-      }
-      if (response.status === 400) {
-        const body = await response.json().catch(() => ({}));
-        if (body && body.error === PUSH_ENDPOINT_REJECTED_ERROR) {
-          // Terminal for this browser: the endpoint will not become allowed by
-          // trying again, so stop and say so instead of retrying on every open.
-          pushEndpointRejected = true;
-          pushSubscriptionEnsured = true;
-        }
-      }
+      await ensureHubPushSubscription();
     } catch {
-      // Push is an enhancement; the poll path never depends on it.
+      // Push is an enhancement; the app reads the server when it is open.
     }
   }
 
@@ -517,13 +263,11 @@
   let alertsReconnect = "";
 
   async function reconnectMessageAlerts() {
-    const endpoint = outboxEndpoint();
-    const pairing = loadPairing();
-    if (!isHubPairing(pairing) && (!endpoint || !pairing?.relaySealKeyBase64)) return "failed";
+    if (!isHubPairing(loadPairing())) return "failed";
     if (!navigator.serviceWorker || !("PushManager" in globalThis)) return "failed";
     try {
       // ensurePushSubscription replaces the subscription itself, and only once
-      // it has reached the relay: dropping it here first left a phone that
+      // it has reached the server: dropping it here first left a phone that
       // tapped Reconnect without a connection with no subscription at all.
       pushSubscriptionEnsured = false;
       await ensurePushSubscription();
@@ -550,138 +294,6 @@
     }
   }
 
-  async function authorizedMailboxRequest(endpoint) {
-    const pairing = loadPairing();
-    const access = await mailboxAccessForPairing(pairing);
-    if (!access) {
-      return { url: endpoint, headers: {} };
-    }
-    // W5 mirror: the push-woken service worker needs exactly these — and only
-    // these — to fetch in the background. Merge-write so the shared cursor is
-    // never clobbered. The seal key is deliberately absent.
-    void writeMailboxAccessMeta({
-      endpointUrl: endpoint,
-      mailboxId: access.scopeId,
-      token: access.token
-    });
-    const url = new URL(endpoint);
-    url.searchParams.set("mailboxId", access.scopeId);
-    return { url: url.toString(), headers: { authorization: "Bearer " + access.token } };
-  }
-
-  function noteMailboxResponse(response) {
-    if (response.ok) {
-      mailboxAuthRejected = false;
-    }
-    // Any answer at all: the phone reaches the mailbox, and a header still
-    // saying otherwise is put right now, not at some later redraw.
-    if (outboxUnreachable) {
-      outboxUnreachable = false;
-      void render();
-    }
-  }
-
-  // The relay reports two different 401s: "mailbox_unregistered" means the
-  // desktop has not finished registering this pairing's mailbox (a quiet
-  // waiting state — keep polling), while a refused token means the pairing
-  // was revoked and only a fresh link helps. Reads the response body, so
-  // callers must not consume it again.
-  async function mailboxAuthFailureState(response) {
-    if (response.status !== 401) {
-      return "other";
-    }
-    const body = await response.text().catch(function () {
-      return "";
-    });
-    if (body.indexOf("mailbox_unregistered") >= 0) {
-      return "unregistered";
-    }
-    mailboxAuthRejected = true;
-    // Revoked means the mirrored background credentials are dead too; destroy
-    // them in step with the pairing lifecycle.
-    void clearMailboxAccessMeta();
-    return "revoked";
-  }
-
-  function isSealedMailboxPayload(payload) {
-    return Boolean(payload) &&
-      typeof payload === "object" &&
-      payload.v === 1 &&
-      payload.alg === "A256GCM" &&
-      typeof payload.iv === "string" &&
-      typeof payload.ct === "string";
-  }
-
-  async function openMailboxEnvelopePayload(envelope, pairing) {
-    const payload = envelope?.payload;
-    if (!isSealedMailboxPayload(payload)) {
-      return payload;
-    }
-    if (!pairing?.relaySealKeyBase64) {
-      return undefined;
-    }
-    try {
-      return await openRelayPayload(JSON.stringify(payload), pairing.relaySealKeyBase64);
-    } catch {
-      return undefined;
-    }
-  }
-
-  function chunkRelayCiphertext(request) {
-    const chunkSize = RELAY_FRAME_MAX_BYTES - RELAY_FRAME_OVERHEAD_BYTES;
-    const chunks = [];
-    for (let start = 0; start < request.ciphertext.length || chunks.length === 0; start += chunkSize) {
-      chunks.push(request.ciphertext.slice(start, start + chunkSize));
-    }
-    return chunks.map(function (chunk, index) {
-      return {
-        protocol: RELAY_PROTOCOL,
-        streamId: request.streamId,
-        logicalMessageId: request.logicalMessageId,
-        frameId: request.logicalMessageId + ":" + index + ":" + chunks.length,
-        frameIndex: index,
-        frameCount: chunks.length,
-        cursor: request.cursor || undefined,
-        // A room can hold more than the desktop. A frame for a machine names
-        // it, so the relay hands it to that device and to nobody else.
-        to: request.to || undefined,
-        ciphertextChunk: chunk
-      };
-    });
-  }
-
-  function reassembleRelayCiphertext(frames) {
-    if (frames.length === 0) {
-      return { status: "missing" };
-    }
-    const first = frames[0];
-    const chunks = new Map();
-    for (const frame of frames) {
-      if (frame.protocol !== RELAY_PROTOCOL ||
-        frame.streamId !== first.streamId ||
-        frame.logicalMessageId !== first.logicalMessageId ||
-        frame.frameCount !== first.frameCount) {
-        return { status: "conflict", reason: "mixed relay frames" };
-      }
-      const existing = chunks.get(frame.frameIndex);
-      if (existing && existing.ciphertextChunk !== frame.ciphertextChunk) {
-        return { status: "conflict", reason: "duplicate frame index with different ciphertext" };
-      }
-      chunks.set(frame.frameIndex, frame);
-    }
-    if (chunks.size !== first.frameCount) {
-      return { status: "missing" };
-    }
-    return {
-      status: "complete",
-      streamId: first.streamId,
-      logicalMessageId: first.logicalMessageId,
-      ciphertext: Array.from({ length: first.frameCount }, function (_, index) {
-        return chunks.get(index).ciphertextChunk;
-      }).join("")
-    };
-  }
-
   function openDb() {
     // One description of this database, shared with the service worker. They
     // are separate programs over the same storage, and when each carried its
@@ -693,10 +305,10 @@
   }
 
   /**
-   * One IndexedDB transaction across several stores, for the durable event log.
-   * The action and its outgoing record are written inside it, so a failed queue
-   * write leaves no event either: an action no peer will ever hear about is
-   * worse than one the User can retry.
+   * One IndexedDB transaction across several stores. A queued event and the
+   * head of the chain it was signed into are written inside one, so a failed
+   * write leaves neither: an event the server will never hear about is worse
+   * than one the User can retry.
    */
   function eventLogPort() {
     return {
@@ -716,6 +328,7 @@
               getAll: function (name) { return requestToPromise(stores[name].getAll()); },
               put: function (name, entry) { return requestToPromise(stores[name].put(entry)); },
               remove: function (name, key) { return requestToPromise(stores[name].delete(key)); },
+              clear: function (name) { return requestToPromise(stores[name].clear()); },
               removeWhere: function (name, matches) {
                 return new Promise(function (resolve, reject) {
                   const request = stores[name].openCursor();
@@ -737,20 +350,6 @@
         });
       }
     };
-  }
-
-  let activeEventLog;
-  /** This device's durable log. Built once the pairing is known, because the
-   *  origin id has to be stable across reloads for its sequence to continue. */
-  function eventLog(originId) {
-    if (!originId || !self.AccordMobileEventLog) return undefined;
-    if (!activeEventLog || activeEventLog.originId !== originId) {
-      activeEventLog = {
-        originId: originId,
-        log: self.AccordMobileEventLog.createMobileEventLog({ port: eventLogPort(), originId: originId })
-      };
-    }
-    return activeEventLog.log;
   }
 
   function withOutbox(mode, fn) {
@@ -789,7 +388,7 @@
 
   function noteOutboxStatus(entry) {
     if (entry && typeof entry.eventId === "string") {
-      outboxStatusById.set(entry.eventId, { status: entry.status, deliveredVia: entry.deliveredVia });
+      outboxStatusById.set(entry.eventId, { status: entry.status });
     }
   }
 
@@ -805,9 +404,9 @@
   // from the database for each of them is what a streaming member costs: a
   // dozen full reads in seven seconds, each one hundreds of milliseconds on a
   // real phone, which is why text arrived in lumps (the User, 2026-09-21).
-  // Only this page writes timeline rows -- the push-woken worker stores sealed
-  // envelopes and nothing else -- so the rows held here cannot go stale behind
-  // this context's back. Anything that writes without maintaining them drops
+  // Only this page writes timeline rows -- the push-woken worker reads what a
+  // push is about and writes no rows -- so the rows held here cannot go stale
+  // behind this context's back. Anything that writes without maintaining them drops
   // them, which is enforced in withTimeline rather than left to each caller.
   // A few chats at a time, not one: the chat on screen is read for drawing
   // while another member streams into a different chat, and a single slot made
@@ -944,8 +543,7 @@
   // was created, as they were at first — the held rows could predate the
   // write in front, and a run's end judged against them missed the live row
   // it had come to end: "Thinking…" stayed above the answer it belonged to
-  // whenever the socket's last row and the mailbox's finished one landed
-  // together.
+  // whenever the run's last live row and its finished one landed together.
   const HELD_ROWS_SYNC_KEY = "\u0000held-rows-sync";
 
   function timelineRowsForConversation(store, conversationId, options) {
@@ -996,19 +594,16 @@
     const key = timelineEntryDedupeKey(entry);
     // The one write path that keeps the held rows in step instead of dropping
     // them: it is the one a streaming member takes, over and over.
-    return withTimeline("readwrite", function (store, meta) {
-      // Same transaction as the timeline write: a concurrent deletion cannot
-      // land between a separate check and this stale message's insertion.
-      return requestToPromise(meta.get("conversation-deleted:" + entry.conversationId)).then(function (deleted) {
-        if (deleted) return 0;
-        return timelineRowsForConversation(store, entry.conversationId, { mayHold: true }).then(function (entries) {
+    return withTimeline("readwrite", function (store) {
+      return timelineRowsForConversation(store, entry.conversationId, { mayHold: true }).then(function (entries) {
         const current = entries.find(function (existing) {
           return existing && existing.id === entry.id && existing.conversationId === entry.conversationId &&
             existing.role === "participant" && entry.role === "participant" && existing.runId === entry.runId;
         });
         if (current && entry.status === "pending") {
-          // Saved snapshots carry the waiting row; only the live socket carries
-          // growing text. Either can arrive last, including after reconnect.
+          // A chat's page carries the waiting row; only the live progress
+          // carries growing text. Either can arrive last, including after a
+          // reconnect.
           if (current.status !== "pending") return 0;
           if (isScaffoldingEntry(entry) && !isPlaceholderTimelineContent(current.content)) {
             entry = { ...entry, content: current.content };
@@ -1084,7 +679,6 @@
           noteChatRowsRemoved(entry.conversationId, removed.map(function (existing) { return existing.id; }));
           noteChatRowStored(entry);
           return true;
-        });
         });
       });
     }, { maintainsChatRows: true });
@@ -1233,9 +827,11 @@
   // never showed ("Auto-resumed @x after member request", tool-approval
   // notes) are dropped once; a system row the User can see (an artifact note)
   // is fetched again with the chat's last page and comes back. Rows the phone
-  // itself wrote — machine warnings and errors — are not from the desktop and
+  // itself wrote — machine warnings and errors, from when it reached machines
+  // directly, kept under ids with this prefix — are not from the desktop and
   // stay.
   const INTERNAL_SYSTEM_ROWS_DROPPED_KEY = "accordagents.mobile.internalSystemRowsDropped.v1";
+  const MACHINE_ROW_ID_PREFIX = "machine-";
 
   function dropStoredInternalSystemRows() {
     if (localStorage.getItem(INTERNAL_SYSTEM_ROWS_DROPPED_KEY) === "1") {
@@ -1257,13 +853,6 @@
       return dropped;
     });
   }
-
-  // W1+W5: one (epoch, cursor) pair, shared with the service worker through
-  // the IndexedDB meta record, which also mirrors the non-decrypting mailbox
-  // credentials a push-woken background fetch needs — endpoint URL, mailbox
-  // id, bearer token. The seal key itself never enters IndexedDB; it stays in
-  // the pairing, which the service worker cannot read.
-  let lastStaleRefillKey = "";
 
   function withNamedStore(storeName, mode, fn) {
     return openDb().then(function (db) {
@@ -1288,13 +877,6 @@
     });
   }
 
-  // This phone as a device of its own: a signing key, the machines it is
-  // allowed to command, and the way to reach one of them directly. Without
-  // this the phone can only ask the desktop, and a closed desktop means a
-  // phone that can do nothing.
-  const MACHINE_IDENTITY_META_KEY = "machine-command-identity";
-  const MACHINE_ACCESS_META_KEY = "machine-access";
-
   async function readMetaRecord(key) {
     return withNamedStore(META_STORE, "readonly", function (store) {
       return requestToPromise(store.get(key));
@@ -1305,737 +887,15 @@
    * A record this phone cannot lose quietly.
    *
    * This used to swallow its errors. A failed write of the signing identity
-   * meant a phone that minted a new key on the next reload, which every
-   * machine then refused because the roster names the old one; a failed write
-   * of the machine list meant a phone that silently forgot where to send. Both
-   * are visible now, and the caller decides.
+   * meant a phone that minted a new key on the next reload, which the server
+   * then refused because its roster names the old one. It is visible now, and
+   * the caller decides.
    */
   async function writeMetaRecord(key, value) {
     const existing = (await readMetaRecord(key)) || {};
     await withNamedStore(META_STORE, "readwrite", function (store) {
       store.put({ ...existing, ...value, key });
     });
-  }
-
-  const machineCommandStore = {
-    get: (key) => readMetaRecord(key),
-    set: (key, value) => writeMetaRecord(key, value)
-  };
-
-  let machineIdentityPromise;
-
-  /** The signing identity a machine checks this phone's commands against. */
-  function machineCommandIdentity() {
-    const api = globalThis.AccordMachineCommand;
-    if (!api) return Promise.resolve(undefined);
-    machineIdentityPromise ??= api.ensureIdentity(machineCommandStore).catch(function (error) {
-      machineIdentityPromise = undefined;
-      machineUnavailableReason = String((error && error.message) || error);
-      recordRelayDebug({ event: "machine-identity-unavailable", message: machineUnavailableReason });
-      return undefined;
-    });
-    return machineIdentityPromise;
-  }
-
-  /**
-   * Records where this phone may reach each machine.
-   *
-   * Only the list of machines is replaced. Everything else under this key --
-   * in particular anything the delivery path keeps -- is left alone: learning
-   * the machines again is a routine refresh, not a reason to forget what has
-   * not been delivered yet.
-   */
-  async function storeMachineAccess(machines) {
-    const list = Array.isArray(machines) ? machines : [];
-    await writeMetaRecord(MACHINE_ACCESS_META_KEY, { machines: list });
-    await machineChannels().then(function (channels) {
-      if (channels) channels.setMachines(list);
-    }).catch(function (error) {
-      recordRelayDebug({ event: "machine-channels-unavailable", message: String(error && error.message || error) });
-    });
-    return list;
-  }
-
-  async function machineAccessList() {
-    const record = await readMetaRecord(MACHINE_ACCESS_META_KEY);
-    return (record && record.machines) || [];
-  }
-
-  /** One IndexedDB transaction over the phone's machine journal. */
-  function machineLogPort() {
-    return {
-      runAtomic: function (names, work) {
-        return eventLogPort().runAtomic(names.map(storeName), function (tx) {
-          return work({
-            get: function (name, key) { return tx.get(storeName(name), key); },
-            getAll: function (name) { return tx.getAll(storeName(name)); },
-            put: function (name, entry) { return tx.put(storeName(name), entry); },
-            remove: function (name, key) { return tx.remove(storeName(name), key); }
-          });
-        });
-      }
-    };
-    // The journal names its stores logically; this is the one place that
-    // knows which physical store each of them is. Idempotent, so a caller that
-    // already speaks the physical names is not mapped a second time into the
-    // wrong store -- which is exactly what silently sent every event into the
-    // meta store, where it has no key at all.
-    function storeName(name) {
-      if (name === "events" || name === MACHINE_EVENT_STORE) return MACHINE_EVENT_STORE;
-      if (name === "outbox" || name === MACHINE_OUTBOX_STORE) return MACHINE_OUTBOX_STORE;
-      if (name === MACHINE_BLOB_STORE) return MACHINE_BLOB_STORE;
-      return META_STORE;
-    }
-  }
-
-  /**
-   * Bodies too large to travel inside one event.
-   *
-   * A long reply is sent as fragments and only becomes readable once every one
-   * of them has arrived and the whole thing hashes to what the event claims.
-   * An incomplete body is not applied and not acknowledged, so the machine
-   * keeps it and sends the rest.
-   */
-  function machineBlobStore(api) {
-    function key(reference, index) { return "blob:" + reference.blobHash + ":" + index; }
-    return {
-      store: function (fragment) {
-        if (!fragment || !fragment.reference || typeof fragment.bytesBase64 !== "string") {
-          return Promise.reject(new Error("Invalid machine event fragment."));
-        }
-        return withNamedStore(MACHINE_BLOB_STORE, "readwrite", function (store) {
-          store.put({ key: key(fragment.reference, fragment.index), bytesBase64: fragment.bytesBase64 });
-        });
-      },
-      /** A fragment held for sending, in the shape the machine reads. */
-      fragment: async function (reference, index) {
-        const held = await withNamedStore(MACHINE_BLOB_STORE, "readonly", function (store) {
-          return requestToPromise(store.get(key(reference, index)));
-        });
-        return held ? { reference: reference, index: index, bytesBase64: held.bytesBase64 } : undefined;
-      },
-      take: async function (reference) {
-        const parts = [];
-        for (let index = 0; index < reference.fragments; index += 1) {
-          const held = await withNamedStore(MACHINE_BLOB_STORE, "readonly", function (store) {
-            return requestToPromise(store.get(key(reference, index)));
-          });
-          if (!held) return undefined;
-          parts.push(api.base64ToBytes(held.bytesBase64));
-        }
-        const total = parts.reduce(function (sum, part) { return sum + part.length; }, 0);
-        if (total !== reference.byteLength) return undefined;
-        const bytes = new Uint8Array(total);
-        let at = 0;
-        for (const part of parts) { bytes.set(part, at); at += part.length; }
-        if ("sha256:" + await api.sha256Hex(bytes) !== reference.blobHash) return undefined;
-        const body = JSON.parse(new TextDecoder().decode(bytes));
-        return body;
-      }
-    };
-  }
-
-  let machineChannelsPromise;
-  /** Said plainly when this phone cannot reach a machine at all. */
-  let machineUnavailableReason;
-
-  /**
-   * This phone's connections to the machines it may command.
-   *
-   * Built once the signing identity exists, because every event it emits and
-   * every acknowledgement it makes is signed with that key, and the machine
-   * decides what to accept by it.
-   */
-  function machineChannels() {
-    const api = globalThis.AccordMachineCommand;
-    const channelApi = globalThis.AccordMachineChannel;
-    const logApi = globalThis.AccordMobileEventLog;
-    if (!api || !channelApi || !logApi) return Promise.resolve(undefined);
-    machineChannelsPromise ??= (async function () {
-      const identity = await machineCommandIdentity();
-      if (!identity) return undefined;
-      const log = logApi.createMobileEventLog({
-        port: machineLogPort(),
-        originId: identity.deviceId,
-        stores: { events: MACHINE_EVENT_STORE, outbox: MACHINE_OUTBOX_STORE, meta: META_STORE, blobs: MACHINE_BLOB_STORE },
-        keyId: identity.keyId,
-        hashPayload: async function (payload) { return "sha256:" + await api.sha256Hex(api.textBytes(api.stableJson(payload))); },
-        hashEvent: async function (unsigned) { return "sha256:" + await api.sha256Hex(api.textBytes(api.stableJson(unsigned))); },
-        sign: async function (eventHash) { return api.signEventHash(identity, eventHash); }
-      });
-      await log.restore();
-      const channels = channelApi.createMachineChannels({
-        api: api,
-        identity: identity,
-        log: log,
-        blobs: machineBlobStore(api),
-        seal: sealRelayPayload,
-        open: openRelayPayload,
-        chunk: chunkRelayCiphertext,
-        reassemble: reassembleRelayCiphertext,
-        connect: function (machine) {
-          return openRelaySocket(machine.relayUrl, {
-            rendezvousId: machine.rendezvousId,
-            fingerprint: machine.fingerprint || "",
-            routingId: machine.rendezvousId,
-            deviceId: identity.deviceId,
-            expectDeviceId: machine.deviceId
-          });
-        },
-        apply: applyMachineEvent,
-        onAcknowledged: noteMachineDelivered,
-        debug: recordRelayDebug
-      });
-      channels.setMachines(await machineAccessList());
-      machineUnavailableReason = undefined;
-      return { channels: channels, log: log, identity: identity };
-    })().catch(function (error) {
-      machineChannelsPromise = undefined;
-      machineUnavailableReason = String((error && error.message) || error);
-      recordRelayDebug({ event: "machine-channels-unavailable", message: machineUnavailableReason });
-      return undefined;
-    });
-    return machineChannelsPromise.then(function (built) { return built && built.channels; });
-  }
-
-  /**
-   * What a machine sends back, carried out here.
-   *
-   * A result is a message in this chat, so it goes through the same projection
-   * the desktop's timeline uses -- one shape, one dedupe rule, one render. A
-   * kind this build does not show yet is still applied, because refusing it
-   * would leave the machine holding it forever; what it must never do is claim
-   * to have shown something it did not.
-   */
-  const deletedMachineConversations = new Set();
-  let deletedMachineConversationsLoaded;
-
-  function loadDeletedMachineConversations() {
-    if (!deletedMachineConversationsLoaded) {
-      deletedMachineConversationsLoaded = withNamedStore(META_STORE, "readonly", store => requestToPromise(store.getAll(IDBKeyRange.bound("conversation-deleted:", "conversation-deleted:\uffff"))))
-        .then(records => {
-          for (const record of records) {
-            if (typeof record.key === "string" && record.key.startsWith("conversation-deleted:")) {
-              deletedMachineConversations.add(record.key.slice("conversation-deleted:".length));
-            }
-          }
-        }).catch(error => { deletedMachineConversationsLoaded = undefined; throw error; });
-    }
-    return deletedMachineConversationsLoaded;
-  }
-
-  async function isMachineConversationDeleted(conversationId) {
-    if (deletedMachineConversations.has(conversationId)) return true;
-    const deleted = await readMetaRecord("conversation-deleted:" + conversationId);
-    if (deleted) deletedMachineConversations.add(conversationId);
-    return Boolean(deleted);
-  }
-
-  async function applyMachineConversationDeletion(conversationId, deletedAt) {
-    // Keep the receipt journal/outbox for replay and ACKs; erase only the
-    // visible projection together with its permanent resurrection barrier.
-    await eventLogPort().runAtomic([META_STORE, TIMELINE_STORE], async tx => {
-      const key = "conversation-deleted:" + conversationId;
-      if (!await tx.get(META_STORE, key)) await tx.put(META_STORE, { key, conversationId, deletedAt });
-      await tx.removeWhere(TIMELINE_STORE, entry => entry.conversationId === conversationId);
-    });
-    timelineGeneration += 1;
-    // Written past withTimeline, so the rows it holds are dropped here.
-    dropCachedChatRows();
-    deletedMachineConversations.add(conversationId);
-    saveChats(loadChats().filter(chat => chat.id !== conversationId));
-    const cards = loadControlCards();
-    delete cards[conversationId];
-    saveControlCards(cards);
-    if (selectedConversationId() === conversationId) localStorage.setItem(ACTIVE_CONVERSATION_KEY, "unpaired");
-    await render("synced");
-  }
-
-  async function applyMachineEvent(event, payload, machine) {
-    const body = payload && typeof payload === "object" ? payload : {};
-    // What this phone was actually handed, when the QA flag is on. Reading the
-    // screen is not proof that a result arrived: the User's own prompt can
-    // contain whatever token an answer is being looked for by.
-    recordRelayDebug({ event: "machine-event-applying", kind: event.kind, bodyType: body.type,
-      messages: Array.isArray(body.messages) ? body.messages.length : undefined, status: body.status });
-    const conversationId = event.conversationId;
-    if (body.type === "machine.conversation.deleted") {
-      if (body.conversationId !== conversationId || typeof body.deletedAt !== "string") throw new Error("Invalid chat deletion identity.");
-      await applyMachineConversationDeletion(conversationId, body.deletedAt);
-      return "applied";
-    }
-    if (await isMachineConversationDeleted(conversationId)) return "applied";
-    if (body.type === "machine.turn.finished") {
-      const stopped = body.status === "interrupted";
-      const events = (body.messages || []).map(function (message) {
-        return machineTimelineEvent(message, body.status === "failed" ? "error" : "done", body.runId);
-      });
-      // A stopped run often produced nothing, and only a settled row for this
-      // run clears the one that says it is still working. Without this the
-      // phone showed "Stopping..." for a member that had already gone.
-      if (stopped) {
-        events.push({
-          id: MACHINE_ROW_ID_PREFIX + "stopped:" + body.runId, messageId: MACHINE_ROW_ID_PREFIX + "stopped:" + body.runId,
-          role: "participant", participantLabel: machineRunLabel(body.runId),
-          content: events.some(function (event) { return event.hidden !== true; })
-            ? "Stopped."
-            : machineRunLabel(body.runId) + " was stopped before answering.",
-          status: "done", createdAt: body.finishedAt, runId: body.runId
-        });
-      }
-      for (const [index, warning] of (body.warnings || []).entries()) {
-        events.push({ id: MACHINE_ROW_ID_PREFIX + "warning:" + body.runId + ":" + index, role: "system", content: warning,
-          status: "done", createdAt: body.finishedAt });
-      }
-      if (body.error) {
-        events.push({ id: MACHINE_ROW_ID_PREFIX + "error:" + body.runId, role: "system", content: body.error,
-          status: "error", createdAt: body.finishedAt });
-      }
-      await handleRelayTimelinePayload({ type: "mobile.timeline.events", conversationId: conversationId, events: events },
-        conversationId);
-      // A member raises a choice by writing one in its own reply, so the
-      // question arrives with the answer's own message rather than in a later
-      // conversation delta. Looking for it only in deltas meant a choice the
-      // member asked at the end of its turn was never shown, and it waited for
-      // an answer the User was never offered the chance to give.
-      for (const message of body.messages || []) {
-        const card = machineChoiceCard(conversationId, message);
-        if (card) mergeControlCard(conversationId, card);
-      }
-      noteMachineRunSettled(body.runId, body.status);
-      // The terminal outlives this page: a reload must not resurrect a Stop
-      // control for a run the machine has already finished.
-      await rememberMachineTerminal(conversationId, body);
-      return "applied";
-    }
-    if (body.type === "machine.turn.started") {
-      noteMachineRunStarted(body.runId, machine);
-      // The same in-progress row the desktop shows, so a member working on a
-      // machine looks like a member working anywhere else.
-      await handleRelayTimelinePayload({
-        type: "mobile.timeline.events", conversationId: conversationId,
-        // Deliberately without a message id of its own. A live row that names
-        // one is ended only by a terminal naming the same id, and this row is
-        // written before the machine has said what its answer's id will be, so
-        // nothing would ever end it: the run showed as still working beside
-        // its own finished answer, and offered a Stop for a member that had
-        // already gone. Carrying only the run id is the other half of that
-        // contract, and it holds because this source posts one live row per
-        // run and no intermediate messages.
-        events: [{
-          id: MACHINE_ROW_ID_PREFIX + "run:" + body.runId, role: "participant",
-          participantLabel: machineRunLabel(body.runId), content: machineRunLabel(body.runId) + " is running...",
-          status: "pending", createdAt: body.startedAt, runId: body.runId
-        }]
-      }, conversationId);
-      return "applied";
-    }
-    if (body.type === "machine.turn.progress.delta") {
-      // Streamed text, accumulated the way the desktop accumulates it: the
-      // frame carries how much of the previous text to keep and what to add.
-      const held = machineRunStreams.get(body.runId) || "";
-      const retain = body.content && Number.isSafeInteger(body.content.retain) ? body.content.retain : held.length;
-      const next = held.slice(0, Math.max(0, Math.min(retain, held.length))) + ((body.content && body.content.append) || "");
-      machineRunStreams.set(body.runId, next);
-      if (next.trim()) {
-        await handleRelayTimelinePayload({
-          type: "mobile.timeline.events", conversationId: conversationId,
-          events: [{
-            id: MACHINE_ROW_ID_PREFIX + "run:" + body.runId, role: "participant",
-            participantLabel: machineRunLabel(body.runId), content: next,
-            status: "pending", createdAt: new Date().toISOString(), runId: body.runId
-          }]
-        }, conversationId);
-      }
-      return "applied";
-    }
-    if (body.type === "machine.conversation.backdelta") {
-      await handleRelayTimelinePayload({
-        type: "mobile.timeline.events",
-        conversationId: conversationId,
-        events: (body.messages || []).map(function (message) { return machineTimelineEvent(message, "done"); })
-      }, conversationId);
-      // A member on a machine asks the User things as well as answering them.
-      // Without this the question existed on the machine and nowhere the User
-      // could see it, and the member waited for an answer that could not come.
-      for (const message of body.messages || []) {
-        const card = machineChoiceCard(conversationId, message);
-        if (card) mergeControlCard(conversationId, card);
-      }
-      await render("synced");
-      return "applied";
-    }
-    if (event.kind === "chat.changes") {
-      // A machine writes its members' messages as chat change events. With the
-      // desktop away they reach this phone directly, and are shown the way the
-      // back delta that carried them before was shown, choice cards included.
-      const changed = (Array.isArray(body.changes) ? body.changes : [])
-        .filter(function (change) { return change && (change.type === "message.created" || change.type === "message.updated") && change.message; })
-        .map(function (change) { return change.message; });
-      // Shown as they arrive, so never older text over newer.
-      const orderKey = MACHINE_CHANGE_ORDER_META_PREFIX + event.originId + ":" + conversationId;
-      const order = globalThis.AccordMachineChannel.newerMachineMessages(await readMetaRecord(orderKey), event.originSeq, changed);
-      const messages = order.fresh;
-      if (messages.length) {
-        await handleRelayTimelinePayload({
-          type: "mobile.timeline.events",
-          conversationId: conversationId,
-          events: messages.map(function (message) { return machineTimelineEvent(message, "done"); })
-        }, conversationId);
-        for (const message of messages) {
-          const card = machineChoiceCard(conversationId, message);
-          if (card) mergeControlCard(conversationId, card);
-        }
-        await writeMetaRecord(orderKey, order.record);
-        await render("synced");
-      }
-      return "applied";
-    }
-    if (body.type === "machine.approval.requested" || body.type === "machine.approval.updated") {
-      mergeControlCard(conversationId, machineApprovalCard(conversationId, body.approval, machine && machine.name));
-      await render("synced");
-      return "applied";
-    }
-    if (body.type === "machine.choice.result") {
-      clearCardSent(body.choiceId);
-      const card = controlCardsFor(conversationId).find(item => item.id === body.choiceId);
-      if (card && body.choice) {
-        const selected = (body.choice.options || []).find(option => option.id === body.choice.selectedOptionId);
-        mergeControlCard(conversationId, { ...card,
-          status: body.choice.status === "pending" ? "pending" : "answered",
-          outcome: body.choice.status === "cancelled" ? "Cancelled" : body.choice.customAnswer || selected?.label || "Answered"
-        });
-      }
-      if (!body.ok || body.uncertain) controlCardErrors.set(body.choiceId, body.error || "The machine has not confirmed this answer.");
-      else controlCardErrors.delete(body.choiceId);
-      await render("synced");
-      return "applied";
-    }
-    if (body.type === "machine.approval.result") {
-      noteMachineApprovalResult(body);
-      return "applied";
-    }
-    recordRelayDebug({ event: "machine-event-unshown", kind: event.kind });
-    return "applied";
-  }
-
-  // A machine hands the phone its messages whole, so the per-message half of
-  // the desktop's timeline rule applies here (the desktop applies the whole
-  // rule before it projects for the phone): an internal system trigger
-  // ("Auto-resumed @x after member request") is not a message the User sees
-  // anywhere else. A hidden row still settles its run's pending row; it is
-  // simply never stored.
-  function machineMessageHiddenOnPhone(message) {
-    const shared = globalThis.AccordMobileShared;
-    if (!shared || !message || typeof message !== "object") {
-      return false;
-    }
-    return shared.isChatMessageHiddenFromTimeline({
-      role: message.role,
-      content: typeof message.content === "string" ? message.content : "",
-      metadata: message.metadata && typeof message.metadata === "object" ? message.metadata : undefined
-    });
-  }
-
-  // Rows this phone writes about a machine run, never received from the
-  // desktop. The sweep of stored internal rows spares them by this prefix.
-  const MACHINE_ROW_ID_PREFIX = "machine-";
-
-  function machineTimelineEvent(message, status, runId) {
-    const content = typeof message.content === "string" ? message.content : "";
-    return {
-      id: message.id,
-      messageId: message.id,
-      role: message.role === "user" ? "you" : message.role === "system" ? "system" : "participant",
-      // A scheduled script's message is named after the script, as the
-      // desktop's timeline names it.
-      participantLabel: message.participantHandle || message.participantName ||
-        (message.role === "script" ? message.participantLabel || (message.metadata && message.metadata.scriptName) : undefined),
-      content: content,
-      status: status,
-      createdAt: message.createdAt || nowIso(),
-      ...(runId ? { runId: runId } : {}),
-      ...(message.threadRootId ? { threadRootId: message.threadRootId } : {}),
-      ...(machineMessageHiddenOnPhone(message) ? { hidden: true } : {})
-    };
-  }
-
-  /** One card in, the rest left alone: replacing the list would erase the
-   *  cards this phone already knows about from the desktop or another run. */
-  function mergeControlCard(conversationId, card) {
-    if (!conversationId || !card || !card.id) return false;
-    const cards = controlCardsFor(conversationId).slice();
-    const at = cards.findIndex(function (existing) { return existing && existing.id === card.id; });
-    if (at >= 0) cards[at] = { ...cards[at], ...card };
-    else cards.push(card);
-    return storeControlCards(conversationId, cards);
-  }
-
-  /**
-   * The same card the desktop would show for this approval.
-   *
-   * Deliberately the same fields as controlCardsFromConversation in
-   * src/shared/mobileControlCards.ts, because a member must be answered the
-   * same way wherever the User happens to be looking. The phone cannot import
-   * that module, so the two are kept in step by the card contract test rather
-   * than by hope; a card missing its options is a card with no buttons.
-   */
-  function machineApprovalCard(conversationId, approval, machineName) {
-    // A script that installs code is approved where its code can be read:
-    // like controlCardFromApproval, the phone may only decline it.
-    // The same fail-closed rule as approvalInstallsScriptCode: a scripts card
-    // it cannot read is treated as installing code.
-    const request = approval.request;
-    const readable = Boolean(request && request.kind === "script-change" && typeof request.scriptId === "string" &&
-      typeof request.name === "string" && Array.isArray(request.secretNames) && request.schedule && typeof request.schedule === "object" &&
-      request.permissions && Array.isArray(request.permissions.chatIds) && Array.isArray(request.permissions.participantIds));
-    const desktopOnly = approval.toolName === "app_scripts_request_change" &&
-      !(readable && (request.op === "delete" || request.op === "enable" || request.op === "disable"));
-    const scriptSummary = approval.summary || "A scheduled script";
-    return {
-      id: approval.id,
-      kind: "permission",
-      // Learned from the machine itself, not from the desktop: the desktop's
-      // chat list cannot vouch for it and must not withdraw it.
-      source: "machine",
-      conversationId: conversationId,
-      title: desktopOnly ? "Approve on the desktop: " + scriptSummary : approval.summary || "Permission request",
-      summary: desktopOnly
-        ? scriptSummary + ". The phone cannot show the script's code yet, so it is approved on the desktop. You can decline it here."
-        : approval.summary || "",
-      ...(approval.requesterHandle ? { requesterLabel: "@" + approval.requesterHandle } : {}),
-      ...(machineName ? { machineName: machineName } : {}),
-      options: desktopOnly ? [{ id: "deny", label: "Deny" }] : [{ id: "allow", label: "Allow" }, { id: "deny", label: "Deny" }],
-      allowsCustomAnswer: false,
-      allowsCancel: false,
-      status: approval.status === "pending" ? "pending" : "answered",
-      createdAt: approval.createdAt,
-      ...(typeof approval.codexDecisionId === "string" ? { codexDecisionId: approval.codexDecisionId } : {}),
-      ...(approval.request ? { draftOverride: approval.request } : {})
-    };
-  }
-
-  /** The choice a member asked, as the desktop shows it. */
-  function machineChoiceCard(conversationId, message) {
-    const choice = message.metadata && message.metadata.pendingChoice;
-    if (!choice) return undefined;
-    const options = choice.options || [];
-    const selected = options.find(function (option) { return option.id === choice.selectedOptionId; });
-    return {
-      id: choice.id,
-      kind: "choice",
-      source: "machine",
-      conversationId: conversationId,
-      title: choice.title || "Choice",
-      summary: choice.question || "",
-      ...(message.participantLabel ? { requesterLabel: message.participantLabel } : {}),
-      options: options,
-      ...(choice.recommendedOptionId && options.some(function (option) { return option.id === choice.recommendedOptionId; })
-        ? { recommendedOptionId: choice.recommendedOptionId }
-        : {}),
-      allowsCustomAnswer: true,
-      allowsCancel: true,
-      status: choice.status === "pending" ? "pending" : "answered",
-      ...(choice.status === "pending" ? {} : {
-        outcome: choice.status === "cancelled" ? "Cancelled"
-          : (selected && selected.label) || choice.customAnswer || "Answered"
-      }),
-      createdAt: message.createdAt,
-      sourceMessageId: message.id
-    };
-  }
-
-  /**
-   * The machine confirmed it has the ask. Only now is the message delivered.
-   *
-   * Until this, the entry stays pending and is offered again -- which is what
-   * makes a dropped connection a delivery that resumes. Marking it at the
-   * moment of sending would both lie to the User and make the phone re-mint an
-   * ask the machine already holds.
-   */
-  async function noteMachineDelivered(receipt) {
-    const entries = await listOutboxEntries();
-    for (const entry of entries) {
-      if (!entry.machineRunId || entry.status === "acked") continue;
-      const api = globalThis.AccordMachineCommand;
-      if (receipt.eventId !== api.machineCommandEventId(entry.machineRunId)) continue;
-      await putOutboxEntry({ ...entry, status: "acked", ack: { ackRole: "machine", eventIds: [receipt.eventId] },
-        updatedAt: nowIso(), lastError: undefined });
-      await render("synced");
-    }
-  }
-
-  const machineRunState = new Map();
-  const machineRunStreams = new Map();
-
-  function noteMachineRunStarted(runId, machine) {
-    const held = machineRunState.get(runId) || {};
-    machineRunState.set(runId, { ...held, status: "running", machineId: machine && machine.machineId });
-  }
-
-  const MACHINE_TERMINALS_META_KEY = "machine-run-terminals";
-
-  /**
-   * What this phone knows ended, kept across reloads.
-   *
-   * The timeline rows say what was said; this says the run itself is over. A
-   * reload rebuilds the Stop controls from the rows, and a run whose terminal
-   * only ever lived in memory would be offered for stopping again.
-   */
-  /** Per machine and chat: the change that last set each message shown here. */
-  const MACHINE_CHANGE_ORDER_META_PREFIX = "machine-change-order:";
-
-  async function rememberMachineTerminal(conversationId, body) {
-    const record = (await readMetaRecord(MACHINE_TERMINALS_META_KEY)) || {};
-    const terminals = record.terminals || {};
-    terminals[body.runId] = { status: body.status, conversationId: conversationId, finishedAt: body.finishedAt };
-    // Bounded: the newest few hundred are what a live screen can refer to.
-    const ids = Object.keys(terminals);
-    if (ids.length > 300) {
-      ids.sort(function (left, right) {
-        return String(terminals[left].finishedAt || "").localeCompare(String(terminals[right].finishedAt || ""));
-      });
-      for (const id of ids.slice(0, ids.length - 300)) delete terminals[id];
-    }
-    await writeMetaRecord(MACHINE_TERMINALS_META_KEY, { terminals: terminals });
-    for (const runId of Object.keys(terminals)) machineRunState.set(runId, { status: terminals[runId].status });
-  }
-
-  function machineRunSettled(runId) {
-    const held = runId ? machineRunState.get(runId) : undefined;
-    return Boolean(held && held.status && held.status !== "running" && held.status !== "requested");
-  }
-
-  /** Reloads what ended, so Stop is not offered for a finished run. */
-  async function restoreMachineTerminals() {
-    const record = await readMetaRecord(MACHINE_TERMINALS_META_KEY).catch(function () { return undefined; });
-    const terminals = (record && record.terminals) || {};
-    for (const runId of Object.keys(terminals)) machineRunState.set(runId, { status: terminals[runId].status });
-    return Object.keys(terminals).length;
-  }
-
-  function noteMachineRunSettled(runId, status) {
-    const held = machineRunState.get(runId) || {};
-    machineRunState.set(runId, { ...held, status: status || "completed" });
-    machineRunStreams.delete(runId);
-  }
-
-  /** Who the row belongs to. This phone knows for a run it asked for itself;
-   *  for anything else it says nothing rather than naming the wrong member. */
-  function machineRunLabel(runId) {
-    const held = machineRunState.get(runId);
-    return (held && held.participantLabel) || "Agent";
-  }
-
-  /**
-   * What the machine made of an answer, rather than that it was sent.
-   *
-   * `ok` false is the owner's own apply error and is shown as one. An
-   * uncertain outcome is neither: the card says it is not settled rather than
-   * claiming an answer that may not have taken.
-   */
-  function noteMachineApprovalResult(body) {
-    if (!body || !body.approvalId) return;
-    if (body.ok === false) {
-      clearCardSent(body.approvalId);
-      controlCardErrors.set(body.approvalId, body.error || "The machine could not apply this answer.");
-      return;
-    }
-    if (body.uncertain) {
-      controlCardErrors.set(body.approvalId, "The machine has not confirmed this answer yet.");
-      return;
-    }
-    controlCardErrors.delete(body.approvalId);
-    if (body.approval) mergeControlCard(body.conversationId, machineApprovalCard(body.conversationId, body.approval));
-  }
-
-  async function readMailboxAccessMeta() {
-    try {
-      return await withNamedStore(META_STORE, "readonly", function (store) {
-        return requestToPromise(store.get(MAILBOX_ACCESS_META_KEY));
-      });
-    } catch {
-      return undefined;
-    }
-  }
-
-  async function writeMailboxAccessMeta(patch) {
-    try {
-      const existing = (await readMailboxAccessMeta()) || {};
-      await withNamedStore(META_STORE, "readwrite", function (store) {
-        store.put({ ...existing, ...patch, key: MAILBOX_ACCESS_META_KEY });
-      });
-    } catch {
-      // Best effort: a lost mirror only delays background sync, never breaks
-      // the foreground path.
-    }
-  }
-
-  async function clearMailboxAccessMeta() {
-    try {
-      await withNamedStore(META_STORE, "readwrite", function (store) {
-        store.delete(MAILBOX_ACCESS_META_KEY);
-      });
-    } catch {
-      // Best effort.
-    }
-  }
-
-  async function loadMailboxCursor() {
-    const meta = await readMailboxAccessMeta();
-    if (meta && (typeof meta.epoch === "string" || Number.isFinite(meta.cursor))) {
-      return { epoch: typeof meta.epoch === "string" ? meta.epoch : "", cursor: Number(meta.cursor) || 0 };
-    }
-    // One-time migration from the short-lived localStorage cursor home.
-    try {
-      const raw = localStorage.getItem(MAILBOX_CURSOR_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        localStorage.removeItem(MAILBOX_CURSOR_KEY);
-        const value = { epoch: typeof parsed.epoch === "string" ? parsed.epoch : "", cursor: Number(parsed.cursor) || 0 };
-        await writeMailboxAccessMeta(value);
-        return value;
-      }
-    } catch {
-      // Fall through to a fresh cursor.
-    }
-    return { epoch: "", cursor: 0 };
-  }
-
-  async function saveMailboxCursor(epoch, cursor) {
-    await writeMailboxAccessMeta({ epoch: epoch, cursor: cursor });
-  }
-
-  // Drains what a push-woken service worker stored while the app was closed:
-  // still-sealed envelopes, opened here with the pairing key, so the timeline
-  // is already caught up the moment the app opens.
-  async function drainSealedEnvelopes(pairing) {
-    let envelopes;
-    try {
-      envelopes = await withNamedStore(SEALED_STORE, "readonly", function (store) {
-        return requestToPromise(store.getAll());
-      });
-    } catch {
-      return 0;
-    }
-    if (!Array.isArray(envelopes) || envelopes.length === 0) {
-      return 0;
-    }
-    let stored = 0;
-    for (const envelope of envelopes) {
-      if (envelope?.kind === "mobile.timeline.events") {
-        const payload = await openMailboxEnvelopePayload(envelope, pairing);
-        if (payload?.type === "mobile.timeline.events") {
-          stored += await handleRelayTimelinePayload(payload, envelope.conversationId, { deferRender: true });
-        }
-      }
-      await withNamedStore(SEALED_STORE, "readwrite", function (store) {
-        store.delete(envelope.eventId);
-      }).catch(function () {
-        return undefined;
-      });
-    }
-    return stored;
   }
 
   // Once a run has produced its final (done or error) event, replayed copies
@@ -2276,7 +1136,7 @@
         const parsed = raw ? JSON.parse(raw) : [];
         cachedChatList = Array.isArray(parsed) ? parsed : [];
       }
-      return cachedChatList.filter(chat => !deletedMachineConversations.has(chat.id));
+      return cachedChatList;
     } catch {
       return [];
     }
@@ -2606,32 +1466,20 @@
     }).filter(Boolean);
   }
 
+  /** How this phone is paired: with the User's server, or not at all. A
+   *  pairing made the old way (through the desktop's relay) is not one: it is
+   *  cleared at launch (see clearOldPairing). */
   function loadPairing() {
-    // A phone paired with the User's server reads and writes only there.
     const hub = loadHubPairing();
-    if (hub) return hubPairingAsPairing(hub);
-    try {
-      const raw = localStorage.getItem(PAIRING_KEY);
-      return raw ? JSON.parse(raw) : undefined;
-    } catch {
-      return undefined;
-    }
+    return hub ? hubPairingAsPairing(hub) : undefined;
   }
 
-  function savePairing(pairing) {
-    localStorage.setItem(PAIRING_KEY, JSON.stringify(pairing));
-    if (pairing.conversationId) {
-      localStorage.setItem(ACTIVE_CONVERSATION_KEY, pairing.conversationId);
-    }
-    return pairing;
-  }
-
-  // W-G(a): once a pairing from the URL persists, the credentials leave the
-  // address bar — a URL surviving in history, screenshots or share sheets
-  // must not be able to pair anyone else. Non-credential params (the qa
-  // debug flag) survive, and the app never re-reads credentials from
-  // location after boot. Pasted-link pairing passes a synthetic location, so
-  // the address bar is credential-free there and this is a no-op.
+  // Once a pairing code is read from the address, it leaves the address bar:
+  // a URL surviving in history, screenshots or share sheets must not be able
+  // to pair anyone else. Non-credential params (the qa debug flag) survive,
+  // and the app never re-reads credentials from location after boot. A link
+  // made the old way carried its credentials in these too, and is scrubbed
+  // the same way though it pairs nothing.
   const CREDENTIAL_URL_PARAMS = ["pair", "rid", "rendezvousId", "route", "routingId", "cap", "fingerprint", "relay", "endpoint", "mailbox", "mailboxUrl", "outbox", "outboxUrl", "conversationId", "relaySealKey"];
 
   function scrubCredentialsFromLocation() {
@@ -2660,36 +1508,8 @@
     }
   }
 
-  function savePairingFromUrl(pairing) {
-    const saved = savePairing(pairing);
-    scrubCredentialsFromLocation();
-    return saved;
-  }
-
-  /** The phone's own start key from the pairing link (`w=`): the instance,
-   *  its region and a key that can only start it. Kept only on this
-   *  device, in the same form the wake button reads. A damaged value is left
-   *  out rather than failing the pairing: the phone still controls the
-   *  desktop, it just cannot start the machine. */
-  function readWakeFromFragment(fragment) {
-    const value = fragment.get("w");
-    if (!value) return undefined;
-    try {
-      // instanceId.region.accessKeyId.secret, each URI-encoded.
-      const parts = value.split(".").map(decodeURIComponent);
-      if (parts.length !== 4) return undefined;
-      const [instanceId, region, accessKeyId, secretAccessKey] = parts;
-      if (!/^i-[a-f0-9]{8,17}$/.test(instanceId) || !/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(region)
-        || !/^[A-Z0-9]{16,128}$/.test(accessKeyId) || !secretAccessKey) {
-        return undefined;
-      }
-      return { instanceId: instanceId, region: region,
-        credentials: { accessKeyId: accessKeyId, secretAccessKey: secretAccessKey, region: region } };
-    } catch {
-      return undefined;
-    }
-  }
-
+  /** Starts pairing with the User's server when the address carries the code
+   *  the desktop shows; true when it did. */
   function readBootstrapFromLocation(locationValue) {
     const url = new URL(locationValue.href);
     // The code for the User's server: paired with it now, in the background
@@ -2698,74 +1518,67 @@
     if (invite) {
       scrubCredentialsFromLocation();
       void pairWithServer(invite);
-      return loadPairing();
+      return true;
     }
-    const fragment = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
-    const wake = readWakeFromFragment(fragment);
-    const compactKey = fragment.get("k") || fragment.get("relaySealKey");
-    const compactRendezvousId = url.searchParams.get("rid") || url.searchParams.get("rendezvousId");
-    const compactRoutingId = url.searchParams.get("route") || url.searchParams.get("routingId");
-    const compactFingerprint = url.searchParams.get("cap") || url.searchParams.get("fingerprint");
-    if (compactKey && compactRendezvousId && compactRoutingId && compactFingerprint) {
-      return savePairingFromUrl({
-        endpoint: url.searchParams.get("relay") || DEFAULT_MANAGED_RELAY_URL,
-        relayUrl: url.searchParams.get("relay") || DEFAULT_MANAGED_RELAY_URL,
-        mailboxUrl: url.searchParams.get("mailbox") || undefined,
-        outboxUrl: url.searchParams.get("outbox") || undefined,
-        conversationId: url.searchParams.get("conversationId") || undefined,
-        routingId: compactRoutingId,
-        rendezvousId: compactRendezvousId,
-        relaySealKeyBase64: compactKey,
-        fingerprint: compactFingerprint,
-        ...(wake ? { power: wake } : {}),
-        pairedAt: nowIso()
-      });
+    if (url.hash || CREDENTIAL_URL_PARAMS.some(function (param) { return url.searchParams.has(param); })) {
+      scrubCredentialsFromLocation();
     }
-    const pairingPayload = fragment.get("pairing");
-    if (pairingPayload) {
-      const pairing = JSON.parse(base64UrlToText(pairingPayload));
-      return savePairingFromUrl({
-        endpoint: pairing.relayUrl || DEFAULT_MANAGED_RELAY_URL,
-        relayUrl: pairing.relayUrl || DEFAULT_MANAGED_RELAY_URL,
-        mailboxUrl: pairing.mailboxUrl || undefined,
-        outboxUrl: pairing.outboxUrl || undefined,
-        conversationId: pairing.capabilities?.find(function (capability) {
-          return capability.scope === "conversation";
-        })?.conversationId || undefined,
-        routingId: pairing.stableRoutingId || undefined,
-        rendezvousId: pairing.rendezvousId || undefined,
-        relaySealKeyBase64: pairing.relaySealKeyBase64 || undefined,
-        fingerprint: pairing.fingerprint || undefined,
-        ...(wake ? { power: wake } : {}),
-        pairedAt: nowIso()
-      });
+    return false;
+  }
+
+  /**
+   * A pairing made the old way, through the desktop's relay, is not used for
+   * anything: what it kept on this phone (its key, its mailbox's cursor and
+   * mirrored access, its queue in the relay's form, the machine journal) is
+   * cleared. A phone that has no server pairing yet says once, plainly, that
+   * it has to be paired again; the note stays until it is.
+   */
+  function clearOldPairing() {
+    let held = false;
+    try {
+      held = localStorage.getItem(OLD_PAIRING_KEY) !== null;
+      if (!held) return Promise.resolve(false);
+      // Said at once (the phone cannot use the old pairing either way); the
+      // key itself goes only once what it kept is cleared, so a launch that
+      // could not clear it tries again at the next one.
+      if (!loadHubPairing()) localStorage.setItem(OLD_PAIRING_CLEARED_KEY, "1");
+    } catch {
+      return Promise.resolve(held);
     }
-    const endpoint = url.searchParams.get("endpoint") || url.searchParams.get("relay");
-    const outboxUrl = url.searchParams.get("outboxUrl");
-    const conversationId = url.searchParams.get("conversationId");
-    const routingId = url.searchParams.get("routingId");
-    const rendezvousId = url.searchParams.get("rendezvousId");
-    // W-G(b): the seal key is accepted from the URL fragment only. A query
-    // string reaches server logs, referrers and browser sync; the fragment
-    // never leaves the device. The app never issued query-key links, so
-    // nothing breaks.
-    const relaySealKeyBase64 = fragment.get("relaySealKey") || fragment.get("k");
-    const fingerprint = url.searchParams.get("fingerprint");
-    if (!endpoint && !outboxUrl && !conversationId && !routingId && !rendezvousId) {
-      return loadPairing();
-    }
-    return savePairingFromUrl({
-      endpoint: endpoint || DEFAULT_MANAGED_RELAY_URL,
-      relayUrl: endpoint || DEFAULT_MANAGED_RELAY_URL,
-      outboxUrl: outboxUrl || undefined,
-      conversationId: conversationId || undefined,
-      routingId: routingId || undefined,
-      rendezvousId: rendezvousId || undefined,
-      relaySealKeyBase64: relaySealKeyBase64 || undefined,
-      fingerprint: fingerprint || undefined,
-      ...(wake ? { power: wake } : {}),
-      pairedAt: nowIso()
+    let dropped = 0;
+    return eventLogPort().runAtomic(OLD_PAIRING_STORES.concat([META_STORE, OUTBOX_STORE]), function (tx) {
+      return Promise.all(OLD_PAIRING_STORES.map(function (name) { return tx.clear(name); }))
+        .then(function () { return Promise.all(OLD_PAIRING_META_KEYS.map(function (key) { return tx.remove(META_STORE, key); })); })
+        .then(function () {
+          return tx.removeWhere(META_STORE, function (record) {
+            const key = record && typeof record.key === "string" ? record.key : "";
+            return OLD_PAIRING_META_PREFIXES.some(function (prefix) { return key.indexOf(prefix) === 0; });
+          });
+        })
+        // What the old pairing never sent goes with it: it was addressed to
+        // the desktop through the relay, and nothing reads it any more.
+        .then(function () { return tx.removeWhere(OUTBOX_STORE, function (entry) { const old = !entry || entry.hub !== true; if (old) dropped += 1; return old; }); });
+    }).then(function () {
+      try {
+        localStorage.removeItem(OLD_PAIRING_KEY);
+        localStorage.removeItem(OLD_MAILBOX_CURSOR_KEY);
+      } catch {
+        // Tried again at the next launch.
+      }
+      recordRelayDebug({ event: "old-pairing-cleared", hubPaired: Boolean(loadHubPairing()), droppedUnsent: dropped });
+      return true;
+    }, function (error) {
+      recordRelayDebug({ event: "old-pairing-clear-failed", message: String(error && error.message || error) });
+      return true;
     });
+  }
+
+  function oldPairingCleared() {
+    try {
+      return localStorage.getItem(OLD_PAIRING_CLEARED_KEY) === "1";
+    } catch {
+      return false;
+    }
   }
 
   function activeConversationId(inputConversationId) {
@@ -2777,66 +1590,14 @@
 
   function selectedConversationId() {
     const active = localStorage.getItem(ACTIVE_CONVERSATION_KEY) || loadPairing()?.conversationId;
-    return active && active !== "unpaired" && !deletedMachineConversations.has(active) ? active : undefined;
+    return active && active !== "unpaired" ? active : undefined;
   }
 
+  /** A queue entry for something this phone did. Every entry is for the
+   *  User's server: it is signed, in its place in this phone's chain, when it
+   *  is first sent (mintHubEntry). */
   async function createOutboxEvent(input) {
-    const pairing = loadPairing();
-    if (isHubPairing(pairing)) return hubOutboxEntry(input);
-    const eventId = input.eventId || createEventId();
-    const createdAt = input.createdAt || nowIso();
-    const conversationId = activeConversationId(input.conversationId);
-    if (await isMachineConversationDeleted(conversationId)) throw new Error("This chat was permanently deleted.");
-    const logScopeId = input.logScopeId || conversationId;
-    const originId = await mobileOriginId(pairing);
-    const originSeq = await nextOriginSeq(originId, logScopeId);
-    const kind = input.kind || "message.created";
-    const payload = input.payload || {
-      content: input.content,
-      ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {})
-    };
-    const payloadHash = "sha256:" + await sha256Hex(stableJson(payload));
-    const prevHash = await previousEventHash(originId, logScopeId);
-    const keyId = "mobile:" + originId;
-    const logicalTs = [
-      String(originSeq).padStart(16, "0"),
-      originId,
-      logScopeId
-    ].join(":");
-    const unsignedEvent = {
-      eventId,
-      conversationId,
-      logScopeId,
-      originId,
-      originSeq,
-      logicalTs,
-      kind,
-      payloadHash,
-      prevHash: prevHash || null,
-      keyId,
-      createdAt
-    };
-    const eventHash = "sha256:" + await sha256Hex(stableJson(unsignedEvent));
-    return {
-      eventId,
-      conversationId,
-      logScopeId,
-      originId,
-      originSeq,
-      logicalTs,
-      kind,
-      payload,
-      payloadHash,
-      ...(prevHash ? { prevHash } : {}),
-      keyId,
-      createdAt,
-      eventHash,
-      status: "queued",
-      attempts: 0,
-      updatedAt: createdAt,
-      ack: undefined,
-      lastError: undefined
-    };
+    return hubOutboxEntry(input);
   }
 
   // Pictures chosen on the phone, waiting for the next send. Same limits the
@@ -3058,35 +1819,12 @@
   }
 
   /**
-   * Records what this device did and queues it for delivery in ONE IndexedDB
-   * transaction. A failed queue write leaves no event either: an action nobody
-   * will ever hear about is worse than one the User can retry.
+   * Queues what this device did. An entry is its own record: its event is
+   * made, signed and kept with it when it is first sent (mintHubEntry), so a
+   * failed write here leaves nothing behind that the User did not see fail.
    */
   function persistOutboundEvent(entry) {
-    // An entry for the server is its own record: its event is made, signed
-    // and kept with it when it is first sent (mintHubEntry).
-    if (entry && entry.hub) return putOutboxEntry(entry).then(function () { return entry; });
-    return eventLogPort().runAtomic([EVENT_STORE, OUTBOX_STORE], function (tx) {
-      return tx.get(EVENT_STORE, entry.eventId).then(function (existing) {
-        if (existing) return entry;
-        return tx.put(EVENT_STORE, {
-          eventId: entry.eventId,
-          conversationId: entry.conversationId,
-          logScopeId: entry.logScopeId,
-          originId: entry.originId,
-          originSeq: entry.originSeq,
-          logicalTs: entry.logicalTs,
-          kind: entry.kind,
-          payload: entry.payload,
-          payloadHash: entry.payloadHash,
-          eventHash: entry.eventHash,
-          createdAt: entry.createdAt,
-          acknowledgedBy: []
-        }).then(function () {
-          return tx.put(OUTBOX_STORE, entry);
-        }).then(function () { noteOutboxStatus(entry); return entry; });
-      });
-    });
+    return putOutboxEntry(entry).then(function () { return entry; });
   }
 
   function enqueueMessage(input) {
@@ -3105,16 +1843,12 @@
     return !entry.kind || entry.kind === "message.created";
   }
 
-  // How many times the desktop may answer "not taken" before the entry is
-  // set aside for good: offered for ever, it would lock the card it carries.
-  const OUTBOX_REFUSAL_LIMIT = 5;
-
-  /** Whether a queue entry is still the desktop's to take: not acknowledged,
-   *  not replaced by a later answer to the same card, not refused for good,
-   *  and not handed to a member's own machine, which acknowledges its own. */
+  /** Whether a queue entry is still the server's to take: not acknowledged,
+   *  not replaced by a later answer to the same card, and not refused for
+   *  good. */
   function desktopOwesEntry(entry) {
     return Boolean(entry) && entry.status !== "acked" && entry.status !== "superseded" &&
-      entry.status !== "refused" && entry.deliveredVia !== "machine";
+      entry.status !== "refused";
   }
 
   /** Runs the User has asked to stop, from the tap onward. The queue entry is
@@ -3136,520 +1870,14 @@
     // A stop goes where every other write goes; the member's home stops it
     // when it reads it, and the row keeps saying "Stopping" until it has.
     const flushResult = await flushOutbox();
-    await pollMailboxTimeline().catch(function () {
-      return 0;
-    });
     await render(flushResult.status);
   }
 
-  async function mobileOriginId(pairing) {
-    const source = [
-      pairing?.routingId,
-      pairing?.rendezvousId,
-      pairing?.fingerprint,
-      "mobile"
-    ].filter(Boolean).join(":");
-    return "mobile-" + (await sha256Hex(source)).slice(0, 32);
-  }
-
-  /** Every event this device has emitted, from the durable store. The queue is
-   *  emptied when things are delivered, so deriving the sequence from it would
-   *  restart at 1 and fork this origin's log. */
-  function listEmittedEvents() {
-    return eventLogPort().runAtomic([EVENT_STORE], function (tx) {
-      return tx.getAll(EVENT_STORE);
-    }).catch(function () { return []; });
-  }
-
-  async function nextOriginSeq(originId, logScopeId) {
-    const entries = await listEmittedEvents();
-    return entries.filter(function (entry) {
-      return entry.originId === originId && entry.logScopeId === logScopeId && Number.isSafeInteger(entry.originSeq);
-    }).reduce(function (max, entry) {
-      return Math.max(max, entry.originSeq);
-    }, 0) + 1;
-  }
-
-  async function previousEventHash(originId, logScopeId) {
-    const entries = await listEmittedEvents();
-    const previous = entries.filter(function (entry) {
-      return entry.originId === originId && entry.logScopeId === logScopeId && typeof entry.eventHash === "string";
-    }).sort(function (left, right) {
-      return left.originSeq - right.originSeq || left.eventId.localeCompare(right.eventId);
-    }).pop();
-    return previous?.eventHash;
-  }
-
-  function mailboxEventForAppend(entry) {
-    return {
-      eventId: entry.eventId,
-      conversationId: entry.conversationId,
-      logScopeId: entry.logScopeId,
-      originId: entry.originId,
-      originSeq: entry.originSeq,
-      logicalTs: entry.logicalTs,
-      kind: entry.kind,
-      payload: entry.payload,
-      payloadHash: entry.payloadHash,
-      eventHash: entry.eventHash,
-      ...(entry.prevHash ? { prevHash: entry.prevHash } : {}),
-      ...(entry.signature ? { signature: entry.signature } : {}),
-      ...(entry.keyId ? { keyId: entry.keyId } : {}),
-      createdAt: entry.createdAt
-    };
-  }
-
-  function outboxEndpoint(endpoint) {
-    const pairing = loadPairing();
-    if (pairing?.outboxUrl) {
-      return pairing.outboxUrl;
-    }
-    const base = endpoint || pairing?.endpoint;
-    if (!base) {
-      return undefined;
-    }
-    const url = new URL("/v1/mailbox/events", base);
-    if (url.protocol === "wss:") {
-      url.protocol = "https:";
-    } else if (url.protocol === "ws:") {
-      url.protocol = "http:";
-    }
-    if (pairing?.routingId && !url.searchParams.has("mailboxId")) {
-      url.searchParams.set("mailboxId", pairing.routingId);
-    }
-    return url.toString();
-  }
-
-  function relayEndpoint() {
-    const pairing = loadPairing();
-    return pairing?.relayUrl || pairing?.endpoint;
-  }
-
-  function relayCanSync(pairing) {
-    return Boolean(
-      pairing?.relaySealKeyBase64 &&
-        pairing?.rendezvousId &&
-        pairing?.routingId &&
-        pairing?.fingerprint &&
-        relayEndpoint()
-    );
-  }
-
-  /** Whether this phone can read and write at all: through the User's
-   *  server, or (paired the old way) through the desktop's relay. */
+  /** Whether this phone can read and write at all: only through the User's
+   *  server, once paired with it. */
   function canSync(pairing) {
-    return isHubPairing(pairing) || relayCanSync(pairing);
+    return isHubPairing(pairing);
   }
-
-  async function flushOutboxViaRelay(entries, pairing) {
-    const relayUrl = relayEndpoint();
-    if (!relayUrl || !relayCanSync(pairing)) {
-      return { status: "waiting-for-desktop", sent: 0, pending: entries.filter((entry) => entry.status !== "acked").length };
-    }
-    const pendingEntries = entries.filter(desktopOwesEntry);
-    if (pendingEntries.length === 0) {
-      return { status: "synced", sent: 0, pending: 0 };
-    }
-    const socket = await getRelaySocket(relayUrl, pairing);
-    ensureRelayTimelineCollector(socket, pairing);
-    let sent = 0;
-    let refused = 0;
-    for (const entry of pendingEntries) {
-      const syncing = {
-        ...entry,
-        status: "syncing",
-        attempts: entry.attempts + 1,
-        updatedAt: nowIso()
-      };
-      await putOutboxEntry(syncing);
-      const sealed = await sealRelayPayload({
-        type: "mobile.outbox.events",
-        events: [syncing]
-      }, pairing.relaySealKeyBase64);
-      const ack = await sendRelayRequest(socket, pairing, {
-        logicalMessageId: entry.eventId,
-        ciphertext: sealed
-      });
-      const openedAck = await openRelayPayload(ack.ciphertext, pairing.relaySealKeyBase64);
-      const ackedEventIds = Array.isArray(openedAck?.eventIds) ? openedAck.eventIds : [openedAck?.eventId];
-      if (!ackedEventIds.includes(entry.eventId)) {
-        // The desktop answered and left this one out: it could not take it.
-        // Every chat's queue goes through here now, so one refused entry
-        // must not stand in front of the rest; it is kept, said to be
-        // waiting, and offered again later — a few times, then set aside,
-        // so the card it carries is not locked behind it for ever.
-        refused += 1;
-        const refusals = (Number(entry.refusals) || 0) + 1;
-        await putOutboxEntry({
-          ...syncing,
-          status: refusals >= OUTBOX_REFUSAL_LIMIT ? "refused" : "waiting-to-sync",
-          refusals: refusals,
-          updatedAt: nowIso(),
-          lastError: "The desktop did not take this."
-        });
-        continue;
-      }
-      await putOutboxEntry({
-        ...syncing,
-        status: "acked",
-        ack: {
-          ackRole: openedAck.ackRole || "desktop",
-          eventIds: ackedEventIds
-        },
-        updatedAt: nowIso(),
-        lastError: undefined
-      });
-      sent += 1;
-    }
-    return { status: "synced", sent, pending: refused };
-  }
-
-  async function getRelaySocket(relayUrl, pairing) {
-    const key = relaySocketKey(relayUrl, pairing);
-    if (activeRelaySocket && activeRelaySocketKey === key && activeRelaySocket.readyState === 1) {
-      return activeRelaySocket;
-    }
-    if (activeRelaySocketPromise && activeRelaySocketKey === key) {
-      return activeRelaySocketPromise;
-    }
-    if (activeRelaySocket && activeRelaySocket.readyState < 2) {
-      activeRelaySocket.close(1000, "mobile relay socket replaced");
-    }
-    activeRelaySocketKey = key;
-    const opening = openRelaySocket(relayUrl, pairing).then(function (socket) {
-      // Dropped or replaced while this open was in flight — the foreground
-      // resync closing a frozen socket and dialling again, a re-pairing — so
-      // this socket must not become the live one beside the replacement: the
-      // relay seats one phone, and the collector would be left on the loser.
-      // Close it and answer with whatever is current instead.
-      if (activeRelaySocketPromise !== opening) {
-        if (socket.readyState < 2) {
-          socket.close(1000, "mobile relay socket superseded");
-        }
-        if (activeRelaySocketKey !== key) {
-          throw new Error("Relay socket replaced by another pairing.");
-        }
-        return getRelaySocket(relayUrl, pairing);
-      }
-      activeRelaySocket = socket;
-      liveRelayReconnectDelayMs = LIVE_RELAY_RECONNECT_MIN_MS;
-      socket.addEventListener("close", function () {
-        if (activeRelaySocket === socket) {
-          activeRelaySocket = undefined;
-          activeRelaySocketPromise = undefined;
-          activeRelayTimelineCollectorSocket = undefined;
-          // The reply on screen stops moving the moment this socket is gone;
-          // dial again now rather than on the next keep-alive tick.
-          scheduleLiveRelayReconnect();
-        }
-      }, { once: true });
-      return socket;
-    }).catch(function (error) {
-      if (activeRelaySocketPromise !== opening) {
-        // Superseded while opening — typically the relay dismissed it the
-        // moment the replacement was seated. Its failure is not the
-        // replacement's: whoever waited on this open continues on the
-        // current socket instead of failing a request the User will see.
-        if (activeRelaySocketKey !== key) {
-          throw error;
-        }
-        return getRelaySocket(relayUrl, pairing);
-      }
-      activeRelaySocket = undefined;
-      activeRelaySocketPromise = undefined;
-      activeRelayTimelineCollectorSocket = undefined;
-      throw error;
-    });
-    activeRelaySocketPromise = opening;
-    return opening;
-  }
-
-  function relaySocketKey(relayUrl, pairing) {
-    return [
-      relayUrl,
-      pairing.rendezvousId,
-      pairing.routingId,
-      pairing.fingerprint
-    ].join("\0");
-  }
-
-  function ensureRelayTimelineCollector(socket, pairing) {
-    if (activeRelayTimelineCollectorSocket === socket) {
-      return;
-    }
-    activeRelayTimelineCollectorSocket = socket;
-    collectRelayTimeline(socket, pairing).catch(function () {
-      if (socket.readyState < 2) {
-        socket.close(1000, "mobile timeline collector stopped");
-      }
-    }).finally(function () {
-      if (activeRelayTimelineCollectorSocket === socket) {
-        activeRelayTimelineCollectorSocket = undefined;
-      }
-    });
-  }
-
-  function openRelaySocket(relayUrl, pairing) {
-    if (typeof globalThis.WebSocket !== "function") {
-      return Promise.reject(new Error("Relay sync requires WebSocket."));
-    }
-    const url = new URL(relayUrl);
-    url.searchParams.set("rid", pairing.rendezvousId);
-    url.searchParams.set("role", "phone");
-    url.searchParams.set("cap", pairing.fingerprint);
-    // A phone that does not name itself is seated under the role name, and a
-    // frame addressed to this device is then delivered to nobody. That is fine
-    // for the two-party desktop pairing, and wrong for a machine's room, where
-    // everything is addressed.
-    if (pairing.deviceId) url.searchParams.set("did", pairing.deviceId);
-    return new Promise(function (resolve, reject) {
-      const socket = new globalThis.WebSocket(url.toString());
-      // The relay forwards frames as binary, and a browser WebSocket hands
-      // binary back as a Blob by default — which every parse site below turned
-      // into the string "[object Blob]" and dropped. That silently discarded
-      // EVERY live frame: the streaming text the desktop publishes arrived and
-      // was thrown away. arraybuffer gives us bytes we can decode in place.
-      socket.binaryType = "arraybuffer";
-      recordRelayDebug({ event: "construct", url: url.toString() });
-      let settled = false;
-      const timer = setTimeout(function () {
-        recordRelayDebug({ event: "connect-timeout", readyState: socket.readyState });
-        socket.close(1000, "relay connect timeout");
-        cleanup();
-        reject(new Error("Relay tunnel reconnecting."));
-      }, RELAY_ACK_TIMEOUT_MS);
-      function cleanup() {
-        clearTimeout(timer);
-        socket.removeEventListener("message", onMessage);
-        socket.removeEventListener("error", onError);
-        socket.removeEventListener("close", onClose);
-      }
-      function resolveReady(reason) {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        recordRelayDebug({ event: "ready", reason, readyState: socket.readyState });
-        cleanup();
-        resolve(socket);
-      }
-      function onMessage(event) {
-        let parsed;
-        try {
-          parsed = JSON.parse(relayFrameText(event.data));
-        } catch {
-          return;
-        }
-        recordRelayDebug({
-          event: "control-message",
-          type: parsed?.type,
-          peerConnected: parsed?.peerConnected,
-          role: parsed?.role
-        });
-        // Waiting for a particular device: a machine's arrival is not
-        // announced to phones, so its presence is read from the room roster
-        // and a room without it fails now and is retried, rather than hanging
-        // until the connect timeout.
-        if (pairing.expectDeviceId) {
-          if (parsed?.type === "relay.ready") {
-            const present = (parsed.peers || []).some(function (peer) { return peer && peer.deviceId === pairing.expectDeviceId; });
-            if (present) resolveReady("expected-device-present");
-            else {
-              cleanup();
-              socket.close(1000, "expected device is not in the room");
-              reject(new Error("That machine is not connected right now."));
-            }
-            return;
-          }
-          if (parsed?.type === "relay.peer-connected" && parsed.deviceId === pairing.expectDeviceId) {
-            resolveReady("expected-device-connected");
-            return;
-          }
-        }
-        if (parsed?.type === "relay.ready" && parsed.peerConnected === true) {
-          resolveReady("peer-connected-at-ready");
-        } else if (parsed?.type === "relay.peer-connected") {
-          resolveReady("peer-connected");
-        } else if (parsed?.type === "relay.error") {
-          cleanup();
-          reject(new Error("Relay tunnel unavailable: " + (parsed.code || "relay error") + "."));
-        }
-      }
-      function onOpen() {
-        recordRelayDebug({ event: "open", readyState: socket.readyState });
-      }
-      function onError() {
-        cleanup();
-        recordRelayDebug({ event: "connect-error", readyState: socket.readyState });
-        reject(new Error("Relay tunnel unavailable."));
-      }
-      function onClose(event) {
-        cleanup();
-        recordRelayDebug({ event: "connect-close", code: event.code, reason: event.reason, readyState: socket.readyState });
-        reject(new Error("Relay tunnel reconnecting."));
-      }
-      socket.addEventListener("open", onOpen, { once: true });
-      socket.addEventListener("message", onMessage);
-      socket.addEventListener("error", onError, { once: true });
-      socket.addEventListener("close", onClose, { once: true });
-    });
-  }
-
-  function sendRelayRequest(socket, pairing, request) {
-    const streamId = pairing.routingId + ":phone";
-    const frames = chunkRelayCiphertext({
-      streamId,
-      logicalMessageId: request.logicalMessageId,
-      ciphertext: request.ciphertext,
-      to: request.to
-    });
-    const buffer = new Map();
-    return new Promise(function (resolve, reject) {
-      const timer = setTimeout(function () {
-        recordRelayDebug({ event: "ack-timeout", logicalMessageId: request.logicalMessageId, readyState: socket.readyState });
-        cleanup();
-        reject(new Error("Relay ack timeout."));
-      }, RELAY_ACK_TIMEOUT_MS);
-      function cleanup() {
-        clearTimeout(timer);
-        socket.removeEventListener("message", onMessage);
-        socket.removeEventListener("close", onClose);
-        socket.removeEventListener("error", onError);
-      }
-      function onMessage(event) {
-        let parsed;
-        try {
-          parsed = JSON.parse(relayFrameText(event.data));
-        } catch {
-          recordRelayDebug({ event: "message-parse-error", data: relayFrameText(event.data).slice(0, 240) });
-          return;
-        }
-        recordRelayDebug({
-          event: "message",
-          protocol: parsed?.protocol,
-          streamId: parsed?.streamId,
-          logicalMessageId: parsed?.logicalMessageId,
-          type: parsed?.type
-        });
-        if (parsed?.type === "relay.error") {
-          cleanup();
-          reject(new Error("Relay tunnel unavailable: " + (parsed.code || "relay error") + "."));
-          return;
-        }
-        if (parsed?.protocol !== RELAY_PROTOCOL) {
-          return;
-        }
-        const key = parsed.streamId + "\0" + parsed.logicalMessageId;
-        const collected = [...(buffer.get(key) || []), parsed];
-        buffer.set(key, collected);
-        const result = reassembleRelayCiphertext(collected);
-        if (result.status === "complete") {
-          if (!isRelayReplyForRequest(request.logicalMessageId, result.logicalMessageId)) {
-            buffer.delete(key);
-            recordRelayDebug({
-              event: "message-ignored",
-              logicalMessageId: result.logicalMessageId,
-              waitingFor: request.logicalMessageId
-            });
-            return;
-          }
-          recordRelayDebug({ event: "ack-complete", logicalMessageId: result.logicalMessageId });
-          cleanup();
-          resolve(result);
-        } else if (result.status === "conflict") {
-          recordRelayDebug({ event: "ack-conflict", reason: result.reason });
-          cleanup();
-          reject(new Error("Relay frame conflict: " + result.reason));
-        }
-      }
-      function onClose(event) {
-        recordRelayDebug({ event: "ack-close", code: event.code, reason: event.reason, readyState: socket.readyState });
-        cleanup();
-        reject(new Error("Relay tunnel reconnecting."));
-      }
-      function onError() {
-        recordRelayDebug({ event: "ack-error", readyState: socket.readyState });
-        cleanup();
-        reject(new Error("Relay tunnel unavailable."));
-      }
-      socket.addEventListener("message", onMessage);
-      socket.addEventListener("close", onClose);
-      socket.addEventListener("error", onError);
-      for (const frame of frames) {
-        recordRelayDebug({ event: "send", logicalMessageId: frame.logicalMessageId, frameIndex: frame.frameIndex, frameCount: frame.frameCount });
-        socket.send(JSON.stringify(frame));
-      }
-    });
-  }
-
-  function isRelayReplyForRequest(requestLogicalMessageId, responseLogicalMessageId) {
-    return responseLogicalMessageId === requestLogicalMessageId ||
-      responseLogicalMessageId.startsWith(requestLogicalMessageId + ":");
-  }
-
-  // W-M: the phone only ever opened a relay socket to *send* something, so a
-  // reader sitting in a chat had no live channel at all — the desktop's
-  // streaming publications had nowhere to land, which is why tapping the
-  // in-progress row showed nothing. While a conversation is open, hold the
-  // socket and keep the timeline collector attached so live text arrives as it
-  // is written. Idempotent: getRelaySocket reuses the open one.
-  // The live socket is what carries a member's text as it is written. When it
-  // drops — the relay seated a newer connection, the network blinked, the
-  // collector's idle close — the keep-alive was the only thing that dialled
-  // again, up to a minute later, and the reply on screen stood still until
-  // then: streaming that worked one time and not the next (the User,
-  // 2026-09-20). Dial again promptly, backing off while the relay stays away.
-  const LIVE_RELAY_RECONNECT_MIN_MS = 1_500;
-  const LIVE_RELAY_RECONNECT_MAX_MS = 30_000;
-  let liveRelayReconnectDelayMs = LIVE_RELAY_RECONNECT_MIN_MS;
-  let liveRelayReconnectTimer;
-
-  function scheduleLiveRelayReconnect() {
-    if (liveRelayReconnectTimer || !selectedConversationId() || document.hidden) return;
-    const delay = liveRelayReconnectDelayMs;
-    liveRelayReconnectDelayMs = Math.min(LIVE_RELAY_RECONNECT_MAX_MS, liveRelayReconnectDelayMs * 2);
-    liveRelayReconnectTimer = setTimeout(function () {
-      liveRelayReconnectTimer = undefined;
-      ensureLiveRelayForOpenConversation();
-    }, delay);
-  }
-
-  function ensureLiveRelayForOpenConversation() {
-    const pairing = loadPairing();
-    const relayUrl = relayEndpoint();
-    if (!pairing || !relayUrl || !relayCanSync(pairing) || !selectedConversationId()) {
-      return;
-    }
-    void getRelaySocket(relayUrl, pairing).then(function (socket) {
-      ensureRelayTimelineCollector(socket, pairing);
-    }).catch(function (error) {
-      recordRelayDebug({ event: "live-relay-failed", reason: String(error && error.message || error) });
-      scheduleLiveRelayReconnect();
-    });
-  }
-
-  async function sendRelayPayload(pairing, logicalMessageId, payload) {
-    const relayUrl = relayEndpoint();
-    if (!relayUrl || !relayCanSync(pairing)) {
-      throw new Error("Waiting for desktop.");
-    }
-    const socket = await getRelaySocket(relayUrl, pairing);
-    ensureRelayTimelineCollector(socket, pairing);
-    const sealed = await sealRelayPayload(payload, pairing.relaySealKeyBase64);
-    const reply = await sendRelayRequest(socket, pairing, {
-      logicalMessageId,
-      ciphertext: sealed
-    });
-    return openRelayPayload(reply.ciphertext, pairing.relaySealKeyBase64);
-  }
-
-  // --- the User's own server ------------------------------------------------
-  // With her own server set up, the phone reads the chat list, a chat's pages
-  // and what changed straight from it, with the pairing's mailbox key: the
-  // desktop does not have to be awake. A server that cannot answer (an older
-  // program, a pairing the desktop has not told it about yet, the shared
-  // relay) leaves the phone asking the desktop as before, and is asked again
-  // a few minutes later.
 
   // --- pairing with the User's own server ----------------------------------
   // The phone pairs with her server itself: the desktop shows a code (the
@@ -3662,6 +1890,8 @@
   const HUB_IDENTITY_META_KEY = "hub-identity";
   const HUB_PENDING_IDENTITY_META_KEY = "hub-identity-pending";
   const HUB_PAIRING_META_KEY = "hub-pairing";
+  /** The key the server said it no longer knows (the phone was removed). */
+  const HUB_REVOKED_IDENTITY_META_KEY = "hub-identity-revoked";
   const HUB_HEAD_META_PREFIX = "hubHead:";
   const HUB_CLOCK_META_KEY = "hubClock";
   const HUB_PHONE_PROTOCOL = 2;
@@ -3691,8 +1921,7 @@
     return Boolean(pairing && pairing.hub === true && pairing.hubUrl);
   }
 
-  /** The hub pairing in the shape the rest of the app reads a pairing in:
-   *  no relay fields, so nothing here talks to a relay or a mailbox. */
+  /** The hub pairing in the shape the rest of the app reads a pairing in. */
   function hubPairingAsPairing(hub) {
     return {
       hub: true,
@@ -3790,7 +2019,17 @@
       }
       const tokenHash = await sha256Hex(invite.token);
       const pending = await readMetaRecord(HUB_PENDING_IDENTITY_META_KEY);
-      const identity = pending && pending.tokenHash === tokenHash && pending.identity ? pending.identity : await api.createHubDeviceIdentity();
+      // A phone paired with this server before keeps its key: paired again,
+      // it replaces its own entry on the Mac and the server instead of
+      // standing beside it as a second phone.
+      const previous = await readMetaRecord(HUB_IDENTITY_META_KEY);
+      const previousPairing = await readMetaRecord(HUB_PAIRING_META_KEY);
+      const revoked = await readMetaRecord(HUB_REVOKED_IDENTITY_META_KEY);
+      const sameServer = Boolean(previous && previous.deviceId && previous.privateKeyDerBase64 && previousPairing &&
+        previousPairing.hubId === invite.hubId && previousPairing.deviceId === previous.deviceId &&
+        !(revoked && revoked.deviceId && revoked.deviceId === previous.deviceId));
+      const identity = pending && pending.tokenHash === tokenHash && pending.identity ? pending.identity
+        : sameServer ? previous : await api.createHubDeviceIdentity();
       await writeMetaRecord(HUB_PENDING_IDENTITY_META_KEY, { tokenHash: tokenHash, identity: identity });
       const answer = await api.enrollHubPhone({ hubUrl: invite.hubUrl, hubId: invite.hubId, token: invite.token, identity: identity, name: phoneName() });
       const before = await readMetaRecord(HUB_IDENTITY_META_KEY);
@@ -3802,6 +2041,9 @@
       if (!before || before.deviceId !== identity.deviceId) await forgetHubHeads();
       const pairing = { hubUrl: invite.hubUrl, hubId: invite.hubId, deviceId: identity.deviceId, scope: answer.scope, pairedAt: nowIso(), protocol: answer.protocol };
       setStoredValue(HUB_PAIRING_KEY, JSON.stringify(pairing));
+      // Paired again: the note that the old pairing was cleared has done its work.
+      localStorage.removeItem(OLD_PAIRING_CLEARED_KEY);
+      if (revoked && revoked.deviceId) await writeMetaRecord(HUB_REVOKED_IDENTITY_META_KEY, { deviceId: "" }).catch(function () {});
       hubClientCache = undefined;
       // The worker reads these to fetch what a push is about.
       await writeMetaRecord(HUB_PAIRING_META_KEY, { hubUrl: invite.hubUrl, hubId: invite.hubId, deviceId: identity.deviceId });
@@ -4258,6 +2500,9 @@
         // reads nothing more and says so. Any other refusal (a clock that is
         // off) is not a removal.
         hubPairingState = { status: "revoked", message: "This phone was removed from your server. Pair it again from your Mac." };
+        // Paired again after this, the phone gets a new key: the one the
+        // User took off is not trusted again.
+        void hubIdentity().then(function (identity) { return writeMetaRecord(HUB_REVOKED_IDENTITY_META_KEY, { deviceId: identity.deviceId }); }).catch(function () {});
       }
       throw Object.assign(new Error(String(error && error.message || error)), { serverStatus: status, serverBody: error && error.body || "", unavailable: Boolean(error && error.unreachable) });
     }
@@ -4276,9 +2521,9 @@
       ticks += 1;
       if (ticks % 10 === 0 && document.visibilityState !== "hidden") void refreshHubMachines();
       // A send the server never answered (a dropped connection, a server
-      // restarting) is offered again while the app is open, as the relay's
-      // timeline poll does; the server keeps one copy whatever arrives twice.
-      if (!catchingUp) void retryPendingOutbox();
+      // restarting) is offered again while the app is open; the server keeps
+      // one copy whatever arrives twice.
+      void retryPendingOutbox();
       const pairing = loadPairing();
       const conversationId = selectedConversationId();
       if (!isHubPairing(pairing) || !conversationId || document.visibilityState === "hidden" || hubProgressBusy) return;
@@ -4292,84 +2537,16 @@
     }, 1_500);
   }
 
-  const SERVER_READ_RETRY_MS = 5 * 60_000;
   const SERVER_FETCH_TIMEOUT_MS = 20_000;
   const SERVER_CHANGES_WAIT_MS = 25_000;
-  let desktopListAskedAt = 0;
+  // Whether the server's feed of changes may be followed: "yes" once the
+  // chat list has been read from it, "no" after it refused the feed (it is
+  // asked again with the next list).
   let serverReads = "unknown"; // "yes" | "no" | "unknown"
-  let serverReadsCheckedAt = 0;
 
-  function serverReadsAvailable() {
-    // Paired with the server, the server is the only place to read from.
-    if (isHubPairing(loadPairing())) return true;
-    return serverReads !== "no" || Date.now() - serverReadsCheckedAt > SERVER_READ_RETRY_MS;
-  }
-
-  async function serverPhoneGet(path, params, options) {
-    if (isHubPairing(loadPairing())) return hubPhoneGet(path, params, options);
-    const pairing = loadPairing();
-    const endpoint = outboxEndpoint();
-    const access = pairing ? await mailboxAccessForPairing(pairing) : undefined;
-    if (!endpoint || !access) {
-      throw Object.assign(new Error("No server for this pairing"), { serverStatus: 0, unavailable: true });
-    }
-    const url = new URL(path, new URL(endpoint).origin);
-    url.searchParams.set("mailboxId", access.scopeId);
-    for (const [key, value] of Object.entries(params || {})) {
-      if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
-    }
-    const response = await fetch(url.toString(), {
-      headers: { authorization: "Bearer " + access.token },
-      cache: "no-store",
-      signal: AbortSignal.timeout((options && options.timeoutMs) || SERVER_FETCH_TIMEOUT_MS)
-    });
-    if (!response.ok) {
-      const body = await response.text().catch(function () { return ""; });
-      throw Object.assign(new Error("The server answered " + response.status), { serverStatus: response.status, serverBody: body });
-    }
-    return response.json();
-  }
-
-  /** One read from the server, or undefined when the phone should ask the
-   *  desktop instead. A server that says it cannot serve this pairing (or
-   *  has no such path) is not asked again for a while. */
-  async function readFromServer(read) {
-    if (!serverReadsAvailable()) return undefined;
-    try {
-      const value = await read();
-      if (serverReads !== "yes") recordRelayDebug({ event: "server-reads", state: "yes" });
-      serverReads = "yes";
-      serverReadsCheckedAt = Date.now();
-      return { value };
-    } catch (error) {
-      const status = error && typeof error === "object" ? error.serverStatus : undefined;
-      const body = String((error && error.serverBody) || "");
-      // The pairing was revoked (or its link expired before this phone used
-      // it): say so now, as the mailbox would, not after a wait on the desktop.
-      // An expired link is not a revoked one (the desktop may yet say it was
-      // used): reading from the server stops for a while, and the mailbox
-      // says on its own whether the pairing is gone.
-      if (status === 401 && body.indexOf("phone_revoked") >= 0) {
-        mailboxAuthRejected = true;
-        void clearMailboxAccessMeta();
-        void render("revoked");
-      }
-      // One chat the server does not hold (deleted, archived, not copied yet)
-      // is asked of the desktop; the server still answers everything else.
-      if (status === 404 && body.indexOf("chat_not_found") >= 0) {
-        return undefined;
-      }
-      if (isHubPairing(loadPairing())) {
-        if (hubPairingState && hubPairingState.status === "revoked") void render("revoked");
-        throw error;
-      }
-      if (status === 404 || status === 403 || status === 401 || status === 405 || (error && error.unavailable)) {
-        if (serverReads !== "no") recordRelayDebug({ event: "server-reads", state: "no", status: status || 0 });
-        serverReads = "no";
-        serverReadsCheckedAt = Date.now();
-      }
-      return undefined;
-    }
+  /** A signed read from the server. */
+  function serverPhoneGet(path, params, options) {
+    return hubPhoneGet(path, params, options);
   }
 
   async function requestChatListFromServer() {
@@ -4416,7 +2593,6 @@
             const status = error && typeof error === "object" ? error.serverStatus : undefined;
             if (status === 404 || status === 403 || status === 401) {
               serverReads = "no";
-              serverReadsCheckedAt = Date.now();
               return;
             }
             failures += 1;
@@ -4453,199 +2629,18 @@
     serverChangesStopped = true;
   }
 
-  async function requestChatListViaRelay(pairing) {
-    if (isHubPairing(pairing)) {
-      const chats = await requestChatListFromServer();
-      serverReads = "yes";
-      startServerChanges();
-      return chats;
-    }
-    const fromServer = await readFromServer(requestChatListFromServer);
-    if (fromServer) {
-      startServerChanges();
-      // The server cannot see every card (approvals live with whoever raised
-      // them), so the desktop's list is asked for too, in the background and
-      // at most once a minute: when the desktop is there, a card it closed
-      // leaves this phone; when it is not, nothing waits for it.
-      if (Date.now() - desktopListAskedAt > 60_000) {
-        desktopListAskedAt = Date.now();
-        void sendRelayPayload(pairing, "chat-list-" + createEventId(), { type: "mobile.chat-list.request" })
-          .then(handleRelayChatListPayload)
-          .then(function () { return render(); })
-          .catch(function () { return undefined; });
-      }
-      return fromServer.value;
-    }
-    const payload = await sendRelayPayload(pairing, "chat-list-" + createEventId(), {
-      type: "mobile.chat-list.request"
-    });
-    return handleRelayChatListPayload(payload);
+  /** The chat list, from the server; following its feed of changes starts
+   *  (again) with it. */
+  async function requestChatListViaRelay() {
+    const chats = await requestChatListFromServer();
+    serverReads = "yes";
+    startServerChanges();
+    return chats;
   }
 
-  /**
-   * Tells the desktop the key this phone signs machine commands with, and
-   * learns which machines it may command.
-   *
-   * Done while the desktop is reachable, precisely so that the phone can keep
-   * working when it is not: a machine answers the devices its owner named, and
-   * this is how the phone gets named.
-   */
-  async function announceMachineIdentityViaRelay(pairing) {
-    const identity = await machineCommandIdentity();
-    if (!identity) return undefined;
-    const payload = await sendRelayPayload(pairing, "device-identity-" + createEventId(), {
-      type: "mobile.device.identity",
-      deviceId: identity.deviceId,
-      publicKeyDerBase64: identity.publicKeyDerBase64,
-      name: "Phone"
-    });
-    if (payload && payload.type === "mobile.machines" && Array.isArray(payload.machines)) {
-      await storeMachineAccess(payload.machines);
-      return payload.machines;
-    }
-    return undefined;
-  }
-
+  /** A chat's newest page (or the page before a message), from the server. */
   async function requestTimelineViaRelay(pairing, conversationId, options) {
-    if (isHubPairing(pairing)) return requestTimelineFromServer(conversationId, options);
-    const fromServer = await readFromServer(function () {
-      return requestTimelineFromServer(conversationId, options);
-    });
-    if (fromServer) return fromServer.value;
-    const beforeMessageId = options && typeof options.beforeMessageId === "string" && options.beforeMessageId.trim()
-      ? options.beforeMessageId
-      : undefined;
-    const payload = await sendRelayPayload(pairing, "timeline-" + conversationId + "-" + createEventId(), {
-      type: "mobile.timeline.request",
-      conversationId,
-      ...(beforeMessageId ? { beforeMessageId } : {})
-    });
-    return handleRelayTimelinePayload(payload, conversationId, {
-      deferRender: Boolean(options && options.deferRender),
-      historyPage: Boolean(beforeMessageId)
-    });
-  }
-
-  async function pollMailboxTimeline(options) {
-    const endpoint = outboxEndpoint(options && options.endpoint);
-    if (!endpoint) {
-      return 0;
-    }
-    const pairing = loadPairing();
-    const request = await authorizedMailboxRequest(endpoint);
-    // Cursor reads span every conversation in the pairing's box: filtering by
-    // conversation while advancing one shared cursor would silently skip
-    // other conversations' envelopes.
-    const fetchPage = async function (afterArrival) {
-      const url = new URL(request.url);
-      url.searchParams.set("limit", String(MAILBOX_PAGE_SIZE));
-      url.searchParams.set("afterArrival", String(Math.max(0, afterArrival)));
-      // The cursor this page brings is the one it committed after storing the
-      // previous page — its acknowledgement of everything below it, the same
-      // one the worker sends — so the relay does not ring for what is already
-      // on the screen.
-      url.searchParams.set("reader", "phone");
-      const response = await fetch(url.toString(), {
-        method: "GET",
-        headers: Object.assign({ "accept": "application/json" }, request.headers),
-        // A response that never comes must not hold the catch-up open for
-        // ever: while it ran, every poll stood aside and every return to the
-        // foreground waited on it, so one stalled connection was a phone that
-        // never synced again until it was relaunched.
-        signal: AbortSignal.timeout(MAILBOX_FETCH_TIMEOUT_MS)
-      });
-      noteMailboxResponse(response);
-      if (response.status === 401) {
-        const failure = await mailboxAuthFailureState(response);
-        if (failure === "revoked") {
-          // The mailbox lock no longer accepts this pairing: the desktop
-          // revoked it. Surface the re-pair screen instead of retrying forever.
-          await render("revoked");
-          throw new Error("Mailbox timeline poll was refused (HTTP 401).");
-        }
-        throw new Error("Mailbox is not registered yet (HTTP 401).");
-      }
-      if (!response.ok) {
-        throw new Error("Mailbox timeline poll failed with HTTP " + response.status + ".");
-      }
-      return response.json();
-    };
-    // Anything a push-woken service worker stored while the app was closed is
-    // ingested first, so the network poll continues from the shared cursor.
-    let drained = await drainSealedEnvelopes(pairing);
-    // How much of the backlog one call takes. The periodic poll takes a page,
-    // because it is never far behind; the catch-up after the app opens takes
-    // as many as it needs, so a phone that was away for hours shows one wait
-    // and then everything, instead of a lump of old messages every few seconds
-    // (the User, 2026-09-21).
-    const pageBudget = Math.max(1, (options && options.pages) || 1);
-    const deadline = options && options.budgetMs ? Date.now() + options.budgetMs : 0;
-    let pagesRead = 0;
-    let total = 0;
-    let more = true;
-    while (more && pagesRead < pageBudget) {
-      const page = await ingestOnePage(drained);
-      drained = 0;
-      total += page.stored;
-      more = page.more;
-      pagesRead += 1;
-      if (deadline && Date.now() > deadline) break;
-    }
-    return total;
-
-    async function ingestOnePage(alreadyStored) {
-    const cursorState = await loadMailboxCursor();
-    let body = await fetchPage(cursorState.cursor);
-    const epoch = typeof body?.epoch === "string" ? body.epoch : "";
-    if (epoch && epoch !== cursorState.epoch) {
-      // Box recreated: numbering restarted, cursor no longer applies. Re-read
-      // from zero; the IndexedDB dedupe absorbs the replay.
-      await saveMailboxCursor(epoch, 0);
-      body = await fetchPage(0);
-    }
-    if (!Array.isArray(body?.events)) {
-      return { stored: alreadyStored, more: false };
-    }
-    // Stale cursor: events expired beneath us, so there is a real gap the
-    // mailbox can no longer fill. Fire exactly one timeline-request refill
-    // per detection instead of silently continuing.
-    const oldestArrival = Number(body.oldestArrivalSeq);
-    const current = await loadMailboxCursor();
-    if (Number.isFinite(oldestArrival) && current.cursor > 0 && current.cursor + 1 < oldestArrival) {
-      const refillKey = (epoch || current.epoch) + ":" + oldestArrival;
-      if (lastStaleRefillKey !== refillKey) {
-        lastStaleRefillKey = refillKey;
-        const refillConversationId = selectedConversationId();
-        if (pairing && refillConversationId && relayCanSync(pairing)) {
-          requestTimelineViaRelay(pairing, refillConversationId).catch(function () {
-            return undefined;
-          });
-        }
-      }
-    }
-    let stored = alreadyStored;
-    let advanced = current.cursor;
-    for (const envelope of body.events) {
-      if (Number.isFinite(envelope?.arrivalSeq) && envelope.arrivalSeq > advanced) {
-        advanced = envelope.arrivalSeq;
-      }
-      if (envelope?.kind !== "mobile.timeline.events") {
-        continue;
-      }
-      const payload = await openMailboxEnvelopePayload(envelope, pairing);
-      if (payload?.type !== "mobile.timeline.events") {
-        continue;
-      }
-      // Rendering happens once per poll (in the callers), not per envelope, so
-      // catching up on several envelopes cannot flash intermediate states.
-      stored += await handleRelayTimelinePayload(payload, envelope.conversationId, { deferRender: true });
-    }
-    if (advanced !== current.cursor || (epoch && epoch !== current.epoch)) {
-      await saveMailboxCursor(epoch || current.epoch, advanced);
-    }
-    // A full page means the box very likely holds more behind it.
-    return { stored: stored, more: body.events.length >= MAILBOX_PAGE_SIZE && advanced > current.cursor };
-    }
+    return requestTimelineFromServer(conversationId, options);
   }
 
   // A queue entry the desktop did not take at the time is offered again while
@@ -4665,11 +2660,6 @@
       return result && result.sent > 0 ? render(result.status) : undefined;
     }).catch(function () { return undefined; });
   }
-
-  // One wait, then everything: while this runs the timeline says so and is not
-  // redrawn per page, so a backlog arrives as a single change rather than as
-  // old messages crawling in one lump at a time.
-  let catchingUp = false;
 
   // "Nothing new" and "still looking" must not look the same. The banner waits
   // a moment so an ordinary fast poll does not blink it, and stays up long
@@ -4721,65 +2711,6 @@
     }
   }
 
-  async function catchUpFromRelay() {
-    if (catchingUp || !outboxEndpoint()) return 0;
-    catchingUp = true;
-    await render();
-    try {
-      return await whileLookingForMessages(function () {
-        return pollMailboxTimeline({ pages: CATCH_UP_PAGE_BUDGET, budgetMs: CATCH_UP_BUDGET_MS });
-      });
-    } catch {
-      return 0;
-    } finally {
-      catchingUp = false;
-      await render("synced");
-    }
-  }
-
-  function startMailboxTimelinePolling() {
-    clearInterval(activeMailboxTimelinePollTimer);
-    if (!outboxEndpoint()) {
-      return;
-    }
-    // Re-registers silently when permission is already granted (covers
-    // subscription lapse: the relay drops a dead subscription and the phone
-    // replaces it here on next open).
-    void ensurePushSubscription();
-    activeMailboxTimelinePollTimer = setInterval(function () {
-      if (catchingUp) return;
-      void retryPendingOutbox();
-      // Polling only wrote to storage; without this the timeline never
-      // repainted, so arriving messages stayed invisible until the next
-      // send or reload.
-      whileLookingForMessages(function () {
-        return pollMailboxTimeline();
-      }).then(function (stored) {
-        return stored > 0 ? render("synced") : undefined;
-      }).catch(function () {
-        return undefined;
-      });
-    }, MAILBOX_TIMELINE_POLL_MS);
-  }
-
-  function startRelayTimelineKeepAlive() {
-    clearInterval(activeRelayTimelineKeepAliveTimer);
-    activeRelayTimelineKeepAliveTimer = setInterval(function () {
-      const pairing = loadPairing();
-      const relayUrl = relayEndpoint();
-      if (!pairing || !relayCanSync(pairing) || !relayUrl || !selectedConversationId()) {
-        return;
-      }
-      // The collector closes its socket after an idle period, and nothing
-      // reopened it, so the phone quietly stopped receiving pushed messages.
-      Promise.resolve(getRelaySocket(relayUrl, pairing)).then(function (socket) {
-        ensureRelayTimelineCollector(socket, pairing);
-      }).catch(function () {
-        return undefined;
-      });
-    }, RELAY_TIMELINE_KEEPALIVE_MS);
-  }
-
   // How long a pending card must have been on this phone before its absence
   // from the desktop's list means it was answered or withdrawn. A card that
   // reached the phone while the list was being built is not in it yet; both
@@ -4799,8 +2730,7 @@
    * of 2026-09-20 showed cards the desktop had closed days earlier.
    *
    * Answered cards are kept; they are the record under their messages, and
-   * the list says nothing about them. A card learned from a machine directly
-   * is kept too: the desktop cannot vouch for it.
+   * the list says nothing about them.
    */
   function reconcilePendingControlCards(payload) {
     // The stamp says the desktop knows this contract; the judgement below is
@@ -4821,7 +2751,7 @@
       for (const card of controlCardsFor(chat.id)) {
         if (!card || typeof card.id !== "string") continue;
         seen.add(card.id);
-        if (card.status !== "pending" || card.source === "machine") {
+        if (card.status !== "pending") {
           // An answered card is never reopened by a list that was read before
           // the answer: what this phone holds is the later fact.
           next.push(card);
@@ -4883,9 +2813,9 @@
       });
   }
 
-  // Bytes arrive once per image and stay for the session. The timeline re-sends
-  // the last forty rows constantly; refetching a screenshot on every batch would
-  // put the picture through the relay again and again.
+  // Bytes arrive once per image and stay for the session. The timeline is read
+  // again constantly; refetching a screenshot on every read would bring the
+  // picture from the server again and again.
   const attachmentDataUrls = new Map();
   const attachmentFetches = new Map();
   const ATTACHMENT_CACHE_MAX_ENTRIES = 24;
@@ -4902,14 +2832,6 @@
     attachmentDataUrls.set(attachmentId, result);
   }
 
-  async function requestAttachmentViaRelay(pairing, conversationId, attachmentId) {
-    return sendRelayPayload(pairing, "attachment-" + attachmentId + "-" + createEventId(), {
-      type: "mobile.attachment.request",
-      conversationId,
-      attachmentId
-    });
-  }
-
   function loadAttachmentInto(image, conversationId, attachment, messageId) {
     if (attachment.dataBase64) {
       // Already in hand — a picture queued on this phone, not yet echoed back.
@@ -4922,13 +2844,10 @@
       return;
     }
     if (!attachmentFetches.has(attachment.id)) {
-      const pairing = loadPairing();
       attachmentFetches.set(attachment.id, (async function () {
         // From the server the picture is read by its message: the server
         // holds the body the device that posted it put there.
-        const payload = isHubPairing(pairing)
-          ? await hubPhoneGet("/v1/phone/attachment", { conversationId: conversationId, attachmentId: attachment.id, messageId: messageId })
-          : await requestAttachmentViaRelay(pairing, conversationId, attachment.id);
+        const payload = await hubPhoneGet("/v1/phone/attachment", { conversationId: conversationId, attachmentId: attachment.id, messageId: messageId });
         if (payload && payload.type === "mobile.attachment" && typeof payload.dataBase64 === "string") {
           const mimeType = typeof payload.mimeType === "string" ? payload.mimeType : attachment.mimeType;
           return "data:" + mimeType + ";base64," + payload.dataBase64;
@@ -5136,16 +3055,12 @@
       const held = previousById.get(card.id);
       return { ...card, receivedAt: (held && held.receivedAt) || card.receivedAt || arrived };
     });
-    // What the desktop sends is the whole of what still waits, so a pending
+    // What the server sends is the whole of what still waits, so a pending
     // card it leaves out is closed. An answered card it leaves out was only
     // outside the page it read: it stays, as the record under its message.
-    // A card learned from a member's machine directly is kept as well: the
-    // desktop cannot vouch for it, and a batch that does not name it says
-    // only that the desktop has not seen it yet — the same rule the chat
-    // list's reconciliation follows.
     const incoming = new Set(stamped.map(function (card) { return card && card.id; }));
     const kept = previous.filter(function (card) {
-      return card && card.id && !incoming.has(card.id) && (card.status !== "pending" || card.source === "machine");
+      return card && card.id && !incoming.has(card.id) && card.status !== "pending";
     }).sort(function (left, right) {
       return String(right.createdAt || "").localeCompare(String(left.createdAt || ""));
     }).slice(0, CONTROL_CARDS_KEPT_ANSWERED_LIMIT);
@@ -5192,14 +3107,13 @@
     // conversation it belongs to used to be filed under whatever the user was
     // looking at, which is how another chat's messages appeared in this one.
     const conversationId = payload.conversationId || fallbackConversationId;
-    if (!conversationId || await isMachineConversationDeleted(conversationId)) {
+    if (!conversationId) {
       return 0;
     }
     // Only the answer to a direct request says where this chat's history
-    // stops; batches that arrive on their own carry no page and leave the
-    // stored cursor alone. Handled here rather than by the requester because
-    // a slow answer can outlive the request's own wait and still land through
-    // the socket collector — the rows must not arrive without their cursor.
+    // stops; batches that arrive on their own (live progress) carry no page
+    // and leave the stored cursor alone. Handled here rather than by the
+    // requester, so the rows never arrive without their cursor.
     if (payload.page && typeof payload.page === "object") {
       await adoptTimelinePage(conversationId, payload);
     }
@@ -5239,7 +3153,7 @@
       // clear anything pending now, nor crowd the recent runs out of the
       // terminal bookkeeping, which is bounded.
       const historyPage = Boolean(options && options.historyPage) || Boolean(payload.page && payload.page.earlier === true);
-      // When this phone watched the run end on the live socket, it notes when:
+      // When this phone watched the run end live (from the open chat), it notes when:
       // the message keeps the time the run started, and Activity lists an
       // update by when it finished. A backlog drained later carries no such
       // moment, so it keeps the desktop's stamp.
@@ -5308,90 +3222,26 @@
     return stored;
   }
 
-  function collectRelayTimeline(socket, pairing) {
-    const buffer = new Map();
-    return new Promise(function (resolve, reject) {
-      let idleTimer;
-      function resetIdleTimer() {
-        clearTimeout(idleTimer);
-        idleTimer = setTimeout(function () {
-          cleanup();
-          socket.close(1000, "mobile timeline idle");
-          resolve();
-        }, RELAY_TIMELINE_IDLE_MS);
-      }
-      function cleanup() {
-        clearTimeout(idleTimer);
-        socket.removeEventListener("message", onMessage);
-        socket.removeEventListener("close", onClose);
-        socket.removeEventListener("error", onError);
-      }
-      async function onMessage(event) {
-        let parsed;
-        try {
-          parsed = JSON.parse(relayFrameText(event.data));
-        } catch {
-          return;
-        }
-        if (parsed?.protocol !== RELAY_PROTOCOL) {
-          return;
-        }
-        const key = parsed.streamId + "\0" + parsed.logicalMessageId;
-        const collected = [...(buffer.get(key) || []), parsed];
-        buffer.set(key, collected);
-        const result = reassembleRelayCiphertext(collected);
-        if (result.status === "complete") {
-          buffer.delete(key);
-          const payload = await openRelayPayload(result.ciphertext, pairing.relaySealKeyBase64);
-          const stored = await handleRelayTimelinePayload(payload, undefined, { deferRender: true, live: true });
-          // Storing alone left the timeline stale: pushed messages did not
-          // appear until the next send or reload.
-          if (stored > 0) {
-            await render("synced");
-          }
-          resetIdleTimer();
-        } else if (result.status === "conflict") {
-          cleanup();
-          reject(new Error("Relay frame conflict: " + result.reason));
-        }
-      }
-      function onClose() {
-        cleanup();
-        resolve();
-      }
-      function onError() {
-        cleanup();
-        reject(new Error("Relay tunnel unavailable."));
-      }
-      socket.addEventListener("message", onMessage);
-      socket.addEventListener("close", onClose);
-      socket.addEventListener("error", onError);
-      resetIdleTimer();
-    });
-  }
-
   // One more pass, queued behind a flush in flight: that flush read the queue
   // before the entry this call is about was written, so answering with it
   // alone left a message sent during a slow flush waiting for the retry tick
   // half a minute later. However many ask meanwhile, one pass follows.
   let queuedFlushOutboxPromise;
 
-  function flushOutbox(options) {
+  function flushOutbox() {
     if (activeFlushOutboxPromise) {
       if (!queuedFlushOutboxPromise) {
         const again = function () {
           queuedFlushOutboxPromise = undefined;
-          return flushOutbox(options);
+          return flushOutbox();
         };
         queuedFlushOutboxPromise = activeFlushOutboxPromise.then(again, again);
       }
       return queuedFlushOutboxPromise;
     }
-    activeFlushOutboxPromise = flushOutboxInternal(options).then(function (result) {
-      // A tunnel coming back proves nothing either way; anything else that
-      // came back reached something.
-      if (result && result.status === "unreachable") outboxUnreachable = true;
-      else if (result && result.status !== "tunnel-reconnecting") outboxUnreachable = false;
+    activeFlushOutboxPromise = flushOutboxInternal().then(function (result) {
+      // Anything that came back reached the server, or said it could not.
+      if (result) outboxUnreachable = result.status === "unreachable";
       return result;
     }).finally(function () {
       activeFlushOutboxPromise = undefined;
@@ -5403,106 +3253,18 @@
   // keeps saying so until one does, not only on the render right after it.
   let outboxUnreachable = false;
 
-  async function flushOutboxInternal(options) {
-    const pairing = loadPairing();
-    const endpoint = outboxEndpoint(options && options.endpoint);
+  async function flushOutboxInternal() {
     // Every chat's queue, not only the open chat's: an answer given from
     // Activity for a chat that was then never opened again sat here for days.
-    // What was handed to a member's machine directly is that machine's to
-    // acknowledge and must not go to the desktop as well — the same message
-    // down both paths is two runs of the member.
     const entries = (await listOutboxEntries()).filter(desktopOwesEntry);
-    if (isHubPairing(pairing)) {
-      try {
-        return await flushOutboxViaHub(entries);
-      } catch (error) {
-        return { status: "unreachable", sent: 0, pending: entries.filter((entry) => entry.hub).length, error: error instanceof Error ? error.message : String(error) };
-      }
+    if (!isHubPairing(loadPairing())) {
+      return { status: "unreachable", sent: 0, pending: entries.length };
     }
-    if (relayCanSync(pairing)) {
-      try {
-        return await flushOutboxViaRelay(entries, pairing);
-      } catch (error) {
-        if (!endpoint) {
-          return { status: "tunnel-reconnecting", sent: 0, pending: entries.filter((entry) => entry.status !== "acked").length, error: error instanceof Error ? error.message : String(error) };
-        }
-      }
+    try {
+      return await flushOutboxViaHub(entries);
+    } catch (error) {
+      return { status: "unreachable", sent: 0, pending: entries.filter((entry) => entry.hub).length, error: error instanceof Error ? error.message : String(error) };
     }
-    if (endpoint) {
-      try {
-        return await flushOutboxViaMailbox(entries, endpoint);
-      } catch (error) {
-        return { status: "unreachable", sent: 0, pending: entries.filter((entry) => entry.status !== "acked").length, error: error instanceof Error ? error.message : String(error) };
-      }
-    }
-    return { status: "unreachable", sent: 0, pending: entries.filter((entry) => entry.status !== "acked").length };
-  }
-
-  async function flushOutboxViaMailbox(entries, endpoint) {
-    const pendingEntries = entries.filter(desktopOwesEntry);
-    let sent = 0;
-    const pairing = loadPairing();
-    const request = await authorizedMailboxRequest(endpoint);
-    for (const entry of pendingEntries) {
-      const syncing = {
-        ...entry,
-        status: "syncing",
-        attempts: entry.attempts + 1,
-        updatedAt: nowIso()
-      };
-      await putOutboxEntry(syncing);
-      // The mailbox answered and would not take it: reachable, so not "Not
-      // connected". The entry stays on its way and is offered again.
-      let answered = false;
-      try {
-        const event = mailboxEventForAppend(syncing);
-        // Hashes stay computed over the plaintext payload; sealing wraps only
-        // what travels, and the desktop unseals before verifying.
-        if (pairing?.relaySealKeyBase64) {
-          event.payload = JSON.parse(await sealRelayPayload(event.payload, pairing.relaySealKeyBase64));
-        }
-        const response = await fetch(request.url, {
-          method: "POST",
-          headers: Object.assign({ "content-type": "application/json" }, request.headers),
-          body: JSON.stringify({ events: [event] }),
-          signal: AbortSignal.timeout(MAILBOX_FETCH_TIMEOUT_MS)
-        });
-        answered = true;
-        noteMailboxResponse(response);
-        if (response.status === 401) {
-          const failure = await mailboxAuthFailureState(response);
-          if (failure === "revoked") {
-            await render("revoked");
-          }
-          throw new Error("HTTP 401 (" + failure + ")");
-        }
-        if (!response.ok) {
-          throw new Error("HTTP " + response.status);
-        }
-        const ack = await response.json();
-        const ackedEventIds = Array.isArray(ack?.eventIds) ? ack.eventIds : [ack?.eventId];
-        if (!ackedEventIds.includes(entry.eventId)) {
-          throw new Error("Ack eventId mismatch.");
-        }
-        await putOutboxEntry({
-          ...syncing,
-          status: "acked",
-          ack,
-          updatedAt: nowIso(),
-          lastError: undefined
-        });
-        sent += 1;
-      } catch (error) {
-        await putOutboxEntry({
-          ...syncing,
-          status: "waiting-to-sync",
-          updatedAt: nowIso(),
-          lastError: error instanceof Error ? error.message : String(error)
-        });
-        return { status: answered ? "waiting-to-sync" : "unreachable", sent, pending: pendingEntries.length - sent };
-      }
-    }
-    return { status: "synced", sent, pending: Math.max(0, pendingEntries.length - sent) };
   }
 
   function statusText(status) {
@@ -5513,7 +3275,7 @@
       return "Syncing";
     }
     if (status === "refused") {
-      return isHubPairing(loadPairing()) ? "Not taken by your server" : "Not taken by the desktop";
+      return "Not taken by your server";
     }
     if (status === "superseded") {
       return "Replaced";
@@ -5522,7 +3284,7 @@
   }
 
   // Waiting with no feedback reads as "nothing is happening", so the wait is
-  // timed and named, and a long silence says the desktop is not answering.
+  // timed and named, and a long silence says the chats have not come.
   function syncWaitStartedAt() {
     const existing = sessionStorage.getItem(SYNC_WAIT_KEY);
     if (existing) {
@@ -5536,19 +3298,9 @@
   function syncProgressText(startedAt) {
     const started = Date.parse(startedAt || "");
     const seconds = Number.isFinite(started) ? Math.max(0, Math.floor((Date.now() - started) / 1000)) : 0;
-    if (serverReads !== "no") {
-      return seconds < 60
-        ? "Loading your chats… " + seconds + "s"
-        : "Your chats have not loaded in " + Math.floor(seconds / 60) + "m. Check your connection, then pull to refresh.";
-    }
-    if (seconds < 20) {
-      return "Asking the desktop for your chats… " + seconds + "s";
-    }
-    if (seconds < 60) {
-      return "Still waiting on the desktop… " + seconds + "s";
-    }
-    return "The desktop has not answered in " + Math.floor(seconds / 60) + "m. " +
-      "Check that AccordAgents is open on your computer, then pair again.";
+    return seconds < 60
+      ? "Loading your chats… " + seconds + "s"
+      : "Your chats have not loaded in " + Math.floor(seconds / 60) + "m. Check your connection, then pull to refresh.";
   }
 
   function startSyncProgressClock() {
@@ -5564,17 +3316,8 @@
   }
 
   function connectionStatusText(status) {
-    // What this phone cannot do at all outranks what it is waiting for: a
-    // browser without Ed25519 will never reach a machine, and saying "waiting
-    // to sync" forever would be a lie the User cannot act on.
-    if (machineUnavailableReason && (status === "waiting-to-sync" || status === "unreachable" || status === "waiting-for-desktop" || status === "tunnel-reconnecting")) {
-      return machineUnavailableReason;
-    }
     if (status === "tunnel-reconnecting") {
       return "Tunnel reconnecting";
-    }
-    if (status === "waiting-for-desktop") {
-      return "Waiting for desktop";
     }
     // Nothing the phone sends could get through: said, because nothing else
     // would say it, and kept until something is reached. The last outcome
@@ -5765,8 +3508,9 @@
   const customAvatarFetches = new Map();
   const customAvatarRetryAfter = new Map();
   const CUSTOM_AVATAR_CACHE_MAX_ENTRIES = 24;
-  // A desktop that is off answers nothing for the relay's whole wait; asking
-  // again on every repaint would keep a request in flight for the session.
+  // A server that cannot be reached answers nothing for the request's whole
+  // wait; asking again on every repaint would keep a request in flight for
+  // the session.
   const CUSTOM_AVATAR_RETRY_PAUSE_MS = 60 * 1000;
 
   function rememberCustomAvatar(avatarId, result) {
@@ -5796,13 +3540,7 @@
         if (!pairing || !canSync(pairing) || !conversationId) {
           return "retry";
         }
-        const payload = isHubPairing(pairing)
-          ? await hubPhoneGet("/v1/phone/avatar", { conversationId: conversationId, avatarId: avatarId })
-          : await sendRelayPayload(pairing, "avatar-" + customId + "-" + createEventId(), {
-          type: "mobile.avatar.request",
-          conversationId: conversationId,
-          avatarId: avatarId
-        });
+        const payload = await hubPhoneGet("/v1/phone/avatar", { conversationId: conversationId, avatarId: avatarId });
         if (payload && payload.type === "mobile.avatar" && typeof payload.dataBase64 === "string") {
           return "data:" + (typeof payload.mimeType === "string" ? payload.mimeType : "image/png") + ";base64," + payload.dataBase64;
         }
@@ -5823,7 +3561,7 @@
         }
         customAvatarFetches.delete(avatarId);
         // Every disc on screen that shows this member gets the picture: a row
-        // painted while the desktop was unreachable is patched in place and
+        // painted while the server was unreachable is patched in place and
         // would otherwise keep its initials for the session.
         for (const node of document.querySelectorAll('[data-avatar-custom-id="' + CSS.escape(customId) + '"]')) {
           applyCustomAvatar(node, result, node.dataset.avatarSignature);
@@ -6095,20 +3833,12 @@
     dropCachedChatRows();
     return render("synced").then(function () {
       const pairing = loadPairing();
-      if (pairing && canSync(pairing)) {
-        return requestTimelineViaRelay(pairing, conversationId).then(function () {
-          return render("synced");
-        }).catch(function () {
-          return render("tunnel-reconnecting");
-        }).then(function () {
-          return pollMailboxTimeline().catch(function () {
-            return 0;
-          });
-        }).then(function () {
-          return render("synced");
-        });
+      if (!pairing || !canSync(pairing)) {
+        return undefined;
       }
-      return pollMailboxTimeline().catch(function () {
+      // A page that could not be read leaves what this phone holds on
+      // screen; the next change, pull or return to the app reads it again.
+      return requestTimelineViaRelay(pairing, conversationId).catch(function () {
         return 0;
       }).then(function () {
         return render("synced");
@@ -6533,7 +4263,7 @@
     const input = document.createElement("input");
     input.type = "url";
     input.className = "pairing-input";
-    input.placeholder = "https://mobile.accordagents.com/?v=1&rid=…";
+    input.placeholder = "https://mobile.accordagents.com/?pair=server#hub=…";
     input.autocomplete = "off";
     input.autocapitalize = "off";
     input.spellcheck = false;
@@ -6553,11 +4283,10 @@
       try {
         // Same parser the app uses when opened via the link, so a pasted link
         // and a tapped link produce exactly the same pairing.
-        const paired = readBootstrapFromLocation({ href: value });
-        if (!paired) {
+        const pairing = readBootstrapFromLocation({ href: value });
+        if (!pairing) {
           throw new Error("That link does not contain pairing details.");
         }
-        mailboxAuthRejected = false;
         delete container.dataset.state;
         void render();
       } catch (parseError) {
@@ -6736,7 +4465,6 @@
     markCardSent(card.id, queued && queued.eventId, answerOutcomeText(card, answer), decision.payload.operationId);
     await render("waiting-to-sync");
     const flushResult = await flushOutbox();
-    await pollMailboxTimeline().catch(function () { return 0; });
     await render(flushResult.status);
   }
 
@@ -6847,7 +4575,7 @@
     if (held && held.status === "refused") return { locked: false, text: CONTROL_CARD_REFUSED_TEXT };
     const at = Date.parse(mark.at || "");
     // An answer nobody has taken yet may be lost, and ten minutes of that
-    // unlocks the card. One the desktop or the mailbox has taken is not lost:
+    // unlocks the card. One the server has taken is not lost:
     // it is applied when the desktop is next up, and a second answer given
     // meanwhile only raced it — the older one won on the desktop and the
     // User's later one was quietly discarded. That answer waits an hour
@@ -6898,7 +4626,7 @@
   const CONTROL_CARD_REFUSED_TEXT = "The desktop did not take this answer. You can answer again.";
   // How long an answer may stay on its way before the card is offered again.
   const CONTROL_CARD_SENT_UNLOCK_MS = 10 * 60_000;
-  // For an answer the desktop or the mailbox has taken: see cardSentState.
+  // For an answer the server has taken: see cardSentState.
   // An hour, not a day: the desktop can take an answer and then give it up
   // (five failed applies) without the phone hearing, and the card must not
   // show dead buttons for a day over that.
@@ -7493,7 +5221,7 @@
    *  composer's focus and blur, which is when the keyboard comes and goes. */
   function applyDock() {
     const name = screenOnShow();
-    const paired = Boolean(loadPairing()) && !mailboxAuthRejected;
+    const paired = Boolean(loadPairing());
     const home = name !== "timeline" && paired;
     const inChat = name === "timeline" && paired;
     // Anything that takes the screen for itself takes the bar with it: the
@@ -7662,11 +5390,6 @@
     return recentTimelineRead;
   }
 
-  function machineRunKnownLive(runId) {
-    const held = runId ? machineRunState.get(runId) : undefined;
-    return Boolean(held && (held.status === "running" || held.status === "requested"));
-  }
-
   /** `cached` asks for the lists to be built from rows already read, never
    *  from a fresh pass over the store. Inside a chat that is the only
    *  acceptable cost: reading a week of rows takes hundreds of milliseconds on
@@ -7715,9 +5438,7 @@
       localStorage.getItem(VIEWED_AT_KEY),
       localStorage.getItem(ACTIVITY_CLEARED_KEY),
       localStorage.getItem(CHAT_LIST_AT_KEY),
-      JSON.stringify(Array.from(deletedMachineConversations)),
       JSON.stringify(Array.from(stops)),
-      JSON.stringify(Array.from(machineRunState, function (pair) { return [pair[0], pair[1] && pair[1].status]; })),
       String(Math.floor(now / 60_000))
     ];
     if (activityMemo && activityMemo.source === source && activityMemo.inputs.length === inputs.length &&
@@ -7730,15 +5451,12 @@
       chats: loadChats(),
       unreadConversationIds: loadUnreadConversationIds(),
       viewedAt: loadViewedAt(),
-      isRunSettled: machineRunSettled,
-      isRunKnownLive: machineRunKnownLive,
       isStopRequested: function (runId) { return stops.has(runId); },
       isPlaceholder: isPlaceholderTimelineContent,
       // Activity previews are member messages too: the block that becomes a
       // card is not what the row should read.
       displayText: function (content) { return displayedMessageText(content, "agent"); },
       clearedEntryIds: loadClearedActivity(),
-      hiddenConversationIds: Array.from(deletedMachineConversations),
       chatListAt: localStorage.getItem(CHAT_LIST_AT_KEY) || undefined,
       now: now
     });
@@ -8392,9 +6110,8 @@
     if (!list) return;
     const permission = "Notification" in globalThis ? Notification.permission : "unsupported";
     const hubPaired = isHubPairing(loadPairing());
-    const pushable = (Boolean(outboxEndpoint()) || hubPaired) && "Notification" in globalThis && "PushManager" in globalThis;
-    const power = hubPaired ? undefined : machinePowerHandoff();
-    const signature = JSON.stringify([permission, pushable, pushEndpointRejected, Boolean(power), machineWakeState, alertsReconnect, hubPaired, hubMachines]);
+    const pushable = hubPaired && "Notification" in globalThis && "PushManager" in globalThis;
+    const signature = JSON.stringify([permission, pushable, pushEndpointRejected, alertsReconnect, hubPaired, hubMachines]);
     if (signature === lastSettingsRenderSignature) return;
     lastSettingsRenderSignature = signature;
     list.replaceChildren();
@@ -8402,7 +6119,7 @@
     list.append(settingsGroup("This phone", [
       hubPaired
         ? settingsRow("Paired with your server", "Chats, replies and alerts come from your own server, with or without your Mac.")
-        : settingsRow("Paired with your desktop", "Chats and replies come through the AccordAgents relay.")
+        : settingsRow("Not paired", "Scan the code from your Mac (Settings → Device Pairing) to connect this phone.")
     ]));
 
     let alertsSub;
@@ -8459,18 +6176,6 @@
         }, Boolean(waking)) : undefined);
       })));
     }
-    if (power) {
-      const waking = machineWakeState.status === "waking";
-      list.append(settingsGroup("Machines", [
-        settingsRow(
-          "Cloud machine",
-          machineWakeState.detail || "Asleep? Wake it to keep working.",
-          settingsButton(waking ? "Waking…" : "Wake", function () {
-            void wakeMachineFromPhone();
-          }, waking)
-        )
-      ]));
-    }
   }
 
   /** Leaves the opened choice at once, so its old content is not what shows
@@ -8514,67 +6219,9 @@
     });
   }
 
-  // --- waking the machine ----------------------------------------------------
-
-  let machineWakeState = { status: "idle", detail: "" };
-
-  /** The scoped key this device was handed at pairing, or undefined when the
-   *  desktop manages no AWS machine. It never leaves this device. */
-  function machinePowerHandoff() {
-    const pairing = loadPairing();
-    const power = pairing && pairing.power;
-    return power && power.instanceId && power.credentials ? power : undefined;
-  }
-
-  async function callMachinePower(action) {
-    const power = machinePowerHandoff();
-    const wake = self.AccordMobileMachineWake;
-    if (!power || !wake || !globalThis.crypto || !globalThis.crypto.subtle) {
-      throw new Error("This phone has no key for that machine.");
-    }
-    const request = await wake.machineWakeRequest({
-      action: action,
-      instanceId: power.instanceId,
-      credentials: power.credentials,
-      crypto: wake.webCrypto(globalThis.crypto.subtle)
-    });
-    const response = await fetch(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body
-    });
-    const text = await response.text();
-    if (!response.ok) {
-      throw new Error(machineWakeFailure(response.status, text));
-    }
-    return text;
-  }
-
-  /** AWS's own error code, in words the User can act on. */
-  function machineWakeFailure(status, text) {
-    const code = (/<Code>([^<]+)<\/Code>/.exec(String(text || "")) || [])[1] || "";
-    if (code === "IncorrectInstanceState") return "The machine is still stopping. Try again in a minute.";
-    if (code.indexOf("InvalidInstanceID") === 0) return "This machine no longer exists. Pair this phone again.";
-    if (code === "AuthFailure" || code === "UnauthorizedOperation" || code === "InvalidClientTokenId" || status === 401 || status === 403) {
-      return "AWS no longer accepts this phone's start key. Pair this phone again.";
-    }
-    return "AWS refused the request (" + (code || status) + ").";
-  }
-
-  async function wakeMachineFromPhone() {
-    machineWakeState = { status: "waking", detail: "Asking AWS to start the machine…" };
-    await render();
-    try {
-      await callMachinePower("start");
-      // Started is not ready: the runtime still has to boot and connect, and
-      // saying otherwise would be the same lie as calling a tap an answer.
-      machineWakeState = { status: "started", detail: "Start requested. The machine appears once its runtime connects." };
-    } catch (error) {
-      machineWakeState = { status: "error", detail: String(error && error.message ? error.message : error) };
-    }
-    await render();
-    await pollMailboxTimeline().catch(function () { return 0; });
-  }
+  // --- waking a machine ------------------------------------------------------
+  // The phone holds no key for any machine: it asks the User's server, which
+  // starts one itself when work waits for it, and now when asked.
 
   // The machines the server knows, and what it says about waking each.
   let hubMachines = [];
@@ -8613,8 +6260,6 @@
 
   async function render(connectionStatus) {
     const revision = ++renderRevision;
-    await loadDeletedMachineConversations();
-    if (revision !== renderRevision) return;
     const state = document.getElementById("connection-state");
     const list = document.getElementById("message-list");
     const chatsScreen = document.getElementById("chats-screen");
@@ -8652,22 +6297,14 @@
       return;
     }
     if (!loadPairing()) {
-      renderUnpairedNotice("Scan the code from your Mac (Settings → Device Pairing) to connect this phone. " +
-        "An installed app has its own storage, so it pairs separately from the browser.");
-      showScreen("chats");
-      return;
-    }
-    if (legacyPairingReplaced && !isHubPairing(loadPairing())) {
-      renderUnpairedNotice("This phone was paired the old way. On your Mac open Settings → Device Pairing and scan the new code: the phone now connects to your server.", "repair");
-      showScreen("chats");
-      return;
-    }
-    if (mailboxAuthRejected) {
-      renderUnpairedNotice(
-        "This device's access was revoked from the desktop. " +
-        "Scan the QR code or paste a fresh pairing link to reconnect.",
-        "revoked"
-      );
+      // A phone that held a pairing made the old way is told why it has to
+      // pair again, once and plainly; the old pairing itself is gone.
+      if (oldPairingCleared()) {
+        renderUnpairedNotice("This phone was paired the old way. Pair it again from Settings on your Mac.", "old-pairing");
+      } else {
+        renderUnpairedNotice("Scan the code from your Mac (Settings → Device Pairing) to connect this phone. " +
+          "An installed app has its own storage, so it pairs separately from the browser.");
+      }
       showScreen("chats");
       return;
     }
@@ -8676,7 +6313,7 @@
     // while permission is still undecided.
     const alertsButton = document.getElementById("enable-alerts");
     if (alertsButton) {
-      const canOffer = (Boolean(outboxEndpoint()) || isHubPairing(loadPairing())) &&
+      const canOffer = isHubPairing(loadPairing()) &&
         "Notification" in globalThis &&
         "PushManager" in globalThis &&
         Notification.permission === "default";
@@ -8738,7 +6375,7 @@
     renderMembersSheetIfOpen(activeChat);
     const entries = await listOutboxEntries(activeId);
     const timelineEntries = await listTimelineEntries(activeId);
-    // A mailbox update, navigation or another tab may have superseded this
+    // A server update, navigation or another tab may have superseded this
     // read. Committing it would replace the current chat with the old snapshot.
     if (revision !== renderRevision || activeId !== selectedConversationId()) return;
     if (!document.hidden) {
@@ -8765,9 +6402,7 @@
     const visibleTimelineEntries = dedupeTimelineEntries(timelineEntries.filter(function (entry) {
       return !(entry.role === "you" && outboxContent.has(entry.content.trim()));
     }));
-    state.textContent = catchingUp
-      ? "Catching up\u2026"
-      : connectionStatusText(connectionStatus);
+    state.textContent = connectionStatusText(connectionStatus);
     let rows = messageEntries.map(function (entry) {
       return {
         rowKey: "outbox\0" + entry.eventId,
@@ -8822,9 +6457,8 @@
         // empty — it says who is working, which is exactly what the desktop
         // shows — so it keeps the member row, the clock and the shimmer.
         scaffolding: isScaffoldingEntry(entry) && !entry.participantLabel,
-        // A run this phone has already seen end is not offered for stopping,
-        // even if a row for it is still on screen after a reload.
-        cancellable: !isScaffoldingEntry(entry) && !machineRunSettled(entry.runId),
+        // Scaffolding stands for a message, not a run that can be stopped.
+        cancellable: !isScaffoldingEntry(entry),
         content: entry.content,
         status: entry.status === "error" ? "Error" : entry.status === "done" ? "Done" : "Running",
         createdAt: entry.createdAt,
@@ -9074,13 +6708,9 @@
   // W-M(a): only a live agent row with a run to follow can be opened. Applied
   // on create AND on update, because a row that ends while on screen is updated
   // in place and would otherwise keep advertising a run that is over.
-  // W-M(f): a row can be followed live only while a relay socket is up, or
-  // when it already carries real text the view can honestly show. Partial
-  // text is live-only, so without either the view would sit empty forever.
-  function relaySocketLive() {
-    return Boolean(activeRelaySocket && activeRelaySocket.readyState === 1);
-  }
-
+  // W-M(f): a row can be followed live only when it already carries real text
+  // the view can honestly show; otherwise the view would sit empty until the
+  // server's progress brings some.
   function applyStreamableState(item, entry) {
     if (entry.scaffolding) {
       delete item.dataset.streamable;
@@ -9090,8 +6720,7 @@
       return;
     }
     if (entry.author === "agent" && entry.status === "Running" && entry.runId) {
-      const followable = relaySocketLive() ||
-        Boolean((entry.content || "").trim() && !isPlaceholderTimelineContent(entry.content));
+      const followable = Boolean((entry.content || "").trim() && !isPlaceholderTimelineContent(entry.content));
       if (followable) {
         item.dataset.streamable = "1";
         item.dataset.streamRunId = entry.runId;
@@ -9945,41 +7574,26 @@
     const pairing = loadPairing();
     const conversationId = selectedConversationId();
     if (!pairing || !canSync(pairing) || !conversationId) {
-      await pollMailboxTimeline().catch(function () { return 0; });
       await render();
       return;
     }
     try {
       await whileLookingForMessages(async function () {
         await requestTimelineViaRelay(pairing, conversationId);
-        await pollMailboxTimeline().catch(function () { return 0; });
       });
       await render("synced");
     } catch {
       await render("tunnel-reconnecting");
     }
-    ensureLiveRelayForOpenConversation();
   }
 
   // --- coming back to the app -----------------------------------------------
-  // iOS freezes the page in the background. The socket that looks open when
-  // the app returns is usually dead, and nothing would notice until the next
-  // request timed out or the keep-alive ticked — up to a minute of a reply
-  // that had stopped moving. Coming back asks the desktop straight away.
+  // iOS freezes the page in the background, and a request that was waiting
+  // for news when it froze is usually dead. Coming back asks the server
+  // straight away.
 
-  const FOREGROUND_RECONNECT_AFTER_MS = 5_000;
   let hiddenSince;
   let foregroundResyncPromise;
-
-  function dropRelaySocket(reason) {
-    const socket = activeRelaySocket;
-    activeRelaySocket = undefined;
-    activeRelaySocketPromise = undefined;
-    activeRelayTimelineCollectorSocket = undefined;
-    if (socket && socket.readyState < 2) {
-      socket.close(1000, reason);
-    }
-  }
 
   function resyncAfterForeground() {
     if (foregroundResyncPromise) {
@@ -9995,49 +7609,15 @@
         await render();
         return;
       }
-      if (isHubPairing(pairing)) {
-        // Back in front: what was missed is read from the server, and what
-        // this phone still owes it goes.
-        await flushOutbox().catch(function () { return undefined; });
-        await requestChatListViaRelay(pairing).catch(function () { return []; });
-        const openId = selectedConversationId();
-        if (openId) await requestTimelineViaRelay(pairing, openId).catch(function () { return 0; });
-        startServerChanges();
-        void markHubNoticesSeen();
-        await render("synced");
-        return;
-      }
-      if (awayMs > FOREGROUND_RECONNECT_AFTER_MS) {
-        dropRelaySocket("mobile foreground resync");
-      }
-      // The box first, the socket after. Coming back from the background is
-      // exactly when the live channel is half-open: each request on it waits
-      // out a twenty-second ack timeout, and behind those the messages already
-      // sitting in the mailbox waited too -- the User came back to a chat that
-      // showed nothing until she left it and opened it again (2026-09-22).
-      // The mailbox is plain HTTPS and owes nothing to the socket.
-      await catchUpFromRelay();
+      // Back in front: what was missed is read from the server, and what
+      // this phone still owes it goes.
+      await flushOutbox().catch(function () { return undefined; });
+      await requestChatListViaRelay(pairing).catch(function () { return []; });
+      const openId = selectedConversationId();
+      if (openId) await requestTimelineViaRelay(pairing, openId).catch(function () { return 0; });
+      startServerChanges();
+      void markHubNoticesSeen();
       await render("synced");
-      try {
-        await requestChatListViaRelay(pairing);
-        const conversationId = selectedConversationId();
-        if (conversationId) {
-          await requestTimelineViaRelay(pairing, conversationId);
-        }
-        await render("synced");
-      } catch {
-        await render("tunnel-reconnecting");
-      }
-      lastOutboxRetryAt = 0;
-      await retryPendingOutbox();
-      await pollMailboxTimeline().catch(function () { return 0; });
-      await render();
-      ensureLiveRelayForOpenConversation();
-      // A launch that could not register for rings tries again here, on the
-      // connection the User has now, rather than on the next launch.
-      if (!pushSubscriptionEnsured) {
-        void ensurePushSubscription();
-      }
     })().finally(function () {
       foregroundResyncPromise = undefined;
     });
@@ -10134,14 +7714,7 @@
 
   async function requestComposerOptionsViaRelay(pairing, conversationId, query, content) {
     // The catalog the desktop published on the server, answered there.
-    const payload = isHubPairing(pairing)
-      ? await hubPhoneGet("/v1/phone/composer", { conversationId: conversationId, query: query, content: String(content || "").slice(0, 2_000) })
-      : await sendRelayPayload(pairing, "composer-" + createEventId(), {
-        type: "mobile.composer.request",
-        conversationId,
-        query,
-        content
-      });
+    const payload = await hubPhoneGet("/v1/phone/composer", { conversationId: conversationId, query: query, content: String(content || "").slice(0, 2_000) });
     if (!payload || payload.type !== "mobile.composer") {
       return { commands: [], prompts: [], skills: [] };
     }
@@ -10225,6 +7798,9 @@
   }
 
   async function init() {
+    // Before anything is drawn: a pairing made the old way is cleared, so the
+    // first screen already says why this phone has to pair again.
+    await clearOldPairing().catch(function () { return false; });
     readBootstrapFromLocation(globalThis.location);
     adoptOpenConversationFromLocation();
     if ("serviceWorker" in navigator) {
@@ -10749,9 +8325,6 @@
         // Sending is a deliberate action, so following it is expected.
         scrollToLatestWhenSettled("auto");
         const flushResult = await flushOutbox();
-        await pollMailboxTimeline().catch(function () {
-          return 0;
-        });
         await render(flushResult.status);
       }
     }
@@ -10771,52 +8344,12 @@
     // What a push-woken worker counted while the app was closed, folded in
     // before the lists paint again; the icon number follows.
     await adoptWorkerUnread().catch(function () { return undefined; });
-    // The connections to this phone's machines come up first and independently
-    // of the desktop. Waiting for the desktop here is what made a closed
-    // desktop a phone that could do nothing: everything the machine owes this
-    // phone, and everything this phone still owes the machine, is settled on
-    // this connection whether or not the desktop is anywhere.
+    // The phone talks to the User's server and to nothing else: no desktop
+    // and no machine is addressed from here.
     const pairing = loadPairing();
-    // Paired with the server, the phone talks to the server and to nothing
-    // else: no machine is addressed from here.
-    if (!isHubPairing(pairing)) {
-      await restoreMachineTerminals().catch(function () { return 0; });
-      void machineChannels().then(function (channels) {
-        if (channels) return channels.deliver().catch(function () { return undefined; });
-        return undefined;
-      }).catch(function () { return undefined; });
-    }
     if (isHubPairing(pairing)) {
       await initHubSession(pairing);
-      return;
     }
-    if (pairing) void probeLegacyPairing(pairing);
-    if (pairing && relayCanSync(pairing)) {
-      try {
-        await requestChatListViaRelay(pairing);
-        await render("synced");
-        const conversationId = selectedConversationId();
-        if (conversationId) {
-          await requestTimelineViaRelay(pairing, conversationId);
-          await render("synced");
-        }
-        // While the desktop is here: register this phone's signing key and
-        // pick up the machines it may reach when the desktop is not. Not
-        // waited for: with the chats read from the server, a desktop that is
-        // asleep must not hold the screen.
-        void announceMachineIdentityViaRelay(pairing).catch(function () { return undefined; });
-      } catch {
-        await render("tunnel-reconnecting");
-      }
-    }
-    const flushResult = await flushOutbox();
-    // Everything the box has held since this phone was last open, taken in one
-    // go behind a single "Catching up" rather than page by page on screen.
-    await catchUpFromRelay();
-    await render(flushResult.status);
-    startMailboxTimelinePolling();
-    ensureLiveRelayForOpenConversation();
-    startRelayTimelineKeepAlive();
   }
 
   /** A phone paired with the User's server: what it owes goes out, the chats
@@ -10851,26 +8384,6 @@
     void pruneSentHubEntries().catch(function () { return undefined; });
   }
 
-  /** Set when this phone holds an old pairing (through the desktop's relay)
-   *  and the User's own server answers at that address: the desktop no
-   *  longer serves it, so the phone asks to be paired again. */
-  let legacyPairingReplaced = false;
-
-  async function probeLegacyPairing(pairing) {
-    const endpoint = outboxEndpoint();
-    if (!endpoint || isHubPairing(pairing)) return;
-    try {
-      const response = await fetch(new URL("/v1/health", endpoint).toString(), { cache: "no-store", signal: AbortSignal.timeout(8_000) });
-      const health = response.ok ? await response.json() : undefined;
-      if (health && Number(health.protocol) >= HUB_PHONE_PROTOCOL && typeof health.hubId === "string") {
-        legacyPairingReplaced = true;
-        await render();
-      }
-    } catch {
-      // Not the User's server, or not reachable: the old pairing goes on.
-    }
-  }
-
   globalThis.AccordAgentsMobile = {
     // W-K's harness drives the real user path — permission prompt, subscribe,
     // POST, render — rather than a stand-in for it.
@@ -10878,14 +8391,11 @@
     ensurePushSubscription,
     whileLookingForMessages,
     reconnectMessageAlerts,
-    ensureLiveRelayForOpenConversation,
     createOutboxEvent,
     enqueueMessage,
     enqueueRunCancel,
     stopRunFromPhone,
     flushOutbox,
-    flushOutboxViaMailbox,
-    flushOutboxViaRelay,
     handleRelayChatListPayload,
     handleRelayTimelinePayload,
     reconcilePendingControlCards,
@@ -10893,8 +8403,6 @@
     isCardSent,
     isCardLocked,
     desktopOwesEntry,
-    machineTimelineEvent,
-    machineChoiceCard,
     activeMentionQuery,
     mentionOptions,
     replaceActiveMention,
@@ -10902,22 +8410,12 @@
     replaceMentionAtCaret,
     isCancellableMobileRow,
     requestChatListViaRelay,
-    announceMachineIdentityViaRelay,
-    machineChannels,
-    machineAccessList,
-    storeMachineAccess,
-    machineCommandIdentity,
     requestTimelineViaRelay,
-    openRelayPayload,
     readBootstrapFromLocation,
     pairWithServer,
     flushOutboxViaHub,
     resolvePhoneDelivery,
     loadHubPairing,
-    machineWakeFailure,
-    reassembleRelayCiphertext,
-    sealRelayPayload,
-    chunkRelayCiphertext,
     listOutboxEntries,
     listTimelineEntries,
     dedupeTimelineEntries,
@@ -10932,7 +8430,6 @@
     addPendingAttachments,
     takePendingAttachments,
     preparePickedImage,
-    savePairing,
     chatMatchesQuery,
     filterChatsByQuery,
     formatClockTime,
@@ -10947,8 +8444,6 @@
     markConversationRead,
     adoptWorkerUnread,
     resyncAfterForeground,
-    dropRelaySocket,
-    relaySocketLive,
     loadEarlierMessages,
     timelinePageFor,
     saveTimelinePage,

@@ -1016,6 +1016,13 @@ export class HubSync {
     if (event.originId === await this.options.localOriginId()) return "done";
     let key = await this.options.trustedKey(event.originId);
     if (!key && this.options.admit) key = await this.options.admit(event, () => this.options.client.fetchBlob(event));
+    // A phone paired again with a new code (it keeps its key) writes a new
+    // certificate: it is taken although the phone is known, so the phone's
+    // entry names the code it paired with now. One that is not taken (an
+    // older code, settled since) changes nothing.
+    else if (key && this.options.admit && event.kind === HUB_PHONE_ENROLLED_EVENT_KIND) {
+      key = await this.options.admit(event, () => this.options.client.fetchBlob(event)) ?? key;
+    }
     // A phone whose enrollment this device never read (it started reading
     // after it, from the server's copy): its enrollment is asked for.
     if (!key && this.options.admit && event.kind !== HUB_PHONE_ENROLLED_EVENT_KIND) key = await this.admitFromEnrollment(event.originId);

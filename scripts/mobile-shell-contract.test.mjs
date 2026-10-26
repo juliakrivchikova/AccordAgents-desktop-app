@@ -1,17 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { createRequire } from "node:module";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
-import WebSocket from "ws";
 
 const execFileAsync = promisify(execFile);
-const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(import.meta.dirname, "..");
-const { createReferenceRelayServer } = require("./relay-reference-server.cjs");
 
 test("mobile shell builds static installable PWA assets", async () => {
   await execFileAsync(process.execPath, ["scripts/build-mobile-shell.mjs"], {
@@ -37,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v70/);
+  assert.match(worker, /accordagents-mobile-shell-v71/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -46,38 +42,45 @@ test("mobile shell builds static installable PWA assets", async () => {
   const pushHandler = /self\.addEventListener\("push",[\s\S]*?\n\}\);/.exec(worker)?.[0] ?? "";
   assert.ok(pushHandler, "service worker must have a push handler");
   assert.doesNotMatch(pushHandler, /event\.data/);
-  // 2. The service worker never references the seal key or the crypto
-  //    contract: it stores sealed envelopes and cannot open them.
+  // 2. What a push is about is read from the User's server only, signed
+  //    with the phone's own key, through the bundled client. The worker
+  //    holds no other way to read: no relay mailbox, no sealed envelopes.
+  assert.match(worker, /backgroundHubSync/);
+  assert.match(worker, /importScripts\("\.\/mobile-hub-client\.js"\)/);
+  assert.match(worker, /"\/v1\/phone\/notices"/);
+  assert.doesNotMatch(worker, /backgroundMailboxSync|acknowledgeStored|\/v1\/mailbox|sealedEnvelopes|SEALED_STORE|mailboxAccess/);
   assert.doesNotMatch(worker, /relaySealKeyBase64/);
   assert.doesNotMatch(worker, /AccordMailboxCrypto/);
   assert.doesNotMatch(worker, /openEnvelope\(|deriveAccess\(|crypto\.subtle/);
   assert.doesNotMatch(worker, /localStorage/);
-  assert.match(worker, /backgroundMailboxSync/);
-  // The store the worker writes into, named once, in the description both
-  // contexts load. The worker imports it rather than repeating it.
+  // The store the worker reads, named once, in the description both contexts
+  // load. The worker imports it rather than repeating it, and asks only for
+  // the store it reads.
   assert.match(worker, /importScripts\("\.\/mobile-db\.js"\)/);
-  assert.match(schema, /sealedEnvelopes/);
+  assert.match(worker, /SCHEMA\.openControlDb\(indexedDB, \[META_STORE\]\)/);
   assert.doesNotMatch(worker, /indexedDB\.open\(\s*DB_NAME\s*,/,
     "the worker must not pin a version of its own; that is what broke the push path");
   assert.match(worker, /accord-test-push/);
-  // W-B: every IndexedDB write in the background sync must be awaited before
-  // returning. The epoch-reset branch previously fired its put and returned
-  // straight into db.close(), so a lost reset left a stale cursor against
-  // renumbered storage — a silent gap. Pins that the reset branch awaits its
-  // transaction, matching the cursor-advance path.
-  // Both slice bounds are checked before slicing: a missing end marker makes
-  // indexOf return -1, and slice(start, -1) would span nearly the whole file —
-  // including the cursor-advance path's own awaited transaction — so the regex
-  // would pass with the reset branch's await deleted.
-  const resetStart = worker.indexOf("epoch && access.epoch");
-  const resetEnd = worker.indexOf("reason: \"epoch reset\"");
-  assert.ok(
-    resetStart >= 0 && resetEnd > resetStart,
-    "epoch-reset branch must exist in the service worker between its two markers"
-  );
-  assert.match(worker.slice(resetStart, resetEnd), /await new Promise[\s\S]+oncomplete/);
+  // The relay's files are gone from the phone: nothing loads them, nothing
+  // precaches them, and the build ships none of them.
+  for (const removed of ["mobile-event-log.js", "mobile-machine-wake.js", "mobile-machine-sealing.js", "mobile-machine-command.js", "mobile-machine-channel.js"]) {
+    assert.ok(!worker.includes(removed), `the service worker must not precache ${removed}`);
+    assert.ok(!(await stat(path.join(repoRoot, "dist/mobile", removed)).catch(() => undefined)), `${removed} must not ship with the phone`);
+  }
   const html = await readFile(path.join(repoRoot, "dist/mobile/index.html"), "utf8");
   const headers = await readFile(path.join(repoRoot, "dist/mobile/_headers"), "utf8");
+  // Every script the page loads ships with the phone and is precached at the
+  // shell's version, so an installed phone opened offline has all of them;
+  // and nothing is precached that does not ship.
+  const scripts = [...html.matchAll(/<script src="([^"?]+)\?v=([^"]+)"/g)].map((match) => ({ file: match[1], version: match[2] }));
+  assert.ok(scripts.length >= 6, "the page loads its scripts");
+  for (const script of scripts) {
+    assert.ok((await stat(path.join(repoRoot, "dist/mobile", script.file))).size > 0, `${script.file} ships with the phone`);
+    assert.ok(worker.includes(`./${script.file}?v=\${ASSET_VERSION}`), `the service worker must precache ${script.file} at the shell's version`);
+  }
+  for (const precached of [...worker.matchAll(/"\.\/([^"?`$]+\.(?:js|css|png|webmanifest))"/g)].map((match) => match[1])) {
+    assert.ok((await stat(path.join(repoRoot, "dist/mobile", precached))).size > 0, `precached ${precached} ships with the phone`);
+  }
   // The rules the phone shares with the desktop verbatim travel as one bundle
   // built from src/shared, loaded before the app, precached with it, and every
   // built-in avatar the desktop can show is copied under its catalog id.
@@ -105,8 +108,8 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.ok(!(await stat(path.join(repoRoot, "dist/mobile/mobile-avatar-catalog.tmp.mjs")).catch(() => undefined)), "no build scratch file ships with the phone");
   assert.match(headers, /\/service-worker\.js\n\s+Cache-Control: public, max-age=0, must-revalidate/);
   assert.match(headers, /\/mobile-app\.js\n\s+Cache-Control: public, max-age=0, must-revalidate/);
-  // W-E: the mobile origin holds a pairing seal key, so the policy that guards
-  // it is pinned here rather than trusted. The behavioural proof is the browser
+  // W-E: the mobile origin holds the phone's signing key for the User's
+  // server, so the policy that guards it is pinned here rather than trusted. The behavioural proof is the browser
   // harness, which serves the app under this exact policy; this pin is what
   // fails fast if a directive is weakened or dropped in a hurry.
   assert.match(headers, /^\/\*$/m, "the policy must apply to every path, not just the shell");
@@ -126,9 +129,10 @@ test("mobile shell builds static installable PWA assets", async () => {
   ]) {
     assert.ok(policy.includes(directive), `policy must contain ${directive}: ${policy}`);
   }
-  // wss: is not redundant with https: — whether one matches the other is
-  // engine-dependent, and this gate runs Chromium while the field runs Safari.
-  assert.ok(policy.includes("connect-src 'self' https: wss:"), `policy must allow wss: explicitly: ${policy}`);
+  // The phone opens no WebSocket any more: every read and write is a signed
+  // HTTPS request to the User's server, so https: is all connect-src allows.
+  assert.ok(policy.includes("connect-src 'self' https:;"), `policy must allow https: connections: ${policy}`);
+  assert.doesNotMatch(policy, /wss:|ws:/, `the policy must not allow WebSocket connections: ${policy}`);
   assert.doesNotMatch(policy, /unsafe-inline|unsafe-eval/, "no escape hatch may be added to the policy");
   assert.match(headers, /X-Content-Type-Options: nosniff/);
   assert.match(headers, /Referrer-Policy: no-referrer/);
@@ -142,9 +146,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(html, /<meta name="viewport"[^>]*viewport-fit=cover/);
   const assetVersion = /const ASSET_VERSION = "([^"]+)"/.exec(worker)?.[1];
   assert.ok(assetVersion, "service worker must declare an asset version");
-  const htmlAssetVersions = [...html.matchAll(/(?:mobile-app\.css|jsqr\.js|mobile-shared\.js|mobile-activity\.js|mobile-app\.js)\?v=([^"']+)/g)]
+  const htmlAssetVersions = [...html.matchAll(/(?:mobile-app\.css|mobile-db\.js|jsqr\.js|mobile-hub-client\.js|mobile-shared\.js|mobile-activity\.js|mobile-app\.js)\?v=([^"']+)/g)]
     .map((match) => match[1]);
-  assert.deepEqual(htmlAssetVersions, [assetVersion, assetVersion, assetVersion, assetVersion, assetVersion]);
+  assert.deepEqual(htmlAssetVersions, [assetVersion, assetVersion, assetVersion, assetVersion, assetVersion, assetVersion, assetVersion]);
   assert.match(html, /data-screen-label="Mobile control"/);
   assert.match(html, /id="chats-screen"/);
   assert.match(html, />Chats</);
@@ -172,12 +176,10 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(html, /id="stream-view"/);
   assert.match(html, /id="stream-body"/);
   assert.match(app, /function applyStreamableState/);
-  // Live relay frames arrive as bytes; stringifying them yielded "[object
-  // Blob]" and every live frame was dropped. This is what made streaming show
-  // nothing at all.
-  assert.match(app, /socket\.binaryType = "arraybuffer"/);
-  assert.match(app, /function relayFrameText/);
-  assert.doesNotMatch(app, /JSON\.parse\(String\(event\.data\)\)/);
+  // Live text comes from the User's server's progress, read while a member
+  // runs; the phone holds no socket of its own.
+  assert.match(app, /"\/v1\/phone\/progress"/);
+  assert.doesNotMatch(app, /WebSocket/);
   // A terminal that predates a pending row cannot be that row's ending. This
   // guard is what stops an upstream mislabelling from deleting a live row.
   assert.match(app, /entry\.status === "Running" && entry\.runId/);
@@ -240,11 +242,11 @@ test("mobile shell builds static installable PWA assets", async () => {
   // bottom of a page that can no longer be scrolled.
   assert.match(lock, /height: var\(--app-h, 100%\)/);
   assert.match(app, /function trackUsableHeight\(\)/);
-  // A picture with no caption used to vanish on both sides of the relay, and
-  // the timeline carries metadata only, so the bytes are asked for by id once.
+  // A picture with no caption used to vanish on both sides, and the timeline
+  // carries metadata only, so the bytes are asked of the server by id once.
   assert.match(app, /function timelineAttachmentsFromEvent\(event\)/);
   assert.match(app, /if \(!content && attachments\.length === 0\)/);
-  assert.match(app, /type: "mobile\.attachment\.request"/);
+  assert.match(app, /"\/v1\/phone\/attachment"/);
   assert.match(app, /function rememberAttachmentResult\(attachmentId, result\)/);
   assert.match(css, /\.message-image \{/);
   // A replaced element renders no pseudo-element, so the failure reason has to
@@ -376,21 +378,20 @@ test("mobile shell builds static installable PWA assets", async () => {
   // rather than a version constant of its own.
   assert.match(app, /schema\.openControlDb\(indexedDB\)/);
   assert.match(schema, /DB_VERSION = \d+/);
-  assert.match(schema, /machineEvents/);
-  assert.match(app, /ackedEventIds\.includes\(entry\.eventId\)/);
-  assert.match(app, /\/v1\/mailbox\/events/);
-  assert.match(app, /return await flushOutboxViaMailbox\(entries, endpoint\)/);
-  assert.match(app, /flushOutboxViaMailbox/);
-  assert.match(app, /return await flushOutboxViaRelay\(entries, pairing\)[\s\S]+return await flushOutboxViaMailbox\(entries, endpoint\)/);
-  // Mailbox traffic is locked and sealed: outbox appends seal the payload
-  // with the pairing key, and every mailbox call carries the derived bearer
-  // token plus the derived per-pairing mailbox id.
-  assert.match(app, /const event = mailboxEventForAppend\(syncing\)/);
-  assert.match(app, /event\.payload = JSON\.parse\(await sealRelayPayload\(event\.payload, pairing\.relaySealKeyBase64\)\)/);
-  assert.match(app, /events: \[event\]/);
-  assert.match(app, /authorization: "Bearer " \+ access\.token/);
-  assert.match(app, /openMailboxEnvelopePayload/);
-  assert.match(app, /mailboxAuthRejected/);
+  // Everything the phone owes goes to the User's server and nowhere else: an
+  // entry is acknowledged only when the server says it holds it.
+  assert.match(app, /return await flushOutboxViaHub\(entries\)/);
+  assert.match(app, /result\.status === "accepted" \|\| result\.status === "duplicate"/);
+  // Phase 5: the relay is gone from the phone. No mailbox, no sealing, no
+  // socket, no machine of its own to command or wake; a pairing made the old
+  // way is cleared and the phone says, once, that it has to pair again.
+  for (const gone of [/\/v1\/mailbox/, /relaySealKey(?!")/, /sealRelayPayload|openRelayPayload|AccordMailboxCrypto/, /flushOutboxViaMailbox|flushOutboxViaRelay|pollMailboxTimeline/,
+    /AccordMachineCommand|AccordMachineChannel|AccordMobileEventLog|AccordMobileMachineWake|AccordMachineSealing/, /sendRelayPayload|getRelaySocket/]) {
+    assert.doesNotMatch(app, gone, `the phone must not keep ${gone}`);
+  }
+  assert.match(app, /OLD_PAIRING_KEY = "accordagents\.mobile\.pairing\.v1"/);
+  assert.match(app, /localStorage\.removeItem\(OLD_PAIRING_KEY\)/);
+  assert.match(app, /"This phone was paired the old way\. Pair it again from Settings on your Mac\."/);
   // W-N: only a participant's finished message may end a run. The behavioral
   // proof is scripts/mobile-inprogress-row.test.mjs; this pin fails fast if the
   // role guard is dropped, since without it the user's own message comes back
@@ -399,59 +400,24 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /status !== "pending" && role === "participant" && \(runId \|\| mobileEventId \|\| messageId\)/);
   // W-K: a refused push endpoint must be recorded and stated, never swallowed.
   // The behavioral proof is scripts/mobile-push-unavailable.test.mjs.
-  assert.match(app, /PUSH_ENDPOINT_REJECTED_ERROR = "mailbox_push_endpoint_rejected"/);
   assert.match(app, /pushEndpointRejected = true/);
   assert.match(app, /alertsState = "unavailable"/);
-  // The phone cannot import the shared contract module, so it hardcodes the
-  // derivation constants. Pin them to src/shared/mailboxSealedPayload.ts:
-  // moving the shared contract without updating the phone must fail here,
-  // not ship a phone that derives the wrong mailbox and token.
-  const sharedContract = await readFile(path.join(repoRoot, "src/shared/mailboxSealedPayload.ts"), "utf8");
-  const sharedConstant = (name) => {
-    const match = new RegExp(`${name} = "([^"]+)"`).exec(sharedContract);
-    assert.ok(match, `shared contract must define ${name}`);
-    return match[1];
-  };
-  const scopeLength = /MAILBOX_SCOPE_ID_LENGTH = (\d+)/.exec(sharedContract)?.[1];
-  assert.ok(scopeLength, "shared contract must define MAILBOX_SCOPE_ID_LENGTH");
-  assert.match(app, new RegExp(`MAILBOX_AUTH_TOKEN_INFO = "${sharedConstant("MAILBOX_AUTH_TOKEN_INFO")}"`));
-  assert.match(app, new RegExp(`MAILBOX_SCOPE_ID_INFO = "${sharedConstant("MAILBOX_SCOPE_ID_INFO")}"`));
-  assert.match(app, new RegExp(`MAILBOX_SCOPE_ID_PREFIX = "${sharedConstant("MAILBOX_SCOPE_ID_PREFIX")}"`));
-  assert.match(app, new RegExp(`MAILBOX_SCOPE_ID_LENGTH = ${scopeLength}`));
-  assert.match(app, new RegExp(sharedConstant("MAILBOX_ERROR_UNREGISTERED")));
-  // W4: the crypto section is generated from the single canonical source.
-  assert.match(app, /churn without a driver|generated: mailbox-crypto/);
-  assert.match(app, /globalThis\.AccordMailboxCrypto = \{/);
-  // W1 arrival cursor: the phone remembers one (epoch, cursor) pair instead
-  // of a capped ledger of every envelope id, asks only for what is new, and
-  // refills once when events expired beneath its cursor.
-  assert.match(app, /MAILBOX_CURSOR_KEY = "accordagents\.mobile\.mailboxCursor\.v1"/);
-  assert.match(app, /afterArrival/);
-  assert.match(app, /oldestArrivalSeq/);
-  assert.match(app, /lastStaleRefillKey/);
-  assert.doesNotMatch(app, /ingestedMailboxEventIds/);
-  assert.match(app, /originSeq/);
-  assert.match(app, /logicalTs/);
-  assert.match(app, /payloadHash/);
-  assert.match(app, /eventHash/);
-  assert.match(app, /"sha256:" \+ await sha256Hex\(stableJson\(payload\)\)/);
-  assert.match(app, /"mobile:" \+ originId/);
+  // Each event the phone sends is minted once, signed, in its place in this
+  // phone's chain of its scope, by the bundled client every device signs with.
+  assert.match(app, /api\.mintHubEvent\(identity, \{/);
+  assert.match(app, /function hubEventShape\(entry\)/);
   assert.match(app, /sha256Hex/);
   assert.match(app, /mobile\.timeline\.events/);
   assert.match(app, /kind: "run\.cancel\.requested"/);
   assert.match(app, /stopRunFromPhone/);
-  assert.match(app, /pollMailboxTimeline/);
-  assert.match(app, /MAILBOX_TIMELINE_POLL_MS = 2_500/);
-  assert.match(app, /mobile\.chat-list\.request/);
-  assert.match(app, /mobile\.timeline\.request/);
+  assert.match(app, /"\/v1\/phone\/chats"/);
+  assert.match(app, /"\/v1\/phone\/timeline"/);
+  assert.match(app, /"\/v1\/phone\/changes"/);
   assert.match(app, /TIMELINE_STORE/);
-  assert.match(app, /fragment\.get\("pairing"\)/);
-  assert.match(app, /fragment\.get\("k"\)/);
-  assert.match(app, /relaySealKeyBase64/);
-  assert.match(app, /sealRelayPayload/);
+  // The pairing code the desktop shows, from the link's fragment only.
+  assert.match(app, /fragment\.get\("hub"\)/);
+  assert.match(app, /fragment\.get\("t"\)/);
   assert.match(app, /handleRelayTimelinePayload/);
-  assert.match(app, /RELAY_ACK_TIMEOUT_MS = 20_000/);
-  assert.match(app, /RELAY_TIMELINE_IDLE_MS = 15 \* 60_000/);
   assert.match(app, /activeFlushOutboxPromise/);
   assert.match(app, /Tunnel reconnecting/);
   // The author travels with the text: the control-block rule applies to a
@@ -467,70 +433,16 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /updateMessageRow\(item, entry\)/);
   assert.match(app, /renderMessageContentIfChanged/);
   assert.doesNotMatch(app, /list\.textContent = ""/);
-  // Coming back from the background reads the mailbox before it asks anything
-  // of the socket: each socket request waits out a twenty-second ack timeout
-  // when the live channel is half-open, and messages already in the box must
-  // not wait behind that.
-  assert.match(app, /await catchUpFromRelay\(\);\n\s*await render\("synced"\);\n\s*try \{\n\s*await requestChatListViaRelay/);
-  // Opening the app takes the whole backlog behind one "Catching up" before it
-  // draws, rather than a page per poll: old messages crawling onto the screen
-  // one lump at a time is what the User saw instead.
-  assert.match(app, /const flushResult = await flushOutbox\(\);\n\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*await catchUpFromRelay\(\);/);
+  // Coming back from the background, what this phone owes goes first, then
+  // the chats and the open chat are read again and the feed of changes is
+  // followed again.
+  assert.match(app, /await flushOutbox\(\)\.catch\(function \(\) \{ return undefined; \}\);\n\s*await requestChatListViaRelay\(pairing\)[\s\S]{0,240}startServerChanges\(\);/);
+  // Opening the app: what it owes goes out, then the chats come in.
+  assert.match(app, /async function initHubSession\(pairing\) \{[\s\S]+const flushResult = await flushOutbox\(\)[\s\S]+await requestChatListViaRelay\(pairing\);/);
   // Opening a chat, from the list or from Activity, goes through one helper.
-  assert.match(app, /function openConversation\(conversationId, options\)[\s\S]+requestTimelineViaRelay\(pairing, conversationId\)[\s\S]+pollMailboxTimeline\(\)\.catch/);
+  assert.match(app, /function openConversation\(conversationId, options\)[\s\S]+requestTimelineViaRelay\(pairing, conversationId\)/);
   assert.match(app, /row\.addEventListener\("click", function \(\) \{\s*(void )?openConversation\(chat\.id\)/);
   assert.match(app, /globalThis\.AccordAgentsMobile/);
-});
-
-test("mobile shell sends only sealed relay frames that the desktop can decrypt by pairing key", async () => {
-  await execFileAsync("npm", ["run", "build:main"], {
-    cwd: repoRoot
-  });
-  await execFileAsync(process.execPath, ["scripts/build-mobile-shell.mjs"], {
-    cwd: repoRoot
-  });
-  await import(pathToFileURL(path.join(repoRoot, "dist/mobile/mobile-app.js")).toString());
-  const { RelayTunnelClient } = await import("../dist/main/main/services/relayTunnelClient.js");
-  const mobile = globalThis.AccordAgentsMobile;
-  const relay = createReferenceRelayServer();
-  const address = await relay.listen();
-  try {
-    const key = bytesToBase64Url(globalThis.crypto.getRandomValues(new Uint8Array(32)));
-    const desktop = new RelayTunnelClient({
-      relayUrl: address.url,
-      rendezvousId: "rv-mobile-shell",
-      role: "desktop",
-      capability: "PAIRING-FINGERPRINT",
-      streamId: "route-mobile-shell:phone"
-    });
-    const received = nextMessage(desktop);
-
-    await desktop.connect();
-    const phone = await openPhoneSocket(address.url, "rv-mobile-shell", "PAIRING-FINGERPRINT");
-    const sealed = await mobile.sealRelayPayload({
-      type: "mobile.outbox.events",
-      events: [{ eventId: "event-mobile-1", payload: { content: "relay secret text" } }]
-    }, key);
-    assert.doesNotMatch(sealed, /relay secret text/);
-    const frames = mobile.chunkRelayCiphertext({
-      streamId: "route-mobile-shell:phone",
-      logicalMessageId: "event-mobile-1",
-      ciphertext: sealed
-    });
-    for (const frame of frames) {
-      phone.send(JSON.stringify(frame));
-    }
-
-    const message = await received;
-    assert.equal(message.logicalMessageId, "event-mobile-1");
-    assert.doesNotMatch(message.ciphertext, /relay secret text/);
-    const opened = await mobile.openRelayPayload(message.ciphertext, key);
-    assert.equal(opened.events[0].payload.content, "relay secret text");
-    phone.close();
-    desktop.close();
-  } finally {
-    await relay.close();
-  }
 });
 
 test("mobile shell matches desktop member mention filtering and insertion", async () => {
@@ -709,56 +621,4 @@ test("mobile shell gives scaffolding one row and every real message its own", as
     mobile.timelineRenderRowKey({ ...pending, id: "conversation:pending-again" }),
     mobile.timelineRenderRowKey(pending)
   );
-});
-
-function openPhoneSocket(relayUrl, rendezvousId, capability) {
-  const url = new URL(relayUrl);
-  url.searchParams.set("rid", rendezvousId);
-  url.searchParams.set("role", "phone");
-  url.searchParams.set("cap", capability);
-  return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url);
-    socket.once("open", () => resolve(socket));
-    socket.once("error", reject);
-  });
-}
-
-function nextMessage(client) {
-  return new Promise((resolve) => {
-    const off = client.on("message", (message) => {
-      off();
-      resolve(message);
-    });
-  });
-}
-
-function bytesToBase64Url(bytes) {
-  return Buffer.from(bytes).toString("base64url");
-}
-
-// A machine hands the phone whole messages. What the desktop keeps off its
-// timeline is marked, not dropped: a hidden row can be the one that ends a
-// run, and the phone settles the run on it without storing a bubble.
-test("mobile shell marks machine-delivered rows the desktop hides, by the desktop's own rule", async () => {
-  await execFileAsync("npm", ["run", "build:main"], { cwd: repoRoot });
-  await execFileAsync(process.execPath, ["scripts/build-mobile-shell.mjs"], { cwd: repoRoot });
-  const shared = await import(pathToFileURL(path.join(repoRoot, "dist/main/shared/mobileSharedRules.js")).href);
-  globalThis.AccordMobileShared = shared;
-  await import(pathToFileURL(path.join(repoRoot, "dist/mobile/mobile-app.js")).toString());
-  const mobile = globalThis.AccordAgentsMobile;
-  const events = [
-    { id: "trigger", role: "system", content: "Auto-resumed @drew after member request.", createdAt: "2026-09-18T00:00:00.000Z" },
-    { id: "carrier", role: "participant", participantLabel: "@drew", content: "@drew asked @taylor: review", createdAt: "2026-09-18T00:00:01.000Z", metadata: { hiddenFromTimeline: true } },
-    { id: "waiting", role: "participant", participantLabel: "@drew", content: "Awaiting user approval.", createdAt: "2026-09-18T00:00:02.000Z" },
-    { id: "note", role: "system", content: "@gera revised [Plan] · v3", createdAt: "2026-09-18T00:00:03.000Z", metadata: { appMessageSource: "app_artifact_note" } },
-    { id: "reply", role: "participant", participantLabel: "@drew", content: "Done.", createdAt: "2026-09-18T00:00:04.000Z" }
-  ].map((message) => mobile.machineTimelineEvent(message, "done", "run-1"));
-  assert.deepEqual(events.map((event) => [event.id, event.hidden === true, event.runId]), [
-    ["trigger", true, "run-1"],
-    ["carrier", true, "run-1"],
-    ["waiting", true, "run-1"],
-    ["note", false, "run-1"],
-    ["reply", false, "run-1"]
-  ]);
-  delete globalThis.AccordMobileShared;
 });

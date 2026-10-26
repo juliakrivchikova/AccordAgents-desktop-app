@@ -11,13 +11,12 @@ export interface TrustedPeerAccess {
   publicKeyDerBase64: string;
   role: TrustedPeerRole;
   name?: string;
-  /** The room this peer listens in, and the key that seals it. */
+  /** Where the room this peer listens in is: its socket on the User's
+   *  server. (Named from the shared relay the rooms were once on; the name
+   *  stays because installed machine runtimes read it.) */
   relayUrl: string;
   rendezvousId: string;
-  relaySealKeyBase64?: string;
-  outboxUrl?: string;
-  /** The room's capability fingerprint: the relay admits a connection only
-   *  when it presents the one the room was opened with. */
+  /** The room's capability fingerprint, as the room was opened with. */
   fingerprint?: string;
   /** For a machine peer: the id members carry as `homeMachineId`. */
   machineId?: string;
@@ -83,7 +82,6 @@ export function trustedPeerRooms(peers: readonly TrustedPeerAccess[]): Array<{
   const rooms = new Map<string, {
     relayUrl: string;
     rendezvousId: string;
-    relaySealKeyBase64?: string;
     fingerprint?: string;
     peers: TrustedPeerAccess[];
   }>();
@@ -92,7 +90,6 @@ export function trustedPeerRooms(peers: readonly TrustedPeerAccess[]): Array<{
     const room = rooms.get(key) ?? {
       relayUrl: peer.relayUrl,
       rendezvousId: peer.rendezvousId,
-      relaySealKeyBase64: peer.relaySealKeyBase64,
       ...(peer.fingerprint ? { fingerprint: peer.fingerprint } : {}),
       peers: []
     };

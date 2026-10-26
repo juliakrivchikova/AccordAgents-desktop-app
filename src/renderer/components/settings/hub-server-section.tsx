@@ -121,7 +121,7 @@ export function HubServerSection(): JSX.Element {
             {ready && !installing ? (state?.notices ?? []).map((notice) => (
               <div key={notice} className="gen-row-desc" data-testid="hub-server-notice">{notice}</div>
             )) : null}
-            {ready && !installing ? (state?.dismissableNotices ?? []).map((notice) => (
+            {!installing ? (state?.dismissableNotices ?? []).map((notice) => (
               <div key={notice.id} className="gen-row-desc" data-testid="hub-server-given-up">
                 {notice.text}{" "}
                 <Button type="button" variant="ghost" size="sm" data-testid="hub-server-given-up-dismiss"

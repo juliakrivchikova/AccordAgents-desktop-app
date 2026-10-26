@@ -9,12 +9,9 @@ import { machineProfileVariables, type MachineInstallRecord } from "../../shared
 import { assertAwsMachinePowerConfig, type AwsMachinePowerConfig } from "../../shared/machinePower";
 import { normalizeMachinePowerHandoffRecords, type MachinePowerHandoffRecord } from "../../shared/machinePowerHandoff";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
-import type { MachineMoveRecord } from "./machineTransportMoves";
 import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
 import { isDeepStrictEqual } from "node:util";
 import type {
-  StoredMobilePairedDevice,
-  StoredPendingMailboxRevocation,
   AppSettings,
   AgentHealth,
   AgentEnvironmentValueProtection,
@@ -99,7 +96,7 @@ import {
   isValidChatSavedPromptTrigger,
   normalizeChatSavedPromptTrigger
 } from "../../shared/chatSavedPrompts";
-import { mobileControlForHub, mobileControlSettingsFromEnvironment } from "../../shared/mobilePairing";
+import { mobileControlSettingsFromEnvironment } from "../../shared/mobilePairing";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 import {
   cliProviderHostDefaultModel,
@@ -113,8 +110,6 @@ import { normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import { readCrashReportsChoice, writeCrashReportsChoice } from "./crashReportPreferences";
 import { HUB_PHONE_INVITE_MAX_LIFETIME_MS, isAcceptableHubUrl } from "../../shared/hubProtocol";
-import { compareVersions } from "../../shared/machineInstall";
-import { HUB_RELAY_FIRST_VERSION } from "../../shared/hubSetup";
 import { isHubServerAddress, type HubLinkConfig } from "../../shared/hubSetup";
 
 type StoredProviderSettings = ProviderSettings & {
@@ -180,12 +175,10 @@ interface StoredSettings {
   chatCustomAvatars?: CustomAvatarSummary[];
   chatParticipantSeedState?: ChatParticipantSeedState;
   /** Enrolled machines (machines transport). The pairing packages carry the
-   *  relay seal keys and are stored sealed, keyed by MachineRecord.pairingKey. */
+   *  key each machine's first hello is sealed with, and are stored sealed,
+   *  keyed by MachineRecord.pairingKey. */
   machines?: MachineRecord[];
   encryptedMachinePairings?: string;
-  /** Moves to another relay address asked of machines and not settled yet
-   *  (see MachineMoveRecord); written durably. */
-  machineMoves?: MachineMoveRecord[];
   /** This host's power key is never part of participant settings replication. */
   encryptedMachinePower?: string;
   /** The power key `encryptedMachinePower` replaced ("none" when there was
@@ -215,9 +208,13 @@ interface StoredSettings {
   /** Phone invites this desktop made for its server, and what became of
    *  each: a phone enrolled with it, or it was revoked. */
   hubPhoneInvites?: StoredHubPhoneInvite[];
-  machinePairingBindings?: Record<string, string>;
-  revokedMachinePairingKeys?: string[];
   machineDeviceRevocations?: Record<string, string>;
+  /** When the records set up through the shared relay were taken off this
+   *  desktop, and what they were: kept for the one notice in Settings. */
+  relayRemoval?: RelayRemovalRecord;
+  /** What a removal that has not finished yet found (a machine's removal
+   *  failed half way): kept, so the notice still names everything. */
+  relayRemovalPending?: { machines: string[]; startKeyHanded: boolean };
   /** When this desktop last asked about machines that stopped being used. */
   machineInactivityCheckAt?: string;
   /** Removed machines whose kept chat changes may not be dropped yet (the
@@ -225,6 +222,31 @@ interface StoredSettings {
   removedMachineOutboxes?: Array<{ pairingKey: string; deviceId: string }>;
 }
 
+/** What was set up through the shared relay and taken off this desktop when
+ *  the relay went away (names only, for the notice). */
+export interface RelayRemovalRecord {
+  removedAt: string;
+  machines: string[];
+  phones: string[];
+  /** A phone paired through the relay was handed the key that starts the AWS
+   *  machine; it keeps its copy until the key is replaced in AWS. */
+  startKeyHanded: boolean;
+  /** When the User dismissed the notice; it is not shown again. */
+  dismissedAt?: string;
+}
+
+function isRelayRemovalRecord(value: unknown): value is RelayRemovalRecord {
+  const record = value as Partial<RelayRemovalRecord> | undefined;
+  return Boolean(record) && typeof record!.removedAt === "string" && Array.isArray(record!.machines) && Array.isArray(record!.phones)
+    && record!.machines.every((name) => typeof name === "string") && record!.phones.every((name) => typeof name === "string")
+    && typeof record!.startKeyHanded === "boolean" && (record!.dismissedAt === undefined || typeof record!.dismissedAt === "string");
+}
+
+function isRelayRemovalPending(value: unknown): value is { machines: string[]; startKeyHanded: boolean } {
+  const pending = value as { machines?: unknown; startKeyHanded?: unknown } | undefined;
+  return Boolean(pending) && Array.isArray(pending!.machines) && pending!.machines.every((name) => typeof name === "string")
+    && typeof pending!.startKeyHanded === "boolean";
+}
 
 const DEFAULT_PROVIDERS: ProviderSettings[] = [
   { kind: "codex-cli", label: CLI_PROVIDER_SETUP["codex-cli"].label, enabled: true },
@@ -1850,8 +1872,6 @@ function normalizeHubSetting(value: unknown): HubLinkConfig | undefined {
 
 export class SettingsService {
   private readonly settingsPath: string;
-  private readonly mobilePairedDevicesPath: string;
-  private readonly pendingMailboxRevocationsPath: string;
   private storedState: StoredSettings | undefined;
   private storedReadError?: unknown;
   private storedLoad: Promise<StoredSettings> | undefined;
@@ -1862,8 +1882,6 @@ export class SettingsService {
 
   constructor(private readonly options: { profileHome?: string } = {}) {
     this.settingsPath = path.join(userDataPath(), "settings.json");
-    this.mobilePairedDevicesPath = path.join(userDataPath(), "mobile-paired-devices.json");
-    this.pendingMailboxRevocationsPath = path.join(userDataPath(), "pending-mailbox-revocations.json");
   }
 
   async getPublicSettings(): Promise<AppSettings> {
@@ -1878,7 +1896,7 @@ export class SettingsService {
       chatAutoWatchWakeLimit: this.normalizeChatAutoWatchWakeLimit(stored.chatAutoWatchWakeLimit),
       chatPromptContext: this.normalizeChatPromptContextSettings(stored.chatPromptContext),
       cloudRuns: this.normalizeCloudRunsSettings(stored),
-      mobileControl: mobileControlForHub(mobileControlSettingsFromEnvironment(process.env), this.hubUrlOf(stored)),
+      mobileControl: mobileControlSettingsFromEnvironment(process.env),
       assistantProviderKind: this.normalizeChatProviderKind(stored.assistantProviderKind),
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
       lastRepoPath: stored.lastRepoPath,
@@ -2964,7 +2982,6 @@ export class SettingsService {
       encryptedMachinePairings: typeof settings.encryptedMachinePairings === "string" && settings.encryptedMachinePairings.trim()
         ? settings.encryptedMachinePairings
         : undefined,
-      machineMoves: normalizeMachineMoves(settings.machineMoves),
       // Read back, not rebuilt. This function returns an explicit object, so a
       // field missing from it is dropped every time settings are read from
       // disk -- and these four were. The roster was written and then forgotten
@@ -2975,12 +2992,11 @@ export class SettingsService {
       hubPhoneInvites: Array.isArray(settings.hubPhoneInvites)
         ? settings.hubPhoneInvites.filter(isStoredHubPhoneInvite).map((invite) => ({ ...invite }))
         : undefined,
-      machinePairingBindings: settings.machinePairingBindings && typeof settings.machinePairingBindings === "object"
-        ? { ...settings.machinePairingBindings } : undefined,
-      revokedMachinePairingKeys: Array.isArray(settings.revokedMachinePairingKeys)
-        ? [...new Set(settings.revokedMachinePairingKeys.filter(key => typeof key === "string" && key))] : undefined,
       machineDeviceRevocations: settings.machineDeviceRevocations && typeof settings.machineDeviceRevocations === "object"
         ? { ...settings.machineDeviceRevocations } : undefined,
+      relayRemoval: isRelayRemovalRecord(settings.relayRemoval) ? { ...settings.relayRemoval } : undefined,
+      relayRemovalPending: isRelayRemovalPending(settings.relayRemovalPending)
+        ? { machines: [...settings.relayRemovalPending.machines], startKeyHanded: settings.relayRemovalPending.startKeyHanded } : undefined,
       // Read back too: dropped here, the 10-day rhythm of the question about
       // unused machines restarted with every launch.
       machineInactivityCheckAt: typeof settings.machineInactivityCheckAt === "string" ? settings.machineInactivityCheckAt : undefined,
@@ -3263,78 +3279,6 @@ export class SettingsService {
     return hostPlatform().secrets.isEncryptionAvailable();
   }
 
-  // A phone that has actually connected is remembered until the user revokes
-  // it, so one install keeps working across desktop restarts. The short-lived
-  // pairing link stays short-lived: it carries a key in a URL.
-  async readMobilePairedDevices(): Promise<StoredMobilePairedDevice[]> {
-    return (await this.readMobilePairedDevicesState()).devices;
-  }
-
-  /** The stored phones, and whether the file could not be read at all (as
-   *  opposed to there being none): a failed read is not "no phones". */
-  async readMobilePairedDevicesState(): Promise<{ devices: StoredMobilePairedDevice[]; readFailed: boolean }> {
-    let raw: string;
-    try {
-      raw = await readFile(this.mobilePairedDevicesPath, "utf8");
-    } catch (error) {
-      return { devices: [], readFailed: (error as NodeJS.ErrnoException).code !== "ENOENT" };
-    }
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (!Array.isArray(parsed)) {
-        return { devices: [], readFailed: true };
-      }
-      return {
-        devices: parsed.filter((entry): entry is StoredMobilePairedDevice =>
-          Boolean(entry) && typeof entry === "object" &&
-          typeof (entry as StoredMobilePairedDevice).stableRoutingId === "string" &&
-          typeof (entry as StoredMobilePairedDevice).pairingJson === "string"),
-        readFailed: false
-      };
-    } catch {
-      return { devices: [], readFailed: true };
-    }
-  }
-
-  async writeMobilePairedDevices(devices: StoredMobilePairedDevice[]): Promise<void> {
-    await mkdir(path.dirname(this.mobilePairedDevicesPath), { recursive: true });
-    const temporaryPath = `${this.mobilePairedDevicesPath}.${randomUUID()}.tmp`;
-    await writeFile(temporaryPath, `${JSON.stringify(devices, null, 2)}\n`, "utf8");
-    await rename(temporaryPath, this.mobilePairedDevicesPath);
-  }
-
-  async readPendingMailboxRevocations(): Promise<StoredPendingMailboxRevocation[]> {
-    try {
-      const raw = await readFile(this.pendingMailboxRevocationsPath, "utf8");
-      const parsed = JSON.parse(raw) as unknown;
-      if (!Array.isArray(parsed)) {
-        return [];
-      }
-      return parsed.filter((entry): entry is StoredPendingMailboxRevocation =>
-        Boolean(entry) && typeof entry === "object" &&
-        typeof (entry as StoredPendingMailboxRevocation).outboxUrl === "string" &&
-        typeof (entry as StoredPendingMailboxRevocation).mailboxScopeId === "string" &&
-        typeof (entry as StoredPendingMailboxRevocation).encryptedToken === "string");
-    } catch {
-      return [];
-    }
-  }
-
-  async writePendingMailboxRevocations(items: StoredPendingMailboxRevocation[]): Promise<void> {
-    await mkdir(path.dirname(this.pendingMailboxRevocationsPath), { recursive: true });
-    const temporaryPath = `${this.pendingMailboxRevocationsPath}.${randomUUID()}.tmp`;
-    await writeFile(temporaryPath, `${JSON.stringify(items, null, 2)}\n`, "utf8");
-    await rename(temporaryPath, this.pendingMailboxRevocationsPath);
-  }
-
-  encodeMobilePairingSecret(value: string): { encryptedValue: string; protection: AgentEnvironmentValueProtection } {
-    return this.encodeAgentEnvironmentValue(value);
-  }
-
-  decodeMobilePairingSecret(encryptedValue: string, protection: AgentEnvironmentValueProtection): string | undefined {
-    return this.decodeAgentEnvironmentValue({ key: "mobile-pairing", encryptedValue, protection } as StoredAgentEnvironmentVariable);
-  }
-
   private normalizedStringList(value: unknown): string[] {
     if (!Array.isArray(value)) {
       return [];
@@ -3424,55 +3368,6 @@ export class SettingsService {
   async listMachines(): Promise<MachineRecord[]> {
     const stored = await this.readStored();
     return (stored.machines ?? []).map((machine) => ({ ...machine }));
-  }
-
-  /** Replaces only a machine's pairing (it moved), leaving its record as
-   *  it stands now. */
-  async saveMachinePairing(pairingKey: string, pairing: MobilePairingPackage): Promise<void> {
-    const stored = await this.readStored();
-    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
-    const pairings = this.readMachinePairings(stored);
-    pairings[pairingKey] = pairing;
-    stored.encryptedMachinePairings = this.sealJson(JSON.stringify(pairings));
-    await this.writeStored(stored);
-  }
-
-  /** Moves this desktop asked machines for and has not settled yet. */
-  async listMachineMoves(): Promise<MachineMoveRecord[]> {
-    const stored = await this.readStored();
-    return (stored.machineMoves ?? []).map((record) => structuredClone(record));
-  }
-
-  /** Written to disk before the move is asked for: a move is never forgotten. */
-  async saveMachineMove(record: MachineMoveRecord): Promise<void> {
-    const stored = await this.readStored();
-    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
-    // A new object: a write that fails leaves the settings in memory as the
-    // disk has them.
-    await this.writeStored({
-      ...stored,
-      machineMoves: [...(stored.machineMoves ?? []).filter((item) => item.machineId !== record.machineId), structuredClone(record)]
-    }, true);
-  }
-
-  /** Settles a move; with `adopt`, the machine's new pairing is saved in the
-   *  same write, so the two never disagree on disk. */
-  async finishMachineMove(machineId: string, adopt?: { pairingKey: string; pairing: MobilePairingPackage }): Promise<boolean> {
-    const stored = await this.readStored();
-    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
-    const remaining = (stored.machineMoves ?? []).filter((item) => item.machineId !== machineId);
-    const next: StoredSettings = { ...stored, machineMoves: remaining.length ? remaining : undefined };
-    // A machine removed meanwhile gets no pairing back: removal leaves no way in.
-    const adopted = Boolean(adopt && (stored.machines ?? []).some((machine) => machine.id === machineId && machine.pairingKey === adopt.pairingKey));
-    if (adopt && adopted) {
-      const pairings = this.readMachinePairings(stored);
-      pairings[adopt.pairingKey] = adopt.pairing;
-      next.encryptedMachinePairings = this.sealJson(JSON.stringify(pairings));
-    }
-    // A new object: a write that fails leaves the record (and the old
-    // pairing) in memory as on disk, so a later pass settles it again.
-    await this.writeStored(next, true);
-    return adopted;
   }
 
   async saveMachine(record: MachineRecord, pairing?: MobilePairingPackage): Promise<MachineRecord[]> {
@@ -3585,29 +3480,13 @@ export class SettingsService {
     return next;
   }
 
-  saveTrustedDevice(record: TrustedDeviceRecord, pairing?: { key: string; createdAt: string }): Promise<TrustedDeviceRecord[]> {
+  saveTrustedDevice(record: TrustedDeviceRecord): Promise<TrustedDeviceRecord[]> {
     return this.serializeDeviceTrust(async () => {
       if (!isTrustedDeviceRecord(record) || !trustedDeviceIdMatchesKey(record, bytes => createHash("sha256").update(bytes).digest("hex"))) {
         throw new Error("The trusted device identity does not match its signing key.");
       }
       const stored = await this.readStored();
       if (this.storedReadError) throw new Error("Trusted devices could not be read; the stored list was left untouched.");
-      if (pairing) {
-        const bound = stored.machinePairingBindings?.[pairing.key];
-        if (stored.revokedMachinePairingKeys?.includes(pairing.key) || (bound && bound !== record.deviceId)) {
-          throw new Error("This pairing cannot authorize that device; pair again from Settings.");
-        }
-        const lastRevocation = Math.max(0, ...Object.values(stored.machineDeviceRevocations ?? {}).map(value => Date.parse(value)));
-        const created = Date.parse(pairing.createdAt);
-        const alreadyTrusted = (stored.trustedDevices ?? []).some(device => device.deviceId === record.deviceId);
-        // An old, not-yet-bound pairing may recover an existing identity, but
-        // cannot enroll a removed identity or a freshly minted alias after a
-        // revocation. Only a new invitation created by the owner can do that.
-        if (!Number.isFinite(created) || (!alreadyTrusted && created <= lastRevocation)) {
-          throw new Error("This device was removed; pair again with a new link from Settings.");
-        }
-        stored.machinePairingBindings = { ...stored.machinePairingBindings, [pairing.key]: record.deviceId };
-      }
       const records = (stored.trustedDevices ?? []).filter(entry => entry.deviceId !== record.deviceId);
       const { channelSealKeyBase64: _legacyKey, ...publicRecord } = record;
       records.push(publicRecord);
@@ -3620,8 +3499,6 @@ export class SettingsService {
   private removeDeviceTrust(stored: StoredSettings, deviceId: string): void {
     stored.trustedDevices = (stored.trustedDevices ?? []).filter(entry => entry.deviceId !== deviceId);
     stored.machineDeviceRevocations = { ...stored.machineDeviceRevocations, [deviceId]: new Date().toISOString() };
-    stored.revokedMachinePairingKeys = [...new Set([...(stored.revokedMachinePairingKeys ?? []),
-      ...Object.entries(stored.machinePairingBindings ?? {}).filter(([, id]) => id === deviceId).map(([key]) => key)])];
   }
 
   removeTrustedDevice(deviceId: string): Promise<TrustedDeviceRecord[]> {
@@ -3677,7 +3554,15 @@ export class SettingsService {
       const next: StoredHubPhoneInvite = invite
         ? { ...invite, state: "enrolled", deviceId: record.deviceId, settledAt }
         : { inviteId: record.inviteId, issuedAt: record.addedAt, expiresAt: record.addedAt, state: "enrolled", deviceId: record.deviceId, settledAt };
-      stored.hubPhoneInvites = keptPhoneInvites([...invites.filter((entry) => entry.inviteId !== record.inviteId), next]);
+      // A phone paired again replaces its own old entry: the code it paired
+      // with before is settled, and no longer names it, so revoking that old
+      // code later cannot take the phone off.
+      const others = invites.filter((entry) => entry.inviteId !== record.inviteId).map((entry): StoredHubPhoneInvite => {
+        if (entry.deviceId !== record.deviceId) return entry;
+        const { deviceId: _replaced, ...rest } = entry;
+        return { ...rest, state: "revoked", settledAt };
+      });
+      stored.hubPhoneInvites = keptPhoneInvites([...others, next]);
       const records = (stored.trustedDevices ?? []).filter((entry) => entry.deviceId !== record.deviceId);
       records.push({ ...record });
       stored.trustedDevices = records;
@@ -3720,25 +3605,81 @@ export class SettingsService {
     return (await this.listPhoneInvites()).filter((invite) => invite.state !== "pending").map((invite) => invite.inviteId);
   }
 
-  revokeMachinePairingTrust(key: string): Promise<void> {
+  /**
+   * The machines that were enrolled with the shared relay: their enrollment
+   * names no server of the User's, so they can never connect again. Empty
+   * once the relay's records were taken off this desktop.
+   */
+  async relayEraMachines(): Promise<MachineRecord[]> {
+    const stored = await this.readStored();
+    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+    if (stored.relayRemoval) return [];
+    const pairings = this.readMachinePairings(stored);
+    return (stored.machines ?? []).filter((machine) => {
+      const pairing = pairings[machine.pairingKey];
+      return Boolean(pairing) && !pairing.hubUrl;
+    }).map((machine) => ({ ...machine }));
+  }
+
+  /** What a removal found before it takes anything off, merged with what an
+   *  earlier, unfinished one found: the notice names all of it. */
+  beginRelayRemoval(found: { machines: string[]; startKeyHanded: boolean }): Promise<void> {
     return this.serializeDeviceTrust(async () => {
       const stored = await this.readStored();
-      if (this.storedReadError) throw new Error("Device pairing trust could not be read.");
-      const deviceId = stored.machinePairingBindings?.[key];
-      if (deviceId) this.removeDeviceTrust(stored, deviceId);
-      stored.revokedMachinePairingKeys = [...new Set([...(stored.revokedMachinePairingKeys ?? []), key])];
+      if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+      if (stored.relayRemoval) return;
+      const before = stored.relayRemovalPending;
+      stored.relayRemovalPending = {
+        machines: [...new Set([...(before?.machines ?? []), ...found.machines])],
+        startKeyHanded: Boolean(before?.startKeyHanded) || found.startKeyHanded
+      };
       await this.writeStored(stored, true);
     });
   }
 
-  async machinePairingTrust(): Promise<{ authorizedKeys: string[]; revokedKeys: string[] }> {
-    await this.trustedDeviceQueue;
+  /**
+   * Takes what was set up through the shared relay off this desktop, once:
+   * the phones paired through it (a phone paired with the User's server has
+   * the invite it enrolled with), and the files the relay's pairings kept.
+   * The machines went first, through the usual removal (relayEraMachines);
+   * what was found is recorded for the notice. Returns the record, or
+   * undefined when this was done before.
+   */
+  finishRelayRemoval(): Promise<RelayRemovalRecord | undefined> {
+    return this.serializeDeviceTrust(async () => {
+      const stored = await this.readStored();
+      if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+      if (stored.relayRemoval) return undefined;
+      const phones = (stored.trustedDevices ?? []).filter((device) => device.role === "phone" && !device.inviteId);
+      stored.trustedDevices = (stored.trustedDevices ?? []).filter((device) => !phones.includes(device));
+      // The files only the relay's phone pairings used; they hold its keys.
+      for (const name of ["mobile-paired-devices.json", "pending-mailbox-revocations.json"]) {
+        await rm(path.join(userDataPath(), name), { force: true });
+      }
+      stored.relayRemoval = {
+        removedAt: new Date().toISOString(),
+        machines: stored.relayRemovalPending?.machines ?? [],
+        phones: phones.map((phone) => phone.name),
+        startKeyHanded: stored.relayRemovalPending?.startKeyHanded ?? false
+      };
+      delete stored.relayRemovalPending;
+      await this.writeStored(stored, true);
+      return { ...stored.relayRemoval };
+    });
+  }
+
+  /** The User dismissed the notice: it is not shown again. */
+  async dismissRelayRemoval(): Promise<void> {
     const stored = await this.readStored();
-    if (this.storedReadError) throw new Error("Device pairing trust could not be read.");
-    const revokedKeys = stored.revokedMachinePairingKeys ?? [];
-    const trusted = new Set((stored.trustedDevices ?? []).map(device => device.deviceId));
-    return { revokedKeys, authorizedKeys: Object.entries(stored.machinePairingBindings ?? {})
-      .filter(([key, device]) => !revokedKeys.includes(key) && trusted.has(device)).map(([key]) => key) };
+    if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+    if (!stored.relayRemoval || stored.relayRemoval.dismissedAt) return;
+    stored.relayRemoval = { ...stored.relayRemoval, dismissedAt: new Date().toISOString() };
+    await this.writeStored(stored, true);
+  }
+
+  async relayRemoval(): Promise<RelayRemovalRecord | undefined> {
+    const stored = await this.readStored();
+    return stored.relayRemoval ? { ...stored.relayRemoval } : undefined;
   }
 
   async listMachineInstalls(): Promise<MachineInstallRecord[]> {
@@ -3770,18 +3711,6 @@ export class SettingsService {
   async getMachinePairing(pairingKey: string): Promise<MobilePairingPackage | undefined> {
     const stored = await this.readStored();
     return this.readMachinePairings(stored)[pairingKey];
-  }
-
-  /** The hub's address as getHubConfig reads it, once its program serves
-   *  the relay (an older one does not, and a pairing that named it would
-   *  find nobody there). */
-  private hubUrlOf(stored: StoredSettings): string | undefined {
-    const override = process.env.ACCORDAGENTS_HUB_URL?.trim();
-    if (override) return isAcceptableHubUrl(override) ? override : undefined;
-    const hub = stored.hub;
-    if (!hub?.url || !isAcceptableHubUrl(hub.url)) return undefined;
-    const installed = hub.server?.installedVersion;
-    return !installed || compareVersions(installed, HUB_RELAY_FIRST_VERSION) >= 0 ? hub.url : undefined;
   }
 
   /** The hub this desktop syncs with. `ACCORDAGENTS_HUB_URL` points a local
@@ -3897,12 +3826,11 @@ export class SettingsService {
       machinePowerHandoffs: _powerHandoffs,
       trustedDevices: _trustedDevices,
       hubPhoneInvites: _hubPhoneInvites,
-      machinePairingBindings: _machinePairingBindings,
-      revokedMachinePairingKeys: _revokedMachinePairingKeys,
       machineDeviceRevocations: _machineDeviceRevocations,
+      relayRemoval: _relayRemoval,
+      relayRemovalPending: _relayRemovalPending,
       machineInactivityCheckAt: _machineInactivityCheckAt,
       removedMachineOutboxes: _removedMachineOutboxes,
-      machineMoves: _machineMoves,
       lastRepoPath: _lastRepoPath,
       ...shareable
     } = stored;
@@ -3967,12 +3895,11 @@ export class SettingsService {
       machinePowerHandoffs: stored.machinePowerHandoffs,
       trustedDevices: stored.trustedDevices,
       hubPhoneInvites: stored.hubPhoneInvites,
-      machinePairingBindings: stored.machinePairingBindings,
-      revokedMachinePairingKeys: stored.revokedMachinePairingKeys,
       machineDeviceRevocations: stored.machineDeviceRevocations,
+      relayRemoval: stored.relayRemoval,
+      relayRemovalPending: stored.relayRemovalPending,
       machineInactivityCheckAt: stored.machineInactivityCheckAt,
       removedMachineOutboxes: stored.removedMachineOutboxes,
-      machineMoves: stored.machineMoves,
       lastRepoPath: stored.lastRepoPath
     };
     // One atomic settings write replaces both configuration and environment.
@@ -3999,8 +3926,9 @@ export class SettingsService {
     return parsed && typeof parsed === "object" ? parsed as Record<string, MobilePairingPackage> : {};
   }
 
-  // Machine pairings carry relay keys, so they are stored sealed or not at
-  // all; the format is marked so a later read never guesses.
+  // Machine pairings carry the key of a machine's first hello, so they are
+  // stored sealed or not at all; the format is marked so a later read never
+  // guesses.
   private sealJson(json: string): string {
     const secrets = hostPlatform().secrets;
     if (!secrets.isEncryptionAvailable()) {
@@ -4628,25 +4556,6 @@ export class SettingsService {
   private normalizeChatPromptContextSettings(value: unknown): ChatPromptContextSettings {
     return normalizeChatPromptContextSettings(value);
   }
-}
-
-function normalizeMachineMoves(value: unknown): MachineMoveRecord[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const text = (item: unknown): item is string => typeof item === "string" && item.length > 0;
-  const addresses = (item: unknown): item is MachineMoveRecord["to"] =>
-    Boolean(item) && typeof item === "object" && text((item as MachineMoveRecord["to"]).relayUrl) && text((item as MachineMoveRecord["to"]).outboxUrl);
-  const records = value.filter((item): item is MachineMoveRecord => Boolean(item) && typeof item === "object"
-    && text((item as MachineMoveRecord).machineId) && text((item as MachineMoveRecord).pairingKey) && text((item as MachineMoveRecord).requestedAt)
-    && addresses((item as MachineMoveRecord).from) && addresses((item as MachineMoveRecord).to))
-    .map((item) => ({
-      machineId: item.machineId,
-      pairingKey: item.pairingKey,
-      from: { relayUrl: item.from.relayUrl, outboxUrl: item.from.outboxUrl },
-      to: { relayUrl: item.to.relayUrl, outboxUrl: item.to.outboxUrl },
-      ...(text(item.instanceId) ? { instanceId: item.instanceId } : {}),
-      requestedAt: item.requestedAt
-    }));
-  return records.length ? records : undefined;
 }
 
 /** A phone invite this desktop made, and what became of it. */

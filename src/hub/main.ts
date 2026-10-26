@@ -10,7 +10,6 @@ import { HubFolder } from "./hubFolder";
 import { hubApplyPolicy } from "./hubPolicy";
 import { HubLog } from "./hubLog";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
-import { HubRelayMailboxes, HubRelayRooms } from "./hubRelay";
 import { HubRetention, hubRetentionConfig } from "./hubRetention";
 import { HubChangeFeed, HubPhoneApi } from "./hubPhone";
 import { HUB_CARD_EVENT_KINDS, HubProgress, HubWaker, approvalNotice, foldApprovalCards, phoneMessageHomes, replyNotice } from "./hubPhoneState";
@@ -111,7 +110,6 @@ export function composeHub(options: {
   keys: { publicKey: string; privateJwk: import("node:crypto").JsonWebKey };
   log: (event: string, payload: Record<string, unknown>) => void;
   acmeWebroot?: string;
-  relay?: { mailboxes: HubRelayMailboxes; rooms: HubRelayRooms };
   /** Local QA and tests: where the EC2 API is reached instead of AWS. */
   ec2Endpoint?: string;
   /** Tests: the push service and AWS are stand-ins. */
@@ -189,7 +187,6 @@ export function composeHub(options: {
   const server = new HubServer({
     hubId: options.hubId, version: options.version, storage, log: hubLog, search, vapidPublicKey: options.keys.publicKey,
     ...(options.acmeWebroot ? { acmeWebroot: options.acmeWebroot } : {}), debugLog: log,
-    ...(options.relay ? { relay: options.relay } : {}),
     phone: phoneApi,
     onCatalogChanged: () => phoneApi.catalogChanged(),
     onProgress: (frames) => { for (const frame of frames) progress.noteFrame(frame); }
@@ -254,12 +251,8 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
   }
 
   const keys = loadOrCreateVapidKeys(path.join(userDataPath(), "vapid.json"));
-  // The relay the phone and the machines speak, rung with the same keys.
-  const mailboxes = new HubRelayMailboxes({ storage: storage.relay(), vapid: { ...keys, subject: PUSH_SUBJECT }, log });
-  await mailboxes.start();
   const hub = composeHub({
     storage, hubId: hubId(), version: HUB_VERSION, keys, log, acmeWebroot: args.acmeWebroot,
-    relay: { mailboxes, rooms: new HubRelayRooms() },
     // QA only: a stand-in for AWS on this computer. A signed start request
     // never goes to any other address than AWS's own.
     ec2Endpoint: loopbackEndpoint(process.env.ACCORDAGENTS_HUB_EC2_ENDPOINT)

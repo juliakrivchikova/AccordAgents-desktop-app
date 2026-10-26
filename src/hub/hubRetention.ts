@@ -198,9 +198,8 @@ export class HubRetention {
  * Who reads which scopes, and how far each scope may be forgotten.
  *
  * Readers are the devices on the roster that read the order: the owner,
- * every device that has read here, and machines the desktop says read it
- * (a machine still on a relay does not, and holds nothing). A reader that
- * has not read yet is kept for from where it was set up. Chat changes and
+ * every device that has read here, and machines the desktop says read it.
+ * A reader that has not read yet is kept for from where it was set up. Chat changes and
  * chat actions are read by all of them. A channel between two devices is
  * read by its two ends: the desktop and a machine it enrolled (`rv-...`,
  * the machine known from the roster or from what it wrote there), or any

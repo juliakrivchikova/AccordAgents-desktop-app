@@ -7,8 +7,8 @@ import { matchingChatSavedPrompts } from "../shared/chatSavedPrompts";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../shared/deviceEventBlobs";
 import type { HubComposerCatalog, HubDevice, HubPhoneScope } from "../shared/hubProtocol";
 import { controlCardFromApproval, controlCardFromChoiceMessage, type MobileControlCard } from "../shared/mobileControlCards";
-import { MOBILE_CHAT_LIST_LIMIT, buildMobileChatList, buildMobileTimelinePage, mobileRelayChatMembers } from "../main/services/mobileChatCatalog";
-import type { MobileRelayChatListItem } from "../main/services/mobileRelayControl";
+import { MOBILE_CHAT_LIST_LIMIT, buildMobileChatList, buildMobileTimelinePage, mobileChatMembers } from "../main/services/mobileChatCatalog";
+import type { MobileChatListItem } from "../main/services/mobileTimeline";
 import type { StorageService } from "../main/services/storage";
 import { liveTimelineEvents, scopeCovers, type HubProgress, type HubWaker } from "./hubPhoneState";
 /**
@@ -126,13 +126,13 @@ const COMPOSER_TARGET_WINDOW = 200;
 const PHONE_ACTIVE_GRACE_MS = 8_000;
 
 export class HubPhoneApi {
-  private listCache = new Map<string, { seq: number; chats: MobileRelayChatListItem[] }>();
+  private listCache = new Map<string, { seq: number; chats: MobileChatListItem[] }>();
   private readonly waitersByDevice = new Map<string, number>();
   private readonly lastWaitEndedAt = new Map<string, number>();
   /** Each listed chat's row as last built, kept until that chat changes: a
    *  change rebuilds one row, not a read per chat (and the rows are small,
    *  where the chats behind them are not). */
-  private readonly rowCache = new Map<string, { seq: number; updatedAt: string; row: MobileRelayChatListItem }>();
+  private readonly rowCache = new Map<string, { seq: number; updatedAt: string; row: MobileChatListItem }>();
   /** A chat's newest messages as last read, while the chat has not changed:
    *  a phone asks for live progress every second or two and for the
    *  composer on every keystroke, and the hub's copy of a big chat is
@@ -214,7 +214,7 @@ export class HubPhoneApi {
     return catalog;
   }
 
-  private async chats(scope: HubPhoneScope): Promise<MobileRelayChatListItem[]> {
+  private async chats(scope: HubPhoneScope): Promise<MobileChatListItem[]> {
     const key = scope.scope === "device" ? "device" : `conversation:${scope.conversationId}`;
     const feed = this.options.feed;
     const seq = feed.current();
@@ -365,7 +365,7 @@ export class HubPhoneApi {
     const conversation = opened?.conversation;
     const empty = { ok: true, type: "mobile.composer", conversationId, query: text, commands: [], prompts: [], skills: [] };
     if (!conversation || conversation.kind !== "chat") return { status: 200, body: empty };
-    const participants = mobileRelayChatMembers(conversation) as ChatParticipant[];
+    const participants = mobileChatMembers(conversation) as ChatParticipant[];
     const target = resolveChatDeliveryTargets({ conversation, participants, content, options: CHAT_DELIVERY_POLICY_OPTIONS });
     const clear = target.targets.length > 0 && target.unknownHandles.length === 0;
     const needle = text.trim().toLowerCase();

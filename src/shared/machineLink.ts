@@ -69,9 +69,6 @@ export interface MachineHelloBody {
   outboxError?: string;
   /** This runtime hosts scheduled scripts (absent before scripts existed). */
   scriptsSupported?: boolean;
-  /** This runtime can move to another relay address when told to
-   *  (machine.transport.move); absent before it could. */
-  transportMoveSupported?: boolean;
   /** An enabled scheduled script keeps this machine from stopping when idle.
    *  Not a run: the desktop's update gate does not wait on it. */
   keepAwake?: boolean;
@@ -379,7 +376,7 @@ export interface MachineAttachmentResultBody {
 }
 
 /** Raw bytes per machine.attachment.result part: ~2.8 MiB once base64-encoded
- *  and sealed, well under the 10 MiB relay logical-message limit, and short
+ *  and sealed, under the 4 MiB limit of a frame in the server's rooms, and short
  *  enough that the link's other traffic is not held behind one picture. */
 export const MACHINE_ATTACHMENT_PART_BYTES = 1_572_864;
 
@@ -547,35 +544,7 @@ export interface MachineScriptsChangedBody {
   type: "machine.scripts.changed";
 }
 
-/** Desktop -> machine: meet this desktop and the phone at another relay
- *  address from now on (the User's own server). The machine keeps its keys,
- *  rooms and mailbox ids, rewrites the addresses in its enrollment and
- *  restarts. Only an idle machine is asked. */
-export interface MachineTransportMoveBody {
-  type: "machine.transport.move";
-  requestId: string;
-  /** The runtime instance the desktop last heard from; a request made for an
-   *  earlier run of the machine is refused. */
-  instanceId?: string;
-  expiresAt?: string;
-  /** How long the desktop waits for the answer, from when it asked: the
-   *  machine measures it on its own clock from receipt, so the two clocks
-   *  need not agree. */
-  answerWithinMs?: number;
-  relayUrl: string;
-  outboxUrl: string;
-}
-
-export interface MachineTransportMovedBody {
-  type: "machine.transport.moved";
-  requestId: string;
-  ok: boolean;
-  error?: string;
-}
-
 export type MachineLinkMessage =
-  | MachineTransportMoveBody
-  | MachineTransportMovedBody
   | MachineScriptsRequestBody
   | MachineScriptsResultBody
   | MachineScriptsChangedBody
@@ -672,8 +641,6 @@ const MESSAGE_TYPE_TABLE: Record<MachineLinkMessageType, true> = {
   "machine.scripts.request": true,
   "machine.scripts.result": true,
   "machine.scripts.changed": true,
-  "machine.transport.move": true,
-  "machine.transport.moved": true,
   "machine.member.background": true,
   "machine.member.background.snapshot": true,
   "machine.member.background.request": true,

@@ -5,7 +5,7 @@
  * without Electron, enrolled with one desktop through a machine pairing. It
  * hosts the participants whose home it is, serves the full App MCP tool
  * registry from its own copy of the chats, and talks to the desktop only
- * through the relay.
+ * through the User's own server.
  *
  * Usage:
  *   node dist/main/machine/main.js --enrollment <pairing.json> [--user-data <dir>] [--name <machine name>]
@@ -14,11 +14,9 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
-import { moveEnrollment, shellCommandLine } from "./transportMove";
 import path from "node:path";
 import { artifactMembersForConversation } from "../shared/artifacts";
-import { ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS, assertMobilePairingPackage, type MobilePairingPackage } from "../shared/mobilePairing";
+import { assertMobilePairingPackage, type MobilePairingPackage } from "../shared/mobilePairing";
 import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "../main/appToolWiring";
 import { createHeadlessPlatform, setHostPlatform, userDataPath } from "../main/platform";
 import { AgentEnvironmentService } from "../main/services/agentEnvironment";
@@ -59,8 +57,6 @@ import { HUB_SCOPE_PREFIXES, HubSync, PULLED_KEY, hubChatChangeApplier, hubPushe
 import { HubClient } from "../main/services/hubClient";
 import { scheduleHubDeviceRetention } from "../main/services/deviceRetention";
 import type { DeviceEventGap } from "../shared/deviceEventDelivery";
-import { signHubRequest } from "../main/services/hubAuth";
-import { setMailboxRegistrationSigner } from "../main/services/mailboxAccess";
 import { ScriptSecretStore, ScriptStore } from "../main/services/scriptStore";
 import { machineScriptHostPhrase } from "../shared/scripts";
 import { PHONE_TURN_RESUME_EVERY_MS, PHONE_TURN_RESUME_WINDOW_MS } from "../shared/hubProtocol";
@@ -271,37 +267,19 @@ async function revertMachinePower(args: MachineArgs): Promise<void> {
   console.log("Machine power reverted.");
 }
 
-function readEnrollment(enrollmentPath: string): MobilePairingPackage {
+function readEnrollment(enrollmentPath: string): MobilePairingPackage & { hubUrl: string } {
   const raw = readFileSync(enrollmentPath, "utf8");
   const parsed = JSON.parse(raw) as unknown;
   assertMobilePairingPackage(parsed);
   if (parsed.purpose !== "machine-host") {
     throw new Error("The enrollment file is not a machine-host pairing.");
   }
-  return parsed;
-}
-
-/** How long a moved runtime waits for its own orderly stop before it exits
- *  anyway: its enrollment names the new address, and staying up on the old
- *  one with no new work would help nobody. */
-const RESTART_STOP_TIMEOUT_MS = 30_000;
-
-/** Starts this runtime again after it stops. Under its service the service
- *  manager does (it restarts a runtime that exits); run by hand, a copy of
- *  it is started once this one has let go of its files. */
-function restartRuntime(stop: (() => Promise<void>) | undefined): void {
-  if (!process.env.INVOCATION_ID) {
-    // The copy waits until this process is gone: two runtimes never share
-    // the machine's files.
-    const command = shellCommandLine([process.execPath, ...process.execArgv, ...process.argv.slice(1)]);
-    spawn("/bin/sh", ["-c", `while kill -0 ${process.pid} 2>/dev/null; do sleep 1; done; exec ${command}`], { detached: true, stdio: "ignore", env: process.env }).unref();
+  // The shared relay is gone: a machine meets its desktop and phone only on
+  // the User's own server, so an enrollment without one cannot connect.
+  if (!parsed.hubUrl) {
+    throw new Error("This machine was set up for the shared relay, which AccordAgents no longer uses. Set up your server on the desktop, then set this machine up again from there (Cloud run in a member's settings).");
   }
-  void Promise.race([
-    (stop ?? (async () => undefined))().catch((error: unknown) => {
-      console.error(`Machine shutdown before restart is not complete: ${error instanceof Error ? error.message : String(error)}`);
-    }),
-    new Promise((resolve) => setTimeout(resolve, RESTART_STOP_TIMEOUT_MS))
-  ]).finally(() => process.exit(0));
+  return { ...parsed, hubUrl: parsed.hubUrl };
 }
 
 function appSkillsSourceRoot(appPath: string): string {
@@ -345,17 +323,6 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   void appSkillsService;
   const appMcpService = new AppMcpService(debugLogService);
   const chatEventLogService = new ChatEventLogService(storageService);
-  /** Set once the runtime is up; a move restarts through it. */
-  let stopRuntime: (() => Promise<void>) | undefined;
-  // This machine's own mailboxes on the User's server (its rooms with
-  // other machines, with the phone) are registered with its signature.
-  setMailboxRegistrationSigner(async ({ url, method, pathWithQuery, body }) => {
-    // Only the User's own server takes it; the shared relay never sees it.
-    const relay = enrollment.relayUrl ? new URL(enrollment.relayUrl) : undefined;
-    const shared = ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS.relayUrl ? new URL(ACCORD_MANAGED_MOBILE_CONTROL_DEFAULTS.relayUrl).host : undefined;
-    if (!relay || relay.host !== url.host || relay.host === shared) return undefined;
-    return signHubRequest(await chatEventLogService.getOrCreateDeviceIdentity(), { method, pathWithQuery, body });
-  });
   const chatEventMirrorService = new ChatEventMirrorService(
     storageService,
     chatEventLogService,
@@ -392,9 +359,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     postNote: (conversationId, eventId, content) => chatService.postArtifactChatNote(conversationId, eventId, content),
     onChanged: () => undefined,
     // Through the User's hub nobody is waited on (see MachineHostService).
-    ...artifactEventWriter(storageService, chatEventLogService, () => hostRef?.chatActionRecipients() ?? (enrollment.hubUrl ? [] : [{
-      deviceId: enrollment.issuer.originId, channelId: enrollment.rendezvousId
-    }]), artifactStore),
+    ...artifactEventWriter(storageService, chatEventLogService, () => hostRef?.chatActionRecipients() ?? [], artifactStore),
     logger: (event, payload) => {
       void debugLogService.write(event, payload);
     }
@@ -503,14 +468,11 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     serveChatActionDependency: async (dependency) => dependency.targetKey.startsWith("artifact:")
       && artifactService.emitRevisionActionFor(dependency.targetKey.slice("artifact:".length), dependency.stateId),
     pairing: enrollment,
-    // With the User's hub, this machine meets its devices in the hub's rooms
-    // and its events travel in the hub's order (no relay, no mailbox).
-    ...(hubUrl ? {
-      hubMode: true,
-      hubRepair: (gap: DeviceEventGap) => { void hubSyncRef?.repairGap(gap); },
-      createClient: (pairing: MobilePairingPackage) => hubRoom(hubUrl, pairing.rendezvousId),
-      createPeerClient: (room: { rendezvousId: string }) => hubRoom(hubUrl, room.rendezvousId)
-    } : {}),
+    // This machine meets its devices in the rooms of the User's server and
+    // its events travel in the server's order.
+    hubRepair: (gap: DeviceEventGap) => { void hubSyncRef?.repairGap(gap); },
+    createClient: (pairing: MobilePairingPackage) => hubRoom(hubUrl, pairing.rendezvousId),
+    createPeerClient: (room: { rendezvousId: string }) => hubRoom(hubUrl, room.rendezvousId),
     deviceId: identity.originId,
     machineName: args.machineName,
     appVersion: platform.appVersion(),
@@ -554,13 +516,10 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
         void writeFile(machineLabelPath, JSON.stringify({ name }), "utf8").catch(() => undefined);
       }
     },
-    moveTransport: async (addresses) => { await moveEnrollment(args.enrollmentPath, addresses); },
-    restartRuntime: () => restartRuntime(stopRuntime),
     scripts: {
       handle: (operation) => handleScriptsOperation(scriptService, operation),
       keepsHostAwake: () => scriptService.keepsHostAwake(),
       scheduledCount: () => scriptService.scheduledCount(),
-      runningNow: () => scriptService.isRunningNow()
     },
     // Chats reach this machine as change events from the desktop.
     applyChatChanges: (event, payload) => chatService.applyRemoteChatChanges(event, payload)
@@ -578,12 +537,12 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     hostMachineId: () => host.enrolledMachineId(),
     desktopOriginId: () => enrollment.issuer.originId,
     machineOriginId: (machineId) => host.machineOriginId(machineId),
-    alwaysEmit: () => Boolean(enrollment.hubUrl)
+    alwaysEmit: () => true
   }));
   const stopChatChangePruning = scheduleChatChangePruning({
     storage: storageService,
     originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
-    unpushedAfter: async () => enrollment.hubUrl ? hubPushedThrough(storageService) : undefined,
+    unpushedAfter: async () => hubPushedThrough(storageService),
     log: (event, payload) => { void debugLogService.write(event, payload); }
   });
   // Through the hub, this machine's own channel events go once the hub has
@@ -591,7 +550,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   const stopDeviceRetention = scheduleHubDeviceRetention({
     storage: storageService,
     originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
-    hubScopes: async () => enrollment.hubUrl ? ["device:"] : undefined,
+    hubScopes: async () => ["device:"],
     pushedThrough: () => hubPushedThrough(storageService),
     log: (event, payload) => { void debugLogService.write(event, payload); }
   });
@@ -671,13 +630,9 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     await idlePower.start();
   }
   await host.start();
-  const hubClient = enrollment.hubUrl
-    ? new HubClient({ url: enrollment.hubUrl, identity: () => chatEventLogService.getOrCreateDeviceIdentity(), storage: storageService })
-    : undefined;
-  if (hubClient) {
-    // A picture the User sent from her phone is read from her server.
-    chatService.setHubBlobReader((reference) => hubClient.downloadBytes(reference));
-  }
+  const hubClient = new HubClient({ url: hubUrl, identity: () => chatEventLogService.getOrCreateDeviceIdentity(), storage: storageService });
+  // A picture the User sent from her phone is read from her server.
+  chatService.setHubBlobReader((reference) => hubClient.downloadBytes(reference));
   // A message the User wrote on her phone starts the members that live here.
   const isUsersPhone = (originId: string): boolean | Promise<boolean> => host.isPhone(originId);
   chatService.setPhoneOrigins(isUsersPhone, await phoneTurnsSince(storageService.hub(), PULLED_KEY, Date.now(), PHONE_TURN_RESUME_WINDOW_MS)
@@ -695,7 +650,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   const phoneTurnsEvery = setInterval(resumePhoneTurns, PHONE_TURN_RESUME_EVERY_MS);
   phoneTurnsFirst.unref?.();
   phoneTurnsEvery.unref?.();
-  const hubSync = hubClient ? new HubSync({
+  const hubSync = new HubSync({
     client: hubClient,
     storage: storageService,
     localOriginId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
@@ -714,12 +669,10 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       localOriginId: (await chatEventLogService.getOrCreateDeviceIdentity()).originId
     }),
     log: (event, payload) => { void debugLogService.write(event, payload); }
-  }) : undefined;
+  });
   hubSyncRef = hubSync;
-  if (hubSync) {
-    chatEventLogService.onLocalAppend(() => hubSync.nudgePush());
-    hubSync.start();
-  }
+  chatEventLogService.onLocalAppend(() => hubSync.nudgePush());
+  hubSync.start();
   void scriptService.start().catch((error) => debugLogService.write("scripts.start.error", { message: String(error) }));
   // Repair artifact actions written by runtimes whose event writer was absent.
   // The ids are immutable, so a restart cannot create another version or signature.
@@ -747,11 +700,10 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     }).finally(() => { refreshing = false; });
   }, 30_000) : undefined;
   presenceTimer?.unref();
-  console.log(`AccordAgents machine ${identity.originId} connected to ${enrollment.hubUrl ?? enrollment.relayUrl} (user data: ${userDataPath()})`);
+  console.log(`AccordAgents machine ${identity.originId} connected to ${enrollment.hubUrl} (user data: ${userDataPath()})`);
 
-  // One stop, whoever asks for it (a move's restart, the service manager's
-  // SIGTERM): a second request waits for the first instead of running the
-  // shutdown again. A stop that failed may be asked for again.
+  // One stop, whoever asks for it (the service manager's SIGTERM): a second
+  // request waits for the first instead of running the shutdown again. A stop that failed may be asked for again.
   let stopping: Promise<void> | undefined;
   const stopOnce = async (): Promise<void> => {
     // Nothing new is claimed while the runtime stops (it could not run it).
@@ -769,15 +721,13 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     await scriptService.stop();
     // The channels close with the host: nothing is read into them any more,
     // so nothing read now is lost; it is read again on the next start.
-    hubSync?.pausePulls();
+    hubSync.pausePulls();
     await host.shutdown(() => cliAgentRunner.shutdownWarmAgents());
-    if (hubSync) {
-      // What the shutdown itself wrote (interrupted turns) goes up before the
-      // link closes; an unreachable hub gets it on the next start instead.
-      hubSync.nudgePush();
-      await Promise.race([hubSync.idle(), new Promise((resolve) => setTimeout(resolve, 5_000).unref())]);
-      hubSync.stop();
-    }
+    // What the shutdown itself wrote (interrupted turns) goes up before the
+    // link closes; an unreachable hub gets it on the next start instead.
+    hubSync.nudgePush();
+    await Promise.race([hubSync.idle(), new Promise((resolve) => setTimeout(resolve, 5_000).unref())]);
+    hubSync.stop();
     idlePower?.close();
     await idlePower?.releaseAfterShutdown();
     // The registration outlives the idle scheduler: it is released only once
@@ -790,14 +740,13 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     }
     await appMcpService.stop();
   };
-  stopRuntime = () => {
+  return () => {
     stopping ??= stopOnce().catch((error: unknown) => {
       stopping = undefined;
       throw error;
     });
     return stopping;
   };
-  return stopRuntime;
 }
 
 if (require.main === module) {

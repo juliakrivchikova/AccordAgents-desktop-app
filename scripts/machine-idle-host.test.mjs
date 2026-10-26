@@ -10,7 +10,7 @@ import { MachineHostPowerRegistry } from "../dist/main/main/services/machineHost
 import { MachineIdleScheduler } from "../dist/main/main/services/machineIdle.js";
 import { MachineIdlePower } from "../dist/main/main/services/machineIdlePower.js";
 import { MACHINE_IDLE_STOP_MS } from "../dist/main/shared/machinePower.js";
-import { openMachineRelayPayload } from "../dist/main/main/services/machineRelaySealing.js";
+import { openMachinePayload } from "../dist/main/main/services/machineChannelSealing.js";
 
 test("idle fences the actual host admission path; retained results resend and late turns wait for a new boot", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-host-"));
@@ -21,7 +21,7 @@ test("idle fences the actual host admission path; retained results resend and la
     const eventLog = new ChatEventLogService(storage); const sourceLog = new ChatEventLogService(source);
     const [identity, sender] = await Promise.all([eventLog.getOrCreateDeviceIdentity(), sourceLog.getOrCreateDeviceIdentity()]);
     const pairing = { version: 1, purpose: "machine-host", issuer: sender, rendezvousId: "idle-room", stableRoutingId: "idle-route",
-      relaySealKeyBase64: Buffer.alloc(32, 6).toString("base64url"), relayUrl: "ws://127.0.0.1:1/v1/relay",
+      relaySealKeyBase64: Buffer.alloc(32, 6).toString("base64url"), hubUrl: "http://127.0.0.1:1",
       capabilities: [{ scope: "device", canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }],
       fingerprint: "idle-test", createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString() };
     const sent = []; const conversations = new Map(); const runs = []; let finish;
@@ -31,7 +31,7 @@ test("idle fences the actual host admission path; retained results resend and la
       // The machine seals for the device it is answering, so the desktop reads
       // its own frames with its own key rather than a key the room shares.
       sendCiphertext: async request => {
-        sent.push(await openMachineRelayPayload(request.ciphertext,
+        sent.push(await openMachinePayload(request.ciphertext,
           { publicKeyDerBase64: sender.publicKeyDerBase64, privateKeyDerBase64: sender.privateKeyDerBase64 },
           undefined, pairing.rendezvousId));
         return [];
@@ -53,7 +53,8 @@ test("idle fences the actual host admission path; retained results resend and la
     const send = async (body, eventId) => {
       const event = (await sourceLog.appendLocalEvent({ conversationId: body.conversationId ?? body.conversation.id,
         kind: body.type, payload: body, eventId, logScopeId: `device:idle-room:${JSON.stringify(["chat", "actions"])}` })).event;
-      await host.eventChannel.receive({ protocol: "accord-device-events-v1", from: sender.originId, to: identity.originId, type: "event", event });
+      // A durable event reaches the machine only through the server's order.
+      assert.equal(await host.receiveFromHub(event), "delivered");
       return event;
     };
     const conversation = { id: "chat", kind: "chat", title: "Idle test", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),

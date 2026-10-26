@@ -35,20 +35,12 @@ export type {
   MachineSshTarget,
   MachineUpgradeRequest
 } from "./machineInstall";
-import type {
-  CreateMobilePairingRequest,
-  CreateMobilePairingResult,
-  MobileControlSettings,
-  RevokeMobilePairingRequest,
-  RevokeMobilePairingResult
-} from "./mobilePairing";
+import type { MobileControlSettings } from "./mobilePairing";
 
 export type {
   CreateMobilePairingRequest,
   CreateMobilePairingResult,
-  MobileControlSettings,
-  RevokeMobilePairingRequest,
-  RevokeMobilePairingResult
+  MobileControlSettings
 } from "./mobilePairing";
 
 export type ProviderKind = "openai" | "anthropic" | "gemini" | "codex-cli" | "claude-code" | "gemini-cli";
@@ -404,36 +396,6 @@ export interface AwsWorkerStartResult {
 export interface CloudRunWorkerTestResult {
   ok: boolean;
   message: string;
-}
-
-/** A phone that completed pairing. Persisted so one install survives desktop
- *  restarts; the relay seal key is stored through safeStorage like other
- *  secrets. Removed only when the user revokes the device. */
-export interface StoredMobilePairedDevice {
-  stableRoutingId: string;
-  rendezvousId: string;
-  /** Pairing package JSON with relaySealKeyBase64 stripped out. */
-  pairingJson: string;
-  encryptedSealKey: string;
-  sealKeyProtection: AgentEnvironmentValueProtection;
-  claimedAt: string;
-  /** Mailbox arrival-cursor state (W1): one epoch + one number replaces
-   *  re-reading the whole box every poll. */
-  mailboxEpoch?: string;
-  mailboxCursor?: number;
-}
-
-/** A relay mailbox revoke that could not reach the relay when its pairing was
- *  revoked. Retried on startup until the relay confirms, because until then a
- *  revoked link holder could still use the mailbox. The bearer token is a
- *  one-way derivation from the (already discarded) pairing seal key and is
- *  stored through safeStorage like other secrets. */
-export interface StoredPendingMailboxRevocation {
-  outboxUrl: string;
-  mailboxScopeId: string;
-  encryptedToken: string;
-  tokenProtection: AgentEnvironmentValueProtection;
-  revokedAt: string;
 }
 
 export type CloudRunWorkerCheckId =
@@ -2987,7 +2949,6 @@ export interface AppBridge {
   respondToChatMentions(request: RespondToChatMentionsRequest): Promise<StartReviewResult>;
   respondToChatChoice(request: RespondToChatChoiceRequest): Promise<StartReviewResult>;
   respondToChatAppToolApproval(request: RespondToChatAppToolApprovalRequest): Promise<Conversation | undefined>;
-  createMobilePairing(request: CreateMobilePairingRequest): Promise<CreateMobilePairingResult>;
   /** A one-time code a phone pairs with the User's server by. */
   createPhoneInvite(request?: CreatePhoneInviteRequest): Promise<CreatePhoneInviteResult>;
   /** Revokes a phone code: unused, it stops working; used, its phone is removed. */
@@ -3000,7 +2961,6 @@ export interface AppBridge {
   onHubSetupProgress(callback: (state: import("./hubSetup").HubSetupState) => void): () => void;
   /** Hides one of the server's dismissable lines (by its id) on this desktop. */
   dismissHubNotice(id: string): Promise<import("./hubSetup").HubSetupState>;
-  revokeMobilePairing(request: RevokeMobilePairingRequest): Promise<RevokeMobilePairingResult>;
   startReview(request: ReviewRequest): Promise<StartReviewResult>;
   continueReview(request: ContinueReviewRequest): Promise<StartReviewResult>;
   askPlanDecisionClarification(request: PlanDecisionClarificationRequest): Promise<StartReviewResult>;
@@ -3053,7 +3013,8 @@ export interface AppBridge {
   answerMachineInactivity(request: AnswerMachineInactivityRequest): Promise<MachineInactivityQuestion[]>;
   onMachineInactivityQuestions(callback: (questions: MachineInactivityQuestion[]) => void): () => void;
   // Machines transport: installing and upgrading the runtime on a machine.
-  // This is the only SSH path to a machine; messaging always uses the relay.
+  // This is the only SSH path to a machine; messaging always goes through
+  // the User's server.
   probeMachineInstall(request: { machineId: string; target: MachineSshTarget }): Promise<MachineRuntimeProbe>;
   installMachine(request: MachineInstallRequest): Promise<MachineInstallResult>;
   upgradeMachine(request: MachineUpgradeRequest): Promise<MachineInstallResult>;

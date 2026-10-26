@@ -908,3 +908,26 @@ test("a phone whose enrollment a device started reading after is admitted from i
   assert.equal(admitted, 1, "admitted once, from the enrollment the server still keeps");
   assert.equal(applied[0].originId, s.phone.identity.originId);
 });
+
+test("a known phone paired again writes a new certificate, and it is taken; one that is refused changes nothing", async (t) => {
+  const s = await setup(t);
+  const applied: ChatEventEnvelope[] = [];
+  // The phone is known, and pairs again with a new code: a second certificate, then a message.
+  await s.phone.log.appendLocalEvent({ conversationId: "device-enrollment", logScopeId: HUB_PHONE_ENROLLMENT_SCOPE, kind: HUB_PHONE_ENROLLED_EVENT_KIND, payload: { certificate: "new code" } });
+  await s.phone.log.appendLocalEvent({ conversationId: "device-enrollment", logScopeId: HUB_PHONE_ENROLLMENT_SCOPE, kind: HUB_PHONE_ENROLLED_EVENT_KIND, payload: { certificate: "settled code" } });
+  await s.phone.log.appendLocalEvent(change("chat-r", 1));
+  await pushAll(s.link(s.phone, []), s, 3);
+  const taken: string[] = [];
+  const desktopSync = s.link(s.desktop, applied, {
+    admit: async (event) => {
+      const certificate = (event.payload as { certificate?: string }).certificate ?? "";
+      taken.push(certificate);
+      // The desktop refuses a certificate for a code it settled.
+      return certificate === "new code" ? s.phone.identity.publicKeyDerBase64 : undefined;
+    }
+  });
+  desktopSync.start();
+  await until(() => applied.length === 1);
+  assert.deepEqual(taken, ["new code", "settled code"], "each certificate of a known phone is offered");
+  assert.equal(applied[0].originId, s.phone.identity.originId, "the phone stays trusted after a refused certificate");
+});

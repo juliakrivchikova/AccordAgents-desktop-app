@@ -77,6 +77,14 @@ test("Cloud run returns the restored home identity so a new participant targets 
   assert.equal(result.machine.id, "original-home");
 });
 
+test("without the User's server Cloud run says so before AWS is touched", async () => {
+  const h = harness();
+  h.options.requireServer = async () => { throw new Error("Set up your server first (Settings → Your server): cloud machines connect through it."); };
+  await assert.rejects(h.service.prepare(request, () => {}), /Set up your server first/);
+  assert.deepEqual(h.calls, [], "no instance started, no machine enrolled");
+  assert.deepEqual(h.machines, []);
+});
+
 test("two desktops sharing one AWS instance install into separate persistent environments", async () => {
   const home = harness();
   const work = harness(); work.options.environmentId = async () => "work-desktop";

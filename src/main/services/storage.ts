@@ -38,7 +38,6 @@ import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
 import type { DeviceEventAppendOptions } from "../../shared/deviceEventDelivery";
 import { DEVICE_EVENT_SCHEMA_SQL, DeviceEventStorage, deviceEventAppendSql } from "./deviceEventStorage";
 import { DEVICE_EVENT_BLOB_SCHEMA_SQL, DeviceEventBlobStorage } from "./deviceEventBlobStorage";
-import { HubRelayStorage } from "./hubRelayStorage";
 import { HubStorage } from "./hubStorage";
 import { NATIVE_COMMAND_SCHEMA_SQL, NativeCommandStore } from "./nativeCommandStore";
 import { PHONE_TURN_CLAIM_SCHEMA_SQL, PhoneTurnClaimStore } from "./phoneTurnClaims";
@@ -355,7 +354,6 @@ export class StorageService {
   private sqliteSession?: SqliteSession;
   private machineProgressStore?: MachineProgressStore;
   private hubStorage?: HubStorage;
-  private hubRelayStorage?: HubRelayStorage;
   private savedMessageStateCache: Map<string, SavedMessageState> | undefined;
   private readonly dbPath: string;
   private readonly sqliteExecutable: string;
@@ -1926,17 +1924,6 @@ export class StorageService {
 
   machinePower(): MachinePowerStore {
     return new MachinePowerStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
-  }
-
-  /** On the hub: the relay's sealed mailboxes it serves to the phone and
-   *  the machines. */
-  relay(): HubRelayStorage {
-    this.hubRelayStorage ??= new HubRelayStorage({
-      init: () => this.init(),
-      query: <T>(sql: string) => this.queryJson<T>(sql),
-      execute: (sql: string) => this.runSql(sql)
-    });
-    return this.hubRelayStorage;
   }
 
   /** The hub's tables: on the hub, its order, roster and push subscriptions;

@@ -12,7 +12,6 @@ import { DEVICE_EVENT_PROBE_LIMIT, DeviceEventProjectionPendingError } from "../
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import { ChatEventLogService, verifySignedChatEvent } from "./chatEventLog";
 import type { StorageService } from "./storage";
-import { DeviceEventMailbox } from "./deviceEventMailbox";
 import { DeviceEventBlobIncompleteError } from "./deviceEventBlobStorage";
 import { DevicePacketAuthenticationError, signDevicePacket, verifyDevicePacket } from "./devicePacketAuthentication";
 
@@ -25,7 +24,7 @@ interface DeviceEventChannelOptions {
   peerPublicKeyDerBase64: string;
   pairing?: MobilePairingPackage;
   isPeerConnected?: () => boolean;
-  /** Seals before sending over the live room, or the same sealed mailbox. */
+  /** Seals before sending over the live room. */
   send(packet: DeviceEventPacket): Promise<void>;
   /** Domain owner persists before returning. Native effects must be guarded
    * by durable command receipts; a process crash may replay an unapplied event. */
@@ -91,7 +90,6 @@ export class DeviceEventChannelClosedError extends Error {
 }
 
 export class DeviceEventChannel {
-  private readonly mailbox?: DeviceEventMailbox;
   private inbound: Promise<void> = Promise.resolve();
   private flushing?: Promise<void>;
   private flushRequested = false;
@@ -115,15 +113,6 @@ export class DeviceEventChannel {
     const hash = createHash("sha256").update(Buffer.from(options.peerPublicKeyDerBase64, "base64")).digest("hex");
     if (options.peerDeviceId !== `device-${hash.slice(0, 32)}`) {
       throw new Error("Device event peer identity does not match its enrolled signing key.");
-    }
-    if (options.pairing?.outboxUrl && !options.hubMode) {
-      this.mailbox = new DeviceEventMailbox({
-        storage: options.storage, pairing: options.pairing,
-        localDeviceId: options.localDeviceId, peerDeviceId: options.peerDeviceId,
-        ...(options.heldKinds ? { heldKinds: options.heldKinds } : {}),
-        authenticate: packet => this.authenticate(packet),
-        receive: (packet) => this.receive(packet), onError: options.onError
-      });
     }
   }
 
@@ -161,14 +150,12 @@ export class DeviceEventChannel {
 
   start(): void {
     this.stopped = false;
-    this.mailbox?.start();
     this.scheduleFlush();
     void this.enqueue(() => this.drain()).catch((error) => this.report(error));
   }
 
   close(): void {
     this.stopped = true;
-    this.mailbox?.close();
     if (this.retry) clearTimeout(this.retry);
     this.retry = undefined;
   }
@@ -555,7 +542,7 @@ export class DeviceEventChannel {
     if (this.retry) clearTimeout(this.retry);
     this.retry = setTimeout(() => {
       this.retry = undefined;
-      void Promise.allSettled([this.flush(), this.mailbox?.flush(), this.receivePending ? this.enqueue(() => this.drain()) : undefined]).then((results) => {
+      void Promise.allSettled([this.flush(), this.receivePending ? this.enqueue(() => this.drain()) : undefined]).then((results) => {
         for (const result of results) if (result.status === "rejected") this.report(result.reason);
       }).finally(() => {
         if (!this.stopped && !this.retry) {
@@ -575,12 +562,8 @@ export class DeviceEventChannel {
     // Through a hub, delivery is the hub's acceptance: no receipts travel.
     if (this.options.hubMode) return;
     packet = await this.authenticate(packet);
-    const writes: Promise<void>[] = this.options.isPeerConnected?.() === false ? [] : [this.options.send(packet)];
-    if (this.mailbox) writes.push(this.mailbox.sendPacket(packet));
-    if (!writes.length) throw new Error("The enrolled peer is unreachable.");
-    // A slow HTTP mailbox cannot stall the live-room apply queue. Promise.any
-    // observes failures in both paths while resolving on the first success.
-    await Promise.any(writes);
+    if (this.options.isPeerConnected?.() === false) throw new Error("The enrolled peer is unreachable.");
+    await this.options.send(packet);
   }
 
   private async authenticate(packet: DeviceEventPacket): Promise<DeviceEventPacket> {

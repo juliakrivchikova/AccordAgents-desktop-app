@@ -269,6 +269,13 @@ export class HubStorage {
     this.ready ??= (async () => {
       await this.database.init();
       await this.database.execute(HUB_SCHEMA_SQL);
+      // The relay's sealed mailboxes and claims, from before the relay was
+      // removed: nothing reads them any more.
+      await this.database.execute(`
+        drop table if exists hub_relay_events;
+        drop table if exists hub_relay_claims;
+        drop table if exists hub_relay_mailboxes;
+      `);
       for (const added of HUB_ADDED_COLUMNS) {
         const columns = await this.database.query<{ name: string }>(`pragma table_info(${added.table});`);
         if (!columns.some((column) => column.name === added.column)) {

@@ -188,11 +188,6 @@ export function machineChatCopyProvider(options: {
   desktopOriginId(): Promise<string>;
   adoptMachineIdentity(machineId: string, identity: { originId: string; publicKeyDerBase64: string }): Promise<void>;
   settleChatSaves(): Promise<void>;
-  /** Other machines' changes held here beyond the marks, sent as events. */
-  shareAfterCopy?(machineId: string, marks: ChatCopyMark[]): Promise<number>;
-  /** After the machine imported the copy: changes kept for it up to the
-   *  marks are confirmed instead of sent. */
-  confirmCopied?(machineId: string, marks: ChatCopyMark[]): Promise<number>;
   /** The desktop's `chats` directory, whose pictures go along. */
   attachmentsDir?: string;
   tempDir: string;
@@ -214,13 +209,11 @@ export function machineChatCopyProvider(options: {
           ...(options.hubPosition ? { hubPosition: options.hubPosition } : {}),
           ...(options.otherAuthors ? { otherAuthors: options.otherAuthors } : {})
         });
-        await options.shareAfterCopy?.(machineId, manifest.marks);
         return {
           dir,
           ...(options.attachmentsDir ? { attachmentsDir: options.attachmentsDir } : {}),
           summary: { conversations: manifest.conversations, messages: manifest.messages, bytes: manifest.bytes },
-          cleanup,
-          imported: async () => { await options.confirmCopied?.(machineId, manifest.marks); }
+          cleanup
         };
       } catch (error) {
         await cleanup().catch(() => undefined);

@@ -1,7 +1,7 @@
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation, ConversationSummary } from "../../shared/types";
 import { chatMessageHiddenFromTimeline } from "../../shared/chatParticipantRequestThreads";
 import { controlCardFromApproval, controlCardFromChoiceMessage, type MobileControlCard } from "../../shared/mobileControlCards";
-import { timelineEventsFromSnapshot, type MobileRelayChatListItem, type MobileTimelinePage } from "./mobileRelayControl";
+import { timelineEventsFromSnapshot, type MobileChatListItem, type MobileTimelinePage } from "./mobileTimeline";
 
 /** The phone's chat list and a chat's page, built the same way wherever the
  *  chats are read: by the desktop from its own store, and by the User's
@@ -45,7 +45,7 @@ export interface MobileChatListOptions {
   summaries?: ConversationSummary[];
 }
 
-export async function buildMobileChatList(store: MobileCatalogStore, options: MobileChatListOptions): Promise<MobileRelayChatListItem[]> {
+export async function buildMobileChatList(store: MobileCatalogStore, options: MobileChatListOptions): Promise<MobileChatListItem[]> {
   const summaries = options.summaries ?? await store.listConversations();
   const listed = summaries
     .filter((summary) => summary.kind === "chat" && summary.archived !== true && (options.include?.(summary) ?? true))
@@ -80,7 +80,7 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
         .map((approval) => controlCardFromApproval(conversationId, approval)),
       ...(pendingChoicesByConversation.get(conversationId) ?? [])
     ].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-  const items: MobileRelayChatListItem[] = [];
+  const items: MobileChatListItem[] = [];
   for (const summary of listed) {
     // The list needs each chat's members and its last line, not its
     // history. Reading whole conversations here pulled the newest hundred
@@ -97,7 +97,7 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
     const newest = conversation?.messages.slice().reverse().filter((message) => message.content.trim()) ?? [];
     const lastMessage = newest.find((message) => !chatMessageHiddenFromTimeline(conversation as Conversation, message)) ??
       newest.find((message) => message.role === "participant" && message.metadata?.hiddenFromTimeline !== true);
-    const members = mobileRelayChatMembers(conversation);
+    const members = mobileChatMembers(conversation);
     const pendingCards = pendingCardsFor(summary.id, conversation);
     items.push({
       id: summary.id,
@@ -163,7 +163,7 @@ export async function buildMobileTimelinePage(store: MobileCatalogStore, convers
   };
 }
 
-export function mobileRelayChatMembers(conversation: Conversation | undefined): ChatParticipant[] {
+export function mobileChatMembers(conversation: Conversation | undefined): ChatParticipant[] {
   const participants = conversation?.metadata.participants;
   return Array.isArray(participants)
     ? participants.filter((participant): participant is ChatParticipant => Boolean(
