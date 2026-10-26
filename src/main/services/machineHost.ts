@@ -406,6 +406,11 @@ export class MachineHostService {
   /** Outbound sends leave in call order (progress before the finished result). */
   private outbound: Promise<void> = Promise.resolve();
   private desktopDeviceId?: string;
+  /** What the room last said of the enrolling desktop, as it said it. Greetings
+   *  are applied later, from the inbound queue, so one that the desktop sent
+   *  before it left (or before this machine's link dropped) cannot bring it
+   *  back: only the room's own word counts. */
+  private desktopInRoom = false;
   /** The enrolling desktop said, in its last greeting, that it runs the
    *  compactions members here ask for themselves. */
   private desktopTakesCompactions = false;
@@ -509,17 +514,28 @@ export class MachineHostService {
       if (event.type === "ready") {
         // Own link (re)established: greet the desktop again even if it is
         // the same one, so stops and results held meanwhile are reconciled.
+        // A room without it means it is away, whatever was known before.
         const desktop = event.peers.find((peer) => peer.deviceId === options.pairing.issuer.originId);
-        this.setDesktop(desktop?.deviceId, { announce: true });
+        this.desktopInRoom = Boolean(desktop);
+        if (desktop) this.setDesktop(desktop.deviceId, { announce: true });
+        else this.desktopAway("not-in-room");
       } else if (event.type === "peer-connected" && event.peer.deviceId === options.pairing.issuer.originId) {
         // Also the desktop's new connection in the seat of an old one the
         // server had not seen close: it is greeted again, as a new one is.
+        this.desktopInRoom = true;
         this.setDesktop(event.peer.deviceId, { announce: true });
       } else if (event.type === "peer-disconnected" && event.peer.deviceId === options.pairing.issuer.originId) {
-        this.desktopDeviceId = undefined;
-        void this.debugLogs.write("machine-host.desktop.away", { deviceId: event.peer.deviceId, pendingTerminals: this.pendingTerminals.size });
-        this.failAllAttachments("The desktop went away before answering with this picture.");
+        this.desktopInRoom = false;
+        this.desktopAway("left");
       }
+    });
+    // While this machine's own link is down, nothing is known of the desktop:
+    // it is not counted as present (a compaction would be handed to it and
+    // run when it next comes, maybe days later). The next "ready" says.
+    this.client.on("state", (state) => {
+      if (state === "connected") return;
+      this.desktopInRoom = false;
+      this.desktopAway("own-link");
     });
     // Inbound messages are applied strictly in arrival order: a conversation
     // delta must be stored before the turn request that follows it is read.
@@ -803,6 +819,14 @@ export class MachineHostService {
         void this.debugLogs.write("machine-host.approval.forward-error", { approvalId: approval.id, message: errorMessage(error) });
       });
     }
+  }
+
+  private desktopAway(reason: "left" | "not-in-room" | "own-link"): void {
+    if (!this.desktopDeviceId) return;
+    const deviceId = this.desktopDeviceId;
+    this.desktopDeviceId = undefined;
+    void this.debugLogs.write("machine-host.desktop.away", { deviceId, reason, pendingTerminals: this.pendingTerminals.size });
+    this.failAllAttachments("The desktop went away before answering with this picture.");
   }
 
   private setDesktop(deviceId: string | undefined, options: { announce?: boolean } = {}): void {
@@ -1164,7 +1188,9 @@ export class MachineHostService {
         return;
       }
       case "machine.hello.ack":
-        this.desktopDeviceId = body.desktopDeviceId || this.desktopDeviceId;
+        // Applied in order, maybe after the desktop left or this machine's
+        // link dropped: it counts as here only while the room says so.
+        if (this.desktopInRoom) this.desktopDeviceId = body.desktopDeviceId || this.desktopDeviceId;
         this.desktopTakesCompactions = body.compactionDelegation === true;
         if (body.machineId) {
           await this.options.eventStorage.deviceEvents().saveHostMachineId(this.options.pairing.rendezvousId, body.machineId);
@@ -1182,7 +1208,7 @@ export class MachineHostService {
         // A (re)started desktop asks to be greeted: the same reconciliation
         // as after a peer change, whether or not the relay reported one.
         if (replyTo && replyTo !== this.options.pairing.issuer.originId) await this.sendHello(replyTo);
-        else this.setDesktop(this.options.pairing.issuer.originId, { announce: true });
+        else if (this.desktopInRoom) this.setDesktop(this.options.pairing.issuer.originId, { announce: true });
         return;
       case "machine.settings.sync":
         if (await this.importSettings(body.snapshot, "sync")) {

@@ -616,3 +616,26 @@ test("an unconfirmed leaving machine keeps where to look again and a well-formed
       [["m1", "us-east-1", "018089055817"], ["m2", "us-east-1", undefined]]);
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
 });
+
+test("a relay removal that failed half way keeps its first failure for the notice across a restart, until it finishes", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-relay-removal-failed-"));
+  setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
+  const settingsPath = path.join(dir, "settings.json");
+  const make = (): SettingsService => { const service = new SettingsService(); (service as any).settingsPath = settingsPath; return service; };
+  try {
+    await make().beginRelayRemoval({ machines: ["One", "Two"], startKeyHanded: false });
+    await make().noteRelayRemovalFailure({ machine: "One", message: "disk full" });
+    const pending = await make().relayRemovalPending();
+    assert.deepEqual({ machine: pending?.failed?.machine, message: pending?.failed?.message }, { machine: "One", message: "disk full" });
+    assert.deepEqual(pending?.machines, ["One", "Two"]);
+    await make().dismissRelayRemoval();
+    assert.ok((await make().relayRemovalPending())?.failedDismissedAt, "its line, dismissed, stays dismissed");
+    // The next start fails again: said again.
+    await make().beginRelayRemoval({ machines: ["One"], startKeyHanded: false });
+    await make().noteRelayRemovalFailure({ machine: "One", message: "still full" });
+    assert.equal((await make().relayRemovalPending())?.failedDismissedAt, undefined);
+    const recorded = await make().finishRelayRemoval();
+    assert.deepEqual(recorded?.machines, ["One", "Two"]);
+    assert.equal(await make().relayRemovalPending(), undefined);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

@@ -140,6 +140,7 @@ import { MACHINE_POWER_MAX_ATTEMPTS, MACHINE_POWER_RETRY_MS, compareVersions } f
 import type { HubReadersResponse } from "../shared/hubProtocol";
 import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
 import { relayRemovalNotice, removeRelayEraRecords } from "./services/relayRemoval";
+import { MachineInactivityQuestions } from "./services/machineInactivityQuestions";
 import { ChatActionApplier } from "./services/chatActionApplier";
 import { ChatActionEmitter, permissionDecisionAction, choiceDecisionAction, chatActionEventId } from "./services/chatActionEmitter";
 import { MachineApprovalExecutor, machineApprovalResultId } from "./services/machineApprovalExecutor";
@@ -173,7 +174,7 @@ import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashRepo
 import { ACTIVITY_RECHECK_MS, appHiddenForUpdate, bootstrapAppUpdater, createUpdateRestart, createUpdateRestartGate, currentUpdateWindows, quitAndInstallUpdate, showUpdateRestartPrompt, updatePromptWindowShown } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
 import { MachineRecoveryService } from "./services/machineRecovery";
-import { MachineInactivityCheck, type MachineInactivityOutcome } from "./services/machineInactivity";
+import { MachineInactivityCheck } from "./services/machineInactivity";
 import { isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase, isMachineRecoveryOperation } from "../shared/machineInstall";
 import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
@@ -937,6 +938,9 @@ function awsInstanceOfWorker(worker: { hostKeyAlias?: string }): string | undefi
   return worker.hostKeyAlias?.startsWith(prefix) ? worker.hostKeyAlias.slice(prefix.length) : undefined;
 }
 
+/** Resolves once the machine link has started, or could not start. */
+let markMachineLinkReady: () => void = () => undefined;
+const machineLinkReady = new Promise<void>((resolve) => { markMachineLinkReady = resolve; });
 const cloudRunAwsService = new CloudRunAwsService(settingsService, {
   appVersion: app.getVersion(),
   // Unknown while the link is still connecting after this desktop started.
@@ -961,6 +965,7 @@ const cloudRunAwsService = new CloudRunAwsService(settingsService, {
   // An instance deleted in Settings → AWS, or one AWS terminated or no longer
   // has, takes its machines along exactly as Settings → Remove removes one.
   removeMachine: async (machineId) => { await removeMachine(machineId); },
+  machinesReady: () => machineLinkReady,
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
   }
@@ -991,22 +996,7 @@ function machineRuntimePayload(): MachineRuntimePayloadLocation {
   return { dir: path.join(app.getAppPath(), "dist", "machine"), source: "checkout", expectVersion: app.getVersion() };
 }
 /** Questions about machines that stopped being used, waiting for the User. */
-const machineInactivityAnswers = new Map<string, {
-  question: MachineInactivityQuestion;
-  resolve: (outcome: MachineInactivityOutcome) => void;
-  answering?: boolean;
-}>();
-/** A machine that connects again is in use: its open question goes away. */
-function withdrawMachineInactivityQuestion(machineId: string): void {
-  const entry = machineInactivityAnswers.get(machineId);
-  if (!entry || entry.answering) return;
-  machineInactivityAnswers.delete(machineId);
-  entry.resolve("active");
-  sendToMainWindow("machines:inactivity-questions", machineInactivityQuestions());
-}
-function machineInactivityQuestions(): MachineInactivityQuestion[] {
-  return [...machineInactivityAnswers.values()].map((entry) => entry.question);
-}
+const machineInactivityQuestions = new MachineInactivityQuestions((questions) => sendToMainWindow("machines:inactivity-questions", questions));
 
 /** Removes a machine from this desktop: Settings > Remove, and the answer
  *  "no longer in use" to the inactive-machine question. The cloud instance
@@ -1024,6 +1014,9 @@ async function removeMachine(id: string): Promise<MachineListResult> {
       });
     }
     await settingsService.removeMachine(id);
+    // However it was removed (Settings, AWS, the relay's cleanup), a question
+    // about it is settled with it.
+    machineInactivityQuestions.settle(id, "remove");
   } catch (error) {
     // Not removed: it stays a machine of this desktop, connected again, and
     // nothing kept for it is dropped.
@@ -1074,7 +1067,9 @@ async function removeRelayEra(): Promise<void> {
 async function relayRemovalNotices(): Promise<Array<{ id: string; text: string }>> {
   const notice = relayRemovalNotice(await settingsService.relayRemoval(), {
     hasServer: Boolean(await settingsService.getHubConfig().catch(() => undefined)),
-    serverPhones: (await hubPhones().catch(() => [])).length
+    serverPhones: (await hubPhones().catch(() => [])).length,
+    pending: await settingsService.relayRemovalPending().catch(() => undefined),
+    leftToRemove: (await settingsService.relayEraMachines().catch(() => [])).map((machine) => machine.name)
   });
   return notice ? [notice] : [];
 }
@@ -2472,24 +2467,13 @@ function registerIpc(): void {
   ipcMain.handle("machines:create", async (_event, request: CreateMachineRequest): Promise<CreateMachineResult> => {
     return createMachine(request);
   });
-  ipcMain.handle("machines:inactivity-questions", (): MachineInactivityQuestion[] => machineInactivityQuestions());
+  ipcMain.handle("machines:inactivity-questions", (): MachineInactivityQuestion[] => machineInactivityQuestions.list());
   ipcMain.handle("machines:inactivity-answer", async (_event, request: AnswerMachineInactivityRequest): Promise<MachineInactivityQuestion[]> => {
     const id = typeof request?.machineId === "string" ? request.machineId : "";
-    const entry = machineInactivityAnswers.get(id);
-    if (entry && !entry.answering && (request.answer === "keep" || request.answer === "remove")) {
-      // Removing is carried out before the question goes: when it fails, the
-      // window says so and the question stays to be answered again.
-      entry.answering = true;
-      try {
-        if (request.answer === "remove") await removeMachine(id);
-      } finally {
-        entry.answering = false;
-      }
-      machineInactivityAnswers.delete(id);
-      entry.resolve(request.answer);
-      sendToMainWindow("machines:inactivity-questions", machineInactivityQuestions());
+    if (request?.answer === "keep" || request?.answer === "remove") {
+      await machineInactivityQuestions.answer(id, request.answer, (machineId) => removeMachine(machineId));
     }
-    return machineInactivityQuestions();
+    return machineInactivityQuestions.list();
   });
   ipcMain.handle("machines:remove", async (_event, request: RemoveMachineRequest): Promise<MachineListResult> => {
     const id = typeof request?.id === "string" ? request.id.trim() : "";
@@ -3238,10 +3222,12 @@ void app.whenReady().then(async () => {
       });
     };
     void machineLinkService.start().then(() => {
+      markMachineLinkReady();
       startHubReading();
       forgetGoneInstance();
       return autoUpgrade.evaluate();
     }).catch((error) => {
+      markMachineLinkReady();
       startHubReading();
       forgetGoneInstance();
       void debugLogService.write("machine-link.start.error", { message: error instanceof Error ? error.message : String(error) });
@@ -3264,18 +3250,13 @@ void app.whenReady().then(async () => {
       },
       lastCheckAt: () => settingsService.getMachineInactivityCheckAt(),
       saveLastCheckAt: (at) => settingsService.saveMachineInactivityCheckAt(at),
-      ask: (machine) => new Promise((resolve) => {
-        machineInactivityAnswers.set(machine.id, {
-          question: { machineId: machine.id, name: machine.name, inactiveDays: machine.inactiveDays },
-          resolve
-        });
-        sendToMainWindow("machines:inactivity-questions", machineInactivityQuestions());
-      }),
+      ask: (machine) => machineInactivityQuestions.ask({ machineId: machine.id, name: machine.name, inactiveDays: machine.inactiveDays }),
       log: (event, payload) => { void debugLogService.write(event, payload); }
     }).start();
-    link.onHello((event) => withdrawMachineInactivityQuestion(event.machineId));
+    link.onHello((event) => machineInactivityQuestions.settle(event.machineId, "active"));
   } catch (error) {
     void debugLogService.write("machine-link.init.error", { message: error instanceof Error ? error.message : String(error) });
+    markMachineLinkReady();
     startHubReading();
   }
   // After the machines are known: what these save or re-emit is addressed to them.

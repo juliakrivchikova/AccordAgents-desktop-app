@@ -9,13 +9,14 @@
 
 import type { MachineRecord } from "../../shared/machineLink";
 import type { MachinePowerHandoffRecord } from "../../shared/machinePowerHandoff";
-import type { RelayRemovalRecord } from "./settings";
+import type { RelayRemovalPending, RelayRemovalRecord } from "./settings";
 
 export interface RelayRemovalOptions {
   settings: {
     relayRemoval(): Promise<RelayRemovalRecord | undefined>;
     relayEraMachines(): Promise<MachineRecord[]>;
     beginRelayRemoval(found: { machines: string[]; startKeyHanded: boolean }): Promise<void>;
+    noteRelayRemovalFailure(failure: { machine: string; message: string }): Promise<void>;
     finishRelayRemoval(): Promise<RelayRemovalRecord | undefined>;
   };
   /** The usual removal of a machine (Settings > Remove). */
@@ -34,17 +35,38 @@ export async function removeRelayEraRecords(options: RelayRemovalOptions): Promi
   // records, and the copy each phone keeps stays valid all the same.
   const live = (await options.handoffs.list()).filter((record) => !record.revokedAt);
   await options.settings.beginRelayRemoval({ machines: machines.map((machine) => machine.name), startKeyHanded: live.length > 0 });
-  for (const machine of machines) await options.removeMachine(machine.id);
+  // Each machine on its own: one that cannot be removed now does not keep
+  // the others; it is named in the notice and tried again at the next start.
+  let failed: { machine: string; message: string } | undefined;
+  for (const machine of machines) {
+    try {
+      await options.removeMachine(machine.id);
+    } catch (error) {
+      failed ??= { machine: machine.name, message: plainReason(error instanceof Error ? error.message : String(error)) };
+    }
+  }
+  if (failed) await options.settings.noteRelayRemovalFailure(failed);
   for (const record of await options.handoffs.list()) {
     if (!record.revokedAt) await options.handoffs.revoke(record.handoffId, "relay-removed");
   }
+  if (failed) return undefined;
   return options.settings.finishRelayRemoval();
 }
 
 /** The one line about what the relay's removal took off this desktop, or
  *  undefined when there is nothing to say (or it was dismissed). */
-export function relayRemovalNotice(removed: RelayRemovalRecord | undefined, now: { hasServer: boolean; serverPhones: number }): { id: string; text: string } | undefined {
-  if (!removed || removed.dismissedAt) return undefined;
+export function relayRemovalNotice(removed: RelayRemovalRecord | undefined, now: { hasServer: boolean; serverPhones: number; pending?: RelayRemovalPending; leftToRemove?: string[] }): { id: string; text: string } | undefined {
+  if (!removed) {
+    const failed = now.pending?.failed;
+    if (!failed || now.pending?.failedDismissedAt) return undefined;
+    // Removed since (Settings), it is no longer there to be tried again.
+    if (now.leftToRemove && !now.leftToRemove.includes(failed.machine)) return undefined;
+    return {
+      id: `relay-removed:failed:${failed.at}`,
+      text: `AccordAgents no longer uses its shared relay. The machine ${failed.machine}, set up through it, could not be removed from this computer yet (${failed.message}); it is tried again at the next start.`
+    };
+  }
+  if (removed.dismissedAt) return undefined;
   const listed = [
     ...removed.machines.map((name) => `the machine ${name}`),
     ...(removed.phones.length ? [removed.phones.length === 1 ? "a phone pairing" : `${removed.phones.length} phone pairings`] : [])
@@ -63,6 +85,12 @@ export function relayRemovalNotice(removed: RelayRemovalRecord | undefined, now:
     ? " Phones paired through it keep a copy of the key that can start your AWS machine; to end that, delete the access key of the accordagents-wake user in AWS IAM, then run the AWS setup command again and paste its result."
     : "";
   return { id: `relay-removed:${removed.removedAt}`, text: `${what}${next}${key}` };
+}
+
+/** One clean line of an error, short, without its final stop. */
+function plainReason(message: string): string {
+  const line = message.split(/\r?\n/).map((part) => part.trim()).find(Boolean) ?? "unknown error";
+  return (line.length > 200 ? `${line.slice(0, 197)}…` : line).replace(/[.!?]$/, "");
 }
 
 function joinList(parts: string[]): string {

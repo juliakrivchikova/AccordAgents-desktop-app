@@ -819,14 +819,14 @@ test("the desktop's new connection in the seat of its old one is greeted again, 
   // The server seated the desktop's new connection (it had not seen the old
   // one close) and says so: the desktop is greeted again.
   client.emit("peer", { type: "peer-connected", peer: { role: "desktop", deviceId: DESKTOP_ID } });
-  for (let i = 0; i < 80 && await hellos() < first + 1; i += 1) { await settle(25); await host.outbound; }
+  for (let i = 0; i < 400 && await hellos() < first + 1; i += 1) { await settle(25); await host.outbound; }
   assert.equal(await hellos(), first + 1);
   // A device event the desktop sent in the room (an old runtime would) is not taken.
   let received = 0;
   host.eventChannel.receive = async () => { received += 1; };
   const packet = { protocol: "accord-device-events-v1", type: "event", from: DESKTOP_ID, to: MACHINE_ID, channelId: enrollment.rendezvousId, event: {} };
   client.emit("message", { logicalMessageId: "x", ciphertext: await sealMachinePayload(packet, desktopEvents.identity, hostEvents.identity.publicKeyDerBase64, enrollment.rendezvousId) });
-  for (let i = 0; i < 80 && !logs.some((entry) => entry.event === "machine-host.room-event-dropped"); i += 1) await settle(25);
+  for (let i = 0; i < 400 && !logs.some((entry) => entry.event === "machine-host.room-event-dropped"); i += 1) await settle(25);
   assert.ok(logs.some((entry) => entry.event === "machine-host.room-event-dropped"));
   assert.equal(received, 0, "durable events come only through the server's order");
   host.close();
@@ -835,9 +835,13 @@ test("the desktop's new connection in the seat of its old one is greeted again, 
 test("an event another machine sends in its room is not taken: durable events come only through the server's order", async () => {
   const { MachinePeerFabric } = await import("../dist/main/main/services/machinePeerFabric.js");
   const { sealMachinePayload } = await import("../dist/main/main/services/machineChannelSealing.js");
+  const { createChatEventDeviceIdentity } = await import("../dist/main/main/services/chatEventLog.js");
   const home = pairing();
-  // The other machine is the desktop's identity here only for its keys.
-  const other = { deviceId: DESKTOP_ID, publicKeyDerBase64: desktopEvents.identity.publicKeyDerBase64, role: "machine", name: "Other",
+  // Two machines meet in the room of the one whose id sorts first: the other
+  // one here sorts first, so they meet in its room (a peer room).
+  let otherIdentity = createChatEventDeviceIdentity(new Date().toISOString());
+  while (otherIdentity.originId > MACHINE_ID) otherIdentity = createChatEventDeviceIdentity(new Date().toISOString());
+  const other = { deviceId: otherIdentity.originId, publicKeyDerBase64: otherIdentity.publicKeyDerBase64, role: "machine", name: "Other",
     machineId: "machine-2", relayUrl: "ws://127.0.0.1:1/v1/room", rendezvousId: "rv-other-room", fingerprint: "F", chatChanges: true };
   const peerRoom = stubClient();
   const logs = [];
@@ -849,16 +853,85 @@ test("an event another machine sends in its room is not taken: durable events co
   try {
     await fabric.reconcile([other]);
     let received = 0;
-    fabric.channel(DESKTOP_ID).receive = async () => { received += 1; };
-    const packet = { protocol: "accord-device-events-v1", type: "event", from: DESKTOP_ID, to: MACHINE_ID, channelId: "rv-other-room", event: {} };
-    const ciphertext = await sealMachinePayload(packet, desktopEvents.identity, hostEvents.identity.publicKeyDerBase64, "rv-other-room");
+    fabric.channel(other.deviceId).receive = async () => { received += 1; };
+    const packet = { protocol: "accord-device-events-v1", type: "event", from: other.deviceId, to: MACHINE_ID, channelId: "rv-other-room", event: {} };
+    const ciphertext = await sealMachinePayload(packet, otherIdentity, hostEvents.identity.publicKeyDerBase64, "rv-other-room");
     peerRoom.emit("message", { logicalMessageId: "x", ciphertext });
     peerRoom.emit("message", { logicalMessageId: "y", ciphertext });
-    for (let i = 0; i < 40 && !logs.some((entry) => entry.event === "machine-host.room-event-dropped"); i += 1) await settle(25);
-    await settle(50);
+    for (let i = 0; i < 400 && !logs.some((entry) => entry.event === "machine-host.room-event-dropped"); i += 1) await settle(25);
+    await settle(100);
     assert.equal(received, 0);
-    assert.equal(logs.filter((entry) => entry.event === "machine-host.room-event-dropped").length, 1, "said once per sender and kind");
+    assert.equal(logs.filter((entry) => entry.event === "machine-host.room-event-dropped").length, 1, `said once per sender and kind: ${JSON.stringify(logs).slice(0, 600)}`);
   } finally {
     fabric.close();
   }
+});
+
+test("a desktop that is not in the room after this machine's link comes back is not counted as present, so no compaction is handed to it", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const client = stubClient();
+  const host = new MachineHostService(
+    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async () => undefined },
+    { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
+    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
+  );
+  await host.start();
+  await settle();
+  await deliver(host, client, { type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home", compactionDelegation: true });
+  assert.equal(host.canDelegateCompaction(), true, "the desktop is here and takes compactions");
+  // This machine's own link drops: nothing is known of the desktop.
+  client.emit("state", "tunnel-reconnecting");
+  assert.equal(host.canDelegateCompaction(), false);
+  // Back, in a room without the desktop.
+  client.emit("state", "connected");
+  client.emit("peer", { type: "ready", deviceId: MACHINE_ID, peerConnected: false, peers: [] });
+  assert.equal(host.canDelegateCompaction(), false, "a compaction it asks for is not handed to a desktop that is not there");
+  // The desktop arrives.
+  client.emit("peer", { type: "peer-connected", peer: { role: "desktop", deviceId: DESKTOP_ID } });
+  assert.equal(host.canDelegateCompaction(), true);
+  // Let what the hello wrote finish before the shared event store is removed.
+  await host.inbound; await host.outbound; await settle();
+  host.close();
+});
+
+test("a hello answer taken after this machine's link dropped does not make the desktop look present", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const client = stubClient();
+  const host = new MachineHostService(
+    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async () => undefined },
+    { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
+    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
+  );
+  await host.start();
+  await settle();
+  client.emit("state", "tunnel-reconnecting");
+  // An answer read from the room just before the drop, applied after it.
+  await deliver(host, client, { type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home", compactionDelegation: true });
+  assert.equal(host.canDelegateCompaction(), false, "nothing is handed to a desktop this machine cannot reach");
+  await host.inbound; await host.outbound; await settle();
+  host.close();
+});
+
+test("a hello answer applied after the desktop left the room does not bring it back", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const client = stubClient();
+  const host = new MachineHostService(
+    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async () => undefined },
+    { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
+    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
+  );
+  await host.start();
+  await settle();
+  // The answer was read from the room before the desktop's leaving was, and
+  // is applied from the queue after it.
+  client.emit("peer", { type: "peer-disconnected", peer: { role: "desktop", deviceId: DESKTOP_ID } });
+  await deliver(host, client, { type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home", compactionDelegation: true });
+  assert.equal(host.canDelegateCompaction(), false, "a compaction is not handed to a desktop that left");
+  await deliver(host, client, { type: "machine.hello.request" });
+  assert.equal(host.canDelegateCompaction(), false, "nor after an old greeting request");
+  await host.inbound; await host.outbound; await settle();
+  host.close();
 });

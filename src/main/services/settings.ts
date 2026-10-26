@@ -266,7 +266,7 @@ interface StoredSettings {
   relayRemoval?: RelayRemovalRecord;
   /** What a removal that has not finished yet found (a machine's removal
    *  failed half way): kept, so the notice still names everything. */
-  relayRemovalPending?: { machines: string[]; startKeyHanded: boolean };
+  relayRemovalPending?: RelayRemovalPending;
   /** When this desktop last asked about machines that stopped being used. */
   machineInactivityCheckAt?: string;
   /** Removed machines whose kept chat changes may not be dropped yet (the
@@ -294,10 +294,21 @@ function isRelayRemovalRecord(value: unknown): value is RelayRemovalRecord {
     && typeof record!.startKeyHanded === "boolean" && (record!.dismissedAt === undefined || typeof record!.dismissedAt === "string");
 }
 
-function isRelayRemovalPending(value: unknown): value is { machines: string[]; startKeyHanded: boolean } {
-  const pending = value as { machines?: unknown; startKeyHanded?: unknown } | undefined;
+/** A relay removal that has not finished: what it found, and the first
+ *  machine whose removal failed at the last start (tried again at the next). */
+export interface RelayRemovalPending {
+  machines: string[];
+  startKeyHanded: boolean;
+  failed?: { machine: string; message: string; at: string };
+  /** The User dismissed the line about this failure. */
+  failedDismissedAt?: string;
+}
+
+function isRelayRemovalPending(value: unknown): value is RelayRemovalPending {
+  const pending = value as { machines?: unknown; startKeyHanded?: unknown; failed?: { machine?: unknown; message?: unknown; at?: unknown } } | undefined;
   return Boolean(pending) && Array.isArray(pending!.machines) && pending!.machines.every((name) => typeof name === "string")
-    && typeof pending!.startKeyHanded === "boolean";
+    && typeof pending!.startKeyHanded === "boolean"
+    && (pending!.failed === undefined || (typeof pending!.failed.machine === "string" && typeof pending!.failed.message === "string" && typeof pending!.failed.at === "string"));
 }
 
 const DEFAULT_PROVIDERS: ProviderSettings[] = [
@@ -3051,7 +3062,8 @@ export class SettingsService {
         ? { ...settings.machineDeviceRevocations } : undefined,
       relayRemoval: isRelayRemovalRecord(settings.relayRemoval) ? { ...settings.relayRemoval } : undefined,
       relayRemovalPending: isRelayRemovalPending(settings.relayRemovalPending)
-        ? { machines: [...settings.relayRemovalPending.machines], startKeyHanded: settings.relayRemovalPending.startKeyHanded } : undefined,
+        ? { ...settings.relayRemovalPending, machines: [...settings.relayRemovalPending.machines],
+          ...(settings.relayRemovalPending.failed ? { failed: { ...settings.relayRemovalPending.failed } } : {}) } : undefined,
       // Read back too: dropped here, the 10-day rhythm of the question about
       // unused machines restarted with every launch.
       machineInactivityCheckAt: typeof settings.machineInactivityCheckAt === "string" ? settings.machineInactivityCheckAt : undefined,
@@ -3687,6 +3699,7 @@ export class SettingsService {
       if (stored.relayRemoval) return;
       const before = stored.relayRemovalPending;
       stored.relayRemovalPending = {
+        ...before,
         machines: [...new Set([...(before?.machines ?? []), ...found.machines])],
         startKeyHanded: Boolean(before?.startKeyHanded) || found.startKeyHanded
       };
@@ -3725,12 +3738,38 @@ export class SettingsService {
     });
   }
 
-  /** The User dismissed the notice: it is not shown again. */
+  /** A machine's removal failed at this start: the first failure is kept
+   *  for the notice, and the removal is tried again at the next start. */
+  noteRelayRemovalFailure(failure: { machine: string; message: string }): Promise<void> {
+    return this.serializeDeviceTrust(async () => {
+      const stored = await this.readStored();
+      if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
+      if (stored.relayRemoval || !stored.relayRemovalPending) return;
+      const { failedDismissedAt: _dismissed, ...pending } = stored.relayRemovalPending;
+      stored.relayRemovalPending = { ...pending, failed: { ...failure, at: new Date().toISOString() } };
+      await this.writeStored(stored, true);
+    });
+  }
+
+  async relayRemovalPending(): Promise<RelayRemovalPending | undefined> {
+    const stored = await this.readStored();
+    return stored.relayRemovalPending ? { ...stored.relayRemovalPending } : undefined;
+  }
+
+  /** The User dismissed the notice: it is not shown again (a failure line,
+   *  until the next start fails again). */
   async dismissRelayRemoval(): Promise<void> {
     const stored = await this.readStored();
     if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
-    if (!stored.relayRemoval || stored.relayRemoval.dismissedAt) return;
-    stored.relayRemoval = { ...stored.relayRemoval, dismissedAt: new Date().toISOString() };
+    const at = new Date().toISOString();
+    if (stored.relayRemoval) {
+      if (stored.relayRemoval.dismissedAt) return;
+      stored.relayRemoval = { ...stored.relayRemoval, dismissedAt: at };
+    } else if (stored.relayRemovalPending?.failed && !stored.relayRemovalPending.failedDismissedAt) {
+      stored.relayRemovalPending = { ...stored.relayRemovalPending, failedDismissedAt: at };
+    } else {
+      return;
+    }
     await this.writeStored(stored, true);
   }
 
