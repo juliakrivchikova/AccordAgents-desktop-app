@@ -139,7 +139,7 @@ import { MachineInstallerService, machinePowerNeedsDelivery } from "./services/m
 import { MACHINE_POWER_MAX_ATTEMPTS, MACHINE_POWER_RETRY_MS, compareVersions } from "../shared/machineInstall";
 import type { HubReadersResponse } from "../shared/hubProtocol";
 import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
-import { relayRemovalNotice, removeRelayEraRecords } from "./services/relayRemoval";
+import { relayRemovalNotices as relayLines, removeRelayEraRecords } from "./services/relayRemoval";
 import { MachineInactivityQuestions } from "./services/machineInactivityQuestions";
 import { ChatActionApplier } from "./services/chatActionApplier";
 import { ChatActionEmitter, permissionDecisionAction, choiceDecisionAction, chatActionEventId } from "./services/chatActionEmitter";
@@ -1050,28 +1050,34 @@ async function removeMachine(id: string): Promise<MachineListResult> {
   return result;
 }
 
-/** What the shared relay set up is taken off this desktop once (see
+/** What the shared relay set up is taken off this desktop (see
  *  relayRemoval.ts); the other machines' rosters follow. */
 async function removeRelayEra(): Promise<void> {
   const recorded = await removeRelayEraRecords({
     settings: settingsService,
-    removeMachine: (machineId) => removeMachine(machineId),
-    handoffs: machinePowerHandoffService
+    removeMachine: (machineId) => removeMachine(machineId).catch((error: unknown) => {
+      void debugLogService.write("relay.remove-machine-error", { machineId, message: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }),
+    handoffs: machinePowerHandoffService,
+    log: (event, payload) => { void debugLogService.write(event, payload); }
   });
   if (!recorded) return;
   void debugLogService.write("relay.removed", { machines: recorded.machines.length, phones: recorded.phones.length, startKeyHanded: recorded.startKeyHanded });
   await machineLinkService?.refreshTrustRosters().catch(() => undefined);
 }
 
-/** The one line about what the relay's removal took off this desktop. */
+/** The relay's lines: what its removal took off this desktop, and the
+ *  machines that could not be removed yet. */
 async function relayRemovalNotices(): Promise<Array<{ id: string; text: string }>> {
-  const notice = relayRemovalNotice(await settingsService.relayRemoval(), {
+  const failures = await settingsService.relayRemovalFailures().catch(() => []);
+  return relayLines(await settingsService.relayRemoval(), {
     hasServer: Boolean(await settingsService.getHubConfig().catch(() => undefined)),
     serverPhones: (await hubPhones().catch(() => [])).length,
-    pending: await settingsService.relayRemovalPending().catch(() => undefined),
-    leftToRemove: (await settingsService.relayEraMachines().catch(() => [])).map((machine) => machine.name)
+    failures,
+    // Opened only when something failed: it reads the sealed enrollments.
+    leftToRemove: failures.length ? (await settingsService.relayEraMachines().catch(() => [])).map((machine) => machine.id) : []
   });
-  return notice ? [notice] : [];
 }
 
 /** Drops what this desktop kept for a removed machine, and stops offering the
@@ -2549,9 +2555,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("hub:setup-state", () => hubInstaller.state());
   ipcMain.handle("hub:dismiss-notice", async (_event, id: string) => {
-    // The relay's one line is kept dismissed with its record, not in the
+    // The relay's lines are kept dismissed with their records, not in the
     // list of the server's own lines (which keeps only the last hundred).
-    if (typeof id === "string" && id.startsWith("relay-removed:")) await settingsService.dismissRelayRemoval();
+    if (typeof id === "string" && id.startsWith("relay-removed:")) await settingsService.dismissRelayRemoval(id);
     else await dismissHubNotice(id);
     return hubInstaller.state();
   });
