@@ -4595,6 +4595,9 @@ const { spawn } = require("node:child_process");
 const { writeFileSync } = require("node:fs");
 const readline = require("node:readline");
 writeFileSync(${JSON.stringify(providerPidFile)}, String(process.pid));
+// It ignores SIGTERM as well, so only the final SIGKILL ends it, and a slow
+// machine still gets to record the EOF before then.
+process.on("SIGTERM", () => {});
 const helper = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore", detached: true });
 writeFileSync(${JSON.stringify(helperPidFile)}, String(helper.pid));
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
@@ -4673,6 +4676,9 @@ test("Claude live background shutdown kills descendants after the provider exits
 const { spawn } = require("node:child_process");
 const { writeFileSync } = require("node:fs");
 const readline = require("node:readline");
+// SIGTERM (sent 300 ms after EOF) must not end it before it handles the
+// EOF itself on a slow machine; it exits on EOF as the scenario says.
+process.on("SIGTERM", () => {});
 const helper = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore", detached: true });
 writeFileSync(${JSON.stringify(helperPidFile)}, String(helper.pid));
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
