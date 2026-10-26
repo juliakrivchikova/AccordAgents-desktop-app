@@ -797,3 +797,68 @@ test("a machine whose enrollment names no server of the User's is not started", 
     { ...hostEvents, pairing: relayEra, deviceId: MACHINE_ID, appVersion: "test", createClient: () => stubClient() }
   ), /does not name the User's server/);
 });
+
+test("the desktop's new connection in the seat of its old one is greeted again, and events sent in the room are not taken", async () => {
+  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+  const { sealMachinePayload } = await import("../dist/main/main/services/machineChannelSealing.js");
+  const client = stubClient();
+  const logs = [];
+  const enrollment = pairing();
+  const host = new MachineHostService(
+    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
+      applyReplicatedConversation: async () => undefined },
+    { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined },
+    { write: async (event, payload) => { logs.push({ event, payload }); } },
+    { ...hostEvents, pairing: enrollment, deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
+  );
+  await host.start();
+  await settle();
+  const hellos = async () => (await controlBodies(client, enrollment)).filter((body) => body.type === "machine.hello").length;
+  const first = await hellos();
+  assert.ok(first >= 1, "greeted on its own link");
+  // The server seated the desktop's new connection (it had not seen the old
+  // one close) and says so: the desktop is greeted again.
+  client.emit("peer", { type: "peer-connected", peer: { role: "desktop", deviceId: DESKTOP_ID } });
+  for (let i = 0; i < 80 && await hellos() < first + 1; i += 1) { await settle(25); await host.outbound; }
+  assert.equal(await hellos(), first + 1);
+  // A device event the desktop sent in the room (an old runtime would) is not taken.
+  let received = 0;
+  host.eventChannel.receive = async () => { received += 1; };
+  const packet = { protocol: "accord-device-events-v1", type: "event", from: DESKTOP_ID, to: MACHINE_ID, channelId: enrollment.rendezvousId, event: {} };
+  client.emit("message", { logicalMessageId: "x", ciphertext: await sealMachinePayload(packet, desktopEvents.identity, hostEvents.identity.publicKeyDerBase64, enrollment.rendezvousId) });
+  for (let i = 0; i < 80 && !logs.some((entry) => entry.event === "machine-host.room-event-dropped"); i += 1) await settle(25);
+  assert.ok(logs.some((entry) => entry.event === "machine-host.room-event-dropped"));
+  assert.equal(received, 0, "durable events come only through the server's order");
+  host.close();
+});
+
+test("an event another machine sends in its room is not taken: durable events come only through the server's order", async () => {
+  const { MachinePeerFabric } = await import("../dist/main/main/services/machinePeerFabric.js");
+  const { sealMachinePayload } = await import("../dist/main/main/services/machineChannelSealing.js");
+  const home = pairing();
+  // The other machine is the desktop's identity here only for its keys.
+  const other = { deviceId: DESKTOP_ID, publicKeyDerBase64: desktopEvents.identity.publicKeyDerBase64, role: "machine", name: "Other",
+    machineId: "machine-2", relayUrl: "ws://127.0.0.1:1/v1/room", rendezvousId: "rv-other-room", fingerprint: "F", chatChanges: true };
+  const peerRoom = stubClient();
+  const logs = [];
+  const fabric = new MachinePeerFabric({
+    selfDeviceId: MACHINE_ID, storage: hostEvents.eventStorage, eventLog: hostEvents.eventLog, home,
+    homeClient: stubClient(), createClient: () => peerRoom, isPeerConnected: () => true,
+    apply: async () => "applied", onError: () => undefined, logger: (event, payload) => logs.push({ event, payload })
+  });
+  try {
+    await fabric.reconcile([other]);
+    let received = 0;
+    fabric.channel(DESKTOP_ID).receive = async () => { received += 1; };
+    const packet = { protocol: "accord-device-events-v1", type: "event", from: DESKTOP_ID, to: MACHINE_ID, channelId: "rv-other-room", event: {} };
+    const ciphertext = await sealMachinePayload(packet, desktopEvents.identity, hostEvents.identity.publicKeyDerBase64, "rv-other-room");
+    peerRoom.emit("message", { logicalMessageId: "x", ciphertext });
+    peerRoom.emit("message", { logicalMessageId: "y", ciphertext });
+    for (let i = 0; i < 40 && !logs.some((entry) => entry.event === "machine-host.room-event-dropped"); i += 1) await settle(25);
+    await settle(50);
+    assert.equal(received, 0);
+    assert.equal(logs.filter((entry) => entry.event === "machine-host.room-event-dropped").length, 1, "said once per sender and kind");
+  } finally {
+    fabric.close();
+  }
+});

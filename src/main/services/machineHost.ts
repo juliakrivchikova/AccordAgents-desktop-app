@@ -512,7 +512,9 @@ export class MachineHostService {
         const desktop = event.peers.find((peer) => peer.deviceId === options.pairing.issuer.originId);
         this.setDesktop(desktop?.deviceId, { announce: true });
       } else if (event.type === "peer-connected" && event.peer.deviceId === options.pairing.issuer.originId) {
-        this.setDesktop(event.peer.deviceId);
+        // Also the desktop's new connection in the seat of an old one the
+        // server had not seen close: it is greeted again, as a new one is.
+        this.setDesktop(event.peer.deviceId, { announce: true });
       } else if (event.type === "peer-disconnected" && event.peer.deviceId === options.pairing.issuer.originId) {
         this.desktopDeviceId = undefined;
         void this.debugLogs.write("machine-host.desktop.away", { deviceId: event.peer.deviceId, pendingTerminals: this.pendingTerminals.size });
@@ -1072,12 +1074,13 @@ export class MachineHostService {
     // Content is sealed to these two identities; the room capability grants no reading.
     const payload = await this.openHomeFrame(ciphertext);
     if (isDeviceEventPacket(payload)) {
-      // The enrolling desktop keeps its own channel; every other device is
-      // answered only if the roster says so.
-      if (payload.from === this.options.pairing.issuer.originId) {
-        await this.eventChannel.receive(payload);
-      } else if (!await this.peers.receive(payload)) {
-        void this.debugLogs.write("machine-host.trust.unknown-peer", { from: payload.from, type: payload.type });
+      // Durable events travel only in the User's server's order (one road):
+      // a copy sent in the room is not taken, from the desktop or anyone.
+      const key = `${payload.from}\u0000${payload.type}`;
+      if (!this.roomEventsDropped.has(key)) {
+        if (this.roomEventsDropped.size >= 200) this.roomEventsDropped.clear();
+        this.roomEventsDropped.add(key);
+        void this.debugLogs.write("machine-host.room-event-dropped", { from: payload.from, type: payload.type });
       }
       return;
     }
@@ -1102,6 +1105,9 @@ export class MachineHostService {
     }
     await this.handleBody(payload.body, undefined, from);
   }
+
+  /** Room events already logged as dropped (by sender and kind). */
+  private readonly roomEventsDropped = new Set<string>();
 
   private async openHomeFrame(ciphertext: string): Promise<unknown> {
     const header = JSON.parse(ciphertext) as { senderPublicKeyDerBase64?: unknown };

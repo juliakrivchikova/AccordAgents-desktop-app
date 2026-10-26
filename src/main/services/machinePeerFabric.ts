@@ -15,8 +15,9 @@
  *   opened to it — this is how a member here asks a member there with no
  *   desktop involved.
  *
- * A device that is not in the roster gets no channel, so its packets are
- * dropped before any signature or command is considered.
+ * A device that is not in the roster gets no channel. Durable events reach
+ * a channel only from the server's order (receiveFromHub); a device event
+ * sent in a room is never taken.
  */
 import { randomUUID } from "node:crypto";
 import { stableJson } from "../../shared/stableJson";
@@ -36,6 +37,9 @@ import type { StorageService } from "./storage";
 import { CHAT_CHANGES_EVENT_KIND } from "./chatChanges";
 import { hubPairChannelId } from "./hubChannels";
 import { hubWebSocketUrl } from "../../shared/hubProtocol";
+
+/** How many senders' dropped room events are remembered for logging once. */
+const ROOM_EVENT_DROPS_LOGGED = 200;
 
 export interface MachinePeerFabricOptions {
   /** The User's server carries every channel's events (its one order); a
@@ -186,26 +190,21 @@ export class MachinePeerFabric {
     }
   }
 
-  /**
-   * Hands an inbound packet to the channel of the device that sent it.
-   * Returns false when nothing trusted claims it, which is what makes an
-   * unknown device's traffic a no-op rather than an input.
-   */
-  async receive(packet: DeviceEventPacket): Promise<boolean> {
-    const connection = this.connections.get(packet.from);
-    if (!connection) {
-      this.options.logger("machine-host.trust.rejected", { from: packet.from, type: packet.type });
-      return false;
-    }
-    await connection.channel.receive(packet);
-    return true;
-  }
-
   private async receiveSealed(ciphertext: string, room: string): Promise<void> {
     const payload = await openMachinePayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
       [...this.connections.values()].map(connection => connection.peer.publicKeyDerBase64), room);
-    if (isDeviceEventPacket(payload)) await this.receive(payload);
+    // Durable events travel only in the User's server's order (one road):
+    // a copy sent in a peer's room is not taken.
+    if (!isDeviceEventPacket(payload)) return;
+    const key = `${payload.from}\u0000${payload.type}`;
+    if (this.roomEventsDropped.has(key)) return;
+    if (this.roomEventsDropped.size >= ROOM_EVENT_DROPS_LOGGED) this.roomEventsDropped.clear();
+    this.roomEventsDropped.add(key);
+    this.options.logger("machine-host.room-event-dropped", { from: payload.from, type: payload.type, room });
   }
+
+  /** Room events already logged as dropped (by sender and kind), once each. */
+  private readonly roomEventsDropped = new Set<string>();
 
   async openHomeFrame(ciphertext: string, _legacyRoomKey?: string): Promise<DeviceEventPacket | undefined> {
     try {

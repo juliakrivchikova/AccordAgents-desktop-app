@@ -44,6 +44,7 @@ import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
 import { DeviceEventChannel, type DeferredWithDependency } from "./deviceEventChannel";
 import { deliverToChannel, type HubDeliverOutcome } from "./hubSync";
 import { hubWebSocketUrl } from "../../shared/hubProtocol";
+import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
 import type { ChatEventLogService } from "./chatEventLog";
 import type { StorageService } from "./storage";
 import type { ChatActionApplier } from "./chatActionApplier";
@@ -66,6 +67,9 @@ export interface MachineLinkOptions {
   createClient?: (pairing: MobilePairingPackage) => TunnelClient | undefined;
   /** Through the hub: a channel's gap is asked of the hub (HubSync.repairGap). */
   hubRepair?: (gap: DeviceEventGap) => void;
+  /** A machine's channel is up: events of it held while it was not are
+   *  offered again (HubSync.nudgeHeld). */
+  onChannelReady?: () => void;
   /** The set of machines (or their keys) changed: whoever admits devices by
    *  key, the User's hub, is told again. */
   onDevicesChanged?: () => void;
@@ -603,7 +607,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
         const machine = event.peers.find(isThisMachine);
         this.setMachinePeer(connection, machine?.deviceId);
       } else if (event.type === "peer-connected" && isThisMachine(event.peer)) {
-        this.setMachinePeer(connection, event.peer.deviceId);
+        // Connected again (also in the seat of a connection the server had not
+        // seen close): what it knows now is asked afresh, not assumed.
+        if (connection.machineDeviceId === event.peer.deviceId) this.machineReturned(connection);
+        else this.setMachinePeer(connection, event.peer.deviceId);
       } else if (event.type === "peer-disconnected" && isThisMachine(event.peer)) {
         this.setMachinePeer(connection, undefined);
       }
@@ -718,8 +725,17 @@ export class MachineLinkService implements MachineTurnDispatcher {
       if (!connection.eventChannel?.accepts(event)) continue;
       return await deliverToChannel(connection.eventChannel, event, fetchBody);
     }
-    const waiting = [...this.connections.values()].some((connection) => !connection.eventChannel &&
-      (connection.record.deviceId === event.originId || event.logScopeId.startsWith(`device:${connection.pairing.rendezvousId}:`)));
+    // What an enrolled machine's channel will take is held until that
+    // channel is up, whether or not its link is open right now (it could not
+    // connect at start, or its connection is being replaced): passed over,
+    // it would be lost. Once its channel is up, what it turned away is not
+    // this desktop's (another pair's channel). Its chat changes need no
+    // channel: the server's reader applies them itself.
+    const waiting = this.machineRecords().some((record) => {
+      if (this.connections.get(record.id)?.eventChannel) return false;
+      if (event.logScopeId.startsWith(`device:${record.pairingKey}:`)) return true;
+      return Boolean(record.deviceId) && record.deviceId === event.originId && event.logScopeId === CHAT_ACTION_LOG_SCOPE;
+    });
     return waiting ? "not-ready" : "not-mine";
   }
 
@@ -1632,8 +1648,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
       throw new Error("A new machine must introduce its identity before sending content.");
     }
     if (isDeviceEventPacket(payload)) {
-      if (!connection.eventChannel) throw new Error("The machine must introduce its signing identity before sending events.");
-      await connection.eventChannel.receive(payload);
+      // Durable events travel only in the User's server's order (one road):
+      // a copy sent in the room is not taken.
+      this.noteRoomEventDropped(connection.record.id, payload.type);
       return;
     }
     if (!isMachineLinkEnvelope(payload)) {
@@ -1922,7 +1939,20 @@ export class MachineLinkService implements MachineTurnDispatcher {
         },
         onError: (error) => { void this.debugLogs.write("machine-link.events.error", { machineId: connection.record.id, message: error.message }); }
       });
+      // Its events held while it had no channel are offered again now.
+      this.options.onChannelReady?.();
     }
+  }
+
+  /** Logged once per machine and kind, so a sender that keeps trying does
+   *  not fill the log. */
+  private readonly roomEventsDropped = new Set<string>();
+  private noteRoomEventDropped(machineId: string, type: string): void {
+    const key = `${machineId}\u0000${type}`;
+    if (this.roomEventsDropped.has(key)) return;
+    if (this.roomEventsDropped.size >= 200) this.roomEventsDropped.clear();
+    this.roomEventsDropped.add(key);
+    void this.debugLogs.write("machine-link.room-event-dropped", { machineId, type });
   }
 
   private async handleHello(connection: MachineConnection, hello: MachineHelloBody): Promise<void> {
@@ -2195,29 +2225,46 @@ export class MachineLinkService implements MachineTurnDispatcher {
       }
       connection.machineDeviceId = undefined;
       connection.settingsSynced = false;
+      // Whatever greeted this connection before, a return is greeted again.
+      connection.helloSeen = false;
       this.rejectPendingScripts(connection, `${connection.record.name} disconnected.`);
     } else if (!connection.machineDeviceId) {
       connection.machineDeviceId = deviceId;
-      // Back on the link (also after a blip a hello does not follow): ask for
-      // the members' background work that is running now.
-      void this.send(connection, { type: "machine.member.background.request" }).catch(() => undefined);
-      if (!connection.helloSeen && !connection.helloRequestTimer) {
-        // The machine is there; if it does not greet this connection by
-        // itself shortly (the server may seat a restarted desktop silently in
-        // place of the old one), ask for the hello that drives reconciliation.
-        connection.helloRequestTimer = setTimeout(() => {
-          connection.helloRequestTimer = undefined;
-          if (connection.helloSeen || !connection.machineDeviceId) {
-            return;
-          }
-          void this.debugLogs.write("machine-link.hello.requested", { machineId: connection.record.id });
-          void this.send(connection, { type: "machine.hello.request", desktopDeviceId: this.options.desktopDeviceId }).catch(() => undefined);
-        }, HELLO_REQUEST_GRACE_MS);
-        connection.helloRequestTimer.unref?.();
-      }
+      this.greetReturningMachine(connection);
     }
     if (changed) {
       this.emitStatus();
+    }
+  }
+
+  /** The machine's new connection took the seat of one the server had not
+   *  seen close (it restarted, or its link came back): it stays present, and
+   *  what it knows is asked afresh rather than assumed. A script request
+   *  still waiting keeps waiting for its answer or its own time limit: one
+   *  sent just now may be answered by the new connection. */
+  private machineReturned(connection: MachineConnection): void {
+    connection.helloSeen = false;
+    connection.settingsSynced = false;
+    this.greetReturningMachine(connection);
+  }
+
+  private greetReturningMachine(connection: MachineConnection): void {
+    // Back on the link (also after a blip a hello does not follow): ask for
+    // the members' background work that is running now.
+    void this.send(connection, { type: "machine.member.background.request" }).catch(() => undefined);
+    if (!connection.helloSeen && !connection.helloRequestTimer) {
+      // The machine is there; if it does not greet this connection by
+      // itself shortly (the server may seat a restarted desktop silently in
+      // place of the old one), ask for the hello that drives reconciliation.
+      connection.helloRequestTimer = setTimeout(() => {
+        connection.helloRequestTimer = undefined;
+        if (connection.helloSeen || !connection.machineDeviceId) {
+          return;
+        }
+        void this.debugLogs.write("machine-link.hello.requested", { machineId: connection.record.id });
+        void this.send(connection, { type: "machine.hello.request", desktopDeviceId: this.options.desktopDeviceId }).catch(() => undefined);
+      }, HELLO_REQUEST_GRACE_MS);
+      connection.helloRequestTimer.unref?.();
     }
   }
 

@@ -1,7 +1,7 @@
-const ASSET_VERSION = "2026-10-26-relay-removed";
+const ASSET_VERSION = "2026-10-26-phone-fixes";
 // Tied to the marker the documented deploy step bumps, so a new shell really
 // replaces the cached one rather than living beside it.
-const CACHE_NAME = `accordagents-mobile-shell-v71-${ASSET_VERSION}`;
+const CACHE_NAME = `accordagents-mobile-shell-v72-${ASSET_VERSION}`;
 const APP_SHELL = [
   "./",
   "./index.html",

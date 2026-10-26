@@ -22,6 +22,10 @@ export interface MobileChatListItem {
   running: boolean;
   participants: string[];
   members?: MobileChatMember[];
+  /** What Activity shows for this chat (phoneActivityEvents): runs going on
+   *  and members' replies of the last week, without the phone reading the
+   *  chat's pages. Absent when there is none. */
+  activity?: MobileTimelineEvent[];
   /** The cards still waiting for the User in this chat, as the server holds
    *  them now. The phone drops a pending card it holds that is not here: the
    *  batch that closed it can be lost, and nothing else would ever say so. */
@@ -93,6 +97,47 @@ export interface MobileTimelineEvent {
   participantId?: string;
   /** The message's own thread (the desktop's reply context). */
   threadId?: string;
+}
+
+/** How far back a finished reply still counts as activity on the phone. */
+export const PHONE_ACTIVITY_DONE_MS = 7 * 24 * 60 * 60_000;
+/** A reply's text as Activity shows it (the page holds the whole). */
+export const PHONE_ACTIVITY_CONTENT_CHARS = 880;
+/** At most this many of a chat's messages travel for Activity, the newest. */
+export const PHONE_ACTIVITY_PER_CHAT = 8;
+
+/**
+ * What the phone's Activity shows for a chat, from the newest messages the
+ * chat list already reads (no page of any chat is read for it): each run
+ * still going, each member's newest finished reply of the last week, and
+ * the reply a member's open question belongs to. Members' messages only,
+ * never hidden ones; text cut short, no pictures; the newest few.
+ */
+export function phoneActivityEvents(conversation: Conversation, now = Date.now()): MobileTimelineEvent[] {
+  const threadRoots = chatParticipantRequestReplyRootMap(conversation);
+  const pendingByRun = new Map<string, MobileTimelineEvent>();
+  const doneByMember = new Map<string, MobileTimelineEvent>();
+  const askingByMember = new Map<string, MobileTimelineEvent>();
+  for (const message of conversation.messages) {
+    if (message.role !== "participant" || !messageTravelsToPhone(conversation, message) || messageIsHiddenOnPhone(conversation, message)) continue;
+    const status = message.status ?? "done";
+    if (status === "done" && !(now - Date.parse(message.createdAt) <= PHONE_ACTIVITY_DONE_MS)) continue;
+    if (status !== "pending" && status !== "done") continue;
+    const { attachments: _attachments, ...event } = timelineEventFromMessage(message, message.id, conversation, threadRoots);
+    const short = { ...event, content: event.content.slice(0, PHONE_ACTIVITY_CONTENT_CHARS) };
+    // Messages are oldest first: a later one of the same run or member wins.
+    const member = message.participantId ?? message.participantLabel ?? short.id;
+    // A reply that asks the User something is listed with its card (as the
+    // desktop does), so it travels as well as the member's previous reply,
+    // which stays its finished one.
+    const asking = (message.metadata?.pendingChoice as { status?: unknown } | undefined)?.status === "pending";
+    if (status === "pending") pendingByRun.set(short.runId ?? short.id, short);
+    else if (asking) askingByMember.set(member, short);
+    else doneByMember.set(member, short);
+  }
+  return [...pendingByRun.values(), ...askingByMember.values(), ...doneByMember.values()]
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .slice(-PHONE_ACTIVITY_PER_CHAT);
 }
 
 export function timelineEventsFromSnapshot(conversation: Conversation, limit = 40): MobileTimelineEvent[] {

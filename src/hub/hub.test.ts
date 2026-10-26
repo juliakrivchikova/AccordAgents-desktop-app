@@ -372,6 +372,37 @@ test("rooms pass live messages between the User's devices and keep nothing", asy
   assert.equal((await h.call(h.owner, "GET", "/v1/events?after=0")).body.head, 0);
 });
 
+test("a device that takes its own seat again is announced to the room, so the others greet it again", async (t) => {
+  const h = await hub(t);
+  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  await h.call(h.owner, "PUT", "/v1/roster", { devices: [{ deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Box", machineId: "machine-1" }] });
+  const { HubTunnelClient } = await import("../main/services/hubTunnelClient");
+  const desktopTunnel = new HubTunnelClient({ hubUrl: h.base, rendezvousId: "rv-seat", role: "desktop", identity: async () => h.owner, reconnectDelayMs: 50 });
+  const first = new HubTunnelClient({ hubUrl: h.base, rendezvousId: "rv-seat", role: "machine", identity: async () => machine, reconnectDelayMs: 50 });
+  // The machine's new process, while the server has not seen the old socket close.
+  const second = new HubTunnelClient({ hubUrl: h.base, rendezvousId: "rv-seat", role: "machine", identity: async () => machine, reconnectDelayMs: 50 });
+  t.after(() => { desktopTunnel.close(); first.close(); second.close(); });
+  const desktopPeers: string[] = [];
+  desktopTunnel.on("peer", (event) => desktopPeers.push(event.type === "peer-connected" ? `+${event.peer.deviceId}` : event.type === "peer-disconnected" ? `-${event.peer.deviceId}` : event.type));
+  const wait = async (check: () => boolean) => { for (let i = 0; i < 100 && !check(); i += 1) await new Promise((resolve) => setTimeout(resolve, 20)); };
+  await desktopTunnel.connect();
+  await wait(() => desktopPeers.includes("ready"));
+  await first.connect();
+  await wait(() => desktopPeers.filter((item) => item === `+${machine.originId}`).length === 1);
+  const firstStates: string[] = [];
+  first.on("state", (state) => firstStates.push(state));
+  await second.connect();
+  await wait(() => desktopPeers.filter((item) => item === `+${machine.originId}`).length === 2);
+  // The replaced connection is closed by the server; whatever its close
+  // could cause has happened before the desktop's view is judged.
+  await wait(() => firstStates.includes("closed"));
+  assert.ok(firstStates.includes("closed"), "the older connection gives up its seat");
+  await desktopTunnel.sendCiphertext({ logicalMessageId: "after", ciphertext: "ping", to: machine.originId }).catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(desktopPeers.filter((item) => item.endsWith(machine.originId)), [`+${machine.originId}`, `+${machine.originId}`],
+    "the new connection is announced, and the replaced one does not read as the machine leaving");
+});
+
 test("a renewed certificate is noticed though its chain ends the same as before", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-cert-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

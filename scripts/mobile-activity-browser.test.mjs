@@ -4,11 +4,13 @@
  * The desktop's part is played the way the desktop plays it now: its chat
  * changes and cards, signed and published on the User's own server (a real
  * hub here), which the paired phone reads. Nothing is written into the
- * phone's storage by hand but the age of its cards. Then the bottom bar is
- * used: the Activity tab lists what the server delivered, a permission is
- * allowed and a choice answered from it, a run is stopped from it, a
+ * phone's storage by hand, and no chat is read for the test: Activity lists
+ * what the server's chat list carries for every chat, and the pages of the
+ * chats the phone opens. Then the bottom bar is used: a permission is
+ * allowed and a choice answered from Activity, a run is stopped from it, a
  * finished update opens its chat, and a card the desktop settles leaves the
- * list.
+ * list at once (the next list the phone asks for says so; the cards here
+ * reached it seconds before).
  *
  * This is a browser check, not the installed phone: it runs the same files the
  * phone runs, under the same origin headers, but a physically installed PWA is
@@ -136,18 +138,8 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
       await waitFor(`document.readyState === "complete" && Boolean(globalThis.AccordAgentsMobile) ? true : null`, "the reloaded page");
     };
     // Any change to a chat on the server: the phone hears of it and reads
-    // the chat again.
+    // the chat list again (and the open chat's newest page, when it is open).
     const touchChat = (conversationId) => hub.changeChat(conversationId, [{ type: "conversation.updated", metadata: { autoTitle: false } }]);
-    // A card the server stops listing leaves the phone once it has been on
-    // the phone for a while (a list read just before the card arrived must
-    // not close it). These cards are minutes old for the purpose: what the
-    // User's phone holds when the desktop settles one.
-    const ageCards = () => evaluate(`(() => {
-      const all = JSON.parse(localStorage.getItem("accordagents.mobile.controlCards.v1") || "{}");
-      for (const list of Object.values(all)) for (const card of list) card.receivedAt = new Date(Date.now() - 10 * 60000).toISOString();
-      localStorage.setItem("accordagents.mobile.controlCards.v1", JSON.stringify(all));
-      return true;
-    })()`);
     const storedEvents = (store, kind) => evaluate(`(async () => {
       const db = await new Promise((resolve, reject) => {
         const request = indexedDB.open("accordagents-mobile-control");
@@ -171,18 +163,12 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
       }));
     })()`;
 
-    // A chat's rows reach this phone when it reads that chat's page from the
-    // server. It reads the open chat's page itself; a chat it is not showing
-    // is read here the same way (the app's own read, as opening the chat
-    // does it, without opening it). Activity lists what the phone holds.
-    // NOTE: the phone does not read a chat it is not showing by itself yet,
-    // so without these reads Running and Finished stay empty for such chats.
-    const readChat = (conversationId) => evaluate(`AccordAgentsMobile.requestTimelineViaRelay(AccordAgentsMobile.loadPairing(), ${JSON.stringify(conversationId)}).then(() => true)`);
+    // The phone reads a chat's pages only while that chat is open. What the
+    // members of every other chat run and last finished comes with the
+    // server's chat list, and Activity lists that: no chat is read here.
     // Paired for every chat: no chat is preselected, so the phone opens on
     // its home screens.
     await pairPage(app, { hub, siteOrigin: site.origin });
-    await readChat(CHAT_POLISH);
-    await readChat(CHAT_CLOUD);
     // The bar is there on the home screen, on Chats.
     assert.equal(await waitFor(`(() => {
       const dock = document.getElementById("home-dock");
@@ -239,7 +225,6 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
     assert.equal(hub.phoneEvents("permission.decided").length, 1, "the one answer reached the server");
 
     // Another chat's cards changing does not make that answer answerable again.
-    await ageCards();
     await hub.raiseApproval(CHAT_CLOUD, { ...cloudApproval, status: "denied", updatedAt: new Date().toISOString() });
     await waitFor(`document.querySelector('[data-card-id="perm-cloud"]') ? null : true`, "the other chat's permission withdrawn");
     assert.equal(await evaluate(`document.querySelector('[data-card-id="perm-deploy"] [data-option-id="allow"]').disabled`), true,
@@ -286,7 +271,6 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
     assert.equal(answers[0].payload.detail.sourceMessageId, "q1");
     // The desktop takes the answer and stops listing the card: the opened
     // choice goes by itself, and the bar comes back.
-    await ageCards();
     await hub.updateMessages(CHAT_POLISH, [question("selected")]);
     await waitFor(`document.getElementById("activity-item").hidden && !document.getElementById("home-dock").hidden ? true : null`,
       "the withdrawn choice to close");
@@ -323,7 +307,13 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
     const drewRow = finished.find((row) => row.text.includes("PWA polish round by @drew"));
     assert.ok(drewRow, "@drew's updates have a row");
     assert.match(drewRow.text, /Fixed\. The badge clears too now\./);
-    assert.match(drewRow.text, /\b2\b/, "two updates from @drew in that chat share one row");
+    // KNOWN GAP (reported): before the phone has read this chat, the list
+    // carries only @drew's newest reply, so the row cannot count both; the
+    // desktop counts every update of the last seven days. Pinned as it is,
+    // so the gap cannot grow unseen; both are counted below, once the chat
+    // has been opened.
+    assert.equal(await evaluate(`document.querySelector('#activity-list .act-row[data-activity-key="${drewRow.key}"] .act-badge') ? document.querySelector('#activity-list .act-row[data-activity-key="${drewRow.key}"] .act-badge').textContent : "none"`),
+      "none", "before the chat is read, @drew's row counts one update (the known gap)");
     assert.equal(drewRow.unread, true);
     assert.ok(finished.some((row) => /PWA polish round by @taylor/.test(row.text) && /Review is green/.test(row.text)));
     assert.ok(finished.some((row) => /Cloud machine setup by @morgan/.test(row.text)));
@@ -334,6 +324,10 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
       !document.getElementById("home-dock").hidden &&
       document.querySelector(".mobile-phone").dataset.dock === "chat" &&
       sessionStorage.getItem("accordagents.mobile.openThreadRootId.v1") === "m1" ? true : null)()`, "the thread to open with the bar under it");
+    // The phone had not read this chat: its page comes from the server as it
+    // opens, and the thread is used once its rows are drawn.
+    await waitFor(`document.getElementById("message-list").innerText.includes("Fixed. The badge clears too now.") ? true : null`, "the thread's rows from the server");
+    await hub.quiet();
 
     // The bar under a chat sits below the composer, not over it, and leaves
     // while the keyboard is up.
@@ -452,11 +446,11 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
       return drew ? drew : null;
     })()`, "Activity again after going back");
     assert.equal(afterBack.unread, false, "an update is read once its chat was opened");
+    assert.match(afterBack.text, /\b2\b/, "two updates from @drew in that chat share one row once the chat was read");
 
     // @taylor's run, stamped by the desktop before the chat was opened just
     // now, reaches the phone after it: that is news, whatever the stamp says.
     await hub.updateMessages(CHAT_POLISH, [{ ...taylorRun, status: "done", content: "Review done: two nits, both in the thread." }]);
-    await readChat(CHAT_POLISH);
     const settled = await waitFor(`(() => {
       const rows = ${listRows("finished")};
       const taylor = rows && rows.find((row) => row.text.includes("Review done"));
@@ -468,10 +462,10 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
     await waitFor(`${tabCounts}.startsWith("Running 0") ? true : null`, "Running to empty");
     // The same message delivered again, and under another id, keeps what the
     // phone knows about it: still unseen. Again from the server (any change
-    // to the chat has its page read again), and once by hand under another
-    // row id, as a copy that names the message differently would arrive.
+    // to the chat has the list read again, carrying it once more), and once
+    // by hand under another row id, as a copy that names the message
+    // differently would arrive.
     await touchChat(CHAT_POLISH);
-    await readChat(CHAT_POLISH);
     const tFinal = { messageId: taylorRun.id, role: "participant", participantLabel: "@taylor",
       content: "Review done: two nits, both in the thread.", status: "done", runId: "run-taylor-1", createdAt: taylorRun.createdAt };
     await evaluate(`AccordAgentsMobile.handleRelayTimelinePayload(${JSON.stringify({ type: "mobile.timeline.events", conversationId: CHAT_POLISH, events: [{ ...tFinal, id: "page:" + taylorRun.id }] })})`);
@@ -549,7 +543,6 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
     // what was cleared: the row comes back.
     await hub.addMessages(CHAT_CLOUD, [{ id: "m-region-2", role: "participant", participantId: MORGAN.id, participantLabel: "@morgan",
       content: "Region moved: eu-central-1 now.", status: "done", createdAt: minutesAgo(0), metadata: { runId: "run-morgan-3" } }]);
-    await readChat(CHAT_CLOUD);
     await waitFor(`(() => {
       const rows = ${listRows("finished")};
       return rows && rows.some((row) => row.text.includes("Region moved")) ? true : null;
@@ -582,7 +575,6 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
     assert.match(cancelled, /^choice:/, "the cancel is recorded against the choice card");
 
     // The desktop settles the last cards: Pending empties.
-    await ageCards();
     await hub.updateMessages(CHAT_POLISH, [swipeQuestion("cancelled")]);
     await hub.raiseApproval(CHAT_POLISH, { ...deployApproval, status: "approved", updatedAt: new Date().toISOString() });
     await hub.raiseApproval(CHAT_CLOUD, { ...chatBarApproval, status: "approved", updatedAt: new Date().toISOString() });

@@ -1,7 +1,7 @@
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation, ConversationSummary } from "../../shared/types";
 import { chatMessageHiddenFromTimeline } from "../../shared/chatParticipantRequestThreads";
 import { controlCardFromApproval, controlCardFromChoiceMessage, type MobileControlCard } from "../../shared/mobileControlCards";
-import { timelineEventsFromSnapshot, type MobileChatListItem, type MobileTimelinePage } from "./mobileTimeline";
+import { phoneActivityEvents, timelineEventsFromSnapshot, type MobileChatListItem, type MobileTimelinePage } from "./mobileTimeline";
 
 /** The phone's chat list and a chat's page, built the same way wherever the
  *  chats are read: by the desktop from its own store, and by the User's
@@ -99,6 +99,7 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
       newest.find((message) => message.role === "participant" && message.metadata?.hiddenFromTimeline !== true);
     const members = mobileChatMembers(conversation);
     const pendingCards = pendingCardsFor(summary.id, conversation);
+    const activity = conversation ? phoneActivityEvents(conversation) : [];
     items.push({
       id: summary.id,
       title: summary.title || "Chat",
@@ -112,6 +113,7 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
         .map((participant) => participant.handle.startsWith("@") ? participant.handle : `@${participant.handle}`)
         .slice(0, 4),
       ...(pendingCards ? { pendingCards } : {}),
+      ...(activity.length ? { activity } : {}),
       members: members.map((participant) => ({
         id: participant.id,
         handle: participant.handle,

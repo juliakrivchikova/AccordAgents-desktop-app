@@ -27,6 +27,8 @@ const CHAT = "chat-tap";
 let serverDown = false;
 // While this is set the server answers but takes nothing the phone sends.
 let holdPushes = false;
+// While this is set the server answers and refuses everything the phone sends.
+let rejectPushes = false;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -119,6 +121,9 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     hub.setGate(async (request) => {
       if (serverDown) return { drop: true };
       if (holdPushes && request.method === "POST" && request.path === "/v1/events") return { status: 503, body: { ok: false } };
+      if (rejectPushes && request.method === "POST" && request.path === "/v1/events") {
+        return { status: 200, body: { results: Array.from({ length: 50 }, () => ({ status: "rejected", error: "Not taken in this test." })) } };
+      }
       if (request.method === "GET" && request.path.startsWith("/v1/phone/")) return { status: 503, body: { ok: false } };
       return undefined;
     });
@@ -289,6 +294,33 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     await refuse(sentOperation);
     await waitFor(`!AccordAgentsMobile.isCardLocked("card-custom") && !document.querySelector('#message-list [data-card-id="card-custom"]').classList.contains("control-card-folded")`,
       "the same answer, refused again under an unchanged card, to open the card again");
+    // A refusal that gives no reason, from the member's home or from the
+    // server, says the same plain thing; neither is "the desktop" any more.
+    const refusedText = "This answer was not accepted. You can answer again.";
+    const cardOpenAgain = `(() => { const node = document.querySelector('#message-list [data-card-id="card-custom"]'); return Boolean(node) && !AccordAgentsMobile.isCardLocked("card-custom") && !node.classList.contains("control-card-folded"); })()`;
+    const submitCustom = `document.querySelector('#message-list [data-card-id="card-custom"] .control-card-submit').click()`;
+    const submitReady = `!document.querySelector('#message-list [data-card-id="card-custom"] .control-card-submit').disabled`;
+    await waitFor(submitReady, "the reopened card to take an answer");
+    await evaluate(submitCustom);
+    await waitFor(`AccordAgentsMobile.isCardLocked("card-custom")`, "the answer given after a refusal to be taken");
+    await evaluate(`AccordAgentsMobile.handleRelayTimelinePayload(${JSON.stringify({
+      type: "mobile.timeline.events", conversationId: CHAT, events: [],
+      cards: [{ ...card("card-custom"), refusedAnswers: [{ operationId: sentOperation }] }]
+    })}, ${JSON.stringify(CHAT)}).then(() => true)`);
+    await waitFor(cardOpenAgain, "an answer the member's home refused without a reason to open the card");
+    assert.equal((await evaluate(cardState)).state, refusedText, "a refusal from the member's home without a reason");
+    rejectPushes = true;
+    await waitFor(submitReady, "the card to take an answer again");
+    await evaluate(submitCustom);
+    await waitFor(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.some((entry) => entry.kind === "choice.answered" && entry.status === "refused"))`,
+      "the server to refuse the answer");
+    await waitFor(`!AccordAgentsMobile.isCardLocked("card-custom")`, "the refused answer to stop holding the card");
+    rejectPushes = false;
+    // In place, with nothing else drawing the chat: every read is refused
+    // here, so no later redraw comes to the rescue. It stayed folded and
+    // "on its way" until the User left the chat and came back.
+    await waitFor(`(${cardOpenAgain}) && document.querySelector('#message-list [data-card-id="card-custom"] .control-card-state').textContent === ${JSON.stringify(refusedText)}`,
+      "an answer the server refused to open the card and say so", 3_000);
 
     // --- a field a pick opens comes into sight in the chat -------------------
     // Picking "Write your own answer" at the bottom edge opened its box below
@@ -563,6 +595,27 @@ test("a tap above the composer while the keyboard is up lands the first time", {
       "the question asked in a thread stands under its message in the thread");
     await evaluate(`document.getElementById("back-to-timeline").click()`);
     await waitFor(`document.getElementById("chat-title").textContent === "Tap test"`, "the chat's main list again");
+
+    // --- a message's first reply arrives after the message was drawn --------
+    // The row is patched in place, and its replies chip came only with a row
+    // drawn afresh: drawn once before its first reply, a message never offered
+    // its thread.
+    const chipRow = `[...document.querySelectorAll('#message-list .message-row')].find((row) => row.innerText.includes("A message whose reply comes later."))`;
+    await evaluate(`AccordAgentsMobile.handleRelayTimelinePayload(${JSON.stringify({ type: "mobile.timeline.events", conversationId: CHAT, events: [
+      { id: "chip-root", messageId: "chip-root", role: "participant", participantLabel: "@drew", content: "A message whose reply comes later.", status: "done", createdAt: new Date(Date.now() + 30_000).toISOString() }
+    ] })}, ${JSON.stringify(CHAT)})`);
+    await waitFor(`Boolean(${chipRow})`, "the message drawn before it has replies");
+    assert.equal(await evaluate(`Boolean(${chipRow}.querySelector('.thread-chip'))`), false, "no chip while it has no replies");
+    await evaluate(`AccordAgentsMobile.handleRelayTimelinePayload(${JSON.stringify({ type: "mobile.timeline.events", conversationId: CHAT, events: [
+      { id: "chip-reply", messageId: "chip-reply", role: "participant", participantLabel: "@drew", content: "The first reply, in a later batch.", status: "done", createdAt: new Date(Date.now() + 40_000).toISOString(), threadRootId: "chip-root" }
+    ] })}, ${JSON.stringify(CHAT)})`);
+    await waitFor(`(() => { const chip = ${chipRow} && ${chipRow}.querySelector('.thread-chip'); return Boolean(chip) && chip.textContent === "1 reply"; })()`,
+      "the row patched in place to offer its thread");
+    await evaluate(`${chipRow}.querySelector('.thread-chip').click()`);
+    await waitFor(`document.getElementById("chat-title").textContent === "Thread" && document.getElementById("message-list").innerText.includes("The first reply, in a later batch.")`,
+      "the chip to open the thread with the reply");
+    await evaluate(`document.getElementById("back-to-timeline").click()`);
+    await waitFor(`document.getElementById("chat-title").textContent === "Tap test"`, "the chat's main list after the thread");
 
     // --- a field being typed in stays put while a message lands above it ----
     // Chrome anchors the scroll itself; Safari on the iPhone does not, and the

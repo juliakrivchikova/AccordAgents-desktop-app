@@ -33,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v71/);
+  assert.match(worker, /accordagents-mobile-shell-v72/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -352,7 +352,7 @@ test("mobile shell builds static installable PWA assets", async () => {
   // never yanked back — the pill offers the way back instead. The measurement
   // must happen BEFORE the rows are mounted, or appending content is itself
   // what makes the answer "not at the bottom" and the view follows nothing.
-  assert.match(app, /const wasAtBottom = isNearBottom\(threadSurface\(\)\);\s*reconcileMessageRows\(list, rows\);/);
+  assert.match(app, /const wasAtBottom = isNearBottom\(threadSurface\(\)\);\s*reconcileMessageRows\(list, rows, rowSignatures\);/);
   assert.match(app, /if \(wasAtBottom\) \{\s*scrollToLatestWhenSettled\("auto"\);/);
   // A run that dies produces no terminal of its own: the control service's
   // catch writes one under the INGEST run's name, which matches no member's
@@ -428,7 +428,7 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /putTimelineEntryDeduped/);
   assert.match(app, /timelineEntryDedupeKey/);
   assert.match(app, /dedupeTimelineEntries/);
-  assert.match(app, /reconcileMessageRows\(list, rows\)/);
+  assert.match(app, /reconcileMessageRows\(list, rows, rowSignatures\)/);
   assert.match(app, /timelineRenderRowKey/);
   assert.match(app, /updateMessageRow\(item, entry\)/);
   assert.match(app, /renderMessageContentIfChanged/);

@@ -232,3 +232,44 @@ test("a hidden member message still travels to the phone, flagged, so the run it
   ]);
   assert.equal(events[1].runId, "run-1", "the terminal keeps the run it ends");
 });
+
+test("Activity on the phone gets each chat's running turns and members' replies of the last week, short and without pictures", async () => {
+  const { phoneActivityEvents, PHONE_ACTIVITY_CONTENT_CHARS } = await import("./mobileTimeline");
+  const now = Date.parse("2026-10-26T12:00:00.000Z");
+  const at = (daysAgo: number) => new Date(now - daysAgo * 24 * 60 * 60_000).toISOString();
+  const conversation = {
+    id: "chat-activity", kind: "chat", title: "A", createdAt: at(30), updatedAt: at(0), findings: [], metadata: {},
+    messages: [
+      { id: "old-done", role: "participant", participantId: "p1", participantLabel: "@drew", content: "last month", createdAt: at(9), status: "done" },
+      { id: "u1", role: "user", content: "@drew go", createdAt: at(2) },
+      { id: "drew-1", role: "participant", participantId: "p1", participantLabel: "@drew", content: "first", createdAt: at(2), status: "done", metadata: { runId: "r1" } },
+      { id: "drew-2", role: "participant", participantId: "p1", participantLabel: "@drew", content: "x".repeat(2000), createdAt: at(1), status: "done", metadata: { runId: "r2" },
+        attachments: [{ id: "a", filename: "p.png", mimeType: "image/png", size: 10 }] },
+      { id: "taylor-run", role: "participant", participantId: "p2", participantLabel: "@taylor", content: "", createdAt: at(0), status: "pending", metadata: { runId: "r3" } },
+      { id: "hidden", role: "participant", participantId: "p2", participantLabel: "@taylor", content: "waiting", createdAt: at(0), status: "done", metadata: { runId: "r4", hiddenFromTimeline: true } },
+      { id: "failed", role: "participant", participantId: "p3", participantLabel: "@admin", content: "boom", createdAt: at(0), status: "error", metadata: { runId: "r5" } },
+      { id: "drew-asks", role: "participant", participantId: "p1", participantLabel: "@drew", content: "Which one?", createdAt: at(0), status: "done",
+        metadata: { runId: "r6", pendingChoice: { id: "c1", status: "pending", options: [] } } }
+    ]
+  } as unknown as Conversation;
+  const events = phoneActivityEvents(conversation, now);
+  assert.deepEqual(events.map((event) => [event.id, event.status]), [["drew-2", "done"], ["taylor-run", "pending"], ["drew-asks", "done"]],
+    "the newest finished reply of each member this week, the reply its open question belongs to, and each run going on; nothing older, hidden or user-written");
+  assert.equal(events[0].content.length, PHONE_ACTIVITY_CONTENT_CHARS);
+  assert.equal("attachments" in events[0], false);
+  assert.equal(events[1].runId, "r3");
+  assert.deepEqual(phoneActivityEvents({ ...conversation, messages: conversation.messages.slice(0, 2) } as Conversation, now), [], "a quiet chat has none");
+});
+
+test("a busy chat sends the phone its newest activity, never more than the cap", async () => {
+  const { phoneActivityEvents, PHONE_ACTIVITY_PER_CHAT } = await import("./mobileTimeline");
+  const now = Date.parse("2026-10-26T12:00:00.000Z");
+  const messages = Array.from({ length: 12 }, (_, index) => ({
+    id: `m${index}`, role: "participant", participantId: `p${index}`, participantLabel: `@m${index}`, content: `reply ${index}`,
+    createdAt: new Date(now - (12 - index) * 60_000).toISOString(), status: "done"
+  }));
+  const events = phoneActivityEvents({ id: "busy", kind: "chat", title: "B", createdAt: "", updatedAt: "", findings: [], metadata: {}, messages } as unknown as Conversation, now);
+  assert.equal(events.length, PHONE_ACTIVITY_PER_CHAT);
+  assert.equal(events[events.length - 1].id, "m11", "the newest is kept");
+  assert.equal(events[0].id, `m${12 - PHONE_ACTIVITY_PER_CHAT}`);
+});

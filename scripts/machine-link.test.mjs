@@ -1181,12 +1181,16 @@ test("when a machine goes away the desktop stops showing the background work it 
   assert.deepEqual(events, [{ machineId: "machine-a", snapshot: [] }]);
   link.setMachinePeer(connection, undefined);
   assert.equal(events.length, 1, "an already absent machine is not cleared twice");
+  assert.equal(connection.helloSeen, false, "gone, what greeted it before counts for nothing");
   const sent = [];
   link.send = async (_connection, body) => { sent.push(body.type); };
   link.options = { desktopDeviceId: "desktop" };
-  connection.helloSeen = true;
   link.setMachinePeer(connection, "device-a");
   assert.ok(sent.includes("machine.member.background.request"), "back on the link, the desktop asks what is running now");
+  // And, with no hello of its own, for a hello.
+  for (let i = 0; i < 40 && !sent.includes("machine.hello.request"); i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(sent.includes("machine.hello.request"));
+  clearTimeout(connection.helloRequestTimer);
 });
 
 test("every enrolled machine whose identity is known reads the server, connected or not, and is never addressed; one not set up with the server gets no room", async () => {
@@ -1549,4 +1553,112 @@ test("a settings event older than what the machine applied is not applied again"
   } finally {
     host.close();
   }
+});
+
+test("an enrolled machine's events are held, never passed over, while its link is not open, and offered again when its channel is up", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const pairing = offlinePairing();
+  const record = { id: "machine-held", name: "Held", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId, chatChanges: true,
+    createdAt: new Date().toISOString(), lastHello: { publicKeyDerBase64: hostEvents.publicKeyDerBase64 } };
+  let failConnect = true;
+  let ready = 0;
+  const link = new MachineLinkService({
+    listMachines: async () => [record], getMachinePairing: async () => pairing,
+    saveMachine: async (next) => { Object.assign(record, next); return [record]; },
+    exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: "", settingsJson: "{}", agentEnvironment: [] })
+  }, { write: async () => undefined }, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, onChannelReady: () => { ready += 1; },
+    createClient: () => {
+      if (failConnect) throw new Error("the room could not be opened");
+      return { on() { return () => undefined; }, connect: async () => undefined, close() {}, sendCiphertext: async () => [], currentState: () => "connected" };
+    }, trustedDevices: async () => [] });
+  try {
+    await link.start();
+    const fromMachine = { eventId: "e1", originId: MACHINE_ID, logScopeId: `device:${pairing.rendezvousId}:actions`, kind: "machine.turn.finished", conversationId: "c" };
+    assert.equal(await link.receiveFromHub(fromMachine), "not-ready", "its link could not open at start: held, not lost");
+    assert.equal(await link.receiveFromHub({ ...fromMachine, originId: "device-" + "e".repeat(32) }), "not-ready", "anything in its channel's scope is held too");
+    assert.equal(await link.receiveFromHub({ ...fromMachine, originId: "device-" + "e".repeat(32), logScopeId: "device:rv-someone-else:actions" }), "not-mine",
+      "traffic of a device that is no machine of this desktop is not");
+    assert.equal(await link.receiveFromHub({ ...fromMachine, logScopeId: "chat-changes:c", kind: "chat.changes" }), "not-mine",
+      "its chat changes need no channel: the server's reader applies them");
+    assert.equal(await link.receiveFromHub({ ...fromMachine, logScopeId: "chat:actions", kind: "permission.decided" }), "not-ready", "its chat actions are held too");
+    failConnect = false;
+    await link.connectMachine(record);
+    assert.equal(ready, 1, "once its channel is up, what was held is offered again");
+    // With its channel up, what the channel turns away (its traffic with
+    // another machine, in their pair's channel) is not held for ever.
+    assert.equal(await link.receiveFromHub({ ...fromMachine, logScopeId: "device:pair-aaaa:actions", kind: "machine.participants.delegate" }), "not-mine");
+    await link.forgetMachine(record.id);
+    assert.equal(await link.receiveFromHub(fromMachine), "not-mine", "a removed machine's events are no longer held for it");
+  } finally { link.close(); }
+});
+
+test("a machine whose new connection takes the seat of its old one is asked for a hello, and stays present", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const pairing = offlinePairing();
+  const record = { id: "machine-seat", name: "Seat", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId, chatChanges: true,
+    createdAt: new Date().toISOString(), lastHello: { publicKeyDerBase64: hostEvents.publicKeyDerBase64 } };
+  const listeners = new Map();
+  const sent = [];
+  const client = {
+    on(event, listener) { listeners.set(event, [...(listeners.get(event) ?? []), listener]); return () => undefined; },
+    emit(event, payload) { for (const listener of listeners.get(event) ?? []) listener(payload); },
+    currentState: () => "connected", async connect() {}, close() {},
+    async sendCiphertext(message) { sent.push(message); return []; }
+  };
+  const link = new MachineLinkService({
+    listMachines: async () => [record], getMachinePairing: async () => pairing,
+    saveMachine: async (next) => { Object.assign(record, next); return [record]; },
+    exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: "", settingsJson: "{}", agentEnvironment: [] })
+  }, { write: async () => undefined }, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, createClient: () => client, trustedDevices: async () => [] });
+  try {
+    await link.start();
+    const connection = link.connections.get(record.id);
+    const types = [];
+    link.send = async (_connection, body) => { types.push(body.type); };
+    client.emit("peer", { type: "ready", deviceId: DESKTOP_ID, peerConnected: true, peers: [{ role: "machine", deviceId: MACHINE_ID }] });
+    connection.helloSeen = true; // it greeted this connection (handleHello sets this)
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    types.length = 0;
+    // The machine restarted; the server seated its new connection and says so.
+    client.emit("peer", { type: "peer-connected", peer: { role: "machine", deviceId: MACHINE_ID } });
+    assert.equal(link.isMachineConnected(record.id), true, "it never reads as gone");
+    await waitFor(() => types.includes("machine.hello.request"), 3_000);
+    assert.deepEqual(types, ["machine.member.background.request", "machine.hello.request"],
+      "it is asked what runs now and, with no hello of its own, for a hello");
+  } finally { link.close(); }
+});
+
+test("an event a machine sends in the room is not taken: durable events come only through the server's order", async () => {
+  const { MachineLinkService } = await import("../dist/main/main/services/machineLink.js");
+  const { sealMachinePayload } = await import("../dist/main/main/services/machineChannelSealing.js");
+  const { DEVICE_EVENT_CHANNEL_PROTOCOL } = await import("../dist/main/shared/deviceEventChannel.js");
+  const pairing = offlinePairing();
+  const record = { id: "machine-room-event", name: "Room", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId, chatChanges: true,
+    createdAt: new Date().toISOString(), lastHello: { publicKeyDerBase64: hostEvents.publicKeyDerBase64 } };
+  const listeners = new Map();
+  const client = {
+    on(event, listener) { listeners.set(event, [...(listeners.get(event) ?? []), listener]); return () => undefined; },
+    emit(event, payload) { for (const listener of listeners.get(event) ?? []) listener(payload); },
+    currentState: () => "connected", async connect() {}, close() {}, async sendCiphertext() { return []; }
+  };
+  const logs = [];
+  const link = new MachineLinkService({
+    listMachines: async () => [record], getMachinePairing: async () => pairing,
+    saveMachine: async (next) => { Object.assign(record, next); return [record]; },
+    exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: "", settingsJson: "{}", agentEnvironment: [] })
+  }, { write: async (event, payload) => { logs.push({ event, payload }); } }, { ...desktopEvents, appVersion: "test", desktopDeviceId: DESKTOP_ID, createClient: () => client, trustedDevices: async () => [] });
+  try {
+    await link.start();
+    const connection = link.connections.get(record.id);
+    let received = 0;
+    connection.eventChannel.receive = async () => { received += 1; };
+    const packet = { protocol: DEVICE_EVENT_CHANNEL_PROTOCOL, type: "event", from: MACHINE_ID, to: DESKTOP_ID, channelId: pairing.rendezvousId, event: {} };
+    const ciphertext = await sealMachinePayload(packet, hostEvents.identity, desktopEvents.identity.publicKeyDerBase64, pairing.rendezvousId);
+    client.emit("message", { logicalMessageId: "x", ciphertext });
+    client.emit("message", { logicalMessageId: "y", ciphertext });
+    await waitFor(() => logs.some((entry) => entry.event === "machine-link.room-event-dropped"), 3_000);
+    await connection.inbound;
+    assert.equal(received, 0, "the room is for live traffic only");
+    assert.equal(logs.filter((entry) => entry.event === "machine-link.room-event-dropped").length, 1, "said once, not for every copy");
+  } finally { link.close(); }
 });

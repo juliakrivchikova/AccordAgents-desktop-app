@@ -339,7 +339,9 @@ export class HubServer {
       if (previous) previous.socket.close(HUB_ROOM_REPLACED_CLOSE_CODE, "replaced");
       const others = [...members.values()].filter((item) => item !== member);
       ws.send(JSON.stringify({ type: "ready", deviceId: device.deviceId, peers: others.map((item) => ({ deviceId: item.deviceId, role: item.role })) }));
-      if (!previous) for (const other of others) sendJson(other.socket, { type: "peer-connected", peer: { deviceId: device.deviceId, role } });
+      // Also when it took the seat of an older connection of its own: the
+      // others learn it came back (a restart, a new link), and greet it again.
+      for (const other of others) sendJson(other.socket, { type: "peer-connected", peer: { deviceId: device.deviceId, role } });
       ws.on("message", (data) => this.roomMessage(rid, member, data));
       const leave = () => {
         if (members.get(device.deviceId) !== member) return;

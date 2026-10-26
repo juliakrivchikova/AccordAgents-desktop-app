@@ -53,6 +53,14 @@
   // Activity drops an "in progress" row that reached the phone well before a
   // list saying nothing runs in that chat: a run the phone never saw end.
   const CHAT_LIST_AT_KEY = "accordagents.mobile.chatListAt.v1";
+  // When each member message the chat list carries for Activity first reached
+  // this phone in its current state, on this phone's clock: what Activity
+  // judges "new since you looked" by for a chat whose pages it never read.
+  const LIST_ACTIVITY_SEEN_KEY = "accordagents.mobile.listActivitySeen.v1";
+  // What the list may carry per chat, and how much of each message: the same
+  // length Activity previews from.
+  const LIST_ACTIVITY_PER_CHAT = 8;
+  const LIST_ACTIVITY_CONTENT_CHARS = 880;
   const TERMINAL_RUNS_MAX = 600;
   let activeFlushOutboxPromise;
   // The status of every queue entry this phone has seen, by event id, so a
@@ -590,7 +598,10 @@
     holdChatRows(conversationId, rows.filter(function (row) { return row && ids.indexOf(row.id) < 0; }));
   }
 
-  function putTimelineEntryDeduped(entry) {
+  /** `arrivedAt` is when a row new here (or in a new state) counts as having
+   *  come, when that is not now: the page a chat was opened with. */
+  function putTimelineEntryDeduped(entry, options) {
+    const arrivedAt = options && typeof options.arrivedAt === "string" ? options.arrivedAt : undefined;
     const key = timelineEntryDedupeKey(entry);
     // The one write path that keeps the held rows in step instead of dropping
     // them: it is the one a streaming member takes, over and over.
@@ -641,7 +652,7 @@
             ...(prior.settledAt && !entry.settledAt ? { settledAt: prior.settledAt } : {})
           };
         } else if (!entry.receivedAt) {
-          entry = { ...entry, receivedAt: nowIso() };
+          entry = { ...entry, receivedAt: arrivedAt || nowIso() };
         }
         // A later copy of a row this phone already holds can name less than
         // the first one did: a machine's delta carries no run id, a page read
@@ -1126,6 +1137,11 @@
       if (!event || event.key === null || event.key === CHAT_LIST_KEY) {
         forgetCachedChatList();
       }
+      // Another tab paired this phone again: its key is read afresh.
+      if (!event || event.key === null || event.key === HUB_PAIRING_KEY) {
+        forgetHubIdentity();
+        hubClientCache = undefined;
+      }
     });
   }
 
@@ -1163,11 +1179,32 @@
         participants: Array.isArray(chat.participants) ? chat.participants.filter(function (item) {
           return typeof item === "string" && item.trim();
         }).slice(0, 4) : [],
-        members: Array.isArray(chat.members) ? chat.members.map(normalizeMobileMember).filter(Boolean) : []
+        members: Array.isArray(chat.members) ? chat.members.map(normalizeMobileMember).filter(Boolean) : [],
+        ...listActivityOf(chat)
       };
     }) : [];
-    localStorage.setItem(CHAT_LIST_KEY, JSON.stringify(normalized));
-    forgetCachedChatList();
+    // A full storage must not stop the list: without the members' recent
+    // messages it is a fraction of the size, and failing that it is kept for
+    // this session only. A list write that threw left the phone on the list
+    // it had, whatever the server said.
+    let kept = normalized;
+    try {
+      localStorage.setItem(CHAT_LIST_KEY, JSON.stringify(normalized));
+      forgetCachedChatList();
+    } catch {
+      kept = normalized.map(function (chat) {
+        const { activity: _activity, ...rest } = chat;
+        return rest;
+      });
+      try {
+        localStorage.setItem(CHAT_LIST_KEY, JSON.stringify(kept));
+        forgetCachedChatList();
+      } catch {
+        recordRelayDebug({ event: "chat-list-not-stored" });
+      }
+      cachedChatList = kept;
+    }
+    noteListActivitySeen(kept);
     // Same rule as the desktop sidebar: a chat that moved while it was not the
     // one on screen is unread. The list this phone held before is the "seen"
     // baseline, so the first list after an update marks nothing.
@@ -1233,7 +1270,7 @@
    *  stamp, so a desktop clock running ahead cannot mark news as seen. Every
    *  render of the open chat lands here, so the answer the User just watched
    *  finish is always behind the mark. */
-  function markConversationViewed(conversationId, newestReceivedAt) {
+  function markConversationViewed(conversationId, newestReceivedAt, viewedAt) {
     if (!conversationId) return;
     const all = loadViewedAt();
     const stored = Date.parse(all[conversationId] || "");
@@ -1242,7 +1279,9 @@
     // all it needs to; rewriting it on every redraw of a streaming chat made
     // Activity rebuild its lists on each one.
     if (Number.isFinite(stored) && (!Number.isFinite(newest) || stored >= newest)) return;
-    const next = nowIso();
+    // Now, unless the look happened earlier (a chat opened and left before
+    // its page came): never moved back.
+    const next = viewedAt || nowIso();
     if (Number.isFinite(stored) && stored >= Date.parse(next)) return;
     all[conversationId] = next;
     try {
@@ -1866,10 +1905,13 @@
     stopRequestedRunIds.add(runId.trim());
     await render("waiting-to-sync");
     await enqueueRunCancel({ conversationId, runId: runId.trim() });
+    // A stop goes where every other write goes, at once; the member's home
+    // stops it when it reads it, and the row keeps saying "Stopping" until
+    // it has.
+    const flushing = flushOutbox();
+    await handOverBeforeDrawing(flushing);
     await render("waiting-to-sync");
-    // A stop goes where every other write goes; the member's home stops it
-    // when it reads it, and the row keeps saying "Stopping" until it has.
-    const flushResult = await flushOutbox();
+    const flushResult = await flushing;
     await render(flushResult.status);
   }
 
@@ -1933,9 +1975,25 @@
     };
   }
 
+  // The phone's key, read once: every event it mints and every request it
+  // signs asks for it, and each read was its own database open on the way
+  // to the server. Replaced when the phone pairs (or another tab does).
+  let hubIdentityCache;
+  // Bumped whenever the key may have changed: a read that started before
+  // does not put the old key back.
+  let hubIdentityGeneration = 0;
+
+  function forgetHubIdentity() {
+    hubIdentityGeneration += 1;
+    hubIdentityCache = undefined;
+  }
+
   function hubIdentity() {
+    if (hubIdentityCache) return Promise.resolve(hubIdentityCache);
+    const generation = hubIdentityGeneration;
     return readMetaRecord(HUB_IDENTITY_META_KEY).then(function (identity) {
       if (!identity || !identity.deviceId || !identity.privateKeyDerBase64) throw new Error("This phone has lost its pairing key. Pair it again.");
+      if (generation === hubIdentityGeneration) hubIdentityCache = identity;
       return identity;
     });
   }
@@ -2036,6 +2094,7 @@
       // The key the server now knows this phone by, before the pairing that
       // names it: a pairing without its key could never sign again.
       await writeMetaRecord(HUB_IDENTITY_META_KEY, identity);
+      forgetHubIdentity();
       // A new key starts its own chains; where the old one's stood means
       // nothing to the server for it.
       if (!before || before.deviceId !== identity.deviceId) await forgetHubHeads();
@@ -2239,18 +2298,24 @@
 
   /** The next stamp of this phone's clock (the desktop's form, hlc:…). */
   async function hubLogicalTs(deviceId) {
-    const record = (await readMetaRecord(HUB_CLOCK_META_KEY)) || {};
-    const now = Date.now();
-    let wall = Number(record.wallMs) || 0;
-    let counter = Number(record.counter) || 0;
-    if (now > wall) {
-      wall = now;
-      counter = 0;
-    } else {
-      counter += 1;
-    }
-    await writeMetaRecord(HUB_CLOCK_META_KEY, { wallMs: wall, counter: counter });
-    return "hlc:" + String(wall).padStart(13, "0") + ":" + String(counter).padStart(6, "0") + ":" + deviceId;
+    // Read and advanced in one transaction: the stamp is this phone's clock,
+    // and two reads and a write for it were three database opens per send.
+    return withNamedStore(META_STORE, "readwrite", function (store) {
+      return requestToPromise(store.get(HUB_CLOCK_META_KEY)).then(function (found) {
+        const record = found || {};
+        const now = Date.now();
+        let wall = Number(record.wallMs) || 0;
+        let counter = Number(record.counter) || 0;
+        if (now > wall) {
+          wall = now;
+          counter = 0;
+        } else {
+          counter += 1;
+        }
+        store.put({ ...record, key: HUB_CLOCK_META_KEY, wallMs: wall, counter: counter });
+        return "hlc:" + String(wall).padStart(13, "0") + ":" + String(counter).padStart(6, "0") + ":" + deviceId;
+      });
+    });
   }
 
   /**
@@ -2268,7 +2333,9 @@
     let payload = await hubEventPayload(entry, client);
     const json = JSON.stringify(payload);
     if (new TextEncoder().encode(json).length > HUB_INLINE_PAYLOAD_BYTES) {
-      payload = await client.uploadBlob(new TextEncoder().encode(json));
+      const uploading = client.uploadBlob(new TextEncoder().encode(json));
+      noteHandOverRequestStarted();
+      payload = await uploading;
     }
     const headKey = HUB_HEAD_META_PREFIX + shape.logScopeId;
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -2357,6 +2424,46 @@
     for (const item of later) noteOutboxStatus({ ...item, status: "waiting-to-sync" });
   }
 
+  // Who waits for this phone's part of the next hand-over to be done.
+  let handOverWaiters = [];
+
+  /** Called as the first request of a hand-over is started (the events, or a
+   *  body too large to travel inline with them): the queue is written and
+   *  the events minted and signed. The request itself is not sent yet — its
+   *  own signature and the network still follow, asynchronously. */
+  function noteHandOverRequestStarted() {
+    const waiters = handOverWaiters;
+    handOverWaiters = [];
+    for (const resolve of waiters) resolve();
+  }
+
+  // The longest a redraw after a send waits for the hand-over to start. The
+  // wait is the phone's own work (its queue, the stamp, the signature), tens
+  // of milliseconds; this only bounds a store that has stalled.
+  const SEND_BEFORE_DRAW_MAX_MS = 1_000;
+
+  /** What the User just did goes to the server before the chat is drawn
+   *  again: a redraw reads and checks every row of the chat in one go, and
+   *  started first, it held the hand-over back for as long as it took (most
+   *  of the time between Send and the server having it). The wait ends when
+   *  the first request has been started (see noteHandOverRequestStarted),
+   *  when the flush ends without one, or after a second at most: the screen
+   *  is never held for the network. */
+  function handOverBeforeDrawing(flushing) {
+    let timer;
+    let waiter;
+    const started = new Promise(function (resolve) {
+      waiter = resolve;
+      handOverWaiters.push(resolve);
+      timer = setTimeout(resolve, SEND_BEFORE_DRAW_MAX_MS);
+    });
+    return Promise.race([started, flushing.then(function () { return undefined; }, function () { return undefined; })])
+      .finally(function () {
+        clearTimeout(timer);
+        handOverWaiters = handOverWaiters.filter(function (item) { return item !== waiter; });
+      });
+  }
+
   /**
    * Sends what this phone still owes its server, in the order it was written.
    * Each entry is acknowledged only when the server says it holds it
@@ -2384,7 +2491,9 @@
       const page = minted.slice(start, start + HUB_PUSH_PAGE);
       let response;
       try {
-        response = await client.pushEvents(page.map(function (entry) { return entry.minted; }));
+        const pushing = client.pushEvents(page.map(function (entry) { return entry.minted; }));
+        noteHandOverRequestStarted();
+        response = await pushing;
         response = await repairHubGaps(client, page, response);
       } catch (error) {
         for (const entry of page) await putOutboxEntry({ ...entry, status: "waiting-to-sync", updatedAt: nowIso(), lastError: String(error && error.message || error) });
@@ -2550,8 +2659,9 @@
   }
 
   async function requestChatListFromServer() {
+    const requestedAt = Date.now();
     const payload = await serverPhoneGet("/v1/phone/chats");
-    return handleRelayChatListPayload(payload);
+    return handleRelayChatListPayload(payload, { requestedAt: requestedAt });
   }
 
   async function requestTimelineFromServer(conversationId, options) {
@@ -2561,7 +2671,9 @@
     const payload = await serverPhoneGet("/v1/phone/timeline", { conversationId, beforeMessageId });
     return handleRelayTimelinePayload(payload, conversationId, {
       deferRender: Boolean(options && options.deferRender),
-      historyPage: Boolean(beforeMessageId)
+      historyPage: Boolean(beforeMessageId),
+      opening: Boolean(options && options.opening),
+      openedAt: options && options.openedAt
     });
   }
 
@@ -2711,32 +2823,146 @@
     }
   }
 
-  // How long a pending card must have been on this phone before its absence
-  // from the desktop's list means it was answered or withdrawn. A card that
-  // reached the phone while the list was being built is not in it yet; both
-  // moments are this phone's own clock, so they compare whatever the desktop
-  // stamped the card with (a choice carries its run's start).
-  // Five minutes rather than two: the list is read from the desktop's
-  // database, and a card reaches the phone from the desktop's memory first —
-  // a save that lags behind must not read as the card being closed.
+  /** The members' messages the server's list carries for a chat (its running
+   *  members and newest finished replies), kept in the shape Activity reads
+   *  timeline rows in. A chat the phone never opened has no other rows, and
+   *  without these Activity listed only the chats opened on this phone. */
+  function listActivityOf(chat) {
+    if (!Array.isArray(chat.activity)) return {};
+    const rows = [];
+    // The newest, if the server ever sends more than this phone keeps.
+    for (const event of chat.activity.slice(-LIST_ACTIVITY_PER_CHAT)) {
+      if (!event || typeof event !== "object" || event.hidden === true || event.role !== "participant") continue;
+      const messageId = typeof event.messageId === "string" && event.messageId.trim() ? event.messageId.trim()
+        : typeof event.id === "string" && event.id.trim() ? event.id.trim() : "";
+      if (!messageId || (event.status !== "pending" && event.status !== "done")) continue;
+      if (typeof event.content !== "string" || typeof event.createdAt !== "string") continue;
+      rows.push({
+        messageId: messageId,
+        status: event.status,
+        content: event.content.slice(0, LIST_ACTIVITY_CONTENT_CHARS),
+        createdAt: event.createdAt,
+        ...(typeof event.runId === "string" && event.runId ? { runId: event.runId } : {}),
+        ...(typeof event.mobileEventId === "string" && event.mobileEventId ? { mobileEventId: event.mobileEventId } : {}),
+        ...(typeof event.participantLabel === "string" && event.participantLabel ? { participantLabel: event.participantLabel } : {}),
+        ...(typeof event.participantId === "string" && event.participantId ? { participantId: event.participantId } : {}),
+        ...(typeof event.threadRootId === "string" && event.threadRootId ? { threadRootId: event.threadRootId } : {})
+      });
+    }
+    return rows.length > 0 ? { activity: rows } : {};
+  }
+
+  function listActivitySeenKey(conversationId, row) {
+    return conversationId + "\u0000" + row.messageId + "\u0000" + row.status;
+  }
+
+  function loadListActivitySeen() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(LIST_ACTIVITY_SEEN_KEY) || "{}");
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /** Each listed message keeps the moment it first came in its current state:
+   *  the same list read again is not news, a run that finished since is. Only
+   *  what the list still carries is kept. */
+  function noteListActivitySeen(chats) {
+    // The first list this phone keeps these for is the baseline, as the
+    // first chat list after an update marks nothing: each message counts as
+    // having come when it was written, so what was there before is judged
+    // against when its chat was last looked at, not counted as new now.
+    const firstList = localStorage.getItem(LIST_ACTIVITY_SEEN_KEY) === null;
+    const previous = loadListActivitySeen();
+    const next = {};
+    const now = nowIso();
+    let changed = firstList;
+    for (const chat of chats) {
+      for (const row of chat.activity || []) {
+        const key = listActivitySeenKey(chat.id, row);
+        next[key] = previous[key] || (firstList ? row.createdAt : now);
+        if (!previous[key]) changed = true;
+      }
+    }
+    if (!changed && Object.keys(previous).length === Object.keys(next).length) return;
+    try {
+      localStorage.setItem(LIST_ACTIVITY_SEEN_KEY, JSON.stringify(next));
+    } catch {
+      // Without it a listed reply only reads as new a little longer.
+    }
+  }
+
+  /** The rows Activity is built from: what this phone holds of the chats it
+   *  read, and for every chat the list carries, the members' messages it
+   *  names. The same message from both is one row: the stored one, unless the
+   *  list says a run the phone last saw going has finished. */
+  function withListActivity(entries, chats, seen) {
+    const listed = new Map();
+    for (const chat of chats) {
+      for (const row of chat.activity || []) {
+        listed.set(chat.id + "\u0000" + row.messageId, {
+          id: chat.id + ":" + row.messageId,
+          sourceId: row.messageId,
+          conversationId: chat.id,
+          role: "participant",
+          participantLabel: row.participantLabel,
+          participantId: row.participantId,
+          content: row.content,
+          status: row.status,
+          createdAt: row.createdAt,
+          receivedAt: seen[listActivitySeenKey(chat.id, row)] || row.createdAt,
+          runId: row.runId,
+          mobileEventId: row.mobileEventId,
+          messageId: row.messageId,
+          threadRootId: row.threadRootId
+        });
+      }
+    }
+    if (listed.size === 0) return entries;
+    const covered = new Set();
+    const kept = entries.filter(function (entry) {
+      const key = entry.conversationId + "\u0000" + (entry.messageId || entry.sourceId || "");
+      const fromList = listed.get(key);
+      if (!fromList) return true;
+      if (entry.status === "pending" && fromList.status === "done") return false;
+      covered.add(key);
+      return true;
+    });
+    for (const [key, row] of listed) {
+      if (!covered.has(key)) kept.push(row);
+    }
+    return kept;
+  }
+
+  // Only for a list this phone may have asked for before a card reached it
+  // (or one it did not ask for itself): such a list cannot know the card, so
+  // its silence about a card younger than this says nothing, and the next
+  // list decides. Both moments are this phone's own clock.
   const PENDING_CARD_RECONCILE_GRACE_MS = 5 * 60_000;
 
   /**
-   * The desktop's chat list says which cards still wait in every chat it
-   * lists. A pending card this phone holds that the desktop no longer lists
-   * was answered or withdrawn while this phone was not listening — the batch
-   * that said so was lost, or was never written because it carried nothing
-   * else — and it would otherwise wait here for ever: the User's screenshot
-   * of 2026-09-20 showed cards the desktop had closed days earlier.
+   * The server's chat list says which cards still wait in every chat it
+   * lists, read from the same store as the chat pages that bring the cards.
+   * A pending card this phone holds that a list asked for after the card
+   * arrived does not name was answered or withdrawn while this phone was not
+   * looking at that chat, and it leaves at once; without this it would wait
+   * here for ever (the User's screenshot of 2026-09-20 showed cards closed
+   * days earlier). A list that may predate the card leaves it to the next
+   * list, for the grace above.
    *
    * Answered cards are kept; they are the record under their messages, and
    * the list says nothing about them.
    */
-  function reconcilePendingControlCards(payload) {
+  function reconcilePendingControlCards(payload, options) {
     // The stamp says the desktop knows this contract; the judgement below is
     // on this phone's clock.
     if (!Number.isFinite(Date.parse(typeof payload.generatedAt === "string" ? payload.generatedAt : ""))) return 0;
     const now = Date.now();
+    // When this phone sent the request the list answers. The server serves
+    // the list and the chat pages from one store, so a list asked for after a
+    // card arrived knows everything the page that brought the card knew.
+    const askedAt = options && Number.isFinite(options.requestedAt) ? options.requestedAt : undefined;
     let changed = 0;
     for (const chat of payload.chats) {
       if (!chat || typeof chat.id !== "string" || !Array.isArray(chat.pendingCards)) continue;
@@ -2763,7 +2989,8 @@
           continue;
         }
         const receivedAt = Date.parse(card.receivedAt || card.createdAt || "");
-        if (Number.isFinite(receivedAt) && receivedAt > now - PENDING_CARD_RECONCILE_GRACE_MS) {
+        const listIsLater = askedAt !== undefined && Number.isFinite(receivedAt) && receivedAt < askedAt;
+        if (!listIsLater && Number.isFinite(receivedAt) && receivedAt > now - PENDING_CARD_RECONCILE_GRACE_MS) {
           // Too new to judge: the list may predate it. The next list decides.
           next.push(card);
         }
@@ -2777,13 +3004,13 @@
     return changed;
   }
 
-  function handleRelayChatListPayload(payload) {
+  function handleRelayChatListPayload(payload, options) {
     if (payload?.type !== "mobile.chat-list" || !Array.isArray(payload.chats)) {
       return [];
     }
     // A card the list closed leaves the screen now, whether or not the
     // caller redraws afterwards.
-    if (reconcilePendingControlCards(payload) > 0) void render();
+    if (reconcilePendingControlCards(payload, options) > 0) void render();
     // When the desktop last said which chats have a run going; Activity
     // trusts a "still running" row only if it started after that.
     try {
@@ -3119,6 +3346,10 @@
     }
     let stored = 0;
     let changed = 0;
+    // Only a tap on the chat opens it: a chat restored at launch was not
+    // opened this time, and what came while the app was closed stays news.
+    const opening = Boolean(options && options.opening);
+    const openedAt = opening && typeof options.openedAt === "string" ? options.openedAt : undefined;
     // Cards are drawn now, but a batch that carries only cards is not news
     // the chat is marked unread for: the refresh the desktop sends after the
     // phone's own answer, and a card it closes, put an unread dot and a
@@ -3200,7 +3431,7 @@
         ...(typeof event.participantId === "string" && event.participantId ? { participantId: event.participantId } : {}),
         ...(typeof event.threadId === "string" && event.threadId ? { threadId: event.threadId } : {}),
         ...(settledAt ? { settledAt: settledAt } : {})
-      });
+      }, openedAt ? { arrivedAt: openedAt } : undefined);
       if (written) {
         changed += 1;
       }
@@ -3210,9 +3441,18 @@
     // is unread, the way the desktop marks a chat it is not showing. The
     // phone's own message echoed back is news too; the desktop treats it so.
     const historyBatch = Boolean(options && options.historyPage) || Boolean(payload.page && payload.page.earlier === true);
-    if (changed > 0 && !historyBatch && (conversationId !== selectedConversationId() || document.hidden)) {
+    // The page a chat is opened with is what the User opened it to read, not
+    // news, even when it lands after she has left it again: its rows count
+    // as come and seen when she opened the chat. What came after that is
+    // still news, and the chat list says so.
+    if (opening && openedAt && changed > 0 && (conversationId !== selectedConversationId() || document.hidden)) {
+      markConversationViewed(conversationId, openedAt, openedAt);
+    }
+    if (changed > 0 && !historyBatch && !opening && (conversationId !== selectedConversationId() || document.hidden)) {
       markConversationsUnread([conversationId]);
     }
+    // For the QA harness: a page answered, and whether it was news.
+    if (payload.page) recordRelayDebug({ event: "timeline-page", conversationId: conversationId, opening: opening, changed: changed });
     if (changed > 0 && !historyBatch) {
       refreshChatListSoon(conversationId);
     }
@@ -3397,12 +3637,28 @@
     return { glyphKind: "generic", label: text, mediaMode: "glyph", initials: text.replace(/^@/, "").charAt(0).toUpperCase() || "?" };
   }
 
+  // Which picture a member shows depends only on what is read here, and
+  // every row asks again on every redraw; worked out once per member state.
+  const memberAvatarCache = new Map();
+
   function avatarForMember(member) {
     const shared = mobileSharedRules();
     const label = member.displayName || "@" + member.handle;
     if (!shared) {
       return initialsAvatar(label);
     }
+    const key = [member.id, member.handle, member.kind, member.avatarId, label, member.isAssistant === true].map(function (part) {
+      return part === undefined ? "" : String(part);
+    }).join("\u0000");
+    const known = memberAvatarCache.get(key);
+    if (known) return { ...known };
+    if (memberAvatarCache.size > 500) memberAvatarCache.clear();
+    const resolved = resolveMemberAvatar(shared, member, label);
+    memberAvatarCache.set(key, resolved);
+    return { ...resolved };
+  }
+
+  function resolveMemberAvatar(shared, member, label) {
     // A member the list only knows by handle (an older chat list) has no
     // provider to pick a default from; its name is all there is to go on.
     if (member.kind !== "claude-code" && member.kind !== "codex-cli" && member.kind !== "gemini-cli") {
@@ -3828,6 +4084,9 @@
     pendingThreadOpen = rootId ? { conversationId: conversationId, rootId: rootId } : undefined;
     setOpenThreadRootId(rootId);
     localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
+    // When the User opened it, on this phone's clock: what the page it is
+    // opened with holds counts as seen at this moment.
+    const openedAt = nowIso();
     // A new visit reads the chat again: rows held from an earlier visit are
     // exactly what a late read must not be able to bring back.
     dropCachedChatRows();
@@ -3838,7 +4097,7 @@
       }
       // A page that could not be read leaves what this phone holds on
       // screen; the next change, pull or return to the app reads it again.
-      return requestTimelineViaRelay(pairing, conversationId).catch(function () {
+      return requestTimelineViaRelay(pairing, conversationId, { opening: true, openedAt: openedAt }).catch(function () {
         return 0;
       }).then(function () {
         return render("synced");
@@ -4445,8 +4704,11 @@
     } finally {
       controlCardAnswering.delete(card.id);
       answeringOutcome.delete(card.id);
-      // An answer that could not be saved leaves the options live again.
-      if (controlCardErrors.has(card.id) && !isCardLocked(card.id)) void render();
+      // An answer that could not be saved, or that the server refused while
+      // it was still being written, leaves the options live again: the
+      // redraw inside the answer still counted it as being written and
+      // folded the card.
+      if (!isCardLocked(card.id)) void render();
     }
   }
 
@@ -4463,8 +4725,11 @@
     }
     controlCardErrors.delete(card.id);
     markCardSent(card.id, queued && queued.eventId, answerOutcomeText(card, answer), decision.payload.operationId);
+    // The answer goes out at once; the redraw does not hold it back.
+    const flushing = flushOutbox();
+    await handOverBeforeDrawing(flushing);
     await render("waiting-to-sync");
-    const flushResult = await flushOutbox();
+    const flushResult = await flushing;
     await render(flushResult.status);
   }
 
@@ -4509,7 +4774,7 @@
     saveCardSentMarks(marks);
   }
 
-  /** The desktop refused the answer this phone sent to a card: it waits no
+  /** The member's home refused the answer this phone sent to a card: it waits no
    *  more, and says why, as a member's machine already makes it. Only for the
    *  answer the refusal names: a later one may still be on its way. True when
    *  the card changed. */
@@ -4623,7 +4888,9 @@
   const answeringOutcome = new Map();
   const CONTROL_CARD_OUTCOME_LABEL_MAX = 200;
   const CONTROL_CARD_STALE_TEXT = "Answer sent, but not applied yet. You can answer again.";
-  const CONTROL_CARD_REFUSED_TEXT = "The desktop did not take this answer. You can answer again.";
+  // Said for a refusal from the member's home and from the server alike, so
+  // it names neither: either way the answer was not taken.
+  const CONTROL_CARD_REFUSED_TEXT = "This answer was not accepted. You can answer again.";
   // How long an answer may stay on its way before the card is offered again.
   const CONTROL_CARD_SENT_UNLOCK_MS = 10 * 60_000;
   // For an answer the server has taken: see cardSentState.
@@ -5438,6 +5705,7 @@
       localStorage.getItem(VIEWED_AT_KEY),
       localStorage.getItem(ACTIVITY_CLEARED_KEY),
       localStorage.getItem(CHAT_LIST_AT_KEY),
+      localStorage.getItem(LIST_ACTIVITY_SEEN_KEY),
       JSON.stringify(Array.from(stops)),
       String(Math.floor(now / 60_000))
     ];
@@ -5446,7 +5714,7 @@
       return activityMemo.activity;
     }
     const activity = activityApi.buildActivity({
-      entries: source.entries,
+      entries: withListActivity(source.entries, loadChats(), loadListActivitySeen()),
       cardsByConversation: loadControlCards(),
       chats: loadChats(),
       unreadConversationIds: loadUnreadConversationIds(),
@@ -6003,9 +6271,17 @@
     const direct = await getTimelineEntry(conversationId + ":" + sourceMessageId).catch(function () { return undefined; });
     if (direct) return direct;
     const entries = await listTimelineEntries(conversationId).catch(function () { return []; });
-    return entries.find(function (entry) {
+    const stored = entries.find(function (entry) {
       return entry.messageId === sourceMessageId || entry.sourceId === sourceMessageId;
     });
+    if (stored) return stored;
+    // A chat this phone never read: the server's list carries the message
+    // that asks (up to the length Activity reads), so the question is shown
+    // with it there too.
+    const chat = loadChats().find(function (item) { return item.id === conversationId; });
+    return chat && Array.isArray(chat.activity) ? chat.activity.find(function (row) {
+      return row.messageId === sourceMessageId;
+    }) : undefined;
   }
 
   /** A choice opened from Activity: the message it belongs to and the whole
@@ -6510,8 +6786,11 @@
     const tailCards = pendingControlCards(activeId).filter(function (card) {
       return card.kind !== "choice" || !card.sourceMessageId;
     });
-    const rowsFingerprint = rows.map(function (row) {
-      return (row.rowKey || row.id) + "\u0000" + messageRowSignature(row);
+    // Each row's change check is worked out once per redraw and used twice:
+    // for whether anything changed, and for which rows to patch.
+    const rowSignatures = rows.map(messageRowSignature);
+    const rowsFingerprint = rows.map(function (row, index) {
+      return (row.rowKey || row.id) + "\u0000" + rowSignatures[index];
     }).concat(tailCards.map(controlCardSignature)).join("\u0001");
     const rowsChanged = rowsFingerprint !== lastRowsFingerprint;
     lastRowsFingerprint = rowsFingerprint;
@@ -6524,7 +6803,7 @@
     const typedField = typingInChatCard() ? document.activeElement : null;
     const typedTop = typedField ? typedField.getBoundingClientRect().top : 0;
     const wasAtBottom = isNearBottom(threadSurface());
-    reconcileMessageRows(list, rows);
+    reconcileMessageRows(list, rows, rowSignatures);
     renderTailCards(list, tailCards);
     if (typedField && typedField.isConnected && document.activeElement === typedField) {
       const drift = typedField.getBoundingClientRect().top - typedTop;
@@ -6831,12 +7110,18 @@
   // participant becomes known; it simply carries no identity until then.
   // Same clock the desktop prints under a message. A finished message says
   // when it was written; only a message still in flight says what it is doing.
+  // One formatter for every row: toLocaleTimeString builds a new one per
+  // call, and every row's change check asks for its time on every redraw —
+  // the single largest cost of drawing a chat, which a send waited behind.
+  let clockFormatter;
+
   function formatClockTime(iso) {
     const time = Date.parse(iso || "");
     if (!Number.isFinite(time)) {
       return "";
     }
-    return new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+    if (!clockFormatter) clockFormatter = new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit", hour12: false });
+    return clockFormatter.format(new Date(time));
   }
 
   function messageStatusLabel(entry) {
@@ -7166,6 +7451,12 @@
     }
   }
 
+  /** What a row's replies chip says; empty when it has no replies. */
+  function threadChipLabel(entry) {
+    if (!entry.replyCount) return "";
+    return entry.replyCount === 1 ? "1 reply" : entry.replyCount + " replies";
+  }
+
   function appendThreadChip(item, entry) {
     const threadRoot = entry.sourceId;
     if (!entry.replyCount) {
@@ -7175,12 +7466,22 @@
     chip.type = "button";
     chip.className = "thread-chip";
     chip.dataset.threadRoot = threadRoot;
-    chip.textContent = entry.replyCount === 1 ? "1 reply" : entry.replyCount + " replies";
+    chip.textContent = threadChipLabel(entry);
     chip.addEventListener("click", function () {
       setOpenThreadRootId(threadRoot);
       void render();
     });
     item.append(chip);
+  }
+
+  /** A row patched in place keeps its replies' chip in step: drawn before
+   *  its first reply was stored (a redraw between two rows of one batch), it
+   *  never got the chip, and the thread could not be opened from it. */
+  function syncThreadChip(item, entry) {
+    const chip = Array.from(item.children).find(function (child) { return child.classList.contains("thread-chip"); });
+    if (chip && chip.textContent === threadChipLabel(entry) && chip.dataset.threadRoot === entry.sourceId) return;
+    if (chip) chip.remove();
+    appendThreadChip(item, entry);
   }
 
   function updateMessageRow(item, entry) {
@@ -7230,6 +7531,7 @@
       // A question answered while its row is on screen keeps its card there.
       syncAnsweredCards(content.parentElement || item, entry);
       syncPendingCards(content.parentElement || item, entry);
+      syncThreadChip(item, entry);
       return true;
     }
     const status = item.querySelector(".message-status");
@@ -7241,6 +7543,7 @@
     status.textContent = messageStatusLabel(entry);
     renderMessageContentIfChanged(content, entry.content, entry.author);
     renderAttachmentsInto(attachmentsNodeFor(content.parentElement || item), entry);
+    syncThreadChip(item, entry);
     return true;
   }
 
@@ -7250,7 +7553,7 @@
   // stayed on screen forever, showing an answer or a "Thinking" that the store
   // no longer had. Consuming one node per rendered row and removing whatever is
   // left over cannot leave an orphan behind, whatever the keys look like.
-  function reconcileMessageRows(list, rows) {
+  function reconcileMessageRows(list, rows, signatures) {
     const existing = new Map();
     for (const child of Array.from(list.children)) {
       if (child.id === "control-cards") continue;
@@ -7278,7 +7581,7 @@
     let cursor = list.firstElementChild;
     rows.forEach(function (entry, index) {
       let item = claimed[index];
-      if (!item || item.dataset.rowSignature !== messageRowSignature(entry)) {
+      if (!item || item.dataset.rowSignature !== (signatures ? signatures[index] : messageRowSignature(entry))) {
         if (item && updateMessageRow(item, entry)) {
           // Keep the existing DOM node mounted so PWA updates do not flash.
         } else {
@@ -8321,10 +8624,13 @@
             }
             : {})
         });
+        // The message goes out at once: drawing it is not what it waits on.
+        const flushing = flushOutbox();
+        await handOverBeforeDrawing(flushing);
         await render();
         // Sending is a deliberate action, so following it is expected.
         scrollToLatestWhenSettled("auto");
-        const flushResult = await flushOutbox();
+        const flushResult = await flushing;
         await render(flushResult.status);
       }
     }
@@ -8414,6 +8720,7 @@
     readBootstrapFromLocation,
     pairWithServer,
     flushOutboxViaHub,
+    hubLogicalTs,
     resolvePhoneDelivery,
     loadHubPairing,
     listOutboxEntries,

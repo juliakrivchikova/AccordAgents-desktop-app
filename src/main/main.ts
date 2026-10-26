@@ -2938,6 +2938,7 @@ void app.whenReady().then(async () => {
         publishHubRoster();
         hubSync?.nudgeHeld();
       },
+      onChannelReady: () => hubSync?.nudgeHeld(),
       createClient: (pairing: MobilePairingPackage) => pairing.hubUrl ? new HubTunnelClient({
         hubUrl: pairing.hubUrl, rendezvousId: pairing.rendezvousId, role: "desktop",
         identity: () => chatEventLogService.getOrCreateDeviceIdentity()

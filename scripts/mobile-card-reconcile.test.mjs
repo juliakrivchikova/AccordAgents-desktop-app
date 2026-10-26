@@ -172,13 +172,17 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
       return row && /You can answer again/.test(row.text) && !row.onItsWay && row.disabled.every((dead) => !dead) ? rows : null;
     })()`, "the stale answer to unlock the card");
     assert.equal(await evaluate(`globalThis.AccordAgentsMobile.isCardLocked("perm-bash")`), false);
-    hub.setGate(undefined);
+    // Still refused while the second answer is given: lifted before, the
+    // retry tick could hand the first answer over in that gap, and then
+    // nothing was left to set aside.
     await evaluate(`document.querySelector('#activity-list .act-row[data-card-id="perm-bash"] .act-pill[data-option-id="deny"]').click()`);
     await waitFor(`(() => {
       const rows = ${pendingRows};
       const row = rows && rows.find((item) => item.card === "perm-bash");
       return row && row.onItsWay && row.disabled.every(Boolean) ? true : null;
     })()`, "the second answer to lock the card again");
+    hub.setGate(undefined);
+    await evaluate(`globalThis.AccordAgentsMobile.flushOutbox().then(() => true)`);
     const superseded = await evaluate(`globalThis.AccordAgentsMobile.listOutboxEntries().then((entries) => entries.map((entry) => entry.eventId + "=" + entry.status))`);
     assert.ok(superseded.includes(earlierEventId + "=superseded"), `the earlier answer was set aside, not sent: ${superseded.join(", ")}`);
     assert.equal(await evaluate(`globalThis.AccordAgentsMobile.desktopOwesEntry({ status: "superseded" })`), false);
@@ -187,17 +191,11 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
     assert.deepEqual(answersAtServer().map((event) => event.payload.stateId), ["approved", "denied"],
       "only the two answers the User actually gave reached the server");
 
-    // The cards reached this phone a while ago (the User's were days old); a
-    // card that arrived within the last few minutes is left for the next list
-    // to judge, so age them here.
-    await evaluate(`(() => {
-      const all = JSON.parse(localStorage.getItem("accordagents.mobile.controlCards.v1") || "{}");
-      for (const list of Object.values(all)) for (const card of list) card.receivedAt = new Date(Date.now() - 10 * 60000).toISOString();
-      localStorage.setItem("accordagents.mobile.controlCards.v1", JSON.stringify(all));
-      return true;
-    })()`);
     // The choice is closed on the desktop while the phone is not looking at
-    // its chat: only the chat list says so. Chat B still waits on the
+    // its chat: only the chat list says so, and a list the phone asked for
+    // after the card reached it is the later word, so the card goes at once
+    // (it stayed for five minutes: the list was trusted only once a card had
+    // been on the phone that long). Chat B still waits on the
     // permission. The stale choice leaves; the permission stays, still
     // marked as sent.
     await hub.updateMessages(CHAT_A, [message("a1", TAYLOR, "Что делаем дальше?", 10, { pendingChoice: choice("choice-stale", "cancelled") })]);
@@ -220,24 +218,31 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
     await evaluate(`document.getElementById("back-to-chats").click()`);
     await waitFor(`!document.getElementById("timeline-screen").classList.contains("is-active") ? true : null`, "back home");
 
-    // A pending card younger than the list may simply have missed it: it
-    // stays until the next list decides.
+    // A list this phone asked for before a card reached it may simply have
+    // missed the card: it stays until a later list decides.
     await hub.addMessages(CHAT_A, [message("a2", TAYLOR, "One more question.", 0, { pendingChoice: choice("choice-fresh", "pending") })]);
     await openActivityPending();
     await waitFor(`(() => { const rows = ${pendingRows}; return rows && rows.some((row) => row.card === "choice-fresh") ? true : null; })()`, "the fresh card in Pending");
+    const emptyList = { type: "mobile.chat-list", generatedAt: new Date().toISOString(),
+      chats: [chatItem(CHAT_A, "PWA cleanup", []), chatItem(CHAT_B, "Octopi Tracker", [])] };
+    const freshAfter = (requestedAt) => evaluate(`(() => {
+      globalThis.AccordAgentsMobile.handleRelayChatListPayload(${JSON.stringify(emptyList)}, { requestedAt: ${requestedAt} });
+      const held = JSON.parse(localStorage.getItem("accordagents.mobile.controlCards.v1"))[${JSON.stringify(CHAT_A)}] || [];
+      return held.some((card) => card.id === "choice-fresh" && card.status === "pending");
+    })()`);
+    assert.equal(await freshAfter(Date.now() - 60_000), true, "a list asked for before the card arrived does not close it");
     // The desktop applies the permission's answer: the server's own list
     // stops naming it.
     await hub.raiseApproval(CHAT_B, approval("denied"));
-    await evaluate(`globalThis.AccordAgentsMobile.handleRelayChatListPayload(${JSON.stringify({
-      type: "mobile.chat-list", generatedAt: new Date().toISOString(),
-      chats: [chatItem(CHAT_A, "PWA cleanup", []), chatItem(CHAT_B, "Octopi Tracker", [])]
-    })})`);
     await waitFor(`(() => { const rows = ${pendingRows}; return rows && !rows.some((row) => row.card === "perm-bash") ? true : null; })()`, "the applied permission to leave Pending");
     await sleep(1200);
     rows = await evaluate(pendingRows);
     assert.ok(rows.some((row) => row.card === "choice-fresh"), "a card younger than the list is kept");
     assert.ok(!rows.some((row) => row.card === "perm-bash"), "a card the desktop no longer waits on is gone");
     assert.equal(await evaluate(`globalThis.AccordAgentsMobile.isCardSent("perm-bash")`), false, "its sent mark went with it");
+    // A list asked for after the card arrived that does not name it is the
+    // later word: the card goes at once, not minutes later.
+    assert.equal(await freshAfter(Date.now()), false, "a list asked for after the card arrived closes it at once");
 
     // The queue is flushed for every chat, not only the open one.
     await evaluate(`globalThis.AccordAgentsMobile.enqueueMessage({ content: "queued for chat A while elsewhere", conversationId: ${JSON.stringify(CHAT_A)} }).then(() => true)`);
