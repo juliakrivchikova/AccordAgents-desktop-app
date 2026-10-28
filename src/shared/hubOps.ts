@@ -51,7 +51,10 @@ export type HubOpKind =
   | "turn.claim"
   | "turn.stop"
   | "turn.finish"
-  | "chat.import";
+  | "chat.import"
+  | "card.raise"
+  | "card.answer"
+  | "card.settle";
 
 export const HUB_OP_KINDS: readonly HubOpKind[] = [
   "conversation.create",
@@ -65,7 +68,10 @@ export const HUB_OP_KINDS: readonly HubOpKind[] = [
   "turn.claim",
   "turn.stop",
   "turn.finish",
-  "chat.import"
+  "chat.import",
+  "card.raise",
+  "card.answer",
+  "card.settle"
 ];
 
 /** The chat's own fields, as a device writes them. */
@@ -106,13 +112,43 @@ export type HubOpBody =
   /** Moving to the server (one time, by the computer that held the chats):
    *  the chat's fields and a page of its messages, oldest pages first; the
    *  last page names the order of every message the computer held. */
-  | { kind: "chat.import"; conversation?: HubConversationFields & { updatedAt?: string }; messages: ChatMessage[]; order?: string[] };
+  | { kind: "chat.import"; conversation?: HubConversationFields & { updatedAt?: string }; messages: ChatMessage[]; order?: string[] }
+  /** A card a member waits on (a permission, a choice, a roster change),
+   *  raised by the device the member runs on; raised again while pending
+   *  replaces what it shows. */
+  | { kind: "card.raise"; cardId: string; cardKind: HubCardKind; participantId?: string; messageId?: string; card: Record<string, unknown> }
+  /** The User's answer, from any device (Д2); the first answer is the one. */
+  | { kind: "card.answer"; cardId: string; answer: Record<string, unknown> }
+  /** What the member's device did with the answer (or that the card is gone). */
+  | { kind: "card.settle"; cardId: string; outcome: Record<string, unknown> };
 
 export type HubOp = HubOpBody & {
   /** Chosen by the writer; a repeat with the same id is the same operation. */
   opId: string;
   conversationId: string;
 };
+
+export type HubCardKind = "permission" | "choice" | "mention" | "roster";
+export type HubCardState = "pending" | "answered" | "settled";
+
+/** A card on the server: what it asks, the answer it got, and what came of it. */
+export interface HubCard {
+  cardId: string;
+  conversationId: string;
+  cardKind: HubCardKind;
+  participantId?: string;
+  messageId?: string;
+  /** The device that raised it (the member's own): it applies the answer. */
+  raisedBy: string;
+  raisedAt: string;
+  card: Record<string, unknown>;
+  state: HubCardState;
+  answer?: Record<string, unknown>;
+  answeredBy?: string;
+  answeredAt?: string;
+  outcome?: Record<string, unknown>;
+  settledAt?: string;
+}
 
 /** Where a turn stands on the server. "claimed" is the second mark a message
  *  shows: the device its member runs on has taken it (Д5). */
@@ -157,13 +193,16 @@ export type HubOpEffect =
   | { kind: "turn.stop"; turn: HubTurn }
   | { kind: "turn.finish"; turn: HubTurn }
   /** The chat changed as a whole (moved to the server): read it again. */
-  | { kind: "chat.import"; last: boolean };
+  | { kind: "chat.import"; last: boolean }
+  | { kind: "card.raise"; card: HubCard }
+  | { kind: "card.answer"; card: HubCard }
+  | { kind: "card.settle"; card: HubCard };
 
 /** How a claim came out, for the device that asked. */
 export type HubClaimOutcome = "claimed" | "already-yours" | "taken" | "stopped" | "finished";
 
 export type HubOpResult =
-  | { opId: string; status: "accepted" | "duplicate"; seq: number; claim?: HubClaimOutcome; turn?: HubTurn }
+  | { opId: string; status: "accepted" | "duplicate"; seq: number; claim?: HubClaimOutcome; turn?: HubTurn; card?: HubCard }
   | { opId: string; status: "rejected"; reason: string };
 
 export interface HubOpsRequest {
@@ -201,6 +240,14 @@ export interface HubFeedGone {
   gone: true;
   head: number;
 }
+
+export interface HubCardsResponse {
+  /** Cards not settled yet in a chat (or every chat), oldest first. */
+  cards: HubCard[];
+  head: number;
+}
+
+export const HUB_CARDS_PATH = "/v3/cards";
 
 export interface HubTurnsResponse {
   /** Turns asked for this device's members that nobody took yet. */
@@ -322,6 +369,16 @@ export function hubOpShapeProblem(value: unknown): string | undefined {
     case "turn.stop":
       return isHubTurnRunId(value.runId) && isHubOpId(value.messageId) && typeof value.participantId === "string" &&
         value.participantId.length > 0 && value.participantId.length <= 256 ? undefined : "Invalid turn.";
+    case "card.raise":
+      if (!isHubOpId(value.cardId) || !["permission", "choice", "mention", "roster"].includes(value.cardKind as string) || !isRecord(value.card) ||
+          (value.participantId !== undefined && !isText(value.participantId, 256)) || (value.messageId !== undefined && !isHubOpId(value.messageId))) {
+        return "Invalid card.";
+      }
+      return undefined;
+    case "card.answer":
+      return isHubOpId(value.cardId) && isRecord(value.answer) ? undefined : "Invalid answer.";
+    case "card.settle":
+      return isHubOpId(value.cardId) && isRecord(value.outcome) ? undefined : "Invalid card outcome.";
     case "chat.import": {
       const conversation = value.conversation;
       if (conversation !== undefined && (!isRecord(conversation) || !isText(conversation.title, 2_000) || conversation.kind !== "chat" ||

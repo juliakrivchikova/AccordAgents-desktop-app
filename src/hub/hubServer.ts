@@ -42,7 +42,7 @@ import { HubRequestError, HubResyncRequiredError, type HubLog } from "./hubLog";
 import { isAllowedPushEndpoint } from "./hubPush";
 import { HUB_PHONE_PATHS, type HubPhoneApi } from "./hubPhone";
 import { HubOpsRequestError, type HubOps } from "./hubOps";
-import { HUB_CHAT_PATH, HUB_CHATS_PATH, HUB_FEED_PATH, HUB_OPS_PATH, HUB_TURNS_PATH, type HubFeedGone, type HubTurnsResponse } from "../shared/hubOps";
+import { HUB_CARDS_PATH, HUB_CHAT_PATH, HUB_CHATS_PATH, HUB_FEED_PATH, HUB_OPS_PATH, HUB_TURNS_PATH, type HubCardsResponse, type HubFeedGone, type HubTurnsResponse } from "../shared/hubOps";
 
 export interface HubServerOptions {
   hubId: string;
@@ -289,6 +289,11 @@ export class HubServer {
     }
     if (request.method === "GET" && url.pathname === HUB_CHATS_PATH) {
       json(response, 200, await ops.chats());
+      return 200;
+    }
+    if (request.method === "GET" && url.pathname === HUB_CARDS_PATH) {
+      const conversationId = url.searchParams.get("conversationId") ?? undefined;
+      json(response, 200, { cards: await ops.openCards(conversationId || undefined), head: await ops.head() } satisfies HubCardsResponse);
       return 200;
     }
     if (request.method === "GET" && url.pathname === HUB_TURNS_PATH) {

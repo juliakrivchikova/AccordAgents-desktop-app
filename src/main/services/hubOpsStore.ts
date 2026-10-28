@@ -1,4 +1,4 @@
-import type { HubClaimOutcome, HubFeedEntry, HubOpEffect, HubOpResult, HubTurn, HubTurnOutcome, HubTurnState } from "../../shared/hubOps";
+import type { HubCard, HubClaimOutcome, HubFeedEntry, HubOpEffect, HubOpResult, HubTurn, HubTurnOutcome, HubTurnState } from "../../shared/hubOps";
 
 /**
  * The server's own record of what it accepted (agreements Д1, Д3): every
@@ -50,6 +50,25 @@ export const HUB_OPS_SCHEMA_SQL = `
     seq integer not null,
     updated_at text not null
   );
+  -- Cards members wait on: raised by the member's device, answered from
+  -- any device, settled by the member's device.
+  create table if not exists hub_cards (
+    card_id text primary key,
+    conversation_id text not null,
+    card_kind text not null,
+    participant_id text,
+    message_id text,
+    raised_by text not null,
+    raised_at text not null,
+    card_json text not null,
+    state text not null check(state in ('pending', 'answered', 'settled')),
+    answer_json text,
+    answered_by text,
+    answered_at text,
+    outcome_json text,
+    settled_at text
+  );
+  create index if not exists hub_cards_open on hub_cards(conversation_id, state);
   -- How far the feed was forgotten (retention): a device that read less
   -- reads its chats again.
   create table if not exists hub_ops_state (
@@ -241,6 +260,32 @@ export class HubOpsStore {
     return rows.map(turnFromRow);
   }
 
+  async card(cardId: string): Promise<HubCard | undefined> {
+    await this.init();
+    const rows = await this.database.query<CardRow>(`select ${CARD_COLUMNS} from hub_cards where card_id = ${quote(cardId)};`);
+    return rows[0] ? cardFromRow(rows[0]) : undefined;
+  }
+
+  /** Cards not settled yet (in one chat, or all), oldest first. */
+  async openCards(conversationId?: string, limit = 500): Promise<HubCard[]> {
+    await this.init();
+    const rows = await this.database.query<CardRow>(`select ${CARD_COLUMNS} from hub_cards where state != 'settled'
+      ${conversationId ? `and conversation_id = ${quote(conversationId)}` : ""} order by raised_at, card_id limit ${Math.max(1, Math.floor(limit))};`);
+    return rows.map(cardFromRow);
+  }
+
+  cardSql(card: HubCard): string {
+    const value = (text: string | undefined) => text === undefined ? "null" : quote(text);
+    const json = (object: Record<string, unknown> | undefined) => object === undefined ? "null" : quote(JSON.stringify(object));
+    return `insert into hub_cards(card_id, conversation_id, card_kind, participant_id, message_id, raised_by, raised_at, card_json, state,
+        answer_json, answered_by, answered_at, outcome_json, settled_at)
+      values (${quote(card.cardId)}, ${quote(card.conversationId)}, ${quote(card.cardKind)}, ${value(card.participantId)}, ${value(card.messageId)},
+        ${quote(card.raisedBy)}, ${quote(card.raisedAt)}, ${quote(JSON.stringify(card.card))}, ${quote(card.state)},
+        ${json(card.answer)}, ${value(card.answeredBy)}, ${value(card.answeredAt)}, ${json(card.outcome)}, ${value(card.settledAt)})
+      on conflict(card_id) do update set card_json = excluded.card_json, state = excluded.state, answer_json = excluded.answer_json,
+        answered_by = excluded.answered_by, answered_at = excluded.answered_at, outcome_json = excluded.outcome_json, settled_at = excluded.settled_at;`;
+  }
+
   async isRemoved(conversationId: string, messageId: string): Promise<boolean> {
     await this.init();
     const rows = await this.database.query<{ one: number }>(`select 1 as one from hub_removed_messages
@@ -253,6 +298,46 @@ export class HubOpsStore {
       select ${quote(conversationId)}, ${quote(messageId)}, ${quote(removedAt)} ${condition ? `where ${condition}` : ""}
       on conflict do nothing;`;
   }
+}
+
+interface CardRow {
+  cardId: string;
+  conversationId: string;
+  cardKind: HubCard["cardKind"];
+  participantId: string | null;
+  messageId: string | null;
+  raisedBy: string;
+  raisedAt: string;
+  cardJson: string;
+  state: HubCard["state"];
+  answerJson: string | null;
+  answeredBy: string | null;
+  answeredAt: string | null;
+  outcomeJson: string | null;
+  settledAt: string | null;
+}
+
+const CARD_COLUMNS = `card_id as cardId, conversation_id as conversationId, card_kind as cardKind, participant_id as participantId,
+  message_id as messageId, raised_by as raisedBy, raised_at as raisedAt, card_json as cardJson, state, answer_json as answerJson,
+  answered_by as answeredBy, answered_at as answeredAt, outcome_json as outcomeJson, settled_at as settledAt`;
+
+function cardFromRow(row: CardRow): HubCard {
+  return {
+    cardId: row.cardId,
+    conversationId: row.conversationId,
+    cardKind: row.cardKind,
+    ...(row.participantId ? { participantId: row.participantId } : {}),
+    ...(row.messageId ? { messageId: row.messageId } : {}),
+    raisedBy: row.raisedBy,
+    raisedAt: row.raisedAt,
+    card: JSON.parse(row.cardJson) as Record<string, unknown>,
+    state: row.state,
+    ...(row.answerJson ? { answer: JSON.parse(row.answerJson) as Record<string, unknown> } : {}),
+    ...(row.answeredBy ? { answeredBy: row.answeredBy } : {}),
+    ...(row.answeredAt ? { answeredAt: row.answeredAt } : {}),
+    ...(row.outcomeJson ? { outcome: JSON.parse(row.outcomeJson) as Record<string, unknown> } : {}),
+    ...(row.settledAt ? { settledAt: row.settledAt } : {})
+  };
 }
 
 function turnFromRow(row: TurnRow): HubTurn {

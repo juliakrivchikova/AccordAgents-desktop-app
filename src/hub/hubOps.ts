@@ -15,6 +15,7 @@ import {
   isHubChatId,
   isHubOpId,
   type HubChatPage,
+  type HubCard,
   type HubChatsResponse,
   type HubClaimOutcome,
   type HubConversationFields,
@@ -170,6 +171,7 @@ export class HubOps {
     }
 
     if (op.kind === "chat.import") return this.applyImport(device, op, devices, { opId, seq, acceptedAt });
+    if (op.kind === "card.raise" || op.kind === "card.answer" || op.kind === "card.settle") return this.applyCard(device, op, devices, { opId, seq, acceptedAt });
     if (op.kind === "turn.request" || op.kind === "turn.stop" || op.kind === "turn.claim" || op.kind === "turn.finish") {
       return this.applyTurn(device, op, devices, { opId, seq, acceptedAt });
     }
@@ -329,6 +331,56 @@ export class HubOps {
     if (settled) return unchanged(settled);
     return place_({ ...(current ?? { runId: op.runId, conversationId: op.conversationId, messageId: op.messageId, participantId: op.participantId }),
       state: "claimed", executorDeviceId: device.deviceId, claimedAt: acceptedAt }, "claimed");
+  }
+
+  /** Cards a member waits on (Д9): raised by the device the member runs on,
+   *  answered once from any device, settled by the device that raised it. */
+  private async applyCard(
+    device: HubDevice,
+    op: Extract<HubOp, { kind: "card.raise" | "card.answer" | "card.settle" }>,
+    devices: HubDevice[],
+    place: { opId: string; seq: number; acceptedAt: string }
+  ): Promise<Outcome> {
+    const { opId, seq, acceptedAt } = place;
+    const store = this.storage.hubOps();
+    const conversation = await this.load(op.conversationId);
+    if (!conversation) return reject(opId, "There is no such chat.");
+    const current = await store.card(op.cardId);
+    if (current && current.conversationId !== op.conversationId) return reject(opId, "This card belongs to another chat.");
+    const placeCard = async (card: HubCard): Promise<Outcome> => {
+      const effect: HubOpEffect = { kind: op.kind, card } as HubOpEffect;
+      const result: HubOpResult = { opId, status: "accepted", seq, card };
+      const entry: HubFeedEntry = { seq, opId, deviceId: device.deviceId, conversationId: op.conversationId, acceptedAt, effect };
+      await store.execute(`${store.cardSql(card)} ${store.insertSql({ ...entry, kind: op.kind, result })}`);
+      return { result, applied: { deviceId: device.deviceId, entry, conversation } };
+    };
+    if (op.kind === "card.raise") {
+      if (op.participantId) {
+        const home = homeDeviceId(conversation, op.participantId, devices);
+        if (home !== device.deviceId) return reject(opId, "Only the device this member runs on raises its cards.");
+      }
+      if (current && current.raisedBy !== device.deviceId) return reject(opId, "Another device raised this card.");
+      if (current && current.state !== "pending") return { result: { opId, status: "accepted", seq: seq - 1, card: current } };
+      return placeCard({
+        cardId: op.cardId, conversationId: op.conversationId, cardKind: op.cardKind,
+        ...(op.participantId ? { participantId: op.participantId } : {}),
+        ...(op.messageId ? { messageId: op.messageId } : {}),
+        raisedBy: device.deviceId, raisedAt: current?.raisedAt ?? acceptedAt, card: op.card, state: "pending"
+      });
+    }
+    if (!current) return reject(opId, "There is no such card.");
+    if (op.kind === "card.answer") {
+      if (current.state !== "pending") return reject(opId, "This card was already answered.");
+      return placeCard({ ...current, state: "answered", answer: op.answer, answeredBy: device.deviceId, answeredAt: acceptedAt });
+    }
+    if (current.raisedBy !== device.deviceId) return reject(opId, "Only the device that raised this card settles it.");
+    if (current.state === "settled") return { result: { opId, status: "accepted", seq: seq - 1, card: current } };
+    return placeCard({ ...current, state: "settled", outcome: op.outcome, settledAt: acceptedAt });
+  }
+
+  /** Cards not settled yet. */
+  async openCards(conversationId?: string): Promise<HubCard[]> {
+    return this.storage.hubOps().openCards(conversationId);
   }
 
   /** Moving a chat to the server, one time, from the computer that held

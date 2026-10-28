@@ -374,3 +374,27 @@ test("the computer moves its chats to the server once: its order wins, and messa
   const after = (await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`)).body;
   assert.deepEqual(after.messages.map((message) => message.id), ["a", "from-phone", "b", "c", "d"]);
 });
+
+test("a card is raised by the member's device, answered once from any device, and settled by the device that raised it", async (t) => {
+  const h = await hub(t);
+  const chat = id("chat");
+  await h.write(h.owner, createChat(chat));
+  const card = { approval: { id: "ap-1", tool: "app_chat_request_participants" } };
+  const byPhone = await h.write(h.phone, { opId: id("op"), kind: "card.raise", conversationId: chat, cardId: "card-1", cardKind: "permission", participantId: "p-box", card });
+  assert.equal(byPhone.body.results[0].status, "rejected", "only the member's device raises it");
+  const raised = await h.write(h.machine, { opId: id("op"), kind: "card.raise", conversationId: chat, cardId: "card-1", cardKind: "permission", participantId: "p-box", card });
+  assert.equal(raised.body.results[0].status, "accepted");
+  const open = await h.call<{ cards: Array<{ cardId: string; state: string }> }>(h.phone, "GET", `/v3/cards?conversationId=${chat}`);
+  assert.deepEqual(open.body.cards.map((item) => [item.cardId, item.state]), [["card-1", "pending"]]);
+  const answered = await h.write(h.phone, { opId: id("op"), kind: "card.answer", conversationId: chat, cardId: "card-1", answer: { approve: true } });
+  assert.equal(answered.body.results[0].status, "accepted");
+  const second = await h.write(h.owner, { opId: id("op"), kind: "card.answer", conversationId: chat, cardId: "card-1", answer: { approve: false } });
+  assert.equal(second.body.results[0].status, "rejected", "the first answer is the one");
+  const notRaiser = await h.write(h.owner, { opId: id("op"), kind: "card.settle", conversationId: chat, cardId: "card-1", outcome: { applied: true } });
+  assert.equal(notRaiser.body.results[0].status, "rejected");
+  const settled = await h.write(h.machine, { opId: id("op"), kind: "card.settle", conversationId: chat, cardId: "card-1", outcome: { applied: true } });
+  assert.equal(settled.body.results[0].status, "accepted");
+  assert.deepEqual((await h.call<{ cards: unknown[] }>(h.phone, "GET", `/v3/cards?conversationId=${chat}`)).body.cards, []);
+  const feed = (await h.call<HubFeedResponse>(h.owner, "GET", "/v3/feed?after=0")).body;
+  assert.deepEqual(feed.entries.filter((entry) => entry.effect.kind.startsWith("card.")).map((entry) => entry.effect.kind), ["card.raise", "card.answer", "card.settle"]);
+});
