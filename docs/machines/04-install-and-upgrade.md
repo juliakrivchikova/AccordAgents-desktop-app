@@ -5,11 +5,13 @@ onto it, and replacing it later, is the only thing in the machines transport
 that uses SSH. Rule 1 of the signed cutover accord (artifact
 `a6f1e5ad-097e-442f-9396-f7566984a01f` v4, §1.6) allows SSH for exactly three
 things — installing and upgrading the app on a machine, bootstrapping a project
-mirror, and an emergency process stop — and for nothing else. Since 2026-10-01
-installing (and the first upgrade of a machine that never had it) also copies
-every chat once (the `chats` phase below; the User's decision of 2026-09-22).
-After that, no message, chat change, turn, progress frame, approval, or Stop
-ever travels over SSH.
+mirror, and an emergency process stop — and for nothing else. Installing also
+reads the identity the new runtime signs its requests with (the `identity`
+phase below), so the User's server admits the machine before it first
+connects. No chat ever travels over SSH: since 2026-10-29 the machine reads
+every chat from the User's server, which owns them (until then a copy of every
+chat went over this connection at setup). No message, chat change, turn,
+progress frame, approval, or Stop travels over SSH.
 
 `MachineInstallerService` (`src/main/services/machineInstaller.ts`) is that
 setup path. `scripts/machine-install-transport-guard.test.mjs` fails the build
@@ -42,7 +44,7 @@ section can show verbatim:
 | `dependencies` | `npm install --omit=dev` inside that release. |
 | `enroll` | The enrollment package is written to `enrollment.json` (mode 600). |
 | `drain` | The running runtime, its native supervisor and any provider process it owns are stopped, and their absence is **proven**. This step always runs, including on a first install. |
-| `chats` | At setup, and at the first upgrade of a machine that never had it: the machine's identity is read and recorded, every chat (shared state, artifacts, deletion records) is exported here, copied with its pictures, and merged into the machine's database by the staged runtime, all while nothing runs there. After this the machine stays current through chat change events (`docs/machines/02-event-contract.md` §4). A failure here replaces nothing and starts the old runtime again (`old-runtime-still-installed`). |
+| `identity` | At setup, and at an upgrade of a machine whose identity this desktop does not know: the staged runtime prints the identity it signs its requests with (`--device-identity`, made once and kept in the machine's own database; the private key never leaves), and this desktop records it, so the User's server's roster names the machine and its settings can be sealed for it before it first connects. Runs while nothing runs there. A failure here replaces nothing and starts the old runtime again (`old-runtime-still-installed`). |
 | `activate` | `current` is repointed at the new release and `install-state.json` records it. |
 | `service` | The systemd unit is written and enabled. |
 | `starting` | The unit is started. |

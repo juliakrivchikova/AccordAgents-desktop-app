@@ -1,5 +1,10 @@
 # Serverless Shared Chat M0 Spikes
 
+> **Superseded on 2026-10-29.** The shared event envelope, its chains and the
+> projector described here are removed (agreement Д7): the User's server owns
+> every chat and devices write operations to it (`src/shared/hubOps.ts`).
+> This document is history.
+
 This records the M0 implementation facts for the approved #3 serverless shared chat plan. It is an implementation checkpoint, not a product launch claim.
 
 ## Event Envelope

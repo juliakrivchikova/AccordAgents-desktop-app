@@ -297,8 +297,9 @@ New on this branch. Nothing here is QA-proven beyond Drew's single live PASS, an
 ## 9. P — PWA control plane
 
 Since 2026-10-26 the phone talks only to the User's server: it pairs by a
-one-time code the desktop shows, reads chats from the server's copy, writes
-signed events there, and the server rings it. Evidence below dated before then
+one-time code the desktop shows, reads chats from the server, writes its
+messages, card answers and Stops there (as operations since 2026-10-29, when
+the server came to own the chats), and the server rings it. Evidence below dated before then
 was gathered over the relay and its mailbox, so a `VERIFIED` row holds for that
 path until it is run again against the server.
 

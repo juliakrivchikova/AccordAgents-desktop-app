@@ -1,5 +1,14 @@
 # Machines transport — step 1: event contract (ids, delivery states, merge)
 
+> **Superseded on 2026-10-29.** The signed event contract below (device
+> identities as event authors, per-origin chains and gap repair, logical
+> clocks, the server's one order of signed events and its folding, chat
+> change events) is removed (agreement Д7). The User's server owns every chat
+> and devices write operations to it (`src/shared/hubOps.ts`,
+> `src/hub/hubOps.ts`); a device's ed25519 key now only signs its requests to
+> the server and what it seals in a machine's room
+> (`src/main/services/deviceIdentity.ts`). This document is history.
+
 Companion to `01-native-control-probes.md`. This is the contract work items 3–5 of the resolution implement. Everything here builds on what exists: the signed `ChatEventEnvelope` (`src/shared/chatEvents.ts`), the projector with per-origin gap and fork detection (`src/shared/chatEventProjection.ts`), the User's own server with its one order of signed events (`src/hub/hubLog.ts`, `src/shared/hubProtocol.ts`), and per-device ed25519 identities (`ChatEventLogService`). Since 2026-10-26 there is no relay: no sealed mailbox, no relay room and no device capability grants; every device talks only to the User's server (`docs/parity-requirements.md`).
 
 ## 1. Identities
