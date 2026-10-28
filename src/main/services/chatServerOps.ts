@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS, type ChatChange } from "./chatChanges";
 import type { HubCard, HubConversationFields, HubOp, HubOpEffect, HubTurn } from "../../shared/hubOps";
-import type { HubOpOutcome } from "./hubOpsClient";
+import type { HubOpOutcome, HubOpWithdrawal } from "./hubOpsClient";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
 /**
@@ -23,6 +23,8 @@ export interface ChatServerLink {
   messageAccepted(conversationId: string, messageId: string, signal?: AbortSignal): Promise<{ status: "accepted"; seq: number } | { status: "rejected"; reason: string } | undefined>;
   /** Resolves once the server answered this operation. */
   opAnswered(opId: string, signal?: AbortSignal): Promise<HubOpOutcome>;
+  /** Takes back an operation nothing sent yet, or says where it stands. */
+  withdraw?(opId: string): Promise<HubOpWithdrawal>;
   /** Turns asked of this device's members that nobody took yet, and the
    *  ones this device took and never finished (it stopped or restarted). */
   waitingTurns(): Promise<{ requested: HubTurn[]; claimed: HubTurn[] }>;

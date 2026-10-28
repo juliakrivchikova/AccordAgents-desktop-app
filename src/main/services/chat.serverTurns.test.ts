@@ -203,3 +203,53 @@ test("a message written on the phone starts the computer's member through the se
   assert.equal(stopped.turns.find((turn) => turn.runId === runId)?.outcome, "stopped");
   h.release();
 });
+
+test("a turn taken on the server and stopped while it waits behind the member's previous turn is ended there as stopped, never left taken", async (t) => {
+  const h = await setup(t);
+  // A Codex member: a second message waits for its running turn (a Claude
+  // member takes it into the running session instead).
+  const chat = localChat("chat-d");
+  chat.metadata = { ...chat.metadata, participants: [{ ...desk, kind: "codex-cli" }] } as Conversation["metadata"];
+  await save(h.chat, chat);
+  await h.link.start();
+  await until(async () => (await h.link.status())?.ready ?? false, (ready) => ready);
+  h.hold();
+  await h.chat.sendMessage({ conversationId: "chat-d", content: "@taylor first" } as never);
+  await until(async () => h.turns.length, (count) => count === 1);
+  await h.chat.sendMessage({ conversationId: "chat-d", content: "@taylor second" } as never);
+  // The second is taken here at once and waits for the first to end.
+  const second = await until(() => h.page("chat-d"), (page) => page.messages.some((message) => message.content === "@taylor second") &&
+    page.turns.some((turn) => turn.messageId === page.messages.find((message) => message.content === "@taylor second")?.id && turn.state === "claimed"));
+  const secondId = second.messages.find((message) => message.content === "@taylor second")!.id;
+  const runId = hubTurnRunId(secondId, desk.id);
+  await h.phoneWrite({ opId: "op-phone-stop-d", kind: "turn.stop", conversationId: "chat-d", runId, messageId: secondId, participantId: desk.id });
+  const ended = await until(() => h.page("chat-d"), (page) => page.turns.some((turn) => turn.runId === runId && turn.state === "finished"));
+  assert.equal(ended.turns.find((turn) => turn.runId === runId)?.outcome, "stopped");
+  assert.equal(h.turns.length, 1, "the stopped turn never ran");
+  // The first one ends as usual.
+  h.release();
+  const firstId = ended.messages.find((message) => message.content === "@taylor first")!.id;
+  await until(() => h.page("chat-d"), (page) => page.turns.some((turn) => turn.runId === hubTurnRunId(firstId, desk.id) && turn.state === "finished"));
+});
+
+test("a claim stopped before it ran is never left taken: taken back if unsent, finished as stopped if the server gave it", async () => {
+  const chat = new ChatService({} as never, {} as never, {} as never, { async write() { return undefined; } } as never);
+  const turn = { conversationId: "chat-e", runId: "turn-m-p", messageId: "m", participantId: "p" };
+  const run = async (withdrawal: unknown, answer?: unknown): Promise<string[]> => {
+    const sent: HubOp[] = [];
+    const link = {
+      withdraw: async () => withdrawal,
+      opAnswered: async () => answer,
+      enqueue: async (ops: HubOp[]) => { sent.push(...ops); }
+    };
+    await (chat as unknown as { endAbortedServerTurn(link: unknown, turn: unknown, claimOpId?: string): Promise<void> }).endAbortedServerTurn(link, turn, "op-claim");
+    return sent.map((op) => op.kind === "turn.finish" ? `finish:${op.outcome}` : op.kind);
+  };
+  assert.deepEqual(await run({ status: "withdrawn", attempted: false }), ["turn.stop"], "never sent: the turn is only stopped");
+  assert.deepEqual(await run({ status: "missing" }), ["turn.stop"]);
+  assert.deepEqual(await run({ status: "withdrawn", attempted: true }), ["turn.stop", "finish:stopped"], "a failed request may have carried it");
+  assert.deepEqual(await run({ status: "in-flight" }, { status: "accepted", seq: 5, claim: "claimed" }), ["finish:stopped"]);
+  assert.deepEqual(await run({ status: "answered", outcome: { status: "accepted", seq: 5, claim: "already-yours" } }), ["finish:stopped"]);
+  assert.deepEqual(await run({ status: "answered", outcome: { status: "accepted", seq: 5, claim: "stopped" } }), [], "stopped there already");
+  assert.deepEqual(await run({ status: "answered", outcome: { status: "rejected", reason: "no" } }), []);
+});

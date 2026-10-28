@@ -384,7 +384,7 @@ test("a machine member's approval is shown on the desktop as its card, answered 
   await assert.rejects(h.desktopChat.answerAppToolApprovalCard({ conversationId: "cards-e", approvalId, approve: false }), /already been answered/);
 });
 
-test("a machine member's request to remove a member is raised by its machine, approved on the phone, made by the desktop that owns the member list, and settled by the machine", async (t) => {
+test("a machine member's request to remove a member is raised by its machine, approved on the phone, made and settled by that machine (Д2), and the desktop only reads it", async (t) => {
   const approvalId = randomUUID();
   const h = await linkedDesktop(t, chat("cards-f"));
   await h.startMachine();
@@ -403,14 +403,16 @@ test("a machine member's request to remove a member is raised by its machine, ap
   assert.equal(raised!.raisedBy, h.machineIdentity.originId);
   await until(() => approvalOf(h.desktopStorage, "cards-f", approvalId), (item) => item?.status === "pending" && item.homeMachineId === "box");
   assert.equal((await h.phoneAnswers("cards-f", approvalId, { approve: true })).result.status, "accepted");
-  // The phone shows it approved and waiting for the Mac while it is made.
+  // The phone shows it approved and waiting while it is made.
   const answered = await h.card(approvalId);
   assert.equal(controlCardFromHubCard(answered!)?.title, "Removal approved");
-  // The desktop makes it.
+  // The machine makes it; the desktop reads it from the server.
   const desktopCopy = await until(() => h.desktopStorage.getConversation("cards-f"), (item) =>
     !((item?.metadata.participants ?? []) as ChatParticipant[]).some((member) => member.id === desk.id));
-  assert.equal(desktopCopy!.messages.filter((message) => message.content === "Removed @taylor from this chat at @drew's request.").length, 1);
-  // The machine applied the answer and, on the desktop's word, settles its card.
+  const said = desktopCopy!.messages.filter((message) => message.content === "Removed @taylor from this chat at @drew's request.");
+  assert.equal(said.length, 1);
+  assert.equal(said[0].metadata?.serverWriter, h.machineIdentity.originId, "written by the machine, once");
+  // The machine applied the answer and settles its card.
   const settled = await until(() => h.card(approvalId), (item) => item?.state === "settled");
   const outcome = settled!.outcome as { result?: string; approval?: ChatAppToolApproval };
   assert.equal(outcome.result, "applied");

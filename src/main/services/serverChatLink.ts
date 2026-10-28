@@ -139,6 +139,7 @@ export class ServerChatLink {
         return outcome.status === "accepted" ? { status: "accepted", seq: outcome.seq } : outcome;
       },
       opAnswered: (opId, signal) => this.requireOps().waitFor(opId, signal),
+      withdraw: (opId) => this.requireOps().withdraw(opId),
       waitingTurns: async () => {
         if (!this.ready || !this.client) return { requested: [], claimed: [] };
         const answer = await this.client.waitingTurns();
@@ -218,9 +219,13 @@ export class ServerChatLink {
       void ops.status().then((status) => {
         const back = this.unreachable !== undefined && status.unreachableSince === undefined;
         this.unreachable = status.unreachableSince;
-        // Back after the server could not be reached: cards answered
-        // meanwhile are applied, and cards raised meanwhile go up.
+        // Back after the server could not be reached: turns asked meanwhile
+        // (or left taken) are taken up, cards answered meanwhile are
+        // applied, and cards raised meanwhile go up.
         if (back && this.ready) {
+          void this.options.chat.resumeServerTurns().catch((error) => {
+            this.options.log("chat.server.resume-error", { message: error instanceof Error ? error.message : String(error) });
+          });
           void this.options.chat.resumeServerCards({ messages: false }).catch((error) => {
             this.options.log("chat.server.cards-resume-error", { message: error instanceof Error ? error.message : String(error) });
           });
@@ -460,6 +465,17 @@ export class ServerChatLink {
     const health = await client.health();
     const doneKey = `ops-moved:${health.hubId}`;
     if (await hub.clientState(doneKey)) return;
+    // Moving to another server than before: turns and cards still queued
+    // for the old one are not its to take (a claim sent there would leave a
+    // turn taken that nothing runs). Turns asked and cards raised are read
+    // again from this server once the chats are on it.
+    // Once per server: a move tried again keeps what was queued for this one.
+    const withdrawnKey = `ops-move-withdrew:${health.hubId}`;
+    if (!await hub.clientState(withdrawnKey)) {
+      const stale = (await this.options.storage.hubClientOps().withdrawKinds("turn.")) + (await this.options.storage.hubClientOps().withdrawKinds("card."));
+      await hub.setClientState(withdrawnKey, new Date().toISOString());
+      if (stale) this.options.log("chat.server.move-withdrew", { ops: stale });
+    }
     const started = Date.now();
     const before = await client.chats();
     const local = (await this.options.storage.listConversations()).filter((summary) => summary.kind === "chat");
