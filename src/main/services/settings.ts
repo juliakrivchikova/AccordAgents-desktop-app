@@ -23,6 +23,7 @@ import type {
   ChatAgentPermissions,
   ChatAppToolCapability,
   AwsWorkerHandleInfo,
+  AwsSetupStep,
   AwsWorkerOperationSnapshot,
   AwsWorkerSpec,
   AwsWorkerVolumeExpansion,
@@ -4271,9 +4272,17 @@ export class SettingsService {
       || typeof record.message !== "string" || typeof record.updatedAt !== "string") {
       return undefined;
     }
+    // The page reads the steps as they are: anything else is dropped.
+    const stepIds = new Set(["instance", "tools", "sign-in-codex", "sign-in-claude", "program"]);
+    const stepStates = new Set(["pending", "current", "done", "skipped", "failed"]);
+    const setupSteps = Array.isArray(record.setupSteps) ? record.setupSteps.filter((step): step is AwsSetupStep => Boolean(step)
+      && typeof step === "object" && stepIds.has(step.id) && stepStates.has(step.state)
+      && (step.detail === undefined || typeof step.detail === "string") && (step.startedAt === undefined || typeof step.startedAt === "string")) : undefined;
+    const { setupSteps: _stored, ...rest } = record;
     return {
-      ...record,
+      ...rest,
       operationId: record.operationId.trim(),
+      ...(setupSteps?.length ? { setupSteps } : {}),
       ...(typeof record.clientToken === "string" && record.clientToken.trim()
         ? { clientToken: record.clientToken.trim().slice(0, 64) }
         : {})

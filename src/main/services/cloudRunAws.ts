@@ -293,6 +293,15 @@ export class CloudRunAwsService {
     return { machines: onInstance, records: installs.filter((record) => ids.has(record.machineId)) };
   }
 
+  /** Whether this desktop's cloud program is on that instance and has
+   *  connected at least once: one installed that never reached this desktop
+   *  is not set up yet. */
+  async programInstalledOn(instanceId: string): Promise<boolean> {
+    const { machines, records } = await this.installsOnInstance({ instanceId } as AwsWorkerHandleInfo);
+    return records.some((record) => Boolean(record.installedVersion)
+      && Boolean(machines.find((machine) => machine.id === record.machineId)?.lastHello));
+  }
+
   // Compatibility entry point for older renderer callers. The new UI calls
   // AwsWorkerSetupService, which continues through running + doctor setup.
   async connectWorker(blob: string, instanceType?: string, rootVolumeSizeGb?: number): Promise<AwsWorkerStatus> {
@@ -993,7 +1002,8 @@ export class CloudRunAwsService {
     const { machines, records: all } = await this.installsOnInstance(handle);
     const records = all.filter((record) => record.installedVersion);
     if (!records.length) {
-      return { message: "The program that stops the instance is not set up on it yet.", action: "reconnect", actionLabel: "Set it up" };
+      // The cloud program does the stopping; its own section installs it.
+      return { message: "Works once the cloud program is installed (see Cloud program)." };
     }
     const machineOf = (machineId: string) => machines.find((machine) => machine.id === machineId);
     const warningOf = (machineId: string) => machineOf(machineId)?.lastHello?.idleStopWarning;

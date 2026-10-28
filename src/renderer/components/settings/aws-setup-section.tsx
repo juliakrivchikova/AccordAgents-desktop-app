@@ -65,7 +65,7 @@ export function setupItems(checks: CloudRunWorkerCheck[]): SetupItem[] {
  * the page opens and after every fix: problems first with their fix, then
  * what is ready. Signing a provider in opens the provider's own sign-in.
  */
-export function AwsSetupSection(props: { running: boolean; instanceId?: string }): JSX.Element | null {
+export function AwsSetupSection(props: { running: boolean; instanceId?: string; finishedSetup?: string; settingUp?: boolean }): JSX.Element | null {
   const kept = lastChecked?.instanceId === props.instanceId ? lastChecked : undefined;
   const [report, setReport] = useState<CloudRunWorkerDoctorReport | undefined>(kept?.report);
   const [checking, setChecking] = useState(false);
@@ -95,6 +95,8 @@ export function AwsSetupSection(props: { running: boolean; instanceId?: string }
     if (!fresh) setReport(undefined);
     if (!fresh || Date.now() - fresh.at > REUSE_MS) void check();
   }, [props.running, props.instanceId]);
+  // A setup that just finished changed what is installed and signed in.
+  useEffect(() => { if (props.running && props.finishedSetup) void check(); }, [props.finishedSetup]);
   useEffect(() => {
     const apply = (next: CloudRunWorkerSetupProgress): void => {
       const finished = next.stage === "complete" || next.stage === "error";
@@ -112,7 +114,7 @@ export function AwsSetupSection(props: { running: boolean; instanceId?: string }
     setError(undefined);
     if (provider) setSignIn({ provider, open: true });
     try {
-      const next = await window.consensus.setupCloudRunWorker(undefined);
+      const next = await window.consensus.setupCloudRunWorker(undefined, { signIn: provider ?? "none" });
       lastChecked = { instanceId: props.instanceId, at: Date.now(), report: next };
       if (mounted.current) setReport(next);
     } catch (cause) {
@@ -125,7 +127,8 @@ export function AwsSetupSection(props: { running: boolean; instanceId?: string }
   const items = report ? setupItems(report.checks) : [];
   const failing = items.filter((item) => !item.ok);
   const required = failing.filter((item) => item.required).length;
-  useEffect(() => { publishAwsAttention("setup", props.running && required > 0); }, [props.running, required]);
+  // What a running setup has not reached yet is not a problem.
+  useEffect(() => { publishAwsAttention("setup", props.running && !props.settingUp && required > 0); }, [props.running, props.settingUp, required]);
   if (!props.running) return null;
   const ordered = [...failing, ...items.filter((item) => item.ok)];
   const meta = checking || setupRunning ? <AwsWaiting>{setupRunning ? progress?.message ?? "Setting up…" : "Checking…"}</AwsWaiting>
@@ -151,7 +154,8 @@ export function AwsSetupSection(props: { running: boolean; instanceId?: string }
                   error={!item.ok && item.required ? item.detail : undefined}
                   action={item.fix ? {
                     label: item.fix === "sign-in" ? "Sign in…" : setupRunning ? "Working…" : item.fix === "install" ? "Install" : "Fix",
-                    disabled: setupRunning || checking,
+                    // A setup running on the page installs and signs in already.
+                    disabled: setupRunning || checking || Boolean(props.settingUp),
                     onClick: () => void runSetup(item.fix === "sign-in" ? item.provider : undefined),
                     testId: `aws-setup-${item.key}-fix`
                   } : undefined} />

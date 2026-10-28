@@ -4,6 +4,8 @@ import test from "node:test";
 import { updateFailureText } from "./aws-program-section";
 import { setupItems } from "./aws-setup-section";
 import { formatBytes, keptText } from "./use-aws-disk";
+import { awsStatusNeedsAttention } from "./use-aws-attention";
+import type { AwsWorkerStatus } from "../../../shared/types";
 
 test("a failed update reads as one sentence with its cause", () => {
   assert.equal(updateFailureText("1.11.2-beta.3", "the machine's disk is full"), "The update to 1.11.2-beta.3 failed: the machine's disk is full.");
@@ -63,4 +65,12 @@ test("setup rows speak in product words; a provider's install and sign-in are on
   assert.equal(byKey.userns.fix, "fix");
   assert.equal(byKey.sudo.label, "Administrator rights");
   assert.equal(byKey.connect.ok, true);
+});
+
+test("what a running setup has not reached yet does not mark AWS in Settings", () => {
+  const notInstalled = { configured: true, state: "running", autoStop: { enabled: true, needsSetup: false,
+    problem: { message: "Works once the cloud program is installed (see Cloud program)." } } } as AwsWorkerStatus;
+  assert.equal(awsStatusNeedsAttention(notInstalled), true);
+  assert.equal(awsStatusNeedsAttention({ ...notInstalled, operation: { operationId: "op", phase: "setting-up", message: "", updatedAt: "" } }), false);
+  assert.equal(awsStatusNeedsAttention({ ...notInstalled, operation: { operationId: "op", phase: "error", message: "", updatedAt: "" } }), true);
 });

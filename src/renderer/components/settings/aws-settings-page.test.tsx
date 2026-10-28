@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act } from "react";
 
-import type { AwsWorkerOperationSnapshot, AwsWorkerStartRequest, AwsWorkerStatus, CloudRunWorkerSetupProgress } from "../../../shared/types";
+import type { AwsSetupStep, AwsWorkerOperationSnapshot, AwsWorkerStartRequest, AwsWorkerStatus, CloudRunWorkerSetupProgress } from "../../../shared/types";
 import { RUNNING, SETTINGS, mount, unmount } from "./aws-settings-page-harness.test";
 
 test("the page is sections: status, program, instance, disk and setup", async () => {
@@ -191,6 +191,7 @@ test("setup puts problems first and signs a provider in through its own sign-in"
   assert.match(ui.find("aws-setup-codex-auth")?.querySelector(".gen-row-error")?.textContent ?? "", /Not signed in/);
   await ui.click(ui.find("aws-setup-codex-auth-fix"));
   assert.equal(ui.bridge.calls.setupCloudRunWorker?.length, 1);
+  assert.deepEqual(ui.bridge.calls.setupCloudRunWorker?.[0], [undefined, { signIn: "codex-cli" }], "Sign in… signs in that provider only");
   assert.match(ui.find("aws-sign-in-dialog")?.textContent ?? "", /Preparing the sign-in/);
   await act(async () => { for (const listener of ui.bridge.progress) listener({ stage: "codex-auth", message: "Approve", authUrl: "https://auth.example/device", authCode: "K7QF-2M9D" } as CloudRunWorkerSetupProgress); });
   await ui.settle();
@@ -209,5 +210,161 @@ test("no instance yet: one switch, and connecting needs the pasted result", asyn
   assert.equal(ui.find<HTMLButtonElement>("aws-worker-connect-start")?.disabled, true);
   await ui.type(document.querySelector<HTMLTextAreaElement>('[aria-label="AWS setup result"]'), "accord-aws-v1:blob");
   assert.equal(ui.find<HTMLButtonElement>("aws-worker-connect-start")?.disabled, false);
+  await unmount();
+});
+
+test("connecting without the User's server says so before anything is created", async () => {
+  const ui = await mount({ status: { configured: false } as AwsWorkerStatus, settings: { ...SETTINGS, hasAwsCredentials: false }, hubUrl: null });
+  await ui.click(ui.find("aws-instance-switch"));
+  assert.match(ui.find("aws-connect-no-server")?.textContent ?? "", /Set up your server first/);
+  await unmount();
+  const withServer = await mount({ status: { configured: false } as AwsWorkerStatus, settings: { ...SETTINGS, hasAwsCredentials: false } });
+  await withServer.click(withServer.find("aws-instance-switch"));
+  assert.equal(withServer.find("aws-connect-no-server"), null);
+  await unmount();
+});
+
+/** A setup snapshot as the main process sends it. */
+function setupSnapshot(operationId: string, steps: AwsSetupStep[], extra: Partial<AwsWorkerOperationSnapshot> = {}): AwsWorkerOperationSnapshot {
+  return { operationId, intent: "setup", phase: "setting-up", message: steps.find((step) => step.state === "current")?.detail ?? "", updatedAt: new Date().toISOString(), setupSteps: steps, ...extra };
+}
+
+test("setting up shows every step as it runs, a sign-in in its own row with Skip, and can be hidden and shown again", async (t) => {
+  const now = Date.now();
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now });
+  let finish!: (value: { operation: AwsWorkerOperationSnapshot; status: AwsWorkerStatus }) => void;
+  const ui = await mount({
+    status: { configured: false } as AwsWorkerStatus,
+    start: () => new Promise((resolve) => { finish = resolve; })
+  });
+  await ui.click(ui.find("aws-instance-switch"));
+  await ui.click(ui.find("aws-worker-connect-start"));
+  const operationId = (ui.bridge.calls.startAwsWorker?.[0]?.[0] as AwsWorkerStartRequest).operationId;
+  const send = async (operation: AwsWorkerOperationSnapshot): Promise<void> => {
+    await act(async () => { for (const listener of ui.bridge.operations) listener(operation); });
+    await ui.settle();
+  };
+  const startedAt = new Date(now - 75_000).toISOString();
+  await send(setupSnapshot(operationId, [
+    { id: "instance", state: "done", detail: "t3.small · 40 GiB disk · us-east-1" },
+    { id: "tools", state: "current", detail: "Installing openjdk-21-jdk…", startedAt },
+    { id: "sign-in-codex", state: "pending" },
+    { id: "program", state: "pending" }
+  ]));
+  assert.equal(ui.find("aws-connect-dialog"), null, "the connect window gives way to the steps");
+  const steps = ui.find("aws-setup-steps");
+  assert.deepEqual([...(steps?.querySelectorAll("li") ?? [])].map((item) => item.getAttribute("data-state")), ["done", "current", "pending", "pending"]);
+  assert.match(ui.find("aws-setup-step-tools")?.textContent ?? "", /Installing openjdk-21-jdk…/);
+  assert.match(ui.find("aws-setup-step-tools")?.textContent ?? "", /1m 15s/, "the running step shows its time");
+  await act(async () => { t.mock.timers.tick(5_000); });
+  assert.match(ui.find("aws-setup-step-tools")?.textContent ?? "", /1m 20s/, "and the time keeps moving");
+
+  await send(setupSnapshot(operationId, [
+    { id: "instance", state: "done" }, { id: "tools", state: "done", detail: "Installed." },
+    { id: "sign-in-codex", state: "current", detail: "Approve the Codex sign-in with the device code." },
+    { id: "program", state: "pending" }
+  ], { authProvider: "codex-cli", authRequestId: "req-1", authUrl: "https://auth.example/device", authCode: "K7QF-2M9D" }));
+  assert.equal(ui.find("aws-setup-sign-in-code")?.textContent, "K7QF-2M9D");
+  await ui.click(ui.find("aws-setup-sign-in-open"));
+  assert.deepEqual(ui.bridge.calls.openExternal, [["https://auth.example/device"]]);
+  await ui.click(ui.find("aws-setup-sign-in-skip"));
+  assert.deepEqual(ui.bridge.calls.cancelCloudRunAuth, [["req-1"]]);
+
+  await send(setupSnapshot(operationId, [
+    { id: "instance", state: "done" }, { id: "tools", state: "done" },
+    { id: "sign-in-codex", state: "skipped", detail: "Codex sign-in skipped." },
+    { id: "program", state: "current", detail: "Copying chats to the machine…", startedAt: new Date().toISOString() }
+  ]));
+  assert.match(ui.find("aws-setup-step-sign-in-codex")?.textContent ?? "", /Codex sign-in skipped\. Sign in later from Setup/);
+  await ui.click(ui.find("aws-setup-progress-hide"));
+  assert.equal(ui.find("aws-setup-progress"), null);
+  assert.match(ui.find("aws-setup-progress-line")?.textContent ?? "", /Cloud program: Copying chats to the machine…/);
+  // A new sign-in brings the window back: the setup waits on the User.
+  await send(setupSnapshot(operationId, [
+    { id: "instance", state: "done" }, { id: "tools", state: "done" }, { id: "sign-in-codex", state: "current" }, { id: "program", state: "pending" }
+  ], { authProvider: "codex-cli", authRequestId: "req-2", authUrl: "https://auth.example/device", authCode: "AAAA-BBBB" }));
+  assert.equal(ui.find("aws-setup-sign-in-code")?.textContent, "AAAA-BBBB");
+  await ui.click(ui.find("aws-setup-progress-hide"));
+  await ui.click(ui.find("aws-setup-progress-show"));
+  assert.ok(ui.find("aws-setup-progress"));
+
+  const done = setupSnapshot(operationId, [
+    { id: "instance", state: "done" }, { id: "tools", state: "done" },
+    { id: "sign-in-codex", state: "skipped", detail: "Codex sign-in skipped." }, { id: "program", state: "done", detail: "Installed and connected." }
+  ], { phase: "ready", message: "Ready. Codex is not signed in; sign in from Setup on this page when you need it." });
+  await act(async () => { finish({ operation: done, status: RUNNING }); });
+  await ui.settle();
+  assert.match(ui.find("aws-setup-progress-message")?.textContent ?? "", /Ready\. Codex is not signed in/);
+  await ui.click(ui.find("aws-setup-progress-done"));
+  assert.equal(ui.find("aws-setup-progress"), null);
+  await unmount();
+});
+
+test("a setup that stopped says where and why, and Try again continues the same setup", async () => {
+  const failed = (operationId: string): AwsWorkerOperationSnapshot => setupSnapshot(operationId, [
+    { id: "instance", state: "done" }, { id: "tools", state: "done" },
+    { id: "program", state: "failed", detail: "Set up your server first (Settings → Your server): cloud machines connect through it." }
+  ], { phase: "error", message: "The cloud program could not be installed: Set up your server first." });
+  const ui = await mount({ status: { configured: false } as AwsWorkerStatus,
+    start: async (request) => ({ operation: failed(request.operationId), status: RUNNING }) });
+  await ui.click(ui.find("aws-instance-switch"));
+  await ui.click(ui.find("aws-worker-connect-start"));
+  assert.match(ui.find("aws-setup-step-program")?.textContent ?? "", /Set up your server first/);
+  await ui.click(ui.find("aws-setup-progress-retry"));
+  const requests = (ui.bridge.calls.startAwsWorker ?? []).map((call) => call[0] as AwsWorkerStartRequest);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].operationId, requests[0].operationId, "the retry continues the setup that stopped");
+  await unmount();
+});
+
+test("a setup closed after it stopped shows again when the same setup runs again", async () => {
+  const ui = await mount({ status: { configured: false } as AwsWorkerStatus, start: () => new Promise(() => undefined) });
+  await ui.click(ui.find("aws-instance-switch"));
+  await ui.click(ui.find("aws-worker-connect-start"));
+  const operationId = (ui.bridge.calls.startAwsWorker?.[0]?.[0] as AwsWorkerStartRequest).operationId;
+  const send = async (operation: AwsWorkerOperationSnapshot): Promise<void> => {
+    await act(async () => { for (const listener of ui.bridge.operations) listener(operation); });
+    await ui.settle();
+  };
+  await send(setupSnapshot(operationId, [{ id: "instance", state: "failed", detail: "AWS refused." }], { phase: "error", message: "AWS refused." }));
+  await ui.click(ui.button("Close"));
+  assert.equal(ui.find("aws-setup-progress"), null);
+  await send(setupSnapshot(operationId, [{ id: "instance", state: "current", detail: "Looking for your AWS instance…" }]));
+  assert.ok(ui.find("aws-setup-progress"), "the retried setup shows its steps again");
+  await unmount();
+});
+
+test("a setup hidden while it ran shows again when it is tried again after it stopped", async () => {
+  const ui = await mount({ status: { configured: false } as AwsWorkerStatus, start: () => new Promise(() => undefined) });
+  await ui.click(ui.find("aws-instance-switch"));
+  await ui.click(ui.find("aws-worker-connect-start"));
+  const operationId = (ui.bridge.calls.startAwsWorker?.[0]?.[0] as AwsWorkerStartRequest).operationId;
+  const send = async (operation: AwsWorkerOperationSnapshot): Promise<void> => {
+    await act(async () => { for (const listener of ui.bridge.operations) listener(operation); });
+    await ui.settle();
+  };
+  await send(setupSnapshot(operationId, [{ id: "instance", state: "current", detail: "Looking…" }]));
+  await ui.click(ui.find("aws-setup-progress-hide"));
+  await send(setupSnapshot(operationId, [{ id: "instance", state: "failed", detail: "AWS refused." }], { phase: "error", message: "AWS refused." }));
+  assert.equal(ui.find("aws-setup-progress"), null, "hidden stays hidden while nothing runs");
+  await send(setupSnapshot(operationId, [{ id: "instance", state: "current", detail: "Looking…" }]));
+  assert.ok(ui.find("aws-setup-progress"), "the retried setup shows its steps again");
+  await unmount();
+});
+
+test("Install or Fix in Setup signs in nobody", async () => {
+  const ui = await mount({ checks: { ok: false, message: "1 problem", checks: [
+    { id: "connect", label: "SSH connection", status: "pass" },
+    { id: "gh", label: "GitHub CLI", status: "fail", fixable: true }
+  ] } });
+  await ui.click(ui.find("aws-setup-gh-fix"));
+  assert.deepEqual(ui.bridge.calls.setupCloudRunWorker?.[0], [undefined, { signIn: "none" }]);
+  await unmount();
+});
+
+test("a cloud program that is not installed is installed from its own section", async () => {
+  const ui = await mount({ machines: { machines: [], status: [] } as never });
+  await ui.click(ui.find("aws-program-install"));
+  assert.deepEqual(ui.bridge.calls.reconnectAwsMachine, [[undefined]]);
   await unmount();
 });

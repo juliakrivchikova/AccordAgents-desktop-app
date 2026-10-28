@@ -13,13 +13,14 @@ import {
   normalizeCloudRunWorkerSettings,
   shellQuotePosix
 } from "./cloudRunWorkers";
-import { runCommand } from "./command";
+import { CommandError, runCommand } from "./command";
 import { isTransientSshError, runWithSshRetries } from "./sshRetry";
 import type { RemoteRunWorkerTarget } from "./remoteWorkerTarget";
 import { remoteProfileCommand } from "./remoteWorkerTarget";
 import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
 import { CloudRunClaudeAuth } from "./cloudRunClaudeAuth";
 import type { Readable } from "node:stream";
+import { randomUUID } from "node:crypto";
 
 const PROBE_TIMEOUT_MS = 25_000;
 const FIX_TIMEOUT_MS = 5 * 60_000;
@@ -57,6 +58,14 @@ interface CloudRunDoctorOptions {
   requirePersistentStorage?: boolean;
   requiredProviderKind?: ChatProviderKind;
   requiredProviderKinds?: ChatProviderKind[];
+  /**
+   * "required" (the default): the providers in `requiredProviderKinds` must be
+   * installed and signed in. "optional": their CLIs are still installed, but a
+   * sign-in is only offered, to the providers in `offerSignIn`; one the User
+   * skips, or that does not finish, leaves the setup going.
+   */
+  signIn?: "required" | "optional";
+  offerSignIn?: ChatProviderKind[];
   maintenance?: MachineMaintenanceTarget;
   profileHome?: string;
 }
@@ -89,6 +98,8 @@ export class CloudRunDoctorService {
   private readonly logger?: (event: string, payload: Record<string, unknown>) => void;
   private readonly environmentForWorker?: CloudRunDoctorServiceOptions["environmentForWorker"];
   private readonly claudeAuth: CloudRunClaudeAuth;
+  /** Codex sign-ins waiting on the User, by request id, so Skip ends them. */
+  private readonly codexLogins = new Map<string, AbortController>();
 
   constructor(options: CloudRunDoctorServiceOptions = {}) {
     this.sshExec = options.sshExec ?? defaultSshExec;
@@ -100,8 +111,11 @@ export class CloudRunDoctorService {
   }
 
   submitAuthCode(requestId: string, code: string): void { this.claudeAuth.submit(requestId, code); }
-  cancelAuth(requestId: string): void { this.claudeAuth.cancel(requestId); }
-  isAuthActive(requestId: string): boolean { return this.claudeAuth.isActive(requestId); }
+  cancelAuth(requestId: string): void {
+    this.claudeAuth.cancel(requestId);
+    this.codexLogins.get(requestId)?.abort();
+  }
+  isAuthActive(requestId: string): boolean { return this.claudeAuth.isActive(requestId) || this.codexLogins.has(requestId); }
 
   private async resolveWorker(settings: CloudRunWorkerSettings, options: CloudRunDoctorOptions, readOnly = false): Promise<(RemoteRunWorkerTarget & { maintenance?: MachineMaintenanceTarget }) | undefined> {
     const worker = workerTarget(settings, options.maintenance, options.profileHome);
@@ -156,7 +170,7 @@ export class CloudRunDoctorService {
       return onProgress?.({ stage, message, ...extra });
     };
 
-    await progress("diagnose", "Checking the worker…");
+    await progress("diagnose", "Checking the instance…");
     const scopedSettings = { ...settings, workerRoot: worker.workerRoot };
     const scopedOptions = { ...options, profileHome: worker.profileHome };
     const before = await this.diagnose(scopedSettings, scopedOptions);
@@ -217,27 +231,40 @@ export class CloudRunDoctorService {
     }
 
     if (failing("git-identity")) {
-      await progress("git-identity", "Copying your git identity to the worker…");
+      await progress("git-identity", "Copying your git identity to the instance…");
       const identity = await this.localGitIdentity();
       const name = identity.name?.trim() || "AccordAgents Remote Agent";
       const email = identity.email?.trim() || "accordagents-remote@users.noreply.github.com";
       await this.fix(worker, `git config --global user.name ${shellQuotePosix(name)} && git config --global user.email ${shellQuotePosix(email)}`);
     }
 
-    if (blocking("codex-auth") && (!failing("codex") || hasSudo)) {
+    // A required sign-in runs whenever it is missing; an optional one only
+    // for the providers it is offered to.
+    const optionalSignIn = options.signIn === "optional";
+    const signInWanted = (provider: ChatProviderKind, id: CloudRunWorkerCheckId): boolean => optionalSignIn
+      ? failing(id) && (options.offerSignIn ?? []).includes(provider)
+      : blocking(id);
+    if (signInWanted("codex-cli", "codex-auth") && (!failing("codex") || hasSudo)) {
       await this.runDeviceAuth(worker, progress);
     }
-    if (blocking("claude-auth") && (!failing("claude") || hasSudo)) {
+    if (signInWanted("claude-code", "claude-auth") && (!failing("claude") || hasSudo)) {
       try {
         await this.claudeAuth.run(worker, value => progress(value.stage, value.message, value));
+        await progress("claude-auth", "Claude Code sign-in completed.", { signInOutcome: "completed" });
       } catch (error) {
         const detail = errorMessage(error);
-        await progress("claude-auth", detail);
-        return failedReport("claude-auth", detail);
+        if (!optionalSignIn) {
+          await progress("claude-auth", detail, { signInOutcome: "failed" });
+          return failedReport("claude-auth", detail);
+        }
+        const skipped = /cancelled/i.test(detail);
+        // The setup goes on, so "start setup again" is not what to do here.
+        const reason = detail.replace(/\s*Start setup again[^.]*\./i, "").trim();
+        await progress("claude-auth", skipped ? "Claude Code sign-in skipped." : reason || "Claude Code sign-in did not complete.", { signInOutcome: skipped ? "skipped" : "failed" });
       }
     }
 
-    await progress("diagnose", "Re-checking the worker…");
+    await progress("diagnose", "Checking the instance again…");
     return this.diagnose(scopedSettings, scopedOptions);
   }
 
@@ -247,7 +274,7 @@ export class CloudRunDoctorService {
   ): Promise<void> {
     const worker = workerTarget(settings);
     if (!worker) throw new Error("Worker host is not configured.");
-    await onProgress?.({ stage: "cloud-init", message: "Waiting for the worker base image…" });
+    await onProgress?.({ stage: "cloud-init", message: "The new instance is installing its base packages (a few minutes on the first start)…" });
     await this.sshExec({
       worker,
       command: "command -v cloud-init >/dev/null 2>&1 && sudo -n cloud-init status --wait >/dev/null || true",
@@ -266,7 +293,17 @@ export class CloudRunDoctorService {
     worker: RemoteRunWorkerTarget,
     progress: (stage: string, message: string, extra?: Partial<CloudRunWorkerSetupProgress>) => void | Promise<unknown>
   ): Promise<void> {
-    await progress("codex-auth", "Starting Codex sign-in on the worker…");
+    // The request id is known before Codex prints anything, so the User can
+    // skip a sign-in that is still starting.
+    const requestId = randomUUID();
+    const skip = new AbortController();
+    this.codexLogins.set(requestId, skip);
+    try {
+      await progress("codex-auth", "Starting Codex sign-in on the instance…", { authProvider: "codex-cli", authRequestId: requestId });
+    } catch (error) {
+      this.codexLogins.delete(requestId);
+      throw error;
+    }
     let buffered = "";
     let authUrl: string | undefined;
     let authCode: string | undefined;
@@ -275,11 +312,21 @@ export class CloudRunDoctorService {
     let published: Promise<unknown> = Promise.resolve();
     let publishError: unknown;
     const abort = new AbortController();
+    // Skip may have come while the first step was being saved.
+    if (skip.signal.aborted) abort.abort();
+    else skip.signal.addEventListener("abort", () => abort.abort(), { once: true });
     const codexPath = worker.codexPath?.trim() || "codex";
+    // The login on the instance does not end when this connection does, so it
+    // carries this sign-in's id on its command line: a skipped or expired one
+    // is ended there by that id, and it never outlives the wait for it.
+    const marker = `ACCORDAGENTS_LOGIN=${requestId}`;
+    const loginSeconds = Math.max(30, Math.floor(DEVICE_AUTH_TIMEOUT_MS / 1000) - 10);
+    let completed = false;
     try {
+      if (abort.signal.aborted) throw new Error("Codex sign-in skipped.");
       await this.sshExec({
         worker,
-        command: `${shellQuotePosix(codexPath)} login --device-auth < /dev/null 2>&1`,
+        command: `exec timeout -k 5 ${loginSeconds} env ${marker} ${shellQuotePosix(codexPath)} login --device-auth < /dev/null 2>&1`,
         timeoutMs: DEVICE_AUTH_TIMEOUT_MS,
         keepAlive: "none",
         signal: abort.signal,
@@ -294,7 +341,7 @@ export class CloudRunDoctorService {
           const progressKey = `${authUrl}:${authCode ?? ""}`;
           if (progressKey !== lastProgressKey) {
             lastProgressKey = progressKey;
-            const challenge = { authUrl, authCode, authProvider: "codex-cli" as const };
+            const challenge = { authUrl, authCode, authProvider: "codex-cli" as const, authRequestId: requestId };
             published = published.then(async () => {
               if (publishError) return;
               await progress("codex-auth", challenge.authCode
@@ -310,11 +357,27 @@ export class CloudRunDoctorService {
       });
       await published;
       if (publishError) throw publishError;
-      await progress("codex-auth", "Codex sign-in completed.");
+      completed = true;
+      await progress("codex-auth", "Codex sign-in completed.", { signInOutcome: "completed" });
     } catch (error) {
       await published;
       if (publishError) throw new Error("The app could not save the Codex sign-in step. Start setup again.");
-      await progress("codex-auth", `Codex sign-in did not complete: ${errorMessage(error)}`);
+      const reason = errorMessage(error);
+      // The wait here or the bound on the instance (timeout exits 124) ran out.
+      const expired = /timed out/i.test(reason) || (error instanceof CommandError && error.result.exitCode === 124);
+      const outcome = skip.signal.aborted ? "skipped" as const : expired ? "expired" as const : "failed" as const;
+      await progress("codex-auth", outcome === "skipped" ? "Codex sign-in skipped."
+        : outcome === "expired" ? "Codex sign-in was not approved within 5 minutes."
+          : `Codex sign-in did not complete: ${reason}`, { signInOutcome: outcome });
+    } finally {
+      this.codexLogins.delete(requestId);
+      // `timeout` keeps the marker in its own command line and passes the
+      // signal on to the login. The bracket keeps pkill from matching the
+      // shell that runs it.
+      if (!completed) {
+        await this.sshExec({ worker, command: `pkill -TERM -f ${shellQuotePosix(`[A]${marker.slice(1)}`)} || true`, timeoutMs: PROBE_TIMEOUT_MS, retryAttempts: 1 })
+          .catch(() => undefined);
+      }
     }
   }
 }
@@ -511,7 +574,7 @@ function requiredChecksForOptions(options: CloudRunDoctorOptions): ReadonlySet<C
   for (const provider of options.requiredProviderKinds ?? [options.requiredProviderKind ?? "codex-cli"]) {
     const check = provider === "claude-code" ? "claude" : "codex";
     required.add(check);
-    required.add(`${check}-auth`);
+    if (options.signIn !== "optional") required.add(`${check}-auth`);
   }
   return required;
 }

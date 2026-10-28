@@ -247,8 +247,14 @@ export class CloudRunPreparationService {
    * `automatic`: the app's own recovery, which never starts, grows or holds
    * the instance to its configured size.
    */
-  async prepareRuntime(options: { agentsChecked?: boolean; machineId?: string; automatic?: boolean } = {}): Promise<void> {
+  async prepareRuntime(options: { agentsChecked?: boolean; machineId?: string; automatic?: boolean;
+    /** Each step of the setup, as it is reached. */
+    progress?: (message: string) => void; } = {}): Promise<void> {
     while (this.active) await this.active.catch(() => undefined);
+    const listener = options.progress ? (snapshot: Omit<CloudRunPreparationProgress, "operationId">): void => {
+      try { options.progress?.(snapshot.message); } catch { /* A watcher never stops the setup. */ }
+    } : undefined;
+    if (listener) this.listeners.add(listener);
     // Claimed before anything is awaited, so a second caller waits for this one.
     this.active = (async () => {
       const currentInstance = await this.options.configuredInstanceId();
@@ -256,7 +262,8 @@ export class CloudRunPreparationService {
       return this.run(undefined, currentInstance, { agentsChecked: options.agentsChecked, machineId: options.machineId,
         ...(options.automatic ? { start: false } : {}) });
     })().finally(() => this.clearActive());
-    await this.active;
+    try { await this.active; }
+    finally { if (listener) this.listeners.delete(listener); }
   }
 
   private async run(provider: PrepareCloudRunRequest["provider"] | undefined, expectedInstanceId?: string,

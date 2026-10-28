@@ -5,6 +5,7 @@ import { AwsAutoStopRow, AwsAutoStopSetupDialog } from "./aws-worker-auto-stop";
 import { AwsConfirmDialog, AwsDialog, AwsWaiting } from "./aws-dialog";
 import { cleanError, CONFIRM_TEXT, WorkerProgress } from "./aws-shared";
 import { AwsSignInDialog } from "./aws-sign-in-dialog";
+import { AwsSetupProgressLine, type AwsSetupView } from "./aws-setup-progress";
 import { awsWorkerStateLabel, isAwsTransition } from "./use-aws-worker-status";
 import type { AwsWorkerControl } from "./use-aws-worker-control";
 
@@ -14,7 +15,7 @@ const FAILED_PREFIX: Record<string, string> = {
 
 /** The instance at a glance: its state, the one thing to do now, its size,
  *  and automatic stop. Start progress and its sign-ins show here too. */
-export function AwsStatusSection(props: { control: AwsWorkerControl }): JSX.Element {
+export function AwsStatusSection(props: { control: AwsWorkerControl; setupView: AwsSetupView }): JSX.Element {
   const c = props.control;
   const [confirmStop, setConfirmStop] = useState(false);
   const [fixing, setFixing] = useState(false);
@@ -34,7 +35,9 @@ export function AwsStatusSection(props: { control: AwsWorkerControl }): JSX.Elem
     ? `${FAILED_PREFIX[c.feedback.action] ?? "Failed"}: ${c.feedback.message}` : undefined;
   const operation = c.currentOperation;
   const [closedSignIn, setClosedSignIn] = useState<string>();
-  const signIn = operation?.phase === "setting-up" && operation.authUrl && operation.authRequestId !== closedSignIn ? operation : undefined;
+  // A setup with steps shows its sign-ins in its own window.
+  const stepped = Boolean(props.setupView.operation);
+  const signIn = !stepped && operation?.phase === "setting-up" && operation.authUrl && operation.authRequestId !== closedSignIn ? operation : undefined;
   const problem = c.configured ? status?.autoStop?.problem : undefined;
   const fixProblem = async (): Promise<void> => {
     if (!problem) return;
@@ -91,7 +94,8 @@ export function AwsStatusSection(props: { control: AwsWorkerControl }): JSX.Elem
               </div>
             ) : null}
           </div>
-          {c.showProgress && operation && operation.intent !== "check" ? <WorkerProgress operation={operation} /> : null}
+          {stepped ? <AwsSetupProgressLine view={props.setupView} />
+            : c.showProgress && operation && operation.intent !== "check" ? <WorkerProgress operation={operation} /> : null}
           {c.configured && status?.autoStop ? (
             <AwsAutoStopRow
               autoStop={status.autoStop}

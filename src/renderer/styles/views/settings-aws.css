@@ -258,3 +258,99 @@
   color: var(--app-muted);
   font-variant-numeric: tabular-nums;
 }
+
+/* Setting the instance up, step by step: a mark, the step, and below it what
+   it is doing now or how it ended. The running step keeps its time moving. */
+.gen-aws-dialog .gen-aws-steps {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-aws-dialog .gen-aws-step {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.gen-aws-dialog .gen-aws-step-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  color: var(--app-muted);
+}
+
+.gen-aws-dialog .gen-aws-step.is-done .gen-aws-step-mark {
+  color: var(--app-text-strong);
+}
+
+.gen-aws-dialog .gen-aws-step.is-failed .gen-aws-step-mark {
+  color: var(--app-danger);
+}
+
+.gen-aws-dialog .gen-aws-step-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--app-hairline);
+}
+
+.gen-aws-dialog .gen-aws-step-title {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  color: var(--app-text-strong);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.gen-aws-dialog .gen-aws-step.is-pending .gen-aws-step-title {
+  color: var(--app-muted);
+}
+
+.gen-aws-dialog .gen-aws-step-time {
+  color: var(--app-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.gen-aws-dialog .gen-aws-step-detail {
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.gen-aws-dialog .gen-aws-sign-in {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.gen-aws-dialog .gen-aws-sign-in-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* The setup goes on with its window hidden: one line and a way back. */
+.settings-view .gen-aws-setup-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: center;
+}
+
+.settings-view .gen-aws-setup-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--app-text-strong);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}

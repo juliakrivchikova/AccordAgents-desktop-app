@@ -101,7 +101,7 @@ test("Claude login stays in its resolved profile and ready requires a successful
       }
     });
     const report = await service.setup(WORKER, p => {
-      if (p.authRequestId) service.submitAuthCode(p.authRequestId, "code#native-state");
+      if (p.authUrl && p.authRequestId) service.submitAuthCode(p.authRequestId, "code#native-state");
     }, { requiredProviderKind: "claude-code" });
     assert.equal(replied, true); assert.equal(report.ok, statusPass);
     assert.equal(report.checks.find(check => check.id === "claude-auth")?.status, statusPass ? "pass" : "fail");
@@ -432,6 +432,81 @@ test("setup drives codex device-auth and surfaces url + code to the user", async
   assert.equal(opened, "https://auth.openai.com/codex/device");
   assert.equal(progress.at(-1)?.authUrl, "https://auth.openai.com/codex/device");
   assert.equal(progress.at(-1)?.authCode, "KIAK-7ETT8");
+});
+
+const NOT_SIGNED_IN = [
+  "rsync=ok", "git=ok", "gh=ok", "java=ok", "node=ok", "codex=ok", "claude=ok",
+  "build-essential=ok", "sudo=ok", "userns=0", "git-name=Dev", "git-email=dev@example.com",
+  "persistent-storage=ok", "codex-auth=missing", "claude-auth=missing"
+].join("\n");
+
+test("an optional sign-in the User skips leaves setup going and the worker ready without that provider", async () => {
+  const seen: string[] = [];
+  const { service, commands } = doctorWith(async (request) => {
+    if (request.command.includes("have rsync")) return NOT_SIGNED_IN;
+    if (request.command.includes("login --device-auth")) {
+      return new Promise((_resolve, reject) => {
+        request.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        request.onStdout?.("Open https://auth.openai.com/codex/device\nEnter this one-time code\n   KIAK-7ETT8\n");
+      });
+    }
+    return "";
+  });
+  const report = await service.setup(WORKER, (event) => {
+    seen.push(event.message);
+    // Skip as soon as the code is shown.
+    if (event.authCode && event.authRequestId) service.cancelAuth(event.authRequestId);
+  }, { requiredProviderKinds: ["codex-cli", "claude-code"], signIn: "optional", offerSignIn: ["codex-cli"] });
+  assert.ok(seen.includes("Codex sign-in skipped."));
+  assert.equal(report.ok, true, "a provider not signed in does not fail the setup");
+  assert.equal(report.checks.find((check) => check.id === "codex-auth")?.status, "warn");
+  // Claude was not offered, so its login never started.
+  assert.equal(commands.some((command) => command.includes('["auth", "login"]')), false);
+  // The skipped login is ended on the instance too, by the id it carries.
+  const launch = commands.find((command) => command.includes("login --device-auth")) ?? "";
+  const id = launch.match(/ACCORDAGENTS_LOGIN=([0-9a-f-]+)/)?.[1];
+  assert.ok(id && launch.includes("exec timeout"), "the login is bounded and carries its id");
+  assert.ok(commands.some((command) => command.includes("pkill -TERM -f") && command.includes(`[A]CCORDAGENTS_LOGIN=${id}`)));
+});
+
+test("Skip works while the Codex sign-in is still starting", async () => {
+  let started = 0;
+  const { service } = doctorWith(async (request) => {
+    if (request.command.includes("have rsync")) return NOT_SIGNED_IN;
+    if (request.command.includes("login --device-auth")) { started++; return new Promise(() => undefined); }
+    return "";
+  });
+  const seen: string[] = [];
+  await service.setup(WORKER, (event) => {
+    seen.push(event.message);
+    if (event.authRequestId && !event.authUrl) service.cancelAuth(event.authRequestId);
+  }, { requiredProviderKinds: ["codex-cli"], signIn: "optional", offerSignIn: ["codex-cli"] });
+  assert.equal(started, 0, "a sign-in skipped before it started never starts");
+  assert.ok(seen.includes("Codex sign-in skipped."));
+});
+
+test("a Codex sign-in that ran out on the instance says it was not approved in time", async () => {
+  const seen: string[] = [];
+  const { service } = doctorWith(async (request) => {
+    if (request.command.includes("have rsync")) return NOT_SIGNED_IN;
+    if (request.command.includes("login --device-auth")) throw commandError({ exitCode: 124, message: "ssh exited with code 124" });
+    return "";
+  });
+  await service.setup(WORKER, (event) => { seen.push(event.message); },
+    { requiredProviderKinds: ["codex-cli"], signIn: "optional", offerSignIn: ["codex-cli"] });
+  assert.ok(seen.includes("Codex sign-in was not approved within 5 minutes."), seen.join(" | "));
+});
+
+test("a sign-in offered to nobody is not started, and a missing one only warns", async () => {
+  const { service, commands } = doctorWith(async (request) => request.command.includes("have rsync") ? NOT_SIGNED_IN : "");
+  const report = await service.setup(WORKER, undefined, { requiredProviderKinds: ["codex-cli", "claude-code"], signIn: "optional" });
+  assert.equal(report.ok, true);
+  assert.equal(commands.some((command) => command.includes("login --device-auth") || command.includes('["auth", "login"]')), false);
+  const diagnosis = await service.diagnose(WORKER, { requiredProviderKinds: ["codex-cli", "claude-code"], signIn: "optional" });
+  assert.deepEqual(diagnosis.checks.filter((check) => check.id.endsWith("-auth")).map((check) => check.status), ["warn", "warn"]);
+  // Required as before when sign-in is not optional.
+  const required = await service.diagnose(WORKER, { requiredProviderKinds: ["codex-cli"] });
+  assert.equal(required.checks.find((check) => check.id === "codex-auth")?.status, "fail");
 });
 
 test("setup without sudo skips installs and reports remaining gaps", async () => {

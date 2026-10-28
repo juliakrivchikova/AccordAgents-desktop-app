@@ -68,6 +68,8 @@ export async function mount(options: {
   list?: (path?: string) => Promise<unknown>;
   del?: (paths: string[]) => Promise<unknown>;
   keepSetupChecks?: boolean;
+  /** The User's server; set up unless a test says otherwise. */
+  hubUrl?: string | null;
 } = {}) {
   assert.equal(globalThis.ACCORD_RENDERER_JSDOM, true, "run this test with scripts/renderer-jsdom-setup.mjs");
   if (mounted) { const previous = mounted; mounted = undefined; await act(async () => { previous.unmount(); }); }
@@ -95,6 +97,7 @@ export async function mount(options: {
     },
     getAwsWorkerBootstrapCommand: async (region: string, recovery?: string) => { record("command", region, recovery); return `command-for-${region}`; },
     setAwsAutoStop: async () => status,
+    getHubSetupState: async () => options.hubUrl === null ? { status: "none", bundledVersion: "1" } : { status: "ready", url: options.hubUrl ?? "https://hub.example", bundledVersion: "1" },
     reconnectAwsMachine: async (machineId?: string) => { record("reconnectAwsMachine", machineId); return status; },
     listMachines: async () => options.machines ?? { machines: [], status: [] },
     onMachinesUpdated: () => () => undefined,
@@ -121,7 +124,7 @@ export async function mount(options: {
       return { freedBytes: 300_000_000, removed: 1, failed: [], space: { totalBytes: DISK.totalBytes, usedBytes: 36_500_000_000, availableBytes: 4_000_000_000 } };
     },
     diagnoseCloudRunWorker: async () => { record("diagnoseCloudRunWorker"); return options.checks ?? CHECKS; },
-    setupCloudRunWorker: async () => { record("setupCloudRunWorker"); return new Promise(() => undefined); },
+    setupCloudRunWorker: async (request?: unknown, setupOptions?: unknown) => { record("setupCloudRunWorker", request, setupOptions); return new Promise(() => undefined); },
     onCloudRunSetupProgress: (listener: (progress: CloudRunWorkerSetupProgress) => void) => { bridge.progress.push(listener); return () => undefined; },
     getCloudRunSetupProgress: async () => undefined,
     openExternal: async (url: string) => { record("openExternal", url); },

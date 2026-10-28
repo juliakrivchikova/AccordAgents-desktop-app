@@ -53,7 +53,9 @@ export class CloudRunClaudeAuth {
     let published: Promise<unknown> = Promise.resolve();
     let publishError: unknown;
     try {
-      await progress({ stage: "claude-auth", message: "Starting Claude sign-in…" });
+      // The id goes out first, so the User can skip a sign-in still starting.
+      await progress({ stage: "claude-auth", message: "Starting Claude sign-in…", authProvider: "claude-code", authRequestId: id });
+      if (login.abort.signal.aborted) throw new Error("Claude sign-in was cancelled.");
       await this.exec({ worker, command: claudeAuthCommand(worker.claudePath || "claude"),
         timeoutMs: 5 * 60_000, retryAttempts: 1, inputStream: login.input, signal: login.abort.signal,
         onStdout: chunk => {

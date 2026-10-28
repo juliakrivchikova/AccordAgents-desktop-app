@@ -29,6 +29,21 @@ test("worker blob round-trips and validates", () => {
   assert.deepEqual(parseWorkerBlob(blob.slice(AWS_WORKER_BLOB_PREFIX.length)), CREDS);
 });
 
+test("the whole Terminal output of the setup command is accepted, not only its last line", () => {
+  const blob = encodeWorkerBlob(CREDS);
+  const output = `\nNo new automatic-stop key was made, so automatic stop stays as it is.\n\nPaste this into AccordAgents:\n${blob}\n`;
+  assert.deepEqual(parseWorkerBlob(output), CREDS);
+  assert.throws(() => parseWorkerBlob("Paste this into AccordAgents:\n"), /not valid/);
+  // Broken over lines by the terminal, alone or inside the whole output,
+  // with the shell prompt after it.
+  const body = blob.slice(AWS_WORKER_BLOB_PREFIX.length);
+  const broken = `${AWS_WORKER_BLOB_PREFIX}${body.slice(0, 40)}\n${body.slice(40, 90)}\n${body.slice(90)}`;
+  assert.deepEqual(parseWorkerBlob(broken), CREDS);
+  assert.deepEqual(parseWorkerBlob(`Paste this into AccordAgents:\n${broken}\nuser@laptop ~ % `), CREDS);
+  // A word line after the value (a command typed next) is not part of it.
+  assert.deepEqual(parseWorkerBlob(`${broken}\nclear`), CREDS);
+});
+
 test("the blob carries the machine's stop key; an older blob without one is still a valid connection", () => {
   const withPower = { ...CREDS, power: { accessKeyId: "AKIAPOWER0000000001", secretAccessKey: "power-secret" } };
   assert.deepEqual(parseWorkerBlob(encodeWorkerBlob(withPower)), withPower);

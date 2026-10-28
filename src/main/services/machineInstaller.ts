@@ -155,11 +155,11 @@ export interface MachineInstallStore {
  *  and a worker cannot drift apart, and so provider credentials are never
  *  copied from this desktop: `setup` performs a native device-auth login. */
 export interface MachineDoctor {
-  diagnose(settings: CloudRunWorkerSettings, options?: { requiredProviderKind?: "codex-cli" | "claude-code"; maintenance?: MachineMaintenanceTarget; profileHome?: string }): Promise<CloudRunWorkerDoctorReport>;
+  diagnose(settings: CloudRunWorkerSettings, options?: { requiredProviderKinds?: ("codex-cli" | "claude-code")[]; maintenance?: MachineMaintenanceTarget; profileHome?: string }): Promise<CloudRunWorkerDoctorReport>;
   setup(
     settings: CloudRunWorkerSettings,
     onProgress?: (progress: CloudRunWorkerSetupProgress) => void,
-    options?: { requiredProviderKind?: "codex-cli" | "claude-code"; maintenance?: MachineMaintenanceTarget; profileHome?: string }
+    options?: { requiredProviderKinds?: ("codex-cli" | "claude-code")[]; maintenance?: MachineMaintenanceTarget; profileHome?: string }
   ): Promise<CloudRunWorkerDoctorReport>;
 }
 
@@ -546,7 +546,11 @@ export class MachineInstallerService {
       // everything from the drain onward is wrapped by the release just
       // staged, which does understand it.
       maintenance = initial.maintenanceCapable ? maintenanceFor(initial) : undefined;
-      const doctorOptions = { requiredProviderKind: request.requiredProvider, maintenance, profileHome: record.profileHome };
+      // A setup for one provider needs that one signed in. Installing the
+      // program alone (from Settings → AWS, a recovery or an update) needs no
+      // provider: nobody may be there to approve a sign-in, and a provider the
+      // User has not signed in must not stop the program from installing.
+      const doctorOptions = { requiredProviderKinds: request.requiredProvider ? [request.requiredProvider] : [], maintenance, profileHome: record.profileHome };
       let report = await this.options.doctor.diagnose(worker, doctorOptions);
       if (!report.ok) {
         // Each doctor frame saves a snapshot, so

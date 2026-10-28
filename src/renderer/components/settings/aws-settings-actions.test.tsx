@@ -110,7 +110,9 @@ test("a size decision answers the attempt that raised it; Not now leaves everyth
   const ui = await mount({ status: STOPPED, start: async (request) => {
     calls += 1;
     if (calls < 3) {
+      // As main sends it: the setup's steps travel with the question.
       const decision = operation(request, { phase: "needs-decision", message: "Choose", updatedAt: new Date(Date.now() + calls).toISOString(),
+        setupSteps: [{ id: "instance", state: "current", detail: "Choose" }],
         specMismatch: { instanceId: "i-0943", actual: RUNNING.actualSpec!, desired: { instanceType: "t3.medium", rootVolumeSizeGb: 40 }, diskTooSmall: false, computeTooSmall: true } });
       return { operation: decision, status: { ...STOPPED, operation: decision } };
     }
@@ -118,6 +120,7 @@ test("a size decision answers the attempt that raised it; Not now leaves everyth
   } });
   await ui.click(ui.find("aws-worker-start"));
   assert.match(ui.find("aws-worker-spec-decision")?.textContent ?? "", /Review the size change/);
+  assert.equal(ui.find("aws-setup-progress"), null, "the size question is its own dialog, not a setup step");
   await ui.click(ui.button("Not now", ui.find("aws-worker-spec-decision")!));
   assert.equal(ui.find("aws-worker-spec-decision"), null);
   assert.equal(ui.bridge.calls.startAwsWorker?.length, 1, "closing it sends nothing");
