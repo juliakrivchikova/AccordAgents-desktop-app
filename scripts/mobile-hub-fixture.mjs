@@ -4,11 +4,13 @@
  * The phone talks to nothing but her server, so a harness that drives the
  * real PWA needs a real one: this starts the hub in-process from the compiled
  * main build (`composeHub`, the same composition the program runs), with its
- * own SQLite file, an owner desktop identity that signs the chat changes a
- * desktop would publish, and a one-time invite the page pairs with exactly as
- * it does from the code the desktop shows. Nothing on the phone's side is
- * stood in for: the page enrolls its own key, signs every read and write, and
- * reads the chat list, pages, cards and live progress from the hub's copy.
+ * own SQLite file, an owner desktop identity that writes the operations a
+ * desktop writes (`POST /v3/ops`: chats, messages, turns, cards), and a
+ * one-time invite the page pairs with exactly as it does from the code the
+ * desktop shows. Nothing on the phone's side is stood in for: the page
+ * enrolls its own key, signs every request, writes its messages, Stops and
+ * answers as operations, and reads the chat list, pages, cards and live
+ * progress from the hub's copy.
  *
  * The hub is reached through a small pass-through in front of it, so a
  * harness can hold or refuse a request the way a slow or broken connection
@@ -72,10 +74,10 @@ export function member(handle, extra = {}) {
 export async function startMobileHub(options = {}) {
   const { composeHub } = require(distMain("hub/main.js"));
   const { StorageService } = require(distMain("main/services/storage.js"));
-  const { createChatEventDeviceIdentity, createSignedChatEvent } = require(distMain("main/services/chatEventLog.js"));
+  const { createChatEventDeviceIdentity } = require(distMain("main/services/chatEventLog.js"));
   const { signHubRequest, signHubText, sha256Hex } = require(distMain("main/services/hubAuth.js"));
-  const { hubPhoneInviteSigningText, HUB_APPROVAL_CARD_EVENT_KIND, HUB_APPROVAL_CARD_SCOPE } = require(distMain("shared/hubProtocol.js"));
-  const { CHAT_CHANGES_EVENT_KIND, chatChangesLogScope } = require(distMain("main/services/chatChanges.js"));
+  const { hubPhoneInviteSigningText } = require(distMain("shared/hubProtocol.js"));
+  const { hubTurnRunId } = require(distMain("shared/hubOps.js"));
   const { encodeMachineProgress } = require(distMain("shared/machineProgress.js"));
 
   const hubId = options.hubId || `hub-${randomBytes(6).toString("hex")}`;
@@ -98,16 +100,15 @@ export async function startMobileHub(options = {}) {
   const inner = await composed.server.listenHttp(0, "127.0.0.1");
   const innerPort = inner.address().port;
 
-  /** Every event the hub placed in its order, in order, as it placed them. */
-  const placed = [];
-  composed.hubLog.onAppended(({ events }) => {
-    for (const item of events) placed.push(item.event);
-  });
-
   // The pass-through the phone reaches the hub by. A gate may hold a request
-  // ({ delayMs }), answer it itself ({ status, body }), or let it pass.
+  // ({ delayMs }), answer it itself ({ status, body }), drop its connection
+  // ({ drop: true }), or let it pass. A request of operations comes to the
+  // gate with what it carries (`ops`).
   let gate;
   const requests = [];
+  /** Every request of operations the phone made and what the hub answered
+   *  (a request a gate answered or dropped never reached the hub). */
+  const opsRequests = [];
   // Requests the phone has open now, but for its long wait for news.
   let inFlight = 0;
   let lastActivityAt = Date.now();
@@ -120,6 +121,18 @@ export async function startMobileHub(options = {}) {
       inFlight += 1;
       lastActivityAt = Date.now();
       res.once("close", () => { inFlight -= 1; lastActivityAt = Date.now(); seen.doneAt = Date.now(); });
+    }
+    // A request of operations is read first, so a gate can answer what it
+    // carries ({ ops } on what it is handed).
+    const opsRequest = req.method === "POST" && url.pathname === "/v3/ops";
+    const sent = opsRequest ? await new Promise((resolve) => {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => resolve(Buffer.concat(chunks)));
+      req.on("error", () => resolve(Buffer.concat(chunks)));
+    }) : undefined;
+    if (sent) {
+      try { seen.ops = JSON.parse(sent.toString("utf8")).ops || []; } catch { seen.ops = []; }
     }
     const decision = gate ? await gate(seen) : undefined;
     if (decision && decision.delayMs) await sleep(decision.delayMs);
@@ -137,6 +150,15 @@ export async function startMobileHub(options = {}) {
     }
     const upstream = httpRequest({ host: "127.0.0.1", port: innerPort, method: req.method, path: req.url, headers: req.headers }, (answer) => {
       res.writeHead(answer.statusCode || 502, answer.headers);
+      if (opsRequest) {
+        const answered = [];
+        answer.on("data", (chunk) => answered.push(chunk));
+        answer.on("end", () => {
+          let results = [];
+          try { results = JSON.parse(Buffer.concat(answered).toString("utf8")).results || []; } catch { results = []; }
+          opsRequests.push({ at: Date.now(), status: answer.statusCode, ops: seen.ops || [], results });
+        });
+      }
       answer.pipe(res);
     });
     upstream.on("error", () => {
@@ -144,7 +166,8 @@ export async function startMobileHub(options = {}) {
       res.end();
     });
     res.on("close", () => upstream.destroy());
-    req.pipe(upstream);
+    if (sent) upstream.end(sent);
+    else req.pipe(upstream);
   });
   const port = await listen(proxy, options.port || 0);
   const base = `http://127.0.0.1:${port}`;
@@ -168,42 +191,47 @@ export async function startMobileHub(options = {}) {
     await composed.folder.idle();
   };
 
-  // The owner's chains, one per scope, as the desktop keeps them.
-  const chains = new Map();
-  const ownerEvent = (scope, conversationId, kind, payload) => {
-    const head = chains.get(scope) || { seq: 0 };
-    const event = createSignedChatEvent(owner, {
-      conversationId, logScopeId: scope, kind, payload, originSeq: head.seq + 1,
-      ...(head.hash ? { prevHash: head.hash } : {}), createdAt: new Date().toISOString()
-    });
-    chains.set(scope, { seq: head.seq + 1, hash: event.eventHash });
-    return event;
-  };
-  // The owner's writes go one at a time, as one desktop's do: an event is
-  // made and pushed in its chain's order, or the hub sees a gap.
-  let ownerQueue = Promise.resolve();
-  const serially = (work) => {
-    const run = ownerQueue.then(work);
-    ownerQueue = run.catch(() => undefined);
-    return run;
-  };
-  const pushOwner = async (events) => {
-    const answer = await call("POST", "/v1/events", { events });
-    const statuses = (answer.results || []).map((result) => result.status);
-    if (statuses.some((status) => status !== "accepted" && status !== "duplicate")) {
-      throw new Error(`the hub did not take the owner's events: ${JSON.stringify(answer.results)}`);
-    }
+  // The owner desktop's writes: operations, answered one by one. A setup
+  // that the hub refuses is the harness's mistake, and says so.
+  let ownerOps = 0;
+  const nextOpId = () => `op-owner-${++ownerOps}-${randomBytes(4).toString("hex")}`;
+  const writeOps = async (ops) => {
+    const answer = await call("POST", "/v3/ops", { ops });
+    const refused = (answer.results || []).filter((result) => result.status === "rejected");
+    if (refused.length > 0) throw new Error(`the hub refused the owner's operations: ${JSON.stringify(refused)}`);
     await settle();
     return answer;
   };
-
+  /** A chat's fields and messages, as the desktop moves them to the server
+   *  (chat.import: any author, in the order given, a message with a known
+   *  id replaced in place), a page at a time. */
+  const importChat = (conversationId, conversation, messages) => {
+    const pages = [];
+    for (let start = 0; start < Math.max(1, messages.length); start += 200) pages.push(messages.slice(start, start + 200));
+    return writeOps(pages.map((page, index) => ({
+      opId: nextOpId(), kind: "chat.import", conversationId,
+      ...(index === 0 && conversation ? { conversation } : {}),
+      messages: page
+    })));
+  };
   await call("PUT", "/v1/roster", { devices: [
     { deviceId: owner.originId, publicKeyDerBase64: owner.publicKeyDerBase64, role: "desktop", name: "Mac" },
     ...(options.rosterDevices || [])
   ] });
 
+  const writeAsDesktop = async (conversationId, messages, kind) => {
+    const conversation = await storage.getConversation(conversationId);
+    const members = Array.isArray(conversation?.metadata?.participants) ? conversation.metadata.participants : [];
+    const elsewhere = (message) => message.role === "participant" &&
+      Boolean(members.find((item) => item.id === message.participantId)?.homeMachineId);
+    const own = messages.filter((message) => !elsewhere(message));
+    if (own.length > 0) await writeOps(own.map((message) => ({ opId: nextOpId(), kind, conversationId, message })));
+    const others = messages.filter(elsewhere);
+    if (others.length > 0) await importChat(conversationId, undefined, others);
+  };
+
   const hub = {
-    base, hubId, owner, storage, composed, dir, rings, placed, requests,
+    base, hubId, owner, storage, composed, dir, rings, requests, opsRequests,
     call, settle,
     /** Holds, answers or passes the phone's requests (see the pass-through). */
     setGate(next) { gate = next; },
@@ -217,26 +245,85 @@ export async function startMobileHub(options = {}) {
       }
       throw new Error(`the phone kept asking the server (${inFlight} open)`);
     },
-    /** The chat changes of one chat, signed by the owner and folded. */
+    /** Operations the owner desktop writes, as it writes them. */
+    ops: writeOps,
+    nextOpId,
+    /** Chat changes in the desktop's old words, written as operations. */
     async changeChat(conversationId, changes) {
-      return serially(() => {
-        const payload = { version: 1, conversationId, updatedAt: new Date().toISOString(), changes };
-        return pushOwner([ownerEvent(chatChangesLogScope(conversationId), conversationId, CHAT_CHANGES_EVENT_KIND, payload)]);
-      });
+      for (const change of changes) {
+        if (change.type === "conversation.created") {
+          await importChat(conversationId, change.conversation, []);
+        } else if (change.type === "conversation.updated") {
+          await writeOps([{ opId: nextOpId(), kind: "conversation.update", conversationId,
+            ...(change.title !== undefined ? { title: change.title } : {}),
+            ...(change.metadata ? { metadata: change.metadata } : {}),
+            ...(change.removedMetadataKeys ? { removedMetadataKeys: change.removedMetadataKeys } : {}) }]);
+        } else if (change.type === "message.created" || change.type === "message.updated") {
+          await importChat(conversationId, undefined, [change.message]);
+        } else {
+          throw new Error(`the harness cannot write a ${change.type}`);
+        }
+      }
     },
     /** A chat as the desktop creates it, with its members and messages. */
     async createChat(conversationId, { title = "Chat", participants = [], repoPath, createdAt, messages = [], metadata = {} } = {}) {
-      await hub.changeChat(conversationId, [{ type: "conversation.created", conversation: {
+      await importChat(conversationId, {
         title, kind: "chat", createdAt: createdAt || new Date().toISOString(), ...(repoPath ? { repoPath } : {}),
         metadata: { participants, ...metadata }
-      } }]);
-      if (messages.length > 0) await hub.addMessages(conversationId, messages);
+      }, messages);
     },
+    /** Messages written as the desktop writes them (message.create, and
+     *  message.update for one already there): the chat's time moves, the
+     *  phone hears of it. A member that runs on a machine writes its own
+     *  messages there; those are moved in the way the desktop moves chats. */
     async addMessages(conversationId, messages) {
-      return hub.changeChat(conversationId, messages.map((message) => ({ type: "message.created", message })));
+      return writeAsDesktop(conversationId, messages, "message.create");
     },
     async updateMessages(conversationId, messages) {
-      return hub.changeChat(conversationId, messages.map((message) => ({ type: "message.updated", message })));
+      return writeAsDesktop(conversationId, messages, "message.update");
+    },
+    /** A member's message written by the member's own device (the owner, for
+     *  a member that runs on it), as a reply is written. */
+    async writeMessage(conversationId, message) {
+      return writeOps([{ opId: nextOpId(), kind: "message.create", conversationId, message }]);
+    },
+    async rewriteMessage(conversationId, message) {
+      return writeOps([{ opId: nextOpId(), kind: "message.update", conversationId, message }]);
+    },
+    /** The turn a User's message asked of a member, taken by the member's
+     *  own device (the owner, for its members): "Taken to work" (Д5). */
+    async claimTurn(conversationId, messageId, participantId) {
+      return writeOps([{ opId: nextOpId(), kind: "turn.claim", conversationId, runId: hubTurnRunId(messageId, participantId), messageId, participantId }]);
+    },
+    async finishTurn(conversationId, messageId, participantId, outcome = "done") {
+      return writeOps([{ opId: nextOpId(), kind: "turn.finish", conversationId, runId: hubTurnRunId(messageId, participantId), outcome }]);
+    },
+    /** The turn as the server holds it. */
+    async turn(messageId, participantId) {
+      return storage.hubOps().turn(hubTurnRunId(messageId, participantId));
+    },
+    /** A card a member waits on, raised as its device raises it (Д9): a
+     *  permission or roster approval, or a member's choice with the message
+     *  that asked it. Raised again while it waits, it shows the new one. */
+    async raiseApproval(conversationId, approval, extra = {}) {
+      const roster = approval.toolName === "app_participants_request_change";
+      return writeOps([{ opId: nextOpId(), kind: "card.raise", conversationId, cardId: approval.id, cardKind: roster ? "roster" : "permission",
+        ...(extra.participantId ? { participantId: extra.participantId } : {}), card: { approval } }]);
+    },
+    async raiseChoice(conversationId, message, extra = {}) {
+      const choice = message.metadata.pendingChoice;
+      return writeOps([{ opId: nextOpId(), kind: "card.raise", conversationId, cardId: choice.id, cardKind: "choice", messageId: message.id,
+        ...(extra.participantId ? { participantId: extra.participantId } : {}), card: { choice, sourceMessageId: message.id } }]);
+    },
+    /** The card's member device did what the answer asked (or the card went). */
+    async settleCard(conversationId, cardId, outcome = {}) {
+      return writeOps([{ opId: nextOpId(), kind: "card.settle", conversationId, cardId, outcome }]);
+    },
+    async answerCard(conversationId, cardId, answer) {
+      return writeOps([{ opId: nextOpId(), kind: "card.answer", conversationId, cardId, answer }]);
+    },
+    async card(cardId) {
+      return storage.hubOps().card(cardId);
     },
     /** Bytes the owner puts on the server as a body named by its hash. */
     async putBlob(bytes) {
@@ -254,10 +341,6 @@ export async function startMobileHub(options = {}) {
     /** The composer catalog the desktop publishes (roles, prompts, skills, drawn avatars). */
     async publishCatalog(catalog = {}) {
       return call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(), roles: {}, prompts: [], skills: [], avatars: {}, ...catalog } });
-    },
-    /** A permission card the desktop raises for one of its members. */
-    async raiseApproval(conversationId, approval) {
-      return serially(() => pushOwner([ownerEvent(HUB_APPROVAL_CARD_SCOPE, conversationId, HUB_APPROVAL_CARD_EVENT_KIND, { conversationId, approval })]));
     },
     /** A member's live text, posted the way the desktop posts it. */
     async progress(conversationId, runId, text, extra = {}) {
@@ -287,9 +370,13 @@ export async function startMobileHub(options = {}) {
     async phones() {
       return (await storage.hub().devices()).filter((device) => device.role === "phone");
     },
-    /** What the phone placed in the hub's order, by kind. */
-    phoneEvents(kind) {
-      return placed.filter((event) => event.originId !== owner.originId && (!kind || event.kind === kind));
+    /** What the hub accepted from the phone, in its order: one entry per
+     *  operation however often it arrived (a repeat is the same one), by the
+     *  kind of what it did. */
+    async phoneOps(kind) {
+      const phones = new Set((await hub.phones()).map((device) => device.deviceId));
+      const { entries } = await storage.hubOps().after(0, 10_000, 64 * 1024 * 1024);
+      return entries.filter((entry) => phones.has(entry.deviceId) && (!kind || entry.effect.kind === kind));
     },
     async close() {
       gate = undefined;

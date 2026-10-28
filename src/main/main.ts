@@ -107,14 +107,11 @@ import { HubPhonePublisher } from "./services/hubPhonePublisher";
 import { isDeviceEventBlobReference } from "../shared/deviceEventBlobs";
 import { phoneTurnsSince } from "./services/phoneTurnClaims";
 import {
-  HUB_PHONE_ENROLLED_EVENT_KIND,
-  HUB_PHONE_ENROLLMENT_SCOPE,
   HUB_PHONE_PROTOCOL_VERSION,
   PHONE_TURN_RESUME_EVERY_MS,
   PHONE_TURN_RESUME_WINDOW_MS,
   hubPhoneInviteSigningText,
-  verifyHubPhoneCertificate,
-  type HubPhoneCertificate,
+  verifyHubPhoneEnrollment,
   type HubPhoneInvite
 } from "./../shared/hubProtocol";
 import { isChatActionKind } from "../shared/chatActionEvents";
@@ -447,45 +444,80 @@ const hubPhonePublisher: HubPhonePublisher = new HubPhonePublisher({
 });
 
 /**
- * A phone that enrolled with one of this desktop's invites writes its
- * certificate first: checked with this desktop's own key, the phone is
- * trusted here, on the server's roster and on every machine. A certificate
- * for an invite this desktop revoked admits nobody.
+ * A phone that pairs with one of this desktop's invites is on the server's
+ * roster from that moment (the server checked the invite's token). This
+ * desktop learns it from there, not from anything the phone writes: it checks
+ * that the invite is its own (signed with its key) and the acceptance the
+ * phone's (signed with the phone's key, inside the invite's window), and from
+ * then on names the phone itself, on the server's roster and on every
+ * machine. A phone whose invite this desktop revoked is not admitted, and the
+ * next roster it publishes takes it off. Returns how many were admitted.
  */
-async function admitEnrolledPhone(event: ChatEventEnvelope, fetchBody: () => Promise<void>): Promise<string | undefined> {
-  if (event.kind !== HUB_PHONE_ENROLLED_EVENT_KIND || event.logScopeId !== HUB_PHONE_ENROLLMENT_SCOPE) return undefined;
-  if (isDeviceEventBlobReference(event.payload)) await fetchBody().catch(() => undefined);
+async function admitEnrolledPhones(): Promise<number> {
+  const client = hubClient;
+  if (!client) return 0;
+  const roster = await client.roster();
   const identity = await chatEventLogService.getOrCreateDeviceIdentity();
-  const certificate = await storageService.deviceEventBlobs().hydrate(event.payload).catch(() => undefined) as HubPhoneCertificate | undefined;
-  if (!verifyHubPhoneCertificate(certificate, { issuerDeviceId: identity.originId, issuerPublicKeyDerBase64: identity.publicKeyDerBase64, ...hubCertificateCrypto }) ||
-      certificate.enrollment.deviceId !== event.originId) {
-    void debugLogService.write("hub.phone.certificate-refused", { originId: event.originId });
-    return undefined;
+  const trusted = await settingsService.listTrustedDevices().catch(() => []);
+  let admittedCount = 0;
+  for (const record of roster.enrollments ?? []) {
+    const onRoster = roster.devices.find((device) => device.deviceId === record.deviceId && device.role === "phone");
+    if (!onRoster || onRoster.inviteId !== record.invite?.inviteId) continue;
+    // Read again every time the roster is: what is known already changes
+    // nothing, and nobody is told again.
+    const known = trusted.find((device) => device.deviceId === record.deviceId);
+    if (known && known.inviteId === record.invite.inviteId && known.publicKeyDerBase64 === record.enrollment?.publicKeyDerBase64) continue;
+    if (!verifyHubPhoneEnrollment(record, { issuerDeviceId: identity.originId, issuerPublicKeyDerBase64: identity.publicKeyDerBase64, ...hubCertificateCrypto }) ||
+        record.enrollment.deviceId !== record.deviceId || onRoster.publicKeyDerBase64 !== record.enrollment.publicKeyDerBase64) {
+      void debugLogService.write("hub.phone.enrollment-refused", { deviceId: record.deviceId, inviteId: record.invite?.inviteId ?? "" });
+      continue;
+    }
+    const admitted = await settingsService.admitInvitedPhone({
+      deviceId: record.enrollment.deviceId,
+      publicKeyDerBase64: record.enrollment.publicKeyDerBase64,
+      role: "phone",
+      name: record.enrollment.name || record.invite.name || "Phone",
+      addedAt: record.enrollment.enrolledAt,
+      inviteId: record.invite.inviteId,
+      phoneScope: record.invite.scope
+    });
+    void debugLogService.write("hub.phone.admitted", { deviceId: record.enrollment.deviceId, inviteId: record.invite.inviteId, admitted });
+    if (admitted) admittedCount += 1;
   }
-  // The same certificate read again (a gap filled, a copy taken again)
-  // changes nothing, and nobody is told again.
-  const known = (await settingsService.listTrustedDevices().catch(() => [])).find((device) => device.deviceId === certificate.enrollment.deviceId);
-  if (known && known.inviteId === certificate.invite.inviteId && known.publicKeyDerBase64 === certificate.enrollment.publicKeyDerBase64) {
-    return certificate.enrollment.publicKeyDerBase64;
+  if (admittedCount > 0) {
+    publishHubRoster();
+    await machineLinkService?.refreshTrustRosters().catch(() => undefined);
+    hubPhonePublisher.phonesChanged();
+    hubPhonePublisher.scheduleCatalog(0);
+    hubPhonePublisher.publishWakeKeys();
+    hubPhonePublisher.flushApprovals();
   }
-  const admitted = await settingsService.admitInvitedPhone({
-    deviceId: certificate.enrollment.deviceId,
-    publicKeyDerBase64: certificate.enrollment.publicKeyDerBase64,
-    role: "phone",
-    name: certificate.enrollment.name || certificate.invite.name || "Phone",
-    addedAt: certificate.enrollment.enrolledAt,
-    inviteId: certificate.invite.inviteId,
-    phoneScope: certificate.invite.scope
-  });
-  void debugLogService.write("hub.phone.admitted", { deviceId: certificate.enrollment.deviceId, inviteId: certificate.invite.inviteId, admitted });
-  if (!admitted) return undefined;
-  publishHubRoster();
-  await machineLinkService?.refreshTrustRosters().catch(() => undefined);
-  hubPhonePublisher.phonesChanged();
-  hubPhonePublisher.scheduleCatalog(0);
-  hubPhonePublisher.publishWakeKeys();
-  hubPhonePublisher.flushApprovals();
-  return certificate.enrollment.publicKeyDerBase64;
+  return admittedCount;
+}
+
+/** How often the server's roster is read for phones that paired: every
+ *  minute, and every few seconds while an invite this desktop made waits to
+ *  be used (the User is pairing a phone right now). */
+const HUB_PHONE_ROSTER_EVERY_MS = 60_000;
+const HUB_PHONE_ROSTER_PAIRING_MS = 5_000;
+let hubPhoneRosterTimer: ReturnType<typeof setTimeout> | undefined;
+
+function scheduleEnrolledPhones(delayMs: number): void {
+  if (hubPhoneRosterTimer) clearTimeout(hubPhoneRosterTimer);
+  hubPhoneRosterTimer = setTimeout(() => {
+    hubPhoneRosterTimer = undefined;
+    void (async () => {
+      if (hubClient) {
+        await admitEnrolledPhones().catch((error: unknown) => {
+          void debugLogService.write("hub.phone.roster-read-error", { message: error instanceof Error ? error.message : String(error) });
+        });
+      }
+      const invites = await settingsService.listPhoneInvites().catch(() => []);
+      const pairing = invites.some((invite) => invite.state === "pending" && Date.parse(invite.expiresAt) > Date.now());
+      scheduleEnrolledPhones(pairing ? HUB_PHONE_ROSTER_PAIRING_MS : HUB_PHONE_ROSTER_EVERY_MS);
+    })();
+  }, Math.max(0, delayMs));
+  hubPhoneRosterTimer.unref?.();
 }
 
 /**
@@ -740,6 +772,9 @@ async function startHubLink(): Promise<void> {
   chatService.setHubBlobReader((reference) => blobClient.downloadBytes(reference));
   hubPhonePublisher.reset();
   publishHubRoster();
+  // Phones that paired while this desktop was away are on the server's
+  // roster: learned now, and the roster is read again from then on.
+  scheduleEnrolledPhones(0);
   void debugLogService.write("hub.link.started", { url: config.url });
   scheduleHubProgramUpdate();
 }
@@ -1830,6 +1865,9 @@ async function createPhoneInvite(request: import("../shared/types").CreatePhoneI
   // All three only in the fragment: the phone's app site never sees them.
   pwaUrl.hash = new URLSearchParams({ hub: hub.url, t: token, id: health.hubId }).toString();
   void debugLogService.write("hub.phone.invite-created", { inviteId: invite.inviteId, scope: invite.scope.scope });
+  // The phone pairs with the server, not here: its roster is read often
+  // while the code waits to be used, so the phone is named here soon after.
+  scheduleEnrolledPhones(HUB_PHONE_ROSTER_PAIRING_MS);
   return { inviteId: invite.inviteId, expiresAt: invite.expiresAt, pwaUrl: pwaUrl.toString(), qrPayload: pwaUrl.toString() };
 }
 

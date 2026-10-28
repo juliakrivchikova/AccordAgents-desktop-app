@@ -2,7 +2,8 @@
  * The phone's database moving from the version every installed phone has to
  * the one this shell asks for, in a real browser.
  *
- * Version 6 adds an index over the timeline store's chat id. On an installed
+ * Version 6 adds an index over the timeline store's chat id (and version 7
+ * the send log's store, created the same way). On an installed
  * phone that store already exists and holds weeks of rows, so the index is
  * created inside the version-change transaction on the existing store — a
  * path a fresh profile never takes, because it creates the store and the
@@ -144,10 +145,13 @@ test("a phone on database version 5 gets the chat index without losing its rows"
       });
       const total = await new Promise((resolve) => { const count = store.count(); count.onsuccess = () => resolve(count.result); });
       const version = db.version;
+      const stores = [...db.objectStoreNames];
       db.close();
-      return { version, names, byChat: rows.length, total };
+      return { version, names, byChat: rows.length, total, stores, wanted: globalThis.AccordMobileDb.DB_VERSION };
     })()`);
-    assert.equal(after.version, 6, "raised to the version this shell asks for");
+    assert.equal(after.version, after.wanted, "raised to the version this shell asks for");
+    assert.ok(after.version >= 7, "at least the version with the send log");
+    assert.ok(after.stores.includes("sendFailures"), `the send log's store was added: ${after.stores.join(", ")}`);
     assert.ok(after.names.includes("conversationId"), `the chat index was added to the existing store: ${after.names.join(", ")}`);
     assert.equal(after.total, 300, "no row was lost in the upgrade");
     assert.equal(after.byChat, 100, "the old rows are reachable through the new index");

@@ -1,5 +1,5 @@
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import { HUB_APPROVAL_CARD_SCOPE, HUB_PHONE_INVITE_MAX_LIFETIME_MS, isHubPhoneScope, type HubDevice, type HubDeviceRole, type HubLoggedEvent, type HubPhoneInvite, type HubPhoneScope } from "../../shared/hubProtocol";
+import { HUB_APPROVAL_CARD_SCOPE, HUB_PHONE_INVITE_MAX_LIFETIME_MS, isHubPhoneScope, type HubDevice, type HubDeviceRole, type HubLoggedEvent, type HubPhoneEnrollment, type HubPhoneEnrollmentRecord, type HubPhoneInvite, type HubPhoneScope } from "../../shared/hubProtocol";
 
 /** The hub's own tables, beside the chat tables StorageService keeps. */
 export const HUB_SCHEMA_SQL = `
@@ -72,16 +72,9 @@ export const HUB_SCHEMA_SQL = `
     enrollment_json text,
     enrollment_signature text
   );
-  -- On the hub: approval cards as the devices that hold them last said.
-  create table if not exists hub_approval_cards (
-    conversation_id text not null,
-    approval_id text not null,
-    approval_json text not null,
-    status text not null,
-    hub_seq integer not null,
-    primary key(conversation_id, approval_id)
-  );
-  create index if not exists hub_approval_cards_pending on hub_approval_cards(status, conversation_id);
+  -- Cards are the server's own now (hub_cards, raised, answered and settled
+  -- by operations): what the hub once folded from devices' events goes.
+  drop table if exists hub_approval_cards;
   -- On the hub: what a phone is rung for and its notification says.
   create table if not exists hub_notices (
     seq integer primary key autoincrement,
@@ -257,10 +250,6 @@ interface Database {
 const PULL_PAGE_BYTES = 4 * 1024 * 1024;
 /** No page of the hub's tables is longer than this. */
 const HUB_STORAGE_PAGE_MAX = 1000;
-/** Settled approval cards kept per chat (pending ones are always kept). */
-const HUB_APPROVAL_CARDS_KEPT = 200;
-/** A card for an approved roster change not applied yet (approvalHasCard). */
-const WAITING_CARD_SQL = `(approval_json like '%"memberRemovalQueuedAt":%' or approval_json like '%"memberAdditionQueuedAt":%')`;
 
 export class HubStorage {
   private ready?: Promise<void>;
@@ -362,20 +351,6 @@ export class HubStorage {
    * without those `skipOriginId` wrote (a device does not read its own back).
    * `through` is how far the page covers, skipped events included.
    */
-  /** The newest events of these kinds in the order (at most `limit`, the
-   *  oldest of them first). */
-  async newestOfKinds(kinds: string[], limit: number): Promise<HubLoggedEvent[]> {
-    if (kinds.length === 0) return [];
-    await this.init();
-    const rows = await this.database.query<{ hubSeq: number; envelope: string }>(`
-      select hubSeq, envelope from (
-        select l.hub_seq as hubSeq, e.envelope_json as envelope from hub_log l join chat_events e on e.event_id = l.event_id
-        where l.kind in (${kinds.map(quote).join(", ")}) order by l.hub_seq desc limit ${Math.max(1, Math.min(Math.floor(limit), HUB_STORAGE_PAGE_MAX))}
-      ) order by hubSeq;
-    `);
-    return rows.map((row) => ({ hubSeq: Number(row.hubSeq), event: JSON.parse(row.envelope) as ChatEventEnvelope }));
-  }
-
   async pull(afterSeq: number, limit: number, skipOriginId?: string): Promise<{ events: HubLoggedEvent[]; through: number }> {
     await this.init();
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error("Invalid hub position.");
@@ -562,24 +537,33 @@ export class HubStorage {
     return Number(rows[0]?.taken ?? 0) === 1;
   }
 
-  /** Approval cards as the devices holding them last said, by hub order. */
-  async saveApprovalCards(cards: Array<{ conversationId: string; approvalId: string; approvalJson: string; status: string; hubSeq: number }>): Promise<void> {
-    if (cards.length === 0) return;
+  /** What each phone that enrolled with an invite enrolled with: the invite
+   *  as the owner signed it and the phone's signed acceptance, for the owner
+   *  to learn the phone from (GET /v1/roster). */
+  async phoneEnrollments(): Promise<HubPhoneEnrollmentRecord[]> {
     await this.init();
-    await this.database.execute(`
-      begin immediate;
-      ${cards.map((card) => `
-        insert into hub_approval_cards(conversation_id, approval_id, approval_json, status, hub_seq)
-          values (${quote(card.conversationId)}, ${quote(card.approvalId)}, ${quote(card.approvalJson)}, ${quote(card.status)}, ${Math.floor(card.hubSeq)})
-        on conflict(conversation_id, approval_id) do update set approval_json = excluded.approval_json, status = excluded.status, hub_seq = excluded.hub_seq
-          where excluded.hub_seq > hub_approval_cards.hub_seq;`).join("")}
-      ${[...new Set(cards.map((card) => card.conversationId))].map((conversationId) => `
-        delete from hub_approval_cards where conversation_id = ${quote(conversationId)} and status <> 'pending'
-          and not ${WAITING_CARD_SQL}
-          and hub_seq < (select hub_seq from hub_approval_cards where conversation_id = ${quote(conversationId)}
-            order by hub_seq desc limit 1 offset ${HUB_APPROVAL_CARDS_KEPT - 1});`).join("")}
-      commit;
+    const rows = await this.database.query<{ deviceId: string; inviteJson: string; signature: string; enrollmentJson: string; enrollmentSignature: string }>(`
+      select i.device_id as deviceId, i.invite_json as inviteJson, i.signature as signature,
+        i.enrollment_json as enrollmentJson, i.enrollment_signature as enrollmentSignature
+      from hub_phone_invites i join hub_devices d on d.device_id = i.device_id and d.invite_id = i.invite_id and d.role = 'phone'
+      where i.used_at is not null and i.enrollment_json is not null and i.enrollment_signature is not null
+      order by i.used_at limit ${HUB_STORAGE_PAGE_MAX};
     `);
+    const records: HubPhoneEnrollmentRecord[] = [];
+    for (const row of rows) {
+      try {
+        records.push({
+          deviceId: row.deviceId,
+          invite: JSON.parse(row.inviteJson) as HubPhoneInvite,
+          inviteSignature: row.signature,
+          enrollment: JSON.parse(row.enrollmentJson) as HubPhoneEnrollment,
+          enrollmentSignature: row.enrollmentSignature
+        });
+      } catch {
+        // An unreadable record proves nothing; the phone is left to the owner.
+      }
+    }
+    return records;
   }
 
   /** Which roster machines read the order, and their channels. */
@@ -630,49 +614,6 @@ export class HubStorage {
       ${held?.gaveUp ? `update hub_reader_floors set gave_up_count = ${Math.max(0, Math.floor(held.gaveUp.count))}, gave_up_at = ${quote(held.gaveUp.at)}
         where device_id = ${quote(deviceId)};` : ""}
       commit;
-    `);
-  }
-
-  /** The status each named card has now (cards not held are left out). */
-  async approvalCardStatuses(conversationId: string, approvalIds: string[]): Promise<Map<string, string>> {
-    const ids = [...new Set(approvalIds)].slice(0, HUB_STORAGE_PAGE_MAX);
-    if (ids.length === 0) return new Map();
-    await this.init();
-    const rows = await this.database.query<{ approvalId: string; status: string }>(`
-      select approval_id as approvalId, status from hub_approval_cards
-      where conversation_id = ${quote(conversationId)} and approval_id in (${ids.map(quote).join(", ")});
-    `);
-    return new Map(rows.map((row) => [row.approvalId, row.status]));
-  }
-
-  /** One chat's approved roster changes that have not happened yet (shown
-   *  on the phone until they have, however many cards came since). */
-  async waitingApprovalCards(conversationId: string, limit = 30): Promise<Array<{ approvalJson: string; status: string; hubSeq: number }>> {
-    await this.init();
-    return this.database.query(`
-      select approval_json as approvalJson, status, hub_seq as hubSeq from hub_approval_cards
-      where status in ('approved', 'auto-applied') and conversation_id = ${quote(conversationId)} and ${WAITING_CARD_SQL}
-      order by hub_seq desc limit ${Math.max(1, Math.min(limit, HUB_STORAGE_PAGE_MAX))};
-    `);
-  }
-
-  /** One chat's approval cards (the newest first, at most `limit`). */
-  async approvalCards(conversationId: string, limit = 30): Promise<Array<{ approvalJson: string; status: string; hubSeq: number }>> {
-    await this.init();
-    return this.database.query(`
-      select approval_json as approvalJson, status, hub_seq as hubSeq from hub_approval_cards
-      where conversation_id = ${quote(conversationId)} order by hub_seq desc limit ${Math.max(1, Math.min(limit, HUB_STORAGE_PAGE_MAX))};
-    `);
-  }
-
-  /** Every pending approval card, by chat, for the chat list. */
-  async pendingApprovalCards(conversationIds: string[]): Promise<Array<{ conversationId: string; approvalJson: string }>> {
-    if (conversationIds.length === 0) return [];
-    await this.init();
-    return this.database.query(`
-      select conversation_id as conversationId, approval_json as approvalJson from hub_approval_cards
-      where status = 'pending' and conversation_id in (${conversationIds.map(quote).join(", ")})
-      order by hub_seq limit ${HUB_STORAGE_PAGE_MAX};
     `);
   }
 

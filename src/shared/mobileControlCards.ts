@@ -14,8 +14,9 @@
  * machine that raised it.
  */
 
-import type { ChatAppToolApproval, ChatChoiceOption, ChatMessage, ChatParticipantRemovalRequest, Conversation } from "./types";
+import type { ChatAppToolApproval, ChatChoiceOption, ChatMessage, ChatParticipantRemovalRequest, ChatPendingChoice, Conversation } from "./types";
 import { APP_PARTICIPANTS_REQUEST_CHANGE_TOOL } from "./appMcpToolContracts";
+import type { HubCard } from "./hubOps";
 import { approvalInstallsScriptCode } from "./scripts";
 
 export type MobileControlCardKind = "permission" | "choice";
@@ -212,6 +213,71 @@ export function controlCardFromChoiceMessage(conversationId: string, message: Ch
       ? { refusedAnswers: choice.refusals.map((refusal) => ({ operationId: refusal.operationId, reason: refusal.reason })) }
       : {})
   };
+}
+
+/** What an answered card waits for: the member's own device applies it. */
+export const HUB_CARD_ANSWERED_WAITING = "Waiting for it to be applied.";
+
+/**
+ * The card the phone shows for a card on the User's server (Д9): raised by
+ * the device the member runs on, answered once from any device, settled by
+ * the device that raised it. The card a device raises carries what the
+ * desktop card is built from — an app-tool approval (a permission or a
+ * roster change) or a member's pending choice with the message that asked
+ * it — so the phone shows the very same card. Pending, it is answered on the
+ * phone; answered, it shows the answer and waits for the member's device;
+ * settled, it is not shown (a choice keeps its record under its message,
+ * read from the message itself). The card's id is the server's card id: the
+ * answer names it. Undefined for a card the phone cannot show.
+ */
+export function controlCardFromHubCard(card: HubCard, participantLabel?: (participantId: string) => string | undefined): MobileControlCard | undefined {
+  if (card.state === "settled") return undefined;
+  const raised = card.card as { approval?: ChatAppToolApproval; choice?: ChatPendingChoice; sourceMessageId?: unknown };
+  if ((card.cardKind === "permission" || card.cardKind === "roster") && raised.approval && typeof raised.approval === "object") {
+    const pending = controlCardFromApproval(card.conversationId, { ...raised.approval, status: "pending" });
+    const base: MobileControlCard = { ...pending, id: card.cardId, createdAt: raised.approval.createdAt || card.raisedAt };
+    if (card.state === "pending") return base;
+    const approve = card.answer?.approve === true;
+    // An approved roster change waits as the desktop's card waits ("Removal
+    // approved … then @x leaves this chat", "Addition approved").
+    if (approve && (card.cardKind === "roster" || raised.approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL)) {
+      const queuedAt = card.answeredAt ?? card.raisedAt;
+      const waiting = controlCardFromApproval(card.conversationId, {
+        ...raised.approval, status: "approved",
+        ...(removalRequest(raised.approval) ? { memberRemovalQueuedAt: queuedAt } : { memberAdditionQueuedAt: queuedAt })
+      });
+      return { ...waiting, id: card.cardId, createdAt: base.createdAt };
+    }
+    const chosen = base.options.find((option) => option.id === (approve ? "allow" : "deny"));
+    // A card that words its answers (a removal: "Yes, remove @x") says the
+    // one given; a plain permission says Allowed or Denied.
+    const said = chosen && chosen.label !== ALLOW.label && chosen.label !== DENY.label ? chosen.label : approve ? "Allowed" : "Denied";
+    const { codexDecisionId: _decision, draftOverride: _draft, ...shown } = base;
+    return { ...shown, options: [], status: "answered", waiting: true, outcome: `${said}. ${HUB_CARD_ANSWERED_WAITING}` };
+  }
+  if (card.cardKind === "choice" && raised.choice && typeof raised.choice === "object") {
+    const sourceMessageId = typeof raised.sourceMessageId === "string" && raised.sourceMessageId ? raised.sourceMessageId : card.messageId;
+    const message = {
+      id: sourceMessageId ?? card.cardId,
+      role: "participant",
+      content: "",
+      createdAt: card.raisedAt,
+      ...(card.participantId ? { participantId: card.participantId } : {}),
+      ...(card.participantId && participantLabel?.(card.participantId) ? { participantLabel: participantLabel(card.participantId) } : {}),
+      metadata: { pendingChoice: { ...raised.choice, status: "pending" } }
+    } as ChatMessage;
+    const pending = controlCardFromChoiceMessage(card.conversationId, message);
+    if (!pending) return undefined;
+    const base: MobileControlCard = { ...pending, id: card.cardId, ...(sourceMessageId ? { sourceMessageId } : { sourceMessageId: undefined }) };
+    if (card.state === "pending") return base;
+    const answer = card.answer ?? {};
+    const outcome = answer.cancel === true ? "Cancelled"
+      : base.options.find((option) => option.id === answer.selectedOptionId)?.label
+        ?? (typeof answer.customAnswer === "string" && answer.customAnswer ? answer.customAnswer : "Answered");
+    const { refusedAnswers: _refused, ...shown } = base;
+    return { ...shown, status: "answered", outcome };
+  }
+  return undefined;
 }
 
 export function controlCardsFromConversation(conversation: Conversation): MobileControlCard[] {

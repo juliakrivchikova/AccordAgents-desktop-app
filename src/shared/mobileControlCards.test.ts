@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { approvalHasCard, controlCardFromApproval, controlCardFromChoiceMessage } from "./mobileControlCards";
+import { approvalHasCard, controlCardFromApproval, controlCardFromChoiceMessage, controlCardFromHubCard } from "./mobileControlCards";
+import type { HubCard } from "./hubOps";
 import type { ChatAppToolApproval, ChatMessage } from "./types";
 
 function choiceMessage(recommendedOptionId?: string): ChatMessage {
@@ -143,4 +144,48 @@ test("a machine member's approved addition waits visibly until the Mac adds the 
   assert.equal(card.title, "Addition approved");
   assert.equal(card.summary, "Add @helper");
   assert.equal(card.outcome, "Waiting for your Mac to apply it.");
+});
+
+function hubCard(patch: Partial<HubCard>): HubCard {
+  return { cardId: "card-1", conversationId: "conversation-1", cardKind: "permission", raisedBy: "device-mac", raisedAt: "2026-10-28T09:00:00.000Z",
+    card: {}, state: "pending", ...patch };
+}
+
+test("a card on the User's server is the phone's card: answerable while it waits, showing its answer once answered, gone once settled", () => {
+  const approval = { id: "approval-1", conversationId: "conversation-1", requesterParticipantId: "drew-id", requesterHandle: "drew", requesterRoleConfigId: "software-engineer",
+    toolName: "Bash", capability: "shell", status: "pending", request: { command: "ls" }, summary: "Use Bash", codexDecisionId: "native-1",
+    createdAt: "2026-10-28T08:59:00.000Z", updatedAt: "2026-10-28T08:59:00.000Z" } as unknown as ChatAppToolApproval;
+  const pending = controlCardFromHubCard(hubCard({ cardId: "approval-1", card: { approval } }));
+  assert.equal(pending?.id, "approval-1", "the server's card id: the answer names it");
+  assert.equal(pending?.status, "pending");
+  assert.deepEqual(pending?.options.map((option) => option.id), ["allow", "deny"]);
+  assert.equal(pending?.codexDecisionId, "native-1", "carried back with the answer");
+  const answered = controlCardFromHubCard(hubCard({ cardId: "approval-1", card: { approval }, state: "answered", answer: { approve: false } }));
+  assert.deepEqual([answered?.status, answered?.waiting, answered?.outcome, answered?.options], ["answered", true, "Denied. Waiting for it to be applied.", []]);
+  assert.equal(answered?.codexDecisionId, undefined, "nothing left to answer");
+  assert.equal(controlCardFromHubCard(hubCard({ card: { approval }, state: "settled" })), undefined, "a settled card is not shown");
+
+  const removal = removalApproval();
+  const roster = controlCardFromHubCard(hubCard({ cardId: removal.id, cardKind: "roster", card: { approval: removal }, state: "answered", answer: { approve: true },
+    answeredAt: "2026-10-28T09:01:00.000Z" }));
+  assert.deepEqual([roster?.title, roster?.waiting, roster?.outcome], ["Removal approved", true,
+    "Waiting for running turns to finish and for your Mac to apply it, then @gera and @taylor leave this chat."], "an approved removal waits as the desktop's does");
+  const declined = controlCardFromHubCard(hubCard({ cardId: removal.id, cardKind: "roster", card: { approval: removal }, state: "answered", answer: { approve: false } }));
+  assert.equal(declined?.outcome, "No, keep @gera and @taylor in this chat. Waiting for it to be applied.", "a worded answer is said in its words");
+
+  const message = choiceMessage("read");
+  const choice = message.metadata!.pendingChoice!;
+  const asked = controlCardFromHubCard(hubCard({ cardId: choice.id, cardKind: "choice", participantId: "taylor-id", messageId: message.id,
+    card: { choice, sourceMessageId: message.id } }), (participantId) => participantId === "taylor-id" ? "@taylor" : undefined);
+  assert.deepEqual([asked?.id, asked?.kind, asked?.status, asked?.sourceMessageId, asked?.requesterLabel, asked?.recommendedOptionId],
+    ["choice-1", "choice", "pending", "message-1", "@taylor", "read"]);
+  const picked = controlCardFromHubCard(hubCard({ cardId: choice.id, cardKind: "choice", card: { choice, sourceMessageId: message.id }, state: "answered",
+    answer: { selectedOptionId: "both" } }));
+  assert.deepEqual([picked?.status, picked?.outcome], ["answered", "Searchable and readable"]);
+  const own = controlCardFromHubCard(hubCard({ cardId: choice.id, cardKind: "choice", card: { choice, sourceMessageId: message.id }, state: "answered",
+    answer: { selectedOptionId: "__custom__", customAnswer: "Neither" } }));
+  assert.equal(own?.outcome, "Neither");
+  const cancelled = controlCardFromHubCard(hubCard({ cardId: choice.id, cardKind: "choice", card: { choice, sourceMessageId: message.id }, state: "answered", answer: { cancel: true } }));
+  assert.equal(cancelled?.outcome, "Cancelled");
+  assert.equal(controlCardFromHubCard(hubCard({ cardKind: "mention", card: {} })), undefined, "a card the phone cannot show is not shown");
 });

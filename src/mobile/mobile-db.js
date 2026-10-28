@@ -25,7 +25,7 @@
 
   const DB_NAME = "accordagents-mobile-control";
   // Raise this only together with a store or an index added in upgradeControlDb.
-  const DB_VERSION = 6;
+  const DB_VERSION = 7;
 
   // `sealed`, `events` and the three machine stores held what a pairing made
   // the old way (through the desktop's relay) kept. Nothing reads them any
@@ -39,7 +39,11 @@
     events: "events",
     machineEvents: "machineEvents",
     machineOutbox: "machineOutbox",
-    machineBlobs: "machineBlobs"
+    machineBlobs: "machineBlobs",
+    // Every attempt to send that failed, and why (agreement Д12): kept on the
+    // phone, the newest few hundred, so the User can read why something she
+    // sent did not go.
+    sendFailures: "sendFailures"
   };
   // The timeline's rows by chat. Every delivered batch is deduplicated inside
   // one chat, and the read that did it used to scan the whole store per row:
@@ -85,6 +89,9 @@
     }
     if (!db.objectStoreNames.contains(STORES.machineBlobs)) {
       db.createObjectStore(STORES.machineBlobs, { keyPath: "key" });
+    }
+    if (!db.objectStoreNames.contains(STORES.sendFailures)) {
+      db.createObjectStore(STORES.sendFailures, { keyPath: "id", autoIncrement: true });
     }
   }
 

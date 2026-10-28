@@ -33,7 +33,7 @@ test("mobile shell builds static installable PWA assets", async () => {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }
   assert.match(worker, /self\.addEventListener\("push"/);
-  assert.match(worker, /accordagents-mobile-shell-v72/);
+  assert.match(worker, /accordagents-mobile-shell-v73/);
   assert.match(worker, /Open AccordAgents to sync updates\./);
   // W5 acceptance, static half (necessary but insufficient on its own — the
   // behavioral storage sweep lives in the browser harness):
@@ -379,9 +379,14 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /schema\.openControlDb\(indexedDB\)/);
   assert.match(schema, /DB_VERSION = \d+/);
   // Everything the phone owes goes to the User's server and nowhere else: an
-  // entry is acknowledged only when the server says it holds it.
-  assert.match(app, /return await flushOutboxViaHub\(entries\)/);
+  // entry is "Sent" only when the server answered its operation accepted (or
+  // a repeat of one it took); refused, it says the server's reason.
+  assert.match(app, /return await flushOutboxToServer\(entries\)/);
   assert.match(app, /result\.status === "accepted" \|\| result\.status === "duplicate"/);
+  assert.match(app, /result\.status === "rejected"/);
+  // Every failed try is written to the send log, kept bounded (agreement Д12).
+  assert.match(app, /const SEND_FAILURES_STORE = "sendFailures"/);
+  assert.match(schema, /sendFailures: "sendFailures"/);
   // Phase 5: the relay is gone from the phone. No mailbox, no sealing, no
   // socket, no machine of its own to command or wake; a pairing made the old
   // way is cleared and the phone says, once, that it has to pair again.
@@ -402,13 +407,18 @@ test("mobile shell builds static installable PWA assets", async () => {
   // The behavioral proof is scripts/mobile-push-unavailable.test.mjs.
   assert.match(app, /pushEndpointRejected = true/);
   assert.match(app, /alertsState = "unavailable"/);
-  // Each event the phone sends is minted once, signed, in its place in this
-  // phone's chain of its scope, by the bundled client every device signs with.
-  assert.match(app, /api\.mintHubEvent\(identity, \{/);
-  assert.match(app, /function hubEventShape\(entry\)/);
+  // Everything the phone writes is one operation of the User's server, sent
+  // in a signed request by the bundled client (agreements Д1, Д10): no record
+  // of its own is signed, and nothing of the old chains is left.
+  assert.match(app, /client\.postOps\(/);
+  assert.match(app, /kind: "message\.create"/);
+  assert.match(app, /kind: "turn\.stop"/);
+  assert.match(app, /kind: "card\.answer"/);
+  assert.doesNotMatch(app, /mintHubEvent|pushEvents|hubLogicalTs|rechainFrom|repairHubGaps/);
+  assert.match(app, /"Not sent, retrying"/);
+  assert.match(app, /"Taken to work"/);
   assert.match(app, /sha256Hex/);
   assert.match(app, /mobile\.timeline\.events/);
-  assert.match(app, /kind: "run\.cancel\.requested"/);
   assert.match(app, /stopRunFromPhone/);
   assert.match(app, /"\/v1\/phone\/chats"/);
   assert.match(app, /"\/v1\/phone\/timeline"/);
@@ -436,9 +446,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   // Coming back from the background, what this phone owes goes first, then
   // the chats and the open chat are read again and the feed of changes is
   // followed again.
-  assert.match(app, /await flushOutbox\(\)\.catch\(function \(\) \{ return undefined; \}\);\n\s*await requestChatListViaRelay\(pairing\)[\s\S]{0,240}startServerChanges\(\);/);
+  assert.match(app, /await retryOutboxNow\(\)\.catch\(function \(\) \{ return undefined; \}\);\n\s*await requestChatListViaRelay\(pairing\)[\s\S]{0,240}startServerChanges\(\);/);
   // Opening the app: what it owes goes out, then the chats come in.
-  assert.match(app, /async function initHubSession\(pairing\) \{[\s\S]+const flushResult = await flushOutbox\(\)[\s\S]+await requestChatListViaRelay\(pairing\);/);
+  assert.match(app, /async function initHubSession\(pairing\) \{[\s\S]+const flushResult = await retryOutboxNow\(\)[\s\S]+await requestChatListViaRelay\(pairing\);/);
   // Opening a chat, from the list or from Activity, goes through one helper.
   assert.match(app, /function openConversation\(conversationId, options\)[\s\S]+requestTimelineViaRelay\(pairing, conversationId\)/);
   assert.match(app, /row\.addEventListener\("click", function \(\) \{\s*(void )?openConversation\(chat\.id\)/);

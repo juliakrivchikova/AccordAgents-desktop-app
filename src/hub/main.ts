@@ -13,8 +13,7 @@ import { HubLog } from "./hubLog";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
 import { HubRetention, hubRetentionConfig } from "./hubRetention";
 import { HubChangeFeed, HubPhoneApi } from "./hubPhone";
-import { HUB_CARD_EVENT_KINDS, HubProgress, HubWaker, approvalNotice, foldApprovalCards, phoneMessageHomes, replyNotice } from "./hubPhoneState";
-import { HUB_APPROVAL_CARD_EVENT_KIND } from "../shared/hubProtocol";
+import { HubProgress, HubWaker, cardNotice, phoneMessageHomes, replyNotice } from "./hubPhoneState";
 import { isDeviceEventBlobReference } from "../shared/deviceEventBlobs";
 import { HubServer } from "./hubServer";
 
@@ -157,6 +156,12 @@ export function composeHub(options: {
   ops.onApplied(({ entry, conversation, previous }) => {
     feed.note(entry.conversationId);
     const effect = entry.effect;
+    // A card raised for the User rings the phone once: raised again while
+    // it waits (what it shows changed), it keeps the moment it was raised.
+    if (effect.kind === "card.raise" && conversation && effect.card.state === "pending" && effect.card.raisedAt === entry.acceptedAt) {
+      void notify(cardNotice(conversation, effect.card)).catch((error) => log("hub.notice.error", { message: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
     if (!conversation || (effect.kind !== "message.create" && effect.kind !== "message.update")) return;
     const message = effect.message;
     // A member's reply that is done now and was running (or new and done).
@@ -179,22 +184,12 @@ export function composeHub(options: {
   let views: Promise<void> = Promise.resolve();
   hubLog.onAppended(({ changedConversationIds, events }) => {
     folder.enqueue(changedConversationIds);
-    // In the order the events were placed: a card answered right after it
-    // was raised must not fold before it.
+    // A machine's live progress, in the order it was placed.
     views = views.then(async () => {
       for (const item of events) {
         if (item.event.kind !== "machine.turn.progress.delta") continue;
         const payload = await storage.deviceEventBlobs().hydrate(item.event.payload).catch(() => undefined);
         progress.note(item.event, payload);
-      }
-      const pending = await foldApprovalCards(storage, events);
-      const touched = new Set(events.filter((item) => item.event.kind === HUB_APPROVAL_CARD_EVENT_KIND || item.event.kind.startsWith("machine.approval.")).map((item) => item.event.conversationId));
-      for (const conversationId of touched) feed.note(conversationId);
-      if (pending.length === 0) return;
-      const summaries = await storage.listConversations().catch(() => []);
-      for (const card of pending) {
-        const title = summaries.find((summary) => summary.id === card.conversationId)?.title ?? "";
-        await notify(approvalNotice(card.conversationId, title, card.approval));
       }
     }).catch((error) => log("hub.phone-views.error", { message: error instanceof Error ? error.message : String(error) }));
   });
@@ -222,17 +217,6 @@ export function composeHub(options: {
     server, folder, push, waker, feed, progress, phone: phoneApi, hubLog, ops,
     /** Resolves once the phone's views have taken in what was placed so far. */
     viewsIdle: async () => { await views; },
-    /** At start: the cards of the newest card events are folded again, so
-     *  a card placed just before a stop (or before this program kept cards)
-     *  is shown. Nobody is rung for them again. */
-    catchUpCards: async () => {
-      views = views.then(async () => {
-        const events = await storage.hub().newestOfKinds(HUB_CARD_EVENT_KINDS, 1_000);
-        await foldApprovalCards(storage, events);
-        for (const conversationId of new Set(events.map((item) => item.event.conversationId))) feed.note(conversationId);
-      }).catch((error) => log("hub.phone-views.catch-up-error", { message: error instanceof Error ? error.message : String(error) }));
-      await views;
-    },
     close: async () => {
       push.close();
       waker.close();
@@ -294,7 +278,6 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
   // certificate, the health check the setup reads.
   await server.listenHttp(args.httpPort, args.host, { openOnly: !args.insecureHttp });
   await folder.start();
-  await hub.catchUpCards();
   // Bodies the chats and the catalog name, pinned once on a server updated
   // from a program that did not pin them (the sweep would take them).
   await pinNamedBodies(storage).catch((error: unknown) => log("hub.blob-pins.error", { message: error instanceof Error ? error.message : String(error) }));

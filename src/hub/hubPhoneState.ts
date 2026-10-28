@@ -1,5 +1,6 @@
 import type { ChatEventEnvelope } from "../shared/chatEvents";
-import { HUB_APPROVAL_CARD_EVENT_KIND, type HubDevice, type HubMachineWakeRequest, type HubMachineStatus, type HubPhoneScope } from "../shared/hubProtocol";
+import type { HubCard } from "../shared/hubOps";
+import type { HubDevice, HubMachineWakeRequest, HubMachineStatus, HubPhoneScope } from "../shared/hubProtocol";
 import { decodeMachineProgress, type MachineProgressFrame } from "../shared/machineProgress";
 import { machineWakeRequest, webCryptoMachineWake, type MachineWakeSubtleCrypto } from "../shared/machineWakeRequest";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "../shared/types";
@@ -7,16 +8,13 @@ import type { HubNotice } from "../main/services/hubStorage";
 import type { StorageService } from "../main/services/storage";
 
 /**
- * What the hub works out for the phone from the order it holds, so that the
- * phone needs no other device to be awake: the approval cards waiting for the
- * User, each running member's live progress, the notices a phone is rung for,
- * and the machines it can wake.
+ * What the hub works out for the phone, so that the phone needs no other
+ * device to be awake: each running member's live progress, the notices a
+ * phone is rung for, and the machines it can wake. The cards waiting for the
+ * User are the server's own (hub_cards, HubOps).
  */
 
 const MACHINE_PROGRESS_KIND = "machine.turn.progress.delta";
-const MACHINE_APPROVAL_KINDS = new Set(["machine.approval.requested", "machine.approval.updated"]);
-/** Every kind a card is folded from. */
-export const HUB_CARD_EVENT_KINDS = [...MACHINE_APPROVAL_KINDS, HUB_APPROVAL_CARD_EVENT_KIND];
 
 /** A run's live progress as the hub folded it from its author's frames. */
 interface LiveRun {
@@ -107,10 +105,14 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
       agent?.remoteRunStatus?.label?.trim() || agent?.activity?.trim() ||
       (message.participantLabel ? `${message.participantLabel} is running...` : "Running...");
     const mobileEventId = typeof message.metadata?.mobileEventId === "string" ? message.metadata.mobileEventId : undefined;
+    const sourceMessageId = typeof message.metadata?.sourceMessageId === "string" && message.metadata.sourceMessageId ? message.metadata.sourceMessageId : undefined;
     events.push({
       id: message.id,
       role: "participant",
       ...(message.participantLabel ? { participantLabel: message.participantLabel } : {}),
+      // With the run id, what a Stop names the turn on the server by.
+      ...(message.participantId ? { participantId: message.participantId } : {}),
+      ...(sourceMessageId ? { sourceMessageId } : {}),
       content,
       status: "pending",
       createdAt: message.createdAt,
@@ -120,50 +122,6 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
     });
   }
   return events;
-}
-
-/**
- * Approval cards from the order: a machine's approval events, and the cards
- * a desktop publishes for its own members. The newest word on each card wins.
- * Returns the cards that became pending in this batch (they ring the phone).
- */
-export async function foldApprovalCards(
-  storage: StorageService,
-  items: Array<{ hubSeq: number; event: ChatEventEnvelope }>
-): Promise<Array<{ conversationId: string; approval: ChatAppToolApproval }>> {
-  const cards: Array<{ conversationId: string; approvalId: string; approvalJson: string; status: string; hubSeq: number; approval: ChatAppToolApproval }> = [];
-  let roles: Map<string, string> | undefined;
-  for (const { hubSeq, event } of items) {
-    if (!MACHINE_APPROVAL_KINDS.has(event.kind) && event.kind !== HUB_APPROVAL_CARD_EVENT_KIND) continue;
-    // A card is its author's to raise: a desktop's for its own members, a
-    // machine's for the members it hosts.
-    roles ??= new Map((await storage.hub().devices()).map((device) => [device.deviceId, device.role]));
-    const role = roles.get(event.originId);
-    if (event.kind === HUB_APPROVAL_CARD_EVENT_KIND ? role !== "owner" && role !== "desktop" : role !== "machine") continue;
-    const payload = await storage.deviceEventBlobs().hydrate(event.payload).catch(() => undefined) as
-      { conversationId?: unknown; approval?: ChatAppToolApproval } | undefined;
-    const approval = payload?.approval;
-    if (!approval || typeof approval.id !== "string" || typeof approval.status !== "string" || payload.conversationId !== event.conversationId) continue;
-    cards.push({ conversationId: event.conversationId, approvalId: approval.id, approvalJson: JSON.stringify(approval), status: approval.status, hubSeq, approval });
-  }
-  if (cards.length === 0) return [];
-  const before = new Map<string, string>();
-  for (const conversationId of new Set(cards.map((card) => card.conversationId))) {
-    const ids = cards.filter((card) => card.conversationId === conversationId).map((card) => card.approvalId);
-    for (const [approvalId, status] of await storage.hub().approvalCardStatuses(conversationId, ids)) {
-      before.set(`${conversationId}\n${approvalId}`, status);
-    }
-  }
-  await storage.hub().saveApprovalCards(cards);
-  const pendingNow: Array<{ conversationId: string; approval: ChatAppToolApproval }> = [];
-  const seen = new Set<string>();
-  for (const card of [...cards].reverse()) {
-    const key = `${card.conversationId}\n${card.approvalId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    if (card.status === "pending" && before.get(key) !== "pending") pendingNow.push({ conversationId: card.conversationId, approval: card.approval });
-  }
-  return pendingNow;
 }
 
 /** Whether a phone's scope covers a chat. */
@@ -186,12 +144,17 @@ export function replyNotice(conversation: Conversation, message: ChatMessage): O
   };
 }
 
-export function approvalNotice(conversationId: string, title: string, approval: ChatAppToolApproval): Omit<HubNotice, "seq"> {
-  const who = approval.requesterHandle ? `@${approval.requesterHandle.replace(/^@/, "")}` : "A member";
+/** A card raised on the server for the User: the notice a phone is shown.
+ *  Who asks, not what: the card is read in the app. */
+export function cardNotice(conversation: Conversation, card: HubCard): Omit<HubNotice, "seq"> {
+  const approval = (card.card as { approval?: ChatAppToolApproval }).approval;
+  const participants = Array.isArray(conversation.metadata?.participants) ? conversation.metadata.participants as ChatParticipant[] : [];
+  const handle = approval?.requesterHandle || participants.find((participant) => participant?.id === card.participantId)?.handle;
+  const who = handle ? `@${handle.replace(/^@/, "")}` : "A member";
   return {
-    conversationId,
+    conversationId: conversation.id,
     kind: "approval",
-    title: title || "Chat",
+    title: conversation.title || "Chat",
     body: `${who} is waiting for your answer.`,
     createdAt: new Date().toISOString()
   };

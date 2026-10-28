@@ -509,6 +509,16 @@ button.mobile-chat-group-title:active {
   flex-shrink: 0;
 }
 
+.mobile-header-spacer[hidden] {
+  display: none;
+}
+
+/* The way to the send log: in the spacer's place, in the warning colour, only
+   while something sent has not reached the server or was refused. */
+.send-log-button {
+  color: var(--warn);
+}
+
 .mobile-title {
   flex: 1;
   min-width: 0;
@@ -1477,6 +1487,11 @@ button.mobile-chat-group-title:active {
   opacity: 0.6;
 }
 
+/* A message the server did not take says so, and why, in its own status. */
+.message-row.is-refused .message-status {
+  color: var(--danger);
+}
+
 .is-on-its-way .control-card-state,
 .is-on-its-way .control-card-who,
 .is-on-its-way .act-pill[disabled] {
@@ -1971,6 +1986,67 @@ button.mobile-chat-group-title:active {
   padding: 18px;
   color: var(--mut);
   font: 400 14px var(--sans);
+}
+
+/* --- Send log -------------------------------------------------------------- */
+
+/* Over every screen, the bottom bar included: it opens from the chat's header
+   and from Settings. */
+.send-log-sheet {
+  z-index: 13;
+}
+
+.send-log-summary {
+  margin: 0;
+  padding: 0 18px 8px;
+  font: 400 13.5px var(--sans);
+  color: var(--fg);
+}
+
+.send-log-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 8px;
+  border-radius: 12px;
+}
+
+.send-log-row + .send-log-row {
+  border-top: 1px solid var(--bdf);
+  border-radius: 0;
+}
+
+.send-log-when {
+  font: 400 12.5px var(--sans);
+  color: var(--mut);
+}
+
+.send-log-what {
+  font: 600 14.5px var(--disp);
+  letter-spacing: -0.01em;
+  color: var(--fg1);
+  overflow-wrap: anywhere;
+}
+
+.send-log-why {
+  font: 400 13.5px var(--sans);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.send-log-row[data-cause="refused"] .send-log-why {
+  color: var(--danger);
+}
+
+.send-log-count {
+  font: 400 12.5px var(--sans);
+  color: var(--mut);
+}
+
+.send-log-footer {
+  padding: 10px 8px 4px;
+  font: 400 12.5px var(--sans);
+  color: var(--mut);
 }
 
 /* --- Picture at full size -------------------------------------------------- */

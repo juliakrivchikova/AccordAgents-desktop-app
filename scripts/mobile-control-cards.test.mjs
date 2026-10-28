@@ -1,12 +1,12 @@
 /**
  * The phone answering a card, driven through the real PWA in a browser.
  *
- * A permission a member is waiting on is published exactly the way the desktop
- * publishes it — a card event on the User's own server, a real hub here — the
+ * A permission a member is waiting on is raised exactly the way the member's
+ * device raises it — a card on the User's own server, a real hub here — the
  * card is tapped in the page, and what the phone then holds and sends is
  * checked: the answer and its queue entry, the native identifiers carried
- * back, the card saying "sent" rather than "answered", the answer arriving in
- * the server's order, and all of it surviving a reload.
+ * back, the answer taken by the server as the card's one answer, the card
+ * then waiting for the member's device, and all of it surviving a reload.
  *
  * This is a browser check, not the installed phone: it runs the same files the
  * phone runs, under the same origin headers, but a physically installed PWA is
@@ -96,7 +96,7 @@ test("a card published by the desktop is answered on the phone and survives a re
   let app;
   try {
     await hub.createChat(CONVERSATION, { title: "Cards QA", participants: [DREW], messages: [message] });
-    await hub.raiseApproval(CONVERSATION, approval);
+    await hub.raiseApproval(CONVERSATION, approval, { participantId: DREW.id });
     app = await attachApp({ port: CDP_PORT });
     await pairPage(app, { hub, siteOrigin: site.origin });
     await openChat(app, CONVERSATION);
@@ -192,42 +192,41 @@ test("a card published by the desktop is answered on the phone and survives a re
       document.querySelector('[data-card-id="card-qa-1"] [data-option-id="allow"]').click();
       return true;
     })()`);
-    await sleep(2000);
+    // At once the card folds to her answer: nothing to tap again.
+    const folded = await evaluate(`(() => {
+      const card = document.querySelector('[data-card-id="card-qa-1"]');
+      const allow = card && card.querySelector('[data-option-id="allow"]');
+      return { text: card ? card.innerText : "", allowOffered: Boolean(allow && !allow.disabled) };
+    })()`);
+    assert.equal(folded.allowOffered, false, "an answered card does not offer the action again");
+    await app.waitFor(`AccordAgentsMobile.listOutboxEntries().then((rows) => rows.some((row) => row.kind === "card.answer" && row.status === "acked"))`,
+      "the server took the answer", 20_000);
 
     const stored = await evaluate(`(async () => {
       const outbox = await AccordAgentsMobile.listOutboxEntries();
-      const decision = outbox.find((entry) => entry.kind === "permission.decided");
-      return {
-        decision: decision || null,
-        cardState: document.querySelector('[data-card-id="card-qa-1"] .control-card-state')?.innerText || "",
-        onItsWay: document.querySelector('[data-card-id="card-qa-1"]')?.classList.contains("is-on-its-way") === true,
-        allowOffered: (() => { const allow = document.querySelector('[data-card-id="card-qa-1"] [data-option-id="allow"]'); return Boolean(allow && !allow.disabled); })()
-      };
+      return outbox.find((entry) => entry.kind === "card.answer") || null;
     })()`);
-    assert.ok(stored.decision, "the answer was not written to the phone's queue");
-    assert.equal(stored.decision.payload.targetKey, "approval:card-qa-1");
-    assert.equal(stored.decision.payload.stateId, "approved");
-    assert.equal(stored.decision.payload.detail.approve, true);
-    assert.equal(stored.decision.payload.detail.codexDecisionId, "native-decision-77",
+    assert.ok(stored, "the answer was not written to the phone's queue");
+    assert.equal(stored.payload.cardId, "card-qa-1");
+    assert.equal(stored.payload.answer.approve, true);
+    assert.equal(stored.payload.answer.codexDecisionId, "native-decision-77",
       "the native decision id must travel back with the answer");
-    assert.deepEqual(stored.decision.payload.detail.draftOverride, { capability: "read", path: "src/index.ts" });
-    // The event is made once, signed, and kept with its queue entry, so a
-    // resend is the same bytes.
-    assert.ok(stored.decision.minted && stored.decision.minted.eventId === stored.decision.eventId, "the signed event is kept with its queue entry");
-    // A tap is not the answer being applied: the card folds to what was
-    // answered and fades, and says nothing more (the User, 2026-09-24).
-    assert.equal(stored.onItsWay, true, "the card fades while its answer is on its way");
-    assert.equal(stored.cardState, "Your answer: Allow", "the card is folded to her answer, nothing about delivery");
-    assert.equal(stored.allowOffered, false, "an answered card does not offer the action again");
+    assert.deepEqual(stored.payload.answer.draftOverride, { capability: "read", path: "src/index.ts" });
 
-    // The server took it: the signed answer is in its order, for the desktop
-    // that holds the approval to apply.
+    // The server took it as the card's one answer, under the queue entry's
+    // id, for the device the member runs on to apply.
     await hub.settle();
-    const placed = hub.phoneEvents("permission.decided");
-    assert.equal(placed.length, 1, "the answer never reached the server");
-    assert.equal(placed[0].payload.targetKey, "approval:card-qa-1");
-    assert.equal(placed[0].payload.detail.codexDecisionId, "native-decision-77");
-    assert.equal(placed[0].payload.detail.decidedOn, "phone");
+    const placed = await hub.phoneOps("card.answer");
+    assert.equal(placed.length, 1, "the answer reached the server once");
+    assert.equal(placed[0].opId, stored.eventId, "the operation is the queue entry");
+    assert.equal(placed[0].effect.card.cardId, "card-qa-1");
+    assert.equal(placed[0].effect.card.state, "answered");
+    assert.equal(placed[0].effect.card.answer.codexDecisionId, "native-decision-77");
+    assert.equal((await hub.card("card-qa-1")).state, "answered");
+    // The phone then shows it answered, waiting for the member's device.
+    await app.waitFor(`/Allowed\. Waiting for it to be applied\./.test(document.querySelector('[data-card-id="card-qa-1"]')?.innerText || "")`,
+      "the card says it was allowed and waits to be applied", 20_000);
+    t.diagnostic(`folded: ${folded.text.replace(/\n/g, " | ")}`);
 
     // A reload must not lose it.
     await app.send("Page.reload", {});
@@ -237,10 +236,11 @@ test("a card published by the desktop is answered on the phone and survives a re
       reloaded = await cardText().catch(() => null);
       if (!reloaded) await sleep(500);
     }
-    assert.ok(reloaded, "the open card did not survive a reload");
+    assert.ok(reloaded, "the waiting card did not survive a reload");
+    assert.match(reloaded, /Waiting for it to be applied/);
 
-    // Once the desktop states it is no longer pending, the card leaves.
-    await hub.raiseApproval(CONVERSATION, { ...approval, status: "approved", updatedAt: new Date().toISOString() });
+    // Once the member's device applied it (settled on the server), it leaves.
+    await hub.settleCard(CONVERSATION, "card-qa-1", { applied: true });
     let gone = false;
     for (let i = 0; i < 60 && !gone; i += 1) {
       gone = await evaluate(`document.querySelector('[data-card-id="card-qa-1"]') === null`) === true;

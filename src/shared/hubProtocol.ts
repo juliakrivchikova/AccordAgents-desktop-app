@@ -166,6 +166,24 @@ export interface HubRosterRequest {
   resolvedInviteIds?: string[];
 }
 
+/** GET /v1/roster (owner only): the roster, and for each phone that enrolled
+ *  with an invite, what it enrolled with. The owner learns a phone that
+ *  paired while it was away from here, checks the invite is its own and the
+ *  acceptance is the phone's (verifyHubPhoneEnrollment), and names the
+ *  phone from then on; the server checked the invite's token itself. */
+export interface HubRosterResponse {
+  devices: HubDevice[];
+  enrollments?: HubPhoneEnrollmentRecord[];
+}
+
+export interface HubPhoneEnrollmentRecord {
+  deviceId: string;
+  invite: HubPhoneInvite;
+  inviteSignature: string;
+  enrollment: HubPhoneEnrollment;
+  enrollmentSignature: string;
+}
+
 /** What a phone may read: every chat, or one. */
 export type HubPhoneScope = { scope: "device" } | { scope: "conversation"; conversationId: string };
 
@@ -285,24 +303,37 @@ export function parsePhoneTurnRunId(runId: string): { messageId: string; partici
   return match ? { messageId: match[1], participantId: match[2] } : undefined;
 }
 
-/** Checks a phone certificate with nothing but the owner's key, so it holds
- *  on any of the User's devices. Crypto is passed in: the desktop and the
- *  machines use node's, nothing else needs it. */
-export function verifyHubPhoneCertificate(certificate: unknown, options: {
+interface HubPhoneCheckCrypto {
   issuerDeviceId: string;
   issuerPublicKeyDerBase64: string;
   verify: (publicKeyDerBase64: string, text: string, signatureBase64: string) => boolean;
   sha256Hex: (text: string) => string;
   deviceIdForPublicKey: (publicKeyDerBase64: string) => string;
-}): certificate is HubPhoneCertificate {
+}
+
+/** Checks a phone certificate with nothing but the owner's key, so it holds
+ *  on any of the User's devices. Crypto is passed in: the desktop and the
+ *  machines use node's, nothing else needs it. */
+export function verifyHubPhoneCertificate(certificate: unknown, options: HubPhoneCheckCrypto): certificate is HubPhoneCertificate {
   if (!certificate || typeof certificate !== "object") return false;
   const cert = certificate as Partial<HubPhoneCertificate>;
+  if (typeof cert.token !== "string" || !cert.invite || options.sha256Hex(cert.token) !== cert.invite.tokenHash) return false;
+  return verifyHubPhoneEnrollment(certificate, options);
+}
+
+/** Everything a certificate proves but the token: the invite is the
+ *  owner's, signed with its key, and the phone accepted it with its own key
+ *  inside the invite's window. What the owner checks of a phone the server
+ *  admitted (the server checked the token, which it does not keep). */
+export function verifyHubPhoneEnrollment(record: unknown, options: HubPhoneCheckCrypto): record is Pick<HubPhoneCertificate, "invite" | "inviteSignature" | "enrollment" | "enrollmentSignature"> {
+  if (!record || typeof record !== "object") return false;
+  const cert = record as Partial<HubPhoneCertificate>;
   const invite = cert.invite;
   const enrollment = cert.enrollment;
-  if (!invite || !enrollment || typeof cert.token !== "string" || typeof cert.inviteSignature !== "string" || typeof cert.enrollmentSignature !== "string") return false;
+  if (!invite || !enrollment || typeof cert.inviteSignature !== "string" || typeof cert.enrollmentSignature !== "string") return false;
   if (invite.version !== 1 || enrollment.version !== 1 || invite.issuerDeviceId !== options.issuerDeviceId) return false;
   if (!isHubPhoneInviteId(invite.inviteId) || !isHubPhoneScope(invite.scope)) return false;
-  if (invite.hubId !== enrollment.hubId || invite.tokenHash !== enrollment.tokenHash || options.sha256Hex(cert.token) !== invite.tokenHash) return false;
+  if (invite.hubId !== enrollment.hubId || invite.tokenHash !== enrollment.tokenHash) return false;
   if (typeof enrollment.publicKeyDerBase64 !== "string" || options.deviceIdForPublicKey(enrollment.publicKeyDerBase64) !== enrollment.deviceId) return false;
   const enrolledAt = Date.parse(enrollment.enrolledAt);
   const expiresAt = Date.parse(invite.expiresAt);

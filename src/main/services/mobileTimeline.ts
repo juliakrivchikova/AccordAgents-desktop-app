@@ -97,6 +97,19 @@ export interface MobileTimelineEvent {
   participantId?: string;
   /** The message's own thread (the desktop's reply context). */
   threadId?: string;
+  /** A member's message: the message its turn answers. With the run id and
+   *  the member it names the turn on the server, which a Stop names. */
+  sourceMessageId?: string;
+  /** The User's message: each member it asked a turn of, and where that turn
+   *  stands on the server ("Taken to work" once the member's own device
+   *  claimed it, agreement Д5). */
+  turns?: MobileTimelineTurn[];
+}
+
+export interface MobileTimelineTurn {
+  participantId: string;
+  runId: string;
+  state: "requested" | "claimed" | "stopped" | "finished";
 }
 
 /** How far back a finished reply still counts as activity on the phone. */
@@ -223,6 +236,8 @@ function timelineEventFromMessage(
     ...(message.participantLabel ? { participantLabel: message.participantLabel } : {}),
     ...(message.role === "participant" && message.participantId ? { participantId: message.participantId } : {}),
     ...(typeof message.metadata?.threadId === "string" && message.metadata.threadId !== message.id ? { threadId: message.metadata.threadId } : {}),
+    ...(message.role === "participant" && typeof message.metadata?.sourceMessageId === "string" && message.metadata.sourceMessageId
+      ? { sourceMessageId: message.metadata.sourceMessageId } : {}),
     content: message.content.trim() || message.role !== "participant" || message.status !== "pending"
       ? message.content
       : pendingParticipantContent(message.participantLabel),

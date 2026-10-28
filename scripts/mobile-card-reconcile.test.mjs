@@ -11,9 +11,10 @@
  * queue is flushed for every chat rather than the open one.
  *
  * The phone is paired with a real hub (the User's own server): the cards are
- * the server's, raised the way the desktop raises them, the list is the
- * server's, and the answers go into its order. One list is made by hand: a
- * list read just before a card arrived, which can only be had by holding it.
+ * the server's, raised the way a member's device raises them, the list is
+ * the server's, and an answer is the card's one answer there. One list is
+ * made by hand: a list read just before a card arrived, which can only be had
+ * by holding it.
  *
  * This is a browser check, not the installed phone: it runs the same files the
  * phone runs, under the same origin headers, but a physically installed PWA is
@@ -64,7 +65,8 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
       messages: [message("a1", TAYLOR, "Что делаем дальше?", 10, { pendingChoice: choice("choice-stale", "pending") })] });
     await hub.createChat(CHAT_B, { title: "Octopi Tracker", participants: [GERA, TAYLOR], createdAt: minutesAgo(20),
       messages: [message("b1", GERA, "Need Bash for this.", 10)] });
-    await hub.raiseApproval(CHAT_B, approval("pending"));
+    await hub.raiseApproval(CHAT_B, approval("pending"), { participantId: GERA.id });
+    await hub.raiseChoice(CHAT_A, message("a1", TAYLOR, "Что делаем дальше?", 10, { pendingChoice: choice("choice-stale", "pending") }), { participantId: TAYLOR.id });
     app = await attachApp({ port: CDP_PORT });
     const evaluate = app.evaluate;
     const waitFor = async (expr, label, tries = 60) => {
@@ -96,7 +98,7 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
       await evaluate(`document.querySelector('[data-activity-tab="pending"]')?.click()`);
       await sleep(TAP_SETTLE_MS);
     };
-    const answersAtServer = () => hub.phoneEvents("permission.decided");
+    const answersAtServer = () => hub.phoneOps("card.answer");
 
     // Paired for every chat: no chat preselected, the phone opens on its
     // home screens. The list is what the server holds.
@@ -105,16 +107,16 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
     let rows = await waitFor(`(() => { const rows = ${pendingRows}; return rows && rows.length === 2 ? rows : null; })()`, "both cards in Pending");
     t.diagnostic(`pending before: ${rows.map((row) => row.card).join(", ")}`);
 
-    // The permission is allowed from the row. The answer is queued, handed to
-    // the server, and the row says so.
+    // The server takes nothing for now: the answer waits on the phone.
+    hub.setGate(async (request) => request.method === "POST" && request.path === "/v3/ops" ? { status: 503, body: { ok: false, error: "Not now." } } : undefined);
+    // The permission is allowed from the row. The answer is queued and the
+    // row folds to it.
     await evaluate(`document.querySelector('#activity-list .act-row[data-card-id="perm-bash"] .act-pill[data-option-id="allow"]').click()`);
     rows = await waitFor(`(() => {
       const rows = ${pendingRows};
       const row = rows && rows.find((item) => item.card === "perm-bash");
       return row && row.onItsWay && row.disabled.every(Boolean) ? rows : null;
-    })()`, "the permission row to say the answer was sent");
-    for (let i = 0; i < 40 && answersAtServer().length === 0; i += 1) await sleep(500);
-    assert.equal(answersAtServer().length, 1, "the answer reached the server");
+    })()`, "the permission row to fold to the answer");
 
     // After a launch the mark is still there: the card is not offered as if
     // nothing had been answered (what the User saw), and it cannot be
@@ -126,44 +128,18 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
     assert.equal(permAfterLaunch.onItsWay, true, "the sent mark survived the launch");
     assert.ok(permAfterLaunch.disabled.every(Boolean), "and the options stay dead");
     assert.equal(await evaluate(`globalThis.AccordAgentsMobile.isCardSent("perm-bash")`), true);
-
-    // An answer the server has taken is not lost, only waiting for the
-    // desktop: however long ago it was given, the card stays locked and says
-    // the answer was sent. Unlocked, a second answer only raced the first,
-    // and the older one won on the desktop.
-    await evaluate(`(() => {
-      const marks = JSON.parse(localStorage.getItem("accordagents.mobile.controlCardSent.v1") || "{}");
-      marks["perm-bash"] = { ...marks["perm-bash"], at: new Date(Date.now() - 11 * 60000).toISOString() };
-      localStorage.setItem("accordagents.mobile.controlCardSent.v1", JSON.stringify(marks));
-      return true;
-    })()`);
-    await reload();
-    await openActivityPending();
-    rows = await waitFor(`(() => {
-      const rows = ${pendingRows};
-      const row = rows && rows.find((item) => item.card === "perm-bash");
-      return row && row.onItsWay && row.disabled.every(Boolean) ? rows : null;
-    })()`, "an answer the server holds to keep the card locked");
-    assert.equal(await evaluate(`globalThis.AccordAgentsMobile.isCardLocked("perm-bash")`), true);
+    assert.equal((await answersAtServer()).length, 0, "the server took nothing yet");
 
     // An answer nobody has taken that has been on its way for too long has
     // stopped meaning anything: the card unlocks and says so, and answering
     // again replaces the earlier answer rather than racing it.
-    const earlierEventId = await evaluate(`(async () => {
+    const earlierEventId = await evaluate(`(() => {
       const marks = JSON.parse(localStorage.getItem("accordagents.mobile.controlCardSent.v1") || "{}");
-      const eventId = marks["perm-bash"] && marks["perm-bash"].eventId;
-      const db = await self.AccordMobileDb.openControlDb(indexedDB);
-      const tx = db.transaction("outbox", "readwrite");
-      const store = tx.objectStore("outbox");
-      await new Promise((resolve) => { const get = store.get(eventId); get.onsuccess = () => { store.put({ ...get.result, status: "waiting-to-sync" }); resolve(); }; });
-      await new Promise((resolve) => { tx.oncomplete = resolve; });
-      db.close();
-      return eventId;
+      marks["perm-bash"] = { ...marks["perm-bash"], at: new Date(Date.now() - 11 * 60000).toISOString() };
+      localStorage.setItem("accordagents.mobile.controlCardSent.v1", JSON.stringify(marks));
+      return marks["perm-bash"].eventId;
     })()`);
     assert.ok(earlierEventId, "the mark names the queue entry that carried the first answer");
-    // The server takes nothing for now, so the launch's flush cannot hand the
-    // answer over again behind the test's back.
-    hub.setGate(async (request) => request.method === "POST" && request.path === "/v1/events" ? { status: 503, body: { ok: false } } : undefined);
     await reload();
     await openActivityPending();
     rows = await waitFor(`(() => {
@@ -172,9 +148,6 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
       return row && /You can answer again/.test(row.text) && !row.onItsWay && row.disabled.every((dead) => !dead) ? rows : null;
     })()`, "the stale answer to unlock the card");
     assert.equal(await evaluate(`globalThis.AccordAgentsMobile.isCardLocked("perm-bash")`), false);
-    // Still refused while the second answer is given: lifted before, the
-    // retry tick could hand the first answer over in that gap, and then
-    // nothing was left to set aside.
     await evaluate(`document.querySelector('#activity-list .act-row[data-card-id="perm-bash"] .act-pill[data-option-id="deny"]').click()`);
     await waitFor(`(() => {
       const rows = ${pendingRows};
@@ -185,25 +158,26 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
     await evaluate(`globalThis.AccordAgentsMobile.flushOutbox().then(() => true)`);
     const superseded = await evaluate(`globalThis.AccordAgentsMobile.listOutboxEntries().then((entries) => entries.map((entry) => entry.eventId + "=" + entry.status))`);
     assert.ok(superseded.includes(earlierEventId + "=superseded"), `the earlier answer was set aside, not sent: ${superseded.join(", ")}`);
-    assert.equal(await evaluate(`globalThis.AccordAgentsMobile.desktopOwesEntry({ status: "superseded" })`), false);
-    // The second answer goes out after the row already says so; give it time.
-    for (let i = 0; i < 40 && answersAtServer().length < 2; i += 1) await sleep(500);
-    assert.deepEqual(answersAtServer().map((event) => event.payload.stateId), ["approved", "denied"],
-      "only the two answers the User actually gave reached the server");
+    assert.equal(await evaluate(`globalThis.AccordAgentsMobile.serverOwesEntry({ status: "superseded" })`), false);
+    for (let i = 0; i < 40 && (await answersAtServer()).length < 1; i += 1) await sleep(500);
+    const answers = await answersAtServer();
+    assert.deepEqual(answers.map((entry) => entry.effect.card.answer.approve), [false], "only the answer the User stood by reached the server");
+    // Answered on the server: nothing waits for the User in it any more.
+    await waitFor(`(() => { const rows = ${pendingRows}; return rows && !rows.some((row) => row.card === "perm-bash") ? true : null; })()`, "the answered permission to leave Pending");
+    assert.equal(await evaluate(`globalThis.AccordAgentsMobile.isCardSent("perm-bash")`), false, "its sent mark went with it");
+    // The failed tries are in the send log, with the server's own words.
+    const failures = await evaluate(`globalThis.AccordAgentsMobile.listSendFailures()`);
+    assert.ok(failures.some((row) => row.kind === "card.answer" && row.cause === "http" && /503: Not now\./.test(row.reason)), `the 503 is in the log: ${JSON.stringify(failures.slice(0, 3))}`);
 
-    // The choice is closed on the desktop while the phone is not looking at
+    // The choice is closed on the server while the phone is not looking at
     // its chat: only the chat list says so, and a list the phone asked for
-    // after the card reached it is the later word, so the card goes at once
-    // (it stayed for five minutes: the list was trusted only once a card had
-    // been on the phone that long). Chat B still waits on the
-    // permission. The stale choice leaves; the permission stays, still
-    // marked as sent.
+    // after the card reached it is the later word, so the card goes at once.
     await hub.updateMessages(CHAT_A, [message("a1", TAYLOR, "Что делаем дальше?", 10, { pendingChoice: choice("choice-stale", "cancelled") })]);
+    await hub.settleCard(CHAT_A, "choice-stale", { cancelled: true });
     rows = await waitFor(`(() => {
       const rows = ${pendingRows};
-      return rows && rows.length === 1 && rows[0].card === "perm-bash" ? rows : null;
-    })()`, "the choice the desktop closed to leave Pending");
-    assert.equal(rows[0].onItsWay, true);
+      return rows && rows.length === 0 ? rows : null;
+    })()`, "the choice the server closed to leave Pending");
     const storedA = await evaluate(`JSON.parse(localStorage.getItem("accordagents.mobile.controlCards.v1"))[${JSON.stringify(CHAT_A)}] || []`);
     assert.deepEqual(storedA.filter((card) => card.status === "pending"), [], "chat A holds no pending card any more");
 
@@ -220,7 +194,9 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
 
     // A list this phone asked for before a card reached it may simply have
     // missed the card: it stays until a later list decides.
-    await hub.addMessages(CHAT_A, [message("a2", TAYLOR, "One more question.", 0, { pendingChoice: choice("choice-fresh", "pending") })]);
+    const fresh = message("a2", TAYLOR, "One more question.", 0, { pendingChoice: choice("choice-fresh", "pending") });
+    await hub.addMessages(CHAT_A, [fresh]);
+    await hub.raiseChoice(CHAT_A, fresh, { participantId: TAYLOR.id });
     await openActivityPending();
     await waitFor(`(() => { const rows = ${pendingRows}; return rows && rows.some((row) => row.card === "choice-fresh") ? true : null; })()`, "the fresh card in Pending");
     const emptyList = { type: "mobile.chat-list", generatedAt: new Date().toISOString(),
@@ -231,15 +207,6 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
       return held.some((card) => card.id === "choice-fresh" && card.status === "pending");
     })()`);
     assert.equal(await freshAfter(Date.now() - 60_000), true, "a list asked for before the card arrived does not close it");
-    // The desktop applies the permission's answer: the server's own list
-    // stops naming it.
-    await hub.raiseApproval(CHAT_B, approval("denied"));
-    await waitFor(`(() => { const rows = ${pendingRows}; return rows && !rows.some((row) => row.card === "perm-bash") ? true : null; })()`, "the applied permission to leave Pending");
-    await sleep(1200);
-    rows = await evaluate(pendingRows);
-    assert.ok(rows.some((row) => row.card === "choice-fresh"), "a card younger than the list is kept");
-    assert.ok(!rows.some((row) => row.card === "perm-bash"), "a card the desktop no longer waits on is gone");
-    assert.equal(await evaluate(`globalThis.AccordAgentsMobile.isCardSent("perm-bash")`), false, "its sent mark went with it");
     // A list asked for after the card arrived that does not name it is the
     // later word: the card goes at once, not minutes later.
     assert.equal(await freshAfter(Date.now()), false, "a list asked for after the card arrived closes it at once");
@@ -249,9 +216,9 @@ test("the phone drops cards the desktop closed, keeps its sent marks across a la
     const flushed = await evaluate(`globalThis.AccordAgentsMobile.flushOutbox().then((result) => JSON.stringify(result))`);
     t.diagnostic(`flush: ${flushed}`);
     await hub.settle();
-    const sent = hub.phoneEvents("chat.changes").filter((event) => event.conversationId === CHAT_A);
+    const sent = (await hub.phoneOps("message.create")).filter((entry) => entry.conversationId === CHAT_A);
     assert.equal(sent.length, 1, "the queued message for the other chat went out");
-    assert.equal(sent[0].payload.changes[0].message.content, "queued for chat A while elsewhere");
+    assert.equal(sent[0].effect.message.content, "queued for chat A while elsewhere");
     const statuses = await evaluate(`globalThis.AccordAgentsMobile.listOutboxEntries().then((entries) => entries.map((entry) => entry.eventId + "=" + entry.status))`);
     // The answer set aside earlier stays set aside; everything the server was
     // owed is acked.

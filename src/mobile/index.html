@@ -8,7 +8,7 @@
     <title>AccordAgents</title>
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="assets/accordagents-mark.png" />
-    <link rel="stylesheet" href="mobile-app.css?v=2026-10-26-removal-cards" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-10-28-server-ops" />
   </head>
   <body>
     <div class="mobile-stage">
@@ -89,7 +89,17 @@
               <span id="chat-title" class="mobile-title-name" role="heading" aria-level="1">AccordAgents</span>
               <span id="connection-state" class="mobile-title-state"></span>
             </button>
-            <span class="mobile-header-spacer" aria-hidden="true"></span>
+            <span id="send-log-spacer" class="mobile-header-spacer" aria-hidden="true"></span>
+            <!-- The way to the send log, beside where the header says whether
+                 the phone is connected: there while something sent has not
+                 reached the server, or after the server refused something. -->
+            <button id="send-log-button" class="mobile-icon-button send-log-button" type="button" aria-label="Send log" aria-haspopup="dialog" aria-controls="send-log-sheet" hidden>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9"></circle>
+                <path d="M12 7.5v5.5"></path>
+                <path d="M12 16.5h.01"></path>
+              </svg>
+            </button>
           </header>
           <div id="timeline-refresh" class="pull-refresh" aria-hidden="true"><span class="pull-refresh-spinner"></span></div>
           <section class="thread-surface mscroll" aria-live="polite">
@@ -217,19 +227,33 @@
             </svg>
           </button>
         </div>
+        <!-- Every try to send that failed, and why: what it was, its chat,
+             when, and what the server or the network said. -->
+        <div id="send-log-sheet" class="members-sheet send-log-sheet" role="dialog" aria-label="Send log" hidden>
+          <div class="members-sheet-backdrop" data-send-log-close="1"></div>
+          <div class="members-sheet-panel">
+            <div class="members-sheet-grip" aria-hidden="true"></div>
+            <div class="members-sheet-head">
+              <strong id="send-log-title">Send log</strong>
+              <button id="send-log-close" class="members-sheet-close" type="button" aria-label="Close">Done</button>
+            </div>
+            <p id="send-log-summary" class="send-log-summary"></p>
+            <div id="send-log-list" class="members-sheet-list send-log-list"></div>
+          </div>
+        </div>
         <div class="mobile-home-indicator" aria-hidden="true"><span></span></div>
       </main>
     </div>
     <!-- The database description both the page and the service worker load. -->
-    <script src="mobile-db.js?v=2026-10-26-removal-cards" defer></script>
-    <script src="jsqr.js?v=2026-10-26-removal-cards" defer></script>
-    <!-- How the phone talks to the User's server (signed requests, its own
-         signed events), and the rules shared with the desktop verbatim
+    <script src="mobile-db.js?v=2026-10-28-server-ops" defer></script>
+    <script src="jsqr.js?v=2026-10-28-server-ops" defer></script>
+    <!-- How the phone talks to the User's server (signed requests carrying
+         its operations), and the rules shared with the desktop verbatim
          (avatars, timeline visibility), bundled from src/shared by the mobile
          build. -->
-    <script src="mobile-hub-client.js?v=2026-10-26-removal-cards" defer></script>
-    <script src="mobile-shared.js?v=2026-10-26-removal-cards" defer></script>
-    <script src="mobile-activity.js?v=2026-10-26-removal-cards" defer></script>
-    <script src="mobile-app.js?v=2026-10-26-removal-cards" defer></script>
+    <script src="mobile-hub-client.js?v=2026-10-28-server-ops" defer></script>
+    <script src="mobile-shared.js?v=2026-10-28-server-ops" defer></script>
+    <script src="mobile-activity.js?v=2026-10-28-server-ops" defer></script>
+    <script src="mobile-app.js?v=2026-10-28-server-ops" defer></script>
   </body>
 </html>

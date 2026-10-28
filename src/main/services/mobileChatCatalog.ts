@@ -1,11 +1,10 @@
-import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation, ConversationSummary } from "../../shared/types";
+import type { ChatMessage, ChatParticipant, Conversation, ConversationSummary } from "../../shared/types";
 import { chatMessageHiddenFromTimeline } from "../../shared/chatParticipantRequestThreads";
-import { controlCardFromApproval, controlCardFromChoiceMessage, type MobileControlCard } from "../../shared/mobileControlCards";
+import type { MobileControlCard } from "../../shared/mobileControlCards";
 import { phoneActivityEvents, timelineEventsFromSnapshot, type MobileChatListItem, type MobileTimelinePage } from "./mobileTimeline";
 
-/** The phone's chat list and a chat's page, built the same way wherever the
- *  chats are read: by the desktop from its own store, and by the User's
- *  server from its copy, so the phone shows the same thing from either. */
+/** The phone's chat list and a chat's page, built from the server's copy of
+ *  the chats, so the phone shows the same thing the desktop does. */
 
 /** Chats the phone lists, newest first. */
 export const MOBILE_CHAT_LIST_LIMIT = 100;
@@ -14,12 +13,10 @@ export const MOBILE_CHAT_LIST_SNIPPET_WINDOW = 10;
 /** Messages per page of a chat. */
 export const MOBILE_TIMELINE_PAGE_SIZE = 80;
 
-/** The store reads the builders need: the desktop's StorageService and the
- *  server's own both answer them. */
+/** The store reads the builders need. */
 export interface MobileCatalogStore {
   listConversations(): Promise<ConversationSummary[]>;
   openConversation(id: string, limit?: number, page?: { beforeMessageId?: string }): Promise<{ conversation: Conversation; messagePage: { hasMoreBefore: boolean } } | undefined>;
-  listPendingChoiceMessages(conversationIds: string[]): Promise<{ rows: Array<{ conversationId: string; message: ChatMessage }>; truncated: boolean }>;
 }
 
 export interface MobileChatListOptions {
@@ -27,20 +24,16 @@ export interface MobileChatListOptions {
   roleLabels: Map<string, string>;
   /** Machine names by machine id. */
   machineNames: Map<string, string>;
-  /** Whether this source holds everything waiting for the User (approvals
-   *  included) and so lists each chat's pending cards. The phone drops a
-   *  pending card that a listed set leaves out, so a source that cannot see
-   *  them all says nothing and the phone keeps what it holds. */
-  pendingCards: boolean;
+  /** Every card still waiting for the User in a chat, as the server holds
+   *  them (its cards, Д9). The phone drops a pending card that a listed set
+   *  leaves out, so it is the whole set or nothing (undefined: the phone
+   *  keeps what it holds). The chat is the one the list read for its row. */
+  pendingCardsFor?: (conversationId: string, conversation: Conversation | undefined) => MobileControlCard[] | undefined;
   /** A summary that cannot say whether a member is running (the server's
    *  copy) is answered from the chat's newest messages instead. */
   runningFromMessages?: boolean;
   /** Only chats this returns true for are listed (a pairing's scope). */
   include?: (summary: ConversationSummary) => boolean;
-  /** Where a chat's approvals are read when they are not on the chat itself
-   *  (the server folds them from the devices that hold them). */
-  approvalsFor?: (conversationId: string) => ChatAppToolApproval[];
-  onPendingCardsTruncated?: (listed: number) => void;
   /** The chat summaries when the caller already read them. */
   summaries?: ConversationSummary[];
 }
@@ -50,36 +43,6 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
   const listed = summaries
     .filter((summary) => summary.kind === "chat" && summary.archived !== true && (options.include?.(summary) ?? true))
     .slice(0, MOBILE_CHAT_LIST_LIMIT);
-  // What waits for the User in each listed chat, so the phone can drop a
-  // pending card the desktop has closed. Pending approvals are in the
-  // metadata opened below; pending choices are one indexed query over the
-  // listed chats, never a chat's history.
-  const pendingChoicesByConversation = new Map<string, MobileControlCard[]>();
-  let pendingTruncated = false;
-  if (options.pendingCards) {
-    const pendingChoices = await store.listPendingChoiceMessages(listed.map((summary) => summary.id));
-    pendingTruncated = pendingChoices.truncated;
-    // The phone then reconciles nothing from this list. Said here, or a
-    // desktop that quietly crossed the cap would look like the old defect.
-    if (pendingTruncated) options.onPendingCardsTruncated?.(listed.length);
-    for (const row of pendingChoices.rows) {
-      const card = controlCardFromChoiceMessage(row.conversationId, row.message);
-      if (!card || card.status !== "pending") continue;
-      const cards = pendingChoicesByConversation.get(row.conversationId) ?? [];
-      cards.push(card);
-      pendingChoicesByConversation.set(row.conversationId, cards);
-    }
-  }
-  // An incomplete set must not be offered as the whole: the phone would
-  // drop every card it does not name.
-  const pendingCardsFor = (conversationId: string, conversation: Conversation | undefined): MobileControlCard[] | undefined =>
-    !options.pendingCards || pendingTruncated ? undefined : [
-      ...(options.approvalsFor ? options.approvalsFor(conversationId)
-        : (conversation?.metadata as { pendingAppToolApprovals?: ChatAppToolApproval[] } | undefined)?.pendingAppToolApprovals ?? [])
-        .filter((approval) => approval.status === "pending")
-        .map((approval) => controlCardFromApproval(conversationId, approval)),
-      ...(pendingChoicesByConversation.get(conversationId) ?? [])
-    ].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   const items: MobileChatListItem[] = [];
   for (const summary of listed) {
     // The list needs each chat's members and its last line, not its
@@ -98,7 +61,7 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
     const lastMessage = newest.find((message) => !chatMessageHiddenFromTimeline(conversation as Conversation, message)) ??
       newest.find((message) => message.role === "participant" && message.metadata?.hiddenFromTimeline !== true);
     const members = mobileChatMembers(conversation);
-    const pendingCards = pendingCardsFor(summary.id, conversation);
+    const pendingCards = options.pendingCardsFor?.(summary.id, conversation);
     const activity = conversation ? phoneActivityEvents(conversation) : [];
     items.push({
       id: summary.id,

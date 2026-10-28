@@ -165,23 +165,6 @@
     }).join("");
   }
 
-  function stableJson(value) {
-    if (value === undefined) {
-      return "null";
-    }
-    if (value === null || typeof value !== "object") {
-      return JSON.stringify(value);
-    }
-    if (Array.isArray(value)) {
-      return "[" + value.map(stableJson).join(",") + "]";
-    }
-    return "{" + Object.keys(value).filter(function (key) {
-      return value[key] !== undefined;
-    }).sort().map(function (key) {
-      return JSON.stringify(key) + ":" + stableJson(value[key]);
-    }).join(",") + "}";
-  }
-
   // Doorbell subscription: the phone registers its Web Push subscription with
   // the User's server, signed with its own key. The server's pushes carry no
   // message text; iOS requires a user gesture before Notification permission,
@@ -313,10 +296,8 @@
   }
 
   /**
-   * One IndexedDB transaction across several stores. A queued event and the
-   * head of the chain it was signed into are written inside one, so a failed
-   * write leaves neither: an event the server will never hear about is worse
-   * than one the User can retry.
+   * One IndexedDB transaction across several stores: what an old pairing
+   * kept goes all at once, and so does what the old queue became.
    */
   function eventLogPort() {
     return {
@@ -396,7 +377,11 @@
 
   function noteOutboxStatus(entry) {
     if (entry && typeof entry.eventId === "string") {
-      outboxStatusById.set(entry.eventId, { status: entry.status });
+      outboxStatusById.set(entry.eventId, {
+        status: entry.status,
+        ...(entry.lastError ? { lastError: entry.lastError } : {}),
+        ...(entry.failedAt ? { failedAt: entry.failedAt } : {})
+      });
     }
   }
 
@@ -404,6 +389,35 @@
     noteOutboxStatus(entry);
     return withOutbox("readwrite", function (store) {
       return requestToPromise(store.put(entry));
+    });
+  }
+
+  /** Several entries in one transaction: all of them, or none. */
+  function putOutboxEntries(entries) {
+    return withOutbox("readwrite", function (store) {
+      return Promise.all(entries.map(function (entry) { return requestToPromise(store.put(entry)); }));
+    }).then(function () {
+      for (const entry of entries) noteOutboxStatus(entry);
+    });
+  }
+
+  /** Changes one entry as it stands in the store now, in one transaction:
+   *  `change` gets the stored entry and returns the new one, or undefined to
+   *  leave it (answered or replaced meanwhile, by another flush or a second
+   *  answer to the same card). Resolves with what was written. */
+  function updateOutboxEntry(eventId, change) {
+    let written;
+    return withOutbox("readwrite", function (store) {
+      return requestToPromise(store.get(eventId)).then(function (stored) {
+        if (!stored) return undefined;
+        const next = change(stored);
+        if (!next) return undefined;
+        written = next;
+        return requestToPromise(store.put(next));
+      });
+    }).then(function () {
+      if (written) noteOutboxStatus(written);
+      return written;
     });
   }
 
@@ -505,13 +519,21 @@
         ? entry.attachments.map(function (attachment) { return attachment.id; }).join(",")
         : "";
     };
+    // Where the turns a message asked for stand: "Taken to work" follows them.
+    const turns = function (entry) {
+      return Array.isArray(entry.turns)
+        ? entry.turns.map(function (turn) { return turn.participantId + ":" + turn.state; }).join(",")
+        : "";
+    };
     return left.content === right.content &&
       left.status === right.status &&
       left.createdAt === right.createdAt &&
       (left.participantLabel || "") === (right.participantLabel || "") &&
       (left.threadRootId || "") === (right.threadRootId || "") &&
       (left.runId || "") === (right.runId || "") &&
-      attachmentIds(left) === attachmentIds(right);
+      (left.sourceMessageId || "") === (right.sourceMessageId || "") &&
+      attachmentIds(left) === attachmentIds(right) &&
+      turns(left) === turns(right);
   }
 
   function sameMobileEvent(left, right) {
@@ -664,7 +686,12 @@
             ...(stored.runId && !entry.runId ? { runId: stored.runId } : {}),
             ...(stored.messageId && !entry.messageId ? { messageId: stored.messageId } : {}),
             ...(stored.threadRootId && !entry.threadRootId ? { threadRootId: stored.threadRootId } : {}),
-            ...(stored.mobileEventId && !entry.mobileEventId ? { mobileEventId: stored.mobileEventId } : {})
+            ...(stored.mobileEventId && !entry.mobileEventId ? { mobileEventId: stored.mobileEventId } : {}),
+            ...(stored.participantId && !entry.participantId ? { participantId: stored.participantId } : {}),
+            ...(stored.sourceMessageId && !entry.sourceMessageId ? { sourceMessageId: stored.sourceMessageId } : {}),
+            // A copy without turns (a page from before the server kept them)
+            // does not undo what a later one said.
+            ...(Array.isArray(stored.turns) && !Array.isArray(entry.turns) ? { turns: stored.turns } : {})
           };
         }
         if (stored && sameTimelineEntryContent(stored, entry) &&
@@ -1632,9 +1659,9 @@
     return active && active !== "unpaired" ? active : undefined;
   }
 
-  /** A queue entry for something this phone did. Every entry is for the
-   *  User's server: it is signed, in its place in this phone's chain, when it
-   *  is first sent (mintHubEntry). */
+  /** A queue entry for something this phone did: one operation for the
+   *  User's server, kept here under the operation's id until the server
+   *  answers it (see flushOutboxToServer). */
   async function createOutboxEvent(input) {
     return hubOutboxEntry(input);
   }
@@ -1858,23 +1885,47 @@
   }
 
   /**
-   * Queues what this device did. An entry is its own record: its event is
-   * made, signed and kept with it when it is first sent (mintHubEntry), so a
-   * failed write here leaves nothing behind that the User did not see fail.
+   * Queues what this device did. An entry is its own record, written before
+   * anything is sent: a failed write here leaves nothing behind that the
+   * User did not see fail.
    */
   function persistOutboundEvent(entry) {
     return putOutboxEntry(entry).then(function () { return entry; });
   }
 
-  function enqueueMessage(input) {
-    return createOutboxEvent(input).then(persistOutboundEvent);
+  /** A message, and the desktop's line for each name in it that is no member
+   *  ("No member named @x."), each its own operation right behind it. One
+   *  transaction: the lines never wait without their message. */
+  async function enqueueMessage(input) {
+    const entry = await createOutboxEvent(input);
+    const threadRootId = entry.payload && typeof entry.payload.threadRootId === "string" && entry.payload.threadRootId ? entry.payload.threadRootId : undefined;
+    const notes = [];
+    for (const handle of (entry.hubDelivery && entry.hubDelivery.unknownHandles) || []) {
+      const noteId = createEventId();
+      notes.push(await createOutboxEvent({
+        eventId: noteId,
+        conversationId: entry.conversationId,
+        kind: "message.system",
+        createdAt: entry.createdAt,
+        dependsOn: entry.eventId,
+        payload: { message: {
+          id: noteId, role: "system", content: "No member named @" + handle + ".", createdAt: entry.createdAt, status: "done",
+          metadata: { threadId: entry.eventId, parentMessageId: entry.eventId, ...(threadRootId ? { chatThreadRootId: threadRootId } : {}) }
+        } }
+      }));
+    }
+    await putOutboxEntries([entry].concat(notes));
+    return entry;
   }
 
-  function enqueueRunCancel(input) {
+  /** A Stop of one member's turn on the server, named by the turn's run id,
+   *  the message it answers and the member (`rowRunId` is the run id the row on
+   *  screen carries, which may be the device's own name for the run). */
+  function enqueueTurnStop(input) {
     return createOutboxEvent({
       conversationId: input.conversationId,
-      kind: "run.cancel.requested",
-      payload: { runId: input.runId }
+      kind: "turn.stop",
+      payload: { runId: input.runId, messageId: input.messageId, participantId: input.participantId, ...(input.rowRunId ? { rowRunId: input.rowRunId } : {}) }
     }).then(persistOutboundEvent);
   }
 
@@ -1882,12 +1933,12 @@
     return !entry.kind || entry.kind === "message.created";
   }
 
-  /** Whether a queue entry is still the server's to take: not acknowledged,
-   *  not replaced by a later answer to the same card, and not refused for
-   *  good. */
-  function desktopOwesEntry(entry) {
-    return Boolean(entry) && entry.status !== "acked" && entry.status !== "superseded" &&
-      entry.status !== "refused";
+  /** Whether a queue entry still waits for the server's answer: not taken
+   *  (accepted, or a repeat of one it took), not refused for good, and not
+   *  replaced by a later answer to the same card. */
+  function serverOwesEntry(entry) {
+    return Boolean(entry) && entry.status !== OUTBOX_SENT && entry.status !== OUTBOX_SUPERSEDED &&
+      entry.status !== OUTBOX_REFUSED;
   }
 
   /** Runs the User has asked to stop, from the tap onward. The queue entry is
@@ -1896,23 +1947,81 @@
    *  second Stop the User can send by accident. */
   const stopRequestedRunIds = new Set();
 
-  async function stopRunFromPhone(runId, forConversationId) {
+  /**
+   * The turn on the server a row's run is: its run id there, the message it
+   * answers and its member. A routed row and a member's bubble say the last
+   * two themselves (`known`); a run reached from somewhere else (the live
+   * reply, Activity) is looked up in what this phone holds of the chat. A
+   * device's own name for a run is the turn's id with "turn-" before it, as
+   * every device names a turn it opens (ChatService.openServerTurn).
+   */
+  async function turnOfRun(conversationId, runId, known) {
+    let messageId = known && typeof known.messageId === "string" && known.messageId ? known.messageId : undefined;
+    let participantId = known && typeof known.participantId === "string" && known.participantId ? known.participantId : undefined;
+    if (!messageId || !participantId) {
+      const rows = await listTimelineEntries(conversationId).catch(function () { return []; });
+      const chat = loadChats().find(function (item) { return item.id === conversationId; });
+      const listed = chat && Array.isArray(chat.activity) ? chat.activity : [];
+      const row = rows.concat(listed).find(function (item) {
+        return item && item.runId === runId && typeof item.sourceMessageId === "string" && item.sourceMessageId && typeof item.participantId === "string" && item.participantId;
+      });
+      if (row) {
+        messageId = messageId || row.sourceMessageId;
+        participantId = participantId || row.participantId;
+      }
+    }
+    if ((!messageId || !participantId) && runId.indexOf("turn-") === 0) {
+      // The turn a User's message asks of a member is named after both.
+      const chat = loadChats().find(function (item) { return item.id === conversationId; });
+      for (const member of chat && Array.isArray(chat.members) ? chat.members : []) {
+        const suffix = "-" + member.id;
+        if (member.id && runId.length > 5 + suffix.length && runId.slice(-suffix.length) === suffix) {
+          messageId = runId.slice(5, runId.length - suffix.length);
+          participantId = member.id;
+          break;
+        }
+      }
+    }
+    if (!messageId || !participantId) return undefined;
+    return { runId: runId.indexOf("turn-") === 0 ? runId : "turn-" + runId, rowRunId: runId, messageId: messageId, participantId: participantId };
+  }
+
+  async function stopRunFromPhone(runId, forConversationId, known) {
     // Activity stops a run in a chat that is not open, so it names the chat.
     const conversationId = forConversationId || selectedConversationId();
     if (!conversationId || typeof runId !== "string" || !runId.trim()) {
       return;
     }
-    stopRequestedRunIds.add(runId.trim());
-    await render("waiting-to-sync");
-    await enqueueRunCancel({ conversationId, runId: runId.trim() });
-    // A stop goes where every other write goes, at once; the member's home
-    // stops it when it reads it, and the row keeps saying "Stopping" until
-    // it has.
-    const flushing = flushOutbox();
+    const wanted = runId.trim();
+    stopRequestedRunIds.add(wanted);
+    await render();
+    const turn = await turnOfRun(conversationId, wanted, known);
+    if (!turn) {
+      // Nothing to name it by: said in the send log, and the Stop comes back.
+      stopRequestedRunIds.delete(wanted);
+      await recordSendFailure({
+        conversationId: conversationId, kind: "turn.stop", text: "Stop", cause: "phone",
+        reason: "This phone does not know which message this run answers, so it could not name it to your server."
+      });
+      await render();
+      return;
+    }
+    await enqueueTurnStop({ conversationId: conversationId, runId: turn.runId, rowRunId: turn.rowRunId, messageId: turn.messageId, participantId: turn.participantId });
+    // A Stop goes where every other write goes, at once; the member's own
+    // device stops the run when it reads it, and the row keeps saying
+    // "Stopping" until it has.
+    await sendNow();
+  }
+
+  /** What the User just did goes to the server at once: the redraw does not
+   *  hold it back, and the retries start over from their first pause. */
+  async function sendNow() {
+    const flushing = retryOutboxNow();
     await handOverBeforeDrawing(flushing);
-    await render("waiting-to-sync");
+    await render();
     const flushResult = await flushing;
     await render(flushResult.status);
+    return flushResult;
   }
 
   /** Whether this phone can read and write at all: only through the User's
@@ -1934,16 +2043,15 @@
   const HUB_PAIRING_META_KEY = "hub-pairing";
   /** The key the server said it no longer knows (the phone was removed). */
   const HUB_REVOKED_IDENTITY_META_KEY = "hub-identity-revoked";
-  const HUB_HEAD_META_PREFIX = "hubHead:";
-  const HUB_CLOCK_META_KEY = "hubClock";
+  // What the phone kept when it wrote its own signed chains (before the
+  // server owned the chats): where each chain stood and its clock. Nothing
+  // reads them; they are cleared once (retireSignedChains).
+  const OLD_CHAIN_HEAD_META_PREFIX = "hubHead:";
+  const OLD_CHAIN_CLOCK_META_KEY = "hubClock";
   const HUB_PHONE_PROTOCOL = 2;
-  /** A sent event is kept this long, so a server that lost it (restored
-   *  from an older copy) can be given it again. */
+  /** A queue entry the server answered is kept this long (its bubble, and
+   *  the mark of an answer), then let go. */
   const HUB_SENT_KEEP_MS = 7 * 24 * 60 * 60_000;
-  /** A payload over this travels as a body the server holds (as every
-   *  device does it), not inside its event. */
-  const HUB_INLINE_PAYLOAD_BYTES = 32 * 1024;
-  const HUB_PUSH_PAGE = 50;
   // Where pairing with the server stands, for the screen: "pairing",
   // "outdated" (the Mac or its server is older), "failed", "revoked".
   let hubPairingState;
@@ -1975,9 +2083,9 @@
     };
   }
 
-  // The phone's key, read once: every event it mints and every request it
-  // signs asks for it, and each read was its own database open on the way
-  // to the server. Replaced when the phone pairs (or another tab does).
+  // The phone's key, read once: every request it signs asks for it, and
+  // each read was its own database open on the way to the server. Replaced
+  // when the phone pairs (or another tab does).
   let hubIdentityCache;
   // Bumped whenever the key may have changed: a read that started before
   // does not put the old key back.
@@ -2090,14 +2198,12 @@
         : sameServer ? previous : await api.createHubDeviceIdentity();
       await writeMetaRecord(HUB_PENDING_IDENTITY_META_KEY, { tokenHash: tokenHash, identity: identity });
       const answer = await api.enrollHubPhone({ hubUrl: invite.hubUrl, hubId: invite.hubId, token: invite.token, identity: identity, name: phoneName() });
-      const before = await readMetaRecord(HUB_IDENTITY_META_KEY);
       // The key the server now knows this phone by, before the pairing that
-      // names it: a pairing without its key could never sign again.
+      // names it: a pairing without its key could never sign again. What the
+      // queue still holds goes out under it: a request is signed when it is
+      // sent, the operations in it are not.
       await writeMetaRecord(HUB_IDENTITY_META_KEY, identity);
       forgetHubIdentity();
-      // A new key starts its own chains; where the old one's stood means
-      // nothing to the server for it.
-      if (!before || before.deviceId !== identity.deviceId) await forgetHubHeads();
       const pairing = { hubUrl: invite.hubUrl, hubId: invite.hubId, deviceId: identity.deviceId, scope: answer.scope, pairedAt: nowIso(), protocol: answer.protocol };
       setStoredValue(HUB_PAIRING_KEY, JSON.stringify(pairing));
       // Paired again: the note that the old pairing was cleared has done its work.
@@ -2109,9 +2215,8 @@
       if (answer.scope && answer.scope.scope === "conversation") {
         localStorage.setItem(ACTIVE_CONVERSATION_KEY, answer.scope.conversationId);
       }
-      // The certificate is the first thing this phone writes: every device
-      // that reads the server learns from it that this phone is the User's.
-      await putOutboxEntry(await hubOutboxEntry({ kind: "device.enrolled", conversationId: "device-enrollment", payload: answer.certificate }));
+      // Nothing more to write: the server put this phone on its roster as it
+      // enrolled, and the desktop learns it from that roster.
       hubPairingState = undefined;
       recordRelayDebug({ event: "hub-paired", deviceId: identity.deviceId });
       await render();
@@ -2127,12 +2232,44 @@
     }
   }
 
-  /** The log scope and event kind an outbox entry becomes on the server. */
-  function hubEventShape(entry) {
-    if (entry.kind === "device.enrolled") return { logScopeId: "device-enrollment", kind: "device.enrolled" };
-    if (entry.kind === "run.cancel.requested") return { logScopeId: "chat:actions", kind: "turn.stop.requested" };
-    if (entry.kind === "permission.decided" || entry.kind === "choice.answered") return { logScopeId: "chat:actions", kind: entry.kind };
-    return { logScopeId: "chat-changes:" + entry.conversationId, kind: "chat.changes" };
+  // --- what this phone writes: operations on the User's server --------------
+  // Everything this phone does to a chat is one operation the server owns
+  // (agreements Д1, Д10): a message is `message.create`, a Stop `turn.stop`,
+  // an answer to a card `card.answer`. Each waits in the queue under its own
+  // id until the server answers it. Accepted, or a repeat of one it already
+  // took, is "Sent" (Д3); rejected is not taken, and says the server's
+  // reason. No answer at all (no connection, a timeout, an error of the
+  // server's own) is offered again, and every such attempt is written to the
+  // send log with its reason (Д12).
+
+  // Where a queue entry stands: waiting for the server's answer, taken,
+  // refused for good, or replaced (an answer to a card the User answered
+  // again before the first one went).
+  const OUTBOX_QUEUED = "queued";
+  const OUTBOX_SENT = "acked";
+  const OUTBOX_REFUSED = "refused";
+  const OUTBOX_SUPERSEDED = "superseded";
+  /** Operations in one request (the server takes a hundred at most), and
+   *  about how much of them: the server reads sixteen megabytes of a request
+   *  at most, and a request it cannot read would fail for every entry in it,
+   *  every time. One operation over what the server takes (four megabytes) is
+   *  not taken, and is said so here rather than sent forever. */
+  const HUB_OPS_PAGE = 50;
+  const HUB_OPS_PAGE_BYTES = 8 * 1024 * 1024;
+  const HUB_OP_MAX_BYTES_FALLBACK = 4 * 1024 * 1024;
+
+  // The order entries are sent in: the order they were written, so a line
+  // that belongs to a message goes behind it even when both carry one moment.
+  let outboxOrderLast = 0;
+  function nextOutboxOrder() {
+    outboxOrderLast = Math.max(outboxOrderLast + 1, Date.now() * 1000);
+    return outboxOrderLast;
+  }
+
+  function outboxOrderOf(entry) {
+    if (typeof entry.order === "number" && Number.isFinite(entry.order)) return entry.order;
+    const at = Date.parse(entry.createdAt || "");
+    return Number.isFinite(at) ? at * 1000 : 0;
   }
 
   async function hubOutboxEntry(input) {
@@ -2144,18 +2281,20 @@
       content: input.content,
       ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {})
     };
-    const shape = hubEventShape({ kind: kind, conversationId: conversationId });
     return {
+      // The operation's id; for a message, the message's id as well.
       eventId: eventId,
       conversationId: conversationId,
-      logScopeId: shape.logScopeId,
       kind: kind,
       payload: payload,
       createdAt: createdAt,
-      status: "queued",
+      order: nextOutboxOrder(),
+      status: OUTBOX_QUEUED,
       attempts: 0,
       updatedAt: createdAt,
       hub: true,
+      ops: 3,
+      ...(input.dependsOn ? { dependsOn: input.dependsOn } : {}),
       // Who the message is for, decided now, from what this phone showed the
       // User when she sent it — the same rules the desktop applies to what is
       // typed there.
@@ -2212,9 +2351,10 @@
     return mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
   }
 
-  /** The chat change a message from this phone is: the User's message, and
-   *  the line the desktop adds for a name that is no member. */
-  async function hubMessagePayload(entry, client) {
+  /** The User's message as the server keeps it (the message the desktop
+   *  makes of what is typed there): its id is the queue entry's, pictures go
+   *  up first as bodies the server holds, and /goal carries its command. */
+  async function phoneMessage(entry, client) {
     const payload = entry.payload || {};
     const content = typeof payload.content === "string" ? payload.content : "";
     const messageId = entry.eventId;
@@ -2224,7 +2364,9 @@
     for (const attachment of Array.isArray(payload.attachments) ? payload.attachments : []) {
       const bytes = base64ToBytesStd(attachment.dataBase64);
       const id = createEventId();
-      const reference = await client.uploadBlob(bytes);
+      const uploading = client.uploadBlob(bytes);
+      noteHandOverRequestStarted();
+      const reference = await uploading;
       imageAttachments.push({
         id: id,
         filename: attachment.filename || ("photo." + imageExtension(attachment.mimeType)),
@@ -2247,7 +2389,7 @@
         nativeCommand = { name: "goal", objective: shared.nativeGoalObjective(goal.contentWithoutCommand, target ? target.handle : "") };
       }
     }
-    const message = {
+    return {
       id: messageId,
       role: "user",
       content: content,
@@ -2258,20 +2400,14 @@
         mobileEventId: entry.eventId,
         threadId: messageId,
         ...(threadRootId ? { chatThreadRootId: threadRootId } : {}),
+        // The server asks a turn of each of them (Д4); "Taken to work" is a
+        // mark per member once its own device took it (Д5).
         deliveryTargets: delivery.targets,
         ...(Array.isArray(payload.skillMentions) && payload.skillMentions.length ? { skillMentions: payload.skillMentions } : {}),
         ...(imageAttachments.length ? { imageAttachments: imageAttachments } : {}),
         ...(nativeCommand ? { nativeCommand: nativeCommand } : {})
       }
     };
-    const changes = [{ type: "message.created", message: message }];
-    for (const handle of delivery.unknownHandles || []) {
-      changes.push({ type: "message.created", message: {
-        id: createEventId(), role: "system", content: "No member named @" + handle + ".", createdAt: entry.createdAt, status: "done",
-        metadata: { threadId: messageId, parentMessageId: messageId, ...(threadRootId ? { chatThreadRootId: threadRootId } : {}) }
-      } });
-    }
-    return { version: 1, conversationId: entry.conversationId, updatedAt: entry.createdAt, changes: changes };
   }
 
   function base64ToBytesStd(value) {
@@ -2281,156 +2417,525 @@
     return bytes;
   }
 
-  /** What an outbox entry says, as the event the server and every device
-   *  apply. A card answer says it was given on the phone. */
-  async function hubEventPayload(entry, client) {
-    if (entry.kind === "device.enrolled") return entry.payload;
-    if (entry.kind === "run.cancel.requested") {
-      const runId = String(entry.payload && entry.payload.runId || "");
-      return { operationId: "stop:" + runId, targetKey: "run:" + runId, stateId: "stop-requested", detail: { by: "phone", runId: runId } };
+  /**
+   * The operation a queue entry is. A message is made once — its pictures
+   * put on the server, its attachments named — and kept with the entry, so
+   * every later attempt sends the very same operation under the same id: the
+   * server takes it once however often it arrives.
+   */
+  async function operationOf(entry, client) {
+    if (entry.op && entry.op.opId === entry.eventId) return entry.op;
+    const base = { opId: entry.eventId, conversationId: entry.conversationId };
+    const payload = entry.payload || {};
+    if (entry.kind === "message.created") {
+      const op = { ...base, kind: "message.create", message: await phoneMessage(entry, client) };
+      // Another attempt may have made it meanwhile (one that outlived its
+      // watchdog): the one kept first is the one sent, every time.
+      let kept;
+      await updateOutboxEntry(entry.eventId, function (stored) {
+        if (stored.op && stored.op.opId === entry.eventId) {
+          kept = stored.op;
+          return undefined;
+        }
+        return { ...stored, op: op };
+      });
+      return kept || op;
     }
-    if (entry.kind === "permission.decided" || entry.kind === "choice.answered") {
-      const payload = entry.payload || {};
-      return { ...payload, detail: { ...(payload.detail || {}), decidedOn: "phone" } };
+    if (entry.kind === "message.system") return { ...base, kind: "message.create", message: payload.message };
+    if (entry.kind === "turn.stop") {
+      return { ...base, kind: "turn.stop", runId: payload.runId, messageId: payload.messageId, participantId: payload.participantId };
     }
-    return hubMessagePayload(entry, client);
+    if (entry.kind === "card.answer") return { ...base, kind: "card.answer", cardId: payload.cardId, answer: payload.answer || {} };
+    throw new Error("This phone cannot send a " + String(entry.kind || "change") + ".");
   }
 
-  /** The next stamp of this phone's clock (the desktop's form, hlc:…). */
-  async function hubLogicalTs(deviceId) {
-    // Read and advanced in one transaction: the stamp is this phone's clock,
-    // and two reads and a write for it were three database opens per send.
-    return withNamedStore(META_STORE, "readwrite", function (store) {
-      return requestToPromise(store.get(HUB_CLOCK_META_KEY)).then(function (found) {
-        const record = found || {};
-        const now = Date.now();
-        let wall = Number(record.wallMs) || 0;
-        let counter = Number(record.counter) || 0;
-        if (now > wall) {
-          wall = now;
-          counter = 0;
-        } else {
-          counter += 1;
-        }
-        store.put({ ...record, key: HUB_CLOCK_META_KEY, wallMs: wall, counter: counter });
-        return "hlc:" + String(wall).padStart(13, "0") + ":" + String(counter).padStart(6, "0") + ":" + deviceId;
-      });
-    });
+  /** Why an attempt failed, in words, and of which kind: no connection, a
+   *  timeout, an error answer of the server's, or this phone's own. */
+  function sendFailureOf(error) {
+    if (error && error.timedOut) return { cause: "timeout", reason: "Your server did not answer in time." };
+    if (error && error.name === "TimeoutError") return { cause: "timeout", reason: "Your server did not answer in time." };
+    if (error && error.unreachable) {
+      const detail = String(error.message || "").replace(/^The server could not be reached:\s*/, "");
+      return { cause: "network", reason: "Could not reach your server" + (detail ? " (" + detail + ")" : "") + "." };
+    }
+    if (error && typeof error.status === "number") {
+      let said = "";
+      try { said = String(JSON.parse(error.body || "{}").error || ""); } catch { said = ""; }
+      if (error.status === 401 && said.indexOf("not on the hub's roster") >= 0) {
+        // Taken off the server's devices (removed on the Mac): said as the
+        // reads say it, and nothing more is offered (see scheduleOutboxRetry).
+        hubPairingState = { status: "revoked", message: "This phone was removed from your server. Pair it again from your Mac." };
+        return { cause: "revoked", reason: "This phone was removed from your server, so it cannot send. Pair it again from your Mac." };
+      }
+      return { cause: "http", reason: "Your server answered " + error.status + (said ? ": " + said : ".") };
+    }
+    return { cause: "phone", reason: "This phone could not send it: " + String(error && error.message || error) };
   }
 
   /**
-   * Makes an entry's event once, signed, in its place in this phone's chain
-   * of that scope, and keeps it with the entry. Sending it again (after a
-   * lost answer, after a restart) sends these very bytes: the server takes
-   * the same event once.
+   * Sends what this phone still owes its server, in the order it was
+   * written. Each entry waits until the server answers its operation:
+   * accepted or a duplicate is sent, rejected is refused with the server's
+   * reason. Anything else keeps it waiting, and is written to the send log.
+   * A line that belongs to a message goes only once the message is taken,
+   * and goes with it when it is refused.
    */
-  async function mintHubEntry(entry) {
-    const api = globalThis.AccordHubClient;
+  async function flushOutboxToServer(entries) {
     const client = hubClient();
-    if (!api || !client) throw new Error("This phone is not paired with a server.");
-    const identity = await hubIdentity();
-    const shape = hubEventShape(entry);
-    let payload = await hubEventPayload(entry, client);
-    const json = JSON.stringify(payload);
-    if (new TextEncoder().encode(json).length > HUB_INLINE_PAYLOAD_BYTES) {
-      const uploading = client.uploadBlob(new TextEncoder().encode(json));
-      noteHandOverRequestStarted();
-      payload = await uploading;
-    }
-    const headKey = HUB_HEAD_META_PREFIX + shape.logScopeId;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const head = hubHeadFor(await readMetaRecord(headKey), identity.deviceId);
-      const seq = head.seq + 1;
-      const event = await api.mintHubEvent(identity, {
-        eventId: entry.eventId,
-        conversationId: shape.kind === "device.enrolled" ? "device-enrollment" : entry.conversationId,
-        logScopeId: shape.logScopeId,
-        kind: shape.kind,
-        payload: payload,
-        originSeq: seq,
-        ...(head.hash ? { prevHash: head.hash } : {}),
-        logicalTs: await hubLogicalTs(identity.deviceId),
-        createdAt: entry.createdAt
-      });
-      const minted = { ...entry, logScopeId: shape.logScopeId, minted: event, updatedAt: nowIso() };
-      // The event and the chain's new head land together, or neither does.
-      const taken = await eventLogPort().runAtomic([OUTBOX_STORE, META_STORE], function (tx) {
-        return tx.get(META_STORE, headKey).then(function (current) {
-          if (hubHeadFor(current, identity.deviceId).seq !== seq - 1) return false;
-          return tx.get(OUTBOX_STORE, entry.eventId).then(function (stored) {
-            if (stored && stored.minted && stored.minted.originId === identity.deviceId) return false;
-            return tx.put(OUTBOX_STORE, minted).then(function () {
-              return tx.put(META_STORE, { key: headKey, seq: seq, hash: event.eventHash, deviceId: identity.deviceId });
-            }).then(function () { return true; });
-          });
-        });
-      });
-      if (taken) {
-        noteOutboxStatus(minted);
-        return minted;
-      }
-      const stored = (await listOutboxEntries()).find(function (item) { return item.eventId === entry.eventId; });
-      if (stored && stored.minted && stored.minted.originId === identity.deviceId) return stored;
-    }
-    throw new Error("Could not place this in the phone's queue.");
-  }
-
-  function forgetHubHeads() {
-    return withNamedStore(META_STORE, "readwrite", function (store) {
-      store.delete(IDBKeyRange.bound(HUB_HEAD_META_PREFIX, HUB_HEAD_META_PREFIX + "\uffff"));
-    });
-  }
-
-  /** Where this phone's chain in a scope stands, for its current identity: a
-   *  phone paired again starts its chains afresh (a head without an owner is
-   *  from before heads named one, so it is the identity's own). */
-  function hubHeadFor(record, deviceId) {
-    if (!record || (record.deviceId && record.deviceId !== deviceId)) return { seq: 0, hash: undefined };
-    return { seq: Number(record.seq) || 0, hash: record.hash };
-  }
-
-  /** The server refused an event (it never will take it): what this phone
-   *  minted after it in the same chain is minted again from the event before
-   *  it, so one refusal does not hold every later message back. */
-  async function rechainAfterRefusal(refused) {
-    return rechainFrom(refused, false);
-  }
-
-  /** The chain in this entry's scope is minted again from where the entry
-   *  stands (`including` it), or after it (it is refused). */
-  async function rechainFrom(refused, including) {
-    const identity = await hubIdentity();
-    const scope = refused.minted && refused.minted.logScopeId;
-    if (!scope || refused.minted.originId !== identity.deviceId) return;
-    const headKey = HUB_HEAD_META_PREFIX + scope;
-    const later = (await listOutboxEntries()).filter(function (item) {
-      return item.minted && item.minted.logScopeId === scope && item.minted.originId === identity.deviceId &&
-        (including ? item.minted.originSeq >= refused.minted.originSeq : item.minted.originSeq > refused.minted.originSeq) && item.status !== "acked";
-    });
-    await eventLogPort().runAtomic([OUTBOX_STORE, META_STORE], function (tx) {
-      return tx.get(META_STORE, headKey).then(function (current) {
-        // Already moved past (another flush did this): nothing to undo.
-        if (hubHeadFor(current, identity.deviceId).seq < refused.minted.originSeq) return undefined;
-        let chain = Promise.resolve();
-        for (const item of later) {
-          const { minted: _minted, ...unminted } = item;
-          chain = chain.then(function () { return tx.put(OUTBOX_STORE, { ...unminted, status: "waiting-to-sync", updatedAt: nowIso() }); });
+    let owed = entries.filter(function (entry) { return entry.hub && serverOwesEntry(entry); })
+      .sort(function (left, right) { return outboxOrderOf(left) - outboxOrderOf(right) || String(left.eventId).localeCompare(String(right.eventId)); });
+    if (!client) return { status: "unreachable", sent: 0, pending: owed.length };
+    let sent = 0;
+    const total = owed.length;
+    const statusOf = new Map(entries.map(function (entry) { return [entry.eventId, entry.status]; }));
+    // A line goes once what it belongs to is taken, so a pass may free more.
+    for (let pass = 0; pass < 3 && owed.length > 0; pass += 1) {
+      const ready = [];
+      const later = [];
+      for (const entry of owed) {
+        const parent = entry.dependsOn ? statusOf.get(entry.dependsOn) : undefined;
+        if (entry.dependsOn && parent === OUTBOX_REFUSED) {
+          await settleOutboxEntry(entry, { status: OUTBOX_REFUSED, lastError: "The message it belongs to was not taken." });
+          continue;
         }
-        return chain.then(function () {
-          return tx.put(META_STORE, { key: headKey, seq: refused.minted.originSeq - 1, hash: refused.minted.prevHash, deviceId: identity.deviceId });
+        if (entry.dependsOn && parent !== undefined && parent !== OUTBOX_SENT) {
+          later.push(entry);
+          continue;
+        }
+        try {
+          const op = await operationOf(entry, client);
+          const bytes = new TextEncoder().encode(JSON.stringify(op)).length;
+          const most = Number(globalThis.AccordHubClient && globalThis.AccordHubClient.HUB_OP_MAX_BYTES) || HUB_OP_MAX_BYTES_FALLBACK;
+          if (bytes > most) {
+            const reason = "It is too large for your server to take (" + Math.ceil(bytes / 1024 / 1024) + " MB; it takes " + Math.floor(most / 1024 / 1024) + " MB at most).";
+            await settleOutboxEntry(entry, { status: OUTBOX_REFUSED, lastError: reason });
+            await recordSendFailure(sendFailureRecord(entry, { cause: "phone", reason: reason }));
+            statusOf.set(entry.eventId, OUTBOX_REFUSED);
+            continue;
+          }
+          ready.push({ entry: entry, op: op, bytes: bytes });
+        } catch (error) {
+          await noteFailedAttempt(entry, sendFailureOf(error));
+          if (error && (error.unreachable || typeof error.status === "number")) {
+            return { status: error.unreachable ? "unreachable" : "waiting-to-sync", sent: sent, pending: total - sent };
+          }
+        }
+      }
+      if (ready.length === 0) {
+        owed = later;
+        continue;
+      }
+      const pages = [];
+      for (const item of ready) {
+        const last = pages[pages.length - 1];
+        if (last && last.items.length < HUB_OPS_PAGE && last.bytes + item.bytes <= HUB_OPS_PAGE_BYTES) {
+          last.items.push(item);
+          last.bytes += item.bytes;
+        } else {
+          pages.push({ items: [item], bytes: item.bytes });
+        }
+      }
+      for (const { items: page } of pages) {
+        let response;
+        try {
+          const posting = client.postOps(page.map(function (item) { return item.op; }));
+          noteHandOverRequestStarted();
+          response = await posting;
+        } catch (error) {
+          const failure = sendFailureOf(error);
+          for (const item of page) await noteFailedAttempt(item.entry, failure);
+          return { status: failure.cause === "network" || failure.cause === "timeout" ? "unreachable" : "waiting-to-sync", sent: sent, pending: total - sent };
+        }
+        const results = new Map((Array.isArray(response && response.results) ? response.results : []).map(function (result) { return [result && result.opId, result]; }));
+        for (const item of page) {
+          const result = results.get(item.op.opId);
+          if (result && (result.status === "accepted" || result.status === "duplicate")) {
+            await settleOutboxEntry(item.entry, { status: OUTBOX_SENT, ack: { seq: result.seq, status: result.status } });
+            statusOf.set(item.entry.eventId, OUTBOX_SENT);
+            sent += 1;
+          } else if (result && result.status === "rejected") {
+            const reason = String(result.reason || "No reason was given.");
+            await settleOutboxEntry(item.entry, { status: OUTBOX_REFUSED, lastError: reason });
+            await recordSendFailure(sendFailureRecord(item.entry, { cause: "refused", reason: "Your server did not take it: " + reason }));
+            statusOf.set(item.entry.eventId, OUTBOX_REFUSED);
+          } else {
+            await noteFailedAttempt(item.entry, { cause: "http", reason: "Your server answered without a word about it." });
+          }
+        }
+      }
+      owed = later;
+    }
+    return { status: sent === total ? "synced" : "waiting-to-sync", sent: sent, pending: total - sent };
+  }
+
+  /** The server answered an entry: what it said is written on the entry,
+   *  unless the entry was answered or replaced meanwhile. */
+  function settleOutboxEntry(entry, patch) {
+    return updateOutboxEntry(entry.eventId, function (stored) {
+      if (!serverOwesEntry(stored)) return undefined;
+      return { ...stored, ...patch, attempts: (Number(stored.attempts) || 0) + 1, updatedAt: nowIso(),
+        ...(patch.status === OUTBOX_SENT ? { lastError: undefined } : {}) };
+    });
+  }
+
+  /** An attempt that got no answer: the entry keeps waiting, says why, and
+   *  the attempt goes into the send log. */
+  async function noteFailedAttempt(entry, failure) {
+    let attempts = (Number(entry.attempts) || 0) + 1;
+    await updateOutboxEntry(entry.eventId, function (stored) {
+      if (!serverOwesEntry(stored)) return undefined;
+      attempts = (Number(stored.attempts) || 0) + 1;
+      return { ...stored, status: OUTBOX_QUEUED, attempts: attempts, updatedAt: nowIso(), lastError: failure.reason, failedAt: nowIso() };
+    }).catch(function () { return undefined; });
+    await recordSendFailure(sendFailureRecord(entry, failure, attempts));
+  }
+
+  /** Entries the server answered, and those replaced, are kept a week (their
+   *  bubbles, the marks of answers), then let go. */
+  async function pruneSentHubEntries() {
+    const cutoff = Date.now() - HUB_SENT_KEEP_MS;
+    const entries = await listOutboxEntries();
+    for (const entry of entries) {
+      if (entry.hub && !serverOwesEntry(entry) && Date.parse(entry.updatedAt || entry.createdAt) < cutoff) {
+        await withOutbox("readwrite", function (store) { return requestToPromise(store.delete(entry.eventId)); }).catch(function () { return undefined; });
+      }
+    }
+  }
+
+  /**
+   * Once, on a phone that queued in the old way (each change a signed event
+   * in its own chain): what it still owes becomes the operation it was, and
+   * what only the chains needed goes — the phone's certificate event (the
+   * desktop learns a phone from the server's roster now), the signed copies,
+   * where each chain stood and its clock. Nothing is sent the old way.
+   */
+  const QUEUE_RETIRED_KEY = "accordagents.mobile.queueOps.v1";
+
+  async function retireSignedChains() {
+    if (localStorage.getItem(QUEUE_RETIRED_KEY) === "1") return;
+    const entries = await listOutboxEntries();
+    const kept = [];
+    const dropped = [];
+    for (const entry of entries) {
+      if (entry.ops === 3) continue;
+      const { minted: _minted, logScopeId: _scope, ...rest } = entry;
+      const base = { ...rest, ops: 3, order: outboxOrderOf(entry) };
+      if (entry.kind === "device.enrolled") {
+        dropped.push(entry.eventId);
+        continue;
+      }
+      if (!serverOwesEntry(entry)) {
+        kept.push(base);
+        continue;
+      }
+      const owed = { ...base, status: OUTBOX_QUEUED };
+      if (!entry.kind || entry.kind === "message.created") {
+        kept.push(owed);
+        // Its lines for names that are no members were part of its old
+        // event; they go behind it as their own operations.
+        for (const handle of (entry.hubDelivery && entry.hubDelivery.unknownHandles) || []) {
+          const noteId = createEventId();
+          const threadRootId = entry.payload && typeof entry.payload.threadRootId === "string" && entry.payload.threadRootId ? entry.payload.threadRootId : undefined;
+          kept.push({
+            eventId: noteId, conversationId: entry.conversationId, kind: "message.system", createdAt: entry.createdAt, order: outboxOrderOf(entry) + 1,
+            status: OUTBOX_QUEUED, attempts: 0, updatedAt: nowIso(), hub: true, ops: 3, dependsOn: entry.eventId,
+            payload: { message: { id: noteId, role: "system", content: "No member named @" + handle + ".", createdAt: entry.createdAt, status: "done",
+              metadata: { threadId: entry.eventId, parentMessageId: entry.eventId, ...(threadRootId ? { chatThreadRootId: threadRootId } : {}) } } }
+          });
+        }
+        continue;
+      }
+      if (entry.kind === "run.cancel.requested") {
+        const runId = String(entry.payload && entry.payload.runId || "");
+        const phoneTurn = /^phone-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-(.+)$/i.exec(runId);
+        const turn = phoneTurn
+          ? { runId: globalThis.AccordHubClient.hubTurnRunId(phoneTurn[1], phoneTurn[2]), rowRunId: runId, messageId: phoneTurn[1], participantId: phoneTurn[2] }
+          : runId ? await turnOfRun(entry.conversationId, runId) : undefined;
+        kept.push(turn
+          ? { ...owed, kind: "turn.stop", payload: turn }
+          : { ...owed, status: OUTBOX_REFUSED, lastError: "This Stop was queued by an earlier version of the app and could not be sent." });
+        continue;
+      }
+      if (entry.kind === "permission.decided" || entry.kind === "choice.answered") {
+        const payload = entry.payload || {};
+        const detail = payload.detail || {};
+        const cardId = String(payload.targetKey || "").replace(/^(approval|choice):/, "");
+        const answer = entry.kind === "permission.decided"
+          ? { approve: detail.approve === true, ...(detail.codexDecisionId ? { codexDecisionId: detail.codexDecisionId } : {}), ...(detail.draftOverride ? { draftOverride: detail.draftOverride } : {}) }
+          : { ...(detail.selectedOptionId ? { selectedOptionId: detail.selectedOptionId } : {}), ...(detail.customAnswer !== undefined ? { customAnswer: detail.customAnswer } : {}),
+            ...(detail.note !== undefined ? { note: detail.note } : {}), ...(detail.cancel ? { cancel: true } : {}) };
+        kept.push(cardId
+          ? { ...owed, kind: "card.answer", payload: { cardId: cardId, cardKind: entry.kind === "permission.decided" ? "permission" : "choice", answer: answer } }
+          : { ...owed, status: OUTBOX_REFUSED, lastError: "This answer was queued by an earlier version of the app and could not be sent." });
+        continue;
+      }
+      kept.push({ ...owed, status: OUTBOX_REFUSED, lastError: "This was queued by an earlier version of the app and could not be sent." });
+    }
+    await eventLogPort().runAtomic([OUTBOX_STORE, META_STORE], function (tx) {
+      let chain = Promise.resolve();
+      for (const eventId of dropped) chain = chain.then(function () { return tx.remove(OUTBOX_STORE, eventId); });
+      for (const entry of kept) chain = chain.then(function () { return tx.put(OUTBOX_STORE, entry); });
+      return chain.then(function () {
+        return tx.removeWhere(META_STORE, function (record) {
+          const key = record && typeof record.key === "string" ? record.key : "";
+          return key === OLD_CHAIN_CLOCK_META_KEY || key.indexOf(OLD_CHAIN_HEAD_META_PREFIX) === 0;
         });
       });
     });
-    for (const item of later) noteOutboxStatus({ ...item, status: "waiting-to-sync" });
+    for (const entry of kept) noteOutboxStatus(entry);
+    localStorage.setItem(QUEUE_RETIRED_KEY, "1");
+    recordRelayDebug({ event: "queue-retired", converted: kept.length, dropped: dropped.length });
+  }
+
+  // --- the send log (agreement Д12) -----------------------------------------
+  // Every attempt to send that failed — no connection, a timeout, an error
+  // answer, the server refusing it — with when, what was sent (its kind, its
+  // chat, a little of its text) and why. Kept on this phone, the newest
+  // SEND_FAILURES_KEPT, and shown from the chat's header and from Settings.
+
+  const SEND_FAILURES_STORE = "sendFailures";
+  const SEND_FAILURES_KEPT = 200;
+  const SEND_FAILURE_TEXT_CHARS = 80;
+  // When the User last opened the log: the header points at it while a send
+  // is failing, or after a refusal she has not seen.
+  const SEND_LOG_SEEN_KEY = "accordagents.mobile.sendLogSeenAt.v1";
+  let sendLogNewestAt = "";
+  let sendLogNewestRefusalAt = "";
+  let sendLogCount = 0;
+
+  /** What an entry is, for the log: its kind, its chat and a little of it. */
+  function sendFailureRecord(entry, failure, attempt) {
+    const payload = entry.payload || {};
+    let text = "";
+    if (entry.kind === "message.created" || !entry.kind) {
+      text = String(payload.content || "").replace(/\s+/g, " ").trim() || (Array.isArray(payload.attachments) && payload.attachments.length ? "A picture" : "");
+    } else if (entry.kind === "message.system") {
+      text = String(payload.message && payload.message.content || "");
+    } else if (entry.kind === "turn.stop") {
+      const chat = loadChats().find(function (item) { return item.id === entry.conversationId; });
+      const member = chat && Array.isArray(chat.members) ? chat.members.find(function (item) { return item.id === payload.participantId; }) : undefined;
+      text = "Stop" + (member ? " @" + member.handle : "");
+    } else if (entry.kind === "card.answer") {
+      text = String(payload.label || "Your answer");
+    }
+    return {
+      entryId: entry.eventId,
+      kind: entry.kind || "message.created",
+      conversationId: entry.conversationId,
+      text: text.length > SEND_FAILURE_TEXT_CHARS ? text.slice(0, SEND_FAILURE_TEXT_CHARS - 1) + "\u2026" : text,
+      cause: failure.cause,
+      reason: failure.reason,
+      ...(attempt ? { attempt: attempt } : {})
+    };
+  }
+
+  /** Writes one failed attempt, and lets go of the oldest past the bound. A
+   *  log that cannot be written never stops the sending it describes. */
+  function recordSendFailure(record) {
+    const at = nowIso();
+    const chat = loadChats().find(function (item) { return item.id === record.conversationId; });
+    const stored = { ...record, at: at, ...(chat && chat.title ? { chatTitle: chat.title } : {}) };
+    sendLogNewestAt = at;
+    if (record.cause === "refused") sendLogNewestRefusalAt = at;
+    recordRelayDebug({ event: "send-failure", kind: record.kind, cause: record.cause, reason: record.reason });
+    return withNamedStore(SEND_FAILURES_STORE, "readwrite", function (store) {
+      store.add(stored);
+      const counting = store.count();
+      counting.onsuccess = function () {
+        let extra = Number(counting.result) - SEND_FAILURES_KEPT;
+        sendLogCount = Math.min(SEND_FAILURES_KEPT, Number(counting.result) || 0);
+        if (extra <= 0) return;
+        // The oldest first: the keys count up as attempts are written.
+        const oldest = store.openCursor();
+        oldest.onsuccess = function () {
+          const row = oldest.result;
+          if (!row || extra <= 0) return;
+          row.delete();
+          extra -= 1;
+          row.continue();
+        };
+      };
+    }).then(function () {
+      lastSettingsRenderSignature = "";
+    }, function () { return undefined; });
+  }
+
+  /** The log, newest first. */
+  function listSendFailures() {
+    return withNamedStore(SEND_FAILURES_STORE, "readonly", function (store) {
+      return requestToPromise(store.getAll());
+    }).then(function (rows) {
+      const list = Array.isArray(rows) ? rows.slice().reverse() : [];
+      sendLogCount = list.length;
+      if (list[0] && list[0].at > sendLogNewestAt) sendLogNewestAt = list[0].at;
+      const refusal = list.find(function (row) { return row.cause === "refused"; });
+      if (refusal && refusal.at > sendLogNewestRefusalAt) sendLogNewestRefusalAt = refusal.at;
+      return list;
+    }).catch(function () { return []; });
+  }
+
+  /** How many queue entries still wait for the server, and whether one of
+   *  them has failed an attempt (the header then points at the log). */
+  function owedSummary() {
+    let owed = 0;
+    let failing = 0;
+    for (const held of outboxStatusById.values()) {
+      if (!serverOwesEntry(held)) continue;
+      owed += 1;
+      if (held.failedAt) failing += 1;
+    }
+    return { owed: owed, failing: failing };
+  }
+
+  function sendLogSeenAt() {
+    try {
+      return localStorage.getItem(SEND_LOG_SEEN_KEY) || "";
+    } catch {
+      return "";
+    }
+  }
+
+  /** The way to the log from the chat's header, beside where it says whether
+   *  the phone is connected: there while a send is failing, and after a
+   *  refusal the User has not looked at. Its place is the header's spacer
+   *  otherwise, so the title does not move. */
+  function renderSendLogButton() {
+    const button = document.getElementById("send-log-button");
+    const spacer = document.getElementById("send-log-spacer");
+    if (!button) return;
+    const summary = owedSummary();
+    const unseenRefusal = Boolean(sendLogNewestRefusalAt) && sendLogNewestRefusalAt > sendLogSeenAt();
+    const shown = isHubPairing(loadPairing()) && (summary.failing > 0 || unseenRefusal);
+    button.hidden = !shown;
+    if (spacer) spacer.hidden = shown;
+    button.setAttribute("aria-label", summary.failing > 0
+      ? "Send log: " + (summary.failing === 1 ? "something you sent has" : summary.failing + " things you sent have") + " not reached your server yet"
+      : "Send log: your server did not take something you sent");
+  }
+
+  function sendLogKindLabel(record) {
+    if (record.kind === "turn.stop") return "";
+    if (record.kind === "card.answer") return "Answer: ";
+    if (record.kind === "message.system") return "Note ";
+    return "Message ";
+  }
+
+  let sendLogDayFormatter;
+  function sendLogTime(iso) {
+    const time = Date.parse(iso || "");
+    if (!Number.isFinite(time)) return "";
+    if (new Date(time).toDateString() === new Date().toDateString()) return formatClockTime(iso);
+    if (!sendLogDayFormatter) sendLogDayFormatter = new Intl.DateTimeFormat([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+    return sendLogDayFormatter.format(new Date(time));
+  }
+
+  /** The log's rows: tries of one thing that failed the same way one after
+   *  another are one row, with how many and from when to when. */
+  function groupSendFailures(records) {
+    const groups = [];
+    for (const record of records) {
+      const last = groups[groups.length - 1];
+      if (last && record.entryId && last.entryId === record.entryId && last.reason === record.reason) {
+        last.count += 1;
+        last.firstAt = record.at;
+        continue;
+      }
+      groups.push({ ...record, count: 1, firstAt: record.at, lastAt: record.at });
+    }
+    return groups;
+  }
+
+  let sendLogRenderToken = 0;
+
+  /** Opens the send log: every attempt that failed, newest first, with what
+   *  it was, its chat, and why. */
+  async function openSendLog() {
+    const sheet = document.getElementById("send-log-sheet");
+    const list = document.getElementById("send-log-list");
+    const summaryNode = document.getElementById("send-log-summary");
+    if (!sheet || !list) return;
+    const token = ++sendLogRenderToken;
+    const records = await listSendFailures();
+    if (token !== sendLogRenderToken) return;
+    try {
+      localStorage.setItem(SEND_LOG_SEEN_KEY, nowIso());
+    } catch {
+      // The header keeps pointing here a little longer.
+    }
+    const summary = owedSummary();
+    if (summaryNode) {
+      summaryNode.textContent = summary.owed > 0
+        ? (summary.owed === 1 ? "1 thing you sent has" : summary.owed + " things you sent have") + " not reached your server yet. It is tried again while the app is open."
+        : "Everything you sent has reached your server.";
+    }
+    list.replaceChildren();
+    if (records.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "members-sheet-empty";
+      empty.textContent = "Nothing failed to send.";
+      list.append(empty);
+    }
+    for (const group of groupSendFailures(records)) {
+      const row = document.createElement("div");
+      row.className = "send-log-row";
+      row.dataset.cause = group.cause || "";
+      row.dataset.entryId = group.entryId || "";
+      const head = document.createElement("span");
+      head.className = "send-log-when";
+      head.textContent = [sendLogTime(group.lastAt), group.chatTitle].filter(Boolean).join(" · ");
+      const what = document.createElement("strong");
+      what.className = "send-log-what";
+      const label = sendLogKindLabel(group);
+      what.textContent = group.kind === "message.created" || group.kind === "message.system"
+        ? label + "\u201c" + (group.text || "") + "\u201d"
+        : label + (group.text || "");
+      const why = document.createElement("span");
+      why.className = "send-log-why";
+      why.textContent = group.reason || "";
+      row.append(head, what, why);
+      if (group.count > 1) {
+        const count = document.createElement("span");
+        count.className = "send-log-count";
+        count.textContent = group.count + " tries, " + sendLogTime(group.firstAt) + "\u2013" + sendLogTime(group.lastAt);
+        row.append(count);
+      }
+      list.append(row);
+    }
+    const footer = document.createElement("div");
+    footer.className = "send-log-footer";
+    footer.textContent = "This phone keeps the newest " + SEND_FAILURES_KEPT + " failed tries.";
+    list.append(footer);
+    sheet.hidden = false;
+    applyDock();
+    renderSendLogButton();
+  }
+
+  function closeSendLog() {
+    sendLogRenderToken += 1;
+    const sheet = document.getElementById("send-log-sheet");
+    if (sheet) sheet.hidden = true;
+    applyDock();
+    renderSendLogButton();
+  }
+
+  function wireSendLog() {
+    const button = document.getElementById("send-log-button");
+    const sheet = document.getElementById("send-log-sheet");
+    const close = document.getElementById("send-log-close");
+    button?.addEventListener("click", function () { void openSendLog(); });
+    close?.addEventListener("click", closeSendLog);
+    sheet?.addEventListener("click", function (event) {
+      if (event.target instanceof Element && event.target.dataset.sendLogClose === "1") closeSendLog();
+    });
   }
 
   // Who waits for this phone's part of the next hand-over to be done.
   let handOverWaiters = [];
 
-  /** Called as the first request of a hand-over is started (the events, or a
-   *  body too large to travel inline with them): the queue is written and
-   *  the events minted and signed. The request itself is not sent yet — its
-   *  own signature and the network still follow, asynchronously. */
+  /** Called as the first request of a hand-over is started (the operations,
+   *  or a picture put up before the message that names it): the queue is
+   *  written. The request itself is not sent yet — its signature and the
+   *  network still follow, asynchronously. */
   function noteHandOverRequestStarted() {
     const waiters = handOverWaiters;
     handOverWaiters = [];
@@ -2438,8 +2943,8 @@
   }
 
   // The longest a redraw after a send waits for the hand-over to start. The
-  // wait is the phone's own work (its queue, the stamp, the signature), tens
-  // of milliseconds; this only bounds a store that has stalled.
+  // wait is the phone's own work (its queue, the signature), tens of
+  // milliseconds; this only bounds a store that has stalled.
   const SEND_BEFORE_DRAW_MAX_MS = 1_000;
 
   /** What the User just did goes to the server before the chat is drawn
@@ -2462,120 +2967,6 @@
         clearTimeout(timer);
         handOverWaiters = handOverWaiters.filter(function (item) { return item !== waiter; });
       });
-  }
-
-  /**
-   * Sends what this phone still owes its server, in the order it was written.
-   * Each entry is acknowledged only when the server says it holds it
-   * (accepted, or already there); until then it stays queued here and is
-   * offered again.
-   */
-  async function flushOutboxViaHub(entries) {
-    const client = hubClient();
-    const pending = entries.filter(function (entry) { return entry.hub && desktopOwesEntry(entry); });
-    if (!client || pending.length === 0) return { status: client ? "synced" : "unreachable", sent: 0, pending: pending.length };
-    let sent = 0;
-    const minted = [];
-    const identity = await hubIdentity();
-    for (const entry of pending) {
-      try {
-        // An entry minted under an identity this phone no longer pairs with
-        // (paired again) is minted again under the current one.
-        minted.push(entry.minted && entry.minted.originId === identity.deviceId ? entry : await mintHubEntry(entry));
-      } catch (error) {
-        await putOutboxEntry({ ...entry, status: "waiting-to-sync", updatedAt: nowIso(), lastError: String(error && error.message || error) });
-        return { status: error && error.unreachable ? "unreachable" : "waiting-to-sync", sent: sent, pending: pending.length - sent };
-      }
-    }
-    for (let start = 0; start < minted.length; start += HUB_PUSH_PAGE) {
-      const page = minted.slice(start, start + HUB_PUSH_PAGE);
-      let response;
-      try {
-        const pushing = client.pushEvents(page.map(function (entry) { return entry.minted; }));
-        noteHandOverRequestStarted();
-        response = await pushing;
-        response = await repairHubGaps(client, page, response);
-      } catch (error) {
-        for (const entry of page) await putOutboxEntry({ ...entry, status: "waiting-to-sync", updatedAt: nowIso(), lastError: String(error && error.message || error) });
-        return { status: error && error.unreachable ? "unreachable" : "waiting-to-sync", sent: sent, pending: pending.length - sent };
-      }
-      const results = Array.isArray(response && response.results) ? response.results : [];
-      const refused = [];
-      for (const [index, entry] of page.entries()) {
-        const result = results[index] || {};
-        if (result.status === "accepted" || result.status === "duplicate") {
-          await putOutboxEntry({ ...entry, status: "acked", ack: { hubSeq: result.hubSeq, ackRole: "server" }, updatedAt: nowIso(), lastError: undefined });
-          sent += 1;
-        } else if (result.status === "rejected" || result.status === "conflict") {
-          await putOutboxEntry({ ...entry, status: "refused", attempts: entry.attempts + 1, updatedAt: nowIso(), lastError: result.error || result.status });
-          refused.push(entry);
-        } else {
-          await putOutboxEntry({ ...entry, status: "waiting-to-sync", attempts: entry.attempts + 1, updatedAt: nowIso(), lastError: result.status || "not taken" });
-        }
-      }
-      // The server has nothing of a chain this phone minted further along
-      // (its record of where the chain stood was not this key's): the chain
-      // starts again at the beginning, as the server expects.
-      const restarts = new Map();
-      for (const [index, entry] of page.entries()) {
-        const result = results[index] || {};
-        if (result.status !== "gap" || Number(result.expectedSeq) !== 1 || !entry.minted || entry.minted.originSeq <= 1) continue;
-        const known = restarts.get(entry.minted.logScopeId);
-        if (!known || entry.minted.originSeq < known.minted.originSeq) restarts.set(entry.minted.logScopeId, entry);
-      }
-      for (const entry of restarts.values()) {
-        const ours = (await listOutboxEntries()).some(function (item) {
-          return item.minted && item.minted.logScopeId === entry.minted.logScopeId && item.minted.originId === entry.minted.originId && item.minted.originSeq === 1;
-        });
-        if (!ours) await rechainFrom({ ...entry, minted: { ...entry.minted, originSeq: 1, prevHash: undefined } }, true).catch(function () { return undefined; });
-      }
-      // The earliest refusal in each chain decides where it is minted again.
-      const firstRefusal = new Map();
-      for (const entry of refused) {
-        const known = firstRefusal.get(entry.minted.logScopeId);
-        if (!known || entry.minted.originSeq < known.minted.originSeq) firstRefusal.set(entry.minted.logScopeId, entry);
-      }
-      for (const entry of firstRefusal.values()) await rechainAfterRefusal(entry).catch(function () { return undefined; });
-      // Minted again: the next pages hold copies from before, so this pass
-      // ends here and the next one reads the queue afresh.
-      if (restarts.size > 0 || firstRefusal.size > 0) {
-        return { status: "waiting-to-sync", sent: sent, pending: pending.length - sent };
-      }
-    }
-    return { status: sent === pending.length ? "synced" : "waiting-to-sync", sent: sent, pending: pending.length - sent };
-  }
-
-  /** A server missing the start of a chain (restored from an older copy) is
-   *  given it again from what this phone still keeps, then the page again. */
-  async function repairHubGaps(client, page, response) {
-    const results = Array.isArray(response && response.results) ? response.results : [];
-    const gaps = new Map();
-    results.forEach(function (result, index) {
-      if (result && result.status === "gap" && page[index]) gaps.set(page[index].logScopeId, Number(result.expectedSeq) || 1);
-    });
-    if (gaps.size === 0) return response;
-    const kept = await listOutboxEntries();
-    const identity = await hubIdentity();
-    for (const [scope, fromSeq] of gaps) {
-      const chain = kept.filter(function (entry) {
-        return entry.minted && entry.minted.logScopeId === scope && entry.minted.originSeq >= fromSeq &&
-          entry.minted.originId === identity.deviceId && entry.status !== "refused" &&
-          !page.some(function (item) { return item.eventId === entry.eventId; });
-      }).sort(function (left, right) { return left.minted.originSeq - right.minted.originSeq; });
-      if (chain.length) await client.pushEvents(chain.map(function (entry) { return entry.minted; }));
-    }
-    return client.pushEvents(page.map(function (entry) { return entry.minted; }));
-  }
-
-  /** Sent entries are kept a week (see HUB_SENT_KEEP_MS), then let go. */
-  async function pruneSentHubEntries() {
-    const cutoff = Date.now() - HUB_SENT_KEEP_MS;
-    const entries = await listOutboxEntries();
-    for (const entry of entries) {
-      if (entry.hub && entry.status === "acked" && Date.parse(entry.updatedAt || entry.createdAt) < cutoff) {
-        await withOutbox("readwrite", function (store) { return requestToPromise(store.delete(entry.eventId)); }).catch(function () { return undefined; });
-      }
-    }
   }
 
   /** The app is open and showing what happened: the notices so far are
@@ -2755,22 +3146,55 @@
     return requestTimelineFromServer(conversationId, options);
   }
 
-  // A queue entry the desktop did not take at the time is offered again while
-  // the phone is open, not only when the User next acts in that chat.
-  const OUTBOX_RETRY_MIN_MS = 30_000;
-  let lastOutboxRetryAt = 0;
+  // While the app is open, what the server has not answered is offered again:
+  // two seconds after an attempt that got no answer, then twice as long each
+  // time, up to half a minute. A send, the network coming back and the app
+  // coming to the front each try at once, and the pauses start over.
+  const OUTBOX_RETRY_FIRST_MS = 2_000;
+  const OUTBOX_RETRY_MAX_MS = 30_000;
+  let outboxRetryTimer;
+  let outboxRetryDelayMs = 0;
 
-  function retryPendingOutbox() {
-    if (activeFlushOutboxPromise || Date.now() - lastOutboxRetryAt < OUTBOX_RETRY_MIN_MS) return Promise.resolve();
-    let pending = false;
+  function outboxOwesAnything() {
     for (const held of outboxStatusById.values()) {
-      if (desktopOwesEntry(held)) { pending = true; break; }
+      if (serverOwesEntry(held)) return true;
     }
-    if (!pending) return Promise.resolve();
-    lastOutboxRetryAt = Date.now();
-    return flushOutbox().then(function (result) {
-      return result && result.sent > 0 ? render(result.status) : undefined;
-    }).catch(function () { return undefined; });
+    return false;
+  }
+
+  /** After every attempt: the next one, if anything still waits. */
+  function scheduleOutboxRetry() {
+    if (outboxRetryTimer) {
+      clearTimeout(outboxRetryTimer);
+      outboxRetryTimer = undefined;
+    }
+    // A phone removed from the server sends nothing until it is paired again.
+    if (!outboxOwesAnything() || !isHubPairing(loadPairing()) || (hubPairingState && hubPairingState.status === "revoked")) {
+      outboxRetryDelayMs = 0;
+      return;
+    }
+    outboxRetryDelayMs = outboxRetryDelayMs ? Math.min(OUTBOX_RETRY_MAX_MS, outboxRetryDelayMs * 2) : OUTBOX_RETRY_FIRST_MS;
+    outboxRetryTimer = setTimeout(function () {
+      outboxRetryTimer = undefined;
+      // An app in the background is not open: coming back tries at once.
+      if (document.visibilityState === "hidden") return;
+      void flushOutbox().then(function (result) { return render(result && result.status); }).catch(function () { return undefined; });
+    }, outboxRetryDelayMs);
+  }
+
+  /** Tries now, and the pauses start over. */
+  function retryOutboxNow() {
+    outboxRetryDelayMs = 0;
+    return flushOutbox();
+  }
+
+  /** The app's own tick: an entry still waiting with no attempt on its way
+   *  and none planned (the page was in the background when one was due)
+   *  gets its next one. */
+  function retryPendingOutbox() {
+    if (activeFlushOutboxPromise || outboxRetryTimer || document.visibilityState === "hidden" || !outboxOwesAnything()) return Promise.resolve();
+    scheduleOutboxRetry();
+    return Promise.resolve();
   }
 
   // "Nothing new" and "still looking" must not look the same. The banner waits
@@ -2846,6 +3270,7 @@
         ...(typeof event.mobileEventId === "string" && event.mobileEventId ? { mobileEventId: event.mobileEventId } : {}),
         ...(typeof event.participantLabel === "string" && event.participantLabel ? { participantLabel: event.participantLabel } : {}),
         ...(typeof event.participantId === "string" && event.participantId ? { participantId: event.participantId } : {}),
+        ...(typeof event.sourceMessageId === "string" && event.sourceMessageId ? { sourceMessageId: event.sourceMessageId } : {}),
         ...(typeof event.threadRootId === "string" && event.threadRootId ? { threadRootId: event.threadRootId } : {})
       });
     }
@@ -2908,6 +3333,7 @@
           role: "participant",
           participantLabel: row.participantLabel,
           participantId: row.participantId,
+          sourceMessageId: row.sourceMessageId,
           content: row.content,
           status: row.status,
           createdAt: row.createdAt,
@@ -3434,6 +3860,13 @@
         // unaddressed message to the member that spoke last by.
         ...(typeof event.participantId === "string" && event.participantId ? { participantId: event.participantId } : {}),
         ...(typeof event.threadId === "string" && event.threadId ? { threadId: event.threadId } : {}),
+        // The message a member's turn answers: with its run and member, what
+        // a Stop names the turn on the server by.
+        ...(typeof event.sourceMessageId === "string" && event.sourceMessageId ? { sourceMessageId: event.sourceMessageId } : {}),
+        // The User's message: where each turn it asked for stands.
+        ...(role === "you" && Array.isArray(event.turns) ? { turns: event.turns.filter(function (turn) {
+          return turn && typeof turn.participantId === "string" && typeof turn.runId === "string" && typeof turn.state === "string";
+        }).map(function (turn) { return { participantId: turn.participantId, runId: turn.runId, state: turn.state }; }) } : {}),
         ...(settledAt ? { settledAt: settledAt } : {})
       }, openedAt ? { arrivedAt: openedAt } : undefined);
       if (written) {
@@ -3472,6 +3905,12 @@
   // half a minute later. However many ask meanwhile, one pass follows.
   let queuedFlushOutboxPromise;
 
+  // One attempt at a time; but an attempt that has not finished in this long
+  // (a request or the phone's database that never answers) no longer holds
+  // the queue back: the next one starts, and the log says why. The server
+  // takes an operation once however often it arrives.
+  const OUTBOX_FLUSH_STUCK_MS = 120_000;
+
   function flushOutbox() {
     if (activeFlushOutboxPromise) {
       if (!queuedFlushOutboxPromise) {
@@ -3483,12 +3922,25 @@
       }
       return queuedFlushOutboxPromise;
     }
-    activeFlushOutboxPromise = flushOutboxInternal().then(function (result) {
+    let watchdog;
+    const stuck = new Promise(function (resolve) {
+      watchdog = setTimeout(function () { resolve({ stuck: true }); }, OUTBOX_FLUSH_STUCK_MS);
+    });
+    activeFlushOutboxPromise = Promise.race([flushOutboxInternal(), stuck]).then(async function (result) {
+      if (result && result.stuck) {
+        const owed = (await listOutboxEntries().catch(function () { return []; })).filter(serverOwesEntry);
+        for (const entry of owed) {
+          await recordSendFailure(sendFailureRecord(entry, { cause: "phone", reason: "Sending did not finish in two minutes; it was started again." }));
+        }
+        return { status: "waiting-to-sync", sent: 0, pending: owed.length };
+      }
       // Anything that came back reached the server, or said it could not.
       if (result) outboxUnreachable = result.status === "unreachable";
       return result;
     }).finally(function () {
+      clearTimeout(watchdog);
       activeFlushOutboxPromise = undefined;
+      scheduleOutboxRetry();
     });
     return activeFlushOutboxPromise;
   }
@@ -3500,31 +3952,49 @@
   async function flushOutboxInternal() {
     // Every chat's queue, not only the open chat's: an answer given from
     // Activity for a chat that was then never opened again sat here for days.
-    const entries = (await listOutboxEntries()).filter(desktopOwesEntry);
+    const entries = await listOutboxEntries();
+    const owed = entries.filter(serverOwesEntry);
     if (!isHubPairing(loadPairing())) {
-      return { status: "unreachable", sent: 0, pending: entries.length };
+      return { status: "unreachable", sent: 0, pending: owed.length };
     }
+    if (owed.length === 0) return { status: "synced", sent: 0, pending: 0 };
     try {
-      return await flushOutboxViaHub(entries);
+      return await flushOutboxToServer(entries);
     } catch (error) {
-      return { status: "unreachable", sent: 0, pending: entries.filter((entry) => entry.hub).length, error: error instanceof Error ? error.message : String(error) };
+      // Not the network's doing (the phone's own database, say): said in the
+      // log for each entry still waiting, and tried again.
+      const failure = sendFailureOf(error);
+      for (const entry of owed) await recordSendFailure(sendFailureRecord(entry, failure));
+      return { status: "waiting-to-sync", sent: 0, pending: owed.length, error: failure.reason };
     }
   }
 
-  function statusText(status) {
-    if (status === "acked") {
-      return "Sent";
-    }
-    if (status === "syncing") {
-      return "Syncing";
-    }
-    if (status === "refused") {
-      return "Not taken by your server";
-    }
-    if (status === "superseded") {
-      return "Replaced";
-    }
-    return "Waiting to sync";
+  // The marks a message of the User's carries, the same words on every
+  // device (agreements Д3, Д5): not answered by the server yet, taken by it,
+  // and taken to work by each member's own device.
+  const MARK_NOT_SENT = "Not sent, retrying";
+  const MARK_SENT = "Sent";
+  const MARK_TAKEN = "Taken to work";
+  const MARK_REFUSED = "Not taken by your server";
+
+  /** "@a", "@a and @b", "@a, @b and @c". */
+  function handleList(handles) {
+    if (handles.length <= 1) return handles[0] || "";
+    return handles.slice(0, -1).join(", ") + " and " + handles[handles.length - 1];
+  }
+
+  /** "Sent", or "Taken to work by @a" once a member's own device claimed the
+   *  turn the message asked of it (or ran it since). */
+  function sentMark(conversationId, turns) {
+    const chat = loadChats().find(function (item) { return item.id === conversationId; });
+    const members = chat && Array.isArray(chat.members) ? chat.members : [];
+    const taken = (Array.isArray(turns) ? turns : []).filter(function (turn) {
+      return turn && (turn.state === "claimed" || turn.state === "finished");
+    }).map(function (turn) {
+      const member = members.find(function (item) { return item.id === turn.participantId; });
+      return member ? "@" + member.handle : "a member";
+    });
+    return taken.length ? MARK_TAKEN + " by " + handleList(taken) : MARK_SENT;
   }
 
   // Waiting with no feedback reads as "nothing is happening", so the wait is
@@ -4641,50 +5111,39 @@
 
   // --- cards a member is waiting on -----------------------------------------
 
-  /** The chat action a tapped card produces. The shape is the one every device
-   *  emits, so the desktop records and applies it exactly as it would its own —
-   *  including the native identifiers the provider needs back. */
-  async function decisionEventForCard(card, answer) {
+  /** The answer a tapped card gives, as the server takes it (`card.answer`,
+   *  agreement Д9): a permission says whether it is allowed, with the native
+   *  identifiers the provider needs back; a choice says what was picked or
+   *  written, or that it was cancelled. */
+  function answerForCard(card, answer) {
     if (card.kind === "permission") {
       const approve = answer.optionId === "allow";
       return {
-        kind: "permission.decided",
-        payload: {
-          operationId: "permission:" + card.id + ":" + (approve ? "allow" : "deny"),
-          targetKey: "approval:" + card.id,
-          stateId: approve ? "approved" : "denied",
-          detail: {
-            approve: approve,
-            ...(card.codexDecisionId ? { codexDecisionId: card.codexDecisionId } : {}),
-            ...(card.draftOverride ? { draftOverride: card.draftOverride } : {})
-          }
+        cardId: card.id,
+        cardKind: "permission",
+        answer: {
+          approve: approve,
+          ...(card.codexDecisionId ? { codexDecisionId: card.codexDecisionId } : {}),
+          ...(card.draftOverride ? { draftOverride: card.draftOverride } : {})
         }
       };
     }
-    const value = answer.cancel ? "cancelled" : answer.optionId || (answer.customAnswer ? "custom" : "empty");
-    const identity = answer.customAnswer !== undefined || answer.note !== undefined
-      ? value + ":" + await sha256Hex(stableJson({ customAnswer: answer.customAnswer, note: answer.note })) : value;
     return {
-      kind: "choice.answered",
-      payload: {
-        operationId: "choice:" + card.id + ":" + identity,
-        targetKey: "choice:" + card.id,
-        stateId: value,
-        detail: {
-          sourceMessageId: card.sourceMessageId || "",
-          ...(answer.optionId ? { selectedOptionId: answer.optionId } : {}),
-          ...(answer.customAnswer !== undefined ? { customAnswer: answer.customAnswer } : {}),
-          ...(answer.note !== undefined ? { note: answer.note } : {}),
-          ...(answer.cancel ? { cancel: true } : {})
-        }
+      cardId: card.id,
+      cardKind: "choice",
+      answer: {
+        ...(answer.optionId ? { selectedOptionId: answer.optionId } : {}),
+        ...(answer.customAnswer !== undefined ? { customAnswer: answer.customAnswer } : {}),
+        ...(answer.note !== undefined ? { note: answer.note } : {}),
+        ...(answer.cancel ? { cancel: true } : {})
       }
     };
   }
 
   /**
-   * Answering a card: the event and the queue entry are written in one
-   * IndexedDB transaction, then the queue is flushed. A tap is not the answer
-   * being applied — the card says "sent" until the desktop states it answered.
+   * Answering a card: the answer is written to the queue, then sent at once.
+   * A tap is not the answer being applied — the card folds to it until the
+   * server states the card answered.
    */
   async function answerControlCard(card, answer) {
     const conversationId = card.conversationId || selectedConversationId();
@@ -4717,30 +5176,28 @@
   }
 
   async function answerControlCardOnce(card, answer, conversationId) {
-    const decision = await decisionEventForCard(card, answer);
+    const given = answerForCard(card, answer);
     await supersedeQueuedAnswer(card.id);
     let queued;
     try {
-      queued = await enqueueDecision({ conversationId: conversationId, kind: decision.kind, payload: decision.payload });
+      queued = await enqueueDecision({ conversationId: conversationId, payload: { ...given, label: answerOutcomeText(card, answer) } });
     } catch (error) {
       controlCardErrors.set(card.id, "Could not save your answer on this phone. Try again.");
-      await render("waiting-to-sync");
+      await render();
       return;
     }
     controlCardErrors.delete(card.id);
-    markCardSent(card.id, queued && queued.eventId, answerOutcomeText(card, answer), decision.payload.operationId);
+    // The operation's id names the answer: a refusal of it from the member's
+    // device names it too.
+    markCardSent(card.id, queued && queued.eventId, answerOutcomeText(card, answer), queued && queued.eventId);
     // The answer goes out at once; the redraw does not hold it back.
-    const flushing = flushOutbox();
-    await handOverBeforeDrawing(flushing);
-    await render("waiting-to-sync");
-    const flushResult = await flushing;
-    await render(flushResult.status);
+    await sendNow();
   }
 
   function enqueueDecision(input) {
     return createOutboxEvent({
       conversationId: input.conversationId,
-      kind: input.kind,
+      kind: "card.answer",
       payload: input.payload
     }).then(persistOutboundEvent);
   }
@@ -4841,7 +5298,9 @@
     const mark = loadCardSentMarks()[cardId];
     if (!mark) return undefined;
     const held = mark.eventId ? outboxStatusById.get(mark.eventId) : undefined;
-    if (held && held.status === "refused") return { locked: false, text: CONTROL_CARD_REFUSED_TEXT };
+    if (held && held.status === OUTBOX_REFUSED) {
+      return { locked: false, text: held.lastError ? MARK_REFUSED + ": " + held.lastError + " You can answer again." : CONTROL_CARD_REFUSED_TEXT };
+    }
     const at = Date.parse(mark.at || "");
     // An answer nobody has taken yet may be lost, and ten minutes of that
     // unlocks the card. One the server has taken is not lost:
@@ -4850,7 +5309,7 @@
     // User's later one was quietly discarded. That answer waits an hour
     // before the card unlocks, for the desktop that took it and then gave it
     // up without saying so.
-    const owed = !held || desktopOwesEntry(held);
+    const owed = !held || serverOwesEntry(held);
     const unlockAfterMs = owed ? CONTROL_CARD_SENT_UNLOCK_MS : CONTROL_CARD_TAKEN_UNLOCK_MS;
     const stale = !Number.isFinite(at) || Date.now() - at > unlockAfterMs;
     if (stale) return { locked: false, text: CONTROL_CARD_STALE_TEXT };
@@ -4858,16 +5317,16 @@
   }
 
   /** An earlier answer to the card still on its way is replaced, not raced:
-   *  both travelling would let the older one win on the desktop and record
-   *  the User's later one as superseded. The entry stays in the journal, so
-   *  the sequence this phone signs is unbroken; it is simply never offered. */
+   *  the server takes the first answer to a card and refuses the next, so
+   *  both travelling would let the older one win. The entry stays in the
+   *  queue, marked replaced; it is never offered. */
   function supersedeQueuedAnswer(cardId) {
     const mark = loadCardSentMarks()[cardId];
     if (!mark || !mark.eventId) return Promise.resolve(false);
     return withOutbox("readwrite", function (store) {
       return requestToPromise(store.get(mark.eventId)).then(function (entry) {
-        if (!entry || !desktopOwesEntry(entry)) return false;
-        const replaced = { ...entry, status: "superseded", updatedAt: nowIso() };
+        if (!entry || !serverOwesEntry(entry)) return false;
+        const replaced = { ...entry, status: OUTBOX_SUPERSEDED, updatedAt: nowIso() };
         noteOutboxStatus(replaced);
         return requestToPromise(store.put(replaced)).then(function () { return true; });
       });
@@ -5504,7 +5963,9 @@
     // sheet — a dialog with a backdrop, and navigation left live outside a
     // backdrop is a way around it. The live-reply view is a screen of the
     // chat rather than a dialog, so the bar stays under that one.
+    const sendLog = document.getElementById("send-log-sheet");
     const covered = (name === "activity" && Boolean(openActivityCardId)) ||
+      Boolean(sendLog && !sendLog.hidden) ||
       (inChat && CHAT_DIALOG_IDS.some(function (id) {
         const node = document.getElementById(id);
         return Boolean(node && !node.hidden);
@@ -5629,16 +6090,21 @@
     });
   }
 
-  /** Runs a stop was asked for that the desktop has not taken yet, from the
-   *  queue itself: after a reload the in-memory mark is gone, the request is not. */
+  /** The runs a Stop was asked for, by every name a row may carry them
+   *  under (the turn's id on the server, and the row's own), from the queue
+   *  itself: after a reload the in-memory mark is gone, the request is not. */
+  function stopRunIdsOf(entries) {
+    const ids = [];
+    for (const entry of entries) {
+      if (!entry || entry.kind !== "turn.stop" || !entry.payload || entry.status === OUTBOX_REFUSED) continue;
+      if (entry.payload.runId) ids.push(entry.payload.runId);
+      if (entry.payload.rowRunId) ids.push(entry.payload.rowRunId);
+    }
+    return ids;
+  }
+
   function queuedStopRunIds() {
-    return listOutboxEntries(undefined).then(function (entries) {
-      return entries.filter(function (entry) {
-        return entry && entry.kind === "run.cancel.requested" && entry.payload && entry.payload.runId;
-      }).map(function (entry) {
-        return entry.payload.runId;
-      });
-    }).catch(function () {
+    return listOutboxEntries(undefined).then(stopRunIdsOf).catch(function () {
       return [];
     });
   }
@@ -6395,15 +6861,23 @@
     const permission = "Notification" in globalThis ? Notification.permission : "unsupported";
     const hubPaired = isHubPairing(loadPairing());
     const pushable = hubPaired && "Notification" in globalThis && "PushManager" in globalThis;
-    const signature = JSON.stringify([permission, pushable, pushEndpointRejected, alertsReconnect, hubPaired, hubMachines]);
+    const sending = owedSummary();
+    const signature = JSON.stringify([permission, pushable, pushEndpointRejected, alertsReconnect, hubPaired, hubMachines,
+      sending.owed, sending.failing, sendLogCount, sendLogNewestAt]);
     if (signature === lastSettingsRenderSignature) return;
     lastSettingsRenderSignature = signature;
     list.replaceChildren();
 
+    // Every failed try to send, and why (agreement Д12).
+    const sendLogSub = sending.owed > 0
+      ? (sending.owed === 1 ? "1 thing you sent has" : sending.owed + " things you sent have") + " not reached your server yet; it is tried again while the app is open."
+      : sendLogCount > 0 ? "Everything you sent has reached your server. Last failed try " + sendLogTime(sendLogNewestAt) + "."
+        : "Nothing failed to send.";
     list.append(settingsGroup("This phone", [
       hubPaired
         ? settingsRow("Paired with your server", "Chats, replies and alerts come from your own server, with or without your Mac.")
-        : settingsRow("Not paired", "Scan the code from your Mac (Settings → Device Pairing) to connect this phone.")
+        : settingsRow("Not paired", "Scan the code from your Mac (Settings → Device Pairing) to connect this phone."),
+      ...(hubPaired ? [settingsRow("Send log", sendLogSub, settingsButton("View", function () { void openSendLog(); }))] : [])
     ]));
 
     let alertsSub;
@@ -6675,19 +7149,27 @@
     // is not still counted as news.
     void refreshDockBadge(revision);
     const messageEntries = entries.filter(isMessageOutboxEntry);
-    const requestedStopRunIds = new Set(entries.filter(function (entry) {
-      return entry.kind === "run.cancel.requested";
-    }).map(function (entry) {
-      return entry.payload.runId;
-    }));
-    const outboxContent = new Set(messageEntries.map(function (entry) {
-      return entry.payload.content.trim();
-    }));
+    const requestedStopRunIds = new Set(stopRunIdsOf(entries));
+    // A message this phone sent and the server's copy of it are one message:
+    // matched by its id, never by its text (two messages saying the same are
+    // two messages). The queue's row stands for both.
+    const ownIds = new Set(messageEntries.map(function (entry) { return entry.eventId; }));
+    const serverCopies = new Map();
+    for (const entry of timelineEntries) {
+      const messageId = entry.role === "you" ? (entry.messageId || entry.sourceId) : undefined;
+      if (messageId && ownIds.has(messageId)) serverCopies.set(messageId, entry);
+    }
     const visibleTimelineEntries = dedupeTimelineEntries(timelineEntries.filter(function (entry) {
-      return !(entry.role === "you" && outboxContent.has(entry.content.trim()));
+      return !(entry.role === "you" && serverCopies.has(entry.messageId || entry.sourceId));
     }));
     state.textContent = connectionStatusText(connectionStatus);
+    renderSendLogButton();
     let rows = messageEntries.map(function (entry) {
+      const serverCopy = serverCopies.get(entry.eventId);
+      // The server's copy is its word that it took the message, whether or
+      // not its answer to the send reached this phone.
+      const refused = entry.status === OUTBOX_REFUSED && !serverCopy;
+      const notSent = !serverCopy && serverOwesEntry(entry);
       return {
         rowKey: "outbox\0" + entry.eventId,
         id: entry.eventId,
@@ -6696,6 +7178,8 @@
         threadRootId: entry.payload && typeof entry.payload.threadRootId === "string"
           ? entry.payload.threadRootId
           : undefined,
+        // On the server it is a message a thread can open from.
+        ...(notSent || refused ? {} : { sourceId: entry.eventId }),
         author: "you",
         content: entry.payload.content,
         // A picture just sent from this phone shows in its own pending row
@@ -6710,8 +7194,11 @@
             };
           })
           : undefined,
-        status: statusText(entry.status),
-        onItsWay: entry.status !== "acked" && entry.status !== "refused" && entry.status !== "superseded",
+        status: refused ? "Refused" : notSent ? "Queued" : "Sent",
+        mark: refused ? MARK_REFUSED + ": " + (entry.lastError || "No reason was given.")
+          : notSent ? MARK_NOT_SENT : sentMark(entry.conversationId, serverCopy && serverCopy.turns),
+        onItsWay: notSent,
+        refused: refused,
         createdAt: entry.createdAt
       };
     }).concat(visibleTimelineEntries.map(function (entry) {
@@ -6744,7 +7231,13 @@
         // Scaffolding stands for a message, not a run that can be stopped.
         cancellable: !isScaffoldingEntry(entry),
         content: entry.content,
-        status: entry.status === "error" ? "Error" : entry.status === "done" ? "Done" : "Running",
+        status: entry.role === "you" ? "Sent" : entry.status === "error" ? "Error" : entry.status === "done" ? "Done" : "Running",
+        // The User's message from another device: on the server, and taken
+        // to work by each member whose device claimed its turn.
+        ...(entry.role === "you" ? { mark: sentMark(entry.conversationId, entry.turns) } : {}),
+        // What a Stop names the member's turn on the server by.
+        ...(entry.participantId ? { participantId: entry.participantId } : {}),
+        ...(entry.sourceMessageId ? { sourceMessageId: entry.sourceMessageId } : {}),
         createdAt: entry.createdAt,
         threadRootId: entry.threadRootId,
         sourceId: entry.sourceId || entry.id,
@@ -6902,6 +7395,8 @@
     stop.hidden = !isCancellableMobileRow(row);
     stop.disabled = row.stopRequested === true;
     stop.dataset.runId = row.runId || "";
+    stop.dataset.turnMessageId = row.sourceMessageId || "";
+    stop.dataset.participantId = row.participantId || "";
     stop.textContent = row.stopRequested ? "Stopping…" : "Stop";
     stop.setAttribute("aria-label", "Stop response from " + (row.participantLabel || "Agent"));
     // (e) When the run finishes the view stays and shows the finished answer;
@@ -6941,7 +7436,7 @@
       }
       stop.disabled = true;
       stop.textContent = "Stopping…";
-      void stopRunFromPhone(runId);
+      void stopRunFromPhone(runId, undefined, { messageId: stop.dataset.turnMessageId, participantId: stop.dataset.participantId });
     });
     // Scrolling away from the tail stops the view yanking itself back down.
     body.addEventListener("scroll", function () {
@@ -7049,8 +7544,10 @@
         ? entry.attachments.map(function (attachment) { return attachment.id; })
         : undefined,
       status: entry.status,
+      mark: entry.mark,
       when: formatClockTime(entry.createdAt),
       runId: entry.runId,
+      turn: entry.sourceMessageId ? entry.sourceMessageId + ":" + (entry.participantId || "") : undefined,
       stopRequested: entry.stopRequested
     });
   }
@@ -7135,10 +7632,12 @@
   }
 
   function messageStatusLabel(entry) {
-    // A message still on its way says nothing about it; it is faded instead
-    // (the User, 2026-09-24).
-    if (entry.onItsWay) {
-      return formatClockTime(entry.createdAt) || "";
+    // The User's message says where it stands, in the same words on every
+    // device: not sent yet (and faded), sent, taken to work, or not taken
+    // and why. Sent and taken carry the time it was written.
+    if (entry.author === "you" && entry.mark) {
+      const time = entry.status === "Sent" ? formatClockTime(entry.createdAt) : "";
+      return time ? time + " · " + entry.mark : entry.mark;
     }
     if (entry.status === "Done" || entry.status === "Sent") {
       return formatClockTime(entry.createdAt) || entry.status;
@@ -7191,11 +7690,12 @@
   const ROUTED_ROW_MAX_MS = 30 * 60_000;
 
   /**
-   * A member a message from this phone is for, whose home has not started it
-   * yet: shown under the message as waiting for that home ("waking" while the
-   * server is starting its machine), with Stop, which names the turn's own
-   * run id so its home never starts it. Gone once the home's own row for the
-   * turn arrives.
+   * A member a message of the User's asked a turn of, whose own device has
+   * not taken it yet: shown under the message as waiting for that device
+   * ("waking" while the server is starting its machine), with Stop, which
+   * names the turn so its device never starts it. Gone once the turn is
+   * taken (or stopped) on the server, or the member's own row arrives. A
+   * message from this phone the server has not answered yet waits for it.
    */
   function routedRows(conversationId, messageEntries, timelineEntries, requestedStopRunIds) {
     const chat = loadChats().find(function (item) { return item.id === conversationId; });
@@ -7204,29 +7704,58 @@
     const stoppedLines = timelineEntries.filter(function (entry) {
       return entry.role === "system" && /stopped by user\.$/.test(String(entry.content || ""));
     });
-    const rows = [];
+    // What the server said of each message's turns (its copy carries them).
+    const turnsByMessage = new Map();
+    for (const entry of timelineEntries) {
+      const messageId = entry.role === "you" ? (entry.messageId || entry.sourceId) : undefined;
+      if (messageId && Array.isArray(entry.turns)) turnsByMessage.set(messageId, entry);
+    }
+    const asks = [];
+    const own = new Set();
     for (const entry of messageEntries) {
-      if (!entry.hub || !entry.hubDelivery || !Array.isArray(entry.hubDelivery.targets)) continue;
-      if (Date.now() - Date.parse(entry.createdAt) > ROUTED_ROW_MAX_MS) continue;
-      for (const participantId of entry.hubDelivery.targets) {
-        const runId = globalThis.AccordHubClient.phoneTurnRunId(entry.eventId, participantId);
+      if (!entry.hub || entry.status === OUTBOX_REFUSED || entry.status === OUTBOX_SUPERSEDED) continue;
+      own.add(entry.eventId);
+      const copy = turnsByMessage.get(entry.eventId);
+      // Once the server's copy is here, the turns it asked are what count; a
+      // member it asked nothing of (not in the chat any more) waits for nobody.
+      const targets = copy ? copy.turns.map(function (turn) { return turn.participantId; })
+        : entry.hubDelivery && Array.isArray(entry.hubDelivery.targets) ? entry.hubDelivery.targets : [];
+      asks.push({
+        messageId: entry.eventId, createdAt: entry.createdAt, targets: targets, turns: copy ? copy.turns : undefined,
+        sent: Boolean(copy) || !serverOwesEntry(entry),
+        threadRootId: entry.payload && typeof entry.payload.threadRootId === "string" ? entry.payload.threadRootId : undefined
+      });
+    }
+    for (const [messageId, copy] of turnsByMessage) {
+      if (own.has(messageId)) continue;
+      asks.push({ messageId: messageId, createdAt: copy.createdAt, targets: copy.turns.map(function (turn) { return turn.participantId; }),
+        turns: copy.turns, sent: true, threadRootId: copy.threadRootId });
+    }
+    const rows = [];
+    for (const ask of asks) {
+      if (Date.now() - Date.parse(ask.createdAt) > ROUTED_ROW_MAX_MS) continue;
+      for (const participantId of ask.targets) {
+        const turn = ask.turns ? ask.turns.find(function (item) { return item.participantId === participantId; }) : undefined;
+        // Taken to work, stopped or done: the bubble's mark says so.
+        if (turn && turn.state !== "requested") continue;
+        const runId = turn ? turn.runId : globalThis.AccordHubClient.hubTurnRunId(ask.messageId, participantId);
         if (runIds.has(runId)) continue;
         const member = members.find(function (item) { return item.id === participantId; });
         if (!member) continue;
         const label = "@" + member.handle;
-        if (stoppedLines.some(function (line) { return line.content.indexOf(label + " stopped") === 0 && line.createdAt >= entry.createdAt; })) continue;
+        if (stoppedLines.some(function (line) { return line.content.indexOf(label + " stopped") === 0 && line.createdAt >= ask.createdAt; })) continue;
         const machine = member.homeMachineId ? hubMachines.find(function (item) { return item.machineId === member.homeMachineId; }) : undefined;
         const where = member.homeMachineName || (machine && machine.name) || "its machine";
         // Not on the server yet (offline): nobody can start it, so the row
         // says what the message itself says.
-        const content = entry.status !== "acked" ? "Waiting to sync…"
+        const content = !ask.sent ? "Waiting to sync…"
           : !member.homeMachineId ? "Waiting for your Mac to start it…"
           : machine && machine.waking ? "Waking " + where + "…" : "Waiting for " + where + "…";
         rows.push({
           rowKey: "routed\0" + runId,
           id: runId,
           conversationId: conversationId,
-          threadRootId: entry.payload && typeof entry.payload.threadRootId === "string" ? entry.payload.threadRootId : undefined,
+          threadRootId: ask.threadRootId,
           author: "agent",
           participantLabel: label,
           identified: true,
@@ -7234,9 +7763,12 @@
           cancellable: true,
           content: content,
           status: "Running",
-          createdAt: entry.createdAt + "~",
+          createdAt: ask.createdAt + "~",
           sourceId: runId,
           runId: runId,
+          // The turn a Stop names: the message and its member.
+          sourceMessageId: ask.messageId,
+          participantId: participantId,
           routed: true,
           stopRequested: requestedStopRunIds.has(runId) || stopRequestedRunIds.has(runId)
         });
@@ -7272,11 +7804,13 @@
         }
         button.disabled = true;
         button.textContent = "Stopping…";
-        void stopRunFromPhone(targetRunId);
+        void stopRunFromPhone(targetRunId, undefined, { messageId: button.dataset.turnMessageId, participantId: button.dataset.participantId });
       });
       meta.append(button);
     }
     button.dataset.runId = entry.runId;
+    button.dataset.turnMessageId = entry.sourceMessageId || "";
+    button.dataset.participantId = entry.participantId || "";
     button.disabled = entry.stopRequested === true;
     button.textContent = entry.stopRequested ? "Stopping…" : "Stop";
     button.setAttribute("aria-label", "Stop response from " + rowHandleText(entry));
@@ -7335,6 +7869,7 @@
       item.append(avatar, copy);
     } else {
       item.classList.toggle("is-on-its-way", Boolean(entry.onItsWay));
+      item.classList.toggle("is-refused", Boolean(entry.refused));
       const bubble = document.createElement("div");
       bubble.className = "message-bubble";
       const content = document.createElement("div");
@@ -7554,6 +8089,7 @@
       return false;
     }
     item.classList.toggle("is-on-its-way", Boolean(entry.onItsWay));
+    item.classList.toggle("is-refused", Boolean(entry.refused));
     status.textContent = messageStatusLabel(entry);
     renderMessageContentIfChanged(content, entry.content, entry.author);
     renderAttachmentsInto(attachmentsNodeFor(content.parentElement || item), entry);
@@ -7927,8 +8463,8 @@
         return;
       }
       // Back in front: what was missed is read from the server, and what
-      // this phone still owes it goes.
-      await flushOutbox().catch(function () { return undefined; });
+      // this phone still owes it goes now, the pauses between tries over.
+      await retryOutboxNow().catch(function () { return undefined; });
       await requestChatListViaRelay(pairing).catch(function () { return []; });
       const openId = selectedConversationId();
       if (openId) await requestTimelineViaRelay(pairing, openId).catch(function () { return 0; });
@@ -8149,6 +8685,7 @@
     wireChatSearch();
     wireHomeDock();
     wireMembersSheet();
+    wireSendLog();
     wireImageViewer();
     wireWorkerMessages();
     // Opened from a notification while the app was not running: the worker
@@ -8639,7 +9176,7 @@
             : {})
         });
         // The message goes out at once: drawing it is not what it waits on.
-        const flushing = flushOutbox();
+        const flushing = retryOutboxNow();
         await handOverBeforeDrawing(flushing);
         await render();
         // Sending is a deliberate action, so following it is expected.
@@ -8660,6 +9197,8 @@
     // What the queue holds, so a card can say whether its answer went out and
     // the periodic retry knows there is something to offer.
     await listOutboxEntries().catch(function () { return []; });
+    // What the send log holds, for the header's way to it and Settings.
+    await listSendFailures();
     await render();
     // What a push-woken worker counted while the app was closed, folded in
     // before the lists paint again; the icon number follows.
@@ -8685,7 +9224,11 @@
         return undefined;
       }).catch(function () { return undefined; });
     }
-    const flushResult = await flushOutbox().catch(function () { return { status: "unreachable" }; });
+    // A queue written the old way becomes operations before anything goes.
+    await retireSignedChains().catch(function (error) {
+      recordRelayDebug({ event: "queue-retire-failed", message: String(error && error.message || error) });
+    });
+    const flushResult = await retryOutboxNow().catch(function () { return { status: "unreachable" }; });
     try {
       await requestChatListViaRelay(pairing);
       await render("synced");
@@ -8713,16 +9256,20 @@
     reconnectMessageAlerts,
     createOutboxEvent,
     enqueueMessage,
-    enqueueRunCancel,
+    enqueueTurnStop,
     stopRunFromPhone,
     flushOutbox,
+    retryOutboxNow,
+    listSendFailures,
+    openSendLog,
+    closeSendLog,
     handleRelayChatListPayload,
     handleRelayTimelinePayload,
     reconcilePendingControlCards,
     retryPendingOutbox,
     isCardSent,
     isCardLocked,
-    desktopOwesEntry,
+    serverOwesEntry,
     activeMentionQuery,
     mentionOptions,
     replaceActiveMention,
@@ -8733,8 +9280,7 @@
     requestTimelineViaRelay,
     readBootstrapFromLocation,
     pairWithServer,
-    flushOutboxViaHub,
-    hubLogicalTs,
+    flushOutboxToServer,
     resolvePhoneDelivery,
     loadHubPairing,
     listOutboxEntries,

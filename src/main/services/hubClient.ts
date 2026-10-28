@@ -4,7 +4,7 @@ import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import {
   HUB_PROGRESS_PATH, HUB_PULL_MAX_EVENTS, hubBlobFragmentPath, hubWebSocketUrl,
   type HubChainResponse, type HubComposerCatalog, type HubDevice, type HubEventPullResponse, type HubEventPushResponse, type HubHealth, type HubKnownDevicesResponse,
-  type HubLiveHead, type HubMachineWakeRequest, type HubPhoneInvite, type HubProgressPost, type HubReadReport, type HubReadersResponse, type HubSnapshotResponse
+  type HubLiveHead, type HubMachineWakeRequest, type HubPhoneInvite, type HubProgressPost, type HubReadReport, type HubReadersResponse, type HubRosterResponse, type HubSnapshotResponse
 } from "../../shared/hubProtocol";
 import type { MachineProgressFrame } from "../../shared/machineProgress";
 import {
@@ -230,6 +230,12 @@ export class HubClient {
       this.receivedBytes += bytes.length;
       await this.options.storage.deviceEventBlobs().store({ reference, index, bytesBase64: bytes.toString("base64") });
     }
+  }
+
+  /** The owner only: the roster as the server holds it, with what each
+   *  phone that paired with an invite enrolled with. */
+  roster(): Promise<HubRosterResponse> {
+    return this.request<HubRosterResponse>("GET", "/v1/roster");
   }
 
   setRoster(devices: Array<Omit<HubDevice, "addedAt">>, resolvedInviteIds?: string[]): Promise<{ devices: HubDevice[] }> {

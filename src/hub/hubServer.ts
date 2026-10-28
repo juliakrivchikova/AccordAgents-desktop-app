@@ -32,7 +32,8 @@ import {
   type HubProgressPost,
   type HubReadReport,
   type HubResyncRequired,
-  type HubRosterRequest
+  type HubRosterRequest,
+  type HubRosterResponse
 } from "../shared/hubProtocol";
 import type { MachineProgressFrame } from "../shared/machineProgress";
 import { HubNonceCache, deviceIdForPublicKey, parseHubAuthorization, sha256Hex, verifyHubRequest, verifyHubText, type ParsedHubAuthorization } from "../main/services/hubAuth";
@@ -615,7 +616,14 @@ export class HubServer {
       }
       if (url.pathname === "/v1/roster") {
         if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub changes its devices.");
-        if (request.method === "GET") return json(response, 200, { devices: await this.options.storage.hub().devices() });
+        // With what each phone enrolled: the owner learns a phone that paired
+        // while it was away from here, and names it from then on.
+        if (request.method === "GET") {
+          return json(response, 200, {
+            devices: await this.options.storage.hub().devices(),
+            enrollments: await this.options.storage.hub().phoneEnrollments()
+          } satisfies HubRosterResponse);
+        }
         if (request.method === "PUT") {
           const parsed = parseJson(body);
           const devices = validRoster(parsed);
