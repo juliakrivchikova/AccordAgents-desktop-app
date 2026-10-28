@@ -9773,6 +9773,37 @@ test("refreshStoredChatState preserves stored completed messages over stale pend
     message.id === "answer"
       ? pendingParticipantMessage(participant, "answer", runId)
       : message
+test("refreshStoredChatState never takes back what the User's server said of a message (Д3, Д5)", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  // A running turn's copy of the chat, taken before the server answered.
+  const staleConversation = clone(conversation);
+  const runId = `turn-user-message-${participant.id}`;
+  conversation.messages[0] = {
+    ...conversation.messages[0],
+    metadata: {
+      ...(conversation.messages[0].metadata ?? {}),
+      serverSeq: 12,
+      serverWriter: "device-a",
+      serverTurns: { [participant.id]: { runId, state: "claimed", executorDeviceId: "device-a" } }
+    }
+  };
+  const { service } = testService({ conversation });
+
+  await (service as any).refreshStoredChatState(staleConversation);
+
+  const message = staleConversation.messages.find((item: any) => item.id === "user-message")!;
+  assert.equal(message.metadata?.serverSeq, 12);
+  assert.equal(message.metadata?.serverWriter, "device-a");
+  assert.equal(message.metadata?.serverTurns?.[participant.id]?.state, "claimed");
+
+  // The newer copy of a turn wins, whichever side holds it.
+  message.metadata!.serverTurns![participant.id] = { runId, state: "finished", executorDeviceId: "device-a", outcome: "stopped" };
+  await (service as any).refreshStoredChatState(staleConversation);
+  assert.equal(message.metadata?.serverTurns?.[participant.id]?.state, "finished");
+  assert.equal(message.metadata?.serverTurns?.[participant.id]?.outcome, "stopped");
+});
+
   );
   const { service } = testService({ conversation });
 

@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
 import { chatChangeBaseline, diffChatChanges, type ChatChangeBaseline, isSafeChatId } from "./chatChanges";
-import { chatChangesToOps, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
+import { chatChangesToOps, furthestTurnMarks, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
 import { hubTurnRunId, isHubTurnRunId, type HubCard, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
 import {
@@ -9939,13 +9939,26 @@ export class ChatService {
       !storedMetadata?.queuedBehind &&
       !storedMetadata?.activityEvents &&
       !storedMetadata?.processingTranscript &&
-      !storedMetadata?.remoteRunStatus
+      !storedMetadata?.remoteRunStatus &&
+      storedMetadata?.serverSeq === undefined &&
+      !storedMetadata?.serverTurns &&
+      !storedMetadata?.serverRejected
     ) {
       return undefined;
     }
     const merged: ChatMessage["metadata"] = {
       ...currentMetadata
     };
+    // What the User's server said of a message (its place, its writer, a
+    // refusal, the turns it asked for) only moves forward: a running turn's
+    // older copy of the message never takes it back (Д3, Д5).
+    if (merged.serverSeq === undefined && storedMetadata?.serverSeq !== undefined) {
+      merged.serverSeq = storedMetadata.serverSeq;
+      if (storedMetadata.serverWriter !== undefined) merged.serverWriter = storedMetadata.serverWriter;
+    }
+    if (!merged.serverRejected && storedMetadata?.serverRejected) merged.serverRejected = storedMetadata.serverRejected;
+    const serverTurns = furthestTurnMarks(storedMetadata?.serverTurns, currentMetadata?.serverTurns);
+    if (serverTurns) merged.serverTurns = cloneJsonValue(serverTurns);
     if (storedMetadata?.reactions) {
       merged.reactions = cloneJsonValue(storedMetadata.reactions);
     } else {
