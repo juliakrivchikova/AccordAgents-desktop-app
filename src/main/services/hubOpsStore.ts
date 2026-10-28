@@ -156,6 +156,14 @@ export class HubOpsStore {
     await this.database.execute(`begin immediate; ${sql} commit;`);
   }
 
+  /** The full answer to an operation already placed (a document action's
+   *  result, known only once its change committed): what a device that
+   *  sends the same operation again is told. */
+  async setResult(opId: string, result: HubOpResult): Promise<void> {
+    await this.init();
+    await this.database.execute(`update hub_ops set result_json = ${quote(JSON.stringify(result))} where op_id = ${quote(opId)};`);
+  }
+
   /** Accepted operations after `after`, in order: at most `limit` entries and
    *  about `maxBytes` of effects (always at least one entry). */
   async after(after: number, limit: number, maxBytes: number): Promise<{ entries: HubFeedEntry[]; more: boolean }> {

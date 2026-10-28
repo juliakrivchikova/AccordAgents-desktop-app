@@ -26,9 +26,8 @@ import { createHeadlessPlatform, setHostPlatform, userDataPath } from "../main/p
 import { AgentEnvironmentService } from "../main/services/agentEnvironment";
 import { AppMcpService } from "../main/services/appMcp";
 import { AppSkillsService } from "../main/services/appSkills";
-import { ArtifactService } from "../main/services/artifacts";
+import { ArtifactClient } from "../main/services/artifactClient";
 import { ArtifactStore } from "../main/services/artifactStore";
-import { artifactEventWriter } from "../main/services/artifactReplication";
 import { importChatCopy } from "../main/services/chatCopy";
 import { ChatEventLogService } from "../main/services/chatEventLog";
 import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "../main/services/chatEventMirror";
@@ -203,8 +202,6 @@ async function runChatCopyImport(args: MachineArgs): Promise<void> {
   setHostPlatform(createHeadlessPlatform({ userDataDir: args.userDataDir }));
   const storage = new StorageService({ sqliteExecutable: "sqlite3" });
   await storage.init();
-  // The artifact tables the copy fills are created by the artifact store.
-  await new ArtifactStore(path.join(userDataPath(), "accordagents.sqlite3"), "sqlite3").init();
   const identity = await new ChatEventLogService(storage).getOrCreateDeviceIdentity();
   const summary = await importChatCopy(storage, args.importChatCopy!, { hostMachineId: args.machineId, localOriginId: identity.originId });
   await finishSetupCommand({ ok: true, ...summary });
@@ -346,19 +343,18 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   // this runtime and nothing runs here.
   chatService.setHostMachineId(undefined);
   wireChatAppToolHandlers(appMcpService, chatService);
+  // Documents are the User's server's (Д9): this machine keeps a copy and
+  // writes every change its members make through the server, exactly as the
+  // computer does for its own members.
   const artifactStore = new ArtifactStore(path.join(userDataPath(), "accordagents.sqlite3"), "sqlite3");
-  const artifactService = new ArtifactService({
+  const artifactService = new ArtifactClient({
     store: artifactStore,
     getMembers: async (conversationId) => {
-      const conversation = await storageService.getConversation(conversationId);
-      if (!conversation || conversation.kind !== "chat") {
-        return undefined;
-      }
-      return artifactMembersForConversation(conversation);
+      const opened = await storageService.openConversation(conversationId, 1);
+      return opened?.conversation.kind === "chat" ? artifactMembersForConversation(opened.conversation) : undefined;
     },
     postNote: (conversationId, eventId, content) => chatService.postArtifactChatNote(conversationId, eventId, content),
-    onChanged: () => undefined,
-    ...artifactEventWriter(storageService, chatEventLogService, () => [], artifactStore),
+    hasChat: async (conversationId) => (await storageService.openConversation(conversationId, 1))?.conversation.kind === "chat",
     logger: log
   });
   chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
@@ -430,6 +426,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     hubConfig: async () => ({ url: hubUrl }),
     machineNames: async () => [],
     movesChats: false,
+    artifacts: artifactService,
     log
   });
   const host: MachineHostService = new MachineHostService(chatService, debugLogService, {

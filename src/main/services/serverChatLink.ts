@@ -5,13 +5,17 @@ import { LOCAL_MESSAGE_METADATA_KEYS } from "./chatChanges";
 import type { HubSigningIdentity } from "./hubAuth";
 import type { StorageService } from "./storage";
 import type { ChatService } from "./chat";
-import { HUB_OP_MAX_BYTES, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
+import type { ArtifactClient, ArtifactServerLink, ArtifactWriteOutcome } from "./artifactClient";
+import { HUB_OP_MAX_BYTES, type HubArtifactImportRows, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
 /** Messages in one page of a chat moving to the server (well under the
  *  server's limit for one operation). */
 const IMPORT_PAGE_BYTES = Math.floor(HUB_OP_MAX_BYTES * 0.8);
 const IMPORT_PAGE_MESSAGES = 200;
+/** A document action a request is already carrying when its writer stops
+ *  waiting gets this much longer for that request's answer. */
+const ARTIFACT_IN_FLIGHT_WAIT_MS = 10_000;
 
 /**
  * The computer's (or a machine's) link to the User's server, which owns every
@@ -30,6 +34,15 @@ export class ServerChatLink {
   private machineNames = new Map<string, string>();
   private starting?: Promise<void>;
   private unreachable?: number;
+  /** Chats whose documents this computer could not move yet (the server
+   *  refused a page): its copy of them is kept, never replaced by the
+   *  server's, until they move. */
+  private readonly pendingArtifactMoves = new Set<string>();
+  /** The computer has not yet read which of its chats' documents are on the
+   *  server: until it has, no chat's documents are replaced by the server's. */
+  private artifactMovesUnknown = false;
+  /** Documents moved or read again later, after a first try failed. */
+  private documentsRetry?: Promise<void>;
 
   constructor(private readonly options: {
     storage: StorageService;
@@ -43,8 +56,68 @@ export class ServerChatLink {
     machineNames: () => Promise<Array<{ id: string; name: string }>>;
     /** Whether this device moves its chats to the server (the computer, not a machine). */
     movesChats: boolean;
+    /** This device's documents: written through the server, its copy kept
+     *  from the server's feed (and moved there with the chats, one time). */
+    artifacts?: ArtifactClient;
     log: (event: string, payload: Record<string, unknown>) => void;
   }) {}
+
+  /** The link as documents use it. */
+  private artifactLink(): ArtifactServerLink {
+    return {
+      deviceId: () => this.deviceIdValue,
+      write: (op, waitMs) => this.writeArtifact(op, waitMs),
+      applied: async (seq, timeoutMs) => this.ops ? this.ops.waitApplied(seq, timeoutMs) : false,
+      conversationArtifacts: async (conversationId) => (await this.requireClient().artifacts(conversationId)).artifacts,
+      // A document the server does not have is said so in an answer; a
+      // request that failed (a server without this route answers 404) is an
+      // error, tried again, and never taken to mean the document is gone.
+      artifact: async (artifactId) => (await this.requireClient().artifact(artifactId)).artifact,
+      revision: async (artifactId, versionEventId) => (await this.requireClient().artifactRevision(artifactId, versionEventId)).revision
+    };
+  }
+
+  private requireClient(): HubClient {
+    if (!this.client) throw new Error("This device is not linked to a server.");
+    return this.client;
+  }
+
+  /**
+   * One document action: queued in order with this device's other writes
+   * and sent; its answer is awaited up to `waitMs`. Then it is taken back if
+   * nothing sent it yet, or given a little longer if a request carries it;
+   * an action taken back is never sent later (Д13: a change is shown done
+   * only when the server took it).
+   */
+  private async writeArtifact(op: HubOp, waitMs: number): Promise<ArtifactWriteOutcome> {
+    const first = this.requireOps();
+    await first.enqueue([op]);
+    const answer = await answerWithin(first, op.opId, waitMs);
+    if (answer) return answer;
+    for (let round = 0; round < 2; round += 1) {
+      const ops = this.ops;
+      if (!ops) break;
+      const taken = await ops.withdraw(op.opId);
+      if (taken.status === "answered") return taken.outcome;
+      if (taken.status === "withdrawn") return { status: "unconfirmed", reason: await this.unconfirmedReason(taken.attempted) };
+      if (taken.status === "missing") break;
+      const late = await answerWithin(ops, op.opId, ARTIFACT_IN_FLIGHT_WAIT_MS);
+      if (late) return late;
+    }
+    return { status: "unconfirmed", reason: await this.unconfirmedReason(true) };
+  }
+
+  private async unconfirmedReason(attempted: boolean): Promise<string> {
+    const status = await this.ops?.status().catch(() => undefined);
+    const why = status?.lastError ? ` (${status.lastError})` : "";
+    if (attempted) {
+      return `Your server did not confirm this change${why}. It may still have reached it: read the document again before trying again.`;
+    }
+    if (!this.ready) {
+      return "Your server is not ready on this device yet (chats and documents are still moving to it), so nothing was changed. Try again in a minute.";
+    }
+    return `Your server could not be reached${why}, so nothing was changed. Try again when it is back.`;
+  }
 
   /** The link as ChatService uses it. */
   private chatLink(): ChatServerLink {
@@ -88,6 +161,7 @@ export class ServerChatLink {
   }
 
   private async startNow(): Promise<void> {
+    this.artifactMovesUnknown = this.options.movesChats && Boolean(this.options.artifacts);
     const identity = await this.options.identity();
     this.deviceIdValue = (identity as { originId?: string }).originId ?? "";
     await this.refreshMachineNames();
@@ -105,17 +179,22 @@ export class ServerChatLink {
       store: this.options.storage.hubClientOps(),
       cursor: { get: () => hub.clientState(HUB_FEED_CURSOR_KEY), set: (value) => hub.setClientState(HUB_FEED_CURSOR_KEY, value) },
       client: () => this.ready ? this.client : undefined,
-      apply: (entries: HubFeedEntry[]) => this.options.chat.applyServerEntries(entries),
+      apply: (entries: HubFeedEntry[]) => this.applyEntries(entries),
       resync: () => this.resync(),
       onAnswered: (row, outcome: HubOpOutcome) => {
         if (outcome.status === "rejected") this.options.log("chat.server.op-rejected", { opId: row.opId, kind: row.kind, conversationId: row.conversationId, reason: outcome.reason });
       },
       log: this.options.log
     });
+    // A document action left queued by a run of this device that ended has
+    // nobody waiting for its answer: it is never sent (Д13).
+    const stale = await this.options.storage.hubClientOps().withdrawKinds("artifact.").catch(() => 0);
+    if (stale) this.options.log("artifact.server.withdrawn-at-start", { ops: stale });
     // Installed before the move, so nothing written meanwhile is lost: it is
     // queued here and sent once the chats are on the server.
     this.options.chat.setServerLink(this.chatLink());
     this.options.chat.setServerChatReader((conversationId) => this.readChat(conversationId));
+    this.options.artifacts?.setServerLink(this.artifactLink());
     const ops = this.ops;
     ops.onStatusChanged(() => { void ops.status().then((status) => { this.unreachable = status.unreachableSince; }); });
     this.ops.start();
@@ -136,6 +215,16 @@ export class ServerChatLink {
         await new Promise((resolve) => setTimeout(resolve, Math.min(60_000, 2_000 * 2 ** Math.min(5, attempt))));
       }
     }
+    // Documents are moved (the computer) and read (every device) before
+    // writes and the feed go through. A failure here (a lost connection, a
+    // server not updated yet) never holds the chats back: it is tried again
+    // in the background, and documents not moved meanwhile stay here as they
+    // are, never replaced by the server's copy.
+    const prepared = await this.prepareDocuments(client).catch((error) => {
+      this.options.log("artifact.server.prepare-failed", { message: error instanceof Error ? error.message : String(error) });
+      return false;
+    });
+    if (!prepared) this.retryDocuments(client);
     this.ready = true;
     this.ops?.nudge();
     this.ops?.wakeReader();
@@ -149,6 +238,7 @@ export class ServerChatLink {
     await this.ops?.stop();
     this.options.chat.setServerLink(undefined);
     this.options.chat.setServerChatReader(undefined);
+    this.options.artifacts?.setServerLink(undefined);
     this.ops = undefined;
     this.client = undefined;
     await this.embedded?.close();
@@ -222,8 +312,69 @@ export class ServerChatLink {
       const queued = await this.options.storage.hubClientOps().forConversation(summary.id);
       if (!queued.some((row) => row.kind === "conversation.create" && row.status === "queued")) await this.options.chat.reloadChatFromServer(summary.id);
     }
+    // Every chat's documents as the server holds them.
+    await this.reloadArtifacts(chats.map((chat) => chat.id));
     this.options.log("chat.server.resynced", { chats: chats.length, head });
     return head;
+  }
+
+  /** What the server accepted: documents to their copy, the rest to the chats. */
+  private async applyEntries(entries: HubFeedEntry[]): Promise<void> {
+    const documents = entries.filter((entry) => entry.effect.kind.startsWith("artifact."));
+    const chats = documents.length ? entries.filter((entry) => !entry.effect.kind.startsWith("artifact.")) : entries;
+    if (chats.length) await this.options.chat.applyServerEntries(chats);
+    if (documents.length) await this.options.artifacts?.applyServerEntries(documents);
+  }
+
+  /** This device's copy of these chats' documents becomes the server's
+   *  (except chats whose documents this computer has not moved yet). */
+  private async reloadArtifacts(conversationIds: string[]): Promise<void> {
+    const documents = this.options.artifacts;
+    if (!documents || this.artifactMovesUnknown) return;
+    for (const conversationId of conversationIds) {
+      if (this.pendingArtifactMoves.has(conversationId)) continue;
+      await documents.reloadConversation(conversationId);
+    }
+  }
+
+  /** Moves (the computer) and reads this device's documents; false while
+   *  some chat's documents could not move yet (they are tried again). */
+  private async prepareDocuments(client: HubClient): Promise<boolean> {
+    if (!this.options.artifacts) return true;
+    const moved = this.options.movesChats ? await this.moveDocuments(client, this.options.artifacts) : true;
+    await this.syncArtifactsOnce(client);
+    return moved;
+  }
+
+  private retryDocuments(client: HubClient): void {
+    if (this.documentsRetry) return;
+    this.documentsRetry = (async () => {
+      for (let attempt = 1; this.client === client; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(60_000, 2_000 * 2 ** Math.min(5, attempt))).unref?.());
+        if (this.client !== client) return;
+        try {
+          if (await this.prepareDocuments(client)) {
+            this.options.log("artifact.server.prepared", { attempt });
+            return;
+          }
+        } catch (error) {
+          this.options.log("artifact.server.prepare-failed", { attempt, message: error instanceof Error ? error.message : String(error) });
+        }
+      }
+    })().finally(() => { this.documentsRetry = undefined; });
+  }
+
+  /** The first time this device links to a server, its copy of every chat's
+   *  documents is read from the server (documents are the server's, Д9). */
+  private async syncArtifactsOnce(client: HubClient): Promise<void> {
+    if (!this.options.artifacts) return;
+    const hub = this.options.storage.hub();
+    const key = `artifacts-synced:${(await client.health()).hubId}`;
+    if (await hub.clientState(key)) return;
+    const { chats } = await client.chats();
+    await this.reloadArtifacts(chats.map((chat) => chat.id));
+    await hub.setClientState(key, new Date().toISOString());
+    this.options.log("artifact.server.synced", { chats: chats.length });
   }
 
   /** The first link to a server that owns the chats: this computer's chats
@@ -262,6 +413,91 @@ export class ServerChatLink {
     for (const chat of chats) await this.options.chat.reloadChatFromServer(chat.id);
     await hub.setClientState(doneKey, new Date().toISOString());
     this.options.log("chat.server.moved", { chats: local.length, pages, serverChats: chats.length, ms: Date.now() - started });
+  }
+
+  /**
+   * The first link to a server that owns documents: this computer's
+   * documents move there, chat by chat, each once, every row as it is (ids,
+   * revision ids and hashes, numbering, signatures, drafts, operations);
+   * each chat's documents are then read back as the server holds them.
+   * Until a chat's documents are on the server, this copy of them is the
+   * only one: it is never replaced by the server's (a refused page leaves
+   * them here, moved again at the next start).
+   */
+  private async moveDocuments(client: HubClient, documents: ArtifactClient): Promise<boolean> {
+    const hub = this.options.storage.hub();
+    const health = await client.health();
+    const doneKey = `ops-moved-artifacts:${health.hubId}`;
+    if (await hub.clientState(doneKey)) {
+      this.pendingArtifactMoves.clear();
+      this.artifactMovesUnknown = false;
+      return true;
+    }
+    const chatKey = (conversationId: string) => `ops-moved-artifacts:${health.hubId}:${conversationId}`;
+    const local = (await this.options.storage.listConversations()).filter((summary) => summary.kind === "chat");
+    for (const summary of local) {
+      if (!await hub.clientState(chatKey(summary.id))) this.pendingArtifactMoves.add(summary.id);
+    }
+    this.artifactMovesUnknown = false;
+    const started = Date.now();
+    let pages = 0;
+    for (const conversationId of [...this.pendingArtifactMoves]) {
+      if (await this.options.storage.conversationTombstones().isDeleted(conversationId)) {
+        this.pendingArtifactMoves.delete(conversationId);
+        continue;
+      }
+      const moved = await this.importArtifacts(client, documents, conversationId);
+      pages += moved.pages;
+      if (moved.refusal !== undefined) {
+        this.options.log("chat.server.move-artifacts-refused", { conversationId, reason: moved.refusal });
+        continue;
+      }
+      await hub.setClientState(chatKey(conversationId), new Date().toISOString());
+      this.pendingArtifactMoves.delete(conversationId);
+      await documents.reloadConversation(conversationId);
+    }
+    if (this.pendingArtifactMoves.size === 0) await hub.setClientState(doneKey, new Date().toISOString());
+    this.options.log("artifact.server.moved", { chats: local.length, pages, pending: this.pendingArtifactMoves.size, ms: Date.now() - started });
+    return this.pendingArtifactMoves.size === 0;
+  }
+
+  /** One chat's documents moved to the server, in pages (every row as it is
+   *  here). A page the server refuses stops this chat's move; returns why. */
+  private async importArtifacts(client: HubClient, documents: ArtifactClient, conversationId: string): Promise<{ pages: number; refusal?: string }> {
+    const rows = await documents.exportConversation(conversationId);
+    if (rows.artifacts.length === 0) return { pages: 0 };
+    const pages: HubArtifactImportRows[] = [];
+    let page: HubArtifactImportRows = {};
+    let bytes = 0;
+    const add = <K extends keyof HubArtifactImportRows>(key: K, row: NonNullable<HubArtifactImportRows[K]>[number]) => {
+      const size = Buffer.byteLength(JSON.stringify(row));
+      if (bytes > 0 && bytes + size > IMPORT_PAGE_BYTES) {
+        pages.push(page);
+        page = {};
+        bytes = 0;
+      }
+      ((page[key] ??= []) as Array<typeof row>).push(row);
+      bytes += size;
+    };
+    // A document before its revisions, revisions before what names them.
+    for (const row of rows.artifacts) add("artifacts", row);
+    for (const row of rows.revisions) add("revisions", row);
+    for (const row of rows.projection) add("projection", row);
+    for (const row of rows.signatures) add("signatures", row);
+    for (const row of rows.sources) add("sources", row);
+    for (const row of rows.drafts) add("drafts", row);
+    for (const row of rows.operations) add("operations", row);
+    if (bytes > 0) pages.push(page);
+    for (let index = 0; index < pages.length; index += 1) {
+      const answer = await client.writeOps([{ opId: newOpId(), kind: "artifact.import", conversationId, rows: pages[index] }]);
+      const result = answer.results[0];
+      if (!result) throw new Error(`The server did not answer for the documents of chat ${conversationId}.`);
+      if (result.status === "rejected") return { pages: index, refusal: result.reason };
+      const kept = result.artifact?.result;
+      const refused = kept?.ok ? (kept.value as { refused?: string[] }).refused ?? [] : [];
+      if (refused.length) this.options.log("chat.server.move-artifact-rows-refused", { conversationId, refused: refused.slice(0, 20) });
+    }
+    return { pages: pages.length };
   }
 
   /** One chat moved to the server, in pages; returns the pages sent. */
@@ -320,4 +556,17 @@ function messageForImport(message: ChatMessage): ChatMessage {
   delete shared.serverSeq;
   delete shared.serverWriter;
   return Object.keys(shared).length ? { ...rest, metadata: shared as ChatMessage["metadata"] } : { ...rest };
+}
+
+/** The operation's answer, or undefined when none came within `ms`. */
+async function answerWithin(ops: HubOpsClient, opId: string, ms: number): Promise<HubOpOutcome | undefined> {
+  const cancel = new AbortController();
+  const timer = setTimeout(() => cancel.abort(), ms);
+  try {
+    return await ops.waitFor(opId, cancel.signal);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
 }

@@ -637,6 +637,7 @@ function errorTitle(error: ArtifactError): string {
     case "access_denied": return "Not allowed";
     case "name_taken": return "Name taken";
     case "not_found": return "Not found";
+    case "server_unavailable": return "Server not reachable";
     default: return "Invalid request";
   }
 }

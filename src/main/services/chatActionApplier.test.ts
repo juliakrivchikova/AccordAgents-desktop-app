@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ChatActionApplier, type ChatActionArtifactPort } from "./chatActionApplier";
-import { createHash } from "node:crypto";
+import { ChatActionApplier } from "./chatActionApplier";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { ChatActionPayload } from "../../shared/chatActionEvents";
 
@@ -39,116 +38,12 @@ test("an answer arriving before its request remains pending, while a foreign own
   assert.equal(applied, 1);
 });
 
-function artifacts(revisions: Record<string, { version: number; contentHash: string; superseded: boolean }>) {
-  const inserted: Array<Record<string, unknown>> = [];
-  const seen = new Set<string>();
-  const port: ChatActionArtifactPort & { inserted: typeof inserted } = {
-    inserted,
-    async getRevision(_artifactId, versionEventId) { return revisions[versionEventId]; },
-    async insertSignature(record) {
-      const key = `${record.versionEventId}:${record.signer}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      inserted.push(record);
-      return true;
-    }
-  };
-  return port;
-}
-
-const signature = (overrides: Partial<ChatActionPayload> = {}): ChatActionPayload => ({
-  operationId: "op-sig",
-  targetKey: "artifact:plan",
-  signer: "gera",
-  signedStateId: "rev-1",
-  signedContentHash: "hash-1",
-  ...overrides
-} as ChatActionPayload);
-
-test("a signature made on another machine really lands on this one", async () => {
-  const port = artifacts({ "rev-1": { version: 1, contentHash: "hash-1", superseded: false } });
-  const applier = new ChatActionApplier({ artifacts: port });
-  const result = await applier.apply(event("artifact.signature.added", signature()));
-  assert.equal(result.status, "applied");
-  assert.deepEqual(port.inserted, [{
-    artifactId: "plan", version: 1, versionEventId: "rev-1", contentHash: "hash-1",
-    signer: "gera", signedAt: "2026-09-07T08:00:00.000Z"
-  }]);
-});
-
-test("re-delivering the same signature changes nothing", async () => {
-  const port = artifacts({ "rev-1": { version: 1, contentHash: "hash-1", superseded: false } });
-  const applier = new ChatActionApplier({ artifacts: port });
-  await applier.apply(event("artifact.signature.added", signature()));
-  const again = await applier.apply(event("artifact.signature.added", signature()));
-  assert.equal(again.status, "duplicate");
-  assert.equal(port.inserted.length, 1);
-});
-
-test("a signature for a revision this machine does not have is kept, not dropped", async () => {
-  const port = artifacts({});
-  const result = await new ChatActionApplier({ artifacts: port }).apply(
-    event("artifact.signature.added", signature())
-  );
-  assert.equal(result.status, "deferred", "dropping it would lose a signature");
-  assert.match(result.detail ?? "", /not on this machine yet/);
-  assert.deepEqual(port.inserted, []);
-});
-
-test("a signature made on different content than this machine holds is refused, never re-pointed", async () => {
-  const port = artifacts({ "rev-1": { version: 1, contentHash: "different-hash", superseded: false } });
-  const result = await new ChatActionApplier({ artifacts: port }).apply(
-    event("artifact.signature.added", signature())
-  );
-  assert.equal(result.status, "superseded");
-  assert.match(result.detail ?? "", /signed different content/);
-  assert.deepEqual(port.inserted, [], "it must not be attached to whatever the head happens to be");
-});
-
-test("a signature on a revision that lost a race is stored with it and said not to count", async () => {
-  const port = artifacts({ "rev-1": { version: 1, contentHash: "hash-1", superseded: true } });
-  const result = await new ChatActionApplier({ artifacts: port }).apply(
-    event("artifact.signature.added", signature())
-  );
-  assert.equal(result.status, "applied");
-  assert.match(result.detail ?? "", /does not count toward the current version/);
-  assert.equal(port.inserted.length, 1, "it still belongs to the content its signer read");
-});
-
-test("a revision made on a base this machine has already replaced is shown as superseded", async () => {
-  const port = artifacts({ "rev-1": { version: 1, contentHash: "hash-1", superseded: true } });
-  const result = await new ChatActionApplier({ artifacts: port }).apply(event("artifact.revision.created", {
-    operationId: "op-rev", targetKey: "artifact:plan", stateId: "rev-2b", contentHash: "hash-2b",
-    precondition: { expectedStateId: "rev-1", expectedContentHash: "hash-1" }
-  }));
-  assert.equal(result.status, "superseded");
-  assert.match(result.detail ?? "", /has since been replaced/);
-});
-
-test("a revision whose base is missing waits, and one already held is a duplicate", async () => {
-  const missing = await new ChatActionApplier({ artifacts: artifacts({}) }).apply(event("artifact.revision.created", {
-    operationId: "op-rev", targetKey: "artifact:plan", stateId: "rev-2", contentHash: "h2",
-    precondition: { expectedStateId: "rev-1" }
-  }));
-  assert.equal(missing.status, "deferred");
-
-  const held = await new ChatActionApplier({
-    artifacts: artifacts({ "rev-2": { version: 2, contentHash: "h2", superseded: false } })
-  }).apply(event("artifact.revision.created", {
-    operationId: "op-rev", targetKey: "artifact:plan", stateId: "rev-2", contentHash: "h2",
-    precondition: { expectedStateId: "rev-1" }
-  }));
-  assert.equal(held.status, "duplicate");
-});
-
 test("an execution receipt is applied as a fact and never repeated locally", async () => {
-  const port = artifacts({});
-  const result = await new ChatActionApplier({ artifacts: port }).apply(event("execution.receipt", {
+  const result = await new ChatActionApplier({}).apply(event("execution.receipt", {
     operationId: "op-receipt", targetKey: "approval:card-1",
     effect: "wrote src/index.ts", executedBy: "cloud-box", executedAt: "2026-09-07T08:00:00.000Z"
   } as ChatActionPayload));
-  assert.equal(result.status, "applied");
-  assert.deepEqual(port.inserted, [], "recording the fact is the whole application");
+  assert.equal(result.status, "applied", "recording the fact is the whole application");
 });
 
 function effects(options: { owns?: boolean; claimed?: Set<string>; fail?: boolean } = {}) {
@@ -228,122 +123,13 @@ test("a choice answered elsewhere is acted on by the peer running the turn", asy
   assert.deepEqual(port.performed, ["choice.answered:choice:c-1"]);
 });
 
-function replicaPort() {
-  const artifacts = new Map<string, { name: string }>();
-  const revisions = new Map<string, { version: number; contentHash: string; superseded: boolean; content: string }>();
-  return {
-    artifacts,
-    revisions,
-    port: {
-      async getRevision(_artifactId: string, versionEventId: string) { return revisions.get(versionEventId); },
-      async insertSignature() { return true; },
-      async hasArtifact(artifactId: string) { return artifacts.has(artifactId); },
-      async createArtifact(request: { artifactId: string; name: string; revision: { versionEventId: string; version: number; content: string } }) {
-        artifacts.set(request.artifactId, { name: request.name });
-        revisions.set(request.revision.versionEventId, {
-          version: request.revision.version,
-          contentHash: createHash("sha256").update(request.revision.content, "utf8").digest("hex"),
-          superseded: false,
-          content: request.revision.content
-        });
-      },
-      async retainRevision(request: { versionEventId: string; version: number; content: string }) {
-        revisions.set(request.versionEventId, {
-          version: request.version,
-          contentHash: createHash("sha256").update(request.content, "utf8").digest("hex"),
-          superseded: false,
-          content: request.content
-        });
-      }
-    }
-  };
-}
-
-const hashOf = (content: string) => createHash("sha256").update(content, "utf8").digest("hex");
-
-test("a machine that has never seen the artifact receives it, its revision and then a signature", async () => {
-  const replica = replicaPort();
-  const applier = new ChatActionApplier({ artifacts: replica.port });
-
-  // Nothing here yet: the first state carries the artifact and its body.
-  const created = await applier.apply(event("artifact.revision.created", {
-    operationId: "artifact-revision:plan:rev-1", targetKey: "artifact:plan",
-    stateId: "rev-1", contentHash: hashOf("v1"),
-    revision: {
-      content: "v1", author: "user", createdAt: "2026-09-07T09:00:00.000Z", version: 1,
-      artifact: { name: "plan", owner: "user", contributors: [], requiredSigners: ["gera"], labels: [], createdAt: "2026-09-07T09:00:00.000Z" }
-    }
-  } as ChatActionPayload));
-  assert.equal(created.status, "applied");
-  assert.match(created.detail ?? "", /artifact and its first version were created here/);
-  assert.equal(replica.revisions.get("rev-1")?.content, "v1");
-
-  // The next revision's body arrives with it too.
-  const revised = await applier.apply(event("artifact.revision.created", {
-    operationId: "artifact-revision:plan:rev-2", targetKey: "artifact:plan",
-    stateId: "rev-2", contentHash: hashOf("v2"),
-    precondition: { expectedStateId: "rev-1" },
-    revision: { content: "v2", author: "drew", createdAt: "2026-09-07T09:01:00.000Z", version: 2 }
-  } as ChatActionPayload));
-  assert.equal(revised.status, "applied");
-  assert.equal(replica.revisions.get("rev-2")?.content, "v2");
-
-  // And the signature on the first revision now has something to bind to.
-  const signed = await applier.apply(event("artifact.signature.added", {
-    operationId: "artifact-signature:plan:rev-1:gera", targetKey: "artifact:plan",
-    signer: "gera", signedStateId: "rev-1", signedContentHash: hashOf("v1")
-  } as ChatActionPayload));
-  assert.equal(signed.status, "applied");
-});
-
-test("a body that does not match the identity it was sent with is refused, not stored", async () => {
-  const replica = replicaPort();
-  const result = await new ChatActionApplier({ artifacts: replica.port }).apply(event("artifact.revision.created", {
-    operationId: "artifact-revision:plan:rev-x", targetKey: "artifact:plan",
-    stateId: "rev-x", contentHash: hashOf("what was promised"),
-    revision: {
-      content: "something else entirely", author: "user", createdAt: "2026-09-07T09:00:00.000Z", version: 1,
-      artifact: { name: "plan", owner: "user", contributors: [], requiredSigners: [], labels: [], createdAt: "2026-09-07T09:00:00.000Z" }
-    }
-  } as ChatActionPayload));
-  assert.equal(result.status, "superseded");
-  assert.match(result.detail ?? "", /does not match the identity/);
-  assert.equal(replica.revisions.size, 0);
-  assert.equal(replica.artifacts.size, 0);
-});
-
-test("two competing revisions keep their own identity and a signature does not move", async () => {
-  const replica = replicaPort();
-  const applier = new ChatActionApplier({ artifacts: replica.port });
-  await applier.apply(event("artifact.revision.created", {
-    operationId: "artifact-revision:plan:rev-1", targetKey: "artifact:plan",
-    stateId: "rev-1", contentHash: hashOf("v1"),
-    revision: {
-      content: "v1", author: "user", createdAt: "2026-09-07T09:00:00.000Z", version: 1,
-      artifact: { name: "plan", owner: "user", contributors: [], requiredSigners: ["gera"], labels: [], createdAt: "2026-09-07T09:00:00.000Z" }
-    }
-  } as ChatActionPayload));
-  await applier.apply(event("artifact.revision.created", {
-    operationId: "artifact-revision:plan:rev-2a", targetKey: "artifact:plan",
-    stateId: "rev-2a", contentHash: hashOf("v2-a"), precondition: { expectedStateId: "rev-1" },
-    revision: { content: "v2-a", author: "drew", createdAt: "2026-09-07T09:01:00.000Z", version: 2 }
-  } as ChatActionPayload));
-
-  // The loser: its base has been replaced here.
-  replica.revisions.get("rev-1")!.superseded = true;
-  const loser = await applier.apply(event("artifact.revision.created", {
-    operationId: "artifact-revision:plan:rev-2b", targetKey: "artifact:plan",
-    stateId: "rev-2b", contentHash: hashOf("v2-b"), precondition: { expectedStateId: "rev-1" },
-    revision: { content: "v2-b", author: "gera", createdAt: "2026-09-07T09:02:00.000Z", version: 2 }
-  } as ChatActionPayload));
-  assert.equal(loser.status, "superseded");
-  assert.equal(replica.revisions.has("rev-2b"), false, "a superseded revision is not written over the winner");
-  assert.equal(replica.revisions.get("rev-2a")?.content, "v2-a", "the winner keeps its own body and identity");
-});
-
 test("only action events are handled, and a malformed payload is not", () => {
   const applier = new ChatActionApplier();
-  assert.equal(applier.handles(event("artifact.signature.added", signature())), true);
-  assert.equal(applier.handles(event("message.created", signature())), false);
-  assert.equal(applier.handles(event("artifact.signature.added", {} as ChatActionPayload)), false);
+  const answer = { operationId: "op-answer", targetKey: "approval:card", detail: { approve: true } } as ChatActionPayload;
+  assert.equal(applier.handles(event("permission.decided", answer)), true);
+  assert.equal(applier.handles(event("message.created", answer)), false);
+  assert.equal(applier.handles(event("permission.decided", {} as ChatActionPayload)), false);
+  // Documents are the server's (Д9): a document event of the old scheme is
+  // not a chat action any more.
+  assert.equal(applier.handles(event("artifact.signature.added", answer)), false);
 });

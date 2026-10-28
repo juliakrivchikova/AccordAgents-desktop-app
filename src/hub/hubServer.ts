@@ -44,7 +44,7 @@ import { isAllowedPushEndpoint } from "./hubPush";
 import { HUB_PHONE_PATHS, type HubPhoneApi } from "./hubPhone";
 import { HubOpsRequestError, type HubOps } from "./hubOps";
 import {
-  HUB_CARDS_PATH, HUB_CHAT_PATH, HUB_CHATS_PATH, HUB_FEED_PATH, HUB_MACHINE_SETTINGS_PATH, HUB_ME_PATH, HUB_OPS_PATH, HUB_TURNS_PATH,
+  HUB_ARTIFACT_PATH, HUB_ARTIFACTS_PATH, HUB_CARDS_PATH, HUB_CHAT_PATH, HUB_CHATS_PATH, HUB_FEED_PATH, HUB_MACHINE_SETTINGS_PATH, HUB_ME_PATH, HUB_OPS_PATH, HUB_TURNS_PATH,
   type HubCardsResponse, type HubFeedGone, type HubLiveSettings, type HubMachineSettings, type HubMachineSettingsPut, type HubMe, type HubTurnsResponse
 } from "../shared/hubOps";
 
@@ -306,6 +306,18 @@ export class HubServer {
     }
     if (request.method === "GET" && url.pathname === HUB_CHAT_PATH) {
       json(response, 200, await ops.chatPage(url.searchParams.get("conversationId") ?? "", url.searchParams.get("before") ?? undefined));
+      return 200;
+    }
+    // Documents, as the server owns them (Д9): a chat's (without revision
+    // bodies), one whole, or one revision's body.
+    if (request.method === "GET" && url.pathname === HUB_ARTIFACTS_PATH) {
+      json(response, 200, await ops.artifactStates(url.searchParams.get("conversationId") ?? ""));
+      return 200;
+    }
+    if (request.method === "GET" && url.pathname === HUB_ARTIFACT_PATH) {
+      const artifactId = url.searchParams.get("artifactId") ?? "";
+      const revision = url.searchParams.get("revision");
+      json(response, 200, revision ? await ops.artifactRevision(artifactId, revision) : await ops.artifactState(artifactId));
       return 200;
     }
     throw new HubRequestError(404, "Not found.");

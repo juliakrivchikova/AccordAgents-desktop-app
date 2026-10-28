@@ -34,14 +34,6 @@ export const MACHINE_EVENT_KINDS = [
   "request.created",
   "request.answered",
   "request.cancelled",
-  "artifact.created",
-  "artifact.revised",
-  "artifact.published",
-  "artifact.signed",
-  "artifact.access.changed",
-  "artifact.draft.saved",
-  "artifact.draft.submitted",
-  "artifact.draft.withdrawn",
   "blob.fragment",
   "ack",
   "sync.resend.requested"
@@ -180,50 +172,6 @@ export interface ParticipantRequestLifecyclePayload {
   at: string;
 }
 
-export interface ArtifactVersionPayload {
-  artifactId: string;
-  /** Equals this event's id for created/revised/published; the immutable
-   *  identity a signature binds to. */
-  versionEventId: string;
-  contentHash: string;
-  contentBlobHash?: string;
-  name?: string;
-  note?: string;
-  expectedHeadVersionEventId?: string;
-  requiredSigners?: string[];
-  author: string;
-  at: string;
-}
-
-export interface ArtifactSignedPayload {
-  artifactId: string;
-  versionEventId: string;
-  contentHash: string;
-  signer: string;
-  at: string;
-}
-
-export interface ArtifactAccessChangedPayload {
-  artifactId: string;
-  expectedHeadVersionEventId: string;
-  contributors?: string[];
-  requiredSigners?: string[];
-  labels?: string[];
-  archived?: boolean;
-  at: string;
-}
-
-export interface ArtifactDraftPayload {
-  artifactId: string;
-  draftId: string;
-  operationId: string;
-  author: string;
-  readers?: string[];
-  contentBlobHash?: string;
-  editRevision?: number;
-  at: string;
-}
-
 export const BLOB_FRAGMENT_MAX_BYTES = 384 * 1024;
 
 export interface BlobFragmentPayload {
@@ -270,14 +218,6 @@ export interface MachineEventPayloadByKind {
   "request.created": ParticipantRequestLifecyclePayload;
   "request.answered": ParticipantRequestLifecyclePayload;
   "request.cancelled": ParticipantRequestLifecyclePayload;
-  "artifact.created": ArtifactVersionPayload;
-  "artifact.revised": ArtifactVersionPayload;
-  "artifact.published": ArtifactVersionPayload;
-  "artifact.signed": ArtifactSignedPayload;
-  "artifact.access.changed": ArtifactAccessChangedPayload;
-  "artifact.draft.saved": ArtifactDraftPayload;
-  "artifact.draft.submitted": ArtifactDraftPayload;
-  "artifact.draft.withdrawn": ArtifactDraftPayload;
   "blob.fragment": BlobFragmentPayload;
   "ack": AckPayload;
   "sync.resend.requested": SyncResendRequestedPayload;
@@ -302,14 +242,7 @@ export const PRECONDITION_EVENT_KINDS: ReadonlySet<MachineEventKind> = new Set<M
   "permission.decided",
   "choice.answered",
   "request.answered",
-  "request.cancelled",
-  "artifact.revised",
-  "artifact.published",
-  "artifact.signed",
-  "artifact.access.changed",
-  "artifact.draft.saved",
-  "artifact.draft.submitted",
-  "artifact.draft.withdrawn"
+  "request.cancelled"
 ]);
 
 /** Events that are immutable facts and are never superseded. */

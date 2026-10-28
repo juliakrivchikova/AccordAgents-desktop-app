@@ -37,69 +37,40 @@ function event(options: {
 
 // --- the two acceptance cases the signed resolution names -------------------
 
-test("two offline machines both produce v2: one wins, the other is visibly superseded, and its signature stays with what it signed", () => {
-  // Both machines read v1 and revised it while disconnected.
-  const v1 = event({
-    kind: "artifact.revision.created", origin: "mac", seq: 1, ts: "100",
-    payload: { operationId: "op-v1", targetKey: "artifact:plan", stateId: "rev-1", contentHash: "hash-1" }
+test("two offline devices act on the same state: one wins, the other is visibly superseded", () => {
+  // Both devices read the same state of a request and moved it on while
+  // disconnected. (Documents are not chat actions any more: the User's
+  // server decides every document change, so they never race this way.)
+  const opened = event({
+    kind: "participant.request.opened", origin: "mac", seq: 1, ts: "100",
+    payload: { operationId: "op-open", targetKey: "request:plan", stateId: "open", contentHash: "hash-open" }
   });
   const winner = event({
-    kind: "artifact.revision.created", origin: "aaa-machine", seq: 1, ts: "200", eventId: "winner",
+    kind: "participant.request.answered", origin: "aaa-machine", seq: 1, ts: "200", eventId: "winner",
     payload: {
-      operationId: "op-a", targetKey: "artifact:plan", stateId: "rev-2a", contentHash: "hash-2a",
-      precondition: { expectedStateId: "rev-1", expectedContentHash: "hash-1" }
+      operationId: "op-a", targetKey: "request:plan", stateId: "answered-a", contentHash: "hash-a",
+      precondition: { expectedStateId: "open", expectedContentHash: "hash-open" }
     }
   });
   const loser = event({
-    kind: "artifact.revision.created", origin: "zzz-machine", seq: 1, ts: "300", eventId: "loser",
+    kind: "participant.request.answered", origin: "zzz-machine", seq: 1, ts: "300", eventId: "loser",
     payload: {
-      operationId: "op-b", targetKey: "artifact:plan", stateId: "rev-2b", contentHash: "hash-2b",
-      precondition: { expectedStateId: "rev-1", expectedContentHash: "hash-1" }
+      operationId: "op-b", targetKey: "request:plan", stateId: "answered-b", contentHash: "hash-b",
+      precondition: { expectedStateId: "open", expectedContentHash: "hash-open" }
     }
   });
-  // gera signed the revision that lost; drew and the User signed the winner.
-  const signedLoser = event({
-    kind: "artifact.signature.added", origin: "zzz-machine", seq: 2, ts: "310", eventId: "sig-loser",
-    payload: {
-      operationId: "op-sig-loser", targetKey: "artifact:plan",
-      signer: "gera", signedStateId: "rev-2b", signedContentHash: "hash-2b"
-    } as ChatActionPayload
-  });
-  const signedWinner = event({
-    kind: "artifact.signature.added", origin: "aaa-machine", seq: 2, ts: "320", eventId: "sig-winner",
-    payload: {
-      operationId: "op-sig-winner", targetKey: "artifact:plan",
-      signer: "drew", signedStateId: "rev-2a", signedContentHash: "hash-2a"
-    } as ChatActionPayload
-  });
-  const signedWinnerToo = event({
-    kind: "artifact.signature.added", origin: "mac", seq: 2, ts: "330", eventId: "sig-winner-2",
-    payload: {
-      operationId: "op-sig-winner-2", targetKey: "artifact:plan",
-      signer: "user", signedStateId: "rev-2a", signedContentHash: "hash-2a"
-    } as ChatActionPayload
-  });
 
-  const result = foldChatActionEvents([signedWinnerToo, loser, v1, signedLoser, winner, signedWinner]);
-  const plan = result.targets.find((target) => target.targetKey === "artifact:plan");
+  const result = foldChatActionEvents([loser, opened, winner]);
+  const plan = result.targets.find((target) => target.targetKey === "request:plan");
   assert.ok(plan);
 
-  assert.equal(plan.stateId, "rev-2a", "the earlier-sorted revision is the one projected");
+  assert.equal(plan.stateId, "answered-a", "the earlier-sorted action is the one projected");
   const supersede = result.superseded.find((entry) => entry.eventId === "loser");
-  assert.ok(supersede, "the later-sorted revision must be visibly superseded, not silently dropped");
+  assert.ok(supersede, "the later-sorted action must be visibly superseded, not silently dropped");
   assert.equal(supersede.reason, "state-changed");
   assert.equal(supersede.supersededBy, "winner");
-  assert.equal(supersede.expectedStateId, "rev-1");
-  assert.equal(supersede.actualStateId, "rev-2a");
-
-  const loserSignature = plan.signatures.find((entry) => entry.signer === "gera");
-  assert.ok(loserSignature);
-  assert.equal(loserSignature.signedStateId, "rev-2b", "a signature never moves to content it did not read");
-  assert.equal(loserSignature.signedContentHash, "hash-2b");
-  assert.equal(loserSignature.countsTowardCurrent, false, "it must not count toward the winning revision");
-
-  const counting = plan.signatures.filter((entry) => entry.countsTowardCurrent).map((entry) => entry.signer).sort();
-  assert.deepEqual(counting, ["drew", "user"], "signatures from different signers on the winner accumulate");
+  assert.equal(supersede.expectedStateId, "open");
+  assert.equal(supersede.actualStateId, "answered-a");
 });
 
 test("a denial that sorts before an executed approval cannot erase what already happened", () => {
@@ -141,12 +112,12 @@ test("a denial that sorts before an executed approval cannot erase what already 
 
 test("every peer folds the same events to the same result whatever order they arrived in", () => {
   const events = [
-    event({ kind: "artifact.revision.created", origin: "a", seq: 1, ts: "100", eventId: "one",
-      payload: { operationId: "op1", targetKey: "artifact:x", stateId: "s1", contentHash: "h1" } }),
-    event({ kind: "artifact.revision.created", origin: "b", seq: 1, ts: "200", eventId: "two",
-      payload: { operationId: "op2", targetKey: "artifact:x", stateId: "s2", contentHash: "h2", precondition: { expectedStateId: "s1" } } }),
-    event({ kind: "artifact.revision.created", origin: "c", seq: 1, ts: "150", eventId: "three",
-      payload: { operationId: "op3", targetKey: "artifact:x", stateId: "s3", contentHash: "h3", precondition: { expectedStateId: "s1" } } })
+    event({ kind: "choice.answered", origin: "a", seq: 1, ts: "100", eventId: "one",
+      payload: { operationId: "op1", targetKey: "choice:x", stateId: "s1", contentHash: "h1" } }),
+    event({ kind: "choice.answered", origin: "b", seq: 1, ts: "200", eventId: "two",
+      payload: { operationId: "op2", targetKey: "choice:x", stateId: "s2", contentHash: "h2", precondition: { expectedStateId: "s1" } } }),
+    event({ kind: "choice.answered", origin: "c", seq: 1, ts: "150", eventId: "three",
+      payload: { operationId: "op3", targetKey: "choice:x", stateId: "s3", contentHash: "h3", precondition: { expectedStateId: "s1" } } })
   ];
   const forward = foldChatActionEvents(events);
   const reversed = foldChatActionEvents([...events].reverse());

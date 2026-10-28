@@ -1,12 +1,10 @@
-import { ARTIFACT_STATE_KINDS } from "./artifactStateEvents";
 /**
- * Applying a chat action that arrived from another machine.
+ * Applying a chat action that arrived from another device.
  *
- * Emitting an action is half a user scenario. Until every peer applies it, a
- * signature made on one machine is invisible on the next, and two machines that
- * revised the same artifact never learn that one of them lost. This is the
- * receiving half, shared by the desktop link and the machine host so both apply
- * the same event the same way.
+ * Emitting an action is half a user scenario: until the device that holds what
+ * it answers applies it, an answer given elsewhere is not acted on. This is the
+ * receiving half, shared by every device so each applies the same event the
+ * same way. (Documents are not chat actions: the User's server owns them.)
  *
  * The outcomes are deliberately distinct:
  *
@@ -14,15 +12,10 @@ import { ARTIFACT_STATE_KINDS } from "./artifactStateEvents";
  *   - `duplicate`   it was already applied; folding it again changes nothing.
  *   - `deferred`    this peer does not hold what the action refers to yet. The
  *                   event is kept and retried rather than dropped, so nothing
- *                   is lost while the content it depends on is still on its way.
+ *                   is lost while what it depends on is still on its way.
  *   - `superseded`  the action was made on state this peer has already moved
  *                   past. It is recorded as visibly superseded, never applied
  *                   silently over the winner.
- *
- * A signature is stored against the revision it was made on, by id and content
- * hash. It is never re-pointed at whatever the head happens to be now: the head
- * filter decides what counts toward approval, so a signature on a revision that
- * lost a race keeps belonging to the content its signer actually read.
  *
  * Nothing here repeats an external effect. An execution receipt is recorded as
  * a fact and applied exactly once; re-delivery is a duplicate.
@@ -31,56 +24,9 @@ import { ARTIFACT_STATE_KINDS } from "./artifactStateEvents";
 import {
   isChatActionKind,
   type ChatActionKind,
-  type ChatActionPayload,
-  type ChatSignaturePayload
+  type ChatActionPayload
 } from "../../shared/chatActionEvents";
-import { createHash } from "node:crypto";
-import { ARTIFACT_CONTENT_MAX_BYTES } from "../../shared/artifacts";
-import type { ChatActionDependency } from "../../shared/deviceEventChannel";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-
-export interface ChatActionArtifactPort {
-  applyState?(event: ChatEventEnvelope, payload: ChatActionPayload): Promise<ChatActionApplyStatus>;
-  getRevision(artifactId: string, versionEventId: string): Promise<
-    { version: number; contentHash: string; superseded: boolean } | undefined
-  >;
-  /** True when this peer holds the artifact at all. */
-  hasArtifact?(artifactId: string): Promise<boolean>;
-  /** Creates the artifact shell a revision needs, for a peer that has never
-   *  seen it. Never overwrites one that is already here. */
-  createArtifact?(request: {
-    artifactId: string;
-    conversationId: string;
-    name: string;
-    owner: string;
-    contributors: string[];
-    requiredSigners: string[];
-    labels: string[];
-    publication?: NonNullable<ChatActionPayload["revision"]>;
-    createdAt: string;
-    revision: { versionEventId: string; version: number; content: string; author: string; note?: string; createdAt: string };
-  }): Promise<void>;
-  /** Stores an immutable revision received from another peer. */
-  publishArtifact?(request: { artifactId: string; conversationId: string; body: NonNullable<ChatActionPayload["revision"]>; versionEventId: string }): Promise<void>;
-  retainRevision?(request: {
-    artifactId: string;
-    versionEventId: string;
-    baseVersionEventId?: string;
-    version: number;
-    content: string;
-    author: string;
-    note?: string;
-    createdAt: string;
-  }): Promise<void>;
-  insertSignature(record: {
-    artifactId: string;
-    version: number;
-    versionEventId: string;
-    contentHash: string;
-    signer: string;
-    signedAt: string;
-  }): Promise<boolean>;
-}
 
 export type ChatActionApplyStatus = "applied" | "duplicate" | "deferred" | "superseded";
 
@@ -90,9 +36,6 @@ export interface ChatActionApplyResult {
   targetKey: string;
   /** Shown to the User for a superseded or deferred action. */
   detail?: string;
-  /** For a deferred action, the state it is waiting for. The transport asks
-   *  the peer for exactly this instead of waiting for it to arrive by luck. */
-  dependency?: ChatActionDependency;
 }
 
 /** What this peer can actually do when a decision from elsewhere arrives.
@@ -124,7 +67,6 @@ export interface ChatActionEffectPort {
 }
 
 export interface ChatActionApplierDeps {
-  artifacts?: ChatActionArtifactPort;
   effects?: ChatActionEffectPort;
   now?(): string;
   logger?(event: string, payload: Record<string, unknown>): void;
@@ -139,27 +81,18 @@ export class ChatActionApplier {
   }
 
   /**
-   * `hydrated` is the payload after fragments have been assembled. A revision
-   * body large enough to be fragmented is only complete there, so it is used in
+   * `hydrated` is the payload after fragments have been assembled. A body
+   * large enough to be fragmented is only complete there, so it is used in
    * preference to the envelope's own payload whenever the caller has it.
    */
   async apply(event: ChatEventEnvelope, hydrated?: unknown): Promise<ChatActionApplyResult> {
     const payload = (isActionPayload(hydrated) ? hydrated : event.payload) as ChatActionPayload;
     const kind = event.kind as ChatActionKind;
     const base = { kind, targetKey: payload.targetKey };
-    if ((ARTIFACT_STATE_KINDS as readonly string[]).includes(kind)) {
-      return { ...base, status: await this.deps.artifacts?.applyState?.(event, payload) ?? "deferred" };
-    }
     if (kind === "execution.receipt") {
       // A fact about something that already happened elsewhere. Recording it is
       // the whole application; there is nothing local to repeat.
       return { ...base, status: "applied" };
-    }
-    if (kind === "artifact.signature.added") {
-      return this.applySignature(event, payload, base);
-    }
-    if (kind === "artifact.revision.created") {
-      return this.applyRevision(event, payload, base);
     }
     if (kind === "permission.decided" || kind === "choice.answered" || kind === "turn.stop.requested") {
       return this.applyDecision(event, payload, kind, base);
@@ -241,164 +174,6 @@ export class ChatActionApplier {
     await effects.record({ conversationId: event.conversationId, targetKey: payload.targetKey, effect });
     return { ...base, status: "applied", detail: effect };
   }
-
-  private async applySignature(
-    event: ChatEventEnvelope,
-    payload: ChatActionPayload,
-    base: { kind: ChatActionKind; targetKey: string }
-  ): Promise<ChatActionApplyResult> {
-    const artifacts = this.deps.artifacts;
-    const signature = payload as ChatSignaturePayload;
-    const artifactId = artifactIdFromTarget(payload.targetKey);
-    if (!artifacts || !artifactId || typeof signature.signer !== "string"
-      || typeof signature.signedStateId !== "string" || typeof signature.signedContentHash !== "string"
-      || (signature.signedAt !== undefined && typeof signature.signedAt !== "string")) {
-      return { ...base, status: "applied" };
-    }
-    const revision = await artifacts.getRevision(artifactId, signature.signedStateId);
-    if (!revision) {
-      // The revision this signature was made on has not reached this peer yet.
-      // Keeping the event is the only honest option: dropping it would lose a
-      // signature, and inventing a target would attach it to the wrong content.
-      return {
-        ...base,
-        status: "deferred",
-        detail: `The revision ${signature.signer} signed is not on this machine yet.`,
-        dependency: { targetKey: payload.targetKey, stateId: signature.signedStateId }
-      };
-    }
-    if (revision.contentHash !== signature.signedContentHash) {
-      return {
-        ...base,
-        status: "superseded",
-        detail: `${signature.signer} signed different content than this machine holds for that revision.`
-      };
-    }
-    const inserted = await artifacts.insertSignature({
-      artifactId,
-      version: revision.version,
-      versionEventId: signature.signedStateId,
-      contentHash: signature.signedContentHash,
-      signer: signature.signer,
-      signedAt: signature.signedAt ?? signatureTime(event, this.deps.now)
-    });
-    if (!inserted) return { ...base, status: "duplicate" };
-    return revision.superseded
-      ? {
-        ...base,
-        status: "applied",
-        detail: `${signature.signer}'s signature belongs to a revision that lost a race; it does not count toward the current version.`
-      }
-      : { ...base, status: "applied" };
-  }
-
-  private async applyRevision(
-    event: ChatEventEnvelope,
-    payload: ChatActionPayload,
-    base: { kind: ChatActionKind; targetKey: string }
-  ): Promise<ChatActionApplyResult> {
-    const artifacts = this.deps.artifacts;
-    const artifactId = artifactIdFromTarget(payload.targetKey);
-    if (!artifacts || !artifactId || !payload.stateId) {
-      return { ...base, status: "applied" };
-    }
-    const already = await artifacts.getRevision(artifactId, payload.stateId);
-    if (already) return { ...base, status: "duplicate" };
-    const expected = payload.precondition?.expectedStateId;
-    const body = payload.revision;
-
-    // The body travels with the event, so a peer that does not hold the
-    // revision can apply it instead of waiting for it forever. Its identity is
-    // checked before anything is written.
-    if (body) {
-      if (typeof body.content !== "string" || Buffer.byteLength(body.content, "utf8") > ARTIFACT_CONTENT_MAX_BYTES
-          || !Number.isSafeInteger(body.version) || body.version < 1 || typeof body.author !== "string"
-          || typeof body.createdAt !== "string" || (body.note !== undefined && typeof body.note !== "string")
-          || (body.sources !== undefined && !Array.isArray(body.sources))) throw new Error("Invalid artifact revision event.");
-      const hash = createHash("sha256").update(body.content, "utf8").digest("hex");
-      if (payload.contentHash && hash !== payload.contentHash) {
-        return {
-          ...base,
-          status: "superseded",
-          detail: "The body of that revision does not match the identity it was sent with; it was not stored."
-        };
-      }
-    }
-
-    if (!expected) {
-      // The action that establishes a target's first state. A peer that has
-      // never seen this artifact creates it here rather than being unable to
-      // hold anything that follows.
-      if (body?.artifact && artifacts.createArtifact && artifacts.hasArtifact
-        && !await artifacts.hasArtifact(artifactId)) {
-        await artifacts.createArtifact({
-          artifactId,
-          conversationId: event.conversationId,
-          name: body.artifact.name,
-          owner: body.artifact.owner,
-          contributors: body.artifact.contributors,
-          requiredSigners: body.artifact.requiredSigners,
-          labels: body.artifact.labels,
-          createdAt: body.artifact.createdAt,
-          publication: body,
-          revision: {
-            versionEventId: payload.stateId,
-            version: body.version,
-            content: body.content,
-            author: body.author,
-            note: body.note,
-            createdAt: body.createdAt
-          }
-        });
-        return { ...base, status: "applied", detail: "The artifact and its first version were created here." };
-      }
-      if (body?.artifact && artifacts.publishArtifact) {
-        await artifacts.publishArtifact({ artifactId, conversationId: event.conversationId, body, versionEventId: payload.stateId });
-      }
-      return { ...base, status: "applied" };
-    }
-    const base_ = await artifacts.getRevision(artifactId, expected);
-    if (!base_) {
-      return {
-        ...base,
-        status: "deferred",
-        detail: "The revision this change was made on is not on this machine yet.",
-        dependency: { targetKey: payload.targetKey, stateId: expected }
-      };
-    }
-    if (base_.superseded) {
-      return {
-        ...base,
-        status: "superseded",
-        detail: "This change was made on a revision that has since been replaced; it is shown as superseded."
-      };
-    }
-    if (body && artifacts.retainRevision) {
-      await artifacts.retainRevision({
-        artifactId,
-        versionEventId: payload.stateId,
-        baseVersionEventId: expected,
-        version: body.version,
-        content: body.content,
-        author: body.author,
-        note: body.note,
-        createdAt: body.createdAt
-      });
-      return { ...base, status: "applied", detail: "The revision was stored here." };
-    }
-    // No body travelled with it: the ordering is recorded, and the content
-    // arrives with the artifact replication.
-    return { ...base, status: "applied" };
-  }
-}
-
-function artifactIdFromTarget(targetKey: string): string | undefined {
-  const match = /^artifact:(.+)$/.exec(targetKey);
-  return match?.[1];
-}
-
-function signatureTime(event: ChatEventEnvelope, now?: () => string): string {
-  return event.createdAt || now?.() || new Date().toISOString();
 }
 
 function isActionPayload(value: unknown): value is ChatActionPayload {

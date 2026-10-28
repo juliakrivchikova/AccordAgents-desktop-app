@@ -332,23 +332,12 @@ export interface ChatCopyMark {
   eventHash: string;
 }
 
-/** Shared state a new machine gets with its chat copy: artifacts, and which
- *  chats were deleted. The artifact delivery outbox is device-local, and the
- *  pre-revision tables (`artifact_versions`, `artifact_signatures`,
- *  `artifact_version_sources`) are read-only history that a current store
- *  refuses writes to; their content lives in the revision tables below. */
+/** Shared state a new machine (or the User's server) gets with its chat
+ *  copy: which chats were deleted. Documents are not part of it: they are
+ *  the server's (Д9), moved there by the computer, and every device reads
+ *  its copy of them from the server. */
 const CHAT_COPY_STATE_TABLES = [
-  "deleted_conversations",
-  "artifact_conversation_tombstones",
-  "artifacts",
-  "artifact_drafts",
-  "artifact_operations",
-  "artifact_revisions",
-  "artifact_state_events",
-  "artifact_version_projection",
-  "artifact_bound_signatures",
-  "artifact_bound_sources",
-  "artifact_revision_migration"
+  "deleted_conversations"
 ] as const;
 
 export class StorageService {
@@ -1702,9 +1691,9 @@ export class StorageService {
    * this read covers at least these, so the receiving machine continues from
    * them instead of asking for history the relay no longer has.
    *
-   * The chat-action log is marked too, per author: the copy carries its
-   * artifact actions, and the rest of it (choices, approvals, stops) is about
-   * runs elsewhere that a new machine has no use for.
+   * The chat-action log is marked too, per author: what it holds (choices,
+   * approvals, stops) is about runs elsewhere that a new machine has no use
+   * for, and the copy carries none of it.
    */
   async chatChangeMarks(localOriginId: string, extraOrigins: readonly string[] = []): Promise<ChatCopyMark[]> {
     await this.init();
@@ -1743,9 +1732,9 @@ export class StorageService {
     `);
   }
 
-  /** Copies artifact and deletion state into a separate SQLite file, so a new
-   *  machine gets it over the setup connection instead of as events. Device-
-   *  local delivery queues are not part of it. */
+  /** Copies deletion state into a separate SQLite file, so a new machine
+   *  gets it over the setup connection instead of as events. Device-local
+   *  delivery queues are not part of it. */
   async exportChatCopyState(targetPath: string): Promise<{ tables: string[] }> {
     await this.init();
     const existing = new Set((await this.queryJson<{ name: string }>(
@@ -1756,20 +1745,16 @@ export class StorageService {
       attach database ${sqlString(targetPath)} as copy;
       begin immediate;
       ${tables.map((table) => `create table copy.${table} as select * from main.${table};`).join("\n")}
-      create table copy.chat_events as select * from main.chat_events
-        where log_scope_id = ${sqlString(CHAT_ACTION_LOG_SCOPE)} and substr(kind, 1, 9) = 'artifact.';
-      create table copy.device_event_blobs as select * from main.device_event_blobs where blob_hash in (
-        select json_extract(payload_json, '$.blobHash') from copy.chat_events where json_extract(payload_json, '$.type') = 'device.event.blob');
-      create table copy.device_event_blob_fragments as select * from main.device_event_blob_fragments
-        where blob_hash in (select blob_hash from copy.device_event_blobs);
       commit;
       detach database copy;
     `);
     return { tables };
   }
 
-  /** Merges artifact and deletion state from an exported file. Rows already
-   *  here win; running it twice changes nothing. */
+  /** Merges deletion state from an exported file. Rows already here win;
+   *  running it twice changes nothing. A copy an older computer made also
+   *  holds documents and their events: those are left out (documents come
+   *  from the server). */
   async importChatCopyState(sourcePath: string): Promise<{ tables: Record<string, number> }> {
     await this.init();
     await this.runSql(`attach database ${sqlString(sourcePath)} as copy; detach database copy;`);
@@ -1781,10 +1766,7 @@ export class StorageService {
     const localTables = new Set((await this.queryJson<{ name: string }>(
       "select name from sqlite_master where type = 'table';"
     )).map((row) => row.name));
-    // The artifact actions behind that state come along as the events they
-    // are, unchanged: without them this device would announce the same
-    // history again as its own and every peer would refuse it as a conflict.
-    for (const table of [...CHAT_COPY_STATE_TABLES, "chat_events", "device_event_blobs", "device_event_blob_fragments"]) {
+    for (const table of CHAT_COPY_STATE_TABLES) {
       if (!sourceTables.has(table) || !localTables.has(table)) continue;
       const sourceColumns = new Set((await this.queryJson<{ name: string }>(
         `attach database ${sqlString(sourcePath)} as copy; select name from pragma_table_info('${table}', 'copy'); detach database copy;`
@@ -1951,6 +1933,27 @@ export class StorageService {
       execute: (sql: string) => this.runSql(sql)
     });
     return this.hubClientOpsStore;
+  }
+
+  /** This database through its own session, for a store whose tables live
+   *  here too (the server's documents), so its changes and the server's
+   *  order can commit together. */
+  sqlExecutor(): { path: string; queryJson<T>(sql: string): Promise<T[]>; queryText(sql: string): Promise<string>; runSql(sql: string): Promise<void> } {
+    return {
+      path: this.dbPath,
+      queryJson: async <T>(sql: string) => {
+        await this.init();
+        return this.queryJson<T>(sql);
+      },
+      queryText: async (sql: string) => {
+        await this.init();
+        return this.queryText(sql);
+      },
+      runSql: async (sql: string) => {
+        await this.init();
+        await this.runSql(sql);
+      }
+    };
   }
 
   /** The server's accepted operations and turns (the User's server only). */

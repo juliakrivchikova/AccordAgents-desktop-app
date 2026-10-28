@@ -1,5 +1,5 @@
 import { HubHttpError, type HubClient } from "./hubClient";
-import { HUB_FEED_WAIT_MAX_MS, HUB_OPS_MAX_PER_REQUEST, type HubClaimOutcome, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
+import { HUB_FEED_WAIT_MAX_MS, HUB_OPS_MAX_PER_REQUEST, type HubArtifactAnswer, type HubClaimOutcome, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
 
 /**
  * A device's side of the chats the User's server owns (agreements Д1, Д3):
@@ -53,6 +53,8 @@ export interface HubClientOpRow {
   seq?: number;
   claim?: HubClaimOutcome;
   turn?: HubTurn;
+  /** The server's answer to a document action. */
+  artifact?: HubArtifactAnswer;
   createdAt: string;
 }
 
@@ -151,19 +153,41 @@ export class HubClientOpsStore {
     return rows[0] ? fromRow(rows[0]) : undefined;
   }
 
-  async accept(opId: string, seq: number, at: string, extra: { claim?: HubClaimOutcome; turn?: HubTurn } = {}): Promise<void> {
+  async accept(opId: string, seq: number, at: string, extra: { claim?: HubClaimOutcome; turn?: HubTurn; artifact?: HubArtifactAnswer } = {}): Promise<void> {
     await this.init();
     await this.database.execute(`update hub_client_ops set status = 'accepted', seq = ${Math.max(0, Math.floor(seq))}, last_error = null,
       result_json = ${Object.keys(extra).length ? quote(JSON.stringify(extra)) : "null"}, updated_at = ${quote(at)}
       where op_id = ${quote(opId)};`);
   }
 
-  async reject(row: HubClientOpRow, reason: string, at: string): Promise<void> {
+  /** `artifact`: the server's answer to a document action it refused by its
+   *  rules (a stale base, no access). That is the action's answer, not a
+   *  failure to send, so it is not kept among the failures. */
+  async reject(row: HubClientOpRow, reason: string, at: string, artifact?: HubArtifactAnswer): Promise<void> {
     await this.init();
     await this.database.execute(`begin immediate;
-      update hub_client_ops set status = 'rejected', last_error = ${quote(reason)}, updated_at = ${quote(at)} where op_id = ${quote(row.opId)};
-      ${this.failureSql(row, reason, at)}
+      update hub_client_ops set status = 'rejected', last_error = ${quote(reason)}, updated_at = ${quote(at)},
+        result_json = ${artifact ? quote(JSON.stringify({ artifact })) : "result_json"} where op_id = ${quote(row.opId)};
+      ${artifact ? "" : this.failureSql(row, reason, at)}
       commit;`);
+  }
+
+  /** Takes back an operation nobody sent yet; false when it is not waiting. */
+  async withdraw(opId: string): Promise<boolean> {
+    await this.init();
+    const rows = await this.database.query<{ changed: number }>(`delete from hub_client_ops where op_id = ${quote(opId)} and status = 'queued';
+      select changes() as changed;`);
+    return Number(rows[0]?.changed ?? 0) > 0;
+  }
+
+  /** Takes back every waiting operation of these kinds (a device that
+   *  restarted: nothing waits for their answer any more). */
+  async withdrawKinds(kindPrefix: string): Promise<number> {
+    await this.init();
+    const rows = await this.database.query<{ changed: number }>(`delete from hub_client_ops where status = 'queued'
+      and substr(kind, 1, ${kindPrefix.length}) = ${quote(kindPrefix)};
+      select changes() as changed;`);
+    return Number(rows[0]?.changed ?? 0);
   }
 
   /** A whole request failed (no answer, or the server refused the request):
@@ -228,14 +252,21 @@ function fromRow(row: RawRow): HubClientOpRow {
     attempts: Number(row.attempts) || 0,
     ...(row.lastError ? { lastError: row.lastError } : {}),
     ...(row.seq !== null && row.seq !== undefined ? { seq: Number(row.seq) } : {}),
-    ...(row.resultJson ? JSON.parse(row.resultJson) as { claim?: HubClaimOutcome; turn?: HubTurn } : {}),
+    ...(row.resultJson ? JSON.parse(row.resultJson) as { claim?: HubClaimOutcome; turn?: HubTurn; artifact?: HubArtifactAnswer } : {}),
     createdAt: row.createdAt
   };
 }
 
 export type HubOpOutcome =
-  | { status: "accepted"; seq: number; claim?: HubClaimOutcome; turn?: HubTurn }
-  | { status: "rejected"; reason: string };
+  | { status: "accepted"; seq: number; claim?: HubClaimOutcome; turn?: HubTurn; artifact?: HubArtifactAnswer }
+  | { status: "rejected"; reason: string; artifact?: HubArtifactAnswer };
+
+/** Where an operation stands when its writer stops waiting for it. */
+export type HubOpWithdrawal =
+  | { status: "withdrawn"; attempted: boolean }
+  | { status: "in-flight" }
+  | { status: "answered"; outcome: HubOpOutcome }
+  | { status: "missing" };
 
 /** Where this device read the server's feed. */
 export const HUB_FEED_CURSOR_KEY = "ops-cursor";
@@ -263,6 +294,14 @@ export class HubOpsClient {
   private readerWake?: () => void;
   /** Cancels the feed read in flight (a stop does not wait out its long wait). */
   private reading_?: AbortController;
+  /** Operations in a request on its way now: they cannot be taken back. */
+  private readonly inFlight = new Set<string>();
+  /** Operations their writer took back: never sent, even if a batch read
+   *  them just before. */
+  private readonly withdrawn = new Set<string>();
+  /** How far this device's copy holds the server's order (the feed applied). */
+  private appliedSeq?: number;
+  private readonly appliedWaiters = new Set<{ seq: number; resolve: (reached: boolean) => void }>();
 
   constructor(private readonly options: {
     store: HubClientOpsStore;
@@ -298,6 +337,7 @@ export class HubOpsClient {
     this.retryTimer = undefined;
     this.readerWake?.();
     this.reading_?.abort();
+    for (const waiter of [...this.appliedWaiters]) waiter.resolve(false);
     await this.flushing?.catch(() => undefined);
     await this.reading?.catch(() => undefined);
   }
@@ -350,11 +390,76 @@ export class HubOpsClient {
       // Answered already (or before this was asked).
       void this.options.store.get(opId).then((row) => {
         if (row?.status === "accepted") {
-          this.answer(opId, { status: "accepted", seq: row.seq ?? 0, ...(row.claim ? { claim: row.claim } : {}), ...(row.turn ? { turn: row.turn } : {}) });
+          this.answer(opId, { status: "accepted", seq: row.seq ?? 0, ...(row.claim ? { claim: row.claim } : {}), ...(row.turn ? { turn: row.turn } : {}),
+            ...(row.artifact ? { artifact: row.artifact } : {}) });
         }
-        else if (row?.status === "rejected") this.answer(opId, { status: "rejected", reason: row.lastError ?? "Rejected." });
+        else if (row?.status === "rejected") this.answer(opId, { status: "rejected", reason: row.lastError ?? "Rejected.", ...(row.artifact ? { artifact: row.artifact } : {}) });
       }).catch(() => undefined);
     });
+  }
+
+  /**
+   * The writer stops waiting for an operation: taken back when nothing sent
+   * it yet; left alone while a request carries it (its answer comes);
+   * answered already, it says how. `attempted` tells whether a request that
+   * failed carried it before (it may have reached the server).
+   */
+  async withdraw(opId: string): Promise<HubOpWithdrawal> {
+    // From here no batch sends it, even one that read it a moment ago, and a
+    // request carrying it now that fails does not send it again.
+    this.withdrawn.add(opId);
+    if (this.inFlight.has(opId)) return { status: "in-flight" };
+    const release = () => { this.withdrawn.delete(opId); };
+    const row = await this.options.store.get(opId);
+    if (!row) {
+      release();
+      return { status: "missing" };
+    }
+    if (row.status !== "queued") {
+      release();
+      return { status: "answered", outcome: outcomeOfRow(row) };
+    }
+    if (this.inFlight.has(opId)) return { status: "in-flight" };
+    if (!await this.options.store.withdraw(opId)) {
+      release();
+      const now = await this.options.store.get(opId);
+      return now && now.status !== "queued" ? { status: "answered", outcome: outcomeOfRow(now) } : { status: "missing" };
+    }
+    // Kept a while for a batch that read it before it went.
+    setTimeout(release, 60_000).unref?.();
+    return { status: "withdrawn", attempted: row.attempts > 0 };
+  }
+
+  /** Resolves true once this device's copy holds the server's order through
+   *  `seq` (what an accepted operation placed is shown here), false when it
+   *  did not within `timeoutMs`. */
+  async waitApplied(seq: number, timeoutMs: number): Promise<boolean> {
+    if (this.appliedSeq === undefined) {
+      const stored = Number(await this.options.cursor.get().catch(() => undefined));
+      if (Number.isSafeInteger(stored) && stored >= 0) this.appliedSeq = Math.max(this.appliedSeq ?? 0, stored);
+    }
+    if ((this.appliedSeq ?? -1) >= seq) return true;
+    this.wakeReader();
+    return new Promise((resolve) => {
+      const waiter = {
+        seq,
+        resolve: (reached: boolean) => {
+          clearTimeout(timer);
+          this.appliedWaiters.delete(waiter);
+          resolve(reached);
+        }
+      };
+      const timer = setTimeout(() => waiter.resolve(false), Math.max(0, timeoutMs));
+      timer.unref?.();
+      this.appliedWaiters.add(waiter);
+    });
+  }
+
+  private noteApplied(seq: number): void {
+    this.appliedSeq = Math.max(this.appliedSeq ?? 0, seq);
+    for (const waiter of [...this.appliedWaiters]) {
+      if (waiter.seq <= seq) waiter.resolve(true);
+    }
   }
 
   /** A chat moved to the server whole: what was queued for its content is in
@@ -404,19 +509,31 @@ export class HubOpsClient {
     for (;;) {
       if (this.stopped) return;
       const client = this.options.client();
-      const batch = await this.options.store.queued(HUB_OPS_MAX_PER_REQUEST, FLUSH_MAX_BYTES);
+      // Read and claimed for this request with nothing awaited between: an
+      // operation its writer took back is never sent.
+      const batch = (await this.options.store.queued(HUB_OPS_MAX_PER_REQUEST, FLUSH_MAX_BYTES)).filter((row) => !this.withdrawn.has(row.opId));
       if (batch.length === 0) return;
       const at = new Date(this.now()).toISOString();
       if (!client) {
         // No link yet: kept, tried when the link comes (nudge).
         return;
       }
+      for (const row of batch) this.inFlight.add(row.opId);
       let response;
       try {
         response = await client.writeOps(batch.map((row) => row.op));
       } catch (error) {
         const reason = error instanceof HubHttpError ? `The server answered ${error.status}: ${error.message}` : error instanceof Error ? error.message : String(error);
         await this.options.store.failed(batch, reason, at).catch(() => undefined);
+        for (const row of batch) {
+          this.inFlight.delete(row.opId);
+          // Its writer stopped waiting while this request carried it: it is
+          // not sent again.
+          if (this.withdrawn.has(row.opId)) {
+            await this.options.store.withdraw(row.opId).catch(() => false);
+            this.withdrawn.delete(row.opId);
+          }
+        }
         this.options.log("hub.ops.send-failed", { ops: batch.length, reason, retryMs: this.retryMs });
         this.setReachable(false, reason);
         this.scheduleRetry();
@@ -425,22 +542,35 @@ export class HubOpsClient {
       this.retryMs = RETRY_MIN_MS;
       this.setReachable(true);
       const byId = new Map(response.results.map((result) => [result.opId, result]));
-      for (const row of batch) {
-        const result = byId.get(row.opId);
-        if (!result) continue;
-        if (result.status === "rejected") {
-          await this.options.store.reject(row, result.reason, at);
-          this.options.log("hub.ops.rejected", { opId: row.opId, kind: row.kind, conversationId: row.conversationId, reason: result.reason });
-          const outcome: HubOpOutcome = { status: "rejected", reason: result.reason };
-          this.options.onAnswered?.(row, outcome);
-          this.answer(row.opId, outcome);
-        } else {
-          const extra = { ...(result.claim ? { claim: result.claim } : {}), ...(result.turn ? { turn: result.turn } : {}) };
-          await this.options.store.accept(row.opId, result.seq, at, extra);
-          const outcome: HubOpOutcome = { status: "accepted", seq: result.seq, ...extra };
-          this.options.onAnswered?.(row, outcome);
-          this.answer(row.opId, outcome);
+      try {
+        for (const row of batch) {
+          const result = byId.get(row.opId);
+          if (!result) continue;
+          if (result.status === "rejected") {
+            await this.options.store.reject(row, result.reason, at, result.artifact);
+            this.options.log("hub.ops.rejected", { opId: row.opId, kind: row.kind, conversationId: row.conversationId, reason: result.reason });
+            const outcome: HubOpOutcome = { status: "rejected", reason: result.reason, ...(result.artifact ? { artifact: result.artifact } : {}) };
+            this.options.onAnswered?.(row, outcome);
+            this.answer(row.opId, outcome);
+          } else {
+            const extra = { ...(result.claim ? { claim: result.claim } : {}), ...(result.turn ? { turn: result.turn } : {}),
+              ...(result.artifact ? { artifact: result.artifact } : {}) };
+            await this.options.store.accept(row.opId, result.seq, at, extra);
+            const outcome: HubOpOutcome = { status: "accepted", seq: result.seq, ...extra };
+            this.options.onAnswered?.(row, outcome);
+            this.answer(row.opId, outcome);
+          }
         }
+      } finally {
+        for (const row of batch) {
+          this.inFlight.delete(row.opId);
+          if (byId.has(row.opId)) this.withdrawn.delete(row.opId);
+        }
+      }
+      for (const row of batch) {
+        if (byId.has(row.opId) || !this.withdrawn.has(row.opId)) continue;
+        await this.options.store.withdraw(row.opId).catch(() => false);
+        this.withdrawn.delete(row.opId);
       }
       if (byId.size === 0) return;
     }
@@ -485,6 +615,7 @@ export class HubOpsClient {
           cursor = await this.options.resync();
           await this.options.cursor.set(String(cursor));
         }
+        this.noteApplied(cursor);
         let page;
         const cancel = new AbortController();
         this.reading_ = cancel;
@@ -496,6 +627,7 @@ export class HubOpsClient {
           this.options.log("hub.feed.gone", { after: cursor });
           const head = await this.options.resync();
           await this.options.cursor.set(String(head));
+          this.noteApplied(head);
           continue;
         } finally {
           if (this.reading_ === cancel) this.reading_ = undefined;
@@ -503,6 +635,7 @@ export class HubOpsClient {
         if (page.entries.length > 0) {
           await this.options.apply(page.entries);
           await this.options.cursor.set(String(page.entries[page.entries.length - 1].seq));
+          this.noteApplied(page.entries[page.entries.length - 1].seq);
         }
         failures = 0;
       } catch (error) {
@@ -512,6 +645,13 @@ export class HubOpsClient {
       }
     }
   }
+}
+
+function outcomeOfRow(row: HubClientOpRow): HubOpOutcome {
+  return row.status === "rejected"
+    ? { status: "rejected", reason: row.lastError ?? "Rejected.", ...(row.artifact ? { artifact: row.artifact } : {}) }
+    : { status: "accepted", seq: row.seq ?? 0, ...(row.claim ? { claim: row.claim } : {}), ...(row.turn ? { turn: row.turn } : {}),
+      ...(row.artifact ? { artifact: row.artifact } : {}) };
 }
 
 function quote(value: string): string {

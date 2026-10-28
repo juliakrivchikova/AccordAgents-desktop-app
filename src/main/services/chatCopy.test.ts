@@ -13,7 +13,6 @@ import { exportChatCopy, importChatCopy, machineChatCopyProvider, mergeCopiedCon
 import { ChatEventLogService } from "./chatEventLog";
 import { ArtifactService } from "./artifacts";
 import { ArtifactStore } from "./artifactStore";
-import { artifactEventWriter } from "./artifactReplication";
 import { StorageService } from "./storage";
 
 const NOW = "2026-10-01T09:00:00.000Z";
@@ -291,7 +290,7 @@ test("a save that started before the machine became a recipient is waited for be
   } finally { await cleanup(); }
 });
 
-test("artifacts go with the copy into a machine whose store refuses the old artifact tables", async () => {
+test("documents do not travel in the chat copy: every device reads them from the User's server", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accord-chat-copy-artifacts-"));
   try {
     const desktopDb = path.join(directory, "desktop.sqlite3");
@@ -303,36 +302,24 @@ test("artifacts go with the copy into a machine whose store refuses the old arti
     const desktopLog = new ChatEventLogService(desktop);
     const desktopIdentity = await desktopLog.getOrCreateDeviceIdentity();
     await desktop.saveConversation(chat("chat-1", [message("m1", "Hello", 1)]));
-    const artifacts = new ArtifactService({ store: desktopStore, getMembers: async () => ["user", "drew"],
-      ...artifactEventWriter(desktop, desktopLog, () => [{ deviceId: "device-machine", channelId: "room" }], desktopStore) });
+    const artifacts = new ArtifactService({ store: desktopStore, getMembers: async () => ["user", "drew"] });
     const created = await artifacts.create("drew", { conversationId: "chat-1", name: "Plan", content: "Version one", requiredSigners: ["drew"] });
     assert.equal(created.ok, true, created.ok ? undefined : created.error?.message);
     const artifactId = created.ok ? created.value.summary.id : "";
-    const signed = await artifacts.sign("drew", { conversationId: "chat-1", artifactId, version: 1 });
-    assert.equal(signed.ok, true, signed.ok ? undefined : signed.error?.message);
 
     const copyDir = path.join(directory, "copy");
     const manifest = await exportChatCopy(desktop, copyDir, { desktopOriginId: desktopIdentity.originId });
-    assert.ok(manifest.marks.some((mark) => mark.logScopeId === "chat:actions" && mark.originId === desktopIdentity.originId));
+    assert.deepEqual(manifest.stateTables, ["deleted_conversations"], "the copy carries which chats were deleted, and no documents");
 
-    // A machine as setup leaves it: the current artifact store, which turns
-    // the pre-revision tables read-only, is initialized before the import.
     const machine = new StorageService({ dbPath: machineDb });
     await machine.init();
     const machineStore = new ArtifactStore(machineDb);
     await machineStore.init();
-    const machineLog = new ChatEventLogService(machine);
-    const machineIdentity = await machineLog.getOrCreateDeviceIdentity();
+    const machineIdentity = await new ChatEventLogService(machine).getOrCreateDeviceIdentity();
     await importChatCopy(machine, copyDir, { hostMachineId: "machine-1", localOriginId: machineIdentity.originId });
-    assert.equal((await machineStore.getById(artifactId))?.name, "Plan");
-    assert.equal((await machineStore.getVersion(artifactId, 1))?.content, "Version one");
-    assert.equal((await machineStore.listSignatures(artifactId)).length, 1);
-    // The actions behind that state came with it: the machine has nothing of
-    // its own to announce, so no peer sees this history twice.
-    const machineArtifacts = new ArtifactService({ store: machineStore, getMembers: async () => ["user", "drew"],
-      ...artifactEventWriter(machine, machineLog, () => [{ deviceId: desktopIdentity.originId, channelId: "room" }], machineStore) });
-    assert.equal(await machineArtifacts.recoverActionEvents("chat-1"), 0);
-    assert.ok((await machine.getChatEventClock()).wallMs >= Date.parse("2026-01-01"), "the clock is past the copied actions");
+    assert.equal((await machine.getConversation("chat-1"))?.messages[0].content, "Hello");
+    assert.equal(await machineStore.getById(artifactId), undefined, "documents come from the server, not from the copy");
+    assert.deepEqual(await machine.listChatEvents("chat-1", "chat:actions"), []);
   } finally { await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 

@@ -1,20 +1,38 @@
-import { ARTIFACT_STATE_SCHEMA, artifactStateChange, artifactStateEventSql, foldArtifactState } from "./artifactStateEvents";
-import type { ChatActionPayload } from "../../shared/chatActionEvents";
-import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { runCommand } from "./command";
 import { artifactRevision, migrateArtifactRevisions, revisionInsertSql, revisionProjectionInsertSql, type ArtifactRevision } from "./artifactRevisions";
 import { artifactNameKey } from "../../shared/artifacts";
+import type {
+  HubArtifactDraftRow,
+  HubArtifactImportRows,
+  HubArtifactRecord,
+  HubArtifactRevision,
+  HubArtifactRevisionMeta,
+  HubArtifactState
+} from "../../shared/hubOps";
 
 // SQLite persistence for artifacts. Deliberately independent from conversation
 // payload storage: artifacts must survive chat compaction, agent session loss,
 // and app restarts, and are append-only at the version level. Uses the same
 // sqlite3-CLI approach as StorageService (no native binding), but takes an
 // explicit dbPath so it can run under plain `node --test` without Electron.
+//
+// The User's server owns every document (agreements Д1, Д9): there this store
+// is the documents themselves, decided by ArtifactService; on the computer and
+// on every machine it is a copy the server's feed keeps current
+// (`applyServerStates`), never written by a device's own rules.
 
 const SQLITE_BUSY_TIMEOUT_MS = 30_000;
 const SQLITE_COMMAND_TIMEOUT_MS = 45_000;
+
+/** Runs this store's SQL through another connection (the server's own
+ *  database session) instead of a sqlite3 process per statement. */
+export interface ArtifactSqlExecutor {
+  queryJson<T>(sql: string): Promise<T[]>;
+  queryText(sql: string): Promise<string>;
+  runSql(sql: string): Promise<void>;
+}
 
 export interface ArtifactRecord {
   id: string;
@@ -236,7 +254,11 @@ export class ArtifactStore {
   private static readonly initByPath = new Map<string, Promise<void>>();
   private initialized = false;
 
-  constructor(private readonly dbPath: string, private readonly sqliteExecutable = "sqlite3") {}
+  constructor(
+    private readonly dbPath: string,
+    private readonly sqliteExecutable = "sqlite3",
+    private readonly executor?: ArtifactSqlExecutor
+  ) {}
 
   async init(): Promise<void> {
     if (this.initialized) {
@@ -309,7 +331,6 @@ export class ArtifactStore {
     }
     await this.runSql(`
       begin immediate;
-      ${ARTIFACT_STATE_SCHEMA}
       create table if not exists artifact_drafts (
         id text primary key,
         artifact_id text not null,
@@ -367,6 +388,9 @@ export class ArtifactStore {
       commit;
     `);
     await migrateArtifactRevisions({ query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
+    // Documents are the server's (Д7): the fold of document events each device
+    // kept before is gone with that scheme.
+    await this.runSql("drop table if exists artifact_state_events;");
   }
 
   private async ensureArtifactColumn(name: string, sql: string): Promise<void> {
@@ -516,95 +540,8 @@ export class ArtifactStore {
     return rows[0] ? this.recordFromRow(rows[0]) : undefined;
   }
 
-  async applyStateEvent(event: ChatEventEnvelope, payload: ChatActionPayload): Promise<"applied" | "superseded"> {
-    await this.init();
-    const change = artifactStateChange(payload);
-    if (!change || event.conversationId !== change.record.conversationId) throw new Error("Invalid artifact state event.");
-    await this.runSql(artifactStateEventSql({ ...event, payload }, change));
-    const rows = await this.queryJson<{ eventJson: string }>(`select event_json as eventJson from artifact_state_events where artifact_id = ${sqlString(change.record.id)};`);
-    const projection = foldArtifactState(rows.map(row => JSON.parse(row.eventJson)));
-    const record = projection.record!;
-    if (!record) return "superseded";
-    const id = sqlString(record.id);
-    const columns: Record<string, string> = {
-      name: "name", owner: "owner", contributors: "contributors_json", requiredSigners: "required_signers_json", labels: "labels_json",
-      archivedAt: "archived_at", allowedDraftAuthors: "allowed_draft_authors_json", requiredDraftAuthors: "required_draft_authors_json",
-      audiencePolicyByAuthor: "audience_policy_json", draftRosterRevision: "draft_roster_revision"
-    };
-    const assignments = Object.entries(projection.metadata).map(([key, value]) => {
-      const column = columns[key];
-      if (!column) throw new Error("Unknown artifact metadata field.");
-      return `${column} = ${typeof value === "number" ? value : sqlString(value && typeof value === "object" ? JSON.stringify(value) : value as string || null)}`;
-    });
-    if (projection.metadata.name) assignments.push(`name_key = ${sqlString(projection.metadata.name.toLowerCase())}`);
-    const drafts = projection.drafts;
-    await this.runSql(`begin immediate;
-      create temp table artifact_fold_guard(valid integer check(valid = 1));
-      insert into artifact_fold_guard select case when (select count(*) from artifact_state_events where artifact_id = ${id}) = ${rows.length}
-        and not exists(select 1 from artifact_conversation_tombstones where conversation_id = ${sqlString(record.conversationId)}) then 1 else 0 end;
-      insert or ignore into artifacts(id, conversation_id, name, name_key, owner, contributors_json, required_signers_json, labels_json,
-        lifecycle, allowed_draft_authors_json, required_draft_authors_json, audience_policy_json, draft_roster_revision, head_version, created_at, updated_at, archived_at)
-      values(${id}, ${sqlString(record.conversationId)}, ${sqlString(record.name)}, ${sqlString(record.name.toLowerCase())}, ${sqlString(record.owner)},
-        ${sqlString(JSON.stringify(record.contributors))}, ${sqlString(JSON.stringify(record.requiredSigners))}, ${sqlString(JSON.stringify(record.labels))},
-        ${sqlString(record.lifecycle)}, ${sqlString(JSON.stringify(record.allowedDraftAuthors))}, ${sqlString(JSON.stringify(record.requiredDraftAuthors))},
-        ${sqlString(JSON.stringify(record.audiencePolicyByAuthor))}, ${record.draftRosterRevision}, ${record.headVersion}, ${sqlString(record.createdAt)}, ${sqlString(record.updatedAt)}, ${sqlString(record.archivedAt)});
-      insert into artifact_fold_guard select case when exists(select 1 from artifacts where id = ${id} and conversation_id = ${sqlString(record.conversationId)}) then 1 else 0 end;
-      ${assignments.length ? `update artifacts set ${assignments.join(", ")} where id = ${id};` : ""}
-      update artifacts set updated_at = max(updated_at, ${sqlString(event.createdAt)}) where id = ${id};
-      ${drafts.length ? `update artifact_drafts set state = 'superseded' where artifact_id = ${id} and id in (${drafts.map(row => sqlString(row.id)).join(",")});` : ""}
-      ${drafts.map(draft => `insert into artifact_drafts(id, artifact_id, author, state, content, readers_json, edit_revision, supersedes_draft_id, created_at, updated_at, submitted_at)
-        values(${sqlString(draft.id)}, ${id}, ${sqlString(draft.author)}, ${sqlString(draft.state)}, ${sqlString(draft.content)}, ${sqlString(JSON.stringify(draft.readers))},
-          ${draft.editRevision}, ${sqlString(draft.supersedesDraftId)}, ${sqlString(draft.createdAt)}, ${sqlString(draft.updatedAt)}, ${sqlString(draft.submittedAt)})
-        on conflict(id) do update set state=excluded.state, content=excluded.content, readers_json=excluded.readers_json,
-          edit_revision=excluded.edit_revision, updated_at=excluded.updated_at, submitted_at=excluded.submitted_at
-        where artifact_drafts.artifact_id=excluded.artifact_id and artifact_drafts.author=excluded.author;`).join("\n")}
-      commit;`);
-    return projection.applied.has(event.eventId) ? "applied" : "superseded";
-  }
-
   operationCommittedSql(operation: ArtifactOperationRecord): string {
     return this.operationAppliedSql(operation);
-  }
-
-  async applyPublication(artifactId: string, body: NonNullable<ChatActionPayload["revision"]>, versionEventId: string, conversationId: string): Promise<void> {
-    await this.init();
-    if (body.version !== 1 || !body.artifact) throw new Error("An initial publication must carry its artifact and version 1.");
-    const id = sqlString(artifactId);
-    const revision = artifactRevision({ artifactId, ...body, versionEventId });
-    const header = body.artifact;
-    artifactStateChange({ operationId: versionEventId, targetKey: `artifact:${artifactId}`, artifactChange: {
-      type: "collection", record: { ...header, id: artifactId, conversationId, lifecycle: "published", headVersion: 1,
-        updatedAt: body.createdAt, allowedDraftAuthors: header.allowedDraftAuthors ?? [], requiredDraftAuthors: header.requiredDraftAuthors ?? [],
-        audiencePolicyByAuthor: header.audiencePolicyByAuthor ?? {}, draftRosterRevision: header.draftRosterRevision ?? 0 }
-    } });
-    const sources = body.sources ?? [];
-    for (const source of sources) {
-      if (source.artifactId !== artifactId || source.version !== 1 || !source.draftId || !source.author
-          || typeof source.submittedAt !== "string" || typeof source.contentHash !== "string"
-          || !["considered", "excluded"].includes(source.disposition)) throw new Error("Invalid publication source.");
-    }
-    await this.runSql(`begin immediate;
-      create temp table publication_guard(valid integer check(valid = 1));
-      insert into publication_guard select case when not exists(select 1 from artifact_conversation_tombstones where conversation_id = ${sqlString(conversationId)}) then 1 else 0 end;
-      insert or ignore into artifacts(id, conversation_id, name, name_key, owner, contributors_json, required_signers_json, labels_json,
-        lifecycle, allowed_draft_authors_json, required_draft_authors_json, audience_policy_json, draft_roster_revision, head_version, created_at, updated_at)
-      values(${id}, ${sqlString(conversationId)}, ${sqlString(header.name)}, ${sqlString(artifactNameKey(header.name))}, ${sqlString(header.owner)},
-        ${sqlString(JSON.stringify(header.contributors))}, ${sqlString(JSON.stringify(header.requiredSigners))}, ${sqlString(JSON.stringify(header.labels))},
-        'collecting_drafts', ${sqlString(JSON.stringify(header.allowedDraftAuthors ?? []))}, ${sqlString(JSON.stringify(header.requiredDraftAuthors ?? []))},
-        ${sqlString(JSON.stringify(header.audiencePolicyByAuthor ?? {}))}, ${header.draftRosterRevision ?? 0}, 0, ${sqlString(header.createdAt)}, ${sqlString(body.createdAt)});
-      insert into publication_guard select case when exists(select 1 from artifacts where id = ${id} and conversation_id = ${sqlString(conversationId)}) then 1 else 0 end;
-      ${revisionInsertSql(revision, `exists(select 1 from artifacts where id = ${id}) and not exists(select 1 from artifact_revisions where version_event_id = ${sqlString(versionEventId)})`)}
-      insert into publication_guard select case when exists(select 1 from artifact_revisions where artifact_id = ${id}
-        and version_event_id = ${sqlString(versionEventId)} and content_hash = ${sqlString(revision.contentHash)}
-        and author = ${sqlString(revision.author)} and created_at = ${sqlString(revision.createdAt)} and original_version = 1 and base_version_event_id is null) then 1 else 0 end;
-      insert or ignore into artifact_version_projection(artifact_id, version, version_event_id)
-        select ${id}, 1, ${sqlString(versionEventId)} where exists(select 1 from artifact_revisions where artifact_id = ${id} and version_event_id = ${sqlString(versionEventId)});
-      update artifacts set lifecycle = 'published', head_version = 1,
-        required_signers_json = ${sqlString(JSON.stringify(body.artifact.requiredSigners))}, updated_at = ${sqlString(body.createdAt)}
-        where id = ${id} and lifecycle = 'collecting_drafts' and head_version = 0;
-      ${sources.map(source => `insert or ignore into artifact_bound_sources(artifact_id, version_event_id, draft_id, author, submitted_at, content_hash, disposition, exclusion_rationale)
-        values(${id}, ${sqlString(versionEventId)}, ${sqlString(source.draftId)}, ${sqlString(source.author)}, ${sqlString(source.submittedAt)}, ${sqlString(source.contentHash)}, ${sqlString(source.disposition)}, ${sqlString(source.exclusionRationale)});`).join("\n")}
-      commit;`);
   }
 
   async getByName(conversationId: string, nameKey: string): Promise<ArtifactRecord | undefined> {
@@ -663,66 +600,6 @@ export class ArtifactStore {
       where r.artifact_id = ${sqlString(artifactId)} and r.version_event_id = ${sqlString(versionEventId)};`);
     const row = rows[0];
     return row ? { ...artifactRevision({ ...row, note: row.note ?? undefined }), superseded: Boolean(row.superseded) } : undefined;
-  }
-
-  async retainRevision(record: ArtifactRevision): Promise<void> {
-    await this.init();
-    const revision = artifactRevision(record);
-    if (!Number.isSafeInteger(record.version) || record.version < 1) throw new Error("Invalid artifact revision number.");
-    await this.runSql(`begin immediate;
-      create temp table revision_guard(valid integer check(valid = 1));
-      insert into revision_guard select case when exists(select 1 from artifacts where id = ${sqlString(record.artifactId)})
-        and ${record.version === 1 ? `${sqlString(record.baseVersionEventId)} is null` : `exists(select 1 from artifact_revisions where artifact_id = ${sqlString(record.artifactId)} and version_event_id = ${sqlString(record.baseVersionEventId)} and original_version = ${record.version - 1})`}
-        then 1 else 0 end;
-      ${revisionInsertSql(revision, `exists(select 1 from artifacts where id = ${sqlString(record.artifactId)}) and not exists(select 1 from artifact_revisions where version_event_id = ${sqlString(record.versionEventId)})`)}
-      commit;`);
-    const stored = await this.getRevision(record.artifactId, record.versionEventId);
-    if (!stored || stored.contentHash !== revision.contentHash || stored.author !== record.author ||
-        (stored.note ?? null) !== (record.note ?? null) || (stored.baseVersionEventId ?? null) !== (record.baseVersionEventId ?? null) || stored.createdAt !== record.createdAt) {
-      throw new Error("Conflicting immutable artifact revision.");
-    }
-  }
-
-  /**
-   * Retains a revision that arrived from another peer and, when it continues
-   * the chain this peer already shows, takes it as the new head.
-   *
-   * Without the second half the revision is stored but stays outside the
-   * projection, which reads as superseded — and the next revision built on it
-   * would be refused as a change to something already replaced.
-   */
-  async retainProjectedRevision(record: ArtifactRevision): Promise<void> {
-    await this.retainRevision(record);
-    const chain = (await this.listVersionMetas(record.artifactId)).map((meta) => meta.versionEventId);
-    if (chain.includes(record.versionEventId)) return;
-    // Not an extension of what is shown here: the fold already calls that
-    // superseded, and rewriting the projection would move the loser in.
-    if ((chain[chain.length - 1] ?? undefined) !== record.baseVersionEventId) return;
-    await this.projectVersions(record.artifactId, [...chain, record.versionEventId]);
-  }
-
-  /** Projection only: replacing display numbers cannot rewrite contents,
-   * signatures, draft sources, or execute a native action. */
-  async projectVersions(artifactId: string, versionEventIds: string[]): Promise<void> {
-    await this.init();
-    if (!versionEventIds.length || new Set(versionEventIds).size !== versionEventIds.length) throw new Error("Artifact projection needs distinct revision identities.");
-    const predicate = `artifact_id = ${sqlString(artifactId)}`;
-    const known = await this.queryJson<{ id: string; parent: string | null }>(`select version_event_id as id, base_version_event_id as parent from artifact_revisions where ${predicate} and version_event_id in (${versionEventIds.map(sqlString).join(",")});`);
-    if (known.length !== versionEventIds.length) throw new Error("An artifact projection refers to an unknown revision.");
-    const parents = new Map(known.map(row => [row.id, row.parent]));
-    if (versionEventIds.some((id, index) => parents.get(id) !== (versionEventIds[index - 1] ?? null))) {
-      throw new Error("An artifact projection must preserve its revision ancestry.");
-    }
-    await this.runSql(`begin immediate;
-      create temp table projection_guard(valid integer check(valid = 1));
-      insert into projection_guard select case when exists(select 1 from artifacts where id = ${sqlString(artifactId)})
-        and (select count(*) from artifact_revisions where ${predicate} and version_event_id in (${versionEventIds.map(sqlString).join(",")})) = ${versionEventIds.length}
-        then 1 else 0 end;
-      delete from artifact_version_projection where ${predicate};
-      ${versionEventIds.map((id, index) => `insert into artifact_version_projection(artifact_id, version, version_event_id)
-        select artifact_id, ${index + 1}, version_event_id from artifact_revisions where ${predicate} and version_event_id = ${sqlString(id)};`).join("\n")}
-      update artifacts set head_version = ${versionEventIds.length} where id = ${sqlString(artifactId)};
-      commit;`);
   }
 
   async listSignatures(artifactId: string): Promise<ArtifactSignatureRecord[]> {
@@ -1403,11 +1280,17 @@ export class ArtifactStore {
 
   async deleteByConversation(conversationId: string): Promise<void> {
     await this.init();
+    await this.runSql(`begin immediate; ${this.deleteByConversationSql(conversationId, new Date().toISOString())} commit;`);
+  }
+
+  /** The statements that delete a chat's documents and keep them deleted (a
+   *  late write for the chat is refused by the tombstone), to commit with
+   *  the chat's own deletion. */
+  deleteByConversationSql(conversationId: string, deletedAt: string): string {
     const artifacts = `(select id from artifacts where conversation_id = ${sqlString(conversationId)})`;
-    await this.runSql(`
-      begin immediate;
+    return `
       insert or ignore into artifact_conversation_tombstones (conversation_id, deleted_at)
-      values (${sqlString(conversationId)}, ${sqlString(new Date().toISOString())});
+      values (${sqlString(conversationId)}, ${sqlString(deletedAt)});
       delete from artifact_version_sources where artifact_id in ${artifacts};
       delete from artifact_bound_sources where artifact_id in ${artifacts};
       delete from artifact_bound_signatures where artifact_id in ${artifacts};
@@ -1416,12 +1299,307 @@ export class ArtifactStore {
       delete from artifact_signatures where artifact_id in ${artifacts};
       delete from artifact_versions where artifact_id in ${artifacts};
       delete from artifact_drafts where artifact_id in ${artifacts};
-      delete from artifact_state_events where artifact_id in ${artifacts};
       delete from artifact_event_outbox where conversation_id = ${sqlString(conversationId)};
       delete from artifact_operations where conversation_id = ${sqlString(conversationId)};
       delete from artifacts where conversation_id = ${sqlString(conversationId)};
-      commit;
-    `);
+    `;
+  }
+
+  // --- the server's documents, whole -----------------------------------------
+
+  /** One document as the server holds it, without revision bodies. */
+  async serverState(artifactId: string): Promise<HubArtifactState | undefined> {
+    const record = await this.getById(artifactId);
+    return record ? (await this.statesOf([record]))[0] : undefined;
+  }
+
+  /** Every document of a chat, without revision bodies. */
+  async serverStates(conversationId: string): Promise<HubArtifactState[]> {
+    return this.statesOf(await this.listByConversation(conversationId));
+  }
+
+  private async statesOf(records: ArtifactRecord[]): Promise<HubArtifactState[]> {
+    if (records.length === 0) return [];
+    await this.init();
+    const states = new Map<string, HubArtifactState>(records.map((record) => [record.id, {
+      record: hubRecord(record), revisions: [], projection: [], signatures: [], sources: [], drafts: []
+    }]));
+    // A chat's documents are read in a few statements, not five per document.
+    for (let start = 0; start < records.length; start += 200) {
+      const ids = records.slice(start, start + 200).map((record) => sqlString(record.id)).join(", ");
+      const revisions = await this.queryJson<RevisionMetaRow>(`select ${REVISION_META_COLUMNS} from artifact_revisions
+        where artifact_id in (${ids}) order by artifact_id, original_version, created_at, version_event_id;`);
+      for (const row of revisions) states.get(row.artifactId)?.revisions.push(revisionMeta(row));
+      const projection = await this.queryJson<{ artifactId: string; version: number; versionEventId: string }>(`select artifact_id as artifactId,
+        version, version_event_id as versionEventId from artifact_version_projection where artifact_id in (${ids}) order by artifact_id, version;`);
+      for (const row of projection) states.get(row.artifactId)?.projection.push({ version: Number(row.version), versionEventId: row.versionEventId });
+      const signatures = await this.queryJson<{ artifactId: string; versionEventId: string; contentHash: string; signer: string; signedAt: string }>(`select
+        artifact_id as artifactId, version_event_id as versionEventId, content_hash as contentHash, signer, signed_at as signedAt
+        from artifact_bound_signatures where artifact_id in (${ids}) order by artifact_id, signed_at, signer;`);
+      for (const { artifactId, ...row } of signatures) states.get(artifactId)?.signatures.push(row);
+      const sources = await this.queryJson<{ artifactId: string; versionEventId: string; draftId: string; author: string; submittedAt: string;
+        contentHash: string; disposition: "considered" | "excluded"; exclusionRationale: string | null }>(`select artifact_id as artifactId,
+        version_event_id as versionEventId, draft_id as draftId, author, submitted_at as submittedAt, content_hash as contentHash, disposition,
+        exclusion_rationale as exclusionRationale from artifact_bound_sources where artifact_id in (${ids}) order by artifact_id, submitted_at, draft_id;`);
+      for (const { artifactId, exclusionRationale, ...row } of sources) {
+        states.get(artifactId)?.sources.push({ ...row, ...(exclusionRationale ? { exclusionRationale } : {}) });
+      }
+      const drafts = await this.queryJson<ArtifactDraftRow>(`${DRAFT_SELECT} where artifact_id in (${ids}) order by artifact_id, created_at, id;`);
+      for (const row of drafts) states.get(row.artifactId)?.drafts.push(hubDraft(this.draftFromRow(row)));
+    }
+    return records.map((record) => states.get(record.id)!);
+  }
+
+  /** One revision with its body, whether or not it shows a number now. */
+  async revisionWithContent(artifactId: string, versionEventId: string): Promise<HubArtifactRevision | undefined> {
+    await this.init();
+    const rows = await this.queryJson<RevisionMetaRow & { content: string }>(`select ${REVISION_META_COLUMNS}, content from artifact_revisions
+      where artifact_id = ${sqlString(artifactId)} and version_event_id = ${sqlString(versionEventId)};`);
+    return rows[0] ? { ...revisionMeta(rows[0]), content: rows[0].content } : undefined;
+  }
+
+  /** Which of these revisions this copy already holds, with their hashes. */
+  async heldRevisions(versionEventIds: string[]): Promise<Map<string, string>> {
+    const held = new Map<string, string>();
+    if (versionEventIds.length === 0) return held;
+    await this.init();
+    for (let start = 0; start < versionEventIds.length; start += 500) {
+      const rows = await this.queryJson<{ id: string; hash: string }>(`select version_event_id as id, content_hash as hash from artifact_revisions
+        where version_event_id in (${versionEventIds.slice(start, start + 500).map(sqlString).join(", ")});`);
+      for (const row of rows) held.set(row.id, row.hash);
+    }
+    return held;
+  }
+
+  /**
+   * Makes this copy hold documents exactly as the server holds them: each
+   * state replaces this copy's document of that id (its fields, revisions,
+   * numbering, signatures, sources and drafts), in one commit. With
+   * `replaceConversation`, documents of the chat the server did not list go.
+   * `bodies` are the revisions this copy did not hold yet. A chat deleted
+   * here keeps nothing.
+   */
+  async applyServerStates(
+    conversationId: string,
+    states: HubArtifactState[],
+    bodies: Map<string, HubArtifactRevision>,
+    options: { replaceConversation?: boolean; forget?: string[]; keep?: string[] } = {}
+  ): Promise<void> {
+    await this.init();
+    const chat = sqlString(conversationId);
+    const statements: string[] = [];
+    const listed = states.map((state) => sqlString(state.record.id));
+    if (options.replaceConversation) {
+      const kept = [...listed, ...(options.keep ?? []).map(sqlString)];
+      const gone = `(select id from artifacts where conversation_id = ${chat}${kept.length ? ` and id not in (${kept.join(", ")})` : ""})`;
+      statements.push(forgetSql(gone));
+    }
+    if (options.forget?.length) statements.push(forgetSql(`(${options.forget.map(sqlString).join(", ")})`));
+    // Names move between documents (a rename, a swap): every document of this
+    // chat named here is freed of its name first, then given the server's.
+    if (listed.length) {
+      statements.push(`update artifacts set name_key = '#moving:' || id where conversation_id = ${chat} and id in (${listed.join(", ")});`);
+    }
+    for (const state of states) {
+      const record = state.record;
+      if (record.conversationId !== conversationId) throw new Error("A document from the server names another chat.");
+      const problem = serverStateProblem(state);
+      if (problem) throw new Error(problem);
+      const id = sqlString(record.id);
+      const keep = (rows: string[]) => rows.length ? ` and version_event_id not in (${rows.join(", ")})` : "";
+      const revisionIds = state.revisions.map((revision) => sqlString(revision.versionEventId));
+      // Another document of this chat holding the same name here is stale: it
+      // is renamed or gone on the server, and its own state follows.
+      statements.push(`update artifacts set name_key = '#stale:' || id where conversation_id = ${chat} and id <> ${id}
+        and name_key = ${sqlString(artifactNameKey(record.name))};`);
+      statements.push(`insert into artifacts (id, conversation_id, name, name_key, owner, contributors_json, required_signers_json, labels_json,
+          lifecycle, allowed_draft_authors_json, required_draft_authors_json, audience_policy_json, draft_roster_revision, head_version,
+          created_at, updated_at, archived_at)
+        values (${id}, ${chat}, ${sqlString(record.name)}, ${sqlString(artifactNameKey(record.name))}, ${sqlString(record.owner)},
+          ${sqlString(JSON.stringify(record.contributors))}, ${sqlString(JSON.stringify(record.requiredSigners))}, ${sqlString(JSON.stringify(record.labels))},
+          ${sqlString(record.lifecycle)}, ${sqlString(JSON.stringify(record.allowedDraftAuthors))}, ${sqlString(JSON.stringify(record.requiredDraftAuthors))},
+          ${sqlString(JSON.stringify(record.audiencePolicyByAuthor))}, ${Math.floor(record.draftRosterRevision)}, ${Math.floor(record.headVersion)},
+          ${sqlString(record.createdAt)}, ${sqlString(record.updatedAt)}, ${sqlString(record.archivedAt)})
+        on conflict(id) do update set name = excluded.name, name_key = excluded.name_key, owner = excluded.owner,
+          contributors_json = excluded.contributors_json, required_signers_json = excluded.required_signers_json, labels_json = excluded.labels_json,
+          lifecycle = excluded.lifecycle, allowed_draft_authors_json = excluded.allowed_draft_authors_json,
+          required_draft_authors_json = excluded.required_draft_authors_json, audience_policy_json = excluded.audience_policy_json,
+          draft_roster_revision = excluded.draft_roster_revision, head_version = excluded.head_version, created_at = excluded.created_at,
+          updated_at = excluded.updated_at, archived_at = excluded.archived_at
+        where artifacts.conversation_id = excluded.conversation_id;`);
+      statements.push(`delete from artifact_version_projection where artifact_id = ${id};`);
+      statements.push(`delete from artifact_bound_signatures where artifact_id = ${id};`);
+      statements.push(`delete from artifact_bound_sources where artifact_id = ${id};`);
+      statements.push(`delete from artifact_drafts where artifact_id = ${id};`);
+      statements.push(`delete from artifact_revisions where artifact_id = ${id}${keep(revisionIds)};`);
+      for (const meta of state.revisions) {
+        const body = bodies.get(meta.versionEventId);
+        if (!body) continue;
+        const revision = artifactRevision({ artifactId: record.id, version: meta.originalVersion, versionEventId: meta.versionEventId,
+          contentHash: meta.contentHash, baseVersionEventId: meta.baseVersionEventId, content: body.content, author: meta.author,
+          note: meta.note, createdAt: meta.createdAt });
+        // A row this copy held under the same id with another body was wrong:
+        // the server's body replaces it.
+        statements.push(`delete from artifact_revisions where version_event_id = ${sqlString(meta.versionEventId)} and content_hash <> ${sqlString(meta.contentHash)};`);
+        statements.push(revisionInsertSql(revision, `not exists(select 1 from artifact_revisions where version_event_id = ${sqlString(meta.versionEventId)})`));
+      }
+      for (const row of state.projection) {
+        statements.push(`insert into artifact_version_projection(artifact_id, version, version_event_id)
+          select ${id}, ${Math.floor(row.version)}, version_event_id from artifact_revisions
+          where artifact_id = ${id} and version_event_id = ${sqlString(row.versionEventId)};`);
+      }
+      for (const row of state.signatures) {
+        statements.push(`insert or ignore into artifact_bound_signatures(artifact_id, version_event_id, content_hash, signer, signed_at)
+          values (${id}, ${sqlString(row.versionEventId)}, ${sqlString(row.contentHash)}, ${sqlString(row.signer)}, ${sqlString(row.signedAt)});`);
+      }
+      for (const row of state.sources) {
+        statements.push(`insert or ignore into artifact_bound_sources(artifact_id, version_event_id, draft_id, author, submitted_at, content_hash, disposition, exclusion_rationale)
+          values (${id}, ${sqlString(row.versionEventId)}, ${sqlString(row.draftId)}, ${sqlString(row.author)}, ${sqlString(row.submittedAt)},
+            ${sqlString(row.contentHash)}, ${sqlString(row.disposition)}, ${sqlString(row.exclusionRationale)});`);
+      }
+      for (const draft of state.drafts) statements.push(draftInsertSql(draft, record.id));
+    }
+    // A revision this copy does not hold the body of is never shown as held:
+    // the whole state waits for it instead.
+    const missing = states.flatMap((state) => state.revisions.filter((meta) => !bodies.has(meta.versionEventId)).map((meta) => meta.versionEventId));
+    const guard = missing.length
+      ? `insert into server_state_guard select case when (select count(*) from artifact_revisions where version_event_id in (${missing.map(sqlString).join(", ")})) = ${missing.length} then 1 else 0 end;`
+      : "";
+    await this.runSql(`begin immediate;
+      create temp table server_state_guard(valid integer check(valid = 1));
+      insert into server_state_guard select case when exists(select 1 from artifact_conversation_tombstones where conversation_id = ${chat}) then 0 else 1 end;
+      ${statements.join("\n")}
+      ${guard}
+      commit;`).catch(async (error) => {
+      // A chat deleted here keeps nothing, whatever the server still sent.
+      if (await this.isConversationDeleted(conversationId)) return;
+      throw error;
+    });
+  }
+
+  /** Drops this copy of one document (the server no longer has it). */
+  async forgetArtifact(artifactId: string): Promise<void> {
+    await this.init();
+    await this.runSql(`begin immediate; ${forgetSql(`(${sqlString(artifactId)})`)} commit;`);
+  }
+
+  async isConversationDeleted(conversationId: string): Promise<boolean> {
+    await this.init();
+    const rows = await this.queryJson<{ one: number }>(`select 1 as one from artifact_conversation_tombstones where conversation_id = ${sqlString(conversationId)};`);
+    return rows.length > 0;
+  }
+
+  /** Every row of a chat's documents, as the computer moves them to the
+   *  server (one time): revisions with their bodies, and the operations
+   *  that keep a repeated operation id answering the same. */
+  async exportConversation(conversationId: string): Promise<Required<HubArtifactImportRows>> {
+    await this.init();
+    const records = await this.listByConversation(conversationId);
+    const rows: Required<HubArtifactImportRows> = { artifacts: [], revisions: [], projection: [], signatures: [], sources: [], drafts: [], operations: [] };
+    for (const state of await this.statesOf(records)) {
+      const artifactId = state.record.id;
+      rows.artifacts.push(state.record);
+      for (const meta of state.revisions) {
+        const revision = await this.revisionWithContent(artifactId, meta.versionEventId);
+        if (revision) rows.revisions.push(revision);
+      }
+      rows.projection.push(...state.projection.map((row) => ({ ...row, artifactId })));
+      rows.signatures.push(...state.signatures.map((row) => ({ ...row, artifactId })));
+      rows.sources.push(...state.sources.map((row) => ({ ...row, artifactId })));
+      rows.drafts.push(...state.drafts);
+    }
+    const operations = await this.queryJson<{ artifactId: string | null; actor: string; operationKind: string; operationId: string; requestHash: string;
+      resultJson: string; createdAt: string }>(`select artifact_id as artifactId, actor, operation_kind as operationKind, operation_id as operationId,
+      request_hash as requestHash, result_json as resultJson, created_at as createdAt from artifact_operations
+      where conversation_id = ${sqlString(conversationId)} and applied = 1 order by created_at, operation_id;`);
+    rows.operations.push(...operations.map(({ artifactId, ...row }) => ({ ...row, ...(artifactId ? { artifactId } : {}) })));
+    return rows;
+  }
+
+  /**
+   * The statements that keep a page of documents moved from the computer,
+   * exactly as they were (ids, revision ids and hashes, numbering,
+   * signatures, sources, drafts, operations). What the server holds already
+   * stays. A moved document whose name another document already took here
+   * keeps its rows under a free name. Returns the documents the page names
+   * and the rows refused (a revision whose body does not match its hash).
+   */
+  async importSql(conversationId: string, rows: HubArtifactImportRows): Promise<{ sql: string; artifactIds: string[]; refused: string[] }> {
+    await this.init();
+    const chat = sqlString(conversationId);
+    const statements: string[] = [];
+    const refused: string[] = [];
+    const artifactIds = new Set<string>();
+    const existing = new Map((await this.listByConversation(conversationId)).map((record) => [artifactNameKey(record.name), record.id]));
+    for (const record of rows.artifacts ?? []) {
+      if (record.conversationId !== conversationId) { refused.push(`document ${record.id}: another chat`); continue; }
+      artifactIds.add(record.id);
+      let name = record.name;
+      for (let suffix = 2; existing.has(artifactNameKey(name)) && existing.get(artifactNameKey(name)) !== record.id; suffix += 1) {
+        name = `${record.name} (${suffix})`;
+      }
+      existing.set(artifactNameKey(name), record.id);
+      statements.push(`insert or ignore into artifacts (id, conversation_id, name, name_key, owner, contributors_json, required_signers_json, labels_json,
+          lifecycle, allowed_draft_authors_json, required_draft_authors_json, audience_policy_json, draft_roster_revision, head_version,
+          created_at, updated_at, archived_at)
+        values (${sqlString(record.id)}, ${chat}, ${sqlString(name)}, ${sqlString(artifactNameKey(name))}, ${sqlString(record.owner)},
+          ${sqlString(JSON.stringify(record.contributors))}, ${sqlString(JSON.stringify(record.requiredSigners))}, ${sqlString(JSON.stringify(record.labels))},
+          ${sqlString(record.lifecycle)}, ${sqlString(JSON.stringify(record.allowedDraftAuthors))}, ${sqlString(JSON.stringify(record.requiredDraftAuthors))},
+          ${sqlString(JSON.stringify(record.audiencePolicyByAuthor))}, ${Math.floor(record.draftRosterRevision)}, ${Math.floor(record.headVersion)},
+          ${sqlString(record.createdAt)}, ${sqlString(record.updatedAt)}, ${sqlString(record.archivedAt)});`);
+    }
+    // Rows of a document go only to that document, in this chat.
+    const owned = (artifactId: string) => `exists(select 1 from artifacts a where a.id = ${sqlString(artifactId)} and a.conversation_id = ${chat})`;
+    for (const revision of rows.revisions ?? []) {
+      let checked: ArtifactRevision;
+      try {
+        checked = artifactRevision({ artifactId: revision.artifactId, version: revision.originalVersion, versionEventId: revision.versionEventId,
+          contentHash: revision.contentHash, baseVersionEventId: revision.baseVersionEventId, content: revision.content, author: revision.author,
+          note: revision.note, createdAt: revision.createdAt });
+      } catch {
+        refused.push(`revision ${revision.versionEventId}: its body does not match its hash`);
+        continue;
+      }
+      artifactIds.add(revision.artifactId);
+      statements.push(revisionInsertSql(checked, `${owned(revision.artifactId)} and not exists(select 1 from artifact_revisions where version_event_id = ${sqlString(revision.versionEventId)})`));
+    }
+    for (const row of rows.projection ?? []) {
+      artifactIds.add(row.artifactId);
+      statements.push(`insert or ignore into artifact_version_projection(artifact_id, version, version_event_id)
+        select ${sqlString(row.artifactId)}, ${Math.floor(row.version)}, version_event_id from artifact_revisions
+        where artifact_id = ${sqlString(row.artifactId)} and version_event_id = ${sqlString(row.versionEventId)} and ${owned(row.artifactId)};`);
+    }
+    for (const row of rows.signatures ?? []) {
+      artifactIds.add(row.artifactId);
+      statements.push(`insert or ignore into artifact_bound_signatures(artifact_id, version_event_id, content_hash, signer, signed_at)
+        select ${sqlString(row.artifactId)}, ${sqlString(row.versionEventId)}, ${sqlString(row.contentHash)}, ${sqlString(row.signer)}, ${sqlString(row.signedAt)}
+        where ${owned(row.artifactId)};`);
+    }
+    for (const row of rows.sources ?? []) {
+      artifactIds.add(row.artifactId);
+      statements.push(`insert or ignore into artifact_bound_sources(artifact_id, version_event_id, draft_id, author, submitted_at, content_hash, disposition, exclusion_rationale)
+        select ${sqlString(row.artifactId)}, ${sqlString(row.versionEventId)}, ${sqlString(row.draftId)}, ${sqlString(row.author)}, ${sqlString(row.submittedAt)},
+          ${sqlString(row.contentHash)}, ${sqlString(row.disposition)}, ${sqlString(row.exclusionRationale)} where ${owned(row.artifactId)};`);
+    }
+    for (const draft of rows.drafts ?? []) {
+      artifactIds.add(draft.artifactId);
+      statements.push(draftInsertSql(draft, draft.artifactId, `${owned(draft.artifactId)} and not exists(select 1 from artifact_drafts where id = ${sqlString(draft.id)})
+        and not (${sqlString(draft.state)} = 'editing' and exists(select 1 from artifact_drafts where artifact_id = ${sqlString(draft.artifactId)}
+          and author = ${sqlString(draft.author)} and state = 'editing'))`));
+    }
+    for (const operation of rows.operations ?? []) {
+      statements.push(`insert or ignore into artifact_operations (conversation_id, artifact_id, actor, operation_kind, operation_id, request_hash, result_json, applied, created_at)
+        values (${chat}, ${sqlString(operation.artifactId)}, ${sqlString(operation.actor)}, ${sqlString(operation.operationKind)}, ${sqlString(operation.operationId)},
+          ${sqlString(operation.requestHash)}, ${sqlString(operation.resultJson)}, 1, ${sqlString(operation.createdAt)});`);
+    }
+    return { sql: statements.join("\n"), artifactIds: [...artifactIds], refused };
+  }
+
+  /** Runs statements in one commit (the server: a change and its place in
+   *  the order together). */
+  async commitSql(sql: string): Promise<void> {
+    await this.init();
+    await this.runSql(`begin immediate; ${sql} commit;`);
   }
 
   private recordFromRow(row: ArtifactRow): ArtifactRecord {
@@ -1525,6 +1703,7 @@ export class ArtifactStore {
   }
 
   private async queryJson<T>(sql: string): Promise<T[]> {
+    if (this.executor) return this.executor.queryJson<T>(sql);
     const result = await runCommand(this.sqliteExecutable, this.sqliteArgs(["-json", this.dbPath]), {
       input: sql,
       timeoutMs: SQLITE_COMMAND_TIMEOUT_MS,
@@ -1535,6 +1714,7 @@ export class ArtifactStore {
   }
 
   private async queryText(sql: string): Promise<string> {
+    if (this.executor) return (await this.executor.queryText(sql)).trim();
     const result = await runCommand(this.sqliteExecutable, this.sqliteArgs(["-batch", "-noheader", this.dbPath]), {
       input: sql,
       timeoutMs: SQLITE_COMMAND_TIMEOUT_MS,
@@ -1544,6 +1724,7 @@ export class ArtifactStore {
   }
 
   private async runSql(sql: string): Promise<void> {
+    if (this.executor) return this.executor.runSql(sql);
     await runCommand(this.sqliteExecutable, this.sqliteArgs([this.dbPath]), {
       input: sql,
       timeoutMs: SQLITE_COMMAND_TIMEOUT_MS,
@@ -1560,3 +1741,88 @@ export class ArtifactStore {
     return ["-bail", "-cmd", `.timeout ${SQLITE_BUSY_TIMEOUT_MS}`, "-cmd", "pragma synchronous = FULL;", ...args];
   }
 }
+
+const DRAFT_SELECT = `
+  select
+    id,
+    artifact_id as artifactId,
+    author,
+    state,
+    content,
+    readers_json as readersJson,
+    edit_revision as editRevision,
+    supersedes_draft_id as supersedesDraftId,
+    created_at as createdAt,
+    updated_at as updatedAt,
+    submitted_at as submittedAt
+  from artifact_drafts
+`;
+
+const REVISION_META_COLUMNS = `artifact_id as artifactId, version_event_id as versionEventId, original_version as originalVersion,
+  base_version_event_id as baseVersionEventId, content_hash as contentHash, author, note, created_at as createdAt`;
+
+interface RevisionMetaRow {
+  artifactId: string;
+  versionEventId: string;
+  originalVersion: number;
+  baseVersionEventId: string | null;
+  contentHash: string;
+  author: string;
+  note: string | null;
+  createdAt: string;
+}
+
+function revisionMeta(row: RevisionMetaRow): HubArtifactRevisionMeta {
+  return {
+    artifactId: row.artifactId,
+    versionEventId: row.versionEventId,
+    originalVersion: Number(row.originalVersion),
+    ...(row.baseVersionEventId ? { baseVersionEventId: row.baseVersionEventId } : {}),
+    contentHash: row.contentHash,
+    author: row.author,
+    ...(row.note !== null && row.note !== undefined ? { note: row.note } : {}),
+    createdAt: row.createdAt
+  };
+}
+
+function hubRecord(record: ArtifactRecord): HubArtifactRecord {
+  const { archivedAt, ...rest } = record;
+  return { ...rest, ...(archivedAt ? { archivedAt } : {}) };
+}
+
+function hubDraft(draft: ArtifactDraftRecord): HubArtifactDraftRow {
+  const { supersedesDraftId, submittedAt, ...rest } = draft;
+  return { ...rest, ...(supersedesDraftId ? { supersedesDraftId } : {}), ...(submittedAt ? { submittedAt } : {}) };
+}
+
+function draftInsertSql(draft: HubArtifactDraftRow, artifactId: string, condition?: string): string {
+  return `insert into artifact_drafts (id, artifact_id, author, state, content, readers_json, edit_revision, supersedes_draft_id, created_at, updated_at, submitted_at)
+    select ${sqlString(draft.id)}, ${sqlString(artifactId)}, ${sqlString(draft.author)}, ${sqlString(draft.state)}, ${sqlString(draft.content)},
+      ${sqlString(JSON.stringify(draft.readers))}, ${Math.floor(draft.editRevision)}, ${sqlString(draft.supersedesDraftId)}, ${sqlString(draft.createdAt)},
+      ${sqlString(draft.updatedAt)}, ${sqlString(draft.submittedAt)}
+    ${condition ? `where ${condition}` : ""};`;
+}
+
+/** Why a document as the server sent it cannot be held as it is, or
+ *  undefined when it can. */
+export function serverStateProblem(state: HubArtifactState): string | undefined {
+  const known = new Set(state.revisions.map((revision) => revision.versionEventId));
+  if (state.projection.some((row) => !known.has(row.versionEventId)) || state.projection.length !== state.record.headVersion) {
+    return `Document ${state.record.id} from the server numbers a revision it does not list.`;
+  }
+  return undefined;
+}
+
+/** Statements that drop documents from this copy (by an id list or a
+ *  subquery of ids), without marking their chat deleted. */
+function forgetSql(ids: string): string {
+  return `
+    delete from artifact_bound_sources where artifact_id in ${ids};
+    delete from artifact_bound_signatures where artifact_id in ${ids};
+    delete from artifact_version_projection where artifact_id in ${ids};
+    delete from artifact_drafts where artifact_id in ${ids};
+    delete from artifact_revisions where artifact_id in ${ids};
+    delete from artifacts where id in ${ids};
+  `;
+}
+

@@ -163,8 +163,10 @@ export function composeHub(options: {
     return typeof home === "string" && home ? home : undefined;
   };
   ops.onApplied(({ entry, conversation, previous }) => {
-    feed.note(entry.conversationId);
     const effect = entry.effect;
+    // A document changed: no chat did (its note is a message of its own).
+    if (effect.kind.startsWith("artifact.")) return;
+    feed.note(entry.conversationId);
     // A card raised for the User rings the phone once: raised again while
     // it waits (what it shows changed), it keeps the moment it was raised.
     if (effect.kind === "card.raise" && conversation && effect.card.state === "pending" && effect.card.raisedAt === entry.acceptedAt) {

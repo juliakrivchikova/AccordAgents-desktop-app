@@ -2623,8 +2623,10 @@ export interface StartReviewResult {
 // --- Artifacts -------------------------------------------------------------
 // Named, versioned, signable work products scoped to one chat. Artifacts live
 // in their own SQLite tables (not in conversation payloads) so they survive
-// context compaction, agent session resets, and app restarts. Members are
-// addressed by normalized handle ("gera") or the reserved "user" for the human.
+// context compaction, agent session resets, and app restarts. The User's
+// server owns them and decides every change; each device keeps a copy it
+// reads. Members are addressed by normalized handle ("gera") or the reserved
+// "user" for the human.
 
 export const ARTIFACT_USER_MEMBER = "user";
 
@@ -2751,7 +2753,10 @@ export type ArtifactErrorCode =
   | "access_denied"
   | "stale_version"
   | "name_taken"
-  | "invalid_request";
+  | "invalid_request"
+  // The User's server, which owns documents, did not confirm the change
+  // (unreachable, or no answer in time): nothing is shown as done.
+  | "server_unavailable";
 
 export interface ArtifactError {
   code: ArtifactErrorCode;

@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { ArtifactService, SUBMIT_OWN_DRAFT_FIRST_MESSAGE } from "./artifacts";
 import { ArtifactStore } from "./artifactStore";
-import { artifactRevision, ARTIFACT_REVISION_SCHEMA } from "./artifactRevisions";
+import { ARTIFACT_REVISION_SCHEMA } from "./artifactRevisions";
 import type { ArtifactDraftRecord, ArtifactOperationRecord } from "./artifactStore";
 import { CommandError, runCommand } from "./command";
 import { resolveSqliteExecutable } from "./sqliteCli";
@@ -32,45 +32,6 @@ test("a maximum-size artifact is written over stdin and signatures never embed i
     const reread = await attach(h.dbPath).store.getVersion(created.summary.id, 1);
     assert.equal(reread?.contentHash, created.version.contentHash);
     assert.equal(reread?.content, content);
-  } finally { await h.cleanup(); }
-});
-
-test("competing offline v2 revisions retain their own signatures when display numbers are reprojected", async () => {
-  const h = await harness();
-  try {
-    const first = expectPublished(expectOk(await h.service.create("gera", { conversationId: CONVERSATION_ID,
-      name: "Offline revisions", content: "base", requiredSigners: ["user", "drew"] })));
-    const second = expectPublished(expectOk(await h.service.revise("gera", { conversationId: CONVERSATION_ID,
-      artifactId: first.summary.id, baseVersion: 1, content: "Signed offline text" })));
-    const signed = { conversationId: CONVERSATION_ID, artifactId: first.summary.id, version: 2,
-      versionEventId: second.version.versionEventId, contentHash: second.version.contentHash };
-    expectOk(await h.service.sign("user", signed));
-    expectOk(await h.service.sign("drew", signed));
-    const competing = artifactRevision({ artifactId: first.summary.id, version: 2, content: "Earlier-ordered competing text",
-      author: "gera", baseVersionEventId: first.version.versionEventId, createdAt: new Date().toISOString() }, "competing-version-event");
-    await h.store.retainRevision(competing);
-    await assert.rejects(h.store.projectVersions(first.summary.id, [competing.versionEventId, first.version.versionEventId]), /ancestry/);
-    await h.store.projectVersions(first.summary.id, [first.version.versionEventId, competing.versionEventId]);
-    const after = expectPublished(expectOk(await h.service.read("user", { conversationId: CONVERSATION_ID, artifactId: first.summary.id })));
-    assert.equal(after.version.version, 2);
-    assert.equal(after.version.content, competing.content);
-    assert.equal(after.version.signatures.length, 0);
-    assert.equal(after.summary.approval.state, "unsigned");
-    const retained = await h.store.getRevision(first.summary.id, second.version.versionEventId);
-    assert.equal(retained?.content, "Signed offline text");
-    assert.equal(retained?.superseded, true);
-    const signatures = await h.store.listSignatures(first.summary.id);
-    assert.deepEqual(signatures.map(s => s.signer).sort(), ["drew", "user"]);
-    assert.ok(signatures.every(s => s.versionEventId === second.version.versionEventId && s.contentHash === second.version.contentHash));
-    expectError(await h.service.sign("user", signed), "stale_version");
-    expectError(await h.service.revise("gera", { conversationId: CONVERSATION_ID, artifactId: first.summary.id,
-      baseVersion: 2, baseVersionEventId: second.version.versionEventId, baseContentHash: second.version.contentHash,
-      content: "Edit of the old offline revision" }), "stale_version");
-    await h.store.projectVersions(first.summary.id, [first.version.versionEventId, second.version.versionEventId]);
-    const restored = expectPublished(expectOk(await attach(h.dbPath).service.read("user", { conversationId: CONVERSATION_ID, artifactId: first.summary.id })));
-    assert.equal(restored.summary.approval.state, "approved");
-    assert.equal(restored.version.signatures.length, 2);
-    await assert.rejects(h.store.retainRevision({ ...competing, content: "changed underneath the same hash" }), /immutable hash/);
   } finally { await h.cleanup(); }
 });
 

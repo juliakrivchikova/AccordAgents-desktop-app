@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "../main/services/chatChanges";
 import { claimOutcomeFor } from "../main/services/hubOpsStore";
+import { HubArtifacts } from "./hubArtifacts";
 import type { SavedMessageRow, StorageService } from "../main/services/storage";
 import type { HubDevice } from "../shared/hubProtocol";
 import {
@@ -12,8 +13,13 @@ import {
   HUB_OPS_MAX_PER_REQUEST,
   hubOpShapeProblem,
   hubTurnRunId,
+  isHubArtifactOpKind,
   isHubChatId,
   isHubOpId,
+  type HubArtifactOpKind,
+  type HubArtifactResponse,
+  type HubArtifactRevisionResponse,
+  type HubArtifactsResponse,
   type HubChatPage,
   type HubCard,
   type HubChatsResponse,
@@ -72,12 +78,16 @@ export class HubOps {
    *  nothing was accepted while it read (a word given meanwhile is not lost). */
   private generation = 0;
   private readonly listeners: Array<(applied: HubOpApplied) => void> = [];
+  /** Every chat's documents, which the server owns too (Д9). */
+  readonly artifacts: HubArtifacts;
 
   constructor(
     private readonly storage: StorageService,
     private readonly log: (event: string, payload: Record<string, unknown>) => void = () => undefined,
     private readonly now: () => Date = () => new Date()
-  ) {}
+  ) {
+    this.artifacts = new HubArtifacts(storage, log, now);
+  }
 
   onApplied(listener: (applied: HubOpApplied) => void): void {
     this.listeners.push(listener);
@@ -174,6 +184,14 @@ export class HubOps {
     }
 
     if (op.kind === "chat.import") return this.applyImport(device, op, devices, { opId, seq, acceptedAt });
+    if (op.kind === "artifact.import") {
+      const outcome = await this.artifacts.import(device, op, { opId, seq, acceptedAt });
+      return { result: outcome.result, ...(outcome.entry ? { applied: { deviceId: device.deviceId, entry: outcome.entry } } : {}) };
+    }
+    if (isArtifactOp(op)) {
+      const outcome = await this.artifacts.apply(device, op, { opId, seq, acceptedAt }, (conversation, participantId) => homeDeviceId(conversation, participantId, devices));
+      return { result: outcome.result, ...(outcome.entry ? { applied: { deviceId: device.deviceId, entry: outcome.entry } } : {}) };
+    }
     if (op.kind === "card.raise" || op.kind === "card.answer" || op.kind === "card.settle") return this.applyCard(device, op, devices, { opId, seq, acceptedAt });
     if (op.kind === "turn.request" || op.kind === "turn.stop" || op.kind === "turn.claim" || op.kind === "turn.finish") {
       return this.applyTurn(device, op, devices, { opId, seq, acceptedAt });
@@ -206,7 +224,9 @@ export class HubOps {
       }
       case "conversation.delete": {
         const done = accepted({ kind: "conversation.delete" });
-        await this.storage.deleteConversation(op.conversationId, { alsoCommitSql: store.insertSql({ ...done.entry, kind: op.kind, result: done.result }) });
+        // The chat's documents go with it, in the same commit (Д9).
+        const documents = await this.artifacts.deletionSql(op.conversationId, acceptedAt);
+        await this.storage.deleteConversation(op.conversationId, { alsoCommitSql: `${store.insertSql({ ...done.entry, kind: op.kind, result: done.result })} ${documents}` });
         this.cache.delete(op.conversationId);
         return { result: done.result, applied: { deviceId: device.deviceId, entry: done.entry } };
       }
@@ -509,6 +529,38 @@ export class HubOps {
     return { entries: page.entries, more: page.more, head: await store.head() };
   }
 
+  /** A chat's documents, as one consistent reading (between operations). */
+  artifactStates(conversationId: string): Promise<HubArtifactsResponse> {
+    if (!isHubChatId(conversationId)) return Promise.reject(new HubOpsRequestError(400, "Invalid chat id."));
+    return this.betweenOperations(async () => ({ head: await this.head(), artifacts: await this.artifacts.states(conversationId) }));
+  }
+
+  /** One document whole, without revision bodies; none when the server has
+   *  no such document. */
+  artifactState(artifactId: string): Promise<HubArtifactResponse> {
+    if (!isHubOpId(artifactId)) return Promise.reject(new HubOpsRequestError(400, "Invalid document id."));
+    return this.betweenOperations(async () => {
+      const head = await this.head();
+      const artifact = await this.artifacts.state(artifactId);
+      return artifact ? { artifact, head } : { head };
+    });
+  }
+
+  /** One revision's body; none when the server has no such revision. */
+  async artifactRevision(artifactId: string, versionEventId: string): Promise<HubArtifactRevisionResponse> {
+    if (!isHubOpId(artifactId) || !versionEventId || versionEventId.length > 256) throw new HubOpsRequestError(400, "Invalid revision.");
+    const revision = await this.artifacts.revision(artifactId, versionEventId);
+    return revision ? { revision } : {};
+  }
+
+  /** Runs a reading after the operations being applied and before the next:
+   *  it sees each of them whole or not at all. */
+  private betweenOperations<T>(read: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(read);
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
   async chats(): Promise<HubChatsResponse> {
     const summaries = await this.storage.listConversations();
     return {
@@ -609,6 +661,10 @@ export class HubOps {
       this.cache.delete(oldest);
     }
   }
+}
+
+function isArtifactOp(op: HubOp): op is Extract<HubOp, { kind: HubArtifactOpKind }> {
+  return isHubArtifactOpKind(op.kind);
 }
 
 function reject(opId: string, reason: string): Outcome {

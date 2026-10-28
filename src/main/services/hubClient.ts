@@ -8,6 +8,8 @@ import {
 } from "../../shared/hubProtocol";
 import type { MachineProgressFrame } from "../../shared/machineProgress";
 import {
+  HUB_ARTIFACT_PATH,
+  HUB_ARTIFACTS_PATH,
   HUB_CHAT_PATH,
   HUB_CHATS_PATH,
   HUB_FEED_PATH,
@@ -15,6 +17,9 @@ import {
   HUB_ME_PATH,
   HUB_OPS_PATH,
   HUB_TURNS_PATH,
+  type HubArtifactResponse,
+  type HubArtifactRevisionResponse,
+  type HubArtifactsResponse,
   type HubChatPage,
   type HubChatsResponse,
   type HubFeedResponse,
@@ -147,6 +152,22 @@ export class HubClient {
   chatPage(conversationId: string, before?: string): Promise<HubChatPage> {
     const query = new URLSearchParams({ conversationId, ...(before ? { before } : {}) });
     return this.request<HubChatPage>("GET", `${HUB_CHAT_PATH}?${query.toString()}`);
+  }
+
+  /** A chat's documents as the server holds them, without revision bodies. */
+  artifacts(conversationId: string): Promise<HubArtifactsResponse> {
+    return this.request<HubArtifactsResponse>("GET", `${HUB_ARTIFACTS_PATH}?${new URLSearchParams({ conversationId }).toString()}`, undefined, undefined, OPS_TIMEOUT_MS);
+  }
+
+  /** One document; a HubHttpError with status 404 when the server has none. */
+  artifact(artifactId: string): Promise<HubArtifactResponse> {
+    return this.request<HubArtifactResponse>("GET", `${HUB_ARTIFACT_PATH}?${new URLSearchParams({ artifactId }).toString()}`);
+  }
+
+  /** One revision's body (a revision never changes). */
+  artifactRevision(artifactId: string, versionEventId: string): Promise<HubArtifactRevisionResponse> {
+    return this.request<HubArtifactRevisionResponse>("GET", `${HUB_ARTIFACT_PATH}?${new URLSearchParams({ artifactId, revision: versionEventId }).toString()}`,
+      undefined, undefined, OPS_TIMEOUT_MS);
   }
 
   waitingTurns(): Promise<HubTurnsResponse> {

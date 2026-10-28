@@ -44,6 +44,8 @@ function assertGeneric(path, value) {
 test("generic artifact surfaces contain no workflow-specific terminology", () => {
   const wholeFiles = [
     "src/main/services/artifacts.ts",
+    "src/main/services/artifactClient.ts",
+    "src/hub/hubArtifacts.ts",
     "src/main/services/artifactStore.ts",
     "src/main/services/artifactRevisions.ts",
     "src/main/services/artifactToolRequest.ts",

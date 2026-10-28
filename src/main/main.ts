@@ -90,9 +90,8 @@ import { ARTIFACT_USER_MEMBER } from "../shared/types";
 import { artifactMembersForConversation } from "../shared/artifacts";
 import { normalizeExternalUrlForOpen } from "../shared/externalLinks";
 import { stableJson } from "../shared/stableJson";
-import { ArtifactService } from "./services/artifacts";
+import { ArtifactClient } from "./services/artifactClient";
 import { ArtifactStore } from "./services/artifactStore";
-import { artifactEventWriter, artifactProjectionPort } from "./services/artifactReplication";
 import { createChatChangeTransport, scheduleChatChangePruning } from "./services/chatChangeTransport";
 import { scheduleHubDeviceRetention } from "./services/deviceRetention";
 import { machineChatCopyProvider } from "./services/chatCopy";
@@ -376,6 +375,27 @@ async function hubPhones(): Promise<import("../shared/machineTrust").TrustedDevi
   return (await settingsService.listTrustedDevices().catch(() => [])).filter((device) => device.role === "phone" && device.inviteId && device.phoneScope);
 }
 
+// Documents (artifacts) are the User's server's too (Д9): this computer keeps
+// a copy, in their own tables of the same SQLite database as conversations,
+// and writes every change through the server.
+const artifactStore = new ArtifactStore(path.join(app.getPath("userData"), "accordagents.sqlite3"), sqliteExecutable);
+const artifactService = new ArtifactClient({
+  store: artifactStore,
+  getMembers: async (conversationId) => {
+    const opened = await storageService.openConversation(conversationId, 1);
+    return opened?.conversation.kind === "chat" ? artifactMembersForConversation(opened.conversation) : undefined;
+  },
+  postNote: (conversationId, eventId, content) => chatService.postArtifactChatNote(conversationId, eventId, content),
+  hasChat: async (conversationId) => (await storageService.openConversation(conversationId, 1))?.conversation.kind === "chat",
+  onChanged: (conversationId) => {
+    sendToMainWindow("artifacts:updated", { conversationId });
+  },
+  logger: (event, payload) => {
+    void debugLogService.write(event, payload);
+  }
+});
+chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
+
 /** The User's server owns every chat (agreements Д1–Д13): her own server, or
  *  the same server inside this app when she has none (Д6). */
 const serverChatLink = new ServerChatLink({
@@ -398,6 +418,7 @@ const serverChatLink = new ServerChatLink({
   },
   machineNames: async () => (await settingsService.listMachines().catch(() => [])).map((machine) => ({ id: machine.id, name: machine.name })),
   movesChats: true,
+  artifacts: artifactService,
   log: (event, payload) => { void debugLogService.write(event, payload); }
 });
 
@@ -1329,28 +1350,6 @@ function broadcastScripts(refresh?: string[]): void {
 }
 chatService.setScriptHost(scriptService);
 appMcpService.setScriptApiHandler((context, _route, body) => scriptService.postFromScript(context, body));
-// Artifacts persist in their own tables of the same SQLite database as
-// conversations, but independently of conversation payloads.
-const artifactStore = new ArtifactStore(path.join(app.getPath("userData"), "accordagents.sqlite3"), sqliteExecutable);
-const artifactService = new ArtifactService({
-  store: artifactStore,
-  getMembers: async (conversationId) => {
-    const conversation = await storageService.getConversation(conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      return undefined;
-    }
-    return artifactMembersForConversation(conversation);
-  },
-  postNote: (conversationId, eventId, content) => chatService.postArtifactChatNote(conversationId, eventId, content),
-  onChanged: (conversationId) => {
-    sendToMainWindow("artifacts:updated", { conversationId });
-  },
-  logger: (event, payload) => {
-    void debugLogService.write(event, payload);
-  },
-  ...artifactEventWriter(storageService, chatEventLogService, () => [], artifactStore)
-});
-chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
 // A deleted chat reaches every other device through the User's server (its
 // deletion is an operation there, which every device applies).
 chatService.setConversationDeletedHandler(async (conversation) => {
@@ -1384,7 +1383,6 @@ const localChatActionEffects = createChatActionEffects({
 });
 const chatActionApplier = new ChatActionApplier({
   effects: localChatActionEffects,
-  artifacts: artifactProjectionPort(artifactStore, (conversationId) => sendToMainWindow("artifacts:updated", { conversationId })),
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
   }
@@ -3203,24 +3201,9 @@ void app.whenReady().then(async () => {
   void recoverLocalApprovalActions().catch(error => {
     void debugLogService.write("chat.approval.recovery-error", { message: error instanceof Error ? error.message : String(error) });
   });
-  // A change committed here whose outgoing event did not survive would leave
-  // peers permanently unaware of it. Recovery is idempotent: the operation ids
-  // come from the immutable revision identity, so this is safe every start.
-  void (async () => {
-    try {
-      const summaries = await storageService.listConversations();
-      let recovered = 0;
-      for (const summary of summaries) {
-        if (summary.kind !== "chat") continue;
-        recovered += await artifactService.recoverActionEvents(summary.id);
-      }
-      if (recovered) await debugLogService.write("artifact.action.recovered-at-start", { recovered });
-    } catch (error) {
-      await debugLogService.write("artifact.action.recover-failed", {
-        message: error instanceof Error ? error.message : String(error)
-      });
-    }
-  })();
+  // A document's chat note this computer wrote before documents moved to the
+  // server and never got into the chat goes in now (later notes come with the
+  // server's feed).
   await artifactService.flushPendingArtifactEvents().catch((error) => {
     void debugLogService.write("artifacts.outbox.startup-error", {
       message: error instanceof Error ? error.message : String(error)

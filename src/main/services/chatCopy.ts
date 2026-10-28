@@ -395,8 +395,9 @@ export async function importChatCopy(
   if (manifest.version !== CHAT_COPY_VERSION || typeof manifest.desktopOriginId !== "string" || !Array.isArray(manifest.marks)) {
     throw new Error("This chat copy was made by a different version of the app.");
   }
-  // Deletions and artifacts first: a chat deleted on the desktop must not be
-  // written here, and the tombstone is what says so.
+  // Deletions first: a chat deleted on the desktop must not be written here,
+  // and the tombstone is what says so. (Documents are not in the copy: every
+  // device reads them from the User's server.)
   await storage.importChatCopyState(path.join(dir, CHAT_COPY_STATE_FILE));
   const tombstones = storage.conversationTombstones();
   const summary: ChatCopyImportSummary = { conversations: 0, skippedDeleted: 0, messages: 0, marks: 0 };
