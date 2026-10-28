@@ -85,7 +85,7 @@ export function AwsConnectSection(props: { control: AwsWorkerControl; setupView:
         )}
         {noServer ? (
           <div className="gen-row-error" role="note" data-testid="aws-connect-no-server">
-            Set up your server first (Settings → Your server): the program on the instance connects through it. Without it the instance is created, but members cannot work in the cloud.
+            Set up your server first (Settings → Your server): the program on the instance connects through it, so the setup stops before creating anything without it.
           </div>
         ) : null}
         {failed ? <div className="gen-row-error" role="alert">{failed}</div> : null}
