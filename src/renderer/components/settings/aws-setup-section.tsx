@@ -65,7 +65,7 @@ export function setupItems(checks: CloudRunWorkerCheck[]): SetupItem[] {
  * the page opens and after every fix: problems first with their fix, then
  * what is ready. Signing a provider in opens the provider's own sign-in.
  */
-export function AwsSetupSection(props: { running: boolean; instanceId?: string }): JSX.Element | null {
+export function AwsSetupSection(props: { running: boolean; instanceId?: string; finishedSetup?: string }): JSX.Element | null {
   const kept = lastChecked?.instanceId === props.instanceId ? lastChecked : undefined;
   const [report, setReport] = useState<CloudRunWorkerDoctorReport | undefined>(kept?.report);
   const [checking, setChecking] = useState(false);
@@ -95,6 +95,8 @@ export function AwsSetupSection(props: { running: boolean; instanceId?: string }
     if (!fresh) setReport(undefined);
     if (!fresh || Date.now() - fresh.at > REUSE_MS) void check();
   }, [props.running, props.instanceId]);
+  // A setup that just finished changed what is installed and signed in.
+  useEffect(() => { if (props.running && props.finishedSetup) void check(); }, [props.finishedSetup]);
   useEffect(() => {
     const apply = (next: CloudRunWorkerSetupProgress): void => {
       const finished = next.stage === "complete" || next.stage === "error";
@@ -112,7 +114,7 @@ export function AwsSetupSection(props: { running: boolean; instanceId?: string }
     setError(undefined);
     if (provider) setSignIn({ provider, open: true });
     try {
-      const next = await window.consensus.setupCloudRunWorker(undefined);
+      const next = await window.consensus.setupCloudRunWorker(undefined, provider ? { signIn: provider } : undefined);
       lastChecked = { instanceId: props.instanceId, at: Date.now(), report: next };
       if (mounted.current) setReport(next);
     } catch (cause) {

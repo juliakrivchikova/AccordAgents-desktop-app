@@ -349,6 +349,19 @@ export type AwsWorkerStartPhase =
 
 export type AwsWorkerSpecResolution = "keep" | "grow-disk" | "recreate";
 
+/** The parts of setting the AWS instance up, in the order they run. */
+export type AwsSetupStepId = "instance" | "tools" | "sign-in-codex" | "sign-in-claude" | "program";
+
+/** One part of the setup as the User sees it: what it is doing now, or how
+ *  it ended. Kept with the operation, so a reopened page shows the same. */
+export interface AwsSetupStep {
+  id: AwsSetupStepId;
+  state: "pending" | "current" | "done" | "skipped" | "failed";
+  detail?: string;
+  /** When the step began, so a long one visibly keeps moving. */
+  startedAt?: string;
+}
+
 export interface AwsWorkerStartRequest {
   operationId: string;
   /** "check" is read-only: it probes AWS access and classifies a refusal
@@ -378,6 +391,8 @@ export interface AwsWorkerOperationSnapshot {
   authCode?: string;
   authProvider?: "codex-cli" | "claude-code";
   authRequestId?: string;
+  /** Present for a start or setup: every step with its state. */
+  setupSteps?: AwsSetupStep[];
   status?: AwsWorkerStatus;
   specMismatch?: AwsWorkerSpecMismatch;
   missingAwsActions?: string[];
@@ -2912,7 +2927,9 @@ export interface AppBridge {
   saveCloudRunsSettings(update: CloudRunsSettingsUpdate): Promise<AppSettings>;
   testCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerTestResult>;
   diagnoseCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport>;
-  setupCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport>;
+  /** `signIn`: sign in only this provider; without it every enabled
+   *  provider must be signed in, as before. */
+  setupCloudRunWorker(request?: CloudRunWorkerSettings, options?: { signIn?: "codex-cli" | "claude-code" }): Promise<CloudRunWorkerDoctorReport>;
   getCloudRunSetupProgress(): Promise<CloudRunWorkerSetupProgress | null>;
   submitCloudRunAuthCode(request: { requestId: string; code: string }): Promise<void>;
   cancelCloudRunAuth(requestId: string): Promise<void>;

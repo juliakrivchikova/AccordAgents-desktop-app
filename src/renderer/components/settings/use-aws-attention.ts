@@ -22,7 +22,9 @@ export function clearAwsAttention(): void {
 
 /** A problem the instance status itself reports. */
 export function awsStatusNeedsAttention(status: AwsWorkerStatus): boolean {
-  return Boolean(status.configured && (status.machineProblem || status.autoStop?.problem
+  // While a setup runs, what it has not reached yet is not a problem.
+  const settingUp = ["starting", "waiting-running", "setting-up"].includes(status.operation?.phase ?? "");
+  return Boolean(status.configured && !settingUp && (status.machineProblem || status.autoStop?.problem
     || status.operation?.phase === "error" && status.operation.remediation === "refresh-aws-authorization"));
 }
 

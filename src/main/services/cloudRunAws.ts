@@ -993,7 +993,8 @@ export class CloudRunAwsService {
     const { machines, records: all } = await this.installsOnInstance(handle);
     const records = all.filter((record) => record.installedVersion);
     if (!records.length) {
-      return { message: "The program that stops the instance is not set up on it yet.", action: "reconnect", actionLabel: "Set it up" };
+      // The cloud program does the stopping; its own section installs it.
+      return { message: "Works once the cloud program is installed (see Cloud program)." };
     }
     const machineOf = (machineId: string) => machines.find((machine) => machine.id === machineId);
     const warningOf = (machineId: string) => machineOf(machineId)?.lastHello?.idleStopWarning;

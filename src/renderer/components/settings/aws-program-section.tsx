@@ -24,6 +24,8 @@ export function AwsProgramSection(props: {
   status: AwsWorkerStatus;
   runtime: AwsMachineRuntime;
   onStatus: (status: AwsWorkerStatus) => void;
+  /** Another action on the instance runs; installing waits for it. */
+  locked?: boolean;
 }): JSX.Element {
   const { status, runtime } = props;
   const [retrying, setRetrying] = useState(false);
@@ -31,20 +33,20 @@ export function AwsProgramSection(props: {
   const running = status.state === "running";
   const version = runtime.runningVersion;
   const title = version ? `Version ${version}` : runtime.machine ? "Version unknown" : "Not installed yet";
+  // Without a machine, this installs the program the way setup does.
   const retry = async (): Promise<void> => {
-    if (!runtime.machine) return;
     setRetrying(true);
     setRetryError(undefined);
-    try { props.onStatus(await window.consensus.reconnectAwsMachine(runtime.machine.id)); }
+    try { props.onStatus(await window.consensus.reconnectAwsMachine(runtime.machine?.id)); }
     catch (cause) { setRetryError(cleanError(cause)); }
     finally { setRetrying(false); }
   };
 
   let versionRow: JSX.Element;
   if (!running) {
-    versionRow = <Row title={title} desc={runtime.machine ? "Starts with the instance." : "Installed when a member first works in the cloud."} />;
+    versionRow = <Row title={title} desc={runtime.machine ? "Starts with the instance." : "Setting the instance up installs it."} />;
   } else if (retrying || runtime.runtime?.state === "updating") {
-    versionRow = <Row title={title} desc={<AwsWaiting>{runtime.runtime?.state === "updating" ? runtime.runtime.text : "Retrying the update…"}</AwsWaiting>} />;
+    versionRow = <Row title={title} desc={<AwsWaiting>{runtime.runtime?.state === "updating" ? runtime.runtime.text : runtime.machine ? "Retrying the update…" : "Installing the cloud program…"}</AwsWaiting>} />;
   } else if (runtime.runtime?.state === "failed") {
     versionRow = (
       <Row title={title} testId="aws-program-version"
@@ -54,9 +56,15 @@ export function AwsProgramSection(props: {
   } else if (runtime.runtime?.state === "pending") {
     versionRow = <Row title={title} testId="aws-program-version"
       desc={runtime.desktopVersion ? `Update to ${runtime.desktopVersion} waits until no agent is working; it installs by itself.` : runtime.runtime.text} />;
+  } else if (!runtime.machine) {
+    // Setup installs it; this is for an instance it could not finish on.
+    versionRow = <Row title={title} testId="aws-program-version"
+      desc={retryError ? undefined : "Members cannot work in the cloud and automatic stop does not work until it is installed."}
+      error={retryError}
+      action={runtime.loaded ? { label: "Install", disabled: props.locked, onClick: () => void retry(), testId: "aws-program-install" } : undefined} />;
   } else {
     versionRow = <Row title={title} testId="aws-program-version"
-      desc={runtime.machine ? "Up to date. Updates install by themselves when no agent is working." : "Installed when a member first works in the cloud."} />;
+      desc="Up to date. Updates install by themselves when no agent is working." />;
   }
 
   const connection = !running ? undefined

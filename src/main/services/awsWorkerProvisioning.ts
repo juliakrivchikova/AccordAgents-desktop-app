@@ -349,9 +349,12 @@ export function encodeWorkerBlob(credentials: AwsWorkerCredentials): string {
 
 export function parseWorkerBlob(blob: string): AwsWorkerCredentials {
   const trimmed = blob.trim();
-  const body = trimmed.startsWith(AWS_WORKER_BLOB_PREFIX)
+  // The whole Terminal output is pasted as often as the one line asked for:
+  // the value is the last line that carries the prefix.
+  const printed = [...trimmed.matchAll(/accord-aws-v1:([A-Za-z0-9+/=]+)/g)].pop()?.[1];
+  const body = printed ?? (trimmed.startsWith(AWS_WORKER_BLOB_PREFIX)
     ? trimmed.slice(AWS_WORKER_BLOB_PREFIX.length)
-    : trimmed;
+    : trimmed);
   let decoded: string;
   try {
     decoded = Buffer.from(body, "base64").toString("utf8");

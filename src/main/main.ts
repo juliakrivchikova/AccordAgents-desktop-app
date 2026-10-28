@@ -970,7 +970,17 @@ const cloudRunAwsService = new CloudRunAwsService(settingsService, {
     void debugLogService.write(event, payload);
   }
 });
-const awsWorkerSetupService = new AwsWorkerSetupService(cloudRunAwsService, cloudRunDoctorService, settingsService);
+const awsWorkerSetupService = new AwsWorkerSetupService(cloudRunAwsService, cloudRunDoctorService, settingsService, {
+  // This desktop's program on that instance; another desktop's does not count.
+  installed: async (instanceId) => (await settingsService.listMachineInstalls())
+    .some((record) => record.target.hostKeyAlias === `accordagents-${instanceId}` && Boolean(record.installedVersion)),
+  // The same setup choosing Cloud run does, as one step of setting AWS up.
+  install: async (progress) => {
+    await cloudRunPreparation.prepareRuntime({ progress });
+    evaluateMachineUpdates?.();
+    sendToMainWindow("machines:updated", await machineListResult());
+  }
+});
 void awsWorkerSetupService.recoverInterruptedOperation();
 // Machines transport: the ONLY SSH path to a machine. Installing, upgrading
 // and the one-time project mirror; never a message, a turn or a Stop.
@@ -1901,22 +1911,28 @@ function registerIpc(): void {
     try {
       const settings = await settingsService.getPublicSettings();
       const managedAws = !request && settings.cloudRuns.mode === "aws";
+      // A provider the User has not signed in yet is offered, not an error:
+      // only its members cannot run in the cloud until then.
       return await withCloudRunWorker(request, (worker) => cloudRunDoctorService.diagnose(worker, {
         requirePersistentStorage: managedAws,
-        requiredProviderKinds: enabledCloudProviders(settings.providers)
+        requiredProviderKinds: enabledCloudProviders(settings.providers),
+        signIn: "optional"
       }), "inspect");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { ok: false, message, checks: [] };
     }
   });
-  ipcMain.handle("cloud-runs:setup-worker", (_event, request?: CloudRunWorkerSettings) =>
+  ipcMain.handle("cloud-runs:setup-worker", (_event, request?: CloudRunWorkerSettings, options?: { signIn?: "codex-cli" | "claude-code" }) =>
     cloudRunSetupSession.run(request, async publish => {
       const settings = await settingsService.getPublicSettings();
       const managedAws = !request && settings.cloudRuns.mode === "aws";
+      // Sign in… on one provider signs in that one; the others stay as they are.
+      const signIn = options?.signIn === "codex-cli" || options?.signIn === "claude-code" ? options.signIn : undefined;
       return withCloudRunWorker(request, worker => cloudRunDoctorService.setup(worker, publish, {
         requirePersistentStorage: managedAws,
-        requiredProviderKinds: enabledCloudProviders(settings.providers)
+        requiredProviderKinds: enabledCloudProviders(settings.providers),
+        ...(signIn ? { signIn: "optional" as const, offerSignIn: [signIn] } : {})
       }), "setup");
     }, progress => sendToMainWindow("cloud-runs:setup-progress", progress)));
   ipcMain.handle("cloud-runs:get-setup-progress", () => cloudRunSetupSession.getProgress());

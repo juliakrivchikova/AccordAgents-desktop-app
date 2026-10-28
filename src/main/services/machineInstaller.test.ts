@@ -112,7 +112,7 @@ interface Harness {
   progress: MachineInstallSnapshot[];
   logged: Array<Record<string, unknown>>;
   syncedUp: string[];
-  doctorCalls: Array<{ call: string; workerRoot?: string; options?: { requiredProviderKind?: string; profileHome?: string } }>;
+  doctorCalls: Array<{ call: string; workerRoot?: string; options?: { requiredProviderKinds?: string[]; profileHome?: string } }>;
   waitedVersion: () => string | undefined;
   chatUploads: Array<Parameters<MachineChatCopyUpload>[0]>;
 }
@@ -774,13 +774,22 @@ test("the chosen provider must be installed and signed in on the machine itself"
     { machineId: "m1", operationId: "op-auth", target: TARGET, requiredProvider: "codex-cli" },
     (snapshot) => { if (snapshot.authUrl) seen.push({ authUrl: snapshot.authUrl, authCode: snapshot.authCode }); }
   );
-  assert.deepEqual(h.doctorCalls.map((call) => call.options?.requiredProviderKind), ["codex-cli", "codex-cli"]);
+  assert.deepEqual(h.doctorCalls.map((call) => call.options?.requiredProviderKinds), [["codex-cli"], ["codex-cli"]]);
   // The sign-in happens ON the machine: the desktop only relays the URL and
   // code, and never copies a credential of its own.
   assert.deepEqual(seen, [{ authUrl: "https://auth.example/device", authCode: "ABCD-1234" }]);
   assert.equal(result.snapshot.phase, "error");
   assert.equal(result.snapshot.recovery?.kind, "nothing-changed");
   assert.equal(h.uploads.length, 0);
+});
+
+test("installing the program alone asks for no provider sign-in", async () => {
+  const h = harness();
+  await h.service.install({ machineId: "m1", operationId: "op-no-provider", target: TARGET });
+  // Nobody may be there to approve a sign-in (Settings → AWS setup, a
+  // recovery, an update), and a provider not signed in is not the program's.
+  assert.ok(h.doctorCalls.length > 0);
+  for (const call of h.doctorCalls) assert.deepEqual(call.options?.requiredProviderKinds, []);
 });
 
 test("the enrollment travels on stdin and never reaches a command line or a log", async () => {

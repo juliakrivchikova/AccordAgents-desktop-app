@@ -29,7 +29,7 @@ function pendingExec() {
 
 test("split native URL produces one scoped challenge; replies use stdin and repeated delivery is idempotent", async () => {
   const f = pendingExec(); const ids: string[] = [];
-  const run = f.service.run(worker, p => { if (p.authRequestId) ids.push(p.authRequestId); });
+  const run = f.service.run(worker, p => { if (p.authUrl && p.authRequestId) ids.push(p.authRequestId); });
   await tick();
   f.request.onStdout?.(`Opening browser\n${url.slice(0, 46)}`);
   await tick(); assert.equal(ids.length, 0);
@@ -52,13 +52,13 @@ test("split native URL produces one scoped challenge; replies use stdin and repe
 
 test("cancel releases the worker, invalidates the challenge, and a new attempt gets a new id", async () => {
   const f = pendingExec(); const ids: string[] = [];
-  const run = f.service.run(worker, p => { if (p.authRequestId) ids.push(p.authRequestId); });
+  const run = f.service.run(worker, p => { if (p.authUrl && p.authRequestId) ids.push(p.authRequestId); });
   await tick(); f.request.onStdout?.(`${url}\n`); await tick();
   await assert.rejects(f.service.run(worker, () => undefined), /already running/);
   const rejected = assert.rejects(run, /cancelled/);
   f.service.cancel(ids[0]); await rejected;
   assert.equal(f.service.isActive(ids[0]), false);
-  const retry = f.service.run(worker, p => { if (p.authRequestId) ids.push(p.authRequestId); });
+  const retry = f.service.run(worker, p => { if (p.authUrl && p.authRequestId) ids.push(p.authRequestId); });
   await tick(); f.request.onStdout?.(`${url}\n`); await tick();
   assert.notEqual(ids[0], ids[1]); f.finish(); await retry;
 });
@@ -69,8 +69,21 @@ test("failed publication aborts native login before opening the browser", async 
     request.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
     request.onStdout?.(`${url}\n`);
   }), () => { opened = true; });
-  await assert.rejects(auth.run(worker, async p => { if (p.authRequestId) throw new Error("save failed"); }), /could not save/);
+  await assert.rejects(auth.run(worker, async p => { if (p.authUrl) throw new Error("save failed"); }), /could not save/);
   assert.equal(opened, false);
+});
+
+test("the sign-in id is known before Claude prints its page, and cancelling then never starts the login", async () => {
+  let started = 0;
+  const auth = new CloudRunClaudeAuth(() => { started++; return new Promise(() => undefined); });
+  const first: Array<{ message: string; authRequestId?: string; authUrl?: string }> = [];
+  await assert.rejects(auth.run(worker, p => {
+    first.push(p);
+    if (p.authRequestId && !p.authUrl) auth.cancel(p.authRequestId);
+  }), /cancelled/);
+  assert.equal(first[0].authUrl, undefined);
+  assert.ok(first[0].authRequestId);
+  assert.equal(started, 0);
 });
 
 test("untrusted URLs never open; native failure output does not expose secrets", async () => {

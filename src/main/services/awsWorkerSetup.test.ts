@@ -21,20 +21,13 @@ const PREPARED: PreparedAwsWorker = {
   created: false
 };
 
-test("generic AWS setup requires enabled Claude sign-in and cannot mark a cancelled login ready", async () => {
-  const aws = {
-    prepareWorker: async () => ({ ...PREPARED }), resumePendingVolumeExpansion: async (value: PreparedAwsWorker) => value,
-    hasAcceptedMismatch: async () => false, ensurePreparedRunning: async () => ({ host: "test-worker" }),
-    status: async () => ({ configured: true, state: "running" })
-  };
-  const saved: AwsWorkerOperationSnapshot[] = [];
-  const settings = { getAwsWorkerOperation: async () => undefined,
-    getPublicSettings: async () => ({ providers: [
-      { kind: "codex-cli", enabled: true, label: "Codex" }, { kind: "claude-code", enabled: true, label: "Claude" },
-      { kind: "gemini-cli", enabled: true, label: "Gemini" }
-    ] }), saveAwsWorkerOperation: async (value: AwsWorkerOperationSnapshot) => { saved.push(value); } };
-  const doctor = new CloudRunDoctorService({ sshExec: async request => {
+/** A Claude login that waits until the User skips it, on a worker where
+ *  Codex is signed in and Claude is not. */
+function claudeSkippableWorker(onCommand: (command: string) => void = () => undefined): CloudRunDoctorService {
+  return new CloudRunDoctorService({ sshExec: async request => {
+    onCommand(request.command);
     if (request.command.includes('["auth", "login"]')) return new Promise((_resolve, reject) => {
+      if (request.signal?.aborted) { reject(new Error("cancelled")); return; }
       request.signal?.addEventListener("abort", () => reject(new Error("cancelled")));
       request.onStdout?.("https://claude.com/cai/oauth/authorize?state=aws-test\n");
     });
@@ -42,15 +35,106 @@ test("generic AWS setup requires enabled Claude sign-in and cannot mark a cancel
     return ["rsync=ok", "git=ok", "gh=ok", "java=ok", "node=ok", "codex=ok", "claude=ok", "build-essential=ok",
       "sudo=ok", "userns=0", "git-name=Test", "git-email=test@example.com", "codex-auth=ok", "claude-auth=missing"].join("\n");
   } });
-  const service = new AwsWorkerSetupService(aws as any, doctor, settings as any);
-  const result = await service.start({ operationId: "aws-all-providers" }, value => {
-    if (value.authRequestId) {
+}
+
+const ALL_PROVIDERS = { getPublicSettings: async () => ({ providers: [
+  { kind: "codex-cli", enabled: true, label: "Codex" }, { kind: "claude-code", enabled: true, label: "Claude" },
+  { kind: "gemini-cli", enabled: true, label: "Gemini" }
+] }) };
+const RUNNING_AWS = {
+  prepareWorker: async () => ({ ...PREPARED }), resumePendingVolumeExpansion: async (value: PreparedAwsWorker) => value,
+  hasAcceptedMismatch: async () => false, ensurePreparedRunning: async () => ({ host: "test-worker" }),
+  status: async () => ({ configured: true, state: "running" })
+};
+
+test("the first setup offers each sign-in, goes on when the User skips one, and installs the cloud program", async () => {
+  const saved: AwsWorkerOperationSnapshot[] = [];
+  const settings = { ...ALL_PROVIDERS, getAwsWorkerOperation: async () => undefined,
+    saveAwsWorkerOperation: async (value: AwsWorkerOperationSnapshot) => { saved.push(value); } };
+  const doctor = claudeSkippableWorker();
+  const installed: string[] = [];
+  const program = {
+    installed: async (instanceId: string) => { installed.push(`asked:${instanceId}`); return false; },
+    install: async (progress: (message: string) => void) => { progress("Copying runtime to the machine…"); installed.push("installed"); }
+  };
+  let skipped = false;
+  const service = new AwsWorkerSetupService(RUNNING_AWS as any, doctor, settings as any, program);
+  const result = await service.start({ operationId: "aws-first" }, value => {
+    if (value.authRequestId && !skipped) {
       assert.equal(saved.at(-1), value, "the challenge is persisted before the UI can act on it");
-      assert.equal(value.authProvider, "claude-code"); doctor.cancelAuth(value.authRequestId);
+      assert.equal(value.authProvider, "claude-code");
+      assert.equal(value.setupSteps?.find((step) => step.state === "current")?.id, "sign-in-claude");
+      skipped = true;
+      doctor.cancelAuth(value.authRequestId);
     }
   });
-  assert.equal(result.operation.phase, "error");
-  assert.equal(saved.some(value => value.phase === "ready"), false);
+  assert.equal(skipped, true, "the Claude sign-in was offered");
+  assert.equal(result.operation.phase, "ready");
+  assert.deepEqual(installed, ["asked:i-shared", "installed"]);
+  assert.deepEqual(result.operation.setupSteps?.map((step) => [step.id, step.state]), [
+    ["instance", "done"], ["tools", "done"], ["sign-in-codex", "done"], ["sign-in-claude", "skipped"], ["program", "done"]
+  ]);
+  assert.match(result.operation.message, /Claude Code is not signed in/);
+  // The program's own steps were shown while it installed.
+  assert.ok(saved.some((value) => value.message === "Copying runtime to the machine…"
+    && value.setupSteps?.find((step) => step.id === "program")?.state === "current"));
+  assert.equal(saved.at(-1)?.authRequestId, undefined, "a finished setup waits on no sign-in");
+});
+
+test("a later start of the instance asks for no sign-in and leaves the installed program alone", async () => {
+  const commands: string[] = [];
+  const settings = { ...ALL_PROVIDERS, getAwsWorkerOperation: async () => undefined, saveAwsWorkerOperation: async () => undefined };
+  let installs = 0;
+  const program = { installed: async () => true, install: async () => { installs++; } };
+  const service = new AwsWorkerSetupService(RUNNING_AWS as any, claudeSkippableWorker((command) => commands.push(command)), settings as any, program);
+  const offered: string[] = [];
+  const result = await service.start({ operationId: "aws-restart" }, value => { if (value.authRequestId) offered.push(value.authRequestId); });
+  assert.equal(result.operation.phase, "ready");
+  assert.deepEqual(offered, []);
+  assert.equal(commands.some((command) => command.includes('["auth", "login"]')), false);
+  assert.equal(installs, 0);
+  assert.deepEqual(result.operation.setupSteps?.map((step) => step.id), ["instance", "tools"]);
+});
+
+test("a cloud program that cannot install stops the setup with its reason, and a retry does not ask again for a skipped sign-in", async () => {
+  let stored: AwsWorkerOperationSnapshot | undefined;
+  const settings = { ...ALL_PROVIDERS, getAwsWorkerOperation: async () => stored,
+    saveAwsWorkerOperation: async (value: AwsWorkerOperationSnapshot) => { stored = value; } };
+  const doctor = claudeSkippableWorker();
+  let fail = true;
+  const program = {
+    installed: async () => false,
+    install: async () => { if (fail) throw new Error("Set up your server first (Settings → Your server): cloud machines connect through it."); }
+  };
+  const service = new AwsWorkerSetupService(RUNNING_AWS as any, doctor, settings as any, program);
+  const offered: string[] = [];
+  const onProgress = (value: AwsWorkerOperationSnapshot): void => {
+    if (value.authRequestId && !offered.includes(value.authRequestId)) { offered.push(value.authRequestId); doctor.cancelAuth(value.authRequestId); }
+  };
+  const failed = await service.start({ operationId: "aws-retry" }, onProgress);
+  assert.equal(failed.operation.phase, "error");
+  assert.match(failed.operation.message, /^The cloud program could not be installed: Set up your server first/);
+  assert.deepEqual(failed.operation.setupSteps?.find((step) => step.id === "program"), {
+    ...failed.operation.setupSteps?.find((step) => step.id === "program"), state: "failed"
+  });
+  assert.equal(offered.length, 1);
+  fail = false;
+  const retried = await service.start({ operationId: "aws-retry" }, onProgress);
+  assert.equal(retried.operation.phase, "ready");
+  assert.equal(offered.length, 1, "the skipped Claude sign-in is not asked again in the same setup");
+  assert.equal(retried.operation.setupSteps?.find((step) => step.id === "sign-in-claude")?.state, "skipped");
+});
+
+test("an interrupted setup marks its running step as not finished", async () => {
+  let stored: AwsWorkerOperationSnapshot | undefined = {
+    operationId: "op-cut", intent: "setup", phase: "setting-up", message: "Installing…", updatedAt: "2026-01-01T00:00:00.000Z",
+    authRequestId: "req", authUrl: "https://example.com", setupSteps: [{ id: "instance", state: "done" }, { id: "tools", state: "current", detail: "Installing…" }]
+  };
+  const settings = { getAwsWorkerOperation: async () => stored, saveAwsWorkerOperation: async (value: AwsWorkerOperationSnapshot) => { stored = value; } };
+  await new AwsWorkerSetupService({} as any, {} as any, settings as any).recoverInterruptedOperation();
+  assert.equal(stored?.phase, "error");
+  assert.equal(stored?.authRequestId, undefined);
+  assert.deepEqual(stored?.setupSteps?.map((step) => step.state), ["done", "failed"]);
 });
 
 test("explicit type downsizing asks for a decision even if larger capacity was previously accepted", async () => {
@@ -438,7 +522,7 @@ test("queued doctor progress cannot overwrite the terminal ready snapshot", asyn
   await service.start({ operationId: "op-ordered" });
   assert.equal(saved.at(-1)?.phase, "ready");
   assert.deepEqual(saved.filter((item) => item.phase === "setting-up").map((item) => item.message), [
-    "Setting up the worker…",
+    "Setting up the tools the agents use…",
     "slow-progress",
     "final-progress"
   ]);

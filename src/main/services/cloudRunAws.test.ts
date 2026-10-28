@@ -1185,8 +1185,7 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
   const ON = { enabled: true, needsSetup: false };
   const SET_UP_AGAIN = { ...ON, problem: { message: "AWS does not accept the automatic-stop key.", action: "set-up-again", actionLabel: "Set up again" } };
   const TRY_AGAIN = { ...ON, problem: { message: "The cloud machine could not take its automatic-stop key.", action: "reconnect", actionLabel: "Try again", machineId: "cloud" } };
-  assert.deepEqual(await autoStop(), { ...ON, problem: { message: "The program that stops the instance is not set up on it yet.",
-    action: "reconnect", actionLabel: "Set it up" } });
+  assert.deepEqual(await autoStop(), { ...ON, problem: { message: "Works once the cloud program is installed (see Cloud program)." } });
   settings.installs = [installFor("cloud")];
   assert.deepEqual(await autoStop(), ON, "a key the machine has not taken yet goes over once it is idle; nothing to do");
   settings.installs = [installFor("cloud", { power: { keyId: "AKIAPOWERKEY000000000", configuredAt: "t" } })];
@@ -1288,7 +1287,7 @@ test("the switch is on only with a stop key the User left on; Diagnostics names 
   recoveryFailure = undefined;
   connected = true;
   settings.installs = [installFor("desk-box", { power: { keyId: POWER_KEY.accessKeyId, configuredAt: "t" } })];
-  assert.equal((await autoStop())?.problem?.actionLabel, "Set it up", "a machine elsewhere does not count");
+  assert.equal((await autoStop())?.problem?.message, "Works once the cloud program is installed (see Cloud program).", "a machine elsewhere does not count");
   settings.autoStopEnabled = false;
   assert.deepEqual(await autoStop(), { enabled: false, needsSetup: false }, "switched off with a key: on again needs no command");
   settings.credentials = OLD_CREDS;
