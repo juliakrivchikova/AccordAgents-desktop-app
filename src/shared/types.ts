@@ -1470,6 +1470,12 @@ export interface ChatRosterChangeOutcome {
 }
 
 export interface ChatMessageMetadata {
+  /** The message's place in the User's server's order (agreement Д1): set
+   *  by the server when it accepted the message, the same on every device. */
+  serverSeq?: number;
+  /** The device that wrote the message on the server, the only one that may
+   *  change it (agreement Д2). */
+  serverWriter?: string;
   rosterChange?: ChatRosterChangeOutcome;
   /** Machines transport, Rule 2: a Stop was requested but the member's
    *  machine has not confirmed it yet (shown honestly instead of "stopped");

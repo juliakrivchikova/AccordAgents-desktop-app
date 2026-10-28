@@ -7,6 +7,7 @@ import { deviceIdForPublicKey } from "../main/services/hubAuth";
 import { StorageService } from "../main/services/storage";
 import { createHeadlessPlatform, setHostPlatform, userDataPath } from "../main/platform";
 import { HubFolder } from "./hubFolder";
+import { HubOps } from "./hubOps";
 import { hubApplyPolicy } from "./hubPolicy";
 import { HubLog } from "./hubLog";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
@@ -87,8 +88,8 @@ function chatCopyMark(): string {
   return path.join(userDataPath(), "chat-copy.json");
 }
 
-function hubId(): string {
-  const file = path.join(userDataPath(), "hub-id.json");
+export function hubId(dir = userDataPath()): string {
+  const file = path.join(dir, "hub-id.json");
   if (existsSync(file)) {
     const stored = JSON.parse(readFileSync(file, "utf8")) as { hubId?: string };
     if (stored.hubId) return stored.hubId;
@@ -150,6 +151,30 @@ export function composeHub(options: {
       for (const machineId of phoneMessageHomes(details.conversation, message)) waker.noteWork(machineId, hubSeq);
     }
   }, isPhone);
+  // The chats as the server owns them (agreements Д1–Д5): devices' writes,
+  // the feed they read, and turns.
+  const ops = new HubOps(storage, log);
+  ops.onApplied(({ entry, conversation, previous }) => {
+    feed.note(entry.conversationId);
+    const effect = entry.effect;
+    if (!conversation || (effect.kind !== "message.create" && effect.kind !== "message.update")) return;
+    const message = effect.message;
+    // A member's reply that is done now and was running (or new and done).
+    const settled = message.role === "participant" && (message.status === "done" || message.status === "error") &&
+      (effect.kind === "message.create" || previous?.status === "pending");
+    if (settled) {
+      const runId = typeof message.metadata?.runId === "string" ? message.metadata.runId : undefined;
+      if (runId) progress.settle(runId);
+      // A member's line that is not the User's to see rings nobody.
+      if (message.metadata?.hiddenFromTimeline !== true) {
+        void notify(replyNotice(conversation, message)).catch((error) => log("hub.notice.error", { message: error instanceof Error ? error.message : String(error) }));
+      }
+    }
+    // Work for a member on a machine that is not reading: woken soon.
+    if (effect.kind === "message.create" && message.role === "user") {
+      for (const machineId of phoneMessageHomes(conversation, message)) waker.noteWork(machineId, entry.seq);
+    }
+  });
   const search = new ChatSearchService(storage);
   let views: Promise<void> = Promise.resolve();
   hubLog.onAppended(({ changedConversationIds, events }) => {
@@ -189,11 +214,12 @@ export function composeHub(options: {
     ...(options.acmeWebroot ? { acmeWebroot: options.acmeWebroot } : {}), debugLog: log,
     phone: phoneApi,
     onCatalogChanged: () => phoneApi.catalogChanged(),
-    onProgress: (frames) => { for (const frame of frames) progress.noteFrame(frame); }
+    onProgress: (frames) => { for (const frame of frames) progress.noteFrame(frame); },
+    ops
   });
   waker.start();
   return {
-    server, folder, push, waker, feed, progress, phone: phoneApi, hubLog,
+    server, folder, push, waker, feed, progress, phone: phoneApi, hubLog, ops,
     /** Resolves once the phone's views have taken in what was placed so far. */
     viewsIdle: async () => { await views; },
     /** At start: the cards of the newest card events are folded again, so

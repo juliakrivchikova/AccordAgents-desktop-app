@@ -39,6 +39,7 @@ import type { DeviceEventAppendOptions } from "../../shared/deviceEventDelivery"
 import { DEVICE_EVENT_SCHEMA_SQL, DeviceEventStorage, deviceEventAppendSql } from "./deviceEventStorage";
 import { DEVICE_EVENT_BLOB_SCHEMA_SQL, DeviceEventBlobStorage } from "./deviceEventBlobStorage";
 import { HubStorage } from "./hubStorage";
+import { HubOpsStore } from "./hubOpsStore";
 import { NATIVE_COMMAND_SCHEMA_SQL, NativeCommandStore } from "./nativeCommandStore";
 import { PHONE_TURN_CLAIM_SCHEMA_SQL, PhoneTurnClaimStore } from "./phoneTurnClaims";
 import { MACHINE_PROGRESS_SCHEMA, MachineProgressStore } from "./machineProgressStore";
@@ -354,6 +355,7 @@ export class StorageService {
   private sqliteSession?: SqliteSession;
   private machineProgressStore?: MachineProgressStore;
   private hubStorage?: HubStorage;
+  private hubOpsStore?: HubOpsStore;
   private savedMessageStateCache: Map<string, SavedMessageState> | undefined;
   private readonly dbPath: string;
   private readonly sqliteExecutable: string;
@@ -1950,6 +1952,16 @@ export class StorageService {
     return this.hubStorage;
   }
 
+  /** The server's accepted operations and turns (the User's server only). */
+  hubOps(): HubOpsStore {
+    this.hubOpsStore ??= new HubOpsStore({
+      init: () => this.init(),
+      query: <T>(sql: string) => this.queryJson<T>(sql),
+      execute: (sql: string) => this.runSql(sql)
+    });
+    return this.hubOpsStore;
+  }
+
   deviceEventBlobs(): DeviceEventBlobStorage {
     return new DeviceEventBlobStorage({
       init: () => this.init(),
@@ -2346,7 +2358,7 @@ export class StorageService {
     return backupPath;
   }
 
-  async deleteConversation(id: string, options: { machineIds?: string[] } = {}): Promise<boolean> {
+  async deleteConversation(id: string, options: { machineIds?: string[]; alsoCommitSql?: string } = {}): Promise<boolean> {
     await this.init();
     const exists = await this.queryText(
       `select id from conversations where id = ${sqlString(id)} limit 1;`
@@ -2359,6 +2371,7 @@ export class StorageService {
       ${this.conversationDeletionSql(id, new Date().toISOString(), options.machineIds ?? [])}
       delete from conversation_messages where conversation_id = ${sqlString(id)};
       delete from conversations where id = ${sqlString(id)};
+      ${options.alsoCommitSql ?? ""}
       commit;
     `);
     this.savedMessageState.delete(id);

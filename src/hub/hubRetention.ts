@@ -73,6 +73,8 @@ export interface HubRetentionReport {
   log: { events: number; bytes: number };
   /** The lowest floor among every reader of the shared scopes. */
   sharedFloor: number;
+  /** Accepted operations the server's feed forgot. */
+  ops: HubPruneResult;
 }
 
 /**
@@ -156,7 +158,7 @@ export class HubRetention {
     const floors = await current();
     const report: HubRetentionReport = {
       chatChanges: { events: 0, bytes: 0 }, chatActions: { events: 0, bytes: 0 }, pairs: { events: 0, bytes: 0 },
-      blobs: { deleted: 0, bytes: 0 }, log: { events: 0, bytes: 0 }, sharedFloor: floors.shared
+      blobs: { deleted: 0, bytes: 0 }, log: { events: 0, bytes: 0 }, sharedFloor: floors.shared, ops: { events: 0, bytes: 0 }
     };
     const most = config.batch * config.maxBatches;
     // One look per rule picks what may go; batches then forget it.
@@ -183,12 +185,26 @@ export class HubRetention {
       const blobs = await this.options.storage.deviceEventBlobs().collectOrphans({ now, graceMs: config.blobGraceMs, scanRows: config.blobScanRows });
       report.blobs = { deleted: blobs.deleted, bytes: blobs.bytes };
     }
+    // The server's feed of accepted operations (agreements Д1–Д3): what every
+    // computer and machine read, past the same grace as chat changes. A
+    // device that read less reads its chats again (HubFeedGone).
+    if (!this.closed) {
+      const readers = devices.filter((device) => device.role !== "phone").map((device) => device.deviceId);
+      for (let index = 0; index < config.maxBatches && !this.closed; index += 1) {
+        const pruned = await this.options.storage.hubOps().prune(readers, cutoff(config.chatChangesMs), config.batch);
+        report.ops.events += pruned.events;
+        report.ops.bytes += pruned.bytes;
+        if (pruned.events < config.batch) break;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
     report.log = await hub.logSize();
-    const forgot = report.chatChanges.events + report.chatActions.events + report.pairs.events + report.blobs.deleted;
+    const forgot = report.chatChanges.events + report.chatActions.events + report.pairs.events + report.blobs.deleted + report.ops.events;
     this.options.log?.(forgot > 0 ? "hub.retention.pruned" : "hub.retention.kept", {
       chatChanges: report.chatChanges.events, chatActions: report.chatActions.events, pairs: report.pairs.events,
       bytes: report.chatChanges.bytes + report.chatActions.bytes + report.pairs.bytes,
-      blobs: report.blobs.deleted, blobBytes: report.blobs.bytes, logEvents: report.log.events, logBytes: report.log.bytes, sharedFloor: floors.shared
+      blobs: report.blobs.deleted, blobBytes: report.blobs.bytes, logEvents: report.log.events, logBytes: report.log.bytes, sharedFloor: floors.shared,
+      ops: report.ops.events, opsBytes: report.ops.bytes
     });
     return report;
   }

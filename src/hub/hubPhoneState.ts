@@ -289,7 +289,8 @@ export class HubWaker {
   async check(): Promise<void> {
     if (this.waiting.size === 0) return;
     const devices = await this.machineDevices();
-    const cursors = await this.options.storage.hub().cursorTimes();
+    // Where each machine read the server's feed (its work is placed there).
+    const cursors = await this.options.storage.hubOps().cursorTimes();
     const configs = await this.configs();
     for (const [machineId, work] of [...this.waiting]) {
       const device = devices.get(machineId);

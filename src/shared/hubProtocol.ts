@@ -140,6 +140,13 @@ export interface HubLiveHead {
   head: number;
 }
 
+/** The live socket's word that the server accepted something new: the
+ *  newest place in its order of operations (HUB_FEED_PATH reads from it). */
+export interface HubLiveOps {
+  type: "ops";
+  head: number;
+}
+
 /** GET /v1/health, unauthenticated: enough to check a pasted setup result. */
 export interface HubHealth {
   ok: true;
