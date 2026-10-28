@@ -3879,8 +3879,11 @@ export class ChatService {
    *  it are never sent, and the desktop and the server take it only from the
    *  desktop. A roster change a machine member asked for is therefore
    *  recorded on its machine and applied here, on the desktop. */
+  /** Every device applies the roster changes its own members ask for (Д2:
+   *  no device has a special right to a chat's members); the server takes
+   *  the change from whichever device made it. */
   private appliesRosterChanges(): boolean {
-    return !this.machineRuntime;
+    return true;
   }
 
   /** An approved removal this host still has to apply: on the desktop, any
@@ -20270,10 +20273,20 @@ export class ChatService {
     }
     const target = conversation;
     const followUps = new Set<"removal" | "addition">();
+    const dropped: ChatParticipant[] = [];
+    let archivedNow = false;
     await this.withChatMutation(target, async () => {
       const before = new Set(target.messages.map((message) => message.id));
+      // What the chat was before (members, archive, the User's messages):
+      // shallow, since applying replaces entries rather than editing them.
+      const previous: Conversation = { ...target, messages: [...target.messages], metadata: { ...target.metadata } };
       for (const entry of entries) this.applyServerEffect(target, entry, me, followUps);
       target.messages = sortByServerOrder(target.messages);
+      // A member that watches the chat here sees new User messages the way a
+      // local one does: a new one resets its wake chain.
+      this.reconcileReplicatedWatcher(previous, target);
+      dropped.push(...this.membersDroppedFrom(previous, target));
+      archivedNow = previous.metadata.archived !== true && target.metadata.archived === true;
       // On a machine: the desktop's word on roster changes this machine's
       // members asked for (it makes them, and says so in the chat).
       this.settleRosterChangesFromDesktop(target, () => target.messages.filter((message) =>
@@ -20281,6 +20294,18 @@ export class ChatService {
       await this.saveConversation(target, { emitChanges: false });
     });
     this.followUpMirroredRosterChanges(conversationId, followUps);
+    // An approved removal waits for every device's turns in the chat to end:
+    // another device's turn may just have ended.
+    this.scheduleQueuedMemberRemovals(conversationId);
+    // A member this device runs that the chat no longer has (removed on any
+    // device) ends its process here, as a local member's does.
+    this.retireRemovedMembers(conversationId, dropped);
+    // An archived chat closes its members' sessions, wherever it was archived.
+    if (archivedNow) await this.cliRunner.closeConversationSessions(conversationId).catch(() => undefined);
+    // New messages from other devices are what a watching member reads next.
+    if (entries.some((entry) => entry.deviceId !== me && entry.effect.kind === "message.create")) {
+      this.scheduleAutoWatchEvaluation(conversationId, "server-messages");
+    }
   }
 
   /** One accepted operation, folded into this device's copy. */

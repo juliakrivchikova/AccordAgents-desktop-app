@@ -127,14 +127,19 @@ const OPEN_CARDS_READ_MAX = 1_000;
 
 /** The server's cards as the phone shows them; a choice names its member as
  *  the chat does. */
-function phoneCards(cards: HubCard[], conversation: Conversation | undefined): MobileControlCard[] {
+function phoneCards(cards: HubCard[], conversation: Conversation | undefined, machineNames?: Map<string, string>): MobileControlCard[] {
   const members = mobileChatMembers(conversation);
   const label = (participantId: string) => {
     const member = members.find((item) => item.id === participantId);
     return member ? `@${member.handle.replace(/^@/, "")}` : undefined;
   };
+  const participants = Array.isArray(conversation?.metadata?.participants) ? conversation!.metadata.participants as Array<{ id?: unknown; homeMachineId?: unknown }> : [];
+  const machineName = (participantId: string) => {
+    const home = participants.find((item) => item?.id === participantId)?.homeMachineId;
+    return typeof home === "string" && home ? machineNames?.get(home) : undefined;
+  };
   return cards.flatMap((card) => {
-    const shown = controlCardFromHubCard(card, label);
+    const shown = controlCardFromHubCard(card, label, machineName);
     return shown ? [shown] : [];
   });
 }
@@ -266,7 +271,7 @@ export class HubPhoneApi {
         roleLabels: new Map(Object.entries(catalog?.roles ?? {})),
         machineNames,
         pendingCardsFor: (conversationId, conversation) => whole
-          ? phoneCards(byChat.get(conversationId) ?? [], conversation) : undefined,
+          ? phoneCards(byChat.get(conversationId) ?? [], conversation, machineNames) : undefined,
         runningFromMessages: true,
         summaries,
         include: (summary: ConversationSummary) => stale.has(summary.id) && include(summary)
@@ -350,7 +355,8 @@ export class HubPhoneApi {
     // cards waiting in a chat never hide a new one.
     const open = (await this.options.store.hubOps().openCards(conversationId, PHONE_CARDS_MAX, { newestFirst: true, exceptKinds: ["mention"] }))
       .filter((card) => !(card.state === "answered" && card.cardKind === "roster" && made.has(card.cardId)));
-    for (const card of phoneCards(open, conversation)) cards.set(card.id, card);
+    const machineNames = await this.options.machineNames().catch(() => new Map<string, string>());
+    for (const card of phoneCards(open, conversation, machineNames)) cards.set(card.id, card);
     return [...cards.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt)).slice(-PHONE_CARDS_MAX);
   }
 

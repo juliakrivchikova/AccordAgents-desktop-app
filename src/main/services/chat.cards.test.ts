@@ -581,7 +581,7 @@ function removalOf(approvalId: string, conversationId: string): ChatAppToolAppro
   } as unknown as ChatAppToolApproval;
 }
 
-test("a machine restarting while its approved removal waits for the desktop keeps the answer: never asked again, made once the desktop is back", async (t) => {
+test("a machine makes the removal its member asked for itself once the User approves, also with the desktop off, and never asks again after a restart (Д2)", async (t) => {
   const approvalId = randomUUID();
   const h = await linkedDesktop(t, chat("cards-k"));
   await h.startMachine();
@@ -590,56 +590,29 @@ test("a machine restarting while its approved removal waits for the desktop keep
   machineCopy.metadata = { ...machineCopy.metadata, pendingAppToolApprovals: [removalOf(approvalId, "cards-k")] } as Conversation["metadata"];
   await save(h.machineChat, machineCopy);
   await until(() => h.card(approvalId), (item) => item?.state === "pending");
-  // The desktop is off; the User approves on the phone; the machine takes it
-  // and waits for the desktop, which owns the member list.
+  // The desktop is off; the User approves on the phone; the machine makes the
+  // change itself: no device has a special right to a chat's members.
   await h.desktopLink.stop();
   assert.equal((await h.phoneAnswers("cards-k", approvalId, { approve: true })).result.status, "accepted");
-  await until(() => approvalOf(h.machineStorage, "cards-k", approvalId), (item) => item?.status === "approved" && typeof item.memberRemovalQueuedAt === "string");
-  // The machine restarts meanwhile (an idle stop, an upgrade).
+  const settled = await until(() => h.card(approvalId), (item) => item?.state === "settled", 20_000);
+  assert.equal((settled!.outcome as { result?: string }).result, "applied");
+  // The machine restarts (an idle stop, an upgrade): nothing is asked or made again.
   await h.machineLink.stop();
   const machine = await restartMachine(h, "machine-k");
   await machine.chat.resumeServerCards();
   await new Promise((resolve) => setTimeout(resolve, 500));
-  const held = await h.card(approvalId);
-  assert.equal(held?.state, "answered", "the User's answer stands; the card is not settled, nor put up again as a question");
   const feed = await h.call<HubFeedResponse>(h.desktopIdentity, "GET", "/v3/feed?after=0");
-  const answeredAt = feed.entries.find((entry) => entry.effect.kind === "card.answer" && entry.effect.card.cardId === approvalId)!.seq;
-  assert.deepEqual(feed.entries.filter((entry) => entry.seq > answeredAt && entry.effect.kind.startsWith("card.") && "card" in entry.effect &&
-    (entry.effect as { card: HubCard }).card.cardId === approvalId).map((entry) => entry.effect.kind), [], "nothing raised or settled after the answer");
-  // The desktop comes back and makes the change; the machine settles the card.
+  const settledAt = feed.entries.find((entry) => entry.effect.kind === "card.settle" && entry.effect.card.cardId === approvalId)!.seq;
+  assert.deepEqual(feed.entries.filter((entry) => entry.seq > settledAt && entry.effect.kind.startsWith("card.") && "card" in entry.effect &&
+    (entry.effect as { card: HubCard }).card.cardId === approvalId).map((entry) => entry.effect.kind), [], "nothing raised or settled after it");
+  // The desktop comes back and reads the chat as the machine left it.
   const desktopAgain = h.link(h.desktopStorage, h.desktopChat, h.desktopEvents, "desktop-k", true);
   h.links.push(desktopAgain);
   await desktopAgain.start();
-  const settled = await until(() => h.card(approvalId), (item) => item?.state === "settled");
-  assert.equal((settled!.outcome as { result?: string }).result, "applied");
-  const desktopCopy = (await h.desktopStorage.getConversation("cards-k"))!;
-  assert.deepEqual((desktopCopy.metadata.participants as ChatParticipant[]).map((member) => member.id), [remote.id]);
-  assert.equal(desktopCopy.messages.filter((message) => message.content === "Removed @taylor from this chat at @drew's request.").length, 1, "made once");
-});
-
-test("a machine that starts after the desktop already made its approved removal takes the desktop's word, and says nothing failed", async (t) => {
-  const approvalId = randomUUID();
-  const h = await linkedDesktop(t, chat("cards-l"));
-  await h.startMachine();
-  await until(() => h.machineStorage.getConversation("cards-l"), (item) => Boolean(item));
-  const machineCopy = (await h.machineStorage.getConversation("cards-l"))!;
-  machineCopy.metadata = { ...machineCopy.metadata, pendingAppToolApprovals: [removalOf(approvalId, "cards-l")] } as Conversation["metadata"];
-  await save(h.machineChat, machineCopy);
-  await until(() => h.card(approvalId), (item) => item?.state === "pending");
-  // The machine is off; the User approves on the phone; the desktop makes it.
-  await h.machineLink.stop();
-  assert.equal((await h.phoneAnswers("cards-l", approvalId, { approve: true })).result.status, "accepted");
-  await until(() => h.desktopStorage.getConversation("cards-l"), (item) =>
-    !((item?.metadata.participants ?? []) as ChatParticipant[]).some((member) => member.id === desk.id));
-  // The machine starts and reads what happened while it was away.
-  const machine = await restartMachine(h, "machine-l");
-  const settled = await until(() => h.card(approvalId), (item) => item?.state === "settled");
-  assert.equal((settled!.outcome as { result?: string }).result, "applied");
-  const onMachine = await approvalOf(h.machineStorage, "cards-l", approvalId);
-  assert.equal(onMachine?.status, "approved");
-  assert.deepEqual(onMachine?.appliedParticipantIds, [desk.id]);
-  const page = await h.call<{ messages: ChatMessage[] }>(h.desktopIdentity, "GET", "/v3/chat?conversationId=cards-l");
+  const desktopCopy = await until(() => h.desktopStorage.getConversation("cards-k"), (item) =>
+    ((item?.metadata.participants ?? []) as ChatParticipant[]).every((member) => member.id !== desk.id));
+  assert.deepEqual((desktopCopy!.metadata.participants as ChatParticipant[]).map((member) => member.id), [remote.id]);
+  const page = await h.call<{ messages: ChatMessage[] }>(h.desktopIdentity, "GET", "/v3/chat?conversationId=cards-k");
+  assert.equal(page.messages.filter((message) => message.content === "Removed @taylor from this chat at @drew's request.").length, 1, "made once");
   assert.equal(page.messages.filter((message) => message.content.startsWith("Could not remove")).length, 0, "nothing says it failed");
-  assert.equal(page.messages.filter((message) => message.content === "Removed @taylor from this chat at @drew's request.").length, 1);
-  void machine;
 });

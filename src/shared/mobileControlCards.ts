@@ -115,8 +115,8 @@ export function controlCardFromApproval(conversationId: string, approval: ChatAp
       createdAt: approval.createdAt
     };
     if (approval.status === "approved" && typeof approval.memberRemovalQueuedAt === "string") {
-      // The desktop's waiting result, with what the phone cannot see: it
-      // cannot tell whether the Mac, which applies it, is on.
+      // The waiting result, with what the phone cannot see: whether the
+      // device that applies it (the asking member's own) is on.
       return {
         ...base,
         title: "Removal approved",
@@ -124,7 +124,7 @@ export function controlCardFromApproval(conversationId: string, approval: ChatAp
         options: [],
         status: "answered",
         waiting: true,
-        outcome: `Waiting for running turns to finish and for your Mac to apply it, then ${handles} ${one ? "leaves" : "leave"} this chat.`
+        outcome: `Waiting for running turns to finish and for ${base.machineName ? base.machineName : "your Mac"} to apply it, then ${handles} ${one ? "leaves" : "leave"} this chat.`
       };
     }
     return {
@@ -151,7 +151,8 @@ export function controlCardFromApproval(conversationId: string, approval: ChatAp
       allowsCancel: false,
       status: "answered",
       waiting: true,
-      outcome: "Waiting for your Mac to apply it.",
+      // The device the asking member runs on applies it (Д2).
+      outcome: `Waiting for ${(approval as { machineName?: string }).machineName || "your Mac"} to apply it.`,
       createdAt: approval.createdAt
     };
   }
@@ -230,7 +231,12 @@ export const HUB_CARD_ANSWERED_WAITING = "Waiting for it to be applied.";
  * read from the message itself). The card's id is the server's card id: the
  * answer names it. Undefined for a card the phone cannot show.
  */
-export function controlCardFromHubCard(card: HubCard, participantLabel?: (participantId: string) => string | undefined): MobileControlCard | undefined {
+export function controlCardFromHubCard(
+  card: HubCard,
+  participantLabel?: (participantId: string) => string | undefined,
+  /** The machine a member runs on, by name (absent: the computer). */
+  memberMachineName?: (participantId: string) => string | undefined
+): MobileControlCard | undefined {
   if (card.state === "settled") return undefined;
   const raised = card.card as { approval?: ChatAppToolApproval; choice?: ChatPendingChoice; sourceMessageId?: unknown; refusals?: unknown };
   if ((card.cardKind === "permission" || card.cardKind === "roster") && raised.approval && typeof raised.approval === "object") {
@@ -251,8 +257,11 @@ export function controlCardFromHubCard(card: HubCard, participantLabel?: (partic
     // approved … then @x leaves this chat", "Addition approved").
     if (approve && (card.cardKind === "roster" || raised.approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL)) {
       const queuedAt = card.answeredAt ?? card.raisedAt;
+      // Applied by the device the asking member runs on (Д2): named.
+      const machineName = card.participantId ? memberMachineName?.(card.participantId) : undefined;
       const waiting = controlCardFromApproval(card.conversationId, {
         ...raised.approval, status: "approved",
+        ...(machineName ? { machineName } : {}),
         ...(removalRequest(raised.approval) ? { memberRemovalQueuedAt: queuedAt } : { memberAdditionQueuedAt: queuedAt })
       });
       return { ...waiting, id: card.cardId, createdAt: base.createdAt };

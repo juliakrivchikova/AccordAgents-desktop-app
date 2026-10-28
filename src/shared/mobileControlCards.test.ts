@@ -170,6 +170,10 @@ test("a card on the User's server is the phone's card: answerable while it waits
     answeredAt: "2026-10-28T09:01:00.000Z" }));
   assert.deepEqual([roster?.title, roster?.waiting, roster?.outcome], ["Removal approved", true,
     "Waiting for running turns to finish and for your Mac to apply it, then @gera and @taylor leave this chat."], "an approved removal waits as the desktop's does");
+  // A member on a machine asked it: that machine makes it (Д2), and is named.
+  const onMachine = controlCardFromHubCard(hubCard({ cardId: removal.id, cardKind: "roster", participantId: "drew-id", card: { approval: removal },
+    state: "answered", answer: { approve: true } }), undefined, (participantId) => participantId === "drew-id" ? "Box" : undefined);
+  assert.equal(onMachine?.outcome, "Waiting for running turns to finish and for Box to apply it, then @gera and @taylor leave this chat.");
   const declined = controlCardFromHubCard(hubCard({ cardId: removal.id, cardKind: "roster", card: { approval: removal }, state: "answered", answer: { approve: false } }));
   assert.equal(declined?.outcome, "No, keep @gera and @taylor in this chat. Waiting for it to be applied.", "a worded answer is said in its words");
 
