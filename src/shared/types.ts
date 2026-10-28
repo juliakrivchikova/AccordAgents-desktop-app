@@ -2931,7 +2931,7 @@ export interface AppBridge {
   diagnoseCloudRunWorker(request?: CloudRunWorkerSettings): Promise<CloudRunWorkerDoctorReport>;
   /** `signIn`: sign in only this provider; without it every enabled
    *  provider must be signed in, as before. */
-  setupCloudRunWorker(request?: CloudRunWorkerSettings, options?: { signIn?: "codex-cli" | "claude-code" }): Promise<CloudRunWorkerDoctorReport>;
+  setupCloudRunWorker(request?: CloudRunWorkerSettings, options?: { signIn?: "codex-cli" | "claude-code" | "none" }): Promise<CloudRunWorkerDoctorReport>;
   getCloudRunSetupProgress(): Promise<CloudRunWorkerSetupProgress | null>;
   submitCloudRunAuthCode(request: { requestId: string; code: string }): Promise<void>;
   cancelCloudRunAuth(requestId: string): Promise<void>;

@@ -293,11 +293,13 @@ export class CloudRunAwsService {
     return { machines: onInstance, records: installs.filter((record) => ids.has(record.machineId)) };
   }
 
-  /** Whether this desktop's cloud program is installed on that instance, by
-   *  the same rule automatic stop uses. */
+  /** Whether this desktop's cloud program is on that instance and has
+   *  connected at least once: one installed that never reached this desktop
+   *  is not set up yet. */
   async programInstalledOn(instanceId: string): Promise<boolean> {
-    const { records } = await this.installsOnInstance({ instanceId } as AwsWorkerHandleInfo);
-    return records.some((record) => Boolean(record.installedVersion));
+    const { machines, records } = await this.installsOnInstance({ instanceId } as AwsWorkerHandleInfo);
+    return records.some((record) => Boolean(record.installedVersion)
+      && Boolean(machines.find((machine) => machine.id === record.machineId)?.lastHello));
   }
 
   // Compatibility entry point for older renderer callers. The new UI calls

@@ -114,7 +114,7 @@ export function AwsSetupSection(props: { running: boolean; instanceId?: string; 
     setError(undefined);
     if (provider) setSignIn({ provider, open: true });
     try {
-      const next = await window.consensus.setupCloudRunWorker(undefined, provider ? { signIn: provider } : undefined);
+      const next = await window.consensus.setupCloudRunWorker(undefined, { signIn: provider ?? "none" });
       lastChecked = { instanceId: props.instanceId, at: Date.now(), report: next };
       if (mounted.current) setReport(next);
     } catch (cause) {
@@ -154,7 +154,8 @@ export function AwsSetupSection(props: { running: boolean; instanceId?: string; 
                   error={!item.ok && item.required ? item.detail : undefined}
                   action={item.fix ? {
                     label: item.fix === "sign-in" ? "Sign in…" : setupRunning ? "Working…" : item.fix === "install" ? "Install" : "Fix",
-                    disabled: setupRunning || checking,
+                    // A setup running on the page installs and signs in already.
+                    disabled: setupRunning || checking || Boolean(props.settingUp),
                     onClick: () => void runSetup(item.fix === "sign-in" ? item.provider : undefined),
                     testId: `aws-setup-${item.key}-fix`
                   } : undefined} />

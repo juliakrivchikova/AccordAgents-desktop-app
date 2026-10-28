@@ -144,6 +144,25 @@ test("tools that could not be installed are named on the tools step, not on a si
   assert.equal(steps.program.state, "pending", "the program is not installed on tools that are not ready");
 });
 
+test("without the User's server the setup says so before anything is created or anyone is asked to sign in", async () => {
+  let prepared = 0;
+  const aws = { ...RUNNING_AWS, prepareWorker: async () => { prepared++; return { ...PREPARED }; } };
+  const settings = { ...ALL_PROVIDERS, getAwsWorkerOperation: async () => undefined, saveAwsWorkerOperation: async () => undefined };
+  const program = { installed: async () => false, install: async () => undefined,
+    ready: async () => { throw new Error("Set up your server first (Settings → Your server): cloud machines connect through it."); } };
+  const service = new AwsWorkerSetupService(aws as any, {} as any, settings as any, program);
+  const result = await service.start({ operationId: "no-server" });
+  assert.equal(result.operation.phase, "error");
+  assert.equal(prepared, 0, "no instance is created");
+  assert.deepEqual(result.operation.setupSteps?.map((step) => [step.id, step.state]), [["instance", "failed"]]);
+  assert.match(result.operation.message, /Set up your server first/);
+  // An instance whose program is set up starts without a server check.
+  const started = new AwsWorkerSetupService(aws as any, { waitForCloudInit: async () => undefined, setup: async () => ({ ok: true, message: "", checks: [] }) } as any,
+    { ...settings, getPublicSettings: async () => ({ ...(await ALL_PROVIDERS.getPublicSettings()), cloudRuns: { awsHandle: { instanceId: "i-shared" } } }) } as any,
+    { ...program, installed: async () => true });
+  assert.equal((await started.start({ operationId: "start-only" })).operation.phase, "ready");
+});
+
 test("an interrupted setup marks its running step as not finished", async () => {
   let stored: AwsWorkerOperationSnapshot | undefined = {
     operationId: "op-cut", intent: "setup", phase: "setting-up", message: "Installing…", updatedAt: "2026-01-01T00:00:00.000Z",

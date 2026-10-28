@@ -20,6 +20,9 @@ export interface AwsCloudProgram {
   installed(instanceId: string): Promise<boolean>;
   /** Installs it and waits until it is connected; throws with the reason. */
   install(progress: (message: string) => void): Promise<void>;
+  /** Throws, with what to do, when the program could not be installed at all
+   *  (there is no server of the User's for it to connect through). */
+  ready?(): Promise<void>;
 }
 
 const SIGN_IN_STEP: Record<"codex-cli" | "claude-code", AwsSetupStepId> = {
@@ -43,7 +46,8 @@ export class AwsWorkerSetupService {
   async recoverInterruptedOperation(): Promise<void> {
     const previous = await this.settings.getAwsWorkerOperation();
     if (!previous || previous.phase === "ready" || previous.phase === "needs-decision" || previous.phase === "error") return;
-    const message = previous.intent === "check" ? "AWS access check was interrupted. Try again to check access." : "Setup was interrupted. Try again to finish it.";
+    const message = previous.intent === "check" ? "AWS access check was interrupted. Try again to check access."
+      : previous.intent === "resize" ? "The change was interrupted. Try again to finish it." : "Setup was interrupted. Try again to finish it.";
     await this.settings.saveAwsWorkerOperation({
       ...previous,
       phase: "error",
@@ -162,6 +166,12 @@ export class AwsWorkerSetupService {
         }
       }
       await emit("starting", "Looking for your AWS instance…");
+      // A setup that would have to install the program, and cannot, says so
+      // before anything is created or anyone is asked to sign in.
+      if (this.program?.ready) {
+        const configured = (await this.settings.getPublicSettings()).cloudRuns?.awsHandle?.instanceId;
+        if (!configured || !(await this.program.installed(configured))) await this.program.ready();
+      }
       let prepared = await this.aws.prepareWorker({
         operationId: request.operationId,
         blob: request.blob,

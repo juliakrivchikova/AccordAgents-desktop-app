@@ -2215,3 +2215,13 @@ test("a look in the first moments after start removes no leaving machine before 
   await waitFor(() => removed.length === 2);
   assert.deepEqual(removed, ["cloud", "older"]);
 });
+
+test("the program counts as set up on an instance only once it has connected", async () => {
+  const settings = powerSettings();
+  const service = serviceWith(settings, new Map());
+  settings.installs = [installFor("cloud")];
+  assert.equal(await service.programInstalledOn(POWER_HANDLE.instanceId), false, "installed but never connected is not set up");
+  settings.machines = [{ id: "cloud", awsInstanceId: POWER_HANDLE.instanceId, lastHello: { appVersion: "1.11.1" } } as never, { id: "desk-box" }];
+  assert.equal(await service.programInstalledOn(POWER_HANDLE.instanceId), true);
+  assert.equal(await service.programInstalledOn("i-another"), false);
+});

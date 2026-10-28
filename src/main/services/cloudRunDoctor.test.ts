@@ -462,11 +462,11 @@ test("an optional sign-in the User skips leaves setup going and the worker ready
   assert.equal(report.checks.find((check) => check.id === "codex-auth")?.status, "warn");
   // Claude was not offered, so its login never started.
   assert.equal(commands.some((command) => command.includes('["auth", "login"]')), false);
-  // The skipped login is ended on the instance too, by the file it wrote.
+  // The skipped login is ended on the instance too, by the id it carries.
   const launch = commands.find((command) => command.includes("login --device-auth")) ?? "";
-  const pidFile = launch.match(/\/tmp\/accordagents-codex-login-[0-9a-f-]+\.pid/)?.[0];
-  assert.ok(pidFile && launch.includes("exec timeout"), "the login is bounded and records its pid");
-  assert.ok(commands.some((command) => command.includes("kill -TERM") && command.includes(pidFile)));
+  const id = launch.match(/ACCORDAGENTS_LOGIN=([0-9a-f-]+)/)?.[1];
+  assert.ok(id && launch.includes("exec timeout"), "the login is bounded and carries its id");
+  assert.ok(commands.some((command) => command.includes("pkill -TERM -f") && command.includes(`[A]CCORDAGENTS_LOGIN=${id}`)));
 });
 
 test("Skip works while the Codex sign-in is still starting", async () => {

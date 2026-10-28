@@ -258,7 +258,9 @@ export class CloudRunDoctorService {
           return failedReport("claude-auth", detail);
         }
         const skipped = /cancelled/i.test(detail);
-        await progress("claude-auth", skipped ? "Claude Code sign-in skipped." : detail, { signInOutcome: skipped ? "skipped" : "failed" });
+        // The setup goes on, so "start setup again" is not what to do here.
+        const reason = detail.replace(/\s*Start setup again[^.]*\./i, "").trim();
+        await progress("claude-auth", skipped ? "Claude Code sign-in skipped." : reason || "Claude Code sign-in did not complete.", { signInOutcome: skipped ? "skipped" : "failed" });
       }
     }
 
@@ -296,7 +298,12 @@ export class CloudRunDoctorService {
     const requestId = randomUUID();
     const skip = new AbortController();
     this.codexLogins.set(requestId, skip);
-    await progress("codex-auth", "Starting Codex sign-in on the instance…", { authProvider: "codex-cli", authRequestId: requestId });
+    try {
+      await progress("codex-auth", "Starting Codex sign-in on the instance…", { authProvider: "codex-cli", authRequestId: requestId });
+    } catch (error) {
+      this.codexLogins.delete(requestId);
+      throw error;
+    }
     let buffered = "";
     let authUrl: string | undefined;
     let authCode: string | undefined;
@@ -309,17 +316,17 @@ export class CloudRunDoctorService {
     if (skip.signal.aborted) abort.abort();
     else skip.signal.addEventListener("abort", () => abort.abort(), { once: true });
     const codexPath = worker.codexPath?.trim() || "codex";
-    // The login on the instance does not end when this connection does, so
-    // it records where it runs: a skipped or expired sign-in is ended there
-    // too, and it never outlives the wait for it.
-    const pidFile = `/tmp/accordagents-codex-login-${requestId}.pid`;
+    // The login on the instance does not end when this connection does, so it
+    // carries this sign-in's id on its command line: a skipped or expired one
+    // is ended there by that id, and it never outlives the wait for it.
+    const marker = `ACCORDAGENTS_LOGIN=${requestId}`;
     const loginSeconds = Math.max(30, Math.floor(DEVICE_AUTH_TIMEOUT_MS / 1000) - 10);
     let completed = false;
     try {
       if (abort.signal.aborted) throw new Error("Codex sign-in skipped.");
       await this.sshExec({
         worker,
-        command: `printf '%s' "$$" > ${shellQuotePosix(pidFile)}; exec timeout -k 5 ${loginSeconds} ${shellQuotePosix(codexPath)} login --device-auth < /dev/null 2>&1`,
+        command: `exec timeout -k 5 ${loginSeconds} env ${marker} ${shellQuotePosix(codexPath)} login --device-auth < /dev/null 2>&1`,
         timeoutMs: DEVICE_AUTH_TIMEOUT_MS,
         keepAlive: "none",
         signal: abort.signal,
@@ -364,10 +371,13 @@ export class CloudRunDoctorService {
           : `Codex sign-in did not complete: ${reason}`, { signInOutcome: outcome });
     } finally {
       this.codexLogins.delete(requestId);
-      // Only a process id the login wrote is ever signalled.
-      const end = completed ? "" : `p="$(cat ${shellQuotePosix(pidFile)} 2>/dev/null)"; case "$p" in ''|*[!0-9]*) ;; *) kill -TERM "$p" 2>/dev/null ;; esac; `;
-      await this.sshExec({ worker, command: `${end}rm -f ${shellQuotePosix(pidFile)}`, timeoutMs: PROBE_TIMEOUT_MS, retryAttempts: 1 })
-        .catch(() => undefined);
+      // `timeout` keeps the marker in its own command line and passes the
+      // signal on to the login. The bracket keeps pkill from matching the
+      // shell that runs it.
+      if (!completed) {
+        await this.sshExec({ worker, command: `pkill -TERM -f ${shellQuotePosix(`[A]${marker.slice(1)}`)} || true`, timeoutMs: PROBE_TIMEOUT_MS, retryAttempts: 1 })
+          .catch(() => undefined);
+      }
     }
   }
 }

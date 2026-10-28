@@ -334,6 +334,34 @@ test("a setup closed after it stopped shows again when the same setup runs again
   await unmount();
 });
 
+test("a setup hidden while it ran shows again when it is tried again after it stopped", async () => {
+  const ui = await mount({ status: { configured: false } as AwsWorkerStatus, start: () => new Promise(() => undefined) });
+  await ui.click(ui.find("aws-instance-switch"));
+  await ui.click(ui.find("aws-worker-connect-start"));
+  const operationId = (ui.bridge.calls.startAwsWorker?.[0]?.[0] as AwsWorkerStartRequest).operationId;
+  const send = async (operation: AwsWorkerOperationSnapshot): Promise<void> => {
+    await act(async () => { for (const listener of ui.bridge.operations) listener(operation); });
+    await ui.settle();
+  };
+  await send(setupSnapshot(operationId, [{ id: "instance", state: "current", detail: "Looking…" }]));
+  await ui.click(ui.find("aws-setup-progress-hide"));
+  await send(setupSnapshot(operationId, [{ id: "instance", state: "failed", detail: "AWS refused." }], { phase: "error", message: "AWS refused." }));
+  assert.equal(ui.find("aws-setup-progress"), null, "hidden stays hidden while nothing runs");
+  await send(setupSnapshot(operationId, [{ id: "instance", state: "current", detail: "Looking…" }]));
+  assert.ok(ui.find("aws-setup-progress"), "the retried setup shows its steps again");
+  await unmount();
+});
+
+test("Install or Fix in Setup signs in nobody", async () => {
+  const ui = await mount({ checks: { ok: false, message: "1 problem", checks: [
+    { id: "connect", label: "SSH connection", status: "pass" },
+    { id: "gh", label: "GitHub CLI", status: "fail", fixable: true }
+  ] } });
+  await ui.click(ui.find("aws-setup-gh-fix"));
+  assert.deepEqual(ui.bridge.calls.setupCloudRunWorker?.[0], [undefined, { signIn: "none" }]);
+  await unmount();
+});
+
 test("a cloud program that is not installed is installed from its own section", async () => {
   const ui = await mount({ machines: { machines: [], status: [] } as never });
   await ui.click(ui.find("aws-program-install"));

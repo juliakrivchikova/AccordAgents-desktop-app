@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Loader2, Minus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { AwsSetupStep, AwsWorkerOperationSnapshot } from "../../../shared/types";
@@ -27,17 +27,21 @@ export function setupOperation(control: AwsWorkerControl): AwsWorkerOperationSna
  */
 export function useAwsSetupView(control: AwsWorkerControl) {
   const operation = setupOperation(control);
-  const [hidden, setHidden] = useState<{ operationId: string; authRequestId?: string; whileLive: boolean }>();
+  const [hidden, setHidden] = useState<{ operationId: string; authRequestId?: string }>();
   const live = isLiveAwsPhase(operation?.phase);
+  // The same setup started again (Try again) shows anew, however it was left.
+  const wasLive = useRef(live);
+  useEffect(() => {
+    if (live && !wasLive.current) setHidden(undefined);
+    wasLive.current = live;
+  }, [live]);
   const waitsOnUser = Boolean(live && operation?.authRequestId && operation.authRequestId !== hidden?.authRequestId);
-  // Closed after it ended, the same setup started again (Try again) shows anew.
-  const restarted = Boolean(live && hidden && !hidden.whileLive);
-  const open = Boolean(operation) && (hidden?.operationId !== operation?.operationId || waitsOnUser || restarted);
+  const open = Boolean(operation) && (hidden?.operationId !== operation?.operationId || waitsOnUser);
   return {
     operation,
     live,
     open,
-    hide: () => { if (operation) setHidden({ operationId: operation.operationId, authRequestId: operation.authRequestId, whileLive: live }); },
+    hide: () => { if (operation) setHidden({ operationId: operation.operationId, authRequestId: operation.authRequestId }); },
     show: () => setHidden(undefined)
   };
 }
@@ -69,12 +73,10 @@ export function AwsSetupProgressDialog(props: { control: AwsWorkerControl; view:
   if (!operation) return null;
   const steps = operation.setupSteps ?? [];
   const failed = operation.phase === "error";
-  // A start of an instance already set up has no sign-ins and no program to
-  // install; a change of size is said as a change.
-  const settingUp = steps.some((step) => step.id === "program");
+  // A change of size is said as a change; everything else is the setup.
   const change = operation.intent === "resize";
-  const title = live ? change ? "Changing the AWS instance" : settingUp ? "Setting up the AWS instance" : "Starting the AWS instance"
-    : failed ? change ? "The change stopped" : settingUp ? "The setup stopped" : "The start stopped" : "The AWS instance is ready";
+  const title = live ? change ? "Changing the AWS instance" : "Setting up the AWS instance"
+    : failed ? change ? "The change stopped" : "The setup stopped" : "The AWS instance is ready";
   const description = live
     ? "Each step shows here as it runs. Hiding this window does not stop the setup."
     : operation.message;

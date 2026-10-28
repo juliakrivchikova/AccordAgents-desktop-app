@@ -44,3 +44,13 @@ test("concurrent AWS progress and settings updates persist one merged state", as
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("stored setup steps that are not steps are dropped, so the AWS page can read the rest", () => {
+  const service = Object.create(SettingsService.prototype) as any;
+  const operation = service.normalizeAwsWorkerOperation({
+    operationId: "op", phase: "error", message: "m", updatedAt: "t",
+    setupSteps: [{ id: "instance", state: "done" }, { id: "bogus", state: "done" }, null, { id: "tools", state: "weird" }, { id: "program", state: "failed", detail: 3 }]
+  });
+  assert.deepEqual(operation.setupSteps, [{ id: "instance", state: "done" }]);
+  assert.equal(service.normalizeAwsWorkerOperation({ operationId: "op", phase: "error", message: "m", updatedAt: "t", setupSteps: "x" }).setupSteps, undefined);
+});

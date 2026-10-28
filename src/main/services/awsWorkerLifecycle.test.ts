@@ -40,6 +40,8 @@ test("the whole Terminal output of the setup command is accepted, not only its l
   const broken = `${AWS_WORKER_BLOB_PREFIX}${body.slice(0, 40)}\n${body.slice(40, 90)}\n${body.slice(90)}`;
   assert.deepEqual(parseWorkerBlob(broken), CREDS);
   assert.deepEqual(parseWorkerBlob(`Paste this into AccordAgents:\n${broken}\nuser@laptop ~ % `), CREDS);
+  // A word line after the value (a command typed next) is not part of it.
+  assert.deepEqual(parseWorkerBlob(`${broken}\nclear`), CREDS);
 });
 
 test("the blob carries the machine's stop key; an older blob without one is still a valid connection", () => {

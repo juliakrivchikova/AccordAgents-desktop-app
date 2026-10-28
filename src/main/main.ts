@@ -977,8 +977,10 @@ const awsWorkerSetupService = new AwsWorkerSetupService(cloudRunAwsService, clou
   install: async (progress) => {
     await cloudRunPreparation.prepareRuntime({ progress });
     evaluateMachineUpdates?.();
-    sendToMainWindow("machines:updated", await machineListResult());
-  }
+    // Installed is installed: a list that cannot be sent now is sent later.
+    void machineListResult().then((result) => sendToMainWindow("machines:updated", result)).catch(() => undefined);
+  },
+  ready: async () => { if (!await settingsService.getHubConfig()) throw new Error(SET_UP_SERVER_FOR_MACHINES); }
 });
 void awsWorkerSetupService.recoverInterruptedOperation();
 // Machines transport: the ONLY SSH path to a machine. Installing, upgrading
@@ -1922,16 +1924,18 @@ function registerIpc(): void {
       return { ok: false, message, checks: [] };
     }
   });
-  ipcMain.handle("cloud-runs:setup-worker", (_event, request?: CloudRunWorkerSettings, options?: { signIn?: "codex-cli" | "claude-code" }) =>
+  ipcMain.handle("cloud-runs:setup-worker", (_event, request?: CloudRunWorkerSettings, options?: { signIn?: "codex-cli" | "claude-code" | "none" }) =>
     cloudRunSetupSession.run(request, async publish => {
       const settings = await settingsService.getPublicSettings();
       const managedAws = !request && settings.cloudRuns.mode === "aws";
-      // Sign in… on one provider signs in that one; the others stay as they are.
+      // Sign in… on one provider signs in that one; Install or Fix signs in
+      // nobody; the others stay as they are.
       const signIn = options?.signIn === "codex-cli" || options?.signIn === "claude-code" ? options.signIn : undefined;
       return withCloudRunWorker(request, worker => cloudRunDoctorService.setup(worker, publish, {
         requirePersistentStorage: managedAws,
         requiredProviderKinds: enabledCloudProviders(settings.providers),
-        ...(signIn ? { signIn: "optional" as const, offerSignIn: [signIn] } : {})
+        ...(signIn ? { signIn: "optional" as const, offerSignIn: [signIn] }
+          : options?.signIn === "none" ? { signIn: "optional" as const, offerSignIn: [] } : {})
       }), "setup");
     }, progress => sendToMainWindow("cloud-runs:setup-progress", progress)));
   ipcMain.handle("cloud-runs:get-setup-progress", () => cloudRunSetupSession.getProgress());

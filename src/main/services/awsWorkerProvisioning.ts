@@ -348,25 +348,32 @@ export function encodeWorkerBlob(credentials: AwsWorkerCredentials): string {
 }
 
 /**
- * The value after the last prefix in what was pasted: the one line asked for,
- * or the whole Terminal output around it. A value the terminal broke over
- * several lines is joined while the lines hold nothing but its characters.
+ * The value after the last prefix in what was pasted (the one line asked for,
+ * or the whole Terminal output around it), longest first: a value the
+ * terminal broke over several lines is joined while the lines hold nothing
+ * but its characters, and a shorter join is tried when a word after it got in.
  */
-function printedBlob(text: string): string | undefined {
+function printedBlobs(text: string): string[] {
   const at = text.lastIndexOf(AWS_WORKER_BLOB_PREFIX);
-  if (at < 0) return undefined;
+  if (at < 0) return [];
   const [first, ...rest] = text.slice(at + AWS_WORKER_BLOB_PREFIX.length).split(/\r?\n/);
-  let value = first.trim();
+  const values = [first.trim()];
   for (const line of rest) {
-    if (value.endsWith("=") || !/^[A-Za-z0-9+/=]+$/.test(line.trim())) break;
-    value += line.trim();
+    const last = values[values.length - 1];
+    if (last.endsWith("=") || !/^[A-Za-z0-9+/=]+$/.test(line.trim())) break;
+    values.push(last + line.trim());
   }
-  return value;
+  return values.reverse();
 }
 
 export function parseWorkerBlob(blob: string): AwsWorkerCredentials {
   const trimmed = blob.trim();
-  const body = printedBlob(trimmed) ?? trimmed;
+  const candidates = printedBlobs(trimmed);
+  // Of several joins, the longest one that reads as a setup value wins.
+  const body = candidates.find((candidate) => {
+    try { return Boolean((JSON.parse(Buffer.from(candidate, "base64").toString("utf8")) as { accessKeyId?: unknown }).accessKeyId); }
+    catch { return false; }
+  }) ?? candidates[0] ?? trimmed;
   let decoded: string;
   try {
     decoded = Buffer.from(body, "base64").toString("utf8");
