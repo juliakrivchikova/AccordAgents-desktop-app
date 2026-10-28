@@ -251,7 +251,7 @@ test("an approved removal on the server waits on the phone, however many cards c
   }
   timeline = await client.getJson("/v1/phone/timeline", { conversationId: "chat-1" });
   assert.deepEqual(timeline.cards.map((card) => [card.id, card.status, card.waiting, card.title, card.outcome]),
-    [["removal-1", "answered", true, "Removal approved", "Waiting for running turns to finish and for your Mac to apply it, then @mac leaves this chat."]]);
+    [["removal-1", "answered", true, "Removal approved", "Waiting for running turns to finish and for Cloud box to apply it, then @mac leaves this chat."]]);
   await write(machine, { opId: opId(), kind: "card.settle", conversationId: "chat-1", cardId: removal.id, outcome: { applied: true } });
   timeline = await client.getJson("/v1/phone/timeline", { conversationId: "chat-1" });
   assert.deepEqual(timeline.cards, [], "applied: gone from the phone");
