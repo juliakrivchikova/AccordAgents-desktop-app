@@ -7,6 +7,9 @@ import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
 import { applyChatChanges, applyHeldReactions, CHAT_CHANGES_VERSION, chatChangeBaseline, diffChatChanges, isSupportedChatChangesVersion, type ChatChangeApplyPolicy, type ChatChangeBaseline, type ChatChangeDiffPolicy, type ChatChangesPayload, isSafeChatId } from "./chatChanges";
+import { chatChangesToOps, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
+import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
+import { hubTurnRunId, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
 import { mergeCopiedConversation, type CopiedConversation } from "./chatCopy";
 import type {
   AgentContextUsage,
@@ -263,6 +266,20 @@ type MachineRosterDecision = { ok: true } | { ok: false; waiting: true } | { ok:
  *  the run (a Stop is then an ordinary one). `registered`: the run is in the
  *  chat's active runs, which then say the chat is busy; until then this entry
  *  says it. */
+/** The members a User's message names, as resolved where it was written. */
+function deliveryTargetsOf(message: ChatMessage): string[] {
+  const value = (message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets;
+  return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
+}
+
+/** How a member's turn was opened on the User's server (Д4, Д5, Д13). */
+type ServerTurnOpen =
+  | { kind: "none" }
+  | { kind: "local"; serverRunId: string }
+  | { kind: "remote"; serverRunId: string; canonical: boolean }
+  | { kind: "stopped"; serverRunId: string }
+  | { kind: "skip"; serverRunId: string; reason: string };
+
 interface PendingPhoneRun {
   conversationId: string;
   controller: AbortController;
@@ -1008,6 +1025,9 @@ export class ChatService {
   private phoneTurnsSince?: number;
   private static readonly CHAT_CHANGE_BASELINE_LIMIT = 256;
   private chatChangeTransport?: ChatChangeTransport;
+  /** The User's server, owner of every chat (agreements Д1–Д13): saves go
+   *  there as operations, and members' turns wait for it. */
+  private serverLink?: ChatServerLink;
   private readonly chatSavesInFlight = new Set<Promise<void>>();
   // Tracked chats are bounded by count and by retained serialized bytes; chats
   // with a run in flight are evicted last, so a settings sweep over many chats
@@ -6624,8 +6644,19 @@ export class ChatService {
             ...dispatch,
             targets: this.allowParticipantRequestsForManualAccordIfSelected(conversation, skillValidation.skillMentions, dispatch.targets)
           };
+          if (this.serverLink && dispatch.targets.length > 0) {
+            // The members this message names, as this device resolved them:
+            // the server asks each one's device for its turn (Д4), and this
+            // process runs its own members' turns itself, under the same ids.
+            const deliveryTargets = dispatch.targets.map((target) => target.id);
+            for (const message of conversation.messages) {
+              if (message.id === userMessage.id) message.metadata = { ...message.metadata, deliveryTargets } as ChatMessageMetadata;
+            }
+            userMessage.metadata = { ...userMessage.metadata, deliveryTargets } as ChatMessageMetadata;
+            for (const target of dispatch.targets) this.inProcessServerTurns.add(hubTurnRunId(userMessage.id, target.id));
+          }
           if (initialAutoTitleCandidate && dispatch.targets.length > 0) {
-            autoTitleTargetRunIds = new Map(dispatch.targets.map((target) => [target.id, randomUUID()]));
+            autoTitleTargetRunIds = new Map(dispatch.targets.map((target) => [target.id, this.serverLink ? hubTurnRunId(userMessage.id, target.id) : randomUUID()]));
             conversation.metadata = {
               ...conversation.metadata,
               autoTitleEligibility: this.initialAutoTitleEligibility(userMessage, dispatch.targets, autoTitleTargetRunIds)
@@ -6660,6 +6691,9 @@ export class ChatService {
     });
 
     const dispatchWarnings: string[] = [];
+    const serverTargetRunIds = this.serverLink && ingest.userMessage
+      ? new Map(ingest.dispatch.targets.map((target) => [target.id, hubTurnRunId(ingest.userMessage!.id, target.id)] as const))
+      : undefined;
     const dispatchPromise = this.runParticipantBatch(
       ingest.conversation,
       ingest.dispatch.targets,
@@ -6668,7 +6702,7 @@ export class ChatService {
       signal,
       progress,
       dispatchWarnings,
-      ingest.autoTitleTargetRunIds ? { targetRunIds: ingest.autoTitleTargetRunIds } : {}
+      ingest.autoTitleTargetRunIds ? { targetRunIds: ingest.autoTitleTargetRunIds } : serverTargetRunIds ? { targetRunIds: serverTargetRunIds } : {}
     );
     // Fire-and-track: ingest is already persisted, so return to the renderer now and let the
     // participant batch run in the background. Completion and per-participant failures surface
@@ -7280,6 +7314,35 @@ export class ChatService {
           });
           return;
         }
+        // The User's server first (Д4, Д13): the message this turn answers is
+        // on it, and the turn is taken here or asked of the member's device.
+        let serverTurn: ServerTurnOpen = { kind: "none" };
+        if (this.serverLink) {
+          try {
+            serverTurn = await this.openServerTurn(conversation, participant, triggerMessage, targetRunId, targetController.signal);
+          } catch (error) {
+            serverTurn = { kind: "skip", serverRunId: "", reason: error instanceof Error ? error.message : String(error) };
+            if (!targetController.signal.aborted) warnings.push(`@${participant.handle} could not start: ${serverTurn.reason}`);
+            else serverTurn = { kind: "stopped", serverRunId: "" };
+          }
+          if (serverTurn.kind === "stopped" || serverTurn.kind === "skip") {
+            if (serverTurn.kind === "stopped" && !this.phoneTurnShown(conversation, triggerMessage, participant, serverTurn.serverRunId)) {
+              await this.notePhoneTurnStoppedBeforeStart(conversation, triggerMessage, participant);
+            }
+            this.serverTurnOpens.delete(targetRunId);
+            this.unregisterTargetRun(targetRunId, targetController);
+            writeGates.get(participant.id)?.markWritten();
+            await this.clearAutoTitleEligibilityForTerminalRun(conversation, targetRunId);
+            signal?.removeEventListener("abort", onParentAbort);
+            completed += 1;
+            this.emitProgress(runId, progress, "debate", `@${participant.handle} ${serverTurn.kind === "stopped" ? "stopped" : "skipped"}.`, {
+              participantLabel: `@${participant.handle}`,
+              completed,
+              total: participants.length
+            });
+            return;
+          }
+        }
         const turnReservation = this.reserveParticipantTurn(conversation.id, participant.id, this.participantTurnMode(participant, triggerMessage));
         // Pre-create the pending message inside the shared mutation queue, before
         // the per-participant turn queue wait, so the queued/streaming bubble is
@@ -7301,6 +7364,10 @@ export class ChatService {
         const pendingMessageIdOverride = options.pendingMessageIds?.get(participant.id);
         if (pendingMessageIdOverride) {
           pendingMessage.id = pendingMessageIdOverride;
+        }
+        if (serverTurn.kind === "remote") {
+          // Shown here until the member's own device writes the real bubble.
+          pendingMessage.metadata = { ...pendingMessage.metadata, serverPlaceholder: true, runId: serverTurn.serverRunId };
         }
         this.setTargetRunPendingMessageId(targetRunId, pendingMessage.id);
         // Register the run as active before persisting the pending bubble, and keep the
@@ -7336,13 +7403,19 @@ export class ChatService {
             turnReservation,
             writeGate: writeGates.get(participant.id)
           });
-          if (targetController.signal.aborted) {
+          if (serverTurn.kind === "remote") {
+            // The member's own device wrote its reply and ran what follows it.
+            await this.dropServerPlaceholder(conversation, pendingMessage.id);
+          } else if (targetController.signal.aborted) {
             await this.discardStoppedTargetRun(conversation, targetRunId, participant, pendingMessage.id);
           } else {
             await appendCompletedTurn(participant, messages);
           }
         } catch (error) {
-          if (targetController.signal.aborted) {
+          if (serverTurn.kind === "remote") {
+            await this.dropServerPlaceholder(conversation, pendingMessage.id);
+            if (!targetController.signal.aborted) warnings.push(error instanceof Error ? error.message : String(error));
+          } else if (targetController.signal.aborted) {
             await this.discardStoppedTargetRun(conversation, targetRunId, participant, pendingMessage.id);
           } else {
             await this.finalizeFailedPrecreatedPendingMessage(conversation, pendingMessage.id, participant, error);
@@ -15099,26 +15172,56 @@ export class ChatService {
       if (!this.machineRuntime) {
         this.promptSuggestions.replyStarted(conversation.id, participant.id, runId);
       }
-      // Machines transport: every path that runs a member's turn (first turn,
-      // continuations, request runners, resumes) goes through here, so a member
-      // whose home is a machine is dispatched there from exactly one place.
-      const onMachine = Boolean(participant.cloudRun || participant.homeMachineId) && !this.machineRuntime;
-      const messages = onMachine
-        ? await this.runParticipantTurnOnMachine(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
+      // Every path that runs a member's turn (first turn, continuations,
+      // request runners, resumes) goes through here: the User's server first
+      // (Д4, Д13), then here or on the member's own device.
+      const opened: ServerTurnOpen = this.serverLink
+        ? await this.openServerTurn(conversation, participant, triggerMessage, runId, turnController.signal)
+        : { kind: "none" };
+      if (opened.kind === "stopped" || opened.kind === "skip") {
+        this.serverTurnOpens.delete(runId);
+        if (opened.kind === "stopped" && !options.existingPendingMessage && !this.phoneTurnShown(conversation, triggerMessage, participant, opened.serverRunId)) {
+          await this.notePhoneTurnStoppedBeforeStart(conversation, triggerMessage, participant);
+        }
+        return [];
+      }
+      const onMachine = !this.serverLink && Boolean(participant.cloudRun || participant.homeMachineId) && !this.machineRuntime;
+      let messages: ChatMessage[];
+      if (opened.kind === "remote") {
+        messages = await this.runParticipantTurnRemote(conversation, participant, triggerMessage, runId, opened, turnController.signal, progress, {
           warnings: options.warnings,
           existingPendingMessage: options.existingPendingMessage,
           continuation: options.continuation,
           turnSegmentId
-        })
-        : await this.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
-          ...options,
+        });
+        this.serverTurnOpens.delete(runId);
+      } else if (onMachine) {
+        messages = await this.runParticipantTurnOnMachine(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
+          warnings: options.warnings,
+          existingPendingMessage: options.existingPendingMessage,
+          continuation: options.continuation,
           turnSegmentId
         });
+      } else {
+        let outcome: "done" | "error" | "stopped" = "error";
+        try {
+          messages = await this.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
+            ...options,
+            turnSegmentId
+          });
+          outcome = turnController.signal.aborted ? "stopped" : "done";
+        } catch (error) {
+          outcome = turnController.signal.aborted ? "stopped" : "error";
+          throw error;
+        } finally {
+          if (opened.kind === "local") this.finishServerTurn(runId, outcome);
+        }
+      }
       if (!this.machineRuntime && this.offersPromptSuggestionAfter(participant, triggerMessage, messages, turnController.signal)) {
         // A cloud member's machine is chosen while its turn is prepared.
         const machineId = this.chatParticipants(conversation).find((item) => item.id === participant.id)?.homeMachineId
           ?? participant.homeMachineId;
-        const source = onMachine ? machineId : CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE;
+        const source = onMachine || opened.kind === "remote" ? machineId : CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE;
         if (source) {
           this.promptSuggestions.replyFinished(conversation.id, participant.id, runId, source);
         }
@@ -20761,6 +20864,29 @@ export class ChatService {
     rows?: SnapshotMessageRow[],
     options: { emitChanges?: boolean } = {}
   ): Promise<void> {
+    const link = this.serverLink;
+    if (link && snapshot.kind === "chat") {
+      // What this save changed goes to the server (Д1), queued in the same
+      // transaction as the save: a crash keeps both or neither.
+      let ops: HubOp[] = [];
+      if (options.emitChanges !== false) {
+        const mayWrite = (message: ChatMessage) => this.mayWriteOnServer(snapshot, message);
+        const diff = diffChatChanges(await this.chatChangeBaselineFor(snapshot.id), snapshot, { emitsConversationFields: true, ownsMessage: mayWrite });
+        ops = chatChangesToOps(snapshot, diff.changes, mayWrite);
+      }
+      try {
+        const token = ops.length
+          ? await this.storage.saveConversation(snapshot, { rows, alsoCommit: { sql: link.queueSql(ops), onlyIfSql: (condition) => link.queueSql(ops, condition) } })
+          : await this.storage.saveConversation(snapshot, { rows });
+        this.rememberLastSavedSnapshot(snapshot, token);
+        this.rememberChatChangeBaseline(snapshot.id, chatChangeBaseline(snapshot));
+      } catch (error) {
+        this.chatChangeBaselines.delete(snapshot.id);
+        throw error;
+      }
+      if (ops.length) link.nudge();
+      return;
+    }
     const transport = this.chatChangeTransport;
     const tracked = Boolean(transport) && snapshot.kind === "chat" && transport!.hasRecipients();
     if (!tracked) this.chatChangeBaselines.delete(snapshot.id);
@@ -20833,6 +20959,595 @@ export class ChatService {
     const paths = current?.sourcePath === desktopRepoPath && current.paths ? current.paths : {};
     conversation.metadata = { ...conversation.metadata, machineRepository: { sourcePath: desktopRepoPath, paths } };
     conversation.repoPath = paths[this.hostMachineId] ?? desktopRepoPath;
+  }
+
+  // --- the User's server owns the chat (agreements Д1–Д13) -----------------
+
+  /** Server turns this process runs or waits for itself (its own sends):
+   *  the feed's executor leaves them alone. */
+  private readonly inProcessServerTurns = new Set<string>();
+  /** A local run's server turn (and its chat), and back (Stop from another device). */
+  private readonly serverRunOfLocal = new Map<string, { runId: string; conversationId: string }>();
+  private readonly localRunOfServer = new Map<string, string>();
+  /** How each local run's turn was opened on the server (memoized per run). */
+  private readonly serverTurnOpens = new Map<string, Promise<ServerTurnOpen>>();
+  /** Waiting for a turn's state to change (a member running elsewhere). */
+  private readonly serverTurnWaiters = new Map<string, Array<(turn: HubTurn) => void>>();
+  /** The newest state heard of each recent turn, so a wait that starts late
+   *  does not miss what already happened. */
+  private readonly serverTurnStates = new Map<string, HubTurn>();
+  /** Turns the feed asked this device to run, while they are being started. */
+  private readonly pendingServerTurns = new Map<string, AbortController>();
+  /** Reads a chat whole from the server (set with the server link). */
+  private serverChatReader?: (conversationId: string) => Promise<{ conversation: Conversation; turns: HubTurn[] } | undefined>;
+
+  setServerChatReader(reader: ((conversationId: string) => Promise<{ conversation: Conversation; turns: HubTurn[] } | undefined>) | undefined): void {
+    this.serverChatReader = reader;
+  }
+
+  /** Replaces this device's copy of a chat with the server's (a chat this
+   *  device does not hold, one moved to the server, or after the feed
+   *  forgot this device's place). Its own bookkeeping on messages stays. */
+  async reloadChatFromServer(conversationId: string): Promise<void> {
+    const read = await this.serverChatReader?.(conversationId);
+    if (!read) {
+      if (await this.storage.getConversation(conversationId) && this.serverChatReader) {
+        // Gone on the server.
+        await this.applyReplicatedConversationDeletion(conversationId, new Date().toISOString());
+      }
+      return;
+    }
+    const server = read.conversation;
+    const existing = await this.storage.getConversation(conversationId);
+    if (!existing) {
+      if (this.hostMachineId) this.localizeRepoPath(server, server.repoPath);
+      for (const turn of read.turns) this.markServerTurn(server, turn);
+      await this.saveConversation(server, { emitChanges: false });
+      for (const turn of read.turns) this.noteServerTurn(turn);
+      return;
+    }
+    await this.withChatMutation(existing, async () => {
+      const local = new Map(existing.messages.map((message) => [message.id, message]));
+      existing.title = server.title;
+      if (this.hostMachineId) this.localizeRepoPath(existing, server.repoPath);
+      else if (server.repoPath) existing.repoPath = server.repoPath; else delete existing.repoPath;
+      for (const key of SHARED_CONVERSATION_METADATA_KEYS) {
+        const value = (server.metadata as Record<string, unknown>)[key];
+        if (value === undefined) delete (existing.metadata as Record<string, unknown>)[key];
+        else (existing.metadata as Record<string, unknown>)[key] = value;
+      }
+      const me = this.serverLink?.deviceId();
+      const fromServer = new Set(server.messages.map((message) => message.id));
+      existing.messages = [
+        ...server.messages.map((message) => {
+          const mine = local.get(message.id);
+          if (!mine) return message;
+          const kept: Record<string, unknown> = {};
+          for (const key of LOCAL_MESSAGE_METADATA_KEYS) {
+            const value = mine.metadata?.[key as keyof ChatMessageMetadata];
+            if (value !== undefined && key !== "serverPlaceholder") kept[key] = value;
+          }
+          return { ...message, metadata: { ...(message.metadata ?? {}), ...kept } as ChatMessage["metadata"] };
+        }),
+        // What this device wrote and the server has not taken yet stays.
+        ...existing.messages.filter((message) => !fromServer.has(message.id) && serverSeqOf(message) === undefined &&
+          (message.metadata?.serverPlaceholder || !message.metadata?.serverWriter || message.metadata.serverWriter === me))
+      ];
+      for (const turn of read.turns) this.markServerTurn(existing, turn);
+      existing.messages = sortByServerOrder(existing.messages);
+      existing.updatedAt = server.updatedAt > existing.updatedAt ? server.updatedAt : existing.updatedAt;
+      await this.saveConversation(existing, { emitChanges: false });
+    });
+    for (const turn of read.turns) this.noteServerTurn(turn);
+  }
+
+  /** Applies what the server accepted (from any device, this one included),
+   *  in the server's order, to this device's copy. Stored without being sent
+   *  back; then members whose turns were asked here start (Д4). */
+  async applyServerEntries(entries: HubFeedEntry[]): Promise<void> {
+    const me = this.serverLink?.deviceId();
+    let index = 0;
+    while (index < entries.length) {
+      const conversationId = entries[index].conversationId;
+      const group: HubFeedEntry[] = [];
+      while (index < entries.length && entries[index].conversationId === conversationId) group.push(entries[index++]);
+      await this.applyServerEntriesFor(conversationId, group, me);
+    }
+    for (const entry of entries) {
+      for (const turn of turnsOfEffect(entry.effect)) this.noteServerTurn(turn);
+    }
+  }
+
+  private async applyServerEntriesFor(conversationId: string, entries: HubFeedEntry[], me: string | undefined): Promise<void> {
+    if (!isSafeChatId(conversationId)) return;
+    const deletion = entries.find((entry) => entry.effect.kind === "conversation.delete");
+    if (deletion) {
+      if (await this.storage.getConversation(conversationId)) await this.applyReplicatedConversationDeletion(conversationId, deletion.acceptedAt);
+      return;
+    }
+    if (await this.storage.conversationTombstones().isDeleted(conversationId)) return;
+    // Moved to the server by the computer that held it: that computer has it
+    // already; any other device reads it again.
+    if (entries.some((entry) => entry.effect.kind === "chat.import" && entry.deviceId !== me)) {
+      await this.reloadChatFromServer(conversationId);
+      return;
+    }
+    let conversation = await this.storage.getConversation(conversationId);
+    if (conversation && conversation.kind !== "chat") return;
+    if (!conversation) {
+      const create = entries.find((entry) => entry.effect.kind === "conversation.create");
+      if (!create || create.effect.kind !== "conversation.create") {
+        // A chat this device does not hold: read it whole.
+        await this.reloadChatFromServer(conversationId);
+        return;
+      }
+      const fields = create.effect.conversation;
+      conversation = {
+        id: conversationId,
+        title: fields.title,
+        kind: "chat",
+        createdAt: fields.createdAt,
+        updatedAt: create.effect.updatedAt,
+        ...(fields.repoPath ? { repoPath: fields.repoPath } : {}),
+        messages: [],
+        findings: [],
+        metadata: { participantSessions: [], warnings: [], running: false, ...fields.metadata } as Conversation["metadata"]
+      };
+      if (this.hostMachineId) this.localizeRepoPath(conversation, fields.repoPath);
+      await this.saveConversation(conversation, { emitChanges: false });
+    }
+    const target = conversation;
+    await this.withChatMutation(target, async () => {
+      for (const entry of entries) this.applyServerEffect(target, entry, me);
+      target.messages = sortByServerOrder(target.messages);
+      await this.saveConversation(target, { emitChanges: false });
+    });
+  }
+
+  /** One accepted operation, folded into this device's copy. */
+  private applyServerEffect(conversation: Conversation, entry: HubFeedEntry, me: string | undefined): void {
+    const effect = entry.effect;
+    const fromHere = entry.deviceId === me;
+    switch (effect.kind) {
+      case "conversation.create":
+      case "conversation.update": {
+        if (fromHere) return;
+        const fields = effect.kind === "conversation.create"
+          ? { title: effect.conversation.title, repoPath: effect.conversation.repoPath ?? null, metadata: effect.conversation.metadata, removedMetadataKeys: [] as string[] }
+          : { title: effect.title, repoPath: effect.repoPath, metadata: effect.metadata ?? {}, removedMetadataKeys: effect.removedMetadataKeys ?? [] };
+        if (fields.title !== undefined) conversation.title = fields.title;
+        if (fields.repoPath !== undefined) {
+          if (this.hostMachineId) this.localizeRepoPath(conversation, fields.repoPath ?? undefined);
+          else if (fields.repoPath === null) delete conversation.repoPath;
+          else conversation.repoPath = fields.repoPath;
+        }
+        for (const [key, value] of Object.entries(fields.metadata)) (conversation.metadata as Record<string, unknown>)[key] = value;
+        for (const key of fields.removedMetadataKeys) delete (conversation.metadata as Record<string, unknown>)[key];
+        if (effect.updatedAt > conversation.updatedAt) conversation.updatedAt = effect.updatedAt;
+        return;
+      }
+      case "message.create":
+      case "message.update": {
+        const incoming = effect.message;
+        const removed = new Set(Array.isArray(conversation.metadata.removedChatMessageIds) ? conversation.metadata.removedChatMessageIds : []);
+        if (removed.has(incoming.id)) return;
+        const index = conversation.messages.findIndex((message) => message.id === incoming.id);
+        const existing = index >= 0 ? conversation.messages[index] : undefined;
+        let next: ChatMessage;
+        if (existing && fromHere && !existing.metadata?.serverPlaceholder) {
+          // Written here: what this device holds may be newer; only the
+          // server's place and writer are taken.
+          next = { ...existing, metadata: { ...(existing.metadata ?? {}), serverSeq: incoming.metadata?.serverSeq, serverWriter: incoming.metadata?.serverWriter } };
+        } else {
+          const local: Record<string, unknown> = {};
+          for (const key of LOCAL_MESSAGE_METADATA_KEYS) {
+            const value = existing?.metadata?.[key as keyof ChatMessageMetadata];
+            if (value !== undefined && key !== "serverPlaceholder") local[key] = value;
+          }
+          next = { ...incoming, metadata: { ...(incoming.metadata ?? {}), ...local } as ChatMessage["metadata"] };
+        }
+        if (index >= 0) conversation.messages[index] = next;
+        else {
+          // The member's real bubble replaces the placeholder shown for it here.
+          const runId = typeof incoming.metadata?.runId === "string" ? incoming.metadata.runId : undefined;
+          if (runId && incoming.role === "participant") {
+            conversation.messages = conversation.messages.filter((message) => !(message.metadata?.serverPlaceholder &&
+              message.participantId === incoming.participantId && message.metadata?.runId === runId));
+          }
+          conversation.messages.push(next);
+        }
+        if (effect.kind === "message.create") {
+          for (const turn of effect.turns ?? []) this.markServerTurn(conversation, turn);
+        }
+        if (incoming.role === "participant") this.recordLastMessageByParticipant(conversation, next);
+        if (incoming.createdAt > conversation.updatedAt) conversation.updatedAt = incoming.createdAt;
+        return;
+      }
+      case "message.react": {
+        const index = conversation.messages.findIndex((message) => message.id === effect.messageId);
+        if (index < 0) return;
+        const metadata = { ...(conversation.messages[index].metadata ?? {}) } as ChatMessageMetadata;
+        if (effect.reactions && Object.keys(effect.reactions).length) metadata.reactions = effect.reactions; else delete metadata.reactions;
+        conversation.messages[index] = { ...conversation.messages[index], metadata };
+        return;
+      }
+      case "message.remove": {
+        const removed = Array.isArray(conversation.metadata.removedChatMessageIds) ? conversation.metadata.removedChatMessageIds : [];
+        if (!removed.includes(effect.messageId)) conversation.metadata.removedChatMessageIds = [...removed, effect.messageId].slice(-100);
+        conversation.messages = conversation.messages.filter((message) => message.id !== effect.messageId);
+        return;
+      }
+      case "turn.request":
+      case "turn.claim":
+      case "turn.stop":
+      case "turn.finish":
+        this.markServerTurn(conversation, effect.turn);
+        return;
+      case "conversation.delete":
+      case "chat.import":
+        return;
+    }
+  }
+
+  /** The turn's mark on the message it answers ("taken to work", Д5). */
+  private markServerTurn(conversation: Conversation, turn: HubTurn): void {
+    const index = conversation.messages.findIndex((message) => message.id === turn.messageId);
+    if (index < 0) return;
+    const message = conversation.messages[index];
+    const marks = { ...(message.metadata?.serverTurns ?? {}) };
+    marks[turn.participantId] = turnMark(turn) as NonNullable<ChatMessageMetadata["serverTurns"]>[string];
+    conversation.messages[index] = { ...message, metadata: { ...(message.metadata ?? {}), serverTurns: marks } };
+  }
+
+  /** A turn changed on the server: start it here when it is this device's
+   *  to run, stop it when it was asked to stop, and tell whoever waits. */
+  private noteServerTurn(turn: HubTurn): void {
+    this.serverTurnStates.delete(turn.runId);
+    this.serverTurnStates.set(turn.runId, turn);
+    while (this.serverTurnStates.size > 2_000) {
+      const oldest = this.serverTurnStates.keys().next().value;
+      if (oldest === undefined) break;
+      this.serverTurnStates.delete(oldest);
+    }
+    const waiters = this.serverTurnWaiters.get(turn.runId);
+    if (waiters) for (const resolve of [...waiters]) resolve(turn);
+    const me = this.serverLink?.deviceId();
+    if (turn.state === "requested") {
+      void this.startServerTurn(turn).catch((error) => {
+        void this.debugLogs.write("chat.server-turn.start-error", { runId: turn.runId, message: error instanceof Error ? error.message : String(error) });
+      });
+      return;
+    }
+    if (turn.state === "claimed" && turn.stopRequestedAt && turn.executorDeviceId === me) {
+      this.cancelRun(this.localRunOfServer.get(turn.runId) ?? turn.runId);
+      return;
+    }
+    if (turn.state === "stopped" && !turn.executorDeviceId) {
+      // Stopped before anyone took it: a start waiting here never begins, and
+      // the member's own device says so in the chat, once.
+      this.pendingServerTurns.get(turn.runId)?.abort();
+      void this.noteServerTurnStoppedBeforeStart(turn).catch(() => undefined);
+    }
+  }
+
+  private async noteServerTurnStoppedBeforeStart(turn: HubTurn): Promise<void> {
+    if (this.inProcessServerTurns.has(turn.runId)) return;
+    const conversation = await this.storage.getConversation(turn.conversationId);
+    if (!conversation || conversation.kind !== "chat") return;
+    const participant = this.chatParticipants(conversation).find((item) => item.id === turn.participantId);
+    const message = conversation.messages.find((item) => item.id === turn.messageId);
+    if (!participant || !message || !this.runsHere(participant)) return;
+    if (this.phoneTurnShown(conversation, message, participant, turn.runId)) return;
+    await this.notePhoneTurnStoppedBeforeStart(conversation, message, participant);
+  }
+
+  /** Runs, here, a turn the server asked of one of this device's members
+   *  (a User's message from any device, a request from a member elsewhere). */
+  async startServerTurn(turn: HubTurn): Promise<void> {
+    if (!this.serverLink || turn.state !== "requested") return;
+    const runId = turn.runId;
+    if (this.inProcessServerTurns.has(runId) || this.pendingServerTurns.has(runId) || this.conversationIdForRun(runId)) return;
+    const conversation = await this.storage.getConversation(turn.conversationId);
+    if (!conversation || conversation.kind !== "chat" || conversation.metadata.archived === true) return;
+    const participant = this.chatParticipants(conversation).find((item) => item.id === turn.participantId);
+    if (!participant || !this.runsHere(participant)) return;
+    const message = conversation.messages.find((item) => item.id === turn.messageId);
+    if (!message) return;
+    const controller = new AbortController();
+    this.pendingServerTurns.set(runId, controller);
+    const warnings: string[] = [];
+    const chat = await this.requireChat(turn.conversationId);
+    try {
+      const settings = await this.settings.getPublicSettings();
+      this.assertParticipantProvidersEnabled([participant], settings.providers ?? []);
+      if (participant.autoWatch === true) {
+        await this.withChatMutation(chat, async () => {
+          this.advanceAutoWatchCursorForDirectTargets(chat, [participant], message);
+          this.queueSnapshot(chat);
+        });
+      }
+      const compact = message.role === "user" ? this.compactCommand(message.content) : undefined;
+      const request = turn.request ?? {};
+      if (request.kind === "compaction" || (compact && compact.handle.toLowerCase() === participant.handle.toLowerCase())) {
+        await this.compactParticipant({
+          conversationId: chat.id, participantId: participant.id, handle: participant.handle,
+          instructions: typeof request.instructions === "string" ? request.instructions : compact?.instructions,
+          triggeredBy: request.triggeredBy === "agent" ? "agent" : "user", runId,
+          threadId: message.metadata?.threadId ?? message.id, parentMessageId: message.id, chatThreadRootId: message.metadata?.chatThreadRootId
+        }, controller.signal, this.onReviewProgress);
+        return;
+      }
+      await this.runParticipantBatch(chat, [participant], message, runId, controller.signal, this.onReviewProgress, warnings, {
+        targetRunIds: new Map([[participant.id, runId]]),
+        ...(turn.pendingMessageId ? { pendingMessageIds: new Map([[participant.id, turn.pendingMessageId]]) } : {})
+      });
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        const reason = error instanceof Error ? error.message : String(error);
+        void this.debugLogs.write("chat.server-turn.error", { conversationId: chat.id, runId, message: reason });
+        warnings.push(`@${participant.handle} could not start: ${reason}`);
+      }
+    } finally {
+      if (this.pendingServerTurns.get(runId) === controller) this.pendingServerTurns.delete(runId);
+      if (warnings.length > 0) await this.appendConversationWarnings(chat, warnings).catch(() => undefined);
+    }
+  }
+
+  /** Moves one chat to the server (the first link, 5.7): sent as this device
+   *  holds it, with its saves held meanwhile; what was queued for it is part
+   *  of the move. */
+  async exportChatForServer(conversationId: string, send: (conversation: Conversation) => Promise<void>): Promise<void> {
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") return;
+    await this.withChatMutation(conversation, async () => {
+      await this.waitForQueuedSave(conversationId);
+      const stored = await this.storage.getConversation(conversationId);
+      if (!stored) return;
+      await send(stored);
+      await this.serverLink?.settleMoved?.(conversationId);
+    });
+  }
+
+  /** After a start or a reconnect: every turn asked of this device's
+   *  members that nobody took yet (the computer or machine was off). */
+  async resumeServerTurns(): Promise<void> {
+    const link = this.serverLink;
+    if (!link) return;
+    for (const turn of await link.waitingTurns()) await this.startServerTurn(turn).catch(() => undefined);
+  }
+
+  /** Opens a member's turn on the server before anything of it is shown or
+   *  run (Д4, Д5, Д13): the message it answers must be on the server first,
+   *  then the turn is taken here (a member that runs here) or asked of the
+   *  device it runs on. Memoized per local run. */
+  private openServerTurn(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage, localRunId: string, signal?: AbortSignal): Promise<ServerTurnOpen> {
+    const known = this.serverTurnOpens.get(localRunId);
+    if (known) return known;
+    const opening = this.openServerTurnNow(conversation, participant, triggerMessage, localRunId, signal);
+    this.serverTurnOpens.set(localRunId, opening);
+    void opening.catch(() => this.serverTurnOpens.delete(localRunId));
+    return opening;
+  }
+
+  private async openServerTurnNow(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage, localRunId: string, signal?: AbortSignal): Promise<ServerTurnOpen> {
+    const link = this.serverLink;
+    if (!link) return { kind: "none" };
+    const targets = deliveryTargetsOf(triggerMessage);
+    const canonical = triggerMessage.role === "user" && targets.includes(participant.id);
+    const serverRunId = canonical ? hubTurnRunId(triggerMessage.id, participant.id) : localRunId.startsWith("turn-") ? localRunId : `turn-${localRunId}`;
+    this.inProcessServerTurns.add(serverRunId);
+    this.serverRunOfLocal.set(localRunId, { runId: serverRunId, conversationId: conversation.id });
+    this.localRunOfServer.set(serverRunId, localRunId);
+    try {
+      // Д13: the message this turn answers is on the server before the
+      // member starts — with no server reachable, it waits, visibly unsent.
+      await this.waitForQueuedSave(conversation.id);
+      const stored = conversation.messages.find((message) => message.id === triggerMessage.id) ?? triggerMessage;
+      if (serverSeqOf(stored) === undefined) {
+        const answer = await link.messageAccepted(conversation.id, triggerMessage.id, signal);
+        if (answer?.status === "rejected") throw new Error(`The server did not accept the message this turn answers: ${answer.reason}`);
+      }
+      if (!this.runsHere(participant)) return { kind: "remote", serverRunId, canonical };
+      const opId = newOpId();
+      await link.enqueue([{ opId, kind: "turn.claim", conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id }]);
+      const answer = await link.opAnswered(opId, signal);
+      if (answer.status === "rejected") throw new Error(`The server did not give @${participant.handle} this turn: ${answer.reason}`);
+      void this.debugLogs.write("chat.server-turn.claim", { conversationId: conversation.id, runId: serverRunId, participantId: participant.id, claim: answer.claim });
+      if (answer.claim === "claimed" || answer.claim === "already-yours") return { kind: "local", serverRunId };
+      if (answer.claim === "stopped") return { kind: "stopped", serverRunId };
+      return { kind: "skip", serverRunId, reason: answer.claim ?? "unknown" };
+    } catch (error) {
+      if (signal?.aborted) {
+        // Stopped while waiting for the server: the turn never starts anywhere.
+        void link.enqueue([{ opId: newOpId(), kind: "turn.stop", conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id }]).catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  /** A placeholder this device showed for a member elsewhere, once that
+   *  member's own bubble has taken its place (or the turn never ran). */
+  private async dropServerPlaceholder(conversation: Conversation, messageId: string): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      const before = conversation.messages.length;
+      conversation.messages = conversation.messages.filter((message) => !(message.id === messageId && message.metadata?.serverPlaceholder));
+      if (conversation.messages.length !== before) this.queueSnapshot(conversation);
+    });
+  }
+
+  /** The end of a turn this device ran, said on the server. */
+  private finishServerTurn(localRunId: string, outcome: "done" | "error" | "stopped" | "interrupted"): void {
+    const link = this.serverLink;
+    const server = this.serverRunOfLocal.get(localRunId);
+    this.serverTurnOpens.delete(localRunId);
+    if (!link || !server) return;
+    this.serverRunOfLocal.delete(localRunId);
+    this.localRunOfServer.delete(server.runId);
+    void link.enqueue([{ opId: newOpId(), kind: "turn.finish", conversationId: server.conversationId, runId: server.runId, outcome }]).catch(() => undefined);
+  }
+
+  /** Waits for a turn on the server to reach one of `states`. */
+  private waitForServerTurn(runId: string, done: (turn: HubTurn) => boolean, signal?: AbortSignal): Promise<HubTurn> {
+    return new Promise((resolve, reject) => {
+      const list = this.serverTurnWaiters.get(runId) ?? [];
+      const onAbort = () => { remove(); reject(signal?.reason ?? new Error("Chat run cancelled.")); };
+      const remove = () => {
+        const current = (this.serverTurnWaiters.get(runId) ?? []).filter((item) => item !== check);
+        if (current.length) this.serverTurnWaiters.set(runId, current); else this.serverTurnWaiters.delete(runId);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const check = (turn: HubTurn) => {
+        if (!done(turn)) return;
+        remove();
+        resolve(turn);
+      };
+      this.serverTurnWaiters.set(runId, [...list, check]);
+      if (signal?.aborted) return onAbort();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const known = this.serverTurnStates.get(runId);
+      if (known) check(known);
+    });
+  }
+
+  /** A member that runs on another device: its turn is asked of that device
+   *  on the server, and this device shows a placeholder until the member's
+   *  own bubble arrives, then waits for the turn to end there. Stop is asked
+   *  on the server too, and shown as waiting until that device confirms
+   *  (parity exception "Stop on an unreachable machine is shown waiting"). */
+  private async runParticipantTurnRemote(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    triggerMessage: ChatMessage,
+    localRunId: string,
+    opened: Extract<ServerTurnOpen, { kind: "remote" }>,
+    signal: AbortSignal | undefined,
+    progress: ProgressCallback | undefined,
+    options: { warnings: string[]; existingPendingMessage?: ChatMessage; continuation?: boolean; turnSegmentId: string }
+  ): Promise<ChatMessage[]> {
+    const link = this.serverLink!;
+    const serverRunId = opened.serverRunId;
+    let placeholder = options.existingPendingMessage;
+    if (!placeholder) {
+      placeholder = this.message(
+        "participant",
+        "",
+        { id: participant.id, kind: participant.kind, label: `@${participant.handle}`, model: participant.model },
+        {
+          threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
+          parentMessageId: triggerMessage.id,
+          chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
+          sourceMessageId: triggerMessage.id,
+          requesterParticipantId: options.continuation ? triggerMessage.participantId : undefined,
+          approvedContinuation: options.continuation || undefined,
+          runId: serverRunId,
+          turnSegmentId: options.turnSegmentId
+        },
+        "pending"
+      );
+      placeholder.metadata = { ...placeholder.metadata, serverPlaceholder: true };
+      const created = placeholder;
+      await this.withChatMutation(conversation, async () => {
+        conversation.messages.push(created);
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+    }
+    const bubble = placeholder;
+    const setOnBubble = async (patch: (metadata: ChatMessageMetadata) => ChatMessageMetadata) => {
+      await this.withChatMutation(conversation, async () => {
+        for (const message of conversation.messages) {
+          if (message.participantId === participant.id && message.metadata?.runId === bubble.metadata?.runId && message.status === "pending") {
+            message.metadata = patch({ ...(message.metadata ?? {}) });
+          }
+        }
+        this.queueSnapshot(conversation);
+      });
+    };
+    // A cloud member's machine is made ready first; the member then names it.
+    if (participant.cloudRun && !participant.homeMachineId) {
+      if (!this.prepareCloudSelection) throw new Error("Cloud setup is not available on this device.");
+      const machineId = await this.prepareCloudSelection(participant.cloudRun, participant.kind, (snapshot) => {
+        this.emitProgress(localRunId, progress, "initial", snapshot.message, { participantLabel: `@${participant.handle}` });
+      });
+      signal?.throwIfAborted();
+      await this.withChatMutation(conversation, async () => {
+        const members = this.chatParticipants(conversation);
+        const ready = members.find((item) => item.id === participant.id);
+        if (!ready) throw new Error("The member left the chat while Cloud was preparing.");
+        conversation.metadata = { ...conversation.metadata, participants: members.map((item) => item.id === ready.id ? { ...ready, homeMachineId: machineId } : item) };
+        await this.saveConversation(conversation);
+        participant = { ...ready, homeMachineId: machineId };
+      });
+    }
+    const machineName = participant.homeMachineId ? link.machineName(participant.homeMachineId) ?? "the machine" : "this computer";
+    const placed = (turn: HubTurn) => turn.state !== "requested";
+    const ended = (turn: HubTurn) => turn.state === "finished" || turn.state === "stopped";
+    await setOnBubble((metadata) => ({ ...metadata, machinePending: { machineName, at: new Date().toISOString() } }));
+    // Asked of the member's device (a User's message asked it already).
+    const opId = newOpId();
+    await link.enqueue([{ opId, kind: "turn.request", conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id,
+      ...(bubble.metadata?.serverPlaceholder ? { pendingMessageId: bubble.id } : {}),
+      request: { kind: "turn", ...(options.continuation ? { continuation: true } : {}) } }]);
+    const asked = await link.opAnswered(opId);
+    if (asked.status === "rejected") throw new Error(`@${participant.handle} could not be started on ${machineName}: ${asked.reason}`);
+    let turn: HubTurn | undefined = asked.turn;
+    try {
+      if (!turn || !placed(turn)) turn = await this.waitForServerTurn(serverRunId, placed, signal);
+      await setOnBubble((metadata) => { delete metadata.machinePending; return metadata; });
+      // The member's device may have written its bubble before this one
+      // showed the placeholder: the placeholder goes.
+      await this.withChatMutation(conversation, async () => {
+        const real = conversation.messages.some((message) => !message.metadata?.serverPlaceholder && message.participantId === participant.id && message.metadata?.runId === serverRunId);
+        if (!real) return;
+        conversation.messages = conversation.messages.filter((message) => !(message.metadata?.serverPlaceholder && message.participantId === participant.id && message.metadata?.runId === serverRunId));
+        this.queueSnapshot(conversation);
+      });
+      if (!ended(turn)) turn = await this.waitForServerTurn(serverRunId, ended, signal);
+    } catch (error) {
+      if (!signal?.aborted) throw error;
+      // Stop: asked on the server; shown as waiting until the member's
+      // device confirms (the approved parity exception).
+      await link.enqueue([{ opId: newOpId(), kind: "turn.stop", conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id }]);
+      await setOnBubble((metadata) => ({ ...metadata, stopPending: { machineName, at: new Date().toISOString() } }));
+      turn = await this.waitForServerTurn(serverRunId, ended);
+      await setOnBubble((metadata) => { delete metadata.stopPending; return metadata; });
+    }
+    const refreshed = await this.requireChat(conversation.id);
+    if (turn.state === "stopped" && !turn.executorDeviceId) {
+      // Never taken: the placeholder goes, the stop is said once.
+      await this.withChatMutation(conversation, async () => {
+        conversation.messages = conversation.messages.filter((message) => !(message.metadata?.serverPlaceholder && message.metadata?.runId === bubble.metadata?.runId));
+        this.queueSnapshot(conversation);
+      });
+      return [];
+    }
+    return refreshed.messages.filter((message) => message.participantId === participant.id && message.metadata?.runId === serverRunId && message.status !== "pending");
+  }
+
+  /** Installs (or removes) the link to the User's server (Д1). */
+  setServerLink(link: ChatServerLink | undefined): void {
+    this.serverLink = link;
+    this.chatChangeBaselines.clear();
+  }
+
+  /** Whether this device writes this message on the server: one it wrote
+   *  there, or a new one it may write (a member's only where it runs, Д4).
+   *  Never a placeholder for a member that runs elsewhere. */
+  private mayWriteOnServer(conversation: Conversation, message: ChatMessage): boolean {
+    const link = this.serverLink;
+    if (!link || message.metadata?.serverPlaceholder) return false;
+    const writer = message.metadata?.serverWriter;
+    if (typeof writer === "string") return writer === link.deviceId();
+    if (message.role !== "participant") return true;
+    const participant = this.chatParticipants(conversation).find((item) => item.id === message.participantId);
+    return Boolean(participant) && this.runsHere(participant!);
+  }
+
+  /** Whether a member runs on this device (Д4): a machine runs the members
+   *  homed on it; the computer runs every member without a machine. */
+  runsHere(participant: Pick<ChatParticipant, "homeMachineId" | "cloudRun">): boolean {
+    if (this.machineRuntime) return Boolean(this.hostMachineId) && participant.homeMachineId === this.hostMachineId;
+    return !participant.homeMachineId && !participant.cloudRun;
   }
 
   /** Installs (or removes) the path a chat's changes take to other devices. */

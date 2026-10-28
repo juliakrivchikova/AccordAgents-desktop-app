@@ -7,10 +7,25 @@ import {
   type HubLiveHead, type HubMachineWakeRequest, type HubPhoneInvite, type HubProgressPost, type HubReadReport, type HubReadersResponse, type HubSnapshotResponse
 } from "../../shared/hubProtocol";
 import type { MachineProgressFrame } from "../../shared/machineProgress";
+import {
+  HUB_CHAT_PATH,
+  HUB_CHATS_PATH,
+  HUB_FEED_PATH,
+  HUB_OPS_PATH,
+  HUB_TURNS_PATH,
+  type HubChatPage,
+  type HubChatsResponse,
+  type HubFeedResponse,
+  type HubOp,
+  type HubOpsResponse,
+  type HubTurnsResponse
+} from "../../shared/hubOps";
 import { sha256Hex, signHubRequest, type HubSigningIdentity } from "./hubAuth";
 import type { StorageService } from "./storage";
 
 const REQUEST_TIMEOUT_MS = 30_000;
+/** Writing a large page (a chat moving to the server) takes longer. */
+const OPS_TIMEOUT_MS = 120_000;
 
 /** The little of a WebSocket the live link uses. */
 interface LiveSocket {
@@ -81,7 +96,7 @@ export class HubClient {
     this.base = options.url.replace(/\/+$/, "");
   }
 
-  private async request<T>(method: string, pathWithQuery: string, body?: Buffer | string, contentType?: string): Promise<T> {
+  private async request<T>(method: string, pathWithQuery: string, body?: Buffer | string, contentType?: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
     const identity = await this.options.identity();
     const response = await reach(this.options.fetchImpl ?? fetch, `${this.base}${pathWithQuery}`, {
       method,
@@ -90,7 +105,7 @@ export class HubClient {
         ...(contentType ? { "content-type": contentType } : {})
       },
       ...(body !== undefined ? { body } : {}),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      signal: AbortSignal.timeout(timeoutMs)
     });
     this.receivedBytes += Number(response.headers.get("content-length")) || 0;
     if (!response.ok) {
@@ -104,6 +119,33 @@ export class HubClient {
     const response = await reach(this.options.fetchImpl ?? fetch, `${this.base}/v1/health`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     if (!response.ok) throw new HubHttpError(response.status, `The hub answered ${response.status}.`);
     return await response.json() as HubHealth;
+  }
+
+  // --- the chats as the server owns them (protocol v3) ---------------------
+
+  /** Writes operations; each is answered accepted, duplicate or rejected. */
+  writeOps(ops: HubOp[]): Promise<HubOpsResponse> {
+    return this.request<HubOpsResponse>("POST", HUB_OPS_PATH, JSON.stringify({ ops }), "application/json", OPS_TIMEOUT_MS);
+  }
+
+  /** What the server accepted after `after`, waiting up to `waitMs` for news.
+   *  A HubHttpError with status 410 says it was forgotten (read the chats). */
+  feed(after: number, waitMs: number): Promise<HubFeedResponse> {
+    return this.request<HubFeedResponse>("GET", `${HUB_FEED_PATH}?after=${Math.max(0, Math.floor(after))}&waitMs=${Math.max(0, Math.floor(waitMs))}`,
+      undefined, undefined, waitMs + REQUEST_TIMEOUT_MS);
+  }
+
+  chats(): Promise<HubChatsResponse> {
+    return this.request<HubChatsResponse>("GET", HUB_CHATS_PATH);
+  }
+
+  chatPage(conversationId: string, before?: string): Promise<HubChatPage> {
+    const query = new URLSearchParams({ conversationId, ...(before ? { before } : {}) });
+    return this.request<HubChatPage>("GET", `${HUB_CHAT_PATH}?${query.toString()}`);
+  }
+
+  waitingTurns(): Promise<HubTurnsResponse> {
+    return this.request<HubTurnsResponse>("GET", HUB_TURNS_PATH);
   }
 
   /** Pushes this device's events in order. A large body is uploaded only

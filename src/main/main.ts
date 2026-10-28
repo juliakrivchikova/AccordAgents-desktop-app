@@ -101,6 +101,7 @@ import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
 import { HubClient } from "./services/hubClient";
 import { HUB_ID_KEY, HUB_SHARED_SCOPE_PREFIXES, HubSync, PULLED_KEY, PUSHED_KEY, hubChatChangeApplier, hubPushedThrough, readGivenUp } from "./services/hubSync";
+import { ServerChatLink } from "./services/serverChatLink";
 import { deviceIdForPublicKey, hubCertificateCrypto, signHubText } from "./services/hubAuth";
 import { HubPhonePublisher } from "./services/hubPhonePublisher";
 import { isDeviceEventBlobReference } from "../shared/deviceEventBlobs";
@@ -376,6 +377,37 @@ let hubOwnerConfirmed = false;
 /** Phones paired with the User's server (the ones it admits). */
 async function hubPhones(): Promise<import("../shared/machineTrust").TrustedDeviceRecord[]> {
   return (await settingsService.listTrustedDevices().catch(() => [])).filter((device) => device.role === "phone" && device.inviteId && device.phoneScope);
+}
+
+/** The User's server owns every chat (agreements Д1–Д13): her own server, or
+ *  the same server inside this app when she has none (Д6). */
+const serverChatLink = new ServerChatLink({
+  storage: storageService,
+  chat: chatService,
+  identity: () => chatEventLogService.getOrCreateDeviceIdentity(),
+  hubConfig: async () => {
+    const config = await settingsService.getHubConfig();
+    return config ? { url: config.url } : undefined;
+  },
+  startEmbedded: async (owner) => {
+    const { startEmbeddedHub } = await import("../hub/embeddedHub");
+    return startEmbeddedHub({
+      dataDir: path.join(app.getPath("userData"), "embedded-server"),
+      owner,
+      version: app.getVersion(),
+      sqliteExecutable,
+      log: (event, payload) => { void debugLogService.write(event, payload); }
+    });
+  },
+  machineNames: async () => (await settingsService.listMachines().catch(() => [])).map((machine) => ({ id: machine.id, name: machine.name })),
+  movesChats: true,
+  log: (event, payload) => { void debugLogService.write(event, payload); }
+});
+
+/** The link to the server follows the hub settings: a new server, or none. */
+async function restartServerChatLink(): Promise<void> {
+  await serverChatLink.stop();
+  await serverChatLink.start();
 }
 
 const hubPhonePublisher: HubPhonePublisher = new HubPhonePublisher({
@@ -707,59 +739,6 @@ async function startHubLink(): Promise<void> {
   // A picture the User sent from the phone is read from the server.
   chatService.setHubBlobReader((reference) => blobClient.downloadBytes(reference));
   hubPhonePublisher.reset();
-  hubSync = new HubSync({
-    client: hubClient,
-    storage: storageService,
-    localOriginId: async () => (await identity()).originId,
-    // Only the User's own devices: its machines and the phones it trusts.
-    trustedKey: async (originId) => {
-      const machine = (await settingsService.listMachines()).find((item) => item.deviceId === originId);
-      const machineKey = machine ? machineSigningKey(machine) : undefined;
-      if (machineKey) return machineKey;
-      return (await settingsService.listTrustedDevices()).find((device) => device.deviceId === originId)?.publicKeyDerBase64;
-    },
-    // A phone proves itself with its first event, its certificate.
-    admit: (event, fetchBody) => admitEnrolledPhone(event, fetchBody),
-    // A machine's event goes to that machine's channel, which applies it as
-    // if the machine had sent it; a phone's chat change is applied here, and
-    // so is its answer to a card or its Stop.
-    // Without the machine link (it failed to start) nothing is passed over:
-    // the event is held until it is there.
-    deliver: async (event, fetchBody) => {
-      if (isChatActionKind(event.kind) && (await hubPhones()).some((phone) => phone.deviceId === event.originId)) return applyPhoneChatAction(event, fetchBody);
-      return machineLinkService ? machineLinkService.receiveFromHub(event, fetchBody) : "not-ready";
-    },
-    applyChatChange: hubChatChangeApplier(storageService, chatService),
-    // Where it starts again after the hub forgot what it needed: before
-    // anything of its machines' channels, from the hub's copy of the chats.
-    ownScopes: hubMachineScopes,
-    mergeCopy: async (copied) => {
-      const originId = (await identity()).originId;
-      await chatService.mergeServerCopy(copied, { desktopOriginId: originId, localOriginId: originId, ownsSharedFields: true });
-    },
-    // A machine is never given a delivery row; one that an older version
-    // wrote lets go when its event is pushed.
-    onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString(), machineLinkService?.hubReaders() ?? []),
-    // Each machine's channel, read from settings, so a machine whose link
-    // has not started yet is not passed over. A pairing that cannot be read
-    // fails the pass (and the cursor stays) rather than pass its events over.
-    scopePrefixes: async () => [...HUB_SHARED_SCOPE_PREFIXES, ...await hubMachineScopes()],
-    log: (event, payload) => { void debugLogService.write(event, payload); }
-  });
-  // What this desktop writes goes up at once; reading waits for the
-  // machines' channels (startHubReading).
-  hubSync.startPushing();
-  if (!hubListenersAdded) {
-    hubListenersAdded = true;
-    // Whatever this desktop writes (a chat change, an action, a command for
-    // a machine) goes up at once.
-    chatEventLogService.onLocalAppend(() => hubSync?.nudgePush());
-    // After sleep the live link may be dead without knowing it: catch up now.
-    powerMonitor.on("resume", () => {
-      hubSync?.nudgePush();
-      hubSync?.nudgePull();
-    });
-  }
   publishHubRoster();
   void debugLogService.write("hub.link.started", { url: config.url });
   scheduleHubProgramUpdate();
@@ -913,9 +892,10 @@ const hubInstaller = new HubInstaller({
     }
     await startHubLink();
     resumeHubReading();
+    await restartServerChatLink();
   },
   currentLink: () => settingsService.getHubConfig().catch(() => undefined),
-  reachable: () => hubSync ? hubSync.isReachable() : undefined,
+  reachable: () => serverChatLink.reachable(),
   notices: () => hubReaderNotices(),
   dismissableNotices: () => hubGivenUpNotices(),
   defaultRegion: async () => (await settingsService.getPublicSettings()).cloudRuns.awsRegion,
@@ -2993,20 +2973,10 @@ void app.whenReady().then(async () => {
       }
       await settingsService.clearRemovedMachineOutbox(outbox.deviceId);
     }
-    chatService.setChatChangeTransport(createChatChangeTransport({
-      role: "desktop",
-      storage: storageService,
-      log: chatEventLogService,
-      recipients: () => machineLinkService?.chatChangeRecipients() ?? [],
-      onCommitted: () => {
-        machineLinkService?.nudgeEventChannels();
-      },
-      machineOriginId: (machineId) => machineLinkService?.machineDeviceId(machineId),
-      // A machine that reads the hub is addressed by no delivery row: its
-      // changes are written for the hub to carry, also while the link to the
-      // hub is not up yet (they go once it is).
-      alwaysEmit: () => Boolean(hubSync) || hubLinking || (machineLinkService?.hubReaders().length ?? 0) > 0
-    }));
+    // Every chat is the server's (Д1): saves go there, its feed comes back.
+    await serverChatLink.start().catch((error: unknown) => {
+      void debugLogService.write("chat.server.start-error", { message: error instanceof Error ? error.message : String(error) });
+    });
     await startHubLink().catch((error: unknown) => {
       void debugLogService.write("hub.link.start-error", { message: error instanceof Error ? error.message : String(error) });
     });
@@ -3376,6 +3346,7 @@ app.on("before-quit", (event) => {
   let cleanupDone = false;
   hubSync?.stop();
   const cleanup = Promise.allSettled([
+    serverChatLink.stop(),
     cliAgentRunner.shutdownWarmAgents(),
     scriptService.stop().then(() => appMcpService.stop())
   ]).then(() => { cleanupDone = true; });

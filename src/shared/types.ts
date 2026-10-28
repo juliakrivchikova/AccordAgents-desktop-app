@@ -1476,6 +1476,12 @@ export interface ChatMessageMetadata {
   /** The device that wrote the message on the server, the only one that may
    *  change it (agreement Д2). */
   serverWriter?: string;
+  /** This device's view of the turns the message asked for, by member: the
+   *  "taken to work" mark (agreement Д5). Never sent to the server. */
+  serverTurns?: Record<string, { runId: string; state: "requested" | "claimed" | "stopped" | "finished"; executorDeviceId?: string; stopRequested?: boolean; outcome?: "done" | "error" | "stopped" | "interrupted" }>;
+  /** A bubble shown here for a member that runs on another device, until that
+   *  device writes the real one. Never sent to the server. */
+  serverPlaceholder?: boolean;
   rosterChange?: ChatRosterChangeOutcome;
   /** Machines transport, Rule 2: a Stop was requested but the member's
    *  machine has not confirmed it yet (shown honestly instead of "stopped");

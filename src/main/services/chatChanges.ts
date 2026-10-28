@@ -71,7 +71,12 @@ export const LOCAL_MESSAGE_METADATA_KEYS: readonly string[] = [
   "cloudRunPreparation",
   "staleRunRecovery",
   /** Which device created a message that arrived from elsewhere. */
-  "remoteAuthorOriginId"
+  "remoteAuthorOriginId",
+  /** The User's server: the turns a message asked for, as this device
+   *  last heard of them, and a placeholder bubble for a member that runs
+   *  elsewhere (shown until its device writes the real one). */
+  "serverTurns",
+  "serverPlaceholder"
 ];
 
 export interface SharedConversationState {

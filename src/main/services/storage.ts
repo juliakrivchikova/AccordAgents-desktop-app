@@ -40,6 +40,7 @@ import { DEVICE_EVENT_SCHEMA_SQL, DeviceEventStorage, deviceEventAppendSql } fro
 import { DEVICE_EVENT_BLOB_SCHEMA_SQL, DeviceEventBlobStorage } from "./deviceEventBlobStorage";
 import { HubStorage } from "./hubStorage";
 import { HubOpsStore } from "./hubOpsStore";
+import { HubClientOpsStore } from "./hubOpsClient";
 import { NATIVE_COMMAND_SCHEMA_SQL, NativeCommandStore } from "./nativeCommandStore";
 import { PHONE_TURN_CLAIM_SCHEMA_SQL, PhoneTurnClaimStore } from "./phoneTurnClaims";
 import { MACHINE_PROGRESS_SCHEMA, MachineProgressStore } from "./machineProgressStore";
@@ -356,6 +357,7 @@ export class StorageService {
   private machineProgressStore?: MachineProgressStore;
   private hubStorage?: HubStorage;
   private hubOpsStore?: HubOpsStore;
+  private hubClientOpsStore?: HubClientOpsStore;
   private savedMessageStateCache: Map<string, SavedMessageState> | undefined;
   private readonly dbPath: string;
   private readonly sqliteExecutable: string;
@@ -1950,6 +1952,16 @@ export class StorageService {
       execute: (sql: string) => this.runSql(sql)
     });
     return this.hubStorage;
+  }
+
+  /** This device's operations for the User's server, and its failed sends. */
+  hubClientOps(): HubClientOpsStore {
+    this.hubClientOpsStore ??= new HubClientOpsStore({
+      init: () => this.init(),
+      query: <T>(sql: string) => this.queryJson<T>(sql),
+      execute: (sql: string) => this.runSql(sql)
+    });
+    return this.hubClientOpsStore;
   }
 
   /** The server's accepted operations and turns (the User's server only). */
