@@ -13871,6 +13871,31 @@ test("a turn this device took and left behind (it restarted) is closed as interr
   assert.equal(link.ops.filter((op) => op.kind === "turn.finish").length, 2);
 });
 
+test("a placeholder that went (its member's bubble arrived, or its turn never ran) does not come back with a copy of the chat read before it went", async () => {
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1" };
+  const conversation = chatConversation([participant]);
+  conversation.messages.push(pendingParticipantMessage(participant, "placeholder-1", "turn-1", { metadata: { runId: "turn-1", serverPlaceholder: true, machinePending: { machineName: "Cloud machine", at: NOW } } }));
+  const { service, storage } = testService({ conversation });
+  const internals = service as unknown as {
+    withChatMutation<T>(conversation: Conversation, fn: () => Promise<T> | T): Promise<T>;
+    queueSnapshot(conversation: Conversation): void;
+    dropServerPlaceholder(conversation: Conversation, messageId: string): Promise<void>;
+  };
+  // Another send holds its own copy, read while the placeholder stood.
+  const stale = clone(storage.current) as Conversation;
+  const current = clone(storage.current) as Conversation;
+  await internals.dropServerPlaceholder(current, "placeholder-1");
+  await service.settleChatSaves();
+  assert.equal(storage.current.messages.some((message: ChatMessage) => message.id === "placeholder-1"), false);
+  // That copy writes next: what it adds stays, the placeholder does not return.
+  await internals.withChatMutation(stale, async () => {
+    stale.messages.push({ id: "later", role: "system", content: "Later.", createdAt: NOW, status: "done" } as ChatMessage);
+    internals.queueSnapshot(stale);
+  });
+  await service.settleChatSaves();
+  assert.deepEqual(storage.current.messages.map((message: ChatMessage) => message.id).filter((id: string) => id === "placeholder-1" || id === "later"), ["later"]);
+});
+
 function participantManagerActor(conversationId: string, participant: ChatParticipant): {
   conversationId: string;
   participantId: string;

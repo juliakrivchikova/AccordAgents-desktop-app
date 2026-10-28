@@ -10016,6 +10016,7 @@ export class ChatService {
     conversation.metadata = this.mergeStoredChatMetadata(stored.metadata, conversation.metadata);
     conversation.title = title;
     this.applyRemovedChatMessageTombstones(conversation);
+    this.withoutGoneServerPlaceholders(conversation);
     conversation.updatedAt = stored.updatedAt > conversation.updatedAt ? stored.updatedAt : conversation.updatedAt;
   }
 
@@ -19360,6 +19361,7 @@ export class ChatService {
     if (this.deletedConversationIds.has(conversation.id)) {
       return;
     }
+    this.withoutGoneServerPlaceholders(conversation);
     const { snapshot, rows } = this.buildAndEmitSnapshot(conversation);
     const previous = this.saveQueues.get(conversation.id) ?? Promise.resolve();
     const outcome = previous
@@ -20195,6 +20197,7 @@ export class ChatService {
     if (pending) {
       await pending.catch(() => undefined);
     }
+    this.withoutGoneServerPlaceholders(conversation);
     const built = this.buildSnapshot(conversation);
     // Rows are remembered before the save so a snapshot queued while this one
     // is in flight diffs against them, and so the saved snapshot is kept for
@@ -20362,6 +20365,12 @@ export class ChatService {
   private readonly serverTurnOpens = new Map<string, Promise<ServerTurnOpen>>();
   /** Waiting for a turn's state to change (a member running elsewhere). */
   private readonly serverTurnWaiters = new Map<string, Array<(turn: HubTurn) => void>>();
+  /** Placeholders shown here for a member elsewhere that are gone (its own
+   *  bubble took their place, or its turn never ran). A copy of the chat read
+   *  before one went (another send's, the feed's) must not bring it back when
+   *  it merges with what is stored. Kept in memory: a placeholder belongs to
+   *  a run of this process. */
+  private readonly goneServerPlaceholders = new Set<string>();
   /** The newest state heard of each recent turn, so a wait that starts late
    *  does not miss what already happened. */
   private readonly serverTurnStates = new Map<string, HubTurn>();
@@ -20543,8 +20552,7 @@ export class ChatService {
           // The member's real bubble replaces the placeholder shown for it here.
           const runId = typeof incoming.metadata?.runId === "string" ? incoming.metadata.runId : undefined;
           if (runId && incoming.role === "participant") {
-            conversation.messages = conversation.messages.filter((message) => !(message.metadata?.serverPlaceholder &&
-              message.participantId === incoming.participantId && message.metadata?.runId === runId));
+            this.removeServerPlaceholders(conversation, (message) => message.participantId === incoming.participantId && message.metadata?.runId === runId);
           }
           conversation.messages.push(next);
         }
@@ -20899,10 +20907,33 @@ export class ChatService {
    *  member's own bubble has taken its place (or the turn never ran). */
   private async dropServerPlaceholder(conversation: Conversation, messageId: string): Promise<void> {
     await this.withChatMutation(conversation, async () => {
-      const before = conversation.messages.length;
-      conversation.messages = conversation.messages.filter((message) => !(message.id === messageId && message.metadata?.serverPlaceholder));
-      if (conversation.messages.length !== before) this.queueSnapshot(conversation);
+      if (this.removeServerPlaceholders(conversation, (message) => message.id === messageId)) this.queueSnapshot(conversation);
     });
+  }
+
+  /** Takes the placeholders `gone` names out of this copy, and remembers them
+   *  so that no other copy brings them back; true when one was here. */
+  private removeServerPlaceholders(conversation: Conversation, gone: (message: ChatMessage) => boolean): boolean {
+    const before = conversation.messages.length;
+    conversation.messages = conversation.messages.filter((message) => {
+      if (!message.metadata?.serverPlaceholder || !gone(message)) return true;
+      this.goneServerPlaceholders.add(message.id);
+      return false;
+    });
+    while (this.goneServerPlaceholders.size > 5_000) {
+      const oldest = this.goneServerPlaceholders.values().next().value;
+      if (oldest === undefined) break;
+      this.goneServerPlaceholders.delete(oldest);
+    }
+    return conversation.messages.length !== before;
+  }
+
+  /** A copy merged with what is stored, or about to be saved, keeps none of
+   *  the placeholders that went meanwhile. */
+  private withoutGoneServerPlaceholders(conversation: Conversation): void {
+    if (!this.goneServerPlaceholders.size) return;
+    const gone = (message: ChatMessage) => Boolean(message.metadata?.serverPlaceholder) && this.goneServerPlaceholders.has(message.id);
+    if (conversation.messages.some(gone)) conversation.messages = conversation.messages.filter((message) => !gone(message));
   }
 
   /** The end of a turn this device ran, said on the server. */
@@ -21103,7 +21134,7 @@ export class ChatService {
       await this.withChatMutation(conversation, async () => {
         const real = conversation.messages.some((message) => !message.metadata?.serverPlaceholder && message.participantId === participant.id && message.metadata?.runId === serverRunId);
         if (!real) return;
-        conversation.messages = conversation.messages.filter((message) => !(message.metadata?.serverPlaceholder && message.participantId === participant.id && message.metadata?.runId === serverRunId));
+        this.removeServerPlaceholders(conversation, (message) => message.participantId === participant.id && message.metadata?.runId === serverRunId);
         this.queueSnapshot(conversation);
       });
       if (!ended(turn)) turn = await this.waitForServerTurn(serverRunId, ended, signal);
@@ -21129,7 +21160,7 @@ export class ChatService {
     if (turn.state === "stopped" && !turn.executorDeviceId) {
       // Never taken: the placeholder goes, the stop is said once.
       await this.withChatMutation(conversation, async () => {
-        conversation.messages = conversation.messages.filter((message) => !(message.metadata?.serverPlaceholder && message.metadata?.runId === bubble.metadata?.runId));
+        this.removeServerPlaceholders(conversation, (message) => message.metadata?.runId === bubble.metadata?.runId);
         this.queueSnapshot(conversation);
       });
       return [];
