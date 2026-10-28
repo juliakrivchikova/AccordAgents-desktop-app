@@ -67,8 +67,6 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", { time
   const site = await serveMobileShell({ port: SITE_PORT, hubOrigins: [hub.base] });
   const client = new HubClient({ url: hub.base, identity: async () => hub.owner, storage: hub.storage });
   const publisher = new HubPhonePublisher({
-    storage: hub.storage,
-    eventLog: { appendLocalEvent: async () => undefined },
     client: () => client,
     hasPhones: async () => true,
     buildCatalog: async () => ({ roles: {}, prompts: [], skills: [] }),

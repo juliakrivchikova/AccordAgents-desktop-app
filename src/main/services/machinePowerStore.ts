@@ -83,7 +83,7 @@ export class MachinePowerStore {
         and not exists(select 1 from machine_maintenance_leases)
         and not exists(select 1 from native_commands where phase!='finished')
         and not exists(select 1 from device_event_inbox i join chat_events e on e.event_id=i.event_id
-          where i.applied_at is null and e.kind in ('machine.turn.request','machine.approval.decision'))
+          where i.applied_at is null and e.kind = 'machine.turn.request')
       returning stop_fence as fence;
       commit;`);
     return rows.length === 1;

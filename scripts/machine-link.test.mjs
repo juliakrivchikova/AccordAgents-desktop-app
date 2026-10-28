@@ -333,7 +333,7 @@ test("each machine's settings are published on the server sealed for that machin
   link.close();
 });
 
-test("the desktop dispatches nothing to a machine, and answers to a machine member's cards are not carried yet", async () => {
+test("the desktop dispatches nothing to a machine, and answers to a machine member's cards are not the room's", async () => {
   const pairing = offlinePairing();
   const record = { id: "machine-x", name: "X", deviceId: MACHINE_ID, devicePublicKeyDerBase64: hostEvents.publicKeyDerBase64, pairingKey: pairing.rendezvousId,
     createdAt: new Date().toISOString() };
@@ -344,9 +344,11 @@ test("the desktop dispatches nothing to a machine, and answers to a machine memb
     for (const retired of ["runTurn", "cancelMachineRun", "compactParticipant", "receiveFromHub", "chatChangeRecipients", "hubReaders"]) {
       assert.equal(typeof link[retired], "undefined", `${retired} is gone: turns travel through the server`);
     }
-    // Step 5 of "the server owns the chat" carries these through the server.
-    await assert.rejects(link.respondToMachineApproval({ machineId: "machine-x", conversationId: "c", approvalId: "a", approve: true }), /does not carry yet/);
-    await assert.rejects(link.respondToMachineChoice({ machineId: "machine-x", conversationId: "c", choiceId: "q", optionId: "o" }), /does not carry yet/);
+    // Cards of a machine's members are raised, answered and settled on the
+    // User's server (chat.cards.test); the room carries none of it.
+    for (const retired of ["respondToMachineApproval", "respondToMachineChoice"]) {
+      assert.equal(typeof link[retired], "undefined", `${retired} is gone: answers travel through the server`);
+    }
     assert.equal(await link.machineActivity("machine-x"), undefined, "not connected: nothing to ask");
     await assert.rejects(link.scriptsRequest("machine-x", { op: "list" }), /not connected/);
     await assert.rejects(link.scriptsRequest("missing", { op: "list" }), /not set up/);

@@ -3,7 +3,9 @@
  *
  * Every chat action between devices and machines is one of these events in the
  * sealed `ChatEventEnvelope`. Payloads are deliberately small: bodies, attachments,
- * and context travel as content-addressed fragments (`blob.fragment`).
+ * and context travel as content-addressed fragments (`blob.fragment`). (A
+ * permission or a choice a member waits on, and the User's answer to it, are
+ * not machine events: they are cards on the User's server, agreement Д9.)
  */
 
 import type { ChatEventEnvelope } from "./chatEvents";
@@ -27,10 +29,6 @@ export const MACHINE_EVENT_KINDS = [
   "turn.finished",
   "turn.cancel.requested",
   "receipt.native",
-  "permission.requested",
-  "permission.decided",
-  "choice.requested",
-  "choice.answered",
   "request.created",
   "request.answered",
   "request.cancelled",
@@ -123,45 +121,6 @@ export interface NativeReceiptPayload {
   recordedAt: string;
 }
 
-export interface PermissionRequestedPayload {
-  requestId: string;
-  turnId: string;
-  participantId: string;
-  executorGeneration: number;
-  provider: "codex-cli" | "claude-code" | "gemini-cli";
-  title: string;
-  detail?: string;
-  options: Array<{ id: string; label: string; scope?: string }>;
-  expiresAt?: string;
-  requestedAt: string;
-}
-
-export interface PermissionDecidedPayload {
-  requestId: string;
-  decisionRevision: number;
-  optionId: string;
-  decidedBy: string;
-  decidedAt: string;
-}
-
-export interface ChoiceRequestedPayload {
-  choiceId: string;
-  participantId: string;
-  turnId?: string;
-  title?: string;
-  question: string;
-  options: Array<{ id: string; label: string; description?: string }>;
-  recommendedOptionId?: string;
-  requestedAt: string;
-}
-
-export interface ChoiceAnsweredPayload {
-  choiceId: string;
-  optionId: string;
-  answeredBy: string;
-  answeredAt: string;
-}
-
 export interface ParticipantRequestLifecyclePayload {
   requestId: string;
   requesterParticipantId?: string;
@@ -211,10 +170,6 @@ export interface MachineEventPayloadByKind {
   "turn.finished": TurnFinishedPayload;
   "turn.cancel.requested": TurnCancelRequestedPayload;
   "receipt.native": NativeReceiptPayload;
-  "permission.requested": PermissionRequestedPayload;
-  "permission.decided": PermissionDecidedPayload;
-  "choice.requested": ChoiceRequestedPayload;
-  "choice.answered": ChoiceAnsweredPayload;
   "request.created": ParticipantRequestLifecyclePayload;
   "request.answered": ParticipantRequestLifecyclePayload;
   "request.cancelled": ParticipantRequestLifecyclePayload;
@@ -239,8 +194,6 @@ export function machineEventOfKind<Kind extends MachineEventKind>(event: ChatEve
  *  time; everything else is append-only and commutative. */
 export const PRECONDITION_EVENT_KINDS: ReadonlySet<MachineEventKind> = new Set<MachineEventKind>([
   "turn.requested",
-  "permission.decided",
-  "choice.answered",
   "request.answered",
   "request.cancelled"
 ]);

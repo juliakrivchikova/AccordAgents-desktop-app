@@ -253,13 +253,8 @@ test("a phone cannot approve a machine script that runs code; the desktop can, a
     unreadable: { id: "unreadable", toolName: "app_scripts_request_change", status: "pending", requesterParticipantId: "p1", request: { kind: "script-change" } }
   };
   const answered = [];
-  const published = [];
   const executor = new MachineApprovalExecutor({
-    storage: {
-      getChatEvent: async () => undefined,
-      nativeCommands: () => ({ approvalEffect: async () => undefined, claimApproval: async () => true })
-    },
-    deviceId: MACHINE_ID,
+    storage: { nativeCommands: () => ({ approvalEffect: async () => undefined, claimApproval: async () => true }) },
     chat: {
       respondToAppToolApproval: async (request, _progress, guard) => {
         await guard.beforeApply(approvals[request.approvalId]);
@@ -267,30 +262,56 @@ test("a phone cannot approve a machine script that runs code; the desktop can, a
         return { id: "chat" };
       }
     },
-    getConversation: async () => ({ id: "chat", metadata: { pendingAppToolApprovals: Object.values(approvals) } }),
-    runtimeIdentity: async () => ({ runtimeId: "rt", instanceId: "i" }),
-    publish: async (body) => { published.push(body); },
-    codeApprover: (event) => event.originId === DESKTOP_ID
+    runtimeIdentity: async () => ({ runtimeId: "rt", pid: 1, startedAt: "s" }),
+    // The desktop that set this machine up shows a script's code: only its
+    // answer on the User's server approves one that installs code.
+    codeApprover: () => DESKTOP_ID
   });
-  const decide = (eventId, originId, approvalId, approve) => executor.apply(
-    { eventId, originId, kind: "machine.approval.decision", conversationId: "chat" },
-    { type: "machine.approval.decision", decisionId: eventId, conversationId: "chat", approvalId, approve, decidedAt: "" }
-  );
+  let at = 0;
+  const decide = (answeredBy, approvalId, approve) => executor.apply({ cardId: approvalId, conversationId: "chat", cardKind: "permission",
+    participantId: "p1", raisedBy: MACHINE_ID, raisedAt: "", card: {}, state: "answered", answer: { approve }, answeredBy,
+    answeredAt: `2026-10-28T08:00:0${at++}.000Z` });
 
-  const fromPhone = await decide("e1", "phone-device", "install", true);
-  assert.equal(fromPhone.ok, false);
-  assert.match(fromPhone.error, /approved on the desktop/);
+  const fromPhone = await decide("phone-device", "install", true);
+  assert.equal(fromPhone.kind, "refused");
+  assert.match(fromPhone.reason, /approved on the desktop/);
   assert.deepEqual(answered, [], "nothing was applied for the phone's approval");
-  assert.equal((await decide("e2", "phone-device", "pause", true)).ok, true, "switching a script off is not installing code");
-  assert.equal((await decide("e5", "phone-device", "unreadable", true)).ok, false, "a card it cannot read is treated as installing code");
-  assert.equal((await decide("e3", "phone-device", "install", false)).ok, true, "the phone may decline");
-  // A phone's answer relayed by the desktop is signed by the desktop but says it was given on the phone.
-  const relayed = await executor.applyAction({ eventId: "e6", originId: DESKTOP_ID, kind: "permission.decided", conversationId: "chat" },
-    { targetKey: "approval:install", detail: { approve: true, decidedOn: "phone" } });
-  assert.equal(relayed.ok, false, "a relayed phone approval of code is refused too");
-  assert.equal((await decide("e4", DESKTOP_ID, "install", true)).ok, true, "the desktop that shows the code may approve");
+  assert.equal((await decide("phone-device", "pause", true)).kind, "applied", "switching a script off is not installing code");
+  assert.equal((await decide("phone-device", "unreadable", true)).kind, "refused", "a card it cannot read is treated as installing code");
+  assert.equal((await decide("phone-device", "install", false)).kind, "applied", "the phone may decline");
+  assert.equal((await decide(DESKTOP_ID, "install", true)).kind, "applied", "the desktop that shows the code may approve");
   assert.deepEqual(answered, [["pause", true], ["install", false], ["install", true]]);
-  assert.equal(published.length, 6, "every decision has a published outcome; the refusal is not retried forever");
+});
+
+test("the machine's card executors are its chat's: an answer from the User's server is applied here, a phone's approval of code refused", async () => {
+  // Answers to cards of the members here come from the User's server, from
+  // any device (chat.cards.test); the machine applies each once with these.
+  const install = { id: "install-2", toolName: "app_scripts_request_change", status: "pending", requesterParticipantId: "p1",
+    request: { kind: "script-change", op: "create" } };
+  const applied = [];
+  let given;
+  const host = makeHost(stubClient(), { chat: {
+    setCardAppliers: (appliers) => { given = appliers; },
+    respondToMentions: async () => undefined,
+    respondToAppToolApproval: async (request, _progress, guard) => {
+      await guard.beforeApply(install);
+      applied.push([request.approvalId, request.approve]);
+      return { id: "chat-cards" };
+    }
+  } });
+  assert.equal(typeof given, "function", "the host hands its executors to the chat");
+  const appliers = await given();
+  for (const kind of ["approval", "choice", "mention"]) assert.equal(typeof appliers[kind].apply, "function", kind);
+  const card = (answeredBy, answeredAt) => ({ cardId: install.id, conversationId: "chat-cards", cardKind: "permission", participantId: "p1",
+    raisedBy: MACHINE_ID, raisedAt: "", card: {}, state: "answered", answer: { approve: true }, answeredBy, answeredAt });
+  const fromPhone = await appliers.approval.apply(card("phone-device", "2026-10-28T09:00:00.000Z"));
+  assert.equal(fromPhone.kind, "refused");
+  assert.match(fromPhone.reason, /approved on the desktop/);
+  assert.deepEqual(applied, [], "nothing applied for the phone's approval");
+  const fromDesktop = await appliers.approval.apply(card(DESKTOP_ID, "2026-10-28T09:00:01.000Z"));
+  assert.equal(fromDesktop.kind, "applied", "the desktop that set this machine up shows the code and may approve it");
+  assert.deepEqual(applied, [[install.id, true]]);
+  host.close?.();
 });
 
 test("a member's background work on the machine is reported to the desktop as it changes and again with each hello", async () => {

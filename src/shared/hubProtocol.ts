@@ -256,8 +256,10 @@ export interface HubPhoneEnrollResponse {
  *  every device that reads the hub learns the phone from the order itself. */
 export const HUB_PHONE_ENROLLED_EVENT_KIND = "device.enrolled";
 export const HUB_PHONE_ENROLLMENT_SCOPE = "device-enrollment";
-/** Desktops publish the approval cards of their own members here. */
-export const HUB_APPROVAL_CARD_EVENT_KIND = "chat.approval";
+/** Where desktops published their members' approval cards before cards
+ *  became the User's server's own (`card.*` operations, agreement Д9).
+ *  Nothing writes it now; the event log keeps pruning what is left of it
+ *  until that log goes. */
 export const HUB_APPROVAL_CARD_SCOPE = "chat-approvals";
 /** A device's own members' live progress (the computer's, a machine's) goes
  *  to the hub by this request, not into the order: it is shown while the

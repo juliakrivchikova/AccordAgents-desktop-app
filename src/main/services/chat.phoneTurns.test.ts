@@ -8,7 +8,6 @@ import { parsePhoneTurnRunId, phoneTurnRunId } from "../../shared/hubProtocol";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
 import { ChatService } from "./chat";
-import { createChatActionEffects } from "./chatActionEffects";
 import { createChatChangeTransport } from "./chatChangeTransport";
 import { copiedConversation } from "./chatCopy";
 import { CHAT_CHANGES_EVENT_KIND, chatChangesLogScope, type ChatChangesPayload } from "./chatChanges";
@@ -115,21 +114,13 @@ test("a Stop the phone gave before the turn started keeps it from starting, at i
     const phone = createChatEventDeviceIdentity(new Date().toISOString());
     const machine = await device(path.join(directory, "machine.sqlite3"), "machine", phone.originId);
     await (machine.service as unknown as { saveConversation(conversation: Conversation): Promise<void> }).saveConversation(chat());
-    const effects = createChatActionEffects({
-      chat: machine.service as never,
-      emitter: { beginExecution: async () => true, recordExecution: async () => undefined },
-      storage: { getConversation: (id) => machine.storage.getConversation(id) },
-      homeMachineId: () => "machine-1"
-    });
     // The machine was asleep: it reads the Stop before the message's turn
-    // could start (its chat:actions chain is not its chat change chain).
+    // could start.
     const messageId = randomUUID();
     const runId = phoneTurnRunId(messageId, remote.id);
-    assert.equal(await effects.owns("chat-phone", `run:${runId}`), true, "the member's home owns a Stop for its turn before it starts");
-    assert.equal(await effects.owns("chat-phone", `run:${phoneTurnRunId(messageId, local.id)}`), false, "not one for the desktop's member");
-    const effect = await effects.perform({ conversationId: "chat-phone", targetKey: `run:${runId}`, kind: "turn.stop.requested",
-      payload: { operationId: `stop:${runId}`, targetKey: `run:${runId}` } });
-    assert.equal(effect, "stopped the turn before it started");
+    assert.equal(await machine.service.ownsPhoneRun("chat-phone", runId), true, "the member's home owns a Stop for its turn before it starts");
+    assert.equal(await machine.service.ownsPhoneRun("chat-phone", phoneTurnRunId(messageId, local.id)), false, "not one for the desktop's member");
+    assert.equal(await machine.service.stopUnstartedPhoneRun("chat-phone", runId), true, "stopped the turn before it started");
     const message: ChatMessage = { id: messageId, role: "user", content: "@drew go", createdAt: "2026-10-25T08:02:00.000Z", status: "done",
       metadata: { deliveryTargets: [remote.id], threadId: messageId } as ChatMessage["metadata"] };
     const { envelope, payload } = phoneMessage(phone, 1, undefined, message);
@@ -157,9 +148,8 @@ test("a Stop the phone gave before the turn started keeps it from starting, at i
     await machine.service.applyRemoteChatChanges(next.envelope, next.payload);
     for (let wait = 0; wait < 50 && !claiming; wait += 1) await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(claiming, true, "the turn is being claimed");
-    assert.equal(await effects.owns("chat-phone", `run:${secondRun}`), true);
-    assert.equal(await effects.perform({ conversationId: "chat-phone", targetKey: `run:${secondRun}`, kind: "turn.stop.requested",
-      payload: { operationId: `stop:${secondRun}`, targetKey: `run:${secondRun}` } }), "stopped the turn before it started");
+    assert.equal(await machine.service.ownsPhoneRun("chat-phone", secondRun), true);
+    assert.equal(await machine.service.stopUnstartedPhoneRun("chat-phone", secondRun), true, "stopped the turn before it started");
     release();
     await settle();
     assert.equal(machine.started.filter((item) => item.runId === secondRun && !item.aborted).length, 0, "it never runs");
@@ -290,15 +280,9 @@ test("a Stop given before the start is said once, however often the home looks a
     const phone = createChatEventDeviceIdentity(new Date().toISOString());
     const machine = await device(path.join(directory, "machine.sqlite3"), "machine", phone.originId);
     await (machine.service as unknown as { saveConversation(conversation: Conversation): Promise<void> }).saveConversation(chat());
-    const effects = createChatActionEffects({
-      chat: machine.service as never,
-      emitter: { beginExecution: async () => true, recordExecution: async () => undefined },
-      storage: { getConversation: (id) => machine.storage.getConversation(id) },
-      homeMachineId: () => "machine-1"
-    });
     const messageId = randomUUID();
     const runId = phoneTurnRunId(messageId, remote.id);
-    await effects.perform({ conversationId: "chat-phone", targetKey: `run:${runId}`, kind: "turn.stop.requested", payload: { operationId: `stop:${runId}`, targetKey: `run:${runId}` } });
+    await machine.service.stopUnstartedPhoneRun("chat-phone", runId);
     const message: ChatMessage = { id: messageId, role: "user", content: "@drew go", createdAt: new Date().toISOString(), status: "done",
       metadata: { deliveryTargets: [remote.id], threadId: messageId } as ChatMessage["metadata"] };
     const { envelope, payload } = phoneMessage(phone, 1, undefined, message);

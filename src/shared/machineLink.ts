@@ -12,7 +12,7 @@
  * (machineControlAuthentication, machineChannelSealing).
  */
 
-import type { ChatAppToolApprovalRequest, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage } from "./types";
+import type { ChatMessage } from "./types";
 import type { MachineProgressFrame } from "./machineProgress";
 import type { TrustedDeviceRecord } from "./machineTrust";
 
@@ -248,48 +248,6 @@ export interface MachineScriptsResultBody {
 /** Machine -> desktop: its scheduled scripts changed; ask for the list again. */
 export interface MachineScriptsChangedBody {
   type: "machine.scripts.changed";
-}
-
-/**
- * Cards of members on a machine (permissions, choices) are being moved to
- * the User's server (step 5 of "the server owns the chat"); until then these
- * shapes remain for the machine's executors, and nothing carries them
- * between devices.
- */
-export interface MachineApprovalDecisionBody {
-  type: "machine.approval.decision";
-  decisionId?: string;
-  conversationId: string;
-  approvalId: string;
-  approve: boolean;
-  scope?: "once" | "chat";
-  draftOverride?: ChatAppToolApprovalRequest;
-  codexDecisionId?: string;
-  decidedAt: string;
-}
-
-export interface MachineApprovalResultBody {
-  type: "machine.approval.result";
-  decisionId?: string;
-  uncertain?: boolean;
-  conversationId: string;
-  approvalId: string;
-  ok: boolean;
-  error?: string;
-  approval?: ChatAppToolApproval;
-  policies?: ChatAppToolApprovalPolicy[];
-}
-
-export interface MachineChoiceResultBody {
-  type: "machine.choice.result";
-  conversationId: string;
-  choiceId: string;
-  sourceMessageId: string;
-  decisionId: string;
-  ok: boolean;
-  error?: string;
-  uncertain?: boolean;
-  choice?: import("./types").ChatPendingChoice;
 }
 
 /** Everything the room carries. Live progress is a MachineProgressFrame

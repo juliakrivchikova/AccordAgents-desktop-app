@@ -76,7 +76,10 @@ export const LOCAL_MESSAGE_METADATA_KEYS: readonly string[] = [
    *  last heard of them, and a placeholder bubble for a member that runs
    *  elsewhere (shown until its device writes the real one). */
   "serverTurns",
-  "serverPlaceholder"
+  "serverPlaceholder",
+  /** A card of a member elsewhere answered on the server and not applied
+   *  there yet, as this device shows it. */
+  "serverCard"
 ];
 
 export interface SharedConversationState {

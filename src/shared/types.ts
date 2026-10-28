@@ -1427,15 +1427,20 @@ export interface ChatAppToolApproval {
    *  member's roster change, so an older copy of the card from the machine
    *  does not bring the waiting state back. */
   rosterChangeSettledAt?: string;
-  /** Machines transport: the approval was raised by a member on this machine;
-   *  the desktop shows it and forwards the decision there. */
+  /** The desktop's view of a card a member on this machine raised on the
+   *  User's server: the desktop shows it, and answers it there. */
   homeMachineId?: string;
+  /** Answered on the User's server (from any device), not applied by the
+   *  member's machine yet. */
   machineDecisionPending?: { decisionId: string; machineName: string; approve: boolean; at: string };
   machineDecisionReceiptId?: string;
-  /** Desktop only: the User's answer (its signed event) the card's machine
-   *  reports it applied; a machine member's roster change is applied here
-   *  only once that answer is confirmed (an approval the User gave). */
+  /** Desktop only: the User's answer to a machine member's roster change, as
+   *  the User's server holds it (`server:<card>@<answered at>`); the desktop
+   *  applies the change only for that answer. */
   machineAppliedDecisionId?: string;
+  /** Answers its device could not apply (the last few), by the operation
+   *  each was sent under: the card is asked again and says why. */
+  cardRefusals?: ChatCardRefusal[];
 }
 
 export interface ChatAppToolApprovalPolicy {
@@ -1469,6 +1474,25 @@ export interface ChatRosterChangeOutcome {
   error?: string;
 }
 
+/** An answer a member's device could not apply, by the operation it was
+ *  sent under on the User's server. */
+export interface ChatCardRefusal {
+  operationId: string;
+  reason: string;
+  at: string;
+}
+
+/** A card answered on the User's server for a member that runs elsewhere,
+ *  while its device has not applied the answer yet. */
+export interface ChatServerCardMark {
+  cardId: string;
+  state: "answered";
+  answer: Record<string, unknown>;
+  answeredAt: string;
+  /** Where the member runs ("the machine" when unnamed). */
+  machineName: string;
+}
+
 export interface ChatMessageMetadata {
   /** The message's place in the User's server's order (agreement Д1): set
    *  by the server when it accepted the message, the same on every device. */
@@ -1482,6 +1506,13 @@ export interface ChatMessageMetadata {
   /** A bubble shown here for a member that runs on another device, until that
    *  device writes the real one. Never sent to the server. */
   serverPlaceholder?: boolean;
+  /** This device's view of a card the message's member waits on that runs
+   *  on another device: answered (from any device), and not applied there
+   *  yet. Shown as answered and waiting; never sent to the server. */
+  serverCard?: ChatServerCardMark;
+  /** Answers to this message's mention approvals its device could not apply
+   *  (the last few), shown with the card asked again. */
+  mentionCardRefusals?: ChatCardRefusal[];
   rosterChange?: ChatRosterChangeOutcome;
   /** Machines transport, Rule 2: a Stop was requested but the member's
    *  machine has not confirmed it yet (shown honestly instead of "stopped");

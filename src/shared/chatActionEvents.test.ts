@@ -3,6 +3,7 @@ import test from "node:test";
 import type { ChatEventEnvelope } from "./chatEvents";
 import {
   foldChatActionEvents,
+  isChatActionKind,
   type ChatActionKind,
   type ChatActionPayload
 } from "./chatActionEvents";
@@ -73,51 +74,39 @@ test("two offline devices act on the same state: one wins, the other is visibly 
   assert.equal(supersede.actualStateId, "answered-a");
 });
 
-test("a denial that sorts before an executed approval cannot erase what already happened", () => {
-  const approved = event({
-    kind: "permission.decided", origin: "phone", seq: 1, ts: "100", eventId: "approve",
-    payload: { operationId: "op-approve", targetKey: "approval:card-1", stateId: "approved", detail: { approve: true } }
-  });
-  const receipt = event({
-    kind: "execution.receipt", origin: "machine", seq: 1, ts: "150", eventId: "receipt",
-    payload: {
-      operationId: "op-write", targetKey: "approval:card-1",
-      effect: "wrote src/index.ts", executedBy: "cloud-box", executedAt: "2026-09-07T00:00:01.000Z"
-    } as ChatActionPayload
-  });
-  // The desktop denied it while offline; its logical time sorts AFTER the
-  // approval but it arrives last.
-  const denied = event({
-    kind: "permission.decided", origin: "desktop", seq: 1, ts: "200", eventId: "deny",
-    payload: { operationId: "op-deny", targetKey: "approval:card-1", stateId: "denied", detail: { approve: false } }
-  });
-
-  const result = foldChatActionEvents([denied, receipt, approved]);
-  const card = result.targets.find((target) => target.targetKey === "approval:card-1");
-  assert.ok(card);
-  assert.equal(card.receipts.length, 1, "the receipt is immutable and is never removed by re-projection");
-  assert.equal(card.receipts[0].effect, "wrote src/index.ts");
-  assert.equal(result.applied.filter((entry) => entry.eventId === "receipt").length, 1, "a receipt is folded once, never replayed");
-
-  const conflict = result.conflicts.find((entry) => entry.conflictingEventId === "deny");
-  assert.ok(conflict, "both decisions must be visible beside the executed effect");
-  assert.equal(conflict.receiptEventId, "receipt");
-  assert.match(conflict.detail, /already happened on cloud-box/);
-  // Both answers stayed in the log; nothing was rewritten to hide one.
-  assert.deepEqual(result.applied.filter((e) => e.targetKey === "approval:card-1" && e.kind === "permission.decided")
-    .map((e) => e.eventId).sort(), ["approve", "deny"]);
+test("an answer to a card, a Stop or an execution receipt is not a chat action any more: the fold passes over it", () => {
+  // Answers to the cards a member waits on and Stop are operations on the
+  // User's server now, applied once by the member's own device, which
+  // settles the card there (chat.cards.test, chat.machineServer.test). An
+  // event of the old scheme still in a log projects nothing.
+  for (const kind of ["permission.decided", "choice.answered", "turn.stop.requested", "execution.receipt"]) {
+    assert.equal(isChatActionKind(kind), false, kind);
+  }
+  const old = [
+    event({ kind: "permission.decided" as ChatActionKind, origin: "phone", seq: 1, ts: "100", eventId: "approve",
+      payload: { operationId: "op-approve", targetKey: "approval:card-1", stateId: "approved", detail: { approve: true } } }),
+    event({ kind: "execution.receipt" as ChatActionKind, origin: "machine", seq: 1, ts: "150", eventId: "receipt",
+      payload: { operationId: "op-write", targetKey: "approval:card-1", effect: "wrote src/index.ts", executedBy: "cloud-box",
+        executedAt: "2026-09-07T00:00:01.000Z" } as ChatActionPayload }),
+    event({ kind: "turn.stop.requested" as ChatActionKind, origin: "phone", seq: 2, ts: "500", eventId: "stop",
+      payload: { operationId: "op-stop", targetKey: "run:r1", stateId: "stop-requested" } })
+  ];
+  const result = foldChatActionEvents(old);
+  assert.deepEqual(result.targets, []);
+  assert.deepEqual(result.applied, []);
+  assert.deepEqual(result.superseded, []);
 });
 
 // --- ordering, idempotency and repair ---------------------------------------
 
 test("every peer folds the same events to the same result whatever order they arrived in", () => {
   const events = [
-    event({ kind: "choice.answered", origin: "a", seq: 1, ts: "100", eventId: "one",
-      payload: { operationId: "op1", targetKey: "choice:x", stateId: "s1", contentHash: "h1" } }),
-    event({ kind: "choice.answered", origin: "b", seq: 1, ts: "200", eventId: "two",
-      payload: { operationId: "op2", targetKey: "choice:x", stateId: "s2", contentHash: "h2", precondition: { expectedStateId: "s1" } } }),
-    event({ kind: "choice.answered", origin: "c", seq: 1, ts: "150", eventId: "three",
-      payload: { operationId: "op3", targetKey: "choice:x", stateId: "s3", contentHash: "h3", precondition: { expectedStateId: "s1" } } })
+    event({ kind: "participant.request.answered", origin: "a", seq: 1, ts: "100", eventId: "one",
+      payload: { operationId: "op1", targetKey: "request:x", stateId: "s1", contentHash: "h1" } }),
+    event({ kind: "participant.request.answered", origin: "b", seq: 1, ts: "200", eventId: "two",
+      payload: { operationId: "op2", targetKey: "request:x", stateId: "s2", contentHash: "h2", precondition: { expectedStateId: "s1" } } }),
+    event({ kind: "participant.request.answered", origin: "c", seq: 1, ts: "150", eventId: "three",
+      payload: { operationId: "op3", targetKey: "request:x", stateId: "s3", contentHash: "h3", precondition: { expectedStateId: "s1" } } })
   ];
   const forward = foldChatActionEvents(events);
   const reversed = foldChatActionEvents([...events].reverse());
@@ -130,10 +119,10 @@ test("every peer folds the same events to the same result whatever order they ar
 });
 
 test("the same operation folded twice changes nothing and is reported as a duplicate", () => {
-  const first = event({ kind: "choice.answered", origin: "phone", seq: 1, ts: "100", eventId: "answer",
-    payload: { operationId: "op-answer", targetKey: "choice:m1", stateId: "answered-a" } });
-  const retry = event({ kind: "choice.answered", origin: "phone", seq: 2, ts: "110", eventId: "answer-retry",
-    payload: { operationId: "op-answer", targetKey: "choice:m1", stateId: "answered-a" } });
+  const first = event({ kind: "participant.request.answered", origin: "phone", seq: 1, ts: "100", eventId: "answer",
+    payload: { operationId: "op-answer", targetKey: "request:m1", stateId: "answered-a" } });
+  const retry = event({ kind: "participant.request.answered", origin: "phone", seq: 2, ts: "110", eventId: "answer-retry",
+    payload: { operationId: "op-answer", targetKey: "request:m1", stateId: "answered-a" } });
   const result = foldChatActionEvents([first, retry]);
   assert.deepEqual(result.duplicates, ["answer-retry"]);
   assert.deepEqual(result.superseded, [], "a retry of the same answer is not a conflict");
@@ -151,10 +140,10 @@ test("a missing sequence stops that origin instead of applying across the hole",
   assert.deepEqual(result.applied.map((entry) => entry.eventId), ["open"]);
 });
 
-test("an unconditional action always applies and a stop is never superseded", () => {
-  const stop = event({ kind: "turn.stop.requested", origin: "phone", seq: 1, ts: "500", eventId: "stop",
-    payload: { operationId: "op-stop", targetKey: "run:r1", stateId: "stop-requested" } });
-  const result = foldChatActionEvents([stop]);
+test("an unconditional action always applies and is never superseded", () => {
+  const opened = event({ kind: "participant.request.opened", origin: "phone", seq: 1, ts: "500", eventId: "opened",
+    payload: { operationId: "op-open", targetKey: "request:r1", stateId: "open" } });
+  const result = foldChatActionEvents([opened]);
   assert.deepEqual(result.superseded, []);
-  assert.equal(result.targets[0].stateId, "stop-requested");
+  assert.equal(result.targets[0].stateId, "open");
 });

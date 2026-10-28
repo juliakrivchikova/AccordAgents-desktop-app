@@ -1,13 +1,15 @@
 /**
  * Canonical chat actions as events, and the projection that folds them.
  *
- * Messages already travel as events. Everything else a member or a device does
- * — answering a permission, answering a choice, opening or answering a
- * participant request, asking for a Stop — is an action on some target, and
- * until now those lived only as metadata a machine rewrote locally. Two
- * machines that acted while disconnected simply overwrote each other, and
- * nobody was told. (Documents are not chat actions any more: the User's server
- * owns them and decides every change, agreement Д9.)
+ * Messages already travel as events. A participant request's lifecycle
+ * (opened, answered) is an action on its target, and until now it lived only
+ * as metadata a machine rewrote locally. Two machines that acted while
+ * disconnected simply overwrote each other, and nobody was told. (Documents,
+ * answers to the cards a member waits on — permissions, choices, mentions —
+ * and Stop are not chat actions any more: they are operations on the User's
+ * server, which owns them and decides every change, agreement Д9. Nor does a
+ * receipt of an execution travel as one: the device that applied an answer
+ * settles its card on the server.)
  *
  * This uses the SAME envelope, ordering and gap handling as the conversation
  * projection (`orderVisibleChatEvents`); it is not a second protocol. What it
@@ -17,12 +19,6 @@
  *     in total order, an action whose expectation no longer holds is not
  *     silently dropped: it is applied nowhere and reported as superseded, with
  *     the event that won.
- *   - **Immutable execution receipts.** A receipt records that something
- *     happened outside this process — a tool ran, a permission was answered to
- *     a provider, a file was written. Re-projection never repeats it and never
- *     erases it. A decision that sorts earlier than a receipt it contradicts is
- *     shown beside it as a conflict; the receipt stands, because the action
- *     really happened.
  *
  * Idempotency is by `operationId`: the same operation arriving twice is folded
  * once and reported as a duplicate, never as a conflict.
@@ -41,24 +37,16 @@ import {
 export const CHAT_ACTION_LOG_SCOPE = "chat:actions";
 
 export type ChatActionKind =
-  | "permission.decided"
-  | "choice.answered"
   | "participant.request.opened"
-  | "participant.request.answered"
-  | "turn.stop.requested"
-  | "execution.receipt";
+  | "participant.request.answered";
 
 export const CHAT_ACTION_KINDS: readonly ChatActionKind[] = [
-  "permission.decided",
-  "choice.answered",
   "participant.request.opened",
-  "participant.request.answered",
-  "turn.stop.requested",
-  "execution.receipt"
+  "participant.request.answered"
 ];
 
 /** What an action expected to be true when it was made. Absent means the
- *  action is unconditional (opening a request, asking for a Stop). */
+ *  action is unconditional (opening a request). */
 export interface ChatActionPrecondition {
   /** The target's state id the author read: a decision revision, a request
    *  lifecycle state. */
@@ -70,8 +58,7 @@ export interface ChatActionPrecondition {
 export interface ChatActionPayload {
   /** Idempotency key. The same operation folded twice changes nothing. */
   operationId: string;
-  /** What is being acted on: `approval:<cardId>`, `choice:<messageId>`,
-   *  `request:<id>`, `run:<runId>`. */
+  /** What is being acted on: `request:<id>`. */
   targetKey: string;
   precondition?: ChatActionPrecondition;
   /** The state id this action establishes when it applies. */
@@ -80,17 +67,6 @@ export interface ChatActionPayload {
   /** Free-form action detail; the projection never interprets it beyond the
    *  fields above, so a new action kind does not need a new projection. */
   detail?: Record<string, unknown>;
-}
-
-/** Something that happened outside this process. Never superseded. */
-export interface ChatExecutionReceiptPayload extends ChatActionPayload {
-  /** What was executed, for the surface that shows it happened. */
-  effect: string;
-  /** The machine that performed it. */
-  executedBy: string;
-  executedAt: string;
-  /** Set when the executor could not prove the effect completed. */
-  uncertain?: boolean;
 }
 
 export type ChatActionEventEnvelope = ChatEventEnvelope<ChatActionPayload> & { kind: ChatActionKind };
@@ -118,25 +94,12 @@ export interface ChatActionSuperseded {
   actualStateId?: string;
 }
 
-export interface ChatExecutionReceiptProjection extends ChatExecutionReceiptPayload {
-  eventId: string;
-}
-
-/** A decision that contradicts an effect that already happened. */
-export interface ChatReceiptConflict {
-  targetKey: string;
-  receiptEventId: string;
-  conflictingEventId: string;
-  detail: string;
-}
-
 export interface ChatActionTargetState {
   targetKey: string;
   stateId?: string;
   contentHash?: string;
   /** The event that established the current state. */
   stateEventId?: string;
-  receipts: ChatExecutionReceiptProjection[];
 }
 
 export interface ChatActionFoldResult {
@@ -145,7 +108,6 @@ export interface ChatActionFoldResult {
   superseded: ChatActionSuperseded[];
   /** Events folded away because their operation had already been folded. */
   duplicates: string[];
-  conflicts: ChatReceiptConflict[];
   gaps: ChatEventVisibleScopeGap[];
   forks: ChatEventForkConflict[];
 }
@@ -169,7 +131,6 @@ export function foldChatActionEvents(
   const applied: ChatActionApplied[] = [];
   const superseded: ChatActionSuperseded[] = [];
   const duplicates: string[] = [];
-  const conflicts: ChatReceiptConflict[] = [];
 
   for (const event of ordered.events) {
     const payload = event.payload as ChatActionPayload | undefined;
@@ -181,19 +142,8 @@ export function foldChatActionEvents(
       continue;
     }
     seenOperations.add(operationKey);
-    const target = targets.get(payload.targetKey) ?? {
-      targetKey: payload.targetKey,
-      receipts: []
-    };
+    const target: ChatActionTargetState = targets.get(payload.targetKey) ?? { targetKey: payload.targetKey };
     targets.set(payload.targetKey, target);
-
-    // A receipt is a fact, not a proposal: it is never checked against a
-    // precondition and never superseded.
-    if (kind === "execution.receipt" && isReceiptPayload(payload)) {
-      target.receipts.push({ ...payload, eventId: event.eventId });
-      applied.push({ eventId: event.eventId, kind, targetKey: payload.targetKey });
-      continue;
-    }
 
     const mismatch = precondition(target, payload);
     if (mismatch) {
@@ -206,9 +156,6 @@ export function foldChatActionEvents(
         expectedStateId: payload.precondition?.expectedStateId,
         actualStateId: target.stateId
       });
-      // An action that lost the race can still contradict something that has
-      // already been executed; the surface shows both.
-      noteReceiptConflict(conflicts, target, event.eventId, kind);
       continue;
     }
 
@@ -217,7 +164,6 @@ export function foldChatActionEvents(
       target.contentHash = payload.contentHash;
       target.stateEventId = event.eventId;
     }
-    noteReceiptConflict(conflicts, target, event.eventId, kind);
     applied.push({ eventId: event.eventId, kind, targetKey: payload.targetKey, stateId: payload.stateId });
   }
 
@@ -226,7 +172,6 @@ export function foldChatActionEvents(
     applied,
     superseded,
     duplicates,
-    conflicts,
     gaps: ordered.gaps,
     forks: ordered.forks
   };
@@ -247,34 +192,9 @@ function precondition(
   return undefined;
 }
 
-/** A permission answered the other way, after the provider already acted on
- *  the first answer, is a visible conflict — never a reason to undo the act. */
-function noteReceiptConflict(
-  conflicts: ChatReceiptConflict[],
-  target: ChatActionTargetState,
-  eventId: string,
-  kind: ChatActionKind
-): void {
-  if (kind !== "permission.decided" && kind !== "choice.answered") return;
-  for (const receipt of target.receipts) {
-    conflicts.push({
-      targetKey: target.targetKey,
-      receiptEventId: receipt.eventId,
-      conflictingEventId: eventId,
-      detail: `${receipt.effect} already happened on ${receipt.executedBy}; this answer cannot undo it.`
-    });
-  }
-}
-
 function isActionPayload(value: unknown): value is ChatActionPayload {
   const payload = value as Partial<ChatActionPayload> | undefined;
   return Boolean(payload && typeof payload === "object" && !Array.isArray(payload)
     && typeof payload.operationId === "string" && payload.operationId
     && typeof payload.targetKey === "string" && payload.targetKey);
-}
-
-function isReceiptPayload(value: ChatActionPayload): value is ChatExecutionReceiptPayload {
-  const payload = value as Partial<ChatExecutionReceiptPayload>;
-  return typeof payload.effect === "string" && typeof payload.executedBy === "string"
-    && typeof payload.executedAt === "string";
 }

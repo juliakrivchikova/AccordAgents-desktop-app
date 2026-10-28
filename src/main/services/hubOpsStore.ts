@@ -1,4 +1,4 @@
-import type { HubCard, HubClaimOutcome, HubFeedEntry, HubOpEffect, HubOpResult, HubTurn, HubTurnOutcome, HubTurnState } from "../../shared/hubOps";
+import type { HubCard, HubCardKind, HubClaimOutcome, HubFeedEntry, HubOpEffect, HubOpResult, HubTurn, HubTurnOutcome, HubTurnState } from "../../shared/hubOps";
 
 /**
  * The server's own record of what it accepted (agreements Д1, Д3): every
@@ -67,7 +67,8 @@ export const HUB_OPS_SCHEMA_SQL = `
     answered_by text,
     answered_at text,
     outcome_json text,
-    settled_at text
+    settled_at text,
+    answer_op_id text
   );
   create index if not exists hub_cards_open on hub_cards(conversation_id, state);
   -- How far the feed was forgotten (retention): a device that read less
@@ -115,6 +116,16 @@ export class HubOpsStore {
     this.ready ??= (async () => {
       await this.database.init();
       await this.database.execute(HUB_OPS_SCHEMA_SQL);
+      // A server whose cards table predates the answer's operation id gets
+      // the column (the id is what a refusal names, for the device that
+      // answered).
+      const columns = await this.database.query<{ name: string }>(`select name from pragma_table_info('hub_cards');`);
+      if (!columns.some((column) => column.name === "answer_op_id")) {
+        await this.database.execute(`alter table hub_cards add column answer_op_id text;`).catch(async (error: unknown) => {
+          const again = await this.database.query<{ name: string }>(`select name from pragma_table_info('hub_cards');`);
+          if (!again.some((column) => column.name === "answer_op_id")) throw error;
+        });
+      }
     })();
     try {
       await this.ready;
@@ -284,23 +295,32 @@ export class HubOpsStore {
   }
 
   /** Cards not settled yet (in one chat, or all), oldest first. */
-  async openCards(conversationId?: string, limit = 500): Promise<HubCard[]> {
+  async openCards(conversationId?: string, limit = 500, options: { newestFirst?: boolean; exceptKinds?: HubCardKind[] } = {}): Promise<HubCard[]> {
     await this.init();
+    const except = (options.exceptKinds ?? []).map(quote).join(", ");
+    const order = options.newestFirst ? "raised_at desc, card_id desc" : "raised_at, card_id";
     const rows = await this.database.query<CardRow>(`select ${CARD_COLUMNS} from hub_cards where state != 'settled'
-      ${conversationId ? `and conversation_id = ${quote(conversationId)}` : ""} order by raised_at, card_id limit ${Math.max(1, Math.floor(limit))};`);
+      ${conversationId ? `and conversation_id = ${quote(conversationId)}` : ""} ${except ? `and card_kind not in (${except})` : ""}
+      order by ${order} limit ${Math.max(1, Math.floor(limit))};`);
     return rows.map(cardFromRow);
+  }
+
+  /** Removes a deleted chat's cards (committed with the deletion). */
+  deleteCardsSql(conversationId: string): string {
+    return `delete from hub_cards where conversation_id = ${quote(conversationId)};`;
   }
 
   cardSql(card: HubCard): string {
     const value = (text: string | undefined) => text === undefined ? "null" : quote(text);
     const json = (object: Record<string, unknown> | undefined) => object === undefined ? "null" : quote(JSON.stringify(object));
     return `insert into hub_cards(card_id, conversation_id, card_kind, participant_id, message_id, raised_by, raised_at, card_json, state,
-        answer_json, answered_by, answered_at, outcome_json, settled_at)
+        answer_json, answered_by, answered_at, outcome_json, settled_at, answer_op_id)
       values (${quote(card.cardId)}, ${quote(card.conversationId)}, ${quote(card.cardKind)}, ${value(card.participantId)}, ${value(card.messageId)},
         ${quote(card.raisedBy)}, ${quote(card.raisedAt)}, ${quote(JSON.stringify(card.card))}, ${quote(card.state)},
-        ${json(card.answer)}, ${value(card.answeredBy)}, ${value(card.answeredAt)}, ${json(card.outcome)}, ${value(card.settledAt)})
+        ${json(card.answer)}, ${value(card.answeredBy)}, ${value(card.answeredAt)}, ${json(card.outcome)}, ${value(card.settledAt)}, ${value(card.answerOpId)})
       on conflict(card_id) do update set card_json = excluded.card_json, state = excluded.state, answer_json = excluded.answer_json,
-        answered_by = excluded.answered_by, answered_at = excluded.answered_at, outcome_json = excluded.outcome_json, settled_at = excluded.settled_at;`;
+        answered_by = excluded.answered_by, answered_at = excluded.answered_at, outcome_json = excluded.outcome_json, settled_at = excluded.settled_at,
+        answer_op_id = excluded.answer_op_id;`;
   }
 
   async isRemoved(conversationId: string, messageId: string): Promise<boolean> {
@@ -332,11 +352,12 @@ interface CardRow {
   answeredAt: string | null;
   outcomeJson: string | null;
   settledAt: string | null;
+  answerOpId: string | null;
 }
 
 const CARD_COLUMNS = `card_id as cardId, conversation_id as conversationId, card_kind as cardKind, participant_id as participantId,
   message_id as messageId, raised_by as raisedBy, raised_at as raisedAt, card_json as cardJson, state, answer_json as answerJson,
-  answered_by as answeredBy, answered_at as answeredAt, outcome_json as outcomeJson, settled_at as settledAt`;
+  answered_by as answeredBy, answered_at as answeredAt, outcome_json as outcomeJson, settled_at as settledAt, answer_op_id as answerOpId`;
 
 function cardFromRow(row: CardRow): HubCard {
   return {
@@ -353,7 +374,8 @@ function cardFromRow(row: CardRow): HubCard {
     ...(row.answeredBy ? { answeredBy: row.answeredBy } : {}),
     ...(row.answeredAt ? { answeredAt: row.answeredAt } : {}),
     ...(row.outcomeJson ? { outcome: JSON.parse(row.outcomeJson) as Record<string, unknown> } : {}),
-    ...(row.settledAt ? { settledAt: row.settledAt } : {})
+    ...(row.settledAt ? { settledAt: row.settledAt } : {}),
+    ...(row.answerOpId ? { answerOpId: row.answerOpId } : {})
   };
 }
 

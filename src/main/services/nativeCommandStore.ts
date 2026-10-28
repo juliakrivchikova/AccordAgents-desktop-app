@@ -69,33 +69,6 @@ const COMMAND_COLUMNS = `command_id as commandId, event_id as eventId, conversat
 export class NativeCommandStore {
   constructor(private readonly database: Database) {}
 
-  /** Headers only: recover this device's recorded answers without loading the
-   * chat or scanning every message body into memory. Results from the owning
-   * machine also retire the corresponding local recovery candidate. */
-  async pendingApprovalActions(originId: string, afterSeq = 0): Promise<Array<{ eventId: string; originSeq: number }>> {
-    if (!originId || !Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error("Invalid approval recovery cursor.");
-    await this.database.init();
-    return this.database.query(`select e.event_id as eventId, e.origin_seq as originSeq from chat_events e
-      where e.origin_id = ${quote(originId)} and e.log_scope_id = 'chat:actions' and e.kind = 'permission.decided'
-        and e.origin_seq > ${afterSeq}
-        and (not exists(select 1 from chat_events r where r.event_id = 'machine-approval-result:' || e.event_id)
-          or exists(select 1 from native_approval_effects a where a.event_id = e.event_id
-            and not exists(select 1 from chat_events r where r.event_id = 'chat-action:receipt:approval:' || a.approval_id)))
-      order by e.origin_seq limit 100;`);
-  }
-
-  async pendingChoiceActions(originId: string, afterSeq = 0): Promise<Array<{ eventId: string; originSeq: number }>> {
-    if (!originId || !Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error("Invalid choice recovery cursor.");
-    await this.database.init();
-    return this.database.query(`select e.event_id as eventId, e.origin_seq as originSeq from chat_events e
-      where e.origin_id = ${quote(originId)} and e.log_scope_id = 'chat:actions' and e.kind = 'choice.answered'
-        and e.origin_seq > ${afterSeq}
-        and (not exists(select 1 from chat_events r where r.event_id = 'machine-choice-result:' || e.event_id)
-          or exists(select 1 from native_approval_effects a where a.event_id = e.event_id
-            and not exists(select 1 from chat_events r where r.event_id = 'chat-action:receipt:' || a.approval_id)))
-      order by e.origin_seq limit 100;`);
-  }
-
   async approvalEffect(conversationId: string, approvalId: string): Promise<NativeApprovalEffect | undefined> {
     await this.database.init();
     return (await this.database.query<NativeApprovalEffect>(`select conversation_id as conversationId,
@@ -125,7 +98,9 @@ export class NativeCommandStore {
   }
 
   /** Called only after the domain validated the answer, immediately before
-   * changing permissions, applying a tool or waking the native request. */
+   * changing permissions, applying a tool or waking the native request.
+   * `eventId` names the answer (a card's answer on the User's server): one
+   * answer claims a target once, and no other answer claims it after. */
   async claimApproval(effect: NativeApprovalEffect): Promise<boolean> {
     if (!Number.isSafeInteger(effect.pid) || effect.pid < 1 || Object.entries(effect).some(([key, value]) => key !== "pid" && (typeof value !== "string" || !value.trim()))) {
       throw new Error("A native approval effect requires stable identities.");
@@ -133,13 +108,14 @@ export class NativeCommandStore {
     await this.database.init();
     const rows = await this.database.query<{ eventId: string }>(durable(`insert into native_approval_effects(
       conversation_id, approval_id, participant_id, event_id, runtime_id, pid, started_at)
-      select conversation_id, ${quote(effect.approvalId)}, ${quote(effect.participantId)}, event_id,
-        ${quote(effect.runtimeId)}, ${effect.pid}, ${quote(effect.startedAt)} from chat_events
-      where event_id = ${quote(effect.eventId)} and conversation_id = ${quote(effect.conversationId)}
-        and kind in ('machine.approval.decision', 'permission.decided', 'choice.answered')
-        and not exists(select 1 from machine_power_state where stop_fence is not null)
-      on conflict(conversation_id, approval_id) do nothing returning event_id as eventId;`));
-    if (!rows.length && !await this.approvalEffect(effect.conversationId, effect.approvalId)) throw new Error("The signed decision is not stored.");
+      select ${quote(effect.conversationId)}, ${quote(effect.approvalId)}, ${quote(effect.participantId)}, ${quote(effect.eventId)},
+        ${quote(effect.runtimeId)}, ${effect.pid}, ${quote(effect.startedAt)}
+      where not exists(select 1 from machine_power_state where stop_fence is not null)
+      on conflict do nothing returning event_id as eventId;`));
+    if (!rows.length && !await this.approvalEffect(effect.conversationId, effect.approvalId)) {
+      // Neither taken nor held by another answer: this machine is stopping.
+      throw new Error("This machine is stopping; the answer waits for its next start.");
+    }
     return rows.length === 1;
   }
 

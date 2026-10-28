@@ -33,8 +33,7 @@ import {
 import { decodeMachineProgress, type MachineProgressFrame } from "../../shared/machineProgress";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
-import type { ChatAppToolApprovalRequest, Conversation, ReviewProgress } from "../../shared/types";
-import type { MachineLinkPort } from "./chat";
+import type { Conversation, ReviewProgress } from "../../shared/types";
 import type { DebugLogService } from "./debugLogs";
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
 import { openMachinePayload, sealChannelPayload, sealMachinePayload } from "./machineChannelSealing";
@@ -141,10 +140,6 @@ const HELLO_REQUEST_GRACE_MS = 750;
  *  last known hello is used instead. */
 const MACHINE_ACTIVITY_TIMEOUT_MS = 15_000;
 
-/** Cards of members on a machine travel through the User's server from step
- *  5 of "the server owns the chat"; until then nothing carries an answer. */
-const CARDS_NOT_CONNECTED = "Answers to cards of members on a machine travel through your server, which this version does not carry yet.";
-
 export interface MachineActivity {
   machineId: string;
   connected: boolean;
@@ -164,7 +159,7 @@ export function machineActivityIsBusy(activity: MachineActivity): boolean {
   return activity.activeRunIds.length > 0;
 }
 
-export class MachineLinkService implements MachineLinkPort {
+export class MachineLinkService {
   private readonly emitter = new EventEmitter();
   private readonly scriptsChangedListeners: Array<(machineId: string) => void> = [];
   private readonly progressListeners: Array<(progress: ReviewProgress) => void> = [];
@@ -223,24 +218,6 @@ export class MachineLinkService implements MachineLinkPort {
   /** Lets the link check that a picture a machine asks for is in a chat. */
   setConversationLoader(loader: (conversationId: string) => Promise<Conversation | undefined>): void {
     this.conversationLoader = loader;
-  }
-
-  /** Cards of members on a machine move to the User's server (step 5). */
-  async respondToMachineApproval(_request: {
-    machineId: string;
-    conversationId: string;
-    approvalId: string;
-    approve: boolean;
-    scope?: "once" | "chat";
-    draftOverride?: ChatAppToolApprovalRequest;
-    codexDecisionId?: string;
-    onQueued?: (decisionId: string, machineName: string) => Promise<void>;
-  }): Promise<void> {
-    throw new Error(CARDS_NOT_CONNECTED);
-  }
-
-  async respondToMachineChoice(_request: import("../../shared/types").RespondToChatChoiceRequest & { machineId: string }): Promise<void> {
-    throw new Error(CARDS_NOT_CONNECTED);
   }
 
   /** Reads the enrolled machines, so the server's roster names them before

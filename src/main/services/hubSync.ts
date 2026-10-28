@@ -72,9 +72,10 @@ const RETRY_MAX_MS = 5 * 60_000;
  *  events and chat actions; never what a desktop wrote for the old phone
  *  mailbox. A desktop narrows `device:` to the machines that read the hub. */
 export const HUB_SCOPE_PREFIXES = ["chat-changes:", "device:", CHAT_ACTION_LOG_SCOPE] as const;
-/** What a desktop sends besides its machines' channels: chat changes, chat
- *  actions, and for the phone the cards and the live progress of its own
- *  members. */
+/** What a desktop sends besides its machines' channels: chat changes and
+ *  chat actions, and what is left of the approval cards it published for the
+ *  phone before cards became the User's server's own (agreement Д9; nothing
+ *  writes them now, and they are pruned like the rest). */
 /** How often an unknown author's enrollment is asked for, and how much of
  *  its enrollment chain (a phone paired again has a few). */
 const ENROLLMENT_ASK_EVERY_MS = 60_000;

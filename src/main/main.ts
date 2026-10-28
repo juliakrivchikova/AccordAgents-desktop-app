@@ -103,7 +103,6 @@ import { HUB_ID_KEY, HUB_SHARED_SCOPE_PREFIXES, HubSync, PULLED_KEY, PUSHED_KEY,
 import { ServerChatLink } from "./services/serverChatLink";
 import { deviceIdForPublicKey, hubCertificateCrypto, signHubText } from "./services/hubAuth";
 import { HubPhonePublisher } from "./services/hubPhonePublisher";
-import { isDeviceEventBlobReference } from "../shared/deviceEventBlobs";
 import { phoneTurnsSince } from "./services/phoneTurnClaims";
 import {
   HUB_PHONE_PROTOCOL_VERSION,
@@ -120,7 +119,6 @@ import { ScriptSecretStore, ScriptStore } from "./services/scriptStore";
 import { hostPlatform } from "./platform";
 import {
   SCRIPT_DESKTOP_HOST_ID,
-  phoneAnswerApprovesScriptCode,
   type DeleteScriptSecretRequest,
   type GetScriptRevisionRequest,
   type ScriptIdRequest,
@@ -138,12 +136,10 @@ import type { HubReadersResponse } from "../shared/hubProtocol";
 import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
 import { removeRelayEraRecords } from "./services/relayRemoval";
 import { MachineInactivityQuestions } from "./services/machineInactivityQuestions";
-import { ChatActionApplier } from "./services/chatActionApplier";
-import { ChatActionEmitter, permissionDecisionAction, choiceDecisionAction, chatActionEventId } from "./services/chatActionEmitter";
-import { MachineApprovalExecutor, machineApprovalResultId } from "./services/machineApprovalExecutor";
+import { MachineApprovalExecutor } from "./services/machineApprovalExecutor";
 import { readPosixProcessTableAsync } from "./services/processTermination";
-import { createChatActionEffects } from "./services/chatActionEffects";
-import { MachineChoiceExecutor, machineChoiceResultId } from "./services/chatActionNativeClaims";
+import { MachineChoiceExecutor, MachineMentionExecutor } from "./services/chatActionNativeClaims";
+import type { ChatCardAppliers } from "./services/chatCards";
 import type { AnswerMachineInactivityRequest, CreateMachineRequest, CreateMachineResult, MachineEnrollmentRequest, MachineInactivityQuestion, MachineListResult, MachineTrustedDevicesResult, RemoveMachineRequest, SaveTrustedDeviceRequest } from "../shared/machineLink";
 import type {
   MachineInstallRecord,
@@ -158,8 +154,6 @@ import type {
 } from "../shared/machineInstall";
 import type { MachineRuntimePayloadLocation } from "./services/machineInstaller";
 import { type CreateMobilePairingResult, type MobilePairingPackage } from "../shared/mobilePairing";
-import type { ChatEventEnvelope } from "../shared/chatEvents";
-import { CHAT_ACTION_LOG_SCOPE } from "../shared/chatActionEvents";
 import { CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
@@ -329,7 +323,7 @@ const chatService = new ChatService(storageService, settingsService, cliAgentRun
   // newest window — because on a chat with thousands of messages the full
   // snapshot is tens of megabytes per update.
   sendToMainWindow("conversations:updated", update);
-  // The phone reads the cards of this desktop's own members from the server.
+  // Which members live on machines (their live progress is theirs to publish).
   hubPhonePublisher.noteConversation(conversation);
 }, userSkillsService, (progress) => emitReviewProgress(progress), chatEventMirrorService);
 // Every progress path reaches the phone (through the server), not only the
@@ -429,8 +423,6 @@ async function restartServerChatLink(): Promise<void> {
 }
 
 const hubPhonePublisher: HubPhonePublisher = new HubPhonePublisher({
-  storage: storageService,
-  eventLog: chatEventLogService,
   client: () => hubOwnerConfirmed ? hubClient : undefined,
   hasPhones: async () => (await hubPhones()).length > 0,
   machineMembersOf: async (conversationId) => {
@@ -510,7 +502,6 @@ async function admitEnrolledPhones(): Promise<number> {
     hubPhonePublisher.phonesChanged();
     hubPhonePublisher.scheduleCatalog(0);
     hubPhonePublisher.publishWakeKeys();
-    hubPhonePublisher.flushApprovals();
   }
   return admittedCount;
 }
@@ -538,29 +529,6 @@ function scheduleEnrolledPhones(delayMs: number): void {
     })();
   }, Math.max(0, delayMs));
   hubPhoneRosterTimer.unref?.();
-}
-
-/**
- * A card answer, an approval or a Stop the User gave on her phone, read from
- * the server: recorded here, then acted on by whichever device holds what it
- * answers (for this desktop's own members, this desktop). One that names what
- * has not arrived here yet is held and offered again.
- */
-async function applyPhoneChatAction(event: ChatEventEnvelope, fetchBody: () => Promise<void>): Promise<"delivered" | "waiting" | "refused"> {
-  // A body too large to travel inline is fetched for an event taken here.
-  if (isDeviceEventBlobReference(event.payload)) await fetchBody();
-  const payload = await storageService.deviceEventBlobs().hydrate(event.payload);
-  if (await phoneApprovesScriptCode(event.conversationId, event.kind, payload)) {
-    void debugLogService.write("mobile.decision.refused", { conversationId: event.conversationId, kind: event.kind, reason: "script-code-on-phone" });
-    return "refused";
-  }
-  const [stored] = await storageService.appendChatEvents([event]);
-  if (stored?.status === "conflict") return "refused";
-  const outcome = await chatActionApplier.apply(event, payload);
-  void debugLogService.write("mobile.decision.applied", {
-    conversationId: event.conversationId, kind: event.kind, targetKey: outcome.targetKey, status: outcome.status, detail: outcome.detail ?? "", via: "hub"
-  });
-  return outcome.status === "deferred" ? "waiting" : "delivered";
 }
 
 /**
@@ -620,11 +588,6 @@ function publishHubRoster(): void {
     hubSync?.nudgeHeld();
     hubPhonePublisher.scheduleCatalog();
     hubPhonePublisher.publishWakeKeys();
-    // Cards that waited while there was no link (a restart, another server).
-    void storageService.recentChatsWithPendingApprovals(100).then((chats) => {
-      for (const chat of chats) hubPhonePublisher.noteConversation(chat);
-      hubPhonePublisher.flushApprovals();
-    }).catch(() => hubPhonePublisher.flushApprovals());
   })().catch((error: unknown) => {
     // A machine set up while the hub was away would be refused by it: the
     // list goes up again until the hub has it.
@@ -1371,64 +1334,7 @@ app.on("before-quit", () => {
 
 const dispatchArtifactTool = createArtifactToolDispatcher(artifactService);
 wireArtifactToolHandler(appMcpService, chatService, dispatchArtifactTool);
-// Applies chat actions that arrive from a machine. Emitting an action is half
-// a user scenario; without this a signature made on a machine would be stored
-// and never become visible here.
-const localChatActionEffects = createChatActionEffects({
-  chat: chatService as unknown as Parameters<typeof createChatActionEffects>[0]["chat"],
-  emitter: { beginExecution: (target) => chatActionEmitter.beginExecution(target), recordExecution: (request) => chatActionEmitter.recordExecution(request) },
-  storage: { getConversation: (id) => storageService.getConversation(id) },
-  applyApproval: async (event, payload) => (await localApprovalExecutor()).applyAction(event, payload),
-  applyChoice: async (event, payload) => (await localChoiceExecutor()).applyAction(event, payload)
-});
-const chatActionApplier = new ChatActionApplier({
-  effects: localChatActionEffects,
-  logger: (event, payload) => {
-    void debugLogService.write(event, payload);
-  }
-});
-/** Every chat action is written locally, for this desktop's own projection.
- *  Answers to cards of members on machines travel through the User's server
- *  from step 5 of "the server owns the chat"; nothing carries them to a
- *  machine before that. */
-async function publishChatAction(action: { conversationId: string; kind: string; payload: { operationId: string } }): Promise<void> {
-  await chatEventLogService.appendLocalEvent({
-    conversationId: action.conversationId,
-    kind: action.kind,
-    payload: action.payload as unknown,
-    eventId: `chat-action:${action.payload.operationId}`,
-    logScopeId: CHAT_ACTION_LOG_SCOPE
-  });
-}
 
-/** The phone cannot show a script's code yet, so it may decline a script
- *  that installs code but never approve one; the desktop card shows the code
- *  (and the phone shows that card as one to answer on the desktop). Read from
- *  the chat's record without its messages. */
-async function phoneApprovesScriptCode(conversationId: string, kind: string, payload: unknown): Promise<boolean> {
-  if (kind !== "permission.decided") return false;
-  const opened = await storageService.openConversation(conversationId, 1);
-  const approvals = (opened?.conversation.metadata?.pendingAppToolApprovals ?? []) as import("../shared/types").ChatAppToolApproval[];
-  return phoneAnswerApprovesScriptCode(kind, payload, approvals);
-}
-
-async function chatActionEventExists(eventId: string): Promise<boolean> {
-  return Boolean(await storageService.getChatEvent(eventId));
-}
-
-/** Permission answers, choices, participant requests and Stop become durable
- *  events here, before the provider is told, and the effect that follows is
- *  recorded once per target. */
-const chatActionEmitter = new ChatActionEmitter({
-  executedBy: app.getName(),
-  publish: (action) => publishChatAction(action),
-  hasEvent: (eventId) => chatActionEventExists(eventId),
-  logger: (event, payload) => {
-    void debugLogService.write(event, payload);
-  }
-});
-
-let approvalExecutor: Promise<MachineApprovalExecutor> | undefined;
 let runtimeIdentity: Promise<{ runtimeId: string; pid: number; startedAt: string }> | undefined;
 
 /** This process, named the way a durable claim names its owner: one identity
@@ -1443,93 +1349,32 @@ function localRuntimeIdentity(): Promise<{ runtimeId: string; pid: number; start
   return pending;
 }
 
-function localApprovalExecutor(): Promise<MachineApprovalExecutor> {
-  const pending = approvalExecutor ??= (async () => {
+/** What applies the User's answers to this desktop's members' cards, from
+ *  the User's server (agreement Д9): each answer once, whichever device gave
+ *  it. A script that installs code is approved only by this desktop's own
+ *  answer (its card shows the code); a phone's approval of one is refused. */
+let cardAppliers: Promise<ChatCardAppliers> | undefined;
+function localCardAppliers(): Promise<ChatCardAppliers> {
+  const pending = cardAppliers ??= (async () => {
     const device = await chatEventLogService.getOrCreateDeviceIdentity();
-    const owner = await localRuntimeIdentity();
-    return new MachineApprovalExecutor({
-      storage: storageService, deviceId: device.originId, chat: chatService,
-      progress: progress => emitReviewProgress(progress),
-      getConversation: id => storageService.getConversation(id), runtimeIdentity: async () => owner,
-      nativeProcessDbPath: path.join(app.getPath("userData"), "native-processes.sqlite3"),
-      // This desktop's card shows a script's code: only its own answers (not
-      // a machine's, not a phone's relayed through it) approve code here.
-      codeApprover: event => event.originId === device.originId,
-      publish: async body => {
-        await chatEventLogService.appendLocalEvent({ conversationId: body.conversationId,
-          logScopeId: `approval:${body.approvalId}`, kind: body.type, eventId: machineApprovalResultId(body.decisionId!), payload: body });
-      }
-    });
+    const nativeProcessDbPath = path.join(app.getPath("userData"), "native-processes.sqlite3");
+    return {
+      approval: new MachineApprovalExecutor({
+        storage: storageService, chat: chatService,
+        progress: (progress) => emitReviewProgress(progress),
+        runtimeIdentity: () => localRuntimeIdentity(), nativeProcessDbPath,
+        codeApprover: () => device.originId
+      }),
+      choice: new MachineChoiceExecutor({ storage: storageService, chat: chatService,
+        progress: (progress) => emitReviewProgress(progress), runtimeIdentity: () => localRuntimeIdentity(), nativeProcessDbPath }),
+      mention: new MachineMentionExecutor({ storage: storageService, chat: chatService,
+        progress: (progress) => emitReviewProgress(progress), runtimeIdentity: () => localRuntimeIdentity() })
+    };
   })();
-  void pending.catch(() => { if (approvalExecutor === pending) approvalExecutor = undefined; });
+  void pending.catch(() => { if (cardAppliers === pending) cardAppliers = undefined; });
   return pending;
 }
-
-let choiceExecutor: Promise<MachineChoiceExecutor> | undefined;
-function localChoiceExecutor(): Promise<MachineChoiceExecutor> {
-  const pending = choiceExecutor ??= (async () => {
-    const device = await chatEventLogService.getOrCreateDeviceIdentity();
-    return new MachineChoiceExecutor({ storage: storageService, deviceId: device.originId, chat: chatService,
-      progress: progress => emitReviewProgress(progress), runtimeIdentity: () => localRuntimeIdentity(),
-      nativeProcessDbPath: path.join(app.getPath("userData"), "native-processes.sqlite3"),
-      publish: async body => {
-        const request = { conversationId: body.conversationId, kind: body.type,
-          eventId: machineChoiceResultId(body.decisionId), payload: body };
-        await chatEventLogService.appendLocalEvent({ ...request, logScopeId: `choice:${body.choiceId}` });
-      }
-    });
-  })();
-  void pending.catch(() => { if (choiceExecutor === pending) choiceExecutor = undefined; });
-  return pending;
-}
-
-async function recoverLocalChoiceActions(): Promise<void> {
-  const device = await chatEventLogService.getOrCreateDeviceIdentity();
-  let cursor = 0;
-  for (;;) {
-    const rows = await storageService.nativeCommands().pendingChoiceActions(device.originId, cursor);
-    if (!rows.length) return;
-    for (const row of rows) {
-      cursor = row.originSeq;
-      try {
-        const event = await storageService.getChatEvent(row.eventId);
-        if (!event) continue;
-        const payload = await storageService.deviceEventBlobs().hydrate(event.payload) as import("../shared/chatActionEvents").ChatActionPayload;
-        const claim = await storageService.nativeCommands().targetEffect(event.conversationId, payload.targetKey);
-        if (claim?.eventId === event.eventId && localChatActionEffects.applyChoice) await localChatActionEffects.applyChoice(event, payload);
-        else await chatActionApplier.apply(event, payload);
-      } catch (error) {
-        await debugLogService.write("chat.choice.recovery-pending", { eventId: row.eventId, message: error instanceof Error ? error.message : String(error) });
-      }
-    }
-  }
-}
-
-async function recoverLocalApprovalActions(): Promise<void> {
-  const device = await chatEventLogService.getOrCreateDeviceIdentity();
-  let cursor = 0;
-  for (;;) {
-    const rows = await storageService.nativeCommands().pendingApprovalActions(device.originId, cursor);
-    if (!rows.length) return;
-    for (const row of rows) {
-      cursor = row.originSeq;
-      try {
-        const event = await storageService.getChatEvent(row.eventId);
-        if (!event) continue;
-        const payload = await storageService.deviceEventBlobs().hydrate(event.payload) as import("../shared/chatActionEvents").ChatActionPayload;
-        const claim = payload.targetKey?.startsWith("approval:")
-          ? await storageService.nativeCommands().approvalEffect(event.conversationId, payload.targetKey.slice(9)) : undefined;
-        if (claim?.eventId === event.eventId && localChatActionEffects.applyApproval) {
-          // A retained fact belongs to its original executor even if the
-          // participant has since moved. The claim prevents another effect.
-          await localChatActionEffects.applyApproval(event, payload);
-        } else await chatActionApplier.apply(event, payload);
-      } catch (error) {
-        await debugLogService.write("chat.approval.recovery-pending", { eventId: row.eventId, message: error instanceof Error ? error.message : String(error) });
-      }
-    }
-  }
-}
+chatService.setCardAppliers(() => localCardAppliers());
 
 const activeReviews = new Map<string, AbortController>();
 const activeChatCreations = new Set<AbortController>();
@@ -2411,17 +2256,15 @@ function registerIpc(): void {
   ipcMain.handle("chat:toggle-reaction", async (_event, request: ToggleChatReactionRequest) => {
     return chatService.toggleReaction(request);
   });
+  // Answers to cards a member waits on go to the User's server (agreement
+  // Д9): the device the member runs on applies them, once, whichever device
+  // answered first; this returns once the server took the answer.
   ipcMain.handle("chat:respond-to-mentions", async (_event, request: RespondToChatMentionsRequest) => {
     const runId = request.runId ?? randomUUID();
     const controller = new AbortController();
     activeReviews.set(runId, controller);
-
     try {
-      return await chatService.respondToMentions(
-        { ...request, runId },
-        controller.signal,
-        (progress) => emitReviewProgress(progress)
-      );
+      return await chatService.answerMentionsCard({ ...request, runId }, controller.signal, (progress) => emitReviewProgress(progress));
     } catch (error) {
       const phase = controller.signal.aborted ? "cancelled" : "error";
       sendToMainWindow("conversations:review-progress", {
@@ -2436,51 +2279,11 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle("chat:respond-to-choice", async (_event, request: RespondToChatChoiceRequest) => {
-    const conversation = await storageService.getConversation(request.conversationId);
-    const source = conversation?.messages.find(message => message.id === request.sourceMessageId);
-    const participants = conversation?.metadata.participants as import("../shared/types").ChatParticipant[] | undefined;
-    const participant = participants?.find(item => item.id === source?.participantId);
-    if (participant?.homeMachineId) {
-      if (!machineLinkService) throw new Error("The choice's machine link is not available.");
-      await machineLinkService.respondToMachineChoice({ ...request, machineId: participant.homeMachineId });
-    } else {
-      const action = choiceDecisionAction(request);
-      await publishChatAction(action);
-      const event = await storageService.getChatEvent(chatActionEventId(action.payload.operationId));
-      if (!event) throw new Error("The choice decision could not be stored.");
-      await chatActionApplier.apply(event, action.payload);
-      const receipt = await storageService.getChatEvent(machineChoiceResultId(event.eventId));
-      const result = receipt ? await storageService.deviceEventBlobs().hydrate(receipt.payload) as import("../shared/machineLink").MachineChoiceResultBody : undefined;
-      if (!result?.ok) throw new Error(result?.error ?? "The choice's application is not confirmed yet.");
-    }
+    await chatService.answerChoiceCard(request);
     return { conversation: await storageService.getConversation(request.conversationId), warnings: [] };
   });
   ipcMain.handle("chat:respond-to-app-tool-approval", async (_event, request: RespondToChatAppToolApprovalRequest) => {
-    if (!await chatService.ownsAppToolApproval(request.conversationId, request.approvalId)) {
-      const conversation = await storageService.getConversation(request.conversationId);
-      const approvals = conversation?.metadata?.pendingAppToolApprovals as import("../shared/types").ChatAppToolApproval[] | undefined;
-      if (!approvals?.find(item => item.id === request.approvalId)?.homeMachineId) {
-        throw new Error("The approval's owning participant is not available here.");
-      }
-      return chatService.respondToAppToolApproval(request, progress => emitReviewProgress(progress));
-    }
-    // The answer becomes a durable event before the provider is told, so a
-    // crash between the two leaves the decision recorded rather than lost.
-    const action = permissionDecisionAction({
-      conversationId: request.conversationId,
-      approvalId: request.approvalId,
-      approve: request.approve,
-      scope: request.scope,
-      decisionId: request.codexDecisionId,
-      draftOverride: request.draftOverride
-    });
-    await publishChatAction(action);
-    const event = await storageService.getChatEvent(chatActionEventId(action.payload.operationId));
-    if (!event) throw new Error("The approval decision could not be stored.");
-    await chatActionApplier.apply(event, action.payload);
-    const receipt = await storageService.getChatEvent(machineApprovalResultId(event.eventId));
-    const result = receipt ? await storageService.deviceEventBlobs().hydrate(receipt.payload) as import("../shared/machineLink").MachineApprovalResultBody : undefined;
-    if (!result?.ok) throw new Error(result?.error ?? "The approval's application is not confirmed yet.");
+    await chatService.answerAppToolApprovalCard(request);
     return storageService.getConversation(request.conversationId);
   });
   ipcMain.handle("machines:list", async (): Promise<MachineListResult> => machineListResult());
@@ -2764,13 +2567,8 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle("conversations:cancel-review", (_event, runId: string) => {
-    // Stop is unconditional and idempotent: the same run stopped twice is one
-    // operation. The event is what lets the machine that owns the run see it.
-    const stopConversationId = chatService.conversationIdForRun(runId);
-    if (stopConversationId) {
-      void chatActionEmitter.stopRequested({ conversationId: stopConversationId, runId, by: "user" })
-        .catch(() => undefined);
-    }
+    // Stop is unconditional and idempotent. A member running on another
+    // device is stopped through the User's server (its turn there).
     const controller = activeReviews.get(runId);
     if (controller) {
       controller.abort();
@@ -3068,7 +2866,6 @@ void app.whenReady().then(async () => {
     // posts it to the server itself for the phone.
     machineLinkService.onProgress((progress) => sendToMainWindow("conversations:review-progress", progress));
     machineLinkService.setConversationLoader((conversationId) => storageService.getConversation(conversationId));
-    chatService.setMachineLink(machineLinkService);
     // Machines update together with the desktop: a machine whose runtime is
     // older than this desktop is upgraded as soon as it is connected and idle.
     const link = machineLinkService;
@@ -3194,13 +2991,6 @@ void app.whenReady().then(async () => {
     markMachineLinkReady();
     startHubReading();
   }
-  // After the machines are known: what these save or re-emit is addressed to them.
-  void recoverLocalChoiceActions().catch(error => {
-    void debugLogService.write("chat.choice.recovery-pending", { message: error instanceof Error ? error.message : String(error) });
-  });
-  void recoverLocalApprovalActions().catch(error => {
-    void debugLogService.write("chat.approval.recovery-error", { message: error instanceof Error ? error.message : String(error) });
-  });
   // A document's chat note this computer wrote before documents moved to the
   // server and never got into the chat goes in now (later notes come with the
   // server's feed).

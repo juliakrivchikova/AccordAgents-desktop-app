@@ -155,10 +155,10 @@ export type HubOpBody =
    *  the chat's fields and a page of its messages, oldest pages first; the
    *  last page names the order of every message the computer held. */
   | { kind: "chat.import"; conversation?: HubConversationFields & { updatedAt?: string }; messages: ChatMessage[]; order?: string[] }
-  /** A card a member waits on (a permission, a choice, a roster change),
-   *  raised by the device the member runs on; raised again while pending
-   *  replaces what it shows. */
-  | { kind: "card.raise"; cardId: string; cardKind: HubCardKind; participantId?: string; messageId?: string; card: Record<string, unknown> }
+  /** A card a member waits on (a permission, a choice, its mentions, a
+   *  roster change), raised by the device the member runs on and naming
+   *  that member; raised again while pending replaces what it shows. */
+  | { kind: "card.raise"; cardId: string; cardKind: HubCardKind; participantId: string; messageId?: string; card: Record<string, unknown> }
   /** The User's answer, from any device (Д2); the first answer is the one. */
   | { kind: "card.answer"; cardId: string; answer: Record<string, unknown> }
   /** What the member's device did with the answer (or that the card is gone). */
@@ -195,6 +195,8 @@ export interface HubCard {
   answer?: Record<string, unknown>;
   answeredBy?: string;
   answeredAt?: string;
+  /** The operation the answer came in (its device names a refusal by it). */
+  answerOpId?: string;
   outcome?: Record<string, unknown>;
   settledAt?: string;
 }
@@ -617,9 +619,14 @@ export function hubOpShapeProblem(value: unknown): string | undefined {
         value.participantId.length > 0 && value.participantId.length <= 256 ? undefined : "Invalid turn.";
     case "card.raise":
       if (!isHubOpId(value.cardId) || !["permission", "choice", "mention", "roster"].includes(value.cardKind as string) || !isRecord(value.card) ||
-          (value.participantId !== undefined && !isText(value.participantId, 256)) || (value.messageId !== undefined && !isHubOpId(value.messageId))) {
+          (value.messageId !== undefined && !isHubOpId(value.messageId))) {
         return "Invalid card.";
       }
+      // A card always names the member it waits on (only that member's
+      // device raises it), and a member's choice or mentions the message
+      // that asked them.
+      if (typeof value.participantId !== "string" || !value.participantId || !isText(value.participantId, 256)) return "A card names its member.";
+      if ((value.cardKind === "choice" || value.cardKind === "mention") && value.messageId === undefined) return "A card names the message that asked it.";
       return undefined;
     case "card.answer":
       return isHubOpId(value.cardId) && isRecord(value.answer) ? undefined : "Invalid answer.";

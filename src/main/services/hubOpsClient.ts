@@ -1,5 +1,5 @@
 import { HubHttpError, type HubClient } from "./hubClient";
-import { HUB_FEED_WAIT_MAX_MS, HUB_OPS_MAX_PER_REQUEST, type HubArtifactAnswer, type HubClaimOutcome, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
+import { HUB_FEED_WAIT_MAX_MS, HUB_OPS_MAX_PER_REQUEST, type HubArtifactAnswer, type HubCard, type HubClaimOutcome, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
 
 /**
  * A device's side of the chats the User's server owns (agreements Д1, Д3):
@@ -53,6 +53,8 @@ export interface HubClientOpRow {
   seq?: number;
   claim?: HubClaimOutcome;
   turn?: HubTurn;
+  /** A card operation: the card as the server holds it after it. */
+  card?: HubCard;
   /** The server's answer to a document action. */
   artifact?: HubArtifactAnswer;
   createdAt: string;
@@ -153,7 +155,7 @@ export class HubClientOpsStore {
     return rows[0] ? fromRow(rows[0]) : undefined;
   }
 
-  async accept(opId: string, seq: number, at: string, extra: { claim?: HubClaimOutcome; turn?: HubTurn; artifact?: HubArtifactAnswer } = {}): Promise<void> {
+  async accept(opId: string, seq: number, at: string, extra: { claim?: HubClaimOutcome; turn?: HubTurn; artifact?: HubArtifactAnswer; card?: HubCard } = {}): Promise<void> {
     await this.init();
     await this.database.execute(`update hub_client_ops set status = 'accepted', seq = ${Math.max(0, Math.floor(seq))}, last_error = null,
       result_json = ${Object.keys(extra).length ? quote(JSON.stringify(extra)) : "null"}, updated_at = ${quote(at)}
@@ -252,13 +254,13 @@ function fromRow(row: RawRow): HubClientOpRow {
     attempts: Number(row.attempts) || 0,
     ...(row.lastError ? { lastError: row.lastError } : {}),
     ...(row.seq !== null && row.seq !== undefined ? { seq: Number(row.seq) } : {}),
-    ...(row.resultJson ? JSON.parse(row.resultJson) as { claim?: HubClaimOutcome; turn?: HubTurn; artifact?: HubArtifactAnswer } : {}),
+    ...(row.resultJson ? JSON.parse(row.resultJson) as { claim?: HubClaimOutcome; turn?: HubTurn; artifact?: HubArtifactAnswer; card?: HubCard } : {}),
     createdAt: row.createdAt
   };
 }
 
 export type HubOpOutcome =
-  | { status: "accepted"; seq: number; claim?: HubClaimOutcome; turn?: HubTurn; artifact?: HubArtifactAnswer }
+  | { status: "accepted"; seq: number; claim?: HubClaimOutcome; turn?: HubTurn; artifact?: HubArtifactAnswer; card?: HubCard }
   | { status: "rejected"; reason: string; artifact?: HubArtifactAnswer };
 
 /** Where an operation stands when its writer stops waiting for it. */
@@ -391,7 +393,7 @@ export class HubOpsClient {
       void this.options.store.get(opId).then((row) => {
         if (row?.status === "accepted") {
           this.answer(opId, { status: "accepted", seq: row.seq ?? 0, ...(row.claim ? { claim: row.claim } : {}), ...(row.turn ? { turn: row.turn } : {}),
-            ...(row.artifact ? { artifact: row.artifact } : {}) });
+            ...(row.artifact ? { artifact: row.artifact } : {}), ...(row.card ? { card: row.card } : {}) });
         }
         else if (row?.status === "rejected") this.answer(opId, { status: "rejected", reason: row.lastError ?? "Rejected.", ...(row.artifact ? { artifact: row.artifact } : {}) });
       }).catch(() => undefined);
@@ -463,12 +465,13 @@ export class HubOpsClient {
   }
 
   /** A chat moved to the server whole: what was queued for its content is in
-   *  that move, so it is settled as accepted and not sent again (turns still
-   *  go). Whoever waits for those operations hears so. */
+   *  that move, so it is settled as accepted and not sent again (turns and
+   *  cards still go: the move carries neither). Whoever waits for those
+   *  operations hears so. */
   async settleMoved(conversationId: string): Promise<void> {
     const at = new Date(this.now()).toISOString();
     for (const row of await this.options.store.forConversation(conversationId)) {
-      if (row.kind.startsWith("turn.")) continue;
+      if (row.kind.startsWith("turn.") || row.kind.startsWith("card.")) continue;
       await this.options.store.accept(row.opId, 0, at);
       this.answer(row.opId, { status: "accepted", seq: 0 });
     }
@@ -554,7 +557,7 @@ export class HubOpsClient {
             this.answer(row.opId, outcome);
           } else {
             const extra = { ...(result.claim ? { claim: result.claim } : {}), ...(result.turn ? { turn: result.turn } : {}),
-              ...(result.artifact ? { artifact: result.artifact } : {}) };
+              ...(result.artifact ? { artifact: result.artifact } : {}), ...(result.card ? { card: result.card } : {}) };
             await this.options.store.accept(row.opId, result.seq, at, extra);
             const outcome: HubOpOutcome = { status: "accepted", seq: result.seq, ...extra };
             this.options.onAnswered?.(row, outcome);
@@ -651,7 +654,7 @@ function outcomeOfRow(row: HubClientOpRow): HubOpOutcome {
   return row.status === "rejected"
     ? { status: "rejected", reason: row.lastError ?? "Rejected.", ...(row.artifact ? { artifact: row.artifact } : {}) }
     : { status: "accepted", seq: row.seq ?? 0, ...(row.claim ? { claim: row.claim } : {}), ...(row.turn ? { turn: row.turn } : {}),
-      ...(row.artifact ? { artifact: row.artifact } : {}) };
+      ...(row.artifact ? { artifact: row.artifact } : {}), ...(row.card ? { card: row.card } : {}) };
 }
 
 function quote(value: string): string {

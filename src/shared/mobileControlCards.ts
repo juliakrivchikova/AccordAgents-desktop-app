@@ -232,11 +232,20 @@ export const HUB_CARD_ANSWERED_WAITING = "Waiting for it to be applied.";
  */
 export function controlCardFromHubCard(card: HubCard, participantLabel?: (participantId: string) => string | undefined): MobileControlCard | undefined {
   if (card.state === "settled") return undefined;
-  const raised = card.card as { approval?: ChatAppToolApproval; choice?: ChatPendingChoice; sourceMessageId?: unknown };
+  const raised = card.card as { approval?: ChatAppToolApproval; choice?: ChatPendingChoice; sourceMessageId?: unknown; refusals?: unknown };
   if ((card.cardKind === "permission" || card.cardKind === "roster") && raised.approval && typeof raised.approval === "object") {
     const pending = controlCardFromApproval(card.conversationId, { ...raised.approval, status: "pending" });
     const base: MobileControlCard = { ...pending, id: card.cardId, createdAt: raised.approval.createdAt || card.raisedAt };
-    if (card.state === "pending") return base;
+    if (card.state === "pending") {
+      // Answers the member's device could not apply, asked again (a phone's
+      // approval of a script's code, say): the phone that sent one says why.
+      const refused = Array.isArray(raised.refusals)
+        ? raised.refusals.filter((item): item is { operationId: string; reason: string } =>
+          Boolean(item) && typeof (item as { operationId?: unknown }).operationId === "string" && Boolean((item as { operationId: string }).operationId) &&
+          typeof (item as { reason?: unknown }).reason === "string")
+        : [];
+      return refused.length ? { ...base, refusedAnswers: refused.map((item) => ({ operationId: item.operationId, reason: item.reason })) } : base;
+    }
     const approve = card.answer?.approve === true;
     // An approved roster change waits as the desktop's card waits ("Removal
     // approved … then @x leaves this chat", "Addition approved").

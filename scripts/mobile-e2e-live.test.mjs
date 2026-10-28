@@ -32,8 +32,6 @@ test("live end-to-end: the in-progress row holds, streams, and becomes the answe
   const client = new HubClient({ url: hub.base, identity: async () => hub.owner, storage: hub.storage });
   const logged = [];
   const publisher = new HubPhonePublisher({
-    storage: hub.storage,
-    eventLog: { appendLocalEvent: async () => undefined },
     client: () => client,
     hasPhones: async () => (await hub.phones()).length > 0,
     buildCatalog: async () => ({ roles: {}, prompts: [], skills: [] }),

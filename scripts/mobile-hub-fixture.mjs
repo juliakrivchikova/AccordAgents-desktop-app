@@ -304,16 +304,17 @@ export async function startMobileHub(options = {}) {
     },
     /** A card a member waits on, raised as its device raises it (Д9): a
      *  permission or roster approval, or a member's choice with the message
-     *  that asked it. Raised again while it waits, it shows the new one. */
+     *  that asked it, naming the member it waits on. Raised again while it
+     *  waits, it shows the new one. */
     async raiseApproval(conversationId, approval, extra = {}) {
       const roster = approval.toolName === "app_participants_request_change";
       return writeOps([{ opId: nextOpId(), kind: "card.raise", conversationId, cardId: approval.id, cardKind: roster ? "roster" : "permission",
-        ...(extra.participantId ? { participantId: extra.participantId } : {}), card: { approval } }]);
+        participantId: extra.participantId ?? approval.requesterParticipantId, card: { approval } }]);
     },
     async raiseChoice(conversationId, message, extra = {}) {
       const choice = message.metadata.pendingChoice;
       return writeOps([{ opId: nextOpId(), kind: "card.raise", conversationId, cardId: choice.id, cardKind: "choice", messageId: message.id,
-        ...(extra.participantId ? { participantId: extra.participantId } : {}), card: { choice, sourceMessageId: message.id } }]);
+        participantId: extra.participantId ?? message.participantId, card: { choice, sourceMessageId: message.id } }]);
     },
     /** The card's member device did what the answer asked (or the card went). */
     async settleCard(conversationId, cardId, outcome = {}) {

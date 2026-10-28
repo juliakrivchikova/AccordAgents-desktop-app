@@ -727,9 +727,10 @@ export class DeviceEventStorage {
 
 /** Own events that are looked up by their id later, as proof that something
  *  was already sent or done (a turn's command while its run is pending, a
- *  stop, an approval's or a choice's result): they are never forgotten here,
- *  or a late repeat would be taken for a first time. */
-const OWN_EVENTS_KEPT_KINDS = ["machine.turn.request", "machine.turn.cancel", "machine.approval.result", "machine.choice.result"] as const;
+ *  stop): they are never forgotten here, or a late repeat would be taken for
+ *  a first time. (An answer to a card is the User's server's: its device
+ *  settles the card there, and keeps no event of it.) */
+const OWN_EVENTS_KEPT_KINDS = ["machine.turn.request", "machine.turn.cancel"] as const;
 
 function quote(value: string): string {
   // The sqlite3 shell reads statements line by line and a NUL ends a line:

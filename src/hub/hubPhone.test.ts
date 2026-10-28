@@ -177,9 +177,14 @@ test("a machine's card on the server is the phone's card: it rings once, an answ
   await client.postJson("/v1/phone/seen", { through: notices.head });
   assert.deepEqual((await client.getJson<{ notices: unknown[] }>("/v1/phone/notices")).notices, [], "seen is not shown again");
   // Answered on the phone: the server holds the answer, the card waits for the machine.
+  const waiting = (h.waker as unknown as { waiting: Map<string, { hubSeq: number }> }).waiting;
+  assert.equal(waiting.has("m-1"), false, "nothing for the machine to do before the answer");
   const answered = await client.postOps([{ opId: crypto.randomUUID(), kind: "card.answer", conversationId: "chat-1", cardId: approval.id, answer: { approve: true } }]);
   assert.equal(answered.results[0].status, "accepted");
   await h.settle();
+  // The answer is the machine's to apply: a stopped machine is woken for it.
+  for (let i = 0; i < 50 && !waiting.has("m-1"); i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(waiting.get("m-1")?.hubSeq, answered.results[0].status === "accepted" ? answered.results[0].seq : -1, "the answer is work for the member's machine");
   timeline = await client.getJson("/v1/phone/timeline", { conversationId: "chat-1" });
   assert.deepEqual(timeline.cards.map((card) => [card.id, card.status, (card as { waiting?: boolean }).waiting, (card as { outcome?: string }).outcome]),
     [["approval-1", "answered", true, "Allowed. Waiting for it to be applied."]]);

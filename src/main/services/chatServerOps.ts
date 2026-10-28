@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS, type ChatChange } from "./chatChanges";
-import type { HubConversationFields, HubOp, HubOpEffect, HubTurn } from "../../shared/hubOps";
+import type { HubCard, HubConversationFields, HubOp, HubOpEffect, HubTurn } from "../../shared/hubOps";
 import type { HubOpOutcome } from "./hubOpsClient";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
@@ -30,6 +30,15 @@ export interface ChatServerLink {
   machineName(machineId: string): string | undefined;
   /** The chat moved to the server whole: what was queued for it is in that move. */
   settleMoved?(conversationId: string): Promise<void>;
+  /** Cards not settled yet on the server, in every chat, and the place in
+   *  its order they were read at (undefined: not linked yet). */
+  openCards?(): Promise<{ cards: HubCard[]; head: number } | undefined>;
+  /** Resolves once this device has read the feed through `seq`, or after
+   *  `timeoutMs` (false then). */
+  readThrough?(seq: number, timeoutMs: number): Promise<boolean>;
+  /** Whether this device holds a settle of this card it has not sent yet
+   *  (what it did with the answer is said already). */
+  cardSettleQueued?(conversationId: string, cardId: string): Promise<boolean>;
 }
 
 /** Message metadata a device keeps for itself about the server: the turns

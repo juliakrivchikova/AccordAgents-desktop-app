@@ -620,28 +620,6 @@ export class StorageService {
     return { rows, truncated };
   }
 
-  /** The most recently updated chats' bodies (no messages) that hold an
-   *  approval waiting for the User. */
-  async recentChatsWithPendingApprovals(limit: number): Promise<Conversation[]> {
-    await this.init();
-    const rows = await this.queryJson<{ id: string; bodyHex: string }>(`
-      select id, hex(coalesce(nullif(body_json, ''), json_set(payload_json, '$.messages', json_array()))) as bodyHex
-      from conversations where kind = 'chat'
-      order by updated_at desc limit ${normalizePositiveInteger(limit, 100)};
-    `);
-    const found: Conversation[] = [];
-    for (const row of rows) {
-      try {
-        const conversation = parseHexJson<Conversation>(row.bodyHex, `conversation ${row.id}`);
-        conversation.messages = [];
-        if (hasPendingAppToolApprovals(conversation)) found.push(conversation);
-      } catch {
-        // An unreadable chat holds no card to show.
-      }
-    }
-    return found;
-  }
-
   async listChatActivity(request: ListChatActivityRequest = {}): Promise<ListChatActivityResult> {
     await this.init();
     const limit = normalizePositiveInteger(request.limit, DEFAULT_CHAT_ACTIVITY_LIMIT);
@@ -2647,6 +2625,44 @@ export class StorageService {
       `coalesce(nullif(body_json, ''), payload_json) like '%"memberRemovalQueuedAt":%'` +
       ` or coalesce(nullif(body_json, ''), payload_json) like '%"memberAdditionQueuedAt":%'`
     );
+  }
+
+  /** Chats that may hold a card a member waits on: an approval waiting (or
+   *  an approved roster change not made yet), a member's choice waiting, its
+   *  mentions waiting for approval, or another device's card answered and
+   *  shown here as waiting. Read at a start and a reconnect, so the cards on
+   *  the User's server match them (ChatService.resumeServerCards). Without
+   *  `messages` only the chats' bodies are read (a reconnect): every message
+   *  row is read only at a start. */
+  async conversationIdsWithOpenCards(options: { messages?: boolean } = {}): Promise<string[]> {
+    await this.init();
+    const messages = options.messages !== false;
+    const bodies = `
+      select id from conversations
+        where kind = 'chat'
+          and coalesce(nullif(body_json, ''), payload_json) like '%"pendingAppToolApprovals":[{%'
+          and json_valid(coalesce(nullif(body_json, ''), payload_json))
+          and exists (
+            select 1 from json_each(coalesce(nullif(body_json, ''), payload_json), '$.metadata.pendingAppToolApprovals') as approval
+            where json_extract(approval.value, '$.status') = 'pending'
+              or json_extract(approval.value, '$.memberRemovalQueuedAt') is not null
+              or json_extract(approval.value, '$.memberAdditionQueuedAt') is not null
+              or json_extract(approval.value, '$.machineDecisionPending') is not null
+          )`;
+    const rows = await this.queryJson<{ id: string }>(`${bodies}${messages ? `
+      union
+      select distinct m.conversation_id as id from conversation_messages m
+        where (m.payload_json like '%"pendingChoice":%' or m.payload_json like '%"pendingMentions":%' or m.payload_json like '%"serverCard":%')
+          and json_valid(m.payload_json)
+          and (
+            json_extract(m.payload_json, '$.metadata.pendingChoice.status') = 'pending'
+            or json_extract(m.payload_json, '$.metadata.serverCard') is not null
+            or exists (
+              select 1 from json_each(m.payload_json, '$.metadata.pendingMentions') as mention
+              where json_extract(mention.value, '$.status') = 'pending'
+            )
+          )` : ""};`);
+    return rows.flatMap((row) => typeof row.id === "string" && row.id.trim() ? [row.id] : []);
   }
 
   private async queryConversationIds(whereSql: string): Promise<string[]> {

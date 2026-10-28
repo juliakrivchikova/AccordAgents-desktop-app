@@ -146,7 +146,14 @@ export class ServerChatLink {
         return { requested: answer.turns, claimed };
       },
       machineName: (machineId) => this.machineNames.get(machineId),
-      settleMoved: (conversationId) => this.requireOps().settleMoved(conversationId)
+      settleMoved: (conversationId) => this.requireOps().settleMoved(conversationId),
+      openCards: async () => {
+        if (!this.ready || !this.client) return undefined;
+        return this.client.openCards();
+      },
+      readThrough: async (seq, timeoutMs) => this.ops ? this.ops.waitApplied(seq, timeoutMs) : false,
+      cardSettleQueued: async (conversationId, cardId) => (await this.options.storage.hubClientOps().forConversation(conversationId))
+        .some((row) => row.op.kind === "card.settle" && row.op.cardId === cardId)
     };
   }
 
@@ -183,6 +190,7 @@ export class ServerChatLink {
       resync: () => this.resync(),
       onAnswered: (row, outcome: HubOpOutcome) => {
         if (outcome.status === "rejected") this.options.log("chat.server.op-rejected", { opId: row.opId, kind: row.kind, conversationId: row.conversationId, reason: outcome.reason });
+        this.options.chat.noteServerOpAnswered(row.op, outcome);
       },
       log: this.options.log
     });
@@ -196,7 +204,19 @@ export class ServerChatLink {
     this.options.chat.setServerChatReader((conversationId) => this.readChat(conversationId));
     this.options.artifacts?.setServerLink(this.artifactLink());
     const ops = this.ops;
-    ops.onStatusChanged(() => { void ops.status().then((status) => { this.unreachable = status.unreachableSince; }); });
+    ops.onStatusChanged(() => {
+      void ops.status().then((status) => {
+        const back = this.unreachable !== undefined && status.unreachableSince === undefined;
+        this.unreachable = status.unreachableSince;
+        // Back after the server could not be reached: cards answered
+        // meanwhile are applied, and cards raised meanwhile go up.
+        if (back && this.ready) {
+          void this.options.chat.resumeServerCards({ messages: false }).catch((error) => {
+            this.options.log("chat.server.cards-resume-error", { message: error instanceof Error ? error.message : String(error) });
+          });
+        }
+      });
+    });
     this.ops.start();
     this.options.log("chat.server.link-started", { embedded: !own, url: own ? url : "loopback" });
     void this.prepare(client).catch((error) => {
@@ -230,6 +250,9 @@ export class ServerChatLink {
     this.ops?.wakeReader();
     await this.options.chat.resumeServerTurns().catch((error) => {
       this.options.log("chat.server.resume-error", { message: error instanceof Error ? error.message : String(error) });
+    });
+    await this.options.chat.resumeServerCards().catch((error) => {
+      this.options.log("chat.server.cards-resume-error", { message: error instanceof Error ? error.message : String(error) });
     });
   }
 
@@ -315,6 +338,13 @@ export class ServerChatLink {
     // Every chat's documents as the server holds them.
     await this.reloadArtifacts(chats.map((chat) => chat.id));
     this.options.log("chat.server.resynced", { chats: chats.length, head });
+    // Cards changed while this device's place was forgotten: read them again
+    // (once the feed continues from `head`).
+    setTimeout(() => {
+      void this.options.chat.resumeServerCards().catch((error) => {
+        this.options.log("chat.server.cards-resume-error", { message: error instanceof Error ? error.message : String(error) });
+      });
+    }, 0).unref?.();
     return head;
   }
 

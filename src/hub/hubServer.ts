@@ -297,7 +297,10 @@ export class HubServer {
     }
     if (request.method === "GET" && url.pathname === HUB_CARDS_PATH) {
       const conversationId = url.searchParams.get("conversationId") ?? undefined;
-      json(response, 200, { cards: await ops.openCards(conversationId || undefined), head: await ops.head() } satisfies HubCardsResponse);
+      // The place first: a card that changes while the list is read is never
+      // stated as older than the place it is read at.
+      const head = await ops.head();
+      json(response, 200, { cards: await ops.openCards(conversationId || undefined), head } satisfies HubCardsResponse);
       return 200;
     }
     if (request.method === "GET" && url.pathname === HUB_TURNS_PATH) {

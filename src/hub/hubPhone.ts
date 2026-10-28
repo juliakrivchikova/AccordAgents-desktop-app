@@ -254,7 +254,8 @@ export class HubPhoneApi {
       // Every card waiting for the User is the server's own (Д9): the list
       // names each chat's whole set, and the phone drops a card it leaves
       // out. A set the read could not hold whole is not stated at all.
-      const open = await this.options.store.hubOps().openCards(undefined, OPEN_CARDS_READ_MAX);
+      // Mention approvals are not the phone's to show: they never count.
+      const open = await this.options.store.hubOps().openCards(undefined, OPEN_CARDS_READ_MAX, { exceptKinds: ["mention"] });
       const whole = open.length < OPEN_CARDS_READ_MAX;
       const byChat = new Map<string, HubCard[]>();
       for (const card of open) {
@@ -340,7 +341,16 @@ export class HubPhoneApi {
       const card = controlCardFromChoiceMessage(conversationId, message);
       if (card && card.status !== "pending") cards.set(card.id, card);
     }
-    for (const card of phoneCards(await this.options.store.hubOps().openCards(conversationId, PHONE_CARDS_MAX), conversation)) cards.set(card.id, card);
+    // A machine member's roster change the computer has made (it says so in
+    // the chat) waits for nothing more, even while that machine, which
+    // settles its card, is stopped.
+    const made = new Set(conversation.messages.flatMap((message) =>
+      message.role === "system" && typeof message.metadata?.rosterChange?.approvalId === "string" ? [message.metadata.rosterChange.approvalId] : []));
+    // The newest the phone shows (it shows no mention approvals): many old
+    // cards waiting in a chat never hide a new one.
+    const open = (await this.options.store.hubOps().openCards(conversationId, PHONE_CARDS_MAX, { newestFirst: true, exceptKinds: ["mention"] }))
+      .filter((card) => !(card.state === "answered" && card.cardKind === "roster" && made.has(card.cardId)));
+    for (const card of phoneCards(open, conversation)) cards.set(card.id, card);
     return [...cards.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt)).slice(-PHONE_CARDS_MAX);
   }
 

@@ -169,8 +169,22 @@ export function composeHub(options: {
     feed.note(entry.conversationId);
     // A card raised for the User rings the phone once: raised again while
     // it waits (what it shows changed), it keeps the moment it was raised.
-    if (effect.kind === "card.raise" && conversation && effect.card.state === "pending" && effect.card.raisedAt === entry.acceptedAt) {
+    // One its member's device decided itself (an addition its policy
+    // allowed, shown waiting to be made) asks nothing and rings nobody; nor
+    // does one the phone does not show (mentions of an older message).
+    const asked = (effect.kind === "card.raise" ? (effect.card.card as { approval?: { status?: unknown } }).approval?.status : undefined) ?? "pending";
+    if (effect.kind === "card.raise" && conversation && effect.card.state === "pending" && effect.card.raisedAt === entry.acceptedAt && asked === "pending" &&
+        effect.card.cardKind !== "mention") {
       void notify(cardNotice(conversation, effect.card)).catch((error) => log("hub.notice.error", { message: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
+    // The User's answer to a card of a member on a machine is work for that
+    // machine: it applies the answer, as the computer applies one for its
+    // own members (a stopped machine is woken for it).
+    if (effect.kind === "card.answer" && effect.card.state === "answered" && effect.card.participantId) {
+      void turnHome(effect.card.conversationId, effect.card.participantId).then((machineId) => {
+        if (machineId) waker.noteWork(machineId, entry.seq);
+      }).catch(() => undefined);
       return;
     }
     // A turn asked of a member on a machine (a continuation, another

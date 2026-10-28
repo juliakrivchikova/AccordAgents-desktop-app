@@ -27,7 +27,7 @@ import {
   AppMcpService
 } from "./appMcp";
 import { ChatService } from "./chat";
-import type { HubFeedEntry, HubOp, HubOpEffect, HubTurn } from "../../shared/hubOps";
+import type { HubCard, HubFeedEntry, HubOp, HubOpEffect, HubTurn } from "../../shared/hubOps";
 import type { CodexServerRequestDelivery } from "./codexApprovals";
 import {
   chatAgentPermissionsEqual,
@@ -6653,22 +6653,34 @@ test("a removal that is no longer valid when approved, or when applied, is close
   }
 });
 
-/** The User's signed answer on a card as the desktop holds it (its own, or a
- *  phone's), for the machine's report that it applied it. */
-function userAnswered(storage: any, approvalId: string, options: { origin?: string; approve?: boolean; conversationId?: string } = {}): string {
-  const decisionId = `chat-action:permission:${approvalId}:${options.approve === false ? "deny" : "allow"}:${options.origin ?? "desktop-origin"}`;
-  const events: Map<string, unknown> = storage.decisionEvents ??= new Map();
-  events.set(decisionId, {
-    eventId: decisionId,
-    conversationId: options.conversationId ?? "conversation-1",
-    kind: "permission.decided",
-    originId: options.origin ?? "desktop-origin",
-    payload: { operationId: decisionId, targetKey: `approval:${approvalId}`, detail: { approve: options.approve !== false } }
+/** The card a machine member's machine raised on the User's server for an
+ *  approval, as the desktop reads it in the feed (agreement Д9). */
+function machineCard(approval: ChatAppToolApproval, patch: Partial<HubCard> = {}): HubCard {
+  const { memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition, homeMachineId: _home, ...shown } = approval;
+  return {
+    cardId: approval.id, conversationId: approval.conversationId, cardKind: "roster", participantId: approval.requesterParticipantId,
+    raisedBy: "machine-device", raisedAt: NOW, state: "pending",
+    card: { approval: { ...shown, status: shown.status === "auto-applied" ? "auto-applied" : "pending" } },
+    ...patch
+  };
+}
+
+/** The card answered on the server: by the User (from any device), or by
+ *  the member's own machine for what its policy allowed (`auto`). */
+function answeredCard(card: HubCard, answer: Record<string, unknown>, answeredBy = "phone-device"): HubCard {
+  return { ...card, state: "answered", answer, answeredBy, answeredAt: new Date().toISOString() };
+}
+
+/** What the desktop does with a card change it reads in the server's feed. */
+async function feedCard(service: ChatService, kind: "card.raise" | "card.answer" | "card.settle", card: HubCard, opId = `op-${randomUUID()}`): Promise<void> {
+  const internals = service as any;
+  const conversation = await internals.storage.getConversation(card.conversationId);
+  const followUps = new Set<"removal" | "addition">();
+  await internals.withChatMutation(conversation, async () => {
+    internals.mirrorServerCard(conversation, kind, card, opId, followUps);
+    await internals.saveConversation(conversation, { emitChanges: false });
   });
-  storage.getChatEvent = async (id: string) => events.get(id);
-  storage.deviceEventBlobs = () => ({ hydrate: async (payload: unknown) => payload });
-  storage.getChatEventDeviceIdentityRecord = async () => ({ originId: "desktop-origin" });
-  return decisionId;
+  internals.followUpMirroredRosterChanges(card.conversationId, followUps);
 }
 
 /** The asking member runs on a machine. */
@@ -6680,7 +6692,8 @@ function homeOnMachine(storage: any, participantId = "manager-participant", mach
 test("a machine member's approved removal is applied by the desktop once the User's answer is confirmed, also after a restart", async () => {
   const { service, storage, target } = memberRemovalFixture();
   homeOnMachine(storage);
-  const decisionId = userAnswered(storage, "queued-target");
+  // The User's answer as the server held it when the desktop read it.
+  const decisionId = `server:queued-target@${NOW}`;
   storage.current.metadata.pendingAppToolApprovals = [queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine", machineAppliedDecisionId: decisionId })];
   storage.conversationIdsWithQueuedRosterChanges = async () => [storage.current.id];
 
@@ -6713,12 +6726,14 @@ test("a machine member's removal reaches the desktop as its card, waits for that
   const closed: string[] = [];
   (service as any).cliRunner.closeWarmAgents = async (_conversationId: string, participantId: string) => { closed.push(participantId); };
   const queued = queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine", updatedAt: new Date().toISOString() });
-  const decisionId = userAnswered(storage, queued.id, { origin: "phone-origin" });
-  service.setPhoneOrigins((origin) => origin === "phone-origin");
+  const card = machineCard(queued);
 
-  // The card arrives before the machine's report of the answer it applied.
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued });
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued, decisionId, decisionApplied: true });
+  // The machine raises its card on the server; the User approves it there
+  // (on her phone).
+  await feedCard(service, "card.raise", card);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending", "shown as the member's card");
+  const answer = answeredCard(card, { approve: true });
+  await feedCard(service, "card.answer", answer);
   await (service as any).applyQueuedMemberRemovalsOnce("conversation-1");
   assert.ok(memberIds(storage.current).includes(target.id), "the asking member's turn on its machine is still running");
   assert.equal(typeof storage.current.metadata.pendingAppToolApprovals[0].memberRemovalQueuedAt, "string");
@@ -6734,10 +6749,10 @@ test("a machine member's removal reaches the desktop as its card, waits for that
   await waitFor(() => closed.length === 1);
   assert.deepEqual(closed, [target.id], "the desktop-local target's process ends here");
 
-  // The machine sends its waiting copy again (a reconnect), and an older
-  // still-asking copy: nothing reverts, nothing is applied twice.
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued });
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: { ...queued, status: "pending", memberRemovalQueuedAt: undefined } });
+  // The card read again (a reconnect reads the open cards), still answered
+  // and its older raise: nothing reverts, nothing is applied twice.
+  await feedCard(service, "card.raise", card);
+  await feedCard(service, "card.answer", answer);
   await (service as any).applyQueuedMemberRemovalsOnce("conversation-1");
   const after = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
   assert.equal(after.status, "approved");
@@ -6746,67 +6761,69 @@ test("a machine member's removal reaches the desktop as its card, waits for that
   assert.equal(storage.current.messages.filter((message: ChatMessage) => message.content.startsWith("Removed @target")).length, 1);
   assert.equal(storage.current.messages.some((message: ChatMessage) => message.content.includes("had already left")), false);
 
-  // Its settled copy, once the machine has the desktop's word, is taken as is.
+  // The machine settles its card once it has the desktop's word: taken as is.
   const { memberRemovalQueuedAt: _queued, ...settledOnMachine } = queued;
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: { ...settledOnMachine, appliedParticipantIds: [target.id], updatedAt: new Date(Date.now() + 1000).toISOString() } });
+  await feedCard(service, "card.settle", { ...answer, state: "settled", outcome: { result: "applied",
+    approval: { ...settledOnMachine, appliedParticipantIds: [target.id], updatedAt: new Date(Date.now() + 1000).toISOString() } } });
   const final = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
   assert.equal(final.memberRemovalQueuedAt, undefined);
   assert.equal(typeof final.rosterChangeSettledAt, "string");
 });
 
-test("the desktop changes no member for a machine's card the User's answer does not confirm, or that another computer sent", async () => {
+test("the desktop changes no member for a machine's card the User did not approve, or that names another member", async () => {
   {
-    // The answer it reports is a refusal, or was not given by the User.
-    for (const answer of [{ approve: false }, { origin: "machine-origin" }]) {
-      const { service, storage, target } = memberRemovalFixture();
-      service.setPhoneOrigins((origin) => origin === "phone-origin");
-      homeOnMachine(storage);
-      const queued = queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" });
-      const decisionId = userAnswered(storage, queued.id, answer);
-      await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued, decisionId, decisionApplied: true });
-      await waitFor(() => (storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).status === "cancelled");
-      assert.ok(memberIds(storage.current).includes(target.id));
-      assert.match((storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).error ?? "", /could not be confirmed/);
-      assert.ok(storage.current.messages.some((message: ChatMessage) => message.content.startsWith("Could not remove @target at @manager's request:")));
-    }
-  }
-  {
-    // A phone's answer before this app knows its phones: not applied yet, not
-    // refused either.
+    // The User refused it: the machine applies the refusal; nothing is
+    // queued here, the desktop's card waits for the machine's word.
     const { service, storage, target } = memberRemovalFixture();
     homeOnMachine(storage);
-    const queued = queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" });
-    await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued, decisionId: userAnswered(storage, queued.id, { origin: "phone-origin" }), decisionApplied: true });
+    const card = machineCard(queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" }));
+    await feedCard(service, "card.raise", card);
+    const refused = answeredCard(card, { approve: false });
+    await feedCard(service, "card.answer", refused, "op-refused");
+    const waiting = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
+    assert.equal(waiting.memberRemovalQueuedAt, undefined);
+    assert.equal(waiting.machineDecisionPending?.approve, false);
+    assert.equal(waiting.machineDecisionPending?.decisionId, "op-refused");
     await (service as any).applyQueuedMemberRemovalsOnce("conversation-1");
     assert.ok(memberIds(storage.current).includes(target.id));
-    assert.equal((storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).status, "approved");
-    service.setPhoneOrigins((origin) => origin === "phone-origin");
-    (service as any).scheduleAutoWatchEvaluation("conversation-1", "run-idle");
-    await waitFor(() => !memberIds(storage.current).includes(target.id));
+    await feedCard(service, "card.settle", { ...refused, state: "settled", outcome: { result: "applied",
+      approval: { ...(card.card as { approval: ChatAppToolApproval }).approval, status: "denied", updatedAt: new Date(Date.now() + 1000).toISOString() } } });
+    const closed = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
+    assert.equal(closed.status, "denied");
+    assert.equal(closed.machineDecisionPending, undefined);
+    assert.ok(memberIds(storage.current).includes(target.id));
   }
   {
-    // A later answer the machine refused (already answered) does not replace
-    // the one it applied.
+    // Approved by the member's own machine, not by the User: never made.
     const { service, storage, target } = memberRemovalFixture();
     homeOnMachine(storage);
-    const queued = queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" });
-    const approved = userAnswered(storage, queued.id);
-    const refused = userAnswered(storage, queued.id, { approve: false });
-    await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued, decisionId: approved, decisionApplied: true });
-    await service.applyMachineApproval({ conversationId: "conversation-1", approval: { ...queued, error: "This approval has already been answered." }, decisionId: refused, decisionApplied: false });
-    await waitFor(() => !memberIds(storage.current).includes(target.id));
-    assert.equal((storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).error, undefined, "the removal is not shown as failed");
+    const card = machineCard(queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" }));
+    await feedCard(service, "card.raise", card);
+    await feedCard(service, "card.answer", answeredCard(card, { approve: true }, card.raisedBy));
+    await waitFor(() => (storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).status === "cancelled");
+    assert.ok(memberIds(storage.current).includes(target.id));
+    assert.match((storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).error ?? "", /could not be confirmed/);
+    assert.ok(storage.current.messages.some((message: ChatMessage) => message.content.startsWith("Could not remove @target at @manager's request:")));
   }
   {
-    // Sent by a computer the asking member does not run on.
+    // Approved on the phone: the server's word is the User's (Д10).
     const { service, storage, target } = memberRemovalFixture();
     homeOnMachine(storage);
-    const queued = queuedRemovalApproval("target-participant", "target", { homeMachineId: "other-machine" });
-    await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued, decisionId: userAnswered(storage, queued.id), decisionApplied: true });
-    const card = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
-    assert.equal(card.status, "cancelled");
-    assert.equal(card.memberRemovalQueuedAt, undefined);
-    assert.match(card.error ?? "", /did not come from the computer @manager runs on/);
+    const card = machineCard(queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" }));
+    await feedCard(service, "card.raise", card);
+    await feedCard(service, "card.answer", answeredCard(card, { approve: true }, "phone-device"));
+    await waitFor(() => !memberIds(storage.current).includes(target.id));
+    assert.ok(memberIds(storage.current).length > 0);
+  }
+  {
+    // A card that names another member than the one asking is not shown, and
+    // nothing is made for it.
+    const { service, storage, target } = memberRemovalFixture();
+    homeOnMachine(storage);
+    const card = machineCard(queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" }), { participantId: "target-participant" });
+    await feedCard(service, "card.raise", card);
+    await feedCard(service, "card.answer", answeredCard(card, { approve: true }));
+    assert.equal(((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).some((item) => item.id === card.cardId), false);
     await (service as any).applyQueuedMemberRemovalsOnce("conversation-1");
     assert.ok(memberIds(storage.current).includes(target.id));
   }
@@ -6814,23 +6831,26 @@ test("the desktop changes no member for a machine's card the User's answer does 
     // It names the member by another handle than the one it removes.
     const { service, storage, target } = memberRemovalFixture();
     homeOnMachine(storage);
-    const queued = queuedRemovalApproval("target-participant", "someone-else", { homeMachineId: "machine" });
-    await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued, decisionId: userAnswered(storage, queued.id), decisionApplied: true });
+    const card = machineCard(queuedRemovalApproval("target-participant", "someone-else", { homeMachineId: "machine" }));
+    await feedCard(service, "card.raise", card);
+    await feedCard(service, "card.answer", answeredCard(card, { approve: true }));
     await waitFor(() => (storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).status === "cancelled");
     assert.ok(memberIds(storage.current).includes(target.id));
     assert.match((storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).error ?? "", /names @someone-else, but that member is @target/);
   }
   {
-    // An addition said to be auto-applied that this desktop's rules for the
-    // asking member would have put on a card.
+    // An addition its machine says its policy allowed, that this desktop's
+    // rules for the asking member would have put on a card.
     const { service, storage, target } = memberRemovalFixture();
     homeOnMachine(storage, target.id);
-    await service.applyMachineApproval({ conversationId: "conversation-1", approval: {
+    const card = machineCard({
       id: "forged-addition", conversationId: "conversation-1", requesterParticipantId: target.id, requesterHandle: "target", requesterRoleConfigId: target.roleConfigId,
       toolName: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, capability: "participants.manage", status: "auto-applied", approvalScope: "chat",
       request: { operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } }] },
       summary: "Add @helper", homeMachineId: "machine", memberAdditionQueuedAt: NOW, createdAt: NOW, updatedAt: NOW
-    } });
+    });
+    await feedCard(service, "card.raise", card);
+    await feedCard(service, "card.answer", answeredCard(card, { approve: true, auto: true }, card.raisedBy));
     await waitFor(() => (storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).status === "cancelled");
     await (service as any).memberAdditionApplies.get("conversation-1");
     assert.equal((storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "helper"), false);
@@ -6920,7 +6940,12 @@ test("a machine member's approved addition is applied by the desktop, once, and 
     updatedAt: NOW
   };
 
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued });
+  // Its machine raises the card and answers it itself (its member's policy
+  // allowed it): the desktop makes it under its own rules for that member.
+  const card = machineCard(queued);
+  const auto = answeredCard(card, { approve: true, auto: true }, card.raisedBy);
+  await feedCard(service, "card.raise", card);
+  await feedCard(service, "card.answer", auto);
   await waitFor(() => (storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "helper"));
   await (service as any).memberAdditionApplies.get("conversation-1");
 
@@ -6933,8 +6958,9 @@ test("a machine member's approved addition is applied by the desktop, once, and 
   const said = storage.current.messages.find((message: ChatMessage) => message.content === "Auto-applied member request from @manager: Add @helper.");
   assert.deepEqual(said?.metadata?.rosterChange, { approvalId: "machine-addition", outcome: "applied", appliedParticipantIds: [helper?.id] });
 
-  // A reconnect sends the waiting copy again: not added twice, not refused.
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued });
+  // Read again (a reconnect reads the open cards): not added twice, not refused.
+  await feedCard(service, "card.raise", card);
+  await feedCard(service, "card.answer", auto);
   await new Promise((resolve) => setTimeout(resolve, 20));
   await (service as any).memberAdditionApplies.get("conversation-1");
   assert.equal((storage.current.metadata.participants as ChatParticipant[]).filter((participant) => participant.handle === "helper").length, 1);
@@ -6945,8 +6971,10 @@ test("a machine member's approved addition is applied by the desktop, once, and 
   assert.equal(storage.current.messages.some((message: ChatMessage) => message.content.startsWith("Could not add")), false);
 
   // One the desktop cannot apply is closed with the reason, not claimed.
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: { ...queued, id: "machine-addition-2", summary: "Add @helper",
-    request: { operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } }] } } });
+  const second = machineCard({ ...queued, id: "machine-addition-2", summary: "Add @helper",
+    request: { operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } }] } });
+  await feedCard(service, "card.raise", second);
+  await feedCard(service, "card.answer", answeredCard(second, { approve: true, auto: true }, second.raisedBy));
   await waitFor(() => (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).find((item) => item.id === "machine-addition-2")?.status === "cancelled");
   const refusal = storage.current.messages.find((message: ChatMessage) => message.content.startsWith("Could not add @helper at @manager's request:"));
   assert.equal(refusal?.metadata?.rosterChange?.outcome, "refused");
@@ -7249,8 +7277,9 @@ test("an approved removal still waiting when the app quit is applied after the r
   ));
 });
 
-test("a removal raised by a member on a machine is answered on that machine, as an addition is", async () => {
+test("a removal raised by a member on a machine is answered on the User's server and applied there, never on the desktop", async () => {
   const { service, storage, manager, target } = memberRemovalFixture();
+  homeOnMachine(storage);
   const approval: ChatAppToolApproval = {
     id: "machine-removal",
     conversationId: "conversation-1",
@@ -7262,23 +7291,17 @@ test("a removal raised by a member on a machine is answered on that machine, as 
     status: "pending",
     request: { kind: "participant_removal", operations: [{ type: "remove_participant_from_chat", participantId: target.id, handle: target.handle }] },
     summary: "Remove @target from this chat",
-    homeMachineId: "machine",
     createdAt: NOW,
     updatedAt: NOW
   };
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval });
-  const forwarded: any[] = [];
-  service.setMachineLink({
-    respondToMachineApproval: async (request) => { forwarded.push(request); }
-  });
+  await feedCard(service, "card.raise", machineCard(approval));
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].homeMachineId, "machine");
 
-  await service.respondToAppToolApproval({ conversationId: "conversation-1", approvalId: approval.id, approve: true, draftOverride: approval.request });
-
-  assert.equal(forwarded.length, 1);
-  assert.equal(forwarded[0].machineId, "machine");
-  assert.equal(forwarded[0].approvalId, approval.id);
-  assert.equal(forwarded[0].approve, true);
-  // Nothing is decided or removed on the desktop until the machine reports back.
+  // Not applied on the desktop directly...
+  await assert.rejects(service.respondToAppToolApproval({ conversationId: "conversation-1", approvalId: approval.id, approve: true, draftOverride: approval.request }),
+    /answered on the device its member runs on/);
+  // ...its answer goes to the User's server, and without one it waits.
+  await assert.rejects(service.answerAppToolApprovalCard({ conversationId: "conversation-1", approvalId: approval.id, approve: true }), /not linked to your server/);
   assert.ok(memberIds(storage.current).includes(target.id));
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
 });
@@ -11682,18 +11705,17 @@ test("startAccord creates structured accord skill mention and dispatches only th
   assert.equal(result.sourceMessageId, userMessage.id);
 });
 
-test("only the participant's home owns an approval, including completed receipts", async () => {
+test("only the member's home raises a card for its approval on the User's server", async () => {
   const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-home" };
   const conversation = chatConversation([participant]);
   conversation.metadata.pendingAppToolApprovals = [permissionApproval(participant,
-    { kind: "portable", permissions: ["repoRead"], reason: "Read the project" }, { id: "owner-card", status: "approved" })];
+    { kind: "portable", permissions: ["repoRead"], reason: "Read the project" }, { id: "owner-card" }),
+  permissionApproval(participant, { kind: "portable", permissions: ["repoRead"], reason: "Read the project" }, { id: "done-card", status: "approved" })];
   const { service } = testService({ conversation });
-  assert.equal(await service.ownsAppToolApproval(conversation.id, "owner-card"), false);
+  const wanted = () => ((service as any).wantedServerCards(conversation) as Array<{ cardId: string }>).map((card) => card.cardId);
+  assert.deepEqual(wanted(), [], "the desktop shows a machine member's card, never raises it");
   service.setHostMachineId("machine-home");
-  assert.equal(await service.ownsAppToolApproval(conversation.id, "owner-card"), true);
-  assert.equal(await service.ownsAppToolApproval(conversation.id, "not-arrived"), undefined);
-  assert.equal(await service.ownsAppToolApproval("chat-not-on-this-peer", "owner-card"), false,
-    "a peer without the chat can never own an answer from it");
+  assert.deepEqual(wanted(), ["owner-card"], "its machine raises it, and only while it waits");
 });
 
 test("startAccord rejects Chat Assistant as facilitator", async () => {
@@ -11838,35 +11860,41 @@ test("a durable approval claim precedes permission changes and a failed claim le
   assert.equal(normalizeChatAgentPermissions(storage.current.metadata.participants[0].permissions).webAccess, true);
 });
 
-test("machine approval feedback is local, survives notifications, and clears only for its matching receipt", async () => {
-  const participant = chatParticipant("codex-cli", { webAccess: false });
-  const approval = { ...permissionApproval(participant, { kind: "portable", permissions: ["webAccess"] }), homeMachineId: "machine" };
-  const conversation = chatConversation([participant], { pendingAppToolApprovals: [approval] });
+test("a machine member's card answered on the server waits on the desktop for its machine, and closes with the machine's outcome", async () => {
+  const participant = { ...chatParticipant("codex-cli", { webAccess: false }), homeMachineId: "machine" };
+  const approval = permissionApproval(participant, { kind: "portable", permissions: ["webAccess"] });
+  const conversation = chatConversation([participant]);
   const { service, storage } = testService({ conversation });
-  service.setMachineLink({
-    respondToMachineApproval: async request => { await request.onQueued?.("decision", "Offline machine"); }
-  });
-  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: approval.id, approve: true });
+  const card = { ...machineCard(approval), cardKind: "permission" as const };
+  await feedCard(service, "card.raise", card);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
+  const answer = answeredCard(card, { approve: true });
+  await feedCard(service, "card.answer", answer, "decision");
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionPending.decisionId, "decision");
-  await service.applyMachineApproval({ conversationId: conversation.id, approval });
-  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionPending.decisionId, "decision");
-  await service.applyMachineApproval({ conversationId: conversation.id, approval: { ...approval, status: "approved" }, decisionId: "decision" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionPending.approve, true);
+  // Nothing of it changed here: the machine applies it.
+  assert.equal(normalizeChatAgentPermissions(storage.current.metadata.participants[0].permissions).webAccess, false);
+  await feedCard(service, "card.settle", { ...answer, state: "settled", outcome: { result: "applied", approval: { ...approval, status: "approved", updatedAt: new Date(Date.now() + 1000).toISOString() } } });
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionPending, undefined);
-  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionReceiptId, "decision");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
 });
 
-test("a fast rejected machine receipt cannot be overwritten by its later queued callback", async () => {
-  const participant = chatParticipant("codex-cli");
-  const approval = { ...permissionApproval(participant, { kind: "portable", permissions: ["webAccess"] }), homeMachineId: "machine" };
-  const conversation = chatConversation([participant], { pendingAppToolApprovals: [approval] });
+test("a machine member's card whose answer its machine refused is asked again on the desktop, saying why", async () => {
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine" };
+  const approval = permissionApproval(participant, { kind: "portable", permissions: ["webAccess"] });
+  const conversation = chatConversation([participant]);
   const { service, storage } = testService({ conversation });
-  service.setMachineLink({ respondToMachineApproval: async request => {
-    await service.applyMachineApproval({ conversationId: conversation.id, approval: { ...approval, error: "Invalid decision" }, decisionId: "fast" });
-    await request.onQueued?.("fast", "Machine");
-  } });
-  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: approval.id, approve: true });
+  const card = { ...machineCard(approval), cardKind: "permission" as const };
+  await feedCard(service, "card.raise", card);
+  const answer = answeredCard(card, { approve: true });
+  await feedCard(service, "card.answer", answer, "fast");
+  await feedCard(service, "card.settle", { ...answer, state: "settled", outcome: { result: "refused", reason: "Invalid decision", answerOpId: "fast" } });
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionPending, undefined);
-  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].error, "Invalid decision");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
+  const refusals = [{ operationId: "fast", reason: "Invalid decision", at: NOW }];
+  await feedCard(service, "card.raise", { ...card, card: { ...card.card, refusals } });
+  assert.deepEqual(storage.current.metadata.pendingAppToolApprovals[0].cardRefusals, refusals, "the card says why");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
 });
 
 test("Codex approval compacts immediately while the provider receives the selected response", async () => {

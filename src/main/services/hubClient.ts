@@ -10,6 +10,7 @@ import type { MachineProgressFrame } from "../../shared/machineProgress";
 import {
   HUB_ARTIFACT_PATH,
   HUB_ARTIFACTS_PATH,
+  HUB_CARDS_PATH,
   HUB_CHAT_PATH,
   HUB_CHATS_PATH,
   HUB_FEED_PATH,
@@ -20,6 +21,7 @@ import {
   type HubArtifactResponse,
   type HubArtifactRevisionResponse,
   type HubArtifactsResponse,
+  type HubCardsResponse,
   type HubChatPage,
   type HubChatsResponse,
   type HubFeedResponse,
@@ -172,6 +174,11 @@ export class HubClient {
 
   waitingTurns(): Promise<HubTurnsResponse> {
     return this.request<HubTurnsResponse>("GET", HUB_TURNS_PATH);
+  }
+
+  /** Cards not settled yet, in one chat or every chat, oldest first. */
+  openCards(conversationId?: string): Promise<HubCardsResponse> {
+    return this.request<HubCardsResponse>("GET", `${HUB_CARDS_PATH}${conversationId ? `?conversationId=${encodeURIComponent(conversationId)}` : ""}`);
   }
 
   /** This device as the server's roster has it (a machine: its machine id). */

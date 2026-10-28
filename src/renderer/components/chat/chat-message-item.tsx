@@ -5,7 +5,7 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Copy, FileText, Li
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { canCompactParticipant } from "../../../shared/chatParticipantStatus";
-import { machineStopPendingText, machineWaitingText } from "../../../shared/machineWaitingText";
+import { machineAnswerPendingText, machineStopPendingText, machineWaitingText } from "../../../shared/machineWaitingText";
 import type {
   AgentContextUsage,
   AgentRunProgress,
@@ -38,6 +38,7 @@ import {
 } from "./chat-conversation-data";
 import { formatChatTime } from "./chat-format";
 import { ChatChoiceCard } from "./chat-choice-card";
+import { chatMessageCards } from "./chat-server-card";
 import { ChatImageAttachmentStrip } from "./chat-image-attachments";
 import { ChatExpandedProcessingTranscript, StreamingMessageContent } from "./chat-streaming";
 import { ChatMessageReactionList } from "./chat-message-reactions";
@@ -139,9 +140,9 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   const participantStatus: ChatParticipantRosterStatus = isStreaming
     ? "running"
     : props.participantStatusById.get(message.participantId ?? "") ?? "idle";
-  const pending = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "pending");
+  const { choice, choiceAnswered, mentionAnswered } = chatMessageCards(message);
+  const pending = mentionAnswered ? [] : (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "pending");
   const approved = (message.metadata?.pendingMentions ?? []).filter((mention) => mention.status === "approved");
-  const choice = message.metadata?.pendingChoice;
   const participantRequest = message.metadata?.participantRequest;
   const participantRequests = [
     ...(participantRequest ? [participantRequest] : []),
@@ -438,6 +439,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               )}
             </div>
           )}
+          {mentionAnswered && <div className="chat-queued-badge"><span>{machineAnswerPendingText(mentionAnswered.machineName)}</span></div>}
           {pending.length > 0 && (
             <div className="chat-approval-box">
               <div className="chat-approval-title-block">
@@ -482,6 +484,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               submitting={props.submittingChoiceIds?.has(choice.id) === true}
               onConfirm={(response) => props.onRespondToChoice(message.id, choice.id, response)}
             />
+            {choiceAnswered && <div className="chat-queued-badge"><span>{machineAnswerPendingText(choiceAnswered.machineName)}</span></div>}
             {threadActions}
           </div>
         </div>

@@ -226,7 +226,11 @@ export class HubOps {
         const done = accepted({ kind: "conversation.delete" });
         // The chat's documents go with it, in the same commit (Д9).
         const documents = await this.artifacts.deletionSql(op.conversationId, acceptedAt);
-        await this.storage.deleteConversation(op.conversationId, { alsoCommitSql: `${store.insertSql({ ...done.entry, kind: op.kind, result: done.result })} ${documents}` });
+        // So do the cards its members waited on: nobody answers or settles
+        // them any more (every operation on a deleted chat is refused).
+        await this.storage.deleteConversation(op.conversationId, {
+          alsoCommitSql: `${store.insertSql({ ...done.entry, kind: op.kind, result: done.result })} ${documents} ${store.deleteCardsSql(op.conversationId)}`
+        });
         this.cache.delete(op.conversationId);
         return { result: done.result, applied: { deviceId: device.deviceId, entry: done.entry } };
       }
@@ -378,15 +382,21 @@ export class HubOps {
       return { result, applied: { deviceId: device.deviceId, entry, conversation } };
     };
     if (op.kind === "card.raise") {
-      if (op.participantId) {
-        const home = homeDeviceId(conversation, op.participantId, devices);
-        if (home !== device.deviceId) return reject(opId, "Only the device this member runs on raises its cards.");
-      }
+      // A card always names its member, and only the device that member
+      // runs on raises it (Д4): a copy of the chat never does.
+      if (!op.participantId) return reject(opId, "A card names its member.");
+      const home = homeDeviceId(conversation, op.participantId, devices);
+      if (home !== device.deviceId) return reject(opId, "Only the device this member runs on raises its cards.");
       if (current && current.raisedBy !== device.deviceId) return reject(opId, "Another device raised this card.");
-      if (current && current.state !== "pending") return { result: { opId, status: "accepted", seq: seq - 1, card: current } };
+      if (current && (current.participantId !== op.participantId || current.cardKind !== op.cardKind)) return reject(opId, "A card keeps its member and its kind.");
+      // Answered: the answer stands until its device settles it; what the
+      // card shows does not change under it.
+      if (current && current.state === "answered") return { result: { opId, status: "accepted", seq: seq - 1, card: current } };
+      // Settled and raised again by its device: the member waits on it again
+      // (its device could not apply the answer it got, and said why when it
+      // settled it), so it is asked again, from the start.
       return placeCard({
-        cardId: op.cardId, conversationId: op.conversationId, cardKind: op.cardKind,
-        ...(op.participantId ? { participantId: op.participantId } : {}),
+        cardId: op.cardId, conversationId: op.conversationId, cardKind: op.cardKind, participantId: op.participantId,
         ...(op.messageId ? { messageId: op.messageId } : {}),
         raisedBy: device.deviceId, raisedAt: current?.raisedAt ?? acceptedAt, card: op.card, state: "pending"
       });
@@ -394,10 +404,22 @@ export class HubOps {
     if (!current) return reject(opId, "There is no such card.");
     if (op.kind === "card.answer") {
       if (current.state !== "pending") return reject(opId, "This card was already answered.");
-      return placeCard({ ...current, state: "answered", answer: op.answer, answeredBy: device.deviceId, answeredAt: acceptedAt });
+      // The User answers from her computer or her phones (Д2). A machine shows
+      // her nothing to answer: it only says that its own member's policy
+      // allowed what one of its cards asks (`auto`).
+      if (device.role === "machine" && (current.raisedBy !== device.deviceId || (op.answer as { auto?: unknown }).auto !== true)) {
+        return reject(opId, "A machine does not answer for the User.");
+      }
+      return placeCard({ ...current, state: "answered", answer: op.answer, answeredBy: device.deviceId, answeredAt: acceptedAt, answerOpId: opId });
     }
     if (current.raisedBy !== device.deviceId) return reject(opId, "Only the device that raised this card settles it.");
     if (current.state === "settled") return { result: { opId, status: "accepted", seq: seq - 1, card: current } };
+    // A settle that says which answer it is about settles only that answer:
+    // one sent for an earlier answer never closes the card asked again since.
+    const forAnswer = (op.outcome as { answerOpId?: unknown }).answerOpId;
+    if (typeof forAnswer === "string" && forAnswer && forAnswer !== current.answerOpId) {
+      return reject(opId, "This card's answer is not the one this settles.");
+    }
     return placeCard({ ...current, state: "settled", outcome: op.outcome, settledAt: acceptedAt });
   }
 

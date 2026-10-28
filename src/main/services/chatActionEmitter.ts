@@ -1,24 +1,12 @@
 /**
- * Turning what the User does into chat actions, and recording what actually
- * happened.
- *
- * Every control that answers something a member is waiting on - a permission
- * card, a user choice, a participant request, Stop - goes through here, so the
- * decision is a durable event before the native side is told about it, and so
- * the same decision arriving twice (a retry, a reconnect, a restart) does not
- * answer the provider twice.
- *
- * The once-only rule is per TARGET, not per operation. A card answered "allow"
- * and then "deny" from another device produces two decisions, and both stay
- * visible, but only the first is executed: the provider was already told, and
- * a second answer cannot un-tell it. Native approvals use the durable command
- * ledger before execution. Receipt lookup here is only a projection check.
+ * Chat actions as durable events: what remains of them here are a member
+ * request's lifecycle (opened, answered). Answers to the cards a member waits
+ * on (permissions, choices, mentions) and Stop travel as operations on the
+ * User's server (agreement Д9; ChatService answerServerCard, turn.stop), not
+ * as chat actions; artifacts keep their own actions (artifactStateEvents).
  */
 
 import type { ChatActionKind, ChatActionPayload } from "../../shared/chatActionEvents";
-import { createHash } from "node:crypto";
-import type { ChatAppToolApprovalRequest } from "../../shared/types";
-import { stableJson } from "../../shared/stableJson";
 
 export interface ChatActionEmission {
   conversationId: string;
@@ -30,11 +18,6 @@ export interface ChatActionEmitterDeps {
   /** Appends the event locally and queues it for every peer that holds the
    *  chat. Must be durable before it resolves. */
   publish(action: ChatActionEmission): Promise<void>;
-  /** True when this event id is already in the log. */
-  hasEvent(eventId: string): Promise<boolean>;
-  /** Identifies the machine that performed an effect. */
-  executedBy: string;
-  now?(): string;
   logger?(event: string, payload: Record<string, unknown>): void;
 }
 
@@ -49,98 +32,12 @@ export function chatActionOperationId(eventId: string): string | undefined {
   return eventId.startsWith(CHAT_ACTION_EVENT_PREFIX) ? eventId.slice(CHAT_ACTION_EVENT_PREFIX.length) : undefined;
 }
 
-/** One receipt per target: the first effect on it is the one that happened. */
-export function chatActionReceiptEventId(targetKey: string): string {
-  return `${CHAT_ACTION_EVENT_PREFIX}receipt:${targetKey}`;
-}
-
-export function approvalTarget(approvalId: string): string {
-  return `approval:${approvalId}`;
-}
-
-export function permissionDecisionAction(request: {
-  conversationId: string; approvalId: string; approve: boolean; scope?: string;
-  decisionId?: string; draftOverride?: ChatAppToolApprovalRequest;
-}): ChatActionEmission {
-  const detail = {
-    approve: request.approve,
-    ...(request.scope ? { scope: request.scope } : {}),
-    ...(request.decisionId ? { codexDecisionId: request.decisionId } : {}),
-    ...(request.draftOverride ? { draftOverride: request.draftOverride } : {})
-  };
-  return { conversationId: request.conversationId, kind: "permission.decided", payload: {
-    operationId: `permission:${request.approvalId}:${request.approve ? "allow" : "deny"}${
-      request.scope || request.decisionId || request.draftOverride ? `:${answerHash(detail)}` : ""}`,
-    targetKey: approvalTarget(request.approvalId), stateId: request.approve ? "approved" : "denied", detail
-  } };
-}
-
-export function choiceTarget(choiceId: string): string {
-  return `choice:${choiceId}`;
-}
-
-export function choiceDecisionAction(request: {
-  conversationId: string; choiceId: string; sourceMessageId: string;
-  selectedOptionId?: string; customAnswer?: string; note?: string; cancel?: boolean;
-}): ChatActionEmission {
-  const state = request.cancel ? "cancelled" : request.selectedOptionId ?? (request.customAnswer !== undefined ? "custom" : "empty");
-  const answer = request.customAnswer !== undefined || request.note !== undefined
-    ? `${state}:${answerHash({ customAnswer: request.customAnswer, note: request.note })}` : state;
-  return { conversationId: request.conversationId, kind: "choice.answered", payload: {
-    operationId: `choice:${request.choiceId}:${answer}`, targetKey: choiceTarget(request.choiceId), stateId: state,
-    detail: { sourceMessageId: request.sourceMessageId,
-      ...(request.selectedOptionId ? { selectedOptionId: request.selectedOptionId } : {}),
-      ...(request.customAnswer !== undefined ? { customAnswer: request.customAnswer } : {}),
-      ...(request.note !== undefined ? { note: request.note } : {}), ...(request.cancel ? { cancel: true } : {}) }
-  } };
-}
-
 export function participantRequestTarget(requestId: string): string {
   return `request:${requestId}`;
 }
 
-export function runTarget(runId: string): string {
-  return `run:${runId}`;
-}
-
 export class ChatActionEmitter {
-  private readonly receiptWrites = new Map<string, Promise<void>>();
   constructor(private readonly deps: ChatActionEmitterDeps) {}
-
-  private now(): string {
-    return this.deps.now?.() ?? new Date().toISOString();
-  }
-
-  /**
-   * The User answered a permission card. Emitted before the provider is told,
-   * so a crash between the two leaves the decision recorded rather than lost.
-   */
-  async permissionDecided(request: {
-    conversationId: string;
-    approvalId: string;
-    approve: boolean;
-    scope?: string;
-    decisionId?: string;
-    draftOverride?: ChatAppToolApprovalRequest;
-  }): Promise<string> {
-    const action = permissionDecisionAction(request);
-    await this.emit(action);
-    return action.payload.targetKey;
-  }
-
-  async choiceAnswered(request: {
-    conversationId: string;
-    choiceId: string;
-    sourceMessageId: string;
-    selectedOptionId?: string;
-    customAnswer?: string;
-    note?: string;
-    cancel?: boolean;
-  }): Promise<string> {
-    const action = choiceDecisionAction(request);
-    await this.emit(action);
-    return action.payload.targetKey;
-  }
 
   async participantRequestOpened(request: {
     conversationId: string;
@@ -184,75 +81,6 @@ export class ChatActionEmitter {
     return targetKey;
   }
 
-  /** Stop is unconditional: it never waits on a precondition, because a
-   *  request to stop is valid whatever state the run is believed to be in. */
-  async stopRequested(request: { conversationId: string; runId: string; by?: string }): Promise<string> {
-    const targetKey = runTarget(request.runId);
-    await this.emit({
-      conversationId: request.conversationId,
-      kind: "turn.stop.requested",
-      payload: {
-        operationId: `stop:${request.runId}`,
-        targetKey,
-        stateId: "stop-requested",
-        detail: request.by ? { by: request.by } : {}
-      }
-    });
-    return targetKey;
-  }
-
-  /**
-   * Checks whether an execution receipt already exists for a target.
-   *
-   * Returns false when a receipt for that target is already in the log: the
-   * provider has been told. This read is not an atomic execution claim and
-   * cannot guard a native effect on its own.
-   */
-  async beginExecution(targetKey: string): Promise<boolean> {
-    const already = await this.deps.hasEvent(chatActionReceiptEventId(targetKey));
-    if (already) {
-      this.deps.logger?.("chat.action.execution-skipped", { targetKey });
-      return false;
-    }
-    return true;
-  }
-
-  /**
-   * Records that the effect happened. Immutable: re-projection never repeats
-   * it, and a later contradicting decision is shown beside it.
-   *
-   * `uncertain` is for the case the executor could not prove it completed —
-   * reported as such, never as success and never as "did not happen".
-   */
-  async recordExecution(request: {
-    conversationId: string;
-    targetKey: string;
-    effect: string;
-    uncertain?: boolean;
-  }): Promise<void> {
-    const current = this.receiptWrites.get(request.targetKey);
-    if (current) return current;
-    const write = (async () => {
-      if (await this.deps.hasEvent(chatActionReceiptEventId(request.targetKey))) return;
-      await this.emit({
-        conversationId: request.conversationId,
-        kind: "execution.receipt",
-        payload: {
-          operationId: `receipt:${request.targetKey}`,
-          targetKey: request.targetKey,
-          effect: request.effect,
-          executedBy: this.deps.executedBy,
-          executedAt: this.now(),
-          ...(request.uncertain ? { uncertain: true } : {})
-        } as ChatActionPayload
-      });
-    })();
-    this.receiptWrites.set(request.targetKey, write);
-    try { await write; } finally {
-      if (this.receiptWrites.get(request.targetKey) === write) this.receiptWrites.delete(request.targetKey);
-    }
-  }
-
   /** A failed local commit must stop the caller before it performs an effect.
    * Relay delivery is asynchronous; failure here means the durable decision
    * itself was not recorded, rather than an offline peer. */
@@ -269,8 +97,4 @@ export class ChatActionEmitter {
       throw error;
     }
   }
-}
-
-function answerHash(value: unknown): string {
-  return createHash("sha256").update(stableJson(value)).digest("hex");
 }

@@ -189,3 +189,15 @@ test("a card on the User's server is the phone's card: answerable while it waits
   assert.equal(cancelled?.outcome, "Cancelled");
   assert.equal(controlCardFromHubCard(hubCard({ cardKind: "mention", card: {} })), undefined, "a card the phone cannot show is not shown");
 });
+
+test("a permission card asked again after its device refused an answer tells the phone that sent it why", () => {
+  const approval = { id: "approval-2", conversationId: "conversation-1", requesterParticipantId: "drew-id", requesterHandle: "drew", requesterRoleConfigId: "software-engineer",
+    toolName: "Bash", capability: "shell", status: "pending", request: { command: "ls" }, summary: "Use Bash",
+    createdAt: "2026-10-28T08:59:00.000Z", updatedAt: "2026-10-28T08:59:00.000Z" } as unknown as ChatAppToolApproval;
+  const asked = controlCardFromHubCard(hubCard({ cardId: "approval-2", card: { approval,
+    refusals: [{ operationId: "op-phone-1", reason: "A script that runs code is approved on the desktop, where its code is shown.", at: "2026-10-28T09:00:00.000Z" }, { operationId: "", reason: "nameless" }] } }));
+  assert.equal(asked?.status, "pending");
+  assert.deepEqual(asked?.refusedAnswers, [{ operationId: "op-phone-1", reason: "A script that runs code is approved on the desktop, where its code is shown." }]);
+  const plain = controlCardFromHubCard(hubCard({ cardId: "approval-2", card: { approval } }));
+  assert.equal(plain?.refusedAnswers, undefined);
+});

@@ -9,7 +9,22 @@ import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, ty
 import { applyChatChanges, applyHeldReactions, CHAT_CHANGES_VERSION, chatChangeBaseline, diffChatChanges, isSupportedChatChangesVersion, type ChatChangeApplyPolicy, type ChatChangeBaseline, type ChatChangeDiffPolicy, type ChatChangesPayload, isSafeChatId } from "./chatChanges";
 import { chatChangesToOps, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
-import { hubTurnRunId, isHubTurnRunId, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
+import { hubTurnRunId, isHubTurnRunId, type HubCard, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
+import {
+  choiceCardId,
+  hubCardDigest,
+  hubCardOutcomeFrom,
+  isRosterApproval,
+  mentionCardId,
+  pendingMentionsOf,
+  wantedHubCards,
+  type HubApprovalCardAnswer,
+  type HubApprovalCardPayload,
+  type HubCardOutcome,
+  type WantedHubCard
+} from "../../shared/hubCards";
+import { ServerCardBook, type CardApplyResult, type ChatCardAppliers } from "./chatCards";
+import type { HubOpOutcome } from "./hubOpsClient";
 import { mergeCopiedConversation, type CopiedConversation } from "./chatCopy";
 import type {
   AgentContextUsage,
@@ -35,6 +50,7 @@ import type {
   ChatLastMessageByParticipant,
   ChatMessage,
   ChatMessageMetadata,
+  ChatServerCardMark,
   ChatExecutionLeaseMetadata,
   ChatMessageReactions,
   ChatParticipant,
@@ -123,7 +139,6 @@ import type {
 } from "../../shared/types";
 import { isAutoWatchStableMessage, isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import type { ChatActionPayload } from "../../shared/chatActionEvents";
 import { isMachineCompactionLine } from "../../shared/machineLink";
 import { machineStopPendingText, machineWaitingText } from "../../shared/machineWaitingText";
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
@@ -183,7 +198,6 @@ import {
   resolveChatDeliveryTargets,
   resolveChatMentionTargets
 } from "../../shared/chatDeliveryPolicy";
-import { chatActionOperationId } from "./chatActionEmitter";
 import { parsePhoneTurnRunId, phoneTurnRunId } from "../../shared/hubProtocol";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { ChatEventMirrorService } from "./chatEventMirror";
@@ -700,7 +714,12 @@ export interface ChatApprovalExecutionGuard {
 }
 
 export interface ChatChoiceExecutionGuard {
+  /** The answer, as the native ledger names it (one card answer). */
   decisionEventId: string;
+  /** The operation the answer was sent under on the User's server, when
+   *  known: a refusal kept on the choice names it, so the device that sent
+   *  it says why. */
+  operationId?: string;
   /** Called after the validated answer is durably saved, before continuation. */
   beforeApply(participantId: string): Promise<void>;
 }
@@ -714,6 +733,20 @@ class RemoteTurnNotStartedError extends Error {}
 /** How long the end of a turn run here waits for the save that writes its
  *  member's last bubble before it is sent anyway. */
 const DEFERRED_SERVER_FINISH_MS = 10_000;
+/** An answer this device could not take right now is tried again after this. */
+const CARD_APPLY_RETRY_MS = 15_000;
+/** How long a read of the open cards waits for the feed to reach it. */
+const CARD_RECONCILE_READ_WAIT_MS = 30_000;
+/** How long an answer given on this device's screen waits to be applied
+ *  here (a card raised here) before the screen is told it was sent. */
+const CARD_ANSWER_LOCAL_WAIT_MS = 30_000;
+/** Refused answers a card keeps (the last few). */
+const CARD_REFUSALS_KEPT = 5;
+/** How long an answer the server took waits for this device's copy to show
+ *  it before the screen is told it was sent. */
+const CARD_ANSWER_FEED_WAIT_MS = 10_000;
+/** A card the server refused to take is offered again after this. */
+const CARD_RAISE_RETRY_MS = 60_000;
 
 interface ParticipantRequestRunResult {
   batch: ChatParticipantRequestBatch;
@@ -772,17 +805,6 @@ export interface MachineLinkPort {
    *  supplies this: replication brings an attachment's metadata here without
    *  its file, and the desktop that owns the chat still has it. */
   fetchAttachment?(conversationId: string, attachmentId: string): Promise<{ dataBase64: string }>;
-  /** Forwards the desktop's decision on an approval raised on a machine. */
-  respondToMachineApproval?(request: {
-    machineId: string;
-    conversationId: string;
-    approvalId: string;
-    approve: boolean;
-    scope?: "once" | "chat";
-    draftOverride?: ChatAppToolApprovalRequest;
-    codexDecisionId?: string;
-    onQueued?: (decisionId: string, machineName: string) => Promise<void>;
-  }): Promise<void>;
 }
 
 export interface ChatParticipantRun {
@@ -972,9 +994,6 @@ export class ChatService {
   private readonly memberAdditionApplies = new Map<string, Promise<void>>();
   private readonly memberAdditionApplyAgain = new Set<string>();
   private readonly memberAdditionRetries = new Map<string, number>();
-  /** Machine members' roster cards whose User answer this desktop confirmed
-   *  (`approvalId\ndecisionId`), so the signed answer is read once. */
-  private readonly confirmedRosterDecisions = new Set<string>();
   private readonly deletedConversationIds = new Set<string>();
   private readonly appMcpTokens = new Map<string, string>();
   /** The last app tool grant issued to each member's CLI process, so a reply
@@ -4070,50 +4089,20 @@ export class ChatService {
   }
 
   /** The User's answer behind a machine member's approved roster change, as
-   *  this desktop can confirm it: the signed answer this desktop or one of the
-   *  User's phones gave on this card, which the machine reports it applied.
-   *  `waiting`: not reported, or not read here, yet. */
+   *  the User's server holds it (Д10: the server's word, no signature): the
+   *  card the member's machine raised, answered "approve" (mirrorServerCard
+   *  notes it as `server:<card>@<answered at>`). `waiting`: not answered yet. */
   private async machineRosterDecision(
-    conversation: Conversation,
+    _conversation: Conversation,
     approval: ChatAppToolApproval
   ): Promise<MachineRosterDecision> {
     const decisionId = approval.machineAppliedDecisionId;
-    const storage = this.storage as Partial<Pick<StorageService, "getChatEvent" | "deviceEventBlobs" | "getChatEventDeviceIdentityRecord">>;
-    if (!decisionId || typeof storage.getChatEvent !== "function") {
+    if (!decisionId) {
       return { ok: false, waiting: true };
     }
-    const key = `${approval.id}\n${decisionId}`;
-    if (this.confirmedRosterDecisions.has(key)) {
-      return { ok: true };
+    if (!decisionId.startsWith(`server:${approval.id}@`)) {
+      return { ok: false, waiting: false, problem: "Your approval of this change could not be confirmed on this computer; ask for it again." };
     }
-    const event = await storage.getChatEvent.call(this.storage, decisionId);
-    if (!event) {
-      return { ok: false, waiting: true };
-    }
-    const refused = { ok: false as const, waiting: false as const, problem: "Your approval of this change could not be confirmed on this computer." };
-    if (event.conversationId !== conversation.id || event.kind !== "permission.decided") {
-      return refused;
-    }
-    const payload = await Promise.resolve(storage.deviceEventBlobs?.call(this.storage).hydrate(event.payload)).catch(() => undefined) as ChatActionPayload | undefined;
-    // `approval:<id>`, the target of a permission answer (approvalTarget).
-    if (payload?.targetKey !== `approval:${approval.id}` || payload.detail?.approve !== true) {
-      return refused;
-    }
-    const own = (await storage.getChatEventDeviceIdentityRecord?.call(this.storage))?.originId;
-    if (event.originId !== own) {
-      // A phone's answer: one of the User's paired phones. Until this app
-      // can tell (just started), it is not refused, only not applied yet.
-      const resolver = this.phoneOrigin;
-      if (!resolver) return { ok: false, waiting: true };
-      let phone: boolean;
-      try {
-        phone = await resolver(event.originId);
-      } catch {
-        return { ok: false, waiting: true };
-      }
-      if (!phone) return refused;
-    }
-    this.confirmedRosterDecisions.add(key);
     return { ok: true };
   }
 
@@ -5423,18 +5412,6 @@ export class ChatService {
     return conversation;
   }
 
-  async ownsAppToolApproval(conversationId: string, approvalId: string): Promise<boolean | undefined> {
-    const conversation = await this.storage.getConversation(conversationId);
-    // A request is raised by a member on the peer that holds its chat, so a
-    // peer without the chat can never own the answer to it.
-    if (!conversation || conversation.kind !== "chat") return false;
-    const approval = this.chatAppToolApprovals(conversation).find(item => item.id === approvalId);
-    if (!approval) return undefined;
-    if (approval.homeMachineId && approval.homeMachineId !== this.hostMachineId) return false;
-    const participant = this.chatParticipants(conversation).find(item => item.id === approval.requesterParticipantId);
-    return Boolean(participant && this.ownsParticipant(participant));
-  }
-
   async respondToAppToolApproval(
     request: RespondToChatAppToolApprovalRequest,
     progress?: ProgressCallback,
@@ -5448,39 +5425,10 @@ export class ChatService {
     if (!approval) {
       throw new Error("App tool approval request was not found.");
     }
-    // Machines transport: an approval raised by a member on a machine is
-    // answered there; this desktop's copy updates when the machine reports
-    // the outcome.
-    if (approval.homeMachineId && !this.machineRuntime) {
-      if (approval.status !== "pending") {
-        throw new Error("App tool approval request has already been answered.");
-      }
-      const link = this.machineLink;
-      if (!link?.respondToMachineApproval) {
-        throw new Error("The machine link is not available, so this approval cannot be answered right now.");
-      }
-      // The whole card answer travels: an edited Codex proposal and the
-      // native decision id are applied on the machine exactly as they would
-      // be here, and the machine's outcome (or error) is this call's outcome.
-      await link.respondToMachineApproval({
-        machineId: approval.homeMachineId,
-        conversationId: conversation.id,
-        approvalId: approval.id,
-        approve: request.approve,
-        ...(request.scope === "chat" ? { scope: "chat" as const } : request.scope === "once" ? { scope: "once" as const } : {}),
-        ...(request.draftOverride ? { draftOverride: request.draftOverride } : {}),
-        ...(request.codexDecisionId ? { codexDecisionId: request.codexDecisionId } : {}),
-        onQueued: async (decisionId, machineName) => {
-          await this.withChatMutation(conversation, async () => {
-            const current = this.chatAppToolApprovals(conversation).find(item => item.id === approval.id);
-            if (current?.status === "pending" && current.machineDecisionReceiptId !== decisionId) this.upsertAppToolApproval(conversation, { ...current,
-              machineDecisionPending: { decisionId, machineName, approve: request.approve, at: new Date().toISOString() } });
-            this.queueSnapshot(conversation);
-          });
-          if (!await this.waitForQueuedSaveResult(conversation.id)) throw new Error("The decision was queued, but its local feedback could not be stored.");
-        }
-      });
-      return (await this.storage.getConversation(conversation.id)) ?? conversation;
+    // A card a member on another device raised is answered on the User's
+    // server and applied there (answerAppToolApprovalCard), never here.
+    if (approval.homeMachineId && approval.homeMachineId !== this.hostMachineId) {
+      throw new Error("This request is answered on the device its member runs on.");
     }
     const approvalOwner = this.chatParticipants(conversation).find(item => item.id === approval.requesterParticipantId);
     if (approvalOwner) this.assertOwnsParticipant(approvalOwner);
@@ -6861,7 +6809,7 @@ export class ChatService {
         // Saved before the refusal is published, so a restart in between does
         // not lose it; the last few are kept, so one refusal does not hide another.
         const refuse = async (reason: string): Promise<never> => {
-          const operationId = execution ? chatActionOperationId(execution.decisionEventId) : undefined;
+          const operationId = execution?.operationId;
           if (operationId && choice.status === "pending") {
             const refusals = [...(choice.refusals ?? []).filter(item => item.operationId !== operationId),
               { operationId, reason, at: new Date().toISOString() }].slice(-CHAT_CHOICE_REFUSALS_KEPT);
@@ -7450,82 +7398,6 @@ export class ChatService {
       })
     );
     await this.ensureHistoryFiles(conversation);
-  }
-
-  /** Machines transport, desktop side: an approval raised or answered by a
-   *  member on a machine lands in this desktop's copy as the same card, with
-   *  the machine's chat-wide policies merged in. */
-  async applyMachineApproval(request: {
-    conversationId: string;
-    approval: ChatAppToolApproval;
-    policies?: ChatAppToolApprovalPolicy[];
-    decisionId?: string;
-    /** With `decisionId`: whether the machine applied that decision. */
-    decisionApplied?: boolean;
-  }): Promise<Conversation | undefined> {
-    const conversation = await this.storage.getConversation(request.conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      throw new Error("The approval's chat is not available; its delivery has not been acknowledged.");
-    }
-    let rosterChange: "removal" | "addition" | undefined;
-    const result = await this.withChatMutation(conversation, async () => {
-      const current = this.chatAppToolApprovals(conversation).find(item => item.id === request.approval.id);
-      const queued = current?.machineDecisionPending;
-      const incoming = request.approval;
-      const claimsRosterChange = Boolean(incoming.memberRemovalQueuedAt || incoming.memberAdditionQueuedAt);
-      // The desktop applies a machine member's roster change; a copy of the
-      // card the machine sent before it learned that (or sends again on a
-      // reconnect), or an older copy still asking, must not bring the waiting
-      // or the pending state back here.
-      const settledHere = current?.rosterChangeSettledAt;
-      const rosterCardHere = Boolean(current && (current.memberRemovalQueuedAt || current.memberAdditionQueuedAt || settledHere));
-      const stale = Boolean((settledHere && claimsRosterChange) || (rosterCardHere && incoming.status === "pending" && current?.status !== "pending"));
-      let next: ChatAppToolApproval = stale && current
-        ? { ...current }
-        : { ...incoming, ...(settledHere ? { rosterChangeSettledAt: settledHere } : {}) };
-      // The User's answer the machine applied, by which a roster change is
-      // confirmed here (machineRosterDecision); a later answer it refused
-      // (already answered) does not replace it.
-      const appliedDecisionId = request.decisionId && request.decisionApplied ? request.decisionId : current?.machineAppliedDecisionId;
-      if (appliedDecisionId) next = { ...next, machineAppliedDecisionId: appliedDecisionId };
-      const problem = !stale && claimsRosterChange ? this.machineRosterCardProblem(conversation, current, incoming) : undefined;
-      if (problem) {
-        // Kept as a card that says why; never applied.
-        const decidedAt = this.laterThan(incoming.updatedAt);
-        const { memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition, ...refused } = next;
-        next = { ...refused, status: "cancelled", error: problem, rosterChangeSettledAt: decidedAt, updatedAt: decidedAt };
-        conversation.messages.push(this.message("system",
-          `Could not ${incoming.memberRemovalQueuedAt ? "remove" : "add"} ${this.rosterChangeTargetsText(incoming)} at ${this.requesterReference(conversation, incoming)}'s request: ${problem}`,
-          undefined, { threadId: "system", rosterChange: { approvalId: incoming.id, outcome: "refused", error: problem } }));
-      }
-      this.upsertAppToolApproval(conversation, { ...next, conversationId: conversation.id,
-        machineDecisionPending: queued && request.decisionId !== queued.decisionId ? queued : undefined,
-        machineDecisionReceiptId: request.decisionId ?? current?.machineDecisionReceiptId });
-      if (!stale && !problem && this.isQueuedMemberRemovalApproval(next)) rosterChange = "removal";
-      else if (!stale && !problem && this.isQueuedMemberAdditionApproval(next)) rosterChange = "addition";
-      for (const policy of request.policies ?? []) {
-        if (policy && typeof policy === "object" && typeof policy.id === "string") {
-          this.upsertAppToolApprovalPolicy(conversation, policy);
-        }
-      }
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
-      return conversation;
-    });
-    // The machine's decision outcome (and the card call behind it) waits for
-    // this write; a failed write is an error, not a silent success.
-    if (!(await this.waitForQueuedSaveResult(request.conversationId))) {
-      throw new Error("The approval could not be stored in this desktop's chat.");
-    }
-    // A machine member's approved roster change: applied here, by the owner
-    // of the member list, a removal once the chat is idle.
-    if (rosterChange === "removal") {
-      this.noteQueuedMemberRemoval(request.conversationId);
-      this.scheduleQueuedMemberRemovals(request.conversationId);
-    } else if (rosterChange === "addition") {
-      void this.applyQueuedMemberAdditionsOnce(request.conversationId);
-    }
-    return result;
   }
 
   /** Machines transport, machine side: stores a conversation replicated from
@@ -20240,6 +20112,9 @@ export class ChatService {
       // transaction as the save: a crash keeps both or neither.
       let ops: HubOp[] = [];
       const finishes: Array<[string, { conversationId: string; participantId: string; op: HubOp; timer: ReturnType<typeof setTimeout> }]> = [];
+      // The cards this chat's members here wait on go up, change or settle
+      // with the save that made them so (Д9), whatever else it emits.
+      const cards = this.serverCardOpsFor(snapshot);
       if (options.emitChanges !== false) {
         const mayWrite = (message: ChatMessage) => this.mayWriteOnServer(snapshot, message);
         const diff = diffChatChanges(await this.chatChangeBaselineFor(snapshot.id), snapshot, { emitsConversationFields: true, ownsMessage: mayWrite });
@@ -20256,12 +20131,14 @@ export class ChatService {
           ops.push(deferred.op);
         }
       }
+      ops.push(...cards.ops);
       try {
         const token = ops.length
           ? await this.storage.saveConversation(snapshot, { rows, alsoCommit: { sql: link.queueSql(ops), onlyIfSql: (condition) => link.queueSql(ops, condition) } })
           : await this.storage.saveConversation(snapshot, { rows });
         this.rememberLastSavedSnapshot(snapshot, token);
         this.rememberChatChangeBaseline(snapshot.id, chatChangeBaseline(snapshot));
+        cards.commit();
       } catch (error) {
         this.chatChangeBaselines.delete(snapshot.id);
         // Not written: the ends wait for the next save (or their timer).
@@ -20378,6 +20255,22 @@ export class ChatService {
   private readonly pendingServerTurns = new Map<string, AbortController>();
   /** Reads a chat whole from the server (set with the server link). */
   private serverChatReader?: (conversationId: string) => Promise<{ conversation: Conversation; turns: HubTurn[] } | undefined>;
+  /** The cards this device raised for its members, as the server holds them. */
+  private readonly serverCards = new ServerCardBook();
+  /** What applies answers to this device's members' cards (set at start). */
+  private cardAppliers?: () => Promise<ChatCardAppliers>;
+  /** Answers given on this device's screen to its own cards, by operation,
+   *  waiting to hear how they were applied. */
+  private readonly cardAnswerWaiters = new Map<string, (result: CardApplyResult) => void>();
+  private readonly cardRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private cardsReconciling?: Promise<void>;
+  /** Where in the server's order this desktop last heard of another
+   *  device's card (its feed): a list of open cards read before that is
+   *  older than what the feed said. */
+  private readonly mirroredCardSeqs = new Map<string, number>();
+  private cardRaiseRetryTimer?: ReturnType<typeof setTimeout>;
+  private cardsReconcileAgain = false;
+  private cardsReconcileMessages = false;
 
   setServerChatReader(reader: ((conversationId: string) => Promise<{ conversation: Conversation; turns: HubTurn[] } | undefined>) | undefined): void {
     this.serverChatReader = reader;
@@ -20454,6 +20347,7 @@ export class ChatService {
     for (const entry of entries) {
       for (const turn of turnsOfEffect(entry.effect)) this.noteServerTurn(turn);
     }
+    this.noteServerCardEntries(entries);
   }
 
   private async applyServerEntriesFor(conversationId: string, entries: HubFeedEntry[], me: string | undefined): Promise<void> {
@@ -20495,15 +20389,22 @@ export class ChatService {
       await this.saveConversation(conversation, { emitChanges: false });
     }
     const target = conversation;
+    const followUps = new Set<"removal" | "addition">();
     await this.withChatMutation(target, async () => {
-      for (const entry of entries) this.applyServerEffect(target, entry, me);
+      const before = new Set(target.messages.map((message) => message.id));
+      for (const entry of entries) this.applyServerEffect(target, entry, me, followUps);
       target.messages = sortByServerOrder(target.messages);
+      // On a machine: the desktop's word on roster changes this machine's
+      // members asked for (it makes them, and says so in the chat).
+      this.settleRosterChangesFromDesktop(target, () => target.messages.filter((message) =>
+        !before.has(message.id) && message.role === "system" && Boolean(message.metadata?.rosterChange) && message.metadata?.serverWriter !== me));
       await this.saveConversation(target, { emitChanges: false });
     });
+    this.followUpMirroredRosterChanges(conversationId, followUps);
   }
 
   /** One accepted operation, folded into this device's copy. */
-  private applyServerEffect(conversation: Conversation, entry: HubFeedEntry, me: string | undefined): void {
+  private applyServerEffect(conversation: Conversation, entry: HubFeedEntry, me: string | undefined, followUps?: Set<"removal" | "addition">): void {
     const effect = entry.effect;
     const fromHere = entry.deviceId === me;
     switch (effect.kind) {
@@ -20589,6 +20490,16 @@ export class ChatService {
         if (usage && member && !this.runsHere(member)) this.updateParticipantContextUsage(conversation, member.id, usage);
         return;
       }
+      case "card.raise":
+      case "card.answer":
+      case "card.settle":
+        // A card of a member elsewhere, as the desktop shows it. Cards this
+        // device raised are its own (noteServerCardEntries); a machine shows
+        // nothing.
+        if (this.machineRuntime || effect.card.raisedBy === me) return;
+        this.noteMirroredCardSeq(effect.card.cardId, entry.seq);
+        this.mirrorServerCard(conversation, effect.kind, effect.card, entry.opId, followUps);
+        return;
       case "conversation.delete":
       case "chat.import":
         return;
@@ -21172,6 +21083,9 @@ export class ChatService {
   setServerLink(link: ChatServerLink | undefined): void {
     this.serverLink = link;
     this.chatChangeBaselines.clear();
+    // The cards of another server (or none) are read again from it.
+    this.serverCards.reset();
+    this.mirroredCardSeqs.clear();
   }
 
   /** Whether this device writes this message on the server: one it wrote
@@ -21192,6 +21106,700 @@ export class ChatService {
   runsHere(participant: Pick<ChatParticipant, "homeMachineId" | "cloudRun">): boolean {
     if (this.machineRuntime) return Boolean(this.hostMachineId) && participant.homeMachineId === this.hostMachineId;
     return !participant.homeMachineId && !participant.cloudRun;
+  }
+
+  // --- cards a member waits on, on the User's server (Д9) -------------------
+
+  /** Sets what applies the User's answers to this device's members' cards
+   *  (the native approval and choice executors). */
+  setCardAppliers(appliers: (() => Promise<ChatCardAppliers>) | undefined): void {
+    this.cardAppliers = appliers;
+  }
+
+  /** The card operations a save of this chat makes (Д9): cards raised for
+   *  its members here, raised again when what they show changed, settled
+   *  when what they asked is resolved here. Committed with the save. */
+  private serverCardOpsFor(snapshot: Conversation): { ops: HubOp[]; commit(): void } {
+    if (!this.serverLink || snapshot.kind !== "chat") return { ops: [], commit: () => undefined };
+    return this.serverCards.opsFor(snapshot, this.wantedServerCards(snapshot), newOpId);
+  }
+
+  /** The cards this chat holds for members that run on this device: a
+   *  machine's members' cards are that machine's to raise, never a copy's. */
+  private wantedServerCards(conversation: Conversation): WantedHubCard[] {
+    const participants = this.chatParticipants(conversation);
+    const me = this.serverLink?.deviceId();
+    const memberHere = (participantId: string | undefined): boolean => {
+      const participant = participants.find((item) => item.id === participantId);
+      return Boolean(participant) && this.runsHere(participant!);
+    };
+    return wantedHubCards(conversation, {
+      approval: (approval) => this.isChatAppToolApproval(approval) && (!approval.homeMachineId || approval.homeMachineId === this.hostMachineId) &&
+        memberHere(approval.requesterParticipantId),
+      message: (message) => {
+        const writer = message.metadata?.serverWriter;
+        if (typeof writer === "string") return Boolean(me) && writer === me;
+        return memberHere(message.participantId);
+      }
+    });
+  }
+
+  /** The server answered one of this device's operations: for a card, how
+   *  it holds it now. A raise it refused is not sent again as it was. */
+  noteServerOpAnswered(op: HubOp, outcome: HubOpOutcome): void {
+    if (op.kind !== "card.raise" && op.kind !== "card.answer" && op.kind !== "card.settle") return;
+    if (outcome.status === "accepted") {
+      if (outcome.card && outcome.card.raisedBy === this.serverLink?.deviceId()) this.serverCards.noteServer(outcome.card, outcome.seq);
+      return;
+    }
+    void this.debugLogs.write("chat.card.op-refused", { kind: op.kind, cardId: op.cardId, conversationId: op.conversationId, reason: outcome.reason });
+    if (op.kind === "card.raise") {
+      this.serverCards.noteRaiseRefused(op.cardId, hubCardDigest(op.cardKind, op.card));
+      // Refused for now (the server does not know this device for the
+      // member yet, say): tried again a while later, not only at a reconnect.
+      if (!this.cardRaiseRetryTimer) {
+        this.cardRaiseRetryTimer = setTimeout(() => {
+          this.cardRaiseRetryTimer = undefined;
+          void this.resumeServerCards({ messages: false }).catch((error) => {
+            void this.debugLogs.write("chat.card.raise-retry-error", { message: error instanceof Error ? error.message : String(error) });
+          });
+        }, CARD_RAISE_RETRY_MS);
+        this.cardRaiseRetryTimer.unref?.();
+      }
+    }
+  }
+
+  /** Card changes in the feed for cards this device raised: their state, and
+   *  an answer to apply here (from any device, this one included). */
+  private noteServerCardEntries(entries: HubFeedEntry[]): void {
+    const me = this.serverLink?.deviceId();
+    if (!me) return;
+    for (const entry of entries) {
+      const effect = entry.effect;
+      if (effect.kind !== "card.raise" && effect.kind !== "card.answer" && effect.kind !== "card.settle") continue;
+      if (effect.card.raisedBy !== me) continue;
+      // An answer is applied only while it is the card's newest word here.
+      if (this.serverCards.noteServer(effect.card, entry.seq) && effect.kind === "card.answer") this.scheduleCardApply(effect.card, entry.opId);
+    }
+  }
+
+  /** Applies an answer to a card this device raised, once, then settles it
+   *  (or asks it again when the answer could not be applied). */
+  private scheduleCardApply(card: HubCard, feedOpId?: string): void {
+    // The operation the answer came in: a refusal is kept under it, so the
+    // device that sent it says why (after a restart too).
+    const answerOpId = feedOpId ?? card.answerOpId;
+    const me = this.serverLink?.deviceId();
+    if (!me || card.raisedBy !== me || card.state !== "answered") return;
+    // This device's own word on a card it decided itself: nothing to apply.
+    if ((card.answer as { auto?: unknown } | undefined)?.auto === true && card.answeredBy === me) return;
+    if (this.serverCards.applying.has(card.cardId)) return;
+    this.serverCards.applying.add(card.cardId);
+    const timer = this.cardRetryTimers.get(card.cardId);
+    if (timer) {
+      clearTimeout(timer);
+      this.cardRetryTimers.delete(card.cardId);
+    }
+    void (async () => {
+      let result: CardApplyResult;
+      try {
+        const applied = await this.applyCardAnswer(card, answerOpId);
+        if (!applied) {
+          this.serverCards.applying.delete(card.cardId);
+          if (answerOpId) {
+            const waiter = this.cardAnswerWaiters.get(answerOpId);
+            this.cardAnswerWaiters.delete(answerOpId);
+            waiter?.({ kind: "applied" });
+          }
+          return;
+        }
+        result = applied;
+      } catch (error) {
+        result = { kind: "retry", reason: error instanceof Error ? error.message : String(error) };
+      }
+      try {
+        await this.finishCardAnswer(card, result, answerOpId);
+      } catch (error) {
+        void this.debugLogs.write("chat.card.finish-error", { conversationId: card.conversationId, cardId: card.cardId,
+          message: error instanceof Error ? error.message : String(error) });
+        if (result.kind !== "retry") result = { kind: "retry", reason: error instanceof Error ? error.message : String(error) };
+      } finally {
+        this.serverCards.applying.delete(card.cardId);
+      }
+      if (answerOpId) {
+        const waiter = this.cardAnswerWaiters.get(answerOpId);
+        this.cardAnswerWaiters.delete(answerOpId);
+        waiter?.(result);
+      }
+      if (result.kind === "retry") this.retryCardApplyLater(card, answerOpId);
+    })();
+  }
+
+  private async applyCardAnswer(card: HubCard, answerOpId?: string): Promise<CardApplyResult | undefined> {
+    // Applied before and settled here, the settle not sent yet (it stopped,
+    // or the server is away): nothing to do again.
+    if (await this.serverLink?.cardSettleQueued?.(card.conversationId, card.cardId)) return undefined;
+    const appliers = await this.cardAppliers?.();
+    if (!appliers) return { kind: "retry", reason: "This device cannot apply answers yet." };
+    // A machine member's roster change is made by the desktop, on the User's
+    // answer as the server holds it, maybe while this machine was away: what
+    // the desktop said of it is read first and is this card's outcome (the
+    // member it removes may be gone already, and is not "not found").
+    if (card.cardKind === "roster" && !this.appliesRosterChanges()) {
+      const read = await this.serverLink?.openCards?.().catch(() => undefined);
+      if (read) await this.serverLink?.readThrough?.(read.head, CARD_RECONCILE_READ_WAIT_MS);
+      if (await this.adoptDesktopRosterOutcome(card)) return { kind: "applied" };
+    }
+    if (card.cardKind === "choice") return appliers.choice.apply(card, answerOpId);
+    if (card.cardKind === "mention") return appliers.mention.apply(card);
+    return appliers.approval.apply(card);
+  }
+
+  /** On a machine: the desktop already said what it did with the roster
+   *  change this card asks (its chat message): the card's approval takes
+   *  that outcome here, without asking the domain again. True when it did. */
+  private async adoptDesktopRosterOutcome(card: HubCard): Promise<boolean> {
+    if (card.answer?.approve !== true) return false;
+    const me = this.serverLink?.deviceId();
+    const conversation = await this.storage.getConversation(card.conversationId);
+    if (!conversation || conversation.kind !== "chat") return false;
+    const said = [...conversation.messages].reverse().find((message) => message.role === "system" &&
+      message.metadata?.rosterChange?.approvalId === card.cardId && message.metadata?.serverWriter !== me)?.metadata?.rosterChange;
+    if (!said) return false;
+    let adopted = false;
+    await this.withChatMutation(conversation, async () => {
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === card.cardId);
+      if (!approval) return;
+      const { memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition, ...rest } = approval;
+      const updatedAt = this.laterThan(approval.updatedAt);
+      this.upsertAppToolApproval(conversation, said.outcome === "applied"
+        ? { ...rest, status: approval.status === "pending" ? "approved" : approval.status, updatedAt,
+          appliedParticipantIds: Array.isArray(said.appliedParticipantIds) ? said.appliedParticipantIds.filter((id) => typeof id === "string") : [] }
+        : { ...rest, status: "cancelled", error: typeof said.error === "string" && said.error ? said.error : "The desktop could not apply this change.", updatedAt });
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      adopted = true;
+    });
+    return adopted;
+  }
+
+  private retryCardApplyLater(card: HubCard, answerOpId?: string): void {
+    if (this.cardRetryTimers.has(card.cardId)) return;
+    const timer = setTimeout(() => {
+      this.cardRetryTimers.delete(card.cardId);
+      if (this.serverCards.known(card.cardId)?.state === "answered") this.scheduleCardApply(card, answerOpId);
+    }, CARD_APPLY_RETRY_MS);
+    timer.unref?.();
+    this.cardRetryTimers.set(card.cardId, timer);
+  }
+
+  /**
+   * What came of an answer, said on the server. Settled with the outcome, and
+   * the settle names the answer it is about (the server never lets it close
+   * a card asked again since). Refused while what it asked still waits here:
+   * settled with why, and asked again. Applied (or past its point of no
+   * return) while the member still waits on the same question (mentions
+   * approved one at a time): settled, and asked again for the rest. Applied
+   * while an approved roster change waits to be made: left answered until
+   * it is made (never asked again: the User answered it).
+   */
+  private async finishCardAnswer(card: HubCard, result: CardApplyResult, answerOpId?: string): Promise<void> {
+    const link = this.serverLink;
+    void this.debugLogs.write("chat.card.answer-applied", { conversationId: card.conversationId, cardId: card.cardId, cardKind: card.cardKind,
+      answeredBy: card.answeredBy ?? "", result: result.kind, ...(result.kind !== "applied" ? { reason: result.reason } : {}) });
+    if (!link || result.kind === "retry") return;
+    const settle = (outcome: HubCardOutcome): HubOp => ({ opId: newOpId(), kind: "card.settle", conversationId: card.conversationId, cardId: card.cardId,
+      outcome: { ...outcome, ...(answerOpId ? { answerOpId } : {}) } as unknown as Record<string, unknown> });
+    const raise = (again: WantedHubCard): HubOp => ({ opId: newOpId(), kind: "card.raise", conversationId: card.conversationId, cardId: again.cardId,
+      cardKind: again.cardKind, participantId: again.participantId, ...(again.messageId ? { messageId: again.messageId } : {}), card: again.card });
+    await this.waitForQueuedSave(card.conversationId);
+    let conversation = await this.storage.getConversation(card.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      await link.enqueue([settle({ result: "closed", reason: "The chat is gone." })]);
+      this.serverCards.noteState(card.cardId, card.conversationId, "settled");
+      return;
+    }
+    if (result.kind === "uncertain") {
+      // Never asked again: what it still asked is closed here with why.
+      await this.closeCardHere(conversation, card, result.reason);
+      conversation = await this.storage.getConversation(card.conversationId);
+      if (!conversation || conversation.kind !== "chat") {
+        await link.enqueue([settle({ result: "closed", reason: "The chat is gone." })]);
+        this.serverCards.noteState(card.cardId, card.conversationId, "settled");
+        return;
+      }
+    }
+    const waiting = this.wantedServerCards(conversation).find((item) => item.cardId === card.cardId);
+    // Whether the member still waits on the User for it (a question), or only
+    // on a roster change the User approved being made.
+    const stillAsks = Boolean(waiting) && (waiting!.cardKind === "choice" || waiting!.cardKind === "mention" ||
+      (waiting!.card as unknown as HubApprovalCardPayload).approval?.status === "pending");
+    if (result.kind === "refused" && waiting && !waiting.selfAnswer) {
+      // Not applied, and the member still waits: the card is asked again,
+      // and says why to the device that sent the answer.
+      await this.recordCardRefusal(conversation, card, result.reason, answerOpId);
+      const stored = await this.storage.getConversation(card.conversationId);
+      const again = stored ? this.wantedServerCards(stored).find((item) => item.cardId === card.cardId) : undefined;
+      await link.enqueue([settle({ result: "refused", reason: result.reason }), ...(again ? [raise(again)] : [])]);
+      this.serverCards.noteState(card.cardId, card.conversationId, again ? "pending" : "settled", again?.digest, { reopen: true });
+      return;
+    }
+    if (waiting && stillAsks && !waiting.selfAnswer) {
+      // Done, and the member still waits on the rest of it: asked again.
+      await link.enqueue([settle({ ...hubCardOutcomeFrom(conversation, card.cardId, result.kind === "applied" ? "applied" : "uncertain"),
+        ...(result.kind !== "applied" ? { reason: result.reason } : {}) }), raise(waiting)]);
+      this.serverCards.noteState(card.cardId, card.conversationId, "pending", waiting.digest, { reopen: true });
+      return;
+    }
+    // Applied, and an approved roster change waits to be made: settled when
+    // it is made (serverCardOpsFor). On a machine the desktop makes it, on
+    // the User's answer as the server holds it, and may have said so in the
+    // chat before this machine applied the answer.
+    if (waiting && !stillAsks && result.kind !== "refused") {
+      if (this.appliesRosterChanges()) return;
+      const me = link.deviceId();
+      let settledHere = false;
+      await this.withChatMutation(conversation, async () => {
+        const before = this.stableJson(this.chatAppToolApprovals(conversation!).find((item) => item.id === card.cardId) ?? null);
+        this.settleRosterChangesFromDesktop(conversation!, () => conversation!.messages.filter((message) =>
+          message.role === "system" && message.metadata?.rosterChange?.approvalId === card.cardId && message.metadata?.serverWriter !== me));
+        if (this.stableJson(this.chatAppToolApprovals(conversation!).find((item) => item.id === card.cardId) ?? null) === before) return;
+        settledHere = true;
+        conversation!.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation!);
+      });
+      if (!settledHere) return;
+      conversation = await this.storage.getConversation(card.conversationId);
+      if (conversation && this.wantedServerCards(conversation).some((item) => item.cardId === card.cardId)) return;
+    }
+    const final = result.kind === "applied" ? "applied" : result.kind === "uncertain" ? "uncertain" : "closed";
+    await link.enqueue([settle({ ...hubCardOutcomeFrom(conversation, card.cardId, final), ...(result.kind !== "applied" ? { reason: result.reason } : {}) })]);
+    this.serverCards.noteState(card.cardId, card.conversationId, "settled");
+  }
+
+  /** An answer that crossed its point of no return unconfirmed: what it
+   *  answered is closed here (never asked again). */
+  private async closeCardHere(conversation: Conversation, card: HubCard, reason: string): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      const now = new Date().toISOString();
+      let changed = false;
+      if (card.cardKind === "choice" || card.cardKind === "mention") {
+        const message = conversation.messages.find((item) => item.id === card.messageId);
+        const choice = message?.metadata?.pendingChoice;
+        if (message && card.cardKind === "choice" && choice?.status === "pending") {
+          this.updatePendingChoiceCancellation(message, choice.id);
+          changed = true;
+        }
+        const mentions = message ? pendingMentionsOf(message) : [];
+        if (message && card.cardKind === "mention" && mentions.length) {
+          this.updatePendingMentionStatus(message, new Set(mentions.map((mention) => mention.targetParticipantId)), "rejected");
+          changed = true;
+        }
+      } else {
+        const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === card.cardId);
+        if (approval?.status === "pending") {
+          this.upsertAppToolApproval(conversation, { ...approval, status: "cancelled", error: reason, updatedAt: this.laterThan(approval.updatedAt) });
+          changed = true;
+        }
+      }
+      if (!changed) return;
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+    });
+  }
+
+  /** Why an answer was not taken, kept with what it answered (the last few):
+   *  the card asked again carries it. A choice keeps its own (respondToChoice). */
+  private async recordCardRefusal(conversation: Conversation, card: HubCard, reason: string, answerOpId?: string): Promise<void> {
+    if (card.cardKind === "choice") return;
+    const refusal = { operationId: answerOpId ?? "", reason, at: new Date().toISOString() };
+    const merged = (list: Array<{ operationId: string; reason: string; at: string }> | undefined) =>
+      [...(list ?? []).filter((item) => !answerOpId || item.operationId !== answerOpId), refusal].slice(-CARD_REFUSALS_KEPT);
+    await this.withChatMutation(conversation, async () => {
+      if (card.cardKind === "mention") {
+        const index = conversation.messages.findIndex((item) => item.id === card.messageId);
+        if (index < 0) return;
+        const message = conversation.messages[index];
+        conversation.messages[index] = { ...message, metadata: { ...(message.metadata ?? {}), mentionCardRefusals: merged(message.metadata?.mentionCardRefusals) } };
+      } else {
+        const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === card.cardId);
+        if (!approval) return;
+        this.upsertAppToolApproval(conversation, { ...approval, cardRefusals: merged(approval.cardRefusals), updatedAt: this.laterThan(approval.updatedAt) });
+      }
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+    });
+  }
+
+  /**
+   * After a start or a reconnect: the server's open cards are read. Cards
+   * this device holds for its members are raised where the server lacks
+   * them (or lacks what they show now) and settled where they are resolved
+   * here; answers this device has not applied yet are applied; and the
+   * desktop's view of other devices' cards is brought up to date.
+   */
+  async resumeServerCards(options: { messages?: boolean } = {}): Promise<void> {
+    // Every message row is read for cards at a start (or after the feed forgot
+    // this device's place), not at each reconnect: what was raised meanwhile
+    // went up with its save, and the server's open cards name the rest.
+    if (options.messages !== false) this.cardsReconcileMessages = true;
+    if (this.cardsReconciling) {
+      this.cardsReconcileAgain = true;
+      return this.cardsReconciling;
+    }
+    const run = (async () => {
+      do {
+        this.cardsReconcileAgain = false;
+        const messages = this.cardsReconcileMessages;
+        this.cardsReconcileMessages = false;
+        try {
+          await this.reconcileServerCards({ messages });
+        } catch (error) {
+          // Not done (the server could not be read): the next one reads
+          // every message row, as this one was to.
+          if (messages) this.cardsReconcileMessages = true;
+          throw error;
+        }
+      } while (this.cardsReconcileAgain);
+    })();
+    this.cardsReconciling = run;
+    try {
+      await run;
+    } finally {
+      if (this.cardsReconciling === run) this.cardsReconciling = undefined;
+    }
+  }
+
+  private async reconcileServerCards(options: { messages: boolean }): Promise<void> {
+    const link = this.serverLink;
+    const me = link?.deviceId();
+    if (!link?.openCards || !me) return;
+    const read = await link.openCards();
+    if (!read) return;
+    // The feed read up to the list's place first: nothing older is applied
+    // after it, and the view of other devices' cards is as current as it.
+    await link.readThrough?.(read.head, CARD_RECONCILE_READ_WAIT_MS);
+    const mine = read.cards.filter((card) => card.raisedBy === me);
+    this.serverCards.noteOpenCards(mine, read.head);
+    const storage = this.storage as Partial<Pick<StorageService, "conversationIdsWithOpenCards">>;
+    const local = typeof storage.conversationIdsWithOpenCards === "function"
+      ? await storage.conversationIdsWithOpenCards.call(this.storage, { messages: options.messages }) : [];
+    const chats = new Set<string>([...local, ...mine.map((card) => card.conversationId)]);
+    for (const conversationId of chats) {
+      if (await this.storage.conversationTombstones?.().isDeleted(conversationId)) continue;
+      const conversation = await this.storage.getConversation(conversationId);
+      if (!conversation || conversation.kind !== "chat") continue;
+      // Decided on the chat's newest copy, between its saves: a card a save
+      // raised meanwhile is never taken for one resolved here.
+      await this.withChatMutation(conversation, async () => {
+        const { ops, commit } = this.serverCards.opsFor(conversation, this.wantedServerCards(conversation), newOpId);
+        if (ops.length === 0) return;
+        await link.enqueue(ops);
+        commit();
+        void this.debugLogs.write("chat.card.reconciled", { conversationId, ops: ops.map((op) => `${op.kind}:${"cardId" in op ? op.cardId : ""}`).slice(0, 20) });
+      });
+    }
+    for (const card of mine) if (card.state === "answered") this.scheduleCardApply(card);
+    this.serverCards.reconciled = true;
+    if (!this.machineRuntime) await this.reconcileCardMirrors(read.cards.filter((card) => card.raisedBy !== me), local, read.head);
+  }
+
+  /** The desktop's view of other devices' cards, as the server holds them
+   *  now: a card it showed that is not open there any more is closed. */
+  private async reconcileCardMirrors(others: HubCard[], localChats: string[], head: number): Promise<void> {
+    const open = new Map(others.map((card) => [card.cardId, card]));
+    // What the feed said of a card after the list was read is newer than the
+    // list: it is left as the feed said.
+    const newer = (cardId: string): boolean => (this.mirroredCardSeqs.get(cardId) ?? 0) > head;
+    const byChat = new Map<string, HubCard[]>();
+    for (const card of others) byChat.set(card.conversationId, [...(byChat.get(card.conversationId) ?? []), card]);
+    for (const conversationId of new Set([...byChat.keys(), ...localChats])) {
+      if (await this.storage.conversationTombstones?.().isDeleted(conversationId)) continue;
+      const conversation = await this.storage.getConversation(conversationId);
+      if (!conversation || conversation.kind !== "chat") continue;
+      const followUps = new Set<"removal" | "addition">();
+      await this.withChatMutation(conversation, async () => {
+        // What this chat shows of other devices' cards: read again as the
+        // server holds them, it is saved only when that differs.
+        const shown = (): string => this.stableJson({
+          approvals: this.chatAppToolApprovals(conversation).map((approval) => ({ ...approval, updatedAt: "" })),
+          marks: conversation.messages.flatMap((message) => message.metadata?.serverCard ? [[message.id, message.metadata.serverCard]] : [])
+        });
+        const before = shown();
+        for (const card of byChat.get(conversationId) ?? []) {
+          if (newer(card.cardId)) continue;
+          this.mirrorServerCard(conversation, card.state === "answered" ? "card.answer" : "card.raise", card, undefined, followUps);
+        }
+        let changed = shown() !== before;
+        const now = new Date().toISOString();
+        for (const approval of this.chatAppToolApprovals(conversation)) {
+          if (!approval.homeMachineId || approval.homeMachineId === this.hostMachineId || open.has(approval.id) || newer(approval.id)) continue;
+          if (approval.status !== "pending" && !approval.machineDecisionPending) continue;
+          this.upsertAppToolApproval(conversation, { ...approval, machineDecisionPending: undefined,
+            ...(approval.status === "pending" ? { status: "expired" as const, error: "This request is not waiting on its machine any more." } : {}),
+            updatedAt: this.laterThan(approval.updatedAt) });
+          changed = true;
+        }
+        conversation.messages = conversation.messages.map((message) => {
+          const mark = message.metadata?.serverCard;
+          if (!mark || open.has(mark.cardId) || newer(mark.cardId)) return message;
+          const { serverCard: _gone, ...metadata } = message.metadata!;
+          changed = true;
+          return { ...message, metadata };
+        });
+        if (!changed) return;
+        conversation.updatedAt = now;
+        await this.saveConversation(conversation, { emitChanges: false });
+      });
+      this.followUpMirroredRosterChanges(conversationId, followUps);
+    }
+  }
+
+  /**
+   * The desktop's view of a card a member on another device raised: an
+   * approval is shown as that member's card here (with the answer it got,
+   * waiting for its machine); a choice or mentions answered elsewhere are
+   * marked answered on the member's message until its machine applies them.
+   * A machine member's approved roster change is noted for this desktop to
+   * make (it owns the member list), on the User's answer as the server
+   * holds it (Д10). True when the chat changed.
+   */
+  private mirrorServerCard(
+    conversation: Conversation,
+    kind: "card.raise" | "card.answer" | "card.settle",
+    card: HubCard,
+    opId: string | undefined,
+    followUps?: Set<"removal" | "addition">
+  ): boolean {
+    const member = this.chatParticipants(conversation).find((item) => item.id === card.participantId);
+    const homeMachineId = member?.homeMachineId;
+    const machineName = (homeMachineId ? this.serverLink?.machineName(homeMachineId) : undefined) ?? "the machine";
+    if (card.cardKind === "choice" || card.cardKind === "mention") {
+      const index = conversation.messages.findIndex((item) => item.id === card.messageId);
+      if (index < 0) return false;
+      const message = conversation.messages[index];
+      const metadata: ChatMessageMetadata = { ...(message.metadata ?? {}) };
+      if (kind === "card.answer" && card.state === "answered") {
+        const mark: ChatServerCardMark = { cardId: card.cardId, state: "answered", answer: card.answer ?? {}, answeredAt: card.answeredAt ?? new Date().toISOString(), machineName };
+        // Read again (a reconnect lists the open cards): nothing changed.
+        if (this.stableJson(metadata.serverCard ?? null) === this.stableJson(mark)) return false;
+        metadata.serverCard = mark;
+      } else if (metadata.serverCard?.cardId === card.cardId) {
+        delete metadata.serverCard;
+      } else {
+        return false;
+      }
+      conversation.messages[index] = { ...message, metadata };
+      return true;
+    }
+    const payload = card.card as Partial<HubApprovalCardPayload>;
+    const raised = payload.approval;
+    if (!raised || raised.id !== card.cardId || raised.requesterParticipantId !== card.participantId || !homeMachineId) return false;
+    const current = this.chatAppToolApprovals(conversation).find((item) => item.id === card.cardId);
+    // Made here already (a machine member's roster change): no older word
+    // from the machine brings the waiting state back.
+    const settledHere = current?.rosterChangeSettledAt;
+    const decided = (approval: ChatAppToolApproval): ChatAppToolApproval => ({ ...approval, conversationId: conversation.id, homeMachineId,
+      updatedAt: this.laterThan(current?.updatedAt) });
+    // The same word read again (a reconnect lists the open cards, the feed
+    // may repeat a raise) changes nothing here.
+    const put = (next: ChatAppToolApproval): boolean => {
+      if (current && this.stableJson({ ...current, updatedAt: "" }) === this.stableJson({ ...next, updatedAt: "" })) return false;
+      this.upsertAppToolApproval(conversation, next);
+      return true;
+    };
+    if (kind === "card.raise") {
+      if (settledHere) return false;
+      const { machineDecisionPending: _pending, machineAppliedDecisionId: _decision, memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition,
+        cardRefusals: _refusals, ...shown } = raised;
+      return put(decided({ ...shown, ...(payload.refusals?.length ? { cardRefusals: payload.refusals } : {}) } as ChatAppToolApproval));
+    }
+    if (kind === "card.answer") {
+      if (settledHere || card.state !== "answered") return false;
+      const base = current ?? decided(raised);
+      const answer = (card.answer ?? {}) as Partial<HubApprovalCardAnswer>;
+      const answeredAt = card.answeredAt ?? new Date().toISOString();
+      if (isRosterApproval(raised) && answer.approve === true) {
+        // The User's answer is any device's but the member's own (that one
+        // answers only for what its member's policy allowed, `auto`): it is
+        // never taken as the User's approval of a change she must approve.
+        const decision = card.answeredBy === card.raisedBy ? `device:${card.cardId}` : `server:${card.cardId}@${answeredAt}`;
+        if (this.isParticipantRemovalRequest(raised.request)) {
+          const changed = put(decided({ ...base, status: "approved", approvalScope: "once", memberRemovalQueuedAt: answeredAt,
+            machineAppliedDecisionId: decision, machineDecisionPending: undefined }));
+          if (changed) followUps?.add("removal");
+          return changed;
+        }
+        // Decided by the machine itself under its member's policy: made here
+        // only under this desktop's own rules for that member.
+        const auto = answer.auto === true && card.answeredBy === card.raisedBy;
+        const request = !auto && answer.draftOverride && raised.toolName !== APP_ROSTER_REQUEST_CHANGE_TOOL ? answer.draftOverride : base.request;
+        const changed = put(decided({ ...base, status: auto ? "auto-applied" : "approved", request, memberAdditionQueuedAt: answeredAt,
+          machineAppliedDecisionId: auto ? undefined : decision, machineDecisionPending: undefined }));
+        if (changed) followUps?.add("addition");
+        return changed;
+      }
+      const known = base.machineDecisionPending?.at === answeredAt ? base.machineDecisionPending.decisionId : undefined;
+      return put(decided({ ...base,
+        machineDecisionPending: { decisionId: known ?? opId ?? `server:${card.cardId}@${answeredAt}`, machineName, approve: answer.approve === true, at: answeredAt } }));
+    }
+    const outcome = (card.outcome ?? {}) as Partial<HubCardOutcome>;
+    if (!current) return false;
+    if (outcome.result === "refused") {
+      // Asked again (a raise follows): its answer was not taken.
+      if (settledHere) return false;
+      const { machineDecisionPending: _pending, machineAppliedDecisionId: _decision, memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition, ...open } = current;
+      return put(decided({ ...open, status: "pending" } as ChatAppToolApproval));
+    }
+    if (outcome.approval && outcome.approval.id === card.cardId) {
+      const final: ChatAppToolApproval = { ...outcome.approval };
+      if (settledHere) {
+        delete final.memberRemovalQueuedAt;
+        delete final.memberAdditionQueuedAt;
+      }
+      return put(decided({ ...final, machineDecisionPending: undefined,
+        ...(settledHere ? { rosterChangeSettledAt: settledHere } : {}),
+        ...(current.machineAppliedDecisionId ? { machineAppliedDecisionId: current.machineAppliedDecisionId } : {}) }));
+    }
+    if (current.status !== "pending" && !current.machineDecisionPending) return false;
+    this.upsertAppToolApproval(conversation, decided({ ...current, machineDecisionPending: undefined,
+      ...(current.status === "pending" ? { status: "cancelled" as const, error: outcome.reason || `Closed on ${machineName}.` } : {}) }));
+    return true;
+  }
+
+  private noteMirroredCardSeq(cardId: string, seq: number): void {
+    this.mirroredCardSeqs.delete(cardId);
+    this.mirroredCardSeqs.set(cardId, Math.max(seq, this.mirroredCardSeqs.get(cardId) ?? 0));
+    while (this.mirroredCardSeqs.size > 5_000) {
+      const oldest = this.mirroredCardSeqs.keys().next().value;
+      if (oldest === undefined) break;
+      this.mirroredCardSeqs.delete(oldest);
+    }
+  }
+
+  /** A machine member's roster change the User approved (or its policy
+   *  allowed) is made here, now or once the chat is idle. */
+  private followUpMirroredRosterChanges(conversationId: string, followUps: Set<"removal" | "addition">): void {
+    if (followUps.has("removal")) {
+      this.noteQueuedMemberRemoval(conversationId);
+      this.scheduleQueuedMemberRemovals(conversationId);
+    }
+    if (followUps.has("addition")) void this.applyQueuedMemberAdditionsOnce(conversationId);
+  }
+
+  /**
+   * The User answered a card on this device's screen: the answer is written
+   * to the User's server and this resolves once the server accepted it (its
+   * refusal is the error). A card raised here is applied here from the feed
+   * (exactly once, whoever answered); this waits for that too, a little, so
+   * a refusal of this device's own (a script's missing keys) is shown.
+   */
+  async answerServerCard(request: { conversationId: string; cardId: string; answer: Record<string, unknown>; raisedHere: boolean }): Promise<void> {
+    const link = this.serverLink;
+    if (!link) throw new Error("This computer is not linked to your server yet; try again in a moment.");
+    const opId = newOpId();
+    let applied: Promise<CardApplyResult | undefined> | undefined;
+    if (request.raisedHere) {
+      applied = new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          this.cardAnswerWaiters.delete(opId);
+          resolve(undefined);
+        }, CARD_ANSWER_LOCAL_WAIT_MS);
+        timer.unref?.();
+        this.cardAnswerWaiters.set(opId, (result) => {
+          clearTimeout(timer);
+          resolve(result);
+        });
+      });
+    }
+    try {
+      await link.enqueue([{ opId, kind: "card.answer", conversationId: request.conversationId, cardId: request.cardId, answer: request.answer }]);
+      const outcome = await link.opAnswered(opId);
+      if (outcome.status === "rejected") {
+        // Not put up yet: by this computer (it is still sending it), or by
+        // the device the member runs on (it is off, or has not read this chat
+        // since it asked).
+        if (outcome.reason === "There is no such card.") {
+          throw new Error(request.raisedHere
+            ? "This question is not on your server yet. Try again in a moment."
+            : "This question is not on your server yet: the device its member runs on has not put it there. Try again when that device is on.");
+        }
+        throw new Error(outcome.reason);
+      }
+      // What the server took is shown here before this returns: a card of a
+      // member elsewhere reads answered, rather than asking again until the
+      // feed brings the answer back.
+      if (outcome.seq > 0) await link.readThrough?.(outcome.seq, CARD_ANSWER_FEED_WAIT_MS);
+    } catch (error) {
+      this.cardAnswerWaiters.delete(opId);
+      throw error;
+    }
+    const result = await applied;
+    if (result?.kind === "refused" || result?.kind === "uncertain") throw new Error(result.reason);
+  }
+
+  /** Whether a card's subject is this device's: what it raised (or would). */
+  private cardRaisedHere(conversation: Conversation, cardId: string): boolean {
+    return this.wantedServerCards(conversation).some((card) => card.cardId === cardId) || this.serverCards.known(cardId) !== undefined;
+  }
+
+  /** The User's answer to an app-tool approval (a permission or a roster
+   *  change), from this device's card: written to the User's server. */
+  async answerAppToolApprovalCard(request: RespondToChatAppToolApprovalRequest): Promise<void> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") throw new Error("The chat is not available.");
+    const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === request.approvalId);
+    if (!approval) throw new Error("App tool approval request was not found.");
+    if (approval.status !== "pending" || approval.machineDecisionPending) throw new Error("App tool approval request has already been answered.");
+    const answer: HubApprovalCardAnswer = {
+      approve: request.approve,
+      ...(request.scope === "once" || request.scope === "chat" ? { scope: request.scope } : {}),
+      ...(request.codexDecisionId ? { codexDecisionId: request.codexDecisionId } : {}),
+      ...(request.draftOverride ? { draftOverride: request.draftOverride } : {})
+    };
+    await this.answerServerCard({ conversationId: conversation.id, cardId: approval.id, answer: answer as unknown as Record<string, unknown>,
+      raisedHere: this.cardRaisedHere(conversation, approval.id) });
+  }
+
+  /** The User's answer to a member's choice, from this device's card. */
+  async answerChoiceCard(request: RespondToChatChoiceRequest): Promise<void> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") throw new Error("The chat is not available.");
+    const message = conversation.messages.find((item) => item.id === request.sourceMessageId);
+    const choice = message?.metadata?.pendingChoice;
+    if (!message || !choice || choice.id !== request.choiceId) throw new Error("Choice request was not found.");
+    if (choice.status !== "pending" || message.metadata?.serverCard) throw new Error("Choice request has already been answered.");
+    const cardId = choiceCardId(message.id);
+    await this.answerServerCard({ conversationId: conversation.id, cardId, raisedHere: this.cardRaisedHere(conversation, cardId), answer: {
+      ...(request.selectedOptionId !== undefined ? { selectedOptionId: request.selectedOptionId } : {}),
+      ...(request.customAnswer !== undefined ? { customAnswer: request.customAnswer } : {}),
+      ...(request.note !== undefined ? { note: request.note } : {}),
+      ...(request.cancel ? { cancel: true } : {})
+    } });
+  }
+
+  /** The User's answer to a member's mentions waiting for approval, from
+   *  this device's card. Continuing the member after its mentions were all
+   *  answered asks nothing of anyone's card: it is a turn of that member,
+   *  started here and run where the member runs. */
+  async answerMentionsCard(request: RespondToChatMentionsRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") throw new Error("The chat is not available.");
+    const message = conversation.messages.find((item) => item.id === request.sourceMessageId);
+    if (!message) throw new Error("Source message was not found.");
+    const pending = pendingMentionsOf(message);
+    if (pending.length === 0) {
+      if (request.approve && request.continueRequester && message.participantId) return this.respondToMentions(request, signal, progress);
+      throw new Error("These mentions were already answered.");
+    }
+    if (message.metadata?.serverCard) throw new Error("These mentions were already answered.");
+    const cardId = mentionCardId(message.id);
+    await this.answerServerCard({ conversationId: conversation.id, cardId, raisedHere: this.cardRaisedHere(conversation, cardId), answer: {
+      approve: request.approve,
+      targetParticipantIds: request.approve ? request.targetParticipantIds : pending.map((mention) => mention.targetParticipantId),
+      ...(request.continueRequester ? { continueRequester: true } : {})
+    } });
+    return { conversation: (await this.storage.getConversation(conversation.id)) ?? conversation, warnings: [] };
   }
 
   /** Installs (or removes) the path a chat's changes take to other devices. */

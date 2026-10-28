@@ -554,6 +554,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   });
   host.onFenceLifted(() => {
     void chatService.resumeServerTurns().catch((error) => log("machine.server-turns.resume-error", { message: error instanceof Error ? error.message : String(error) }));
+    // Answers to its members' cards that waited while it took nothing new.
+    void chatService.resumeServerCards({ messages: false }).catch((error) => log("machine.server-cards.resume-error", { message: error instanceof Error ? error.message : String(error) }));
   });
   const powerConfig = await settingsService.getMachinePower();
   if (!powerConfig) {

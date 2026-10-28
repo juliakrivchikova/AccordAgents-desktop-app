@@ -30,9 +30,7 @@ import {
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import type { MachineProgressFrame } from "../../shared/machineProgress";
 import type { AgentHealth, ChatBackgroundTasksEvent, ReviewProgress } from "../../shared/types";
-import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
-import type { ChatActionPayload } from "../../shared/chatActionEvents";
 import type { ChatService } from "./chat";
 import type { DebugLogService } from "./debugLogs";
 import type { ChatEventDeviceIdentityRecord, StorageService } from "./storage";
@@ -43,7 +41,7 @@ import { signMachineControl, verifyMachineControl, machineControlSender } from "
 import { MachineProgressSender } from "./machineProgressSender";
 import { readPosixProcessTableAsync } from "./processTermination";
 import { MachineApprovalExecutor } from "./machineApprovalExecutor";
-import { MachineChoiceExecutor } from "./chatActionNativeClaims";
+import { MachineChoiceExecutor, MachineMentionExecutor } from "./chatActionNativeClaims";
 
 export interface MachineHostOptions {
   pairing: MobilePairingPackage;
@@ -103,10 +101,6 @@ const LIVE_PROGRESS_TEXT_FLUSH_MS = 100;
 /** Runs whose progress is sent at once, at most (the oldest stop). */
 const PROGRESS_RUNS_MAX = 32;
 
-/** Cards of members here travel through the User's server from step 5 of
- *  "the server owns the chat"; until then nothing carries them. */
-const CARDS_NOT_CONNECTED = "Answers to cards of members on a machine travel through your server, which this version does not carry yet.";
-
 function changesScripts(operation: MachineScriptsOperation): boolean {
   return operation.op !== "list" && operation.op !== "revision" && operation.op !== "runs";
 }
@@ -124,9 +118,9 @@ interface MachineAttachmentWaiter {
   fileName?: string;
 }
 
-type HostChat = Pick<ChatService, "respondToChoice" | "respondToAppToolApproval"> &
+type HostChat = Pick<ChatService, "respondToChoice" | "respondToAppToolApproval" | "respondToMentions"> &
   Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "onParticipantRunSettled" | "conversationIdForRun" | "setPromptSuggestionForwarder" |
-    "onBackgroundTasksChanged" | "localBackgroundTasks">>;
+    "onBackgroundTasksChanged" | "localBackgroundTasks" | "setCardAppliers">>;
 
 export class MachineHostService {
   private readonly client: TunnelClient;
@@ -165,6 +159,7 @@ export class MachineHostService {
   private scriptsQueue: Promise<void> = Promise.resolve();
   private readonly approvalExecutor: MachineApprovalExecutor;
   private readonly choiceExecutor: MachineChoiceExecutor;
+  private readonly mentionExecutor: MachineMentionExecutor;
 
   constructor(
     private readonly chat: HostChat,
@@ -179,20 +174,31 @@ export class MachineHostService {
     // A machine meets its devices on the User's server, nowhere else.
     if (!pairing.hubUrl) throw new Error("This machine's enrollment does not name the User's server; set it up again from the desktop (Cloud run in a member's settings).");
     this.client = options.createClient(pairing);
-    // Step 5 moves cards to the server; until then their outcomes go nowhere.
+    // The User's answers to cards of members here arrive from the User's
+    // server; these apply each once (agreement Д9). Only the desktop that
+    // set this machine up shows a script's code, so only its answer
+    // approves a script that installs code.
     this.choiceExecutor = new MachineChoiceExecutor({
-      storage: options.storage, deviceId: options.deviceId, chat,
+      storage: options.storage, chat,
       progress: (progress, conversationId) => this.noteProgressFor(conversationId, progress),
       runtimeIdentity: () => this.getRuntimeIdentity(), nativeProcessDbPath: options.nativeProcessDbPath,
-      canApply: () => this.canApplyNativeEffects(), publish: async () => { throw new Error(CARDS_NOT_CONNECTED); }
+      canApply: () => this.canApplyNativeEffects()
     });
     this.approvalExecutor = new MachineApprovalExecutor({
-      storage: options.storage, deviceId: options.deviceId, chat, getConversation: (id) => options.storage.getConversation(id),
+      storage: options.storage, chat,
+      progress: (progress, conversationId) => this.noteProgressFor(conversationId, progress),
       runtimeIdentity: () => this.getRuntimeIdentity(), nativeProcessDbPath: options.nativeProcessDbPath,
       canApply: () => this.canApplyNativeEffects(),
-      publish: async () => { throw new Error(CARDS_NOT_CONNECTED); },
-      codeApprover: (event) => event.originId === pairing.issuer.originId
+      codeApprover: () => pairing.issuer.originId
     });
+    this.mentionExecutor = new MachineMentionExecutor({
+      storage: options.storage, chat,
+      progress: (progress, conversationId) => this.noteProgressFor(conversationId, progress),
+      runtimeIdentity: () => this.getRuntimeIdentity(),
+      canApply: () => this.canApplyNativeEffects()
+    });
+    const appliers = { approval: this.approvalExecutor, choice: this.choiceExecutor, mention: this.mentionExecutor };
+    this.chat.setCardAppliers?.(async () => appliers);
     this.client.on("peer", (event) => {
       if (event.type === "ready") {
         // Own link (re)established: greet the desktop again even if it is
@@ -270,7 +276,7 @@ export class MachineHostService {
   async shutdown(stopProviders: () => Promise<void>, closeLink = true): Promise<void> {
     this.draining = true;
     await stopProviders();
-    while (this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork() || (this.chat.activeParticipantRuns?.().length ?? 0) ||
+    while (this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork() || this.mentionExecutor.hasActiveWork() || (this.chat.activeParticipantRuns?.().length ?? 0) ||
         (this.chat.liveRunIds?.().length ?? 0)) {
       // A turn may still be preparing its workspace when shutdown begins.
       // Close an executor created by that preparation before waiting again.
@@ -335,7 +341,7 @@ export class MachineHostService {
     // due time. This vetoes idle stop only; it is not a run, so the desktop's
     // update gate (hello run ids) does not wait for it.
     if (this.options.scripts?.keepsHostAwake()) return true;
-    if (this.closed || this.draining || this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork() ||
+    if (this.closed || this.draining || this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork() || this.mentionExecutor.hasActiveWork() ||
         (this.chat.activeParticipantRuns?.().length ?? 0) > 0 || (this.chat.liveRunIds?.().length ?? 0) > 0) return true;
     const unsent = await this.options.unsentServerWrites?.().catch(() => ({ queued: 1 }));
     return (unsent?.queued ?? 0) > 0;
@@ -402,14 +408,6 @@ export class MachineHostService {
     for (const listener of this.fenceListeners) {
       try { listener(); } catch { /* a listener never breaks the fence */ }
     }
-  }
-
-  applyApprovalAction(event: ChatEventEnvelope, payload: ChatActionPayload): Promise<import("../../shared/machineLink").MachineApprovalResultBody> {
-    return this.approvalExecutor.applyAction(event, payload);
-  }
-
-  applyChoiceAction(event: ChatEventEnvelope, payload: ChatActionPayload): Promise<import("../../shared/machineLink").MachineChoiceResultBody> {
-    return this.choiceExecutor.applyAction(event, payload);
   }
 
   /** This runtime, as a durable claim names its owner. */
