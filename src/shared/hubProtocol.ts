@@ -259,10 +259,9 @@ export const HUB_PHONE_ENROLLMENT_SCOPE = "device-enrollment";
 /** Desktops publish the approval cards of their own members here. */
 export const HUB_APPROVAL_CARD_EVENT_KIND = "chat.approval";
 export const HUB_APPROVAL_CARD_SCOPE = "chat-approvals";
-/** A desktop's own members' live progress goes to the hub by this request,
- *  not into the order: it is shown while the member runs and is worth
- *  nothing afterwards, so nothing keeps it (machines publish theirs as
- *  machine.turn.progress.delta in their channels). */
+/** A device's own members' live progress (the computer's, a machine's) goes
+ *  to the hub by this request, not into the order: it is shown while the
+ *  member runs and is worth nothing afterwards, so nothing keeps it. */
 export const HUB_PROGRESS_PATH = "/v1/progress";
 export interface HubProgressPost {
   frames: MachineProgressFrame[];

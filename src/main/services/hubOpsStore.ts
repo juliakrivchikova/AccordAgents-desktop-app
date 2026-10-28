@@ -35,6 +35,7 @@ export const HUB_OPS_SCHEMA_SQL = `
   );
   create index if not exists hub_turns_message on hub_turns(conversation_id, message_id);
   create index if not exists hub_turns_requested on hub_turns(state) where state = 'requested';
+  create index if not exists hub_turns_claimed on hub_turns(executor_device_id) where state = 'claimed';
   -- Messages removed from a chat: never added again, whoever writes them.
   create table if not exists hub_removed_messages (
     conversation_id text not null,
@@ -257,6 +258,14 @@ export class HubOpsStore {
     await this.init();
     const rows = await this.database.query<TurnRow>(`select ${TURN_COLUMNS} from hub_turns where state = 'requested'
       order by requested_at, run_id limit ${Math.max(1, Math.floor(limit))};`);
+    return rows.map(turnFromRow);
+  }
+
+  /** Turns this device took and has not finished, oldest first. */
+  async claimedBy(deviceId: string, limit = 500): Promise<HubTurn[]> {
+    await this.init();
+    const rows = await this.database.query<TurnRow>(`select ${TURN_COLUMNS} from hub_turns where state = 'claimed'
+      and executor_device_id = ${quote(deviceId)} order by claimed_at, run_id limit ${Math.max(1, Math.floor(limit))};`);
     return rows.map(turnFromRow);
   }
 

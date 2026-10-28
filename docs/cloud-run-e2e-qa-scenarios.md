@@ -24,8 +24,9 @@
 > - **The phone with the desktop closed** was proven by
 >   `scripts/mobile-phone-machine-e2e.mjs` against the relay; that script went
 >   with the relay on 2026-10-26. Through the User's server,
->   `scripts/machine-hub-order.test.mjs` covers a machine whose reply the
->   server folds with the desktop away, and `scripts/hub-phone-http.test.mjs`
+>   `scripts/machine-runtime-hub.test.mjs` covers the built machine runtime
+>   taking a phone's message from the server and answering it with the desktop
+>   away, and `scripts/hub-phone-http.test.mjs`
 >   the phone's pairing and reads. A run of the shipped PWA with a real server,
 >   a machine and the desktop closed has not been redone.
 > - **Durable native admission for approvals and choices, machine deletion,

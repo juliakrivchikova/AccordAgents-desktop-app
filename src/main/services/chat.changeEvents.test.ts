@@ -366,27 +366,6 @@ test("a machine's change waits on another machine until the desktop change it wa
   }
 });
 
-test("a machine's back delta changes only its own members' messages and what it created", async () => {
-  const { desktop, machine, cleanup } = await pair();
-  try {
-    await save(desktop, chat());
-    const back = (message: ChatMessage) => desktop.service.applyMachineBackDelta({
-      conversationId: "chat-1", messages: [message], machineId: "machine-1", machineOriginId: machine.originId
-    });
-    await back({ id: "m2", role: "user", content: "Rewritten by a machine", createdAt: "2026-09-24T12:00:01.000Z", status: "done" });
-    await back({ id: "forged", role: "participant", participantId: "local", participantLabel: "@taylor", content: "Not mine",
-      createdAt: "2026-09-24T12:00:03.000Z", status: "done" });
-    await back({ id: "own", role: "participant", participantId: "remote", participantLabel: "@drew", content: "Mine",
-      createdAt: "2026-09-24T12:00:04.000Z", status: "done" });
-    await back({ id: "typed", role: "user", content: "Typed on the phone into the machine", createdAt: "2026-09-24T12:00:05.000Z", status: "done" });
-    const stored = (await desktop.storage.getConversation("chat-1"))!;
-    assert.deepEqual(stored.messages.map((message) => message.id), ["m1", "m2", "own", "typed"]);
-    assert.equal(stored.messages[1].content, "Hello", "the User's message is not the machine's to change");
-    assert.equal((stored.messages[3].metadata as Record<string, unknown>).remoteAuthorOriginId, machine.originId,
-      "what the machine created stays its own; this desktop does not send changes to it as the author");
-  } finally { await cleanup(); }
-});
-
 test("a change from a newer version waits for this device's update instead of being half applied", async () => {
   const { desktop, machine, cleanup } = await pair();
   try {
@@ -421,44 +400,6 @@ test("a waiting change is tried again only once more of what it waits for has ar
     have = 2;
     assert.equal(await machine.service.applyRemoteChatChanges(from, reply as unknown as ChatChangesPayload), "waiting");
     assert.ok(reads > afterFirst, "tried again once more arrived");
-  } finally { await cleanup(); }
-});
-
-test("a machine stays the author of what it created through every back delta", async () => {
-  const { desktop, machine, cleanup } = await pair();
-  try {
-    await save(desktop, chat());
-    const back = (message: ChatMessage) => desktop.service.applyMachineBackDelta({
-      conversationId: "chat-1", messages: [message], machineId: "machine-1", machineOriginId: machine.originId
-    });
-    const typed: ChatMessage = { id: "typed", role: "user", content: "First", createdAt: "2026-09-24T12:00:05.000Z", status: "done",
-      metadata: { remoteAuthorOriginId: "a-claim" } as ChatMessage["metadata"] };
-    await back(typed);
-    await back({ ...typed, content: "Second", metadata: undefined });
-    await back({ ...typed, content: "Third", metadata: undefined });
-    const stored = (await desktop.storage.getConversation("chat-1"))!.messages.find((message) => message.id === "typed")!;
-    assert.equal(stored.content, "Third");
-    assert.equal((stored.metadata as Record<string, unknown>).remoteAuthorOriginId, machine.originId, "this desktop's record, not the sender's claim");
-  } finally { await cleanup(); }
-});
-
-test("reactions to a message that arrives later by another way are applied, net of what was undone", async () => {
-  const { desktop, machine, cleanup } = await pair();
-  try {
-    await save(desktop, chat());
-    const { envelope, payload } = await event(desktop, desktop.committed[0]);
-    const reactor = { actorId: "remote", actorLabel: "@drew", actorKind: "participant" as const, at: NOW };
-    const react = (added: unknown[], removed: unknown[], seq: number) => desktop.service.applyRemoteChatChanges(
-      { ...envelope, originId: machine.originId, eventId: `react-${seq}` },
-      { ...payload, changes: [{ type: "message.reactions", messageId: "late", added, removed }] } as unknown as ChatChangesPayload);
-    await react([{ emoji: "👍", reactor }, { emoji: "🎉", reactor }], [], 1);
-    await react([], [{ emoji: "🎉", actorId: "remote" }], 2);
-    // The message comes with a machine's back delta, not as a change.
-    await desktop.service.applyMachineBackDelta({ conversationId: "chat-1", machineId: "machine-1", machineOriginId: machine.originId,
-      messages: [{ id: "late", role: "participant", participantId: "remote", participantLabel: "@drew", content: "Arrived", createdAt: NOW, status: "done" }] });
-    const late = (await desktop.storage.getConversation("chat-1"))!.messages.find((message) => message.id === "late")!;
-    assert.deepEqual(Object.keys(late.metadata?.reactions ?? {}), ["👍"], "added and then removed stays removed");
-    assert.equal((await desktop.storage.getConversation("chat-1"))!.metadata.pendingChatReactions, undefined);
   } finally { await cleanup(); }
 });
 

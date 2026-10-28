@@ -9,7 +9,7 @@ import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, ty
 import { applyChatChanges, applyHeldReactions, CHAT_CHANGES_VERSION, chatChangeBaseline, diffChatChanges, isSupportedChatChangesVersion, type ChatChangeApplyPolicy, type ChatChangeBaseline, type ChatChangeDiffPolicy, type ChatChangesPayload, isSafeChatId } from "./chatChanges";
 import { chatChangesToOps, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
-import { hubTurnRunId, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
+import { hubTurnRunId, isHubTurnRunId, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
 import { mergeCopiedConversation, type CopiedConversation } from "./chatCopy";
 import type {
   AgentContextUsage,
@@ -124,7 +124,7 @@ import type {
 import { isAutoWatchStableMessage, isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
 import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { ChatActionPayload } from "../../shared/chatActionEvents";
-import { isMachineCompactionLine, normalizeMachineTurnCompaction, type MachineCompactionDelegateRequest, type MachineTurnCompaction } from "../../shared/machineLink";
+import { isMachineCompactionLine } from "../../shared/machineLink";
 import { machineStopPendingText, machineWaitingText } from "../../shared/machineWaitingText";
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
 import {
@@ -238,7 +238,7 @@ import {
   withParticipantCompactionsForRunRemoved
 } from "../../shared/chatRunState";
 import { INTERRUPTED_RUN_WARNING, sanitizeWarningList, sanitizeWarningText } from "../../shared/warnings";
-import { foldMachineTurnResult, markStopUnconfirmed, markStoppedByUser } from "./machineTurnOutcome";
+import { markStopUnconfirmed, markStoppedByUser } from "./machineTurnOutcome";
 import { NativeProcessUnavailableError } from "./nativeProcess";
 import { normalizeAutoChatTitle, normalizeManualChatTitle, sanitizeAutoChatTitleSuggestion } from "../../shared/chatTitles";
 import {
@@ -707,12 +707,13 @@ export interface ChatChoiceExecutionGuard {
 
 export class ChatChoicePersistenceError extends Error {}
 
-/** How often a machine looks at its own copy while the desktop runs the
- *  targets, and how long it keeps looking before answering with what it has. */
-const DELEGATED_PARTICIPANT_REQUEST_POLL_MS = 1_000;
-const DELEGATED_PARTICIPANT_REQUEST_LIMIT_MS = 24 * 60 * 60 * 1_000;
-/** How long the desktop waits for the request message a delegation names. */
-const DELEGATED_PARTICIPANT_REQUEST_WAIT_MS = 10_000;
+/** A member elsewhere could not be asked: its machine or its project could
+ *  not be made ready on this device. */
+class RemoteTurnNotStartedError extends Error {}
+
+/** How long the end of a turn run here waits for the save that writes its
+ *  member's last bubble before it is sent anyway. */
+const DEFERRED_SERVER_FINISH_MS = 10_000;
 
 interface ParticipantRequestRunResult {
   batch: ChatParticipantRequestBatch;
@@ -763,89 +764,10 @@ interface RemoteRunTerminalizationResult {
   autoResumeRequestMessageIds: string[];
 }
 
-/** Machines transport: runs one participant turn on the participant's home
- *  machine. The desktop owns the pending bubble and applies the returned
- *  messages exactly as it would for a local turn. */
-export interface MachineTurnDispatchRequest {
-  conversation: Conversation;
-  participant: ChatParticipant;
-  triggerMessage: ChatMessage;
-  runId: string;
-  pendingMessageId: string;
-  signal?: AbortSignal;
-  progress?: ProgressCallback;
-  /** Rule 2 (docs/parity-requirements.md): called when a Stop has been
-   *  requested but the machine has not confirmed it, so the User sees the
-   *  honest state instead of a silent wait. */
-  onStopPending?: (machineName: string) => void;
-  /** The machine is not ready to take the turn: not connected, or its
-   *  runtime is being updated (`reason`). Shown on the pending bubble (on a
-   *  compaction's status line for a compaction). */
-  onMachineWaiting?: (machineName: string, reason?: string) => Promise<void>;
-}
-
-export interface MachineTurnDispatchResult {
-  /** "unconfirmed": a Stop was requested and the machine never confirmed the
-   *  run is gone (it restarted or reported the run unknown); Rule 2 forbids
-   *  showing it as stopped. */
-  status: "completed" | "interrupted" | "failed" | "unconfirmed";
-  messages: ChatMessage[];
-  warnings: string[];
-  error?: string;
-  /** The machine's finish time of this result (absent for outcomes the
-   *  desktop produced itself). */
-  finishedAt?: string;
-  receiptId?: string;
-  /** Called once the desktop has stored the result; the machine keeps it
-   *  until then. */
-  acknowledge?: () => void | Promise<void>;
-  /** False when the turn never left this desktop (refused, or stopped while
-   *  being prepared): the member's home only ever had its empty bubble. */
-  sent?: boolean;
-  /** The member's context use as its CLI reported it on the machine after
-   *  this run, shown here exactly as a local member's. */
-  contextUsage?: AgentContextUsage;
-}
-
-/** Compacts a member on the machine that hosts it, through the same command
- *  path as its turns (no message to answer, no bubble, no progress frames). */
-export type MachineCompactionDispatchRequest = Omit<MachineTurnDispatchRequest, "triggerMessage" | "pendingMessageId" | "progress"> & {
-  compaction: MachineTurnCompaction;
-};
-
-/** Machine side. Hands a compaction a member here asked for itself to the
- *  desktop, which runs it as one the User started (and so shows it and can
- *  stop it), and sends it back here as a compaction command. */
-export interface ChatCompactionDelegate {
-  /** False when the desktop cannot take it now; the compaction then runs
-   *  here directly, as it would without a desktop. */
-  canDelegateCompaction(): boolean;
-  delegateCompaction(request: MachineCompactionDelegateRequest): Promise<void>;
-}
-
-/** Machine side. Hands one prepared member request to the desktop; the answers
- *  come back with the conversation, like every other message. */
-export interface ChatParticipantRequestDelegate {
-  delegateParticipantRequest(request: {
-    conversationId: string;
-    requestMessageId: string;
-    batchId: string;
-    depth: number;
-    /** Where these members live: a machine id, or undefined for the desktop.
-     *  Exactly one device is asked for each group, so no two run the same
-     *  member. */
-    homeMachineId?: string;
-    targetParticipantIds: string[];
-    /** The rows the recipient needs to act on this request, for the case
-     *  where it is another machine that has not seen them. */
-    messages: ChatMessage[];
-  }): Promise<void>;
-}
-
-export interface MachineTurnDispatcher {
-  runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult>;
-  compactOnMachine?(request: MachineCompactionDispatchRequest): Promise<MachineTurnDispatchResult>;
-  cancelMachineRun?(request: { machineId: string; conversationId: string; runId: string; onStopPending?: (machineName: string) => Promise<void> }): Promise<void>;
+/** What a device's live link to its machines (the desktop) or to its desktop
+ *  (a machine) gives a chat. Turns, Stops and compactions never travel here:
+ *  they are the User's server's (agreements Д1, Д4). */
+export interface MachineLinkPort {
   /** The bytes of a picture this copy does not hold on disk. Only a machine
    *  supplies this: replication brings an attachment's metadata here without
    *  its file, and the desktop that owns the chat still has it. */
@@ -1094,15 +1016,30 @@ export class ChatService {
   private readonly appToolApprovalDecisionListeners = new Set<(event: ChatAppToolApprovalDecisionEvent) => Promise<void> | void>();
   private readonly appInstanceId = randomUUID();
   private runOwnerHeartbeatTimer?: NodeJS.Timeout;
-  private machineLink?: MachineTurnDispatcher;
+  private machineLink?: MachineLinkPort;
   private scriptHost?: ChatScriptHost;
-  private participantRequestDelegate?: ChatParticipantRequestDelegate;
-  private compactionDelegate?: ChatCompactionDelegate;
-  /** Machine compactions in flight here: puts their status line back to
-   *  "Compacting" once the machine has started them. */
-  private readonly machineCompactionStatus = new Map<string, () => void>();
-  /** Run ids of compactions machines delegated here, so a redelivery is one run. */
-  private readonly delegatedCompactionRunIds = new Set<string>();
+  /** Compactions of machine members this desktop shows as runs while their
+   *  machine compacts them (asked by the member itself, on its machine). */
+  private readonly observedServerCompactions = new Set<string>();
+  /** The server turn of each such compaction while this desktop shows it,
+   *  by its run id (the same id the machine runs it under). */
+  private readonly observedCompactionTurns = new Map<string, HubTurn>();
+  /** Machine side: runs before a server turn asked of a member here starts
+   *  (the machine's settings are made current first); false leaves the turn
+   *  waiting on the server (an idle stop is under way). */
+  private serverTurnPreparation?: (turn: HubTurn) => Promise<boolean>;
+  /** Desktop side: why a machine cannot take turns right now (its runtime is
+   *  being updated), shown on a member's waiting bubble. */
+  private machineWaitReason?: (machineId: string) => string | undefined;
+  /** Desktop side: runs before a turn of a machine member is asked (the
+   *  machine's settings, with where its project lives, go to the server). */
+  private beforeRemoteTurn?: (machineId: string) => Promise<void>;
+  /** Desktop side: whether a chat's project is ready on a machine (a machine
+   *  set up from here has it copied before its member's first turn). */
+  private machineProjectReady?: (machineId: string, repoPath: string) => Promise<boolean>;
+  /** Machine side: where the computer's projects live here, by the
+   *  computer's path (from the settings it published for this machine). */
+  private machineProjects: Record<string, string> = {};
   private cloudRunAws?: CloudRunAwsResolver;
   private cloudRunDoctor?: CloudRunDoctorProbe;
   private artifactCleanup?: (conversationId: string) => Promise<void>;
@@ -1257,7 +1194,7 @@ export class ChatService {
     }
   }
 
-  setMachineLink(link: MachineTurnDispatcher | undefined): void {
+  setMachineLink(link: MachineLinkPort | undefined): void {
     this.machineLink = link;
   }
 
@@ -1302,16 +1239,46 @@ export class ChatService {
     this.scriptHost = host;
   }
 
-  /** Machines transport, machine side: hands a member request to the desktop,
-   *  which owns the roster and runs each target where that member lives. */
-  setParticipantRequestDelegate(delegate: ChatParticipantRequestDelegate | undefined): void {
-    this.participantRequestDelegate = delegate;
+  /** Machine side: what must happen before a turn the server asked of a
+   *  member here starts (see serverTurnPreparation). */
+  setServerTurnPreparation(prepare: ((turn: HubTurn) => Promise<boolean>) | undefined): void {
+    this.serverTurnPreparation = prepare;
   }
 
-  /** Machine side: where a member's own compaction request goes (see
-   *  ChatCompactionDelegate). */
-  setCompactionDelegate(delegate: ChatCompactionDelegate | undefined): void {
-    this.compactionDelegate = delegate;
+  /** Desktop side: why a machine cannot take turns right now, if it cannot. */
+  setMachineWaitReason(reason: ((machineId: string) => string | undefined) | undefined): void {
+    this.machineWaitReason = reason;
+  }
+
+  /** Desktop side: see beforeRemoteTurn and machineProjectReady. */
+  setRemoteTurnPreparation(preparation: {
+    beforeRemoteTurn?: (machineId: string) => Promise<void>;
+    machineProjectReady?: (machineId: string, repoPath: string) => Promise<boolean>;
+  } | undefined): void {
+    this.beforeRemoteTurn = preparation?.beforeRemoteTurn;
+    this.machineProjectReady = preparation?.machineProjectReady;
+  }
+
+  /** Machine side: where the computer's projects live on this machine. */
+  setMachineProjects(projects: Record<string, string>): void {
+    this.machineProjects = { ...projects };
+  }
+
+  /** Machine side: a chat's project folder here, as the computer's settings
+   *  for this machine say now (before a member works in it). */
+  async refreshMachineRepository(conversationId: string): Promise<void> {
+    if (!this.hostMachineId) return;
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") return;
+    const recorded = conversation.metadata.machineRepository as { sourcePath?: string } | undefined;
+    const sourcePath = recorded?.sourcePath ?? conversation.repoPath;
+    if (!sourcePath) return;
+    await this.withChatMutation(conversation, async () => {
+      const before = this.stableJson({ repository: conversation.metadata.machineRepository ?? null, repoPath: conversation.repoPath ?? null });
+      this.localizeRepoPath(conversation, sourcePath);
+      if (this.stableJson({ repository: conversation.metadata.machineRepository ?? null, repoPath: conversation.repoPath ?? null }) === before) return;
+      await this.saveConversation(conversation, { emitChanges: false });
+    });
   }
 
   setCloudRunAwsService(service: CloudRunAwsResolver): void {
@@ -1697,7 +1664,12 @@ export class ChatService {
         // crash before the transport is ready must not forget who holds a copy.
         const machineIds = this.chatParticipants(conversation).map(participant => participant.homeMachineId)
           .filter((id): id is string => typeof id === "string" && id.length > 0);
-        const deleted = await this.storage.deleteConversation(conversation.id, { machineIds });
+        // The User's server owns the chat (Д1): the deletion goes there with
+        // the rows, and every other device (its machines too) takes it from
+        // there.
+        const serverDelete = this.serverLink?.queueSql([{ opId: newOpId(), kind: "conversation.delete", conversationId: conversation.id }]);
+        const deleted = await this.storage.deleteConversation(conversation.id, { machineIds, ...(serverDelete ? { alsoCommitSql: serverDelete } : {}) });
+        if (deleted && serverDelete) this.serverLink?.nudge();
         if (!deleted) {
           await rm(cleanupMarker, { force: true });
           this.deletedConversationIds.delete(conversation.id);
@@ -2322,12 +2294,15 @@ export class ChatService {
   }
 
   /**
-   * Desktop side of compacting a member that runs on a machine. The machine
-   * runs this service's own compactParticipant for the member's session there
-   * and returns the outcome line it wrote; this desktop shows that same line,
-   * the same progress and the member's new context use. Whatever kept the
-   * machine from running it (not connected, an older runtime, stopped before
-   * it was sent) ends exactly as a local compaction that could not start.
+   * Desktop side of compacting a member that runs on a machine. The compaction
+   * is a turn of that member on the User's server (Д4): asked of its machine
+   * there, taken and run by it with this service's own compactParticipant,
+   * which writes the outcome line this desktop then shows, with the same
+   * status and Stop as a local compaction. Whatever kept the machine from
+   * running it (no server link, stopped before it was taken) ends exactly as a
+   * local compaction that could not start. A compaction the member's machine
+   * asked for itself (`observedServerTurns`) is shown here the same way,
+   * without being asked again.
    */
   private async compactParticipantOnMachine(
     conversation: Conversation,
@@ -2340,78 +2315,95 @@ export class ChatService {
     signal?: AbortSignal,
     progress?: ProgressCallback
   ): Promise<StartReviewResult> {
-    const link = this.machineLink;
-    let result: MachineTurnDispatchResult;
+    const link = this.serverLink;
+    const observed = this.observedCompactionTurns.get(runId);
+    const serverRunId = observed?.runId ?? (runId.startsWith("turn-") ? runId : `turn-${runId}`);
+    const compacting = `Compacting @${participant.handle}.`;
+    const status = (message: string): void => {
+      this.emitProgress(runId, progress, "initial", message, { participantLabel: `@${participant.handle}` });
+    };
+    let turn: HubTurn | undefined = observed;
+    let failure: { status: "interrupted" | "failed"; error?: string } | undefined;
+    let anchorId: string | undefined = observed?.messageId;
     if (signal?.aborted) {
-      result = { status: "interrupted", messages: [], warnings: [], sent: false };
-    } else if (!link?.compactOnMachine) {
-      result = { status: "failed", messages: [], warnings: [], sent: false, error: `@${participant.handle} is hosted on a machine, but the machine link is not available` };
+      failure = { status: "interrupted" };
+    } else if (!link) {
+      failure = { status: "failed", error: `@${participant.handle} runs on a cloud machine, which this device reaches only through your server; it is not linked to it yet` };
     } else {
-      // The compaction's own status line says what a turn's bubble says
-      // while its machine is away, and returns to "Compacting" once it runs.
-      const compacting = `Compacting @${participant.handle}.`;
-      const status = (message: string): void => {
-        this.emitProgress(runId, progress, "initial", message, { participantLabel: `@${participant.handle}` });
-      };
-      // Once Stop is waiting for the machine, that stays until the outcome,
-      // as on a turn's bubble.
-      let stopPending = false;
-      this.machineCompactionStatus.set(runId, () => { if (!stopPending) status(compacting); });
+      const machineName = participant.homeMachineId ? link.machineName(participant.homeMachineId) ?? "the machine" : "the machine";
+      const placed = (item: HubTurn) => item.state !== "requested";
+      const ended = (item: HubTurn) => item.state === "finished" || item.state === "stopped";
       try {
-        result = await link.compactOnMachine({
-          conversation,
-          participant,
-          runId,
-          signal,
-          compaction: normalizeMachineTurnCompaction({ ...request, instructions: compactInstructions }),
-          onMachineWaiting: async (machineName, reason) => {
-            if (!stopPending) status(`${compacting} ${machineWaitingText(machineName, reason)}`);
-          },
-          onStopPending: (machineName) => {
-            void this.debugLogs.write("chat.compaction.stop-pending", { conversationId: conversation.id, runId, machineName });
-            stopPending = true;
-            status(`${compacting} ${machineStopPendingText(machineName)}`);
+        if (!turn) {
+          const anchor = this.compactionAnchor(conversation, request);
+          if (!anchor) {
+            // Nothing in this chat reached the server yet: the member never
+            // ran in it, so it has no session there to compact.
+            return await this.compactionWithoutSession(conversation, participant, request, runId, warnings, auditBase);
           }
-        });
-      } finally {
-        this.machineCompactionStatus.delete(runId);
+          anchorId = anchor.id;
+          const opId = newOpId();
+          await link.enqueue([{
+            opId, kind: "turn.request", conversationId: conversation.id, runId: serverRunId, messageId: anchor.id, participantId: participant.id,
+            request: {
+              kind: "compaction",
+              triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
+              ...(compactInstructions ? { instructions: compactInstructions } : {}),
+              ...(request.threadId?.trim() ? { threadId: request.threadId.trim() } : {}),
+              ...(request.parentMessageId?.trim() ? { parentMessageId: request.parentMessageId.trim() } : {}),
+              ...(request.chatThreadRootId?.trim() ? { chatThreadRootId: request.chatThreadRootId.trim() } : {})
+            }
+          }]);
+          const asked = await link.opAnswered(opId, signal);
+          if (asked.status === "rejected") throw new Error(`@${participant.handle} could not be compacted on ${machineName}: ${asked.reason}`);
+          turn = asked.turn;
+        }
+        if (!turn || !placed(turn)) {
+          // The same words a turn's bubble shows while its machine has not
+          // taken it; back to "Compacting" once it has.
+          const reason = participant.homeMachineId ? this.machineWaitReason?.(participant.homeMachineId) : undefined;
+          status(`${compacting} ${machineWaitingText(machineName, reason)}`);
+          turn = await this.waitForServerTurn(serverRunId, placed, signal);
+          if (!ended(turn)) status(compacting);
+        }
+        if (!ended(turn)) turn = await this.waitForServerTurn(serverRunId, ended, signal);
+      } catch (error) {
+        if (!signal?.aborted) {
+          failure = { status: "failed", error: error instanceof Error ? error.message : String(error) };
+        } else if (anchorId) {
+          // Stop: asked on the server, and shown as waiting until the machine
+          // confirms (the approved parity exception), as on a turn's bubble.
+          void this.debugLogs.write("chat.compaction.stop-pending", { conversationId: conversation.id, runId, machineName });
+          await link.enqueue([{ opId: newOpId(), kind: "turn.stop", conversationId: conversation.id, runId: serverRunId, messageId: anchorId, participantId: participant.id }]);
+          status(`${compacting} ${machineStopPendingText(machineName)}`);
+          turn = await this.waitForServerTurn(serverRunId, ended);
+        } else {
+          failure = { status: "interrupted" };
+        }
       }
     }
-    // Only the lines the machine's compaction of this run wrote are taken.
-    const compactionLines = result.messages.filter((message) => isMachineCompactionLine(message, runId, participant.id));
+    // The lines the machine's compaction of this run wrote reached this
+    // device through the server, before the turn's end did.
+    const refreshed = await this.requireChat(conversation.id).catch(() => conversation);
+    const compactionLines = refreshed.messages.filter((message) => isMachineCompactionLine(message, serverRunId, participant.id));
     const outcomeMessage = compactionLines.at(-1);
     const reported = outcomeMessage?.metadata?.compaction?.outcome;
     let outcome: "completed" | "failed" | "no-active-session" = reported === "completed" || reported === "no-active-session" ? reported : "failed";
-    await this.withChatMutation(conversation, async () => {
-      if (outcomeMessage) {
-        for (const message of compactionLines) {
-          if (!conversation.messages.some((existing) => existing.id === message.id)) {
-            conversation.messages.push(message);
-          }
-        }
-        for (const warning of result.warnings) {
-          if (!warnings.includes(warning)) warnings.push(warning);
-        }
-      } else {
-        // It never ran on the machine: the same line a local compaction that
-        // could not start writes (a Stop before it started: word for word).
-        const content = machineCompactionFailureLine(participant.handle, result.status, result.error);
+    if (!outcomeMessage) {
+      // It never ran on the machine: the same line a local compaction that
+      // could not start writes (a Stop before it started: word for word).
+      const stoppedBeforeStart = turn?.state === "stopped" && !turn.executorDeviceId;
+      const content = failure
+        ? machineCompactionFailureLine(participant.handle, failure.status, failure.error)
+        : machineCompactionFailureLine(participant.handle, stoppedBeforeStart ? "interrupted" : "failed",
+          stoppedBeforeStart ? undefined : "the machine ended the compaction without saying how it went");
+      await this.withChatMutation(conversation, async () => {
         conversation.messages.push(this.message("system", content, undefined, this.compactMessageMetadata(request, participant.id, "failed")));
-        warnings.push(content);
-        outcome = "failed";
-      }
-      this.updateParticipantContextUsage(conversation, participant.id, normalizeAgentContextUsage(result.contextUsage));
-      conversation.updatedAt = new Date().toISOString();
-      await this.saveConversation(conversation);
-    });
-    // The machine keeps its result until this desktop has stored it.
-    if (await this.waitForQueuedSaveResult(conversation.id)) {
-      try { await result.acknowledge?.(); }
-      catch (error) {
-        void this.debugLogs.write("chat.compaction.ack-pending", { conversationId: conversation.id, runId, message: error instanceof Error ? error.message : String(error) });
-      }
-    } else {
-      void this.debugLogs.write("chat.compaction.not-stored", { conversationId: conversation.id, runId });
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+      });
+      warnings.push(content);
+      outcome = "failed";
     }
     if (outcome !== "no-active-session") {
       this.emitProgress(runId, progress, outcome === "completed" ? "done" : "error", outcome === "completed" ? `Compacted @${participant.handle}.` : `Could not compact @${participant.handle}.`, {
@@ -2424,39 +2416,46 @@ export class ChatService {
       participantHandle: participant.handle,
       outcome,
       homeMachineId: participant.homeMachineId,
-      machineStatus: result.status
+      serverTurn: turn ? { state: turn.state, outcome: turn.outcome } : undefined
     });
-    return { conversation, warnings };
+    return { conversation: refreshed, warnings };
   }
 
-  /** Machines transport, machine side: compacts one of this machine's members
-   *  for the desktop, with the run id the desktop chose. Returns the outcome
-   *  line written here and the member's context use after it. */
-  async runMachineHostedCompaction(
-    request: { conversationId: string; participantId: string; runId: string } & MachineTurnCompaction,
-    signal?: AbortSignal
-  ): Promise<{ messages: ChatMessage[]; warnings: string[]; contextUsage?: AgentContextUsage }> {
-    // Stop reaches it by run id as it reaches a turn (cancelRun), not only
-    // through the command's own controller.
-    const run = this.registerBackgroundRunController(request.runId, signal);
-    try {
-      const result = await this.compactParticipant({
-        conversationId: request.conversationId,
-        participantId: request.participantId,
-        runId: request.runId,
-        triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
-        ...(request.instructions ? { instructions: request.instructions } : {}),
-        ...(request.threadId ? { threadId: request.threadId } : {}),
-        ...(request.parentMessageId ? { parentMessageId: request.parentMessageId } : {}),
-        ...(request.chatThreadRootId ? { chatThreadRootId: request.chatThreadRootId } : {})
-      }, run.signal);
-      const conversation = result.conversation;
-      const messages = conversation.messages.filter((message) => isMachineCompactionLine(message, request.runId, request.participantId));
-      const contextUsage = this.agentContextUsageByParticipant(conversation)[request.participantId];
-      return { messages, warnings: result.warnings, ...(contextUsage ? { contextUsage } : {}) };
-    } finally {
-      run.cleanup();
+  /** The message a machine member's compaction turn is placed against on the
+   *  server: the one the User compacted from, or the chat's newest one the
+   *  server holds. */
+  private compactionAnchor(conversation: Conversation, request: { parentMessageId?: string }): ChatMessage | undefined {
+    const accepted = (message: ChatMessage) => serverSeqOf(message) !== undefined && !message.metadata?.serverPlaceholder;
+    const parentId = request.parentMessageId?.trim();
+    const parent = parentId ? conversation.messages.find((message) => message.id === parentId && accepted(message)) : undefined;
+    if (parent) return parent;
+    for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+      if (accepted(conversation.messages[index])) return conversation.messages[index];
     }
+    return undefined;
+  }
+
+  /** The line a compaction of a member that has no session writes. */
+  private async compactionWithoutSession(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    request: CompactChatParticipantRequest,
+    runId: string,
+    warnings: string[],
+    auditBase: Record<string, unknown>
+  ): Promise<StartReviewResult> {
+    await this.withChatMutation(conversation, async () => {
+      conversation.messages.push(this.message(
+        "system",
+        `@${participant.handle} does not have an active session to compact yet.`,
+        undefined,
+        this.compactMessageMetadata({ ...request, runId }, participant.id, "no-active-session")
+      ));
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+    });
+    await this.debugLogs.write("chat.compaction.finished", { ...auditBase, participantId: participant.id, participantHandle: participant.handle, outcome: "no-active-session" });
+    return { conversation, warnings };
   }
 
   async syncSavedParticipantAvatar(
@@ -3116,7 +3115,6 @@ export class ChatService {
       prepared.requestMessage.id,
       prepared.batch.depth,
       requesterProgress,
-      undefined,
       inlineParentSignal
     );
     // When replies come back in a fresh requester turn, there is nothing to
@@ -6648,7 +6646,16 @@ export class ChatService {
             // The members this message names, as this device resolved them:
             // the server asks each one's device for its turn (Д4), and this
             // process runs its own members' turns itself, under the same ids.
-            const deliveryTargets = dispatch.targets.map((target) => target.id);
+            // A member whose cloud machine is not chosen yet, or whose machine
+            // has not got this chat's project yet, is asked by this device once
+            // that is done (runParticipantTurnRemote), not by the server at once.
+            const askedLater = new Set<string>();
+            for (const target of dispatch.targets) {
+              if (target.cloudRun && !target.homeMachineId) askedLater.add(target.id);
+              else if (target.homeMachineId && conversation.repoPath && this.machineProjectReady &&
+                  !await this.machineProjectReady(target.homeMachineId, conversation.repoPath).catch(() => false)) askedLater.add(target.id);
+            }
+            const deliveryTargets = dispatch.targets.filter((target) => !askedLater.has(target.id)).map((target) => target.id);
             for (const message of conversation.messages) {
               if (message.id === userMessage.id) message.metadata = { ...message.metadata, deliveryTargets } as ChatMessageMetadata;
             }
@@ -7412,7 +7419,9 @@ export class ChatService {
             await appendCompletedTurn(participant, messages);
           }
         } catch (error) {
-          if (serverTurn.kind === "remote") {
+          if (serverTurn.kind === "remote" && error instanceof RemoteTurnNotStartedError && !targetController.signal.aborted) {
+            await this.finalizeFailedPrecreatedPendingMessage(conversation, pendingMessage.id, participant, new Error(error.message));
+          } else if (serverTurn.kind === "remote") {
             await this.dropServerPlaceholder(conversation, pendingMessage.id);
             if (!targetController.signal.aborted) warnings.push(error instanceof Error ? error.message : String(error));
           } else if (targetController.signal.aborted) {
@@ -7441,264 +7450,6 @@ export class ChatService {
       })
     );
     await this.ensureHistoryFiles(conversation);
-  }
-
-  /** Machines transport, desktop side: the participant's home machine runs the
-   *  turn; the desktop waits for it under the same per-participant reservation
-   *  and cancellation rules as a local turn. Progress arrives through the same
-   *  callback; the returned messages are appended by the caller. */
-  private async runParticipantTurnOnMachine(
-    conversation: Conversation,
-    participant: ChatParticipant,
-    triggerMessage: ChatMessage,
-    runId: string,
-    signal: AbortSignal | undefined,
-    progress: ProgressCallback | undefined,
-    options: {
-      warnings: string[];
-      existingPendingMessage?: ChatMessage;
-      continuation?: boolean;
-      turnSegmentId: string;
-    }
-  ): Promise<ChatMessage[]> {
-    const link = this.machineLink;
-    if (!link) {
-      throw new Error(`@${participant.handle} is hosted on a machine, but the machine link is not available.`);
-    }
-    // The desktop owns the pending bubble exactly as for a local turn; a
-    // pre-created bubble (batch path) is reused, otherwise one is created here
-    // and finalized below (continuation and resume paths).
-    let pendingMessage: ChatMessage;
-    const ownsPendingMessage = !options.existingPendingMessage;
-    if (options.existingPendingMessage) {
-      pendingMessage = options.existingPendingMessage;
-    } else {
-      pendingMessage = this.message(
-        "participant",
-        "",
-        { id: participant.id, kind: participant.kind, label: `@${participant.handle}`, model: participant.model },
-        {
-          threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
-          parentMessageId: triggerMessage.id,
-          chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
-          sourceMessageId: triggerMessage.id,
-          requesterParticipantId: options.continuation ? triggerMessage.participantId : undefined,
-          approvedContinuation: options.continuation || undefined,
-          runId,
-          turnSegmentId: options.turnSegmentId
-        },
-        "pending"
-      );
-      this.setTargetRunPendingMessageId(runId, pendingMessage.id);
-      await this.withChatMutation(conversation, async () => {
-        this.resolveSupersededParticipantInteractions(conversation, participant.id, pendingMessage.id);
-        conversation.messages.push(pendingMessage);
-        this.recordLastMessageByParticipant(conversation, pendingMessage);
-        conversation.updatedAt = new Date().toISOString();
-        this.queueSnapshot(conversation);
-      });
-    }
-    // After refresh-then-merge the bubble object held here may no longer be
-    // the one inside conversation.messages; both are updated by id.
-    const bubbleObjects = (): ChatMessage[] => {
-      const inConversation = conversation.messages.find((message) => message.id === pendingMessage.id);
-      return inConversation && inConversation !== pendingMessage ? [pendingMessage, inConversation] : [pendingMessage];
-    };
-    const clearStopPending = (): void => {
-      for (const bubble of bubbleObjects()) {
-        if (bubble.metadata?.stopPending) {
-          const { stopPending: _stopPending, ...rest } = bubble.metadata;
-          bubble.metadata = rest;
-        }
-      }
-    };
-    // The machine keeps its result until this desktop has stored the
-    // outcome (whatever it is): store now, acknowledge only on a successful
-    // write, and leave the result on the machine otherwise.
-    const storeOutcomeAndAcknowledge = async (result: MachineTurnDispatchResult, extra: ChatMessage[] = []): Promise<void> => {
-      await this.withChatMutation(conversation, async () => {
-        for (const message of extra) {
-          if (!conversation.messages.some((existing) => existing.id === message.id)) {
-            conversation.messages.push(message);
-          }
-        }
-        this.updateParticipantContextUsage(conversation, participant.id, normalizeAgentContextUsage(result.contextUsage));
-        conversation.updatedAt = new Date().toISOString();
-        this.queueSnapshot(conversation);
-      });
-      const stored = await this.waitForQueuedSaveResult(conversation.id);
-      if (stored) {
-        try { await result.acknowledge?.(); }
-        catch (error) {
-          // The provider outcome is already safely stored. An outbox/receipt
-          // failure must retry delivery, never turn that outcome into failure.
-          void this.debugLogs.write("chat.machine-turn.ack-pending", { conversationId: conversation.id, runId, message: error instanceof Error ? error.message : String(error) });
-        }
-      } else {
-        void this.debugLogs.write("chat.machine-turn.not-stored", { conversationId: conversation.id, runId, status: result.status });
-      }
-    };
-    let dispatchResult: MachineTurnDispatchResult | undefined;
-    // A turn that never left this desktop is settled here, everywhere: the
-    // member's home machine only ever had its empty bubble.
-    const markTurnNotSent = (): void => {
-      for (const bubble of bubbleObjects()) bubble.metadata = { ...bubble.metadata, machineTurnNotSent: true };
-    };
-    // Set once the machine's result has been folded, stored and acknowledged:
-    // a failure raised after that (the run failed on its machine) leaves the
-    // bubble as folded and is never stored or acknowledged a second time.
-    let terminalHandled = false;
-    let dispatched = false;
-    let progressWrites = Promise.resolve();
-    const reportPreparation = (snapshot: CloudRunPreparationProgress): void => {
-      if (signal?.aborted) return;
-      this.emitProgress(runId, progress, "initial", snapshot.message, { participantLabel: `@${participant.handle}` });
-      progressWrites = progressWrites.then(() => this.withChatMutation(conversation, async () => {
-        if (signal?.aborted) return;
-        for (const bubble of bubbleObjects()) bubble.metadata = { ...bubble.metadata, cloudRunPreparation: snapshot };
-        this.queueSnapshot(conversation);
-      }));
-      void progressWrites.catch(() => {});
-    };
-    try {
-      signal?.throwIfAborted();
-      if (participant.cloudRun && !participant.homeMachineId) {
-        if (!this.prepareCloudSelection) throw new Error("Cloud setup is not available on this device.");
-        reportPreparation({ operationId: runId, message: "Preparing Cloud run…" });
-        const preparing = this.prepareCloudSelection(participant.cloudRun, participant.kind, reportPreparation);
-        let abort: (() => void) | undefined;
-        const cancelled = new Promise<never>((_resolve, reject) => {
-          abort = () => reject(signal?.reason ?? new Error("Chat run cancelled."));
-          signal?.addEventListener("abort", abort, { once: true });
-          if (signal?.aborted) abort();
-        });
-        let machineId: string;
-        try { machineId = await Promise.race([preparing, cancelled]); }
-        finally { if (abort) signal?.removeEventListener("abort", abort); }
-        signal?.throwIfAborted();
-        await this.withChatMutation(conversation, async () => {
-          signal?.throwIfAborted();
-          const members = this.chatParticipants(conversation);
-          const current = members.find(item => item.id === participant.id);
-          if (!current || JSON.stringify(current.cloudRun) !== JSON.stringify(participant.cloudRun)) {
-            throw new Error("The member's run location changed while Cloud was preparing.");
-          }
-          if (current.homeMachineId && current.homeMachineId !== machineId) {
-            throw new Error("The cloud machine identity changed. Re-add this member before running it there.");
-          }
-          const ready = { ...current, homeMachineId: machineId };
-          conversation.metadata = { ...conversation.metadata, participants: members.map(item => item.id === ready.id ? ready : item) };
-          await this.saveConversation(conversation);
-          participant = ready;
-        });
-      }
-      signal?.throwIfAborted();
-      await this.prepareParticipantProjects(conversation.repoPath, [participant], signal,
-        message => reportPreparation({ operationId: runId, message }));
-      await progressWrites;
-      signal?.throwIfAborted();
-      await this.withChatMutation(conversation, async () => {
-        for (const bubble of bubbleObjects()) if (bubble.metadata) delete bubble.metadata.cloudRunPreparation;
-        this.queueSnapshot(conversation);
-      });
-      if (!await this.waitForQueuedSaveResult(conversation.id)) throw new Error("The cloud run could not be saved before dispatch.");
-      signal?.throwIfAborted();
-      dispatched = true;
-      const result = await link.runTurn({
-        conversation,
-        participant,
-        triggerMessage,
-        runId,
-        pendingMessageId: pendingMessage.id,
-        signal,
-        progress,
-        onMachineWaiting: async (machineName, reason) => {
-          await this.withChatMutation(conversation, async () => {
-            for (const bubble of bubbleObjects().filter(item => item.status === "pending")) {
-              bubble.metadata = { ...bubble.metadata, machinePending: { machineName, at: new Date().toISOString(), ...(reason ? { reason } : {}) } };
-            }
-            this.queueSnapshot(conversation);
-          });
-          if (!await this.waitForQueuedSaveResult(conversation.id)) throw new Error("The waiting machine command could not be stored.");
-        },
-        onStopPending: (machineName) => {
-          void this.debugLogs.write("chat.stop-pending.requested", { conversationId: conversation.id, runId, pendingMessageId: pendingMessage.id });
-          void this.withChatMutation(conversation, async () => {
-            const bubbles = bubbleObjects().filter((bubble) => bubble.status === "pending");
-            void this.debugLogs.write("chat.stop-pending.mutation", { conversationId: conversation.id, runId, bubbles: bubbles.length, statuses: bubbleObjects().map((bubble) => bubble.status) });
-            if (bubbles.length === 0) {
-              return;
-            }
-            // Delivered text stays; the waiting state is a separate mark the
-            // renderer shows under the bubble.
-            const stopPending = { machineName, at: new Date().toISOString() };
-            for (const bubble of bubbles) {
-              bubble.metadata = { ...bubble.metadata, stopPending };
-            }
-            conversation.updatedAt = new Date().toISOString();
-            this.queueSnapshot(conversation);
-            void this.debugLogs.write("chat.stop-pending.marked", { conversationId: conversation.id, runId });
-          }).catch((error: unknown) => {
-            void this.debugLogs.write("chat.stop-pending.error", { conversationId: conversation.id, runId, message: error instanceof Error ? error.message : String(error) });
-          });
-        }
-      });
-      this.promptSuggestions.replyEnded(conversation.id, participant.id, runId);
-      clearStopPending();
-      dispatchResult = result;
-      if (result.sent === false) markTurnNotSent();
-      for (const warning of result.warnings) {
-        if (!options.warnings.includes(warning)) {
-          options.warnings.push(warning);
-        }
-      }
-      // Whatever the outcome, the machine's copy of the bubble (same id)
-      // contributes its text and the run's other messages, and the whole
-      // result is stored before the machine is told to drop it.
-      const status = result.status === "failed" && signal?.aborted ? "unconfirmed" : result.status;
-      const others = foldMachineTurnResult(pendingMessage, participant.handle, runId, { status, messages: result.messages, error: result.error, finishedAt: result.finishedAt, receiptId: result.receiptId });
-      for (const bubble of bubbleObjects()) {
-        if (bubble !== pendingMessage) {
-          bubble.content = pendingMessage.content;
-          bubble.status = pendingMessage.status;
-          bubble.metadata = pendingMessage.metadata;
-        }
-      }
-      await storeOutcomeAndAcknowledge(result, others);
-      terminalHandled = true;
-      if (status === "failed") {
-        throw new Error(result.error ?? `@${participant.handle} failed on its machine.`);
-      }
-      if (status === "interrupted" || status === "unconfirmed") {
-        return ownsPendingMessage ? [pendingMessage, ...others] : others;
-      }
-      return [pendingMessage, ...others];
-    } catch (error) {
-      if (terminalHandled) {
-        throw error;
-      }
-      clearStopPending();
-      if (!dispatched) markTurnNotSent();
-      if (!signal?.aborted) {
-        pendingMessage.status = "error";
-        pendingMessage.content = this.failedPrecreatedPendingMessageContent(participant, error);
-      } else if (!dispatched) {
-        this.markParticipantMessageStoppedByUser(pendingMessage, participant);
-      } else {
-        // Once dispatched, only the machine can confirm cancellation.
-        this.markParticipantMessageStopUnconfirmed(pendingMessage, participant, error instanceof Error ? error.message : String(error));
-      }
-      if (dispatchResult) {
-        await storeOutcomeAndAcknowledge(dispatchResult).catch(() => undefined);
-      }
-      throw error;
-    } finally {
-      await progressWrites.catch(() => {});
-      for (const bubble of bubbleObjects()) if (bubble.metadata) delete bubble.metadata.cloudRunPreparation;
-      if (ownsPendingMessage && (!signal?.aborted || !dispatched)) {
-        await this.finalizePendingParticipantMessage(conversation, participant, pendingMessage);
-      }
-    }
   }
 
   /** Machines transport, desktop side: an approval raised or answered by a
@@ -7892,277 +7643,6 @@ export class ChatService {
         this.resetAutoWatchDepthForUserMessage(incoming);
       }
     }
-  }
-
-  /** Machines transport, desktop side: messages created or changed by turns
-   *  that started on a machine (a member resumed after an approval, a member
-   *  request run there) land in this desktop's copy under their own ids. */
-  async applyMachineBackDelta(request: {
-    conversationId: string;
-    messages: ChatMessage[];
-    /** The machine that sent them, and its device identity. A machine writes
-     *  only its own members' messages and what it created itself; anything
-     *  else it sends is refused, not stored and then sent on as this
-     *  desktop's own. */
-    machineId?: string;
-    machineOriginId?: string;
-  }): Promise<Conversation | undefined> {
-    if (this.deletedConversationIds.has(request.conversationId) || await this.storage.conversationTombstones?.().isDeleted(request.conversationId)) return undefined;
-    const conversation = await this.storage.getConversation(request.conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      return conversation;
-    }
-    return this.withChatMutation(conversation, async () => {
-      let changed = false;
-      const refused: string[] = [];
-      // Read as the chat change rules read it (chatChangeTransport).
-      const listed = Array.isArray(conversation.metadata.participants) ? conversation.metadata.participants as Array<{ id?: unknown; homeMachineId?: unknown }> : [];
-      const homeOf = (participantId: string | undefined): string | undefined => {
-        const home = participantId ? listed.find((participant) => participant?.id === participantId)?.homeMachineId : undefined;
-        return typeof home === "string" && home ? home : undefined;
-      };
-      const itsMember = (message: ChatMessage): boolean =>
-        message.role === "participant" && Boolean(message.participantId) && homeOf(message.participantId) === request.machineId;
-      const createdThere = (message: ChatMessage): boolean => Boolean(request.machineOriginId) &&
-        (message.metadata as Record<string, unknown> | undefined)?.remoteAuthorOriginId === request.machineOriginId;
-      for (const raw of request.messages) {
-        if (!raw || typeof raw.id !== "string") {
-          continue;
-        }
-        let incoming = raw;
-        const index = conversation.messages.findIndex((message) => message.id === incoming.id);
-        if (request.machineId) {
-          const current = index >= 0 ? conversation.messages[index] : undefined;
-          const allowed = current
-            ? (itsMember(current) || createdThere(current)) && (incoming.role !== "participant" || itsMember(incoming))
-            : incoming.role === "participant" ? itsMember(incoming) : incoming.role === "user" || incoming.role === "system";
-          if (!allowed) {
-            refused.push(incoming.id);
-            continue;
-          }
-          // Who created a message is this desktop's record, never the sender's
-          // claim. One the machine created stays its own here, through every
-          // later update: this desktop does not take it over as its own.
-          const { remoteAuthorOriginId: _claimed, ...metadata } = (incoming.metadata ?? {}) as Record<string, unknown>;
-          const author = current
-            ? (current.metadata as Record<string, unknown> | undefined)?.remoteAuthorOriginId
-            : incoming.role !== "participant" ? request.machineOriginId : undefined;
-          incoming = { ...incoming, metadata: { ...metadata, ...(typeof author === "string" && author ? { remoteAuthorOriginId: author } : {}) } as ChatMessage["metadata"] };
-        }
-        if (index >= 0) {
-          const current = conversation.messages[index];
-          // Never let a machine's copy demote a message this desktop already finished.
-          if (current.status !== "pending" && incoming.status === "pending") {
-            continue;
-          }
-          conversation.messages[index] = incoming;
-        } else {
-          conversation.messages.push(incoming);
-        }
-        if (incoming.role === "participant") {
-          this.recordLastMessageByParticipant(conversation, incoming);
-          // A reply the member started on its machine (its runs this desktop
-          // dispatched are already its newest).
-          const replyRunId = incoming.metadata?.runId;
-          if (index < 0 && incoming.participantId && replyRunId) {
-            this.promptSuggestions.replyStarted(conversation.id, incoming.participantId, replyRunId);
-          }
-        }
-        changed = true;
-      }
-      if (refused.length) {
-        void this.debugLogs.write("chat.machine-backdelta.refused", { conversationId: conversation.id, machineId: request.machineId, messageIds: refused.slice(0, 20) });
-      }
-      if (!changed) {
-        return conversation;
-      }
-      conversation.messages.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
-      return conversation;
-    }).then(async (result) => {
-      // Callers acknowledge to the machine only once the rows are stored; a
-      // failed write is an error here, so no acknowledgement follows it.
-      if (!(await this.waitForQueuedSaveResult(request.conversationId))) {
-        throw new Error("The machine's messages could not be stored in this desktop's chat.");
-      }
-      this.scheduleAutoWatchEvaluation(request.conversationId, "machine-messages");
-      return result;
-    });
-  }
-
-  async applyMachineRunStarted(request: { conversationId: string; runId: string }): Promise<void> {
-    if (this.deletedConversationIds.has(request.conversationId) || await this.storage.conversationTombstones?.().isDeleted(request.conversationId)) return;
-    // A compaction that waited for its machine is running now.
-    this.machineCompactionStatus.get(request.runId)?.();
-    const conversation = await this.requireChat(request.conversationId);
-    await this.withChatMutation(conversation, async () => {
-      for (const message of conversation.messages) {
-        if (message.status === "pending" && message.metadata?.runId === request.runId) delete message.metadata.machinePending;
-      }
-      // Retry the write even when a previous failed save already cleared the
-      // in-memory mark. Transport acknowledgement requires a stored projection.
-      this.queueSnapshot(conversation);
-    });
-    if (!await this.waitForQueuedSaveResult(conversation.id)) throw new Error("The machine's started state could not be stored.");
-  }
-
-  /** Machines transport, desktop side: a turn result (any status) for a run
-   *  this desktop no longer tracks, because it restarted meanwhile. The
-   *  bubble is folded exactly as for a live turn, the run's other messages
-   *  are inserted, and the result counts as applied only once stored; the
-   *  caller acknowledges to the machine (and drops a held stop) after that. */
-  async applyMachineLateTerminal(request: {
-    conversationId: string;
-    runId: string;
-    status: "completed" | "interrupted" | "failed" | "unconfirmed";
-    messages: ChatMessage[];
-    warnings?: string[];
-    error?: string;
-    finishedAt?: string;
-    receiptId?: string;
-    machineName: string;
-    /** The machine that sent it: context use is taken only for its own member. */
-    machineId?: string;
-    participantId?: string;
-    contextUsage?: AgentContextUsage;
-    /** A compaction of `participantId`: one that never wrote its outcome
-     *  line (stopped or failed before it ran) gets the line it would have. */
-    compaction?: { triggeredBy: "user" | "agent" };
-  }): Promise<void> {
-    // The tombstone is a durable disposition of a late result: acknowledge it
-    // without reviving a deleted chat or retaining its delivery forever.
-    if (this.deletedConversationIds.has(request.conversationId) || await this.storage.conversationTombstones?.().isDeleted(request.conversationId)) return;
-    const conversation = await this.storage.getConversation(request.conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      throw new Error(`The chat for the result from machine ${request.machineName} is unavailable; the result has not been stored.`);
-    }
-    await this.withChatMutation(conversation, async () => {
-      const bubble = conversation.messages.find((message) => message.role === "participant" && message.metadata?.runId === request.runId);
-      let others = request.messages;
-      if (bubble) {
-        const participant = this.chatParticipants(conversation).find((item) => item.id === bubble.participantId);
-        const handle = participant?.handle ?? bubble.participantLabel?.replace(/^@/, "") ?? "member";
-        others = foldMachineTurnResult(bubble, handle, request.runId, { status: request.status, messages: request.messages, error: request.error, finishedAt: request.finishedAt, receiptId: request.receiptId });
-        this.recordLastMessageByParticipant(conversation, bubble);
-      }
-      for (const incoming of others) {
-        const index = conversation.messages.findIndex((message) => message.id === incoming.id);
-        if (index >= 0) {
-          if (conversation.messages[index].status !== "pending" && incoming.status === "pending") {
-            continue;
-          }
-          conversation.messages[index] = incoming;
-        } else {
-          conversation.messages.push(incoming);
-        }
-        if (incoming.role === "participant") {
-          this.recordLastMessageByParticipant(conversation, incoming);
-        }
-      }
-      conversation.messages.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-      // The run's CLI warnings reach the chat exactly as a live turn's would.
-      for (const warning of request.warnings ?? []) {
-        this.addConversationWarning(conversation, warning);
-      }
-      const usageParticipantId = bubble?.participantId ?? request.participantId;
-      const usageMember = usageParticipantId ? this.chatParticipants(conversation).find((item) => item.id === usageParticipantId) : undefined;
-      const ownMember = usageMember && request.machineId && usageMember.homeMachineId === request.machineId ? usageMember : undefined;
-      if (ownMember) {
-        this.updateParticipantContextUsage(conversation, ownMember.id, normalizeAgentContextUsage(request.contextUsage));
-      }
-      if (ownMember && request.compaction && !bubble && request.status !== "completed" &&
-          !conversation.messages.some((message) => isMachineCompactionLine(message, request.runId, ownMember.id))) {
-        const line = machineCompactionFailureLine(ownMember.handle, request.status, request.error);
-        conversation.messages.push(this.message("system", line, undefined,
-          { ...this.compactMessageMetadata({ runId: request.runId, triggeredBy: request.compaction.triggeredBy }, ownMember.id, "failed"),
-            ...(request.compaction.triggeredBy === "agent" ? { threadId: "system" } : {}) }));
-      }
-      // A late result has no local run's finally block to clear its status.
-      // Publish and store that same final state, preserving other machines'
-      // concurrent runs rather than relying on a later storage read to sweep it.
-      const active = readActiveRunIds(conversation.metadata);
-      const compatibilityRunId = conversation.metadata.runId;
-      if (conversation.metadata.running && typeof compatibilityRunId === "string" && !active.includes(compatibilityRunId)) active.push(compatibilityRunId);
-      conversation.metadata = withActiveRunIdRemoved({ ...conversation.metadata, activeRunIds: active }, request.runId);
-      const owners = { ...this.chatRunOwners(conversation.metadata) };
-      delete owners[request.runId];
-      if (Object.keys(owners).length) conversation.metadata[ACTIVE_RUN_OWNERS_KEY] = owners;
-      else delete conversation.metadata[ACTIVE_RUN_OWNERS_KEY];
-      if (conversation.metadata.runId === request.runId) {
-        const remaining = readActiveRunIds(conversation.metadata);
-        if (remaining.length) conversation.metadata.runId = remaining[0];
-        else delete conversation.metadata.runId;
-      }
-      if ((this.backgroundRunnerCounts.get(conversation.id) ?? 0) > 0) conversation.metadata.running = true;
-      conversation.metadata = withParticipantCompactionsForRunRemoved(conversation.metadata, request.runId);
-      conversation.metadata = this.metadataAfterAutoTitleRunTerminal(conversation.id, conversation.metadata, request.runId);
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
-    });
-    if (!(await this.waitForQueuedSaveResult(request.conversationId))) {
-      throw new Error(`The result from machine ${request.machineName} could not be stored in this desktop's chat.`);
-    }
-  }
-
-  /** Machines transport, machine side: runs one participant turn for a message
-   *  that already exists in this machine's copy of the conversation, reusing
-   *  the run id and pending message id the desktop chose. Returns the
-   *  participant's messages for that run. */
-  async runMachineHostedTurn(
-    request: { conversationId: string; participantId: string; messageId: string; runId: string; pendingMessageId: string },
-    signal?: AbortSignal,
-    progress?: ProgressCallback
-  ): Promise<{ messages: ChatMessage[]; warnings: string[]; contextUsage?: AgentContextUsage }> {
-    // The desktop's pending bubble for this run is already in the copy; the
-    // run must count as live before the stale-run sweep in requireChat sees
-    // it, or the bubble is marked interrupted before the turn even starts.
-    this.activeRunIds.add(request.runId);
-    const warnings: string[] = [];
-    let participant: ChatParticipant | undefined;
-    try {
-      const conversation = await this.requireChat(request.conversationId);
-      participant = this.chatParticipants(conversation).find((item) => item.id === request.participantId);
-      if (!participant) {
-        throw new Error("Machine-hosted turn participant was not found in this machine's copy of the chat.");
-      }
-      this.assertOwnsParticipant(participant);
-      const triggerMessage = conversation.messages.find((message) => message.id === request.messageId);
-      if (!triggerMessage) {
-        throw new Error("Machine-hosted turn message was not found in this machine's copy of the chat.");
-      }
-      await this.runParticipantBatch(
-        conversation,
-        [participant],
-        triggerMessage,
-        request.runId,
-        signal,
-        progress,
-        warnings,
-        {
-          targetRunIds: new Map([[participant.id, request.runId]]),
-          pendingMessageIds: new Map([[participant.id, request.pendingMessageId]]),
-          onTargetRunBegun: async () => this.withChatMutation(conversation, async () => {
-            this.advanceAutoWatchCursorForDirectTargets(conversation, [participant!], triggerMessage);
-            await this.saveConversation(conversation);
-          })
-        }
-      );
-    } finally {
-      // The early registration above is dropped on every exit unless the
-      // batch's own ref-counted bookkeeping still holds the run.
-      if ((this.activeRunRefCounts.get(request.runId) ?? 0) === 0) {
-        this.activeRunIds.delete(request.runId);
-      }
-    }
-    const participantId = participant.id;
-    const refreshed = await this.requireChat(request.conversationId);
-    const messages = refreshed.messages.filter((message) =>
-      message.participantId === participantId && message.metadata?.runId === request.runId && message.status !== "pending"
-    );
-    // The desktop shows the member's context use from what its CLI reported here.
-    const contextUsage = this.agentContextUsageByParticipant(refreshed)[participantId];
-    return { messages, warnings, ...(contextUsage ? { contextUsage } : {}) };
   }
 
   private async discardStoppedTargetRun(
@@ -10536,6 +10016,7 @@ export class ChatService {
     conversation.metadata = this.mergeStoredChatMetadata(stored.metadata, conversation.metadata);
     conversation.title = title;
     this.applyRemovedChatMessageTombstones(conversation);
+    this.withoutGoneServerPlaceholders(conversation);
     conversation.updatedAt = stored.updatedAt > conversation.updatedAt ? stored.updatedAt : conversation.updatedAt;
   }
 
@@ -14302,140 +13783,11 @@ export class ChatService {
   }
 
 
-  /**
-   * Machine side. Hands each group to its home and waits for the answers to
-   * reach this machine's own copy of the chat.
-   *
-   * The request message is already on its way there through the ordinary
-   * back delta; the delegation also carries that row and its source in case
-   * it arrives first. Receivers fold it onto the same request message and
-   * only items still open and owned by that receiver are run.
-   */
-  private async delegateParticipantRequest(
-    conversationId: string,
-    requestMessageId: string,
-    targetIds: ReadonlySet<string>
-  ): Promise<ParticipantRequestRunResult> {
-    const delegate = this.participantRequestDelegate;
-    if (!delegate) throw new Error("This machine cannot reach the owner's other devices to ask other members.");
-    // One delegation per home: each member is run by the device it lives on,
-    // and no device is asked for a member that is not its own.
-    const conversation = await this.requireChat(conversationId);
-    const requestMessage = conversation.messages.find(message => message.id === requestMessageId);
-    const batch = requestMessage?.metadata?.participantRequest;
-    if (!requestMessage || !batch) throw new Error("Member request message was not found.");
-    const participants = this.chatParticipants(conversation);
-    const byHome = new Map<string, string[]>();
-    for (const item of batch.items) {
-      if (item.status !== "running" || !targetIds.has(item.targetParticipantId)) continue;
-      const target = participants.find((participant) => participant.id === item.targetParticipantId);
-      if (!target) throw new Error("The requested member is no longer in this chat.");
-      if (this.ownsParticipant(target)) throw new Error("A local member must not be delegated back to this machine.");
-      const home = target?.homeMachineId ?? "";
-      byHome.set(home, [...(byHome.get(home) ?? []), item.targetParticipantId]);
-    }
-    const carried = conversation.messages.filter((message) =>
-      message.id === requestMessage.id || message.id === requestMessage.metadata?.sourceMessageId);
-    for (const [home, targetParticipantIds] of byHome) {
-      await delegate.delegateParticipantRequest({
-        conversationId,
-        requestMessageId: requestMessage.id,
-        batchId: batch.id,
-        depth: batch.depth,
-        ...(home ? { homeMachineId: home } : {}),
-        targetParticipantIds,
-        messages: carried
-      });
-    }
-    const deadline = Date.now() + DELEGATED_PARTICIPANT_REQUEST_LIMIT_MS;
-    for (;;) {
-      const conversation = await this.requireChat(conversationId);
-      const message = conversation.messages.find((candidate) => candidate.id === requestMessageId);
-      const batch = message?.metadata?.participantRequest;
-      if (!batch) throw new Error("Member request message was not found.");
-      const items = batch.items.filter(item => targetIds.has(item.targetParticipantId));
-      if (!items.some((item) => this.isOpenParticipantRequestStatus(item.status)) || Date.now() >= deadline) {
-        return {
-          batch,
-          replies: items.map((item) => {
-            const reply = item.replyMessageId
-              ? conversation.messages.find((candidate) => candidate.id === item.replyMessageId)
-              : undefined;
-            return {
-              targetHandle: item.targetHandle,
-              messageId: reply?.id,
-              content: reply?.content,
-              error: item.error ?? (reply?.status === "error" ? reply.content : undefined)
-            };
-          })
-        };
-      }
-      await new Promise((resolve) => setTimeout(resolve, DELEGATED_PARTICIPANT_REQUEST_POLL_MS));
-    }
-  }
-
-  /**
-   * Desktop side. A member on a machine asked other members to answer; this
-   * runs them here, each where that member lives.
-   *
-   * Resuming the requester is deliberately not done here: the requester is
-   * that machine's own member, and that machine's runner is still waiting for
-   * these answers and resumes it once they arrive. Resuming it from here as
-   * well would give it two turns at once.
-   */
-  async runDelegatedParticipantRequest(request: {
-    conversationId: string;
-    requestMessageId: string;
-    depth: number;
-    /** Only these members are run here; the rest live elsewhere and were
-     *  asked for separately. */
-    targetParticipantIds?: string[];
-    /** Rows the asking device carried, for a machine that has not seen them. */
-    messages?: ChatMessage[];
-  }): Promise<void> {
-    if (request.messages?.length) {
-      await this.applyMachineBackDelta({ conversationId: request.conversationId, messages: request.messages });
-    }
-    await this.waitForQueuedSave(request.conversationId);
-    // The request message travels ahead of this on the same stream. Waiting a
-    // little rather than failing keeps a slow write from turning into a retry
-    // storm; if it truly is not here, this throws and the delegation is kept
-    // for retry instead of being acknowledged as done.
-    const deadline = Date.now() + DELEGATED_PARTICIPANT_REQUEST_WAIT_MS;
-    let ownedIds: Set<string>;
-    for (;;) {
-      const conversation = await this.requireChat(request.conversationId);
-      const message = conversation.messages.find((message) => message.id === request.requestMessageId);
-      if (message?.metadata?.participantRequest) {
-        const participants = this.chatParticipants(conversation);
-        ownedIds = new Set(participants.filter(participant => this.ownsParticipant(participant)).map(participant => participant.id));
-        if (request.targetParticipantIds?.some(id => !ownedIds.has(id))) {
-          throw new Error("The delegated request names a member that does not belong to this machine.");
-        }
-        if (request.targetParticipantIds) ownedIds = new Set(request.targetParticipantIds);
-        break;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error("The member request this machine delegated has not reached this desktop yet.");
-      }
-      await new Promise((resolve) => setTimeout(resolve, DELEGATED_PARTICIPANT_REQUEST_POLL_MS));
-    }
-    if (ownedIds.size === 0) return;
-    await this.startParticipantRequestRunner(
-      request.conversationId,
-      request.requestMessageId,
-      request.depth,
-      undefined,
-      ownedIds
-    );
-  }
-
   private startParticipantRequestRunner(
     conversationId: string,
     requestMessageId: string,
     depth: number,
     progress?: ProgressCallback,
-    onlyParticipantIds?: ReadonlySet<string>,
     inlineParentSignal?: AbortSignal
   ): Promise<ParticipantRequestRunResult> {
     const existing = this.participantRequestRunners.get(requestMessageId);
@@ -14444,7 +13796,7 @@ export class ChatService {
     }
     const runnerProgress = progress ?? this.onReviewProgress;
     this.incrementBackgroundRunner(conversationId);
-    const runner = this.runParticipantRequest(conversationId, requestMessageId, depth, runnerProgress, onlyParticipantIds, inlineParentSignal)
+    const runner = this.runParticipantRequest(conversationId, requestMessageId, depth, runnerProgress, inlineParentSignal)
       .finally(() => {
         this.participantRequestRunners.delete(requestMessageId);
         this.decrementBackgroundRunner(conversationId);
@@ -14494,9 +13846,6 @@ export class ChatService {
     requestMessageId: string,
     depth: number,
     progress?: ProgressCallback,
-    /** When a device was asked for specific members, it runs only those: the
-     *  others live elsewhere and are being run there. */
-    onlyParticipantIds?: ReadonlySet<string>,
     /** Set only for an inline request: the requester's own run, whose Stop
      *  also stops these targets. */
     inlineParentSignal?: AbortSignal
@@ -14509,21 +13858,10 @@ export class ChatService {
       throw new Error("Member request message was not found.");
     }
     const participants = this.chatParticipants(conversation);
-    const selectedItems = batch.items.filter((item) => item.status === "running"
-      && (!onlyParticipantIds || onlyParticipantIds.has(item.targetParticipantId)));
-    const delegatedItems = this.machineRuntime && !onlyParticipantIds
-      ? selectedItems.filter(item => {
-        const target = participants.find(participant => participant.id === item.targetParticipantId);
-        return target && !this.ownsParticipant(target);
-      }) : [];
-    const delegatedIds = new Set(delegatedItems.map(item => item.targetParticipantId));
-    const runnableItems = selectedItems.filter(item => !delegatedIds.has(item.targetParticipantId));
-    // Every request source (tool, inferred mention, approval, or retry) shares
-    // this split. Handle rejection immediately while local targets run.
-    const delegation = delegatedIds.size
-      ? this.delegateParticipantRequest(conversationId, requestMessageId, delegatedIds)
-        .then(result => ({ result, error: undefined }), error => ({ result: undefined, error }))
-      : undefined;
+    // Every target runs as its own turn: here when it is this device's
+    // member, otherwise on its own device, asked through the User's server
+    // (runParticipantTurnSerialized), wherever the request was made.
+    const runnableItems = batch.items.filter((item) => item.status === "running");
     const replies: ParticipantRequestRunResult["replies"] = [];
     await Promise.all(runnableItems.map(async (item) => {
       const target = participants.find((participant) => participant.id === item.targetParticipantId);
@@ -14648,21 +13986,6 @@ export class ChatService {
       this.queueSnapshot(conversation);
       this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
     }));
-    if (delegation) {
-      const outcome = await delegation;
-      await this.refreshStoredChatState(conversation);
-      if (outcome.error) {
-        const error = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-        this.updateParticipantRequestBatch(conversation, requestMessageId, current => ({
-          ...current,
-          items: current.items.map(item => delegatedIds.has(item.targetParticipantId) && this.isOpenParticipantRequestStatus(item.status)
-            ? { ...item, status: "failed", error, updatedAt: new Date().toISOString() } : item)
-        }));
-        replies.push(...delegatedItems.map(item => ({ targetHandle: item.targetHandle, error })));
-      } else if (outcome.result) {
-        replies.push(...outcome.result.replies);
-      }
-    }
     const updatedBatch = this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => {
       const status = this.rollupParticipantRequestStatus(current.items);
       return {
@@ -15185,7 +14508,13 @@ export class ChatService {
         }
         return [];
       }
-      const onMachine = !this.serverLink && Boolean(participant.cloudRun || participant.homeMachineId) && !this.machineRuntime;
+      // A member that runs on another device is reached only through the
+      // User's server (Д4, Д13): without a link to it, it does not start.
+      if (opened.kind === "none" && !this.runsHere(participant)) {
+        throw new Error(participant.homeMachineId || participant.cloudRun
+          ? `@${participant.handle} runs on a cloud machine, which this device reaches only through your server; it is not linked to it yet.`
+          : `@${participant.handle} runs on your computer, which this machine reaches only through your server; it is not linked to it yet.`);
+      }
       let messages: ChatMessage[];
       if (opened.kind === "remote") {
         messages = await this.runParticipantTurnRemote(conversation, participant, triggerMessage, runId, opened, turnController.signal, progress, {
@@ -15195,13 +14524,6 @@ export class ChatService {
           turnSegmentId
         });
         this.serverTurnOpens.delete(runId);
-      } else if (onMachine) {
-        messages = await this.runParticipantTurnOnMachine(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
-          warnings: options.warnings,
-          existingPendingMessage: options.existingPendingMessage,
-          continuation: options.continuation,
-          turnSegmentId
-        });
       } else {
         let outcome: "done" | "error" | "stopped" = "error";
         try {
@@ -15214,14 +14536,15 @@ export class ChatService {
           outcome = turnController.signal.aborted ? "stopped" : "error";
           throw error;
         } finally {
-          if (opened.kind === "local") this.finishServerTurn(runId, outcome);
+          // Its context use goes with the turn's end, for every other device.
+          if (opened.kind === "local") this.finishServerTurn(runId, outcome, this.agentContextUsageByParticipant(conversation)[participant.id]);
         }
       }
       if (!this.machineRuntime && this.offersPromptSuggestionAfter(participant, triggerMessage, messages, turnController.signal)) {
         // A cloud member's machine is chosen while its turn is prepared.
         const machineId = this.chatParticipants(conversation).find((item) => item.id === participant.id)?.homeMachineId
           ?? participant.homeMachineId;
-        const source = onMachine || opened.kind === "remote" ? machineId : CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE;
+        const source = opened.kind === "remote" ? machineId : CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE;
         if (source) {
           this.promptSuggestions.replyFinished(conversation.id, participant.id, runId, source);
         }
@@ -17285,75 +16608,75 @@ export class ChatService {
     request: ChatSelfCompactionRequest,
     runId: string
   ): void {
-    // A member on a machine asked for it there: the desktop runs it as one
-    // the User asked for, so it is shown and can be stopped the same way.
-    // Without a desktop to take it now, it runs here as before.
-    const delegate = this.machineRuntime ? this.compactionDelegate : undefined;
-    if (delegate?.canDelegateCompaction()) {
-      void delegate.delegateCompaction({
-        conversationId,
-        participantId: participant.id,
-        runId,
-        ...(request.instructions ? { instructions: request.instructions } : {})
-      }).then(() => this.debugLogs.write("chat.self-compaction.delegated", { conversationId, participantId: participant.id, runId }), async (error) => {
-        await this.debugLogs.write("chat.self-compaction.delegate-error", {
-          conversationId, participantId: participant.id, runId, message: error instanceof Error ? error.message : String(error)
-        });
-        this.runQueuedSelfCompaction(conversationId, participant, request, runId);
+    // A member on a machine asked for it there: it is a turn of that member
+    // on the User's server, which this machine takes and runs like any other
+    // (startServerTurn), and every other device sees and can stop.
+    if (this.machineRuntime && this.serverLink) {
+      void this.requestServerSelfCompaction(conversationId, participant, request, runId).catch(async (error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        await this.debugLogs.write("chat.self-compaction.request-error", { conversationId, participantId: participant.id, runId, message });
+        await this.recordSelfCompactionFailure(conversationId, participant, runId, request.instructions, message);
       });
       return;
     }
     this.runQueuedSelfCompaction(conversationId, participant, request, runId);
   }
 
-  /** Desktop side: a member on a machine asked to compact its own context.
-   *  Only the member's own machine may ask for it. */
-  async runDelegatedCompaction(request: MachineCompactionDelegateRequest & { machineId: string }): Promise<void> {
-    if (this.machineRuntime) return;
-    const refuse = (reason: string): Promise<void> => this.debugLogs.write("chat.self-compaction.delegation-refused", {
-      conversationId: request.conversationId, participantId: request.participantId, runId: request.runId, machineId: request.machineId, reason
+  /** Machine side: a member's own compaction, asked on the server. */
+  private async requestServerSelfCompaction(conversationId: string, participant: ChatParticipant, request: ChatSelfCompactionRequest, runId: string): Promise<void> {
+    const link = this.serverLink;
+    if (!link) throw new Error("This machine is not linked to your server.");
+    await this.waitForQueuedSave(conversationId);
+    const conversation = await this.requireChat(conversationId);
+    const anchor = this.compactionAnchor(conversation, {});
+    if (!anchor) throw new Error("Nothing in this chat has reached your server yet");
+    const serverRunId = runId.startsWith("turn-") ? runId : `turn-${runId}`;
+    const opId = newOpId();
+    await link.enqueue([{ opId, kind: "turn.request", conversationId, runId: serverRunId, messageId: anchor.id, participantId: participant.id,
+      request: { kind: "compaction", triggeredBy: "agent", ...(request.instructions ? { instructions: request.instructions } : {}) } }]);
+    const answer = await link.opAnswered(opId);
+    if (answer.status === "rejected") throw new Error(answer.reason);
+    void this.debugLogs.write("chat.self-compaction.requested", { conversationId, participantId: participant.id, runId: serverRunId });
+  }
+
+  /** Desktop side: a compaction of a machine member that another device asked
+   *  for (the member itself, on its machine, or the phone) is shown here as a
+   *  run while that machine compacts it, with the same status line and Stop as
+   *  one the User started here. Asked once per turn. */
+  private observeServerCompaction(turn: HubTurn): void {
+    const link = this.serverLink;
+    if (this.machineRuntime || !link || turn.request?.kind !== "compaction") return;
+    if (turn.state !== "requested" && turn.state !== "claimed") return;
+    if (turn.requestedBy === link.deviceId() || this.inProcessServerTurns.has(turn.runId) || this.observedServerCompactions.has(turn.runId)) return;
+    this.observedServerCompactions.add(turn.runId);
+    if (this.observedServerCompactions.size > 1_000) {
+      this.observedServerCompactions.delete(this.observedServerCompactions.values().next().value as string);
+    }
+    void (async () => {
+      const opened = typeof this.storage.openConversation === "function"
+        ? (await this.storage.openConversation(turn.conversationId, 1))?.conversation
+        : await this.storage.getConversation(turn.conversationId);
+      if (!opened || opened.kind !== "chat") return;
+      const participant = this.chatParticipants(opened).find((item) => item.id === turn.participantId);
+      if (!participant || this.runsHere(participant)) return;
+      const request = turn.request ?? {};
+      this.observedCompactionTurns.set(turn.runId, turn);
+      const run = this.registerBackgroundRunController(turn.runId, undefined);
+      try {
+        await this.compactParticipant({
+          conversationId: turn.conversationId,
+          participantId: participant.id,
+          runId: turn.runId,
+          triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
+          ...(typeof request.instructions === "string" ? { instructions: request.instructions } : {})
+        }, run.signal, this.onReviewProgress);
+      } finally {
+        run.cleanup();
+        this.observedCompactionTurns.delete(turn.runId);
+      }
+    })().catch((error) => {
+      void this.debugLogs.write("chat.compaction.observe-error", { conversationId: turn.conversationId, runId: turn.runId, message: error instanceof Error ? error.message : String(error) });
     });
-    // A run id becomes this desktop's own (run state, the machine's record):
-    // only a plain token is taken.
-    if (!isSafeChatId(request.runId)) return refuse("invalid-run-id");
-    if (this.deletedConversationIds.has(request.conversationId)) return refuse("deleted");
-    // Delivered again while this process runs it or ran it: one run.
-    if (this.delegatedCompactionRunIds.has(request.runId) || this.activeRunIds.has(request.runId) || this.chatRunControllers.has(request.runId)) {
-      return refuse("already-run");
-    }
-    // What a compaction just started here wrote must be read back.
-    await this.waitForQueuedSave(request.conversationId);
-    // Read without its messages: this runs in the machine's ordered event
-    // stream, and the chat can be thousands of messages long.
-    const stored = typeof this.storage.openConversation === "function"
-      ? (await this.storage.openConversation(request.conversationId, 1))?.conversation
-      : await this.storage.getConversation(request.conversationId);
-    if (!stored || stored.kind !== "chat") return refuse("no-chat");
-    const participant = this.chatParticipants(stored).find((item) => item.id === request.participantId);
-    if (!participant || participant.homeMachineId !== request.machineId) return refuse("not-its-member");
-    let instructions: string | undefined;
-    try {
-      instructions = this.normalizeCompactInstructions(request.instructions);
-    } catch (error) {
-      return refuse(error instanceof Error ? error.message : String(error));
-    }
-    // A compaction of this member already queued or running here (the User's)
-    // covers it, as it does for a local member asking at the same time.
-    if (readParticipantCompactions(stored.metadata)[participant.id]) return refuse("already-compacting");
-    this.delegatedCompactionRunIds.add(request.runId);
-    if (this.delegatedCompactionRunIds.size > 1_000) {
-      this.delegatedCompactionRunIds.delete(this.delegatedCompactionRunIds.values().next().value as string);
-    }
-    // The User's choice on this desktop holds, even before it reached the machine.
-    const permission = normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(participant.permissions).requestCompaction);
-    if (permission === "deny") {
-      await refuse("denied");
-      // Written off the machine's event stream, as a compaction would run.
-      void this.recordSelfCompactionFailure(request.conversationId, participant, request.runId, instructions, `Context compaction requests are disabled for @${participant.handle}`)
-        .catch((error) => this.debugLogs.write("chat.self-compaction.denied-line-error", { conversationId: request.conversationId, runId: request.runId, message: error instanceof Error ? error.message : String(error) }));
-      return;
-    }
-    this.runQueuedSelfCompaction(stored.id, participant, { type: "self_compaction", instructions }, request.runId);
   }
 
   /** The line a member's own compaction that could not run leaves. */
@@ -20038,6 +19361,7 @@ export class ChatService {
     if (this.deletedConversationIds.has(conversation.id)) {
       return;
     }
+    this.withoutGoneServerPlaceholders(conversation);
     const { snapshot, rows } = this.buildAndEmitSnapshot(conversation);
     const previous = this.saveQueues.get(conversation.id) ?? Promise.resolve();
     const outcome = previous
@@ -20237,20 +19561,11 @@ export class ChatService {
       // single-machine fallback is only for a run this copy cannot attribute at
       // all -- no row replicated yet, or a member since removed.
       const homeMachineId = participant ? participant.homeMachineId : this.soleMachineMemberHome(conversation);
-      if (knownHere && !runRow?.metadata?.cloudRunPreparation && homeMachineId && homeMachineId !== this.hostMachineId && this.machineLink?.cancelMachineRun) {
-        await this.machineLink.cancelMachineRun({
-          machineId: homeMachineId, conversationId: conversation.id, runId: targetRunId,
-          onStopPending: async (machineName) => {
-            if (!pending) return;
-            await this.withChatMutation(conversation, async () => {
-              const bubble = conversation.messages.find((message) => message.id === pending.id);
-              if (bubble?.status === "pending") {
-                bubble.metadata = { ...bubble.metadata, stopPending: { machineName, at: new Date().toISOString() } };
-                this.queueSnapshot(conversation);
-              }
-            });
-          }
-        });
+      // A run of a member on another device: its Stop is asked on the User's
+      // server, which the member's own device obeys (Д2, Д4).
+      if (knownHere && !runRow?.metadata?.cloudRunPreparation && this.serverLink &&
+          (participant ? !this.runsHere(participant) : Boolean(homeMachineId && homeMachineId !== this.hostMachineId)) &&
+          await this.requestServerStop(conversation, targetRunId, runRow)) {
         return true;
       }
       // A copied pending row is not evidence that this process owns its
@@ -20283,6 +19598,60 @@ export class ChatService {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Asks the User's server to stop a turn that another device runs, and
+   * shows the Stop as waiting on its bubble until that device confirms (the
+   * approved parity exception: a machine that cannot be reached shows
+   * waiting, never "stopped"). False when this device cannot name the turn.
+   */
+  private async requestServerStop(conversation: Conversation, runId: string, row: ChatMessage | undefined): Promise<boolean> {
+    const link = this.serverLink;
+    if (!link) return false;
+    const turn = this.knownServerTurn(conversation, runId, row);
+    if (!turn) return false;
+    await link.enqueue([{ opId: newOpId(), kind: "turn.stop", conversationId: conversation.id, runId: turn.runId, messageId: turn.messageId, participantId: turn.participantId }]);
+    void this.debugLogs.write("chat.cancel.server-stop", { conversationId: conversation.id, runId: turn.runId, participantId: turn.participantId });
+    const member = this.chatParticipants(conversation).find((item) => item.id === turn.participantId);
+    const machineName = member?.homeMachineId ? link.machineName(member.homeMachineId) ?? "the machine" : "this computer";
+    const mark = async (stopPending: { machineName: string; at: string } | undefined): Promise<void> => {
+      await this.withChatMutation(conversation, async () => {
+        let changed = false;
+        for (const message of conversation.messages) {
+          if (message.role !== "participant" || message.metadata?.runId !== turn.runId) continue;
+          if (stopPending && message.status === "pending") {
+            message.metadata = { ...message.metadata, stopPending };
+            changed = true;
+          } else if (!stopPending && message.metadata?.stopPending) {
+            const { stopPending: _waiting, ...rest } = message.metadata;
+            message.metadata = rest;
+            changed = true;
+          }
+        }
+        if (changed) this.queueSnapshot(conversation);
+      });
+    };
+    await mark({ machineName, at: new Date().toISOString() });
+    void this.waitForServerTurn(turn.runId, (item) => item.state === "finished" || item.state === "stopped")
+      .then(() => mark(undefined))
+      .catch(() => undefined);
+    return true;
+  }
+
+  /** The server turn a run of this chat belongs to: as the server last said,
+   *  as a message's turn marks keep it, or as the member's bubble names it. */
+  private knownServerTurn(conversation: Conversation, runId: string, row: ChatMessage | undefined): Pick<HubTurn, "runId" | "messageId" | "participantId"> | undefined {
+    const known = this.serverTurnStates.get(runId);
+    if (known && known.conversationId === conversation.id) return known;
+    for (const message of conversation.messages) {
+      for (const [participantId, mark] of Object.entries(message.metadata?.serverTurns ?? {})) {
+        if (mark?.runId === runId) return { runId, messageId: message.id, participantId };
+      }
+    }
+    const trigger = row?.metadata?.sourceMessageId ?? row?.metadata?.parentMessageId;
+    if (row?.participantId && trigger && isHubTurnRunId(runId)) return { runId, messageId: trigger, participantId: row.participantId };
+    return undefined;
   }
 
   private async cancelStoredOrphanedRun(conversation: Conversation, runId: string): Promise<void> {
@@ -20828,6 +20197,7 @@ export class ChatService {
     if (pending) {
       await pending.catch(() => undefined);
     }
+    this.withoutGoneServerPlaceholders(conversation);
     const built = this.buildSnapshot(conversation);
     // Rows are remembered before the save so a snapshot queued while this one
     // is in flight diffs against them, and so the saved snapshot is kept for
@@ -20869,10 +20239,22 @@ export class ChatService {
       // What this save changed goes to the server (Д1), queued in the same
       // transaction as the save: a crash keeps both or neither.
       let ops: HubOp[] = [];
+      const finishes: Array<[string, { conversationId: string; participantId: string; op: HubOp; timer: ReturnType<typeof setTimeout> }]> = [];
       if (options.emitChanges !== false) {
         const mayWrite = (message: ChatMessage) => this.mayWriteOnServer(snapshot, message);
         const diff = diffChatChanges(await this.chatChangeBaselineFor(snapshot.id), snapshot, { emitsConversationFields: true, ownsMessage: mayWrite });
         ops = chatChangesToOps(snapshot, diff.changes, mayWrite);
+        // The end of a turn run here goes after its member's last bubble, in
+        // the same transaction.
+        for (const [runId, deferred] of this.deferredServerFinishes) {
+          if (deferred.conversationId !== snapshot.id) continue;
+          if (snapshot.messages.some((message) => message.participantId === deferred.participantId && message.metadata?.runId === runId && message.status === "pending")) continue;
+          finishes.push([runId, deferred]);
+        }
+        for (const [runId, deferred] of finishes) {
+          this.deferredServerFinishes.delete(runId);
+          ops.push(deferred.op);
+        }
       }
       try {
         const token = ops.length
@@ -20882,8 +20264,11 @@ export class ChatService {
         this.rememberChatChangeBaseline(snapshot.id, chatChangeBaseline(snapshot));
       } catch (error) {
         this.chatChangeBaselines.delete(snapshot.id);
+        // Not written: the ends wait for the next save (or their timer).
+        for (const [runId, deferred] of finishes) this.deferredServerFinishes.set(runId, deferred);
         throw error;
       }
+      for (const [, deferred] of finishes) clearTimeout(deferred.timer);
       if (ops.length) link.nudge();
       return;
     }
@@ -20956,7 +20341,10 @@ export class ChatService {
       return;
     }
     const current = conversation.metadata.machineRepository as { sourcePath?: string; paths?: Record<string, string> } | undefined;
-    const paths = current?.sourcePath === desktopRepoPath && current.paths ? current.paths : {};
+    let paths = current?.sourcePath === desktopRepoPath && current.paths ? current.paths : {};
+    // Where the computer said this project lives here wins.
+    const published = this.machineProjects[desktopRepoPath];
+    if (published) paths = { ...paths, [this.hostMachineId]: published };
     conversation.metadata = { ...conversation.metadata, machineRepository: { sourcePath: desktopRepoPath, paths } };
     conversation.repoPath = paths[this.hostMachineId] ?? desktopRepoPath;
   }
@@ -20967,12 +20355,22 @@ export class ChatService {
    *  the feed's executor leaves them alone. */
   private readonly inProcessServerTurns = new Set<string>();
   /** A local run's server turn (and its chat), and back (Stop from another device). */
-  private readonly serverRunOfLocal = new Map<string, { runId: string; conversationId: string }>();
+  private readonly serverRunOfLocal = new Map<string, { runId: string; conversationId: string; participantId: string }>();
+  /** Ends of turns run here, held until the save that writes the member's
+   *  last bubble of the run, so the server hears the end after the reply
+   *  (whoever waits for the end reads the reply then). */
+  private readonly deferredServerFinishes = new Map<string, { conversationId: string; participantId: string; op: HubOp; timer: ReturnType<typeof setTimeout> }>();
   private readonly localRunOfServer = new Map<string, string>();
   /** How each local run's turn was opened on the server (memoized per run). */
   private readonly serverTurnOpens = new Map<string, Promise<ServerTurnOpen>>();
   /** Waiting for a turn's state to change (a member running elsewhere). */
   private readonly serverTurnWaiters = new Map<string, Array<(turn: HubTurn) => void>>();
+  /** Placeholders shown here for a member elsewhere that are gone (its own
+   *  bubble took their place, or its turn never ran). A copy of the chat read
+   *  before one went (another send's, the feed's) must not bring it back when
+   *  it merges with what is stored. Kept in memory: a placeholder belongs to
+   *  a run of this process. */
+  private readonly goneServerPlaceholders = new Set<string>();
   /** The newest state heard of each recent turn, so a wait that starts late
    *  does not miss what already happened. */
   private readonly serverTurnStates = new Map<string, HubTurn>();
@@ -21140,9 +20538,12 @@ export class ChatService {
           next = { ...existing, metadata: { ...(existing.metadata ?? {}), serverSeq: incoming.metadata?.serverSeq, serverWriter: incoming.metadata?.serverWriter } };
         } else {
           const local: Record<string, unknown> = {};
+          // What this device showed while the member's turn waited (for its
+          // machine, for a Stop to be confirmed) ends with the turn.
+          const waitingMarks = incoming.status === "pending" ? [] : ["stopPending", "machinePending", "cloudRunPreparation", "queuedBehind"];
           for (const key of LOCAL_MESSAGE_METADATA_KEYS) {
             const value = existing?.metadata?.[key as keyof ChatMessageMetadata];
-            if (value !== undefined && key !== "serverPlaceholder") local[key] = value;
+            if (value !== undefined && key !== "serverPlaceholder" && !waitingMarks.includes(key)) local[key] = value;
           }
           next = { ...incoming, metadata: { ...(incoming.metadata ?? {}), ...local } as ChatMessage["metadata"] };
         }
@@ -21151,8 +20552,7 @@ export class ChatService {
           // The member's real bubble replaces the placeholder shown for it here.
           const runId = typeof incoming.metadata?.runId === "string" ? incoming.metadata.runId : undefined;
           if (runId && incoming.role === "participant") {
-            conversation.messages = conversation.messages.filter((message) => !(message.metadata?.serverPlaceholder &&
-              message.participantId === incoming.participantId && message.metadata?.runId === runId));
+            this.removeServerPlaceholders(conversation, (message) => message.participantId === incoming.participantId && message.metadata?.runId === runId);
           }
           conversation.messages.push(next);
         }
@@ -21180,9 +20580,15 @@ export class ChatService {
       case "turn.request":
       case "turn.claim":
       case "turn.stop":
-      case "turn.finish":
+      case "turn.finish": {
         this.markServerTurn(conversation, effect.turn);
+        // A member elsewhere: its context use, as its device said after the
+        // turn, is shown here as a local member's is.
+        const usage = effect.kind === "turn.finish" && effect.turn.contextUsage ? normalizeAgentContextUsage(effect.turn.contextUsage) : undefined;
+        const member = usage ? this.chatParticipants(conversation).find((item) => item.id === effect.turn.participantId) : undefined;
+        if (usage && member && !this.runsHere(member)) this.updateParticipantContextUsage(conversation, member.id, usage);
         return;
+      }
       case "conversation.delete":
       case "chat.import":
         return;
@@ -21212,6 +20618,7 @@ export class ChatService {
     const waiters = this.serverTurnWaiters.get(turn.runId);
     if (waiters) for (const resolve of [...waiters]) resolve(turn);
     const me = this.serverLink?.deviceId();
+    this.observeServerCompaction(turn);
     if (turn.state === "requested") {
       void this.startServerTurn(turn).catch((error) => {
         void this.debugLogs.write("chat.server-turn.start-error", { runId: turn.runId, message: error instanceof Error ? error.message : String(error) });
@@ -21231,7 +20638,9 @@ export class ChatService {
   }
 
   private async noteServerTurnStoppedBeforeStart(turn: HubTurn): Promise<void> {
-    if (this.inProcessServerTurns.has(turn.runId)) return;
+    // A compaction that never started is said by the device that asked for
+    // it (compactParticipantOnMachine), with a compaction's own words.
+    if (this.inProcessServerTurns.has(turn.runId) || turn.request?.kind === "compaction") return;
     const conversation = await this.storage.getConversation(turn.conversationId);
     if (!conversation || conversation.kind !== "chat") return;
     const participant = this.chatParticipants(conversation).find((item) => item.id === turn.participantId);
@@ -21247,14 +20656,43 @@ export class ChatService {
     if (!this.serverLink || turn.state !== "requested") return;
     const runId = turn.runId;
     if (this.inProcessServerTurns.has(runId) || this.pendingServerTurns.has(runId) || this.conversationIdForRun(runId)) return;
-    const conversation = await this.storage.getConversation(turn.conversationId);
-    if (!conversation || conversation.kind !== "chat" || conversation.metadata.archived === true) return;
-    const participant = this.chatParticipants(conversation).find((item) => item.id === turn.participantId);
-    if (!participant || !this.runsHere(participant)) return;
-    const message = conversation.messages.find((item) => item.id === turn.messageId);
-    if (!message) return;
+    // Taken here before anything awaits: the feed and a resume after a
+    // restart can both offer the same turn, and it runs once.
     const controller = new AbortController();
     this.pendingServerTurns.set(runId, controller);
+    const release = (): void => { if (this.pendingServerTurns.get(runId) === controller) this.pendingServerTurns.delete(runId); };
+    let started = false;
+    try {
+      started = await this.startServerTurnNow(turn, controller);
+    } finally {
+      if (!started) release();
+    }
+  }
+
+  /** startServerTurn once the turn is reserved here; false when it was not
+   *  started (not this device's, or this device takes nothing now). */
+  private async startServerTurnNow(turn: HubTurn, controller: AbortController): Promise<boolean> {
+    const runId = turn.runId;
+    let conversation = await this.storage.getConversation(turn.conversationId);
+    // A chat (or the message it answers) this device has not read yet (it is
+    // reading the server's chats for the first time): read it now.
+    if ((!conversation || !conversation.messages.some((item) => item.id === turn.messageId)) && this.serverChatReader &&
+        !await this.storage.conversationTombstones?.().isDeleted(turn.conversationId)) {
+      await this.reloadChatFromServer(turn.conversationId);
+      conversation = await this.storage.getConversation(turn.conversationId);
+    }
+    if (!conversation || conversation.kind !== "chat" || conversation.metadata.archived === true) return false;
+    const participant = this.chatParticipants(conversation).find((item) => item.id === turn.participantId);
+    if (!participant || !this.runsHere(participant)) return false;
+    const message = conversation.messages.find((item) => item.id === turn.messageId);
+    if (!message) return false;
+    // A machine makes its settings current first, and takes nothing while it
+    // stops (the turn waits on the server for its next start).
+    const prepared = await (this.serverTurnPreparation?.(turn) ?? Promise.resolve(true)).catch((error) => {
+      void this.debugLogs.write("chat.server-turn.prepare-error", { conversationId: turn.conversationId, runId, message: error instanceof Error ? error.message : String(error) });
+      return true;
+    });
+    if (!prepared || controller.signal.aborted) return false;
     const warnings: string[] = [];
     const chat = await this.requireChat(turn.conversationId);
     try {
@@ -21269,13 +20707,34 @@ export class ChatService {
       const compact = message.role === "user" ? this.compactCommand(message.content) : undefined;
       const request = turn.request ?? {};
       if (request.kind === "compaction" || (compact && compact.handle.toLowerCase() === participant.handle.toLowerCase())) {
-        await this.compactParticipant({
-          conversationId: chat.id, participantId: participant.id, handle: participant.handle,
-          instructions: typeof request.instructions === "string" ? request.instructions : compact?.instructions,
-          triggeredBy: request.triggeredBy === "agent" ? "agent" : "user", runId,
-          threadId: message.metadata?.threadId ?? message.id, parentMessageId: message.id, chatThreadRootId: message.metadata?.chatThreadRootId
-        }, controller.signal, this.onReviewProgress);
-        return;
+        // Taken on the server first, like any turn (Д5); a Stop from any
+        // device reaches it by its run id.
+        if (await this.claimServerTurnHere(turn, controller.signal) !== "claimed") return true;
+        const run = this.registerBackgroundRunController(runId, controller.signal);
+        let outcome: "done" | "error" | "stopped" = "error";
+        let usage: AgentContextUsage | undefined;
+        const text = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+        try {
+          const compacted = await this.compactParticipant({
+            conversationId: chat.id, participantId: participant.id, handle: participant.handle,
+            instructions: typeof request.instructions === "string" ? request.instructions : compact?.instructions,
+            triggeredBy: request.triggeredBy === "agent" ? "agent" : "user", runId,
+            // Asked as a compaction: in the thread it was asked from (none for
+            // a member's own); typed as a message: under that message.
+            ...(request.kind === "compaction"
+              ? { threadId: text(request.threadId), parentMessageId: text(request.parentMessageId), chatThreadRootId: text(request.chatThreadRootId) }
+              : { threadId: message.metadata?.threadId ?? message.id, parentMessageId: message.id, chatThreadRootId: message.metadata?.chatThreadRootId })
+          }, run.signal, this.onReviewProgress);
+          usage = this.agentContextUsageByParticipant(compacted.conversation)[participant.id];
+          outcome = run.signal.aborted ? "stopped" : "done";
+        } catch (error) {
+          outcome = run.signal.aborted ? "stopped" : "error";
+          throw error;
+        } finally {
+          run.cleanup();
+          this.finishServerTurn(runId, outcome, usage);
+        }
+        return true;
       }
       await this.runParticipantBatch(chat, [participant], message, runId, controller.signal, this.onReviewProgress, warnings, {
         targetRunIds: new Map([[participant.id, runId]]),
@@ -21291,6 +20750,7 @@ export class ChatService {
       if (this.pendingServerTurns.get(runId) === controller) this.pendingServerTurns.delete(runId);
       if (warnings.length > 0) await this.appendConversationWarnings(chat, warnings).catch(() => undefined);
     }
+    return true;
   }
 
   /** Moves one chat to the server (the first link, 5.7): sent as this device
@@ -21308,12 +20768,90 @@ export class ChatService {
     });
   }
 
-  /** After a start or a reconnect: every turn asked of this device's
-   *  members that nobody took yet (the computer or machine was off). */
+  /** After a start or a reconnect: every turn this device took and that
+   *  nothing runs any more is closed (it stopped or restarted in the middle
+   *  of it), and every turn asked of its members that nobody took yet starts
+   *  (the computer or machine was off). */
   async resumeServerTurns(): Promise<void> {
     const link = this.serverLink;
     if (!link) return;
-    for (const turn of await link.waitingTurns()) await this.startServerTurn(turn).catch(() => undefined);
+    const { requested, claimed } = await link.waitingTurns();
+    for (const turn of claimed) {
+      await this.closeOrphanedServerTurn(turn).catch((error) => {
+        void this.debugLogs.write("chat.server-turn.orphan-error", { runId: turn.runId, message: error instanceof Error ? error.message : String(error) });
+      });
+    }
+    for (const turn of requested) await this.startServerTurn(turn).catch(() => undefined);
+  }
+
+  /** Takes a turn the server asked of a member here, for a run that has no
+   *  turn of its own to open it (a compaction). */
+  private async claimServerTurnHere(turn: HubTurn, signal: AbortSignal): Promise<"claimed" | "stopped" | "skip"> {
+    const link = this.serverLink;
+    if (!link) return "skip";
+    this.inProcessServerTurns.add(turn.runId);
+    this.serverRunOfLocal.set(turn.runId, { runId: turn.runId, conversationId: turn.conversationId, participantId: turn.participantId });
+    this.localRunOfServer.set(turn.runId, turn.runId);
+    const forget = () => {
+      this.serverRunOfLocal.delete(turn.runId);
+      this.localRunOfServer.delete(turn.runId);
+    };
+    try {
+      const opId = newOpId();
+      await link.enqueue([{ opId, kind: "turn.claim", conversationId: turn.conversationId, runId: turn.runId, messageId: turn.messageId, participantId: turn.participantId }]);
+      const answer = await link.opAnswered(opId, signal);
+      if (answer.status === "rejected") throw new Error(`The server did not give this turn: ${answer.reason}`);
+      void this.debugLogs.write("chat.server-turn.claim", { conversationId: turn.conversationId, runId: turn.runId, participantId: turn.participantId, claim: answer.claim });
+      if (answer.claim === "claimed" || answer.claim === "already-yours") return "claimed";
+      forget();
+      return answer.claim === "stopped" ? "stopped" : "skip";
+    } catch (error) {
+      forget();
+      throw error;
+    }
+  }
+
+  /**
+   * A turn this device took that nothing here runs any more: this device
+   * stopped or restarted while it ran. Its bubble here is closed (never as
+   * "stopped": a Stop asked meanwhile was not confirmed, the parity
+   * exception's "restarted before confirming the stop") and the turn is
+   * finished on the server as interrupted, so whoever waits for it stops
+   * waiting.
+   */
+  private async closeOrphanedServerTurn(turn: HubTurn): Promise<void> {
+    const link = this.serverLink;
+    if (!link || turn.state !== "claimed" || turn.executorDeviceId !== link.deviceId()) return;
+    if (this.inProcessServerTurns.has(turn.runId) || this.pendingServerTurns.has(turn.runId) || this.localRunOfServer.has(turn.runId) ||
+        this.activeRunIds.has(turn.runId) || this.chatRunControllers.has(turn.runId)) return;
+    this.inProcessServerTurns.add(turn.runId);
+    const conversation = await this.requireChat(turn.conversationId).catch(() => undefined);
+    if (conversation) {
+      const participant = this.chatParticipants(conversation).find((item) => item.id === turn.participantId);
+      const handle = participant?.handle ?? "member";
+      await this.withChatMutation(conversation, async () => {
+        let changed = false;
+        for (const message of conversation.messages) {
+          if (message.role !== "participant" || message.participantId !== turn.participantId || message.metadata?.runId !== turn.runId) continue;
+          const swept = message.metadata?.staleRunRecovery?.runId === turn.runId;
+          if (message.status !== "pending" && !swept) continue;
+          if (turn.stopRequestedAt) {
+            markStopUnconfirmed(message, handle, `${this.machineRuntime ? "The machine" : "This computer"} restarted before confirming the stop.`);
+          } else if (message.status === "pending") {
+            message.status = "error";
+            if (!message.content) message.content = "Interrupted before completion.";
+          }
+          changed = true;
+        }
+        if (changed) {
+          conversation.updatedAt = new Date().toISOString();
+          this.queueSnapshot(conversation);
+        }
+      });
+      await this.waitForQueuedSave(conversation.id);
+    }
+    void this.debugLogs.write("chat.server-turn.orphan-closed", { conversationId: turn.conversationId, runId: turn.runId, stopRequested: Boolean(turn.stopRequestedAt) });
+    await link.enqueue([{ opId: newOpId(), kind: "turn.finish", conversationId: turn.conversationId, runId: turn.runId, outcome: "interrupted" }]);
   }
 
   /** Opens a member's turn on the server before anything of it is shown or
@@ -21336,7 +20874,7 @@ export class ChatService {
     const canonical = triggerMessage.role === "user" && targets.includes(participant.id);
     const serverRunId = canonical ? hubTurnRunId(triggerMessage.id, participant.id) : localRunId.startsWith("turn-") ? localRunId : `turn-${localRunId}`;
     this.inProcessServerTurns.add(serverRunId);
-    this.serverRunOfLocal.set(localRunId, { runId: serverRunId, conversationId: conversation.id });
+    this.serverRunOfLocal.set(localRunId, { runId: serverRunId, conversationId: conversation.id, participantId: participant.id });
     this.localRunOfServer.set(serverRunId, localRunId);
     try {
       // Д13: the message this turn answers is on the server before the
@@ -21369,21 +20907,65 @@ export class ChatService {
    *  member's own bubble has taken its place (or the turn never ran). */
   private async dropServerPlaceholder(conversation: Conversation, messageId: string): Promise<void> {
     await this.withChatMutation(conversation, async () => {
-      const before = conversation.messages.length;
-      conversation.messages = conversation.messages.filter((message) => !(message.id === messageId && message.metadata?.serverPlaceholder));
-      if (conversation.messages.length !== before) this.queueSnapshot(conversation);
+      if (this.removeServerPlaceholders(conversation, (message) => message.id === messageId)) this.queueSnapshot(conversation);
     });
   }
 
+  /** Takes the placeholders `gone` names out of this copy, and remembers them
+   *  so that no other copy brings them back; true when one was here. */
+  private removeServerPlaceholders(conversation: Conversation, gone: (message: ChatMessage) => boolean): boolean {
+    const before = conversation.messages.length;
+    conversation.messages = conversation.messages.filter((message) => {
+      if (!message.metadata?.serverPlaceholder || !gone(message)) return true;
+      this.goneServerPlaceholders.add(message.id);
+      return false;
+    });
+    while (this.goneServerPlaceholders.size > 5_000) {
+      const oldest = this.goneServerPlaceholders.values().next().value;
+      if (oldest === undefined) break;
+      this.goneServerPlaceholders.delete(oldest);
+    }
+    return conversation.messages.length !== before;
+  }
+
+  /** A copy merged with what is stored, or about to be saved, keeps none of
+   *  the placeholders that went meanwhile. */
+  private withoutGoneServerPlaceholders(conversation: Conversation): void {
+    if (!this.goneServerPlaceholders.size) return;
+    const gone = (message: ChatMessage) => Boolean(message.metadata?.serverPlaceholder) && this.goneServerPlaceholders.has(message.id);
+    if (conversation.messages.some(gone)) conversation.messages = conversation.messages.filter((message) => !gone(message));
+  }
+
   /** The end of a turn this device ran, said on the server. */
-  private finishServerTurn(localRunId: string, outcome: "done" | "error" | "stopped" | "interrupted"): void {
+  private finishServerTurn(localRunId: string, outcome: "done" | "error" | "stopped" | "interrupted", contextUsage?: AgentContextUsage): void {
     const link = this.serverLink;
     const server = this.serverRunOfLocal.get(localRunId);
     this.serverTurnOpens.delete(localRunId);
     if (!link || !server) return;
     this.serverRunOfLocal.delete(localRunId);
     this.localRunOfServer.delete(server.runId);
-    void link.enqueue([{ opId: newOpId(), kind: "turn.finish", conversationId: server.conversationId, runId: server.runId, outcome }]).catch(() => undefined);
+    const op: HubOp = { opId: newOpId(), kind: "turn.finish", conversationId: server.conversationId, runId: server.runId, outcome,
+      ...(contextUsage ? { contextUsage: contextUsage as unknown as Record<string, unknown> } : {}) };
+    // The member's last bubble of the run is saved by the caller right after
+    // this: the end goes with that save (persistConversationSnapshotNow), or
+    // at once when nothing of the run is still pending here.
+    const timer = setTimeout(() => this.releaseDeferredServerFinish(server.runId), DEFERRED_SERVER_FINISH_MS);
+    timer.unref?.();
+    this.deferredServerFinishes.set(server.runId, { conversationId: server.conversationId, participantId: server.participantId, op, timer });
+    void (async () => {
+      await this.waitForQueuedSave(server.conversationId);
+      const stored = await this.storage.getConversation(server.conversationId);
+      const pending = stored?.messages.some((message) => message.participantId === server.participantId && message.metadata?.runId === server.runId && message.status === "pending");
+      if (!pending) this.releaseDeferredServerFinish(server.runId);
+    })().catch(() => this.releaseDeferredServerFinish(server.runId));
+  }
+
+  private releaseDeferredServerFinish(serverRunId: string): void {
+    const deferred = this.deferredServerFinishes.get(serverRunId);
+    if (!deferred) return;
+    this.deferredServerFinishes.delete(serverRunId);
+    clearTimeout(deferred.timer);
+    void this.serverLink?.enqueue([deferred.op]).catch(() => undefined);
   }
 
   /** Waits for a turn on the server to reach one of `states`. */
@@ -21463,26 +21045,79 @@ export class ChatService {
         this.queueSnapshot(conversation);
       });
     };
-    // A cloud member's machine is made ready first; the member then names it.
-    if (participant.cloudRun && !participant.homeMachineId) {
-      if (!this.prepareCloudSelection) throw new Error("Cloud setup is not available on this device.");
-      const machineId = await this.prepareCloudSelection(participant.cloudRun, participant.kind, (snapshot) => {
-        this.emitProgress(localRunId, progress, "initial", snapshot.message, { participantLabel: `@${participant.handle}` });
-      });
-      signal?.throwIfAborted();
-      await this.withChatMutation(conversation, async () => {
-        const members = this.chatParticipants(conversation);
-        const ready = members.find((item) => item.id === participant.id);
-        if (!ready) throw new Error("The member left the chat while Cloud was preparing.");
-        conversation.metadata = { ...conversation.metadata, participants: members.map((item) => item.id === ready.id ? { ...ready, homeMachineId: machineId } : item) };
-        await this.saveConversation(conversation);
-        participant = { ...ready, homeMachineId: machineId };
-      });
+    try {
+      // A cloud member's machine is made ready first; the member then names it.
+      if (participant.cloudRun && !participant.homeMachineId) {
+        if (!this.prepareCloudSelection) throw new Error("Cloud setup is not available on this device.");
+        // What the preparation says (a sign-in it waits for) is on the bubble,
+        // and a Stop ends the wait at once.
+        const preparing = this.prepareCloudSelection(participant.cloudRun, participant.kind, (snapshot) => {
+          this.emitProgress(localRunId, progress, "initial", snapshot.message, { participantLabel: `@${participant.handle}` });
+          if (!signal?.aborted) void setOnBubble((metadata) => ({ ...metadata, cloudRunPreparation: snapshot })).catch(() => undefined);
+        });
+        let abort: (() => void) | undefined;
+        const cancelled = new Promise<never>((_resolve, reject) => {
+          abort = () => reject(signal?.reason ?? new Error("Chat run cancelled."));
+          signal?.addEventListener("abort", abort, { once: true });
+          if (signal?.aborted) abort();
+        });
+        void preparing.catch(() => undefined);
+        let machineId: string;
+        try { machineId = await Promise.race([preparing, cancelled]); }
+        finally { if (abort) signal?.removeEventListener("abort", abort); }
+        signal?.throwIfAborted();
+        await setOnBubble((metadata) => { delete metadata.cloudRunPreparation; return metadata; });
+        await this.withChatMutation(conversation, async () => {
+          const members = this.chatParticipants(conversation);
+          const ready = members.find((item) => item.id === participant.id);
+          if (!ready) throw new Error("The member left the chat while Cloud was preparing.");
+          conversation.metadata = { ...conversation.metadata, participants: members.map((item) => item.id === ready.id ? { ...ready, homeMachineId: machineId } : item) };
+          await this.saveConversation(conversation);
+          participant = { ...ready, homeMachineId: machineId };
+        });
+      }
+      if (participant.homeMachineId) {
+        const machineId = participant.homeMachineId;
+        // The chat's project is on the member's machine before its turn is
+        // asked there (copied once, never over what is there), and the machine
+        // knows where it is: its settings on the server say so.
+        if (conversation.repoPath && this.prepareMachineProject) {
+          await this.prepareParticipantProjects(conversation.repoPath, [participant], signal, (message) => {
+            this.emitProgress(localRunId, progress, "initial", message, { participantLabel: `@${participant.handle}` });
+            void setOnBubble((metadata) => ({ ...metadata, cloudRunPreparation: { operationId: localRunId, message } })).catch(() => undefined);
+          });
+          await setOnBubble((metadata) => { delete metadata.cloudRunPreparation; return metadata; });
+        }
+        await this.beforeRemoteTurn?.(machineId).catch((error: unknown) => {
+          void this.debugLogs.write("chat.remote-turn.prepare-error", { conversationId: conversation.id, machineId, message: error instanceof Error ? error.message : String(error) });
+        });
+        signal?.throwIfAborted();
+      }
+    } catch (error) {
+      // Stopped while its machine or project was made ready: the turn is
+      // stopped on the server too, so its machine never starts it (a User's
+      // message asked for it already).
+      if (signal?.aborted) {
+        await link.enqueue([{ opId: newOpId(), kind: "turn.stop", conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id }]).catch(() => undefined);
+        // A member whose cloud machine is not chosen yet has no device but
+        // this one: it says the member stopped, as for a local member stopped
+        // before it started (a machine says so for its own members).
+        const said = conversation.messages.some((item) => item.role === "system" && item.content === `@${participant.handle} stopped by user.` &&
+          item.metadata?.parentMessageId === triggerMessage.id);
+        if (!participant.homeMachineId && !said) await this.notePhoneTurnStoppedBeforeStart(conversation, triggerMessage, participant);
+        throw error;
+      }
+      // It could not be made ready: the bubble says why, as a local member's
+      // that could not start does (only this device has it).
+      throw new RemoteTurnNotStartedError(error instanceof Error ? error.message : String(error));
     }
     const machineName = participant.homeMachineId ? link.machineName(participant.homeMachineId) ?? "the machine" : "this computer";
     const placed = (turn: HubTurn) => turn.state !== "requested";
     const ended = (turn: HubTurn) => turn.state === "finished" || turn.state === "stopped";
-    await setOnBubble((metadata) => ({ ...metadata, machinePending: { machineName, at: new Date().toISOString() } }));
+    // Why the machine cannot take it right now (its runtime is being
+    // updated), when this device knows.
+    const waitReason = participant.homeMachineId ? this.machineWaitReason?.(participant.homeMachineId) : undefined;
+    await setOnBubble((metadata) => ({ ...metadata, machinePending: { machineName, at: new Date().toISOString(), ...(waitReason ? { reason: waitReason } : {}) } }));
     // Asked of the member's device (a User's message asked it already).
     const opId = newOpId();
     await link.enqueue([{ opId, kind: "turn.request", conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id,
@@ -21499,7 +21134,7 @@ export class ChatService {
       await this.withChatMutation(conversation, async () => {
         const real = conversation.messages.some((message) => !message.metadata?.serverPlaceholder && message.participantId === participant.id && message.metadata?.runId === serverRunId);
         if (!real) return;
-        conversation.messages = conversation.messages.filter((message) => !(message.metadata?.serverPlaceholder && message.participantId === participant.id && message.metadata?.runId === serverRunId));
+        this.removeServerPlaceholders(conversation, (message) => message.participantId === participant.id && message.metadata?.runId === serverRunId);
         this.queueSnapshot(conversation);
       });
       if (!ended(turn)) turn = await this.waitForServerTurn(serverRunId, ended, signal);
@@ -21510,13 +21145,22 @@ export class ChatService {
       await link.enqueue([{ opId: newOpId(), kind: "turn.stop", conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id }]);
       await setOnBubble((metadata) => ({ ...metadata, stopPending: { machineName, at: new Date().toISOString() } }));
       turn = await this.waitForServerTurn(serverRunId, ended);
-      await setOnBubble((metadata) => { delete metadata.stopPending; return metadata; });
+      // Confirmed: whatever the bubble's state now, it no longer waits.
+      await this.withChatMutation(conversation, async () => {
+        for (const message of conversation.messages) {
+          if (message.participantId === participant.id && message.metadata?.runId === serverRunId && message.metadata?.stopPending) {
+            const { stopPending: _confirmed, ...rest } = message.metadata;
+            message.metadata = rest;
+          }
+        }
+        this.queueSnapshot(conversation);
+      });
     }
     const refreshed = await this.requireChat(conversation.id);
     if (turn.state === "stopped" && !turn.executorDeviceId) {
       // Never taken: the placeholder goes, the stop is said once.
       await this.withChatMutation(conversation, async () => {
-        conversation.messages = conversation.messages.filter((message) => !(message.metadata?.serverPlaceholder && message.metadata?.runId === bubble.metadata?.runId));
+        this.removeServerPlaceholders(conversation, (message) => message.metadata?.runId === bubble.metadata?.runId);
         this.queueSnapshot(conversation);
       });
       return [];

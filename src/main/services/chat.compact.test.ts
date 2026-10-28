@@ -9,6 +9,8 @@ import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../.
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { readParticipantCompactions } from "../../shared/chatRunState";
 import { ChatService } from "./chat";
+import type { ChatServerLink } from "./chatServerOps";
+import type { HubFeedEntry, HubOp, HubOpEffect, HubTurn } from "../../shared/hubOps";
 
 const NOW = "2026-01-01T00:00:00.000Z";
 const ROLE: ChatRoleConfig = {
@@ -760,161 +762,171 @@ test("requestSelfCompactionFromTool enforces a deny override even with a stale c
   assert.equal(compactCalls, 0);
 });
 
-test("/compact on a member hosted on a machine is compacted there and shows the machine's outcome and context use", async () => {
+/** A message the server holds (a machine member's compaction is a turn
+ *  placed against one). */
+function acceptedMessage(id = "anchor"): any {
+  return { id, role: "user", content: "Earlier.", createdAt: NOW, status: "done", metadata: { threadId: id, serverSeq: 7, serverWriter: "desktop-device" } };
+}
+
+/** The User's server as a chat sees it, played by the test. */
+function fakeServerLink(deviceId: string) {
+  const ops: HubOp[] = [];
+  let seq = 100;
+  const turnOf = (op: HubOp, state: HubTurn["state"]): HubTurn | undefined => op.kind === "turn.request" || op.kind === "turn.claim"
+    ? { runId: op.runId, conversationId: op.conversationId, messageId: op.messageId, participantId: op.participantId, state,
+      ...(state === "requested" ? { requestedBy: deviceId } : { executorDeviceId: deviceId }),
+      ...(op.kind === "turn.request" && op.request ? { request: op.request } : {}) }
+    : undefined;
+  const link: ChatServerLink & { ops: HubOp[] } = {
+    ops,
+    deviceId: () => deviceId,
+    queueSql: (queued) => { ops.push(...queued); return ""; },
+    enqueue: async (queued) => { ops.push(...queued); },
+    nudge: () => undefined,
+    messageAccepted: async () => ({ status: "accepted", seq: ++seq }),
+    opAnswered: async (opId) => {
+      const op = ops.find((item) => item.opId === opId);
+      if (op?.kind === "turn.request") return { status: "accepted", seq: ++seq, turn: turnOf(op, "requested") };
+      if (op?.kind === "turn.claim") return { status: "accepted", seq: ++seq, claim: "claimed", turn: turnOf(op, "claimed") };
+      return { status: "accepted", seq: ++seq };
+    },
+    waitingTurns: async () => ({ requested: [], claimed: [] }),
+    machineName: () => "Box"
+  };
+  return link;
+}
+
+let feedSeq = 0;
+function fromServer(deviceId: string, effect: HubOpEffect): HubFeedEntry {
+  feedSeq += 1;
+  return { seq: 500 + feedSeq, opId: `feed-${feedSeq}`, deviceId, conversationId: "chat-compact", acceptedAt: new Date().toISOString(), effect };
+}
+
+function compactionLine(runId: string, participantId: string, outcome: "completed" | "failed", content: string, threadId?: string): any {
+  return { id: `line-${runId}`, role: "system", content, createdAt: NOW, status: "done",
+    metadata: { runId, ...(threadId ? { threadId } : {}), compaction: { triggeredBy: "user", participantId, outcome, instructionsProvided: false }, serverSeq: 900, serverWriter: "machine-device" } };
+}
+
+test("/compact on a member hosted on a machine is asked of its machine on the server, and shows the line and context use the machine wrote", async () => {
   const participant = chatParticipant({ homeMachineId: "box" });
   const conversation = chatConversation([participant], []);
+  conversation.messages.push(acceptedMessage());
   const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
   const { service, storage } = testService({
     conversation,
     debugEvents,
     compactSession: async () => { throw new Error("a member on a machine is never compacted on the desktop"); }
   });
-  const dispatched: any[] = [];
-  let acknowledged = false;
-  let markerDuringDispatch: unknown;
+  const link = fakeServerLink("desktop-device");
+  service.setServerLink(link);
+  const lines: string[] = [];
+  const running = service.sendMessage({ conversationId: conversation.id, runId: "machine-compact", content: "@admin /compact keep the plan", threadId: "thread-1" },
+    undefined, (progress) => lines.push(progress.message));
+  await waitFor(() => link.ops.some((op) => op.kind === "turn.request"));
+  const request = link.ops.find((op) => op.kind === "turn.request") as Extract<HubOp, { kind: "turn.request" }>;
+  assert.equal(request.runId, "turn-machine-compact");
+  assert.equal(request.participantId, participant.id);
+  assert.equal(request.messageId, "anchor", "placed against a message the server holds");
+  assert.deepEqual(request.request, { kind: "compaction", triggeredBy: "user", instructions: "keep the plan", threadId: "thread-1" });
+  assert.equal(readParticipantCompactions(storage.current.metadata)[participant.id]?.runId, "machine-compact", "the member shows as compacting while its machine works");
+  const turn: HubTurn = { runId: request.runId, conversationId: conversation.id, messageId: "anchor", participantId: participant.id, state: "claimed", executorDeviceId: "machine-device" };
   const usage = { usedTokens: 300, contextWindowTokens: 1000, percentage: 30, source: "codex-cli", updatedAt: "2026-02-01T00:00:00.000Z" };
-  service.setMachineLink({
-    runTurn: async () => { throw new Error("not a turn"); },
-    compactOnMachine: async (request) => {
-      dispatched.push(request);
-      markerDuringDispatch = readParticipantCompactions(storage.current.metadata)[participant.id]?.runId;
-      return {
-        status: "completed",
-        messages: [{ id: "machine-outcome", role: "system", content: "Compacted @admin context with focus instructions.", createdAt: NOW, status: "done",
-          metadata: { runId: request.runId, threadId: "thread-1", compaction: { triggeredBy: "user", participantId: participant.id, outcome: "completed", instructionsProvided: true } } } as any],
-        warnings: [],
-        contextUsage: usage as any,
-        acknowledge: async () => { acknowledged = true; }
-      };
-    }
-  });
-
-  const result = await service.sendMessage({ conversationId: conversation.id, runId: "machine-compact", content: "@admin /compact keep the plan", threadId: "thread-1" });
-
-  assert.equal(dispatched.length, 1);
-  assert.equal(dispatched[0].runId, "machine-compact");
-  assert.equal(dispatched[0].participant.id, participant.id);
-  assert.deepEqual(dispatched[0].compaction, { triggeredBy: "user", instructions: "keep the plan", threadId: "thread-1" });
-  assert.equal(markerDuringDispatch, "machine-compact", "the member shows as compacting while its machine works");
+  await service.applyServerEntries([fromServer("machine-device", { kind: "turn.claim", turn })]);
+  await service.applyServerEntries([fromServer("machine-device", { kind: "message.create",
+    message: compactionLine(request.runId, participant.id, "completed", "Compacted @admin context with focus instructions.", "thread-1") })]);
+  await service.applyServerEntries([fromServer("machine-device", { kind: "turn.finish", turn: { ...turn, state: "finished", outcome: "done", contextUsage: usage } })]);
+  const result = await running;
   assert.equal(result.warnings.length, 0);
-  assert.equal(storage.current.messages.at(-1)?.id, "machine-outcome");
+  assert.equal(storage.current.messages.at(-1)?.id, `line-${request.runId}`);
   assert.equal(storage.current.messages.at(-1)?.content, "Compacted @admin context with focus instructions.");
+  assert.equal(storage.current.messages.filter((message: any) => message.role === "system").length, 1, "the machine's line only, not a second one from here");
   assert.equal(storage.current.metadata.agentContextUsageByParticipant?.[participant.id]?.usedTokens, 300);
-  assert.equal(acknowledged, true, "the machine drops its result only after this desktop stored it");
   assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
   assert.equal(storage.current.metadata.activeRunIds, undefined);
+  assert.deepEqual(lines, ["Compacting @admin.", "Compacting @admin. Waiting for machine Box", "Compacting @admin.", "Compacted @admin."]);
   assert.deepEqual(debugEvents.filter(({ event }) => event.startsWith("chat.compaction.")).map(({ event, payload }) => [event, payload.outcome]), [
     ["chat.compaction.requested", undefined],
     ["chat.compaction.finished", "completed"]
   ]);
 });
 
-test("while its machine is away a compaction's status line says what a turn's bubble says", async () => {
+test("Stop on a machine member's compaction is asked on the server and shown as waiting until the machine confirms", async () => {
   const participant = chatParticipant({ homeMachineId: "box" });
   const conversation = chatConversation([participant], []);
-  const { service } = testService({ conversation, compactSession: async () => { throw new Error("not here"); } });
+  conversation.messages.push(acceptedMessage());
+  const { service, storage } = testService({ conversation, compactSession: async () => { throw new Error("not here"); } });
+  const link = fakeServerLink("desktop-device");
+  service.setServerLink(link);
   const lines: string[] = [];
-  let release!: () => void;
-  const released = new Promise<void>((resolve) => { release = resolve; });
-  let started!: () => void;
-  const waiting = new Promise<void>((resolve) => { started = resolve; });
-  service.setMachineLink({
-    runTurn: async () => { throw new Error("not a turn"); },
-    compactOnMachine: async (request) => {
-      await request.onMachineWaiting?.("Box", "its runtime is being updated");
-      await request.onMachineWaiting?.("Box");
-      request.onStopPending?.("Box");
-      started();
-      await released;
-      return { status: "completed", warnings: [], messages: [{ id: "line", role: "system", content: "Compacted @admin context.", createdAt: NOW, status: "done",
-        metadata: { runId: request.runId, compaction: { triggeredBy: "user", participantId: participant.id, outcome: "completed", instructionsProvided: false } } } as any] };
-    }
-  });
-  const running = service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "waiting-run" }, undefined, (progress) => lines.push(progress.message));
-  await waiting;
-  // The machine started it before the held Stop landed: the Stop still waits
-  // for the machine, as on a turn's bubble.
-  await service.applyMachineRunStarted({ conversationId: conversation.id, runId: "waiting-run" });
-  release();
+  const stop = new AbortController();
+  const running = service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "waiting-run" }, stop.signal, (progress) => lines.push(progress.message));
+  await waitFor(() => link.ops.some((op) => op.kind === "turn.request"));
+  const turn: HubTurn = { runId: "turn-waiting-run", conversationId: conversation.id, messageId: "anchor", participantId: participant.id, state: "claimed", executorDeviceId: "machine-device" };
+  await service.applyServerEntries([fromServer("machine-device", { kind: "turn.claim", turn })]);
+  stop.abort();
+  await waitFor(() => link.ops.some((op) => op.kind === "turn.stop"));
+  await waitFor(() => lines.at(-1) === "Compacting @admin. Stop requested — waiting for machine Box");
+  // The machine stops it and says how its compaction ended.
+  await service.applyServerEntries([fromServer("machine-device", { kind: "message.create",
+    message: compactionLine("turn-waiting-run", participant.id, "failed", "Could not compact @admin context: Compaction was cancelled.") })]);
+  await service.applyServerEntries([fromServer("machine-device", { kind: "turn.finish", turn: { ...turn, state: "finished", outcome: "stopped" } })]);
   await running;
-  // A late or repeated start after the outcome says nothing.
-  await service.applyMachineRunStarted({ conversationId: conversation.id, runId: "waiting-run" });
   assert.deepEqual(lines, [
     "Compacting @admin.",
-    "Compacting @admin. Waiting for machine Box: its runtime is being updated",
     "Compacting @admin. Waiting for machine Box",
+    "Compacting @admin.",
     "Compacting @admin. Stop requested — waiting for machine Box",
-    "Compacted @admin."
+    "Could not compact @admin."
   ]);
-});
-
-test("a compaction that waited for its machine says Compacting again once the machine starts it", async () => {
-  const participant = chatParticipant({ homeMachineId: "box" });
-  const conversation = chatConversation([participant], []);
-  const { service } = testService({ conversation, compactSession: async () => { throw new Error("not here"); } });
-  const lines: string[] = [];
-  let release!: () => void;
-  const released = new Promise<void>((resolve) => { release = resolve; });
-  let waitingShown!: () => void;
-  const shown = new Promise<void>((resolve) => { waitingShown = resolve; });
-  service.setMachineLink({
-    runTurn: async () => { throw new Error("not a turn"); },
-    compactOnMachine: async (request) => {
-      await request.onMachineWaiting?.("Box");
-      waitingShown();
-      await released;
-      return { status: "completed", warnings: [], messages: [{ id: "line-2", role: "system", content: "Compacted @admin context.", createdAt: NOW, status: "done",
-        metadata: { runId: request.runId, compaction: { triggeredBy: "user", participantId: participant.id, outcome: "completed", instructionsProvided: false } } } as any] };
-    }
-  });
-  const running = service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "back-run" }, undefined, (progress) => lines.push(progress.message));
-  await shown;
-  await service.applyMachineRunStarted({ conversationId: conversation.id, runId: "back-run" });
-  release();
-  await running;
-  assert.deepEqual(lines, ["Compacting @admin.", "Compacting @admin. Waiting for machine Box", "Compacting @admin.", "Compacted @admin."]);
+  assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: Compaction was cancelled.");
+  assert.equal(storage.current.metadata.activeRunIds, undefined);
 });
 
 test("a machine compaction that could not start ends as a local one that could not", async () => {
   const participant = chatParticipant({ homeMachineId: "box" });
   const conversation = chatConversation([participant], []);
+  conversation.messages.push(acceptedMessage());
   const { service, storage } = testService({ conversation, compactSession: async () => { throw new Error("not here"); } });
-  const calls: string[] = [];
-  service.setMachineLink({
-    runTurn: async () => { throw new Error("not a turn"); },
-    compactOnMachine: async (request) => {
-      calls.push(request.runId);
-      return { status: "failed", messages: [], warnings: [], sent: false, error: "@admin is hosted on Box, which is not connected." };
-    }
-  });
+  // No link to the User's server: nothing can reach the machine.
   const offline = await service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "machine-offline" });
-  assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: @admin is hosted on Box, which is not connected.");
+  assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: @admin runs on a cloud machine, which this device reaches only through your server; it is not linked to it yet.");
   assert.equal(storage.current.messages.at(-1)?.metadata?.compaction?.outcome, "failed");
-  assert.deepEqual(offline.warnings, ["Could not compact @admin context: @admin is hosted on Box, which is not connected."]);
+  assert.equal(offline.warnings.length, 1);
 
-  // Stopped before it was sent: the words a local compaction stopped before it started writes.
+  const link = fakeServerLink("desktop-device");
+  service.setServerLink(link);
+  // Stopped before it was asked: the words a local compaction stopped before it started writes.
   const stop = new AbortController();
   stop.abort();
   await service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "machine-stopped" }, stop.signal);
-  assert.deepEqual(calls, ["machine-offline"], "a stopped compaction is never sent");
+  assert.equal(link.ops.some((op) => op.kind === "turn.request"), false, "a stopped compaction is never asked");
   assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: Compaction was cancelled before native execution started.");
   assert.equal(storage.current.metadata.activeRunIds, undefined);
+
+  // Stopped on the server before the machine took it: the same words.
+  const asked = service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "stopped-there" });
+  await waitFor(() => link.ops.some((op) => op.kind === "turn.request"));
+  await service.applyServerEntries([fromServer("phone-device", { kind: "turn.stop",
+    turn: { runId: "turn-stopped-there", conversationId: conversation.id, messageId: "anchor", participantId: participant.id, state: "stopped", outcome: "stopped" } })]);
+  await asked;
+  assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: Compaction was cancelled before native execution started.");
 
   // A member whose cloud machine was never prepared has never run.
   const pending = chatParticipant({ id: "cloud-pending", handle: "cloudy", cloudRun: { kind: "aws" } as any });
   storage.current.metadata.participants = [participant, pending];
   await service.compactParticipant({ conversationId: conversation.id, participantId: pending.id, runId: "machine-pending" });
   assert.equal(storage.current.messages.at(-1)?.content, "@cloudy does not have an active session to compact yet.");
-  assert.deepEqual(calls, ["machine-offline"]);
+  assert.equal(link.ops.filter((op) => op.kind === "turn.request").length, 1);
 });
 
-test("the machine compacts its own member with the desktop's run id and returns the outcome line and context use", async () => {
+test("the machine takes a compaction turn asked of its member, runs it under the turn's id, and ends it on the server with the member's context use", async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-machine-"));
   try {
     const participant = chatParticipant({ homeMachineId: "box" });
     const conversation = chatConversation([participant], [chatSession(participant, "session-on-box")]);
+    conversation.messages.push(acceptedMessage());
     let compactedSession: unknown;
-    const { service } = testService({
+    const { service, storage } = testService({
       conversation,
       compactSession: async (runParticipant, _repoPath, _diffMode, _kind, _signal, options) => {
         compactedSession = options.sessionId;
@@ -924,27 +936,38 @@ test("the machine compacts its own member with the desktop's run id and returns 
     });
     (service as any).ensureHistoryFiles = async () => tempRoot;
     service.setHostMachineId("box");
-    const result = await service.runMachineHostedCompaction({ conversationId: conversation.id, participantId: participant.id, runId: "desktop-run", triggeredBy: "agent", threadId: "t-9" });
+    const link = fakeServerLink("machine-device");
+    service.setServerLink(link);
+    await service.startServerTurn({ runId: "turn-desktop-run", conversationId: conversation.id, messageId: "anchor", participantId: participant.id, state: "requested",
+      request: { kind: "compaction", triggeredBy: "agent", threadId: "t-9" } });
+    await waitFor(() => link.ops.some((op) => op.kind === "turn.finish"));
     assert.equal(compactedSession, "session-on-box");
-    assert.equal(result.messages.length, 1);
-    assert.equal(result.messages[0].content, "Compacted @admin context.");
-    assert.equal(result.messages[0].metadata?.runId, "desktop-run");
-    assert.equal(result.messages[0].metadata?.threadId, "t-9");
-    assert.equal(result.messages[0].metadata?.compaction?.triggeredBy, "agent");
-    assert.equal(result.contextUsage?.usedTokens, 50);
+    assert.deepEqual(link.ops.filter((op) => op.kind.startsWith("turn.")).map((op) => op.kind), ["turn.claim", "turn.finish"], "taken before it ran, ended after");
+    const finish = link.ops.find((op) => op.kind === "turn.finish") as Extract<HubOp, { kind: "turn.finish" }>;
+    assert.equal(finish.outcome, "done");
+    assert.equal((finish.contextUsage as { usedTokens?: number } | undefined)?.usedTokens, 50);
+    const line = storage.current.messages.at(-1);
+    assert.equal(line.content, "Compacted @admin context.");
+    assert.equal(line.metadata?.runId, "turn-desktop-run");
+    assert.equal(line.metadata?.threadId, "t-9");
+    assert.equal(line.metadata?.compaction?.triggeredBy, "agent");
+    // The line goes to the server before the turn's end.
+    const lineOp = link.ops.findIndex((op) => op.kind === "message.create" && op.message.id === line.id);
+    assert.ok(lineOp >= 0 && lineOp < link.ops.findIndex((op) => op.kind === "turn.finish"));
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
 
-test("a member on a machine asking to compact itself is run through the desktop when it is there", async () => {
-  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-delegate-"));
+test("a member on a machine asking to compact itself asks it on the server, and its machine then takes it like any compaction", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-self-"));
   try {
     const participant = chatParticipant({
       homeMachineId: "box",
       permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "allow" })
     });
     const conversation = chatConversation([participant], [chatSession(participant, "session-on-box")]);
+    conversation.messages.push(acceptedMessage());
     let compactCalls = 0;
     const { service } = testService({
       conversation,
@@ -952,195 +975,57 @@ test("a member on a machine asking to compact itself is run through the desktop 
     });
     (service as any).ensureHistoryFiles = async () => tempRoot;
     service.setHostMachineId("box");
-    const delegated: any[] = [];
-    let desktopHere = true;
-    service.setCompactionDelegate({ canDelegateCompaction: () => desktopHere, delegateCompaction: async (request) => { delegated.push(request); } });
+    const link = fakeServerLink("machine-device");
+    service.setServerLink(link);
 
     const asked = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), { instructions: "Keep the API notes." });
     assert.equal(asked.status, "queued");
-    await waitFor(() => delegated.length === 1);
-    assert.deepEqual(delegated[0], { conversationId: conversation.id, participantId: participant.id, runId: asked.runId, instructions: "Keep the API notes." });
+    await waitFor(() => link.ops.some((op) => op.kind === "turn.request"));
+    const request = link.ops.find((op) => op.kind === "turn.request") as Extract<HubOp, { kind: "turn.request" }>;
+    assert.equal(request.participantId, participant.id);
+    assert.deepEqual(request.request, { kind: "compaction", triggeredBy: "agent", instructions: "Keep the API notes." });
     await delay(25);
-    assert.equal(compactCalls, 0, "the desktop runs it, and sends it back as a compaction command");
-
-    // No desktop to take it: it runs here, as it always has.
-    desktopHere = false;
-    (service as any).storage.current.metadata.participantSelfCompactionRequestedAtByParticipantId = {};
-    const alone = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), {});
-    assert.equal(alone.status, "queued");
+    assert.equal(compactCalls, 0, "it runs when the server says so, so every device sees it and can stop it");
+    // The server's word comes back: this machine takes it.
+    await service.applyServerEntries([fromServer("machine-device", { kind: "turn.request",
+      turn: { runId: request.runId, conversationId: conversation.id, messageId: request.messageId, participantId: participant.id, state: "requested",
+        requestedBy: "machine-device", request: request.request } })]);
     await waitFor(() => compactCalls === 1);
-    assert.equal(delegated.length, 1);
+    await waitFor(() => link.ops.some((op) => op.kind === "turn.finish"));
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
 
-test("the desktop runs a compaction a machine asks for only for that machine's own member", async () => {
+test("the desktop shows a compaction a machine member asked for itself as a run, and its Stop is asked on the server", async () => {
   const participant = chatParticipant({ homeMachineId: "box" });
   const conversation = chatConversation([participant], []);
-  const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
-  const { service, storage } = testService({ conversation, debugEvents, compactSession: async () => { throw new Error("not here"); } });
-  const dispatched: any[] = [];
-  service.setMachineLink({
-    runTurn: async () => { throw new Error("not a turn"); },
-    compactOnMachine: async (request) => {
-      dispatched.push(request);
-      return { status: "completed", warnings: [], messages: [{ id: `outcome-${request.runId}`, role: "system", content: "Compacted @admin context.", createdAt: NOW, status: "done",
-        metadata: { runId: request.runId, compaction: { triggeredBy: "agent", participantId: participant.id, outcome: "completed", instructionsProvided: false } } } as any] };
-    }
-  });
-  await service.runDelegatedCompaction({ machineId: "another-box", conversationId: conversation.id, participantId: participant.id, runId: "foreign" });
-  assert.equal(dispatched.length, 0);
-  assert.equal(debugEvents.find(({ event }) => event === "chat.self-compaction.delegation-refused")?.payload.reason, "not-its-member");
-
-  await service.runDelegatedCompaction({ machineId: "box", conversationId: conversation.id, participantId: participant.id, runId: "own", instructions: "Focus." });
-  await waitFor(() => storage.current.messages.some((message: any) => message.id === "outcome-own"));
-  assert.equal(dispatched.length, 1);
-  assert.deepEqual(dispatched[0].compaction, { triggeredBy: "agent", instructions: "Focus." });
-  // Delivered again: still one run.
-  await service.runDelegatedCompaction({ machineId: "box", conversationId: conversation.id, participantId: participant.id, runId: "own" });
-  assert.equal(debugEvents.filter(({ event }) => event === "chat.self-compaction.delegation-refused").at(-1)?.payload.reason, "already-run");
-  assert.equal(dispatched.length, 1);
-  await service.runDelegatedCompaction({ machineId: "box", conversationId: conversation.id, participantId: participant.id, runId: "../../etc" });
-  assert.equal(debugEvents.filter(({ event }) => event === "chat.self-compaction.delegation-refused").at(-1)?.payload.reason, "invalid-run-id");
-});
-
-test("a delegated compaction is one run while it is in flight, and yields to one already running", async () => {
-  const participant = chatParticipant({ homeMachineId: "box" });
-  const conversation = chatConversation([participant], []);
-  const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
-  const { service, storage } = testService({ conversation, debugEvents, compactSession: async () => { throw new Error("not here"); } });
-  const dispatched: string[] = [];
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => { release = resolve; });
-  service.setMachineLink({
-    runTurn: async () => { throw new Error("not a turn"); },
-    compactOnMachine: async (request) => {
-      dispatched.push(request.runId);
-      await held;
-      return { status: "completed", warnings: [], messages: [{ id: `outcome-${request.runId}`, role: "system", content: "Compacted @admin context.", createdAt: NOW, status: "done",
-        metadata: { runId: request.runId, compaction: { triggeredBy: "agent", participantId: participant.id, outcome: "completed", instructionsProvided: false } } } as any] };
-    }
-  });
-  const reasons = () => debugEvents.filter(({ event }) => event === "chat.self-compaction.delegation-refused").map(({ payload }) => payload.reason);
-  await service.runDelegatedCompaction({ machineId: "box", conversationId: conversation.id, participantId: participant.id, runId: "first" });
-  await waitFor(() => dispatched.length === 1);
-  await service.runDelegatedCompaction({ machineId: "box", conversationId: conversation.id, participantId: participant.id, runId: "first" });
-  assert.deepEqual(reasons(), ["already-run"]);
-  // The member asks again while the first is running: the running one covers it.
-  await service.runDelegatedCompaction({ machineId: "box", conversationId: conversation.id, participantId: participant.id, runId: "second" });
-  assert.deepEqual(reasons(), ["already-run", "already-compacting"]);
-  release();
-  await waitFor(() => storage.current.messages.some((message: any) => message.id === "outcome-first"));
-  assert.deepEqual(dispatched, ["first"]);
-});
-
-test("a member's own compaction the User switched off here ends with the line a refusal leaves", async () => {
-  const participant = chatParticipant({ homeMachineId: "box", permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "deny" }) });
-  const conversation = chatConversation([participant], []);
+  conversation.messages.push(acceptedMessage());
   const { service, storage } = testService({ conversation, compactSession: async () => { throw new Error("not here"); } });
-  let dispatched = 0;
-  service.setMachineLink({ runTurn: async () => { throw new Error("not a turn"); }, compactOnMachine: async () => { dispatched += 1; return { status: "completed", messages: [], warnings: [] }; } });
-  await service.runDelegatedCompaction({ machineId: "box", conversationId: conversation.id, participantId: participant.id, runId: "refused" });
-  assert.equal(dispatched, 0);
-  await waitFor(() => storage.current.messages.at(-1)?.content === "Could not compact @admin context: Context compaction requests are disabled for @admin.");
-  assert.equal(storage.current.messages.at(-1)?.metadata?.compaction?.triggeredBy, "agent");
+  const link = fakeServerLink("desktop-device");
+  service.setServerLink(link);
+  const turn: HubTurn = { runId: "turn-self", conversationId: conversation.id, messageId: "anchor", participantId: participant.id, state: "requested",
+    requestedBy: "machine-device", request: { kind: "compaction", triggeredBy: "agent" } };
+  await service.applyServerEntries([fromServer("machine-device", { kind: "turn.request", turn })]);
+  await waitFor(() => readParticipantCompactions(storage.current.metadata)[participant.id]?.runId === "turn-self");
+  assert.equal(link.ops.some((op) => op.kind === "turn.request"), false, "not asked again: the machine asked it");
+  // Shown once, whatever the feed says again.
+  await service.applyServerEntries([fromServer("machine-device", { kind: "turn.claim", turn: { ...turn, state: "claimed", executorDeviceId: "machine-device" } })]);
+  assert.equal(service.cancelRun("turn-self"), true);
+  await waitFor(() => link.ops.some((op) => op.kind === "turn.stop"));
+  await service.applyServerEntries([fromServer("machine-device", { kind: "message.create",
+    message: compactionLine("turn-self", participant.id, "failed", "Could not compact @admin context: Compaction was cancelled.") })]);
+  await service.applyServerEntries([fromServer("machine-device", { kind: "turn.finish", turn: { ...turn, state: "finished", outcome: "stopped", executorDeviceId: "machine-device" } })]);
+  await waitFor(() => storage.current.metadata.activeRunIds === undefined && !readParticipantCompactions(storage.current.metadata)[participant.id]);
+  assert.equal(storage.current.messages.filter((message: any) => message.role === "system").length, 1);
 });
 
-test("the machine keeps its compaction result while this desktop cannot store it", async () => {
-  const participant = chatParticipant({ homeMachineId: "box" });
-  const conversation = chatConversation([participant], []);
-  const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
-  const { service, storage } = testService({ conversation, debugEvents, compactSession: async () => { throw new Error("not here"); } });
-  let acknowledged = 0;
-  let failSaves = false;
-  const save = storage.saveConversation.bind(storage);
-  storage.saveConversation = async (next: Conversation) => {
-    if (failSaves && next.messages.some((message: any) => message.id === "unsaved-outcome")) throw new Error("SQLITE_FULL: database or disk is full");
-    return save(next);
-  };
-  service.setMachineLink({
-    runTurn: async () => { throw new Error("not a turn"); },
-    compactOnMachine: async (request) => {
-      failSaves = request.runId === "unsaved";
-      return { status: "completed", warnings: [],
-        messages: [{ id: `${request.runId}-outcome`, role: "system", content: "Compacted @admin context.", createdAt: NOW, status: "done",
-          metadata: { runId: request.runId, compaction: { triggeredBy: "user", participantId: participant.id, outcome: "completed", instructionsProvided: false } } } as any],
-        acknowledge: async () => {
-          acknowledged += 1;
-          if (request.runId === "ack-fails") throw new Error("the receipt could not be sent");
-        }
-      };
-    }
-  });
-  await assert.rejects(service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "unsaved" }), /SQLITE_FULL/);
-  assert.equal(acknowledged, 0, "no acknowledgement for a result this desktop did not store: the machine keeps it and sends it again");
-  assert.ok(debugEvents.some(({ event, payload }) => event === "chat.compaction.finished" && payload.runId === "unsaved" && payload.outcome === "failed"));
-  failSaves = false;
-  await service.compactParticipant({ conversationId: conversation.id, participantId: participant.id, runId: "ack-fails" });
-  assert.equal(acknowledged, 1);
-  assert.ok(debugEvents.some(({ event, payload }) => event === "chat.compaction.ack-pending" && payload.runId === "ack-fails"));
-  assert.equal(storage.current.messages.at(-1)?.id, "ack-fails-outcome");
-  assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
-  assert.equal(storage.current.metadata.activeRunIds, undefined);
-});
-
-test("a compaction result that arrives after a desktop restart lands its line and the member's context use", async () => {
-  const participant = chatParticipant({ homeMachineId: "box" });
-  const local = chatParticipant({ id: "local-member", handle: "local" });
-  const conversation = chatConversation([participant, local], []);
-  conversation.metadata.participantCompactionsByParticipantId = { [participant.id]: { runId: "late-run", startedAt: NOW } };
-  conversation.metadata.activeRunIds = ["late-run"];
-  const { service, storage } = testService({ conversation, compactSession: async () => { throw new Error("not here"); } });
-  const usage = { usedTokens: 70, contextWindowTokens: 1000, percentage: 7, source: "codex-cli", updatedAt: "2026-04-01T00:00:00.000Z" };
-  const line = { id: "late-outcome", role: "system", content: "Compacted @admin context.", createdAt: NOW, status: "done",
-    metadata: { runId: "late-run", compaction: { triggeredBy: "user", participantId: participant.id, outcome: "completed", instructionsProvided: false } } } as any;
-  await service.applyMachineLateTerminal({ conversationId: conversation.id, runId: "late-run", status: "completed", messages: [line], warnings: [],
-    machineName: "Box", machineId: "box", participantId: participant.id, contextUsage: usage as any });
-  assert.equal(storage.current.messages.at(-1)?.content, "Compacted @admin context.");
-  assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
-  assert.equal(storage.current.metadata.agentContextUsageByParticipant?.[participant.id]?.usedTokens, 70);
-  // A compaction stopped on the machine before it ran, learned after a restart, still says so.
-  await service.applyMachineLateTerminal({ conversationId: conversation.id, runId: "late-stopped", status: "interrupted", messages: [], warnings: [],
-    machineName: "Box", machineId: "box", participantId: participant.id, compaction: { triggeredBy: "user" } });
-  assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: Compaction was cancelled before native execution started.");
-  assert.equal(storage.current.messages.at(-1)?.metadata?.runId, "late-stopped");
-  await service.applyMachineLateTerminal({ conversationId: conversation.id, runId: "late-failed", status: "failed", messages: [], warnings: [],
-    machineName: "Box", machineId: "box", participantId: participant.id, compaction: { triggeredBy: "agent" },
-    error: "The machine runtime ended after accepting this command; its execution outcome is uncertain and it was not run again." });
-  assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: The machine runtime ended after accepting this command; its execution outcome is uncertain and it was not run again.");
-  // Another machine cannot set the context use of a member that is not its own.
-  await service.applyMachineLateTerminal({ conversationId: conversation.id, runId: "other-run", status: "completed", messages: [], warnings: [],
-    machineName: "Other", machineId: "other-box", participantId: local.id, contextUsage: { ...usage, usedTokens: 999, updatedAt: "2099-01-01T00:00:00.000Z" } as any });
-  assert.equal(storage.current.metadata.agentContextUsageByParticipant?.[local.id], undefined);
-});
-
-test("a member's own compaction runs on its machine when handing it to the desktop fails", async () => {
-  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-delegate-fail-"));
-  try {
-    const participant = chatParticipant({ homeMachineId: "box", permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "allow" }) });
-    const conversation = chatConversation([participant], [chatSession(participant, "session-on-box")]);
-    const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
-    let compactCalls = 0;
-    const { service } = testService({ conversation, debugEvents,
-      compactSession: async (runParticipant) => { compactCalls += 1; return { participant: runParticipant, ok: true, sessionId: "session-on-box" }; } });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
-    service.setHostMachineId("box");
-    service.setCompactionDelegate({ canDelegateCompaction: () => true, delegateCompaction: async () => { throw new Error("outbox full"); } });
-    const asked = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), {});
-    assert.equal(asked.status, "queued");
-    await waitFor(() => compactCalls === 1);
-    assert.ok(debugEvents.some(({ event, payload }) => event === "chat.self-compaction.delegate-error" && payload.runId === asked.runId));
-  } finally {
-    await rm(tempRoot, { recursive: true, force: true });
-  }
-});
-
-test("Stop by run id reaches a compaction the machine runs for the desktop", async () => {
+test("Stop by run id reaches a compaction the machine runs for another device, which ends it on the server as stopped", async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-machine-stop-"));
   try {
     const participant = chatParticipant({ homeMachineId: "box" });
     const conversation = chatConversation([participant], [chatSession(participant, "session-on-box")]);
+    conversation.messages.push(acceptedMessage());
     let compactSignal: AbortSignal | undefined;
     const { service } = testService({
       conversation,
@@ -1152,12 +1037,18 @@ test("Stop by run id reaches a compaction the machine runs for the desktop", asy
     });
     (service as any).ensureHistoryFiles = async () => tempRoot;
     service.setHostMachineId("box");
-    const running = service.runMachineHostedCompaction({ conversationId: conversation.id, participantId: participant.id, runId: "stop-me", triggeredBy: "user" });
+    const link = fakeServerLink("machine-device");
+    service.setServerLink(link);
+    const turn: HubTurn = { runId: "turn-stop-me", conversationId: conversation.id, messageId: "anchor", participantId: participant.id, state: "requested",
+      request: { kind: "compaction", triggeredBy: "user" } };
+    void service.startServerTurn(turn);
     await waitFor(() => compactSignal !== undefined);
-    assert.equal(service.cancelRun("stop-me"), true);
-    const result = await running;
-    assert.equal(compactSignal?.aborted, true);
-    assert.equal(result.messages[0]?.metadata?.compaction?.outcome, "failed");
+    // The Stop arrives from the server: asked while this machine has it.
+    await service.applyServerEntries([fromServer("desktop-device", { kind: "turn.stop",
+      turn: { ...turn, state: "claimed", executorDeviceId: "machine-device", stopRequestedAt: NOW } })]);
+    await waitFor(() => compactSignal?.aborted === true);
+    await waitFor(() => link.ops.some((op) => op.kind === "turn.finish"));
+    assert.equal((link.ops.find((op) => op.kind === "turn.finish") as Extract<HubOp, { kind: "turn.finish" }>).outcome, "stopped");
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -1343,6 +1234,10 @@ function testService(options: {
     },
     async saveConversation(conversation: Conversation): Promise<void> {
       this.current = clone(conversation);
+    },
+    // What the User's server's feed asks of a device's storage.
+    conversationTombstones() {
+      return { isDeleted: async () => false, mark: async () => undefined, pendingCopies: async () => [] };
     }
   };
   const settings = {

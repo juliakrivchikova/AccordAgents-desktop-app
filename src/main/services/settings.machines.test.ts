@@ -72,7 +72,10 @@ test("a handover that did not work puts the previous machine power key back, and
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
 });
 
-test("machine run intents and held stops survive a fresh SettingsService reading the disk", async () => {
+test("a machine record from before the server owned the chats sheds the old dispatch bookkeeping on the next read and save", async () => {
+  // Turns, Stops and settings travel through the User's server now: the run
+  // intents, held stops and publication digests the desktop kept per machine
+  // mean nothing any more and are not carried forward.
   const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-settings-"));
   const file = path.join(dir, "settings.json");
   const instance = (): SettingsService => {
@@ -81,48 +84,22 @@ test("machine run intents and held stops survive a fresh SettingsService reading
     return service;
   };
   try {
-    const record = {
-      id: "machine-1", name: "Test machine", deviceId: "device-machine", pairingKey: "pairing-1",
-      createdAt: "2026-09-06T00:00:00.000Z",
+    const record = { id: "machine-1", name: "Test machine", deviceId: "device-machine", pairingKey: "pairing-1", createdAt: "2026-09-06T00:00:00.000Z" };
+    await instance().saveMachine(record);
+    const disk = JSON.parse(await readFile(file, "utf8"));
+    Object.assign(disk.machines[0], {
       pendingRuns: [{ runId: "run-live", conversationId: "chat-1" }],
-      pendingCancels: [{ runId: "run-stopped", conversationId: "chat-2" }]
-    };
-    await instance().saveMachine(record);
-    assert.deepEqual((await instance().listMachines())[0].pendingRuns, record.pendingRuns);
-    assert.deepEqual((await instance().listMachines())[0].pendingCancels, record.pendingCancels);
-    const disk = JSON.parse(await readFile(file, "utf8"));
-    disk.machines[0].pendingRuns.push(null, {}, { runId: 12, conversationId: "chat" }, { runId: " ", conversationId: "chat" }, { runId: "run-live", conversationId: "chat-1" });
+      pendingCancels: [{ runId: "run-stopped", conversationId: "chat-2" }],
+      chatChanges: true,
+      published: { instanceId: "runtime-run-1", settings: "digest", roster: "digest" }
+    });
     await writeFile(file, JSON.stringify(disk));
-    const restarted = instance();
-    assert.deepEqual((await restarted.listMachines())[0].pendingRuns, record.pendingRuns);
-    await restarted.saveMachine({ ...record, pendingRuns: [], pendingCancels: [] });
-    assert.deepEqual((await instance().listMachines())[0].pendingRuns, []);
-    assert.deepEqual((await instance().listMachines())[0].pendingCancels, []);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("what the desktop published to a machine's runtime survives a fresh SettingsService reading the disk", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-published-"));
-  const file = path.join(dir, "settings.json");
-  const instance = (): SettingsService => {
-    const service = new SettingsService();
-    (service as any).settingsPath = file;
-    return service;
-  };
-  try {
-    const published = { instanceId: "runtime-run-1", settings: "digest-of-settings", roster: "digest-of-roster" };
-    const record = { id: "machine-p", name: "Published", deviceId: "device-p", pairingKey: "pairing-p", createdAt: "2026-10-22T00:00:00.000Z", published };
-    await instance().saveMachine(record);
-    assert.deepEqual((await instance().listMachines())[0].published, published, "a desktop restart remembers it, so it publishes nothing again");
-    const disk = JSON.parse(await readFile(file, "utf8"));
-    disk.machines[0].published = { instanceId: 7, settings: "x".repeat(300), roster: "kept" };
-    await writeFile(file, JSON.stringify(disk));
-    assert.deepEqual((await instance().listMachines())[0].published, { roster: "kept" }, "malformed parts are dropped, so they are published again");
-    disk.machines[0].published = "nonsense";
-    await writeFile(file, JSON.stringify(disk));
-    assert.equal((await instance().listMachines())[0].published, undefined);
+    const read = (await instance().listMachines())[0] as unknown as Record<string, unknown>;
+    for (const key of ["pendingRuns", "pendingCancels", "chatChanges", "published"]) assert.equal(key in read, false, `${key} is not read`);
+    assert.equal(read.deviceId, "device-machine");
+    await instance().saveMachine((await instance().listMachines())[0]);
+    const saved = JSON.parse(await readFile(file, "utf8")).machines[0] as Record<string, unknown>;
+    for (const key of ["pendingRuns", "pendingCancels", "chatChanges", "published"]) assert.equal(key in saved, false, `${key} is not written back`);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

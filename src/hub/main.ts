@@ -153,6 +153,15 @@ export function composeHub(options: {
   // The chats as the server owns them (agreements Д1–Д5): devices' writes,
   // the feed they read, and turns.
   const ops = new HubOps(storage, log);
+  /** The machine a member of a chat runs on, if it runs on one. Read
+   *  without the chat's messages: a chat can be thousands of them. */
+  const turnHome = async (conversationId: string, participantId: string): Promise<string | undefined> => {
+    const opened = await storage.openConversation(conversationId, 1);
+    const participants = Array.isArray(opened?.conversation.metadata?.participants)
+      ? opened!.conversation.metadata.participants as Array<{ id?: unknown; homeMachineId?: unknown }> : [];
+    const home = participants.find((participant) => participant?.id === participantId)?.homeMachineId;
+    return typeof home === "string" && home ? home : undefined;
+  };
   ops.onApplied(({ entry, conversation, previous }) => {
     feed.note(entry.conversationId);
     const effect = entry.effect;
@@ -160,6 +169,14 @@ export function composeHub(options: {
     // it waits (what it shows changed), it keeps the moment it was raised.
     if (effect.kind === "card.raise" && conversation && effect.card.state === "pending" && effect.card.raisedAt === entry.acceptedAt) {
       void notify(cardNotice(conversation, effect.card)).catch((error) => log("hub.notice.error", { message: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
+    // A turn asked of a member on a machine (a continuation, another
+    // member's request, a compaction) is work for that machine too.
+    if (effect.kind === "turn.request" && effect.turn.state === "requested") {
+      void turnHome(effect.turn.conversationId, effect.turn.participantId).then((machineId) => {
+        if (machineId) waker.noteWork(machineId, entry.seq);
+      }).catch(() => undefined);
       return;
     }
     if (!conversation || (effect.kind !== "message.create" && effect.kind !== "message.update")) return;

@@ -162,12 +162,16 @@ test("while the server is unreachable a message stays unsent and its member does
   await save(h.chat, localChat("chat-b"));
   await h.link.start();
   await until(() => h.page("chat-b"), (page) => Boolean((page as { messages?: unknown[] }).messages?.length));
+  // The one-time move ends (every chat read back) before the server goes away.
+  await until(async () => (await h.link.status())?.ready ?? false, (ready) => ready);
   h.front.block();
   await h.chat.sendMessage({ conversationId: "chat-b", content: "@taylor are you there" } as never);
-  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  // Every failed attempt is recorded with its reason (Д12); meanwhile the
+  // message waits, unsent, and its member does not start (Д13).
+  const failures = await until(() => h.storage.hubClientOps().failures(), (list) => list.length > 0, 15_000);
+  assert.match(failures[0].reason, /503/);
   assert.equal(h.turns.length, 0, "the member waits for the server");
   assert.ok(await h.storage.hubClientOps().count("queued") > 0, "the message waits, unsent");
-  assert.ok((await h.storage.hubClientOps().failures()).length > 0, "every failed attempt is recorded with its reason (Д12)");
   h.front.open();
   const done = await until(() => h.page("chat-b"), (page) => page.messages.some((message) => message.role === "participant" && message.status === "done"), 40_000);
   assert.equal(done.messages.filter((message) => message.role === "user").length, 1, "sent once");
@@ -185,7 +189,9 @@ test("a message written on the phone starts the computer's member through the se
   assert.equal(sent.results[0].status, "accepted");
   const done = await until(() => h.page("chat-c"), (page) => page.messages.some((message) => message.role === "participant" && message.status === "done"));
   assert.equal(done.messages.find((message) => message.role === "participant")?.content, "reply to @taylor from the phone");
-  assert.equal(done.turns.find((turn) => turn.runId === hubTurnRunId("phone-m1", desk.id))?.state, "finished");
+  // The turn's end reaches the server right after the reply it wrote.
+  const ended = await until(() => h.page("chat-c"), (page) => page.turns.some((turn) => turn.runId === hubTurnRunId("phone-m1", desk.id) && turn.state === "finished"));
+  assert.equal(ended.messages.filter((message) => message.role === "participant").length, 1, "the turn ran once");
   // A second message whose turn the phone stops while it runs.
   h.hold();
   await h.phoneWrite({ opId: "op-phone-2", kind: "message.create", conversationId: "chat-c",

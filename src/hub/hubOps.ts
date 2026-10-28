@@ -68,6 +68,9 @@ export class HubOps {
   private readonly cache = new Map<string, { conversation: Conversation; token: string }>();
   private readonly rows = new WeakMap<ChatMessage, Omit<SavedMessageRow, "index" | "id">>();
   private readonly waiters = new Set<() => void>();
+  /** Counts what was accepted: a read that saw nothing new waits only if
+   *  nothing was accepted while it read (a word given meanwhile is not lost). */
+  private generation = 0;
   private readonly listeners: Array<(applied: HubOpApplied) => void> = [];
 
   constructor(
@@ -292,7 +295,7 @@ export class HubOps {
     if (op.kind === "turn.finish") {
       if (!current || current.executorDeviceId !== device.deviceId) return reject(opId, "Only the device that took this turn may finish it.");
       if (current.state === "finished") return unchanged("finished");
-      return place_({ ...current, state: "finished", finishedAt: acceptedAt, outcome: op.outcome });
+      return place_({ ...current, state: "finished", finishedAt: acceptedAt, outcome: op.outcome, ...(op.contextUsage ? { contextUsage: op.contextUsage } : {}) });
     }
 
     const conversation = await this.load(op.conversationId);
@@ -464,6 +467,12 @@ export class HubOps {
     return turns;
   }
 
+  /** Turns this device took and never finished: what it closes after it
+   *  stopped or restarted in the middle of them. */
+  async claimedTurns(device: HubDevice): Promise<HubTurn[]> {
+    return this.storage.hubOps().claimedBy(device.deviceId);
+  }
+
   /** Who may add a message: anyone, except a member's message, which only
    *  the device that member runs on writes (Д4). */
   private mayWriteMessage(device: HubDevice, conversation: Conversation, message: ChatMessage, devices: HubDevice[]): Rejection | undefined {
@@ -484,7 +493,15 @@ export class HubOps {
     if (!Number.isSafeInteger(after) || after < 0) throw new HubOpsRequestError(400, "Invalid position.");
     if (deviceId) await store.recordRead(deviceId, after, this.now().toISOString());
     if (after < await store.prunedThrough()) return { gone: true, head: await store.head() };
+    let generation = this.generation;
     let page = await store.after(after, HUB_FEED_PAGE_MAX, HUB_FEED_PAGE_BYTES);
+    // Something accepted while it read: read again rather than wait for the
+    // next word (the one given meanwhile went to nobody).
+    while (page.entries.length === 0 && waitMs > 0 && this.generation !== generation) {
+      generation = this.generation;
+      page = await store.after(after, HUB_FEED_PAGE_MAX, HUB_FEED_PAGE_BYTES);
+    }
+    // No await between that check and the wait's registration.
     if (page.entries.length === 0 && waitMs > 0) {
       await this.wait(Math.min(waitMs, HUB_FEED_WAIT_MAX_MS), closed);
       page = await store.after(after, HUB_FEED_PAGE_MAX, HUB_FEED_PAGE_BYTES);
@@ -533,6 +550,7 @@ export class HubOps {
   }
 
   private wake(): void {
+    this.generation += 1;
     for (const waiter of [...this.waiters]) waiter();
   }
 

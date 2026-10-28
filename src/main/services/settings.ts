@@ -3133,46 +3133,11 @@ export class SettingsService {
         pairingKey: record.pairingKey.trim(),
         createdAt: typeof record.createdAt === "string" ? record.createdAt : new Date(0).toISOString(),
         ...(typeof record.lastSeenAt === "string" ? { lastSeenAt: record.lastSeenAt } : {}),
-        pendingRuns: this.normalizeMachineRunRecords(record.pendingRuns),
-        pendingCancels: this.normalizeMachineRunRecords(record.pendingCancels),
         ...(record.lastHello && typeof record.lastHello === "object" ? { lastHello: record.lastHello } : {}),
-        ...(typeof record.devicePublicKeyDerBase64 === "string" && record.devicePublicKeyDerBase64 ? { devicePublicKeyDerBase64: record.devicePublicKeyDerBase64 } : {}),
-        ...(record.chatChanges === true ? { chatChanges: true } : {}),
-        ...(this.normalizeMachinePublished(record.published) ?? {})
+        ...(typeof record.devicePublicKeyDerBase64 === "string" && record.devicePublicKeyDerBase64 ? { devicePublicKeyDerBase64: record.devicePublicKeyDerBase64 } : {})
       }];
     });
     return machines.length > 0 ? machines : undefined;
-  }
-
-  /** What the desktop last published to the machine's runtime (digests only):
-   *  kept across restarts so a restart does not publish the same again. */
-  private normalizeMachinePublished(value: unknown): Pick<MachineRecord, "published"> | undefined {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-    const record = value as Record<string, unknown>;
-    const text = (field: unknown): string | undefined => typeof field === "string" && field.length > 0 && field.length <= 256 ? field : undefined;
-    const published = {
-      ...(text(record.instanceId) ? { instanceId: text(record.instanceId) } : {}),
-      ...(text(record.settings) ? { settings: text(record.settings) } : {}),
-      ...(text(record.roster) ? { roster: text(record.roster) } : {})
-    };
-    return Object.keys(published).length ? { published } : undefined;
-  }
-
-  private normalizeMachineRunRecords(value: unknown): Array<{ runId: string; conversationId: string }> {
-    if (!Array.isArray(value)) {
-      return [];
-    }
-    const records = new Map<string, { runId: string; conversationId: string }>();
-    for (const entry of value) {
-      if (!entry || typeof entry !== "object") {
-        continue;
-      }
-      const { runId, conversationId } = entry as Record<string, unknown>;
-      if (typeof runId === "string" && runId.trim() && typeof conversationId === "string" && conversationId.trim()) {
-        records.set(runId.trim(), { runId: runId.trim(), conversationId: conversationId.trim() });
-      }
-    }
-    return [...records.values()];
   }
 
   private normalizeChatProviderKind(value: unknown): ChatProviderKind | undefined {
@@ -3496,7 +3461,7 @@ export class SettingsService {
       throw new Error("Machine not found.");
     }
     if (record.id === installedMachineId && record.pairingKey === installed.rendezvousId && isDeepStrictEqual(pairings[record.pairingKey], installed)) return { ...record };
-    if (record.pendingRuns?.length || record.pendingCancels?.length || record.lastHello?.activeRunIds?.length) {
+    if (record.lastHello?.activeRunIds?.length) {
       throw new Error("The machine has pending actions. Finish them before restoring its connection.");
     }
     if (record.pairingKey !== requested.rendezvousId || !isDeepStrictEqual(pairings[record.pairingKey], requested)) {

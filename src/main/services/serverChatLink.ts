@@ -60,7 +60,18 @@ export class ServerChatLink {
         return outcome.status === "accepted" ? { status: "accepted", seq: outcome.seq } : outcome;
       },
       opAnswered: (opId, signal) => this.requireOps().waitFor(opId, signal),
-      waitingTurns: async () => this.ready && this.client ? (await this.client.waitingTurns()).turns : [],
+      waitingTurns: async () => {
+        if (!this.ready || !this.client) return { requested: [], claimed: [] };
+        const answer = await this.client.waitingTurns();
+        // A turn whose end this device wrote and has not sent yet (it stopped
+        // right after) is not one it left behind.
+        const claimed: HubTurn[] = [];
+        for (const turn of answer.claimed ?? []) {
+          const queued = await this.options.storage.hubClientOps().forConversation(turn.conversationId);
+          if (!queued.some((row) => row.op.kind === "turn.finish" && row.op.runId === turn.runId)) claimed.push(turn);
+        }
+        return { requested: answer.turns, claimed };
+      },
       machineName: (machineId) => this.machineNames.get(machineId),
       settleMoved: (conversationId) => this.requireOps().settleMoved(conversationId)
     };

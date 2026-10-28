@@ -23,7 +23,8 @@ export const HUB_OPS_PATH = "/v3/ops";
 export const HUB_FEED_PATH = "/v3/feed";
 export const HUB_CHATS_PATH = "/v3/chats";
 export const HUB_CHAT_PATH = "/v3/chat";
-/** Turns waiting for the asking device's members (after a restart). */
+/** Turns waiting for the asking device's members (after a restart), and
+ *  the ones it took and never finished. */
 export const HUB_TURNS_PATH = "/v3/turns";
 
 /** Operations in one request. */
@@ -108,7 +109,9 @@ export type HubOpBody =
   | { kind: "turn.request"; runId: string; messageId: string; participantId: string; pendingMessageId?: string; request?: Record<string, unknown> }
   | { kind: "turn.claim"; runId: string; messageId: string; participantId: string }
   | { kind: "turn.stop"; runId: string; messageId: string; participantId: string }
-  | { kind: "turn.finish"; runId: string; outcome: HubTurnOutcome }
+  /** `contextUsage`: the member's context use as its CLI reported it after
+   *  the turn, which every device shows as it shows a local member's. */
+  | { kind: "turn.finish"; runId: string; outcome: HubTurnOutcome; contextUsage?: Record<string, unknown> }
   /** Moving to the server (one time, by the computer that held the chats):
    *  the chat's fields and a page of its messages, oldest pages first; the
    *  last page names the order of every message the computer held. */
@@ -177,6 +180,9 @@ export interface HubTurn {
   stopRequestedAt?: string;
   finishedAt?: string;
   outcome?: HubTurnOutcome;
+  /** The member's context use after the turn, as its device said when it
+   *  finished it (carried in the feed; not kept with the turn). */
+  contextUsage?: Record<string, unknown>;
 }
 
 /** What an accepted operation did, as every device applies it to its copy. */
@@ -252,7 +258,47 @@ export const HUB_CARDS_PATH = "/v3/cards";
 export interface HubTurnsResponse {
   /** Turns asked for this device's members that nobody took yet. */
   turns: HubTurn[];
+  /** Turns this device took and never finished (it stopped or restarted
+   *  while they ran): it closes them, as nothing runs them any more. */
+  claimed?: HubTurn[];
   head: number;
+}
+
+/** Who the asking device is on the server's roster (GET). A machine learns
+ *  here which members are its own (its `machineId` is their `homeMachineId`). */
+export const HUB_ME_PATH = "/v3/me";
+
+export interface HubMe {
+  deviceId: string;
+  role: "owner" | "desktop" | "machine" | "phone";
+  machineId?: string;
+  name: string;
+}
+
+/**
+ * A machine's settings, as the computer that set it up published them for it
+ * (PUT, owner only; GET, the machine reads its own). Sealed for that machine
+ * alone: the server keeps and hands over the sealed text and never reads it.
+ * A PUT is told to the machine on its live socket (HubLiveSettings).
+ */
+export const HUB_MACHINE_SETTINGS_PATH = "/v3/machine-settings";
+
+export interface HubMachineSettingsPut {
+  machineId: string;
+  sealed: string;
+}
+
+export interface HubMachineSettings {
+  /** Absent while the computer has published nothing for this machine. */
+  sealed?: string;
+  /** When the server took it: a read `?since=` it answers `unchanged`. */
+  updatedAt?: string;
+  unchanged?: boolean;
+}
+
+/** The live socket's word to a machine that its settings changed. */
+export interface HubLiveSettings {
+  type: "settings";
 }
 
 export interface HubChatSummary {
@@ -388,6 +434,7 @@ export function hubOpShapeProblem(value: unknown): string | undefined {
       return undefined;
     }
     case "turn.finish":
+      if (value.contextUsage !== undefined && (!isRecord(value.contextUsage) || JSON.stringify(value.contextUsage).length > 4_096)) return "Invalid context use.";
       return isHubTurnRunId(value.runId) && (value.outcome === "done" || value.outcome === "error" || value.outcome === "stopped" || value.outcome === "interrupted")
         ? undefined : "Invalid turn outcome.";
   }

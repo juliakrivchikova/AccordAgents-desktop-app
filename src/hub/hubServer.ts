@@ -43,7 +43,10 @@ import { HubRequestError, HubResyncRequiredError, type HubLog } from "./hubLog";
 import { isAllowedPushEndpoint } from "./hubPush";
 import { HUB_PHONE_PATHS, type HubPhoneApi } from "./hubPhone";
 import { HubOpsRequestError, type HubOps } from "./hubOps";
-import { HUB_CARDS_PATH, HUB_CHAT_PATH, HUB_CHATS_PATH, HUB_FEED_PATH, HUB_OPS_PATH, HUB_TURNS_PATH, type HubCardsResponse, type HubFeedGone, type HubTurnsResponse } from "../shared/hubOps";
+import {
+  HUB_CARDS_PATH, HUB_CHAT_PATH, HUB_CHATS_PATH, HUB_FEED_PATH, HUB_MACHINE_SETTINGS_PATH, HUB_ME_PATH, HUB_OPS_PATH, HUB_TURNS_PATH,
+  type HubCardsResponse, type HubFeedGone, type HubLiveSettings, type HubMachineSettings, type HubMachineSettingsPut, type HubMe, type HubTurnsResponse
+} from "../shared/hubOps";
 
 export interface HubServerOptions {
   hubId: string;
@@ -298,7 +301,7 @@ export class HubServer {
       return 200;
     }
     if (request.method === "GET" && url.pathname === HUB_TURNS_PATH) {
-      json(response, 200, { turns: await ops.waitingTurns(device), head: await ops.head() } satisfies HubTurnsResponse);
+      json(response, 200, { turns: await ops.waitingTurns(device), claimed: await ops.claimedTurns(device), head: await ops.head() } satisfies HubTurnsResponse);
       return 200;
     }
     if (request.method === "GET" && url.pathname === HUB_CHAT_PATH) {
@@ -306,6 +309,55 @@ export class HubServer {
       return 200;
     }
     throw new HubRequestError(404, "Not found.");
+  }
+
+  /**
+   * A machine's settings, sealed for it by the computer that set it up: the
+   * owner puts them, the machine reads its own (by the machine id the roster
+   * gives it). The server keeps the sealed text and never opens it; a put is
+   * told to the machine at once on its live socket.
+   */
+  private async handleMachineSettings(request: IncomingMessage, response: ServerResponse, url: URL, device: HubDevice, body: Buffer): Promise<number> {
+    const hub = this.options.storage.hub();
+    if (request.method === "PUT") {
+      if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub publishes a machine's settings.");
+      const parsed = parseJson(body) as Partial<HubMachineSettingsPut> | undefined;
+      if (!parsed || typeof parsed.machineId !== "string" || !MACHINE_ID.test(parsed.machineId) ||
+          typeof parsed.sealed !== "string" || parsed.sealed.length === 0 || parsed.sealed.length > HUB_MAX_BODY_BYTES) {
+        throw new HubRequestError(400, "Invalid machine settings.");
+      }
+      const updatedAt = new Date(this.now()).toISOString();
+      await hub.setDocument(machineSettingsKey(parsed.machineId), { sealed: parsed.sealed, updatedAt }, updatedAt);
+      this.tellMachine(parsed.machineId, { type: "settings" } satisfies HubLiveSettings);
+      this.options.debugLog?.("hub.machine-settings.published", { machineId: parsed.machineId, bytes: parsed.sealed.length });
+      json(response, 200, { ok: true, updatedAt });
+      return 200;
+    }
+    if (request.method === "GET") {
+      if (device.role !== "machine" || !device.machineId) throw new HubRequestError(403, "Only a machine reads its settings, and only its own.");
+      const stored = (await hub.document(machineSettingsKey(device.machineId)))?.value as { sealed?: unknown; updatedAt?: unknown } | undefined;
+      const sealed = typeof stored?.sealed === "string" ? stored.sealed : undefined;
+      const updatedAt = typeof stored?.updatedAt === "string" ? stored.updatedAt : undefined;
+      const since = url.searchParams.get("since") ?? undefined;
+      if (sealed && updatedAt && since && updatedAt <= since) {
+        json(response, 200, { updatedAt, unchanged: true } satisfies HubMachineSettings);
+        return 200;
+      }
+      json(response, 200, (sealed && updatedAt ? { sealed, updatedAt } : {}) satisfies HubMachineSettings);
+      return 200;
+    }
+    throw new HubRequestError(404, "Not found.");
+  }
+
+  /** A live word to the devices of one machine (its settings changed). */
+  private tellMachine(machineId: string, frame: HubLiveSettings): void {
+    void this.options.storage.hub().devices().then((devices) => {
+      const ids = new Set(devices.filter((item) => item.role === "machine" && item.machineId === machineId).map((item) => item.deviceId));
+      const text = JSON.stringify(frame);
+      for (const [socket, deviceId] of this.live) {
+        if (ids.has(deviceId) && socket.readyState === socket.OPEN) socket.send(text);
+      }
+    }).catch(() => undefined);
   }
 
   private broadcastOps(head: number): void {
@@ -481,13 +533,24 @@ export class HubServer {
       }
       const checked = await this.preauthenticate(request.headers.authorization);
       const large = (request.method === "POST" && (url.pathname === "/v1/events" || url.pathname === HUB_OPS_PATH)) || (request.method === "PUT" && BLOB_PATH.test(url.pathname)) ||
-        (request.method === "PUT" && url.pathname === "/v1/catalog") || (request.method === "POST" && url.pathname === HUB_PROGRESS_PATH);
+        (request.method === "PUT" && url.pathname === "/v1/catalog") || (request.method === "POST" && url.pathname === HUB_PROGRESS_PATH) ||
+        // A machine's settings carry the User's skills and environment.
+        (request.method === "PUT" && url.pathname === HUB_MACHINE_SETTINGS_PATH);
       const body = await readBody(request, large ? HUB_MAX_BODY_BYTES : HUB_MAX_SMALL_BODY_BYTES);
       const device = await this.authenticate(request.method ?? "GET", body, request.headers.authorization, pathWithQuery, checked);
       if (this.options.phone && HUB_PHONE_PATHS.has(url.pathname)) {
         // Only a phone reads the phone's views, as what its invite allowed.
         if (device.role !== "phone") throw new HubRequestError(403, "Only a phone reads this.");
         status = await this.options.phone.handle(request, response, url, device, body);
+        return;
+      }
+      if (request.method === "GET" && url.pathname === HUB_ME_PATH) {
+        return json(response, 200, {
+          deviceId: device.deviceId, role: device.role, name: device.name, ...(device.machineId ? { machineId: device.machineId } : {})
+        } satisfies HubMe);
+      }
+      if (url.pathname === HUB_MACHINE_SETTINGS_PATH) {
+        status = await this.handleMachineSettings(request, response, url, device, body);
         return;
       }
       if (this.options.ops && url.pathname.startsWith("/v3/")) {
@@ -663,9 +726,8 @@ export class HubServer {
         return json(response, 200, { ok: true, machines: entries.length });
       }
       if (url.pathname === HUB_PROGRESS_PATH && request.method === "POST") {
-        // The desktop's own members run there; a machine's progress travels
-        // in its channel, a phone runs nothing.
-        if (device.role !== "owner" && device.role !== "desktop") throw new HubRequestError(403, "Only a desktop posts its members' progress.");
+        // Members run on the computer and on machines; a phone runs nothing.
+        if (device.role === "phone") throw new HubRequestError(403, "Only a device that runs members posts their progress.");
         const frames = (parseJson(body) as Partial<HubProgressPost> | undefined)?.frames;
         if (!Array.isArray(frames) || frames.length > 100) throw new HubRequestError(400, "Invalid progress.");
         this.options.onProgress?.(frames);
@@ -875,6 +937,11 @@ function readReport(params: URLSearchParams): (HubReadReport & { peek?: boolean 
 
 const RENDEZVOUS_ID = /^[A-Za-z0-9._-]{1,128}$/;
 const MAX_DATE_MS = 8_640_000_000_000_000;
+const MACHINE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+
+function machineSettingsKey(machineId: string): string {
+  return `machine-settings:${machineId}`;
+}
 
 function validRoster(value: unknown): HubDevice[] {
   const devices = (value as HubRosterRequest | undefined)?.devices;

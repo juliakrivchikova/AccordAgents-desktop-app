@@ -1,19 +1,20 @@
 /**
- * Machine link — sealed messages between a desktop and a machine that hosts
- * participants (machines transport, work items 3–5). Every message travels as
- * one sealed relay logical message (same sealing as the phone pairing) inside
- * the machine's own relay room, targeted with the room's device ids.
+ * Machine link: live, unstored control between a computer and a cloud machine
+ * it set up, in that machine's room on the User's server. Nothing here is
+ * durable and nothing here is chat content: chats, members' turns, Stops,
+ * compactions and settings are the User's server's (agreements Д1, Д4, Д9),
+ * which every device reads and writes alike. The room carries only what
+ * matters while both ends are there: the machine's greeting and status,
+ * its scheduled scripts, a picture a member reads, background-task labels,
+ * next-prompt suggestions and live progress for the computer's window.
  *
- * This is the first, direct form of the contract in
- * docs/machines/02-event-contract.md: conversation state is replicated to the
- * machine as messages and settings snapshots, a turn is requested by id, and the
- * machine answers with progress and the finished participant messages.
+ * Every message is signed by its sender and sealed for its one recipient
+ * (machineControlAuthentication, machineChannelSealing).
  */
 
-import type {
-  AgentContextUsage, ChatAppToolApprovalRequest, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "./types";
+import type { ChatAppToolApprovalRequest, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatMessage } from "./types";
 import type { MachineProgressFrame } from "./machineProgress";
-import type { MachineTrustRoster, TrustedDeviceRecord } from "./machineTrust";
+import type { TrustedDeviceRecord } from "./machineTrust";
 
 export const MACHINE_LINK_PROTOCOL = "accord-machine-link-v1";
 
@@ -27,14 +28,33 @@ export interface MachineLinkEnvelope<Body = MachineLinkMessage> {
 
 /** Settings a machine needs to run a participant exactly like the desktop
  *  would: the same roles, rules, saved prompts, participant presets and
- *  environment variables. Secrets travel sealed and are stored with the
- *  machine's own secret store. */
+ *  environment variables. Published by the computer on the User's server,
+ *  sealed for that machine alone; stored with the machine's own secret store. */
 export interface MachineSettingsSnapshot {
   version: 1;
   exportedAt: string;
   /** JSON of the desktop's stored settings with secrets removed. */
   settingsJson: string;
   agentEnvironment: Array<{ key: string; value: string }>;
+}
+
+/** What the computer publishes for one machine on the User's server, sealed
+ *  for that machine alone (the server never opens it). */
+export interface MachineSettingsDocument {
+  version: 1;
+  settings: MachineSettingsSnapshot;
+  /** Where each of the computer's projects lives on this machine, by the
+   *  computer's path: the folder a member here works in for a chat whose
+   *  project is that path. */
+  projects: Record<string, string>;
+}
+
+export function isMachineSettingsDocument(value: unknown): value is MachineSettingsDocument {
+  if (!value || typeof value !== "object") return false;
+  const document = value as Partial<MachineSettingsDocument>;
+  return document.version === 1 && Boolean(document.settings) && typeof document.settings === "object" &&
+    Boolean(document.projects) && typeof document.projects === "object" && !Array.isArray(document.projects) &&
+    Object.entries(document.projects as Record<string, unknown>).every(([source, local]) => typeof source === "string" && typeof local === "string" && local.startsWith("/"));
 }
 
 export interface MachineHelloBody {
@@ -50,23 +70,20 @@ export interface MachineHelloBody {
   providers: Array<{ kind: string; installed: boolean; version?: string }>;
   /** Bound to deviceId; exchanged inside the enrolled sealed room. */
   publicKeyDerBase64?: string;
-  /** Runs still executing on the machine (reconnect reconciliation). */
+  /** Runs executing on the machine now (an update waits for none). */
   activeRunIds?: string[];
-  /** Finished runs whose result the desktop has not acknowledged yet. */
-  pendingTerminalRunIds?: string[];
   /** Random id of this runtime process; changes when the machine restarts,
    *  so the desktop can tell a restart from a reconnect. */
   instanceId?: string;
-  /** When this runtime process started; a hello from an older instance that
-   *  arrives late is ignored by the desktop. */
+  /** When this runtime process started. */
   instanceStartedAt?: string;
-  /** Monotonic start counter kept by the machine on disk; preferred over the
-   *  wall-clock start time for ordering instances. Absent when the machine
-   *  could not read or advance it reliably. */
+  /** Monotonic start counter kept by the machine on disk; a hello from an
+   *  older instance that arrives late is ignored by the desktop. Absent when
+   *  the machine could not read or advance it reliably. */
   instanceSequence?: number;
-  /** Set when the machine cannot keep its outbox on disk: results are held
-   *  in memory only and would not survive a restart of the runtime. */
-  outboxError?: string;
+  /** What this machine wrote that the User's server has not taken yet (a
+   *  reply, a turn's end), and why it has not: shown on the desktop. */
+  unsentWarning?: string;
   /** This runtime hosts scheduled scripts (absent before scripts existed). */
   scriptsSupported?: boolean;
   /** An enabled scheduled script keeps this machine from stopping when idle.
@@ -74,93 +91,18 @@ export interface MachineHelloBody {
   keepAwake?: boolean;
   /** How many switched-on scripts keep it awake ("Kept on by 2 scheduled scripts"). */
   keepAwakeScripts?: number;
-  /** The chat change version this runtime folds (1 and up). A runtime from
-   *  before chat change events leaves it out: it is sent no chat changes and
-   *  runs no turns until it is updated. */
-  chatChanges?: number;
-  /** This runtime compacts its members when the desktop asks
-   *  (machine.turn.request with `compaction`); absent before it could, and
-   *  such a runtime is sent no compaction. */
-  compactionSupported?: boolean;
 }
 
 export interface MachineHelloAckBody {
   type: "machine.hello.ack";
   desktopDeviceId: string;
   appVersion: string;
-  /** The desktop's record id for this machine: the value members carry as
-   *  `homeMachineId`, so the runtime knows which members are its own. */
+  /** The desktop's record id for this machine (the roster on the User's
+   *  server says the same: it is what decides which members are its own). */
   machineId?: string;
   /** The name the User gave this machine on the desktop, so what the machine
    *  writes about itself (a script card's "Runs on") uses the same name. */
   machineName?: string;
-  /** The desktop runs a compaction a member here asks for itself
-   *  (machine.compaction.delegate), so the User sees and stops it exactly as
-   *  one they started. Absent from desktops that cannot. */
-  compactionDelegation?: boolean;
-}
-
-export interface MachineSettingsSyncBody {
-  type: "machine.settings.sync";
-  snapshot: MachineSettingsSnapshot;
-}
-
-export interface MachineSettingsSealedBody {
-  type: "machine.settings.sealed";
-  /** Device settings stream, not a user's conversation. */
-  conversationId: string;
-  ciphertext: string;
-}
-
-/** Full copy of a conversation, sent once per machine and after any gap. */
-export interface MachineConversationSyncBody {
-  type: "machine.conversation.sync";
-  conversation: Conversation;
-}
-
-/** Messages created or updated since the previous sync; the machine upserts
- *  them by id and replaces metadata when present. */
-export interface MachineConversationDeltaBody {
-  type: "machine.conversation.delta";
-  conversationId: string;
-  messages: ChatMessage[];
-  metadata?: Conversation["metadata"];
-  removedMessageIds?: string[];
-  updatedAt: string;
-}
-
-/** A compaction of the member's own CLI session, run on its machine by the
- *  same code a desktop runs for a local member. Carried by a
- *  machine.turn.request, so it is queued, admitted, stopped and answered
- *  exactly as a turn is. */
-export interface MachineTurnCompaction {
-  instructions?: string;
-  triggeredBy: "user" | "agent";
-  /** Where the outcome line goes, as for a local compaction. */
-  threadId?: string;
-  parentMessageId?: string;
-  chatThreadRootId?: string;
-}
-
-/** The message id a compaction request names: no message has it, so a
- *  runtime that does not know compactions fails the request instead of
- *  running a turn. */
-export function machineCompactionMessageId(runId: string): string {
-  return `compaction:${runId}`;
-}
-
-/** A compaction as it arrives from another device, with only the fields it
- *  may carry. */
-export function normalizeMachineTurnCompaction(value: unknown): MachineTurnCompaction {
-  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
-  const text = (field: unknown): string | undefined => typeof field === "string" && field.trim() ? field.trim() : undefined;
-  return {
-    triggeredBy: record.triggeredBy === "agent" ? "agent" : "user",
-    ...(text(record.instructions) ? { instructions: text(record.instructions) } : {}),
-    ...(text(record.threadId) ? { threadId: text(record.threadId) } : {}),
-    ...(text(record.parentMessageId) ? { parentMessageId: text(record.parentMessageId) } : {}),
-    ...(text(record.chatThreadRootId) ? { chatThreadRootId: text(record.chatThreadRootId) } : {})
-  };
 }
 
 /** The outcome line a compaction of `runId` wrote for this member. */
@@ -169,183 +111,36 @@ export function isMachineCompactionLine(message: ChatMessage | undefined, runId:
     message!.metadata?.runId === runId && message!.metadata?.compaction?.participantId === participantId;
 }
 
-export interface MachineTurnRequestBody {
-  type: "machine.turn.request";
-  conversationId: string;
-  participantId: string;
-  participant: ChatParticipant;
-  messageId: string;
-  runId: string;
-  pendingMessageId: string;
-  requestedAt: string;
-  /** Sealed before entering the immutable log: environment values must not
-   * become plaintext chat history or blob fragments on either endpoint. */
-  sealedSettings?: string;
-  /** The last chat change the desktop committed for this chat before the
-   *  request. The machine runs the turn only once it has applied that event,
-   *  so a member never answers a chat that has not fully arrived. */
-  chatHead?: { originId: string; logScopeId: string; originSeq: number };
-  /** Where the chat's project lives on each machine (the member's cwd). */
-  machineRepository?: { sourcePath: string; paths: Record<string, string> };
-  /** Present when this command compacts the member instead of running a
-   *  turn; `messageId` and `pendingMessageId` then name no message. */
-  compaction?: MachineTurnCompaction;
-}
-
-export interface MachineTurnCancelBody {
-  type: "machine.turn.cancel";
-  conversationId: string;
-  runId: string;
-}
-
-export interface MachineTurnProgressBody {
-  type: "machine.turn.progress";
-  conversationId: string;
-  runId: string;
-  progress: ReviewProgress;
-}
-
-export interface MachineTurnStartedBody {
-  type: "machine.turn.started";
-  conversationId: string;
-  runId: string;
-  startedAt: string;
-}
-
-export interface MachineTurnFinishedBody {
-  type: "machine.turn.finished";
-  /** Identifies this immutable result, including native continuations of a run. */
-  receiptId?: string;
-  conversationId: string;
-  runId: string;
-  participantId: string;
-  status: "completed" | "interrupted" | "failed";
-  messages: ChatMessage[];
-  warnings: string[];
-  error?: string;
-  finishedAt: string;
-  /** The member's context window use as its CLI reports it after this run,
-   *  which the desktop shows exactly as for a local member. */
-  contextUsage?: AgentContextUsage;
-  /** Set when the run was a compaction, so a result that arrives after the
-   *  desktop restarted still gets its outcome line. */
-  compaction?: { triggeredBy: "user" | "agent" };
-}
-
-/** Machine -> desktop: a member here asked to compact its own context. The
- *  desktop runs it as it runs one the User asked for (and sends it back here
- *  as a compaction command), so the User sees it and can stop it. Sent only
- *  to a desktop that said it takes these (hello.ack compactionDelegation). */
-export interface MachineCompactionDelegateBody {
-  type: "machine.compaction.delegate";
-  conversationId: string;
-  participantId: string;
-  runId: string;
-  instructions?: string;
-}
-
-export type MachineCompactionDelegateRequest = Omit<MachineCompactionDelegateBody, "type">;
-
-/** Conversation changes made on the machine while it hosts a turn (pending
- *  approval cards, participant requests, reactions). The desktop upserts them. */
-export interface MachineConversationBackDeltaBody {
-  type: "machine.conversation.backdelta";
-  conversationId: string;
-  messages: ChatMessage[];
-  updatedAt: string;
-}
-
-/** An app-tool approval (permission, Codex approval, participant request)
- *  raised by a member on the machine; the desktop shows the same card. */
-export interface MachineApprovalRequestedBody {
-  type: "machine.approval.requested";
-  conversationId: string;
-  approval: ChatAppToolApproval;
-}
-
-/** The machine answered or timed out an approval; carries the machine's
- *  chat-wide policies so a "for this chat" grant reaches the desktop. */
-export interface MachineApprovalUpdatedBody {
-  type: "machine.approval.updated";
-  conversationId: string;
-  approval: ChatAppToolApproval;
-  policies?: ChatAppToolApprovalPolicy[];
-}
-
-export interface MachineApprovalDecisionBody {
-  type: "machine.approval.decision";
-  decisionId?: string;
-  conversationId: string;
-  approvalId: string;
-  approve: boolean;
-  scope?: "once" | "chat";
-  /** The card's edited proposal (Codex approvals) and native decision id,
-   *  exactly as the desktop's own approval path receives them. */
-  draftOverride?: ChatAppToolApprovalRequest;
-  codexDecisionId?: string;
-  decidedAt: string;
-}
-
-/** Machine -> desktop: outcome of applying a decision (the desktop's card
- *  call resolves or fails with it). */
-export interface MachineApprovalResultBody {
-  type: "machine.approval.result";
-  decisionId?: string;
-  uncertain?: boolean;
-  conversationId: string;
-  approvalId: string;
-  ok: boolean;
-  error?: string;
-  /** The approval as the machine holds it after applying the decision, and
-   *  the chat-wide policies; the desktop stores both before the card call
-   *  returns. */
-  approval?: ChatAppToolApproval;
-  policies?: ChatAppToolApprovalPolicy[];
-}
-
 /** Desktop -> machine: a desktop that just connected asks the machine to
- *  greet it (hello), because a relay may seat a restarted desktop in place
+ *  greet it (hello), because the server may seat a restarted desktop in place
  *  of the old one without telling the machine that anything changed. */
 export interface MachineHelloRequestBody {
   type: "machine.hello.request";
   desktopDeviceId: string;
 }
 
-/** Desktop -> machine: does this runtime still hold this run (running, or a
- *  result waiting in its outbox)? Answered with machine.turn.unknown when
- *  not; silence otherwise (progress or the result follows). Sent after a
- *  hello for every turn the desktop still waits on, so lost turns are
- *  closed without guessing at process order. */
-export interface MachineTurnQueryBody {
-  type: "machine.turn.query";
-  conversationId: string;
-  runId: string;
+/** Desktop -> machine: take no new turns from the User's server for now (its
+ *  runtime is about to be replaced); turns asked meanwhile wait there for the
+ *  runtime that takes them. Lapses by itself at `until`, so a desktop that went
+ *  away never leaves the machine idle; sent again while it holds. */
+export interface MachineTurnsHoldBody {
+  type: "machine.turns.hold";
+  reason: string;
+  until: string;
 }
 
-/** Machine -> desktop: a stop (or any command) named a run this runtime does
- *  not know: it is not running here and no result is waiting. Whether its
- *  processes are gone is not verified (a restarted runtime does not know). */
-export interface MachineTurnUnknownBody {
-  type: "machine.turn.unknown";
-  conversationId: string;
-  runId: string;
-}
-
-/** Machine -> desktop: a batch of the first copy could not be stored; the
- *  desktop sends the whole copy again. */
-export interface MachineConversationResyncBody {
-  type: "machine.conversation.resync";
-  conversationId: string;
+/** Desktop -> machine: the hold is over; take the turns that waited. */
+export interface MachineTurnsReleaseBody {
+  type: "machine.turns.release";
 }
 
 /** Machine -> desktop: the bytes of a picture this chat carries.
  *
- *  Conversation replication carries an attachment's metadata but not its file,
- *  so a member running on a machine could see that a picture exists and never
- *  read it. Fetched on demand rather than replicated with the chat: a chat's
- *  pictures are far larger than its text and a member usually needs none of
- *  them. The phone asks the desktop for the same bytes the same way
- *  (`mobile.attachment.request`). */
+ *  The server's copy of a chat carries an attachment's metadata; a picture
+ *  attached on the computer stays there (one the phone sent is a blob on the
+ *  server, read from it). Fetched on demand rather than with the chat: a
+ *  chat's pictures are far larger than its text and a member usually needs
+ *  none of them. */
 export interface MachineAttachmentRequestBody {
   type: "machine.attachment.request";
   requestId: string;
@@ -364,10 +159,8 @@ export interface MachineAttachmentResultBody {
   ok: boolean;
   /** Base64 of this part of the file, present only when ok. */
   dataBase64?: string;
-  /** Which part this is, 0-based, and how many the picture has. A picture
-   *  travels in bounded parts because one relay logical message may not
-   *  exceed the provider's limit (10 MiB), while a picture may be 10 MB before
-   *  base64 and sealing. Absent on a refusal. */
+  /** Which part this is, 0-based, and how many the picture has: one frame in
+   *  the server's rooms is bounded. Absent on a refusal. */
   part?: number;
   parts?: number;
   mediaType?: string;
@@ -379,93 +172,6 @@ export interface MachineAttachmentResultBody {
  *  and sealed, under the 4 MiB limit of a frame in the server's rooms, and short
  *  enough that the link's other traffic is not held behind one picture. */
 export const MACHINE_ATTACHMENT_PART_BYTES = 1_572_864;
-
-/** Desktop -> machine: the first copy of a chat (shell plus every batch) has
- *  been sent in full; the machine may now compare its own rows against what
- *  the desktop holds. */
-export interface MachineConversationSyncDoneBody {
-  type: "machine.conversation.sync.done";
-  conversationId: string;
-}
-
-/** Desktop -> machine: the finished turn has been applied on the desktop;
- *  the machine may drop it from its outbox. */
-export interface MachineTurnFinishedAckBody {
-  type: "machine.turn.finished.ack";
-  conversationId: string;
-  runId: string;
-  receiptId?: string;
-  finishedAt: string;
-}
-
-/**
- * The chat is gone on the device that owns it, and must be gone here.
- *
- * Deletion is a command of its own rather than a shape of the conversation,
- * because the conversation is exactly what stops existing: a machine that only
- * ever learns state from snapshots cannot be told about the absence of one. It
- * is durable, so a machine that is off is told when it comes back, and it
- * leaves a tombstone, so a snapshot still in flight cannot bring the chat back.
- */
-export interface MachineConversationDeletedBody {
-  type: "machine.conversation.deleted";
-  conversationId: string;
-  deletedAt: string;
-}
-
-export interface MachineChoiceResultBody {
-  type: "machine.choice.result";
-  conversationId: string;
-  choiceId: string;
-  sourceMessageId: string;
-  decisionId: string;
-  ok: boolean;
-  error?: string;
-  uncertain?: boolean;
-  choice?: import("./types").ChatPendingChoice;
-}
-
-export interface MachineChoiceAnswerBody {
-  type: "machine.choice.answer";
-  conversationId: string;
-  messageId: string;
-  optionId: string;
-  answeredAt: string;
-}
-
-/**
- * A member running on this machine asked other members to answer.
- *
- * Routing belongs to the desktop, which owns the roster: it runs each target
- * where that member lives — locally, or on the machine that member calls home
- * — and the answers reach this machine with the conversation like any other
- * message. A machine never runs a member that is not its own.
- */
-export interface MachineParticipantsDelegateBody {
-  type: "machine.participants.delegate";
-  conversationId: string;
-  requestMessageId: string;
-  batchId: string;
-  depth: number;
-  /** The members this recipient is being asked to run, because it is where
-   *  they live. Absent in older deliveries, which meant "all of them". */
-  targetParticipantIds?: string[];
-}
-
-/**
- * The owner's devices, as the desktop that installed this machine knows them.
- *
- * Sent whenever the set changes and on every reconnection, so a machine can
- * be commanded by any of the owner's devices instead of only by the desktop
- * that enrolled it. It travels in the enrolled channel, signed by the issuer,
- * which is what makes it trustworthy: nothing else may change the roster.
- */
-export interface MachineTrustRosterBody {
-  type: "machine.trust.roster";
-  /** Its own stream, so a roster update never queues behind chat traffic. */
-  conversationId: string;
-  roster: MachineTrustRoster;
-}
 
 /** A member hosted on this machine started or ended background work (Claude
  *  Code `run_in_background`); the full current list, empty when none is left.
@@ -506,7 +212,7 @@ export interface MachineTurnSuggestionBody {
 
 /** One operation on this machine's scheduled scripts, asked by the desktop
  *  that enrolled it. Ephemeral and addressed to one machine: a key value in
- *  setSecret never enters the durable event log, a mailbox or settings. */
+ *  setSecret never enters the server, a mailbox or settings. */
 export type MachineScriptsOperation =
   | { op: "list" }
   | { op: "revision"; scriptId: string; revisionId?: string }
@@ -544,39 +250,61 @@ export interface MachineScriptsChangedBody {
   type: "machine.scripts.changed";
 }
 
+/**
+ * Cards of members on a machine (permissions, choices) are being moved to
+ * the User's server (step 5 of "the server owns the chat"); until then these
+ * shapes remain for the machine's executors, and nothing carries them
+ * between devices.
+ */
+export interface MachineApprovalDecisionBody {
+  type: "machine.approval.decision";
+  decisionId?: string;
+  conversationId: string;
+  approvalId: string;
+  approve: boolean;
+  scope?: "once" | "chat";
+  draftOverride?: ChatAppToolApprovalRequest;
+  codexDecisionId?: string;
+  decidedAt: string;
+}
+
+export interface MachineApprovalResultBody {
+  type: "machine.approval.result";
+  decisionId?: string;
+  uncertain?: boolean;
+  conversationId: string;
+  approvalId: string;
+  ok: boolean;
+  error?: string;
+  approval?: ChatAppToolApproval;
+  policies?: ChatAppToolApprovalPolicy[];
+}
+
+export interface MachineChoiceResultBody {
+  type: "machine.choice.result";
+  conversationId: string;
+  choiceId: string;
+  sourceMessageId: string;
+  decisionId: string;
+  ok: boolean;
+  error?: string;
+  uncertain?: boolean;
+  choice?: import("./types").ChatPendingChoice;
+}
+
+/** Everything the room carries. Live progress is a MachineProgressFrame
+ *  ("machine.turn.progress.delta"): one stream per run and connection, the
+ *  first frame whole. */
 export type MachineLinkMessage =
   | MachineScriptsRequestBody
   | MachineScriptsResultBody
   | MachineScriptsChangedBody
   | MachineHelloBody
   | MachineHelloAckBody
-  | MachineSettingsSyncBody
-  | MachineSettingsSealedBody
-  | MachineConversationSyncBody
-  | MachineConversationDeltaBody
-  | MachineTurnRequestBody
-  | MachineConversationDeletedBody
-  | MachineTurnCancelBody
-  | MachineTurnProgressBody
-  | MachineProgressFrame
-  | MachineTurnStartedBody
-  | MachineTurnFinishedBody
-  | MachineConversationBackDeltaBody
-  | MachineApprovalRequestedBody
-  | MachineApprovalUpdatedBody
-  | MachineApprovalDecisionBody
-  | MachineApprovalResultBody
-  | MachineTurnFinishedAckBody
-  | MachineTurnUnknownBody
-  | MachineTurnQueryBody
   | MachineHelloRequestBody
-  | MachineConversationSyncDoneBody
-  | MachineConversationResyncBody
-  | MachineTrustRosterBody
-  | MachineParticipantsDelegateBody
-  | MachineCompactionDelegateBody
-  | MachineChoiceAnswerBody
-  | MachineChoiceResultBody
+  | MachineTurnsHoldBody
+  | MachineTurnsReleaseBody
+  | MachineProgressFrame
   | MachineAttachmentRequestBody
   | MachineAttachmentResultBody
   | MachineTurnSuggestionBody
@@ -586,55 +314,16 @@ export type MachineLinkMessage =
 
 export type MachineLinkMessageType = MachineLinkMessage["type"];
 
-export function isMachineReplicationMessage(body: MachineLinkMessage): boolean {
-  return body.type === "machine.conversation.sync" || body.type === "machine.conversation.delta" ||
-    body.type === "machine.conversation.sync.done" || body.type === "machine.conversation.backdelta";
-}
-
-export function isMachineDurableMessage(body: MachineLinkMessage): boolean {
-  return isMachineReplicationMessage(body) || body.type === "machine.turn.finished" || body.type === "machine.turn.finished.ack" ||
-    body.type === "machine.turn.request" || body.type === "machine.turn.cancel" || body.type === "machine.settings.sealed" || body.type === "machine.turn.started" ||
-    body.type === "machine.approval.requested" || body.type === "machine.approval.updated" || body.type === "machine.approval.decision" || body.type === "machine.approval.result" || body.type === "machine.choice.result" ||
-    body.type === "machine.turn.progress.delta" || body.type === "machine.participants.delegate" || body.type === "machine.compaction.delegate" ||
-    body.type === "machine.conversation.deleted" || body.type === "machine.trust.roster";
-}
-
-export function machineCommandId(runId: string): string { return `machine-command:${runId}`; }
-export function machineCommandTerminalId(runId: string): string { return `machine-terminal:${machineCommandId(runId)}`; }
-
 /** Every message the link accepts. Typed as a table over the union so that a
  *  body added to `MachineLinkMessage` without a row here is a compile error,
  *  not a message both sides silently drop on receipt. */
 const MESSAGE_TYPE_TABLE: Record<MachineLinkMessageType, true> = {
   "machine.hello": true,
   "machine.hello.ack": true,
-  "machine.settings.sync": true,
-  "machine.settings.sealed": true,
-  "machine.conversation.sync": true,
-  "machine.conversation.delta": true,
-  "machine.conversation.deleted": true,
-  "machine.turn.request": true,
-  "machine.turn.cancel": true,
-  "machine.turn.progress": true,
-  "machine.turn.progress.delta": true,
-  "machine.participants.delegate": true,
-  "machine.compaction.delegate": true,
-  "machine.trust.roster": true,
-  "machine.turn.started": true,
-  "machine.turn.finished": true,
-  "machine.conversation.backdelta": true,
-  "machine.approval.requested": true,
-  "machine.approval.updated": true,
-  "machine.approval.decision": true,
-  "machine.approval.result": true,
-  "machine.turn.finished.ack": true,
-  "machine.turn.unknown": true,
-  "machine.turn.query": true,
   "machine.hello.request": true,
-  "machine.conversation.sync.done": true,
-  "machine.conversation.resync": true,
-  "machine.choice.result": true,
-  "machine.choice.answer": true,
+  "machine.turns.hold": true,
+  "machine.turns.release": true,
+  "machine.turn.progress.delta": true,
   "machine.attachment.request": true,
   "machine.attachment.result": true,
   "machine.turn.suggestion": true,
@@ -670,8 +359,8 @@ export interface MachineLinkStatus {
   deviceId?: string;
   lastSeenAt?: string;
   lastHello?: MachineRecord["lastHello"];
-  /** A condition on the machine the User should know about (for example an
-   *  outbox that cannot be written). */
+  /** A condition on the machine the User should know about (for example
+   *  what it wrote that the server has not taken yet). */
   warning?: string;
 }
 
@@ -750,21 +439,4 @@ export interface MachineRecord {
   createdAt: string;
   lastSeenAt?: string;
   lastHello?: Omit<MachineHelloBody, "type">;
-  /** Stops requested while the machine was unreachable (Rule 2): kept until
-   *  the machine confirms, across desktop restarts. */
-  pendingCancels?: Array<{ runId: string; conversationId: string }>;
-  /** Turns dispatched to the machine whose result has not been stored here
-   *  yet: kept across desktop restarts, so a restarted desktop asks the
-   *  machine about them instead of leaving their bubbles pending forever. */
-  pendingRuns?: Array<{ runId: string; conversationId: string }>;
-  /** The machine runs a runtime that folds chat change events: known from its
-   *  hello, or from setup, which installs such a runtime and copies every
-   *  chat to it. Until then it is sent no chat changes. */
-  chatChanges?: boolean;
-  /** What this desktop last published to the machine's runtime `instanceId`:
-   *  keyed digests of the settings and of the trust roster (timestamps
-   *  excluded). The same content is not published to it again; a runtime
-   *  process this desktop has not published to is sent both, since it may
-   *  have lost what the previous one had. */
-  published?: { instanceId?: string; settings?: string; roster?: string };
 }

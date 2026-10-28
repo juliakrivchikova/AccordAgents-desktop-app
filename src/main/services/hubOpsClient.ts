@@ -261,6 +261,8 @@ export class HubOpsClient {
   private readonly waiters = new Map<string, Array<(outcome: HubOpOutcome) => void>>();
   private readonly statusListeners: Array<() => void> = [];
   private readerWake?: () => void;
+  /** Cancels the feed read in flight (a stop does not wait out its long wait). */
+  private reading_?: AbortController;
 
   constructor(private readonly options: {
     store: HubClientOpsStore;
@@ -295,6 +297,7 @@ export class HubOpsClient {
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
     this.readerWake?.();
+    this.reading_?.abort();
     await this.flushing?.catch(() => undefined);
     await this.reading?.catch(() => undefined);
   }
@@ -483,14 +486,19 @@ export class HubOpsClient {
           await this.options.cursor.set(String(cursor));
         }
         let page;
+        const cancel = new AbortController();
+        this.reading_ = cancel;
         try {
-          page = await client.feed(cursor, HUB_FEED_WAIT_MAX_MS);
+          page = await client.feed(cursor, HUB_FEED_WAIT_MAX_MS, cancel.signal);
         } catch (error) {
+          if (this.stopped) return;
           if (!(error instanceof HubHttpError && error.status === 410)) throw error;
           this.options.log("hub.feed.gone", { after: cursor });
           const head = await this.options.resync();
           await this.options.cursor.set(String(head));
           continue;
+        } finally {
+          if (this.reading_ === cancel) this.reading_ = undefined;
         }
         if (page.entries.length > 0) {
           await this.options.apply(page.entries);

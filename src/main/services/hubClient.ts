@@ -11,11 +11,16 @@ import {
   HUB_CHAT_PATH,
   HUB_CHATS_PATH,
   HUB_FEED_PATH,
+  HUB_MACHINE_SETTINGS_PATH,
+  HUB_ME_PATH,
   HUB_OPS_PATH,
   HUB_TURNS_PATH,
   type HubChatPage,
   type HubChatsResponse,
   type HubFeedResponse,
+  type HubMachineSettings,
+  type HubMachineSettingsPut,
+  type HubMe,
   type HubOp,
   type HubOpsResponse,
   type HubTurnsResponse
@@ -96,7 +101,7 @@ export class HubClient {
     this.base = options.url.replace(/\/+$/, "");
   }
 
-  private async request<T>(method: string, pathWithQuery: string, body?: Buffer | string, contentType?: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+  private async request<T>(method: string, pathWithQuery: string, body?: Buffer | string, contentType?: string, timeoutMs = REQUEST_TIMEOUT_MS, cancel?: AbortSignal): Promise<T> {
     const identity = await this.options.identity();
     const response = await reach(this.options.fetchImpl ?? fetch, `${this.base}${pathWithQuery}`, {
       method,
@@ -105,7 +110,7 @@ export class HubClient {
         ...(contentType ? { "content-type": contentType } : {})
       },
       ...(body !== undefined ? { body } : {}),
-      signal: AbortSignal.timeout(timeoutMs)
+      signal: cancel ? AbortSignal.any([AbortSignal.timeout(timeoutMs), cancel]) : AbortSignal.timeout(timeoutMs)
     });
     this.receivedBytes += Number(response.headers.get("content-length")) || 0;
     if (!response.ok) {
@@ -130,9 +135,9 @@ export class HubClient {
 
   /** What the server accepted after `after`, waiting up to `waitMs` for news.
    *  A HubHttpError with status 410 says it was forgotten (read the chats). */
-  feed(after: number, waitMs: number): Promise<HubFeedResponse> {
+  feed(after: number, waitMs: number, cancel?: AbortSignal): Promise<HubFeedResponse> {
     return this.request<HubFeedResponse>("GET", `${HUB_FEED_PATH}?after=${Math.max(0, Math.floor(after))}&waitMs=${Math.max(0, Math.floor(waitMs))}`,
-      undefined, undefined, waitMs + REQUEST_TIMEOUT_MS);
+      undefined, undefined, waitMs + REQUEST_TIMEOUT_MS, cancel);
   }
 
   chats(): Promise<HubChatsResponse> {
@@ -146,6 +151,22 @@ export class HubClient {
 
   waitingTurns(): Promise<HubTurnsResponse> {
     return this.request<HubTurnsResponse>("GET", HUB_TURNS_PATH);
+  }
+
+  /** This device as the server's roster has it (a machine: its machine id). */
+  me(): Promise<HubMe> {
+    return this.request<HubMe>("GET", HUB_ME_PATH);
+  }
+
+  /** The owner: a machine's settings, sealed for that machine. */
+  putMachineSettings(request: HubMachineSettingsPut): Promise<{ ok: boolean; updatedAt: string }> {
+    return this.request("PUT", HUB_MACHINE_SETTINGS_PATH, JSON.stringify(request), "application/json", OPS_TIMEOUT_MS);
+  }
+
+  /** A machine: its own settings, unless they are no newer than `since`. */
+  machineSettings(since?: string): Promise<HubMachineSettings> {
+    return this.request<HubMachineSettings>("GET", `${HUB_MACHINE_SETTINGS_PATH}${since ? `?since=${encodeURIComponent(since)}` : ""}`,
+      undefined, undefined, OPS_TIMEOUT_MS);
   }
 
   /** Pushes this device's events in order. A large body is uploaded only
@@ -303,7 +324,7 @@ export class HubClient {
    * Keeps a live link that reports the hub's head; reconnects with backoff.
    * Returns a function that closes it for good.
    */
-  live(onHead: (head: number) => void, onState?: (connected: boolean) => void): () => void {
+  live(onHead: (head: number) => void, onState?: (connected: boolean) => void, onFrame?: (frame: { type: string } & Record<string, unknown>) => void): () => void {
     let closed = false;
     let socket: LiveSocket | undefined;
     let attempt = 0;
@@ -336,8 +357,9 @@ export class HubClient {
         };
         created.onmessage = (event) => {
           try {
-            const frame = JSON.parse(String(event.data)) as HubLiveHead;
-            if (frame.type === "head" && Number.isSafeInteger(frame.head)) onHead(frame.head);
+            const frame = JSON.parse(String(event.data)) as HubLiveHead | ({ type: string } & Record<string, unknown>);
+            if (frame.type === "head" && Number.isSafeInteger(frame.head)) onHead(frame.head as number);
+            else if (frame && typeof frame.type === "string") onFrame?.(frame as { type: string } & Record<string, unknown>);
           } catch { /* a malformed frame is ignored */ }
         };
         created.onerror = () => undefined;

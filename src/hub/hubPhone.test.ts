@@ -385,7 +385,7 @@ test("a phone's message for a machine member that is not reading makes the serve
   assert.match(wake.message, /no key/);
 });
 
-test("a desktop's card for its own member rings once however often it is raised, and a phone can neither raise one for a member nor post progress", async (t) => {
+test("a desktop's card for its own member rings once however often it is raised, and a phone can neither raise one for a member nor post progress, which a machine can", async (t) => {
   const h = await hub(t);
   const machine = createChatEventDeviceIdentity(new Date().toISOString());
   const { opId, write } = await seedChat(h, machine);
@@ -412,8 +412,9 @@ test("a desktop's card for its own member rings once however often it is raised,
   // A phone writes messages, answers and Stops: not a member's card.
   const forged = await client.postOps([raise({ ...approval, id: "approval-forged" })]);
   assert.deepEqual(forged.results.map((result) => result.status === "rejected" ? result.reason : result.status), ["Only the device this member runs on raises its cards."]);
-  // Live progress is the desktop's to post (and is never stored).
-  assert.equal((await h.call(machine, "POST", "/v1/progress", { frames: [] })).status, 403);
+  // Live progress is posted by the devices members run on, the computer and
+  // the machines (and is never stored); a phone runs nothing.
+  assert.equal((await h.call(machine, "POST", "/v1/progress", { frames: [] })).status, 200);
   const phoneProgress = await fetch(`${h.base}/v1/progress`, { method: "POST", headers: { "content-type": "application/json",
     authorization: await signHubRequestWeb(identity, { method: "POST", pathWithQuery: "/v1/progress", body: "{\"frames\":[]}" }) }, body: "{\"frames\":[]}" });
   assert.equal(phoneProgress.status, 403);

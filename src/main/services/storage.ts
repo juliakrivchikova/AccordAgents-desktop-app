@@ -43,7 +43,6 @@ import { HubOpsStore } from "./hubOpsStore";
 import { HubClientOpsStore } from "./hubOpsClient";
 import { NATIVE_COMMAND_SCHEMA_SQL, NativeCommandStore } from "./nativeCommandStore";
 import { PHONE_TURN_CLAIM_SCHEMA_SQL, PhoneTurnClaimStore } from "./phoneTurnClaims";
-import { MACHINE_PROGRESS_SCHEMA, MachineProgressStore } from "./machineProgressStore";
 import { MACHINE_POWER_SCHEMA, MachinePowerStore } from "./machinePowerStore";
 
 const DEFAULT_MESSAGE_PAGE_LIMIT = 80;
@@ -354,7 +353,6 @@ const CHAT_COPY_STATE_TABLES = [
 
 export class StorageService {
   private sqliteSession?: SqliteSession;
-  private machineProgressStore?: MachineProgressStore;
   private hubStorage?: HubStorage;
   private hubOpsStore?: HubOpsStore;
   private hubClientOpsStore?: HubClientOpsStore;
@@ -484,7 +482,6 @@ export class StorageService {
       ${DEVICE_EVENT_BLOB_SCHEMA_SQL}
       ${NATIVE_COMMAND_SCHEMA_SQL}
       ${PHONE_TURN_CLAIM_SCHEMA_SQL}
-      ${MACHINE_PROGRESS_SCHEMA}
       ${MACHINE_POWER_SCHEMA}
     `);
     await this.pruneStaleRunCancelRequests();
@@ -796,7 +793,6 @@ export class StorageService {
     }
     conversation.metadata = clearLegacyAccordState(conversation.metadata);
     sanitizeConversationWarnings(conversation);
-    conversation.messages = await this.machineProgress().overlay(id, conversation.messages);
     return conversation;
   }
 
@@ -913,9 +909,9 @@ export class StorageService {
       `select count(*) as totalMessages from conversation_messages where conversation_id = ${sqlString(request.conversationId)};`
     );
     return {
-      messages: await this.machineProgress().overlay(request.conversationId, selectedRows.map((row) =>
+      messages: selectedRows.map((row) =>
         parseHexJson<ChatMessage>(row.payloadHex, `conversation message ${request.conversationId}:${row.sequence}`)
-      )),
+      ),
       oldestSequence: selectedRows[0]?.sequence,
       newestSequence: selectedRows[selectedRows.length - 1]?.sequence,
       hasMoreBefore: rows.length > limit,
@@ -1930,13 +1926,6 @@ export class StorageService {
 
   phoneTurnClaims(): PhoneTurnClaimStore {
     return new PhoneTurnClaimStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
-  }
-
-  machineProgress(): MachineProgressStore {
-    return this.machineProgressStore ??= new MachineProgressStore({
-      init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql),
-      hydrate: payload => this.deviceEventBlobs().hydrate(payload)
-    });
   }
 
   machinePower(): MachinePowerStore {
