@@ -5,7 +5,7 @@ import type { AwsSetupStep, AwsWorkerOperationSnapshot } from "../../../shared/t
 import { CopyButton } from "../primitives";
 import { AwsDialog, AwsWaiting } from "./aws-dialog";
 import { cleanError } from "./aws-shared";
-import type { AwsWorkerControl } from "./use-aws-worker-control";
+import { isLiveAwsPhase, type AwsWorkerControl } from "./use-aws-worker-control";
 
 const STEP_LABEL: Record<AwsSetupStep["id"], string> = {
   "instance": "AWS instance",
@@ -14,12 +14,11 @@ const STEP_LABEL: Record<AwsSetupStep["id"], string> = {
   "sign-in-claude": "Sign in to Claude Code",
   "program": "Cloud program"
 };
-const LIVE = new Set<AwsWorkerOperationSnapshot["phase"]>(["starting", "waiting-running", "setting-up"]);
-
-/** A start or setup the User can follow step by step. */
+/** A start, setup or change the User can follow step by step. A size
+ *  question has its own dialog and is not a step. */
 export function setupOperation(control: AwsWorkerControl): AwsWorkerOperationSnapshot | undefined {
   const operation = control.currentOperation;
-  return operation && operation.intent !== "check" && operation.setupSteps?.length ? operation : undefined;
+  return operation && operation.intent !== "check" && operation.phase !== "needs-decision" && operation.setupSteps?.length ? operation : undefined;
 }
 
 /**
@@ -29,7 +28,7 @@ export function setupOperation(control: AwsWorkerControl): AwsWorkerOperationSna
 export function useAwsSetupView(control: AwsWorkerControl) {
   const operation = setupOperation(control);
   const [hidden, setHidden] = useState<{ operationId: string; authRequestId?: string; whileLive: boolean }>();
-  const live = Boolean(operation && LIVE.has(operation.phase));
+  const live = isLiveAwsPhase(operation?.phase);
   const waitsOnUser = Boolean(live && operation?.authRequestId && operation.authRequestId !== hidden?.authRequestId);
   // Closed after it ended, the same setup started again (Try again) shows anew.
   const restarted = Boolean(live && hidden && !hidden.whileLive);
@@ -70,10 +69,12 @@ export function AwsSetupProgressDialog(props: { control: AwsWorkerControl; view:
   if (!operation) return null;
   const steps = operation.setupSteps ?? [];
   const failed = operation.phase === "error";
-  // A start of an instance already set up has no sign-ins and no program to install.
+  // A start of an instance already set up has no sign-ins and no program to
+  // install; a change of size is said as a change.
   const settingUp = steps.some((step) => step.id === "program");
-  const title = live ? settingUp ? "Setting up the AWS instance" : "Starting the AWS instance"
-    : failed ? settingUp ? "The setup stopped" : "The start stopped" : "The AWS instance is ready";
+  const change = operation.intent === "resize";
+  const title = live ? change ? "Changing the AWS instance" : settingUp ? "Setting up the AWS instance" : "Starting the AWS instance"
+    : failed ? change ? "The change stopped" : settingUp ? "The setup stopped" : "The start stopped" : "The AWS instance is ready";
   const description = live
     ? "Each step shows here as it runs. Hiding this window does not stop the setup."
     : operation.message;

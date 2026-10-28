@@ -489,3 +489,22 @@ test("two requests to set the program up again run one setup, and a member's Clo
   assert.equal(h.installRequests.length, 1, "one setup, however many asked");
   assert.ok(h.calls.includes("provider:codex-cli"), "the member still gets its provider checked");
 });
+
+test("setting the program up from Settings → AWS shows each of its steps, and a watcher that fails stops nothing", async () => {
+  const h = harness();
+  const seen: string[] = [];
+  await h.service.prepareRuntime({ progress: (message) => { seen.push(message); } });
+  assert.deepEqual(seen, ["Checking your AWS instance…", "Connecting to your AWS instance…", "Connected", "Cloud run is ready."]);
+  // The watcher is gone once the setup ended, failed or not.
+  const after = harness();
+  after.failInstall();
+  const failed: string[] = [];
+  await assert.rejects(after.service.prepareRuntime({ progress: (message) => { failed.push(message); } }));
+  const count = failed.length;
+  after.allowInstall();
+  await after.service.prepareRuntime();
+  assert.equal(failed.length, count, "a later setup does not report to a finished one's watcher");
+  const throwing = harness();
+  await throwing.service.prepareRuntime({ progress: () => { throw new Error("window closed"); } });
+  assert.ok(throwing.calls.includes("install:machine-1:undefined"));
+});

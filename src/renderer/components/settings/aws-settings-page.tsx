@@ -47,7 +47,7 @@ export function AwsSettingsPage(props: { settings: CloudRunsSettings; onDeleted:
       <AwsInstanceSection control={control} />
       <AwsDiskSection control={control} />
       <AwsSetupSection running={status.state === "running"} instanceId={control.actual?.instanceId ?? status.handle?.instanceId}
-        finishedSetup={setupView.operation?.phase === "ready" ? setupView.operation.operationId : undefined} />
+        finishedSetup={setupView.operation?.phase === "ready" ? setupView.operation.operationId : undefined} settingUp={setupView.live} />
     </div>
   );
 }

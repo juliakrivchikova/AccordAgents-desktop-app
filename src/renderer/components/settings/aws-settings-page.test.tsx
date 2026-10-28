@@ -229,7 +229,9 @@ function setupSnapshot(operationId: string, steps: AwsSetupStep[], extra: Partia
   return { operationId, intent: "setup", phase: "setting-up", message: steps.find((step) => step.state === "current")?.detail ?? "", updatedAt: new Date().toISOString(), setupSteps: steps, ...extra };
 }
 
-test("setting up shows every step as it runs, a sign-in in its own row with Skip, and can be hidden and shown again", async () => {
+test("setting up shows every step as it runs, a sign-in in its own row with Skip, and can be hidden and shown again", async (t) => {
+  const now = Date.now();
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now });
   let finish!: (value: { operation: AwsWorkerOperationSnapshot; status: AwsWorkerStatus }) => void;
   const ui = await mount({
     status: { configured: false } as AwsWorkerStatus,
@@ -242,7 +244,7 @@ test("setting up shows every step as it runs, a sign-in in its own row with Skip
     await act(async () => { for (const listener of ui.bridge.operations) listener(operation); });
     await ui.settle();
   };
-  const startedAt = new Date(Date.now() - 75_000).toISOString();
+  const startedAt = new Date(now - 75_000).toISOString();
   await send(setupSnapshot(operationId, [
     { id: "instance", state: "done", detail: "t3.small · 40 GiB disk · us-east-1" },
     { id: "tools", state: "current", detail: "Installing openjdk-21-jdk…", startedAt },
@@ -253,7 +255,9 @@ test("setting up shows every step as it runs, a sign-in in its own row with Skip
   const steps = ui.find("aws-setup-steps");
   assert.deepEqual([...(steps?.querySelectorAll("li") ?? [])].map((item) => item.getAttribute("data-state")), ["done", "current", "pending", "pending"]);
   assert.match(ui.find("aws-setup-step-tools")?.textContent ?? "", /Installing openjdk-21-jdk…/);
-  assert.match(ui.find("aws-setup-step-tools")?.textContent ?? "", /1m 1\d+s|1m 15s/, "the running step shows its time");
+  assert.match(ui.find("aws-setup-step-tools")?.textContent ?? "", /1m 15s/, "the running step shows its time");
+  await act(async () => { t.mock.timers.tick(5_000); });
+  assert.match(ui.find("aws-setup-step-tools")?.textContent ?? "", /1m 20s/, "and the time keeps moving");
 
   await send(setupSnapshot(operationId, [
     { id: "instance", state: "done" }, { id: "tools", state: "done", detail: "Installed." },

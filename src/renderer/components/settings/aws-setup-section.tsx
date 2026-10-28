@@ -65,7 +65,7 @@ export function setupItems(checks: CloudRunWorkerCheck[]): SetupItem[] {
  * the page opens and after every fix: problems first with their fix, then
  * what is ready. Signing a provider in opens the provider's own sign-in.
  */
-export function AwsSetupSection(props: { running: boolean; instanceId?: string; finishedSetup?: string }): JSX.Element | null {
+export function AwsSetupSection(props: { running: boolean; instanceId?: string; finishedSetup?: string; settingUp?: boolean }): JSX.Element | null {
   const kept = lastChecked?.instanceId === props.instanceId ? lastChecked : undefined;
   const [report, setReport] = useState<CloudRunWorkerDoctorReport | undefined>(kept?.report);
   const [checking, setChecking] = useState(false);
@@ -127,7 +127,8 @@ export function AwsSetupSection(props: { running: boolean; instanceId?: string; 
   const items = report ? setupItems(report.checks) : [];
   const failing = items.filter((item) => !item.ok);
   const required = failing.filter((item) => item.required).length;
-  useEffect(() => { publishAwsAttention("setup", props.running && required > 0); }, [props.running, required]);
+  // What a running setup has not reached yet is not a problem.
+  useEffect(() => { publishAwsAttention("setup", props.running && !props.settingUp && required > 0); }, [props.running, props.settingUp, required]);
   if (!props.running) return null;
   const ordered = [...failing, ...items.filter((item) => item.ok)];
   const meta = checking || setupRunning ? <AwsWaiting>{setupRunning ? progress?.message ?? "Setting up…" : "Checking…"}</AwsWaiting>

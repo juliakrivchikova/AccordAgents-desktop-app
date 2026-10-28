@@ -464,6 +464,8 @@ export interface CloudRunWorkerSetupProgress {
   authCode?: string;
   authProvider?: "codex-cli" | "claude-code";
   authRequestId?: string;
+  /** How a provider sign-in ended, on its last frame. */
+  signInOutcome?: "completed" | "skipped" | "expired" | "failed";
 }
 
 export interface RemoteRunSyncInfo {

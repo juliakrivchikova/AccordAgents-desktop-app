@@ -1,5 +1,6 @@
 import { useEffect, useReducer, useState } from "react";
 import type { AwsWorkerStatus } from "../../../shared/types";
+import { isLiveAwsPhase } from "./use-aws-worker-control";
 
 /** Things only the AWS page measures (the disk, the setup checks, the
  *  program's updates) report here, so Settings can mark AWS while the User
@@ -23,7 +24,7 @@ export function clearAwsAttention(): void {
 /** A problem the instance status itself reports. */
 export function awsStatusNeedsAttention(status: AwsWorkerStatus): boolean {
   // While a setup runs, what it has not reached yet is not a problem.
-  const settingUp = ["starting", "waiting-running", "setting-up"].includes(status.operation?.phase ?? "");
+  const settingUp = isLiveAwsPhase(status.operation?.phase);
   return Boolean(status.configured && !settingUp && (status.machineProblem || status.autoStop?.problem
     || status.operation?.phase === "error" && status.operation.remediation === "refresh-aws-authorization"));
 }

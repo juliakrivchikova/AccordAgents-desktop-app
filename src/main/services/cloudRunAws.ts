@@ -293,6 +293,13 @@ export class CloudRunAwsService {
     return { machines: onInstance, records: installs.filter((record) => ids.has(record.machineId)) };
   }
 
+  /** Whether this desktop's cloud program is installed on that instance, by
+   *  the same rule automatic stop uses. */
+  async programInstalledOn(instanceId: string): Promise<boolean> {
+    const { records } = await this.installsOnInstance({ instanceId } as AwsWorkerHandleInfo);
+    return records.some((record) => Boolean(record.installedVersion));
+  }
+
   // Compatibility entry point for older renderer callers. The new UI calls
   // AwsWorkerSetupService, which continues through running + doctor setup.
   async connectWorker(blob: string, instanceType?: string, rootVolumeSizeGb?: number): Promise<AwsWorkerStatus> {

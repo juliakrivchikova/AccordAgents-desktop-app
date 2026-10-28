@@ -108,8 +108,10 @@ export class AwsWorkerSetupService {
       message: string,
       extra: Partial<AwsWorkerOperationSnapshot> = {}
     ): Promise<AwsWorkerOperationSnapshot> => {
-      // The instance step says what is happening to the instance itself.
-      if (currentStep()?.id === "instance" && phase !== "error" && phase !== "ready") setStep("instance", "current", message);
+      // The instance step says what is happening to the instance itself; a
+      // run that ends there (keeping the current size) ends it too.
+      if (currentStep()?.id === "instance" && phase === "ready") setStep("instance", "done", message);
+      else if (currentStep()?.id === "instance" && phase !== "error") setStep("instance", "current", message);
       const operation: AwsWorkerOperationSnapshot = {
         operationId: request.operationId,
         intent: request.intent,
@@ -205,17 +207,18 @@ export class AwsWorkerSetupService {
       ];
       const offerSignIn: ChatProviderKind[] = signIns.filter((kind) => !skippedBefore.has(SIGN_IN_STEP[kind]));
       let progressWrites: Promise<unknown> = Promise.resolve();
-      // How each sign-in ended, in the words the User reads.
-      const signInOutcome = new Map<AwsSetupStepId, string>();
+      // How each sign-in ended, as the doctor reported it on its last frame.
+      const signInOutcome = new Map<AwsSetupStepId, { outcome: NonNullable<CloudRunWorkerSetupProgress["signInOutcome"]>; message: string }>();
+      const signInEnded = (id: AwsSetupStepId): AwsSetupStep["state"] => signInOutcome.get(id)?.outcome === "completed" ? "done" : "skipped";
       const doctorProgress = (progress: CloudRunWorkerSetupProgress): Promise<unknown> => {
         const stepId: AwsSetupStepId = progress.stage === "codex-auth" ? "sign-in-codex"
           : progress.stage === "claude-auth" ? "sign-in-claude" : "tools";
-        if (stepId !== "tools" && /skipped|not approved|did not|cancel/i.test(progress.message)) signInOutcome.set(stepId, progress.message);
+        if (stepId !== "tools" && progress.signInOutcome) signInOutcome.set(stepId, { outcome: progress.signInOutcome, message: progress.message });
         const current = currentStep();
         const order = (id: AwsSetupStepId | undefined): number => steps?.findIndex((step) => step.id === id) ?? -1;
         if (current && order(stepId) > order(current.id)) {
           // Moving on: what the previous step ended as, until the final check says.
-          setStep(current.id, current.id === "tools" ? "done" : signInEnded(current.detail), current.id === "tools" ? "Installed." : undefined);
+          setStep(current.id, current.id === "tools" ? "done" : signInEnded(current.id), current.id === "tools" ? "Installed." : undefined);
           setStep(stepId, "current", progress.message);
         } else if (current && order(stepId) === order(current.id)) {
           setStep(stepId, "current", progress.message);
@@ -239,12 +242,26 @@ export class AwsWorkerSetupService {
         offerSignIn
       });
       await progressWrites;
+      // Each sign-in is what the last check found, said with how it ended.
+      // `reached`: the doctor got past the sign-ins, so one it did not run
+      // (already signed in, or skipped in an earlier try) is settled too.
+      const settleSignIns = (reached: boolean): void => {
+        for (const kind of signIns) {
+          const id = SIGN_IN_STEP[kind];
+          const step = steps?.find((item) => item.id === id);
+          const ranNow = signInOutcome.has(id) || step?.state === "current";
+          if (!ranNow && !reached) continue;
+          const check = report.checks.find((item) => item.id === (kind === "codex-cli" ? "codex-auth" : "claude-auth"));
+          const signedIn = check ? check.status === "pass" : signInEnded(id) === "done";
+          if (signedIn) setStep(id, "done", "Signed in.");
+          else if (!ranNow && step?.state === "skipped") continue;
+          else setStep(id, "skipped", signInOutcome.get(id)?.message ?? "Not signed in.");
+        }
+      };
       if (!report.ok) {
-        // What failed are the tools (or the connection); a sign-in that was
-        // under way when the last check ran ended as it ended.
+        // What failed are the tools (or the connection), not a sign-in.
         const missing = report.checks.filter((check) => check.status === "fail").map((check) => check.label);
-        const current = currentStep();
-        if (current && current.id !== "tools") setStep(current.id, signInOutcome.has(current.id) ? "skipped" : signInEnded(current.detail), signInOutcome.get(current.id));
+        settleSignIns(false);
         setStep("tools", "failed", missing.length ? `Not ready: ${missing.join(", ")}.` : report.message);
         const operation = await emit("error", report.message, {
           error: report.message,
@@ -253,13 +270,7 @@ export class AwsWorkerSetupService {
         return { operation, status: await this.aws.status(), report };
       }
       if (currentStep()?.id === "tools") setStep("tools", "done", "Installed.");
-      for (const kind of signIns) {
-        const id = SIGN_IN_STEP[kind];
-        const signedIn = report.checks.some((check) => check.id === (kind === "codex-cli" ? "codex-auth" : "claude-auth") && check.status === "pass");
-        const step = steps?.find((item) => item.id === id);
-        if (signedIn) setStep(id, "done", "Signed in.");
-        else setStep(id, "skipped", signInOutcome.get(id) ?? (step?.state === "skipped" ? step.detail : undefined) ?? "Not signed in.");
-      }
+      settleSignIns(true);
       if (onboarding) {
         setStep("program", "current", "Installing the cloud program…");
         await emit("setting-up", "Installing the cloud program…");
@@ -331,11 +342,6 @@ export class AwsWorkerSetupService {
     await emit("starting", "Recreating the shared worker at the configured size…");
     return this.aws.recreateWorker(prepared, request.expectedInstanceId ?? "", request.operationId);
   }
-}
-
-/** How a sign-in step ended, read from its last message. */
-function signInEnded(detail: string | undefined): AwsSetupStep["state"] {
-  return detail && /completed|signed in/i.test(detail) && !/did not|not signed/i.test(detail) ? "done" : "skipped";
 }
 
 /** Ready, and what is left for later, in one sentence. */

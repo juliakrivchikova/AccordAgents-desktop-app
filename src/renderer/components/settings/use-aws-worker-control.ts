@@ -11,6 +11,9 @@ const isAttempt = (action: AwsAction | undefined): action is AwsAttemptIntent =>
 const TERMINAL_PHASES: AwsWorkerOperationSnapshot["phase"][] = ["ready", "error", "needs-decision"];
 const livePhase = (operation: AwsWorkerOperationSnapshot | null | undefined): boolean =>
   Boolean(operation && !TERMINAL_PHASES.includes(operation.phase));
+/** Whether an operation in this phase is still running. */
+export const isLiveAwsPhase = (phase: AwsWorkerOperationSnapshot["phase"] | undefined): boolean =>
+  Boolean(phase && !TERMINAL_PHASES.includes(phase));
 const latestOperation = (
   previous: AwsWorkerOperationSnapshot | null,
   next: AwsWorkerOperationSnapshot | null

@@ -347,14 +347,26 @@ export function encodeWorkerBlob(credentials: AwsWorkerCredentials): string {
   return `${AWS_WORKER_BLOB_PREFIX}${Buffer.from(json, "utf8").toString("base64")}`;
 }
 
+/**
+ * The value after the last prefix in what was pasted: the one line asked for,
+ * or the whole Terminal output around it. A value the terminal broke over
+ * several lines is joined while the lines hold nothing but its characters.
+ */
+function printedBlob(text: string): string | undefined {
+  const at = text.lastIndexOf(AWS_WORKER_BLOB_PREFIX);
+  if (at < 0) return undefined;
+  const [first, ...rest] = text.slice(at + AWS_WORKER_BLOB_PREFIX.length).split(/\r?\n/);
+  let value = first.trim();
+  for (const line of rest) {
+    if (value.endsWith("=") || !/^[A-Za-z0-9+/=]+$/.test(line.trim())) break;
+    value += line.trim();
+  }
+  return value;
+}
+
 export function parseWorkerBlob(blob: string): AwsWorkerCredentials {
   const trimmed = blob.trim();
-  // The whole Terminal output is pasted as often as the one line asked for:
-  // the value is the last line that carries the prefix.
-  const printed = [...trimmed.matchAll(/accord-aws-v1:([A-Za-z0-9+/=]+)/g)].pop()?.[1];
-  const body = printed ?? (trimmed.startsWith(AWS_WORKER_BLOB_PREFIX)
-    ? trimmed.slice(AWS_WORKER_BLOB_PREFIX.length)
-    : trimmed);
+  const body = printedBlob(trimmed) ?? trimmed;
   let decoded: string;
   try {
     decoded = Buffer.from(body, "base64").toString("utf8");

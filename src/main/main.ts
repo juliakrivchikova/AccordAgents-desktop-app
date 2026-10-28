@@ -972,8 +972,7 @@ const cloudRunAwsService = new CloudRunAwsService(settingsService, {
 });
 const awsWorkerSetupService = new AwsWorkerSetupService(cloudRunAwsService, cloudRunDoctorService, settingsService, {
   // This desktop's program on that instance; another desktop's does not count.
-  installed: async (instanceId) => (await settingsService.listMachineInstalls())
-    .some((record) => record.target.hostKeyAlias === `accordagents-${instanceId}` && Boolean(record.installedVersion)),
+  installed: (instanceId) => cloudRunAwsService.programInstalledOn(instanceId),
   // The same setup choosing Cloud run does, as one step of setting AWS up.
   install: async (progress) => {
     await cloudRunPreparation.prepareRuntime({ progress });

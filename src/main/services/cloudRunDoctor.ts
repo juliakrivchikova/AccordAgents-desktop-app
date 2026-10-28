@@ -250,13 +250,15 @@ export class CloudRunDoctorService {
     if (signInWanted("claude-code", "claude-auth") && (!failing("claude") || hasSudo)) {
       try {
         await this.claudeAuth.run(worker, value => progress(value.stage, value.message, value));
+        await progress("claude-auth", "Claude Code sign-in completed.", { signInOutcome: "completed" });
       } catch (error) {
         const detail = errorMessage(error);
         if (!optionalSignIn) {
-          await progress("claude-auth", detail);
+          await progress("claude-auth", detail, { signInOutcome: "failed" });
           return failedReport("claude-auth", detail);
         }
-        await progress("claude-auth", /cancelled/i.test(detail) ? "Claude Code sign-in skipped." : detail);
+        const skipped = /cancelled/i.test(detail);
+        await progress("claude-auth", skipped ? "Claude Code sign-in skipped." : detail, { signInOutcome: skipped ? "skipped" : "failed" });
       }
     }
 
@@ -349,16 +351,17 @@ export class CloudRunDoctorService {
       await published;
       if (publishError) throw publishError;
       completed = true;
-      await progress("codex-auth", "Codex sign-in completed.");
+      await progress("codex-auth", "Codex sign-in completed.", { signInOutcome: "completed" });
     } catch (error) {
       await published;
       if (publishError) throw new Error("The app could not save the Codex sign-in step. Start setup again.");
       const reason = errorMessage(error);
       // The wait here or the bound on the instance (timeout exits 124) ran out.
       const expired = /timed out/i.test(reason) || (error instanceof CommandError && error.result.exitCode === 124);
-      await progress("codex-auth", skip.signal.aborted ? "Codex sign-in skipped."
-        : expired ? "Codex sign-in was not approved within 5 minutes."
-          : `Codex sign-in did not complete: ${reason}`);
+      const outcome = skip.signal.aborted ? "skipped" as const : expired ? "expired" as const : "failed" as const;
+      await progress("codex-auth", outcome === "skipped" ? "Codex sign-in skipped."
+        : outcome === "expired" ? "Codex sign-in was not approved within 5 minutes."
+          : `Codex sign-in did not complete: ${reason}`, { signInOutcome: outcome });
     } finally {
       this.codexLogins.delete(requestId);
       // Only a process id the login wrote is ever signalled.

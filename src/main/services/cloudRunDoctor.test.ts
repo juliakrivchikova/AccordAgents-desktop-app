@@ -461,7 +461,8 @@ test("an optional sign-in the User skips leaves setup going and the worker ready
   assert.equal(report.ok, true, "a provider not signed in does not fail the setup");
   assert.equal(report.checks.find((check) => check.id === "codex-auth")?.status, "warn");
   // Claude was not offered, so its login never started.
-  assert.equal(commands.some((command) => command.includes('["auth", "login"]')), false);  // The skipped login is ended on the instance too, by the file it wrote.
+  assert.equal(commands.some((command) => command.includes('["auth", "login"]')), false);
+  // The skipped login is ended on the instance too, by the file it wrote.
   const launch = commands.find((command) => command.includes("login --device-auth")) ?? "";
   const pidFile = launch.match(/\/tmp\/accordagents-codex-login-[0-9a-f-]+\.pid/)?.[0];
   assert.ok(pidFile && launch.includes("exec timeout"), "the login is bounded and records its pid");
