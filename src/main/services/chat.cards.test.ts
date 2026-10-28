@@ -12,11 +12,10 @@ import { controlCardFromHubCard } from "../../shared/mobileControlCards";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
 import { HubOps } from "../../hub/hubOps";
-import { HubLog } from "../../hub/hubLog";
 import { HubServer } from "../../hub/hubServer";
 import { ChatService } from "./chat";
 import { MachineChoiceExecutor, MachineMentionExecutor } from "./chatActionNativeClaims";
-import { ChatEventLogService, createChatEventDeviceIdentity } from "./chatEventLog";
+import { DeviceIdentityService, createDeviceIdentity } from "./deviceIdentity";
 import { ChatSearchService } from "./chatSearch";
 import { HubClient } from "./hubClient";
 import { signHubRequest, type HubSigningIdentity } from "./hubAuth";
@@ -91,12 +90,12 @@ function appliers(storage: StorageService, chat: ChatService, codeApprover: stri
 async function setup(t: test.TestContext) {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-cards-"));
   const desktopStorage = new StorageService({ dbPath: path.join(dir, "desktop.sqlite3") });
-  const desktopEvents = new ChatEventLogService(desktopStorage);
+  const desktopEvents = new DeviceIdentityService(desktopStorage);
   const desktopIdentity = await desktopEvents.getOrCreateDeviceIdentity();
   const machineStorage = new StorageService({ dbPath: path.join(dir, "machine.sqlite3") });
-  const machineEvents = new ChatEventLogService(machineStorage);
+  const machineEvents = new DeviceIdentityService(machineStorage);
   const machineIdentity = await machineEvents.getOrCreateDeviceIdentity();
-  const phone = createChatEventDeviceIdentity(new Date().toISOString());
+  const phone = createDeviceIdentity(new Date().toISOString());
   const hubStorage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3") });
   await hubStorage.init();
   await hubStorage.hub().setOwner({ deviceId: desktopIdentity.originId, publicKeyDerBase64: desktopIdentity.publicKeyDerBase64, name: "Desktop", addedAt: new Date().toISOString() });
@@ -105,7 +104,7 @@ async function setup(t: test.TestContext) {
     { deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone", name: "Phone", scope: { scope: "device" }, inviteId: "invite-1", addedAt: "" }
   ], new Date().toISOString());
   const ops = new HubOps(hubStorage, (event, payload) => trace("hub", event, payload));
-  const hubServer = new HubServer({ hubId: "hub-test", version: "test", storage: hubStorage, log: new HubLog(hubStorage), search: new ChatSearchService(hubStorage), vapidPublicKey: "BPUB", ops });
+  const hubServer = new HubServer({ hubId: "hub-test", version: "test", storage: hubStorage, search: new ChatSearchService(hubStorage), vapidPublicKey: "BPUB", ops });
   const http = await hubServer.listenHttp(0, "127.0.0.1");
   const hubUrl = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 
@@ -122,14 +121,14 @@ async function setup(t: test.TestContext) {
     async applyApproved() { scripts.applied += 1; return "Saved the script."; },
     async rejectPending() { scripts.rejected += 1; }
   } as never);
-  const link = (storage: StorageService, chat: ChatService, events: ChatEventLogService, device: string, movesChats: boolean) => new ServerChatLink({
+  const link = (storage: StorageService, chat: ChatService, events: DeviceIdentityService, device: string, movesChats: boolean) => new ServerChatLink({
     storage, chat, identity: () => events.getOrCreateDeviceIdentity(), hubConfig: async () => ({ url: hubUrl }),
     machineNames: async () => [{ id: "box", name: "Box" }], movesChats, log: (event, payload) => trace(device, event, payload)
   });
   const desktopLink = link(desktopStorage, desktopChat, desktopEvents, "desktop", true);
   const machineLink = link(machineStorage, machineChat, machineEvents, "machine", false);
   const links = [desktopLink, machineLink];
-  const phoneHub = new HubClient({ url: hubUrl, identity: async () => phone, storage: desktopStorage });
+  const phoneHub = new HubClient({ url: hubUrl, identity: async () => phone });
 
   t.after(async () => {
     for (const item of links) await item.stop();

@@ -1,19 +1,13 @@
 /**
- * The User's own server ("hub"): one ordered log of every signed event from
- * the User's devices, the chats it folds into, and the search over them.
+ * The User's own server ("hub"): the owner of every chat (agreements Д1–Д13;
+ * the operations, the feed and the chat pages are in hubOps.ts), its roster
+ * of the User's devices, the phone's pairing, pictures and avatars, and the
+ * rooms where the computer and its machines pass live control messages.
  *
- * Devices write their events to the hub and read everyone else's back from
- * it by position. There is no per-peer outbox for durable events and no
- * device that has to be awake for another one to see news: the hub is
- * always on and holds the one order everybody reads. Live traffic that is
- * not kept (progress, presence) passes through the hub's rooms.
- *
- * Every request is signed by the device's own Ed25519 key (the same identity
- * its chat events are signed with); the hub answers only devices on its
- * roster, which the desktop that set it up keeps.
+ * Every request is signed by the device's own Ed25519 key; the hub answers
+ * only devices on its roster, which the desktop that set it up keeps.
  */
 
-import type { ChatEventEnvelope } from "./chatEvents";
 import type { ChatProviderKind, ChatSkillMention } from "./types";
 import type { MachineProgressFrame } from "./machineProgress";
 import { stableJson } from "./stableJson";
@@ -50,11 +44,6 @@ export interface HubDevice {
   scope?: HubPhoneScope;
   /** For a phone: the owner's invite it enrolled with. */
   inviteId?: string;
-  /** A machine that reads the hub's order (not one still on a relay): the
-   *  hub keeps what it has not read yet. */
-  reader?: boolean;
-  /** The channel this machine shares with the desktop (`device:<id>:`). */
-  rendezvousId?: string;
 }
 
 /** Signed request header: `Authorization: Accord <deviceId>.<ms>.<nonce>.<signature>`. */
@@ -80,66 +69,6 @@ export function hubRequestSigningText(request: {
   ].join("\n");
 }
 
-/** One event the hub accepted, with its place in the hub's order. */
-export interface HubLoggedEvent {
-  hubSeq: number;
-  event: ChatEventEnvelope;
-}
-
-export type HubEventPushStatus =
-  /** Stored; `hubSeq` is its place in the order. */
-  | "accepted"
-  /** The hub already holds this very event. */
-  | "duplicate"
-  /** An earlier event of the same chain is missing: send from `expectedSeq`. */
-  | "gap"
-  /** A different event already holds this place in the chain. */
-  | "conflict"
-  /** The payload is a blob whose fragments the hub does not hold yet: upload
-   *  them (PUT /v1/blobs) and push again. */
-  | "blob-missing"
-  /** Invalid: bad signature, not this device's, malformed, or too large. */
-  | "rejected";
-
-export interface HubEventPushResult {
-  eventId: string;
-  status: HubEventPushStatus;
-  hubSeq?: number;
-  expectedSeq?: number;
-  error?: string;
-}
-
-/** POST /v1/events. A payload over the inline limit travels as a blob
- *  reference; the hub answers "blob-missing" until its fragments are there,
- *  each uploaded as hubBlobFragmentPath() names. */
-export interface HubEventPushRequest {
-  events: ChatEventEnvelope[];
-}
-
-export interface HubEventPushResponse {
-  results: HubEventPushResult[];
-  head: number;
-}
-
-/** GET /v1/events?after=<hubSeq>&limit=<n>: the order without the asking
- *  device's own events. */
-export interface HubEventPullResponse {
-  events: HubLoggedEvent[];
-  /** How far this page covers, past the asker's own events too: the next
-   *  read starts here. */
-  through: number;
-  /** The hub's newest position; more to read while `through` is below it. */
-  head: number;
-  /** Which hub this is: positions mean nothing at another one. */
-  hubId?: string;
-}
-
-/** The live socket says only where the log is; devices then read from there. */
-export interface HubLiveHead {
-  type: "head";
-  head: number;
-}
-
 /** The live socket's word that the server accepted something new: the
  *  newest place in its order of operations (HUB_FEED_PATH reads from it). */
 export interface HubLiveOps {
@@ -153,6 +82,7 @@ export interface HubHealth {
   protocol: number;
   hubId: string;
   version: string;
+  /** The newest place in the server's feed of operations. */
   head: number;
 }
 
@@ -174,6 +104,9 @@ export interface HubRosterRequest {
 export interface HubRosterResponse {
   devices: HubDevice[];
   enrollments?: HubPhoneEnrollmentRecord[];
+  /** When each device that read the server's feed last did (a machine that
+   *  works for the phone while the desktop is closed is active too). */
+  feedReads?: Array<{ deviceId: string; readAt: string }>;
 }
 
 export interface HubPhoneEnrollmentRecord {
@@ -252,18 +185,9 @@ export interface HubPhoneEnrollResponse {
   protocol: number;
 }
 
-/** The event a phone writes first: its certificate, in its own chain, so
- *  every device that reads the hub learns the phone from the order itself. */
-export const HUB_PHONE_ENROLLED_EVENT_KIND = "device.enrolled";
-export const HUB_PHONE_ENROLLMENT_SCOPE = "device-enrollment";
-/** Where desktops published their members' approval cards before cards
- *  became the User's server's own (`card.*` operations, agreement Д9).
- *  Nothing writes it now; the event log keeps pruning what is left of it
- *  until that log goes. */
-export const HUB_APPROVAL_CARD_SCOPE = "chat-approvals";
 /** A device's own members' live progress (the computer's, a machine's) goes
- *  to the hub by this request, not into the order: it is shown while the
- *  member runs and is worth nothing afterwards, so nothing keeps it. */
+ *  to the hub by this request: it is shown while the member runs and is
+ *  worth nothing afterwards, so nothing keeps it. */
 export const HUB_PROGRESS_PATH = "/v1/progress";
 export interface HubProgressPost {
   frames: MachineProgressFrame[];
@@ -277,14 +201,6 @@ export function hubPhoneEnrollmentSigningText(enrollment: HubPhoneEnrollment): s
   return `accord-hub-phone-enroll-v1\n${stableJson(enrollment)}`;
 }
 
-/** The deterministic run id of a member's turn for a message a phone wrote:
- *  every device computes the same one, so a turn is claimed once wherever
- *  the message is applied, and a Stop can name it before it starts. */
-/** How far back a member's home looks for phone messages it took in but
- *  never started (see ChatService.resumePhoneTurns), and how often. */
-export const PHONE_TURN_RESUME_WINDOW_MS = 24 * 60 * 60_000;
-export const PHONE_TURN_RESUME_EVERY_MS = 10 * 60_000;
-
 /** An invite's id, as the desktop makes it (`invite-<uuid>`). */
 export function isHubPhoneInviteId(value: unknown): value is string {
   return typeof value === "string" && /^invite-[A-Za-z0-9-]{8,80}$/.test(value);
@@ -292,17 +208,6 @@ export function isHubPhoneInviteId(value: unknown): value is string {
 /** The longest a phone invite may wait to be used (the desktop's last ten
  *  minutes); an unused one is forgotten this long after it lapsed. */
 export const HUB_PHONE_INVITE_MAX_LIFETIME_MS = 24 * 60 * 60_000;
-
-export function phoneTurnRunId(messageId: string, participantId: string): string {
-  return `phone-${messageId}-${participantId}`;
-}
-
-/** The message and member a phone turn's run id names (the phone writes
- *  message ids as UUIDs), or undefined for any other run id. */
-export function parsePhoneTurnRunId(runId: string): { messageId: string; participantId: string } | undefined {
-  const match = /^phone-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-(.+)$/i.exec(runId);
-  return match ? { messageId: match[1], participantId: match[2] } : undefined;
-}
 
 interface HubPhoneCheckCrypto {
   issuerDeviceId: string;
@@ -383,7 +288,7 @@ export interface HubMachineWakeRequest {
 export interface HubMachineStatus {
   machineId: string;
   name: string;
-  /** When the machine last read the hub's order. */
+  /** When the machine last read the server's feed. */
   lastSeenAt?: string;
   /** True when the hub has work for it and has asked AWS to start it. */
   waking: boolean;
@@ -414,7 +319,7 @@ export function isAcceptableHubUrl(value: string): boolean {
   }
 }
 
-/** Where one fragment of a large event body is uploaded and read. */
+/** Where one fragment of a body (a picture, an avatar) is uploaded and read. */
 export function hubBlobFragmentPath(reference: { blobHash: string; byteLength: number; fragments: number }, index: number): string {
   return `/v1/blobs/${reference.blobHash}?bytes=${reference.byteLength}&fragments=${reference.fragments}&index=${index}`;
 }
@@ -423,119 +328,3 @@ export function hubBlobFragmentPath(reference: { blobHash: string; byteLength: n
 export function hubWebSocketUrl(hubUrl: string, pathWithQuery: string): string {
   return `${hubUrl.replace(/\/+$/, "").replace(/^http/, "ws")}${pathWithQuery}`;
 }
-/** Events one pull returns at most. */
-export const HUB_PULL_MAX_EVENTS = 200;
-/** Events one push may carry. */
-export const HUB_PUSH_MAX_EVENTS = 200;
-
-/**
- * What a device reports on each read so the hub knows what it still needs:
- * its lowest held position (an event it read but could not take yet) and
- * since when it holds it. The hub keeps everything a reader still needs:
- * the reader's floor is min(its cursor, its lowest held position - 1).
- * Sent as query parameters of GET /v1/events (`held`, `heldSince`,
- * `heldCount`); `peek=1` marks a read that is not the device's own place
- * (a held event read again), which moves no cursor.
- */
-export interface HubReadReport {
-  /** Lowest held position, 0 when none. */
-  held: number;
-  /** When the oldest held position was first held (ms), 0 when none. */
-  heldSince: number;
-  heldCount: number;
-  /** Changes it gave up on after holding them two weeks (`gaveUp`,
-   *  `gaveUpAt` ms): the desktop says so in Settings. */
-  gaveUp?: number;
-  gaveUpAt?: number;
-}
-
-/** GET /v1/events answers 410 with this when the hub no longer holds every
- *  event this device needs after `after` (it was away while they were
- *  forgotten, or it never read here): the device starts again from a copy. */
-export interface HubResyncRequired {
-  ok: false;
-  error: string;
-  resync: true;
-  /** Events this device would need were forgotten up to here. */
-  prunedThrough: number;
-}
-
-/** One chain's newest event a hub copy covers (as ChatCopyMark). */
-export interface HubCopyMark {
-  originId: string;
-  logScopeId: string;
-  originSeq: number;
-  eventHash: string;
-}
-
-/** One chat of the hub's copy, or one part of a chat too large for a page:
- *  the parts of a chat come in order, the last one with `more` unset. */
-export interface HubCopyPart {
-  id: string;
-  updatedAt: string;
-  shared: unknown;
-  messages: unknown[];
-  removed: string[];
-  authors?: Record<string, string>;
-  /** More messages of this chat follow on the next page. */
-  more?: boolean;
-}
-
-/**
- * GET /v1/snapshot: where a device starts reading the order again, and (with
- * `copy=1`) the hub's copy of every chat, paged. The first page (no `page`)
- * fixes `hubSeq` and keeps everything after it for this device; `marks` say
- * how far each chat change chain the copy covers. Later pages repeat
- * `hubSeq` and carry on from `page`. `scopes` names the device's own
- * channel scopes (prefixes): it starts before any of their events the hub
- * still holds. `atMost` caps where it starts (a copy the device already
- * has, made at that position).
- */
-export interface HubSnapshotResponse {
-  hubSeq: number;
-  hubId?: string;
-  marks?: HubCopyMark[];
-  conversations: HubCopyPart[];
-  /** The next page's token; absent on the last page. */
-  next?: string;
-}
-
-/** GET /v1/chain?origin=&scope=&from=&to=: one chain's events in a range,
- *  for a reader that found a gap. `pruned` says how far the hub forgot this
- *  chain (events up to it are gone, by design). */
-export interface HubChainResponse {
-  events: HubLoggedEvent[];
-  pruned?: { originSeq: number; eventHash: string };
-}
-
-/** GET /v1/devices/known?ids=: which of these devices are on the roster now
- *  (one that is not was removed: what was held for it is let go). */
-export interface HubKnownDevicesResponse {
-  known: string[];
-}
-
-/** GET /v1/readers (owner only): every device that reads the order, where it
- *  stands, and what the hub keeps for it. */
-export interface HubReaderStatus {
-  deviceId: string;
-  name: string;
-  role: HubDeviceRole;
-  machineId?: string;
-  /** Last time it read the order (or was set up, before its first read). */
-  readAt?: string;
-  /** Never read here yet. */
-  neverRead?: boolean;
-  floor: number;
-  /** Its oldest held position's age, when it holds any. */
-  heldSince?: string;
-  heldCount?: number;
-  /** Changes it gave up on after holding them two weeks, and when last. */
-  givenUpCount?: number;
-  givenUpAt?: string;
-}
-
-export interface HubReadersResponse {
-  head: number;
-  readers: HubReaderStatus[];
-}
-

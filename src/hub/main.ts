@@ -1,15 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { importChatCopy } from "../main/services/chatCopy";
 import { ChatSearchService } from "../main/services/chatSearch";
 import { deviceIdForPublicKey } from "../main/services/hubAuth";
 import { StorageService } from "../main/services/storage";
 import { createHeadlessPlatform, setHostPlatform, userDataPath } from "../main/platform";
-import { HubFolder } from "./hubFolder";
 import { HubOps } from "./hubOps";
-import { hubApplyPolicy } from "./hubPolicy";
-import { HubLog } from "./hubLog";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
 import { HubRetention, hubRetentionConfig } from "./hubRetention";
 import { HubChangeFeed, HubPhoneApi } from "./hubPhone";
@@ -24,8 +20,6 @@ interface HubArgs {
   userDataDir?: string;
   /** Setup only: the owner desktop's identity on stdin, then exit. */
   setOwner?: boolean;
-  /** Setup only: import the desktop's chat copy from this directory, then exit. */
-  importChatCopy?: string;
   httpPort: number;
   httpsPort: number;
   host?: string;
@@ -47,7 +41,6 @@ function parseArgs(argv: string[]): HubArgs {
     };
     if (arg === "--user-data") args.userDataDir = next();
     else if (arg === "--set-owner") args.setOwner = true;
-    else if (arg === "--import-chat-copy") args.importChatCopy = path.resolve(next());
     else if (arg === "--http-port") args.httpPort = Number(next());
     else if (arg === "--https-port") args.httpsPort = Number(next());
     else if (arg === "--host") args.host = next();
@@ -82,11 +75,6 @@ function finish(result: unknown): Promise<never> {
 /** Who the hub's pushes say they come from. */
 const PUSH_SUBJECT = "mailto:push@accordagents.com";
 
-/** Present once the desktop's first copy of the chats is in. */
-function chatCopyMark(): string {
-  return path.join(userDataPath(), "chat-copy.json");
-}
-
 export function hubId(dir = userDataPath()): string {
   const file = path.join(dir, "hub-id.json");
   if (existsSync(file)) {
@@ -99,9 +87,10 @@ export function hubId(dir = userDataPath()): string {
 }
 
 /**
- * The hub's parts and how they hear of each other: the order, the folding of
- * chats, and what the phone is shown and rung for. Shared by the program and
- * its tests, so a test runs the hub as it is put together.
+ * The hub's parts and how they hear of each other: the chats as the server
+ * owns them (operations, the feed, turns, cards), and what the phone is shown
+ * and rung for. Shared by the program, the server inside the app and their
+ * tests, so a test runs the hub as it is put together.
  */
 export function composeHub(options: {
   storage: StorageService;
@@ -117,8 +106,6 @@ export function composeHub(options: {
   pushDebounceMs?: number;
 }) {
   const { storage, log } = options;
-  const policy = hubApplyPolicy(storage);
-  const hubLog = new HubLog(storage);
   // Which chats' copies changed, for the phones reading them here.
   const feed = new HubChangeFeed();
   const progress = new HubProgress();
@@ -134,22 +121,6 @@ export function composeHub(options: {
     const seq = await storage.hub().addNotice(notice);
     await push.noteNotice({ seq, conversationId: notice.conversationId });
   };
-  const isPhone = async (originId: string): Promise<boolean> =>
-    (await storage.hub().devices()).some((device) => device.deviceId === originId && device.role === "phone");
-  const folder = new HubFolder(storage, policy, log, (conversationId, details) => {
-    feed.note(conversationId);
-    for (const message of details.settled) {
-      const runId = typeof message.metadata?.runId === "string" ? message.metadata.runId : undefined;
-      if (runId) progress.settle(runId);
-      // A member's line that is not the User's to see rings nobody.
-      if (message.metadata?.hiddenFromTimeline === true) continue;
-      void notify(replyNotice(details.conversation, message)).catch((error) => log("hub.notice.error", { message: error instanceof Error ? error.message : String(error) }));
-    }
-    // A message for a member on a machine that is not reading: woken soon.
-    for (const { message, hubSeq } of details.phoneMessages) {
-      for (const machineId of phoneMessageHomes(details.conversation, message)) waker.noteWork(machineId, hubSeq);
-    }
-  }, isPhone);
   // The chats as the server owns them (agreements Д1–Д5): devices' writes,
   // the feed they read, and turns.
   const ops = new HubOps(storage, log);
@@ -214,18 +185,6 @@ export function composeHub(options: {
     }
   });
   const search = new ChatSearchService(storage);
-  let views: Promise<void> = Promise.resolve();
-  hubLog.onAppended(({ changedConversationIds, events }) => {
-    folder.enqueue(changedConversationIds);
-    // A machine's live progress, in the order it was placed.
-    views = views.then(async () => {
-      for (const item of events) {
-        if (item.event.kind !== "machine.turn.progress.delta") continue;
-        const payload = await storage.deviceEventBlobs().hydrate(item.event.payload).catch(() => undefined);
-        progress.note(item.event, payload);
-      }
-    }).catch((error) => log("hub.phone-views.error", { message: error instanceof Error ? error.message : String(error) }));
-  });
   phone = new HubPhoneApi({
     store: storage,
     feed,
@@ -238,7 +197,7 @@ export function composeHub(options: {
   });
   const phoneApi = phone;
   const server = new HubServer({
-    hubId: options.hubId, version: options.version, storage, log: hubLog, search, vapidPublicKey: options.keys.publicKey,
+    hubId: options.hubId, version: options.version, storage, search, vapidPublicKey: options.keys.publicKey,
     ...(options.acmeWebroot ? { acmeWebroot: options.acmeWebroot } : {}), debugLog: log,
     phone: phoneApi,
     onCatalogChanged: () => phoneApi.catalogChanged(),
@@ -246,20 +205,20 @@ export function composeHub(options: {
     ops
   });
   waker.start();
+  // What the server kept for the order of signed events it had before it
+  // owned the chats (Д7): nothing reads it any more, and it goes once, in the
+  // background. The bodies (pictures, avatars) are the server's and stay.
+  const dropping = new AbortController();
+  const dropped = storage.dropLegacyEventTables({ keepBodies: true, signal: dropping.signal, log })
+    .catch((error: unknown) => log("hub.legacy-tables.error", { message: error instanceof Error ? error.message : String(error) }));
   return {
-    server, folder, push, waker, feed, progress, phone: phoneApi, hubLog, ops,
-    /** Resolves once the phone's views have taken in what was placed so far. */
-    viewsIdle: async () => { await views; },
+    server, push, waker, feed, progress, phone: phoneApi, ops,
     close: async () => {
       push.close();
       waker.close();
-      // The folding stops after the chat it is on; what is left is folded on
-      // the next start (it is read from the order, not kept in memory).
-      folder.close();
+      dropping.abort();
       await server.close();
-      await folder.idle();
-      // What was placed before the stop reaches the phone's views (cards).
-      await views;
+      await dropped;
     }
   };
 }
@@ -283,14 +242,7 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
       return finish({ ok: false, reason: "another-owner", hubId: hubId() });
     }
     await storage.hub().setOwner({ deviceId: owner.deviceId, publicKeyDerBase64: owner.publicKeyDerBase64, name: owner.name || "Desktop", addedAt: new Date().toISOString() });
-    // Already this desktop's, and its chats copied: its cursors stand.
-    return finish({ ok: true, hubId: hubId(), alreadyOwner: Boolean(before), chatsCopied: existsSync(chatCopyMark()) });
-  }
-  if (args.importChatCopy) {
-    const summary = await importChatCopy(storage, args.importChatCopy, {});
-    // Written last: a copy that stopped half way is copied again.
-    writeFileSync(chatCopyMark(), JSON.stringify({ at: new Date().toISOString(), ...summary }), { mode: 0o600 });
-    return finish({ ok: true, ...summary });
+    return finish({ ok: true, hubId: hubId(), alreadyOwner: Boolean(before) });
   }
 
   const keys = loadOrCreateVapidKeys(path.join(userDataPath(), "vapid.json"));
@@ -300,7 +252,7 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
     // never goes to any other address than AWS's own.
     ec2Endpoint: loopbackEndpoint(process.env.ACCORDAGENTS_HUB_EC2_ENDPOINT)
   });
-  const { server, folder } = hub;
+  const { server } = hub;
   const https = Boolean(args.cert && args.key && existsSync(args.cert) && existsSync(args.key));
   if (https) {
     await server.listenHttps(args.httpsPort, { cert: args.cert!, key: args.key! }, args.host);
@@ -310,13 +262,13 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
   // Plain HTTP serves the certificate challenge and, before there is a
   // certificate, the health check the setup reads.
   await server.listenHttp(args.httpPort, args.host, { openOnly: !args.insecureHttp });
-  await folder.start();
   // Bodies the chats and the catalog name, pinned once on a server updated
   // from a program that did not pin them (the sweep would take them).
   await pinNamedBodies(storage).catch((error: unknown) => log("hub.blob-pins.error", { message: error instanceof Error ? error.message : String(error) }));
   // Rings the stopped program had scheduled and did not ring.
   await hub.push.rearm().catch((error: unknown) => log("hub.push.rearm-error", { message: error instanceof Error ? error.message : String(error) }));
-  // The order stays bounded: what every reader read, past its grace period.
+  // The feed stays bounded: what every reader read, past its grace period;
+  // and so do the bodies (what nothing names any more).
   const retention = new HubRetention({
     storage, config: hubRetentionConfig(), log,
     bodiesReady: async () => Boolean(await storage.hub().document(BLOB_PINS_DONE_KEY)),

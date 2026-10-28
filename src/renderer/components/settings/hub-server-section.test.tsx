@@ -70,15 +70,15 @@ test("a server another computer set up is started over only after the User agree
   await view.unmount();
 });
 
-test("a failed step is marked where it stopped, and a skipped copy is said so", async () => {
+test("a failed step is marked where it stopped, and setup copies no chats of its own", async () => {
   const view = await mount({ status: "none", bundledVersion: "1.0.0" }, async () => ({ status: "failed", bundledVersion: "1.0.0" }));
   await act(async () => { button("hub-server-setup")!.click(); });
-  await view.emit({ status: "failed", phase: "certificate", message: "too many certificates", skipped: ["chats"], bundledVersion: "1.0.0" });
+  await view.emit({ status: "failed", phase: "certificate", message: "too many certificates", bundledVersion: "1.0.0" });
   const steps = [...document.querySelectorAll("[data-testid=hub-server-progress] li")];
   const certificate = steps.find((item) => item.textContent?.includes("Certificate"));
   assert.ok(certificate?.classList.contains("is-failed"));
   assert.match(certificate?.textContent ?? "", /✕/);
-  assert.match(steps.find((item) => item.textContent?.includes("Chats"))?.textContent ?? "", /already there/);
+  assert.equal(steps.some((item) => item.textContent?.includes("Chats")), false, "the chats move through the link, not as a setup step");
   assert.equal(button("hub-server-setup")?.textContent, "Try again…");
   await view.unmount();
 });
@@ -134,19 +134,11 @@ test("the start-over question stays with the line it was asked about", async () 
   await view.unmount();
 });
 
-test("a line the User may dismiss goes when dismissed", async () => {
-  const notice = { id: "given-up:a:1", text: "Some changes could not be applied." };
-  const ready = { status: "ready" as const, url: "https://3.14.15.92", bundledVersion: "1.0.0" };
-  const view = await mount({ ...ready, dismissableNotices: [notice] }, async () => ready);
-  const dismissed: string[] = [];
-  (window as unknown as { consensus: Record<string, unknown> }).consensus.dismissHubNotice = async (id: string) => {
-    dismissed.push(id);
-    return ready;
-  };
-  assert.match(document.querySelector("[data-testid=hub-server-given-up]")?.textContent ?? "", /could not be applied/);
-  await act(async () => { button("hub-server-given-up-dismiss")!.click(); });
-  await settle();
-  assert.deepEqual(dismissed, [notice.id]);
-  assert.equal(document.querySelector("[data-testid=hub-server-given-up]"), null);
+test("what this computer's link says is shown under the server, and only once it is set up", async () => {
+  const lines = ["2 changes from this computer are waiting to reach your server.", "Last attempt: The hub could not be reached."];
+  const ready = { status: "ready" as const, url: "https://3.14.15.92", reachable: false, notices: lines, bundledVersion: "1.0.0" };
+  const view = await mount(ready, async () => ready);
+  assert.deepEqual([...document.querySelectorAll("[data-testid=hub-server-notice]")].map((item) => item.textContent), lines);
+  assert.match(document.querySelector("[data-testid=hub-server-unreachable]")?.textContent ?? "", /not reaching the server/);
   await view.unmount();
 });

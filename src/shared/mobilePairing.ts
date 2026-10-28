@@ -41,8 +41,8 @@ export interface MobilePairingPackage {
    *  is sent before it has keys of its own with this desktop). The name is
    *  kept from the enrollments already installed on machines. */
   relaySealKeyBase64: string;
-  /** The User's own server: the machine meets its devices in the server's
-   *  rooms, and every durable event goes through the server's one order.
+  /** The User's own server: the machine meets the computer that set it up in
+   *  its room there, and reads and writes its chats there.
    *  Every enrollment made now names it; one without it is from the shared
    *  relay, which is gone. */
   hubUrl?: string;

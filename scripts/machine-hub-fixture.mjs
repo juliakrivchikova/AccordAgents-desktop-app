@@ -10,11 +10,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const { StorageService } = await import("../dist/main/main/services/storage.js");
-const { ChatEventLogService } = await import("../dist/main/main/services/chatEventLog.js");
+const { DeviceIdentityService } = await import("../dist/main/main/services/deviceIdentity.js");
 const { HubTunnelClient } = await import("../dist/main/main/services/hubTunnelClient.js");
 const { ChatSearchService } = await import("../dist/main/main/services/chatSearch.js");
 const { HubServer } = await import("../dist/main/hub/hubServer.js");
-const { HubLog } = await import("../dist/main/hub/hubLog.js");
 const { HubOps } = await import("../dist/main/hub/hubOps.js");
 
 export async function waitFor(predicate, timeoutMs = 10_000, what = "the condition") {
@@ -30,10 +29,10 @@ export async function hubDevice(directory, name) {
   const dbPath = path.join(directory, `${name}.sqlite3`);
   const eventStorage = new StorageService({ dbPath });
   await eventStorage.init();
-  const eventLog = new ChatEventLogService(eventStorage);
-  const identity = await eventLog.getOrCreateDeviceIdentity();
+  const deviceIdentity = new DeviceIdentityService(eventStorage);
+  const identity = await deviceIdentity.getOrCreateDeviceIdentity();
   return {
-    name, dbPath, eventStorage, eventLog, identity,
+    name, dbPath, eventStorage, deviceIdentity, identity,
     deviceId: identity.originId,
     publicKeyDerBase64: identity.publicKeyDerBase64,
     issuer: { originId: identity.originId, keyId: identity.keyId, publicKeyDerBase64: identity.publicKeyDerBase64 }
@@ -52,17 +51,16 @@ export async function startHubWorld({ prefix = "accord-machine-hub-", devices = 
   const hubStore = await hubDevice(directory, "hub");
   const owner = named[devices[0]];
   await hubStore.eventStorage.hub().setOwner({ deviceId: owner.deviceId, publicKeyDerBase64: owner.publicKeyDerBase64, name: "Desktop", addedAt: new Date().toISOString() });
-  const log = new HubLog(hubStore.eventStorage);
   const ops = new HubOps(hubStore.eventStorage);
   const progress = [];
-  const server = new HubServer({ hubId, version: "test", storage: hubStore.eventStorage, log, ops,
+  const server = new HubServer({ hubId, version: "test", storage: hubStore.eventStorage, ops,
     search: new ChatSearchService(hubStore.eventStorage), vapidPublicKey: "B", onProgress: (frames) => progress.push(...frames) });
   const http = await server.listenHttp(0, "127.0.0.1");
   const hubUrl = `http://127.0.0.1:${http.address().port}`;
   const closers = [];
   let closed = false;
   const world = {
-    directory, hubUrl, hubStore, server, log, ops, owner, progress, ...named,
+    directory, hubUrl, hubStore, server, ops, owner, progress, ...named,
     /** Closed in reverse order by `close`. */
     defer(close) { closers.push(close); return close; },
     /** The server's roster besides its owner: machines (`{ device, machineId, name }`)
@@ -108,11 +106,11 @@ export function machinePairing(issuerDevice, hubUrl, { rendezvousId, fingerprint
 /** The desktop's room client for a machine (src/main/main.ts `createClient`). */
 export function desktopRoomClient(desktop, { reconnectDelayMs = 50 } = {}) {
   return (enrollment) => enrollment.hubUrl ? new HubTunnelClient({ hubUrl: enrollment.hubUrl, rendezvousId: enrollment.rendezvousId, role: "desktop",
-    identity: () => desktop.eventLog.getOrCreateDeviceIdentity(), reconnectDelayMs }) : undefined;
+    identity: () => desktop.deviceIdentity.getOrCreateDeviceIdentity(), reconnectDelayMs }) : undefined;
 }
 
 /** The machine's room client (src/machine/main.ts). */
 export function machineRoomClient(machine, hubUrl, { reconnectDelayMs = 50 } = {}) {
   return (enrollment) => new HubTunnelClient({ hubUrl, rendezvousId: enrollment.rendezvousId, role: "machine",
-    identity: () => machine.eventLog.getOrCreateDeviceIdentity(), reconnectDelayMs });
+    identity: () => machine.deviceIdentity.getOrCreateDeviceIdentity(), reconnectDelayMs });
 }

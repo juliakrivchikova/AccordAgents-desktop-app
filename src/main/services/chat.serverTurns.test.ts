@@ -8,10 +8,9 @@ import test from "node:test";
 import { hubTurnRunId, type HubChatPage, type HubOp, type HubOpsResponse } from "../../shared/hubOps";
 import type { ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
 import { HubOps } from "../../hub/hubOps";
-import { HubLog } from "../../hub/hubLog";
 import { HubServer } from "../../hub/hubServer";
 import { ChatService } from "./chat";
-import { ChatEventLogService, createChatEventDeviceIdentity } from "./chatEventLog";
+import { DeviceIdentityService, createDeviceIdentity } from "./deviceIdentity";
 import { ChatSearchService } from "./chatSearch";
 import { signHubRequest, type HubSigningIdentity } from "./hubAuth";
 import { ServerChatLink } from "./serverChatLink";
@@ -52,16 +51,16 @@ async function setup(t: test.TestContext) {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-server-turns-"));
   // The computer: its identity owns the server.
   const storage = new StorageService({ dbPath: path.join(dir, "desktop.sqlite3") });
-  const events = new ChatEventLogService(storage);
+  const events = new DeviceIdentityService(storage);
   const identity = await events.getOrCreateDeviceIdentity();
   // The server.
   const hubStorage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3") });
   await hubStorage.init();
   await hubStorage.hub().setOwner({ deviceId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64, name: "Desktop", addedAt: new Date().toISOString() });
-  const phone = createChatEventDeviceIdentity(new Date().toISOString());
+  const phone = createDeviceIdentity(new Date().toISOString());
   await hubStorage.hub().replaceRoster([{ deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone", name: "Phone", addedAt: "", scope: { scope: "device" } }], new Date().toISOString());
   const ops = new HubOps(hubStorage);
-  const hubServer = new HubServer({ hubId: "hub-test", version: "test", storage: hubStorage, log: new HubLog(hubStorage), search: new ChatSearchService(hubStorage), vapidPublicKey: "BPUB", ops });
+  const hubServer = new HubServer({ hubId: "hub-test", version: "test", storage: hubStorage, search: new ChatSearchService(hubStorage), vapidPublicKey: "BPUB", ops });
   const http = await hubServer.listenHttp(0, "127.0.0.1");
   const hubUrl = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
   const front = await gate(hubUrl);

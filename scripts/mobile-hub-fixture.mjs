@@ -74,7 +74,7 @@ export function member(handle, extra = {}) {
 export async function startMobileHub(options = {}) {
   const { composeHub } = require(distMain("hub/main.js"));
   const { StorageService } = require(distMain("main/services/storage.js"));
-  const { createChatEventDeviceIdentity } = require(distMain("main/services/chatEventLog.js"));
+  const { createDeviceIdentity } = require(distMain("main/services/deviceIdentity.js"));
   const { signHubRequest, signHubText, sha256Hex } = require(distMain("main/services/hubAuth.js"));
   const { hubPhoneInviteSigningText } = require(distMain("shared/hubProtocol.js"));
   const { hubTurnRunId } = require(distMain("shared/hubOps.js"));
@@ -84,7 +84,7 @@ export async function startMobileHub(options = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "aa-mobile-hub-"));
   const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
   await storage.init();
-  const owner = createChatEventDeviceIdentity(new Date().toISOString());
+  const owner = createDeviceIdentity(new Date().toISOString());
   await storage.hub().setOwner({ deviceId: owner.originId, publicKeyDerBase64: owner.publicKeyDerBase64, name: "Mac", addedAt: new Date().toISOString() });
 
   /** What the hub tried to reach outside itself: rings of the push service. */
@@ -185,10 +185,9 @@ export async function startMobileHub(options = {}) {
     return answer;
   };
 
+  // What the server does after an answer (rings, live progress) is done by then.
   const settle = async () => {
-    await composed.folder.idle();
-    await composed.viewsIdle();
-    await composed.folder.idle();
+    await new Promise((resolve) => setTimeout(resolve, 50));
   };
 
   // The owner desktop's writes: operations, answered one by one. A setup

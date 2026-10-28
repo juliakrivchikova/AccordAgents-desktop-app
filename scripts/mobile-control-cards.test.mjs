@@ -80,8 +80,8 @@ const message = {
 };
 
 test("a card published by the desktop is answered on the phone and survives a reload", { timeout: 180_000 }, async (t) => {
-  const { createChatEventDeviceIdentity } = require("../dist/main/main/services/chatEventLog.js");
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const { createDeviceIdentity } = require("../dist/main/main/services/deviceIdentity.js");
+  const machine = createDeviceIdentity(new Date().toISOString());
   // A cloud machine the server can start: its Wake belongs in Settings.
   const hub = await startMobileHub({ rosterDevices: [
     { deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "cloud-box", machineId: "m1" }

@@ -33,7 +33,7 @@ import type { AgentHealth, ChatBackgroundTasksEvent, ReviewProgress } from "../.
 import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
 import type { ChatService } from "./chat";
 import type { DebugLogService } from "./debugLogs";
-import type { ChatEventDeviceIdentityRecord, StorageService } from "./storage";
+import type { DeviceIdentityRecord, StorageService } from "./storage";
 import { advanceInstanceSequence } from "./machineTurnOutcome";
 import { openChannelPayload, openMachinePayload, sealMachinePayload } from "./machineChannelSealing";
 import type { TunnelClient } from "./hubTunnelClient";
@@ -50,7 +50,7 @@ export interface MachineHostOptions {
   appVersion: string;
   publicKeyDerBase64: string;
   /** This machine's device identity: what it signs and seals with. */
-  identity: () => Promise<ChatEventDeviceIdentityRecord>;
+  identity: () => Promise<DeviceIdentityRecord>;
   /** Opens this machine's room on the User's server (a stand-in in tests). */
   createClient: (pairing: MobilePairingPackage) => TunnelClient;
   /** The machine's own storage (its approval and choice executors). */

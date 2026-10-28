@@ -26,7 +26,7 @@ test("restoring an enrollment commits the sealed route before reconnect, survive
   const connections: string[] = [];
   const settings = make();
   const link = new MachineLinkService(settings, { write: async () => {} }, {
-    appVersion: "test", desktopDeviceId: "desktop", eventLog: {} as any,
+    appVersion: "test", desktopDeviceId: "desktop", deviceIdentity: {} as any,
     createClient: pairing => {
       const client = Object.assign(new EventEmitter(), { close: () => {}, connect: async () => {
         const disk = make();

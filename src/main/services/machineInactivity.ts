@@ -3,8 +3,8 @@ import type { MachineRecord } from "../../shared/machineLink";
 /**
  * Machines that stopped being used.
  *
- * While a machine is enrolled, this desktop keeps every chat change for it
- * until the machine confirms it, however long it stays away. Whether that
+ * While a machine is enrolled, the User's server keeps everything it has not
+ * read yet, however long it stays away. Whether that
  * should end is the User's call: once every 10 days the machines are checked,
  * and about each one that has not been active for 10 days or more the User is
  * asked whether it is still in use. "No" removes it from the app; "yes" keeps
@@ -32,8 +32,9 @@ export interface InactiveMachine {
 export interface MachineInactivityCheckOptions {
   listMachines(): Promise<MachineRecord[]>;
   isConnected(machineId: string): boolean;
-  /** When the machine last confirmed something this desktop sent it. */
-  lastAcknowledgedAt(machine: MachineRecord): Promise<string | undefined>;
+  /** When the machine was last active where this desktop does not see it
+   *  (its last read of the User's server). */
+  lastActiveAt(machine: MachineRecord): Promise<string | undefined>;
   lastCheckAt(): Promise<string | undefined>;
   saveLastCheckAt(at: string): Promise<void>;
   /** Resolves once the User's answer has been carried out ("remove" after
@@ -89,7 +90,7 @@ export class MachineInactivityCheck {
     const inactive: InactiveMachine[] = [];
     for (const machine of await this.options.listMachines()) {
       if (this.options.isConnected(machine.id)) continue;
-      const times = [machine.createdAt, machine.lastSeenAt, await this.options.lastAcknowledgedAt(machine)]
+      const times = [machine.createdAt, machine.lastSeenAt, await this.options.lastActiveAt(machine)]
         .map((value) => Date.parse(value ?? ""))
         .filter((value) => Number.isFinite(value));
       const lastActive = times.length ? Math.max(...times) : 0;

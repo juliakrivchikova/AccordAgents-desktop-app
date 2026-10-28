@@ -6,7 +6,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
-import { applyChatChanges, applyHeldReactions, CHAT_CHANGES_VERSION, chatChangeBaseline, diffChatChanges, isSupportedChatChangesVersion, type ChatChangeApplyPolicy, type ChatChangeBaseline, type ChatChangeDiffPolicy, type ChatChangesPayload, isSafeChatId } from "./chatChanges";
+import { chatChangeBaseline, diffChatChanges, type ChatChangeBaseline, isSafeChatId } from "./chatChanges";
 import { chatChangesToOps, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
 import { hubTurnRunId, isHubTurnRunId, type HubCard, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
@@ -25,7 +25,6 @@ import {
 } from "../../shared/hubCards";
 import { ServerCardBook, type CardApplyResult, type ChatCardAppliers } from "./chatCards";
 import type { HubOpOutcome } from "./hubOpsClient";
-import { mergeCopiedConversation, type CopiedConversation } from "./chatCopy";
 import type {
   AgentContextUsage,
   AgentHealth,
@@ -138,7 +137,6 @@ import type {
   RemoteRunSyncInfo
 } from "../../shared/types";
 import { isAutoWatchStableMessage, isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
-import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import { isMachineCompactionLine } from "../../shared/machineLink";
 import { machineStopPendingText, machineWaitingText } from "../../shared/machineWaitingText";
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
@@ -198,9 +196,7 @@ import {
   resolveChatDeliveryTargets,
   resolveChatMentionTargets
 } from "../../shared/chatDeliveryPolicy";
-import { parsePhoneTurnRunId, phoneTurnRunId } from "../../shared/hubProtocol";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
-import type { ChatEventMirrorService } from "./chatEventMirror";
 import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
 import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
@@ -293,13 +289,6 @@ type ServerTurnOpen =
   | { kind: "remote"; serverRunId: string; canonical: boolean }
   | { kind: "stopped"; serverRunId: string }
   | { kind: "skip"; serverRunId: string; reason: string };
-
-interface PendingPhoneRun {
-  conversationId: string;
-  controller: AbortController;
-  started: boolean;
-  registered?: boolean;
-}
 
 interface ChatParticipantSessionState {
   session: ChatParticipantSession;
@@ -837,30 +826,6 @@ function cloneJsonValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-/**
- * How a chat's changes leave this device: one signed `chat.changes` event per
- * save, committed in the same transaction as the save. Installed by the
- * desktop and by the machine runtime; absent in tests and when no other device
- * is enrolled, in which case saves behave exactly as before.
- */
-export interface ChatChangeTransport {
-  /** False when no other device should receive this device's chat changes. */
-  hasRecipients(): boolean;
-  /** The last change event this device committed for a chat (seq 0: none). */
-  head(conversationId: string): Promise<{ originId: string; logScopeId: string; originSeq: number }>;
-  diffPolicy(conversation: Conversation): ChatChangeDiffPolicy;
-  applyPolicy(conversation: Conversation | undefined): ChatChangeApplyPolicy;
-  /** Mints the event and hands its SQL to `write`, which saves the chat in the
-   *  same transaction. Returns the save token `write` produced. */
-  commit(
-    payload: ChatChangesPayload,
-    write: (also: { sql: string; onlyIfSql(condition: string): string }) => Promise<string>
-  ): Promise<{ token: string; committed: boolean; eventId: string }>;
-  /** How far this device has applied the changes the author had when it
-   *  wrote this (ChatChangesPayload.after). Undefined: nothing to wait for. */
-  dependency?(payload: ChatChangesPayload): Promise<{ needed: number; have: number } | undefined>;
-}
-
 export class ChatService {
   private readonly saveQueues = new Map<string, Promise<void>>();
   // Serialized message rows of the last snapshot emitted per conversation. The
@@ -952,23 +917,9 @@ export class ChatService {
   // to what the change diff needs. Loaded from the database when absent (after
   // a restart, an eviction or a failed save), never guessed.
   private readonly chatChangeBaselines = new Map<string, ChatChangeBaseline | undefined>();
-  /** Chat changes waiting for desktop changes they were written after: the
-   *  applied head seen when each was last tried (see applyRemoteChatChanges). */
-  private readonly waitingChatChanges = new Map<string, number>();
-  /** Which devices are the User's phones (their messages start turns here). */
-  private phoneOrigin?: (originId: string) => boolean | Promise<boolean>;
+  /** Reads a picture the phone sent from the User's server. */
   private hubBlobReader?: (reference: DeviceEventBlobReference) => Promise<Buffer>;
-  /** Turns for a phone's message this device is starting: the turn's run id
-   *  is known before its run begins, so a Stop for it is not lost. */
-  private readonly pendingPhoneRuns = new Map<string, PendingPhoneRun>();
-  /** Chats with a phone's message whose members are being claimed. */
-  private readonly phoneStartsInFlight = new Map<string, number>();
-  /** When this device began reading the User's server: a phone's message
-   *  from before then is not this device's to start (a new or recreated
-   *  machine reads the whole order, turns other homes ran long ago). */
-  private phoneTurnsSince?: number;
   private static readonly CHAT_CHANGE_BASELINE_LIMIT = 256;
-  private chatChangeTransport?: ChatChangeTransport;
   /** The User's server, owner of every chat (agreements Д1–Д13): saves go
    *  there as operations, and members' turns wait for it. */
   private serverLink?: ChatServerLink;
@@ -1076,7 +1027,6 @@ export class ChatService {
     private readonly onConversationSnapshot?: (conversation: Conversation, update: ConversationUpdate) => void,
     private readonly userSkills?: UserSkillsService,
     private readonly onReviewProgress?: ProgressCallback,
-    private readonly chatEventMirror?: ChatEventMirrorService,
     /** W-C: an interrupted run has no terminal snapshot of its own — nothing
      *  finished, the process died. Recovery is the only thing that can tell a
      *  paired phone the run is over, so it is published explicitly here rather
@@ -1679,15 +1629,11 @@ export class ChatService {
         await (this.chatMutationQueues.get(conversation.id) ?? Promise.resolve()).catch(() => undefined);
         await this.waitForQueuedSave(conversation.id);
         const cleanupMarker = await this.enqueueDeletedConversationArtifactCleanup(conversation);
-        // The tombstone and target identities commit with row deletion. A
-        // crash before the transport is ready must not forget who holds a copy.
-        const machineIds = this.chatParticipants(conversation).map(participant => participant.homeMachineId)
-          .filter((id): id is string => typeof id === "string" && id.length > 0);
         // The User's server owns the chat (Д1): the deletion goes there with
-        // the rows, and every other device (its machines too) takes it from
-        // there.
+        // the rows (the tombstone commits with them too), and every other
+        // device (its machines too) takes it from there.
         const serverDelete = this.serverLink?.queueSql([{ opId: newOpId(), kind: "conversation.delete", conversationId: conversation.id }]);
-        const deleted = await this.storage.deleteConversation(conversation.id, { machineIds, ...(serverDelete ? { alsoCommitSql: serverDelete } : {}) });
+        const deleted = await this.storage.deleteConversation(conversation.id, serverDelete ? { alsoCommitSql: serverDelete } : {});
         if (deleted && serverDelete) this.serverLink?.nudge();
         if (!deleted) {
           await rm(cleanupMarker, { force: true });
@@ -6443,12 +6389,6 @@ export class ChatService {
     if (!mobileEventId) {
       return false;
     }
-    if (
-      typeof this.storage.hasChatEvent === "function" &&
-      await this.storage.hasChatEvent(conversationId, mobileEventId)
-    ) {
-      return true;
-    }
     const conversation = await this.storage.getConversation(conversationId);
     return Boolean(conversation && this.hasMobileEventMessage(conversation, mobileEventId));
   }
@@ -7281,8 +7221,8 @@ export class ChatService {
             else serverTurn = { kind: "stopped", serverRunId: "" };
           }
           if (serverTurn.kind === "stopped" || serverTurn.kind === "skip") {
-            if (serverTurn.kind === "stopped" && !this.phoneTurnShown(conversation, triggerMessage, participant, serverTurn.serverRunId)) {
-              await this.notePhoneTurnStoppedBeforeStart(conversation, triggerMessage, participant);
+            if (serverTurn.kind === "stopped" && !this.turnShown(conversation, triggerMessage, participant, serverTurn.serverRunId)) {
+              await this.noteTurnStoppedBeforeStart(conversation, triggerMessage, participant);
             }
             this.serverTurnOpens.delete(targetRunId);
             this.unregisterTargetRun(targetRunId, targetController);
@@ -7435,9 +7375,7 @@ export class ChatService {
     }
     const conversation = await this.storage.getConversation(conversationId);
     const marker = conversation ? await this.enqueueDeletedConversationArtifactCleanup(conversation) : undefined;
-    const machineIds = conversation ? this.chatParticipants(conversation).map(participant => participant.homeMachineId)
-      .filter((id): id is string => typeof id === "string" && id.length > 0) : [];
-    await this.storage.conversationTombstones().mark(conversationId, deletedAt, machineIds);
+    await this.storage.conversationTombstones().mark(conversationId, deletedAt);
     await this.closeReplicatedConversationSessions(conversationId);
     await this.storage.deleteConversation(conversationId);
     if (conversation) {
@@ -14375,8 +14313,8 @@ export class ChatService {
         : { kind: "none" };
       if (opened.kind === "stopped" || opened.kind === "skip") {
         this.serverTurnOpens.delete(runId);
-        if (opened.kind === "stopped" && !options.existingPendingMessage && !this.phoneTurnShown(conversation, triggerMessage, participant, opened.serverRunId)) {
-          await this.notePhoneTurnStoppedBeforeStart(conversation, triggerMessage, participant);
+        if (opened.kind === "stopped" && !options.existingPendingMessage && !this.turnShown(conversation, triggerMessage, participant, opened.serverRunId)) {
+          await this.noteTurnStoppedBeforeStart(conversation, triggerMessage, participant);
         }
         return [];
       }
@@ -19266,9 +19204,6 @@ export class ChatService {
   }
 
   private buildSnapshot(conversation: Conversation): ReturnType<typeof buildConversationSnapshot> {
-    // Reactions that arrived before their message, which has since come by a
-    // finished turn or a back delta rather than as a chat change.
-    if (conversation.kind === "chat") applyHeldReactions(conversation);
     return buildConversationSnapshot(conversation, this.snapshotRowStates.get(conversation.id));
   }
 
@@ -19320,8 +19255,6 @@ export class ChatService {
     if (!targetRunId) {
       return false;
     }
-    // A phone's turn that is still being claimed: stopped before it starts.
-    this.pendingPhoneRuns.get(targetRunId)?.controller.abort();
     const controllers = this.chatRunControllers.get(targetRunId);
     void this.debugLogs.write("chat.cancel.requested", {
       runId: targetRunId,
@@ -19359,10 +19292,6 @@ export class ChatService {
     const fromMeta = this.chatRunMeta.get(targetRunId)?.conversationId;
     if (fromMeta) {
       return fromMeta;
-    }
-    const pendingPhone = this.pendingPhoneRuns.get(targetRunId)?.conversationId;
-    if (pendingPhone) {
-      return pendingPhone;
     }
     for (const [conversationId, runIds] of this.activeConversationRunIds) {
       if (runIds.has(targetRunId)) {
@@ -19857,8 +19786,6 @@ export class ChatService {
   }
 
   private rememberActiveChatRun(conversationId: string, runId: string): void {
-    const pendingPhone = this.pendingPhoneRuns.get(runId);
-    if (pendingPhone) pendingPhone.registered = true;
     this.ensureRunOwnerHeartbeatTimer();
     this.activeRunRefCounts.set(runId, (this.activeRunRefCounts.get(runId) ?? 0) + 1);
     this.activeRunIds.add(runId);
@@ -19993,11 +19920,7 @@ export class ChatService {
   private chatHasLiveWork(conversationId: string): boolean {
     return (
       (this.activeConversationRunIds.get(conversationId)?.size ?? 0) > 0 ||
-      (this.backgroundRunnerCounts.get(conversationId) ?? 0) > 0 ||
-      // A phone's message whose members are still being claimed or started:
-      // their runs are not registered yet (a registered one is, or has ended).
-      (this.phoneStartsInFlight.get(conversationId) ?? 0) > 0 ||
-      [...this.pendingPhoneRuns.values()].some((pending) => pending.conversationId === conversationId && !pending.registered)
+      (this.backgroundRunnerCounts.get(conversationId) ?? 0) > 0
     );
   }
 
@@ -20091,12 +20014,8 @@ export class ChatService {
     return run;
   }
 
-  /**
-   * Resolves once every chat save that had started when it was called has
-   * finished. A machine's first chat copy reads its marks after this, so a
-   * save that chose its recipients before the machine was one of them cannot
-   * land after the copy was taken.
-   */
+  /** Resolves once every chat save that had started when it was called has
+   *  finished (and so has queued what it changed for the User's server). */
   async settleChatSaves(): Promise<void> {
     await Promise.allSettled([...this.chatSavesInFlight]);
   }
@@ -20149,49 +20068,10 @@ export class ChatService {
       if (ops.length) link.nudge();
       return;
     }
-    const transport = this.chatChangeTransport;
-    const tracked = Boolean(transport) && snapshot.kind === "chat" && transport!.hasRecipients();
-    if (!tracked) this.chatChangeBaselines.delete(snapshot.id);
-    let payload: ChatChangesPayload | undefined;
-    if (tracked && options.emitChanges !== false) {
-      const diff = diffChatChanges(await this.chatChangeBaselineFor(snapshot.id), snapshot, transport!.diffPolicy(snapshot));
-      if (diff.suppressedMessageIds.length) {
-        void this.debugLogs.write("chat.changes.not-owner", { conversationId: snapshot.id, messageIds: diff.suppressedMessageIds.slice(0, 20) });
-      }
-      if (diff.changes.length) {
-        payload = { version: CHAT_CHANGES_VERSION, conversationId: snapshot.id, updatedAt: snapshot.updatedAt, changes: diff.changes };
-      }
-    }
-    // A save that must not emit (an incoming change being stored) still moves
-    // the baseline below, so the next local save does not echo it back.
-    try {
-      const previous = this.chatEventMirror?.isEnabled() ? await this.storage.getConversation(snapshot.id) : undefined;
-      if (payload) {
-        const outcome = await transport!.commit(payload, (also) => this.storage.saveConversation(snapshot, { rows, alsoCommit: also }));
-        if (!outcome.committed) {
-          void this.debugLogs.write("chat.changes.not-committed", { conversationId: snapshot.id, eventId: outcome.eventId });
-        }
-        this.rememberLastSavedSnapshot(snapshot, outcome.token);
-      } else {
-        this.rememberLastSavedSnapshot(snapshot, await this.storage.saveConversation(snapshot, { rows }));
-      }
-      if (tracked) this.rememberChatChangeBaseline(snapshot.id, chatChangeBaseline(snapshot));
-      if (this.chatEventMirror?.isEnabled()) await this.chatEventMirror.mirrorSavedConversation(previous, snapshot);
-    } catch (error) {
-      // What the database holds after a failed save is unknown; the next save
-      // diffs against a fresh read instead.
-      this.chatChangeBaselines.delete(snapshot.id);
-      throw error;
-    }
-  }
-
-  /** The chat change a machine must have applied before it runs a turn in
-   *  this chat: everything saved so far, including queued saves. */
-  async chatChangeHead(conversationId: string): Promise<{ originId: string; logScopeId: string; originSeq: number } | undefined> {
-    const transport = this.chatChangeTransport;
-    if (!transport) return undefined;
-    await this.waitForQueuedSave(conversationId);
-    return transport.head(conversationId);
+    // Not linked to a server (yet): the chat is only saved here. The next
+    // save with a link diffs against what the database holds then.
+    this.chatChangeBaselines.delete(snapshot.id);
+    this.rememberLastSavedSnapshot(snapshot, await this.storage.saveConversation(snapshot, { rows }));
   }
 
   /** Machine side: records where a chat's project lives here before a turn
@@ -20557,8 +20437,8 @@ export class ChatService {
     const participant = this.chatParticipants(conversation).find((item) => item.id === turn.participantId);
     const message = conversation.messages.find((item) => item.id === turn.messageId);
     if (!participant || !message || !this.runsHere(participant)) return;
-    if (this.phoneTurnShown(conversation, message, participant, turn.runId)) return;
-    await this.notePhoneTurnStoppedBeforeStart(conversation, message, participant);
+    if (this.turnShown(conversation, message, participant, turn.runId)) return;
+    await this.noteTurnStoppedBeforeStart(conversation, message, participant);
   }
 
   /** Runs, here, a turn the server asked of one of this device's members
@@ -21015,7 +20895,7 @@ export class ChatService {
         // before it started (a machine says so for its own members).
         const said = conversation.messages.some((item) => item.role === "system" && item.content === `@${participant.handle} stopped by user.` &&
           item.metadata?.parentMessageId === triggerMessage.id);
-        if (!participant.homeMachineId && !said) await this.notePhoneTurnStoppedBeforeStart(conversation, triggerMessage, participant);
+        if (!participant.homeMachineId && !said) await this.noteTurnStoppedBeforeStart(conversation, triggerMessage, participant);
         throw error;
       }
       // It could not be made ready: the bubble says why, as a local member's
@@ -21802,12 +21682,6 @@ export class ChatService {
     return { conversation: (await this.storage.getConversation(conversation.id)) ?? conversation, warnings: [] };
   }
 
-  /** Installs (or removes) the path a chat's changes take to other devices. */
-  setChatChangeTransport(transport: ChatChangeTransport | undefined): void {
-    this.chatChangeTransport = transport;
-    this.chatChangeBaselines.clear();
-  }
-
   private async chatChangeBaselineFor(conversationId: string): Promise<ChatChangeBaseline | undefined> {
     if (this.chatChangeBaselines.has(conversationId)) {
       const baseline = this.chatChangeBaselines.get(conversationId);
@@ -21830,373 +21704,23 @@ export class ChatService {
     }
   }
 
-  /**
-   * Folds a `chat.changes` event from another device into this device's copy.
-   * The result is stored without being emitted again. "missing-conversation"
-   * means the event refers to a chat this device does not have yet; the caller
-   * holds it and asks for the chat.
-   */
-  async applyRemoteChatChanges(event: ChatEventEnvelope, payload: ChatChangesPayload): Promise<"applied" | "missing-conversation" | "waiting"> {
-    const transport = this.chatChangeTransport;
-    if (!transport) throw new Error("This device has no chat change transport.");
-    if (payload.conversationId !== event.conversationId) throw new Error("Chat change event names another chat.");
-    const conversationId = payload.conversationId;
-    if (this.deletedConversationIds.has(conversationId) || await this.storage.conversationTombstones?.().isDeleted(conversationId)) {
-      return "applied";
-    }
-    // Held, not skipped: a newer version's changes wait for this device's update.
-    if (!isSupportedChatChangesVersion(payload)) return "waiting";
-    // Written after desktop changes that have not reached this device yet. A
-    // change refused only for want of them (a member it names, that member's
-    // home) waits for them; one that applies anyway does not wait. While it
-    // waits it is looked at again only once more of them have arrived: trying
-    // it means reading the whole chat.
-    const dependency = transport.dependency ? await transport.dependency(payload) : undefined;
-    const dependencyMet = !dependency || dependency.have >= dependency.needed;
-    if (dependency && !dependencyMet && this.waitingChatChanges.get(event.eventId) === dependency.have) return "waiting";
-    const wait = (): "waiting" => {
-      this.waitingChatChanges.delete(event.eventId);
-      this.waitingChatChanges.set(event.eventId, dependency?.have ?? 0);
-      while (this.waitingChatChanges.size > 1_000) {
-        const oldest = this.waitingChatChanges.keys().next().value;
-        if (oldest === undefined) break;
-        this.waitingChatChanges.delete(oldest);
-      }
-      return "waiting";
-    };
-    const logIgnored = (ignored: string[]): void => {
-      if (ignored.length) {
-        void this.debugLogs.write("chat.changes.ignored", { conversationId, originId: event.originId, eventId: event.eventId, ignored: ignored.slice(0, 20) });
-      }
-    };
-    const existing = await this.storage.getConversation(conversationId);
-    if (!existing) {
-      const result = applyChatChanges(undefined, payload, event.originId, transport.applyPolicy(undefined));
-      if (result.status === "missing-conversation") return "missing-conversation";
-      if (!dependencyMet && result.ignored.length) return wait();
-      this.waitingChatChanges.delete(event.eventId);
-      logIgnored(result.ignored);
-      if (result.status === "ignored") return "applied";
-      this.localizeRepoPath(result.conversation, result.conversation.repoPath);
-      await this.saveConversation(result.conversation, { emitChanges: false });
-      this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
-      return "applied";
-    }
-    if (existing.kind !== "chat") return "applied";
-    let waiting = false;
-    const dropped: ChatParticipant[] = [];
-    // The phone's messages this application adds (one applied before, a
-    // redelivery, starts nothing again).
-    let addedMessageIds = new Set<string>();
-    await this.withChatMutation(existing, async () => {
-      const result = applyChatChanges(existing, payload, event.originId, transport.applyPolicy(existing));
-      if (result.status !== "applied") return;
-      const held = new Set(existing.messages.map((message) => message.id));
-      addedMessageIds = new Set(result.conversation.messages.filter((message) => !held.has(message.id)).map((message) => message.id));
-      if (!dependencyMet && result.ignored.length) {
-        waiting = true;
-        return;
-      }
-      logIgnored(result.ignored);
-      if (!result.changed) return;
-      // A member that watches the chat here sees new user messages the way a
-      // local one does: a new one resets its wake chain.
-      this.reconcileReplicatedWatcher(existing, result.conversation);
-      const droppedHere = this.membersDroppedFrom(existing, result.conversation);
-      const wasArchived = existing.metadata.archived === true;
-      existing.title = result.conversation.title;
-      const repoChanged = payload.changes.some((change) => change.type === "conversation.updated" && change.repoPath !== undefined);
-      if (this.hostMachineId) {
-        // The incoming path is the desktop's; this machine keeps its own copy.
-        if (repoChanged) this.localizeRepoPath(result.conversation, result.conversation.repoPath);
-        else if (existing.repoPath) result.conversation.repoPath = existing.repoPath;
-      }
-      if (result.conversation.repoPath) existing.repoPath = result.conversation.repoPath;
-      else delete existing.repoPath;
-      existing.messages = result.conversation.messages;
-      existing.metadata = result.conversation.metadata;
-      existing.updatedAt = result.conversation.updatedAt;
-      const touched = new Set(payload.changes.flatMap((change) =>
-        change.type === "message.created" || change.type === "message.updated" ? [change.message.id] : []));
-      // The desktop's word on roster changes this machine's members asked for.
-      if (transport.applyPolicy(existing).acceptsConversationFields(event.originId)) {
-        this.settleRosterChangesFromDesktop(existing, () => existing.messages.filter((message) => touched.has(message.id)));
-      }
-      for (const message of existing.messages) {
-        if (message.role === "participant" && touched.has(message.id)) this.recordLastMessageByParticipant(existing, message);
-      }
-      if (!wasArchived && existing.metadata.archived === true) await this.cliRunner.closeConversationSessions(conversationId);
-      await this.saveConversation(existing, { emitChanges: false });
-      dropped.push(...droppedHere);
-    });
-    // A member this host runs that the member list no longer has (removed on
-    // the desktop) ends its process here, as a local member's does there.
-    this.retireRemovedMembers(conversationId, dropped);
-    if (waiting) return wait();
-    this.waitingChatChanges.delete(event.eventId);
-    this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
-    this.notePhoneMessages(event.originId, conversationId, payload, addedMessageIds);
-    return "applied";
-  }
-
   /** Reads a body from the User's server by its reference (a picture sent
    *  from the phone). */
   setHubBlobReader(reader: ((reference: DeviceEventBlobReference) => Promise<Buffer>) | undefined): void {
     this.hubBlobReader = reader;
   }
 
-  /** Says which devices are the User's phones. A message one of them wrote
-   *  starts its members here when they live here (see startPhoneTurns). */
-  setPhoneOrigins(resolver: ((originId: string) => boolean | Promise<boolean>) | undefined, since?: string): void {
-    this.phoneOrigin = resolver;
-    const at = since ? Date.parse(since) : NaN;
-    this.phoneTurnsSince = Number.isFinite(at) ? at : undefined;
-  }
-
-  private notePhoneMessages(originId: string, conversationId: string, payload: ChatChangesPayload, added: Set<string>): void {
-    const resolver = this.phoneOrigin;
-    if (!resolver) return;
-    const messages = payload.changes.flatMap((change) =>
-      change.type === "message.created" && change.message.role === "user" && added.has(change.message.id) ? [change.message] : []);
-    if (messages.length === 0) return;
-    // Until its members are claimed the chat counts as busy, so a watcher
-    // evaluating meanwhile does not take the same message as well.
-    this.phoneStartsInFlight.set(conversationId, (this.phoneStartsInFlight.get(conversationId) ?? 0) + 1);
-    void Promise.resolve(resolver(originId)).then((phone) => {
-      if (phone) return this.startPhoneTurns(conversationId, messages);
-      return undefined;
-    }).catch((error) => {
-      void this.debugLogs.write("chat.phone-turns.error", { conversationId, message: error instanceof Error ? error.message : String(error) });
-    }).finally(() => {
-      const left = (this.phoneStartsInFlight.get(conversationId) ?? 1) - 1;
-      if (left > 0) {
-        this.phoneStartsInFlight.set(conversationId, left);
-        return;
-      }
-      this.phoneStartsInFlight.delete(conversationId);
-      // A message whose turns all ended before registering (taken elsewhere,
-      // stopped) left no run whose end says the chat went idle.
-      this.scheduleQueuedMemberRemovals(conversationId);
-    });
-  }
-
-  /**
-   * Phone messages this device took in recently whose members living here
-   * were never started: the device stopped (a quit, a crash, an update)
-   * between taking a message in and claiming its turns, or this program is
-   * newer than the one that took it in. Their claims keep the ones that did
-   * start from starting again.
-   */
-  async resumePhoneTurns(sinceIso: string): Promise<void> {
-    const resolver = this.phoneOrigin;
-    if (!resolver) return;
-    const claims = this.storage.phoneTurnClaims();
-    const phones: string[] = [];
-    for (const originId of await claims.chatChangeOriginsSince(sinceIso)) {
-      if (await Promise.resolve(resolver(originId)).catch(() => false)) phones.push(originId);
-    }
-    if (phones.length === 0) return;
-    const byChat = new Map<string, ChatMessage[]>();
-    for (const row of await claims.chatChangesFrom(phones, sinceIso, 500)) {
-      try {
-        const envelope = JSON.parse(Buffer.from(row.envelopeHex, "hex").toString("utf8")) as ChatEventEnvelope;
-        const payload = await this.storage.deviceEventBlobs().hydrate(envelope.payload) as ChatChangesPayload;
-        for (const change of Array.isArray(payload?.changes) ? payload.changes : []) {
-          if (change.type !== "message.created" || change.message.role !== "user") continue;
-          byChat.set(envelope.conversationId, [...(byChat.get(envelope.conversationId) ?? []), change.message]);
-        }
-      } catch {
-        // An event this device cannot read back is not one it can start.
-      }
-    }
-    for (const [conversationId, messages] of byChat) {
-      await this.startPhoneTurns(conversationId, messages).catch((error) => {
-        void this.debugLogs.write("chat.phone-turns.error", { conversationId, message: error instanceof Error ? error.message : String(error) });
-      });
-    }
-  }
-
-  /** Whether this device starts this member's turns: the desktop starts its
-   *  own members (and prepares cloud ones), a machine the members it hosts. */
-  private startsPhoneTurnFor(participant: ChatParticipant): boolean {
-    const home = chatParticipantHome(participant);
-    return this.machineRuntime
-      ? Boolean(this.hostMachineId) && home.kind === "machine" && home.machineId === this.hostMachineId
-      : home.kind !== "machine";
-  }
-
-  /** The members a phone's message is for: the ones the phone resolved when
-   *  the User sent it (by the desktop's rules, from what the phone showed),
-   *  or, for a message that names none, the same rules here. */
-  private phoneMessageTargets(conversation: Conversation, message: ChatMessage): ChatParticipant[] {
-    const participants = this.chatParticipants(conversation);
-    const named = (message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets;
-    if (Array.isArray(named)) {
-      return named.flatMap((id) => {
-        const participant = typeof id === "string" ? participants.find((item) => item.id === id) : undefined;
-        return participant ? [participant] : [];
-      });
-    }
-    return this.resolveDispatchTargetsForContent(conversation, message.content, this.replyContextFromMessage(message)).targets;
-  }
-
-  /**
-   * The User wrote a message on her phone; it reached this device through the
-   * hub. The members it is for whose home is here start now, as they would for
-   * a message typed here; members that live elsewhere are started by their own
-   * home. Each turn is claimed under its run id before it starts (the same id
-   * on every device), so applying the message again — a redelivery, a
-   * restart — never runs a member twice, and a Stop that came first keeps it
-   * from starting.
-   */
-  async startPhoneTurns(conversationId: string, messages: ChatMessage[]): Promise<void> {
-    const presence = await this.storage.conversationPresence(conversationId);
-    if (!presence || presence.kind !== "chat") return;
-    // The chat's body names its members; the whole chat is read only when a
-    // member of this message lives here.
-    const opened = await this.storage.openConversation(conversationId, 1);
-    if (!opened || opened.conversation.metadata.archived === true) return;
-    let conversation: Conversation | undefined;
-    for (const message of messages) {
-      if (message.role !== "user") continue;
-      // Written before this device read the server: another home's.
-      if (this.phoneTurnsSince !== undefined && Date.parse(message.createdAt) < this.phoneTurnsSince - PHONE_TURN_CLOCK_SKEW_MS) continue;
-      const named = Array.isArray((message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets);
-      if (named) {
-        const here = this.phoneMessageTargets(opened.conversation, message).filter((participant) => this.startsPhoneTurnFor(participant));
-        if (here.length === 0) continue;
-        // Every turn here claimed already (the sweep finds most so): the
-        // whole chat is not read for them.
-        const claimed = await this.storage.phoneTurnClaims().claimedRunIds(here.map((participant) => phoneTurnRunId(message.id, participant.id)));
-        if (here.every((participant) => claimed.has(phoneTurnRunId(message.id, participant.id)))) continue;
-      }
-      conversation ??= await this.requireChat(conversationId);
-      const stored = conversation.messages.find((item) => item.id === message.id && item.role === "user");
-      if (!stored) continue;
-      const everyTarget = this.phoneMessageTargets(conversation, stored);
-      // What the desktop refuses to send it refuses here too, said once (by
-      // the home of the first member named) and nobody starts.
-      const goal = parseNativeGoalCommand(stored.content);
-      const refusal = goal.kind === "invalid" ? goal.error
-        : goal.kind === "valid" && everyTarget.length !== 1 ? "/goal requires exactly one resolved chat member." : undefined;
-      if (refusal) {
-        // Said by the first member's home, or by the desktop when it names none.
-        if (everyTarget[0] ? this.startsPhoneTurnFor(everyTarget[0]) : !this.machineRuntime) await this.notePhoneMessageRefused(conversation, stored, refusal);
-        continue;
-      }
-      const targets = everyTarget.filter((participant) => this.startsPhoneTurnFor(participant));
-      if (targets.length === 0) continue;
-      await this.startPhoneTurnsFor(conversation, stored, targets);
-    }
-  }
-
-  private async startPhoneTurnsFor(conversation: Conversation, message: ChatMessage, targets: ChatParticipant[]): Promise<void> {
-    const conversationId = conversation.id;
-    // A watcher member addressed directly has seen this message, as for a
-    // message typed here.
-    if (targets.some((participant) => participant.autoWatch === true)) {
-      await this.withChatMutation(conversation, async () => {
-        const before = JSON.stringify(conversation.metadata.participantWatchers ?? null);
-        this.advanceAutoWatchCursorForDirectTargets(conversation, targets, message);
-        if (JSON.stringify(conversation.metadata.participantWatchers ?? null) === before) return;
-        conversation.updatedAt = new Date().toISOString();
-        this.queueSnapshot(conversation);
-      });
-    }
-    const compact = this.compactCommand(message.content);
-    for (const participant of targets) {
-      const runId = phoneTurnRunId(message.id, participant.id);
-      if (this.pendingPhoneRuns.has(runId) || this.conversationIdForRun(runId)) continue;
-      // Its turn already shows in the chat (another home ran or stopped it,
-      // the member moved since): not again here.
-      if (this.phoneTurnShown(conversation, message, participant, runId)) continue;
-      const controller = new AbortController();
-      // Registered before anything is awaited, so a second start (the live
-      // one and a sweep) finds it, and a Stop arriving meanwhile stops the
-      // turn before it starts.
-      const pending: PendingPhoneRun = { conversationId, controller, started: false };
-      this.pendingPhoneRuns.set(runId, pending);
-      const release = (): void => {
-        if (this.pendingPhoneRuns.get(runId) !== pending) return;
-        this.pendingPhoneRuns.delete(runId);
-        // A turn that never registered left no run whose end says the chat
-        // went idle; an approved member removal may be waiting for exactly that.
-        if (!pending.registered) this.scheduleQueuedMemberRemovals(conversationId);
-      };
-      let outcome: Awaited<ReturnType<ReturnType<StorageService["phoneTurnClaims"]>["claim"]>>;
-      try {
-        outcome = await this.storage.phoneTurnClaims().claim({ runId, conversationId, messageId: message.id, participantId: participant.id, at: new Date().toISOString() });
-      } catch (error) {
-        // Not claimed: the next resume tries again. The other members go on.
-        release();
-        void this.debugLogs.write("chat.phone-turn.claim-error", { conversationId, runId, message: error instanceof Error ? error.message : String(error) });
-        continue;
-      }
-      if (outcome === "taken") {
-        release();
-        continue;
-      }
-      void this.debugLogs.write("chat.phone-turn", { conversationId, runId, participantId: participant.id, outcome });
-      if (outcome === "cancelled" || controller.signal.aborted) {
-        release();
-        await this.notePhoneTurnStoppedBeforeStart(conversation, message, participant);
-        continue;
-      }
-      const warnings: string[] = [];
-      pending.started = true;
-      const started = (async () => {
-        const settings = await this.settings.getPublicSettings();
-        // What a message typed here checks before it starts a member.
-        this.assertParticipantProvidersEnabled([participant], settings.providers ?? []);
-        if (compact && compact.handle.toLowerCase() === participant.handle.toLowerCase()) {
-          await this.compactParticipant({
-            conversationId, participantId: participant.id, handle: participant.handle, instructions: compact.instructions, triggeredBy: "user", runId,
-            threadId: message.metadata?.threadId ?? message.id, parentMessageId: message.id, chatThreadRootId: message.metadata?.chatThreadRootId
-          }, controller.signal, this.onReviewProgress);
-          return;
-        }
-        await this.runParticipantBatch(conversation, [participant], message, runId, controller.signal, this.onReviewProgress, warnings, {
-          targetRunIds: new Map([[participant.id, runId]])
-        });
-      })();
-      void started.catch(async (error) => {
-        const reason = error instanceof Error ? error.message : String(error);
-        void this.debugLogs.write("chat.phone-turn.error", { conversationId, runId, message: reason });
-        // Said in the chat, where the User sees it on her phone too.
-        warnings.push(`@${participant.handle} could not start for your message: ${reason}`);
-      }).finally(async () => {
-        release();
-        if (warnings.length > 0) await this.appendConversationWarnings(conversation, warnings).catch(() => undefined);
-      });
-    }
-  }
-
-  /** A phone's message the desktop would not have sent: the reason, under
-   *  it, once (a claim keeps a redelivery from saying it again). */
-  private async notePhoneMessageRefused(conversation: Conversation, message: ChatMessage, reason: string): Promise<void> {
-    const outcome = await this.storage.phoneTurnClaims().claim({ runId: `phone-refused-${message.id}`, conversationId: conversation.id, messageId: message.id,
-      participantId: "", at: new Date().toISOString() });
-    if (outcome !== "claimed") return;
-    await this.withChatMutation(conversation, async () => {
-      conversation.messages.push(this.message("system", reason, undefined, {
-        threadId: message.metadata?.threadId ?? message.id,
-        parentMessageId: message.id,
-        chatThreadRootId: message.metadata?.chatThreadRootId
-      }));
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
-    });
-  }
-
-  private phoneTurnShown(conversation: Conversation, message: ChatMessage, participant: ChatParticipant, runId: string): boolean {
+  /** Whether a member's turn for a message already shows in the chat (its
+   *  bubble, or the line saying it was stopped). */
+  private turnShown(conversation: Conversation, message: ChatMessage, participant: ChatParticipant, runId: string): boolean {
     const stopped = `@${participant.handle} stopped by user.`;
     return conversation.messages.some((item) => item.metadata?.runId === runId ||
       (item.role === "system" && item.content === stopped && item.metadata?.parentMessageId === message.id));
   }
 
-  /** A member stopped before its turn for a phone's message started: the
-   *  line a member stopped while queued gets. */
-  private async notePhoneTurnStoppedBeforeStart(conversation: Conversation, message: ChatMessage, participant: ChatParticipant): Promise<void> {
+  /** A member stopped before its turn started (on the server, from any
+   *  device): the line a member stopped while queued gets. */
+  private async noteTurnStoppedBeforeStart(conversation: Conversation, message: ChatMessage, participant: ChatParticipant): Promise<void> {
     await this.withChatMutation(conversation, async () => {
       conversation.messages.push(this.message("system", `@${participant.handle} stopped by user.`, undefined, {
         threadId: message.metadata?.threadId ?? message.id,
@@ -22206,152 +21730,6 @@ export class ChatService {
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
     });
-  }
-
-  /** A Stop for a phone's turn that is not running here. True when this
-   *  device is that member's home: the turn is then recorded as stopped and
-   *  never starts (or was stopped while starting). */
-  async stopUnstartedPhoneRun(conversationId: string, runId: string): Promise<boolean> {
-    const parsed = parsePhoneTurnRunId(runId);
-    if (!parsed) return false;
-    const pending = this.pendingPhoneRuns.get(runId);
-    if (pending) {
-      // Still being claimed: it never starts. Started: a Stop like any other.
-      if (pending.started) return false;
-      pending.controller.abort();
-      return true;
-    }
-    // The chat's newest messages: a turn the Stop names is a recent one.
-    const opened = await this.storage.openConversation(conversationId, PHONE_TURN_STOP_WINDOW);
-    if (!opened || opened.conversation.kind !== "chat") return false;
-    const participant = this.chatParticipants(opened.conversation).find((item) => item.id === parsed.participantId);
-    if (!participant || !this.startsPhoneTurnFor(participant)) return false;
-    // It ran already (on the member's earlier home): not stopped here.
-    if (opened.conversation.messages.some((item) => item.metadata?.runId === runId)) return false;
-    const cancelled = await this.storage.phoneTurnClaims().cancelUnstarted({
-      runId, conversationId, messageId: parsed.messageId, participantId: participant.id, at: new Date().toISOString()
-    });
-    // Claimed before: it ran (or runs, and the ordinary Stop reaches it).
-    if (!cancelled) return false;
-    // The message is here already but the start had not decided yet: it reads
-    // the cancelled claim and writes the stopped line itself.
-    return true;
-  }
-
-  /** Whether a run named in a Stop is a phone turn whose member lives here;
-   *  undefined while this copy of the chat does not know the member yet (the
-   *  Stop waits for it rather than being lost). */
-  async ownsPhoneRun(conversationId: string, runId: string): Promise<boolean | undefined> {
-    const parsed = parsePhoneTurnRunId(runId);
-    if (!parsed) return false;
-    if (this.pendingPhoneRuns.has(runId)) return true;
-    // The chat's body names its members: no need to read every message.
-    const opened = await this.storage.openConversation(conversationId, 1);
-    if (!opened || opened.conversation.kind !== "chat") return false;
-    const participant = this.chatParticipants(opened.conversation).find((item) => item.id === parsed.participantId);
-    if (!participant) return undefined;
-    return this.startsPhoneTurnFor(participant);
-  }
-
-  /**
-   * One chat of the User's server's copy, for a device that starts again
-   * from it (events it needed were forgotten while it was away, or a chain
-   * of this chat's changes was): merged the way a machine merges its first
-   * copy. The copy's shared content wins; this device keeps its own run
-   * bookkeeping, sessions and what it wrote itself. Saved without being
-   * announced (it is nobody's new change), and a chat deleted here stays
-   * deleted.
-   */
-  async mergeServerCopy(copied: CopiedConversation, options: {
-    desktopOriginId: string;
-    localOriginId?: string;
-    /** The desktop: the device a chat's own fields (title, members and their
-     *  permissions, the project) come from. From the copy it takes only the
-     *  messages it does not have yet, into chats it has, never those fields:
-     *  its own changes the server has not folded yet would be rolled back. */
-    ownsSharedFields?: boolean;
-  }): Promise<void> {
-    if (this.deletedConversationIds.has(copied.id) || await this.storage.conversationTombstones?.().isDeleted(copied.id)) return;
-    const merge = (local: Conversation | undefined): Conversation => mergeCopiedConversation(local, copied, {
-      desktopOriginId: options.desktopOriginId,
-      ...(options.localOriginId ? { localOriginId: options.localOriginId } : {}),
-      ...(this.hostMachineId ? { hostMachineId: this.hostMachineId } : {})
-    });
-    const existing = await this.storage.getConversation(copied.id);
-    if (existing && existing.kind !== "chat") return;
-    const held = new Set((existing?.messages ?? []).map((message) => message.id));
-    // A phone's messages this copy brings (they reached the server while this
-    // device could not read them) start their members here as if read in
-    // order; the same guards keep an old or already-run turn from starting.
-    const startPhoneMessagesFrom = (conversation: Conversation): void => {
-      const byOrigin = new Map<string, string[]>();
-      for (const message of conversation.messages) {
-        const author = copied.authors?.[message.id];
-        if (message.role !== "user" || held.has(message.id) || !author) continue;
-        byOrigin.set(author, [...(byOrigin.get(author) ?? []), message.id]);
-      }
-      for (const [author, ids] of byOrigin) {
-        const changes = conversation.messages.filter((message) => ids.includes(message.id)).map((message) => ({ type: "message.created" as const, message }));
-        this.notePhoneMessages(author, conversation.id, { version: CHAT_CHANGES_VERSION, conversationId: conversation.id, updatedAt: conversation.updatedAt, changes }, new Set(ids));
-      }
-    };
-    if (!existing) {
-      if (options.ownsSharedFields) return;
-      const created = merge(undefined);
-      await this.saveConversation(created, { emitChanges: false });
-      startPhoneMessagesFrom(created);
-      return;
-    }
-    const dropped: ChatParticipant[] = [];
-    await this.withChatMutation(existing, async () => {
-      if (options.ownsSharedFields) {
-        // Messages it lacks, and the copy's version of those another device
-        // wrote (a machine member's finished reply); its own stay as they are.
-        const merged = new Map(merge(existing).messages.map((message) => [message.id, message]));
-        const theirs = (id: string): boolean => {
-          const author = copied.authors?.[id];
-          return Boolean(author) && author !== options.localOriginId && author !== options.desktopOriginId;
-        };
-        let changed = false;
-        const messages = existing.messages.map((message) => {
-          const incoming = merged.get(message.id);
-          if (!incoming || !theirs(message.id) || JSON.stringify(incoming) === JSON.stringify(message)) return message;
-          changed = true;
-          return incoming;
-        });
-        const known = new Set(existing.messages.map((message) => message.id));
-        const added = [...merged.values()].filter((message) => !known.has(message.id));
-        if (!changed && added.length === 0) return;
-        existing.messages = [...messages, ...added]
-          .map((message, index) => ({ message, index }))
-          .sort((left, right) => left.message.createdAt.localeCompare(right.message.createdAt) || left.index - right.index)
-          .map((entry) => entry.message);
-        await this.saveConversation(existing, { emitChanges: false });
-        startPhoneMessagesFrom(existing);
-        return;
-      }
-      const merged = merge(existing);
-      // A copy without a member list (an older server's) says nothing about
-      // who left: no member's process is ended for it.
-      const droppedHere = Array.isArray(copied.shared?.metadata?.participants)
-        ? this.membersDroppedFrom(existing, merged)
-        : [];
-      existing.title = merged.title;
-      existing.messages = merged.messages;
-      existing.metadata = merged.metadata;
-      // The desktop's word on roster changes this machine's members asked for.
-      this.settleRosterChangesFromDesktop(existing, () => existing.messages.filter((message) =>
-        (message.metadata as { remoteAuthorOriginId?: string } | undefined)?.remoteAuthorOriginId === options.desktopOriginId));
-      existing.updatedAt = merged.updatedAt;
-      if (merged.repoPath) existing.repoPath = merged.repoPath;
-      else delete existing.repoPath;
-      await this.saveConversation(existing, { emitChanges: false });
-      dropped.push(...droppedHere);
-      startPhoneMessagesFrom(existing);
-    });
-    // A member this host runs that the copied member list no longer has ends
-    // its process here, as on a chat change (applyRemoteChatChanges).
-    this.retireRemovedMembers(copied.id, dropped);
   }
 
   private clone(conversation: Conversation): Conversation {
@@ -22669,10 +22047,8 @@ export class ChatService {
 }
 
 /** How far a phone's clock may be off from this device's. */
-const PHONE_TURN_CLOCK_SKEW_MS = 10 * 60_000;
 /** The newest messages a Stop for a phone turn not running here is checked
  *  against. */
-const PHONE_TURN_STOP_WINDOW = 200;
 
 function mobileEventIdFromChatTrigger(triggerMessage: ChatMessage): string | undefined {
   if (triggerMessage.metadata?.appMessageSource !== "mobile-relay") {

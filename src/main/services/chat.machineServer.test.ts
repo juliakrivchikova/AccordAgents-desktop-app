@@ -10,10 +10,9 @@ import { isMachineSettingsDocument, type MachineSettingsDocument, type MachineSe
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import type { ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
 import { HubOps } from "../../hub/hubOps";
-import { HubLog } from "../../hub/hubLog";
 import { HubServer } from "../../hub/hubServer";
 import { ChatService } from "./chat";
-import { ChatEventLogService } from "./chatEventLog";
+import { DeviceIdentityService } from "./deviceIdentity";
 import { ChatSearchService } from "./chatSearch";
 import { HubClient } from "./hubClient";
 import { signHubRequest, type HubSigningIdentity } from "./hubAuth";
@@ -80,11 +79,11 @@ async function setup(t: test.TestContext) {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-server-"));
   // The computer: its identity owns the server.
   const desktopStorage = new StorageService({ dbPath: path.join(dir, "desktop.sqlite3") });
-  const desktopEvents = new ChatEventLogService(desktopStorage);
+  const desktopEvents = new DeviceIdentityService(desktopStorage);
   const desktopIdentity = await desktopEvents.getOrCreateDeviceIdentity();
   // The machine: its own storage and identity.
   const machineStorage = new StorageService({ dbPath: path.join(dir, "machine.sqlite3") });
-  const machineEvents = new ChatEventLogService(machineStorage);
+  const machineEvents = new DeviceIdentityService(machineStorage);
   const machineIdentity = await machineEvents.getOrCreateDeviceIdentity();
   // The server, with the machine on its roster as the desktop's machine "box".
   const hubStorage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3") });
@@ -93,7 +92,7 @@ async function setup(t: test.TestContext) {
   await hubStorage.hub().replaceRoster([{ deviceId: machineIdentity.originId, publicKeyDerBase64: machineIdentity.publicKeyDerBase64, role: "machine", name: "Box",
     machineId: "box", addedAt: "" }], new Date().toISOString());
   const ops = new HubOps(hubStorage, (event, payload) => trace("hub", event, payload));
-  const hubServer = new HubServer({ hubId: "hub-test", version: "test", storage: hubStorage, log: new HubLog(hubStorage), search: new ChatSearchService(hubStorage), vapidPublicKey: "BPUB", ops });
+  const hubServer = new HubServer({ hubId: "hub-test", version: "test", storage: hubStorage, search: new ChatSearchService(hubStorage), vapidPublicKey: "BPUB", ops });
   const http = await hubServer.listenHttp(0, "127.0.0.1");
   const hubUrl = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 
@@ -112,8 +111,8 @@ async function setup(t: test.TestContext) {
     movesChats: true,
     log: (event, payload) => trace("desktop", event, payload)
   });
-  const machineHub = new HubClient({ url: hubUrl, identity: () => machineEvents.getOrCreateDeviceIdentity(), storage: machineStorage });
-  const desktopHub = new HubClient({ url: hubUrl, identity: () => desktopEvents.getOrCreateDeviceIdentity(), storage: desktopStorage });
+  const machineHub = new HubClient({ url: hubUrl, identity: () => machineEvents.getOrCreateDeviceIdentity() });
+  const desktopHub = new HubClient({ url: hubUrl, identity: () => desktopEvents.getOrCreateDeviceIdentity() });
   const machineLink = new ServerChatLink({
     storage: machineStorage, chat: machineChat,
     identity: () => machineEvents.getOrCreateDeviceIdentity(),
@@ -139,7 +138,7 @@ async function setup(t: test.TestContext) {
     async getMachinePairing() { return pairing as never; },
     async exportMachineSettingsSnapshot() { return snapshot; }
   } as never, { async write() { return undefined; } }, {
-    appVersion: "test", desktopDeviceId: desktopIdentity.originId, eventLog: desktopEvents,
+    appVersion: "test", desktopDeviceId: desktopIdentity.originId, deviceIdentity: desktopEvents,
     publishSettings: async (machineId, sealed) => { await desktopHub.putMachineSettings({ machineId, sealed }); },
     machineProjects: async () => ({ "/Users/me/project": "/home/box/project" })
   });
@@ -310,7 +309,7 @@ test("the machine applies the settings the computer published before it runs a m
   // A setting saved on the computer: told to the machine live, and in any
   // case read before its member's next turn.
   const frames: string[] = [];
-  const stopLive = h.machineHub.live(() => undefined, undefined, (frame) => frames.push(frame.type));
+  const stopLive = h.machineHub.live(undefined, (frame) => frames.push(frame.type));
   t.after(() => stopLive());
   await new Promise((resolve) => setTimeout(resolve, 300));
   h.setSnapshot({ version: 1, exportedAt: new Date().toISOString(), settingsJson: JSON.stringify({ marker: "second" }), agentEnvironment: [{ key: "TOKEN", value: "two" }] });
@@ -333,8 +332,8 @@ test("the machine applies the settings the computer published before it runs a m
 
 test("a machine the server's roster does not name is told so, and a removed machine reads nothing more", async (t) => {
   const h = await linked(t, localChat("chat-e"));
-  const stranger = new ChatEventLogService(new StorageService({ dbPath: path.join(tmpdir(), `stranger-${process.pid}-${Date.now()}.sqlite3`) }));
-  const strangerHub = new HubClient({ url: (h.machineHub as unknown as { base: string }).base, identity: () => stranger.getOrCreateDeviceIdentity(), storage: h.machineStorage });
+  const stranger = new DeviceIdentityService(new StorageService({ dbPath: path.join(tmpdir(), `stranger-${process.pid}-${Date.now()}.sqlite3`) }));
+  const strangerHub = new HubClient({ url: (h.machineHub as unknown as { base: string }).base, identity: () => stranger.getOrCreateDeviceIdentity() });
   await assert.rejects(strangerHub.me(), /not on the hub's roster/);
   await assert.rejects(strangerHub.machineSettings(), /not on the hub's roster/);
   // The computer cannot read a machine's settings, and a machine cannot put any.

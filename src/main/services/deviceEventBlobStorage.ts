@@ -1,10 +1,8 @@
 import { createHash } from "node:crypto";
-import { BLOB_FRAGMENT_MAX_BYTES } from "../../shared/machineEvents";
-import {
-  DEVICE_EVENT_INLINE_BYTES, fragmentByteLength, isDeviceEventBlobReference,
-  type DeviceEventBlobFragment, type DeviceEventBlobReference
-} from "../../shared/deviceEventBlobs";
+import { fragmentByteLength, type DeviceEventBlobFragment, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 
+/** The User's server keeps these: pictures a phone sends and the avatars the
+ *  composer's catalog names, by their content. No other device keeps bodies. */
 export const DEVICE_EVENT_BLOB_SCHEMA_SQL = `
   create table if not exists device_event_blobs (
     blob_hash text primary key,
@@ -19,19 +17,9 @@ export const DEVICE_EVENT_BLOB_SCHEMA_SQL = `
     bytes blob not null,
     primary key(blob_hash, fragment_index)
   );
-  -- Finding bodies no event refers to any more, a few thousand events at a
-  -- time: one look at every event of a large store at once would hold the
-  -- database for a minute.
-  create table if not exists device_event_blob_gc (
-    key text primary key,
-    value text not null
-  );
-  create table if not exists device_event_blob_gc_refs (
-    blob_hash text primary key
-  );
-  -- Bodies kept for what is not an event's payload: a picture a message
-  -- names, an avatar the composer's catalog names (no expiry), or a body a
-  -- phone put up before the event naming it arrived (until it expires).
+  -- Why each body is kept: a picture a message names, an avatar the
+  -- composer's catalog names (no expiry), or a body put up before the
+  -- message naming it arrived (until it expires). A body nothing keeps goes.
   create table if not exists device_event_blob_pins (
     blob_hash text not null,
     reason text not null,
@@ -40,19 +28,7 @@ export const DEVICE_EVENT_BLOB_SCHEMA_SQL = `
   );
 `;
 
-/** One pass of the search for unreferenced bodies, as it is kept between runs. */
-interface BlobGcPass {
-  startedAt: number;
-  /** Events up to here are looked at by the pass; later ones at its end. */
-  endRowid: number;
-  cursor: number;
-  /** Bodies up to here existed when the pass began: only they may go. */
-  blobRowid: number;
-}
-
-/** A blob reference is a short payload: longer ones are never looked into. */
-const BLOB_REFERENCE_PAYLOAD_MAX = 512;
-/** Unreferenced bodies deleted per transaction. */
+/** Bodies nothing keeps deleted per transaction. */
 const ORPHANS_PER_TRANSACTION = 25;
 
 interface Database {
@@ -61,30 +37,26 @@ interface Database {
   execute(sql: string): Promise<void>;
 }
 
-export class DeviceEventBlobIncompleteError extends Error {
-  constructor() { super("Device event body is incomplete."); }
-}
-
-/** Local content-addressed storage. A body can exceed relay/mailbox limits;
- * every SQLite input and transport fragment remains bounded to 384 KiB raw.
- * Stored fragments are immutable, and only a fully hash-verified blob hydrates. */
+/** The server's content-addressed bodies. Every SQLite input and transport
+ * fragment stays bounded to 384 KiB raw; stored fragments are immutable, and
+ * a body counts as there only once its whole content matches its name. */
 export class DeviceEventBlobStorage {
+  private ready?: Promise<void>;
+
   constructor(private readonly database: Database) {}
 
-  async prepare(payload: unknown): Promise<unknown | DeviceEventBlobReference> {
-    const json = JSON.stringify(payload);
-    if (json === undefined) throw new Error("A device event requires a JSON payload.");
-    const bytes = Buffer.from(json, "utf8");
-    if (bytes.byteLength <= DEVICE_EVENT_INLINE_BYTES && !isDeviceEventBlobReference(payload)) return JSON.parse(json) as unknown;
-    const reference: DeviceEventBlobReference = {
-      type: "device.event.blob", blobHash: hash(bytes), byteLength: bytes.byteLength,
-      fragments: Math.ceil(bytes.byteLength / BLOB_FRAGMENT_MAX_BYTES)
-    };
-    for (let index = 0; index < reference.fragments; index += 1) {
-      await this.store({ reference, index, bytesBase64: bytes.subarray(index * BLOB_FRAGMENT_MAX_BYTES, (index + 1) * BLOB_FRAGMENT_MAX_BYTES).toString("base64") });
+  /** Made on first use: only the User's server keeps bodies. */
+  private async init(): Promise<void> {
+    this.ready ??= (async () => {
+      await this.database.init();
+      await this.database.execute(DEVICE_EVENT_BLOB_SCHEMA_SQL);
+    })();
+    try {
+      await this.ready;
+    } catch (error) {
+      this.ready = undefined;
+      throw error;
     }
-    if (!await this.verify(reference)) throw new Error("The prepared device event blob is incomplete.");
-    return reference;
   }
 
   async store(fragment: DeviceEventBlobFragment): Promise<void> {
@@ -99,7 +71,7 @@ export class DeviceEventBlobStorage {
     if (bytes.byteLength !== expected || bytes.toString("base64") !== bytesBase64) {
       throw new Error("Invalid device event fragment bytes.");
     }
-    await this.database.init();
+    await this.init();
     await this.database.execute(`
       pragma synchronous = full; pragma fullfsync = on;
       begin immediate;
@@ -115,9 +87,21 @@ export class DeviceEventBlobStorage {
     `);
   }
 
+  /** A body still being uploaded gets this fragment, replacing a different
+   *  one (a complete, verified body is never touched: see the server's PUT). */
+  async replaceFragment(reference: DeviceEventBlobReference, index: number): Promise<void> {
+    await this.init();
+    await this.database.execute(`
+      begin immediate;
+      delete from device_event_blob_fragments where blob_hash = ${quote(reference.blobHash)} and fragment_index = ${Math.floor(index)};
+      update device_event_blobs set byte_length = ${Math.floor(reference.byteLength)}, fragments = ${Math.floor(reference.fragments)} where blob_hash = ${quote(reference.blobHash)};
+      commit;
+    `);
+  }
+
   async fragment(reference: DeviceEventBlobReference, index: number): Promise<DeviceEventBlobFragment | undefined> {
     fragmentByteLength(reference, index);
-    await this.database.init();
+    await this.init();
     const rows = await this.database.query<{ hex: string; fragmentHash: string }>(`
       select hex(f.bytes) as hex, f.fragment_hash as fragmentHash
       from device_event_blob_fragments f join device_event_blobs b on b.blob_hash = f.blob_hash
@@ -146,7 +130,7 @@ export class DeviceEventBlobStorage {
 
   private async complete(reference: DeviceEventBlobReference): Promise<boolean> {
     fragmentByteLength(reference, 0);
-    await this.database.init();
+    await this.init();
     const rows = await this.database.query<{ total: number; bytes: number }>(`
       select count(*) as total, coalesce(sum(length(f.bytes)), 0) as bytes
       from device_event_blob_fragments f join device_event_blobs b on b.blob_hash = f.blob_hash
@@ -163,93 +147,47 @@ export class DeviceEventBlobStorage {
   }
 
   /**
-   * Looks for bodies no stored event refers to, a bounded stretch of events
-   * per call, and deletes them once a whole pass found no reference: a body
-   * fetched for an event this device never kept, or one whose event was
-   * forgotten without it. A body that appeared after the pass began, or
-   * whose pass is younger than `graceMs` (an upload still waiting for its
-   * event), stays. Running it again is harmless.
+   * Deletes the bodies no pin keeps (or whose pins expired), a few per
+   * transaction, then the expired pins. A body is pinned before its first
+   * fragment is stored (PUT /v1/blobs), so an upload in progress is never
+   * taken. Running it again is harmless.
    */
-  async collectOrphans(options: { now: number; graceMs: number; scanRows: number }): Promise<{ scanned: number; deleted: number; bytes: number; swept: boolean }> {
-    await this.database.init();
-    const read = async (): Promise<BlobGcPass | undefined> => {
-      const rows = await this.database.query<{ value: string }>(`select value from device_event_blob_gc where key = 'pass';`);
-      try { return rows[0] ? JSON.parse(rows[0].value) as BlobGcPass : undefined; } catch { return undefined; }
-    };
-    const save = (pass: BlobGcPass): Promise<void> => this.database.execute(`
-      insert into device_event_blob_gc(key, value) values ('pass', ${quote(JSON.stringify(pass))})
-      on conflict(key) do update set value = excluded.value;`);
-    let pass = await read();
-    if (!pass) {
-      const [counts] = await this.database.query<{ blobs: number; blobRowid: number | null; endRowid: number | null }>(`
-        select (select count(*) from device_event_blobs) as blobs, (select max(rowid) from device_event_blobs) as blobRowid,
-          (select max(rowid) from chat_events) as endRowid;`);
-      if (!counts || Number(counts.blobs) === 0) return { scanned: 0, deleted: 0, bytes: 0, swept: false };
-      pass = { startedAt: options.now, endRowid: Number(counts.endRowid ?? 0) || 0, cursor: 0, blobRowid: Number(counts.blobRowid ?? 0) || 0 };
-      await this.database.execute(`delete from device_event_blob_gc_refs;`);
-      await save(pass);
-    }
-    const length = await this.byteLengthFunction();
-    // Pinned bodies count as referred to while the pin stands.
-    const pinned = `
-      insert or ignore into device_event_blob_gc_refs(blob_hash)
-        select blob_hash from device_event_blob_pins where expires_at is null or expires_at > ${Math.floor(options.now)};`;
-    const references = (from: number, to?: number) => `
-      ${pinned}
-      insert or ignore into device_event_blob_gc_refs(blob_hash)
-        select json_extract(payload_json, '$.blobHash') from chat_events
-        where rowid > ${Math.floor(from)} ${to === undefined ? "" : `and rowid <= ${Math.floor(to)}`}
-          and ${length}(payload_json) < ${BLOB_REFERENCE_PAYLOAD_MAX} and instr(payload_json, ${quote(`"device.event.blob"`)}) > 0
-          and json_valid(payload_json) and json_extract(payload_json, '$.blobHash') is not null;`;
-    if (pass.cursor < pass.endRowid) {
-      const to = Math.min(pass.endRowid, pass.cursor + Math.max(1, Math.floor(options.scanRows)));
-      await this.database.execute(references(pass.cursor, to));
-      const scanned = to - pass.cursor;
-      pass = { ...pass, cursor: to };
-      await save(pass);
-      if (pass.cursor < pass.endRowid) return { scanned, deleted: 0, bytes: 0, swept: false };
-    }
-    if (options.now - pass.startedAt < options.graceMs) return { scanned: 0, deleted: 0, bytes: 0, swept: false };
-    // The bodies nothing refers to go a few at a time, each batch in one
-    // transaction with a look at the events written since the last one (a
-    // body may have been referred to again meanwhile: bodies are shared by
-    // content).
-    let lastLook = pass.endRowid;
+  async collectOrphans(options: { now: number }): Promise<{ deleted: number; bytes: number }> {
+    await this.init();
+    const now = Math.floor(options.now);
     let deleted = 0;
     let bytes = 0;
     for (;;) {
-      const [result] = await this.database.query<{ deleted: number; bytes: number | null; seen: number | null }>(`
+      const [result] = await this.database.query<{ deleted: number; bytes: number | null }>(`
         pragma synchronous = full; pragma fullfsync = on;
         begin immediate;
-        ${references(lastLook)}
         create temp table if not exists blob_gc_orphans(blob_hash text primary key, byte_length integer);
         delete from temp.blob_gc_orphans;
         insert into temp.blob_gc_orphans(blob_hash, byte_length)
-          select blob_hash, byte_length from device_event_blobs
-          where rowid <= ${Math.floor(pass.blobRowid)} and blob_hash not in (select blob_hash from device_event_blob_gc_refs)
+          select b.blob_hash, b.byte_length from device_event_blobs b
+          where not exists (select 1 from device_event_blob_pins p
+            where p.blob_hash = b.blob_hash and (p.expires_at is null or p.expires_at > ${now}))
           limit ${ORPHANS_PER_TRANSACTION};
         delete from device_event_blob_fragments where blob_hash in (select blob_hash from temp.blob_gc_orphans);
         delete from device_event_blobs where blob_hash in (select blob_hash from temp.blob_gc_orphans);
-        select count(*) as deleted, sum(byte_length) as bytes, (select max(rowid) from chat_events) as seen from temp.blob_gc_orphans;
+        select count(*) as deleted, sum(byte_length) as bytes from temp.blob_gc_orphans;
         delete from temp.blob_gc_orphans;
         commit;
       `);
       deleted += Number(result?.deleted ?? 0) || 0;
       bytes += Number(result?.bytes ?? 0) || 0;
-      lastLook = Math.max(lastLook, Number(result?.seen ?? 0) || 0);
       if ((Number(result?.deleted ?? 0) || 0) < ORPHANS_PER_TRANSACTION) break;
       await new Promise((resolve) => setImmediate(resolve));
     }
-    await this.database.execute(`delete from device_event_blob_gc where key = 'pass'; delete from device_event_blob_gc_refs;
-      delete from device_event_blob_pins where expires_at is not null and expires_at <= ${Math.floor(options.now)};`);
-    return { scanned: 0, deleted, bytes, swept: true };
+    await this.database.execute(`delete from device_event_blob_pins where expires_at is not null and expires_at <= ${now};`);
+    return { deleted, bytes };
   }
 
   /** Keeps these bodies for `reason` (forever, or until `expiresAt`). */
   async pin(blobHashes: string[], reason: string, expiresAt?: number): Promise<void> {
     const hashes = [...new Set(blobHashes)].filter((hash) => /^sha256:[0-9a-f]{64}$/.test(hash) || /^[0-9a-f]{64}$/.test(hash));
     if (hashes.length === 0) return;
-    await this.database.init();
+    await this.init();
     await this.database.execute(`
       insert into device_event_blob_pins(blob_hash, reason, expires_at) values ${hashes.map((hash) => `(${quote(hash)}, ${quote(reason)}, ${expiresAt === undefined ? "null" : Math.floor(expiresAt)})`).join(", ")}
       on conflict(blob_hash, reason) do update set expires_at = case
@@ -260,39 +198,12 @@ export class DeviceEventBlobStorage {
 
   /** Lets go of every body pinned for `reason` but these. */
   async pinOnly(blobHashes: string[], reason: string): Promise<void> {
-    await this.database.init();
+    await this.init();
     const keep = [...new Set(blobHashes)];
     await this.database.execute(`
       delete from device_event_blob_pins where reason = ${quote(reason)}${keep.length ? ` and blob_hash not in (${keep.map(quote).join(", ")})` : ""};
     `);
     await this.pin(keep, reason);
-  }
-
-  private byteLength?: Promise<string>;
-
-  /** octet_length reads a value's size without reading the value (sqlite
-   *  3.43 and later); older ones measure the text. */
-  private byteLengthFunction(): Promise<string> {
-    this.byteLength ??= this.database.query<{ n: number }>(`select octet_length('x') as n;`)
-      .then(() => "octet_length", () => "length");
-    return this.byteLength;
-  }
-
-  async hydrate(payload: unknown): Promise<unknown> {
-    if (!isDeviceEventBlobReference(payload)) return payload;
-    // Verify from stored bytes, not just a flag left by a previous process.
-    if (!await this.complete(payload)) throw new DeviceEventBlobIncompleteError();
-    const parts: Buffer[] = [];
-    const digest = createHash("sha256");
-    for (let index = 0; index < payload.fragments; index += 1) {
-      const fragment = await this.fragment(payload, index);
-      if (!fragment) throw new Error("Device event body lost a stored fragment.");
-      const bytes = Buffer.from(fragment.bytesBase64, "base64");
-      parts.push(bytes);
-      digest.update(bytes);
-    }
-    await this.confirmHash(payload, digest.digest("hex"));
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(parts)));
   }
 }
 

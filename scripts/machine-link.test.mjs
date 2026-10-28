@@ -19,7 +19,7 @@ const { MachineHostService } = await import("../dist/main/main/services/machineH
 const { isMachineLinkEnvelope, isMachineSettingsDocument, MACHINE_LINK_PROTOCOL, MACHINE_ATTACHMENT_PART_BYTES } = await import("../dist/main/shared/machineLink.js");
 const { sealMachinePayload, openChannelPayload } = await import("../dist/main/main/services/machineChannelSealing.js");
 const { deriveMachineChannelKey } = await import("../dist/main/shared/machineChannelKey.js");
-const { createChatEventDeviceIdentity } = await import("../dist/main/main/services/chatEventLog.js");
+const { createDeviceIdentity } = await import("../dist/main/main/services/deviceIdentity.js");
 const { HUB_ROOM_MAX_MESSAGE_BYTES } = await import("../dist/main/shared/hubProtocol.js");
 
 const snapshotOf = (marker, token = "secret-token") => ({ version: 1, exportedAt: new Date().toISOString(),
@@ -78,7 +78,7 @@ test("the desktop answers a picture request in bounded parts, for any chat it ho
   const record = { id: "machine-1", name: "Box", deviceId: "", pairingKey: "rv-att", createdAt: new Date().toISOString() };
   const reads = [];
   const link = new MachineLinkService(machineSettings([record], []), { write: async () => undefined }, {
-    appVersion: "test", desktopDeviceId: DESKTOP_ID, eventLog: desktopEvents.eventLog,
+    appVersion: "test", desktopDeviceId: DESKTOP_ID, deviceIdentity: desktopEvents.deviceIdentity,
     readChatAttachment: async (request) => { reads.push(request); return { attachment: { mimeType: "image/png", filename: "shot.png" }, dataBase64: picture.toString("base64") }; } });
   const chats = new Map([
     ["chat-on-box", { id: "chat-on-box", kind: "chat", messages: [], metadata: { participants: [{ id: "p1", handle: "bot", homeMachineId: "machine-1" }] } }],
@@ -125,7 +125,7 @@ test("through the server's room the desktop and its machine greet each other, an
   const logs = [];
   const picture = Buffer.alloc(MACHINE_ATTACHMENT_PART_BYTES + 99, 3);
   const link = new MachineLinkService(machineSettings([record], [pairing]), { write: async (event, payload) => { logs.push({ event, payload }); } }, {
-    appVersion: "desktop-v", desktopDeviceId: desktop.deviceId, eventLog: desktop.eventLog, createClient: desktopRoomClient(desktop),
+    appVersion: "desktop-v", desktopDeviceId: desktop.deviceId, deviceIdentity: desktop.deviceIdentity, createClient: desktopRoomClient(desktop),
     readChatAttachment: async () => ({ attachment: { mimeType: "image/png", filename: "p.png" }, dataBase64: picture.toString("base64") }) });
   link.setConversationLoader(async (id) => (id === "chat-1" ? { id, kind: "chat", messages: [], metadata: {} } : undefined));
   world.defer(() => link.close());
@@ -145,7 +145,7 @@ test("through the server's room the desktop and its machine greet each other, an
     localBackgroundTasks: () => []
   }, { write: async () => undefined }, {
     pairing, deviceId: machine.deviceId, appVersion: "machine-v", publicKeyDerBase64: machine.publicKeyDerBase64,
-    identity: () => machine.eventLog.getOrCreateDeviceIdentity(), createClient: machineRoomClient(machine, world.hubUrl), storage: machine.eventStorage,
+    identity: () => machine.deviceIdentity.getOrCreateDeviceIdentity(), createClient: machineRoomClient(machine, world.hubUrl), storage: machine.eventStorage,
     onDesktopMachineName: (name) => names.push(name),
     scripts: { handle: async (operation) => { handled.push(operation.op); return [{ id: "s1" }]; }, keepsHostAwake: () => false, scheduledCount: () => 0 }
   });
@@ -217,7 +217,7 @@ test("through the server's room the desktop and its machine greet each other, an
   await assert.rejects(host.requestAttachment("chat-1", "a1", 10_000), /not connected/, "a picture is read only from a desktop that is there");
   // And finds it again when it is back.
   const again = new MachineLinkService(machineSettings([record], [pairing]), { write: async () => undefined }, {
-    appVersion: "desktop-v", desktopDeviceId: desktop.deviceId, eventLog: desktop.eventLog, createClient: desktopRoomClient(desktop) });
+    appVersion: "desktop-v", desktopDeviceId: desktop.deviceId, deviceIdentity: desktop.deviceIdentity, createClient: desktopRoomClient(desktop) });
   world.defer(() => again.close());
   await again.start();
   await waitFor(() => again.isMachineConnected("machine-1") && host.isDesktopConnected(), 10_000, "the machine found again");
@@ -232,14 +232,14 @@ test("while the desktop replaces a machine's runtime its new turns are held, als
   const record = { id: "machine-h", name: "Hold box", deviceId: machine.deviceId, devicePublicKeyDerBase64: machine.publicKeyDerBase64,
     pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
   const link = new MachineLinkService(machineSettings([record], [pairing]), { write: async () => undefined }, {
-    appVersion: "desktop-v", desktopDeviceId: desktop.deviceId, eventLog: desktop.eventLog, createClient: desktopRoomClient(desktop) });
+    appVersion: "desktop-v", desktopDeviceId: desktop.deviceId, deviceIdentity: desktop.deviceIdentity, createClient: desktopRoomClient(desktop) });
   world.defer(() => link.close());
   let lifted = 0;
   const makeHost = () => {
     const created = new MachineHostService({ respondToChoice: async () => undefined, respondToAppToolApproval: async () => undefined },
       { write: async () => undefined }, {
         pairing, deviceId: machine.deviceId, appVersion: "machine-v", publicKeyDerBase64: machine.publicKeyDerBase64,
-        identity: () => machine.eventLog.getOrCreateDeviceIdentity(), createClient: machineRoomClient(machine, world.hubUrl), storage: machine.eventStorage });
+        identity: () => machine.deviceIdentity.getOrCreateDeviceIdentity(), createClient: machineRoomClient(machine, world.hubUrl), storage: machine.eventStorage });
     created.onFenceLifted(() => { lifted += 1; });
     return created;
   };
@@ -270,11 +270,11 @@ test("while the desktop replaces a machine's runtime its new turns are held, als
 });
 
 test("each machine's settings are published on the server sealed for that machine alone, once per change, and only by the desktop that set it up", async () => {
-  const machineA = createChatEventDeviceIdentity(new Date().toISOString());
-  const machineB = createChatEventDeviceIdentity(new Date().toISOString());
+  const machineA = createDeviceIdentity(new Date().toISOString());
+  const machineB = createDeviceIdentity(new Date().toISOString());
   const pairingA = offlinePairing();
   const pairingB = offlinePairing();
-  const otherDesktop = createChatEventDeviceIdentity(new Date().toISOString());
+  const otherDesktop = createDeviceIdentity(new Date().toISOString());
   const pairingC = offlinePairing({ originId: otherDesktop.originId, keyId: otherDesktop.keyId, publicKeyDerBase64: otherDesktop.publicKeyDerBase64 });
   const createdAt = new Date().toISOString();
   const records = [
@@ -288,7 +288,7 @@ test("each machine's settings are published on the server sealed for that machin
   const published = [];
   let failNext = false;
   const link = new MachineLinkService(machineSettings(records, [pairingA, pairingB, pairingC], () => snapshot), { write: async () => undefined }, {
-    appVersion: "test", desktopDeviceId: DESKTOP_ID, eventLog: desktopEvents.eventLog,
+    appVersion: "test", desktopDeviceId: DESKTOP_ID, deviceIdentity: desktopEvents.deviceIdentity,
     publishSettings: async (machineId, sealed) => {
       if (failNext) { failNext = false; throw new Error("The server did not answer."); }
       published.push({ machineId, sealed });
@@ -338,7 +338,7 @@ test("the desktop dispatches nothing to a machine, and answers to a machine memb
   const record = { id: "machine-x", name: "X", deviceId: MACHINE_ID, devicePublicKeyDerBase64: hostEvents.publicKeyDerBase64, pairingKey: pairing.rendezvousId,
     createdAt: new Date().toISOString() };
   const link = new MachineLinkService(machineSettings([record], [pairing]), { write: async () => undefined }, {
-    appVersion: "test", desktopDeviceId: DESKTOP_ID, eventLog: desktopEvents.eventLog, createClient: () => stubRoom() });
+    appVersion: "test", desktopDeviceId: DESKTOP_ID, deviceIdentity: desktopEvents.deviceIdentity, createClient: () => stubRoom() });
   try {
     await link.start();
     for (const retired of ["runTurn", "cancelMachineRun", "compactParticipant", "receiveFromHub", "chatChangeRecipients", "hubReaders"]) {
@@ -359,7 +359,7 @@ test("script requests go to the one machine, resolve on its answer, and refuse a
   const record = { id: "machine-s", name: "Box", deviceId: "dev-s", pairingKey: "rv-s", createdAt: new Date().toISOString(),
     lastHello: { protocol: MACHINE_LINK_PROTOCOL, deviceId: "dev-s", instanceId: "run-7", scriptsSupported: true, keepAwake: true } };
   const link = new MachineLinkService(machineSettings([record], []), { write: async () => undefined }, {
-    appVersion: "test", desktopDeviceId: DESKTOP_ID, eventLog: desktopEvents.eventLog });
+    appVersion: "test", desktopDeviceId: DESKTOP_ID, deviceIdentity: desktopEvents.deviceIdentity });
   const sent = [];
   const connection = { record, machineDeviceId: "dev-s", pendingScripts: new Map(), client: { close() {} }, pairing: { issuer: { originId: DESKTOP_ID } } };
   link.connections.set(record.id, connection);
@@ -416,7 +416,7 @@ test("another machine meeting this one in its room does not make it look present
   const record = { id: "machine-presence", name: "Presence", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
   const client = stubRoom();
   const link = new MachineLinkService(machineSettings([record], [pairing]), { write: async () => undefined }, {
-    appVersion: "test", desktopDeviceId: DESKTOP_ID, eventLog: desktopEvents.eventLog, createClient: () => client });
+    appVersion: "test", desktopDeviceId: DESKTOP_ID, deviceIdentity: desktopEvents.deviceIdentity, createClient: () => client });
   try {
     await link.start();
     const other = "device-" + "f".repeat(32);
@@ -463,7 +463,7 @@ test("every enrolled machine is met in its room on the server; one not set up wi
   const noServer = { id: "machine-no-server", name: "No server", deviceId: "", pairingKey: withoutServer.rendezvousId, createdAt: new Date().toISOString() };
   const clients = [];
   const link = new MachineLinkService(machineSettings(records, pairings), { write: async () => undefined }, {
-    appVersion: "test", desktopDeviceId: DESKTOP_ID, eventLog: desktopEvents.eventLog,
+    appVersion: "test", desktopDeviceId: DESKTOP_ID, deviceIdentity: desktopEvents.deviceIdentity,
     createClient: (pairing) => { if (!pairing.hubUrl) return undefined; const client = stubRoom(); clients.push(client); return client; } });
   try {
     await link.start();
@@ -480,7 +480,7 @@ test("a machine whose new connection takes the seat of its old one is asked for 
     createdAt: new Date().toISOString(), lastHello: { publicKeyDerBase64: hostEvents.publicKeyDerBase64 } };
   const client = stubRoom();
   const link = new MachineLinkService(machineSettings([record], [pairing]), { write: async () => undefined }, {
-    appVersion: "test", desktopDeviceId: DESKTOP_ID, eventLog: desktopEvents.eventLog, createClient: () => client });
+    appVersion: "test", desktopDeviceId: DESKTOP_ID, deviceIdentity: desktopEvents.deviceIdentity, createClient: () => client });
   try {
     await link.start();
     const connection = link.connections.get(record.id);

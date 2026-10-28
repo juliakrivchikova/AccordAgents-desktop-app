@@ -12,18 +12,17 @@ import { setTimeout as delay } from "node:timers/promises";
 const dist = path.resolve(import.meta.dirname, "../dist/main");
 const { StorageService } = await import(path.join(dist, "main/services/storage.js"));
 const { ChatSearchService } = await import(path.join(dist, "main/services/chatSearch.js"));
-const { HubLog } = await import(path.join(dist, "hub/hubLog.js"));
 const { HubServer } = await import(path.join(dist, "hub/hubServer.js"));
 const { HubChangeFeed, HubPhoneApi } = await import(path.join(dist, "hub/hubPhone.js"));
 const { HubProgress } = await import(path.join(dist, "hub/hubPhoneState.js"));
-const { createChatEventDeviceIdentity } = await import(path.join(dist, "main/services/chatEventLog.js"));
+const { createDeviceIdentity } = await import(path.join(dist, "main/services/deviceIdentity.js"));
 const { signHubRequest, signHubText, sha256Hex } = await import(path.join(dist, "main/services/hubAuth.js"));
 const { hubPhoneInviteSigningText, hubPhoneEnrollmentSigningText } = await import(path.join(dist, "shared/hubProtocol.js"));
 
 const HUB_ID = "hub-phone-http-test";
 
-/** The server as src/hub/main.ts composes it for a phone: its store, its
- *  log, and the phone's views over the store. */
+/** The server as src/hub/main.ts composes it for a phone: its store and
+ *  the phone's views over it. */
 async function startHub({ owner, machines = [] } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-phone-http-"));
   const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
@@ -32,7 +31,7 @@ async function startHub({ owner, machines = [] } = {}) {
   if (machines.length) await storage.hub().replaceRoster(machines.map((device, index) => ({ deviceId: device.originId, publicKeyDerBase64: device.publicKeyDerBase64, role: "machine", name: `Machine ${index}`, machineId: `m-${index}`, addedAt: "" })), new Date().toISOString());
   const feed = new HubChangeFeed();
   const server = new HubServer({
-    hubId: HUB_ID, version: "test", storage, log: new HubLog(storage), search: new ChatSearchService(storage), vapidPublicKey: "B",
+    hubId: HUB_ID, version: "test", storage, search: new ChatSearchService(storage), vapidPublicKey: "B",
     phone: new HubPhoneApi({
       store: storage, feed, progress: new HubProgress(),
       machineNames: async () => new Map((await storage.hub().devices()).filter((device) => device.machineId).map((device) => [device.machineId, device.name]))
@@ -53,7 +52,7 @@ async function startHub({ owner, machines = [] } = {}) {
 }
 
 test("the server's health answers on the open port; a phone's reads never travel over plain HTTP there", async () => {
-  const owner = createChatEventDeviceIdentity();
+  const owner = createDeviceIdentity();
   const hub = await startHub({ owner });
   try {
     const health = await (await fetch(`${hub.openUrl}/v1/health`)).json();
@@ -90,7 +89,7 @@ function inTenMinutes() {
 /** A phone paired the way the desktop pairs one now: the owner signs a
  *  one-time invite, the phone shows its token and signs its acceptance. */
 async function enrollPhone(hub, owner, scope) {
-  const phone = createChatEventDeviceIdentity();
+  const phone = createDeviceIdentity();
   const token = randomBytes(32).toString("base64url");
   const invite = { version: 1, inviteId: `invite-${randomBytes(8).toString("hex")}`, hubId: HUB_ID, issuerDeviceId: owner.originId,
     tokenHash: sha256Hex(token), scope, name: "Phone", issuedAt: new Date().toISOString(), expiresAt: inTenMinutes() };
@@ -113,8 +112,8 @@ function phoneGet(hub, phone, pathname, query = {}, headers = {}) {
 }
 
 test("a paired phone reads the chat list and a chat's page from the server, within what its invite allowed", async () => {
-  const owner = createChatEventDeviceIdentity();
-  const machine = createChatEventDeviceIdentity();
+  const owner = createDeviceIdentity();
+  const machine = createDeviceIdentity();
   const hub = await startHub({ owner, machines: [machine] });
   try {
     await hub.storage.saveConversation(chatFixture("chat-a", { title: "Alpha", messages: [
@@ -161,7 +160,7 @@ test("a paired phone reads the chat list and a chat's page from the server, with
     // Only a phone reads the phone's views, and only signed.
     assert.equal((await phoneGet(hub, machine, "/v1/phone/chats")).status, 403, "a machine is not a phone");
     assert.equal((await fetch(`${hub.baseUrl}/v1/phone/chats`)).status, 401, "unsigned");
-    assert.equal((await phoneGet(hub, createChatEventDeviceIdentity(), "/v1/phone/chats")).status, 401, "not on the roster");
+    assert.equal((await phoneGet(hub, createDeviceIdentity(), "/v1/phone/chats")).status, 401, "not on the roster");
 
     // The owner's roster decides once it has settled the invite: listed, the
     // phone stays; settled and left out, it is gone at once.
@@ -187,8 +186,8 @@ test("a paired phone reads the chat list and a chat's page from the server, with
 });
 
 test("a pairing code is spent once, by one phone, inside its window; the same phone asking again is told again", async () => {
-  const owner = createChatEventDeviceIdentity();
-  const machine = createChatEventDeviceIdentity();
+  const owner = createDeviceIdentity();
+  const machine = createDeviceIdentity();
   const hub = await startHub({ owner, machines: [machine] });
   try {
     const { phone, token, enrollment, answer } = await enrollPhone(hub, owner, { scope: "device" });
@@ -201,7 +200,7 @@ test("a pairing code is spent once, by one phone, inside its window; the same ph
     assert.equal(again.status, 200);
     assert.deepEqual((await again.json()).certificate, answer.certificate, "the certificate it was given first");
     // Another key with the same code: refused.
-    const thief = createChatEventDeviceIdentity();
+    const thief = createDeviceIdentity();
     const stolen = { ...enrollment, deviceId: thief.originId, publicKeyDerBase64: thief.publicKeyDerBase64 };
     const refused = await fetch(`${hub.baseUrl}/v1/phone/enroll`, { method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ token, enrollment: stolen, signature: signHubText(thief, hubPhoneEnrollmentSigningText(stolen)) }) });
@@ -228,7 +227,7 @@ test("a pairing code is spent once, by one phone, inside its window; the same ph
 });
 
 test("a phone waiting for news is answered when a chat's copy changes", async () => {
-  const owner = createChatEventDeviceIdentity();
+  const owner = createDeviceIdentity();
   const hub = await startHub({ owner });
   try {
     for (let index = 0; index < 60; index += 1) {

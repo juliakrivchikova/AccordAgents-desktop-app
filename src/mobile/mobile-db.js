@@ -29,8 +29,9 @@
 
   // `sealed`, `events` and the three machine stores held what a pairing made
   // the old way (through the desktop's relay) kept. Nothing reads them any
-  // more and the app empties them; they stay here because the upgrade only
-  // ever adds, and a build a version behind may still ask for them.
+  // more and the app empties them; they stay here (without the indexes they
+  // once had) because the upgrade only ever adds, and a build a version
+  // behind may still ask for them.
   const STORES = {
     outbox: "outbox",
     timeline: "timeline",
@@ -74,15 +75,10 @@
       db.createObjectStore(STORES.sealed, { keyPath: "eventId" });
     }
     if (!db.objectStoreNames.contains(STORES.events)) {
-      const store = db.createObjectStore(STORES.events, { keyPath: "eventId" });
-      store.createIndex("origin", ["originId", "logScopeId", "originSeq"], { unique: false });
-      store.createIndex("conversationId", "conversationId", { unique: false });
+      db.createObjectStore(STORES.events, { keyPath: "eventId" });
     }
-    // The phone's journal towards the machines it may command, and the bodies
-    // too large to travel inside one event.
     if (!db.objectStoreNames.contains(STORES.machineEvents)) {
-      const store = db.createObjectStore(STORES.machineEvents, { keyPath: "eventId" });
-      store.createIndex("origin", ["originId", "logScopeId", "originSeq"], { unique: false });
+      db.createObjectStore(STORES.machineEvents, { keyPath: "eventId" });
     }
     if (!db.objectStoreNames.contains(STORES.machineOutbox)) {
       db.createObjectStore(STORES.machineOutbox, { keyPath: "eventId" });

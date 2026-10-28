@@ -9,7 +9,7 @@
 // is finished by running it again.
 import { randomBytes } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -33,7 +33,6 @@ const HUB_ROOT = "/opt/accordagents-hub";
 // nothing root does later (setup, certificate renewal) is pointed elsewhere.
 const HUB_VAR = "/var/lib/accordagents-hub";
 const HUB_ACME = `${HUB_VAR}/acme`;
-const HUB_IMPORT = `${HUB_VAR}/import`;
 // The service's own, and the only place it writes.
 const HUB_DATA = `${HUB_VAR}/data`;
 const HUB_TLS = "/etc/accordagents-hub/tls";
@@ -46,7 +45,7 @@ const NODE_MAJOR = 22;
 const MIN_NODE_MAJOR = 20;
 /** Of the server's 512 MB: what the hub's JavaScript may use, swap beside it. */
 const HUB_HEAP_MB = 320;
-/** Longer than any setup keeps the hub stopped (the chat import's step). */
+/** Longer than any setup keeps the hub stopped. */
 const RESTART_GUARD_MIN = 45;
 
 const CONNECT_TIMEOUT_MS = 8 * 60_000;
@@ -61,8 +60,9 @@ const NONCE_TTL_MS = 24 * 60 * 60_000;
 /** Commands shown and not run yet that still count (a dialog opened again). */
 const REMEMBERED_COMMANDS = 10;
 
-/** Where a setup keeps the chat copy and its archive while it sends them. */
-export const HUB_COPY_TEMP_PREFIX = "accordagents-hub-copy-";
+/** Where an older setup kept a copy of the chats and its archive while it
+ *  sent them to a new server (the chats move through the link since). */
+const HUB_COPY_TEMP_PREFIX = "accordagents-hub-copy-";
 const HUB_ARCHIVE_TEMP_PREFIX = "accordagents-hub-archive-";
 /** Older than any setup runs: a copy left by one that never finished. */
 const STALE_TEMP_MS = 6 * 60 * 60_000;
@@ -70,10 +70,9 @@ const STALE_TEMP_MS = 6 * 60 * 60_000;
 type Run = (command: string, args: string[], options?: CommandOptions) => Promise<CommandResult>;
 
 /**
- * Removes chat copies a setup left behind (the app quit or crashed in the
- * middle of one). They hold the User's chats, so they are not left to the
- * system's own cleaning. Only old ones: another running app may be in a
- * setup of its own right now.
+ * Removes chat copies an older setup left behind (the app quit or crashed in
+ * the middle of one). They hold the User's chats, so they are not left to the
+ * system's own cleaning. Only old ones.
  */
 export async function removeStaleHubTemp(dir = tmpdir(), now = Date.now()): Promise<number> {
   let removed = 0;
@@ -88,21 +87,10 @@ export async function removeStaleHubTemp(dir = tmpdir(), now = Date.now()): Prom
   return removed;
 }
 
-export interface HubChatCopy {
-  dir: string;
-  /** This desktop's own events up to here are in the copy: the hub is not
-   *  sent them again. */
-  pushedThrough: number;
-  conversations: number;
-  cleanup(): Promise<void>;
-}
-
 export interface HubLinkRequest {
   url: string;
   hubId: string;
   server: HubServerRecord;
-  /** Set when the chats were copied now: where this desktop's sending starts. */
-  pushedThrough?: number;
 }
 
 export interface HubInstallerOptions {
@@ -112,17 +100,14 @@ export interface HubInstallerOptions {
   payloadDir: () => string;
   bundledVersion: string;
   identity: () => Promise<{ originId: string; publicKeyDerBase64: string }>;
-  exportChatCopy: () => Promise<HubChatCopy>;
-  /** Saves the hub, sets this desktop's cursors and starts syncing. */
+  /** Saves the hub and links this desktop to it (its chats move there). */
   link: (request: HubLinkRequest) => Promise<void>;
   currentLink: () => Promise<HubLinkConfig | undefined>;
   /** Whether the desktop reaches the hub now (undefined: not linked). */
   reachable?: () => boolean | undefined;
-  /** Plain lines about the server's readers for Settings (a device that has
-   *  not read for long, changes held for long). */
+  /** Plain lines for Settings about this desktop's link to the server (what
+   *  waits to be sent, and why the last attempt failed). */
   notices?: () => Promise<string[]>;
-  /** Lines the User may dismiss (changes a device gave up on). */
-  dismissableNotices?: () => Promise<Array<{ id: string; text: string }>>;
   defaultRegion?: () => Promise<string | undefined>;
   run?: Run;
   fetchImpl?: typeof fetch;
@@ -161,14 +146,12 @@ export class HubInstaller {
     const linked = await this.options.currentLink();
     const reachable = this.options.reachable?.();
     const notices = linked?.url ? await this.options.notices?.().catch(() => []) ?? [] : [];
-    const dismissable = linked?.url ? await this.options.dismissableNotices?.().catch(() => []) ?? [] : [];
-    const lines = dismissable.length ? { dismissableNotices: dismissable } : {};
     const link = linked?.url ? {
       url: linked.url, ...(linked.server ? { server: linked.server } : {}), ...(reachable !== undefined ? { reachable } : {}),
       ...(notices.length ? { notices } : {})
     } : {};
-    if (this.snapshot.status === "failed") return this.withVersion({ ...this.snapshot, ...link, ...lines, ...extra });
-    return this.withVersion(linked?.url ? { status: "ready", ...link, ...lines, ...extra } : { status: "none", ...lines, ...extra });
+    if (this.snapshot.status === "failed") return this.withVersion({ ...this.snapshot, ...link, ...extra });
+    return this.withVersion(linked?.url ? { status: "ready", ...link, ...extra } : { status: "none", ...extra });
   }
 
   /** The command for Settings; it names this desktop's key for the server
@@ -219,7 +202,6 @@ export class HubInstaller {
       status: phase === "ready" ? "ready" : phase === "error" ? "failed" : "installing",
       phase: phase === "error" ? failedAt ?? "error" : phase,
       message, updatedAt: this.now().toISOString(),
-      ...(this.snapshot.skipped?.length && phase !== "connecting" ? { skipped: this.snapshot.skipped } : {}),
       ...extra
     };
     this.options.log?.("hub.setup.progress", { phase: this.snapshot.phase, status: this.snapshot.status, message });
@@ -376,33 +358,6 @@ export class HubInstaller {
       if (!owner.ok || typeof owner.hubId !== "string") throw new Error("The hub did not accept this computer as its owner.");
       const hubId = owner.hubId;
 
-      let pushedThrough: number | undefined;
-      // The copy is skipped only when this desktop is already linked to this
-      // very hub: a copy taken by a setup that never linked is taken again
-      // (what this desktop wrote since may be gone from it by now).
-      if (owner.alreadyOwner && owner.chatsCopied && linked?.hubId === hubId) {
-        this.snapshot = { ...this.snapshot, skipped: ["chats"] };
-      } else {
-        this.progress("chats", "Copying your chats to the hub…");
-        const copy = await this.options.exportChatCopy();
-        let archiveDir: string | undefined;
-        try {
-          archiveDir = await mkdtemp(path.join(tmpdir(), HUB_ARCHIVE_TEMP_PREFIX));
-          const archive = path.join(archiveDir, "chats.tgz");
-          // macOS file tags would come out as warnings in the server's answer.
-          await this.run("tar", ["--no-xattrs", "-czf", archive, "-C", copy.dir, "."], { timeoutMs: STEP_TIMEOUT_MS });
-          // Streamed into the server's root-only import directory: never left
-          // in a place another account on the server could read.
-          const imported = parseLastJson<{ ok?: boolean; conversations?: number }>(await this.remote(server, hubImportChatsScript(), STEP_TIMEOUT_MS, { file: archive }));
-          if (!imported.ok) throw new Error("The hub did not take the chats.");
-          this.options.log?.("hub.setup.chats", { exported: copy.conversations, imported: imported.conversations ?? 0 });
-          pushedThrough = copy.pushedThrough;
-        } finally {
-          if (archiveDir) await rm(archiveDir, { recursive: true, force: true }).catch(() => undefined);
-          await copy.cleanup().catch(() => undefined);
-        }
-      }
-
       this.progress("starting", "Starting the hub…");
       await this.remote(server, hubServiceScript(), SHORT_TIMEOUT_MS);
       serviceMayBeStopped = false;
@@ -417,7 +372,7 @@ export class HubInstaller {
 
       const { nonce: _nonce, hostKeys: _hostKeys, ...where } = server;
       const record: HubServerRecord = { ...where, installedAt: this.now().toISOString(), installedVersion: version };
-      await this.options.link({ url, hubId, server: record, ...(pushedThrough !== undefined ? { pushedThrough } : {}) });
+      await this.options.link({ url, hubId, server: record });
       this.progress("ready", "Your hub is ready.", { url, server: record });
       return this.withVersion(this.snapshot);
     } catch (error) {
@@ -471,7 +426,6 @@ interface HubOwnerAnswer {
   reason?: string;
   hubId?: string;
   alreadyOwner?: boolean;
-  chatsCopied?: boolean;
 }
 
 function releaseName(version: string): string {
@@ -490,7 +444,7 @@ export function hubPrepareScript(): string {
     "set -eo pipefail",
     "export DEBIAN_FRONTEND=noninteractive",
     "APT='apt-get -o DPkg::Lock::Timeout=600 -y -q'",
-    // 512 MB of memory: swap keeps a large import or search from being killed.
+    // 512 MB of memory: swap keeps a large move of chats or search from being killed.
     "if ! swapon --show | grep -q .; then fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile && (grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab); fi",
     "need=''; for p in sqlite3 curl ca-certificates gnupg; do dpkg -s $p >/dev/null 2>&1 || need=\"$need $p\"; done",
     "if [ -n \"$need\" ]; then $APT update >/dev/null && $APT install $need >/dev/null; fi",
@@ -506,7 +460,7 @@ export function hubPrepareScript(): string {
     "if ! snap list certbot >/dev/null 2>&1; then snap install --classic certbot >/dev/null; else snap refresh certbot >/dev/null 2>&1 || true; fi",
     "ln -sf /snap/bin/certbot /usr/bin/certbot",
     `id -u ${HUB_SERVICE_USER} >/dev/null 2>&1 || useradd --system --home-dir ${HUB_DATA} --shell /usr/sbin/nologin ${HUB_SERVICE_USER}`,
-    noLink(HUB_VAR, HUB_DATA, HUB_ACME, HUB_IMPORT, "/etc/accordagents-hub", HUB_TLS),
+    noLink(HUB_VAR, HUB_DATA, HUB_ACME, "/etc/accordagents-hub", HUB_TLS),
     `install -d -o root -g root -m 755 ${HUB_VAR} ${HUB_ACME} ${HUB_ROOT} ${HUB_ROOT}/releases /etc/accordagents-hub`,
     `install -d -o root -g ${HUB_SERVICE_USER} -m 750 ${HUB_TLS}`,
     `install -d -o ${HUB_SERVICE_USER} -g ${HUB_SERVICE_USER} -m 700 ${HUB_DATA}`,
@@ -557,19 +511,6 @@ export function hubStartOverScript(stamp: string): string {
     `systemctl stop ${HUB_SERVICE_NAME} 2>/dev/null || true`,
     `mv ${HUB_DATA} ${HUB_VAR}/data.replaced-${stamp.replace(/[^0-9]/g, "")}`,
     `install -d -o ${HUB_SERVICE_USER} -g ${HUB_SERVICE_USER} -m 700 ${HUB_DATA}`
-  ].join("\n");
-}
-
-/** The chats arrive on stdin as a tar archive. */
-export function hubImportChatsScript(): string {
-  return [
-    "set -e",
-    noLink(HUB_IMPORT),
-    `trap 'rm -rf ${HUB_IMPORT}' EXIT`,
-    `systemctl stop ${HUB_SERVICE_NAME} 2>/dev/null || true`,
-    `rm -rf ${HUB_IMPORT} && install -d -o ${HUB_SERVICE_USER} -g ${HUB_SERVICE_USER} -m 700 ${HUB_IMPORT}`,
-    `sudo -u ${HUB_SERVICE_USER} tar -xzf - -C ${HUB_IMPORT}`,
-    hubCli(`--import-chat-copy ${HUB_IMPORT}`)
   ].join("\n");
 }
 

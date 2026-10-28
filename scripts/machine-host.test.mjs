@@ -14,7 +14,7 @@ import { desktopEvents, hostEvents, DESKTOP_ID, MACHINE_ID, DESKTOP_ISSUER } fro
 
 const { sealMachinePayload, openMachinePayload } = await import("../dist/main/main/services/machineChannelSealing.js");
 const { signMachineControl } = await import("../dist/main/main/services/machineControlAuthentication.js");
-const { createChatEventDeviceIdentity } = await import("../dist/main/main/services/chatEventLog.js");
+const { createDeviceIdentity } = await import("../dist/main/main/services/deviceIdentity.js");
 const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
 const { decodeMachineProgress } = await import("../dist/main/shared/machineProgress.js");
 
@@ -74,7 +74,7 @@ function makeHost(client, { chat = {}, logs, ...options } = {}) {
     { write: async (event, payload) => { logs?.push({ event, payload }); } },
     {
       pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", publicKeyDerBase64: hostEvents.publicKeyDerBase64,
-      identity: () => hostEvents.eventLog.getOrCreateDeviceIdentity(), createClient: () => client, storage: hostEvents.eventStorage,
+      identity: () => hostEvents.deviceIdentity.getOrCreateDeviceIdentity(), createClient: () => client, storage: hostEvents.eventStorage,
       ...options
     }
   );
@@ -416,7 +416,7 @@ test("the computer holds this machine's new turns while its runtime is replaced,
   now += 31 * 60_000;
   assert.equal(host.takesNewWork(), true, "lapsed after at most half an hour");
   // Only the computer that set it up may hold it.
-  const stranger = createChatEventDeviceIdentity(new Date().toISOString());
+  const stranger = createDeviceIdentity(new Date().toISOString());
   client.emit("message", { ciphertext: await controlFrame({ type: "machine.turns.hold", reason: "x", until: new Date(now + 60_000).toISOString() }, host.options.pairing, stranger) });
   await host.inbound;
   assert.equal(host.takesNewWork(), true, "a frame not from the enrolling computer changes nothing");

@@ -45,7 +45,7 @@ test("mobile shell builds static installable PWA assets", async () => {
   // 2. What a push is about is read from the User's server only, signed
   //    with the phone's own key, through the bundled client. The worker
   //    holds no other way to read: no relay mailbox, no sealed envelopes.
-  assert.match(worker, /backgroundHubSync/);
+  assert.match(worker, /backgroundServerSync/);
   assert.match(worker, /importScripts\("\.\/mobile-hub-client\.js"\)/);
   assert.match(worker, /"\/v1\/phone\/notices"/);
   assert.doesNotMatch(worker, /backgroundMailboxSync|acknowledgeStored|\/v1\/mailbox|sealedEnvelopes|SEALED_STORE|mailboxAccess/);

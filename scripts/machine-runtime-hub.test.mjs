@@ -27,7 +27,7 @@ const { ChatService } = await import("../dist/main/main/services/chat.js");
 const { ServerChatLink } = await import("../dist/main/main/services/serverChatLink.js");
 const { HubClient } = await import("../dist/main/main/services/hubClient.js");
 const { signHubRequest } = await import("../dist/main/main/services/hubAuth.js");
-const { createChatEventDeviceIdentity } = await import("../dist/main/main/services/chatEventLog.js");
+const { createDeviceIdentity } = await import("../dist/main/main/services/deviceIdentity.js");
 const { hubTurnRunId } = await import("../dist/main/shared/hubOps.js");
 const BUNDLE = path.resolve(import.meta.dirname, "../dist/machine/accordagents-machine.cjs");
 
@@ -67,7 +67,7 @@ test("the built machine runtime takes its member's turns from the server, applie
   // the machine (and the User's phone) on its server's roster.
   const { stdout } = await promisify(execFile)(process.execPath, [BUNDLE, "--device-identity", "--user-data", userData], { env, encoding: "utf8" });
   const identity = JSON.parse(stdout.trim().split("\n").pop());
-  const phone = createChatEventDeviceIdentity(new Date().toISOString());
+  const phone = createDeviceIdentity(new Date().toISOString());
   await world.setRoster([
     { device: { deviceId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64, name: "E2E machine" }, machineId: "machine-e2e", name: "E2E machine" },
     { device: { deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64, name: "Phone" }, role: "phone" }
@@ -79,9 +79,9 @@ test("the built machine runtime takes its member's turns from the server, applie
   // The computer.
   const desktop = world.desktop;
   const chat = desktopChat(desktop.eventStorage);
-  const chatLink = new ServerChatLink({ storage: desktop.eventStorage, chat, identity: () => desktop.eventLog.getOrCreateDeviceIdentity(),
+  const chatLink = new ServerChatLink({ storage: desktop.eventStorage, chat, identity: () => desktop.deviceIdentity.getOrCreateDeviceIdentity(),
     hubConfig: async () => ({ url: world.hubUrl }), machineNames: async () => [{ id: "machine-e2e", name: "E2E machine" }], movesChats: true, log: () => undefined });
-  const desktopHub = new HubClient({ url: world.hubUrl, identity: () => desktop.eventLog.getOrCreateDeviceIdentity(), storage: desktop.eventStorage });
+  const desktopHub = new HubClient({ url: world.hubUrl, identity: () => desktop.deviceIdentity.getOrCreateDeviceIdentity() });
   const record = { id: "machine-e2e", name: "E2E machine", deviceId: identity.originId, devicePublicKeyDerBase64: identity.publicKeyDerBase64,
     pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };
   // The User switched automatic stop off: the machine has it once it read its settings.
@@ -92,7 +92,7 @@ test("the built machine runtime takes its member's turns from the server, applie
     getMachinePairing: async (key) => (key === pairing.rendezvousId ? pairing : undefined),
     exportMachineSettingsSnapshot: async () => ({ version: 1, exportedAt: new Date().toISOString(), settingsJson: JSON.stringify({ machineAutoStopEnabled: false }), agentEnvironment: [] })
   };
-  const linkOptions = { appVersion: "e2e", desktopDeviceId: desktop.deviceId, eventLog: desktop.eventLog, createClient: desktopRoomClient(desktop),
+  const linkOptions = { appVersion: "e2e", desktopDeviceId: desktop.deviceId, deviceIdentity: desktop.deviceIdentity, createClient: desktopRoomClient(desktop),
     publishSettings: async (machineId, sealed) => { await desktopHub.putMachineSettings({ machineId, sealed }); }, machineProjects: async () => ({}) };
   let link = new MachineLinkService(settings, { write: async () => undefined }, linkOptions);
   chat.setRemoteTurnPreparation({ beforeRemoteTurn: () => link.syncSettings() });

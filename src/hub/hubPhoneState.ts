@@ -1,4 +1,3 @@
-import type { ChatEventEnvelope } from "../shared/chatEvents";
 import type { HubCard } from "../shared/hubOps";
 import type { HubDevice, HubMachineWakeRequest, HubMachineStatus, HubPhoneScope } from "../shared/hubProtocol";
 import { decodeMachineProgress, type MachineProgressFrame } from "../shared/machineProgress";
@@ -13,8 +12,6 @@ import type { StorageService } from "../main/services/storage";
  * phone is rung for, and the machines it can wake. The cards waiting for the
  * User are the server's own (hub_cards, HubOps).
  */
-
-const MACHINE_PROGRESS_KIND = "machine.turn.progress.delta";
 
 /** A run's live progress as the hub folded it from its author's frames. */
 interface LiveRun {
@@ -37,15 +34,7 @@ export class HubProgress {
 
   constructor(private readonly now: () => number = Date.now) {}
 
-  /** A machine's progress frame from the order. */
-  note(event: ChatEventEnvelope, payload: unknown): void {
-    if (event.kind !== MACHINE_PROGRESS_KIND) return;
-    const frame = payload as MachineProgressFrame;
-    if (!frame || frame.conversationId !== event.conversationId) return;
-    this.noteFrame(frame);
-  }
-
-  /** A progress frame, from the order (a machine's) or posted by a desktop. */
+  /** A progress frame, as the computer or a machine posted it. */
   noteFrame(frame: MachineProgressFrame): void {
     if (!frame || typeof frame.runId !== "string" || typeof frame.streamId !== "string" || typeof frame.conversationId !== "string" ||
         !Number.isSafeInteger(frame.sequence)) return;
@@ -188,12 +177,12 @@ const WAKE_CHECK_MS = 10_000;
 
 /**
  * Starts a stopped AWS machine when work waits for it: work for one of its
- * members is in the hub and the machine has not read the order for a while.
+ * members is on the server and the machine has not read its feed for a while.
  * The hub holds a key that can only start the User's tagged instances, given
  * by the owner desktop; the phone holds none and asks the hub instead.
  */
 export class HubWaker {
-  /** Work waiting per machine: since when, how far in the order, and how
+  /** Work waiting per machine: since when, where in the feed, and how
    *  many times the hub started the machine for it. */
   private readonly waiting = new Map<string, { since: number; hubSeq: number; wakes: number }>();
   private readonly attempts = new Map<string, { at: number; manual: boolean; result: string; ok: boolean }>();
@@ -321,7 +310,8 @@ export class HubWaker {
   /** What the phone shows about each machine. */
   async status(): Promise<HubMachineStatus[]> {
     const devices = await this.machineDevices();
-    const cursors = await this.options.storage.hub().cursorTimes();
+    // When each machine last read the server's feed.
+    const cursors = await this.options.storage.hubOps().cursorTimes();
     const configs = await this.configs();
     return [...devices.entries()].map(([machineId, device]) => {
       const cursor = cursors.get(device.deviceId);

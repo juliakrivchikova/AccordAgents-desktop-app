@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createChatEventDeviceIdentity, createSignedChatEvent } from "../main/services/chatEventLog";
+import { createDeviceIdentity } from "../main/services/deviceIdentity";
 import { hubCertificateCrypto, sha256Hex, signHubRequest, signHubText } from "../main/services/hubAuth";
 import { StorageService } from "../main/services/storage";
 import { createHubDeviceClient, enrollHubPhone, createHubDeviceIdentity, hubTurnRunId, signHubRequestWeb } from "../shared/hubDeviceClient";
@@ -17,7 +17,7 @@ import { composeHub } from "./main";
 import { HubWaker } from "./hubPhoneState";
 import { HubRetention, HUB_RETENTION_DEFAULTS } from "./hubRetention";
 
-type Identity = ReturnType<typeof createChatEventDeviceIdentity>;
+type Identity = ReturnType<typeof createDeviceIdentity>;
 
 function vapid() {
   const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
@@ -30,7 +30,7 @@ async function hub(t: test.TestContext) {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-phone-"));
   const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
   await storage.init();
-  const owner = createChatEventDeviceIdentity(new Date().toISOString());
+  const owner = createDeviceIdentity(new Date().toISOString());
   await storage.hub().setOwner({ deviceId: owner.originId, publicKeyDerBase64: owner.publicKeyDerBase64, name: "Mac", addedAt: new Date().toISOString() });
   const rings: Array<{ url: string; at: number }> = [];
   const aws: Array<{ url: string; body: string }> = [];
@@ -59,10 +59,9 @@ async function hub(t: test.TestContext) {
     });
     return { status: response.status, body: await response.json() as Record<string, unknown> };
   };
+  /** What the server does after an answer (rings, live progress) is done by then. */
   const settle = async () => {
-    await composed.folder.idle();
-    await composed.viewsIdle();
-    await composed.folder.idle();
+    await new Promise((resolve) => setTimeout(resolve, 50));
   };
   return { dir, storage, owner, base, call, settle, rings, aws, ...composed };
 }
@@ -117,7 +116,7 @@ async function seedChat(h: Awaited<ReturnType<typeof hub>>, machine: Identity) {
 
 test("a phone's message is an operation the server takes once, asking a turn of each member it names", async (t) => {
   const h = await hub(t);
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   const { opId, write } = await seedChat(h, machine);
   const { identity, client, answer } = await pairPhone(h);
   assert.equal(answer.deviceId, identity.deviceId);
@@ -152,7 +151,7 @@ test("a phone's message is an operation the server takes once, asking a turn of 
 
 test("a machine's card on the server is the phone's card: it rings once, an answer from the phone waits, and settled it leaves", async (t) => {
   const h = await hub(t);
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   const { opId, write } = await seedChat(h, machine);
   const { client } = await pairPhone(h);
   await client.registerPushSubscription({ endpoint: "https://fcm.googleapis.com/fcm/send/phone-1", keys: { p256dh: "x", auth: "y" } });
@@ -201,7 +200,7 @@ test("a machine's card on the server is the phone's card: it rings once, an answ
 
 test("a member's choice raised on the server stands under its message, and its answer is the record once settled", async (t) => {
   const h = await hub(t);
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   const { opId, write } = await seedChat(h, machine);
   const { client } = await pairPhone(h);
   const choice = { id: "choice-1", title: "Target", question: "Where should it go?", options: [{ id: "a", label: "Staging" }, { id: "b", label: "Main" }],
@@ -228,7 +227,7 @@ test("a member's choice raised on the server stands under its message, and its a
 
 test("an approved removal on the server waits on the phone, however many cards come after it, until its device settles it", async (t) => {
   const h = await hub(t);
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   const { opId, write } = await seedChat(h, machine);
   const { client } = await pairPhone(h);
   const at = () => new Date().toISOString();
@@ -260,7 +259,7 @@ test("an approved removal on the server waits on the phone, however many cards c
 
 test("a machine's live progress shows as the pending row with the turn it is, the reply settling it rings the phone, and an open app is not rung", async (t) => {
   const h = await hub(t);
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   const { opId, write } = await seedChat(h, machine);
   const { client, identity } = await pairPhone(h);
   await client.registerPushSubscription({ endpoint: "https://fcm.googleapis.com/fcm/send/phone-2", keys: { p256dh: "x", auth: "y" } });
@@ -274,8 +273,7 @@ test("a machine's live progress shows as the pending row with the turn it is, th
   const progress: ReviewProgress = { runId, phase: "debate", message: "working", createdAt: new Date().toISOString(),
     agentProgress: { participantId: machineMember.id, participantLabel: "@box", state: "running", messageId: "bubble-1", partialContent: "Half of the answer" } } as ReviewProgress;
   const frame = encodeMachineProgress(undefined, progress, { conversationId: "chat-1", streamId: "stream-1", sequence: 1 });
-  const progressEvent = createSignedChatEvent(machine, { conversationId: "chat-1", logScopeId: `device:rv-1:["chat-1","terminal:${runId}"]`, kind: "machine.turn.progress.delta", payload: frame, originSeq: 1, createdAt: new Date().toISOString() });
-  await h.call(machine, "POST", "/v1/events", { events: [progressEvent] });
+  assert.equal((await h.call(machine, "POST", "/v1/progress", { frames: [frame] })).status, 200, "a machine posts its members' progress");
   await h.settle();
   const live = await client.getJson<{ events: Array<{ id: string; content: string; status: string; runId: string; participantId?: string; sourceMessageId?: string }> }>("/v1/phone/progress", { conversationId: "chat-1" });
   assert.deepEqual(live.events.map((event) => [event.id, event.content, event.status, event.runId, event.participantId, event.sourceMessageId]),
@@ -297,7 +295,7 @@ test("a machine's live progress shows as the pending row with the turn it is, th
 
 test("a picture the phone puts on the server is read back by its message, and a custom avatar from the catalog", async (t) => {
   const h = await hub(t);
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   await seedChat(h, machine);
   const { client } = await pairPhone(h);
   const bytes = new Uint8Array(randomBytes(500_000));
@@ -337,7 +335,7 @@ test("the server wakes a machine that leaves a phone's message unread, at most o
   t.after(() => rm(dir, { recursive: true, force: true }));
   const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
   await storage.init();
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   await storage.hub().replaceRoster([{ deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Cloud box", machineId: "m-1", addedAt: "" }], new Date().toISOString());
   await storage.hub().replaceMachineWake([{ machineId: "m-1", configJson: JSON.stringify({ machineId: "m-1", instanceId: "i-0123456789abcdef0", region: "us-east-1",
     credentials: { accessKeyId: "AKIAEXAMPLEEXAMPLE12", secretAccessKey: "secretsecretsecretsecretsecret", region: "us-east-1" } }) }], new Date().toISOString());
@@ -348,7 +346,7 @@ test("the server wakes a machine that leaves a phone's message unread, at most o
     return new Response("<StartInstancesResponse/>", { status: 200 });
   }) as typeof fetch });
   // The machine last read long ago; work for it lands now.
-  await storage.hub().setCursor(machine.originId, 3, new Date(clock - 3_600_000).toISOString());
+  await storage.hubOps().recordRead(machine.originId, 3, new Date(clock - 3_600_000).toISOString());
   waker.noteWork("m-1", 10);
   await waker.check();
   assert.equal(calls.length, 0, "not before the machine had its chance to read it");
@@ -364,7 +362,7 @@ test("the server wakes a machine that leaves a phone's message unread, at most o
   await waker.check();
   assert.equal(calls.length, 1, "asked again only after a while");
   // The machine came up and read past the work: nothing waits for it.
-  await storage.hub().setCursor(machine.originId, 12, new Date(clock).toISOString());
+  await storage.hubOps().recordRead(machine.originId, 12, new Date(clock).toISOString());
   await waker.check();
   assert.equal((await waker.status())[0].waking, false);
   clock += 10 * 60_000;
@@ -376,7 +374,7 @@ test("the server wakes a machine that leaves a phone's message unread, at most o
 
 test("a phone's message for a machine member that is not reading makes the server wake it", async (t) => {
   const h = await hub(t);
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   await seedChat(h, machine);
   const { client } = await pairPhone(h);
   const message = phoneMessage("@box go", [machineMember.id]);
@@ -392,7 +390,7 @@ test("a phone's message for a machine member that is not reading makes the serve
 
 test("a desktop's card for its own member rings once however often it is raised, and a phone can neither raise one for a member nor post progress, which a machine can", async (t) => {
   const h = await hub(t);
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   const { opId, write } = await seedChat(h, machine);
   const { client, identity } = await pairPhone(h);
   await client.registerPushSubscription({ endpoint: "https://fcm.googleapis.com/fcm/send/phone-3", keys: { p256dh: "x", auth: "y" } });
@@ -427,7 +425,7 @@ test("a desktop's card for its own member rings once however often it is raised,
 
 test("a desktop member's live progress reaches the phone by a post the server keeps only in memory", async (t) => {
   const h = await hub(t);
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   const { opId, write } = await seedChat(h, machine);
   const { client } = await pairPhone(h);
   const runId = "turn-run-local-1";
@@ -455,7 +453,7 @@ test("a certificate is refused when anything in it was changed, or its owner is 
   assert.equal(check({ ...certificate, enrollment: { ...certificate.enrollment, enrolledAt: "2000-01-01T00:00:00.000Z" } }), false, "an enrollment changed after the phone signed it");
   const other = await createHubDeviceIdentity();
   assert.equal(check({ ...certificate, enrollment: { ...certificate.enrollment, deviceId: other.deviceId, publicKeyDerBase64: other.publicKeyDerBase64 } }), false, "another key under the same signature");
-  assert.equal(check(certificate, createChatEventDeviceIdentity(new Date().toISOString())), false, "not this owner's invite");
+  assert.equal(check(certificate, createDeviceIdentity(new Date().toISOString())), false, "not this owner's invite");
 });
 
 test("the owner learns a phone that enrolled from the roster, with what it enrolled with, and checks it with its own key", async (t) => {
@@ -474,7 +472,7 @@ test("the owner learns a phone that enrolled from the roster, with what it enrol
   assert.equal(check({ ...record!, invite: { ...record!.invite, scope: { scope: "conversation", conversationId: "chat-x" } } }), false, "an invite changed after the owner signed it");
   const other = await createHubDeviceIdentity();
   assert.equal(check({ ...record!, enrollment: { ...record!.enrollment, deviceId: other.deviceId, publicKeyDerBase64: other.publicKeyDerBase64 } }), false, "another key");
-  assert.equal(check(record, createChatEventDeviceIdentity(new Date().toISOString())), false, "not this owner's invite");
+  assert.equal(check(record, createDeviceIdentity(new Date().toISOString())), false, "not this owner's invite");
   // Only the owner reads the roster.
   assert.equal((await fetch(`${h.base}/v1/roster`, { headers: { authorization: await signHubRequestWeb(identity, { method: "GET", pathWithQuery: "/v1/roster" }) } })).status, 403);
   // The owner's next roster keeps the phone while its invite is not settled, and names it once it is.
@@ -484,7 +482,7 @@ test("the owner learns a phone that enrolled from the roster, with what it enrol
 
 test("words in any script reach the server as the phone wrote them, and a removed phone is told so", async (t) => {
   const h = await hub(t);
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   await seedChat(h, machine);
   const { identity, client } = await pairPhone(h);
   const content = "Привет, @box 👋 second line — «quotes» 漢字";
@@ -510,14 +508,14 @@ test("the server gives up starting a machine that does not read its work after a
   t.after(() => rm(dir, { recursive: true, force: true }));
   const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
   await storage.init();
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   await storage.hub().replaceRoster([{ deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Cloud box", machineId: "m-1", addedAt: "" }], new Date().toISOString());
   await storage.hub().replaceMachineWake([{ machineId: "m-1", configJson: JSON.stringify({ machineId: "m-1", instanceId: "i-0123456789abcdef0", region: "us-east-1",
     credentials: { accessKeyId: "AKIAEXAMPLEEXAMPLE12", secretAccessKey: "secretsecretsecretsecretsecret", region: "us-east-1" } }) }], new Date().toISOString());
   let clock = Date.now();
   let calls = 0;
   const waker = new HubWaker({ storage, now: () => clock, fetchImpl: (async () => { calls += 1; return new Response("<StartInstancesResponse/>", { status: 200 }); }) as unknown as typeof fetch });
-  await storage.hub().setCursor(machine.originId, 3, new Date(clock - 3_600_000).toISOString());
+  await storage.hubOps().recordRead(machine.originId, 3, new Date(clock - 3_600_000).toISOString());
   waker.noteWork("m-1", 10);
   for (let round = 0; round < 8; round += 1) {
     clock += 6 * 60_000;
@@ -529,7 +527,7 @@ test("the server gives up starting a machine that does not read its work after a
 
 test("a phone paired again is rung once, under its new key", async (t) => {
   const h = await hub(t);
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   await seedChat(h, machine);
   const first = await pairPhone(h);
   const second = await pairPhone(h);
@@ -542,7 +540,7 @@ test("a phone paired again is rung once, under its new key", async (t) => {
 
 test("after a restart the server rings a phone for what it missed, not again for what it was rung for", async (t) => {
   const h = await hub(t);
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   await seedChat(h, machine);
   const { client, identity } = await pairPhone(h);
   await client.registerPushSubscription({ endpoint: "https://fcm.googleapis.com/fcm/send/restart", keys: { p256dh: "x", auth: "y" } });
@@ -564,7 +562,7 @@ test("after a restart the server rings a phone for what it missed, not again for
 
 test("under retention a phone holds nothing back, and its pictures, avatars and cards stay", async (t) => {
   const h = await hub(t);
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const machine = createDeviceIdentity(new Date().toISOString());
   const { opId, write } = await seedChat(h, machine);
   const { client } = await pairPhone(h);
   // A picture the phone sends, and one it put up but never sent.
@@ -592,7 +590,9 @@ test("under retention a phone holds nothing back, and its pictures, avatars and 
   await h.call(h.owner, "GET", `/v3/feed?after=${head}`);
   await h.call(machine, "GET", `/v3/feed?after=${head}`);
   const later = 40 * 24 * 60 * 60_000;
-  const retention = new HubRetention({ storage: h.storage, config: { ...HUB_RETENTION_DEFAULTS, batch: 50 }, now: () => Date.now() + later });
+  // As the server program runs it: the pictures the chats name are pinned again before a sweep.
+  const retention = new HubRetention({ storage: h.storage, config: { ...HUB_RETENTION_DEFAULTS, batch: 50 }, now: () => Date.now() + later,
+    renewPins: async () => h.storage.deviceEventBlobs().pinOnly(await h.storage.hub().namedPictureHashes(), "attachment") });
   const report = await retention.runOnce();
   assert.ok(report.ops.events >= 3, "what every reader read is forgotten: a phone does not hold the feed back");
   await retention.runOnce();
@@ -604,7 +604,8 @@ test("under retention a phone holds nothing back, and its pictures, avatars and 
   assert.equal(Buffer.from(shown.dataBase64 ?? "", "base64").equals(Buffer.from(picture)), true, "the picture a message names stays");
   const avatar = await client.getJson<{ dataBase64?: string }>("/v1/phone/avatar", { conversationId: "chat-1", avatarId: "custom:a" });
   assert.ok(avatar.dataBase64, "the catalog's avatar stays");
-  assert.ok(stray.blobHash, "a body nothing names is the sweep's (see the next test)");
+  const strayLeft = await h.storage.deviceEventBlobs().verify(stray);
+  assert.equal(strayLeft, false, "a body nothing names goes once its upload's month is over");
   // The phone keeps writing after what was forgotten.
   const third = phoneMessage("back again", []);
   assert.deepEqual((await client.postOps([{ opId: third.id, kind: "message.create", conversationId: "chat-1", message: third }])).results.map((result) => result.status), ["accepted"]);
@@ -615,11 +616,10 @@ test("a phone's picture put up before its message arrives is kept for a month, t
   const { client } = await pairPhone(h);
   const early = await client.uploadBlob(new Uint8Array(randomBytes(1_200)));
   const blobs = h.storage.deviceEventBlobs();
-  const sweep = (afterMs: number) => blobs.collectOrphans({ now: Date.now() + afterMs, graceMs: 60 * 60_000, scanRows: 50_000 });
+  const sweep = (afterMs: number) => blobs.collectOrphans({ now: Date.now() + afterMs });
   await sweep(2 * 60 * 60_000);
   await sweep(4 * 60 * 60_000);
   assert.equal((await sweep(6 * 60 * 60_000)).deleted, 0, "a day later it is still there");
-  // A sweep is a look at everything, then a deletion a while later.
   const deleted = (await sweep(31 * 24 * 60 * 60_000)).deleted + (await sweep(32 * 24 * 60 * 60_000)).deleted + (await sweep(33 * 24 * 60 * 60_000)).deleted;
   assert.equal(deleted, 1, "a month later, never named, it goes");
   assert.ok(early.blobHash);

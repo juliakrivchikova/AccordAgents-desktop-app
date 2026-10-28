@@ -98,11 +98,9 @@ test("a phone on database version 5 gets the chat index without losing its rows"
         timeline.createIndex("createdAt", "createdAt", { unique: false });
         db.createObjectStore("meta", { keyPath: "key" });
         db.createObjectStore("sealedEnvelopes", { keyPath: "eventId" });
-        const events = db.createObjectStore("events", { keyPath: "eventId" });
-        events.createIndex("origin", ["originId", "logScopeId", "originSeq"], { unique: false });
-        events.createIndex("conversationId", "conversationId", { unique: false });
-        const machineEvents = db.createObjectStore("machineEvents", { keyPath: "eventId" });
-        machineEvents.createIndex("origin", ["originId", "logScopeId", "originSeq"], { unique: false });
+        // The stores a relay pairing kept (their indexes do not matter here).
+        db.createObjectStore("events", { keyPath: "eventId" });
+        db.createObjectStore("machineEvents", { keyPath: "eventId" });
         db.createObjectStore("machineOutbox", { keyPath: "eventId" });
         db.createObjectStore("machineBlobs", { keyPath: "key" });
       };

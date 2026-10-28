@@ -56,7 +56,6 @@ import {
   machinePowerScript,
   machineDeviceIdentityScript,
   machineDrainScript,
-  machineImportChatCopyScript,
   machineInstallDependenciesScript,
   machineInstallLayout,
   machineInstallServiceScript,
@@ -91,7 +90,6 @@ const DRAIN_TIMEOUT_MS = 5 * 60_000;
 const CONNECT_TIMEOUT_MS = 3 * 60_000;
 /** Importing every chat on the User's data (hundreds of chats, tens of MB)
  *  is a one-time write of a few minutes at most. */
-const CHAT_COPY_TIMEOUT_MS = 20 * 60_000;
 const MINIMUM_NODE_MAJOR = 20;
 
 export interface MachineSshExecRequest {
@@ -115,33 +113,6 @@ export type MachineBundleUpload = (request: {
   timeoutMs: number;
   maintenance?: MachineMaintenanceTarget;
 }) => Promise<void>;
-
-/** Copies the desktop's chat copy (and the pictures of every chat) to the
- *  machine over the setup connection. Pictures are only added, never deleted. */
-export type MachineChatCopyUpload = (request: {
-  target: MachineSshTarget;
-  copyDir: string;
-  remoteCopyDir: string;
-  attachmentsDir?: string;
-  remoteChatsDir: string;
-  timeoutMs: number;
-  maintenance?: MachineMaintenanceTarget;
-}) => Promise<void>;
-
-/** The desktop's half of a machine's first chat copy. */
-export interface MachineChatCopyProvider {
-  /** Records the machine's signing identity (so every chat change from now on
-   *  is addressed to it), then exports every chat into a fresh directory. */
-  export(machineId: string, identity: { originId: string; publicKeyDerBase64: string }): Promise<{
-    dir: string;
-    attachmentsDir?: string;
-    summary: { conversations: number; messages: number; bytes: number };
-    cleanup(): Promise<void>;
-    /** Called once the machine has imported the copy: what it covers need
-     *  not be sent to the machine as well. */
-    imported?(): Promise<void>;
-  }>;
-}
 
 /** The slice of `SettingsService` this service needs. */
 export interface MachineInstallStore {
@@ -209,10 +180,13 @@ export interface MachineInstallerOptions {
   machinePower?: (machineId: string) => Promise<AwsMachinePowerConfig | undefined>;
   sshExec?: MachineSshExec;
   uploadBundle?: MachineBundleUpload;
-  /** Every chat goes to every machine: the first copy is made here, at
-   *  install (and at the first upgrade of a machine that never had one). */
-  chatCopy?: MachineChatCopyProvider;
-  uploadChatCopy?: MachineChatCopyUpload;
+  /** Records the identity the installed runtime reads for itself on this
+   *  desktop: from then on the User's server admits it (the roster names it)
+   *  and its settings can be sealed for it, before it first connects. */
+  adoptIdentity?: (machineId: string, identity: { originId: string; publicKeyDerBase64: string }) => Promise<void>;
+  /** Whether this desktop knows the machine's identity already (an update of
+   *  a machine set up before then reads nothing). */
+  identityKnown?: (machineId: string) => Promise<boolean>;
   mirrorSync?: RemoteMirrorSyncRunner;
   now?: () => Date;
   logger?: (event: string, payload: Record<string, unknown>) => void;
@@ -223,14 +197,12 @@ export class MachineInstallerService {
   private readonly activeRequests = new Map<string, { kind: MachineInstallKind; request: MachineUpgradeRequest }>();
   private readonly sshExec: MachineSshExec;
   private readonly uploadBundle: MachineBundleUpload;
-  private readonly uploadChatCopy: MachineChatCopyUpload;
   private readonly mirrorSync: RemoteMirrorSyncRunner;
   private readonly now: () => Date;
 
   constructor(private readonly options: MachineInstallerOptions) {
     this.sshExec = options.sshExec ?? defaultMachineSshExec;
     this.uploadBundle = options.uploadBundle ?? defaultBundleUpload;
-    this.uploadChatCopy = options.uploadChatCopy ?? defaultChatCopyUpload;
     this.mirrorSync = options.mirrorSync ?? defaultRemoteMirrorSync;
     this.now = options.now ?? (() => new Date());
   }
@@ -794,11 +766,11 @@ export class MachineInstallerService {
         );
       }
 
-      // 5b. Chats. Every chat lives on every machine; the first copy travels
-      //     over this connection, not through the relay, while nothing runs
-      //     here. A failure replaces nothing and puts the old runtime back.
-      if (this.options.chatCopy && (kind === "install" || !record.chatCopyAt)) {
-        await emit("chats", "Copying chats to the machine…");
+      // 5b. Identity. The staged runtime says which key it signs with (made
+      //     once, kept in the machine's own database), read while nothing
+      //     runs here. A failure replaces nothing and puts the old runtime back.
+      if (this.options.adoptIdentity && (kind === "install" || !await this.options.identityKnown?.(record.machineId).catch(() => false))) {
+        await emit("identity", "Reading the machine's identity…");
         const runtimePath = `${layout.releasesDir}/${release}/accordagents-machine.cjs`;
         const nodePath = probe.nodePath ?? "node";
         try {
@@ -810,41 +782,13 @@ export class MachineInstallerService {
           if (typeof identity.originId !== "string" || !identity.originId || typeof identity.publicKeyDerBase64 !== "string") {
             throw new Error("The machine did not report its identity.");
           }
-          const copy = await this.options.chatCopy.export(record.machineId, identity);
-          try {
-            const remoteCopyDir = `${layout.installRoot}/chat-copy/${request.operationId.replace(/[^A-Za-z0-9_-]/g, "_")}`;
-            await this.uploadChatCopy({
-              target: request.target,
-              copyDir: copy.dir,
-              remoteCopyDir,
-              attachmentsDir: copy.attachmentsDir,
-              remoteChatsDir: `${layout.userDataDir}/chats`,
-              timeoutMs: TRANSFER_TIMEOUT_MS,
-              maintenance
-            });
-            const imported = parseSetupCommandJson<{ ok?: boolean; conversations?: number; messages?: number; skippedDeleted?: number }>(await exec({
-              target: request.target,
-              script: machineImportChatCopyScript(layout, runtimePath, remoteCopyDir, record.machineId, nodePath),
-              timeoutMs: CHAT_COPY_TIMEOUT_MS
-            }));
-            if (!imported.ok) throw new Error("The machine did not confirm the chat copy.");
-            this.options.logger?.("machines.install.chat-copy", {
-              machineId: record.machineId, exported: copy.summary, imported
-            });
-            await copy.imported?.().catch((error: unknown) => {
-              // Only a saving: what the copy covers is otherwise sent and confirmed unapplied.
-              this.options.logger?.("machines.install.chat-copy-confirm-error", { machineId: record.machineId, message: remoteCommandFailure(error) });
-            });
-          } finally {
-            await copy.cleanup().catch(() => undefined);
-          }
-          record = { ...record, chatCopyAt: this.now().toISOString() };
-          await this.options.store.saveMachineInstall(record);
+          await this.options.adoptIdentity(record.machineId, identity);
+          this.options.logger?.("machines.install.identity", { machineId: record.machineId, deviceId: identity.originId });
         } catch (error) {
           if (wasRunning) {
             await exec({ target: request.target, script: machineStartServiceScript(layout), timeoutMs: SHORT_TIMEOUT_MS }).catch(() => undefined);
           }
-          return await fail("error", `Copying the chats to the machine failed: ${remoteCommandFailure(error)}`, {
+          return await fail("error", `Reading the machine's identity failed: ${remoteCommandFailure(error)}`, {
             kind: "old-runtime-still-installed",
             detail: `Nothing was replaced: ${probe.installedVersion ?? "the installed version"} is still the one the machine runs`
               + `${wasRunning ? ", and it was started again" : ""}. The new files are staged in ${layout.releasesDir}/${release}. Retry when the cause is fixed.`,
@@ -1134,7 +1078,6 @@ export class MachineInstallerService {
       power: existing?.power,
       powerError: existing?.powerError,
       powerRetry: existing?.powerRetry,
-      chatCopyAt: existing?.chatCopyAt,
       profileHome: existing?.profileHome,
       isolatedProfile: existing?.installRoot
         ? existing.isolatedProfile ?? Boolean(existing.profileHome) : request.isolatedProfile ?? false
@@ -1574,31 +1517,6 @@ async function defaultBundleUpload(request: {
     `${path.resolve(request.localDir)}/`,
     `${target}:${escapeRemoteRsyncPath(request.remoteDir)}/`
   ], { timeoutMs: request.timeoutMs }));
-}
-
-async function defaultChatCopyUpload(request: Parameters<MachineChatCopyUpload>[0]): Promise<void> {
-  const worker = workerSettingsFor(request.target) as CloudRunWorkerSettings & { host: string };
-  const sshArgs = cloudRunSshOptionArgs(worker);
-  const target = buildCloudRunSshTarget(worker);
-  await runCommand("ssh", [...sshArgs, target, machineMaintenanceCommand(request.maintenance,
-    `bash -c ${shellQuotePosix(`umask 077; mkdir -p ${shellQuotePosix(request.remoteCopyDir)} ${shellQuotePosix(request.remoteChatsDir)}`)}`)], {
-    timeoutMs: 60_000
-  });
-  const rsync = (args: string[]): Promise<unknown> => withMachineRsyncPath(request.maintenance, (command, input) => runCommand("ssh", [
-    ...sshArgs, target, command
-  ], { input, timeoutMs: 60_000 }), (rsyncPath) => runCommand("rsync", [
-    ...args.slice(0, -2),
-    ...(rsyncPath ? ["--rsync-path", rsyncPath] : []),
-    "-e",
-    rsyncRshCommand(sshArgs),
-    ...args.slice(-2)
-  ], { timeoutMs: request.timeoutMs }));
-  await rsync(["-az", "--delete", `${path.resolve(request.copyDir)}/`, `${target}:${escapeRemoteRsyncPath(request.remoteCopyDir)}/`]);
-  if (request.attachmentsDir && fs.existsSync(request.attachmentsDir)) {
-    // Only the pictures of each chat; never a deletion on the machine.
-    await rsync(["-az", "-m", "--include=/*/", "--include=/*/attachments/***", "--exclude=*",
-      `${path.resolve(request.attachmentsDir)}/`, `${target}:${escapeRemoteRsyncPath(request.remoteChatsDir)}/`]);
-  }
 }
 
 /** Replaces base64/base64url/hex runs long enough to be a key. Deliberately

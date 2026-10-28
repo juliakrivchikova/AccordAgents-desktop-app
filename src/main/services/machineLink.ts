@@ -40,14 +40,14 @@ import { openMachinePayload, sealChannelPayload, sealMachinePayload } from "./ma
 import type { TunnelClient } from "./hubTunnelClient";
 import { signMachineControl, verifyMachineControl } from "./machineControlAuthentication";
 import type { SettingsService } from "./settings";
-import type { ChatEventLogService } from "./chatEventLog";
+import type { DeviceIdentityService } from "./deviceIdentity";
 import type { MachineRecoveryLinkState } from "./machineRecovery";
 
 export interface MachineLinkOptions {
   appVersion: string;
   desktopDeviceId: string;
   /** This desktop's device identity: what it signs and seals with. */
-  eventLog: Pick<ChatEventLogService, "getOrCreateDeviceIdentity">;
+  deviceIdentity: Pick<DeviceIdentityService, "getOrCreateDeviceIdentity">;
   /** Builds the client for one machine's room on the User's server (a test
    *  stand-in in tests); undefined when this desktop has no server. */
   createClient?: (pairing: MobilePairingPackage) => TunnelClient | undefined;
@@ -714,7 +714,7 @@ export class MachineLinkService {
     const publish = this.options.publishSettings;
     if (!publish || this.closed) return;
     let snapshot: MachineSettingsSnapshot | undefined;
-    const identity = await this.options.eventLog.getOrCreateDeviceIdentity();
+    const identity = await this.options.deviceIdentity.getOrCreateDeviceIdentity();
     const failures: string[] = [];
     for (const record of await this.settings.listMachines()) {
       const machineKey = machineSigningKey(this.machineRecord(record.id) ?? record);
@@ -754,7 +754,7 @@ export class MachineLinkService {
 
   private async handleMessage(connection: MachineConnection, ciphertext: string): Promise<void> {
     const pinned = machineSigningKey(connection.record);
-    const payload = await openMachinePayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
+    const payload = await openMachinePayload(ciphertext, await this.options.deviceIdentity.getOrCreateDeviceIdentity(),
       pinned ? [pinned] : undefined, connection.pairing.rendezvousId);
     if (!isMachineLinkEnvelope(payload)) return;
     if (!pinned && payload.body.type !== "machine.hello") {
@@ -995,7 +995,7 @@ export class MachineLinkService {
       sentAt: this.now().toISOString(),
       body
     };
-    const identity = await this.options.eventLog.getOrCreateDeviceIdentity();
+    const identity = await this.options.deviceIdentity.getOrCreateDeviceIdentity();
     const signed = signMachineControl(envelope, identity, connection.pairing.rendezvousId, to);
     const peerKey = machineSigningKey(connection.record);
     if (!peerKey) {

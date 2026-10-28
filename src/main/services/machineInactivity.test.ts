@@ -21,7 +21,7 @@ function harness(options: { machines: MachineRecord[]; connected?: string[]; ack
   const check = new MachineInactivityCheck({
     listMachines: async () => state.machines,
     isConnected: (id) => (options.connected ?? []).includes(id),
-    lastAcknowledgedAt: async (record) => options.acks?.[record.id],
+    lastActiveAt: async (record) => options.acks?.[record.id],
     lastCheckAt: async () => state.lastCheckAt,
     saveLastCheckAt: async (at) => { state.lastCheckAt = at; },
     ask: async (record) => {

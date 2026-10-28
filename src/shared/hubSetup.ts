@@ -38,7 +38,7 @@ export interface HubLinkConfig {
 }
 
 /** Setup's steps, in order. */
-export const HUB_SETUP_STEPS = ["connecting", "preparing", "uploading", "owner", "chats", "starting", "certificate", "checking"] as const;
+export const HUB_SETUP_STEPS = ["connecting", "preparing", "uploading", "owner", "starting", "certificate", "checking"] as const;
 export type HubSetupStep = typeof HUB_SETUP_STEPS[number];
 export type HubSetupPhase = HubSetupStep | "ready" | "error";
 
@@ -56,17 +56,11 @@ export interface HubSetupState {
   /** Why setup stopped when it needs the User: the server belongs to another
    *  computer and starting it over is hers to decide. */
   reason?: "another-owner";
-  /** Steps that had nothing to do (the chats were there already). */
-  skipped?: HubSetupStep[];
-  /** Whether the desktop's live link to the hub is up right now. */
+  /** Whether this desktop's writes reach the server right now. */
   reachable?: boolean;
-  /** Plain lines about the server's readers: a device that has not read
-   *  from it for a long time (the server keeps everything it has not read:
-   *  start it or remove it), or changes held for a long time. */
+  /** Plain lines about this desktop's link to the server: what it wrote and
+   *  has not got there yet, and why the last attempt failed. */
   notices?: string[];
-  /** Lines the User may dismiss: changes a device could not apply for two
-   *  weeks and gave up on. */
-  dismissableNotices?: Array<{ id: string; text: string }>;
   /** The region to offer for a new server: the one AWS is used in already. */
   defaultRegion?: string;
   updatedAt?: string;

@@ -12,7 +12,6 @@ import type {
   ArtifactReadResult, ArtifactResult, ArtifactSummary, ChatParticipant, Conversation, PublishedArtifactReadResult
 } from "../../shared/types";
 import { HubOps } from "../../hub/hubOps";
-import { HubLog } from "../../hub/hubLog";
 import { HubServer } from "../../hub/hubServer";
 import { createArtifactToolDispatcher } from "../appToolWiring";
 import { APP_ARTIFACT_CREATE_TOOL, APP_ARTIFACT_REVISE_TOOL, APP_ARTIFACT_SIGN_TOOL } from "./appMcp";
@@ -20,7 +19,7 @@ import { ArtifactClient } from "./artifactClient";
 import { ArtifactService } from "./artifacts";
 import { ArtifactStore } from "./artifactStore";
 import { ChatService } from "./chat";
-import { ChatEventLogService } from "./chatEventLog";
+import { DeviceIdentityService } from "./deviceIdentity";
 import { ChatSearchService } from "./chatSearch";
 import { signHubRequest } from "./hubAuth";
 import { ServerChatLink } from "./serverChatLink";
@@ -152,10 +151,10 @@ async function setup(t: test.TestContext, conversation: Conversation, options: {
   const desktopDb = path.join(dir, "desktop.sqlite3");
   const machineDb = path.join(dir, "machine.sqlite3");
   const desktopStorage = new StorageService({ dbPath: desktopDb });
-  const desktopEvents = new ChatEventLogService(desktopStorage);
+  const desktopEvents = new DeviceIdentityService(desktopStorage);
   const desktopIdentity = await desktopEvents.getOrCreateDeviceIdentity();
   const machineStorage = new StorageService({ dbPath: machineDb });
-  const machineEvents = new ChatEventLogService(machineStorage);
+  const machineEvents = new DeviceIdentityService(machineStorage);
   const machineIdentity = await machineEvents.getOrCreateDeviceIdentity();
   const hubStorage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3") });
   await hubStorage.init();
@@ -164,7 +163,7 @@ async function setup(t: test.TestContext, conversation: Conversation, options: {
     machineId: "box", addedAt: "" }], new Date().toISOString());
   const ops = new HubOps(hubStorage, (event, payload) => trace("hub", event, payload));
   const serve = async (port = 0) => {
-    const server = new HubServer({ hubId: "hub-test", version: "test", storage: hubStorage, log: new HubLog(hubStorage), search: new ChatSearchService(hubStorage), vapidPublicKey: "BPUB", ops });
+    const server = new HubServer({ hubId: "hub-test", version: "test", storage: hubStorage, search: new ChatSearchService(hubStorage), vapidPublicKey: "BPUB", ops });
     const http = await server.listenHttp(port, "127.0.0.1");
     return { server, port: (http.address() as AddressInfo).port };
   };

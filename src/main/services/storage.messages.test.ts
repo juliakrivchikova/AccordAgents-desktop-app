@@ -10,7 +10,6 @@ import {
   UnsupportedStorageSchemaVersionError
 } from "./storage";
 import { resolveSqliteExecutable } from "./sqliteCli";
-import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
 function hexJson(value: unknown): string {
@@ -458,9 +457,9 @@ test("init records the supported storage schema version for a legacy database", 
     assert.equal(storage.initialized, true);
     assert.match(runSqlStatements[0], /create table if not exists schema_meta/);
     assert.match(queryTextSql[0], new RegExp(STORAGE_SCHEMA_VERSION_META_KEY));
-    // The conversation columns and the durable receipt-delivery column upgrade
-    // before reads and recovery run against the legacy database.
-    assert.deepEqual(calls, ["prune", "ensureColumn", "ensureColumn", "ensureColumn", "backfill", "normalize", "clear"]);
+    // The conversation columns upgrade before reads and recovery run against
+    // the legacy database.
+    assert.deepEqual(calls, ["prune", "ensureColumn", "ensureColumn", "backfill", "normalize", "clear"]);
     assert.ok(runSqlStatements.some((sql) =>
       sql.includes(STORAGE_SCHEMA_VERSION_META_KEY) &&
       sql.includes(String(SUPPORTED_STORAGE_SCHEMA_VERSION))
@@ -535,172 +534,6 @@ test("queryJson and queryText stream SQL larger than the process argument limit"
     const jsonRows = await storage.queryJson(`select length('${content}') as bytes;`) as Array<{ bytes: number }>;
     assert.deepEqual(jsonRows, [{ bytes: content.length }]);
     assert.equal(await storage.queryText(`select length('${content}');`), String(content.length));
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("appendChatEvent is idempotent and detects visible-scope sequence conflicts", async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-events-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.initialized = false;
-  const firstEvent = chatEvent({
-    eventId: "event-1",
-    originSeq: 1,
-    payload: { content: "hello" },
-    payloadHash: "hash-hello",
-    prevHash: "hash-prev"
-  });
-
-  try {
-    assert.deepEqual(await (storage as StorageService).appendChatEvent(firstEvent), {
-      status: "appended",
-      eventId: "event-1"
-    });
-    assert.deepEqual(await (storage as StorageService).appendChatEvent(firstEvent), {
-      status: "duplicate",
-      eventId: "event-1"
-    });
-
-    const conflict = await (storage as StorageService).appendChatEvent(chatEvent({
-      eventId: "event-2",
-      originSeq: 1,
-      payload: { content: "conflict" },
-      payloadHash: "hash-conflict"
-    }));
-
-    assert.deepEqual(conflict, {
-      status: "conflict",
-      eventId: "event-2",
-      existingEventId: "event-1",
-      conflictReason: "origin-sequence-conflict"
-    });
-    const events = await (storage as StorageService).listChatEvents("conversation-1", "conversation-1");
-    assert.deepEqual(events, [firstEvent]);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("appendChatEvent detects event id reuse with a different envelope", async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-event-id-conflict-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.initialized = false;
-  const firstEvent = chatEvent({
-    eventId: "event-1",
-    originSeq: 1,
-    payload: { content: "hello" },
-    payloadHash: "hash-hello"
-  });
-
-  try {
-    await (storage as StorageService).appendChatEvent(firstEvent);
-    const conflict = await (storage as StorageService).appendChatEvent({
-      ...firstEvent,
-      originSeq: 2,
-      payload: { content: "different" },
-      payloadHash: "hash-different"
-    });
-
-    assert.deepEqual(conflict, {
-      status: "conflict",
-      eventId: "event-1",
-      existingEventId: "event-1",
-      conflictReason: "event-id-conflict"
-    });
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("appendChatEvents preserves input-order results while batching inserts", async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-event-batch-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.initialized = false;
-  const events = [1, 2, 3].map((sequence) => chatEvent({
-    eventId: `event-${sequence}`,
-    originSeq: sequence,
-    payload: { content: `message-${sequence}` },
-    payloadHash: `hash-${sequence}`,
-    prevHash: sequence === 1 ? "genesis" : `hash-${sequence - 1}`
-  }));
-
-  try {
-    assert.deepEqual(await (storage as StorageService).appendChatEvents(events), [
-      { status: "appended", eventId: "event-1" },
-      { status: "appended", eventId: "event-2" },
-      { status: "appended", eventId: "event-3" }
-    ]);
-
-    const duplicate = events[1];
-    const conflict = chatEvent({
-      eventId: "event-4",
-      originSeq: 3,
-      payload: { content: "conflict" },
-      payloadHash: "hash-conflict"
-    });
-    assert.deepEqual(await (storage as StorageService).appendChatEvents([duplicate, conflict]), [
-      { status: "duplicate", eventId: "event-2" },
-      {
-        status: "conflict",
-        eventId: "event-4",
-        existingEventId: "event-3",
-        conflictReason: "origin-sequence-conflict"
-      }
-    ]);
-
-    const stored = await (storage as StorageService).listChatEvents("conversation-1", "conversation-1");
-    assert.deepEqual(stored.map((event) => event.eventId), ["event-1", "event-2", "event-3"]);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("chat event projection rows upsert independently from legacy conversation saves", async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-projection-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.initialized = false;
-
-  try {
-    await (storage as StorageService).saveChatEventProjection({
-      conversationId: "conversation-1",
-      projectionKey: "messages",
-      version: 1,
-      lastEventId: "event-1",
-      payload: { messageIds: ["message-1"] },
-      updatedAt: "2026-08-06T00:00:00.000Z"
-    });
-    await (storage as StorageService).saveConversation(basicConversation("conversation-1", [
-      { id: "message-1", role: "user", content: "hello", createdAt: "2026-08-06T00:00:00.000Z", metadata: {} }
-    ]));
-    await (storage as StorageService).saveChatEventProjection({
-      conversationId: "conversation-1",
-      projectionKey: "messages",
-      version: 2,
-      lastEventId: "event-2",
-      payload: { messageIds: ["message-1", "message-2"] },
-      updatedAt: "2026-08-06T00:01:00.000Z"
-    });
-
-    const row = await (storage as StorageService).getChatEventProjection<{ messageIds: string[] }>(
-      "conversation-1",
-      "messages"
-    );
-
-    assert.deepEqual(row, {
-      conversationId: "conversation-1",
-      projectionKey: "messages",
-      version: 2,
-      lastEventId: "event-2",
-      payload: { messageIds: ["message-1", "message-2"] },
-      updatedAt: "2026-08-06T00:01:00.000Z"
-    });
-    const stored = await (storage as StorageService).getConversation("conversation-1");
-    assert.equal(stored?.messages.length, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -784,25 +617,6 @@ function maintenanceStorage(options: {
     saved.push(JSON.parse(JSON.stringify(conversation)) as Conversation);
   };
   return { storage: storage as StorageService, queryJsonSql, queryTextSql, runSqlStatements, saved };
-}
-
-function chatEvent(overrides: Partial<ChatEventEnvelope<{ content: string }>> = {}): ChatEventEnvelope<{ content: string }> {
-  return {
-    eventId: "event-1",
-    conversationId: "conversation-1",
-    logScopeId: "conversation-1",
-    originId: "device-1",
-    originSeq: 1,
-    logicalTs: "0000000000000001",
-    kind: "message.created",
-    payload: { content: "hello" },
-    payloadHash: "hash-hello",
-    eventHash: "event-hash-hello",
-    signature: "signature-1",
-    keyId: "key-1",
-    createdAt: "2026-08-06T00:00:00.000Z",
-    ...overrides
-  };
 }
 
 function legacyInferredConversation(): Conversation {

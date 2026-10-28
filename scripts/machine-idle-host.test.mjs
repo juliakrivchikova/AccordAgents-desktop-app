@@ -10,7 +10,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { StorageService } from "../dist/main/main/services/storage.js";
-import { ChatEventLogService } from "../dist/main/main/services/chatEventLog.js";
+import { DeviceIdentityService } from "../dist/main/main/services/deviceIdentity.js";
 import { MachineHostService } from "../dist/main/main/services/machineHost.js";
 import { MachineHostPowerRegistry } from "../dist/main/main/services/machineHostPower.js";
 import { MachineIdleScheduler } from "../dist/main/main/services/machineIdle.js";
@@ -23,8 +23,8 @@ test("idle waits for the members running here and for what the server has not ta
   try {
     const storage = new StorageService({ dbPath: path.join(dir, "host.sqlite3") });
     const source = new StorageService({ dbPath: path.join(dir, "source.sqlite3") });
-    const eventLog = new ChatEventLogService(storage); const sourceLog = new ChatEventLogService(source);
-    const [identity, sender] = await Promise.all([eventLog.getOrCreateDeviceIdentity(), sourceLog.getOrCreateDeviceIdentity()]);
+    const deviceIdentity = new DeviceIdentityService(storage); const sourceIdentity = new DeviceIdentityService(source);
+    const [identity, sender] = await Promise.all([deviceIdentity.getOrCreateDeviceIdentity(), sourceIdentity.getOrCreateDeviceIdentity()]);
     const pairing = { version: 1, purpose: "machine-host", issuer: sender, rendezvousId: "idle-room", stableRoutingId: "idle-route",
       relaySealKeyBase64: Buffer.alloc(32, 6).toString("base64url"), hubUrl: "http://127.0.0.1:1",
       capabilities: [{ scope: "device", canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }],
@@ -40,7 +40,7 @@ test("idle waits for the members running here and for what the server has not ta
     };
     const create = () => new MachineHostService(chat, { write: async () => undefined }, {
       pairing, deviceId: identity.originId, appVersion: "test", publicKeyDerBase64: identity.publicKeyDerBase64,
-      identity: () => eventLog.getOrCreateDeviceIdentity(), createClient: () => client, storage,
+      identity: () => deviceIdentity.getOrCreateDeviceIdentity(), createClient: () => client, storage,
       unsentServerWrites: async () => unsent,
       onNativeActivitySettled: async () => { activityCalls++; await scheduler.noteActivity(); } });
     host = create();

@@ -38,8 +38,8 @@ const HIDDEN_FILLERS = Array.from({ length: 78 }, (_, index) => ({
 const FIRST_OF_LATEST_PAGE = "f-01";
 
 test("PWA polish: search, times, unread, members, earlier history, slash menu, refresh, foreground, pictures, notification wording", { timeout: 300_000 }, async () => {
-  const { createChatEventDeviceIdentity } = require("../dist/main/main/services/chatEventLog.js");
-  const office = createChatEventDeviceIdentity(new Date().toISOString());
+  const { createDeviceIdentity } = require("../dist/main/main/services/deviceIdentity.js");
+  const office = createDeviceIdentity(new Date().toISOString());
   const hub = await startMobileHub({ rosterDevices: [
     { deviceId: office.originId, publicKeyDerBase64: office.publicKeyDerBase64, role: "machine", name: "Office Mac", machineId: "machine-1" }
   ] });

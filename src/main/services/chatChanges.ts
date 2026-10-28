@@ -1,50 +1,24 @@
 import { createHash } from "node:crypto";
 import { stableJson } from "../../shared/stableJson";
-import type { ChatMessage, ChatMessageReactions, ChatReactor, Conversation } from "../../shared/types";
+import type { ChatMessage, ChatReactor, Conversation } from "../../shared/types";
 
 /**
- * Chat content as events: the one way a chat's state reaches another device.
+ * What a save changed in a chat: the one way a chat's change leaves a device
+ * for the User's server, which owns every chat (agreements Д1–Д13). A save
+ * compares the chat with what the database held before it (never with an
+ * in-memory guess, which a restart would lose); chatServerOps turns the
+ * difference into operations, queued in the same SQLite transaction as the
+ * save.
  *
- * A save compares the chat with what the database held before it (never with
- * an in-memory guess, which a restart would lose) and records the difference
- * as one signed `chat.changes` event, committed in the same SQLite transaction
- * as the save. Receivers fold that event into their own copy.
- *
- * Who may change what is decided per field, not per message:
- *   - a message's content and status: only its owner (the device that runs
- *     the member that wrote it, or the device where it was typed);
- *   - reactions: anyone, merged key by key;
- *   - removal: anyone, merged as a union of removed ids;
- *   - the chat's own shared fields (title, members, project, archive state):
- *     only the device that installed the machines (the desktop).
+ * What a device writes is decided per field, not per message:
+ *   - a message's content and status: only the device that may write it
+ *     (where its member runs, or where it was typed);
+ *   - reactions: anyone, key by key;
+ *   - removal: anyone;
+ *   - the chat's own shared fields (title, members, project, archive state).
  * Everything else on a chat or a message is device-local run bookkeeping and
  * never leaves the device.
  */
-
-export const CHAT_CHANGES_EVENT_KIND = "chat.changes";
-/**
- * Every enrolled machine is addressed every change; one whose runtime folds
- * an older version is sent none of them (and no turn) until it is updated,
- * and then gets them all in order. A payload of a newer version than a device
- * folds waits there, unapplied, until that device is updated.
- */
-export const CHAT_CHANGES_VERSION = 1;
-
-export const CHAT_CHANGES_LOG_SCOPE_PREFIX = "chat-changes:";
-
-/** One log scope per chat, so a gap in one chat never holds another. */
-export function chatChangesLogScope(conversationId: string): string {
-  return `${CHAT_CHANGES_LOG_SCOPE_PREFIX}${conversationId}`;
-}
-
-export function isChatChangesLogScope(logScopeId: string): boolean {
-  return logScopeId.startsWith(CHAT_CHANGES_LOG_SCOPE_PREFIX) && isSafeChatId(logScopeId.slice(CHAT_CHANGES_LOG_SCOPE_PREFIX.length));
-}
-
-/** A SQL condition selecting chat change scopes on `column`, as an index range. */
-export function chatChangesScopeSql(column: string): string {
-  return `${column} >= '${CHAT_CHANGES_LOG_SCOPE_PREFIX}' and ${column} < 'chat-changes;'`;
-}
 
 /** Chat ids name directories (chats/<id>) on every device, so one that
  *  arrives from another device must be a plain token, never a path. */
@@ -70,7 +44,8 @@ export const LOCAL_MESSAGE_METADATA_KEYS: readonly string[] = [
   "machinePending",
   "cloudRunPreparation",
   "staleRunRecovery",
-  /** Which device created a message that arrived from elsewhere. */
+  /** Which device created a message, as messages from before the User's
+   *  server owned the chats recorded it. */
   "remoteAuthorOriginId",
   /** The User's server: the turns a message asked for, as this device
    *  last heard of them, and a placeholder bubble for a member that runs
@@ -108,17 +83,6 @@ export type ChatChange =
   | { type: "message.reactions"; messageId: string; added: ChatReactionAdded[]; removed: ChatReactionRemoved[] }
   | { type: "message.removed"; messageId: string };
 
-export interface ChatChangesPayload {
-  version: typeof CHAT_CHANGES_VERSION;
-  conversationId: string;
-  updatedAt: string;
-  changes: ChatChange[];
-  /** Machines only: the desktop's newest change of this chat its author had
-   *  applied. A member or a home it names may come from that change, so
-   *  another machine judges this one only once it has applied it too. */
-  after?: { originId: string; originSeq: number };
-}
-
 /** What the database held for a chat, reduced to what a diff needs. */
 export interface ChatChangeBaseline {
   shared: Record<string, string>;
@@ -139,32 +103,6 @@ export interface ChatChangeDiff {
    *  local; the owner's version wins everywhere else. */
   suppressedMessageIds: string[];
 }
-
-export interface ChatChangeApplyPolicy {
-  /** May `originId` set the chat's shared fields, including creating it? */
-  acceptsConversationFields(originId: string): boolean;
-  /** May `originId` change this message's content and status (to `incoming`)? */
-  acceptsMessageUpdate(existing: ChatMessage, conversation: Conversation, originId: string, incoming: ChatMessage): boolean;
-  /** May `originId` add this message? A member's reply comes only from where
-   *  that member runs (or the desktop that dispatches it). */
-  acceptsMessageCreate(message: ChatMessage, conversation: Conversation, originId: string): boolean;
-  /** May `originId` remove this message? Only the desktop, or the device that
-   *  may change it. */
-  acceptsMessageRemoval(existing: ChatMessage | undefined, conversation: Conversation, originId: string): boolean;
-  /** A chat this device does not hold yet is waited for (machines), or a
-   *  change for it is refused (the desktop, where every chat starts). */
-  holdsUnknownChats: boolean;
-}
-
-export type ChatChangeApplyResult =
-  | { status: "applied"; conversation: Conversation; created: boolean; changed: boolean; ignored: string[] }
-  | { status: "missing-conversation" }
-  /** Nothing to store: every change was refused (a chat this device will
-   *  never hold, or one the sender may not create). */
-  | { status: "ignored"; ignored: string[] };
-
-/** How many removed message ids a chat remembers (the same cap ChatService uses). */
-export const CHAT_REMOVED_MESSAGE_IDS_MAX = 100;
 
 function hash(value: unknown): string {
   return createHash("sha1").update(stableJson(value ?? null)).digest("hex");
@@ -331,309 +269,4 @@ export function diffChatChanges(
     if (!baseline.removed.has(id)) changes.push({ type: "message.removed", messageId: id });
   }
   return { changes, suppressedMessageIds };
-}
-
-/** Messages in creation order; the original order breaks ties. */
-function sortedByCreatedAt(messages: ChatMessage[]): ChatMessage[] {
-  return messages
-    .map((message, index) => ({ message, index }))
-    .sort((left, right) => left.message.createdAt.localeCompare(right.message.createdAt) || left.index - right.index)
-    .map((entry) => entry.message);
-}
-
-/** Keeps this device's own bookkeeping and reactions on a message whose
- *  shared content is replaced by an incoming change. */
-function mergeIncomingMessage(existing: ChatMessage | undefined, incoming: ChatMessage, originId: string): ChatMessage {
-  const metadata: Record<string, unknown> = { ...(incoming.metadata ?? {}) };
-  for (const key of LOCAL_MESSAGE_METADATA_KEYS) delete metadata[key];
-  if (existing?.metadata) {
-    for (const key of LOCAL_MESSAGE_METADATA_KEYS) {
-      if (existing.metadata[key as keyof typeof existing.metadata] !== undefined) {
-        metadata[key] = existing.metadata[key as keyof typeof existing.metadata];
-      }
-    }
-    // An owner's update carries no reactions; this device's merged set stays.
-    if (existing.metadata.reactions !== undefined) metadata.reactions = existing.metadata.reactions;
-  }
-  if (!existing) metadata.remoteAuthorOriginId = originId;
-  return Object.keys(metadata).length ? { ...incoming, metadata: metadata as ChatMessage["metadata"] } : { ...incoming, metadata: undefined };
-}
-
-function applyReactions(message: ChatMessage, added: ChatReactionAdded[], removed: ChatReactionRemoved[]): ChatMessage {
-  const reactions: ChatMessageReactions = {};
-  for (const [emoji, reactors] of Object.entries(message.metadata?.reactions ?? {})) {
-    if (Array.isArray(reactors) && reactors.length) reactions[emoji] = [...reactors];
-  }
-  for (const entry of removed) {
-    const list = reactions[entry.emoji]?.filter((reactor) => reactor.actorId !== entry.actorId);
-    if (!list) continue;
-    if (list.length) reactions[entry.emoji] = list; else delete reactions[entry.emoji];
-  }
-  for (const entry of added) {
-    const list = (reactions[entry.emoji] ?? []).filter((reactor) => reactor.actorId !== entry.reactor.actorId);
-    list.push(entry.reactor);
-    reactions[entry.emoji] = list;
-  }
-  const metadata = { ...(message.metadata ?? {}) } as NonNullable<ChatMessage["metadata"]>;
-  if (Object.keys(reactions).length) metadata.reactions = reactions; else delete metadata.reactions;
-  return { ...message, metadata };
-}
-
-function newConversation(conversationId: string, state: SharedConversationState, updatedAt: string): Conversation {
-  // Only the chat's shared fields are taken from another device; everything
-  // else on a new chat starts as this device's own.
-  const metadata: Record<string, unknown> = { participantSessions: [], warnings: [], running: false };
-  for (const key of SHARED_CONVERSATION_METADATA_KEYS) {
-    if (state.metadata?.[key] !== undefined) metadata[key] = state.metadata[key];
-  }
-  return {
-    id: conversationId,
-    title: state.title,
-    kind: "chat",
-    createdAt: state.createdAt,
-    updatedAt,
-    ...(state.repoPath ? { repoPath: state.repoPath } : {}),
-    messages: [],
-    findings: [],
-    metadata: metadata as Conversation["metadata"]
-  };
-}
-
-/** Reactions to a message this device does not hold yet. They come from
- *  another device's log than the message itself, so they can arrive first;
- *  they are kept here (device-local) and applied when the message arrives. */
-const PENDING_REACTIONS_KEY = "pendingChatReactions";
-const PENDING_REACTIONS_MAX = 200;
-
-type PendingReactions = Record<string, { added: ChatReactionAdded[]; removed: ChatReactionRemoved[] }>;
-
-function pendingReactions(conversation: Conversation): PendingReactions {
-  const value = (conversation.metadata as Record<string, unknown>)[PENDING_REACTIONS_KEY];
-  return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as PendingReactions) } : {};
-}
-
-function setPendingReactions(conversation: Conversation, pending: PendingReactions): void {
-  const ids = Object.keys(pending);
-  const metadata = conversation.metadata as Record<string, unknown>;
-  if (!ids.length) {
-    delete metadata[PENDING_REACTIONS_KEY];
-    return;
-  }
-  const kept = ids.slice(-PENDING_REACTIONS_MAX);
-  metadata[PENDING_REACTIONS_KEY] = Object.fromEntries(kept.map((id) => [id, pending[id]]));
-}
-
-/**
- * Folds one incoming `chat.changes` event into this device's copy. Pure: the
- * caller persists the result (without emitting it again). A change the rules
- * refuse is listed in `ignored`; it never stops the rest of the event.
- */
-export function applyChatChanges(
-  existing: Conversation | undefined,
-  payload: ChatChangesPayload,
-  originId: string,
-  policy: ChatChangeApplyPolicy
-): ChatChangeApplyResult {
-  let conversation = existing ? { ...existing, messages: [...existing.messages], metadata: { ...existing.metadata } } : undefined;
-  let created = false;
-  let changed = false;
-  const ignored: string[] = [];
-  for (const change of payload.changes) {
-    if (!isValidChange(change)) {
-      ignored.push(`invalid:${typeof (change as { type?: unknown })?.type === "string" ? (change as { type: string }).type : "unknown"}`);
-      continue;
-    }
-    if (change.type === "conversation.created") {
-      if (!conversation) {
-        if (!policy.acceptsConversationFields(originId)) {
-          ignored.push("conversation.created");
-          continue;
-        }
-        conversation = newConversation(payload.conversationId, change.conversation, payload.updatedAt);
-        created = true;
-        changed = true;
-      }
-      continue;
-    }
-    if (!conversation) {
-      if (policy.holdsUnknownChats) return { status: "missing-conversation" };
-      ignored.push(`${change.type}:unknown-chat`);
-      continue;
-    }
-    switch (change.type) {
-      case "conversation.updated": {
-        if (!policy.acceptsConversationFields(originId)) {
-          ignored.push("conversation.updated");
-          break;
-        }
-        if (typeof change.title === "string") conversation.title = change.title;
-        if (change.repoPath === null) delete conversation.repoPath;
-        else if (typeof change.repoPath === "string") conversation.repoPath = change.repoPath;
-        for (const [key, value] of Object.entries(change.metadata ?? {})) {
-          if (SHARED_CONVERSATION_METADATA_KEYS.includes(key)) conversation.metadata[key] = value;
-        }
-        for (const key of change.removedMetadataKeys ?? []) {
-          if (SHARED_CONVERSATION_METADATA_KEYS.includes(key)) delete conversation.metadata[key];
-        }
-        changed = true;
-        break;
-      }
-      case "message.created":
-      case "message.updated": {
-        if (removedIds(conversation).has(change.message.id)) break;
-        const index = conversation.messages.findIndex((message) => message.id === change.message.id);
-        if (index < 0) {
-          if (!policy.acceptsMessageCreate(change.message, conversation, originId)) {
-            ignored.push(`${change.type}:${change.message.id}`);
-            break;
-          }
-          let inserted = mergeIncomingMessage(undefined, change.message, originId);
-          const pending = pendingReactions(conversation);
-          const held = pending[inserted.id];
-          if (held) {
-            inserted = applyReactions(inserted, held.added, held.removed);
-            delete pending[inserted.id];
-            setPendingReactions(conversation, pending);
-          }
-          conversation.messages.push(inserted);
-          changed = true;
-          break;
-        }
-        const current = conversation.messages[index];
-        if (!policy.acceptsMessageUpdate(current, conversation, originId, change.message)) {
-          ignored.push(`${change.type}:${change.message.id}`);
-          break;
-        }
-        conversation.messages[index] = mergeIncomingMessage(current, change.message, originId);
-        changed = true;
-        break;
-      }
-      case "message.reactions": {
-        const index = conversation.messages.findIndex((message) => message.id === change.messageId);
-        if (index < 0) {
-          if (removedIds(conversation).has(change.messageId)) break;
-          const pending = pendingReactions(conversation);
-          const held = pending[change.messageId] ?? { added: [], removed: [] };
-          // Kept as where each reaction ended up, in the order they came: one
-          // added and then removed before the message arrives stays removed.
-          const same = (emoji: string, actorId: string) => (entry: { emoji: string; actorId?: string; reactor?: { actorId: string } }) =>
-            entry.emoji === emoji && (entry.actorId ?? entry.reactor?.actorId) === actorId;
-          let added = held.added.filter((entry) => !change.removed.some((removal) => same(removal.emoji, removal.actorId)(entry))
-            && !change.added.some((addition) => same(addition.emoji, addition.reactor.actorId)(entry)));
-          let removed = held.removed.filter((entry) => !change.added.some((addition) => same(addition.emoji, addition.reactor.actorId)(entry))
-            && !change.removed.some((removal) => same(removal.emoji, removal.actorId)(entry)));
-          added = [...added, ...change.added];
-          removed = [...removed, ...change.removed];
-          pending[change.messageId] = { added, removed };
-          setPendingReactions(conversation, pending);
-          changed = true;
-          break;
-        }
-        conversation.messages[index] = applyReactions(conversation.messages[index], change.added, change.removed);
-        changed = true;
-        break;
-      }
-      case "message.removed": {
-        const current = conversation.messages.find((message) => message.id === change.messageId);
-        if (!policy.acceptsMessageRemoval(current, conversation, originId)) {
-          ignored.push(`message.removed:${change.messageId}`);
-          break;
-        }
-        const removed = removedIds(conversation);
-        if (!removed.has(change.messageId)) {
-          conversation.metadata.removedChatMessageIds = [...removed, change.messageId].slice(-CHAT_REMOVED_MESSAGE_IDS_MAX);
-        }
-        conversation.messages = conversation.messages.filter((message) => message.id !== change.messageId);
-        changed = true;
-        break;
-      }
-    }
-  }
-  if (!conversation) {
-    return policy.holdsUnknownChats ? { status: "missing-conversation" } : { status: "ignored", ignored };
-  }
-  if (changed) {
-    conversation.messages = sortedByCreatedAt(conversation.messages);
-    if (payload.updatedAt && (!conversation.updatedAt || payload.updatedAt > conversation.updatedAt)) conversation.updatedAt = payload.updatedAt;
-  }
-  return { status: "applied", conversation, created, changed, ignored };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function isValidMessage(value: unknown): value is ChatMessage {
-  return isRecord(value) && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 256 &&
-    typeof value.role === "string" && typeof value.content === "string" && typeof value.createdAt === "string" &&
-    (value.metadata === undefined || isRecord(value.metadata));
-}
-
-function isValidReactor(value: unknown): value is ChatReactor {
-  return isRecord(value) && typeof value.actorId === "string" && value.actorId.length > 0;
-}
-
-/** One change of a known type with the fields applying it reads. Anything
- *  else is skipped: refusing the whole event would stop that chat's log on
- *  this device for good, and a newer peer may add change types. */
-export function isValidChange(value: unknown): value is ChatChange {
-  if (!isRecord(value)) return false;
-  switch (value.type) {
-    case "conversation.created": {
-      const state = value.conversation;
-      return isRecord(state) && typeof state.title === "string" && typeof state.createdAt === "string" &&
-        state.kind === "chat" && (state.repoPath === undefined || typeof state.repoPath === "string") && isRecord(state.metadata);
-    }
-    case "conversation.updated":
-      return (value.title === undefined || typeof value.title === "string") &&
-        (value.repoPath === undefined || value.repoPath === null || typeof value.repoPath === "string") &&
-        (value.metadata === undefined || isRecord(value.metadata)) &&
-        (value.removedMetadataKeys === undefined || (Array.isArray(value.removedMetadataKeys) && value.removedMetadataKeys.every((key) => typeof key === "string")));
-    case "message.created":
-    case "message.updated":
-      return isValidMessage(value.message);
-    case "message.reactions":
-      return typeof value.messageId === "string" && Array.isArray(value.added) && Array.isArray(value.removed) &&
-        value.added.every((entry) => isRecord(entry) && typeof entry.emoji === "string" && isValidReactor(entry.reactor)) &&
-        value.removed.every((entry) => isRecord(entry) && typeof entry.emoji === "string" && typeof entry.actorId === "string");
-    case "message.removed":
-      return typeof value.messageId === "string" && value.messageId.length > 0;
-    default:
-      return false;
-  }
-}
-
-/** A chat change event a device can fold: a safe chat id and a list of
- *  changes. Individual changes are checked when applied. */
-/** A payload written by a newer version waits, unapplied, until this device
- *  is updated: skipping what it does not understand would lose it for good. */
-export function isSupportedChatChangesVersion(payload: Pick<ChatChangesPayload, "version">): boolean {
-  return payload.version <= CHAT_CHANGES_VERSION;
-}
-
-/**
- * Applies reactions held for messages that have since arrived some other way
- * than as a change (a finished turn, a back delta). Returns whether any was.
- */
-export function applyHeldReactions(conversation: Conversation): boolean {
-  const pending = pendingReactions(conversation);
-  const ids = Object.keys(pending);
-  if (!ids.length) return false;
-  const indexes = new Map(conversation.messages.map((message, index) => [message.id, index]));
-  let changed = false;
-  for (const id of ids) {
-    const index = indexes.get(id);
-    if (index === undefined) continue;
-    conversation.messages[index] = applyReactions(conversation.messages[index], pending[id].added, pending[id].removed);
-    delete pending[id];
-    changed = true;
-  }
-  if (changed) setPendingReactions(conversation, pending);
-  return changed;
-}
-
-export function isChatChangesPayload(value: unknown): value is ChatChangesPayload {
-  if (!isRecord(value)) return false;
-  return typeof value.version === "number" && value.version >= 1 && isSafeChatId(value.conversationId) &&
-    typeof value.updatedAt === "string" && Array.isArray(value.changes);
 }

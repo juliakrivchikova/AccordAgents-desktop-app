@@ -107,8 +107,8 @@ async function swipeLeft(app, selector) {
 }
 
 test("Activity lists what the server delivered and acts on it from the bottom bar", { timeout: 300_000 }, async (t) => {
-  const { createChatEventDeviceIdentity } = require("../dist/main/main/services/chatEventLog.js");
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const { createDeviceIdentity } = require("../dist/main/main/services/deviceIdentity.js");
+  const machine = createDeviceIdentity(new Date().toISOString());
   const hub = await startMobileHub({ rosterDevices: [
     { deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Cloud machine", machineId: "m1" }
   ] });

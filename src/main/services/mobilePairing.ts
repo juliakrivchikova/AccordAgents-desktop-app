@@ -7,14 +7,14 @@ import {
   type MobilePairingPackage
 } from "../../shared/mobilePairing";
 import { stableJson } from "../../shared/stableJson";
-import type { ChatEventLogService } from "./chatEventLog";
+import type { DeviceIdentityService } from "./deviceIdentity";
 import { isAcceptableHubUrl } from "../../shared/hubProtocol";
 
 const DEFAULT_PAIRING_TTL_MINUTES = 10;
 
 export class MobilePairingService {
   constructor(
-    private readonly eventLog: ChatEventLogService,
+    private readonly deviceIdentity: Pick<DeviceIdentityService, "getOrCreateDeviceIdentity">,
     private readonly now: () => Date = () => new Date()
   ) {}
 
@@ -28,7 +28,7 @@ export class MobilePairingService {
     const hubUrl = normalizedOptionalUrl(request.hubUrl, ["https:", "http:"], "hubUrl");
     if (!hubUrl) throw new Error("Set up your server first (Settings → Your server): machines connect through it.");
     if (!isAcceptableHubUrl(hubUrl)) throw new Error("A hub is reached over HTTPS (plain HTTP only on this computer).");
-    const identity = await this.eventLog.getOrCreateDeviceIdentity();
+    const identity = await this.deviceIdentity.getOrCreateDeviceIdentity();
     const createdAtDate = this.now();
     const createdAt = createdAtDate.toISOString();
     const expiresAt = new Date(createdAtDate.getTime() + pairingTtlMs(request.ttlMinutes)).toISOString();

@@ -82,8 +82,8 @@ test("pairing credentials leave the URL; an old pairing is cleared and said once
       tx.objectStore("meta").put({ key: "machine-change-order:o:c", seq: 1 });
       tx.objectStore("meta").put({ key: "chatTitles", titles: { kept: "Kept" } });
       tx.objectStore("sealedEnvelopes").put({ eventId: "env-1" });
-      tx.objectStore("events").put({ eventId: "ev-1", originId: "o", logScopeId: "s", originSeq: 1, conversationId: "c" });
-      tx.objectStore("machineEvents").put({ eventId: "mev-1", originId: "o", logScopeId: "s", originSeq: 1 });
+      tx.objectStore("events").put({ eventId: "ev-1", originId: "o", logScopeId: "s", conversationId: "c" });
+      tx.objectStore("machineEvents").put({ eventId: "mev-1", originId: "o", logScopeId: "s" });
       tx.objectStore("machineOutbox").put({ eventId: "mout-1" });
       tx.objectStore("machineBlobs").put({ key: "blob:1" });
       tx.objectStore("outbox").put({ eventId: "relay-entry", conversationId: "c", kind: "message.created", payload: { content: "old" }, status: "waiting-to-sync", createdAt: new Date(0).toISOString(), attempts: 0 });

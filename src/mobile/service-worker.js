@@ -134,7 +134,7 @@ function dbRequest(request) {
 /** What a push from the User's server is about: the notices this phone has
  *  not seen, read from the server. Not synced when this phone is not paired
  *  with a server. */
-async function backgroundHubSync() {
+async function backgroundServerSync() {
   let db;
   let pairing;
   let identity;
@@ -326,7 +326,7 @@ self.addEventListener("push", (event) => {
     // that does not surface a notification counts against the subscription on
     // iOS. The page catches up on open regardless.
     let result;
-    const sync = backgroundHubSync();
+    const sync = backgroundServerSync();
     try {
       // A sync that takes too long is the same thing to iOS as no sync at all:
       // the handler is cut off with nothing shown, and that counts against the
@@ -380,7 +380,7 @@ self.addEventListener("message", (event) => {
       }
       return;
     }
-    const result = await backgroundHubSync();
+    const result = await backgroundServerSync();
     if (event.source) {
       event.source.postMessage({ type: "accord-test-push-done", result: result && result.hubAcknowledge ? { ...result, hubAcknowledge: { through: result.hubAcknowledge.through } } : result });
     }

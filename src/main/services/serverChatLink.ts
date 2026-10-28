@@ -16,6 +16,9 @@ const IMPORT_PAGE_MESSAGES = 200;
 /** A document action a request is already carrying when its writer stops
  *  waiting gets this much longer for that request's answer. */
 const ARTIFACT_IN_FLIGHT_WAIT_MS = 10_000;
+/** A machine looks this often whether it has read the server yet, before it
+ *  drops what it kept for the old order. */
+const LEGACY_DROP_CHECK_MS = 30_000;
 
 /**
  * The computer's (or a machine's) link to the User's server, which owns every
@@ -43,6 +46,9 @@ export class ServerChatLink {
   private artifactMovesUnknown = false;
   /** Documents moved or read again later, after a first try failed. */
   private documentsRetry?: Promise<void>;
+  /** The one-time drop of what this device kept for the old order of signed
+   *  events, under way (stopped by stop()). */
+  private legacyDrop?: { abort: AbortController; done: Promise<void> };
 
   constructor(private readonly options: {
     storage: StorageService;
@@ -179,7 +185,7 @@ export class ServerChatLink {
       this.embedded ??= await this.options.startEmbedded({ deviceId: this.deviceIdValue, publicKeyDerBase64: identity.publicKeyDerBase64 });
       url = this.embedded.url;
     }
-    const client = new HubClient({ url, identity: this.options.identity, storage: this.options.storage });
+    const client = new HubClient({ url, identity: this.options.identity });
     this.client = client;
     const hub = this.options.storage.hub();
     this.ops = new HubOpsClient({
@@ -248,6 +254,7 @@ export class ServerChatLink {
     this.ready = true;
     this.ops?.nudge();
     this.ops?.wakeReader();
+    this.dropLegacyTables();
     await this.options.chat.resumeServerTurns().catch((error) => {
       this.options.log("chat.server.resume-error", { message: error instanceof Error ? error.message : String(error) });
     });
@@ -258,6 +265,9 @@ export class ServerChatLink {
 
   async stop(): Promise<void> {
     this.ready = false;
+    const legacy = this.legacyDrop;
+    legacy?.abort.abort();
+    await legacy?.done;
     await this.ops?.stop();
     this.options.chat.setServerLink(undefined);
     this.options.chat.setServerChatReader(undefined);
@@ -266,6 +276,36 @@ export class ServerChatLink {
     this.client = undefined;
     await this.embedded?.close();
     this.embedded = undefined;
+  }
+
+  /**
+   * What this device kept for the order of signed events before the User's
+   * server owned the chats (agreement Д7) goes, once, in the background: on
+   * the computer once its chats are on the server (the move above finished),
+   * on a machine once it has read the server (its place in the feed is
+   * kept). Nothing reads any of it any more; a stop interrupts it and the
+   * next start carries on.
+   */
+  private dropLegacyTables(): void {
+    if (this.legacyDrop) return;
+    const abort = new AbortController();
+    const hub = this.options.storage.hub();
+    const done = (async () => {
+      while (!abort.signal.aborted && !this.options.movesChats && await hub.clientState(HUB_FEED_CURSOR_KEY) === undefined) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, LEGACY_DROP_CHECK_MS);
+          timer.unref?.();
+          abort.signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+        });
+      }
+      if (abort.signal.aborted) return;
+      await this.options.storage.dropLegacyEventTables({ keepBodies: false, signal: abort.signal, log: this.options.log });
+    })().catch((error: unknown) => {
+      this.options.log("storage.legacy-tables.error", { message: error instanceof Error ? error.message : String(error) });
+    }).finally(() => {
+      if (this.legacyDrop?.abort === abort) this.legacyDrop = undefined;
+    });
+    this.legacyDrop = { abort, done };
   }
 
   async refreshMachineNames(): Promise<void> {

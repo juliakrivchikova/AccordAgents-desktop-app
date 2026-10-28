@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { decodeMachineProgress, encodeMachineProgress, machineProgressEventId, type MachineProgressFrame } from "../../shared/machineProgress";
-import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import type { ReviewProgress } from "../../shared/types";
 import { MachineProgressSender } from "./machineProgressSender";
 
@@ -36,8 +35,8 @@ test("sender retains a failed frame verbatim, coalesces only text and flushes st
   const attempts: MachineProgressFrame[] = [];
   const durable: MachineProgressFrame[] = [];
   let fail = true, recovered = 0;
-  const sender = new MachineProgressSender({ conversationId: "chat", publish: async frame => {
-    attempts.push(structuredClone(frame)); return { eventId: machineProgressEventId(frame) } as ChatEventEnvelope;
+  const sender = new MachineProgressSender<{ eventId: string }>({ conversationId: "chat", publish: async frame => {
+    attempts.push(structuredClone(frame)); return { eventId: machineProgressEventId(frame) };
   }, stored: async (_event, frame) => { if (fail) throw Error("SQLITE_FULL"); durable.push(frame); }, onError: () => undefined, onRecovered: () => { recovered++; } });
   try {
     sender.note(progress("first"));
@@ -63,9 +62,9 @@ test("a blocked writer retains tool transitions as deltas without quadratic answ
   const blocked = new Promise<void>(resolve => { release = resolve; });
   let reconstructed: ReviewProgress | undefined;
   let observed = 0;
-  const sender = new MachineProgressSender({ conversationId: "chat", publish: async frame => {
+  const sender = new MachineProgressSender<{ eventId: string }>({ conversationId: "chat", publish: async frame => {
     await blocked;
-    return { eventId: machineProgressEventId(frame) } as ChatEventEnvelope;
+    return { eventId: machineProgressEventId(frame) };
   }, stored: async (_event, frame) => { reconstructed = decodeMachineProgress(reconstructed, frame); observed++; },
   onError: () => undefined, onRecovered: () => undefined });
   try {

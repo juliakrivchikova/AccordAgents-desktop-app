@@ -6,31 +6,30 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { ChatSearchService } from "../main/services/chatSearch";
-import { createChatEventDeviceIdentity } from "../main/services/chatEventLog";
+import { createDeviceIdentity } from "../main/services/deviceIdentity";
 import { signHubRequest, type HubSigningIdentity } from "../main/services/hubAuth";
 import { StorageService } from "../main/services/storage";
 import { hubTurnRunId, type HubChatPage, type HubFeedResponse, type HubOp, type HubOpsResponse } from "../shared/hubOps";
 import type { ChatMessage } from "../shared/types";
-import { HubLog } from "./hubLog";
 import { HubOps } from "./hubOps";
 import { HubServer } from "./hubServer";
 
-type Identity = ReturnType<typeof createChatEventDeviceIdentity>;
+type Identity = ReturnType<typeof createDeviceIdentity>;
 
 async function hub(t: test.TestContext) {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-ops-"));
   const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
   await storage.init();
   const now = () => new Date().toISOString();
-  const owner = createChatEventDeviceIdentity(now());
-  const phone = createChatEventDeviceIdentity(now());
-  const machine = createChatEventDeviceIdentity(now());
+  const owner = createDeviceIdentity(now());
+  const phone = createDeviceIdentity(now());
+  const machine = createDeviceIdentity(now());
   await storage.hub().setOwner({ deviceId: owner.originId, publicKeyDerBase64: owner.publicKeyDerBase64, name: "Desktop", addedAt: now() });
   const logged: Array<{ event: string; payload: Record<string, unknown> }> = [];
   const log = (event: string, payload: Record<string, unknown>) => { logged.push({ event, payload }); };
   const ops = new HubOps(storage, log);
   const server = new HubServer({
-    hubId: "hub-test", version: "test", storage, log: new HubLog(storage), search: new ChatSearchService(storage), vapidPublicKey: "BPUB",
+    hubId: "hub-test", version: "test", storage, search: new ChatSearchService(storage), vapidPublicKey: "BPUB",
     ops, debugLog: log
   });
   const http = await server.listenHttp(0, "127.0.0.1");
@@ -277,7 +276,7 @@ test("the feed is kept until every computer and machine read it; a phone never h
 test("without a server of her own, the same server runs inside the app on this computer only", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-embedded-hub-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const owner = createChatEventDeviceIdentity(new Date().toISOString());
+  const owner = createDeviceIdentity(new Date().toISOString());
   const { startEmbeddedHub } = await import("./embeddedHub");
   const start = () => startEmbeddedHub({ dataDir: dir, owner: { deviceId: owner.originId, publicKeyDerBase64: owner.publicKeyDerBase64 }, version: "test", log: () => undefined });
   const first = await start();
@@ -298,7 +297,7 @@ test("without a server of her own, the same server runs inside the app on this c
   assert.equal(page.status, 200);
   await second.close();
   // Another identity cannot take it over.
-  const stranger = createChatEventDeviceIdentity(new Date().toISOString());
+  const stranger = createDeviceIdentity(new Date().toISOString());
   await assert.rejects(startEmbeddedHub({ dataDir: dir, owner: { deviceId: stranger.originId, publicKeyDerBase64: stranger.publicKeyDerBase64 }, version: "test", log: () => undefined }));
 });
 

@@ -65,7 +65,7 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", { time
   const { hubTurnRunId } = require(path.join(repoRoot, "dist/main/shared/hubOps.js"));
   const hub = await startMobileHub();
   const site = await serveMobileShell({ port: SITE_PORT, hubOrigins: [hub.base] });
-  const client = new HubClient({ url: hub.base, identity: async () => hub.owner, storage: hub.storage });
+  const client = new HubClient({ url: hub.base, identity: async () => hub.owner });
   const publisher = new HubPhonePublisher({
     client: () => client,
     hasPhones: async () => true,
