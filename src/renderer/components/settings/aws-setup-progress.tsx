@@ -28,15 +28,17 @@ export function setupOperation(control: AwsWorkerControl): AwsWorkerOperationSna
  */
 export function useAwsSetupView(control: AwsWorkerControl) {
   const operation = setupOperation(control);
-  const [hidden, setHidden] = useState<{ operationId: string; authRequestId?: string }>();
+  const [hidden, setHidden] = useState<{ operationId: string; authRequestId?: string; whileLive: boolean }>();
   const live = Boolean(operation && LIVE.has(operation.phase));
   const waitsOnUser = Boolean(live && operation?.authRequestId && operation.authRequestId !== hidden?.authRequestId);
-  const open = Boolean(operation) && (hidden?.operationId !== operation?.operationId || waitsOnUser);
+  // Closed after it ended, the same setup started again (Try again) shows anew.
+  const restarted = Boolean(live && hidden && !hidden.whileLive);
+  const open = Boolean(operation) && (hidden?.operationId !== operation?.operationId || waitsOnUser || restarted);
   return {
     operation,
     live,
     open,
-    hide: () => { if (operation) setHidden({ operationId: operation.operationId, authRequestId: operation.authRequestId }); },
+    hide: () => { if (operation) setHidden({ operationId: operation.operationId, authRequestId: operation.authRequestId, whileLive: live }); },
     show: () => setHidden(undefined)
   };
 }

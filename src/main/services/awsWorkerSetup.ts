@@ -240,7 +240,12 @@ export class AwsWorkerSetupService {
       });
       await progressWrites;
       if (!report.ok) {
-        setStep(currentStep()?.id ?? "tools", "failed", report.message);
+        // What failed are the tools (or the connection); a sign-in that was
+        // under way when the last check ran ended as it ended.
+        const missing = report.checks.filter((check) => check.status === "fail").map((check) => check.label);
+        const current = currentStep();
+        if (current && current.id !== "tools") setStep(current.id, signInOutcome.has(current.id) ? "skipped" : signInEnded(current.detail), signInOutcome.get(current.id));
+        setStep("tools", "failed", missing.length ? `Not ready: ${missing.join(", ")}.` : report.message);
         const operation = await emit("error", report.message, {
           error: report.message,
           retryable: true

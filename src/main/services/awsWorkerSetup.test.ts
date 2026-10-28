@@ -125,6 +125,25 @@ test("a cloud program that cannot install stops the setup with its reason, and a
   assert.equal(retried.operation.setupSteps?.find((step) => step.id === "sign-in-claude")?.state, "skipped");
 });
 
+test("tools that could not be installed are named on the tools step, not on a sign-in", async () => {
+  const settings = { ...ALL_PROVIDERS, getAwsWorkerOperation: async () => undefined, saveAwsWorkerOperation: async () => undefined };
+  const doctor = {
+    waitForCloudInit: async () => undefined,
+    setup: async (_worker: unknown, progress: (value: any) => void) => {
+      progress({ stage: "codex-auth", message: "Codex sign-in skipped." });
+      return { ok: false, message: "1 check failing.", checks: [{ id: "rsync", label: "rsync", status: "fail" }] };
+    }
+  };
+  const service = new AwsWorkerSetupService(RUNNING_AWS as any, doctor as any, settings as any, { installed: async () => false, install: async () => undefined });
+  const result = await service.start({ operationId: "aws-tools-fail" });
+  assert.equal(result.operation.phase, "error");
+  const steps = Object.fromEntries((result.operation.setupSteps ?? []).map((step) => [step.id, step]));
+  assert.equal(steps.tools.state, "failed");
+  assert.equal(steps.tools.detail, "Not ready: rsync.");
+  assert.equal(steps["sign-in-codex"].state, "skipped");
+  assert.equal(steps.program.state, "pending", "the program is not installed on tools that are not ready");
+});
+
 test("an interrupted setup marks its running step as not finished", async () => {
   let stored: AwsWorkerOperationSnapshot | undefined = {
     operationId: "op-cut", intent: "setup", phase: "setting-up", message: "Installing…", updatedAt: "2026-01-01T00:00:00.000Z",

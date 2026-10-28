@@ -313,6 +313,23 @@ test("a setup that stopped says where and why, and Try again continues the same 
   await unmount();
 });
 
+test("a setup closed after it stopped shows again when the same setup runs again", async () => {
+  const ui = await mount({ status: { configured: false } as AwsWorkerStatus, start: () => new Promise(() => undefined) });
+  await ui.click(ui.find("aws-instance-switch"));
+  await ui.click(ui.find("aws-worker-connect-start"));
+  const operationId = (ui.bridge.calls.startAwsWorker?.[0]?.[0] as AwsWorkerStartRequest).operationId;
+  const send = async (operation: AwsWorkerOperationSnapshot): Promise<void> => {
+    await act(async () => { for (const listener of ui.bridge.operations) listener(operation); });
+    await ui.settle();
+  };
+  await send(setupSnapshot(operationId, [{ id: "instance", state: "failed", detail: "AWS refused." }], { phase: "error", message: "AWS refused." }));
+  await ui.click(ui.button("Close"));
+  assert.equal(ui.find("aws-setup-progress"), null);
+  await send(setupSnapshot(operationId, [{ id: "instance", state: "current", detail: "Looking for your AWS instance…" }]));
+  assert.ok(ui.find("aws-setup-progress"), "the retried setup shows its steps again");
+  await unmount();
+});
+
 test("a cloud program that is not installed is installed from its own section", async () => {
   const ui = await mount({ machines: { machines: [], status: [] } as never });
   await ui.click(ui.find("aws-program-install"));

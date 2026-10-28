@@ -26,9 +26,9 @@ export function AwsConnectSection(props: { control: AwsWorkerControl; setupView:
     if (!open) return;
     void window.consensus.getHubSetupState().then((state) => setNoServer(!state.url)).catch(() => undefined);
   }, [open]);
-  // Once the setup has started, its own window shows each step.
-  const setupStarted = Boolean(props.setupView.operation);
-  useEffect(() => { if (setupStarted) setOpen(false); }, [setupStarted]);
+  // Once the setup runs, its own window shows each step.
+  const setupRunning = props.setupView.live;
+  useEffect(() => { if (setupRunning) setOpen(false); }, [setupRunning]);
   const spec = c.baseSpec;
   return (
     <section className="gen-section" data-testid="aws-worker-connect">

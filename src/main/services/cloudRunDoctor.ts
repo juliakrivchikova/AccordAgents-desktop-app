@@ -13,7 +13,7 @@ import {
   normalizeCloudRunWorkerSettings,
   shellQuotePosix
 } from "./cloudRunWorkers";
-import { runCommand } from "./command";
+import { CommandError, runCommand } from "./command";
 import { isTransientSshError, runWithSshRetries } from "./sshRetry";
 import type { RemoteRunWorkerTarget } from "./remoteWorkerTarget";
 import { remoteProfileCommand } from "./remoteWorkerTarget";
@@ -354,12 +354,15 @@ export class CloudRunDoctorService {
       await published;
       if (publishError) throw new Error("The app could not save the Codex sign-in step. Start setup again.");
       const reason = errorMessage(error);
+      // The wait here or the bound on the instance (timeout exits 124) ran out.
+      const expired = /timed out/i.test(reason) || (error instanceof CommandError && error.result.exitCode === 124);
       await progress("codex-auth", skip.signal.aborted ? "Codex sign-in skipped."
-        : /timed out/i.test(reason) ? "Codex sign-in was not approved within 5 minutes."
+        : expired ? "Codex sign-in was not approved within 5 minutes."
           : `Codex sign-in did not complete: ${reason}`);
     } finally {
       this.codexLogins.delete(requestId);
-      const end = completed ? "" : `kill -TERM "$(cat ${shellQuotePosix(pidFile)} 2>/dev/null)" 2>/dev/null; `;
+      // Only a process id the login wrote is ever signalled.
+      const end = completed ? "" : `p="$(cat ${shellQuotePosix(pidFile)} 2>/dev/null)"; case "$p" in ''|*[!0-9]*) ;; *) kill -TERM "$p" 2>/dev/null ;; esac; `;
       await this.sshExec({ worker, command: `${end}rm -f ${shellQuotePosix(pidFile)}`, timeoutMs: PROBE_TIMEOUT_MS, retryAttempts: 1 })
         .catch(() => undefined);
     }

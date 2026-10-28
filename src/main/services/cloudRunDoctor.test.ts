@@ -484,6 +484,18 @@ test("Skip works while the Codex sign-in is still starting", async () => {
   assert.ok(seen.includes("Codex sign-in skipped."));
 });
 
+test("a Codex sign-in that ran out on the instance says it was not approved in time", async () => {
+  const seen: string[] = [];
+  const { service } = doctorWith(async (request) => {
+    if (request.command.includes("have rsync")) return NOT_SIGNED_IN;
+    if (request.command.includes("login --device-auth")) throw commandError({ exitCode: 124, message: "ssh exited with code 124" });
+    return "";
+  });
+  await service.setup(WORKER, (event) => { seen.push(event.message); },
+    { requiredProviderKinds: ["codex-cli"], signIn: "optional", offerSignIn: ["codex-cli"] });
+  assert.ok(seen.includes("Codex sign-in was not approved within 5 minutes."), seen.join(" | "));
+});
+
 test("a sign-in offered to nobody is not started, and a missing one only warns", async () => {
   const { service, commands } = doctorWith(async (request) => request.command.includes("have rsync") ? NOT_SIGNED_IN : "");
   const report = await service.setup(WORKER, undefined, { requiredProviderKinds: ["codex-cli", "claude-code"], signIn: "optional" });
