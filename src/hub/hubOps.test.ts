@@ -300,3 +300,77 @@ test("without a server of her own, the same server runs inside the app on this c
   const stranger = createChatEventDeviceIdentity(new Date().toISOString());
   await assert.rejects(startEmbeddedHub({ dataDir: dir, owner: { deviceId: stranger.originId, publicKeyDerBase64: stranger.publicKeyDerBase64 }, version: "test", log: () => undefined }));
 });
+
+test("a User's message asks a turn of each member it names; the member's own device finds it after a restart", async (t) => {
+  const h = await hub(t);
+  const chat = id("chat");
+  await h.write(h.owner, createChat(chat));
+  const sent = await h.write(h.phone, { opId: id("op"), kind: "message.create", conversationId: chat, message: userMessage("u1", "@box @desk hi", ["p-box", "p-desk", "p-gone"]) });
+  assert.equal(sent.body.results[0].status, "accepted");
+  const feed = (await h.call<HubFeedResponse>(h.machine, "GET", "/v3/feed?after=0")).body;
+  const created = feed.entries.find((entry) => entry.effect.kind === "message.create")?.effect as { turns?: Array<{ runId: string; state: string }> };
+  assert.deepEqual(created.turns?.map((turn) => [turn.runId, turn.state]).sort(), [
+    [hubTurnRunId("u1", "p-box"), "requested"], [hubTurnRunId("u1", "p-desk"), "requested"]
+  ], "a member not in the chat asks nothing");
+  // Each device sees only its own members' waiting work.
+  const machineWork = (await h.call<{ turns: Array<{ runId: string }> }>(h.machine, "GET", "/v3/turns")).body.turns.map((turn) => turn.runId);
+  const ownerWork = (await h.call<{ turns: Array<{ runId: string }> }>(h.owner, "GET", "/v3/turns")).body.turns.map((turn) => turn.runId);
+  assert.deepEqual(machineWork, [hubTurnRunId("u1", "p-box")]);
+  assert.deepEqual(ownerWork, [hubTurnRunId("u1", "p-desk")]);
+  // Taken: no longer waiting.
+  await h.write(h.machine, { opId: id("op"), kind: "turn.claim", conversationId: chat, runId: hubTurnRunId("u1", "p-box"), messageId: "u1", participantId: "p-box" });
+  assert.deepEqual((await h.call<{ turns: unknown[] }>(h.machine, "GET", "/v3/turns")).body.turns, []);
+});
+
+test("any device asks a turn of a member elsewhere, naming the bubble it will take; its home takes it", async (t) => {
+  const h = await hub(t);
+  const chat = id("chat");
+  await h.write(h.owner, createChat(chat));
+  await h.write(h.owner, { opId: id("op"), kind: "message.create", conversationId: chat, message: reply("r-desk", "p-desk", "done", "@box please check") });
+  const runId = `turn-${id("x")}`;
+  const asked = await h.write(h.owner, { opId: id("op"), kind: "turn.request", conversationId: chat, runId, messageId: "r-desk", participantId: "p-box",
+    pendingMessageId: "bubble-1", request: { kind: "turn", continuation: false } });
+  assert.equal(asked.body.results[0].status, "accepted");
+  const claimed = await h.write(h.machine, { opId: id("op"), kind: "turn.claim", conversationId: chat, runId, messageId: "r-desk", participantId: "p-box" });
+  const turn = (claimed.body.results[0] as { turn?: { pendingMessageId?: string; request?: Record<string, unknown>; requestedBy?: string } }).turn;
+  assert.equal(turn?.pendingMessageId, "bubble-1");
+  assert.deepEqual(turn?.request, { kind: "turn", continuation: false });
+  assert.equal(turn?.requestedBy, h.owner.originId);
+  // The machine writes the bubble under the id it was given.
+  const bubble = await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message: reply("bubble-1", "p-box", "pending") });
+  assert.equal(bubble.body.results[0].status, "accepted");
+  // A Stop on an asked-for turn nobody took keeps it from ever starting.
+  const other = `turn-${id("x")}`;
+  await h.write(h.owner, { opId: id("op"), kind: "turn.request", conversationId: chat, runId: other, messageId: "r-desk", participantId: "p-box" });
+  await h.write(h.phone, { opId: id("op"), kind: "turn.stop", conversationId: chat, runId: other, messageId: "r-desk", participantId: "p-box" });
+  const late = await h.write(h.machine, { opId: id("op"), kind: "turn.claim", conversationId: chat, runId: other, messageId: "r-desk", participantId: "p-box" });
+  assert.equal((late.body.results[0] as { claim?: string }).claim, "stopped");
+});
+
+test("the computer moves its chats to the server once: its order wins, and messages only the server had keep their place", async (t) => {
+  const h = await hub(t);
+  const chat = id("chat");
+  const t0 = Date.parse("2026-10-01T10:00:00Z");
+  const at = (minutes: number) => new Date(t0 + minutes * 60_000).toISOString();
+  // The server already has the chat with one phone message (its old copy).
+  await h.write(h.owner, createChat(chat, "Old"));
+  await h.write(h.phone, { opId: id("op"), kind: "message.create", conversationId: chat, message: { ...userMessage("from-phone", "phone"), createdAt: at(2) } as ChatMessage });
+  const fields = { title: "Moved", kind: "chat" as const, createdAt: at(0), metadata: { participants: members } };
+  const page1 = [{ ...userMessage("a", "first"), createdAt: at(1) }, { ...reply("b", "p-box", "done", "box says"), createdAt: at(3) }] as ChatMessage[];
+  const page2 = [{ ...userMessage("c", "third"), createdAt: at(4) }] as ChatMessage[];
+  const byMachine = await h.write(h.machine, { opId: id("op"), kind: "chat.import", conversationId: chat, conversation: fields, messages: page1 });
+  assert.equal(byMachine.body.results[0].status, "rejected", "only the computer that held the chats moves them");
+  assert.equal((await h.write(h.owner, { opId: id("op"), kind: "chat.import", conversationId: chat, conversation: fields, messages: page1 })).body.results[0].status, "accepted");
+  assert.equal((await h.write(h.owner, { opId: id("op"), kind: "chat.import", conversationId: chat, messages: page2, order: ["a", "b", "c"] })).body.results[0].status, "accepted");
+  const page = (await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`)).body;
+  assert.equal(page.conversation.title, "Moved");
+  assert.deepEqual(page.messages.map((message) => message.id), ["a", "from-phone", "b", "c"]);
+  // The box member's message is the machine's to change from now on.
+  assert.equal(page.messages.find((message) => message.id === "b")?.metadata?.serverWriter, h.machine.originId);
+  const update = await h.write(h.machine, { opId: id("op"), kind: "message.update", conversationId: chat, message: { ...reply("b", "p-box", "done", "edited"), createdAt: at(3) } as ChatMessage });
+  assert.equal(update.body.results[0].status, "accepted");
+  // New messages come after everything moved.
+  await h.write(h.phone, { opId: id("op"), kind: "message.create", conversationId: chat, message: { ...userMessage("d", "new"), createdAt: at(0) } as ChatMessage });
+  const after = (await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`)).body;
+  assert.deepEqual(after.messages.map((message) => message.id), ["a", "from-phone", "b", "c", "d"]);
+});

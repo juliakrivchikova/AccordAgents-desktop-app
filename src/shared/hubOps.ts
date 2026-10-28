@@ -23,6 +23,8 @@ export const HUB_OPS_PATH = "/v3/ops";
 export const HUB_FEED_PATH = "/v3/feed";
 export const HUB_CHATS_PATH = "/v3/chats";
 export const HUB_CHAT_PATH = "/v3/chat";
+/** Turns waiting for the asking device's members (after a restart). */
+export const HUB_TURNS_PATH = "/v3/turns";
 
 /** Operations in one request. */
 export const HUB_OPS_MAX_PER_REQUEST = 100;
@@ -45,9 +47,11 @@ export type HubOpKind =
   | "message.update"
   | "message.react"
   | "message.remove"
+  | "turn.request"
   | "turn.claim"
   | "turn.stop"
-  | "turn.finish";
+  | "turn.finish"
+  | "chat.import";
 
 export const HUB_OP_KINDS: readonly HubOpKind[] = [
   "conversation.create",
@@ -57,9 +61,11 @@ export const HUB_OP_KINDS: readonly HubOpKind[] = [
   "message.update",
   "message.react",
   "message.remove",
+  "turn.request",
   "turn.claim",
   "turn.stop",
-  "turn.finish"
+  "turn.finish",
+  "chat.import"
 ];
 
 /** The chat's own fields, as a device writes them. */
@@ -93,9 +99,14 @@ export type HubOpBody =
   | { kind: "message.update"; message: ChatMessage }
   | { kind: "message.react"; messageId: string; added: HubReactionAdded[]; removed: HubReactionRemoved[] }
   | { kind: "message.remove"; messageId: string }
+  | { kind: "turn.request"; runId: string; messageId: string; participantId: string; pendingMessageId?: string; request?: Record<string, unknown> }
   | { kind: "turn.claim"; runId: string; messageId: string; participantId: string }
   | { kind: "turn.stop"; runId: string; messageId: string; participantId: string }
-  | { kind: "turn.finish"; runId: string; outcome: HubTurnOutcome };
+  | { kind: "turn.finish"; runId: string; outcome: HubTurnOutcome }
+  /** Moving to the server (one time, by the computer that held the chats):
+   *  the chat's fields and a page of its messages, oldest pages first; the
+   *  last page names the order of every message the computer held. */
+  | { kind: "chat.import"; conversation?: HubConversationFields & { updatedAt?: string }; messages: ChatMessage[]; order?: string[] };
 
 export type HubOp = HubOpBody & {
   /** Chosen by the writer; a repeat with the same id is the same operation. */
@@ -105,7 +116,7 @@ export type HubOp = HubOpBody & {
 
 /** Where a turn stands on the server. "claimed" is the second mark a message
  *  shows: the device its member runs on has taken it (Д5). */
-export type HubTurnState = "claimed" | "stopped" | "finished";
+export type HubTurnState = "requested" | "claimed" | "stopped" | "finished";
 
 export interface HubTurn {
   runId: string;
@@ -113,6 +124,16 @@ export interface HubTurn {
   messageId: string;
   participantId: string;
   state: HubTurnState;
+  /** Asked for by a device for a member that runs elsewhere, or by the
+   *  server for each member a User's message names (deliveryTargets). */
+  requestedAt?: string;
+  requestedBy?: string;
+  /** The id the member's reply bubble takes, chosen by the device that asked
+   *  (so its placeholder becomes the real bubble). */
+  pendingMessageId?: string;
+  /** What kind of turn, for the device that runs it (a continuation, a
+   *  compaction, a request from another member…). */
+  request?: Record<string, unknown>;
   /** The device that took it (absent while it was stopped before anyone did). */
   executorDeviceId?: string;
   claimedAt?: string;
@@ -127,13 +148,16 @@ export type HubOpEffect =
   | { kind: "conversation.create"; conversation: HubConversationFields; updatedAt: string }
   | { kind: "conversation.update"; title?: string; repoPath?: string | null; metadata?: Record<string, unknown>; removedMetadataKeys?: string[]; updatedAt: string }
   | { kind: "conversation.delete" }
-  | { kind: "message.create"; message: ChatMessage }
+  | { kind: "message.create"; message: ChatMessage; turns?: HubTurn[] }
   | { kind: "message.update"; message: ChatMessage }
   | { kind: "message.react"; messageId: string; reactions: ChatMessageReactions | null }
   | { kind: "message.remove"; messageId: string }
+  | { kind: "turn.request"; turn: HubTurn }
   | { kind: "turn.claim"; turn: HubTurn }
   | { kind: "turn.stop"; turn: HubTurn }
-  | { kind: "turn.finish"; turn: HubTurn };
+  | { kind: "turn.finish"; turn: HubTurn }
+  /** The chat changed as a whole (moved to the server): read it again. */
+  | { kind: "chat.import"; last: boolean };
 
 /** How a claim came out, for the device that asked. */
 export type HubClaimOutcome = "claimed" | "already-yours" | "taken" | "stopped" | "finished";
@@ -178,6 +202,12 @@ export interface HubFeedGone {
   head: number;
 }
 
+export interface HubTurnsResponse {
+  /** Turns asked for this device's members that nobody took yet. */
+  turns: HubTurn[];
+  head: number;
+}
+
 export interface HubChatSummary {
   id: string;
   title: string;
@@ -202,9 +232,14 @@ export interface HubChatPage {
   head: number;
 }
 
-/** A turn's id: one per message and member, the same on every device. */
+/** The turn a User's message asks of a member it names: one per message and
+ *  member, the same on every device. Other turns take any `turn-` id. */
 export function hubTurnRunId(messageId: string, participantId: string): string {
   return `turn-${messageId}-${participantId}`;
+}
+
+export function isHubTurnRunId(value: unknown): value is string {
+  return isHubOpId(value) && value.startsWith("turn-");
 }
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/;
@@ -277,13 +312,26 @@ export function hubOpShapeProblem(value: unknown): string | undefined {
       return undefined;
     case "message.remove":
       return isHubOpId(value.messageId) ? undefined : "Invalid message id.";
+    case "turn.request":
+      if ((value.pendingMessageId !== undefined && !isHubOpId(value.pendingMessageId)) || (value.request !== undefined && !isRecord(value.request))) {
+        return "Invalid turn request.";
+      }
+      return isHubTurnRunId(value.runId) && isHubOpId(value.messageId) && typeof value.participantId === "string" &&
+        value.participantId.length > 0 && value.participantId.length <= 256 ? undefined : "Invalid turn.";
     case "turn.claim":
     case "turn.stop":
-      return isHubOpId(value.runId) && isHubOpId(value.messageId) && typeof value.participantId === "string" &&
-        value.participantId.length > 0 && value.participantId.length <= 256 && value.runId === hubTurnRunId(value.messageId as string, value.participantId as string)
-        ? undefined : "Invalid turn.";
+      return isHubTurnRunId(value.runId) && isHubOpId(value.messageId) && typeof value.participantId === "string" &&
+        value.participantId.length > 0 && value.participantId.length <= 256 ? undefined : "Invalid turn.";
+    case "chat.import": {
+      const conversation = value.conversation;
+      if (conversation !== undefined && (!isRecord(conversation) || !isText(conversation.title, 2_000) || conversation.kind !== "chat" ||
+          typeof conversation.createdAt !== "string" || !isRecord(conversation.metadata))) return "Invalid chat fields.";
+      if (!Array.isArray(value.messages) || !value.messages.every(isMessage)) return "Invalid messages.";
+      if (value.order !== undefined && (!Array.isArray(value.order) || !value.order.every(isHubOpId))) return "Invalid message order.";
+      return undefined;
+    }
     case "turn.finish":
-      return isHubOpId(value.runId) && (value.outcome === "done" || value.outcome === "error" || value.outcome === "stopped" || value.outcome === "interrupted")
+      return isHubTurnRunId(value.runId) && (value.outcome === "done" || value.outcome === "error" || value.outcome === "stopped" || value.outcome === "interrupted")
         ? undefined : "Invalid turn outcome.";
   }
 }

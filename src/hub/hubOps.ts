@@ -11,6 +11,7 @@ import {
   HUB_OP_MAX_BYTES,
   HUB_OPS_MAX_PER_REQUEST,
   hubOpShapeProblem,
+  hubTurnRunId,
   isHubChatId,
   isHubOpId,
   type HubChatPage,
@@ -168,7 +169,8 @@ export class HubOps {
       return { result: done.result, applied: { deviceId: device.deviceId, entry: done.entry, conversation } };
     }
 
-    if (op.kind === "turn.stop" || op.kind === "turn.claim" || op.kind === "turn.finish") {
+    if (op.kind === "chat.import") return this.applyImport(device, op, devices, { opId, seq, acceptedAt });
+    if (op.kind === "turn.request" || op.kind === "turn.stop" || op.kind === "turn.claim" || op.kind === "turn.finish") {
       return this.applyTurn(device, op, devices, { opId, seq, acceptedAt });
     }
 
@@ -211,8 +213,11 @@ export class HubOps {
         const message = storedMessage(op.message, { serverSeq: seq, serverWriter: device.deviceId });
         conversation.messages.push(message);
         conversation.updatedAt = acceptedAt;
-        const done = accepted({ kind: "message.create", message });
-        await this.save(conversation, done);
+        // A User's message asks a turn of every member it names: waiting on
+        // the server for the device each member runs on (Д4).
+        const turns = requestedTurnsFor(conversation, message, devices, { by: device.deviceId, at: acceptedAt });
+        const done = accepted({ kind: "message.create", message, ...(turns.length ? { turns } : {}) });
+        await this.save(conversation, done, () => turns.map((turn) => store.turnSql(turn)).join("\n"));
         return { result: done.result, applied: { deviceId: device.deviceId, entry: done.entry, conversation } };
       }
       case "message.update": {
@@ -262,7 +267,7 @@ export class HubOps {
 
   private async applyTurn(
     device: HubDevice,
-    op: Extract<HubOp, { kind: "turn.claim" | "turn.stop" | "turn.finish" }>,
+    op: Extract<HubOp, { kind: "turn.request" | "turn.claim" | "turn.stop" | "turn.finish" }>,
     devices: HubDevice[],
     place: { opId: string; seq: number; acceptedAt: string }
   ): Promise<Outcome> {
@@ -299,19 +304,112 @@ export class HubOps {
         return place_({ runId: op.runId, conversationId: op.conversationId, messageId: op.messageId, participantId: op.participantId,
           state: "stopped", finishedAt: acceptedAt, outcome: "stopped" });
       }
+      // Asked for and not taken yet: nobody ever takes it.
+      if (current.state === "requested") return place_({ ...current, state: "stopped", finishedAt: acceptedAt, outcome: "stopped" });
       if (current.state !== "claimed" || current.stopRequestedAt) return unchanged();
       return place_({ ...current, stopRequestedAt: acceptedAt });
     }
 
-    // turn.claim: only where the member runs (Д4), once (Д5).
     if (!conversation.messages.some((message) => message.id === op.messageId)) return reject(opId, "There is no such message.");
     const home = homeDeviceId(conversation, op.participantId, devices);
     if (!home) return reject(opId, "This member is not in the chat, or its machine is not on the server's roster.");
+
+    if (op.kind === "turn.request") {
+      // Any device asks; the member's own device takes it (Д2, Д4).
+      if (current) return unchanged(claimOutcomeFor(current, device.deviceId));
+      return place_({ runId: op.runId, conversationId: op.conversationId, messageId: op.messageId, participantId: op.participantId,
+        state: "requested", requestedAt: acceptedAt, requestedBy: device.deviceId,
+        ...(op.pendingMessageId ? { pendingMessageId: op.pendingMessageId } : {}),
+        ...(op.request ? { request: op.request } : {}) });
+    }
+
+    // turn.claim: only where the member runs (Д4), once (Д5).
     if (home !== device.deviceId) return reject(opId, "Only the device this member runs on may take its turn.");
     const settled = claimOutcomeFor(current, device.deviceId);
     if (settled) return unchanged(settled);
-    return place_({ runId: op.runId, conversationId: op.conversationId, messageId: op.messageId, participantId: op.participantId,
+    return place_({ ...(current ?? { runId: op.runId, conversationId: op.conversationId, messageId: op.messageId, participantId: op.participantId }),
       state: "claimed", executorDeviceId: device.deviceId, claimedAt: acceptedAt }, "claimed");
+  }
+
+  /** Moving a chat to the server, one time, from the computer that held
+   *  it: its fields, then its messages page by page; the last page names the
+   *  order. Messages only the server held (written on a phone and not yet on
+   *  the computer) keep their place by time. */
+  private async applyImport(
+    device: HubDevice,
+    op: Extract<HubOp, { kind: "chat.import" }>,
+    devices: HubDevice[],
+    place: { opId: string; seq: number; acceptedAt: string }
+  ): Promise<Outcome> {
+    const { opId, seq, acceptedAt } = place;
+    if (device.role !== "owner") return reject(opId, "Only the computer that held the chats moves them to the server.");
+    const loaded = await this.load(op.conversationId);
+    if (!loaded && !op.conversation) return reject(opId, "The first page of a chat names its fields.");
+    const conversation: Conversation = loaded
+      ? { ...loaded, messages: [...loaded.messages], metadata: { ...loaded.metadata } }
+      : { id: op.conversationId, title: "", kind: "chat", createdAt: acceptedAt, updatedAt: acceptedAt, messages: [], findings: [],
+        metadata: { participantSessions: [], warnings: [], running: false } as unknown as Conversation["metadata"] };
+    if (op.conversation) {
+      const fields = conversationFields(op.conversation);
+      conversation.title = fields.title;
+      conversation.createdAt = fields.createdAt;
+      if (fields.repoPath) conversation.repoPath = fields.repoPath; else delete conversation.repoPath;
+      for (const key of SHARED_CONVERSATION_METADATA_KEYS) {
+        if (fields.metadata[key] !== undefined) (conversation.metadata as Record<string, unknown>)[key] = fields.metadata[key];
+        else delete (conversation.metadata as Record<string, unknown>)[key];
+      }
+    }
+    const store = this.storage.hubOps();
+    for (const incoming of op.messages) {
+      if (await store.isRemoved(op.conversationId, incoming.id)) continue;
+      const index = conversation.messages.findIndex((message) => message.id === incoming.id);
+      const writer = incoming.role === "participant" && incoming.participantId
+        ? homeDeviceId(conversation, incoming.participantId, devices) ?? device.deviceId
+        : device.deviceId;
+      const existing = index >= 0 ? conversation.messages[index] : undefined;
+      const message = storedMessage(incoming, {
+        serverSeq: 0,
+        serverWriter: typeof existing?.metadata?.serverWriter === "string" ? existing.metadata.serverWriter : writer,
+        reactions: incoming.metadata?.reactions ?? existing?.metadata?.reactions
+      });
+      if (index >= 0) conversation.messages[index] = message; else conversation.messages.push(message);
+    }
+    if (op.order) {
+      const rank = new Map(op.order.map((id, index) => [id, index]));
+      const named = conversation.messages.filter((message) => rank.has(message.id)).sort((left, right) => (rank.get(left.id) ?? 0) - (rank.get(right.id) ?? 0));
+      const others = conversation.messages.filter((message) => !rank.has(message.id));
+      // Each message only the server held goes before the first named message
+      // written after it.
+      const merged: ChatMessage[] = [];
+      let next = 0;
+      for (const message of named) {
+        while (next < others.length && others[next].createdAt.localeCompare(message.createdAt) < 0) merged.push(others[next++]);
+        merged.push(message);
+      }
+      while (next < others.length) merged.push(others[next++]);
+      conversation.messages = merged.map((message) => typeof message.metadata?.serverSeq === "number" ? message
+        : { ...message, metadata: { ...(message.metadata ?? {}), serverSeq: 0 } as ChatMessage["metadata"] });
+    }
+    conversation.updatedAt = op.conversation?.updatedAt && typeof op.conversation.updatedAt === "string" ? op.conversation.updatedAt : conversation.updatedAt;
+    const effect: HubOpEffect = { kind: "chat.import", last: Boolean(op.order) };
+    const result: HubOpResult = { opId, status: "accepted", seq };
+    const entry: HubFeedEntry = { seq, opId, deviceId: device.deviceId, conversationId: op.conversationId, acceptedAt, effect };
+    await this.save(conversation, { result, entry });
+    return { result, applied: { deviceId: device.deviceId, entry, conversation } };
+  }
+
+  /** Turns asked of this device's members that nobody took yet: what a
+   *  computer or machine runs after it was off. */
+  async waitingTurns(device: HubDevice): Promise<HubTurn[]> {
+    const devices = await this.storage.hub().devices();
+    const turns: HubTurn[] = [];
+    const chats = new Map<string, Conversation | undefined>();
+    for (const turn of await this.storage.hubOps().requested()) {
+      if (!chats.has(turn.conversationId)) chats.set(turn.conversationId, await this.load(turn.conversationId));
+      const conversation = chats.get(turn.conversationId);
+      if (conversation && homeDeviceId(conversation, turn.participantId, devices) === device.deviceId) turns.push(turn);
+    }
+    return turns;
   }
 
   /** Who may add a message: anyone, except a member's message, which only
@@ -518,4 +616,22 @@ export function homeDeviceId(conversation: Conversation, participantId: string, 
     return devices.find((device) => device.role === "machine" && device.machineId === participant.homeMachineId)?.deviceId;
   }
   return devices.find((device) => device.role === "owner")?.deviceId;
+}
+
+/** The turns a User's message asks of the members it names (deliveryTargets):
+ *  one per member in the chat, with the id every device can name. */
+function requestedTurnsFor(conversation: Conversation, message: ChatMessage, devices: HubDevice[], by: { by: string; at: string }): HubTurn[] {
+  if (message.role !== "user") return [];
+  const targets = Array.isArray((message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets)
+    ? ((message.metadata as { deliveryTargets: unknown[] }).deliveryTargets).filter((id): id is string => typeof id === "string" && id.length > 0)
+    : [];
+  return [...new Set(targets)].filter((participantId) => homeDeviceId(conversation, participantId, devices)).map((participantId) => ({
+    runId: hubTurnRunId(message.id, participantId),
+    conversationId: conversation.id,
+    messageId: message.id,
+    participantId,
+    state: "requested" as const,
+    requestedAt: by.at,
+    requestedBy: by.by
+  }));
 }

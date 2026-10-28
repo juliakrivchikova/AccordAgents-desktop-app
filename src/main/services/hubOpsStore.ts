@@ -22,7 +22,11 @@ export const HUB_OPS_SCHEMA_SQL = `
     conversation_id text not null,
     message_id text not null,
     participant_id text not null,
-    state text not null check(state in ('claimed', 'stopped', 'finished')),
+    state text not null check(state in ('requested', 'claimed', 'stopped', 'finished')),
+    requested_at text,
+    requested_by text,
+    pending_message_id text,
+    request_json text,
     executor_device_id text,
     claimed_at text,
     stop_requested_at text,
@@ -30,6 +34,7 @@ export const HUB_OPS_SCHEMA_SQL = `
     outcome text
   );
   create index if not exists hub_turns_message on hub_turns(conversation_id, message_id);
+  create index if not exists hub_turns_requested on hub_turns(state) where state = 'requested';
   -- Messages removed from a chat: never added again, whoever writes them.
   create table if not exists hub_removed_messages (
     conversation_id text not null,
@@ -65,6 +70,10 @@ interface TurnRow {
   messageId: string;
   participantId: string;
   state: HubTurnState;
+  requestedAt: string | null;
+  requestedBy: string | null;
+  pendingMessageId: string | null;
+  requestJson: string | null;
   executorDeviceId: string | null;
   claimedAt: string | null;
   stopRequestedAt: string | null;
@@ -73,7 +82,8 @@ interface TurnRow {
 }
 
 const TURN_COLUMNS = `run_id as runId, conversation_id as conversationId, message_id as messageId, participant_id as participantId,
-  state, executor_device_id as executorDeviceId, claimed_at as claimedAt, stop_requested_at as stopRequestedAt,
+  state, requested_at as requestedAt, requested_by as requestedBy, pending_message_id as pendingMessageId, request_json as requestJson,
+  executor_device_id as executorDeviceId, claimed_at as claimedAt, stop_requested_at as stopRequestedAt,
   finished_at as finishedAt, outcome`;
 
 export class HubOpsStore {
@@ -213,12 +223,22 @@ export class HubOpsStore {
   /** Writes a turn as it stands now (inside the caller's transaction). */
   turnSql(turn: HubTurn): string {
     const value = (text: string | undefined) => text === undefined ? "null" : quote(text);
-    return `insert into hub_turns(run_id, conversation_id, message_id, participant_id, state, executor_device_id, claimed_at, stop_requested_at, finished_at, outcome)
+    return `insert into hub_turns(run_id, conversation_id, message_id, participant_id, state, requested_at, requested_by, pending_message_id, request_json,
+        executor_device_id, claimed_at, stop_requested_at, finished_at, outcome)
       values (${quote(turn.runId)}, ${quote(turn.conversationId)}, ${quote(turn.messageId)}, ${quote(turn.participantId)}, ${quote(turn.state)},
+        ${value(turn.requestedAt)}, ${value(turn.requestedBy)}, ${value(turn.pendingMessageId)}, ${turn.request ? quote(JSON.stringify(turn.request)) : "null"},
         ${value(turn.executorDeviceId)}, ${value(turn.claimedAt)}, ${value(turn.stopRequestedAt)}, ${value(turn.finishedAt)}, ${value(turn.outcome)})
       on conflict(run_id) do update set state = excluded.state, executor_device_id = excluded.executor_device_id,
         claimed_at = excluded.claimed_at, stop_requested_at = excluded.stop_requested_at, finished_at = excluded.finished_at,
         outcome = excluded.outcome;`;
+  }
+
+  /** Turns asked for that nobody has taken yet, oldest first. */
+  async requested(limit = 500): Promise<HubTurn[]> {
+    await this.init();
+    const rows = await this.database.query<TurnRow>(`select ${TURN_COLUMNS} from hub_turns where state = 'requested'
+      order by requested_at, run_id limit ${Math.max(1, Math.floor(limit))};`);
+    return rows.map(turnFromRow);
   }
 
   async isRemoved(conversationId: string, messageId: string): Promise<boolean> {
@@ -242,6 +262,10 @@ function turnFromRow(row: TurnRow): HubTurn {
     messageId: row.messageId,
     participantId: row.participantId,
     state: row.state,
+    ...(row.requestedAt ? { requestedAt: row.requestedAt } : {}),
+    ...(row.requestedBy ? { requestedBy: row.requestedBy } : {}),
+    ...(row.pendingMessageId ? { pendingMessageId: row.pendingMessageId } : {}),
+    ...(row.requestJson ? { request: JSON.parse(row.requestJson) as Record<string, unknown> } : {}),
     ...(row.executorDeviceId ? { executorDeviceId: row.executorDeviceId } : {}),
     ...(row.claimedAt ? { claimedAt: row.claimedAt } : {}),
     ...(row.stopRequestedAt ? { stopRequestedAt: row.stopRequestedAt } : {}),
@@ -252,7 +276,7 @@ function turnFromRow(row: TurnRow): HubTurn {
 
 /** The claim outcome a turn's state gives a device that asks for it. */
 export function claimOutcomeFor(turn: HubTurn | undefined, deviceId: string): HubClaimOutcome | undefined {
-  if (!turn) return undefined;
+  if (!turn || turn.state === "requested") return undefined;
   if (turn.state === "stopped") return "stopped";
   if (turn.state === "finished") return "finished";
   return turn.executorDeviceId === deviceId ? "already-yours" : "taken";
