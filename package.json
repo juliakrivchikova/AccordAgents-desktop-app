@@ -94,7 +94,7 @@
     "test:packaged-native": "node scripts/verify-packaged-native-process.mjs",
     "test:avatar-studio": "npm run build:main && node --require ./scripts/electron-stub.cjs --test dist/main/shared/chatAvatarCatalog.test.js dist/main/main/services/avatarStudio.test.js dist/main/main/services/settings.customAvatars.test.js && npm run build:renderer-tests && node --test --test-force-exit --import ./scripts/renderer-jsdom-setup.mjs dist/renderer-tests/renderer/components/avatar/avatar-studio-dialog.test.mjs",
     "build:hub": "node scripts/build-hub-bundle.mjs",
-    "test:hub": "npm run build:main && node --test --test-force-exit dist/main/hub/hub.test.js dist/main/hub/hubPhone.test.js dist/main/main/services/chat.phoneTurns.test.js dist/main/main/services/hubPhonePublisher.test.js dist/main/hub/hubSync.test.js dist/main/main/services/hubSetup.test.js dist/main/main/services/relayTables.test.js scripts/hub-phone-http.test.mjs dist/main/main/services/chat.machineServer.test.js dist/main/hub/hubOps.test.js dist/main/main/services/chat.serverArtifacts.test.js dist/main/main/services/chat.cards.test.js"
+    "test:hub": "npm run build:main && node --test --test-force-exit dist/main/hub/hub.test.js dist/main/main/services/hubOpsClient.test.js dist/main/hub/hubPhone.test.js dist/main/main/services/chat.phoneTurns.test.js dist/main/main/services/hubPhonePublisher.test.js dist/main/hub/hubSync.test.js dist/main/main/services/hubSetup.test.js dist/main/main/services/relayTables.test.js scripts/hub-phone-http.test.mjs dist/main/main/services/chat.machineServer.test.js dist/main/hub/hubOps.test.js dist/main/main/services/chat.serverArtifacts.test.js dist/main/main/services/chat.cards.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-ec2": "^3.1079.0",

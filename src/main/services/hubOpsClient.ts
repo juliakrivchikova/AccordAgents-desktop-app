@@ -471,7 +471,9 @@ export class HubOpsClient {
   async settleMoved(conversationId: string): Promise<void> {
     const at = new Date(this.now()).toISOString();
     for (const row of await this.options.store.forConversation(conversationId)) {
-      if (row.kind.startsWith("turn.") || row.kind.startsWith("card.")) continue;
+      // Only the chat's own content travels in the move (its fields and
+      // messages); turns, cards and documents are sent as they were queued.
+      if (!row.kind.startsWith("conversation.") && !row.kind.startsWith("message.")) continue;
       await this.options.store.accept(row.opId, 0, at);
       this.answer(row.opId, { status: "accepted", seq: 0 });
     }
@@ -622,6 +624,11 @@ export class HubOpsClient {
         let page;
         const cancel = new AbortController();
         this.reading_ = cancel;
+        // Stopped between the check above and here: no new wait begins.
+        if (this.stopped) {
+          this.reading_ = undefined;
+          break;
+        }
         try {
           page = await client.feed(cursor, HUB_FEED_WAIT_MAX_MS, cancel.signal);
         } catch (error) {
