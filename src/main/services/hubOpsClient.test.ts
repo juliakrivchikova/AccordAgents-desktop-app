@@ -59,3 +59,49 @@ test("stopping the client does not wait for a feed read it never needed to start
   assert.ok(Date.now() - started < 5_000, `stopped in ${Date.now() - started} ms`);
   assert.ok(feedCalls >= 1);
 });
+
+test("an operation too large for the server is refused here with its reason and never holds back the ones after it; answered ones are cleared away", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-ops-client-large-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const storage = new StorageService({ dbPath: path.join(dir, "device.sqlite3") });
+  const store = storage.hubClientOps();
+  const sent: string[][] = [];
+  const fakeClient = {
+    writeOps: async (ops: HubOp[]) => {
+      sent.push(ops.map((op) => op.opId));
+      return { results: ops.map((op, index) => ({ opId: op.opId, status: "accepted", seq: index + 1 })), head: ops.length };
+    },
+    feed: async (_after: number, waitMs: number, signal?: AbortSignal) => {
+      await new Promise<void>((resolve) => { const timer = setTimeout(resolve, waitMs); signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }); });
+      return { entries: [], head: 0, more: false };
+    }
+  };
+  const answered: Array<{ opId: string; status: string; reason?: string }> = [];
+  const client = new HubOpsClient({
+    store,
+    cursor: { get: async () => "0", set: async () => undefined },
+    client: () => fakeClient as never,
+    apply: async () => undefined,
+    resync: async () => 0,
+    onAnswered: (row, outcome) => answered.push({ opId: row.opId, status: outcome.status, ...(outcome.status === "rejected" ? { reason: outcome.reason } : {}) }),
+    log: () => undefined
+  });
+  t.after(() => client.stop());
+  const at = new Date().toISOString();
+  // Cyrillic text: more bytes than characters (the server counts bytes).
+  const huge = "ж".repeat(2_200_000);
+  await store.enqueue([
+    { opId: "op-huge", kind: "message.create", conversationId: "chat-1", message: { id: "m-huge", role: "user", content: huge, createdAt: at } },
+    { opId: "op-next", kind: "message.create", conversationId: "chat-1", message: { id: "m-next", role: "user", content: "next", createdAt: at } }
+  ], at);
+  client.start();
+  const deadline = Date.now() + 10_000;
+  while (answered.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(answered.map((item) => [item.opId, item.status]), [["op-huge", "rejected"], ["op-next", "accepted"]]);
+  assert.equal(answered[0].reason, "The operation is too large.");
+  assert.deepEqual(sent, [["op-next"]], "the large one was never sent");
+  assert.equal((await store.failures())[0]?.reason, "The operation is too large.", "it is in the failure log (Д12)");
+  // A week later the answered ones go.
+  await store.prune(Date.now() + 8 * 24 * 60 * 60_000);
+  assert.equal(await store.get("op-next"), undefined);
+});

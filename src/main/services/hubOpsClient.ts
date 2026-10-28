@@ -1,5 +1,5 @@
 import { HubHttpError, type HubClient } from "./hubClient";
-import { HUB_FEED_WAIT_MAX_MS, HUB_OPS_MAX_PER_REQUEST, type HubArtifactAnswer, type HubCard, type HubClaimOutcome, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
+import { HUB_FEED_WAIT_MAX_MS, HUB_OP_MAX_BYTES, HUB_OPS_MAX_PER_REQUEST, type HubArtifactAnswer, type HubCard, type HubClaimOutcome, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
 
 /**
  * A device's side of the chats the User's server owns (agreements Д1, Д3):
@@ -58,6 +58,8 @@ export interface HubClientOpRow {
   /** The server's answer to a document action. */
   artifact?: HubArtifactAnswer;
   createdAt: string;
+  /** How large the operation is, in bytes (read with the waiting ones). */
+  bytes?: number;
 }
 
 export interface HubClientOpFailure {
@@ -115,14 +117,16 @@ export class HubClientOpsStore {
   /** Waiting operations in the order they were written. */
   async queued(limit: number, maxBytes: number): Promise<HubClientOpRow[]> {
     await this.init();
-    const rows = await this.database.query<RawRow & { size: number }>(`select ${COLUMNS}, length(op_json) as size from hub_client_ops
+    // Bytes, as the server counts a request (length() alone counts
+    // characters).
+    const rows = await this.database.query<RawRow & { size: number }>(`select ${COLUMNS}, length(cast(op_json as blob)) as size from hub_client_ops
       where status = 'queued' order by rowid limit ${Math.max(1, Math.floor(limit))};`);
     const picked: HubClientOpRow[] = [];
     let bytes = 0;
     for (const row of rows) {
       if (picked.length > 0 && bytes + Number(row.size) > maxBytes) break;
       bytes += Number(row.size);
-      picked.push(fromRow(row));
+      picked.push({ ...fromRow(row), bytes: Number(row.size) });
     }
     return picked;
   }
@@ -275,6 +279,9 @@ export const HUB_FEED_CURSOR_KEY = "ops-cursor";
 
 const RETRY_MIN_MS = 2_000;
 const RETRY_MAX_MS = 30_000;
+/** How often answered operations and old failures are cleared away. */
+const PRUNE_EVERY_MS = 60 * 60_000;
+const TOO_LARGE = "The operation is too large.";
 
 /**
  * Sends a device's operations to the User's server in the order they were
@@ -286,6 +293,7 @@ export class HubOpsClient {
   private flushing?: Promise<void>;
   private flushAgain = false;
   private retryTimer?: ReturnType<typeof setTimeout>;
+  private pruneTimer?: ReturnType<typeof setInterval>;
   private retryMs = RETRY_MIN_MS;
   private reading?: Promise<void>;
   private stopped = true;
@@ -331,12 +339,25 @@ export class HubOpsClient {
     this.stopped = false;
     this.nudge();
     this.reading ??= this.readLoop().finally(() => { this.reading = undefined; });
+    // What was answered is kept a week, the newest failures for the log
+    // (Д12); the rest goes, now and every hour.
+    this.prune();
+    this.pruneTimer = setInterval(() => this.prune(), PRUNE_EVERY_MS);
+    this.pruneTimer.unref?.();
+  }
+
+  private prune(): void {
+    void this.options.store.prune(this.now()).catch((error) => {
+      this.options.log("hub.ops.prune-failed", { message: error instanceof Error ? error.message : String(error) });
+    });
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
+    if (this.pruneTimer) clearInterval(this.pruneTimer);
+    this.pruneTimer = undefined;
     this.readerWake?.();
     this.reading_?.abort();
     for (const waiter of [...this.appliedWaiters]) waiter.resolve(false);
@@ -516,9 +537,24 @@ export class HubOpsClient {
       const client = this.options.client();
       // Read and claimed for this request with nothing awaited between: an
       // operation its writer took back is never sent.
-      const batch = (await this.options.store.queued(HUB_OPS_MAX_PER_REQUEST, FLUSH_MAX_BYTES)).filter((row) => !this.withdrawn.has(row.opId));
-      if (batch.length === 0) return;
+      const waiting = (await this.options.store.queued(HUB_OPS_MAX_PER_REQUEST, FLUSH_MAX_BYTES)).filter((row) => !this.withdrawn.has(row.opId));
+      if (waiting.length === 0) return;
       const at = new Date(this.now()).toISOString();
+      // One the server would refuse for its size is refused here, as it
+      // would be there: never sent, so it never holds the others back.
+      const batch: HubClientOpRow[] = [];
+      for (const row of waiting) {
+        if ((row.bytes ?? 0) <= HUB_OP_MAX_BYTES) {
+          batch.push(row);
+          continue;
+        }
+        await this.options.store.reject(row, TOO_LARGE, at);
+        this.options.log("hub.ops.rejected", { opId: row.opId, kind: row.kind, conversationId: row.conversationId, reason: TOO_LARGE });
+        const outcome: HubOpOutcome = { status: "rejected", reason: TOO_LARGE };
+        this.options.onAnswered?.(row, outcome);
+        this.answer(row.opId, outcome);
+      }
+      if (batch.length === 0) continue;
       if (!client) {
         // No link yet: kept, tried when the link comes (nudge).
         return;

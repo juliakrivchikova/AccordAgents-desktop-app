@@ -553,15 +553,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+/** Text the server stores in a column of its own: never with a NUL (the
+ *  storage refuses it, and the whole request would fail again and again). */
 function isText(value: unknown, max: number): value is string {
-  return typeof value === "string" && value.length <= max;
+  return typeof value === "string" && value.length <= max && !value.includes("\u0000");
+}
+
+/** A member or time named in a column: one line of text. */
+function isName(value: unknown, max = 256): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= max && !CONTROL.test(value);
 }
 
 function isMessage(value: unknown): value is ChatMessage {
   return isRecord(value) && isHubOpId(value.id) &&
     (value.role === "user" || value.role === "participant" || value.role === "system" || value.role === "summary" || value.role === "script") &&
     typeof value.content === "string" && typeof value.createdAt === "string" && !CONTROL.test(value.createdAt) &&
-    (value.participantId === undefined || (typeof value.participantId === "string" && value.participantId.length <= 256)) &&
+    (value.participantId === undefined || isName(value.participantId)) &&
     (value.status === undefined || value.status === "pending" || value.status === "done" || value.status === "error") &&
     (value.metadata === undefined || isRecord(value.metadata));
 }
@@ -581,7 +588,7 @@ export function hubOpShapeProblem(value: unknown): string | undefined {
     case "conversation.create": {
       const conversation = value.conversation;
       if (!isRecord(conversation) || !isText(conversation.title, 2_000) || conversation.kind !== "chat" ||
-          typeof conversation.createdAt !== "string" || !isRecord(conversation.metadata) ||
+          !isName(conversation.createdAt, 64) || !isRecord(conversation.metadata) ||
           (conversation.repoPath !== undefined && !isText(conversation.repoPath, 4_096))) return "Invalid chat fields.";
       return undefined;
     }
@@ -611,12 +618,10 @@ export function hubOpShapeProblem(value: unknown): string | undefined {
       if ((value.pendingMessageId !== undefined && !isHubOpId(value.pendingMessageId)) || (value.request !== undefined && !isRecord(value.request))) {
         return "Invalid turn request.";
       }
-      return isHubTurnRunId(value.runId) && isHubOpId(value.messageId) && typeof value.participantId === "string" &&
-        value.participantId.length > 0 && value.participantId.length <= 256 ? undefined : "Invalid turn.";
+      return isHubTurnRunId(value.runId) && isHubOpId(value.messageId) && isName(value.participantId) ? undefined : "Invalid turn.";
     case "turn.claim":
     case "turn.stop":
-      return isHubTurnRunId(value.runId) && isHubOpId(value.messageId) && typeof value.participantId === "string" &&
-        value.participantId.length > 0 && value.participantId.length <= 256 ? undefined : "Invalid turn.";
+      return isHubTurnRunId(value.runId) && isHubOpId(value.messageId) && isName(value.participantId) ? undefined : "Invalid turn.";
     case "card.raise":
       if (!isHubOpId(value.cardId) || !["permission", "choice", "mention", "roster"].includes(value.cardKind as string) || !isRecord(value.card) ||
           (value.messageId !== undefined && !isHubOpId(value.messageId))) {
@@ -625,7 +630,7 @@ export function hubOpShapeProblem(value: unknown): string | undefined {
       // A card always names the member it waits on (only that member's
       // device raises it), and a member's choice or mentions the message
       // that asked them.
-      if (typeof value.participantId !== "string" || !value.participantId || !isText(value.participantId, 256)) return "A card names its member.";
+      if (!isName(value.participantId)) return "A card names its member.";
       if ((value.cardKind === "choice" || value.cardKind === "mention") && value.messageId === undefined) return "A card names the message that asked it.";
       return undefined;
     case "card.answer":
@@ -635,7 +640,8 @@ export function hubOpShapeProblem(value: unknown): string | undefined {
     case "chat.import": {
       const conversation = value.conversation;
       if (conversation !== undefined && (!isRecord(conversation) || !isText(conversation.title, 2_000) || conversation.kind !== "chat" ||
-          typeof conversation.createdAt !== "string" || !isRecord(conversation.metadata))) return "Invalid chat fields.";
+          !isName(conversation.createdAt, 64) || !isRecord(conversation.metadata) ||
+          (conversation.repoPath !== undefined && !isText(conversation.repoPath, 4_096)))) return "Invalid chat fields.";
       if (!Array.isArray(value.messages) || !value.messages.every(isMessage)) return "Invalid messages.";
       if (value.order !== undefined && (!Array.isArray(value.order) || !value.order.every(isHubOpId))) return "Invalid message order.";
       return undefined;

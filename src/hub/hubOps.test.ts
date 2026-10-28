@@ -226,6 +226,12 @@ test("the feed gives every device the same order, waits for news, and says when 
   const gone = await h.call<{ gone?: boolean }>(h.machine, "GET", "/v3/feed?after=1");
   assert.equal(gone.status, 410);
   assert.equal(gone.body.gone, true);
+
+  // A place this server never gave (it was restored from an older copy, or
+  // the device read another server): read again, nothing skipped.
+  const ahead = await h.call<{ gone?: boolean; head?: number }>(h.machine, "GET", `/v3/feed?after=${woken.head + 50}`);
+  assert.equal(ahead.status, 410);
+  assert.equal(ahead.body.head, woken.head);
 });
 
 test("a deleted chat is gone for everyone: later writes are refused and the feed says so", async (t) => {
@@ -251,6 +257,20 @@ test("a malformed operation is refused with its reason and logged, not stored", 
   assert.equal(empty.status, 400);
   assert.ok(h.logged.some((item) => item.event === "hub.request" && item.payload.status === 400 && typeof item.payload.reason === "string"));
   assert.equal((await h.call<HubFeedResponse>(h.owner, "GET", "/v3/feed?after=0")).body.entries.length, 0);
+
+  // One the server cannot store (a NUL in a member's id) is refused alone;
+  // the rest of the request goes on, and nothing is asked again forever.
+  const chat = id("chat");
+  await h.write(h.owner, createChat(chat));
+  await h.write(h.owner, { opId: id("op"), kind: "message.create", conversationId: chat, message: userMessage("nul-m", "hi") });
+  const mixed = await h.write(h.owner,
+    { opId: "nul-turn", kind: "turn.request", conversationId: chat, runId: hubTurnRunId("nul-m", "p-desk"), messageId: "nul-m", participantId: "p-desk\u0000x" },
+    { opId: "after-nul", kind: "message.create", conversationId: chat, message: userMessage("after-nul-m", "still here") });
+  assert.equal(mixed.status, 200);
+  assert.equal(mixed.body.results[0].status, "rejected");
+  assert.equal(mixed.body.results[1].status, "accepted");
+  const titled = await h.write(h.owner, { opId: id("op"), kind: "conversation.update", conversationId: chat, title: "bad\u0000title" });
+  assert.equal(titled.body.results[0].status, "rejected");
 });
 
 test("the feed is kept until every computer and machine read it; a phone never holds it back", async (t) => {
@@ -369,6 +389,12 @@ test("the computer moves its chats to the server once: its order wins, and messa
   assert.equal(page.messages.find((message) => message.id === "b")?.metadata?.serverWriter, h.machine.originId);
   const update = await h.write(h.machine, { opId: id("op"), kind: "message.update", conversationId: chat, message: { ...reply("b", "p-box", "done", "edited"), createdAt: at(3) } as ChatMessage });
   assert.equal(update.body.results[0].status, "accepted");
+  // A move sent again never replaces a message written here through an
+  // operation (the phone's) with the computer's older copy of it.
+  const stale = [{ ...userMessage("from-phone", "the computer's older copy"), createdAt: at(2) }] as ChatMessage[];
+  assert.equal((await h.write(h.owner, { opId: id("op"), kind: "chat.import", conversationId: chat, messages: stale })).body.results[0].status, "accepted");
+  const resent = (await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`)).body;
+  assert.equal(resent.messages.find((message) => message.id === "from-phone")?.content, "phone");
   // New messages come after everything moved.
   await h.write(h.phone, { opId: id("op"), kind: "message.create", conversationId: chat, message: { ...userMessage("d", "new"), createdAt: at(0) } as ChatMessage });
   const after = (await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`)).body;

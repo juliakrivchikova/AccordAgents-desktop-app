@@ -260,13 +260,16 @@ export class HubOpsStore {
   }
 
   /** Writes a turn as it stands now (inside the caller's transaction). */
-  turnSql(turn: HubTurn): string {
+  /** `condition`: written only when it holds (with the save of the message
+   *  the turn answers, never without it). */
+  turnSql(turn: HubTurn, condition?: string): string {
     const value = (text: string | undefined) => text === undefined ? "null" : quote(text);
     return `insert into hub_turns(run_id, conversation_id, message_id, participant_id, state, requested_at, requested_by, pending_message_id, request_json,
         executor_device_id, claimed_at, stop_requested_at, finished_at, outcome)
-      values (${quote(turn.runId)}, ${quote(turn.conversationId)}, ${quote(turn.messageId)}, ${quote(turn.participantId)}, ${quote(turn.state)},
+      select ${quote(turn.runId)}, ${quote(turn.conversationId)}, ${quote(turn.messageId)}, ${quote(turn.participantId)}, ${quote(turn.state)},
         ${value(turn.requestedAt)}, ${value(turn.requestedBy)}, ${value(turn.pendingMessageId)}, ${turn.request ? quote(JSON.stringify(turn.request)) : "null"},
-        ${value(turn.executorDeviceId)}, ${value(turn.claimedAt)}, ${value(turn.stopRequestedAt)}, ${value(turn.finishedAt)}, ${value(turn.outcome)})
+        ${value(turn.executorDeviceId)}, ${value(turn.claimedAt)}, ${value(turn.stopRequestedAt)}, ${value(turn.finishedAt)}, ${value(turn.outcome)}
+      where ${condition ?? "1"}
       on conflict(run_id) do update set state = excluded.state, executor_device_id = excluded.executor_device_id,
         claimed_at = excluded.claimed_at, stop_requested_at = excluded.stop_requested_at, finished_at = excluded.finished_at,
         outcome = excluded.outcome;`;
@@ -321,6 +324,15 @@ export class HubOpsStore {
       on conflict(card_id) do update set card_json = excluded.card_json, state = excluded.state, answer_json = excluded.answer_json,
         answered_by = excluded.answered_by, answered_at = excluded.answered_at, outcome_json = excluded.outcome_json, settled_at = excluded.settled_at,
         answer_op_id = excluded.answer_op_id;`;
+  }
+
+  /** Every message removed from this chat, read at once (a move's page
+   *  checks each of its messages). */
+  async removedIds(conversationId: string): Promise<Set<string>> {
+    await this.init();
+    const rows = await this.database.query<{ messageId: string }>(`select message_id as messageId from hub_removed_messages
+      where conversation_id = ${quote(conversationId)};`);
+    return new Set(rows.map((row) => row.messageId));
   }
 
   async isRemoved(conversationId: string, messageId: string): Promise<boolean> {

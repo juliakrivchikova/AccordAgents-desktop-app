@@ -1,3 +1,4 @@
+import { CommandError } from "../main/services/command";
 import { createHash } from "node:crypto";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "../main/services/chatChanges";
 import { claimOutcomeFor } from "../main/services/hubOpsStore";
@@ -117,11 +118,15 @@ export class HubOps {
       try {
         outcome = await this.applyOne(device, op, devices);
       } catch (error) {
+        this.cache.clear();
+        const message = error instanceof Error ? error.message : String(error);
+        this.log("hub.op.error", { opId, deviceId: device.deviceId, message });
         // A failure to store is not the operation's fault: the device sends
         // it again. Nothing was placed.
-        this.cache.clear();
-        this.log("hub.op.error", { opId, deviceId: device.deviceId, message: error instanceof Error ? error.message : String(error) });
-        throw error;
+        if (error instanceof CommandError || !opId) throw error;
+        // Anything else would fail the same way every time: this operation
+        // is refused, with the reason, and the device's later ones go on.
+        outcome = reject(opId, `The server could not apply this operation: ${message.slice(0, 500)}`);
       }
       results.push(outcome.result);
       const kind = typeof (op as { kind?: unknown })?.kind === "string" ? (op as { kind: string }).kind : "";
@@ -246,7 +251,7 @@ export class HubOps {
         // the server for the device each member runs on (Д4).
         const turns = requestedTurnsFor(conversation, message, devices, { by: device.deviceId, at: acceptedAt });
         const done = accepted({ kind: "message.create", message, ...(turns.length ? { turns } : {}) });
-        await this.save(conversation, done, () => turns.map((turn) => store.turnSql(turn)).join("\n"));
+        await this.save(conversation, done, (condition) => turns.map((turn) => store.turnSql(turn, condition)).join("\n"));
         return { result: done.result, applied: { deviceId: device.deviceId, entry: done.entry, conversation } };
       }
       case "message.update": {
@@ -456,10 +461,14 @@ export class HubOps {
         else delete (conversation.metadata as Record<string, unknown>)[key];
       }
     }
-    const store = this.storage.hubOps();
+    const removed = await this.storage.hubOps().removedIds(op.conversationId);
+    const indexOf = new Map(conversation.messages.map((message, index) => [message.id, index]));
     for (const incoming of op.messages) {
-      if (await store.isRemoved(op.conversationId, incoming.id)) continue;
-      const index = conversation.messages.findIndex((message) => message.id === incoming.id);
+      if (removed.has(incoming.id)) continue;
+      const index = indexOf.get(incoming.id) ?? -1;
+      // Written here through an operation since (a move interrupted and
+      // sent again): the server's copy is the newer one.
+      if (index >= 0 && Number(conversation.messages[index].metadata?.serverSeq ?? 0) > 0) continue;
       const writer = incoming.role === "participant" && incoming.participantId
         ? homeDeviceId(conversation, incoming.participantId, devices) ?? device.deviceId
         : device.deviceId;
@@ -469,7 +478,8 @@ export class HubOps {
         serverWriter: typeof existing?.metadata?.serverWriter === "string" ? existing.metadata.serverWriter : writer,
         reactions: incoming.metadata?.reactions ?? existing?.metadata?.reactions
       });
-      if (index >= 0) conversation.messages[index] = message; else conversation.messages.push(message);
+      if (index >= 0) conversation.messages[index] = message;
+      else indexOf.set(message.id, conversation.messages.push(message) - 1);
     }
     if (op.order) {
       const rank = new Map(op.order.map((id, index) => [id, index]));
@@ -533,8 +543,13 @@ export class HubOps {
   async feed(after: number, waitMs: number, closed?: Promise<void>, deviceId?: string): Promise<HubFeedResponse | { gone: true; head: number }> {
     const store = this.storage.hubOps();
     if (!Number.isSafeInteger(after) || after < 0) throw new HubOpsRequestError(400, "Invalid position.");
+    // A place this server never gave (it was restored from an older copy, or
+    // the device read another server before): read again from the start,
+    // never skip what is numbered at or below it here.
+    const head = await store.head();
+    if (after > head) return { gone: true, head };
     if (deviceId) await store.recordRead(deviceId, after, this.now().toISOString());
-    if (after < await store.prunedThrough()) return { gone: true, head: await store.head() };
+    if (after < await store.prunedThrough()) return { gone: true, head };
     let generation = this.generation;
     let page = await store.after(after, HUB_FEED_PAGE_MAX, HUB_FEED_PAGE_BYTES);
     // Something accepted while it read: read again rather than wait for the
