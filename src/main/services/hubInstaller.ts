@@ -123,9 +123,6 @@ export interface HubInstallerOptions {
   notices?: () => Promise<string[]>;
   /** Lines the User may dismiss (changes a device gave up on). */
   dismissableNotices?: () => Promise<Array<{ id: string; text: string }>>;
-  /** Dismissable lines shown with or without a server (what the shared
-   *  relay's removal took off this desktop). */
-  standingNotices?: () => Promise<Array<{ id: string; text: string }>>;
   defaultRegion?: () => Promise<string | undefined>;
   run?: Run;
   fetchImpl?: typeof fetch;
@@ -164,8 +161,7 @@ export class HubInstaller {
     const linked = await this.options.currentLink();
     const reachable = this.options.reachable?.();
     const notices = linked?.url ? await this.options.notices?.().catch(() => []) ?? [] : [];
-    const standing = await this.options.standingNotices?.().catch(() => []) ?? [];
-    const dismissable = [...standing, ...(linked?.url ? await this.options.dismissableNotices?.().catch(() => []) ?? [] : [])];
+    const dismissable = linked?.url ? await this.options.dismissableNotices?.().catch(() => []) ?? [] : [];
     const lines = dismissable.length ? { dismissableNotices: dismissable } : {};
     const link = linked?.url ? {
       url: linked.url, ...(linked.server ? { server: linked.server } : {}), ...(reachable !== undefined ? { reachable } : {}),

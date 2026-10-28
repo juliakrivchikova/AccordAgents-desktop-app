@@ -262,10 +262,10 @@ interface StoredSettings {
   hubPhoneInvites?: StoredHubPhoneInvite[];
   machineDeviceRevocations?: Record<string, string>;
   /** When the records set up through the shared relay were taken off this
-   *  desktop, and what they were: kept for the one notice in Settings. */
+   *  desktop, and what they were: its presence means the removal ran. */
   relayRemoval?: RelayRemovalRecord;
   /** What the removal found before it took anything off (a start that stops
-   *  half way): kept, so the notice still names everything. */
+   *  half way): kept, so the record still names everything. */
   relayRemovalPending?: RelayRemovalPending;
   /** Relay machines whose removal failed at the last start; each is tried
    *  again at every start until it goes. */
@@ -278,7 +278,7 @@ interface StoredSettings {
 }
 
 /** What was set up through the shared relay and taken off this desktop when
- *  the relay went away (names only, for the notice). */
+ *  the relay went away (names only); its presence means the removal ran. */
 export interface RelayRemovalRecord {
   removedAt: string;
   machines: string[];
@@ -286,7 +286,7 @@ export interface RelayRemovalRecord {
   /** A phone paired through the relay was handed the key that starts the AWS
    *  machine; it keeps its copy until the key is replaced in AWS. */
   startKeyHanded: boolean;
-  /** When the User dismissed the notice; it is not shown again. */
+  /** Kept from versions that showed the removal in Settings; unused. */
   dismissedAt?: string;
 }
 
@@ -317,13 +317,9 @@ export interface RelayRemovalFailure {
   message: string;
   /** When this machine first failed for this reason. */
   at: string;
-  /** The reasons the User dismissed the line for, for this machine: the
-   *  line comes back only for a reason not among them. */
+  /** Kept from versions that showed the failure in Settings; unused. */
   dismissedMessages?: string[];
 }
-
-/** Dismissed reasons kept per machine (the newest). */
-const RELAY_FAILURE_DISMISSALS_KEPT = 20;
 
 function isRelayRemovalFailure(value: unknown): value is RelayRemovalFailure {
   const failure = value as Partial<RelayRemovalFailure> | undefined;
@@ -3714,7 +3710,7 @@ export class SettingsService {
   }
 
   /** What a removal found before it takes anything off, merged with what an
-   *  earlier, unfinished one found: the notice names all of it. */
+   *  earlier, unfinished one found: the record names all of it. */
   beginRelayRemoval(found: { machines: Array<{ id: string; name: string }>; startKeyHanded: boolean }): Promise<void> {
     return this.serializeDeviceTrust(async () => {
       const stored = await this.readStored();
@@ -3735,7 +3731,7 @@ export class SettingsService {
    * the phones paired through it (a phone paired with the User's server has
    * the invite it enrolled with), and the files the relay's pairings kept.
    * The machines went first, through the usual removal (relayEraMachines);
-   * what was found is recorded for the notice, but for the machines whose ids
+   * what was found is recorded, but for the machines whose ids
    * are in `notRemoved` (their removal failed; tried again at each start).
    * Returns the record, or undefined when this was done before.
    */
@@ -3763,7 +3759,7 @@ export class SettingsService {
   }
 
   /** Relay machines a later start removed (after failing before): added to
-   *  the record, which keeps its dismissal. */
+   *  the record. */
   noteRelayMachinesRemoved(names: string[]): Promise<void> {
     return this.serializeDeviceTrust(async () => {
       if (names.length === 0) return;
@@ -3776,8 +3772,7 @@ export class SettingsService {
   }
 
   /** The relay machines whose removal failed at this start, replacing the
-   *  last start's. A machine keeps the reasons its line was dismissed for;
-   *  one removed (or gone) is dropped. */
+   *  last start's; one removed (or gone) is dropped. */
   noteRelayRemovalFailures(failures: Array<{ machineId: string; machine: string; message: string }>): Promise<void> {
     return this.serializeDeviceTrust(async () => {
       const stored = await this.readStored();
@@ -3789,8 +3784,7 @@ export class SettingsService {
         const earlier = before.find((entry) => entry.machineId === failure.machineId);
         return {
           ...failure,
-          at: earlier && earlier.message === failure.message ? earlier.at : at,
-          ...(earlier?.dismissedMessages ? { dismissedMessages: [...earlier.dismissedMessages] } : {})
+          at: earlier && earlier.message === failure.message ? earlier.at : at
         };
       });
       if (JSON.stringify(next) === JSON.stringify(before)) return;
@@ -3803,27 +3797,6 @@ export class SettingsService {
   async relayRemovalFailures(): Promise<RelayRemovalFailure[]> {
     const stored = await this.readStored();
     return (stored.relayRemovalFailures ?? []).map((failure) => ({ ...failure }));
-  }
-
-  /** The User dismissed one of the relay's lines: what was removed, or the
-   *  machines that could not be (each until it fails for another reason). */
-  async dismissRelayRemoval(noticeId: string): Promise<void> {
-    return this.serializeDeviceTrust(async () => {
-      const stored = await this.readStored();
-      if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
-      const at = new Date().toISOString();
-      if (noticeId.startsWith("relay-removed:failed:")) {
-        const failures = stored.relayRemovalFailures ?? [];
-        if (failures.every((failure) => failure.dismissedMessages?.includes(failure.message))) return;
-        stored.relayRemovalFailures = failures.map((failure) => failure.dismissedMessages?.includes(failure.message) ? failure : {
-          ...failure, dismissedMessages: [...(failure.dismissedMessages ?? []), failure.message].slice(-RELAY_FAILURE_DISMISSALS_KEPT)
-        });
-      } else {
-        if (!stored.relayRemoval || stored.relayRemoval.dismissedAt) return;
-        stored.relayRemoval = { ...stored.relayRemoval, dismissedAt: at };
-      }
-      await this.writeStored(stored, true);
-    });
   }
 
   async relayRemoval(): Promise<RelayRemovalRecord | undefined> {

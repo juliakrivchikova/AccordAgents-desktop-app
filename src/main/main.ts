@@ -139,7 +139,7 @@ import { MachineInstallerService, machinePowerNeedsDelivery } from "./services/m
 import { MACHINE_POWER_MAX_ATTEMPTS, MACHINE_POWER_RETRY_MS, compareVersions } from "../shared/machineInstall";
 import type { HubReadersResponse } from "../shared/hubProtocol";
 import { MachinePowerHandoffService } from "./services/machinePowerHandoff";
-import { relayRemovalNotices as relayLines, removeRelayEraRecords } from "./services/relayRemoval";
+import { removeRelayEraRecords } from "./services/relayRemoval";
 import { MachineInactivityQuestions } from "./services/machineInactivityQuestions";
 import { ChatActionApplier } from "./services/chatActionApplier";
 import { ChatActionEmitter, permissionDecisionAction, choiceDecisionAction, chatActionEventId } from "./services/chatActionEmitter";
@@ -918,7 +918,6 @@ const hubInstaller = new HubInstaller({
   reachable: () => hubSync ? hubSync.isReachable() : undefined,
   notices: () => hubReaderNotices(),
   dismissableNotices: () => hubGivenUpNotices(),
-  standingNotices: () => relayRemovalNotices(),
   defaultRegion: async () => (await settingsService.getPublicSettings()).cloudRuns.awsRegion,
   log: (event, payload) => { void debugLogService.write(event, payload); }
 });
@@ -1065,19 +1064,6 @@ async function removeRelayEra(): Promise<void> {
   if (!recorded) return;
   void debugLogService.write("relay.removed", { machines: recorded.machines.length, phones: recorded.phones.length, startKeyHanded: recorded.startKeyHanded });
   await machineLinkService?.refreshTrustRosters().catch(() => undefined);
-}
-
-/** The relay's lines: what its removal took off this desktop, and the
- *  machines that could not be removed yet. */
-async function relayRemovalNotices(): Promise<Array<{ id: string; text: string }>> {
-  const failures = await settingsService.relayRemovalFailures().catch(() => []);
-  return relayLines(await settingsService.relayRemoval(), {
-    hasServer: Boolean(await settingsService.getHubConfig().catch(() => undefined)),
-    serverPhones: (await hubPhones().catch(() => [])).length,
-    failures,
-    // Opened only when something failed: it reads the sealed enrollments.
-    leftToRemove: failures.length ? (await settingsService.relayEraMachines().catch(() => [])).map((machine) => machine.id) : []
-  });
 }
 
 /** Drops what this desktop kept for a removed machine, and stops offering the
@@ -2555,10 +2541,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("hub:setup-state", () => hubInstaller.state());
   ipcMain.handle("hub:dismiss-notice", async (_event, id: string) => {
-    // The relay's lines are kept dismissed with their records, not in the
-    // list of the server's own lines (which keeps only the last hundred).
-    if (typeof id === "string" && id.startsWith("relay-removed:")) await settingsService.dismissRelayRemoval(id);
-    else await dismissHubNotice(id);
+    await dismissHubNotice(id);
     return hubInstaller.state();
   });
   ipcMain.handle("hub:setup-command", async (_event, request: import("../shared/hubSetup").HubSetupCommandRequest) => {

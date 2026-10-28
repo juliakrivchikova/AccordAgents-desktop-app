@@ -322,8 +322,7 @@ machine when work for one of its members has waited unread for half a minute,
 and when the phone's Wake button asks it to. The phone holds no key.
 
 A phone paired the old way, through the relay, was given a copy of the key in
-its pairing link and keeps it; after the relay's removal Settings → Your
-server says so in one line until it is dismissed. To end that copy: delete the access key of
+its pairing link and keeps it; the app does not remind of it. To end that copy: delete the access key of
 `accordagents-wake-<device>` in AWS IAM, run the setup command again (it makes
 a new start key because the app's no longer exists), and paste the result.
 

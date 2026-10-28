@@ -111,9 +111,9 @@ How far it is built, so the two are not confused:
   machine: Device Pairing and Cloud run say "Set up your server first", and
   nothing else changes for local members. What was set up through the relay
   (a machine enrolled with it, a phone paired through it) is taken off the
-  desktop once, at its first start without the relay, and Settings → Your
-  server says so in one line until dismissed; a phone pairs again from
-  Device Pairing, a machine is added again. The Cloudflare relay worker
+  desktop once, at its first start without the relay, without a notice in
+  Settings; a phone pairs again from Device Pairing, a machine is added
+  again. The Cloudflare relay worker
   itself is still deployed until the User says to shut it down; no build of
   the app talks to it.
 - Since phase 3 (`taylor/server-only-phone`) the phone talks only to the

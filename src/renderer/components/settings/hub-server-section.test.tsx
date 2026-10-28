@@ -134,15 +134,16 @@ test("the start-over question stays with the line it was asked about", async () 
   await view.unmount();
 });
 
-test("what the shared relay's removal took off is said once, also before a server is set up, until dismissed", async () => {
-  const notice = { id: "relay-removed:2026-10-26T00:00:00.000Z", text: "AccordAgents no longer uses its shared relay, so what was set up through it was removed from this computer: a phone pairing. Set up your server, then pair your phone again from Device Pairing." };
-  const view = await mount({ status: "none", bundledVersion: "1.0.0", dismissableNotices: [notice] }, async () => ({ status: "none", bundledVersion: "1.0.0" }));
+test("a line the User may dismiss goes when dismissed", async () => {
+  const notice = { id: "given-up:a:1", text: "Some changes could not be applied." };
+  const ready = { status: "ready" as const, url: "https://3.14.15.92", bundledVersion: "1.0.0" };
+  const view = await mount({ ...ready, dismissableNotices: [notice] }, async () => ready);
   const dismissed: string[] = [];
   (window as unknown as { consensus: Record<string, unknown> }).consensus.dismissHubNotice = async (id: string) => {
     dismissed.push(id);
-    return { status: "none", bundledVersion: "1.0.0" };
+    return ready;
   };
-  assert.match(document.querySelector("[data-testid=hub-server-given-up]")?.textContent ?? "", /no longer uses its shared relay/);
+  assert.match(document.querySelector("[data-testid=hub-server-given-up]")?.textContent ?? "", /could not be applied/);
   await act(async () => { button("hub-server-given-up-dismiss")!.click(); });
   await settle();
   assert.deepEqual(dismissed, [notice.id]);

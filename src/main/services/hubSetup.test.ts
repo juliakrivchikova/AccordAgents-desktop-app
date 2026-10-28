@@ -237,17 +237,14 @@ test("Settings is told whether the hub answers now and which region to offer", a
   assert.equal(state.reachable, false);
 });
 
-test("a line that stands without a server is given with or without one, ahead of the server's own", async (t) => {
-  const line = { id: "relay-removed:1", text: "AccordAgents no longer uses its shared relay." };
+test("the lines the User may dismiss are the server's own, and need a server", async (t) => {
   const given = { id: "given-up:a:1", text: "Some changes could not be applied." };
   const none = await fixture(t, { owner: [] });
-  (none.installer as unknown as { options: Record<string, unknown> }).options.standingNotices = async () => [line];
   (none.installer as unknown as { options: Record<string, unknown> }).options.dismissableNotices = async () => [given];
-  assert.deepEqual((await none.installer.state()).dismissableNotices, [line], "the server's own lines need a server");
+  assert.equal((await none.installer.state()).dismissableNotices, undefined, "nothing is said before a server is set up");
   const linked = await fixture(t, { owner: [], linked: { url: "https://3.14.15.92", hubId: "hub-1" } });
-  (linked.installer as unknown as { options: Record<string, unknown> }).options.standingNotices = async () => [line];
   (linked.installer as unknown as { options: Record<string, unknown> }).options.dismissableNotices = async () => [given];
-  assert.deepEqual((await linked.installer.state()).dismissableNotices, [line, given]);
+  assert.deepEqual((await linked.installer.state()).dismissableNotices, [given]);
 });
 
 test("the service is never given up on, and every hub command keeps to the server's memory", () => {

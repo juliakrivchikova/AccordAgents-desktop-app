@@ -2,15 +2,15 @@
  * The shared relay is gone. A machine enrolled with it and a phone paired
  * through it can never connect again: they are taken off this desktop at the
  * first start without the relay, the usual way (a machine as Remove in
- * Settings does it), and Settings says so in one line until it is dismissed.
- * The phones, their key files and the start keys handed to them go at that
- * start whatever happens to the machines; a machine that cannot be removed
- * is named in a line of its own and tried again at every start.
+ * Settings does it). The phones, their key files and the start keys handed
+ * to them go at that start whatever happens to the machines; a machine that
+ * cannot be removed is tried again at every start. Settings says nothing
+ * about it (docs/machines/04-install-and-upgrade.md has the start-key steps).
  */
 
 import type { MachineRecord } from "../../shared/machineLink";
 import type { MachinePowerHandoffRecord } from "../../shared/machinePowerHandoff";
-import type { RelayRemovalFailure, RelayRemovalRecord } from "./settings";
+import type { RelayRemovalRecord } from "./settings";
 
 export interface RelayRemovalOptions {
   settings: {
@@ -73,62 +73,8 @@ export async function removeRelayEraRecords(options: RelayRemovalOptions): Promi
   return options.settings.finishRelayRemoval(failures.map((failure) => failure.machineId));
 }
 
-/** The relay's lines in Settings: what its removal took off this desktop,
- *  and the machines that could not be removed yet. Each is left out once
- *  dismissed (a machine's, until it fails for another reason). */
-export function relayRemovalNotices(removed: RelayRemovalRecord | undefined, now: {
-  hasServer: boolean; serverPhones: number; failures?: RelayRemovalFailure[]; leftToRemove?: string[];
-}): Array<{ id: string; text: string }> {
-  const notice = relayRemovalNotice(removed, now);
-  const failing = failureNotice(now.failures ?? [], now.leftToRemove);
-  return [...(notice ? [notice] : []), ...(failing ? [failing] : [])];
-}
-
-function failureNotice(failures: RelayRemovalFailure[], leftToRemove: string[] | undefined): { id: string; text: string } | undefined {
-  // Removed since (Settings), a machine is no longer there to be tried again.
-  const shown = failures.filter((failure) => !failure.dismissedMessages?.includes(failure.message)
-    && (!leftToRemove || leftToRemove.includes(failure.machineId)));
-  if (shown.length === 0) return undefined;
-  const latest = shown.map((failure) => failure.at).sort().pop();
-  const named = joinList(shown.map((failure) => `${failure.machine} (${failure.message})`));
-  return {
-    id: `relay-removed:failed:${latest}`,
-    text: shown.length === 1
-      ? `AccordAgents no longer uses its shared relay. The machine ${named}, set up through it, could not be removed from this computer yet; it is tried again at each start.`
-      : `AccordAgents no longer uses its shared relay. The machines ${named}, set up through it, could not be removed from this computer yet; they are tried again at each start.`
-  };
-}
-
-/** The one line about what the relay's removal took off this desktop, or
- *  undefined when there is nothing to say (or it was dismissed). */
-export function relayRemovalNotice(removed: RelayRemovalRecord | undefined, now: { hasServer: boolean; serverPhones: number }): { id: string; text: string } | undefined {
-  if (!removed || removed.dismissedAt) return undefined;
-  const listed = [
-    ...removed.machines.map((name) => `the machine ${name}`),
-    ...(removed.phones.length ? [removed.phones.length === 1 ? "a phone pairing" : `${removed.phones.length} phone pairings`] : [])
-  ];
-  if (listed.length === 0 && !removed.startKeyHanded) return undefined;
-  // A phone already paired with the server since is not told to pair again.
-  const steps = [
-    ...(removed.phones.length && now.serverPhones === 0 ? ["pair your phone again from Device Pairing"] : []),
-    ...(removed.machines.length ? ["choose Cloud run in a member's settings to set a machine up again"] : [])
-  ].join(" and ");
-  const next = !steps ? "" : now.hasServer ? ` ${steps.charAt(0).toUpperCase()}${steps.slice(1)}.` : ` Set up your server, then ${steps}.`;
-  const what = listed.length
-    ? `AccordAgents no longer uses its shared relay, so what was set up through it was removed from this computer: ${joinList(listed)}.`
-    : "AccordAgents no longer uses its shared relay.";
-  const key = removed.startKeyHanded
-    ? " Phones paired through it keep a copy of the key that can start your AWS machine; to end that, delete the access key of the accordagents-wake user in AWS IAM, then run the AWS setup command again and paste its result."
-    : "";
-  return { id: `relay-removed:${removed.removedAt}`, text: `${what}${next}${key}` };
-}
-
 /** One clean line of an error, short, without its final stop. */
 function plainReason(message: string): string {
   const line = message.split(/\r?\n/).map((part) => part.trim()).find(Boolean) ?? "unknown error";
   return (line.length > 200 ? `${line.slice(0, 197)}…` : line).replace(/[.!?]$/, "");
-}
-
-function joinList(parts: string[]): string {
-  return parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : parts[0];
 }

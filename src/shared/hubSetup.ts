@@ -65,8 +65,7 @@ export interface HubSetupState {
    *  start it or remove it), or changes held for a long time. */
   notices?: string[];
   /** Lines the User may dismiss: changes a device could not apply for two
-   *  weeks and gave up on, and what the shared relay's removal took off this
-   *  desktop (shown with or without a server). */
+   *  weeks and gave up on. */
   dismissableNotices?: Array<{ id: string; text: string }>;
   /** The region to offer for a new server: the one AWS is used in already. */
   defaultRegion?: string;
