@@ -20719,6 +20719,19 @@ export class ChatService {
     }
   }
 
+  /** The User's server refused a message this device wrote: the message
+   *  says so with the reason, instead of waiting to be sent (Д3). */
+  async markMessageRefused(conversationId: string, messageId: string, reason: string): Promise<void> {
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") return;
+    await this.withChatMutation(conversation, async () => {
+      const message = conversation.messages.find((item) => item.id === messageId);
+      if (!message || message.metadata?.serverRejected === reason) return;
+      message.metadata = { ...(message.metadata ?? {}), serverRejected: reason };
+      await this.saveConversation(conversation, { emitChanges: false });
+    });
+  }
+
   /** A placeholder this device showed for a member elsewhere, once that
    *  member's own bubble has taken its place (or the turn never ran). */
   private async dropServerPlaceholder(conversation: Conversation, messageId: string): Promise<void> {

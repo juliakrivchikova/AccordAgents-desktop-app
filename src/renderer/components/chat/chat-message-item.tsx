@@ -1,5 +1,6 @@
 import { CloudProviderAuth } from "../cloud-provider-auth";
 import { memo, useState } from "react";
+import { ChatMessageDeliveryMark } from "./chat-message-delivery-mark";
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Copy, FileText, ListChecks, RefreshCw, Reply, Smile, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -338,6 +339,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               )
             )}
             <span className="message-when">{formatChatTime(message.createdAt)}</span>
+            <ChatMessageDeliveryMark message={message} participants={props.participants} />
             {!props.inThread && message.metadata?.parentMessageId && message.role === "user" && (
               <StatusBadge tone="neutral">reply</StatusBadge>
             )}

@@ -3235,6 +3235,21 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Where the User's message stands on her server: neutral, like the time;
+   a message not taken yet reads as waiting, not as an error. */
+.chat-message .message-delivery {
+  color: var(--app-muted);
+  font-size: 11.5px;
+}
+
+.chat-message .message-delivery::before {
+  content: "· ";
+}
+
+.chat-message .message-delivery.is-waiting {
+  font-style: italic;
+}
+
 /* Thread pill — stacked reply summary at the bottom of a message. */
 .chat-thread-pill {
   display: inline-flex;

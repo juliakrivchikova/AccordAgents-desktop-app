@@ -52,6 +52,7 @@ export const LOCAL_MESSAGE_METADATA_KEYS: readonly string[] = [
    *  elsewhere (shown until its device writes the real one). */
   "serverTurns",
   "serverPlaceholder",
+  "serverRejected",
   /** A card of a member elsewhere answered on the server and not applied
    *  there yet, as this device shows it. */
   "serverCard"

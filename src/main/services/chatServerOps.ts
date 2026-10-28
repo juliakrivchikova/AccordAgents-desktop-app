@@ -45,7 +45,7 @@ export interface ChatServerLink {
  *  the message asked for (its "taken to work" marks), and a placeholder bubble
  *  for a member that runs elsewhere, shown until that device writes the real
  *  one. Never sent. */
-export const SERVER_LOCAL_MESSAGE_KEYS = ["serverTurns", "serverPlaceholder"] as const;
+export const SERVER_LOCAL_MESSAGE_KEYS = ["serverTurns", "serverPlaceholder", "serverRejected"] as const;
 
 export function newOpId(): string {
   return `op-${randomUUID()}`;

@@ -1506,6 +1506,9 @@ export interface ChatMessageMetadata {
   /** A bubble shown here for a member that runs on another device, until that
    *  device writes the real one. Never sent to the server. */
   serverPlaceholder?: boolean;
+  /** The User's server refused this message, with its reason (agreement Д3:
+   *  shown instead of "sent"). Never sent to the server. */
+  serverRejected?: string;
   /** This device's view of a card the message's member waits on that runs
    *  on another device: answered (from any device), and not applied there
    *  yet. Shown as answered and waiting; never sent to the server. */

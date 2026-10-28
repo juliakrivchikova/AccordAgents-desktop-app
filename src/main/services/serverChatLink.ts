@@ -196,6 +196,10 @@ export class ServerChatLink {
       resync: () => this.resync(),
       onAnswered: (row, outcome: HubOpOutcome) => {
         if (outcome.status === "rejected") this.options.log("chat.server.op-rejected", { opId: row.opId, kind: row.kind, conversationId: row.conversationId, reason: outcome.reason });
+        // A User's message the server refused says so, with its reason (Д3).
+        if (outcome.status === "rejected" && row.kind === "message.create" && row.messageId) {
+          void this.options.chat.markMessageRefused(row.conversationId, row.messageId, outcome.reason).catch(() => undefined);
+        }
         this.options.chat.noteServerOpAnswered(row.op, outcome);
       },
       log: this.options.log
