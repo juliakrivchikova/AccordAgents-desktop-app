@@ -6859,7 +6859,7 @@ test("the desktop changes no member for a machine's card the User did not approv
   }
 });
 
-test("on a machine, an approved removal or addition is recorded for the desktop and never applied there", async () => {
+test("on a machine, an approved removal or addition is applied there exactly as on the desktop (Д2)", async () => {
   {
     const { service, storage, actor, target } = memberRemovalFixture();
     service.setHostMachineId("machine");
@@ -6869,35 +6869,24 @@ test("on a machine, an approved removal or addition is recorded for the desktop 
     }) as { approvalId: string };
 
     await service.respondToAppToolApproval({ conversationId: "conversation-1", approvalId: requested.approvalId, approve: true });
-    (service as any).scheduleAutoWatchEvaluation("conversation-1", "run-idle");
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitFor(() => !memberIds(storage.current).includes(target.id));
 
     const approval = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
     assert.equal(approval.status, "approved");
-    assert.equal(typeof approval.memberRemovalQueuedAt, "string");
-    assert.ok(memberIds(storage.current).includes(target.id), "only the desktop changes the member list");
-    assert.equal(storage.current.messages.some((message: ChatMessage) => message.content.startsWith("Removed ")), false, "nothing claims it happened");
+    assert.equal(storage.current.messages.filter((message: ChatMessage) => message.content.startsWith("Removed @target")).length, 1);
   }
   {
-    // An addition the member's policy allows: not added here, and the member
-    // is told so; asking again while it waits gives the same card.
+    // An addition the member's policy allows: added at once, and said so.
     const { service, storage, actor } = memberRemovalFixture();
     service.setHostMachineId("machine");
     homeOnMachine(storage);
-    const ask = () => service.requestParticipantChangeFromTool(actor, {
+    const result = await service.requestParticipantChangeFromTool(actor, {
       operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } }]
-    }) as Promise<{ status: string; next: string; approvalId: string }>;
-    const result = await ask();
+    }) as { status: string };
 
-    assert.equal(result.status, "approved_pending_apply");
-    assert.match(result.next, /desktop/);
-    const approval = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
-    assert.equal(approval.status, "auto-applied");
-    assert.equal(typeof approval.memberAdditionQueuedAt, "string");
-    assert.equal((storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "helper"), false);
-    assert.equal(storage.current.messages.some((message: ChatMessage) => message.content.startsWith("Auto-applied")), false);
-    assert.equal((await ask()).approvalId, result.approvalId);
-    assert.equal(storage.current.metadata.pendingAppToolApprovals.length, 1);
+    assert.equal(result.status, "auto_applied");
+    assert.equal((storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "helper"), true);
+    assert.equal(storage.current.messages.filter((message: ChatMessage) => message.content.startsWith("Auto-applied")).length, 1);
   }
   {
     // An addition the User approves on its card (the Chat Assistant asks).
@@ -6910,12 +6899,11 @@ test("on a machine, an approved removal or addition is recorded for the desktop 
     assert.equal(requested.status, "pending_user_approval");
 
     await service.respondToAppToolApproval({ conversationId: "conversation-1", approvalId: requested.approvalId, approve: true });
+    await waitFor(() => (storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "helper"));
 
     const approval = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
     assert.equal(approval.status, "approved");
-    assert.equal(typeof approval.memberAdditionQueuedAt, "string");
-    assert.equal((storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "helper"), false);
-    assert.equal(storage.current.messages.some((message: ChatMessage) => message.content.startsWith("Applied ")), false);
+    assert.equal(approval.memberAdditionQueuedAt, undefined);
   }
 });
 
@@ -9773,6 +9761,18 @@ test("refreshStoredChatState preserves stored completed messages over stale pend
     message.id === "answer"
       ? pendingParticipantMessage(participant, "answer", runId)
       : message
+  );
+  const { service } = testService({ conversation });
+
+  await (service as any).refreshStoredChatState(staleConversation);
+
+  const answer = staleConversation.messages.find((message: any) => message.id === "answer")!;
+  assert.equal(answer.status, "done");
+  assert.equal(answer.content, "Finished answer.");
+  assert.equal((service as any).recoverStaleChatRun(staleConversation), false);
+  assert.equal(answer.metadata?.staleRunRecovery, undefined);
+});
+
 test("refreshStoredChatState never takes back what the User's server said of a message (Д3, Д5)", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
@@ -9802,18 +9802,6 @@ test("refreshStoredChatState never takes back what the User's server said of a m
   await (service as any).refreshStoredChatState(staleConversation);
   assert.equal(message.metadata?.serverTurns?.[participant.id]?.state, "finished");
   assert.equal(message.metadata?.serverTurns?.[participant.id]?.outcome, "stopped");
-});
-
-  );
-  const { service } = testService({ conversation });
-
-  await (service as any).refreshStoredChatState(staleConversation);
-
-  const answer = staleConversation.messages.find((message: any) => message.id === "answer")!;
-  assert.equal(answer.status, "done");
-  assert.equal(answer.content, "Finished answer.");
-  assert.equal((service as any).recoverStaleChatRun(staleConversation), false);
-  assert.equal(answer.metadata?.staleRunRecovery, undefined);
 });
 
 test("refreshStoredChatState unions warnings added by a concurrent tool mutation", async () => {

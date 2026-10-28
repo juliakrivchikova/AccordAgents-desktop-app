@@ -66,7 +66,6 @@ import type {
   ChatParticipantChangeRequest,
   ChatParticipantChangeOperation,
   ChatParticipantRemovalRequest,
-  ChatRosterChangeOutcome,
   ChatParticipantRequestApprovalRequest,
   ChatParticipantRequestBatch,
   ChatParticipantRequestInput,
@@ -2650,9 +2649,6 @@ export class ChatService {
         prepared.summary,
         "auto-applied"
       );
-      if (!this.appliesRosterChanges()) {
-        return this.queueMemberAdditionForDesktop(conversation, approval);
-      }
       const applied = this.applyPreparedRosterChange(conversation, prepared);
       approval.appliedParticipantIds = applied.map((participant) => participant.id);
       approval.updatedAt = new Date().toISOString();
@@ -3629,16 +3625,6 @@ export class ChatService {
         participantRequest: request
       });
       if (manageRolesParticipants === "allow" && !prepared.managementEscalation) {
-        if (!this.appliesRosterChanges()) {
-          return this.queueMemberAdditionForDesktop(conversation, {
-            ...pendingRoleApproval.approval,
-            toolName: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
-            request: prepared.request,
-            summary: prepared.summary,
-            status: "auto-applied",
-            approvalScope: "chat"
-          });
-        }
         const applied = await this.applyPreparedRoleParticipantChange(conversation, prepared);
         const approval: ChatAppToolApproval = {
           ...pendingRoleApproval.approval,
@@ -3699,9 +3685,6 @@ export class ChatService {
         prepared.summary,
         "auto-applied"
       );
-      if (!this.appliesRosterChanges()) {
-        return this.queueMemberAdditionForDesktop(conversation, approval);
-      }
       const applied = await this.applyPreparedParticipantChange(conversation, prepared);
       approval.appliedParticipantIds = applied.map((participant) => participant.id);
       approval.updatedAt = new Date().toISOString();
@@ -3875,102 +3858,25 @@ export class ChatService {
       (approval.status === "pending" || (approval.status === "approved" && typeof approval.memberRemovalQueuedAt === "string"));
   }
 
-  /** Only the desktop changes a chat's member list: a machine's changes to
-   *  it are never sent, and the desktop and the server take it only from the
-   *  desktop. A roster change a machine member asked for is therefore
-   *  recorded on its machine and applied here, on the desktop. */
-  /** Every device applies the roster changes its own members ask for (Д2:
-   *  no device has a special right to a chat's members); the server takes
-   *  the change from whichever device made it. */
-  private appliesRosterChanges(): boolean {
-    return true;
-  }
-
-  /** An approved removal this host still has to apply: on the desktop, any
-   *  member's, a machine member's included (its card arrives from the
-   *  machine); on a machine, none. */
+  /** An approved removal this device still has to apply once the chat's
+   *  turns end (any device, Д2). */
   private isQueuedMemberRemovalApproval(approval: ChatAppToolApproval): approval is MemberRemovalApproval {
-    return this.appliesRosterChanges() &&
-      approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
+    return approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
       approval.status === "approved" &&
       typeof approval.memberRemovalQueuedAt === "string" &&
       this.isParticipantRemovalRequest(approval.request);
   }
 
-  /** An approved addition a machine member asked for, waiting here for the
-   *  desktop to apply it. */
+  /** An approved addition waiting here to be applied: one a machine member
+   *  asked for before every device applied its own members' changes (Д2). */
   private isQueuedMemberAdditionApproval(approval: ChatAppToolApproval): boolean {
-    return this.appliesRosterChanges() &&
-      typeof approval.memberAdditionQueuedAt === "string" &&
+    return typeof approval.memberAdditionQueuedAt === "string" &&
       (approval.status === "approved" || approval.status === "auto-applied") &&
       (
         (approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
           (this.isParticipantChangeRequest(approval.request) || this.isRoleParticipantChangeRequest(approval.request))) ||
         (approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL && this.isRosterChangeRequest(approval.request))
       );
-  }
-
-  /** On a machine, an auto-applied addition: recorded for the desktop, which
-   *  adds the member; the member asking is told it has not happened yet. The
-   *  same addition asked again while it waits is answered with that card. */
-  private async queueMemberAdditionForDesktop(conversation: Conversation, approval: ChatAppToolApproval): Promise<Record<string, unknown>> {
-    let queued = approval;
-    await this.withChatMutation(conversation, async () => {
-      // Who it adds (a preparation's ids differ each time).
-      const targets = JSON.stringify(this.memberAdditionTargets(approval.request));
-      const waiting = this.chatAppToolApprovals(conversation).find((item) =>
-        typeof item.memberAdditionQueuedAt === "string" &&
-        item.requesterParticipantId === approval.requesterParticipantId &&
-        item.toolName === approval.toolName &&
-        JSON.stringify(this.memberAdditionTargets(item.request)) === targets);
-      if (waiting) {
-        queued = waiting;
-        return;
-      }
-      const now = new Date().toISOString();
-      queued = { ...approval, memberAdditionQueuedAt: now, updatedAt: now };
-      this.upsertAppToolApproval(conversation, queued);
-      conversation.updatedAt = now;
-      await this.saveConversation(conversation);
-    });
-    return {
-      ok: true,
-      status: "approved_pending_apply",
-      approvalId: queued.id,
-      summary: queued.summary,
-      next: "Approved, not in effect yet: the desktop owns this chat's member list and adds the member when it applies the change, within seconds while it is on. Until then the member is not in the chat. The outcome is posted to the chat."
-    };
-  }
-
-  /** On a machine, the User approved an addition: recorded for the desktop to
-   *  apply. Nothing about the member list changes here; the desktop's message
-   *  saying what it did settles this card (settleRosterChangesFromDesktop). */
-  private async recordMemberAdditionForDesktop(
-    conversation: Conversation,
-    approval: ChatAppToolApproval,
-    request: ChatAppToolApprovalRequest,
-    scope: ChatAppToolApprovalScope = "chat"
-  ): Promise<void> {
-    await this.withChatMutation(conversation, async () => {
-      const current = this.chatAppToolApprovals(conversation).find((item) => item.id === approval.id);
-      if (!current || current.status !== "pending") {
-        throw new Error("App tool approval request has already been answered.");
-      }
-      const now = new Date().toISOString();
-      this.upsertAppToolApproval(conversation, {
-        ...current,
-        status: "approved",
-        request,
-        approvalScope: scope,
-        memberAdditionQueuedAt: now,
-        updatedAt: now
-      });
-      if (scope === "chat" && current.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL) {
-        this.upsertRosterChatPolicy(conversation, current, now);
-      }
-      conversation.updatedAt = now;
-      await this.saveConversation(conversation);
-    });
   }
 
   /** "Allow for chat" on a legacy roster card: later additions by the same
@@ -3986,34 +3892,6 @@ export class ChatService {
       createdAt: now,
       updatedAt: now
     });
-  }
-
-  /** On a machine: the desktop's messages saying what it did with roster
-   *  changes this machine's members asked for (applied, or refused with the
-   *  reason). Their cards here are settled to match, so the phone and the
-   *  desktop stop showing them as waiting. Only messages the desktop wrote. */
-  private settleRosterChangesFromDesktop(conversation: Conversation, desktopMessages: () => ChatMessage[]): void {
-    if (this.appliesRosterChanges()) {
-      return;
-    }
-    const waiting = this.chatAppToolApprovals(conversation).filter((approval) =>
-      typeof approval.memberRemovalQueuedAt === "string" || typeof approval.memberAdditionQueuedAt === "string");
-    if (waiting.length === 0) {
-      return;
-    }
-    const outcomes = new Map<string, ChatRosterChangeOutcome>();
-    for (const message of desktopMessages()) {
-      const outcome = message.role === "system" ? message.metadata?.rosterChange : undefined;
-      if (outcome && typeof outcome.approvalId === "string") outcomes.set(outcome.approvalId, outcome);
-    }
-    for (const approval of waiting) {
-      const outcome = outcomes.get(approval.id);
-      if (!outcome) continue;
-      const { memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition, ...settled } = approval;
-      this.upsertAppToolApproval(conversation, outcome.outcome === "applied"
-        ? { ...settled, appliedParticipantIds: Array.isArray(outcome.appliedParticipantIds) ? outcome.appliedParticipantIds.filter((id) => typeof id === "string") : [], updatedAt: this.laterThan(approval.updatedAt) }
-        : { ...settled, status: "cancelled", error: typeof outcome.error === "string" && outcome.error ? outcome.error : "The desktop could not apply this change.", updatedAt: this.laterThan(approval.updatedAt) });
-    }
   }
 
   /** Now, or strictly later than `previous`: the metadata merge keeps the
@@ -4192,7 +4070,7 @@ export class ChatService {
       await refuse();
       return conversation;
     }
-    if (recorded && this.appliesRosterChanges()) {
+    if (recorded) {
       // Indexed only once the decision is stored, so any idle hook that sees
       // the index also finds the stored decision. On a machine the decision
       // waits for the desktop, which receives this card and applies it.
@@ -4406,9 +4284,6 @@ export class ChatService {
    *  machine members' additions not applied yet are. Only on the desktop: a
    *  machine applies no roster change. */
   async resumeQueuedRosterChanges(): Promise<void> {
-    if (!this.appliesRosterChanges()) {
-      return;
-    }
     const storage = this.storage as Partial<Pick<StorageService, "conversationIdsWithQueuedRosterChanges">>;
     if (typeof storage.conversationIdsWithQueuedRosterChanges !== "function") {
       return;
@@ -4456,9 +4331,6 @@ export class ChatService {
    *  policy here, or the User's confirmed answer). The chat says what
    *  happened only once it has. */
   private async applyQueuedMemberAdditions(conversationId: string): Promise<void> {
-    if (!this.appliesRosterChanges()) {
-      return;
-    }
     // The saved copy this process holds first: most chats it is asked about
     // (after a restart, say) hold only a waiting removal.
     await this.waitForQueuedSave(conversationId);
@@ -5555,10 +5427,6 @@ export class ChatService {
         return conversation;
       }
       await execution?.beforeApply(approval);
-      if (!this.appliesRosterChanges()) {
-        await this.recordMemberAdditionForDesktop(conversation, approval, prepared.request);
-        return conversation;
-      }
       const applied = await this.applyPreparedRoleParticipantChange(conversation, prepared);
       this.upsertAppToolApproval(conversation, {
         ...approval,
@@ -5638,10 +5506,6 @@ export class ChatService {
         return conversation;
       }
       await execution?.beforeApply(approval);
-      if (!this.appliesRosterChanges()) {
-        await this.recordMemberAdditionForDesktop(conversation, approval, prepared.request);
-        return conversation;
-      }
       const applied = await this.applyPreparedParticipantChange(conversation, prepared);
       this.upsertAppToolApproval(conversation, {
         ...approval,
@@ -5690,11 +5554,6 @@ export class ChatService {
       return conversation;
     }
     await execution?.beforeApply(approval);
-    if (!isPermissionApproval && !this.appliesRosterChanges()) {
-      // The legacy roster tool's addition: the desktop applies it too.
-      await this.recordMemberAdditionForDesktop(conversation, approval, approval.request, scope);
-      return conversation;
-    }
     const applied = isPermissionApproval
       ? scope === "once"
         ? [requester].filter((participant): participant is ChatParticipant => Boolean(participant))
@@ -10745,14 +10604,6 @@ export class ChatService {
           }
           const participant = this.activeAutoWatchParticipant(conversation);
           if (!participant) {
-            return;
-          }
-          // On a machine, a member whose approved removal waits for the
-          // desktop is not woken: the desktop applies it at this idle moment.
-          if (!this.appliesRosterChanges() && this.chatAppToolApprovals(conversation).some((approval) =>
-            approval.status === "approved" && typeof approval.memberRemovalQueuedAt === "string" &&
-            this.isParticipantRemovalRequest(approval.request) &&
-            approval.request.operations.some((operation) => operation.participantId === participant.id))) {
             return;
           }
           if (this.storedMetadataHasProtectedLiveRuns(conversation.metadata)) {
@@ -20300,10 +20151,6 @@ export class ChatService {
       this.reconcileReplicatedWatcher(previous, target);
       dropped.push(...this.membersDroppedFrom(previous, target));
       archivedNow = previous.metadata.archived !== true && target.metadata.archived === true;
-      // On a machine: the desktop's word on roster changes this machine's
-      // members asked for (it makes them, and says so in the chat).
-      this.settleRosterChangesFromDesktop(target, () => target.messages.filter((message) =>
-        !before.has(message.id) && message.role === "system" && Boolean(message.metadata?.rosterChange) && message.metadata?.serverWriter !== me));
       await this.saveConversation(target, { emitChanges: false });
     });
     this.followUpMirroredRosterChanges(conversationId, followUps);
@@ -21172,46 +21019,9 @@ export class ChatService {
     if (await this.serverLink?.cardSettleQueued?.(card.conversationId, card.cardId)) return undefined;
     const appliers = await this.cardAppliers?.();
     if (!appliers) return { kind: "retry", reason: "This device cannot apply answers yet." };
-    // A machine member's roster change is made by the desktop, on the User's
-    // answer as the server holds it, maybe while this machine was away: what
-    // the desktop said of it is read first and is this card's outcome (the
-    // member it removes may be gone already, and is not "not found").
-    if (card.cardKind === "roster" && !this.appliesRosterChanges()) {
-      const read = await this.serverLink?.openCards?.().catch(() => undefined);
-      if (read) await this.serverLink?.readThrough?.(read.head, CARD_RECONCILE_READ_WAIT_MS);
-      if (await this.adoptDesktopRosterOutcome(card)) return { kind: "applied" };
-    }
     if (card.cardKind === "choice") return appliers.choice.apply(card, answerOpId);
     if (card.cardKind === "mention") return appliers.mention.apply(card);
     return appliers.approval.apply(card);
-  }
-
-  /** On a machine: the desktop already said what it did with the roster
-   *  change this card asks (its chat message): the card's approval takes
-   *  that outcome here, without asking the domain again. True when it did. */
-  private async adoptDesktopRosterOutcome(card: HubCard): Promise<boolean> {
-    if (card.answer?.approve !== true) return false;
-    const me = this.serverLink?.deviceId();
-    const conversation = await this.storage.getConversation(card.conversationId);
-    if (!conversation || conversation.kind !== "chat") return false;
-    const said = [...conversation.messages].reverse().find((message) => message.role === "system" &&
-      message.metadata?.rosterChange?.approvalId === card.cardId && message.metadata?.serverWriter !== me)?.metadata?.rosterChange;
-    if (!said) return false;
-    let adopted = false;
-    await this.withChatMutation(conversation, async () => {
-      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === card.cardId);
-      if (!approval) return;
-      const { memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition, ...rest } = approval;
-      const updatedAt = this.laterThan(approval.updatedAt);
-      this.upsertAppToolApproval(conversation, said.outcome === "applied"
-        ? { ...rest, status: approval.status === "pending" ? "approved" : approval.status, updatedAt,
-          appliedParticipantIds: Array.isArray(said.appliedParticipantIds) ? said.appliedParticipantIds.filter((id) => typeof id === "string") : [] }
-        : { ...rest, status: "cancelled", error: typeof said.error === "string" && said.error ? said.error : "The desktop could not apply this change.", updatedAt });
-      conversation.updatedAt = new Date().toISOString();
-      await this.saveConversation(conversation);
-      adopted = true;
-    });
-    return adopted;
   }
 
   private retryCardApplyLater(card: HubCard, answerOpId?: string): void {
@@ -21283,26 +21093,8 @@ export class ChatService {
       return;
     }
     // Applied, and an approved roster change waits to be made: settled when
-    // it is made (serverCardOpsFor). On a machine the desktop makes it, on
-    // the User's answer as the server holds it, and may have said so in the
-    // chat before this machine applied the answer.
-    if (waiting && !stillAsks && result.kind !== "refused") {
-      if (this.appliesRosterChanges()) return;
-      const me = link.deviceId();
-      let settledHere = false;
-      await this.withChatMutation(conversation, async () => {
-        const before = this.stableJson(this.chatAppToolApprovals(conversation!).find((item) => item.id === card.cardId) ?? null);
-        this.settleRosterChangesFromDesktop(conversation!, () => conversation!.messages.filter((message) =>
-          message.role === "system" && message.metadata?.rosterChange?.approvalId === card.cardId && message.metadata?.serverWriter !== me));
-        if (this.stableJson(this.chatAppToolApprovals(conversation!).find((item) => item.id === card.cardId) ?? null) === before) return;
-        settledHere = true;
-        conversation!.updatedAt = new Date().toISOString();
-        await this.saveConversation(conversation!);
-      });
-      if (!settledHere) return;
-      conversation = await this.storage.getConversation(card.conversationId);
-      if (conversation && this.wantedServerCards(conversation).some((item) => item.cardId === card.cardId)) return;
-    }
+    // it is made (serverCardOpsFor), on the device whose member asked (Д2).
+    if (waiting && !stillAsks && result.kind !== "refused") return;
     const final = result.kind === "applied" ? "applied" : result.kind === "uncertain" ? "uncertain" : "closed";
     await link.enqueue([settle({ ...hubCardOutcomeFrom(conversation, card.cardId, final), ...(result.kind !== "applied" ? { reason: result.reason } : {}) })]);
     this.serverCards.noteState(card.cardId, card.conversationId, "settled");
