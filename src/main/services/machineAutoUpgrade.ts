@@ -193,7 +193,7 @@ export class MachineAutoUpgradeService {
       if (!this.waiting.has(id)) {
         this.waiting.add(id);
         this.log("machines.auto-upgrade.waiting", { machineId: id, running, desktop: this.options.desktopVersion, fresh: activity.fresh,
-          power, activeRunIds: activity.activeRunIds, dispatchedRunIds: activity.dispatchedRunIds });
+          power, activeRunIds: activity.activeRunIds });
         this.options.onProgress(this.notice(id, "preflight", activity.fresh
           ? `Waiting for ${name} to finish its current work before ${purpose}.`
           : `Waiting for ${name} to report what it is doing before ${purpose}.`));

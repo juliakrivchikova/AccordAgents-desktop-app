@@ -480,7 +480,6 @@ async function admitEnrolledPhone(event: ChatEventEnvelope, fetchBody: () => Pro
   void debugLogService.write("hub.phone.admitted", { deviceId: certificate.enrollment.deviceId, inviteId: certificate.invite.inviteId, admitted });
   if (!admitted) return undefined;
   publishHubRoster();
-  await machineLinkService?.refreshTrustRosters().catch(() => undefined);
   hubPhonePublisher.phonesChanged();
   hubPhonePublisher.scheduleCatalog(0);
   hubPhonePublisher.publishWakeKeys();
@@ -561,6 +560,10 @@ function publishHubRoster(): void {
     hubRosterRetryMs = 5_000;
     hubOwnerConfirmed = true;
     void debugLogService.write("hub.roster.published", { machines: machines.length, phones: phones.length });
+    // The machines it names read their settings from the server.
+    void machineLinkService?.syncSettings().catch((error: unknown) => {
+      void debugLogService.write("machine-link.settings.sync-error", { message: error instanceof Error ? error.message : String(error) });
+    });
     hubSync?.nudgeHeld();
     hubPhonePublisher.scheduleCatalog();
     hubPhonePublisher.publishWakeKeys();
@@ -735,6 +738,8 @@ async function startHubLink(): Promise<void> {
   hubOwnerConfirmed = false;
   const identity = () => chatEventLogService.getOrCreateDeviceIdentity();
   hubClient = new HubClient({ url: config.url, identity, storage: storageService });
+  // Another server (or the first): every machine's settings are put there.
+  machineLinkService?.resetPublishedSettings();
   const blobClient = hubClient;
   // A picture the User sent from the phone is read from the server.
   chatService.setHubBlobReader((reference) => blobClient.downloadBytes(reference));
@@ -1031,10 +1036,8 @@ async function removeMachine(id: string): Promise<MachineListResult> {
       void forget("later").then(() => settingsService.clearRemovedMachineOutbox(deviceId)).catch(() => undefined);
     }, 10_000).unref?.();
   }
-  // The other machines drop it from their rosters, and what they kept for it.
-  await machineLinkService?.refreshTrustRosters().catch((error: unknown) => {
-    void debugLogService.write("machine.remove.roster-error", { machineId: id, message: error instanceof Error ? error.message : String(error) });
-  });
+  // The User's server drops it from its roster: it reads and writes nothing more.
+  publishHubRoster();
   const result = await machineListResult();
   sendToMainWindow("machines:updated", result);
   return result;
@@ -1054,7 +1057,7 @@ async function removeRelayEra(): Promise<void> {
   });
   if (!recorded) return;
   void debugLogService.write("relay.removed", { machines: recorded.machines.length, phones: recorded.phones.length, startKeyHanded: recorded.startKeyHanded });
-  await machineLinkService?.refreshTrustRosters().catch(() => undefined);
+  publishHubRoster();
 }
 
 /** Drops what this desktop kept for a removed machine, and stops offering the
@@ -1153,7 +1156,7 @@ const machineInstallerService: MachineInstallerService = new MachineInstallerSer
     const activity = await machineLinkService?.machineActivity(record.machineId);
     if (!activity?.connected) return "The machine is not connected right now, so its runtime was not stopped.";
     if (!activity.fresh) return "The machine did not say what it is doing in time, so its runtime was not stopped.";
-    if (activity.activeRunIds.length > 0 || activity.pendingTerminalRunIds.length > 0 || activity.dispatchedRunIds.length > 0) {
+    if (activity.activeRunIds.length > 0) {
       return "A member started work on the machine while the update was being staged, so its runtime was not stopped.";
     }
     return undefined;
@@ -1310,14 +1313,13 @@ const artifactService = new ArtifactService({
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
   },
-  ...artifactEventWriter(storageService, chatEventLogService, () => machineLinkService?.chatActionRecipients() ?? [], artifactStore)
+  ...artifactEventWriter(storageService, chatEventLogService, () => [], artifactStore)
 });
 chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
-// A deleted chat is deleted on the machines that host its members too, durably
-// and with a tombstone, so a snapshot still in flight cannot bring it back.
+// A deleted chat reaches every other device through the User's server (its
+// deletion is an operation there, which every device applies).
 chatService.setConversationDeletedHandler(async (conversation) => {
   sendToMainWindow("conversations:deleted", conversation.id);
-  await machineLinkService?.deleteConversationOnMachines(conversation);
 });
 const avatarStudioService = new AvatarStudioService({
   cliRunner: cliAgentRunner,
@@ -1352,21 +1354,18 @@ const chatActionApplier = new ChatActionApplier({
     void debugLogService.write(event, payload);
   }
 });
-/** One route for every chat action: the local event plus a copy queued for
- *  each enrolled machine that holds the chat. With no machine enrolled the
- *  action is still written locally, for this desktop's own projection and for
- *  a machine that enrols later. */
+/** Every chat action is written locally, for this desktop's own projection.
+ *  Answers to cards of members on machines travel through the User's server
+ *  from step 5 of "the server owns the chat"; nothing carries them to a
+ *  machine before that. */
 async function publishChatAction(action: { conversationId: string; kind: string; payload: { operationId: string } }): Promise<void> {
-  const request = {
+  await chatEventLogService.appendLocalEvent({
     conversationId: action.conversationId,
     kind: action.kind,
     payload: action.payload as unknown,
-    eventId: `chat-action:${action.payload.operationId}`
-  };
-  const published = (await machineLinkService?.publishChatAction(request)) ?? 0;
-  if (published === 0) {
-    await chatEventLogService.appendLocalEvent({ ...request, logScopeId: CHAT_ACTION_LOG_SCOPE });
-  }
+    eventId: `chat-action:${action.payload.operationId}`,
+    logScopeId: CHAT_ACTION_LOG_SCOPE
+  });
 }
 
 /** The phone cannot show a script's code yet, so it may decline a script
@@ -1443,9 +1442,7 @@ function localChoiceExecutor(): Promise<MachineChoiceExecutor> {
       publish: async body => {
         const request = { conversationId: body.conversationId, kind: body.type,
           eventId: machineChoiceResultId(body.decisionId), payload: body };
-        if (!await machineLinkService?.publishChatAction(request)) {
-          await chatEventLogService.appendLocalEvent({ ...request, logScopeId: `choice:${body.choiceId}` });
-        }
+        await chatEventLogService.appendLocalEvent({ ...request, logScopeId: `choice:${body.choiceId}` });
       }
     });
   })();
@@ -2517,12 +2514,12 @@ function registerIpc(): void {
       name: String(request?.name ?? "").trim() || "Another device",
       addedAt: new Date().toISOString()
     });
-    await machineLinkService?.refreshTrustRosters();
+    publishHubRoster();
     return trustedDevicesResult();
   });
   ipcMain.handle("machines:untrust-device", async (_event, deviceId: string): Promise<MachineTrustedDevicesResult> => {
     await settingsService.removeTrustedDevice(String(deviceId ?? "").trim());
-    await machineLinkService?.refreshTrustRosters();
+    publishHubRoster();
     return trustedDevicesResult();
   });
   ipcMain.handle("machines:install-payload", async (): Promise<MachineRuntimePayloadInfo> => machineInstallerService.readPayload());
@@ -2560,7 +2557,6 @@ function registerIpc(): void {
     // The last phone gone: the server keeps no start key for it.
     hubPhonePublisher.publishWakeKeys();
     publishHubRoster();
-    await machineLinkService?.refreshTrustRosters().catch(() => undefined);
     return { revoked: true, inviteId, ...(removed ? { deviceId: removed } : {}) };
   });
   ipcMain.handle("conversations:start-review", async (_event, request: ReviewRequest) => {
@@ -2907,48 +2903,39 @@ void app.whenReady().then(async () => {
   try {
     const desktopIdentity = await chatEventLogService.getOrCreateDeviceIdentity();
     machineLinkService = new MachineLinkService(settingsService, debugLogService, {
-      // A channel's gap is asked of the hub, which holds the order.
-      hubRepair: (gap) => { void hubSync?.repairGap(gap); },
-      onDevicesChanged: () => {
-        publishHubRoster();
-        hubSync?.nudgeHeld();
-      },
-      onChannelReady: () => hubSync?.nudgeHeld(),
+      // A machine's key changed: the User's server is told who may use it.
+      onDevicesChanged: () => publishHubRoster(),
       createClient: (pairing: MobilePairingPackage) => pairing.hubUrl ? new HubTunnelClient({
         hubUrl: pairing.hubUrl, rendezvousId: pairing.rendezvousId, role: "desktop",
         identity: () => chatEventLogService.getOrCreateDeviceIdentity()
       }) : undefined,
-      chatActions: chatActionApplier,
-      repositoryPaths: (sourcePath) => cloudRunPreparation.repositoryPaths(sourcePath),
-      // A machine that held an action back because it lacked the revision it
-      // refers to asks for exactly that state, and gets the same event again.
-      serveChatActionDependency: async (dependency) => dependency.targetKey.startsWith("artifact:")
-        && artifactService.emitRevisionActionFor(dependency.targetKey.slice("artifact:".length), dependency.stateId),
       appVersion: app.getVersion(),
       desktopDeviceId: desktopIdentity.originId,
-      eventStorage: storageService,
       eventLog: chatEventLogService,
-      // A member on a machine reads the User's pictures from here: a chat's
-      // text is replicated to that machine, its attachment files are not.
+      // A member on a machine reads a picture attached here from here (one
+      // the phone sent it reads from the server).
       readChatAttachment: (request) => chatService.readChatAttachment(request),
-      // A machine's own changes (its members' replies, messages typed into it
-      // while this desktop was away) arrive as chat change events.
-      applyChatChanges: (event, payload) => chatService.applyRemoteChatChanges(event, payload),
-      chatChangeHead: (conversationId) => chatService.chatChangeHead(conversationId),
-      // Every device the User has trusted is named to each machine, in the
-      // room that machine is met in. That is what lets a machine keep working
-      // when this desktop is closed.
-      resolvedInviteIds: () => settingsService.resolvedPhoneInviteIds(),
-      trustedDevices: async (room) => (await settingsService.listTrustedDevices()).map((device) => ({
-        deviceId: device.deviceId,
-        publicKeyDerBase64: device.publicKeyDerBase64,
-        role: device.role,
-        name: device.name,
-        relayUrl: room.relayUrl,
-        rendezvousId: room.rendezvousId,
-        fingerprint: room.fingerprint
-      }))
+      // Each machine's settings go to the User's server, sealed for it alone.
+      publishSettings: async (machineId, sealed) => {
+        const client = hubClient;
+        if (!client) throw new Error("This computer is not linked to your server.");
+        await client.putMachineSettings({ machineId, sealed });
+      },
+      // Where this desktop's projects were copied on each machine.
+      machineProjects: async (machineId) => (await settingsService.listMachineInstalls()).find((record) => record.machineId === machineId)?.projects ?? {}
     });
+    const machineLink = machineLinkService;
+    // A turn of a member on a machine is asked once the machine has the
+    // chat's project and its settings say where (Д4: the machine runs it).
+    chatService.setRemoteTurnPreparation({
+      beforeRemoteTurn: () => machineLink.syncSettings(),
+      machineProjectReady: async (machineId, repoPath) => {
+        const install = (await settingsService.listMachineInstalls()).find((record) => record.machineId === machineId);
+        // A machine set up by hand keeps its own folders.
+        return !install || Boolean(install.projects?.[repoPath]);
+      }
+    });
+    chatService.setMachineWaitReason((machineId) => machineLink.turnWaitReason(machineId));
     // Every chat goes to every enrolled machine, as one change event per save
     // in the server's order. The machines are read before any chat is saved,
     // so the server is told who reads it before anything is written for them;
@@ -3028,58 +3015,6 @@ void app.whenReady().then(async () => {
     // A restarted runtime greets again with a new instance; until then its
     // requests are refused, so it is asked again once it has.
     machineLinkService.onHello((event) => broadcastScripts([event.machineId]));
-    machineLinkService.onConversationDeleted((event) => chatService.applyReplicatedConversationDeletion(event.conversationId, event.deletedAt));
-    machineLinkService.onConversationBackDelta((delta) => {
-      // The machine keeps the result until the desktop has stored it. It may
-      // write only its own members' messages and what it created itself.
-      return chatService.applyMachineBackDelta({
-        conversationId: delta.conversationId,
-        messages: delta.messages,
-        machineId: delta.machineId,
-        machineOriginId: machineLinkService?.machineDeviceId(delta.machineId)
-      })
-        .then((conversation) => {
-          if (!conversation) throw new Error("The desktop chat is unavailable; machine messages remain unacknowledged.");
-          delta.acknowledge?.();
-        })
-        .catch((error) => {
-          void debugLogService.write("machine-link.backdelta.apply-error", { message: error instanceof Error ? error.message : String(error) });
-          throw error;
-        });
-    });
-    // A member on a machine asked other members to answer. They run here,
-    // each where that member lives; the machine waits for the answers.
-    machineLinkService.onParticipantRequest((request) => chatService.runDelegatedParticipantRequest({
-      conversationId: request.conversationId,
-      requestMessageId: request.requestMessageId,
-      depth: request.depth,
-      ...(request.targetParticipantIds ? { targetParticipantIds: request.targetParticipantIds } : {})
-    }).catch((error) => {
-      void debugLogService.write("machine-link.participants.delegate-error", {
-        conversationId: request.conversationId,
-        requestMessageId: request.requestMessageId,
-        message: error instanceof Error ? error.message : String(error)
-      });
-      throw error;
-    }));
-    machineLinkService.onApproval((event) =>
-      // A failed store must fail the machine's decision outcome (and the
-      // card call behind it), so the error is logged and re-thrown.
-      chatService.applyMachineApproval({
-        conversationId: event.conversationId,
-        approval: event.approval,
-        policies: event.policies,
-        decisionId: event.decisionId,
-        decisionApplied: event.decisionApplied
-      }).then(() => undefined, (error: unknown) => {
-        void debugLogService.write("machine-link.approval.apply-error", { message: error instanceof Error ? error.message : String(error) });
-        throw error;
-      })
-    );
-    // A member on a machine asked to compact its own context: it runs here,
-    // as a compaction the User started, and is dispatched back to it.
-    machineLinkService.onCompactionDelegate((event) => chatService.runDelegatedCompaction(event));
-    machineLinkService.onRunStarted((event) => chatService.applyMachineRunStarted(event));
     machineLinkService.onMemberBackgroundTasks((event) => {
       if (event.member) {
         chatService.applyMachineBackgroundTasks(event.machineId, event.member);
@@ -3093,24 +3028,9 @@ void app.whenReady().then(async () => {
       runId: event.runId,
       text: event.suggestion
     }, event.machineId));
-    machineLinkService.onProgress(emitReviewProgress);
-    machineLinkService.onLateTerminal((event) =>
-      chatService.applyMachineLateTerminal({
-        conversationId: event.conversationId,
-        runId: event.runId,
-        status: event.status,
-        messages: event.messages,
-        warnings: event.warnings,
-        error: event.error,
-        finishedAt: event.finishedAt,
-        receiptId: event.receiptId,
-        machineName: event.machineName,
-        machineId: event.machineId,
-        participantId: event.participantId,
-        contextUsage: event.contextUsage,
-        compaction: event.compaction
-      })
-    );
+    // A machine member's live progress, for this window only: the machine
+    // posts it to the server itself for the phone.
+    machineLinkService.onProgress((progress) => sendToMainWindow("conversations:review-progress", progress));
     machineLinkService.setConversationLoader((conversationId) => storageService.getConversation(conversationId));
     chatService.setMachineLink(machineLinkService);
     // Machines update together with the desktop: a machine whose runtime is

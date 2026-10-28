@@ -315,12 +315,12 @@ export class CloudRunPreparationService {
       this.report({ message: "Cloud run is ready." });
       return { machine };
     }
-    // A program that crashed mid-turn keeps reporting that turn, and a turn
-    // sent while it is down waits for it: neither may keep it down once the
-    // machine itself said nothing runs. A program that came back meanwhile
-    // reports afresh, and that report counts again.
+    // A program that crashed mid-turn keeps reporting that turn: that may
+    // not keep it down once the machine itself said nothing runs (a turn
+    // asked meanwhile waits on the User's server). A program that came back
+    // meanwhile reports afresh, and that report counts again.
     const checked = runtime.agentsChecked && !(machine && this.options.isConnected(machine.id));
-    if (!checked && (machine?.lastHello?.activeRunIds?.length || machine?.pendingRuns?.length)) {
+    if (!checked && machine?.lastHello?.activeRunIds?.length) {
       throw new Error("The cloud runtime needs an update. Finish its current runs, then select Cloud run again.");
     }
     machine ??= await this.options.createMachine("Cloud run", instanceId);

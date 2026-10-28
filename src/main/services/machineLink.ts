@@ -1,121 +1,72 @@
 /**
- * Machine link, desktop side (machines transport, work items 3–5).
+ * Machine link, desktop side.
  *
- * One room per enrolled machine on the User's server: the desktop sits in the
- * room as `desktop`, the machine as `machine` with its device id. The first
- * hello is sealed with the enrollment's key, everything after it with the
- * pair's own key, and each message is addressed to the peer's device id;
- * durable events travel in the server's order. The desktop replicates conversations and settings to the machine and
- * dispatches participant turns to it; the machine answers with progress and
- * the finished participant messages.
+ * A cloud machine is a plain client of the User's server (agreements Д1–Д13):
+ * its members' turns are asked of it there, it takes them there and writes
+ * their replies there, and a Stop reaches it there (ChatService). This desktop
+ * dispatches nothing to it. What is left here is the live control between
+ * this desktop and the machines it set up, in each machine's room on the
+ * server, never stored: the machine's greeting and status (Settings, updates,
+ * automatic stop), its scheduled scripts, a picture a member there reads from
+ * this desktop, background-task labels, next-prompt suggestions and live
+ * progress for this window. And this desktop publishes each machine's
+ * settings on the server, sealed for that machine alone.
  */
 
-import { createHmac, hkdfSync, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   MACHINE_LINK_PROTOCOL,
   isMachineLinkEnvelope,
   MACHINE_ATTACHMENT_PART_BYTES,
-  type MachineConversationDeletedBody,
+  machineSigningKey,
+  type MachineAttachmentRequestBody,
   type MachineHelloBody,
   type MachineLinkEnvelope,
   type MachineLinkMessage,
   type MachineLinkStatus,
   type MachineRecord,
-  type MachineSettingsSnapshot,
-  type MachineTurnCompaction,
-  type MachineTurnFinishedBody,
-  machineCompactionMessageId
+  type MachineScriptsOperation,
+  type MachineSettingsDocument,
+  type MachineSettingsSnapshot
 } from "../../shared/machineLink";
-import type { MachineAttachmentRequestBody, MachineCompactionDelegateRequest, MachineScriptsOperation } from "../../shared/machineLink";
+import { decodeMachineProgress, type MachineProgressFrame } from "../../shared/machineProgress";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
 import { assertRecoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
-import type { AgentContextUsage, ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatAppToolApprovalRequest, ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "../../shared/types";
-import type { MachineCompactionDispatchRequest, MachineTurnDispatchRequest, MachineTurnDispatchResult, MachineTurnDispatcher } from "./chat";
-import { stableJson } from "../../shared/stableJson";
+import type { ChatAppToolApprovalRequest, Conversation, ReviewProgress } from "../../shared/types";
+import type { MachineLinkPort } from "./chat";
 import type { DebugLogService } from "./debugLogs";
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
 import { openMachinePayload, sealChannelPayload, sealMachinePayload } from "./machineChannelSealing";
 import type { TunnelClient } from "./hubTunnelClient";
 import { signMachineControl, verifyMachineControl } from "./machineControlAuthentication";
 import type { SettingsService } from "./settings";
-import { isMachineDurableMessage, machineCommandId, machineSigningKey } from "../../shared/machineLink";
-import { isDeviceEventPacket } from "../../shared/deviceEventChannel";
-import { DeviceEventChannel, type DeferredWithDependency } from "./deviceEventChannel";
-import { deliverToChannel, type HubDeliverOutcome } from "./hubSync";
-import { hubWebSocketUrl } from "../../shared/hubProtocol";
-import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
 import type { ChatEventLogService } from "./chatEventLog";
-import type { StorageService } from "./storage";
-import type { ChatActionApplier } from "./chatActionApplier";
-import { permissionDecisionAction, choiceDecisionAction, chatActionEventId } from "./chatActionEmitter";
-import type { ChatActionDependency } from "../../shared/deviceEventChannel";
-import type { DeviceEventGap } from "../../shared/deviceEventDelivery";
-import type { MachineTrustRoster, TrustedPeerAccess } from "../../shared/machineTrust";
-import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import { CHAT_CHANGES_EVENT_KIND, CHAT_CHANGES_VERSION, isChatChangesPayload, type ChatChangesPayload } from "./chatChanges";
 import type { MachineRecoveryLinkState } from "./machineRecovery";
 
 export interface MachineLinkOptions {
-  repositoryPaths?: (sourcePath: string) => Promise<Record<string, string>>;
   appVersion: string;
   desktopDeviceId: string;
-  eventStorage: StorageService;
-  eventLog: ChatEventLogService;
+  /** This desktop's device identity: what it signs and seals with. */
+  eventLog: Pick<ChatEventLogService, "getOrCreateDeviceIdentity">;
   /** Builds the client for one machine's room on the User's server (a test
    *  stand-in in tests); undefined when this desktop has no server. */
   createClient?: (pairing: MobilePairingPackage) => TunnelClient | undefined;
-  /** Through the hub: a channel's gap is asked of the hub (HubSync.repairGap). */
-  hubRepair?: (gap: DeviceEventGap) => void;
-  /** A machine's channel is up: events of it held while it was not are
-   *  offered again (HubSync.nudgeHeld). */
-  onChannelReady?: () => void;
   /** The set of machines (or their keys) changed: whoever admits devices by
-   *  key, the User's hub, is told again. */
+   *  key, the User's server, is told again. */
   onDevicesChanged?: () => void;
-  /** Applies chat actions that arrive from a machine. Without it an action is
-   *  stored but never reaches this desktop's own state. */
-  chatActions?: ChatActionApplier;
-  /** The owner's devices that are not machines (paired phones, other
-   *  desktops). They are met in the room of the machine they are talking to,
-   *  which is why the room is handed in. */
-  trustedDevices?: (room: {
-    relayUrl: string;
-    rendezvousId: string;
-    relaySealKeyBase64?: string;
-    fingerprint: string;
-  }) => Promise<TrustedPeerAccess[]>;
-  /** Phone invites the owner has settled: told to every machine with its
-   *  roster, so a phone enrolled with one is trusted only while listed. */
-  resolvedInviteIds?: () => Promise<string[]>;
-  /** Produces the state a peer says a held action of its own is waiting for,
-   *  by re-emitting the action that carries it. */
-  serveChatActionDependency?: (dependency: ChatActionDependency) => Promise<boolean>;
-  /** The bytes of a picture a machine asks for. Replication carries an
-   *  attachment's metadata but not its file, so this desktop is where a
-   *  member running on a machine reads one from. */
+  /** The bytes of a picture a machine asks for: a picture attached on this
+   *  desktop is kept here, and a member on a machine reads it from here. */
   readChatAttachment?: (request: { conversationId: string; attachmentId: string })
     => Promise<{ attachment: { mimeType?: string; filename?: string }; dataBase64: string }>;
-  /** Folds a `chat.changes` event from a machine into this desktop's copy.
-   *  "missing-conversation" holds the event until the chat arrives. */
-  applyChatChanges?: (event: ChatEventEnvelope, payload: ChatChangesPayload) => Promise<"applied" | "missing-conversation" | "waiting">;
-  /** The last chat change this desktop committed for a chat, after its
-   *  queued saves: a turn request names it and the machine waits for it. */
-  chatChangeHead?: (conversationId: string) => Promise<{ originId: string; logScopeId: string; originSeq: number } | undefined>;
+  /** Puts one machine's settings, sealed for it, on the User's server. */
+  publishSettings?: (machineId: string, sealed: string) => Promise<void>;
+  /** Where this desktop's projects live on a machine (by this desktop's path). */
+  machineProjects?: (machineId: string) => Promise<Record<string, string>>;
   now?: () => Date;
 }
 
 export type { MachineLinkStatus };
-
-export interface MachineApprovalEvent {
-  machineId: string;
-  conversationId: string;
-  approval: ChatAppToolApproval;
-  policies?: ChatAppToolApprovalPolicy[];
-  decisionId?: string;
-  /** With `decisionId`: whether the machine applied that decision. */
-  decisionApplied?: boolean;
-}
 
 function cleanBackgroundLabels(labels: unknown[]): string[] {
   return labels.filter((label): label is string => typeof label === "string").slice(0, 50);
@@ -131,7 +82,7 @@ export interface MachineMemberBackgroundEvent {
 }
 
 /** The machine that sent it is named: the desktop offers a suggestion only
- *  for a reply it dispatched to that machine. */
+ *  for a reply it asked of that machine. */
 export interface MachinePromptSuggestionEvent {
   machineId: string;
   conversationId: string;
@@ -140,92 +91,40 @@ export interface MachinePromptSuggestionEvent {
   suggestion: string;
 }
 
-/** A turn result for a run this desktop no longer tracks (it restarted
- *  meanwhile), any status. The listener stores it; the machine is told to
- *  drop the result (and a held stop is dropped) only after that. */
-export interface MachineLateTerminalEvent {
-  machineId: string;
-  machineName: string;
-  conversationId: string;
-  runId: string;
-  status: "completed" | "interrupted" | "failed" | "unconfirmed";
-  messages: ChatMessage[];
-  warnings: string[];
-  error?: string;
-  finishedAt?: string;
-  receiptId?: string;
-  /** The member the run was for, and its context use after it. */
-  participantId?: string;
-  contextUsage?: AgentContextUsage;
-  /** The run was a compaction of that member. */
-  compaction?: { triggeredBy: "user" | "agent" };
-}
-
-/** A member on a machine asked to compact its own context; the desktop runs
- *  it as one the User asked for. */
-export type MachineCompactionDelegateEvent = MachineCompactionDelegateRequest & { machineId: string };
-
 interface MachineConnection {
-  eventChannel?: DeviceEventChannel;
   record: MachineRecord;
   pairing: MobilePairingPackage;
   client: TunnelClient;
   machineDeviceId?: string;
-  settingsSynced: boolean;
-  pendingTurns: Map<string, {
-    resolve: (result: MachineTurnDispatchResult) => void;
-    progress?: (progress: ReviewProgress) => void;
-    /** Runtime instance the turn was dispatched to (from the machine's hello). */
-    instanceId?: string;
-    /** True once machine.turn.request has left; only then can the machine be
-     *  asked whether it holds the run. */
-    dispatched: boolean;
-  }>;
-  /** Stops the machine has not confirmed yet (run id → conversation id).
-   *  Rule 2: a Stop is stored (in the machine record, so it survives a desktop
-   *  restart) and delivered again when the machine is back; "stopped" appears
-   *  only after the machine confirms. */
-  pendingCancels: Map<string, string>;
   /** Serializes machine-record writes for this connection. */
   persist: Promise<void>;
-  /** Approval decisions waiting for the machine's outcome. */
-  pendingApprovals: Map<string, Set<{ resolve: () => void; reject: (error: Error) => void }>>;
-  pendingChoices: Map<string, Set<{ resolve: () => void; reject: (error: Error) => void }>>;
-  /** run id → conversation id for turns this desktop waits on. */
-  pendingTurnConversations: Map<string, string>;
-  /** Dispatched turns whose result is not stored yet (persisted in the
-   *  machine record, so a restarted desktop still asks about them). */
-  pendingRuns: Map<string, string>;
   /** Inbound messages are decrypted and applied strictly in arrival order. */
   inbound: Promise<void>;
-  /** Sealing and frame writes preserve command order, including Stop. */
+  /** Sealing and frame writes preserve order. */
   outbound: Promise<void>;
   /** A hello arrived on this connection; until then the machine is asked
    *  to greet a desktop that just connected. */
   helloSeen: boolean;
   helloRequestTimer?: ReturnType<typeof setTimeout>;
   /** The hello request in flight from machineActivity(), shared by every
-   *  caller asking meanwhile: one request, one answering hello. A hello
-   *  arriving while it is out answers it and is not announced to onHello
-   *  listeners, so a listener that probes on every hello cannot loop. */
+   *  caller asking meanwhile: one request, one answering hello. */
   activityProbe?: Promise<boolean>;
-  /** While the runtime is being replaced, turns wait here instead of being
-   *  dispatched into a process that is about to be stopped. */
-  /** Start time of the newest runtime instance seen; a late hello from an
-   *  older instance is ignored. */
-  latestInstanceStartedAt?: string;
-  /** Monotonic start counter of the newest runtime instance seen (preferred
-   *  over the wall-clock start time). */
+  /** Monotonic start counter of the newest runtime instance seen. */
   latestInstanceSequence?: number;
   /** Requests waiting for the machine's answer (scheduled scripts). */
   pendingScripts: Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>;
-  /** Settings and roster publications to this machine, one at a time, each
-   *  deciding from what the previous one recorded. */
-  publication?: Promise<void>;
+  /** Live progress being decoded, by run: the stream and its newest state. */
+  progress: Map<string, { streamId: string; sequence: number; progress: ReviewProgress }>;
 }
 
 /** How long a scheduled-script request waits for the machine's answer. */
 const SCRIPTS_REQUEST_TIMEOUT_MS = 20_000;
+/** How long one hold of a machine's turns lasts unless renewed, and how
+ *  often it is renewed while held. */
+const TURN_HOLD_MS = 15 * 60_000;
+const TURN_HOLD_RENEW_MS = 5 * 60_000;
+/** Runs whose live progress is followed per machine, at most. */
+const LIVE_PROGRESS_RUNS_MAX = 64;
 
 /** A machine as Settings → Scripts sees it. */
 export interface MachineScriptHost {
@@ -235,19 +134,16 @@ export interface MachineScriptHost {
   supported: boolean;
 }
 
-/** How long a delivered Stop may go unconfirmed before the User is told the
- *  machine has not answered yet. */
-const STOP_CONFIRM_GRACE_MS = 5_000;
-/** How long the desktop waits for a machine to report the outcome of an
- *  approval decision. */
-const APPROVAL_RESULT_TIMEOUT_MS = 60_000;
-const TURN_ACK_TIMEOUT_MS = 24 * 60 * 60_000;
 /** How long a freshly connected desktop waits for the machine's own hello
  *  before asking for one. */
 const HELLO_REQUEST_GRACE_MS = 750;
 /** How long a connected machine gets to answer a hello request before its
  *  last known hello is used instead. */
 const MACHINE_ACTIVITY_TIMEOUT_MS = 15_000;
+
+/** Cards of members on a machine travel through the User's server from step
+ *  5 of "the server owns the chat"; until then nothing carries an answer. */
+const CARDS_NOT_CONNECTED = "Answers to cards of members on a machine travel through your server, which this version does not carry yet.";
 
 export interface MachineActivity {
   machineId: string;
@@ -258,47 +154,35 @@ export interface MachineActivity {
   fresh: boolean;
   /** Runtime version the machine reports. */
   appVersion?: string;
+  /** Runs executing on the machine, as it says. A turn asked of it that it
+   *  has not taken waits on the User's server and does not count: the
+   *  runtime that is there when it is taken runs it. */
   activeRunIds: string[];
-  pendingTerminalRunIds: string[];
-  /** Turns this desktop dispatched and has not seen finish. */
-  dispatchedRunIds: string[];
 }
 
 export function machineActivityIsBusy(activity: MachineActivity): boolean {
-  return activity.activeRunIds.length > 0 || activity.pendingTerminalRunIds.length > 0 || activity.dispatchedRunIds.length > 0;
+  return activity.activeRunIds.length > 0;
 }
 
-/** Where a machine's devices meet: the rooms of the User's server. */
-function meetingUrl(pairing: Pick<MobilePairingPackage, "hubUrl">): string {
-  return pairing.hubUrl ? hubWebSocketUrl(pairing.hubUrl, "") : "";
-}
-
-export class MachineLinkService implements MachineTurnDispatcher {
+export class MachineLinkService implements MachineLinkPort {
   private readonly emitter = new EventEmitter();
-  private readonly approvalListeners: Array<(event: MachineApprovalEvent) => Promise<void> | void> = [];
   private readonly scriptsChangedListeners: Array<(machineId: string) => void> = [];
-  private readonly lateTerminalListeners: Array<(event: MachineLateTerminalEvent) => Promise<void> | void> = [];
-  private readonly runStartedListeners: Array<(event: { conversationId: string; runId: string }) => Promise<void> | void> = [];
   private readonly progressListeners: Array<(progress: ReviewProgress) => void> = [];
   private readonly suggestionListeners: Array<(event: MachinePromptSuggestionEvent) => void> = [];
   private readonly backgroundListeners: Array<(event: MachineMemberBackgroundEvent) => void> = [];
-  private readonly participantRequestListeners: Array<(request: { machineId: string; conversationId: string; requestMessageId: string; depth: number; targetParticipantIds?: string[] }) => Promise<void> | void> = [];
-  private readonly compactionDelegateListeners: Array<(event: MachineCompactionDelegateEvent) => Promise<void> | void> = [];
-  private readonly backDeltaListeners: Array<(delta: { machineId: string; conversationId: string; messages: ChatMessage[]; acknowledge?: () => void }) => Promise<void> | void> = [];
-  private readonly deletionListeners: Array<(event: MachineConversationDeletedBody) => Promise<void>> = [];
   private conversationLoader?: (conversationId: string) => Promise<Conversation | undefined>;
   private readonly connections = new Map<string, MachineConnection>();
-  /** Turns held for a machine (an update), by machine id. */
-  private readonly turnHolds = new Map<string, { reason: string; released: Promise<void>; release: () => void; holders: number }>();
-  /** Every enrolled machine, read from settings before any connects: a chat
-   *  saved while the link is still starting (or for a machine whose
-   *  connection failed) must still be addressed to it. */
+  /** Why a machine cannot take turns right now (its runtime is being
+   *  replaced), by machine id: shown on a waiting member's bubble. */
+  private readonly turnHolds = new Map<string, Array<{ reason: string }>>();
+  /** Every enrolled machine, read from settings before any connects. */
   private readonly enrolled = new Map<string, MachineRecord>();
-  /** Events whose deferral was already reported, so a retry is not logged again. */
-  private readonly reportedDeferrals = new Set<string>();
-  private deletionRetry?: ReturnType<typeof setTimeout>;
-  private deletionDelivery?: Promise<number>;
-  private deletionDeliveryRequested = false;
+  /** What each machine's settings on the User's server were last published
+   *  from (a digest of what a machine uses, the key it is sealed for and the
+   *  place it was put): the same is not put again. Kept in memory, so every
+   *  start of this desktop publishes once. */
+  private readonly publishedSettings = new Map<string, string>();
+  private settingsPublication: Promise<void> = Promise.resolve();
   private closed = false;
   private readonly seenMessageIds = new Set<string>();
   private readonly now: () => Date;
@@ -316,11 +200,6 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return () => this.emitter.off("status", listener);
   }
 
-  onRunStarted(listener: (event: { conversationId: string; runId: string }) => Promise<void> | void): () => void {
-    this.runStartedListeners.push(listener);
-    return () => { const index = this.runStartedListeners.indexOf(listener); if (index >= 0) this.runStartedListeners.splice(index, 1); };
-  }
-
   /** A member hosted on a machine started or ended background work; `labels`
    *  empty also when the machine went away (nothing it said holds any more). */
   onMemberBackgroundTasks(listener: (event: MachineMemberBackgroundEvent) => void): () => void {
@@ -334,87 +213,20 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return () => { const index = this.suggestionListeners.indexOf(listener); if (index >= 0) this.suggestionListeners.splice(index, 1); };
   }
 
+  /** A machine member's live progress, for this window (the phone reads it
+   *  from the server, where the machine posts it itself). */
   onProgress(listener: (progress: ReviewProgress) => void): () => void {
     this.progressListeners.push(listener);
     return () => { const index = this.progressListeners.indexOf(listener); if (index >= 0) this.progressListeners.splice(index, 1); };
   }
 
-  /** Conversation changes made on a machine (approval cards, requests). The
-   *  listener calls `acknowledge` once the messages are stored. */
-  onConversationDeleted(listener: (event: MachineConversationDeletedBody) => Promise<void>): () => void {
-    this.deletionListeners.push(listener);
-    return () => { const index = this.deletionListeners.indexOf(listener); if (index >= 0) this.deletionListeners.splice(index, 1); };
-  }
-
-  /** Messages a machine owns that this desktop must store now: the result of
-   *  a choice answered here for a member on that machine. */
-  onConversationBackDelta(listener: (delta: { machineId: string; conversationId: string; messages: ChatMessage[]; acknowledge?: () => void }) => Promise<void> | void): () => void {
-    this.backDeltaListeners.push(listener);
-    return () => { const index = this.backDeltaListeners.indexOf(listener); if (index >= 0) this.backDeltaListeners.splice(index, 1); };
-  }
-
-  /** A member on a machine asked other members to answer. The listener runs
-   *  them here, where the roster and every member's home are known. */
-  onParticipantRequest(listener: (request: { machineId: string; conversationId: string; requestMessageId: string; depth: number; targetParticipantIds?: string[] }) => Promise<void> | void): () => void {
-    this.participantRequestListeners.push(listener);
-    return () => {
-      const index = this.participantRequestListeners.indexOf(listener);
-      if (index >= 0) this.participantRequestListeners.splice(index, 1);
-    };
-  }
-
-  /** A member on a machine asked to compact its own context. The listener
-   *  runs it here, as a compaction the User started, which dispatches it back
-   *  to that machine. */
-  onCompactionDelegate(listener: (event: MachineCompactionDelegateEvent) => Promise<void> | void): () => void {
-    this.compactionDelegateListeners.push(listener);
-    return () => {
-      const index = this.compactionDelegateListeners.indexOf(listener);
-      if (index >= 0) this.compactionDelegateListeners.splice(index, 1);
-    };
-  }
-
-  /** An approval raised or answered by a member on a machine. A listener
-   *  may return a promise; the machine's decision outcome waits for it, so
-   *  the card call returns only after the desktop stored the approval. */
-  onApproval(listener: (event: MachineApprovalEvent) => Promise<void> | void): () => void {
-    this.approvalListeners.push(listener);
-    return () => {
-      const index = this.approvalListeners.indexOf(listener);
-      if (index >= 0) {
-        this.approvalListeners.splice(index, 1);
-      }
-    };
-  }
-
-  private async emitApproval(event: MachineApprovalEvent): Promise<void> {
-    if (!this.approvalListeners.length) throw new Error("No chat owner is available to store the machine's approval.");
-    await Promise.all(this.approvalListeners.map((listener) => listener(event)));
-  }
-
-  onLateTerminal(listener: (event: MachineLateTerminalEvent) => Promise<void> | void): () => void {
-    this.lateTerminalListeners.push(listener);
-    return () => {
-      const index = this.lateTerminalListeners.indexOf(listener);
-      if (index >= 0) {
-        this.lateTerminalListeners.splice(index, 1);
-      }
-    };
-  }
-
-  private async emitLateTerminal(event: MachineLateTerminalEvent): Promise<void> {
-    if (!this.lateTerminalListeners.length) throw new Error("No chat owner is available to store the machine's outcome.");
-    await Promise.all(this.lateTerminalListeners.map((listener) => listener(event)));
-  }
-
-  /** Lets the link fetch the desktop's current copy of a chat when a machine
-   *  asks for the first copy again. */
+  /** Lets the link check that a picture a machine asks for is in a chat. */
   setConversationLoader(loader: (conversationId: string) => Promise<Conversation | undefined>): void {
     this.conversationLoader = loader;
   }
 
-  /** Forwards the desktop's decision on a machine-raised approval. */
-  async respondToMachineApproval(request: {
+  /** Cards of members on a machine move to the User's server (step 5). */
+  async respondToMachineApproval(_request: {
     machineId: string;
     conversationId: string;
     approvalId: string;
@@ -424,115 +236,17 @@ export class MachineLinkService implements MachineTurnDispatcher {
     codexDecisionId?: string;
     onQueued?: (decisionId: string, machineName: string) => Promise<void>;
   }): Promise<void> {
-    const connection = this.connections.get(request.machineId);
-    if (!connection?.eventChannel) {
-      throw new Error("The machine that raised this approval has not introduced its durable channel.");
-    }
-    const action = permissionDecisionAction({ ...request, decisionId: request.codexDecisionId });
-    const decisionId = chatActionEventId(action.payload.operationId);
-    const previous = await this.options.eventStorage.getChatEvent(decisionId);
-    if (previous && (previous.originId !== this.options.desktopDeviceId || previous.kind !== action.kind || previous.conversationId !== request.conversationId)) {
-      throw new Error("The retained approval decision has inconsistent ownership.");
-    }
-    // The call resolves with the machine's outcome: an edited proposal or a
-    // native decision the machine rejects is an error here, not a silent no-op.
-    let waiter!: { resolve: () => void; reject: (error: Error) => void };
-    const outcome = new Promise<void>((resolve, reject) => { waiter = { resolve, reject }; });
-    const waiters = connection.pendingApprovals.get(decisionId) ?? new Set();
-    waiters.add(waiter);
-    connection.pendingApprovals.set(decisionId, waiters);
-    const removeWaiter = () => {
-      waiters.delete(waiter);
-      if (!waiters.size && connection.pendingApprovals.get(decisionId) === waiters) connection.pendingApprovals.delete(decisionId);
-    };
-    void outcome.catch(() => undefined);
-    const timeout = setTimeout(() => {
-      if (waiters.has(waiter)) {
-        removeWaiter();
-        waiter.reject(new Error(`The decision is saved and will be delivered to ${connection.record.name}; its application is not confirmed yet.`));
-      }
-    }, APPROVAL_RESULT_TIMEOUT_MS);
-    timeout.unref?.();
-    try {
-      // The journal action is the command. Do not also send an independent
-      // machine approval RPC: either could execute first and reject the other.
-      const publication = { ...action, eventId: decisionId };
-      await connection.eventChannel.publish({ ...publication, sharedScope: true });
-      await this.publishChatAction(publication);
-      await request.onQueued?.(decisionId, connection.record.name);
-      const savedResult = await this.options.eventStorage.getChatEvent(`machine-approval-result:${decisionId}`);
-      if (savedResult && savedResult.originId === connection.record.deviceId && savedResult.kind === "machine.approval.result" && savedResult.conversationId === request.conversationId) {
-        await this.handleBody(connection, await this.options.eventStorage.deviceEventBlobs().hydrate(savedResult.payload) as import("../../shared/machineLink").MachineApprovalResultBody);
-      }
-      await outcome;
-    } finally {
-      clearTimeout(timeout);
-      removeWaiter();
-    }
-    void this.debugLogs.write("machine-link.approval.decision-sent", {
-      machineId: request.machineId,
-      conversationId: request.conversationId,
-      approvalId: request.approvalId,
-      approve: request.approve,
-      scope: request.scope
-    });
+    throw new Error(CARDS_NOT_CONNECTED);
   }
 
-  async respondToMachineChoice(request: import("../../shared/types").RespondToChatChoiceRequest & { machineId: string }): Promise<void> {
-    const connection = this.connections.get(request.machineId);
-    if (!connection?.eventChannel) {
-      throw new Error("The machine that raised this choice has not introduced its durable channel.");
-    }
-    const action = choiceDecisionAction(request);
-    const decisionId = chatActionEventId(action.payload.operationId);
-    const previous = await this.options.eventStorage.getChatEvent(decisionId);
-    if (previous && (previous.originId !== this.options.desktopDeviceId || previous.kind !== action.kind || previous.conversationId !== request.conversationId)) {
-      throw new Error("The retained choice decision has inconsistent ownership.");
-    }
-    // The call resolves with the machine's outcome: an edited proposal or a
-    // native decision the machine rejects is an error here, not a silent no-op.
-    let waiter!: { resolve: () => void; reject: (error: Error) => void };
-    const outcome = new Promise<void>((resolve, reject) => { waiter = { resolve, reject }; });
-    const waiters = connection.pendingChoices.get(decisionId) ?? new Set();
-    waiters.add(waiter);
-    connection.pendingChoices.set(decisionId, waiters);
-    const removeWaiter = () => {
-      waiters.delete(waiter);
-      if (!waiters.size && connection.pendingChoices.get(decisionId) === waiters) connection.pendingChoices.delete(decisionId);
-    };
-    void outcome.catch(() => undefined);
-    const timeout = setTimeout(() => {
-      if (waiters.has(waiter)) {
-        removeWaiter();
-        waiter.reject(new Error(`The decision is saved and will be delivered to ${connection.record.name}; its application is not confirmed yet.`));
-      }
-    }, APPROVAL_RESULT_TIMEOUT_MS);
-    timeout.unref?.();
-    try {
-      // The journal action is the command. Do not also send an independent
-      // machine choice RPC: either could execute first and reject the other.
-      const publication = { ...action, eventId: decisionId };
-      await connection.eventChannel.publish({ ...publication, sharedScope: true });
-      await this.publishChatAction(publication);
-      const savedResult = await this.options.eventStorage.getChatEvent(`machine-choice-result:${decisionId}`);
-      if (savedResult && savedResult.originId === connection.record.deviceId && savedResult.kind === "machine.choice.result" && savedResult.conversationId === request.conversationId) {
-        await this.handleBody(connection, await this.options.eventStorage.deviceEventBlobs().hydrate(savedResult.payload) as import("../../shared/machineLink").MachineChoiceResultBody);
-      }
-      await outcome;
-    } finally {
-      clearTimeout(timeout);
-      removeWaiter();
-    }
+  async respondToMachineChoice(_request: import("../../shared/types").RespondToChatChoiceRequest & { machineId: string }): Promise<void> {
+    throw new Error(CARDS_NOT_CONNECTED);
   }
 
-  /** Reads the enrolled machines, so the hub's readers are known before any
-   *  chat activity. */
+  /** Reads the enrolled machines, so the server's roster names them before
+   *  any chat activity. */
   async loadMachines(): Promise<void> {
-    await this.enrollAll(await this.settings.listMachines());
-  }
-
-  private async enrollAll(records: MachineRecord[]): Promise<void> {
-    for (const record of records) {
+    for (const record of await this.settings.listMachines()) {
       if (!this.connections.has(record.id)) this.enrolled.set(record.id, record);
     }
   }
@@ -540,18 +254,16 @@ export class MachineLinkService implements MachineTurnDispatcher {
   async start(): Promise<void> {
     this.closed = false;
     const machines = await this.settings.listMachines();
-    await this.enrollAll(machines);
+    for (const record of machines) if (!this.connections.has(record.id)) this.enrolled.set(record.id, record);
     void this.debugLogs.write("machine-link.start", { machines: machines.length, desktopDeviceId: this.options.desktopDeviceId });
     for (const record of machines) {
       await this.connectMachine(record).catch((error) => {
         void this.debugLogs.write("machine-link.connect.error", { machineId: record.id, message: errorMessage(error) });
       });
     }
-    await this.deliverPendingConversationDeletions();
   }
 
-  async connectMachine(record: MachineRecord, pairingOverride?: MobilePairingPackage,
-    carried?: Pick<MachineConnection, "pendingTurns" | "pendingTurnConversations">): Promise<void> {
+  async connectMachine(record: MachineRecord, pairingOverride?: MobilePairingPackage): Promise<void> {
     const existing = this.connections.get(record.id);
     if (existing) {
       existing.record = record;
@@ -559,9 +271,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }
     this.enrolled.set(record.id, record);
     const pairing = pairingOverride ?? await this.settings.getMachinePairing(record.pairingKey);
-    if (!pairing) {
-      throw new Error(`Machine ${record.name} has no pairing package.`);
-    }
+    if (!pairing) throw new Error(`Machine ${record.name} has no pairing package.`);
     // A machine is reached in its room on the User's server, nowhere else.
     const client = pairing.hubUrl ? this.options.createClient?.(pairing) : undefined;
     if (!client) throw new Error(`${record.name} is not set up with your server; choose Cloud run in a member's settings to set it up again.`);
@@ -569,30 +279,14 @@ export class MachineLinkService implements MachineTurnDispatcher {
       record,
       pairing,
       client,
-      settingsSynced: false,
-      pendingTurns: carried?.pendingTurns ?? new Map(),
-      pendingCancels: new Map((record.pendingCancels ?? []).map((cancel) => [cancel.runId, cancel.conversationId])),
-      pendingRuns: new Map((record.pendingRuns ?? []).map((run) => [run.runId, run.conversationId])),
       persist: Promise.resolve(),
-      pendingApprovals: new Map(),
-      pendingChoices: new Map(),
-      pendingTurnConversations: carried?.pendingTurnConversations ?? new Map(),
       inbound: Promise.resolve(),
       outbound: Promise.resolve(),
       helloSeen: false,
-      pendingScripts: new Map()
+      pendingScripts: new Map(),
+      progress: new Map()
     };
     this.connections.set(record.id, connection);
-    if (record.deviceId && record.lastHello?.publicKeyDerBase64) {
-      // A machine can post its reply and stop before this desktop returns.
-      // The pinned identity lets its events be taken from the server's order
-      // without a new live hello.
-      await this.initializeEventChannel(connection, record.deviceId, record.lastHello.publicKeyDerBase64);
-      connection.eventChannel?.start();
-      // Recover the latest local grant/revocation without waiting for a live
-      // machine, including a crash between settings and outbox persistence.
-      await this.sendTrustRoster(connection);
-    }
     client.on("peer", (event) => {
       if (this.connections.get(record.id) !== connection) return;
       void this.debugLogs.write("machine-link.peer", {
@@ -601,13 +295,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
         ...(event.type === "ready" ? { peers: event.peers.map((peer) => `${peer.role}:${peer.deviceId ?? ""}`) } : {}),
         ...(event.type === "peer-connected" || event.type === "peer-disconnected" ? { peer: `${event.peer.role}:${event.peer.deviceId ?? ""}` } : {})
       });
-      // Other machines meet this one in its room too: only this machine's
-      // own device decides whether it is here.
+      // Only this machine's own device decides whether it is here.
       const isThisMachine = (peer: { role: string; deviceId?: string }) => peer.role === "machine" &&
         (!connection.record.deviceId || peer.deviceId === connection.record.deviceId);
       if (event.type === "ready") {
-        const machine = event.peers.find(isThisMachine);
-        this.setMachinePeer(connection, machine?.deviceId);
+        this.setMachinePeer(connection, event.peers.find(isThisMachine)?.deviceId);
       } else if (event.type === "peer-connected" && isThisMachine(event.peer)) {
         // Connected again (also in the seat of a connection the server had not
         // seen close): what it knows now is asked afresh, not assumed.
@@ -619,8 +311,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
     });
     client.on("message", (message) => {
       if (this.connections.get(record.id) !== connection) return;
-      // Strictly in order from decryption on: a large progress frame must
-      // not be overtaken by the small finished result behind it.
+      // Strictly in order from decryption on: a progress frame must not be
+      // overtaken by the next one.
       connection.inbound = connection.inbound
         .then(() => this.handleMessage(connection, message.ciphertext))
         .catch((error) => {
@@ -630,9 +322,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
     client.on("state", (state) => {
       if (this.connections.get(record.id) !== connection) return;
       void this.debugLogs.write("machine-link.tunnel.state", { machineId: record.id, state });
-      if (state !== "connected") {
-        this.setMachinePeer(connection, undefined);
-      }
+      if (state !== "connected") this.setMachinePeer(connection, undefined);
     });
     client.on("error", (error) => {
       void this.debugLogs.write("machine-link.tunnel.error", { machineId: record.id, message: error.message });
@@ -642,36 +332,95 @@ export class MachineLinkService implements MachineTurnDispatcher {
     });
   }
 
-  /** Closes a machine's connection. It stays enrolled, and a recipient of
-   *  every chat change, until `forgetMachine`. */
-  async disconnectMachine(machineId: string, options: { keepTurns?: boolean } = {}): Promise<void> {
+  /** Closes a machine's connection. It stays enrolled until `forgetMachine`. */
+  async disconnectMachine(machineId: string): Promise<void> {
     const connection = this.connections.get(machineId);
-    if (!connection) {
-      return;
-    }
+    if (!connection) return;
     this.enrolled.set(machineId, connection.record);
     this.connections.delete(machineId);
-    if (!options.keepTurns) {
-      for (const pending of connection.pendingTurns.values()) {
-        pending.resolve({ status: "failed", messages: [], warnings: [], error: "The machine was removed while the turn was running." });
-      }
-      connection.pendingTurns.clear();
-    }
+    if (connection.helloRequestTimer) clearTimeout(connection.helloRequestTimer);
     this.rejectPendingScripts(connection, "The machine was removed.");
-    connection.eventChannel?.close();
     connection.client.close();
     this.emitMemberBackground({ machineId, snapshot: [] });
     this.emitStatus();
   }
 
-  /** Whether turns for this machine are being held (an update). */
+  /** The machine is no longer enrolled: removed from the app. */
+  async forgetMachine(machineId: string): Promise<void> {
+    await this.disconnectMachine(machineId);
+    this.enrolled.delete(machineId);
+    this.publishedSettings.delete(machineId);
+  }
+
+  close(): void {
+    this.closed = true;
+    if (this.turnHoldTimer) clearInterval(this.turnHoldTimer);
+    this.turnHoldTimer = undefined;
+    for (const connection of this.connections.values()) {
+      if (connection.helloRequestTimer) clearTimeout(connection.helloRequestTimer);
+      connection.client.close();
+    }
+    this.connections.clear();
+  }
+
+  /** Holds a machine's turns while its runtime is being replaced: the
+   *  machine takes no new turn from the User's server meanwhile (they wait
+   *  there for the runtime that takes them), and a waiting member's bubble
+   *  says why. Each caller gets its own release; turns go on once every
+   *  holder let go. */
+  holdTurns(machineId: string, reason: string): () => void {
+    const holds = this.turnHolds.get(machineId) ?? [];
+    const hold = { reason };
+    holds.push(hold);
+    this.turnHolds.set(machineId, holds);
+    void this.debugLogs.write("machine-link.turns.held", { machineId, reason });
+    this.sendTurnHold(machineId);
+    if (!this.turnHoldTimer) {
+      // Renewed while held: the machine lets a hold lapse by itself.
+      this.turnHoldTimer = setInterval(() => { for (const id of this.turnHolds.keys()) this.sendTurnHold(id); }, TURN_HOLD_RENEW_MS);
+      this.turnHoldTimer.unref?.();
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.turnHolds.get(machineId) ?? []).filter((item) => item !== hold);
+      if (remaining.length) {
+        this.turnHolds.set(machineId, remaining);
+        return;
+      }
+      this.turnHolds.delete(machineId);
+      if (this.turnHolds.size === 0 && this.turnHoldTimer) {
+        clearInterval(this.turnHoldTimer);
+        this.turnHoldTimer = undefined;
+      }
+      const connection = this.connections.get(machineId);
+      if (connection?.machineDeviceId) void this.send(connection, { type: "machine.turns.release" }).catch(() => undefined);
+      void this.debugLogs.write("machine-link.turns.released", { machineId });
+    };
+  }
+
+  private turnHoldTimer?: ReturnType<typeof setInterval>;
+
+  private sendTurnHold(machineId: string): void {
+    const reason = this.turnHolds.get(machineId)?.[0]?.reason;
+    const connection = this.connections.get(machineId);
+    if (!reason || !connection?.machineDeviceId) return;
+    void this.send(connection, { type: "machine.turns.hold", reason, until: new Date(this.now().getTime() + TURN_HOLD_MS).toISOString() }).catch(() => undefined);
+  }
+
   hasTurnHold(machineId: string): boolean {
     return this.turnHolds.has(machineId);
   }
 
+  /** Why turns asked of this machine wait right now, when this desktop knows. */
+  turnWaitReason(machineId: string): string | undefined {
+    return this.turnHolds.get(machineId)?.[0]?.reason;
+  }
+
   /** Ask a machine to do something with its scheduled scripts and wait for
    *  the answer. Ephemeral and sealed to that machine: a key value travels
-   *  only here, never in the durable event log, the server's order or settings. */
+   *  only here, never on the server or in settings. */
   async scriptsRequest(machineId: string, operation: MachineScriptsOperation, timeoutMs = SCRIPTS_REQUEST_TIMEOUT_MS): Promise<unknown> {
     const connection = this.connections.get(machineId);
     if (!connection) throw new Error("That machine is not set up on this computer.");
@@ -708,39 +457,6 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return answer;
   }
 
-  /** The machines that read the User's server, connected or not: every
-   *  enrolled machine whose identity is known. */
-  hubReaders(): string[] {
-    return this.machineRecords().filter((record) => record.deviceId).map((record) => record.deviceId);
-  }
-
-  /**
-   * An event the hub's order brought, to the channel of the machine that
-   * wrote it. A machine whose channel is not set up yet (this desktop just
-   * started, the machine has not greeted it) has the event held for it;
-   * traffic between two other devices is not this desktop's. `fetchBody`
-   * stores the event's large body, fetched only for an event one of this
-   * desktop's machine channels takes.
-   */
-  async receiveFromHub(event: ChatEventEnvelope, fetchBody?: () => Promise<void>): Promise<HubDeliverOutcome> {
-    for (const connection of this.connections.values()) {
-      if (!connection.eventChannel?.accepts(event)) continue;
-      return await deliverToChannel(connection.eventChannel, event, fetchBody);
-    }
-    // What an enrolled machine's channel will take is held until that
-    // channel is up, whether or not its link is open right now (it could not
-    // connect at start, or its connection is being replaced): passed over,
-    // it would be lost. Once its channel is up, what it turned away is not
-    // this desktop's (another pair's channel). Its chat changes need no
-    // channel: the server's reader applies them itself.
-    const waiting = this.machineRecords().some((record) => {
-      if (this.connections.get(record.id)?.eventChannel) return false;
-      if (event.logScopeId.startsWith(`device:${record.pairingKey}:`)) return true;
-      return Boolean(record.deviceId) && record.deviceId === event.originId && event.logScopeId === CHAT_ACTION_LOG_SCOPE;
-    });
-    return waiting ? "not-ready" : "not-mine";
-  }
-
   /** Every machine whose scripts this desktop manages, with whether it is
    *  connected now and runs a runtime that hosts scripts. */
   scriptHosts(): MachineScriptHost[] {
@@ -773,40 +489,24 @@ export class MachineLinkService implements MachineTurnDispatcher {
     connection.pendingScripts.clear();
   }
 
-  /** The machine is no longer enrolled: removed from the app. */
-  async forgetMachine(machineId: string): Promise<void> {
-    await this.disconnectMachine(machineId);
-    this.enrolled.delete(machineId);
-  }
-
-  close(): void {
-    this.closed = true;
-    if (this.deletionRetry) clearTimeout(this.deletionRetry);
-    this.deletionRetry = undefined;
-    for (const connection of this.connections.values()) {
-      connection.eventChannel?.close();
-      connection.client.close();
-    }
-    this.connections.clear();
-  }
-
   status(): MachineLinkStatus[] {
-    return [...this.connections.values()].map((connection) => ({
-      machineId: connection.record.id,
-      name: connection.record.name,
-      connected: Boolean(connection.machineDeviceId),
-      deviceId: connection.machineDeviceId ?? connection.record.deviceId ?? undefined,
-      lastSeenAt: connection.record.lastSeenAt,
-      lastHello: connection.record.lastHello,
-      ...((connection.record.lastHello?.outboxError || connection.record.lastHello?.idleStopWarning) ? {
-        warning: [connection.record.lastHello.outboxError ? `Results on ${connection.record.name} are not kept on disk: ${connection.record.lastHello.outboxError}` : undefined,
-          connection.record.lastHello.idleStopWarning].filter(Boolean).join("; ")
-      } : {})
-    }));
+    return [...this.connections.values()].map((connection) => {
+      const hello = connection.record.lastHello;
+      const warning = [hello?.unsentWarning, hello?.idleStopWarning].filter(Boolean).join("; ");
+      return {
+        machineId: connection.record.id,
+        name: connection.record.name,
+        connected: Boolean(connection.machineDeviceId),
+        deviceId: connection.machineDeviceId ?? connection.record.deviceId ?? undefined,
+        lastSeenAt: connection.record.lastSeenAt,
+        lastHello: hello,
+        ...(warning ? { warning } : {})
+      };
+    });
   }
 
   /** The device identity of an enrolled machine as its signed hello or its
-   *  setup proved it; never the id a relay presence frame claims. */
+   *  setup proved it. */
   machineDeviceId(machineId: string): string | undefined {
     return this.machineRecord(machineId)?.deviceId || undefined;
   }
@@ -815,25 +515,10 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return this.connections.get(machineId)?.record ?? this.enrolled.get(machineId);
   }
 
-  private machineRecords(): MachineRecord[] {
-    const ids = new Set([...this.enrolled.keys(), ...this.connections.keys()]);
-    return [...ids].flatMap((id) => {
-      const record = this.machineRecord(id);
-      return record ? [record] : [];
-    });
-  }
-
-  /** Where this desktop's chat changes are addressed: nowhere. Every
-   *  machine takes them from the User's server's order, and nobody keeps a
-   *  delivery row for a reader of the server. */
-  chatChangeRecipients(): Array<{ deviceId: string; channelId: string }> {
-    return [];
-  }
-
   /**
-   * Machine setup reads the identity of the runtime it installs before it
-   * copies the chats, and records it here: from then on the User's server
-   * admits it, although it has not connected yet.
+   * Machine setup reads the identity of the runtime it installs and records
+   * it here: from then on the User's server admits it (the roster names it),
+   * and its settings can be sealed for it, although it has not connected yet.
    */
   async adoptMachineIdentity(machineId: string, identity: { originId: string; publicKeyDerBase64: string }): Promise<void> {
     const connection = this.connections.get(machineId);
@@ -841,211 +526,29 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (connection.record.deviceId && connection.record.deviceId !== identity.originId) {
       throw new Error("The machine's enrolled device identity changed; its history cannot be accepted as the previous machine.");
     }
-    if (connection.record.deviceId === identity.originId && connection.record.chatChanges === true) return;
-    // The runtime being installed folds chat changes and gets every chat in
-    // the copy that follows, so from here on it is sent them.
-    connection.record = { ...connection.record, deviceId: identity.originId, devicePublicKeyDerBase64: identity.publicKeyDerBase64, chatChanges: true };
-    await this.persistCancels(connection, true);
+    if (connection.record.deviceId === identity.originId && connection.record.devicePublicKeyDerBase64 === identity.publicKeyDerBase64) return;
+    connection.record = { ...connection.record, deviceId: identity.originId, devicePublicKeyDerBase64: identity.publicKeyDerBase64 };
+    await this.persistRecord(connection, true);
     void this.debugLogs.write("machine-link.identity.adopted", { machineId, deviceId: identity.originId });
-    // The other machines learn it from their rosters, or keep holding their
-    // own changes for it; its first hello finds nothing new to tell them.
-    await this.refreshTrustRosters().catch((error: unknown) => {
-      void this.debugLogs.write("machine-link.trust.refresh-error", { machineId, message: errorMessage(error) });
+    this.options.onDevicesChanged?.();
+    await this.syncSettings().catch((error: unknown) => {
+      void this.debugLogs.write("machine-link.settings.sync-error", { machineId, message: errorMessage(error) });
     });
   }
 
-  /** A chat save committed change events for the machines: send them now
-   *  rather than at each channel's next retry tick. */
-  nudgeEventChannels(): void {
-    for (const connection of this.connections.values()) connection.eventChannel?.nudge();
-  }
-
-  /** Who a chat action is addressed to: nobody, as for chat changes (every
-   *  machine reads the User's server). */
-  chatActionRecipients(): Array<{ deviceId: string; channelId: string }> {
-    return [];
-  }
-
-  /**
-   * Tells a machine who else may command it.
-   *
-   * This is what lets the machine keep working when this desktop is closed:
-   * the owner's other devices are named here, each with the room to meet it in
-   * and the key its events are signed with. Only this desktop sends a roster,
-   * and only inside the enrolled channel, so a device cannot add itself.
-   */
-  private sendTrustRoster(connection: MachineConnection): Promise<void> {
-    // Built and compared one at a time: two callers must not both find it
-    // unpublished, nor an older roster leave after a newer one.
-    return this.serializePublication(connection, () => this.sendTrustRosterNow(connection));
-  }
-
-  private async sendTrustRosterNow(connection: MachineConnection): Promise<void> {
-    if (this.options.desktopDeviceId !== connection.pairing.issuer.originId) return;
-    const build = this.options.trustedDevices;
-    if (!build) return;
-    try {
-      const identity = await this.options.eventLog.getOrCreateDeviceIdentity();
-      const machines = await this.settings.listMachines();
-      const peers: TrustedPeerAccess[] = [{
-        deviceId: identity.originId,
-        publicKeyDerBase64: identity.publicKeyDerBase64,
-        role: "desktop",
-        name: "This computer",
-        // A device is reached in its own room; this desktop is met in the
-        // room of the machine it is talking to.
-        relayUrl: meetingUrl(connection.pairing),
-        rendezvousId: connection.pairing.rendezvousId,
-        fingerprint: connection.pairing.fingerprint
-      }];
-      for (const machine of machines) {
-        if (machine.id === connection.record.id || !machine.deviceId) continue;
-        const pairing = await this.settings.getMachinePairing(machine.pairingKey);
-        const publicKeyDerBase64 = machineSigningKey(machine);
-        if (!pairing || !meetingUrl(pairing) || !publicKeyDerBase64) continue;
-        peers.push({
-          deviceId: machine.deviceId,
-          publicKeyDerBase64,
-          role: "machine",
-          name: machine.name,
-          machineId: machine.id,
-          ...(machine.chatChanges === true ? { chatChanges: true } : {}),
-          relayUrl: meetingUrl(pairing),
-          rendezvousId: pairing.rendezvousId,
-          fingerprint: pairing.fingerprint
-        });
-      }
-      peers.push(...await build({
-        relayUrl: meetingUrl(connection.pairing),
-        rendezvousId: connection.pairing.rendezvousId,
-        fingerprint: connection.pairing.fingerprint
-      }));
-      const resolvedInviteIds = await this.options.resolvedInviteIds?.() ?? [];
-      const roster: MachineTrustRoster = {
-        version: 1,
-        issuerDeviceId: identity.originId,
-        updatedAt: this.now().toISOString(),
-        peers,
-        ...(resolvedInviteIds.length ? { resolvedInviteIds } : {})
-      };
-      // The same peers again are not a new roster: every one of them is a
-      // durable event the User's hub keeps, and the machine applies nothing.
-      const digest = this.publishedDigest(connection, stableJson({ version: roster.version, issuerDeviceId: roster.issuerDeviceId, peers,
-        ...(resolvedInviteIds.length ? { resolvedInviteIds } : {}) }));
-      if (digest && connection.record.published?.roster === digest) return;
-      await this.send(connection, {
-        type: "machine.trust.roster",
-        conversationId: `machine-trust:${connection.pairing.rendezvousId}`,
-        roster
-      });
-      if (digest) this.notePublished(connection, { roster: digest });
-      void this.debugLogs.write("machine-link.trust.sent", { machineId: connection.record.id, peers: peers.length });
-    } catch (error) {
-      void this.debugLogs.write("machine-link.trust.error", {
-        machineId: connection.record.id,
-        message: error instanceof Error ? error.message : String(error)
-      });
-      throw error;
-    }
-  }
-
-  /** Retains the roster for every enrolled machine, including offline ones. */
-  async refreshTrustRosters(): Promise<void> {
-    try {
-      for (const connection of this.connections.values()) {
-        if (connection.eventChannel) await this.sendTrustRoster(connection);
-      }
-    } finally {
-      this.options.onDevicesChanged?.();
-    }
-  }
-
-  /** Serves a machine the state a held action of its own is waiting for. The
-   *  action is re-emitted with the same operation id, so the machine receives
-   *  that event rather than a second copy of it. */
-  private async serveChatActionDependency(dependency: ChatActionDependency): Promise<boolean> {
-    const serve = this.options.serveChatActionDependency;
-    if (!serve) return false;
-    try {
-      return await serve(dependency);
-    } catch (error) {
-      void this.debugLogs.write("machine-link.action.dependency-error", {
-        ...dependency, message: error instanceof Error ? error.message : String(error)
-      });
-      return false;
-    }
-  }
-
-  /** Applies an incoming chat action, or undefined when the event is not one.
-   *  A `deferred` outcome keeps the event for retry: this peer does not hold
-   *  what the action refers to yet, and dropping it would lose the action. */
-  private async applyChatAction(event: ChatEventEnvelope, hydrated?: unknown): Promise<"applied" | "deferred" | DeferredWithDependency | undefined> {
-    const applier = this.options.chatActions;
-    if (!applier?.handles(event, hydrated)) return undefined;
-    const outcome = await applier.apply(event, hydrated);
-    // A deferral is reported once; it is retried until it applies, and logging
-    // every attempt wrote hundreds of thousands of identical lines a day.
-    const repeatedDeferral = outcome.status === "deferred" && this.reportedDeferrals.has(event.eventId);
-    if (outcome.status === "deferred") rememberBounded(this.reportedDeferrals, event.eventId);
-    else this.reportedDeferrals.delete(event.eventId);
-    if (outcome.detail && !repeatedDeferral) {
-      void this.debugLogs.write("machine-link.action.applied", {
-        kind: outcome.kind, targetKey: outcome.targetKey, status: outcome.status, detail: outcome.detail
-      });
-    }
-    if (outcome.status !== "deferred") return "applied";
-    // Named, so the channel can ask the peer for exactly what is missing.
-    return outcome.dependency ? { deferred: true, dependency: outcome.dependency } : "deferred";
-  }
-
-  /**
-   * Publishes one chat action to every machine that holds this chat, through
-   * the same sealed device-event channel messages use — same HLC, same
-   * immutable log, same gap rules, no second protocol.
-   *
-   * Each channel appends its own recipient row, so a machine that is offline
-   * keeps the event in this desktop's outbox until it acknowledges it; the
-   * retention policy decides when it may be forgotten. With no machine
-   * enrolled the action is still written locally and simply has nobody to
-   * deliver to.
-   */
-  async publishChatAction(request: { conversationId: string; kind: string; payload: unknown; eventId?: string }): Promise<number> {
-    let published = 0;
-    for (const connection of this.connections.values()) {
-      const channel = connection.eventChannel;
-      if (!channel) continue;
-      try {
-        await channel.publish({ ...request, sharedScope: true });
-        published += 1;
-      } catch (error) {
-        void this.debugLogs.write("machine-link.action.publish-error", {
-          machineId: connection.record.id,
-          kind: request.kind,
-          message: error instanceof Error ? error.message : String(error)
-        });
-      }
-    }
-    return published;
-  }
-
   /** True while any connected machine says it is working. The AWS idle stop
-   *  asks this before stopping a box: an instance that is running a member's
-   *  turn must not be stopped underneath it. */
+   *  asks this before stopping a box. */
   hasActiveMachineWork(): boolean {
     for (const connection of this.connections.values()) {
       if (!connection.machineDeviceId) continue;
-      const hello = connection.record.lastHello;
-      if ((hello?.activeRunIds?.length ?? 0) > 0 || (hello?.pendingTerminalRunIds?.length ?? 0) > 0) {
-        return true;
-      }
+      if ((connection.record.lastHello?.activeRunIds?.length ?? 0) > 0) return true;
     }
     return false;
   }
 
-  /** True while scheduled scripts need a machine awake: the User approved
-   *  them to run on a schedule, so the box stays on for them. Asked about one
-   *  AWS instance, only the machines on it count, by what they last said
-   *  even when the link is down at that moment; otherwise any connected one. */
+  /** True while scheduled scripts need a machine awake. Asked about one AWS
+   *  instance, only the machines on it count, by what they last said even when
+   *  the link is down at that moment; otherwise any connected one. */
   machineKeepsAwake(awsInstanceId?: string): boolean {
     const onInstance = awsInstanceId
       ? [...this.connections.values()].filter((connection) => connection.record.awsInstanceId === awsInstanceId)
@@ -1057,8 +560,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return false;
   }
 
-  /** Every hello a machine sends: a (re)connect, a restart, an outbox state
-   *  change, or an answer to `machine.hello.request`. */
+  /** Every hello a machine sends: a (re)connect, a restart, a status change,
+   *  or an answer to `machine.hello.request`. */
   onHello(listener: (event: { machineId: string; appVersion?: string; deviceId?: string }) => void): () => void {
     const wrapped = (event: { machineId: string; appVersion?: string; deviceId?: string; solicited?: boolean }): void => {
       if (!event.solicited) listener(event);
@@ -1067,13 +570,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return () => { this.emitter.off("hello", wrapped); };
   }
 
-  /** What one machine is doing right now, from a hello it sends on request
-   *  rather than the one it sent when it connected: a hello is a snapshot,
-   *  and a turn that started or ended since is not in it. Answered with the
-   *  last known hello when the machine does not reply in time, and undefined
-   *  when the machine is not enrolled or not connected. `dispatchedRunIds`
-   *  are turns this desktop sent and has not seen finish, whichever hello
-   *  lists them. */
+  /** What one machine is doing right now, from a hello it sends on request.
+   *  Answered with the last known hello when the machine does not reply in
+   *  time, and undefined when it is not enrolled or not connected. */
   async machineActivity(machineId: string, options: { fresh?: boolean; timeoutMs?: number } = {}): Promise<MachineActivity | undefined> {
     const connection = this.connections.get(machineId);
     if (!connection?.machineDeviceId) return undefined;
@@ -1087,8 +586,6 @@ export class MachineLinkService implements MachineTurnDispatcher {
           const finish = (value: boolean): void => {
             clearTimeout(timer);
             this.emitter.off("hello", onHello);
-            // Cleared before anyone is resumed, so a hello that answers this
-            // probe is the last one attributed to it.
             if (connection.activityProbe === probe) connection.activityProbe = undefined;
             void this.debugLogs.write("machine-link.activity", { machineId, fresh: value });
             resolve(value);
@@ -1101,52 +598,16 @@ export class MachineLinkService implements MachineTurnDispatcher {
       fresh = await connection.activityProbe;
     }
     const hello = connection.record.lastHello;
-    const listed = new Set([...(hello?.activeRunIds ?? []), ...(hello?.pendingTerminalRunIds ?? [])]);
-    // A remembered run the machine's fresh hello does not list is one the
-    // reconciliation is closing, not work in progress; on a stale hello every
-    // remembered run still counts.
-    const remembered = [...connection.pendingRuns.keys()].filter((runId) => !fresh || listed.has(runId));
     return {
       machineId,
       connected: Boolean(connection.machineDeviceId),
       fresh,
       appVersion: hello?.appVersion,
-      activeRunIds: [...(hello?.activeRunIds ?? [])],
-      pendingTerminalRunIds: [...(hello?.pendingTerminalRunIds ?? [])],
-      dispatchedRunIds: [...new Set([...connection.pendingTurns.keys(), ...remembered])]
+      activeRunIds: [...(hello?.activeRunIds ?? [])]
     };
   }
 
-  /** Holds every turn for this machine until released: the runtime is being
-   *  replaced, and a turn dispatched now would be killed by the drain. A held
-   *  turn that is stopped by the User ends as interrupted without being sent.
-   *  Each caller gets its own release; turns go on once every holder let go. */
-  holdTurns(machineId: string, reason: string): () => void {
-    // Kept by machine, not by connection: a hold outlives the connection
-    // being replaced.
-    if (!this.turnHolds.has(machineId)) {
-      let resolve!: () => void;
-      const released = new Promise<void>((done) => { resolve = done; });
-      const created = { reason, released, holders: 0, release: () => {
-        if (this.turnHolds.get(machineId) === created) this.turnHolds.delete(machineId);
-        resolve();
-      } };
-      this.turnHolds.set(machineId, created);
-      void this.debugLogs.write("machine-link.turns.held", { machineId, reason });
-    }
-    const hold = this.turnHolds.get(machineId)!;
-    hold.holders += 1;
-    let done = false;
-    return () => {
-      if (done) return;
-      done = true;
-      hold.holders -= 1;
-      if (hold.holders <= 0) hold.release();
-    };
-  }
-
-  /** True while any connected machine is running or holding a turn, asked
-   *  afresh from every machine. */
+  /** True while any connected machine is running a turn, asked afresh. */
   async anyMachineBusy(options: { timeoutMs?: number } = {}): Promise<boolean> {
     const activities = await Promise.all([...this.connections.keys()].map((machineId) => this.machineActivity(machineId, options)));
     // A connected machine that did not answer is not known to be idle.
@@ -1164,35 +625,24 @@ export class MachineLinkService implements MachineTurnDispatcher {
     return this.connections.get(machineId)?.client.currentState() === "connected";
   }
 
-  /**
-   * Whether the machine's program is in touch, as the place they meet says:
-   * the machine's room on the User's server. "connected": the machine is
-   * there. "out-of-touch": this desktop is there and the machine is not,
-   * which the server itself reports when the machine's socket goes. "unknown": this desktop is not there
-   * either, so nothing is known about the machine.
-   */
+  /** Whether the machine's program is in touch, as its room says. */
   presenceState(machineId: string): MachineRecoveryLinkState {
     if (this.isMachineConnected(machineId)) return "connected";
     return this.reachesRoom(machineId) ? "out-of-touch" : "unknown";
   }
 
   /** The enrollment package for a machine, as the installer writes it to the
-   *  machine. It carries the relay seal key, so it is read on demand and never
-   *  held anywhere else. */
+   *  machine. Read on demand and never held anywhere else. */
   async enrollmentJson(machineId: string): Promise<string> {
     const record = (await this.settings.listMachines()).find((machine) => machine.id === machineId);
-    if (!record) {
-      throw new Error("Machine not found.");
-    }
+    if (!record) throw new Error("Machine not found.");
     const pairing = await this.settings.getMachinePairing(record.pairingKey);
-    if (!pairing) {
-      throw new Error("The machine's enrollment is missing; remove and add the machine again.");
-    }
+    if (!pairing) throw new Error("The machine's enrollment is missing; remove and add the machine again.");
     return JSON.stringify(pairing, null, 2);
   }
 
-  /** Restore this owner's existing remote channel, preserving its delivery
-   * history. Never disconnect a working channel or discard queued actions. */
+  /** Restore this owner's existing remote connection. Never disconnects a
+   *  machine that is working. */
   private enrollmentRecovery = new Map<string, { requested: string; installed: string; installedMachineId: string; task: Promise<string> }>();
 
   restoreEnrollment(machineId: string, requestedJson: string, installedJson: string, installedMachineId = machineId): Promise<string> {
@@ -1213,11 +663,9 @@ export class MachineLinkService implements MachineTurnDispatcher {
     if (!this.settings.restoreMachineEnrollment) throw new Error("Machine connection recovery is unavailable.");
     const connection = this.connections.get(machineId);
     if (machineId === installedMachineId && connection?.pairing.rendezvousId === installed.rendezvousId) return machineId;
-    if (connection && (connection.machineDeviceId || connection.pendingRuns.size || connection.pendingTurns.size
-      || connection.pendingCancels.size || connection.pendingApprovals.size || connection.pendingChoices.size)) {
-      throw new Error("The machine still has an active connection or pending actions. Finish them before restoring its connection.");
+    if (connection && (connection.machineDeviceId || (connection.record.lastHello?.activeRunIds?.length ?? 0) > 0)) {
+      throw new Error("The machine still has an active connection or running work. Finish it before restoring its connection.");
     }
-    if (connection?.helloRequestTimer) clearTimeout(connection.helloRequestTimer);
     await this.disconnectMachine(machineId);
     try {
       if (connection) {
@@ -1238,9 +686,8 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   /** Resolves on the next hello from this machine that arrives after the call
-   *  started — never on a connection that was already open. With
-   *  `expectAppVersion` it also requires that hello to report that version, so
-   *  an upgrade is only "done" once the NEW runtime greeted the desktop. */
+   *  started. With `expectAppVersion` it also requires that hello to report
+   *  that version, so an upgrade is only "done" once the new runtime greeted. */
   waitForConnected(machineId: string, timeoutMs: number, expectAppVersion?: string): Promise<boolean> {
     return new Promise((resolve) => {
       let settled = false;
@@ -1254,9 +701,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       const onHello = (event: { machineId: string; appVersion?: string }): void => {
         if (event.machineId !== machineId) return;
         if (expectAppVersion && event.appVersion !== expectAppVersion) {
-          void this.debugLogs.write("machine-link.wait.version-mismatch", {
-            machineId, expected: expectAppVersion, reported: event.appVersion ?? ""
-          });
+          void this.debugLogs.write("machine-link.wait.version-mismatch", { machineId, expected: expectAppVersion, reported: event.appVersion ?? "" });
           return;
         }
         finish(true);
@@ -1267,371 +712,59 @@ export class MachineLinkService implements MachineTurnDispatcher {
     });
   }
 
-  async cancelMachineRun(request: { machineId: string; conversationId: string; runId: string; onStopPending?: (machineName: string) => Promise<void> }): Promise<void> {
-    const connection = this.connections.get(request.machineId);
-    if (!connection) {
-      throw new Error("The member's machine is not enrolled.");
-    }
-    connection.pendingCancels.set(request.runId, request.conversationId);
-    await this.persistCancels(connection, true);
-    const waiting = async (): Promise<void> => {
-      if (connection.pendingCancels.has(request.runId)) {
-        await request.onStopPending?.(connection.record.name);
-      }
-    };
-    try {
-      await this.send(connection, { type: "machine.turn.cancel", conversationId: request.conversationId, runId: request.runId });
-      if (!connection.machineDeviceId) await waiting();
-      const grace = setTimeout(() => { void waiting().catch((error) => {
-        void this.debugLogs.write("machine-link.stop.feedback-error", { runId: request.runId, message: errorMessage(error) });
-      }); }, STOP_CONFIRM_GRACE_MS);
-      grace.unref?.();
-    } catch {
-      await waiting();
-    }
-  }
+  // --- settings on the User's server ---------------------------------------
 
-  /** Pushes the current desktop settings to every machine (called after a
-   *  settings save). A machine that already has them is sent nothing; one
-   *  that is offline gets them as a durable event, or on its next hello. */
-  async syncSettings(): Promise<void> {
-    for (const connection of this.connections.values()) {
-      if (this.options.desktopDeviceId !== connection.pairing.issuer.originId) continue;
-      if (!connection.eventChannel) {
-        connection.settingsSynced = false;
-        continue;
-      }
-      await this.publishSettings(connection);
-      connection.settingsSynced = true;
-    }
-  }
-
-  /** Publishes the settings to one machine unless it was already given
-   *  exactly these (what a machine uses; the export time is not part of it).
-   *  Each publication is a ~150 KB durable event the User's hub keeps. Read
-   *  in turn, so a snapshot read before a save never leaves after a newer one. */
-  private publishSettings(connection: MachineConnection): Promise<void> {
-    return this.serializePublication(connection, async () => {
-      const snapshot = await this.settings.exportMachineSettingsSnapshot();
-      const digest = this.publishedDigest(connection, machineSettingsKey(snapshot));
-      if (digest && connection.record.published?.settings === digest) return;
-      await this.send(connection, { type: "machine.settings.sync", snapshot });
-      if (digest) this.notePublished(connection, { settings: digest });
-      void this.debugLogs.write("machine-link.settings.sent", { machineId: connection.record.id });
-    });
-  }
-
-  private serializePublication(connection: MachineConnection, task: () => Promise<void>): Promise<void> {
-    const run = (connection.publication ?? Promise.resolve()).then(task);
-    connection.publication = run.then(() => undefined, () => undefined);
-    return run;
-  }
-
-  /** Keyed with a key derived from the machine pairing's secret: the
-   *  settings carry the User's environment values, and their digest is stored
-   *  in plain settings with the machine record. Undefined without that
-   *  secret: then nothing is remembered and everything is published. */
-  private publishedDigest(connection: MachineConnection, content: string): string | undefined {
-    const secret = connection.pairing.relaySealKeyBase64;
-    if (!secret) return undefined;
-    const key = Buffer.from(hkdfSync("sha256", Buffer.from(secret, "base64url"), Buffer.alloc(0), "accordagents/machine-published-digest/v1", 32));
-    return createHmac("sha256", key).update(content).digest("base64url");
-  }
-
-  /** Remembers, with the machine's record, what its runtime was given. Only
-   *  after the event committed: a crash before that sends it again. */
-  private notePublished(connection: MachineConnection, part: { settings?: string; roster?: string }): void {
-    // A connection replaced or removed meanwhile does not write its record:
-    // it would bring back a removed machine, or older run records.
-    if (this.connections.get(connection.record.id) !== connection) return;
-    connection.record = { ...connection.record, published: { ...connection.record.published, ...part } };
-    // persistCancels saves the whole record (the held stops and run intents
-    // with it), so this survives a restart.
-    void this.persistCancels(connection);
+  /** The User's server changed (another one, or the link came back): every
+   *  machine's settings are put there again. */
+  resetPublishedSettings(): void {
+    this.publishedSettings.clear();
   }
 
   /**
-   * Tells every enrolled machine that this chat is gone.
-   *
-   * Durable, not best-effort: a machine that is off learns when it comes back,
-   * and the event is retained until it acknowledges.
+   * Puts the current settings of every machine this desktop set up on the
+   * User's server, sealed for that machine alone (called after a settings
+   * save, when the server link starts, and when a machine greets). A machine
+   * already given exactly these is not given them again. A machine whose key
+   * is not known yet is given them once it is (adoptMachineIdentity, hello).
    */
-  async deleteConversationOnMachines(conversation: Pick<Conversation, "id" | "metadata">): Promise<number> {
-    // Every enrolled machine holds every chat, so every one of them is told.
-    const machineIds = [...this.connections.keys()];
-    // Also safe for callers outside ChatService: no connection, disk failure,
-    // or process restart may erase the identities before outbox persistence.
-    await this.options.eventStorage.conversationTombstones().mark(conversation.id, this.now().toISOString(), machineIds);
-    return this.deliverPendingConversationDeletions();
+  syncSettings(): Promise<void> {
+    const run = this.settingsPublication.then(() => this.syncSettingsNow());
+    this.settingsPublication = run.catch(() => undefined);
+    return run;
   }
 
-  private deliverPendingConversationDeletions(): Promise<number> {
-    if (this.deletionDelivery) { this.deletionDeliveryRequested = true; return this.deletionDelivery; }
-    this.deletionDeliveryRequested = false;
-    let pendingRemains = true;
-    const delivery = (async () => {
-      const tombstones = this.options.eventStorage.conversationTombstones();
-      let delivered = 0;
-      let after: { conversationId: string; machineId: string } | undefined;
-      pendingRemains = false;
-      for (;;) {
-        const pending = await tombstones.pendingDeliveries(after);
-        for (const intent of pending) {
-          if (this.closed) return delivered;
-          const connection = this.connections.get(intent.machineId);
-          if (!connection?.eventChannel) { pendingRemains = true; continue; }
-          try {
-            await this.send(connection, { type: "machine.conversation.deleted", conversationId: intent.conversationId, deletedAt: intent.deletedAt });
-            // publish resolves after the event and recipient outbox commit.
-            // Until then this independent, small intent remains retryable.
-            await tombstones.delivered(intent.conversationId, intent.machineId);
-            delivered++;
-          } catch (error) {
-            pendingRemains = true;
-            void this.debugLogs.write("machine-link.conversation.delete-pending", { ...intent, message: errorMessage(error) });
-          }
-        }
-        if (pending.length < 100) return delivered;
-        after = pending[pending.length - 1];
-      }
-    })();
-    this.deletionDelivery = delivery;
-    void delivery.finally(() => {
-      if (this.deletionDelivery === delivery) this.deletionDelivery = undefined;
-      if (pendingRemains || this.deletionDeliveryRequested) this.scheduleConversationDeletions();
-    }).catch(error => {
-      this.scheduleConversationDeletions();
-      void this.debugLogs.write("machine-link.conversation.delete-retry-error", { message: errorMessage(error) });
-    });
-    return delivery;
-  }
-
-  private scheduleConversationDeletions(): void {
-    if (this.closed || this.deletionRetry) return;
-    this.deletionRetry = setTimeout(() => {
-      this.deletionRetry = undefined;
-      void this.deliverPendingConversationDeletions().catch(() => undefined);
-    }, 5_000);
-    this.deletionRetry.unref();
-  }
-
-  async runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult> {
-    return this.dispatchCommand(request, { messageId: request.triggerMessage.id, pendingMessageId: request.pendingMessageId });
-  }
-
-  /** Compacts a member on the machine that hosts it: the same command a turn
-   *  is (queued while the machine is away, admitted, stopped and answered the
-   *  same way), carrying the compaction instead of a message to answer. */
-  async compactOnMachine(request: MachineCompactionDispatchRequest): Promise<MachineTurnDispatchResult> {
-    const messageId = machineCompactionMessageId(request.runId);
-    return this.dispatchCommand(request, { messageId, pendingMessageId: messageId, compaction: request.compaction });
-  }
-
-  private async dispatchCommand(
-    request: {
-      conversation: Conversation;
-      participant: ChatParticipant;
-      runId: string;
-      signal?: AbortSignal;
-      progress?: (progress: ReviewProgress) => void;
-      onStopPending?: (machineName: string) => void;
-      onMachineWaiting?: (machineName: string, reason?: string) => Promise<void>;
-    },
-    command: { messageId: string; pendingMessageId: string; compaction?: MachineTurnCompaction }
-  ): Promise<MachineTurnDispatchResult> {
-    const machineId = request.participant.homeMachineId ?? "";
-    const notEnrolled = (): MachineTurnDispatchResult => ({ status: "failed", messages: [], warnings: [], sent: false, error: `@${request.participant.handle} is hosted on a machine that is not enrolled on this desktop.` });
-    if (!this.connections.has(machineId) && !this.turnHolds.has(machineId)) return notEnrolled();
-    // Every outcome decided before the request left says so (sent: false).
-    const interrupted: MachineTurnDispatchResult = { status: "interrupted", messages: [], warnings: [], sent: false };
-    let hold = this.turnHolds.get(machineId);
-    if (hold) {
-      void this.debugLogs.write("machine-link.turn.held", { machineId, runId: request.runId, reason: hold.reason });
-      const name = this.connections.get(machineId)?.record.name ?? this.enrolled.get(machineId)?.name ?? "The machine";
-      await request.onMachineWaiting?.(name, hold.reason).catch(() => undefined);
-      const aborted = new Promise<boolean>((resolve) => {
-        if (request.signal?.aborted) resolve(true);
-        else request.signal?.addEventListener("abort", () => resolve(true), { once: true });
-      });
-      // The hold may end while the bubble is written, and another may follow
-      // at once (an update evaluated right after a setup): wait for all.
-      while (hold) {
-        if (await Promise.race([hold.released.then(() => false), aborted])) return interrupted;
-        hold = this.turnHolds.get(machineId);
+  private async syncSettingsNow(): Promise<void> {
+    const publish = this.options.publishSettings;
+    if (!publish || this.closed) return;
+    let snapshot: MachineSettingsSnapshot | undefined;
+    const identity = await this.options.eventLog.getOrCreateDeviceIdentity();
+    const failures: string[] = [];
+    for (const record of await this.settings.listMachines()) {
+      const machineKey = machineSigningKey(this.machineRecord(record.id) ?? record);
+      if (!machineKey) continue;
+      const pairing = this.connections.get(record.id)?.pairing ?? await this.settings.getMachinePairing(record.pairingKey);
+      if (!pairing?.hubUrl || pairing.issuer.originId !== this.options.desktopDeviceId) continue;
+      try {
+        snapshot ??= await this.settings.exportMachineSettingsSnapshot();
+        const projects = await this.options.machineProjects?.(record.id) ?? {};
+        const digest = createHash("sha256").update(JSON.stringify([machineSettingsKey(snapshot), projects, machineKey, pairing.hubUrl, pairing.rendezvousId])).digest("hex");
+        if (this.publishedSettings.get(record.id) === digest) continue;
+        const document: MachineSettingsDocument = { version: 1, settings: snapshot, projects };
+        const sealed = await sealChannelPayload(document, deriveMachineChannelKey(identity, machineKey, pairing.rendezvousId));
+        await publish(record.id, sealed);
+        this.publishedSettings.set(record.id, digest);
+        void this.debugLogs.write("machine-link.settings.published", { machineId: record.id, bytes: sealed.length });
+      } catch (error) {
+        failures.push(`${record.name}: ${errorMessage(error)}`);
       }
     }
-    // The connection as it is now: a held turn waited out a reconnect.
-    const connection = this.connections.get(machineId);
-    if (!connection) return notEnrolled();
-    if (!connection.eventChannel && !connection.machineDeviceId) {
-      return { status: "failed", messages: [], warnings: [], sent: false, error: `@${request.participant.handle} is hosted on ${connection.record.name}, which is not connected.` };
-    }
-    if (request.signal?.aborted) {
-      return interrupted;
-    }
-    // A runtime from before chat change events would run the turn on a copy
-    // of the chat it no longer receives. This desktop updates it once it is
-    // idle; until then the turn is not sent.
-    if (connection.record.chatChanges !== true) {
-      void this.debugLogs.write("machine-link.turn.runtime-outdated", { machineId, runId: request.runId, appVersion: connection.record.lastHello?.appVersion ?? "" });
-      return {
-        status: "failed", messages: [], warnings: [], sent: false,
-        error: `@${request.participant.handle} is hosted on ${connection.record.name}, which still runs an older version of AccordAgents that cannot receive this chat. This computer updates it the next time it is connected and idle; send the message again after that.`
-      };
-    }
-    // A runtime from before compactions would read the command as a turn for
-    // a message it does not have. The same update brings them.
-    if (command.compaction && connection.record.lastHello?.compactionSupported !== true) {
-      void this.debugLogs.write("machine-link.compaction.runtime-outdated", { machineId, runId: request.runId, appVersion: connection.record.lastHello?.appVersion ?? "" });
-      return {
-        status: "failed", messages: [], warnings: [], sent: false,
-        error: `@${request.participant.handle} is hosted on ${connection.record.name}, which still runs an older version of AccordAgents that cannot compact members. This computer updates it the next time it is connected and idle; compact again after that`
-      };
-    }
-    // Stop can arrive at any point of the preparation; a cancelled turn is
-    // never dispatched, and one already dispatched is cancelled on the machine.
-    let dispatchAttempted = false;
-    let intentRecorded = false;
-    let stopRequested = false;
-    const stopPending = (reason: string): void => {
-      if (!connection.pendingTurns.has(request.runId)) {
-        return;
-      }
-      void this.debugLogs.write("machine-link.stop.waiting", { machineId: connection.record.id, runId: request.runId, reason });
-      request.onStopPending?.(connection.record.name);
-    };
-    const onAbort = (): void => {
-      if (!dispatchAttempted || stopRequested) {
-        return;
-      }
-      stopRequested = true;
-      void this.cancelMachineRun({
-        machineId, conversationId: request.conversation.id, runId: request.runId,
-        onStopPending: async () => stopPending("no confirmation")
-      }).catch((error: unknown) => stopPending(errorMessage(error)));
-    };
-    request.signal?.addEventListener("abort", onAbort, { once: true });
-    const result = new Promise<MachineTurnDispatchResult>((resolve) => {
-      connection.pendingTurns.set(request.runId, { resolve, progress: request.progress, instanceId: connection.record.lastHello?.instanceId, dispatched: false });
-    });
-    connection.pendingTurnConversations.set(request.runId, request.conversation.id);
-    const timeout = setTimeout(() => {
-      const pending = connection.pendingTurns.get(request.runId);
-      if (pending) {
-        connection.pendingTurns.delete(request.runId);
-        pending.resolve({ status: "failed", messages: [], warnings: [], error: `The machine did not finish the ${command.compaction ? "compaction" : "turn"} within the run timeout.` });
-      }
-    }, TURN_ACK_TIMEOUT_MS);
-    timeout.unref?.();
-    try {
-      await this.waitForIntroduction(connection, request.signal);
-      if (request.signal?.aborted) return interrupted;
-      // The request retains its settings even if neither endpoint is online
-      // at the same time. Seal before the append: settings can contain secrets
-      // and can exceed one relay frame on the User's actual skill catalogue.
-      const sealedSettings = this.options.desktopDeviceId === connection.pairing.issuer.originId
-        ? await sealChannelPayload(await this.settings.exportMachineSettingsSnapshot(), await this.channelSealKey(connection))
-        : undefined;
-      if (request.signal?.aborted) {
-        return interrupted;
-      }
-      // The chat itself reaches the machine as change events. The request
-      // names the last one this desktop committed, and the machine runs the
-      // turn only once it has applied it.
-      const chatHead = await this.options.chatChangeHead?.(request.conversation.id);
-      const machineRepository = await this.machineRepositoryFor(request.conversation);
-      if (request.signal?.aborted) {
-        return interrupted;
-      }
-      // Persist the intent before any request can reach the provider. During
-      // this preparation a hello must not query it; after a process restart
-      // the recorded intent is reconciled, never automatically replayed.
-      connection.pendingRuns.set(request.runId, request.conversation.id);
-      intentRecorded = true;
-      await this.persistCancels(connection, true);
-      if (request.signal?.aborted) {
-        return interrupted;
-      }
-      if (!connection.machineDeviceId) await request.onMachineWaiting?.(connection.record.name);
-      await this.send(connection, {
-        type: "machine.turn.request",
-        conversationId: request.conversation.id,
-        participantId: request.participant.id,
-        participant: request.participant,
-        messageId: command.messageId,
-        runId: request.runId,
-        pendingMessageId: command.pendingMessageId,
-        ...(sealedSettings ? { sealedSettings } : {}),
-        ...(chatHead ? { chatHead } : {}),
-        ...(machineRepository ? { machineRepository } : {}),
-        ...(command.compaction ? { compaction: command.compaction } : {}),
-        requestedAt: this.now().toISOString()
-      }, () => {
-        // Queueing and sealing are still preparation. This synchronous fence
-        // is the first point at which the request may leave for the machine.
-        if (request.signal?.aborted) throw new Error("Stopped before machine dispatch.");
-        dispatchAttempted = true;
-        const entry = connection.pendingTurns.get(request.runId);
-        if (entry) entry.dispatched = true;
-      });
-      if (request.signal?.aborted) {
-        onAbort();
-      }
-      return await result;
-    } catch (error) {
-      if (request.signal?.aborted && !dispatchAttempted) return interrupted;
-      return { status: "failed", messages: [], warnings: [], error: errorMessage(error), ...(dispatchAttempted ? {} : { sent: false }) };
-    } finally {
-      if (intentRecorded && !dispatchAttempted) {
-        // No provider could have seen the command. A failed cleanup remains
-        // safe to reconcile as unknown after restart.
-        connection.pendingRuns.delete(request.runId);
-        await this.persistCancels(connection);
-      }
-      connection.pendingTurns.delete(request.runId);
-      connection.pendingTurnConversations.delete(request.runId);
-      clearTimeout(timeout);
-      request.signal?.removeEventListener("abort", onAbort);
-    }
+    if (failures.length) throw new Error(`Settings could not be published for ${failures.join("; ")}`);
   }
 
-  /** Where the chat's project lives on each machine that has a copy of it. */
-  private async machineRepositoryFor(conversation: Conversation): Promise<{ sourcePath: string; paths: Record<string, string> } | undefined> {
-    if (!conversation.repoPath || !this.options.repositoryPaths) return undefined;
-    const sourcePath = conversation.metadata.machineRepository?.sourcePath ?? conversation.repoPath;
-    const paths = await this.options.repositoryPaths(sourcePath);
-    return Object.keys(paths).length ? { sourcePath, paths } : undefined;
-  }
+  // --- the room -------------------------------------------------------------
 
-  private waitForIntroduction(connection: MachineConnection, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted || connection.eventChannel) return Promise.resolve();
-    return new Promise<void>((resolve, reject) => {
-      const finish = (error?: Error): void => {
-        clearTimeout(timer);
-        this.emitter.off("status", check);
-        signal?.removeEventListener("abort", aborted);
-        if (error) reject(error); else resolve();
-      };
-      const check = (): void => {
-        if (!this.connections.has(connection.record.id)) finish(new Error("The machine was removed while connecting."));
-        else if (connection.eventChannel) finish();
-      };
-      const aborted = (): void => finish();
-      const timer = setTimeout(() => finish(new Error(`Machine ${connection.record.name} did not finish introducing its event channel.`)), 15_000);
-      timer.unref?.();
-      this.emitter.on("status", check);
-      signal?.addEventListener("abort", aborted, { once: true });
-      check();
-    });
-  }
-
-  /** Saves the machine's whole record. Rule 2: stops waiting for a machine
-   *  are part of it, so a desktop restart does not forget them (nor the run
-   *  intents, nor what was published to its runtime). */
-  private persistCancels(connection: MachineConnection, required = false): Promise<void> {
-    const pendingCancels = [...connection.pendingCancels.entries()].map(([runId, conversationId]) => ({ runId, conversationId }));
-    const pendingRuns = [...connection.pendingRuns.entries()].map(([runId, conversationId]) => ({ runId, conversationId }));
-    connection.record = { ...connection.record, pendingCancels, pendingRuns };
+  /** Saves the machine's record (its greeting, its identity). */
+  private persistRecord(connection: MachineConnection, required = false): Promise<void> {
     const record = connection.record;
     const write = connection.persist
       .then(() => this.settings.saveMachine(record))
@@ -1643,37 +776,24 @@ export class MachineLinkService implements MachineTurnDispatcher {
   }
 
   private async handleMessage(connection: MachineConnection, ciphertext: string): Promise<void> {
-    const pinned = connection.record.lastHello?.publicKeyDerBase64;
+    const pinned = machineSigningKey(connection.record);
     const payload = await openMachinePayload(ciphertext, await this.options.eventLog.getOrCreateDeviceIdentity(),
       pinned ? [pinned] : undefined, connection.pairing.rendezvousId);
-    if (!pinned && (!isMachineLinkEnvelope(payload) || payload.body.type !== "machine.hello")) {
-      throw new Error("A new machine must introduce its identity before sending content.");
-    }
-    if (isDeviceEventPacket(payload)) {
-      // Durable events travel only in the User's server's order (one road):
-      // a copy sent in the room is not taken.
-      this.noteRoomEventDropped(connection.record.id, payload.type);
-      return;
-    }
-    if (!isMachineLinkEnvelope(payload)) {
-      return;
+    if (!isMachineLinkEnvelope(payload)) return;
+    if (!pinned && payload.body.type !== "machine.hello") {
+      throw new Error("A new machine must introduce its identity before sending anything else.");
     }
     const hello = payload.body.type === "machine.hello" ? payload.body : undefined;
     const from = connection.record.deviceId || hello?.deviceId;
-    const key = connection.record.lastHello?.publicKeyDerBase64 ?? hello?.publicKeyDerBase64;
-    if (!from || !key || isMachineDurableMessage(payload.body) ||
-        !verifyMachineControl(payload, { from, publicKeyDerBase64: key, to: this.options.desktopDeviceId, room: connection.pairing.rendezvousId })) {
-      throw new Error("Machine presence requires its signing identity; results require durable events.");
+    const key = pinned ?? hello?.publicKeyDerBase64;
+    if (!from || !key || !verifyMachineControl(payload, { from, publicKeyDerBase64: key, to: this.options.desktopDeviceId, room: connection.pairing.rendezvousId })) {
+      throw new Error("A machine's messages carry its signing identity.");
     }
-    if (this.seenMessageIds.has(payload.messageId)) {
-      return;
-    }
+    if (this.seenMessageIds.has(payload.messageId)) return;
     this.seenMessageIds.add(payload.messageId);
     if (this.seenMessageIds.size > 10_000) {
       const first = this.seenMessageIds.values().next().value;
-      if (first) {
-        this.seenMessageIds.delete(first);
-      }
+      if (first) this.seenMessageIds.delete(first);
     }
     await this.handleBody(connection, payload.body);
   }
@@ -1683,27 +803,18 @@ export class MachineLinkService implements MachineTurnDispatcher {
       case "machine.hello":
         await this.handleHello(connection, body);
         return;
-      case "machine.turn.progress": {
-        const pending = connection.pendingTurns.get(body.runId);
-        pending?.progress?.(body.progress);
-        return;
-      }
-      case "machine.turn.finished":
-        await this.finishTurn(connection, body);
+      case "machine.turn.progress.delta":
+        this.receiveProgress(connection, body);
         return;
       case "machine.member.background":
-        if (typeof body.conversationId !== "string" || typeof body.participantId !== "string" || !Array.isArray(body.labels)) {
-          return;
-        }
+        if (typeof body.conversationId !== "string" || typeof body.participantId !== "string" || !Array.isArray(body.labels)) return;
         this.emitMemberBackground({
           machineId: connection.record.id,
           member: { conversationId: body.conversationId, participantId: body.participantId, labels: cleanBackgroundLabels(body.labels) }
         });
         return;
       case "machine.member.background.snapshot":
-        if (!Array.isArray(body.members)) {
-          return;
-        }
+        if (!Array.isArray(body.members)) return;
         this.emitMemberBackground({
           machineId: connection.record.id,
           snapshot: body.members
@@ -1712,36 +823,11 @@ export class MachineLinkService implements MachineTurnDispatcher {
             .map((member) => ({ conversationId: member.conversationId, participantId: member.participantId, labels: cleanBackgroundLabels(member.labels) }))
         });
         return;
-      case "machine.member.background.request":
-        return;
       case "machine.turn.suggestion":
-        if (typeof body.suggestion !== "string" || typeof body.participantId !== "string" || typeof body.runId !== "string") {
-          return;
-        }
+        if (typeof body.suggestion !== "string" || typeof body.participantId !== "string" || typeof body.runId !== "string") return;
         for (const listener of this.suggestionListeners) {
-          listener({
-            machineId: connection.record.id,
-            conversationId: body.conversationId,
-            runId: body.runId,
-            participantId: body.participantId,
-            suggestion: body.suggestion
-          });
+          listener({ machineId: connection.record.id, conversationId: body.conversationId, runId: body.runId, participantId: body.participantId, suggestion: body.suggestion });
         }
-        return;
-      case "machine.conversation.backdelta":
-        // A machine runtime that has not been updated yet writes its members'
-        // messages this way, and an updated one may still deliver some it
-        // wrote before. Stored as before; nothing new is sent this way.
-        if (!this.backDeltaListeners.length) throw new Error("No chat owner is available to store the machine's messages.");
-        await Promise.all(this.backDeltaListeners.map((listener) => listener({ machineId: connection.record.id, conversationId: body.conversationId, messages: body.messages })));
-        return;
-      case "machine.conversation.resync":
-        // Asked by a runtime that has not been updated yet; chats reach it
-        // as change events once it is.
-        void this.debugLogs.write("machine-link.legacy-resync-ignored", { machineId: connection.record.id });
-        return;
-      case "machine.turn.unknown":
-        await this.handleUnknownRun(connection, body);
         return;
       case "machine.scripts.result": {
         const pending = connection.pendingScripts.get(body.requestId);
@@ -1755,436 +841,97 @@ export class MachineLinkService implements MachineTurnDispatcher {
       }
       case "machine.scripts.changed":
         for (const listener of this.scriptsChangedListeners) {
-          try {
-            listener(connection.record.id);
-          } catch {
-            // A listener failure never breaks the link.
-          }
+          try { listener(connection.record.id); } catch { /* a listener failure never breaks the link */ }
         }
-        return;
-      case "machine.scripts.request":
         return;
       case "machine.attachment.request":
         // Served off the inbound chain: reading a chat and sending a picture
-        // takes seconds on a large chat, and the machine's turn results,
-        // progress and approvals must not wait behind it.
+        // takes seconds on a large chat, and live progress must not wait.
         void this.answerAttachmentRequest(connection, body);
-        return;
-      case "machine.choice.result": {
-        const pending = connection.pendingChoices.get(body.decisionId);
-        try {
-          if (body.choice) {
-            const conversation = await this.conversationLoader?.(body.conversationId);
-            const source = conversation?.messages.find(message => message.id === body.sourceMessageId);
-            if (!source || source.metadata?.pendingChoice?.id !== body.choiceId) throw new Error("The choice result's source message is not available.");
-            const participants = conversation?.metadata.participants as import("../../shared/types").ChatParticipant[] | undefined;
-            if (participants?.find(item => item.id === source.participantId)?.homeMachineId !== connection.record.id) {
-              throw new Error("The choice result came from a machine that does not own its member.");
-            }
-            if (!this.backDeltaListeners.length) throw new Error("No chat owner is available to store the choice result.");
-            const message = { ...source, metadata: { ...source.metadata, pendingChoice: body.choice } };
-            await Promise.all(this.backDeltaListeners.map(listener => listener({ machineId: connection.record.id,
-              conversationId: body.conversationId, messages: [message] })));
-          }
-        } catch (error) {
-          for (const waiter of pending ?? []) waiter.reject(error instanceof Error ? error : new Error(String(error)));
-          throw error;
-        }
-        connection.pendingChoices.delete(body.decisionId);
-        for (const waiter of pending ?? []) {
-          if (body.ok) waiter.resolve();
-          else waiter.reject(new Error(body.error ?? "The machine could not apply this choice."));
-        }
-        return;
-      }
-      case "machine.approval.result": {
-        const pending = body.decisionId ? connection.pendingApprovals.get(body.decisionId) : undefined;
-        if (body.decisionId) connection.pendingApprovals.delete(body.decisionId);
-        try {
-          const cachedApprovals = body.approval ? undefined : (await this.conversationLoader?.(body.conversationId))?.metadata?.pendingAppToolApprovals;
-          const approval = body.approval ?? (Array.isArray(cachedApprovals) ? cachedApprovals.find((item: ChatAppToolApproval) => item.id === body.approvalId) as ChatAppToolApproval | undefined : undefined);
-          if (approval) {
-            // Store the machine's view of the card (and policies) before the
-            // desktop's card call returns; a failed store fails that call.
-            await this.emitApproval({
-              machineId: connection.record.id,
-              conversationId: body.conversationId,
-              decisionId: body.decisionId,
-              decisionApplied: body.ok === true,
-              approval: { ...approval, ...(!body.ok && body.error ? { error: body.error } : {}), homeMachineId: connection.record.id },
-              ...(body.policies ? { policies: body.policies } : {})
-            });
-          }
-        } catch (error) {
-          for (const waiter of pending ?? []) waiter.reject(error instanceof Error ? error : new Error(String(error)));
-          throw error; // A failed projection must not acknowledge the event.
-        }
-        for (const waiter of pending ?? []) {
-          if (body.ok) waiter.resolve();
-          else waiter.reject(new Error(body.error ?? `Machine ${connection.record.name} could not apply the decision.`));
-        }
-        return;
-      }
-      case "machine.compaction.delegate": {
-        if (typeof body.participantId !== "string" || typeof body.runId !== "string" || !body.runId.trim()) return;
-        if (!this.compactionDelegateListeners.length) {
-          throw new Error("No chat owner is available to run the compaction this machine asked for.");
-        }
-        await Promise.all(this.compactionDelegateListeners.map((listener) => listener({
-          machineId: connection.record.id,
-          conversationId: body.conversationId,
-          participantId: body.participantId,
-          runId: body.runId,
-          ...(typeof body.instructions === "string" ? { instructions: body.instructions } : {})
-        })));
-        return;
-      }
-      case "machine.participants.delegate": {
-        // The request message itself arrived just before this, on the same
-        // ordered stream, as an ordinary back delta.
-        if (!this.participantRequestListeners.length) {
-          throw new Error("No chat owner is available to run the members this machine asked for.");
-        }
-        await Promise.all(this.participantRequestListeners.map((listener) => listener({
-          machineId: connection.record.id,
-          conversationId: body.conversationId,
-          requestMessageId: body.requestMessageId,
-          depth: body.depth,
-          ...(body.targetParticipantIds ? { targetParticipantIds: body.targetParticipantIds } : {})
-        })));
-        return;
-      }
-      case "machine.approval.requested":
-      case "machine.approval.updated":
-        await this.emitApproval({
-          machineId: connection.record.id,
-          conversationId: body.conversationId,
-          approval: { ...body.approval, homeMachineId: connection.record.id },
-          ...(body.type === "machine.approval.updated" && body.policies ? { policies: body.policies } : {})
-        });
         return;
       default:
         return;
     }
   }
 
-  private async initializeEventChannel(connection: MachineConnection, deviceId: string, publicKeyDerBase64: string): Promise<void> {
-    const identity = await this.options.eventLog.getOrCreateDeviceIdentity();
-    if (!connection.eventChannel) {
-      connection.eventChannel = new DeviceEventChannel({
-        storage: this.options.eventStorage, eventLog: this.options.eventLog,
-        pairing: { ...connection.pairing, relaySealKeyBase64: deriveMachineChannelKey(identity, publicKeyDerBase64, connection.pairing.rendezvousId) },
-        isPeerConnected: () => Boolean(connection.machineDeviceId),
-        // The User's server carries the channel's events (its one order).
-        hubMode: true,
-        ...(this.options.hubRepair ? { hubRepair: this.options.hubRepair } : {}),
-        channelId: connection.pairing.rendezvousId, localDeviceId: this.options.desktopDeviceId,
-        peerDeviceId: deviceId, peerPublicKeyDerBase64: publicKeyDerBase64,
-        send: async (packet) => {
-          const ciphertext = await sealMachinePayload(packet, identity, publicKeyDerBase64, connection.pairing.rendezvousId);
-          await connection.client.sendCiphertext({ logicalMessageId: randomUUID(), ciphertext, to: deviceId });
-        },
-        serveDependency: (dependency) => this.serveChatActionDependency(dependency),
-        onDependencyUnavailable: (dependency) => {
-          void this.debugLogs.write("machine-link.action.dependency-unavailable", { ...dependency, machineId: connection.record.id });
-        },
-        peerHoldsEveryChat: true,
-        // Kept for a runtime that cannot fold chat changes yet; sent once it can.
-        heldKinds: () => connection.record.chatChanges === true ? [] : [CHAT_CHANGES_EVENT_KIND],
-        apply: async (event, body) => {
-          if (event.kind === CHAT_CHANGES_EVENT_KIND) {
-            if (!this.options.applyChatChanges || !isChatChangesPayload(body)) throw new Error("Unexpected chat change event.");
-            return await this.options.applyChatChanges(event, body) === "applied" ? "applied" : "deferred";
-          }
-          // Chat actions from another machine are applied here, not rejected:
-          // a signature made there has to become visible here, and a change
-          // made on state this desktop has replaced has to be shown as
-          // superseded rather than silently written over the winner.
-          if (this.options.chatActions?.handles(event, body) && await this.options.eventStorage.conversationTombstones().isDeleted(event.conversationId)) return "applied";
-          const action = await this.applyChatAction(event, body);
-          if (action) return action;
-          const envelope = { protocol: MACHINE_LINK_PROTOCOL, messageId: "event", sentAt: this.now().toISOString(), body };
-          if (!isMachineLinkEnvelope(envelope) || !["machine.conversation.deleted", "machine.conversation.backdelta", "machine.turn.finished", "machine.turn.started", "machine.participants.delegate",
-            "machine.compaction.delegate", "machine.approval.requested", "machine.approval.updated", "machine.approval.result", "machine.choice.result", "machine.turn.progress.delta"].includes(envelope.body.type) ||
-              !("conversationId" in envelope.body) ||
-              event.kind !== envelope.body.type || event.conversationId !== envelope.body.conversationId) {
-            throw new Error("Unexpected machine replication event.");
-          }
-          if (envelope.body.type === "machine.conversation.deleted") {
-            if (!this.deletionListeners.length) throw new Error("No chat owner is available to apply deletion.");
-            const deletion = envelope.body;
-            await Promise.all(this.deletionListeners.map(listener => listener(deletion)));
-            return "applied";
-          }
-          // An immutable tombstone plus the stored event is a durable
-          // disposition. Do not rebuild a projection or invoke UI controls for
-          // this deleted chat; terminals still clear their held run/stop ACKs.
-          if (envelope.body.type !== "machine.turn.finished" && await this.options.eventStorage.conversationTombstones().isDeleted(event.conversationId)) return "applied";
-          if (envelope.body.type === "machine.turn.finished") {
-            const stored = await this.finishTurn(connection, envelope.body, () => connection.eventChannel!.confirmApplied(event));
-            return stored ? "applied" : "deferred";
-          }
-          if (envelope.body.type === "machine.turn.started") {
-            await Promise.all(this.runStartedListeners.map(listener => listener(envelope.body as { conversationId: string; runId: string })));
-            return "applied";
-          }
-          if (envelope.body.type === "machine.turn.progress.delta") {
-            const progress = await this.options.eventStorage.machineProgress().apply(event, envelope.body);
-            if (progress) {
-              const callback = connection.pendingTurns.get(progress.runId)?.progress;
-              if (callback) callback(progress);
-              else for (const listener of this.progressListeners) listener(progress);
-            }
-            return "applied";
-          }
-          await this.handleBody(connection, envelope.body);
-          return "applied";
-        },
-        onError: (error) => { void this.debugLogs.write("machine-link.events.error", { machineId: connection.record.id, message: error.message }); }
-      });
-      // Its events held while it had no channel are offered again now.
-      this.options.onChannelReady?.();
+  /** One live progress frame of a member on this machine: decoded against the
+   *  run's stream so far, and shown. A frame whose base was missed (this
+   *  desktop reconnected mid-stream) waits for the next whole one: the machine
+   *  starts every run's stream anew for a desktop that greets it. */
+  private receiveProgress(connection: MachineConnection, frame: MachineProgressFrame): void {
+    if (!frame || typeof frame.runId !== "string" || typeof frame.streamId !== "string" || !Number.isSafeInteger(frame.sequence)) return;
+    const current = connection.progress.get(frame.runId);
+    if (current && current.streamId === frame.streamId && frame.sequence <= current.sequence) return;
+    const base = current && current.streamId === frame.streamId && frame.sequence === current.sequence + 1 ? current.progress : undefined;
+    let progress: ReviewProgress;
+    try {
+      progress = decodeMachineProgress(base, frame);
+    } catch {
+      return;
     }
-  }
-
-  /** Logged once per machine and kind, so a sender that keeps trying does
-   *  not fill the log. */
-  private readonly roomEventsDropped = new Set<string>();
-  private noteRoomEventDropped(machineId: string, type: string): void {
-    const key = `${machineId}\u0000${type}`;
-    if (this.roomEventsDropped.has(key)) return;
-    if (this.roomEventsDropped.size >= 200) this.roomEventsDropped.clear();
-    this.roomEventsDropped.add(key);
-    void this.debugLogs.write("machine-link.room-event-dropped", { machineId, type });
+    const terminal = progress.phase === "done" || progress.phase === "error" || progress.phase === "cancelled" || progress.agentProgress?.state === "finished";
+    connection.progress.delete(frame.runId);
+    if (!terminal) {
+      connection.progress.set(frame.runId, { streamId: frame.streamId, sequence: frame.sequence, progress });
+      while (connection.progress.size > LIVE_PROGRESS_RUNS_MAX) connection.progress.delete(connection.progress.keys().next().value as string);
+    }
+    for (const listener of this.progressListeners) {
+      try { listener(progress); } catch (error) {
+        void this.debugLogs.write("machine-link.progress.listener-error", { machineId: connection.record.id, message: errorMessage(error) });
+      }
+    }
   }
 
   private async handleHello(connection: MachineConnection, hello: MachineHelloBody): Promise<void> {
     // A hello from an instance older than one already seen (the old process
-    // saying goodbye late) is ignored, but only when both hellos carry the
-    // machine's on-disk start counter; without a reliable counter nothing
-    // is inferred from clocks, and no hello is refused. Lost turns are
-    // closed by asking the machine (machine.turn.query), never by ordering.
+    // saying goodbye late) is ignored, when both carry the start counter.
     const stale = typeof hello.instanceSequence === "number" && typeof connection.latestInstanceSequence === "number"
       && hello.instanceSequence < connection.latestInstanceSequence;
     if (stale) {
-      void this.debugLogs.write("machine-link.hello.stale-instance", { machineId: connection.record.id, instanceId: hello.instanceId, instanceSequence: hello.instanceSequence, instanceStartedAt: hello.instanceStartedAt });
+      void this.debugLogs.write("machine-link.hello.stale-instance", { machineId: connection.record.id, instanceId: hello.instanceId, instanceSequence: hello.instanceSequence });
       return;
     }
-    if (!hello.publicKeyDerBase64) throw new Error("This machine needs the device-event runtime before it can synchronize chats.");
+    if (!hello.publicKeyDerBase64) throw new Error("This machine must introduce its signing key.");
     if (connection.record.deviceId && connection.record.deviceId !== hello.deviceId) {
       throw new Error("The machine's enrolled device identity changed; its history cannot be accepted as the previous machine.");
     }
-    // The other machines learn this one's key, and whether it can fold chat
-    // changes, from the roster; until then they refuse what it wrote, or keep
-    // their changes for it.
-    const chatChanges = (hello.chatChanges ?? 0) >= CHAT_CHANGES_VERSION;
-    const rosterChanged = connection.record.lastHello?.publicKeyDerBase64 !== hello.publicKeyDerBase64
-      || (connection.record.chatChanges === true) !== chatChanges;
-    await this.initializeEventChannel(connection, hello.deviceId, hello.publicKeyDerBase64);
-    if (typeof hello.instanceSequence === "number") {
-      connection.latestInstanceSequence = hello.instanceSequence;
-    }
-    if (hello.instanceStartedAt) {
-      connection.latestInstanceStartedAt = hello.instanceStartedAt;
-    }
+    const keyChanged = machineSigningKey(connection.record) !== hello.publicKeyDerBase64 || connection.record.deviceId !== hello.deviceId;
+    if (typeof hello.instanceSequence === "number") connection.latestInstanceSequence = hello.instanceSequence;
     connection.machineDeviceId = hello.deviceId;
     connection.helloSeen = true;
     if (connection.helloRequestTimer) {
       clearTimeout(connection.helloRequestTimer);
       connection.helloRequestTimer = undefined;
     }
-    connection.settingsSynced = false;
     const { type: _type, ...rest } = hello;
     connection.record = {
       ...connection.record,
       deviceId: hello.deviceId,
-      // What the running runtime folds decides whether chat changes are sent
-      // to it; a runtime put back after a failed update gets none until it
-      // is updated again (they are kept for it meanwhile).
-      chatChanges,
       lastSeenAt: this.now().toISOString(),
-      lastHello: rest,
-      pendingCancels: [...connection.pendingCancels.entries()].map(([runId, conversationId]) => ({ runId, conversationId })),
-      pendingRuns: [...connection.pendingRuns.entries()].map(([runId, conversationId]) => ({ runId, conversationId }))
+      lastHello: rest
     };
-    // A runtime process this desktop has not published to may hold nothing
-    // (a reinstall, wiped data, a new instance): it is given both again. The
-    // same process greeting again (a reconnect, a desktop restart, a hello
-    // request) already has them.
-    // In turn with the publications, so one still on its way to the previous
-    // process is not counted as given to this one.
-    await this.serializePublication(connection, async () => {
-      if (!hello.instanceId || connection.record.published?.instanceId !== hello.instanceId) {
-        connection.record = { ...connection.record, published: hello.instanceId ? { instanceId: hello.instanceId } : undefined };
-      }
-    });
-    await this.persistCancels(connection, true);
+    await this.persistRecord(connection, true);
     if (this.options.desktopDeviceId === connection.pairing.issuer.originId) {
-      await this.send(connection, { type: "machine.hello.ack", desktopDeviceId: this.options.desktopDeviceId, appVersion: this.options.appVersion, machineId: connection.record.id, machineName: connection.record.name,
-        ...(this.compactionDelegateListeners.length ? { compactionDelegation: true } : {}) });
-      await this.publishSettings(connection);
-      await this.sendTrustRoster(connection);
-      if (rosterChanged) {
-        for (const other of this.connections.values()) {
-          if (other !== connection && other.eventChannel) await this.sendTrustRoster(other).catch(() => undefined);
-        }
-        this.options.onDevicesChanged?.();
-      }
+      await this.send(connection, { type: "machine.hello.ack", desktopDeviceId: this.options.desktopDeviceId, appVersion: this.options.appVersion,
+        machineId: connection.record.id, machineName: connection.record.name });
+      if (keyChanged) this.options.onDevicesChanged?.();
+      // A runtime that greets while its turns are held (the new one an update
+      // started) holds them too until the update is done.
+      this.sendTurnHold(connection.record.id);
+      // Its settings on the server, sealed for the key it greeted with.
+      void this.syncSettings().catch((error: unknown) => {
+        void this.debugLogs.write("machine-link.settings.sync-error", { machineId: connection.record.id, message: errorMessage(error) });
+      });
     }
-    connection.settingsSynced = true;
-    connection.eventChannel?.start();
-    await this.deliverPendingConversationDeletions();
     this.emitStatus();
     // Machine setup waits for a hello that arrives AFTER it restarted the
-    // runtime, and checks the version it reports: a live connection alone can
-    // still be the old process that never went away.
+    // runtime, and checks the version it reports.
     this.emitter.emit("hello", { machineId: connection.record.id, appVersion: hello.appVersion, deviceId: hello.deviceId, solicited: Boolean(connection.activityProbe) });
-    await this.reconcileAfterHello(connection, hello);
-  }
-
-  /** After a machine reconnects: stops that were waiting are delivered
-   *  again, and turns the machine no longer knows (it restarted) are closed
-   *  instead of waiting for a result that will never come. */
-  private async reconcileAfterHello(connection: MachineConnection, hello: MachineHelloBody): Promise<void> {
-    for (const [runId, conversationId] of [...connection.pendingCancels.entries()]) {
-      void this.debugLogs.write("machine-link.stop.redelivered", { machineId: connection.record.id, runId });
-      await this.send(connection, { type: "machine.turn.cancel", conversationId, runId }).catch(() => undefined);
-    }
-    // Turns this desktop still waits on that the machine did not list as
-    // running or waiting in its outbox: ask the machine. A runtime that does
-    // not hold the run answers machine.turn.unknown and the turn is closed
-    // then; one that does hold it stays silent and the result follows. No
-    // turn is ever closed from process order or clocks.
-    // The records survive a desktop restart. A live preparation has a saved
-    // intent too, but its in-memory dispatched flag prevents an early query.
-    const listed = new Set([...(hello.activeRunIds ?? []), ...(hello.pendingTerminalRunIds ?? [])]);
-    const asked = new Set<string>();
-    for (const [runId, conversationId] of [...connection.pendingRuns.entries(), ...connection.pendingCancels.entries()]) {
-      const preparing = connection.pendingTurns.get(runId)?.dispatched === false;
-      if (listed.has(runId) || asked.has(runId) || preparing) {
-        continue;
-      }
-      // A retained command may still be on its way through the server's
-      // order or waiting on earlier copy events. A live query must not overtake durable admission.
-      if (await this.options.eventStorage.getChatEvent(machineCommandId(runId))) continue;
-      asked.add(runId);
-      void this.debugLogs.write("machine-link.turn.queried", { machineId: connection.record.id, runId });
-      await this.send(connection, { type: "machine.turn.query", conversationId, runId }).catch(() => undefined);
-    }
-  }
-
-  private async finishTurn(connection: MachineConnection, body: MachineTurnFinishedBody, onStored?: () => Promise<void>): Promise<boolean> {
-    const messages = await this.options.eventStorage.machineProgress().retainPartialForOutcome(body);
-    // The machine keeps the result until this acknowledgement arrives, and
-    // it is sent only once the result has been stored on this desktop; a
-    // held stop for the run is dropped at the same moment, never before.
-    const acknowledge = async (): Promise<void> => {
-      await this.options.eventStorage.machineProgress().close(body.runId);
-      const held = connection.pendingCancels.get(body.runId);
-      const remembered = connection.pendingRuns.get(body.runId);
-      const changed = connection.pendingCancels.delete(body.runId);
-      const forgotten = connection.pendingRuns.delete(body.runId);
-      if (changed || forgotten) {
-        try { await this.persistCancels(connection, true); }
-        catch (error) {
-          if (held) connection.pendingCancels.set(body.runId, held);
-          if (remembered) connection.pendingRuns.set(body.runId, remembered);
-          throw error;
-        }
-      }
-      await this.send(connection, {
-        type: "machine.turn.finished.ack", conversationId: body.conversationId, runId: body.runId,
-        receiptId: body.receiptId, finishedAt: body.finishedAt
-      });
-    };
-    const pending = connection.pendingTurns.get(body.runId);
-    if (!pending) {
-      // The turn finished while this desktop was away (restart, relay drop):
-      // the machine kept the result, and the chat gets it exactly as a live
-      // turn would (reply, stop, failure), stored before it is acknowledged.
-      void this.debugLogs.write("machine-link.turn.finished-late", { machineId: connection.record.id, runId: body.runId, status: body.status, messages: body.messages.length });
-      await this.emitLateTerminal({
-        machineId: connection.record.id,
-        machineName: connection.record.name,
-        conversationId: body.conversationId,
-        runId: body.runId,
-        status: body.status,
-        messages,
-        warnings: body.warnings,
-        finishedAt: body.finishedAt,
-        receiptId: body.receiptId,
-        ...(body.error ? { error: body.error } : {}),
-        ...(typeof body.participantId === "string" ? { participantId: body.participantId } : {}),
-        ...(body.contextUsage ? { contextUsage: body.contextUsage } : {}),
-        ...(body.compaction ? { compaction: { triggeredBy: body.compaction.triggeredBy === "agent" ? "agent" as const : "user" as const } } : {})
-      });
-      await acknowledge();
-      return true;
-    }
-    connection.pendingTurns.delete(body.runId);
-    pending.resolve({
-      status: body.status,
-      messages,
-      warnings: body.warnings,
-      error: body.error,
-      finishedAt: body.finishedAt,
-      receiptId: body.receiptId,
-      ...(body.contextUsage ? { contextUsage: body.contextUsage } : {}),
-      acknowledge: async () => { await acknowledge(); await onStored?.(); }
-    });
-    return false;
-  }
-
-  /** The machine does not know this run: not running there, no result
-   *  waiting. A held stop for it cannot be confirmed (Rule 2). */
-  private async handleUnknownRun(connection: MachineConnection, body: { conversationId: string; runId: string }): Promise<void> {
-    const pending = connection.pendingTurns.get(body.runId);
-    const held = connection.pendingCancels.has(body.runId);
-    void this.debugLogs.write("machine-link.turn.unknown", { machineId: connection.record.id, runId: body.runId, pending: Boolean(pending), held, dispatched: pending?.dispatched });
-    if (pending && !pending.dispatched) {
-      // The request has not left yet (a query raced the preparation, or a
-      // stale answer): the turn is about to be dispatched, nothing to close.
-      return;
-    }
-    if (await this.options.eventStorage.getChatEvent(machineCommandId(body.runId))) return;
-    const detail = held
-      ? `Machine ${connection.record.name} does not know this run any more; whether its processes are gone is not verified.`
-      : `Machine ${connection.record.name} does not know this run any more (it restarted or lost it before finishing).`;
-    const recorded = connection.pendingRuns.has(body.runId);
-    const dropRecords = (): void => {
-      const changed = connection.pendingCancels.delete(body.runId);
-      const forgotten = connection.pendingRuns.delete(body.runId);
-      if (changed || forgotten) {
-        this.persistCancels(connection);
-      }
-    };
-    if (pending) {
-      connection.pendingTurns.delete(body.runId);
-      // The live path stores the outcome and calls acknowledge; the held
-      // stop goes with it. Without a stop this is a lost run, not a stop.
-      pending.resolve({ status: held ? "unconfirmed" : "failed", messages: [], warnings: [], error: detail, acknowledge: dropRecords });
-      return;
-    }
-    if (held || recorded) {
-      // This desktop restarted since the turn was dispatched (or the stop
-      // held): the chat gets the outcome first, and the records are dropped
-      // only once it is stored.
-      try {
-        await this.emitLateTerminal({ machineId: connection.record.id, machineName: connection.record.name, conversationId: body.conversationId, runId: body.runId, status: held ? "unconfirmed" : "failed", messages: [], warnings: [], error: detail });
-      } catch (error) {
-        void this.debugLogs.write("machine-link.turn.late-store-error", { machineId: connection.record.id, runId: body.runId, message: errorMessage(error) });
-        return;
-      }
-    }
-    dropRecords();
   }
 
   /** The bytes of a picture a machine asked for. Answered either way: a
    *  refusal tells the member the picture is unavailable, where silence would
-   *  leave it waiting out its turn. Every enrolled machine holds every chat,
-   *  so any of them may ask; ChatService checks the attachment belongs to
-   *  that chat. Sent in bounded parts (see
-   *  MACHINE_ATTACHMENT_PART_BYTES). */
+   *  leave it waiting out its turn. Sent in bounded parts. */
   private async answerAttachmentRequest(connection: MachineConnection, body: MachineAttachmentRequestBody): Promise<void> {
     const reply = { type: "machine.attachment.result" as const, requestId: body.requestId,
       conversationId: body.conversationId, attachmentId: body.attachmentId };
@@ -2192,9 +939,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
       if (!this.options.readChatAttachment) throw new Error("This desktop cannot read chat pictures.");
       const conversation = await this.conversationLoader?.(body.conversationId);
       if (!conversation || conversation.kind !== "chat") throw new Error("This chat is not on this desktop.");
-      const read = await this.options.readChatAttachment({
-        conversationId: body.conversationId, attachmentId: body.attachmentId
-      });
+      const read = await this.options.readChatAttachment({ conversationId: body.conversationId, attachmentId: body.attachmentId });
       const bytes = Buffer.from(read.dataBase64, "base64");
       const parts = Math.max(1, Math.ceil(bytes.length / MACHINE_ATTACHMENT_PART_BYTES));
       for (let part = 0; part < parts; part += 1) {
@@ -2212,9 +957,7 @@ export class MachineLinkService implements MachineTurnDispatcher {
 
   private emitMemberBackground(event: MachineMemberBackgroundEvent): void {
     for (const listener of this.backgroundListeners) {
-      try {
-        listener(event);
-      } catch (error) {
+      try { listener(event); } catch (error) {
         void this.debugLogs.write("machine-link.background.listener-error", { machineId: event.machineId, message: errorMessage(error) });
       }
     }
@@ -2223,47 +966,36 @@ export class MachineLinkService implements MachineTurnDispatcher {
   private setMachinePeer(connection: MachineConnection, deviceId: string | undefined): void {
     const changed = connection.machineDeviceId !== deviceId;
     if (!deviceId) {
-      if (connection.machineDeviceId) {
-        this.emitMemberBackground({ machineId: connection.record.id, snapshot: [] });
-      }
+      if (connection.machineDeviceId) this.emitMemberBackground({ machineId: connection.record.id, snapshot: [] });
       connection.machineDeviceId = undefined;
-      connection.settingsSynced = false;
       // Whatever greeted this connection before, a return is greeted again.
       connection.helloSeen = false;
+      connection.progress.clear();
       this.rejectPendingScripts(connection, `${connection.record.name} disconnected.`);
     } else if (!connection.machineDeviceId) {
       connection.machineDeviceId = deviceId;
       this.greetReturningMachine(connection);
     }
-    if (changed) {
-      this.emitStatus();
-    }
+    if (changed) this.emitStatus();
   }
 
   /** The machine's new connection took the seat of one the server had not
-   *  seen close (it restarted, or its link came back): it stays present, and
-   *  what it knows is asked afresh rather than assumed. A script request
-   *  still waiting keeps waiting for its answer or its own time limit: one
-   *  sent just now may be answered by the new connection. */
+   *  seen close (it restarted, or its link came back). */
   private machineReturned(connection: MachineConnection): void {
     connection.helloSeen = false;
-    connection.settingsSynced = false;
+    connection.progress.clear();
     this.greetReturningMachine(connection);
   }
 
   private greetReturningMachine(connection: MachineConnection): void {
-    // Back on the link (also after a blip a hello does not follow): ask for
-    // the members' background work that is running now.
+    // Back on the link: ask for the members' background work running now.
     void this.send(connection, { type: "machine.member.background.request" }).catch(() => undefined);
     if (!connection.helloSeen && !connection.helloRequestTimer) {
-      // The machine is there; if it does not greet this connection by
-      // itself shortly (the server may seat a restarted desktop silently in
-      // place of the old one), ask for the hello that drives reconciliation.
+      // The machine is there; if it does not greet this connection by itself
+      // shortly, ask for the hello.
       connection.helloRequestTimer = setTimeout(() => {
         connection.helloRequestTimer = undefined;
-        if (connection.helloSeen || !connection.machineDeviceId) {
-          return;
-        }
+        if (connection.helloSeen || !connection.machineDeviceId) return;
         void this.debugLogs.write("machine-link.hello.requested", { machineId: connection.record.id });
         void this.send(connection, { type: "machine.hello.request", desktopDeviceId: this.options.desktopDeviceId }).catch(() => undefined);
       }, HELLO_REQUEST_GRACE_MS);
@@ -2271,60 +1003,33 @@ export class MachineLinkService implements MachineTurnDispatcher {
     }
   }
 
-  private async channelSealKey(connection: MachineConnection): Promise<string> {
-    const key = connection.record.lastHello?.publicKeyDerBase64;
-    if (!key) throw new Error("The machine must introduce its identity first.");
-    return deriveMachineChannelKey(await this.options.eventLog.getOrCreateDeviceIdentity(), key, connection.pairing.rendezvousId);
-  }
-
-  private send(connection: MachineConnection, body: MachineLinkMessage, beforeWrite?: () => void): Promise<void> {
-    const send = connection.outbound.then(() => this.sendNow(connection, body, beforeWrite));
+  private send(connection: MachineConnection, body: MachineLinkMessage): Promise<void> {
+    const send = connection.outbound.then(() => this.sendNow(connection, body));
     connection.outbound = send.catch(() => undefined);
     return send;
   }
 
-  private async sendNow(connection: MachineConnection, body: MachineLinkMessage, beforeWrite?: () => void): Promise<void> {
-    if (body.type === "machine.settings.sync") {
-      return this.sendNow(connection, {
-        type: "machine.settings.sealed", conversationId: `machine-settings:${connection.pairing.rendezvousId}`,
-        ciphertext: await sealChannelPayload(body.snapshot, await this.channelSealKey(connection))
-      }, beforeWrite);
-    }
-    if (isMachineDurableMessage(body)) {
-      if (!connection.eventChannel) throw new Error("The machine has not introduced its event channel yet.");
-      const conversationId = body.type === "machine.conversation.sync" ? body.conversation.id : "conversationId" in body ? body.conversationId : "";
-      beforeWrite?.();
-      await connection.eventChannel.publish({ conversationId, kind: body.type, payload: body,
-        ...(body.type === "machine.approval.decision" && body.decisionId ? { eventId: body.decisionId, scope: `approval:${body.approvalId}` } : {}),
-        ...(body.type === "machine.conversation.deleted" ? { eventId: `machine-delete:${JSON.stringify([this.options.desktopDeviceId, connection.record.id, body.conversationId])}`, scope: "deletion" } : {}),
-        ...(body.type === "machine.turn.request" ? { eventId: machineCommandId(body.runId) } : {}),
-        ...(body.type === "machine.turn.cancel" ? { eventId: `machine-cancel:${body.runId}`, scope: `cancel:${body.runId}` } : {}),
-        ...(body.type === "machine.turn.finished.ack" ? { eventId: `machine-terminal-ack:${body.receiptId ?? `${body.runId}:${body.finishedAt}`}`, scope: `terminal-ack:${body.runId}` } : {}) });
-      return;
-    }
+  private async sendNow(connection: MachineConnection, body: MachineLinkMessage): Promise<void> {
     const to = connection.machineDeviceId;
-    if (!to) {
-      throw new Error(`${connection.record.name} is not connected.`);
-    }
+    if (!to) throw new Error(`${connection.record.name} is not connected.`);
     const envelope: MachineLinkEnvelope = {
       protocol: MACHINE_LINK_PROTOCOL,
       messageId: randomUUID(),
       sentAt: this.now().toISOString(),
       body
     };
-    const signed = signMachineControl(envelope, await this.options.eventLog.getOrCreateDeviceIdentity(), connection.pairing.rendezvousId, to);
-    const peerKey = connection.record.lastHello?.publicKeyDerBase64;
+    const identity = await this.options.eventLog.getOrCreateDeviceIdentity();
+    const signed = signMachineControl(envelope, identity, connection.pairing.rendezvousId, to);
+    const peerKey = machineSigningKey(connection.record);
     if (!peerKey) {
-      // Only identity discovery may use the enrollment capability's old seal.
-      // No settings, run inventory, roster or content is included.
+      // Only a greeting request may use the enrollment's own seal, before the
+      // machine's key is known. Nothing else is included.
       if (body.type !== "machine.hello.request") throw new Error("The machine must introduce its identity first.");
       const ciphertext = await sealChannelPayload(signed, connection.pairing.relaySealKeyBase64);
       await connection.client.sendCiphertext({ logicalMessageId: envelope.messageId, ciphertext, to });
       return;
     }
-    const ciphertext = await sealMachinePayload(signed, await this.options.eventLog.getOrCreateDeviceIdentity(),
-      peerKey, connection.pairing.rendezvousId);
-    beforeWrite?.();
+    const ciphertext = await sealMachinePayload(signed, identity, peerKey, connection.pairing.rendezvousId);
     await connection.client.sendCiphertext({ logicalMessageId: envelope.messageId, ciphertext, to });
   }
 
@@ -2341,11 +1046,3 @@ function errorMessage(error: unknown): string {
 function machineSettingsKey(snapshot: MachineSettingsSnapshot): string {
   return JSON.stringify([snapshot.settingsJson, snapshot.agentEnvironment]);
 }
-
-/** Adds to a set that keeps at most `limit` entries, dropping the oldest. */
-function rememberBounded(set: Set<string>, value: string, limit = 5_000): void {
-  set.delete(value);
-  set.add(value);
-  if (set.size > limit) set.delete(set.values().next().value as string);
-}
-

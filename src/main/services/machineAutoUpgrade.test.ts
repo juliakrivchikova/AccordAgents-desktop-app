@@ -19,7 +19,7 @@ function record(overrides: Partial<MachineInstallRecord> = {}): MachineInstallRe
 }
 
 function activity(overrides: Partial<MachineActivity> = {}): MachineActivity {
-  return { machineId: "m1", connected: true, fresh: true, appVersion: "1.10.4-beta.10", activeRunIds: [], pendingTerminalRunIds: [], dispatchedRunIds: [], ...overrides };
+  return { machineId: "m1", connected: true, fresh: true, appVersion: "1.10.4-beta.10", activeRunIds: [], ...overrides };
 }
 
 function snapshot(overrides: Partial<MachineInstallSnapshot> = {}): MachineInstallSnapshot {
@@ -104,11 +104,12 @@ test("a busy machine is told to wait once and is upgraded when it becomes idle",
   assert.equal(h.service.hasWaiting(), false);
 });
 
-test("a turn this desktop dispatched counts as busy even when the machine's hello predates it", async () => {
-  const h = harness({ activity: () => activity({ dispatchedRunIds: ["run-2"] }) });
+test("a turn asked of the machine that it has not taken does not hold its update: it waits on the server for the runtime that is there", async () => {
+  // Only what runs on the machine counts (its fresh hello); a turn waiting on
+  // the User's server is taken by the updated runtime.
+  const h = harness({ activity: () => activity({ activeRunIds: [] }) });
   await h.service.evaluate();
-  assert.equal(h.upgrades.length, 0);
-  assert.equal(h.service.hasWaiting(), true);
+  assert.equal(h.upgrades.length, 1);
 });
 
 test("a machine that did not answer in time is not taken as idle", async () => {

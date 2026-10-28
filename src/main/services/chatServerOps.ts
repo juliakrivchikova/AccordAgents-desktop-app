@@ -23,8 +23,9 @@ export interface ChatServerLink {
   messageAccepted(conversationId: string, messageId: string, signal?: AbortSignal): Promise<{ status: "accepted"; seq: number } | { status: "rejected"; reason: string } | undefined>;
   /** Resolves once the server answered this operation. */
   opAnswered(opId: string, signal?: AbortSignal): Promise<HubOpOutcome>;
-  /** Turns asked of this device's members that nobody took yet. */
-  waitingTurns(): Promise<HubTurn[]>;
+  /** Turns asked of this device's members that nobody took yet, and the
+   *  ones this device took and never finished (it stopped or restarted). */
+  waitingTurns(): Promise<{ requested: HubTurn[]; claimed: HubTurn[] }>;
   /** A machine's name, for "waiting for machine …". */
   machineName(machineId: string): string | undefined;
   /** The chat moved to the server whole: what was queued for it is in that move. */
