@@ -28,6 +28,7 @@ import {
 } from "./appMcp";
 import { ChatService } from "./chat";
 import type { HubCard, HubFeedEntry, HubOp, HubOpEffect, HubTurn } from "../../shared/hubOps";
+import { hubTurnRunId } from "../../shared/hubOps";
 import type { CodexServerRequestDelivery } from "./codexApprovals";
 import {
   chatAgentPermissionsEqual,
@@ -4101,6 +4102,33 @@ test("run location is editable only before a participant has durable run history
     }),
     /Run location is locked/
   );
+});
+
+test("the phone's New chat options come out the same while nothing changed, each member named by its preset", { timeout: 10_000 }, async () => {
+  const saved: ChatParticipantConfig = {
+    id: "saved-drew", handle: "drew", roleConfigId: ROLE.id, behaviorRuleIds: [], kind: "codex-cli", updatedAt: NOW
+  };
+  const { service } = testService({ agents: installedChatAgents(), settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], chatParticipantConfigs: [saved] } });
+  const first = await service.newChatOptions([]);
+  const second = await service.newChatOptions([]);
+  assert.ok(first);
+  // An unchanged offer is not published again (hubPhonePublisher compares).
+  assert.equal(JSON.stringify(second), JSON.stringify(first));
+  assert.equal(first.assistant.id, "administrator");
+  const drew = first.members.find((member) => member.configId === saved.id);
+  assert.equal(drew?.participant.id, saved.id);
+  assert.equal(drew?.participant.handle, "drew");
+});
+
+test("with no CLI ready the phone's New chat says why in the computer's words, and the Assistant's presets are not offered", { timeout: 10_000 }, async () => {
+  const saved: ChatParticipantConfig = { id: "saved-drew", handle: "drew", roleConfigId: ROLE.id, behaviorRuleIds: [], kind: "codex-cli", updatedAt: NOW };
+  const legacy: ChatParticipantConfig = { id: "saved-admin", handle: "admin", roleConfigId: ROLE.id, behaviorRuleIds: [], kind: "codex-cli", updatedAt: NOW };
+  const { service } = testService({ agents: [], settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], chatParticipantConfigs: [saved, legacy] } });
+  const offered = await service.newChatOptions([]);
+  assert.ok(offered);
+  assert.equal(offered.unavailable, "Set up and sign in to at least one CLI provider before creating a chat.");
+  assert.equal(offered.assistant.roleConfigId, "administrator");
+  assert.deepEqual(offered.members.map((member) => member.configId), ["saved-drew"]);
 });
 
 test("new cloud chat saves every Cloud choice without waiting for project preparation", { timeout: 10_000 }, async () => {
@@ -13054,6 +13082,58 @@ for (const route of [
     assert.equal(restarted.storage.current.messages.filter((m: ChatMessage) => m.metadata?.autoWatchTrigger).length, route.expected);
   });
 }
+
+test("a chat's first message from another device (the phone's New chat) has the member it asked name the chat, as a first message sent here does", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  conversation.messages[0].metadata = { threadId: "user-message", deliveryTargets: [participant.id] } as any;
+  const prompts: string[] = [];
+  const { service, storage, tempRoot } = testService({ conversation, run: async (member, prompt) => {
+    prompts.push(String(prompt));
+    return { participant: member, ok: true, content: "Answer", durationMs: 1 };
+  } });
+  service.setServerLink(fakeServerLink("desktop-device"));
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.startServerTurn({ runId: hubTurnRunId("user-message", participant.id), conversationId: conversation.id, messageId: "user-message", participantId: participant.id, state: "requested" });
+  await waitFor(() => prompts.length === 1);
+  assert.match(prompts[0], /Chat title assignment:/);
+  assert.equal(storage.current.metadata.autoTitle, undefined, "named only by the member, with app_chat_set_title");
+});
+
+test("a machine's member does not name a chat from another device's first message, no more than before", async () => {
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1" };
+  const conversation = chatConversation([participant]);
+  conversation.messages[0].metadata = { threadId: "user-message", deliveryTargets: [participant.id] } as any;
+  const prompts: string[] = [];
+  const { service, storage, tempRoot } = testService({ conversation, run: async (member, prompt) => {
+    prompts.push(String(prompt));
+    return { participant: member, ok: true, content: "Answer", durationMs: 1 };
+  } });
+  service.setHostMachineId("machine-1");
+  service.setServerLink(fakeServerLink("machine-device"));
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.startServerTurn({ runId: hubTurnRunId("user-message", participant.id), conversationId: conversation.id, messageId: "user-message", participantId: participant.id, state: "requested" });
+  await waitFor(() => prompts.length === 1);
+  assert.doesNotMatch(prompts[0], /Chat title assignment:/);
+  assert.equal(storage.current.metadata.autoTitleEligibility, undefined);
+});
+
+test("a later message from another device does not ask for a title", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  conversation.messages.push({ id: "second", role: "user", content: "And this.", createdAt: NOW, status: "done", metadata: { threadId: "second", deliveryTargets: [participant.id] } as any });
+  const prompts: string[] = [];
+  const { service, storage, tempRoot } = testService({ conversation, run: async (member, prompt) => {
+    prompts.push(String(prompt));
+    return { participant: member, ok: true, content: "Answer", durationMs: 1 };
+  } });
+  service.setServerLink(fakeServerLink("desktop-device"));
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.startServerTurn({ runId: hubTurnRunId("second", participant.id), conversationId: conversation.id, messageId: "second", participantId: participant.id, state: "requested" });
+  await waitFor(() => prompts.length === 1);
+  assert.doesNotMatch(prompts[0], /Chat title assignment:/);
+  assert.equal(storage.current.metadata.autoTitleEligibility, undefined);
+});
 
 test("member ownership: direct machine turn advances its own watcher cursor", async () => {
   const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1", autoWatch: true };

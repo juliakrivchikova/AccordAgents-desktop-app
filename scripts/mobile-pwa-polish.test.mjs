@@ -105,7 +105,9 @@ test("PWA polish: search, times, unread, members, earlier history, slash menu, r
     // --- the list, and searching it --------------------------------------
     const rowTitles = async () => await evaluate(`(() => [...document.querySelectorAll("#chat-list .mobile-chat-row strong")].map((n) => n.textContent))()`);
     await waitFor(rowTitles, (titles) => titles.length === 3, "the three chats from the desktop are listed");
-    assert.ok(!(await evaluate(`(() => Boolean(document.querySelector('[aria-label="New chat"]')))()`)), "the phone offers no new-chat button: it cannot create one");
+    // Paired for every chat, the phone starts new ones as the computer does
+    // (the User, 2026-10-29; scripts/mobile-new-chat.test.mjs drives it).
+    assert.ok(await evaluate(`(() => { const button = document.querySelector('[aria-label="New chat"]'); return Boolean(button && !button.hidden); })()`), "the phone offers New chat");
     await evaluate(`(() => { document.getElementById("chat-search-toggle").click(); return true; })()`);
     assert.equal(await evaluate(`(() => document.getElementById("chat-search").hidden)()`), false, "the search box opens");
     await evaluate(`(() => { const i = document.getElementById("chat-search-input"); i.value = "BETA"; i.dispatchEvent(new Event("input", { bubbles: true })); return true; })()`);
@@ -139,10 +141,10 @@ test("PWA polish: search, times, unread, members, earlier history, slash menu, r
     const rows = async () => await evaluate(`(() => [...document.querySelectorAll("#message-list .message-row")].map((n) => ({ status: n.dataset.status, label: (n.querySelector(".message-status") || {}).textContent, text: (n.querySelector(".message-content") || {}).textContent })))()`);
     await waitFor(rows, (list) => list.length === 2, "the latest page arrives from the server");
     const latest = await rows();
-    // The User's own message says when it was written and that the server
-    // has it, in the words every device uses (agreement Д3).
+    // The User's own message the server has is shown as any message: its
+    // time, no word about sending (the User, 2026-10-29).
     assert.equal(latest[0].status, "Sent");
-    assert.match(latest[0].label, /^\d{2}:\d{2} · Sent$/, "the User's message shows its time and that it was sent");
+    assert.match(latest[0].label, /^\d{2}:\d{2}$/, "the User's message shows only its time");
     assert.match(latest[1].label, /^\d{2}:\d{2}$/, "a finished member's message shows the time it was written, not the word Done");
     assert.equal(await evaluate(`(() => document.getElementById("load-earlier").hidden)()`), false, "the desktop said there is more before this page, so the phone offers it");
 

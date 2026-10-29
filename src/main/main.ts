@@ -399,6 +399,7 @@ async function restartServerChatLink(): Promise<void> {
   await serverChatLink.start();
 }
 
+let lastNewChatOptions: import("../shared/hubProtocol").HubNewChatOptions | undefined;
 const hubPhonePublisher: HubPhonePublisher = new HubPhonePublisher({
   client: () => hubOwnerConfirmed ? hubClient : undefined,
   hasPhones: async () => (await hubPhones()).length > 0,
@@ -416,13 +417,15 @@ const hubPhonePublisher: HubPhonePublisher = new HubPhonePublisher({
       }).catch(() => undefined);
     }
     const skills = await userSkillsService.listAll({ limit: 300 }).catch(() => ({ skills: [] as import("../shared/types").UserSkillSummary[] }));
-    // The phone's New chat, as this computer's offers it.
+    // The phone's New chat, as this computer's offers it; what it last
+    // offered while it cannot tell now (a CLI check that failed, say).
     const newChat = await storageService.listConversations()
       .then((summaries) => chatService.newChatOptions(summaries))
       .catch((error) => {
         void debugLogService.write("hub.phone.new-chat-options-error", { message: error instanceof Error ? error.message : String(error) });
         return undefined;
-      });
+      }) ?? lastNewChatOptions;
+    lastNewChatOptions = newChat;
     return {
       ...(newChat ? { newChat } : {}),
       roles: Object.fromEntries(settings.chatRoleConfigs.map((role) => [role.id,

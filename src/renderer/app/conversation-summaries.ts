@@ -2,6 +2,9 @@ import type { Conversation, ConversationSummary } from "../../shared/types";
 import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import type { ProjectSessionGroup } from "../components/shell";
 import { NO_PROJECT_GROUP_KEY } from "./constants";
+import { normalizeProjectPath, projectLabelForPath } from "../../shared/newChat";
+
+export { normalizeProjectPath };
 
 export function buildProjectSessionGroups(summaries: ConversationSummary[]): ProjectSessionGroup[] {
   const groups = new Map<string, ProjectSessionGroup>();
@@ -44,15 +47,6 @@ export function buildProjectSessionGroups(summaries: ConversationSummary[]): Pro
     });
 }
 
-export function normalizeProjectPath(repoPath: string | undefined): string | undefined {
-  const trimmed = repoPath?.trim();
-  if (!trimmed) {
-    return undefined;
-  }
-  const normalized = trimmed.replace(/[\\/]+$/g, "");
-  return normalized || trimmed;
-}
-
 export function upsertConversationSummary(summaries: ConversationSummary[], conversation: Conversation): ConversationSummary[] {
   const nextSummary = summaryFromConversation(conversation);
   return [
@@ -69,11 +63,6 @@ export function compareConversationSummaries(left: ConversationSummary, right: C
 export function conversationTimeValue(value: string): number {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function projectLabelForPath(repoPath: string): string {
-  const parts = repoPath.split(/[\\/]+/).filter(Boolean);
-  return parts[parts.length - 1] ?? repoPath;
 }
 
 function summaryFromConversation(conversation: Conversation): ConversationSummary {

@@ -184,8 +184,11 @@ test("a message is faded until the server takes it, then shown as any message, a
   // the turn the message asked of it: the message says nothing about it.
   const turn = await hub.turn(entry.eventId, DREW.id);
   assert.equal(turn.state, "requested", "the server asked a turn of the member the message names");
+  const waitingRow = `Boolean(document.querySelector('#message-list .message-row[data-row-key^="routed"]'))`;
+  await app.waitFor(waitingRow, "the member's waiting row while its turn waits", 20_000);
   await hub.claimTurn(CHAT, entry.eventId, DREW.id);
-  await sleep(2_000);
+  // The phone saw the claim: the member's waiting row went.
+  await app.waitFor(`!${waitingRow}`, "the waiting row to go once the member's device took the turn", 20_000);
   const marks = await app.evaluate(`window.__marks`);
   t.diagnostic(`marks: ${JSON.stringify(marks)}`);
   assert.deepEqual(marks.map((mark) => mark.replace(/\d{2}:\d{2}$/, "HH:MM")), ["faded HH:MM", "plain HH:MM"], `faded, then plain, only its time: ${JSON.stringify(marks)}`);

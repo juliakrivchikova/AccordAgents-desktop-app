@@ -4,8 +4,9 @@ import type { ChatParticipant, ChatParticipantConfig, ConversationSummary } from
 /**
  * How a new chat is made, the same on the computer and on the phone (the
  * User, 2026-10-29: the phone's New chat is the computer's). The computer
- * prepares each member as it would add it (HubNewChatOptions); either device
- * then puts the chat together with these rules.
+ * prepares each member as it would add it (HubNewChatOptions); the phone puts
+ * the chat together with these rules, which copy the computer's own (named at
+ * each), and both use the intro, the title, the usage order and the projects.
  */
 
 /** The system message a new chat starts with. */
@@ -63,6 +64,51 @@ function participantFallbackKey(participant: Pick<ChatParticipantConfig, "handle
   return `${participant.kind}:${participant.handle.trim().replace(/^@/, "").toLowerCase()}`;
 }
 
+/** A project's folder, as the computer's sidebar groups chats by it. */
+export function normalizeProjectPath(repoPath: string | undefined): string | undefined {
+  const trimmed = repoPath?.trim();
+  if (!trimmed) return undefined;
+  const normalized = trimmed.replace(/[\\/]+$/g, "");
+  return normalized || trimmed;
+}
+
+export function projectLabelForPath(repoPath: string): string {
+  const parts = repoPath.split(/[\\/]+/).filter(Boolean);
+  return parts[parts.length - 1] ?? repoPath;
+}
+
+function timeValue(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * The computer's projects for a new chat: the folders its chats are in (not
+ * archived), newest first; and the folder its New chat starts in when no chat
+ * is open: the one last chosen, or the newest chat's that has one.
+ */
+export function newChatProjects(summaries: ConversationSummary[], lastRepoPath: string | undefined): {
+  projects: Array<{ path: string; label: string }>;
+  defaultProject?: string;
+} {
+  const byPath = new Map<string, { path: string; label: string; at: number }>();
+  let newest: { path: string; at: number } | undefined;
+  for (const summary of summaries) {
+    const path = normalizeProjectPath(summary.repoPath);
+    if (!path) continue;
+    const at = timeValue(summary.updatedAt);
+    if (!newest || at > newest.at) newest = { path, at };
+    if (summary.archived) continue;
+    const known = byPath.get(path);
+    if (known) known.at = Math.max(known.at, at);
+    else byPath.set(path, { path, label: projectLabelForPath(path), at });
+  }
+  const projects = [...byPath.values()].sort((left, right) => (right.at - left.at) || left.label.localeCompare(right.label))
+    .map(({ path, label }) => ({ path, label }));
+  const defaultProject = normalizeProjectPath(lastRepoPath) ?? newest?.path;
+  return defaultProject ? { projects, defaultProject } : { projects };
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -79,6 +125,14 @@ export interface NewChatMemberOption {
   unavailable?: string;
 }
 
+/** The saved members a new chat gets: each chosen, and each the first
+ *  message names with an @ (the computer's selectedOrMentionedChatParticipantDrafts). */
+export function newChatPickedMembers(input: { members: NewChatMemberOption[]; chosenConfigIds: string[]; firstMessage: string }): NewChatMemberOption[] {
+  const chosen = new Set(input.chosenConfigIds);
+  return input.members.filter((member) => chosen.has(member.configId) ||
+    new RegExp(`@${escapeRegExp(member.participant.handle)}(?![A-Za-z0-9_-])`, "i").test(input.firstMessage));
+}
+
 /**
  * A new chat's members, as the computer makes them: each member chosen, and
  * each saved member the first message names with an @, then the Chat
@@ -92,9 +146,7 @@ export function newChatParticipants(input: {
   firstMessage: string;
   newId: () => string;
 }): ChatParticipant[] {
-  const chosen = new Set(input.chosenConfigIds);
-  const picked = input.members.filter((member) => chosen.has(member.configId) ||
-    new RegExp(`@${escapeRegExp(member.participant.handle)}(?![A-Za-z0-9_-])`, "i").test(input.firstMessage));
+  const picked = newChatPickedMembers(input);
   let watching = false;
   const members = picked.map((member) => {
     const autoWatch = member.participant.autoWatch === true && !watching;

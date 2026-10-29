@@ -411,7 +411,7 @@ export class HubPhoneApi {
     const catalog = await this.catalog();
     const options = catalog?.newChat;
     if (!options) {
-      return { status: 200, body: { ok: true, type: "mobile.new-chat", unavailable: "Your Mac has not told your server about its projects and members yet. Open AccordAgents on your Mac." } };
+      return { status: 200, body: { ok: true, type: "mobile.new-chat", unavailable: "Your Mac has not told your server about its projects and members yet. Open AccordAgents on your Mac, or update it." } };
     }
     // The names the panel shows: each role's, and each machine's a member runs on.
     const machines = await this.options.machineNames().catch(() => new Map<string, string>());

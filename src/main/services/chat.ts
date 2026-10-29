@@ -7,7 +7,8 @@ import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
 import { chatChangeBaseline, diffChatChanges, type ChatChangeBaseline, isSafeChatId } from "./chatChanges";
-import { newChatIntro, participantConfigUsage, participantConfigUsageCount, type NewChatMemberOption } from "../../shared/newChat";
+import { newChatIntro, newChatProjects, participantConfigUsage, participantConfigUsageCount, type NewChatMemberOption } from "../../shared/newChat";
+import { normalizedChatAvatarId } from "../../shared/chatAvatarCatalog";
 import type { HubNewChatOptions } from "../../shared/hubProtocol";
 import { chatChangesToOps, furthestTurnMarks, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
@@ -29,6 +30,7 @@ import { HUB_OP_TAKEN_BACK, type HubOpOutcome } from "./hubOpsClient";
 import type {
   AgentContextUsage,
   AgentHealth,
+  AppSettings,
   AddChatParticipantRequest,
   ChatAgentMode,
   ChatAgentPermissions,
@@ -1395,23 +1397,15 @@ export class ChatService {
       signal?.throwIfAborted();
       await this.settings.ensureAssistantProviderDefault(agents);
       const settings = await this.settings.ensureGenericChatParticipantSeeds(agents);
-      const readyKinds = readyProviderKinds(agents, settings.providers);
-      if (readyKinds.length === 0) {
-        throw new Error("Set up and sign in to at least one CLI provider before creating a chat.");
-      }
       const assistantProviderKind = resolveAssistantProviderKind({
         agents,
         providers: settings.providers,
         explicitKind: settings.assistantProviderKind
       });
-      if (!assistantProviderKind) {
-        const savedKind = settings.assistantProviderKind;
-        if (savedKind) {
-          const label = cliProviderMetadata(savedKind).label;
-          const state = readinessForProvider(savedKind, agents, settings.providers);
-          throw new Error(`${agentReadinessReason(state, label) ?? `${label} is not ready.`} Change the Assistant provider in General Settings.`);
-        }
-        throw new Error("Could not initialize an Assistant provider. Check General Settings and try again.");
+      const readyKinds = readyProviderKinds(agents, settings.providers);
+      const cannotStart = this.newChatBlockedReason(agents, settings, assistantProviderKind);
+      if (cannotStart || !assistantProviderKind) {
+        throw new Error(cannotStart ?? "Could not initialize an Assistant provider. Check General Settings and try again.");
       }
       const hasRequestedParticipants = request.participants.length > 0;
       const skipDefaultParticipants = request.skipDefaultParticipants === true;
@@ -1507,22 +1501,26 @@ export class ChatService {
     await this.settings.ensureAssistantProviderDefault(agents);
     const settings = await this.settings.ensureGenericChatParticipantSeeds(agents);
     const assistantKind = resolveAssistantProviderKind({ agents, providers: settings.providers, explicitKind: settings.assistantProviderKind });
-    const [assistant] = await this.ensureAdministratorParticipant([], assistantKind);
-    if (!assistant) return undefined;
-    const readyKinds = readyProviderKinds(agents, settings.providers);
-    let unavailable: string | undefined;
-    if (readyKinds.length === 0) unavailable = "Set up and sign in to at least one CLI provider before creating a chat.";
-    else if (!assistantKind) {
-      const savedKind = settings.assistantProviderKind;
-      const label = savedKind ? cliProviderMetadata(savedKind).label : undefined;
-      unavailable = savedKind && label
-        ? `${agentReadinessReason(readinessForProvider(savedKind, agents, settings.providers), label) ?? `${label} is not ready.`} Change the Assistant provider in General Settings.`
-        : "Could not initialize an Assistant provider. Check General Settings and try again.";
+    const unavailable = this.newChatBlockedReason(agents, settings, assistantKind);
+    // With no Assistant provider ready, the phone shows why, as this
+    // computer's New chat does, and starts nothing.
+    let assistant: ChatParticipant | undefined;
+    try {
+      [assistant] = await this.ensureAdministratorParticipant([], assistantKind);
+    } catch (error) {
+      if (!unavailable) throw error;
     }
+    if (!assistant && unavailable) {
+      assistant = { id: CHAT_ADMINISTRATOR_ROLE_ID, handle: CHAT_ADMINISTRATOR_HANDLE, roleConfigId: CHAT_ADMINISTRATOR_ROLE_ID, kind: settings.assistantProviderKind ?? "codex-cli" } as ChatParticipant;
+    }
+    if (!assistant) return undefined;
     const usage = participantConfigUsage(summaries);
     const members: NewChatMemberOption[] = [];
     for (const config of settings.chatParticipantConfigs) {
-      if (config.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID || config.handle.trim().replace(/^@/, "").toLowerCase() === CHAT_ADMINISTRATOR_HANDLE) continue;
+      // The Assistant's own presets are not offered (isChatAssistantParticipant).
+      if (config.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID || config.handle.trim().replace(/^@/, "").toLowerCase() === "admin") continue;
+      // As the computer's New chat makes a saved member's draft
+      // (chatParticipantConfigToDraft).
       const input: CreateChatConversationRequest["participants"][number] = {
         participantConfigId: config.id,
         handle: config.handle,
@@ -1530,58 +1528,50 @@ export class ChatService {
         behaviorRuleIds: config.behaviorRuleIds,
         kind: config.kind,
         model: config.model,
-        reasoningEffort: config.reasoningEffort,
-        avatarId: config.avatarId,
-        hostId: config.hostId,
-        agentMode: config.agentMode,
-        permissions: config.permissions,
+        reasoningEffort: normalizeChatReasoningEffort(config.reasoningEffort, config.kind),
+        avatarId: normalizedChatAvatarId(config.kind, config.avatarId, config.id || config.handle),
+        hostId: config.hostId?.trim() || undefined,
+        agentMode: normalizeChatAgentMode(config.agentMode),
+        permissions: normalizeChatAgentPermissions(config.permissions),
         remoteExecution: config.remoteExecution,
-        homeMachineId: config.homeMachineId,
+        homeMachineId: config.homeMachineId || undefined,
         cloudRun: config.cloudRun,
-        skipToolchainPreflight: config.skipToolchainPreflight,
+        skipToolchainPreflight: config.skipToolchainPreflight === true,
         autoWatch: config.roleConfigId === WORKFLOW_MANAGER_ROLE_ID || config.autoWatchEnabled === true
       };
       let participant: ChatParticipant | undefined;
-      try {
-        [participant] = await this.validateParticipants([input], [], true);
-      } catch {
-        // One this computer could not add at all (a deleted role) is not offered.
-        continue;
-      }
-      if (!participant) continue;
       let reason: string | undefined;
       try {
+        [participant] = await this.validateParticipants([input], [], true);
         this.assertParticipantProvidersReady([input], agents, settings.providers, settings.cliProviderHosts ?? []);
       } catch (error) {
+        // Offered, and why it cannot be added, as the computer's screen shows it.
         reason = error instanceof Error ? error.message : String(error);
       }
-      members.push({ configId: config.id, participant, uses: participantConfigUsageCount(config, usage), ...(reason ? { unavailable: reason } : {}) });
+      const shown = participant ?? { id: config.id, handle: config.handle, roleConfigId: config.roleConfigId, kind: config.kind, avatarId: input.avatarId, homeMachineId: input.homeMachineId };
+      // Named by its preset, not a fresh id: the phone gives each its own id
+      // (newChatParticipants), and an unchanged offer is not published again.
+      members.push({ configId: config.id, participant: { ...shown, id: config.id }, uses: participantConfigUsageCount(config, usage), ...(reason ? { unavailable: reason } : {}) });
     }
-    const projects: Array<{ path: string; label: string; updatedAt: string }> = [];
-    for (const summary of summaries) {
-      if (summary.kind !== "chat" || summary.archived) continue;
-      const path = summary.repoPath?.trim().replace(/[\\/]+$/g, "");
-      if (!path) continue;
-      const known = projects.find((project) => project.path === path);
-      if (known) {
-        if (summary.updatedAt > known.updatedAt) known.updatedAt = summary.updatedAt;
-        continue;
-      }
-      projects.push({ path, label: path.split(/[\\/]+/).filter(Boolean).pop() ?? path, updatedAt: summary.updatedAt });
-    }
-    projects.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.label.localeCompare(right.label));
-    // The folder the computer's New chat starts in when no chat is open: the
-    // last one chosen, or the newest chat's.
-    const newest = [...summaries].filter((summary) => summary.kind === "chat" && !summary.archived)
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
-    const defaultProject = settings.lastRepoPath?.trim() || newest?.repoPath?.trim() || undefined;
+    const { projects, defaultProject } = newChatProjects(summaries, settings.lastRepoPath);
     return {
-      projects: projects.map(({ path, label }) => ({ path, label })),
-      ...(defaultProject ? { defaultProject: defaultProject.replace(/[\\/]+$/g, "") } : {}),
-      assistant,
+      projects,
+      ...(defaultProject ? { defaultProject } : {}),
+      assistant: { ...assistant, id: CHAT_ADMINISTRATOR_ROLE_ID },
       members,
       ...(unavailable ? { unavailable } : {})
     };
+  }
+
+  /** Why this computer starts no chat now, in the words its New chat uses;
+   *  undefined when it can. */
+  private newChatBlockedReason(agents: AgentHealth[], settings: AppSettings, assistantKind: ChatProviderKind | undefined): string | undefined {
+    if (readyProviderKinds(agents, settings.providers).length === 0) return "Set up and sign in to at least one CLI provider before creating a chat.";
+    if (assistantKind) return undefined;
+    const savedKind = settings.assistantProviderKind;
+    if (!savedKind) return "Could not initialize an Assistant provider. Check General Settings and try again.";
+    const label = cliProviderMetadata(savedKind).label;
+    return `${agentReadinessReason(readinessForProvider(savedKind, agents, settings.providers), label) ?? `${label} is not ready.`} Change the Assistant provider in General Settings.`;
   }
 
   private seededParticipantInputs(
@@ -20519,6 +20509,9 @@ export class ChatService {
         }
         return true;
       }
+      await this.withChatMutation(chat, async () => {
+        if (this.armServerChatTitle(chat, message)) this.queueSnapshot(chat);
+      });
       await this.runParticipantBatch(chat, [participant], message, runId, controller.signal, this.onReviewProgress, warnings, {
         targetRunIds: new Map([[participant.id, runId]]),
         ...(turn.pendingMessageId ? { pendingMessageIds: new Map([[participant.id, turn.pendingMessageId]]) } : {})
@@ -20533,6 +20526,30 @@ export class ChatService {
       if (this.pendingServerTurns.get(runId) === controller) this.pendingServerTurns.delete(runId);
       if (warnings.length > 0) await this.appendConversationWarnings(chat, warnings).catch(() => undefined);
     }
+    return true;
+  }
+
+  /**
+   * A chat's first message written on another device (the phone's New chat):
+   * the members it asked name the chat, as when this computer sends a chat's
+   * first message (shouldCreateInitialAutoTitleEligibility). On the computer
+   * only: a machine's members name a chat no more than before. Whether it
+   * armed the title now.
+   */
+  private armServerChatTitle(conversation: Conversation, message: ChatMessage): boolean {
+    if (this.machineRuntime) return false;
+    if (message.role !== "user" || conversation.metadata.autoTitle || conversation.metadata.autoTitleEligibility) return false;
+    if (message.metadata?.parentMessageId || message.metadata?.chatThreadRootId) return false;
+    if ((message.metadata?.threadId ?? message.id) !== message.id) return false;
+    const index = conversation.messages.findIndex((item) => item.id === message.id);
+    if (index < 0 || conversation.messages.slice(0, index).some((item) => item.role === "user" || item.role === "participant")) return false;
+    const asked = new Set(deliveryTargetsOf(message));
+    const targets = this.chatParticipants(conversation).filter((item) => asked.has(item.id));
+    if (targets.length === 0) return false;
+    conversation.metadata = {
+      ...conversation.metadata,
+      autoTitleEligibility: this.initialAutoTitleEligibility(message, targets, new Map(targets.map((target) => [target.id, hubTurnRunId(message.id, target.id)])))
+    };
     return true;
   }
 

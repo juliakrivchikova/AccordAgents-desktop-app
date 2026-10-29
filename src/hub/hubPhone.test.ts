@@ -634,7 +634,7 @@ test("the phone starts a new chat from what the computer published, as the compu
     members: [{ configId: "c-mac", uses: 3, participant: { ...localMember, id: "t-mac", participantConfigId: "c-mac" } },
       { configId: "c-box", uses: 0, participant: { ...machineMember, id: "t-box", participantConfigId: "c-box" }, unavailable: "Cloud box is not ready." }] };
   const catalog = { version: 1, publishedAt: new Date().toISOString(), roles: { "software-engineer": "Engineer", administrator: "Chat Assistant" }, prompts: [], skills: [], avatars: {}, newChat };
-  const { client, identity } = await pairPhone(h);
+  const { client } = await pairPhone(h);
   const before = await client.getJson<{ options?: unknown; unavailable?: string }>("/v1/phone/new-chat");
   assert.match(before.unavailable ?? "", /has not told your server/, "nothing published yet: said so");
   assert.equal((await h.call(h.owner, "PUT", "/v1/catalog", { catalog })).status, 200);
@@ -661,6 +661,4 @@ test("the phone starts a new chat from what the computer published, as the compu
   assert.deepEqual(listed?.members.map((member) => member.handle), ["assistant", "mac"]);
   const turns = await h.storage.hubOps().requested();
   assert.ok(turns.some((turn) => turn.conversationId === conversationId && turn.participantId === participants[1].id), "the computer's member is asked to answer");
-  assert.ok(identity);
-
 });

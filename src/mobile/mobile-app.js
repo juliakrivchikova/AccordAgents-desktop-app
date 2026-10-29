@@ -1195,7 +1195,11 @@
   function loadStartedChats() {
     try {
       const parsed = JSON.parse(localStorage.getItem(STARTED_CHATS_KEY) || "[]");
-      return Array.isArray(parsed) ? parsed.filter(function (chat) { return chat && typeof chat.id === "string"; }) : [];
+      // Started under this pairing: paired again (to another server, say),
+      // the phone does not show what it started before.
+      const pairing = loadPairing();
+      const here = pairing && pairing.deviceId;
+      return Array.isArray(parsed) ? parsed.filter(function (chat) { return chat && typeof chat.id === "string" && Boolean(here) && chat.deviceId === here; }) : [];
     } catch {
       return [];
     }
@@ -1208,6 +1212,17 @@
     } catch {
       // Kept as it was: shown until the server lists it.
     }
+  }
+
+  /** A chat started here that will not be made (the server refused it, or
+   *  nothing was queued): out of the list, as the computer lists no chat its
+   *  New chat failed to make. Why stays in the send log and in the chat. */
+  function forgetStartedChat(conversationId) {
+    const started = loadStartedChats();
+    const kept = started.filter(function (chat) { return chat.id !== conversationId; });
+    if (kept.length === started.length) return;
+    saveStartedChats(kept);
+    renderChatList();
   }
 
   function saveChats(chats) {
@@ -1928,6 +1943,13 @@
    *  ("No member named @x."), each its own operation right behind it. One
    *  transaction: the lines never wait without their message. */
   async function enqueueMessage(input) {
+    const entries = await messageOutboxEntries(input);
+    await putOutboxEntries(entries);
+    return entries[0];
+  }
+
+  /** The message's entries, not written yet: the message first. */
+  async function messageOutboxEntries(input) {
     const entry = await createOutboxEvent(input);
     const threadRootId = entry.payload && typeof entry.payload.threadRootId === "string" && entry.payload.threadRootId ? entry.payload.threadRootId : undefined;
     const notes = [];
@@ -1945,8 +1967,7 @@
         } }
       }));
     }
-    await putOutboxEntries([entry].concat(notes));
-    return entry;
+    return [entry].concat(notes);
   }
 
   /** A Stop of one member's turn on the server, named by the turn's run id,
@@ -2520,6 +2541,8 @@
     let sent = 0;
     const total = owed.length;
     const statusOf = new Map(entries.map(function (entry) { return [entry.eventId, entry.status]; }));
+    // Why each was refused, this pass's refusals included.
+    const refusalOf = new Map(entries.map(function (entry) { return [entry.eventId, entry.lastError]; }));
     // A line goes once what it belongs to is taken, so a pass may free more.
     for (let pass = 0; pass < 3 && owed.length > 0; pass += 1) {
       const ready = [];
@@ -2528,8 +2551,9 @@
         const parent = entry.dependsOn ? statusOf.get(entry.dependsOn) : undefined;
         if (entry.dependsOn && parent === OUTBOX_REFUSED) {
           const owner = entries.find(function (item) { return item.eventId === entry.dependsOn; });
+          const why = refusalOf.get(entry.dependsOn);
           await settleOutboxEntry(entry, { status: OUTBOX_REFUSED, lastError: owner && owner.kind === "conversation.create"
-            ? "The chat was not created" + (owner.lastError ? ": " + owner.lastError : ".")
+            ? "The chat was not created" + (why ? ": " + why : ".")
             : "The message it belongs to was not taken." });
           continue;
         }
@@ -2546,6 +2570,8 @@
             await settleOutboxEntry(entry, { status: OUTBOX_REFUSED, lastError: reason });
             await recordSendFailure(sendFailureRecord(entry, { cause: "phone", reason: reason }));
             statusOf.set(entry.eventId, OUTBOX_REFUSED);
+            refusalOf.set(entry.eventId, reason);
+            if (entry.kind === "conversation.create") forgetStartedChat(entry.conversationId);
             continue;
           }
           ready.push({ entry: entry, op: op, bytes: bytes });
@@ -2593,6 +2619,8 @@
             await settleOutboxEntry(item.entry, { status: OUTBOX_REFUSED, lastError: reason });
             await recordSendFailure(sendFailureRecord(item.entry, { cause: "refused", reason: "Your server did not take it: " + reason }));
             statusOf.set(item.entry.eventId, OUTBOX_REFUSED);
+            refusalOf.set(item.entry.eventId, reason);
+            if (item.entry.kind === "conversation.create") forgetStartedChat(item.entry.conversationId);
           } else {
             await noteFailedAttempt(item.entry, { cause: "http", reason: "Your server answered without a word about it." });
           }
@@ -2996,7 +3024,10 @@
       answer = await serverPhoneGet("/v1/phone/new-chat", {});
     } catch (error) {
       if (token !== newChatToken) return;
-      renderNewChat("Could not reach your server: " + (error && error.message ? error.message : String(error)));
+      // A server from before New chat on the phone: it updates once the Mac does.
+      renderNewChat(error && error.serverStatus === 404
+        ? "Your server does not start chats from the phone yet. It will once AccordAgents on your Mac has updated."
+        : "Could not reach your server: " + (error && error.message ? error.message : String(error)));
       return;
     }
     if (token !== newChatToken) return;
@@ -3119,26 +3150,32 @@
     const shared = mobileSharedRules();
     const text = input ? input.value.trim() : "";
     if (!offer || offer.unavailable || !text || !shared || newChatStarting) return;
-    const blocked = offer.members.find(function (member) { return member.unavailable && newChatChosen.has(member.configId); });
+    // Each member it gets, chosen or named with @, must be one the computer
+    // could add now, as the computer's New chat checks them all.
+    const blocked = shared.newChatPickedMembers({ members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text })
+      .find(function (member) { return member.unavailable; });
     if (blocked) {
       renderNewChat(blocked.unavailable);
       return;
     }
     newChatStarting = true;
     renderNewChat();
+    const conversationId = createEventId();
+    let listed = false;
     try {
-      const conversationId = createEventId();
       const createdAt = nowIso();
       const participants = shared.newChatParticipants({
         assistant: offer.assistant, members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text, newId: createEventId
       });
       const repoPath = folder && folder.value ? folder.value : undefined;
       const title = shared.newChatTitle(text);
-      const group = repoPath ? (repoPath.split(/[\\/]+/).filter(Boolean).pop() || repoPath) : "No project";
-      // In the list at once, as the computer's sidebar shows a chat it made.
+      // In the list at once, as the computer's sidebar shows a chat it made
+      // (the first message finds its members there).
+      listed = true;
       saveStartedChats([{
-        id: conversationId, title: title, group: group, snippet: text.slice(0, 84), who: "You:", updatedAt: createdAt, running: false, startedHere: true,
-        participants: participants.map(function (participant) { return participant.handle; }).slice(0, 4),
+        id: conversationId, title: title, group: shared.mobileChatGroupLabel(repoPath), snippet: shared.mobileSnippet(text), who: "you:", updatedAt: createdAt,
+        running: false, startedHere: true, deviceId: (loadPairing() || {}).deviceId,
+        participants: participants.map(function (participant) { return "@" + participant.handle; }).slice(0, 4),
         members: participants.map(function (participant) {
           const assistant = participant.roleConfigId === "administrator";
           return normalizeMobileMember({ id: participant.id, handle: participant.handle, mentionHandle: participant.handle,
@@ -3157,16 +3194,23 @@
         payload: { message: { id: introId, role: "system", content: shared.newChatIntro(participants.map(function (participant) { return participant.handle; })),
           createdAt: createdAt, status: "done", metadata: { threadId: "system" } } }
       });
-      await putOutboxEntries([create, intro]);
-      await enqueueMessage({ conversationId: conversationId, content: text, dependsOn: create.eventId });
-      if (input) input.value = "";
-      closeNewChat();
-      await openConversation(conversationId);
-      void sendNow();
-    } finally {
+      const message = await messageOutboxEntries({ conversationId: conversationId, content: text, dependsOn: create.eventId });
+      // One transaction: the chat is never queued without its first message.
+      await putOutboxEntries([create, intro].concat(message));
+      listed = false;
+    } catch (error) {
+      // Nothing was queued: the chat is not in the list, and the panel says why.
+      if (listed) forgetStartedChat(conversationId);
       newChatStarting = false;
-      renderNewChat();
+      renderNewChat("Could not start the chat: " + (error && error.message ? error.message : String(error)));
+      return;
     }
+    newChatStarting = false;
+    if (input) input.value = "";
+    closeNewChat();
+    renderNewChat("");
+    await openConversation(conversationId);
+    void sendNow();
   }
 
   function wireNewChat() {

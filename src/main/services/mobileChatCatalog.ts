@@ -1,7 +1,10 @@
 import type { ChatMessage, ChatParticipant, Conversation, ConversationSummary } from "../../shared/types";
 import { chatMessageHiddenFromTimeline } from "../../shared/chatParticipantRequestThreads";
+import { mobileChatGroupLabel, mobileSnippet } from "../../shared/mobileChatRow";
 import type { MobileControlCard } from "../../shared/mobileControlCards";
 import { phoneActivityEvents, timelineEventsFromSnapshot, type MobileChatListItem, type MobileTimelinePage } from "./mobileTimeline";
+
+export { mobileChatGroupLabel, mobileSnippet };
 
 /** The phone's chat list and a chat's page, built from the server's copy of
  *  the chats, so the phone shows the same thing the desktop does. */
@@ -169,21 +172,6 @@ export function mobileParticipantDisplayName(participant: Pick<ChatParticipant, 
 
 /** The project's folder name. Split on either separator: the server reads
  *  paths the desktop wrote, whatever system that is. */
-export function mobileChatGroupLabel(repoPath: string | undefined): string {
-  if (!repoPath) {
-    return "AccordAgents";
-  }
-  const parts = repoPath.split(/[\\/]+/).filter(Boolean);
-  return parts[parts.length - 1] || "AccordAgents";
-}
-
-export function mobileSnippet(content: string | undefined): string {
-  const normalized = content?.replace(/\s+/g, " ").trim() ?? "";
-  if (!normalized) {
-    return "No messages yet";
-  }
-  return normalized.length > 84 ? `${normalized.slice(0, 81)}...` : normalized;
-}
 
 export function mobileWhoLabel(message: ChatMessage | undefined): string | undefined {
   if (!message) {
