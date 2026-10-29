@@ -41,7 +41,7 @@ test("a server that does not answer is not updated, and the loader says it will 
 test("a failed update opens the app with the reason, and a thrown one counts as failed", async () => {
   const refused = harness({ confirmedAfter: 0, install: async () => ({ status: "failed", message: "SSH said no" }) });
   assert.equal(await updateServerBeforeOpening(refused.options), "failed");
-  assert.equal(refused.said.at(-1)?.text, "Your server could not be updated: SSH said no AccordAgents will try again later.");
+  assert.equal(refused.said.at(-1)?.text, "Your server could not be updated: SSH said no. AccordAgents will try again later.");
   const thrown = harness({ confirmedAfter: 0, install: async () => { throw new Error("No server is set up yet."); } });
   assert.equal(await updateServerBeforeOpening(thrown.options), "failed");
   assert.equal(thrown.said.at(-1)?.tone, "error");

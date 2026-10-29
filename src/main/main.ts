@@ -1,4 +1,5 @@
 import path from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { HubInstaller, removeStaleHubTemp } from "./services/hubInstaller";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
@@ -182,6 +183,13 @@ let mainWindow: BrowserWindow | undefined;
 let quitCleanupStarted = false;
 let quitCleanupFinished = false;
 let quittingForUpdate = false;
+// The restart for an update this app asked for (the update prompt's
+// Restart). Electron keeps watching the windows after a restart that failed
+// and asks again every time they all close; those later asks are not one.
+let updateRestartRequested = false;
+// Only the loader is up while the User's server updates before the window
+// opens (serverUpdateLoader.ts): no window of the app's own yet.
+let serverUpdateLoaderOpen = false;
 
 function sendToMainWindow(channel: string, ...args: unknown[]): boolean {
   const window = mainWindow;
@@ -251,7 +259,9 @@ function recordMainProcessRuntimeError(kind: "uncaughtException" | "unhandledRej
     origin,
     ...details
   });
-  if (!mainWindow || mainWindow.isDestroyed()) {
+  // Before the app's window is up startup failed; while only the server
+  // update's loader is up, the window still comes once it is done.
+  if ((!mainWindow || mainWindow.isDestroyed()) && !serverUpdateLoaderOpen) {
     dialog.showErrorBox("AccordAgents failed", details.message);
     app.quit();
   }
@@ -655,7 +665,11 @@ const HUB_PROGRAM_UPDATE_DELAY_MS = 60_000;
 const HUB_PROGRAM_UPDATE_RETRY_MS = 30 * 60_000;
 const HUB_PROGRAM_UPDATE_MAX_TRIES = 3;
 
-function scheduleHubProgramUpdate(delayMs = HUB_PROGRAM_UPDATE_DELAY_MS): void {
+function scheduleHubProgramUpdate(delayMs = HUB_PROGRAM_UPDATE_DELAY_MS, options: { replace?: boolean } = {}): void {
+  if (hubProgramUpdateTimer && options.replace) {
+    clearTimeout(hubProgramUpdateTimer);
+    hubProgramUpdateTimer = undefined;
+  }
   if (hubProgramUpdateTimer) return;
   hubProgramUpdateTimer = setTimeout(() => {
     hubProgramUpdateTimer = undefined;
@@ -685,6 +699,22 @@ async function hubProgramUpdateDue(): Promise<{ from: string; to: string } | und
 
 /** The update made before the app's window opens is running. */
 let hubProgramUpdatingBeforeOpening = false;
+
+/** Whether this start may update the server before opening: the first one
+ *  for this desktop version. Noted before it is tried, so a start that is
+ *  killed midway does not try again on every start. */
+async function claimServerUpdateBeforeOpening(version: string): Promise<boolean> {
+  const file = path.join(app.getPath("userData"), "hub", "update-before-opening.json");
+  try {
+    const noted = JSON.parse(await readFile(file, "utf8")) as { version?: unknown };
+    if (noted.version === version) return false;
+  } catch {
+    // Never tried, or unreadable: tried now.
+  }
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, JSON.stringify({ version, at: new Date().toISOString() }));
+  return true;
+}
 
 async function updateHubProgramIfBehind(): Promise<void> {
   const due = await hubProgramUpdateDue();
@@ -2489,7 +2519,10 @@ void app.whenReady().then(async () => {
     canPrompt: () => updatePromptWindowShown(updatePromptWindow()),
     prompt: (info) => showUpdateRestartPrompt(info, updatePromptWindow()),
     quitAndInstall: createUpdateRestart({
-      quitAndInstall: quitAndInstallUpdate,
+      quitAndInstall: () => {
+        updateRestartRequested = true;
+        quitAndInstallUpdate();
+      },
       windows: currentUpdateWindows,
       appHidden: appHiddenForUpdate,
       log: (event, payload) => { debugLogService.writeNow(event, payload); }
@@ -2501,14 +2534,26 @@ void app.whenReady().then(async () => {
   // runs the older program: the server is updated before the app opens (the
   // User, 2026-10-29), and until then only a loader is shown and no member
   // starts — the link to the server, through which every turn comes, waits.
-  const serverUpdate = await hubProgramUpdateDue().catch(() => undefined);
+  // Once per version of this desktop: a server that stays away, or an update
+  // that keeps failing, does not hold every later start; the regular update
+  // tries again while the app is open.
+  const serverUpdate = await hubProgramUpdateDue().then(async (due) => due && await claimServerUpdateBeforeOpening(due.to) ? due : undefined)
+    .catch(() => undefined);
   const serverUpdateLoader = serverUpdate ? openServerUpdateLoader(path.join(__dirname, "../../renderer/assets")) : undefined;
-  if (serverUpdate) hubProgramUpdatingBeforeOpening = true;
+  if (serverUpdate) {
+    hubProgramUpdatingBeforeOpening = true;
+    serverUpdateLoaderOpen = true;
+  }
   await appMcpService.start();
   await storageService.init();
-  void scriptService.start().catch((error) => {
-    void debugLogService.write("scripts.start.error", { message: error instanceof Error ? error.message : String(error) });
-  });
+  // A scheduled script wakes members by writing into a chat: with the server
+  // being updated first, it starts once the chats go through the server.
+  const startScripts = (): void => {
+    void scriptService.start().catch((error) => {
+      void debugLogService.write("scripts.start.error", { message: error instanceof Error ? error.message : String(error) });
+    });
+  };
+  if (!serverUpdate) startScripts();
   // A laptop that slept through a due time runs it (or records it missed) on wake.
   powerMonitor.on("resume", () => {
     void scriptService.tick();
@@ -2735,30 +2780,6 @@ void app.whenReady().then(async () => {
     void debugLogService.write("machine-link.init.error", { message: error instanceof Error ? error.message : String(error) });
     markMachineLinkReady();
   }
-  // A document's chat note this computer wrote before documents moved to the
-  // server and never got into the chat goes in now (later notes come with the
-  // server's feed).
-  await artifactService.flushPendingArtifactEvents().catch((error) => {
-    void debugLogService.write("artifacts.outbox.startup-error", {
-      message: error instanceof Error ? error.message : String(error)
-    });
-  });
-  await chatService.reconcileConversationDeletions().catch((error) => {
-    void debugLogService.write("chat.delete.reconcile-error", { message: error instanceof Error ? error.message : String(error) });
-  });
-  await chatService.reconcileDeletedConversationArtifacts().catch((error) => {
-    void debugLogService.write("chat.delete.artifacts.reconcile-error", {
-      message: error instanceof Error ? error.message : String(error)
-    });
-  });
-  // A member removal the User approved before the app quit, still waiting for
-  // a turn to end (nothing runs after a restart, so it is applied now), and a
-  // machine member's addition not applied yet.
-  void chatService.resumeQueuedRosterChanges().catch((error) => {
-    void debugLogService.write("chat.member-removal.resume-error", {
-      message: error instanceof Error ? error.message : String(error)
-    });
-  });
   if (serverUpdate && serverUpdateLoader) {
     const offProgress = hubInstaller.onProgress((state) => {
       if (state.status === "installing" && state.message) serverUpdateLoader.status(state.message);
@@ -2783,7 +2804,7 @@ void app.whenReady().then(async () => {
       } else {
         hubProgramUpdatingBeforeOpening = false;
       }
-      if (outcome === "failed") scheduleHubProgramUpdate(HUB_PROGRAM_UPDATE_RETRY_MS);
+      if (outcome === "failed") scheduleHubProgramUpdate(HUB_PROGRAM_UPDATE_RETRY_MS, { replace: true });
     } catch (error) {
       hubProgramUpdatingBeforeOpening = false;
       void debugLogService.write("hub.program-update.error", { message: error instanceof Error ? error.message : String(error), beforeOpening: true });
@@ -2791,10 +2812,37 @@ void app.whenReady().then(async () => {
       offProgress();
     }
     // Updated or not, the chats go through the server from here (an update
-    // that linked the server again has started the link already).
+    // that linked the server again has started the link already), and what
+    // writes into chats starts after it: below, and the scripts.
     await startServerChatLinkOnce();
+    startScripts();
   }
+  // A document's chat note this computer wrote before documents moved to the
+  // server and never got into the chat goes in now (later notes come with the
+  // server's feed).
+  await artifactService.flushPendingArtifactEvents().catch((error) => {
+    void debugLogService.write("artifacts.outbox.startup-error", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+  });
+  await chatService.reconcileConversationDeletions().catch((error) => {
+    void debugLogService.write("chat.delete.reconcile-error", { message: error instanceof Error ? error.message : String(error) });
+  });
+  await chatService.reconcileDeletedConversationArtifacts().catch((error) => {
+    void debugLogService.write("chat.delete.artifacts.reconcile-error", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+  });
+  // A member removal the User approved before the app quit, still waiting for
+  // a turn to end (nothing runs after a restart, so it is applied now), and a
+  // machine member's addition not applied yet.
+  void chatService.resumeQueuedRosterChanges().catch((error) => {
+    void debugLogService.write("chat.member-removal.resume-error", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+  });
   createWindow();
+  serverUpdateLoaderOpen = false;
   serverUpdateLoader?.close();
   void ensureLoginShellEnvPrimed();
   await detectAgentsWithAppSkills().catch((error) => {
@@ -2822,12 +2870,18 @@ app.on("window-all-closed", () => {
   debugLogService.writeNow("app-window.all-closed", { forUpdate: quittingForUpdate, quitting: quitCleanupStarted });
   // The loader closed by hand while the server updates: the app's window
   // still comes.
-  if (process.platform !== "darwin" && !hubProgramUpdatingBeforeOpening) {
+  if (process.platform !== "darwin" && !serverUpdateLoaderOpen) {
     app.quit();
   }
 });
 
 autoUpdater.on("before-quit-for-update", () => {
+  if (!updateRestartRequested) {
+    // Electron asking again on its own after a restart that failed (every
+    // time the windows all close): not a restart, and nothing is stopped.
+    debugLogService.writeNow("app-update-before-quit-ignored", { windows: currentUpdateWindows() });
+    return;
+  }
   const again = quittingForUpdate;
   quittingForUpdate = true;
   debugLogService.writeNow("app-update-before-quit", { again, windows: currentUpdateWindows() });
@@ -2847,7 +2901,8 @@ autoUpdater.on("before-quit-for-update", () => {
  * downloaded update still installs when the app quits.
  */
 autoUpdater.on("error", (error: Error) => {
-  if (!quittingForUpdate) return;
+  if (!updateRestartRequested) return;
+  updateRestartRequested = false;
   quittingForUpdate = false;
   debugLogService.writeNow("app-update-restart-failed", { message: error instanceof Error ? error.message : String(error) });
   setImmediate(() => {

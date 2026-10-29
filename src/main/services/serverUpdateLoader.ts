@@ -72,7 +72,8 @@ export async function updateServerBeforeOpening(options: ServerUpdateBeforeOpeni
     }
     options.log("hub.program-update.finished", { status: result.status, message: result.message ?? "", beforeOpening: true });
     if (result.status !== "ready") {
-      options.loader.status(`Your server could not be updated${result.message ? `: ${result.message}` : "."} AccordAgents will try again later.`, "error");
+      const reason = result.message?.trim();
+      options.loader.status(`Your server could not be updated${reason ? `: ${/[.!?]$/.test(reason) ? reason : `${reason}.`}` : "."} AccordAgents will try again later.`, "error");
       await sleep(noticeMs);
       return "failed";
     }
@@ -100,7 +101,7 @@ export function serverUpdateLoaderHtml(logoDataUrl: string | undefined): string 
   @keyframes turn { to { transform: rotate(360deg); } }
   h1 { margin: 0; font-size: 19px; font-weight: 700; color: var(--fg1); }
   p { margin: 8px 0 0; line-height: 1.45; }
-  #status { min-height: 20px; margin-top: 14px; color: var(--mut); }
+  #status { min-height: 20px; max-height: 64px; overflow: hidden; margin-top: 14px; color: var(--mut); overflow-wrap: anywhere; }
   #status[data-tone="error"] { color: var(--danger); }
 </style></head>
 <body>
@@ -148,7 +149,8 @@ export function openServerUpdateLoader(rendererAssetsDir: string): ServerUpdateL
   const windowId = window.id;
   loaderWindowIds.add(windowId);
   window.on("closed", () => { loaderWindowIds.delete(windowId); });
-  let last: { text: string; tone?: string } = { text: "" };
+  // Until the update itself starts, the desktop is still starting up.
+  let last: { text: string; tone?: string } = { text: "Getting ready\u2026" };
   const apply = (): void => {
     if (window.isDestroyed() || window.webContents.isLoading()) return;
     void window.webContents.executeJavaScript(`(() => { const node = document.getElementById("status"); node.textContent = ${JSON.stringify(last.text)};
