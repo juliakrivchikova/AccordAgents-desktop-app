@@ -108,7 +108,7 @@ export function serverUpdateLoaderHtml(logoDataUrl: string | undefined): string 
   ${logoDataUrl ? `<img class="logo" src="${logoDataUrl}" alt="">` : ""}
   <h1>Updating your server…</h1>
   <p>AccordAgents opens when it is done.<br>Members wait until then.</p>
-  <p id="status" role="status"></p>
+  <p id="status" role="status">Getting ready\u2026</p>
 </body></html>`;
 }
 
@@ -149,20 +149,18 @@ export function openServerUpdateLoader(rendererAssetsDir: string): ServerUpdateL
   const windowId = window.id;
   loaderWindowIds.add(windowId);
   window.on("closed", () => { loaderWindowIds.delete(windowId); });
-  // Until the update itself starts, the desktop is still starting up.
-  let last: { text: string; tone?: string } = { text: "Getting ready\u2026" };
-  const apply = (): void => {
-    if (window.isDestroyed() || window.webContents.isLoading()) return;
-    void window.webContents.executeJavaScript(`(() => { const node = document.getElementById("status"); node.textContent = ${JSON.stringify(last.text)};
-      if (${JSON.stringify(last.tone ?? "")}) node.dataset.tone = ${JSON.stringify(last.tone ?? "")}; else delete node.dataset.tone; })()`).catch(() => undefined);
+  // Until the update itself starts, the desktop is still starting up: said by
+  // the page itself, before anything is sent to it.
+  const apply = (text: string, tone?: string): void => {
+    if (window.isDestroyed()) return;
+    // Sent at once: Electron runs it as soon as the page can (still loading
+    // when its load has just finished, by Electron's own account), in order.
+    void window.webContents.executeJavaScript(`(() => { const node = document.getElementById("status"); node.textContent = ${JSON.stringify(text)};
+      if (${JSON.stringify(tone ?? "")}) node.dataset.tone = ${JSON.stringify(tone ?? "")}; else delete node.dataset.tone; })()`).catch(() => undefined);
   };
-  window.webContents.on("did-finish-load", apply);
   void window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(serverUpdateLoaderHtml(logoDataUrl(rendererAssetsDir)))}`);
   return {
-    status: (text, tone) => {
-      last = { text, tone };
-      apply();
-    },
+    status: (text, tone) => apply(text, tone),
     close: () => {
       if (!window.isDestroyed()) window.destroy();
     }
