@@ -373,7 +373,6 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               </>
             )}
           </div>
-          <ChatMessageRefusal delivery={delivery} />
           {props.appToolApprovals && props.appToolApprovals.length > 0 && props.onRespondToAppToolApproval && (
             <div className="chat-message-embedded-approvals">
               <ChatAppToolApprovalList
@@ -424,6 +423,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           {imageAttachments.length > 0 && (
             <ChatImageAttachmentStrip conversationId={props.conversationId} attachments={imageAttachments} />
           )}
+          <ChatMessageRefusal delivery={delivery} />
           <ChatMessageReactionList reactions={reactionEntries} onToggleReaction={toggleReaction} />
           {participantRequests.map((request) => (
             <div className={`chat-approval-note ${participantRequestNoteClass(request)}`} key={request.id}>

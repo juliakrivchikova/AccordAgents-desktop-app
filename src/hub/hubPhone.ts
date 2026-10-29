@@ -361,7 +361,7 @@ export class HubPhoneApi {
   }
 
   /** Each of the User's messages with the turns it asked for, as the server
-   *  holds them: "Taken to work" once a member's own device claimed one.
+   *  holds them: a member's waiting row goes once its own device took one.
    *  A message that asked none says so (an empty list): nobody is waited for. */
   private async withTurns(conversationId: string, events: MobileTimelineEvent[], messages: ChatMessage[]): Promise<MobileTimelineEvent[]> {
     const asked = new Set(messages.filter((message) => message.role === "user").map((message) => message.id));

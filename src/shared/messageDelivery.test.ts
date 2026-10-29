@@ -21,6 +21,10 @@ test("a message her server refused says so with the server's reason", () => {
   assert.deepEqual(messageDelivery(userMessage({ serverRejected: "the chat was deleted" })), { state: "refused", text: "Not taken by your server: the chat was deleted" });
 });
 
+test("a message on the server is shown as any message even if a server refused it before", () => {
+  assert.equal(messageDelivery(userMessage({ serverRejected: "the chat was deleted", serverSeq: 0 })), undefined);
+});
+
 test("only the User's messages have a delivery state", () => {
   assert.equal(messageDelivery({ ...userMessage(), role: "participant" }), undefined);
 });

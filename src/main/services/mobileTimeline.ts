@@ -101,8 +101,8 @@ export interface MobileTimelineEvent {
    *  the member it names the turn on the server, which a Stop names. */
   sourceMessageId?: string;
   /** The User's message: each member it asked a turn of, and where that turn
-   *  stands on the server ("Taken to work" once the member's own device
-   *  claimed it, agreement Д5). */
+   *  stands on the server (the phone shows a member's waiting row until the
+   *  member's own device took it). */
   turns?: MobileTimelineTurn[];
 }
 

@@ -15,8 +15,10 @@ export type MessageDelivery =
 /** Undefined for a message the server took, and for any other message. */
 export function messageDelivery(message: ChatMessage): MessageDelivery | undefined {
   if (message.role !== "user") return undefined;
+  // On the server (a later move to another server took it, say): shown as
+  // any message, whatever was refused before.
+  if (typeof message.metadata?.serverSeq === "number") return undefined;
   const refused = message.metadata?.serverRejected;
   if (typeof refused === "string" && refused) return { state: "refused", text: `${MESSAGE_REFUSED_PREFIX}: ${refused}` };
-  if (typeof message.metadata?.serverSeq !== "number") return { state: "unsent" };
-  return undefined;
+  return { state: "unsent" };
 }

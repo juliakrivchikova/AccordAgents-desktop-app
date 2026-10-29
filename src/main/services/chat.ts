@@ -20290,7 +20290,7 @@ export class ChatService {
     }
   }
 
-  /** The turn's mark on the message it answers ("taken to work", Д5). */
+  /** The turn, as the server holds it, on the message it answers. */
   private markServerTurn(conversation: Conversation, turn: HubTurn): void {
     const index = conversation.messages.findIndex((message) => message.id === turn.messageId);
     if (index < 0) return;
