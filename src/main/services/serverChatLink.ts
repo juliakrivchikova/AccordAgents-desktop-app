@@ -31,6 +31,9 @@ export class ServerChatLink {
   private client?: HubClient;
   private ops?: HubOpsClient;
   private embedded?: { url: string; close(): Promise<void> };
+  /** When this link last started (what was queued before belongs to an
+   *  earlier one). */
+  private startedAt?: string;
   /** Writes and reads wait until the chats were moved (the first time). */
   private ready = false;
   private deviceIdValue = "";
@@ -175,6 +178,7 @@ export class ServerChatLink {
   }
 
   private async startNow(): Promise<void> {
+    this.startedAt = new Date().toISOString();
     this.artifactMovesUnknown = this.options.movesChats && Boolean(this.options.artifacts);
     const identity = await this.options.identity();
     this.deviceIdValue = (identity as { originId?: string }).originId ?? "";
@@ -472,7 +476,10 @@ export class ServerChatLink {
     // Once per server: a move tried again keeps what was queued for this one.
     const withdrawnKey = `ops-move-withdrew:${health.hubId}`;
     if (!await hub.clientState(withdrawnKey)) {
-      const stale = (await this.options.storage.hubClientOps().withdrawKinds("turn.")) + (await this.options.storage.hubClientOps().withdrawKinds("card."));
+      // Only what was queued before this link started: nothing of this
+      // process waits for those.
+      const ops = this.options.storage.hubClientOps();
+      const stale = (await ops.withdrawKinds("turn.", this.startedAt)) + (await ops.withdrawKinds("card.", this.startedAt));
       await hub.setClientState(withdrawnKey, new Date().toISOString());
       if (stale) this.options.log("chat.server.move-withdrew", { ops: stale });
     }

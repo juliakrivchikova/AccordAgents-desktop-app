@@ -24,6 +24,7 @@ export const HUB_CLIENT_OPS_SCHEMA_SQL = `
     updated_at text not null
   );
   create index if not exists hub_client_ops_queued on hub_client_ops(status);
+  create index if not exists hub_client_ops_answered on hub_client_ops(status, updated_at);
   create index if not exists hub_client_ops_message on hub_client_ops(conversation_id, message_id);
   create table if not exists hub_client_op_failures (
     id integer primary key autoincrement,
@@ -187,11 +188,12 @@ export class HubClientOpsStore {
   }
 
   /** Takes back every waiting operation of these kinds (a device that
-   *  restarted: nothing waits for their answer any more). */
-  async withdrawKinds(kindPrefix: string): Promise<number> {
+   *  restarted: nothing waits for their answer any more); `before`: only
+   *  those written before then. */
+  async withdrawKinds(kindPrefix: string, before?: string): Promise<number> {
     await this.init();
     const rows = await this.database.query<{ changed: number }>(`delete from hub_client_ops where status = 'queued'
-      and substr(kind, 1, ${kindPrefix.length}) = ${quote(kindPrefix)};
+      and substr(kind, 1, ${kindPrefix.length}) = ${quote(kindPrefix)} ${before ? `and created_at < ${quote(before)}` : ""};
       select changes() as changed;`);
     return Number(rows[0]?.changed ?? 0);
   }
@@ -282,6 +284,9 @@ const RETRY_MAX_MS = 30_000;
 /** How often answered operations and old failures are cleared away. */
 const PRUNE_EVERY_MS = 60 * 60_000;
 const TOO_LARGE = "The operation is too large.";
+/** The answer to an operation its writer took back after a request that
+ *  carried it failed: it may or may not have reached the server. */
+export const HUB_OP_TAKEN_BACK = "Taken back after a request that may have carried it failed.";
 
 /**
  * Sends a device's operations to the User's server in the order they were
@@ -554,7 +559,9 @@ export class HubOpsClient {
         this.options.onAnswered?.(row, outcome);
         this.answer(row.opId, outcome);
       }
-      if (batch.length === 0) continue;
+      // Read again: nothing may be awaited between reading a batch and
+      // claiming it (a withdrawal meanwhile would be sent anyway).
+      if (batch.length !== waiting.length) continue;
       if (!client) {
         // No link yet: kept, tried when the link comes (nudge).
         return;
@@ -573,6 +580,7 @@ export class HubOpsClient {
           if (this.withdrawn.has(row.opId)) {
             await this.options.store.withdraw(row.opId).catch(() => false);
             this.withdrawn.delete(row.opId);
+            this.answer(row.opId, { status: "rejected", reason: HUB_OP_TAKEN_BACK });
           }
         }
         this.options.log("hub.ops.send-failed", { ops: batch.length, reason, retryMs: this.retryMs });
@@ -612,6 +620,7 @@ export class HubOpsClient {
         if (byId.has(row.opId) || !this.withdrawn.has(row.opId)) continue;
         await this.options.store.withdraw(row.opId).catch(() => false);
         this.withdrawn.delete(row.opId);
+        this.answer(row.opId, { status: "rejected", reason: HUB_OP_TAKEN_BACK });
       }
       if (byId.size === 0) return;
     }

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { HubOpsClient } from "./hubOpsClient";
+import { HUB_OP_TAKEN_BACK, HubOpsClient } from "./hubOpsClient";
 import { StorageService } from "./storage";
 import type { HubOp } from "../../shared/hubOps";
 
@@ -104,4 +104,39 @@ test("an operation too large for the server is refused here with its reason and 
   // A week later the answered ones go.
   await store.prune(Date.now() + 8 * 24 * 60 * 60_000);
   assert.equal(await store.get("op-next"), undefined);
+});
+
+test("an operation taken back while a request carried it is answered when that request fails, so nobody waits for it forever", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-ops-client-taken-back-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const storage = new StorageService({ dbPath: path.join(dir, "device.sqlite3") });
+  const store = storage.hubClientOps();
+  let failRequest: (() => void) | undefined;
+  const fakeClient = {
+    writeOps: () => new Promise((_resolve, reject) => { failRequest = () => reject(new Error("socket hang up")); }),
+    feed: async (_after: number, waitMs: number, signal?: AbortSignal) => {
+      await new Promise<void>((resolve) => { const timer = setTimeout(resolve, waitMs); signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }); });
+      return { entries: [], head: 0, more: false };
+    }
+  };
+  const client = new HubOpsClient({
+    store,
+    cursor: { get: async () => "0", set: async () => undefined },
+    client: () => fakeClient as never,
+    apply: async () => undefined,
+    resync: async () => 0,
+    log: () => undefined
+  });
+  t.after(() => client.stop());
+  const at = new Date().toISOString();
+  await store.enqueue([{ opId: "op-claim", kind: "turn.claim", conversationId: "chat-1", runId: "turn-m1-p1", messageId: "m1", participantId: "p1" }], at);
+  client.start();
+  const deadline = Date.now() + 5_000;
+  while (!failRequest && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(failRequest, "the request is on its way");
+  assert.deepEqual(await client.withdraw("op-claim"), { status: "in-flight" });
+  const answer = client.waitFor("op-claim");
+  failRequest!();
+  assert.deepEqual(await answer, { status: "rejected", reason: HUB_OP_TAKEN_BACK });
+  assert.equal(await store.get("op-claim"), undefined, "never sent again");
 });

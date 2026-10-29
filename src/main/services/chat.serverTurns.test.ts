@@ -13,6 +13,7 @@ import { ChatService } from "./chat";
 import { DeviceIdentityService, createDeviceIdentity } from "./deviceIdentity";
 import { ChatSearchService } from "./chatSearch";
 import { signHubRequest, type HubSigningIdentity } from "./hubAuth";
+import { HUB_OP_TAKEN_BACK } from "./hubOpsClient";
 import { ServerChatLink } from "./serverChatLink";
 import { StorageService } from "./storage";
 
@@ -248,8 +249,10 @@ test("a claim stopped before it ran is never left taken: taken back if unsent, f
   assert.deepEqual(await run({ status: "withdrawn", attempted: false }), ["turn.stop"], "never sent: the turn is only stopped");
   assert.deepEqual(await run({ status: "missing" }), ["turn.stop"]);
   assert.deepEqual(await run({ status: "withdrawn", attempted: true }), ["turn.stop", "finish:stopped"], "a failed request may have carried it");
-  assert.deepEqual(await run({ status: "in-flight" }, { status: "accepted", seq: 5, claim: "claimed" }), ["finish:stopped"]);
-  assert.deepEqual(await run({ status: "answered", outcome: { status: "accepted", seq: 5, claim: "already-yours" } }), ["finish:stopped"]);
-  assert.deepEqual(await run({ status: "answered", outcome: { status: "accepted", seq: 5, claim: "stopped" } }), [], "stopped there already");
-  assert.deepEqual(await run({ status: "answered", outcome: { status: "rejected", reason: "no" } }), []);
+  assert.deepEqual(await run({ status: "in-flight" }, { status: "accepted", seq: 5, claim: "claimed" }), ["turn.stop", "finish:stopped"]);
+  assert.deepEqual(await run({ status: "in-flight" }, { status: "rejected", reason: HUB_OP_TAKEN_BACK }), ["turn.stop", "finish:stopped"],
+    "its request failed after it was taken back: it may have reached the server");
+  assert.deepEqual(await run({ status: "answered", outcome: { status: "accepted", seq: 5, claim: "already-yours" } }), ["turn.stop", "finish:stopped"]);
+  assert.deepEqual(await run({ status: "answered", outcome: { status: "accepted", seq: 5, claim: "stopped" } }), ["turn.stop"], "stopped there already");
+  assert.deepEqual(await run({ status: "answered", outcome: { status: "rejected", reason: "no" } }), ["turn.stop"]);
 });

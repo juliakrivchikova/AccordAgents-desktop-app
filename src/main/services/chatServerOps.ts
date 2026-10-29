@@ -175,8 +175,10 @@ export function turnMark(turn: HubTurn): ChatServerTurnMark {
 const TURN_STAGE: Record<HubTurn["state"], number> = { requested: 0, claimed: 1, stopped: 2, finished: 2 };
 
 /** A turn on the server only moves forward (requested, claimed, then stopped
- *  or finished): of two copies of a message's turn marks, each turn keeps the
- *  furthest one, so an older copy of the message never takes it back. */
+ *  or finished): of the stored marks (`a`, written as the feed said) and an
+ *  older copy's (`b`), each turn keeps the furthest one, so an older copy of
+ *  the message never takes it back; another turn of the same member in the
+ *  older copy is an earlier one, and the stored mark stays. */
 export function furthestTurnMarks(
   a: Record<string, ChatServerTurnMark> | undefined,
   b: Record<string, ChatServerTurnMark> | undefined
@@ -185,8 +187,8 @@ export function furthestTurnMarks(
   const merged: Record<string, ChatServerTurnMark> = { ...a };
   for (const [participantId, mark] of Object.entries(b)) {
     const other = merged[participantId];
-    const further = !other || other.runId !== mark.runId || TURN_STAGE[mark.state] > TURN_STAGE[other.state] ||
-      (TURN_STAGE[mark.state] === TURN_STAGE[other.state] && Boolean(mark.stopRequested || mark.outcome) && !(other.stopRequested || other.outcome));
+    const further = !other || (other.runId === mark.runId && (TURN_STAGE[mark.state] > TURN_STAGE[other.state] ||
+      (TURN_STAGE[mark.state] === TURN_STAGE[other.state] && Boolean(mark.stopRequested || mark.outcome) && !(other.stopRequested || other.outcome))));
     if (further) merged[participantId] = mark;
   }
   return merged;

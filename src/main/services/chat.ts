@@ -23,7 +23,7 @@ import {
   type WantedHubCard
 } from "../../shared/hubCards";
 import { ServerCardBook, type CardApplyResult, type ChatCardAppliers } from "./chatCards";
-import type { HubOpOutcome } from "./hubOpsClient";
+import { HUB_OP_TAKEN_BACK, type HubOpOutcome } from "./hubOpsClient";
 import type {
   AgentContextUsage,
   AgentHealth,
@@ -20604,27 +20604,21 @@ export class ChatService {
   }
 
   /**
-   * A turn stopped before it ran here: never left taken on the server. A
-   * claim nothing sent yet is taken back and the turn stopped; a claim the
-   * server may have had is answered first, and a turn it gave this device is
-   * finished as stopped (a Stop alone would leave it taken, every device
-   * showing it busy).
+   * A turn stopped before it ran here: never left taken on the server. The
+   * Stop goes first, whatever the claim's state (a turn only asked for is
+   * stopped by it); a claim nothing sent yet is taken back, and a turn the
+   * server gave this device (or may have, after a request carrying the
+   * claim failed) is also finished as stopped, since a Stop alone leaves
+   * it taken, every device showing it busy.
    */
   private async endAbortedServerTurn(link: ChatServerLink, turn: { conversationId: string; runId: string; messageId: string; participantId: string }, claimOpId?: string): Promise<void> {
-    const stop: HubOp = { opId: newOpId(), kind: "turn.stop", ...turn };
-    const finish: HubOp = { opId: newOpId(), kind: "turn.finish", conversationId: turn.conversationId, runId: turn.runId, outcome: "stopped" };
     const taken = claimOpId ? await link.withdraw?.(claimOpId) : undefined;
-    if (!claimOpId || !taken || taken.status === "missing" || (taken.status === "withdrawn" && !taken.attempted)) {
-      await link.enqueue([stop]);
-      return;
-    }
-    // A request that failed carried it: the server may have given the turn.
-    if (taken.status === "withdrawn") {
-      await link.enqueue([stop, finish]);
-      return;
-    }
-    const outcome = taken.status === "answered" ? taken.outcome : await link.opAnswered(claimOpId);
-    if (outcome.status === "accepted" && (outcome.claim === "claimed" || outcome.claim === "already-yours")) await link.enqueue([finish]);
+    await link.enqueue([{ opId: newOpId(), kind: "turn.stop", ...turn }]);
+    if (!claimOpId || !taken || taken.status === "missing" || (taken.status === "withdrawn" && !taken.attempted)) return;
+    const outcome = taken.status === "withdrawn" ? undefined : taken.status === "answered" ? taken.outcome : await link.opAnswered(claimOpId);
+    const given = !outcome || (outcome.status === "accepted" && (outcome.claim === "claimed" || outcome.claim === "already-yours")) ||
+      (outcome.status === "rejected" && outcome.reason === HUB_OP_TAKEN_BACK);
+    if (given) await link.enqueue([{ opId: newOpId(), kind: "turn.finish", conversationId: turn.conversationId, runId: turn.runId, outcome: "stopped" }]);
   }
 
   /** The User's server refused a message this device wrote: the message
