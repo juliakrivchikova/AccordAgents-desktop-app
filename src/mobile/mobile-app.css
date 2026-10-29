@@ -2000,6 +2000,9 @@ button.mobile-chat-group-title:active {
   z-index: 13;
   display: flex;
   flex-direction: column;
+  /* Held sideways, clear of the notch and the rounded corners. */
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
   background: var(--surface);
 }
 
@@ -2027,14 +2030,16 @@ button.mobile-chat-group-title:active {
   cursor: pointer;
 }
 
+/* Short (the keyboard up, the phone sideways), it scrolls from the top rather
+   than cutting the line that says why a start failed. */
 .new-chat-hero {
   flex: 1;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: safe center;
   padding: 0 28px 20px;
   text-align: center;
 }
@@ -2105,8 +2110,14 @@ button.mobile-chat-group-title:active {
   background: var(--s2);
 }
 
+/* The composer's strip floats above its bar; on the card it is a row inside it. */
 .new-chat-attachments {
+  position: static;
   padding: 8px 6px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .new-chat-input {
@@ -2139,6 +2150,7 @@ button.mobile-chat-group-title:active {
 }
 
 .new-chat-plus {
+  position: relative;
   width: 36px;
   height: 40px;
   flex-shrink: 0;
@@ -2224,6 +2236,7 @@ button.mobile-chat-group-title:active {
 }
 
 .new-chat-send {
+  position: relative;
   width: 38px;
   height: 38px;
   flex-shrink: 0;
@@ -2235,6 +2248,14 @@ button.mobile-chat-group-title:active {
   background: var(--fg1);
   color: var(--surface-fg);
   cursor: pointer;
+}
+
+/* 44px to a finger, whatever the drawn size. */
+.new-chat-plus::before,
+.new-chat-send::before {
+  content: "";
+  position: absolute;
+  inset: -3px -4px;
 }
 
 .new-chat-send:disabled {
@@ -2274,6 +2295,12 @@ button.mobile-chat-group-title:active {
 /* A member that cannot be added now says why, faded. */
 .new-chat-option[data-unavailable="1"] {
   opacity: 0.5;
+}
+
+.new-chat-option .members-sheet-location {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .new-chat-project-icon {

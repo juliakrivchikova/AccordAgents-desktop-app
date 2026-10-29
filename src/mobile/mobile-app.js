@@ -1825,12 +1825,15 @@
   }
 
   /** Prepares pictures picked for a message and adds them to its list: the
-   *  chat's composer's, unless another list (New chat's) is given. */
+   *  chat's composer's, unless another one is named (New chat's, as a
+   *  function giving its list). The list is read when it is used, not before
+   *  the picture is prepared: a send, a start or a removed picture meanwhile
+   *  replaces it, and a picture added to the replaced one was lost. */
   async function addPendingAttachments(files, target) {
     const rejected = [];
+    const currentList = function () { return target ? target() : pendingAttachments; };
     for (const file of Array.from(files || [])) {
-      const list = target || pendingAttachments;
-      if (list.length >= MOBILE_UPLOAD_MAX_IMAGES) {
+      if (currentList().length >= MOBILE_UPLOAD_MAX_IMAGES) {
         rejected.push(file.name + " — too many pictures");
         continue;
       }
@@ -1858,6 +1861,11 @@
         }
         // Five 4 MB pictures would be a 27 MB base64 payload in IndexedDB and
         // one relay frame. The batch is bounded as well as each picture.
+        const list = currentList();
+        if (list.length >= MOBILE_UPLOAD_MAX_IMAGES) {
+          rejected.push(file.name + " — too many pictures");
+          continue;
+        }
         const pendingBytes = list.reduce(function (total, item) {
           return total + Math.floor((item.dataBase64.length * 3) / 4);
         }, 0);
@@ -3015,6 +3023,9 @@
   let newChatProject = "";
   // Pictures for the first message, prepared as the chat's composer prepares them.
   let newChatAttachments = [];
+  // Pictures still being prepared: Start waits for them.
+  let newChatPreparing = 0;
+  const NEW_CHAT_REJECTED_PREFIX = "Not attached: ";
   let newChatToken = 0;
   let newChatStarting = false;
 
@@ -3073,6 +3084,7 @@
     closeNewChatPickers();
     const sheet = document.getElementById(id);
     if (sheet) sheet.hidden = false;
+    renderNewChatState();
   }
 
   function closeNewChatPickers() {
@@ -3080,6 +3092,7 @@
       const sheet = document.getElementById(id);
       if (sheet) sheet.hidden = true;
     }
+    renderNewChatState();
   }
 
   /** The saved members as the computer's New chat lists them: the most used
@@ -3217,7 +3230,6 @@
         }
       }
     }
-    renderNewChatAttachments();
     renderNewChatState();
   }
 
@@ -3266,7 +3278,14 @@
       else delete noteNode.dataset.tone;
     }
     const hasMessage = Boolean(input && input.value.trim()) || newChatAttachments.length > 0;
-    if (start) start.disabled = newChatStarting || !offer || Boolean(offer.unavailable) || !hasMessage;
+    if (start) start.disabled = newChatStarting || newChatPreparing > 0 || !offer || Boolean(offer.unavailable) || !hasMessage;
+    // What is being started is what was on the card when Start was tapped.
+    if (input) input.readOnly = newChatStarting;
+    for (const id of ["new-chat-project", "new-chat-members-button"]) {
+      const button = document.getElementById(id);
+      const sheet = document.getElementById(id === "new-chat-project" ? "new-chat-projects-sheet" : "new-chat-members-sheet");
+      if (button) button.setAttribute("aria-expanded", sheet && !sheet.hidden ? "true" : "false");
+    }
     if (input) {
       // The field grows with what is typed, up to its limit, and scrolls past it.
       input.style.height = "auto";
@@ -3375,6 +3394,7 @@
     newChatStarting = false;
     if (input) input.value = "";
     newChatAttachments = [];
+    renderNewChatAttachments();
     closeNewChat();
     renderNewChat("");
     await openConversation(conversationId);
@@ -3401,10 +3421,23 @@
     if (attach && imageInput) {
       attach.addEventListener("click", function () { imageInput.click(); });
       imageInput.addEventListener("change", async function () {
-        const rejected = await addPendingAttachments(imageInput.files, newChatAttachments);
+        const files = Array.from(imageInput.files || []);
         // Clearing lets the same file be picked again after removing it.
         imageInput.value = "";
-        renderNewChat(rejected.length > 0 ? "Not attached: " + rejected.join("; ") : undefined);
+        newChatPreparing += 1;
+        renderNewChatState();
+        let rejected = [];
+        try {
+          rejected = await addPendingAttachments(files, function () { return newChatAttachments; });
+        } finally {
+          newChatPreparing -= 1;
+        }
+        renderNewChatAttachments();
+        // A refusal is said; a later pick that went through clears an earlier
+        // refusal, and nothing else that is said.
+        if (rejected.length > 0) renderNewChat(NEW_CHAT_REJECTED_PREFIX + rejected.join("; "));
+        else if (String(newChatSaid || "").indexOf(NEW_CHAT_REJECTED_PREFIX) === 0) renderNewChat("");
+        else renderNewChatState();
       });
     }
   }
@@ -6349,6 +6382,7 @@
    *  a tab can be tapped from inside one), the tab is remembered, and the
    *  screen redrawn. */
   function switchHomeTab(tab) {
+    closeNewChat();
     closeActivityItem();
     leaveOpenChat();
     setHomeTab(tab);
@@ -6390,7 +6424,7 @@
     // a choice opened from Activity: iOS lifts it, and the height must hold
     // there too or the screen shrinking would lift it a second time.
     return (active.tagName === "INPUT" || active.tagName === "TEXTAREA") &&
-      Boolean(active.closest && active.closest("#timeline-screen, #activity-item"));
+      Boolean(active.closest && active.closest("#timeline-screen, #activity-item, #new-chat-screen"));
   }
 
   /** What is on screen, read from the screens themselves rather than kept
@@ -8956,6 +8990,7 @@
    *  happened across every chat. A chat can be one of many and a reply can be
    *  inside a thread, so the list is the one place that always holds it. */
   function openActivityFromNotification(list) {
+    closeNewChat();
     leaveOpenChat();
     setHomeTab("activity");
     // The list the notification was about: an approval waits on Pending, a

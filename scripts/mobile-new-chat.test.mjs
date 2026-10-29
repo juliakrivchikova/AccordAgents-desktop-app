@@ -136,6 +136,14 @@ test("the phone starts a chat the way the computer would: in the project chosen,
   const { nodeId } = await app.send("DOM.querySelector", { nodeId: root.nodeId, selector: "#new-chat-image-input" });
   await app.send("DOM.setFileInputFiles", { nodeId, files: [picture] });
   await app.waitFor(`document.querySelectorAll("#new-chat-attachments .composer-attachment-thumb").length === 1`, "the picture on the card");
+  // Where a finger can reach it: inside the card, on screen, the topmost thing there.
+  assert.deepEqual(await app.evaluate(`(() => {
+    const thumb = document.querySelector("#new-chat-attachments .composer-attachment-thumb").getBoundingClientRect();
+    const card = document.querySelector(".new-chat-card").getBoundingClientRect();
+    const hit = document.elementFromPoint(thumb.left + thumb.width / 2, thumb.top + thumb.height / 2);
+    return { inside: thumb.top >= card.top && thumb.bottom <= card.bottom && thumb.left >= card.left && thumb.right <= card.right,
+      onScreen: thumb.top >= 0 && thumb.bottom <= innerHeight, topmost: Boolean(hit && hit.closest("#new-chat-attachments")) };
+  })()`), { inside: true, onScreen: true, topmost: true }, "the picture shows on the card");
   await app.evaluate(`(() => { const input = document.getElementById("new-chat-input"); input.value = "@drew start with the login page"; input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
   await app.evaluate(`document.getElementById("new-chat-start").click()`);
   await app.waitFor(`document.getElementById("timeline-screen").classList.contains("is-active") && document.getElementById("chat-title").textContent === "start with the login page"`, "the new chat opened, titled as the computer titles it");
@@ -176,6 +184,25 @@ test("the phone starts a chat the way the computer would: in the project chosen,
   const field = await app.send("DOM.querySelector", { nodeId: again.root.nodeId, selector: "#new-chat-image-input" });
   await app.send("DOM.setFileInputFiles", { nodeId: field.nodeId, files: [picture] });
   await app.waitFor(`!document.getElementById("new-chat-start").disabled`, "a picture is enough to start");
+  // Taken off again, there is nothing to start.
+  await app.evaluate(`document.querySelector("#new-chat-attachments .composer-attachment-remove").click()`);
+  await app.waitFor(`document.getElementById("new-chat-start").disabled && document.getElementById("new-chat-attachments").hidden`, "the picture removed");
+  const field2 = await app.send("DOM.querySelector", { nodeId: (await app.send("DOM.getDocument", { depth: -1, pierce: true })).root.nodeId, selector: "#new-chat-image-input" });
+  await app.send("DOM.setFileInputFiles", { nodeId: field2.nodeId, files: [picture] });
+  await app.waitFor(`!document.getElementById("new-chat-start").disabled`, "the picture again");
   await app.evaluate(`document.getElementById("new-chat-start").click()`);
   await app.waitFor(`document.getElementById("timeline-screen").classList.contains("is-active") && document.getElementById("chat-title").textContent === "Image: dot.png"`, "the picture's chat, titled as the computer titles it");
+  let pictureChat;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const summary = (await hub.storage.listConversations()).find((item) => item.title === "Image: dot.png");
+    pictureChat = summary ? await hub.storage.getConversation(summary.id) : undefined;
+    if (pictureChat && pictureChat.messages.some((item) => item.role === "user")) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const first = pictureChat.messages.find((item) => item.role === "user");
+  assert.equal(first.content, "", "a picture and no words");
+  assert.equal((first.metadata.imageAttachments || []).length, 1);
+  assert.ok(first.metadata.imageAttachments[0].hubBlob, "the picture is on the server");
+  const assistantId = pictureChat.metadata.participants.find((participant) => participant.roleConfigId === "administrator").id;
+  assert.deepEqual(first.metadata.deliveryTargets, [assistantId], "unaddressed, it is for the Chat Assistant, as on the computer");
 });
