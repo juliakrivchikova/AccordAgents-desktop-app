@@ -291,6 +291,17 @@ test("the feed is kept until every computer and machine read it; a phone never h
   assert.equal(report.ops.events, 2);
   assert.equal((await h.call(h.phone, "GET", "/v3/feed?after=0")).status, 410, "a reader behind it reads the chats again");
   assert.equal((await h.call<HubChatPage>(h.phone, "GET", `/v3/chat?conversationId=${chat}`)).body.messages.length, 1, "the chat itself stays");
+
+  // A machine stopped for weeks no longer keeps it: what it never read goes,
+  // and when it starts again it reads its chats again.
+  await h.write(h.phone, { opId: id("op"), kind: "message.create", conversationId: chat, message: userMessage("m2", "two") });
+  const head = (await h.call<HubFeedResponse>(h.owner, "GET", "/v3/feed?after=2")).body.head;
+  await h.call(h.owner, "GET", `/v3/feed?after=${head}`);
+  const muchLater = Date.now() + 60 * 24 * 60 * 60_000;
+  await h.storage.hubOps().execute(`update hub_ops_cursors set updated_at = '${new Date(muchLater - 1_000).toISOString()}' where device_id = '${h.owner.originId}';`);
+  report = await new HubRetention({ storage: h.storage, now: () => muchLater }).runOnce();
+  assert.equal(report.ops.events, 1, "the silent machine held it back no more");
+  assert.equal((await h.call(h.machine, "GET", "/v3/feed?after=2")).status, 410);
 });
 
 test("without a server of her own, the same server runs inside the app on this computer only", async (t) => {

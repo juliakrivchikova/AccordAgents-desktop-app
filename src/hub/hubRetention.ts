@@ -13,6 +13,10 @@ export interface HubRetentionConfig {
   /** Operations forgotten per transaction, and transactions per run. */
   batch: number;
   maxBatches: number;
+  /** A computer or machine that has not read for this long (a machine
+   *  stopped for weeks) no longer keeps the feed: when it reads again, it
+   *  reads its chats again instead. */
+  silentReaderMs: number;
 }
 
 export const HUB_RETENTION_DEFAULTS: HubRetentionConfig = {
@@ -20,7 +24,8 @@ export const HUB_RETENTION_DEFAULTS: HubRetentionConfig = {
   firstRunMs: 5 * 60_000,
   feedMs: 7 * DAY_MS,
   batch: 500,
-  maxBatches: 40
+  maxBatches: 40,
+  silentReaderMs: 45 * DAY_MS
 };
 
 const ENV_KEYS: Record<keyof HubRetentionConfig, string> = {
@@ -28,7 +33,8 @@ const ENV_KEYS: Record<keyof HubRetentionConfig, string> = {
   firstRunMs: "ACCORDAGENTS_HUB_RETENTION_FIRST_MS",
   feedMs: "ACCORDAGENTS_HUB_KEEP_FEED_MS",
   batch: "ACCORDAGENTS_HUB_RETENTION_BATCH",
-  maxBatches: "ACCORDAGENTS_HUB_RETENTION_MAX_BATCHES"
+  maxBatches: "ACCORDAGENTS_HUB_RETENTION_MAX_BATCHES",
+  silentReaderMs: "ACCORDAGENTS_HUB_SILENT_READER_MS"
 };
 
 /** The defaults, with whatever the environment sets (a positive integer). */
@@ -125,8 +131,15 @@ export class HubRetention {
     const report: HubRetentionReport = { ops: { events: 0, bytes: 0 }, blobs: { deleted: 0, bytes: 0 } };
     const devices = await this.options.storage.hub().devices();
     // Every device that keeps copies of the chats reads the feed; a phone
-    // reads the server's own copy and holds nothing back.
-    const readers = devices.filter((device) => device.role !== "phone").map((device) => device.deviceId);
+    // reads the server's own copy and holds nothing back, and neither does
+    // a computer or machine silent for weeks (it reads its chats again).
+    const reads = await this.options.storage.hubOps().cursorTimes();
+    const silentBefore = now - config.silentReaderMs;
+    const readers = devices.filter((device) => {
+      if (device.role === "phone") return false;
+      const last = Date.parse(reads.get(device.deviceId)?.updatedAt ?? device.addedAt ?? "");
+      return !Number.isFinite(last) || last >= silentBefore;
+    }).map((device) => device.deviceId);
     const cutoff = new Date(now - config.feedMs).toISOString();
     for (let index = 0; index < config.maxBatches && !this.closed; index += 1) {
       const pruned = await this.options.storage.hubOps().prune(readers, cutoff, config.batch);
