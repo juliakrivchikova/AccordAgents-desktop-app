@@ -1,4 +1,3 @@
-import { updateElectronApp, UpdateSourceType } from "update-electron-app";
 import { app, autoUpdater, BrowserWindow, dialog } from "electron";
 import { DebugLogService } from "./debugLogs";
 
@@ -187,6 +186,67 @@ export function createUpdateRestartGate(options: UpdateRestartGateOptions): Upda
   };
 }
 
+/** How often the update service is asked for a newer version. */
+export const UPDATE_CHECK_INTERVAL_MS = 60 * 60_000;
+
+export interface UpdateCheckLoopOptions {
+  check: () => void;
+  intervalMs: number;
+  log: (event: string, payload: Record<string, unknown>) => void;
+}
+
+export interface UpdateCheckLoop {
+  /** An update was downloaded: no more checks in this run of the app. */
+  downloaded: () => void;
+  dispose: () => void;
+}
+
+/**
+ * Asks for an update now and every interval after, until one is downloaded.
+ *
+ * On macOS a check made after the download finds nothing new (the update is
+ * already there) and, finishing so, clears the native updater's note that an
+ * update is ready to install; Restart then fails with "No update available,
+ * can't quit and install". That is what the User's desktop did on 2026-10-29:
+ * beta.8 downloaded at 12:58, the hourly check ran at 13:58, and her Restart
+ * at 22:18 closed the window and left beta.7 running. The downloaded update
+ * stays where the updater put it and installs on Restart or on quit, so
+ * nothing is checked again until the app runs anew.
+ */
+export function createUpdateCheckLoop(options: UpdateCheckLoopOptions): UpdateCheckLoop {
+  let downloaded = false;
+  let skippedLogged = false;
+  const tick = (): void => {
+    if (downloaded) {
+      if (!skippedLogged) {
+        skippedLogged = true;
+        options.log("app-update-check-skipped", { reason: "downloaded" });
+      }
+      return;
+    }
+    options.check();
+  };
+  tick();
+  const timer = setInterval(tick, options.intervalMs);
+  timer.unref?.();
+  return {
+    downloaded: () => { downloaded = true; },
+    dispose: () => clearInterval(timer)
+  };
+}
+
+/** The interval a test run may shorten (ACCORDAGENTS_UPDATE_CHECK_INTERVAL_MS,
+ *  never under ten seconds); the hour otherwise. */
+export function updateCheckIntervalMs(env: NodeJS.ProcessEnv = process.env): number {
+  const asked = Number(env.ACCORDAGENTS_UPDATE_CHECK_INTERVAL_MS);
+  return Number.isFinite(asked) && asked >= 10_000 ? asked : UPDATE_CHECK_INTERVAL_MS;
+}
+
+/** Where Electron's public update service answers for this build. */
+export function updateFeedUrl(repo: string, version: string, platform: NodeJS.Platform, arch: string, windowsStore = false): string {
+  return `https://update.electronjs.org/${repo}/${platform}-${arch}${windowsStore ? "/msix" : ""}/${version}`;
+}
+
 export function bootstrapAppUpdater(debugLogs: DebugLogService, betaUpdates: boolean, gate: UpdateRestartGate): void {
   if (!supportsAutoUpdates(app.isPackaged, process.platform)) {
     return;
@@ -215,14 +275,21 @@ export function bootstrapAppUpdater(debugLogs: DebugLogService, betaUpdates: boo
         ...(error && error.domain !== undefined ? { domain: error.domain } : {})
       });
     });
-    updateElectronApp({
-      updateSource: {
-        type: UpdateSourceType.ElectronPublicUpdateService,
-        repo
-      },
-      updateInterval: "1 hour",
-      notifyUser: true,
-      onNotifyUser: (info) => gate.onDownloaded({ releaseName: info.releaseName, releaseNotes: info.releaseNotes })
+    autoUpdater.setFeedURL({
+      url: updateFeedUrl(repo, app.getVersion(), process.platform, process.arch, Boolean(process.windowsStore)),
+      headers: { "User-Agent": `AccordAgents/${app.getVersion()} (${process.platform}: ${process.arch})` },
+      serverType: "default"
+    });
+    // The checks the update-electron-app library made, except that they stop
+    // once an update is downloaded (createUpdateCheckLoop says why).
+    const checks = createUpdateCheckLoop({
+      check: () => autoUpdater.checkForUpdates(),
+      intervalMs: updateCheckIntervalMs(),
+      log: (event, payload) => { void debugLogs.write(event, payload); }
+    });
+    autoUpdater.on("update-downloaded", (_event, releaseNotes, releaseName) => {
+      checks.downloaded();
+      gate.onDownloaded({ releaseName, releaseNotes });
     });
   } catch (error) {
     void debugLogs.write("app-updater-bootstrap-error", {
