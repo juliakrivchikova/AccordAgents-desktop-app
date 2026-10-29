@@ -1,6 +1,7 @@
 import { CloudProviderAuth } from "../cloud-provider-auth";
 import { memo, useState } from "react";
-import { ChatMessageDeliveryMark } from "./chat-message-delivery-mark";
+import { messageDelivery } from "../../../shared/messageDelivery";
+import { ChatMessageRefusal } from "./chat-message-refusal";
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Copy, FileText, ListChecks, RefreshCw, Reply, Smile, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -240,9 +241,10 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
     props.onToggleReaction(message.id, emoji);
   }
 
+  const delivery = messageDelivery(message);
   return (
     <>
-      <article data-message-id={message.id} className={`message chat-message ${choice ? "has-choice" : ""} ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""} ${isStreaming ? "is-running" : ""}`}>
+      <article data-message-id={message.id} className={`message chat-message ${choice ? "has-choice" : ""} ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""} ${isStreaming ? "is-running" : ""} ${delivery?.state === "unsent" ? "is-unsent" : ""}`}>
         {message.role === "participant" ? (
           <AgentAvatarWithDetails
             className="message-avatar"
@@ -339,7 +341,6 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               )
             )}
             <span className="message-when">{formatChatTime(message.createdAt)}</span>
-            <ChatMessageDeliveryMark message={message} participants={props.participants} />
             {!props.inThread && message.metadata?.parentMessageId && message.role === "user" && (
               <StatusBadge tone="neutral">reply</StatusBadge>
             )}
@@ -372,6 +373,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               </>
             )}
           </div>
+          <ChatMessageRefusal delivery={delivery} />
           {props.appToolApprovals && props.appToolApprovals.length > 0 && props.onRespondToAppToolApproval && (
             <div className="chat-message-embedded-approvals">
               <ChatAppToolApprovalList

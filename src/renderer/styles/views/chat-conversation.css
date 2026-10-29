@@ -3237,17 +3237,17 @@
 
 /* Where the User's message stands on her server: neutral, like the time;
    a message not taken yet reads as waiting, not as an error. */
-.chat-message .message-delivery {
-  color: var(--app-muted);
-  font-size: 11.5px;
+/* The User's message her server has not taken yet: faded, nothing more
+   (the User, 2026-10-29). */
+.chat-message.is-unsent .message-body {
+  opacity: 0.55;
 }
 
-.chat-message .message-delivery::before {
-  content: "· ";
-}
-
-.chat-message .message-delivery.is-waiting {
-  font-style: italic;
+/* One the server refused: why, under it. */
+.chat-message .message-refused {
+  margin-top: 4px;
+  color: var(--app-danger);
+  font-size: 12px;
 }
 
 /* Thread pill — stacked reply summary at the bottom of a message. */

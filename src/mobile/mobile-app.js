@@ -519,7 +519,7 @@
         ? entry.attachments.map(function (attachment) { return attachment.id; }).join(",")
         : "";
     };
-    // Where the turns a message asked for stand: "Taken to work" follows them.
+    // Where the turns a message asked for stand: a member's waiting row follows them.
     const turns = function (entry) {
       return Array.isArray(entry.turns)
         ? entry.turns.map(function (turn) { return turn.participantId + ":" + turn.state; }).join(",")
@@ -2400,8 +2400,8 @@
         mobileEventId: entry.eventId,
         threadId: messageId,
         ...(threadRootId ? { chatThreadRootId: threadRootId } : {}),
-        // The server asks a turn of each of them (Д4); "Taken to work" is a
-        // mark per member once its own device took it (Д5).
+        // The server asks a turn of each of them (Д4); each member's own
+        // device takes its turn, and its reply shows it started.
         deliveryTargets: delivery.targets,
         ...(Array.isArray(payload.skillMentions) && payload.skillMentions.length ? { skillMentions: payload.skillMentions } : {}),
         ...(imageAttachments.length ? { imageAttachments: imageAttachments } : {}),
@@ -3969,33 +3969,10 @@
     }
   }
 
-  // The marks a message of the User's carries, the same words on every
-  // device (agreements Д3, Д5): not answered by the server yet, taken by it,
-  // and taken to work by each member's own device.
-  const MARK_NOT_SENT = "Not sent, retrying";
-  const MARK_SENT = "Sent";
-  const MARK_TAKEN = "Taken to work";
+  // A message of the User's is faded until her server took it, then shown
+  // as any message; a member's reply appearing under it is the sign that
+  // work started (the User, 2026-10-29). Only a refusal says something.
   const MARK_REFUSED = "Not taken by your server";
-
-  /** "@a", "@a and @b", "@a, @b and @c". */
-  function handleList(handles) {
-    if (handles.length <= 1) return handles[0] || "";
-    return handles.slice(0, -1).join(", ") + " and " + handles[handles.length - 1];
-  }
-
-  /** "Sent", or "Taken to work by @a" once a member's own device claimed the
-   *  turn the message asked of it (or ran it since). */
-  function sentMark(conversationId, turns) {
-    const chat = loadChats().find(function (item) { return item.id === conversationId; });
-    const members = chat && Array.isArray(chat.members) ? chat.members : [];
-    const taken = (Array.isArray(turns) ? turns : []).filter(function (turn) {
-      return turn && (turn.state === "claimed" || turn.state === "finished");
-    }).map(function (turn) {
-      const member = members.find(function (item) { return item.id === turn.participantId; });
-      return member ? "@" + member.handle : "a member";
-    });
-    return taken.length ? MARK_TAKEN + " by " + handleList(taken) : MARK_SENT;
-  }
 
   // Waiting with no feedback reads as "nothing is happening", so the wait is
   // timed and named, and a long silence says the chats have not come.
@@ -7195,8 +7172,7 @@
           })
           : undefined,
         status: refused ? "Refused" : notSent ? "Queued" : "Sent",
-        mark: refused ? MARK_REFUSED + ": " + (entry.lastError || "No reason was given.")
-          : notSent ? MARK_NOT_SENT : sentMark(entry.conversationId, serverCopy && serverCopy.turns),
+        ...(refused ? { mark: MARK_REFUSED + ": " + (entry.lastError || "No reason was given.") } : {}),
         onItsWay: notSent,
         refused: refused,
         createdAt: entry.createdAt
@@ -7232,9 +7208,6 @@
         cancellable: !isScaffoldingEntry(entry),
         content: entry.content,
         status: entry.role === "you" ? "Sent" : entry.status === "error" ? "Error" : entry.status === "done" ? "Done" : "Running",
-        // The User's message from another device: on the server, and taken
-        // to work by each member whose device claimed its turn.
-        ...(entry.role === "you" ? { mark: sentMark(entry.conversationId, entry.turns) } : {}),
         // What a Stop names the member's turn on the server by.
         ...(entry.participantId ? { participantId: entry.participantId } : {}),
         ...(entry.sourceMessageId ? { sourceMessageId: entry.sourceMessageId } : {}),
@@ -7632,14 +7605,10 @@
   }
 
   function messageStatusLabel(entry) {
-    // The User's message says where it stands, in the same words on every
-    // device: not sent yet (and faded), sent, taken to work, or not taken
-    // and why. Sent and taken carry the time it was written.
-    if (entry.author === "you" && entry.mark) {
-      const time = entry.status === "Sent" ? formatClockTime(entry.createdAt) : "";
-      return time ? time + " · " + entry.mark : entry.mark;
-    }
-    if (entry.status === "Done" || entry.status === "Sent") {
+    // A refused message of the User's says why; one not sent yet is faded
+    // and shows its time like any other.
+    if (entry.author === "you" && entry.mark) return entry.mark;
+    if (entry.author === "you" || entry.status === "Done" || entry.status === "Sent") {
       return formatClockTime(entry.createdAt) || entry.status;
     }
     return entry.status;
@@ -7736,7 +7705,7 @@
       if (Date.now() - Date.parse(ask.createdAt) > ROUTED_ROW_MAX_MS) continue;
       for (const participantId of ask.targets) {
         const turn = ask.turns ? ask.turns.find(function (item) { return item.participantId === participantId; }) : undefined;
-        // Taken to work, stopped or done: the bubble's mark says so.
+        // Taken by its device, stopped or done: the member's own row says so.
         if (turn && turn.state !== "requested") continue;
         const runId = turn ? turn.runId : globalThis.AccordHubClient.hubTurnRunId(ask.messageId, participantId);
         if (runIds.has(runId)) continue;

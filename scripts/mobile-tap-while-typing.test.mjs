@@ -447,7 +447,7 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     })()`, "the queued message on screen");
     assert.equal(pendingMessage.onItsWay, true, "the message on its way is faded");
     assert.equal(pendingMessage.opacity, "0.6");
-    assert.equal(pendingMessage.status, "Not sent, retrying", "the message says it was not sent");
+    assert.match(pendingMessage.status, /^\d{2}:\d{2}$/, "the faded message shows only its time");
     assert.doesNotMatch(pendingMessage.header, /Waiting to sync|Syncing|Not sent/, "the header does not report a send on its way");
     // A send that could not get through at all is still said, in the header:
     // nothing else would say it.
