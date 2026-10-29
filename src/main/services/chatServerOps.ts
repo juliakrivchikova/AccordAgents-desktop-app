@@ -44,7 +44,7 @@ export interface ChatServerLink {
 }
 
 /** Message metadata a device keeps for itself about the server: the turns
- *  the message asked for (its "taken to work" marks), and a placeholder bubble
+ *  the message asked for, a refusal, and a placeholder bubble
  *  for a member that runs elsewhere, shown until that device writes the real
  *  one. Never sent. */
 export const SERVER_LOCAL_MESSAGE_KEYS = ["serverTurns", "serverPlaceholder", "serverRejected"] as const;

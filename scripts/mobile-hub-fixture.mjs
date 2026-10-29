@@ -290,7 +290,7 @@ export async function startMobileHub(options = {}) {
       return writeOps([{ opId: nextOpId(), kind: "message.update", conversationId, message }]);
     },
     /** The turn a User's message asked of a member, taken by the member's
-     *  own device (the owner, for its members): "Taken to work" (Д5). */
+     *  own device (the owner, for its members). */
     async claimTurn(conversationId, messageId, participantId) {
       return writeOps([{ opId: nextOpId(), kind: "turn.claim", conversationId, runId: hubTurnRunId(messageId, participantId), messageId, participantId }]);
     },

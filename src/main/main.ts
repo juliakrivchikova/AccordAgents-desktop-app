@@ -399,6 +399,7 @@ async function restartServerChatLink(): Promise<void> {
   await serverChatLink.start();
 }
 
+let lastNewChatOptions: import("../shared/hubProtocol").HubNewChatOptions | undefined;
 const hubPhonePublisher: HubPhonePublisher = new HubPhonePublisher({
   client: () => hubOwnerConfirmed ? hubClient : undefined,
   hasPhones: async () => (await hubPhones()).length > 0,
@@ -416,7 +417,17 @@ const hubPhonePublisher: HubPhonePublisher = new HubPhonePublisher({
       }).catch(() => undefined);
     }
     const skills = await userSkillsService.listAll({ limit: 300 }).catch(() => ({ skills: [] as import("../shared/types").UserSkillSummary[] }));
+    // The phone's New chat, as this computer's offers it; what it last
+    // offered while it cannot tell now (a CLI check that failed, say).
+    const newChat = await storageService.listConversations()
+      .then((summaries) => chatService.newChatOptions(summaries))
+      .catch((error) => {
+        void debugLogService.write("hub.phone.new-chat-options-error", { message: error instanceof Error ? error.message : String(error) });
+        return undefined;
+      }) ?? lastNewChatOptions;
+    lastNewChatOptions = newChat;
     return {
+      ...(newChat ? { newChat } : {}),
       roles: Object.fromEntries(settings.chatRoleConfigs.map((role) => [role.id,
         role.id === "generic-participant" && role.label === "Generic Participant" ? "Generic Member" : role.label])),
       prompts: (settings.chatSavedPrompts ?? []).slice(0, 200).map((prompt) => ({ id: prompt.id, label: prompt.label, trigger: prompt.trigger, body: prompt.body.slice(0, 20_000) })),
@@ -1862,7 +1873,11 @@ function registerIpc(): void {
     const cancelCreation = (): void => controller.abort();
     event.sender.once("destroyed", cancelCreation);
     try {
-      return await chatService.createConversation({ ...request, runId }, controller.signal, emitReviewProgress);
+      const created = await chatService.createConversation({ ...request, runId }, controller.signal, emitReviewProgress);
+      // A new project, or a member used once more: the phone's New chat
+      // offers what this one does.
+      hubPhonePublisher.scheduleCatalog();
+      return created;
     } catch (error) {
       if (controller.signal.aborted) throw new Error("Chat creation cancelled.");
       throw error;

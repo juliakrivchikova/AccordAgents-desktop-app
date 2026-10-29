@@ -624,3 +624,41 @@ test("a phone's picture put up before its message arrives is kept for a month, t
   assert.equal(deleted, 1, "a month later, never named, it goes");
   assert.ok(early.blobHash);
 });
+
+test("the phone starts a new chat from what the computer published, as the computer would", async (t) => {
+  const h = await hub(t);
+  const machine = createDeviceIdentity(new Date().toISOString());
+  await seedChat(h, machine);
+  const assistant: ChatParticipant = { id: "t-assistant", handle: "assistant", roleConfigId: "administrator", kind: "codex-cli" };
+  const newChat = { projects: [{ path: "/Users/u/work", label: "work" }], defaultProject: "/Users/u/work", assistant,
+    members: [{ configId: "c-mac", uses: 3, participant: { ...localMember, id: "t-mac", participantConfigId: "c-mac" } },
+      { configId: "c-box", uses: 0, participant: { ...machineMember, id: "t-box", participantConfigId: "c-box" }, unavailable: "Cloud box is not ready." }] };
+  const catalog = { version: 1, publishedAt: new Date().toISOString(), roles: { "software-engineer": "Engineer", administrator: "Chat Assistant" }, prompts: [], skills: [], avatars: {}, newChat };
+  const { client } = await pairPhone(h);
+  const before = await client.getJson<{ options?: unknown; unavailable?: string }>("/v1/phone/new-chat");
+  assert.match(before.unavailable ?? "", /has not told your server/, "nothing published yet: said so");
+  assert.equal((await h.call(h.owner, "PUT", "/v1/catalog", { catalog })).status, 200);
+  const offer = await client.getJson<{ options: typeof newChat; roles: Record<string, string>; machines: Record<string, string> }>("/v1/phone/new-chat");
+  assert.deepEqual(offer.options.projects, newChat.projects);
+  assert.equal(offer.options.members[1].unavailable, "Cloud box is not ready.");
+  assert.equal(offer.roles["software-engineer"], "Engineer");
+  assert.equal(offer.machines["m-1"], "Cloud box", "the machine a member runs on, by name");
+  // The phone writes the chat, its first line and its first message, in order.
+  const conversationId = crypto.randomUUID();
+  const participants = [{ ...assistant, id: crypto.randomUUID() }, { ...localMember, id: crypto.randomUUID(), participantConfigId: "c-mac" }];
+  const message = phoneMessage("@mac hello", [participants[1].id]);
+  const written = await client.postOps([
+    { opId: `op-${crypto.randomUUID()}`, kind: "conversation.create", conversationId,
+      conversation: { title: "hello", kind: "chat", createdAt: new Date().toISOString(), repoPath: "/Users/u/work", metadata: { participants } } },
+    { opId: `op-${crypto.randomUUID()}`, kind: "message.create", conversationId,
+      message: { id: crypto.randomUUID(), role: "system", content: "Chat started.\nMembers:\n- User\n- @assistant\n- @mac", createdAt: new Date().toISOString(), status: "done", metadata: { threadId: "system" } } as ChatMessage },
+    { opId: message.id, kind: "message.create", conversationId, message }
+  ]);
+  assert.deepEqual(written.results.map((result) => result.status), ["accepted", "accepted", "accepted"]);
+  const chats = await client.getJson<{ chats: Array<{ id: string; title: string; members: Array<{ handle: string }> }> }>("/v1/phone/chats");
+  const listed = chats.chats.find((chat) => chat.id === conversationId);
+  assert.equal(listed?.title, "hello");
+  assert.deepEqual(listed?.members.map((member) => member.handle), ["assistant", "mac"]);
+  const turns = await h.storage.hubOps().requested();
+  assert.ok(turns.some((turn) => turn.conversationId === conversationId && turn.participantId === participants[1].id), "the computer's member is asked to answer");
+});

@@ -23,7 +23,8 @@ import { liveTimelineEvents, scopeCovers, type HubProgress, type HubWaker } from
 
 export const HUB_PHONE_PATHS = new Set([
   "/v1/phone/chats", "/v1/phone/timeline", "/v1/phone/changes", "/v1/phone/progress", "/v1/phone/composer",
-  "/v1/phone/attachment", "/v1/phone/avatar", "/v1/phone/notices", "/v1/phone/seen", "/v1/phone/machines", "/v1/phone/wake"
+  "/v1/phone/attachment", "/v1/phone/avatar", "/v1/phone/notices", "/v1/phone/seen", "/v1/phone/machines", "/v1/phone/wake",
+  "/v1/phone/new-chat"
 ]);
 
 export const PHONE_ERROR_NO_SCOPE = "phone_scope_missing";
@@ -204,6 +205,7 @@ export class HubPhoneApi {
       case "/v1/phone/changes": return this.changes(scope, device.deviceId, url.searchParams, response);
       case "/v1/phone/progress": return this.liveProgress(scope, url.searchParams);
       case "/v1/phone/composer": return this.composer(scope, url.searchParams);
+      case "/v1/phone/new-chat": return this.newChat(scope);
       case "/v1/phone/attachment": return this.attachment(scope, url.searchParams);
       case "/v1/phone/avatar": return this.avatar(scope, url.searchParams);
       case "/v1/phone/notices": return this.notices(scope, device.deviceId, url.searchParams);
@@ -361,7 +363,7 @@ export class HubPhoneApi {
   }
 
   /** Each of the User's messages with the turns it asked for, as the server
-   *  holds them: "Taken to work" once a member's own device claimed one.
+   *  holds them: a member's waiting row goes once its own device took one.
    *  A message that asked none says so (an empty list): nobody is waited for. */
   private async withTurns(conversationId: string, events: MobileTimelineEvent[], messages: ChatMessage[]): Promise<MobileTimelineEvent[]> {
     const asked = new Set(messages.filter((message) => message.role === "user").map((message) => message.id));
@@ -398,6 +400,22 @@ export class HubPhoneApi {
     if (!opened || opened.conversation.kind !== "chat") return { status: 404, body: { ok: false, error: PHONE_ERROR_CHAT_NOT_FOUND } };
     const events = liveTimelineEvents(opened.conversation, this.options.progress.forConversation(conversationId));
     return { status: 200, body: { ok: true, type: "mobile.timeline.events", conversationId, events, live: true } };
+  }
+
+  /** What the phone's New chat offers, as the computer published it. A
+   *  phone paired for one chat starts no other. */
+  private async newChat(scope: HubPhoneScope): Promise<Answer> {
+    if (scope.scope !== "device") {
+      return { status: 200, body: { ok: true, type: "mobile.new-chat", unavailable: "This phone was paired for one chat, so it does not start new ones." } };
+    }
+    const catalog = await this.catalog();
+    const options = catalog?.newChat;
+    if (!options) {
+      return { status: 200, body: { ok: true, type: "mobile.new-chat", unavailable: "Your Mac has not told your server about its projects and members yet. Open AccordAgents on your Mac, or update it." } };
+    }
+    // The names the panel shows: each role's, and each machine's a member runs on.
+    const machines = await this.options.machineNames().catch(() => new Map<string, string>());
+    return { status: 200, body: { ok: true, type: "mobile.new-chat", options, roles: catalog.roles, machines: Object.fromEntries(machines) } };
   }
 
   /** What the composer offers after `/`, as the desktop's composer would for

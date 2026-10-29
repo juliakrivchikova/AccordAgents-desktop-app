@@ -8,7 +8,7 @@
     <title>AccordAgents</title>
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="assets/accordagents-mark.png" />
-    <link rel="stylesheet" href="mobile-app.css?v=2026-10-28-server-ops" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-10-29-phone-new-chat" />
   </head>
   <body>
     <div class="mobile-stage">
@@ -23,6 +23,13 @@
         <section id="chats-screen" class="mobile-screen is-active" aria-label="Chats">
           <header class="mobile-chats-header">
             <h1>Chats</h1>
+            <!-- A new chat, as the computer's New chat starts one. -->
+            <button id="new-chat-button" class="mobile-icon-button new-chat-button" type="button" aria-label="New chat" aria-haspopup="dialog" aria-controls="new-chat-sheet" hidden>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 20h9"></path>
+                <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"></path>
+              </svg>
+            </button>
           </header>
           <!-- Filters the list already on the phone by title, last sender and
                last message; nothing is asked of the desktop. -->
@@ -241,19 +248,42 @@
             <div id="send-log-list" class="members-sheet-list send-log-list"></div>
           </div>
         </div>
+        <!-- The computer's New chat, on the phone: the first message, the
+             folder it works in (or none) and its members. -->
+        <div id="new-chat-sheet" class="members-sheet new-chat-sheet" role="dialog" aria-label="New chat" hidden>
+          <div class="members-sheet-backdrop" data-new-chat-close="1"></div>
+          <div class="members-sheet-panel">
+            <div class="members-sheet-grip" aria-hidden="true"></div>
+            <div class="members-sheet-head">
+              <strong>New chat</strong>
+              <button id="new-chat-close" class="members-sheet-close" type="button">Cancel</button>
+            </div>
+            <div class="new-chat-body">
+              <textarea id="new-chat-input" class="new-chat-input" rows="3" placeholder="What are you working on?" aria-label="What are you working on?" autocomplete="off"></textarea>
+              <label class="new-chat-field">
+                <span>Folder</span>
+                <select id="new-chat-folder" aria-label="Folder"></select>
+              </label>
+              <div id="new-chat-members-title" class="new-chat-section">Members</div>
+              <div id="new-chat-members" class="members-sheet-list new-chat-members" role="group" aria-labelledby="new-chat-members-title"></div>
+              <p id="new-chat-note" class="new-chat-note" role="status" hidden></p>
+              <button id="new-chat-start" class="new-chat-start" type="button" disabled>Start chat</button>
+            </div>
+          </div>
+        </div>
         <div class="mobile-home-indicator" aria-hidden="true"><span></span></div>
       </main>
     </div>
     <!-- The database description both the page and the service worker load. -->
-    <script src="mobile-db.js?v=2026-10-28-server-ops" defer></script>
-    <script src="jsqr.js?v=2026-10-28-server-ops" defer></script>
+    <script src="mobile-db.js?v=2026-10-29-phone-new-chat" defer></script>
+    <script src="jsqr.js?v=2026-10-29-phone-new-chat" defer></script>
     <!-- How the phone talks to the User's server (signed requests carrying
          its operations), and the rules shared with the desktop verbatim
          (avatars, timeline visibility), bundled from src/shared by the mobile
          build. -->
-    <script src="mobile-hub-client.js?v=2026-10-28-server-ops" defer></script>
-    <script src="mobile-shared.js?v=2026-10-28-server-ops" defer></script>
-    <script src="mobile-activity.js?v=2026-10-28-server-ops" defer></script>
-    <script src="mobile-app.js?v=2026-10-28-server-ops" defer></script>
+    <script src="mobile-hub-client.js?v=2026-10-29-phone-new-chat" defer></script>
+    <script src="mobile-shared.js?v=2026-10-29-phone-new-chat" defer></script>
+    <script src="mobile-activity.js?v=2026-10-29-phone-new-chat" defer></script>
+    <script src="mobile-app.js?v=2026-10-29-phone-new-chat" defer></script>
   </body>
 </html>

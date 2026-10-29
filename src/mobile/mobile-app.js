@@ -519,7 +519,7 @@
         ? entry.attachments.map(function (attachment) { return attachment.id; }).join(",")
         : "";
     };
-    // Where the turns a message asked for stand: "Taken to work" follows them.
+    // Where the turns a message asked for stand: a member's waiting row follows them.
     const turns = function (entry) {
       return Array.isArray(entry.turns)
         ? entry.turns.map(function (turn) { return turn.participantId + ":" + turn.state; }).join(",")
@@ -1179,10 +1179,50 @@
         const parsed = raw ? JSON.parse(raw) : [];
         cachedChatList = Array.isArray(parsed) ? parsed : [];
       }
-      return cachedChatList;
+      // A chat started here is in the list before the server lists it.
+      const started = loadStartedChats().filter(function (chat) {
+        return !cachedChatList.some(function (known) { return known.id === chat.id; });
+      });
+      return started.length ? started.concat(cachedChatList) : cachedChatList;
     } catch {
       return [];
     }
+  }
+
+  // Chats started on this phone that the server's list does not name yet.
+  const STARTED_CHATS_KEY = "accordagents.mobile.startedChats.v1";
+
+  function loadStartedChats() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(STARTED_CHATS_KEY) || "[]");
+      // Started under this pairing: paired again (to another server, say),
+      // the phone does not show what it started before.
+      const pairing = loadPairing();
+      const here = pairing && pairing.deviceId;
+      return Array.isArray(parsed) ? parsed.filter(function (chat) { return chat && typeof chat.id === "string" && Boolean(here) && chat.deviceId === here; }) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveStartedChats(chats) {
+    try {
+      if (chats.length) localStorage.setItem(STARTED_CHATS_KEY, JSON.stringify(chats));
+      else localStorage.removeItem(STARTED_CHATS_KEY);
+    } catch {
+      // Kept as it was: shown until the server lists it.
+    }
+  }
+
+  /** A chat started here that will not be made (the server refused it, or
+   *  nothing was queued): out of the list, as the computer lists no chat its
+   *  New chat failed to make. Why stays in the send log and in the chat. */
+  function forgetStartedChat(conversationId) {
+    const started = loadStartedChats();
+    const kept = started.filter(function (chat) { return chat.id !== conversationId; });
+    if (kept.length === started.length) return;
+    saveStartedChats(kept);
+    renderChatList();
   }
 
   function saveChats(chats) {
@@ -1193,7 +1233,7 @@
       return [chat.id, chat];
     }));
     const normalized = Array.isArray(chats) ? chats.filter(function (chat) {
-      return chat && typeof chat.id === "string" && chat.id.trim();
+      return chat && typeof chat.id === "string" && chat.id.trim() && chat.startedHere !== true;
     }).map(function (chat) {
       return {
         id: chat.id,
@@ -1232,6 +1272,12 @@
       cachedChatList = kept;
     }
     noteListActivitySeen(kept);
+    // A chat started here that the server now lists is the server's.
+    const started = loadStartedChats();
+    const stillStarted = started.filter(function (chat) {
+      return !normalized.some(function (known) { return known.id === chat.id; });
+    });
+    if (stillStarted.length !== started.length) saveStartedChats(stillStarted);
     // Same rule as the desktop sidebar: a chat that moved while it was not the
     // one on screen is unread. The list this phone held before is the "seen"
     // baseline, so the first list after an update marks nothing.
@@ -1897,6 +1943,13 @@
    *  ("No member named @x."), each its own operation right behind it. One
    *  transaction: the lines never wait without their message. */
   async function enqueueMessage(input) {
+    const entries = await messageOutboxEntries(input);
+    await putOutboxEntries(entries);
+    return entries[0];
+  }
+
+  /** The message's entries, not written yet: the message first. */
+  async function messageOutboxEntries(input) {
     const entry = await createOutboxEvent(input);
     const threadRootId = entry.payload && typeof entry.payload.threadRootId === "string" && entry.payload.threadRootId ? entry.payload.threadRootId : undefined;
     const notes = [];
@@ -1914,8 +1967,7 @@
         } }
       }));
     }
-    await putOutboxEntries([entry].concat(notes));
-    return entry;
+    return [entry].concat(notes);
   }
 
   /** A Stop of one member's turn on the server, named by the turn's run id,
@@ -2400,8 +2452,8 @@
         mobileEventId: entry.eventId,
         threadId: messageId,
         ...(threadRootId ? { chatThreadRootId: threadRootId } : {}),
-        // The server asks a turn of each of them (Д4); "Taken to work" is a
-        // mark per member once its own device took it (Д5).
+        // The server asks a turn of each of them (Д4); each member's own
+        // device takes its turn, and its reply shows it started.
         deliveryTargets: delivery.targets,
         ...(Array.isArray(payload.skillMentions) && payload.skillMentions.length ? { skillMentions: payload.skillMentions } : {}),
         ...(imageAttachments.length ? { imageAttachments: imageAttachments } : {}),
@@ -2442,6 +2494,7 @@
       return kept || op;
     }
     if (entry.kind === "message.system") return { ...base, kind: "message.create", message: payload.message };
+    if (entry.kind === "conversation.create") return { ...base, kind: "conversation.create", conversation: payload.conversation };
     if (entry.kind === "turn.stop") {
       return { ...base, kind: "turn.stop", runId: payload.runId, messageId: payload.messageId, participantId: payload.participantId };
     }
@@ -2488,6 +2541,8 @@
     let sent = 0;
     const total = owed.length;
     const statusOf = new Map(entries.map(function (entry) { return [entry.eventId, entry.status]; }));
+    // Why each was refused, this pass's refusals included.
+    const refusalOf = new Map(entries.map(function (entry) { return [entry.eventId, entry.lastError]; }));
     // A line goes once what it belongs to is taken, so a pass may free more.
     for (let pass = 0; pass < 3 && owed.length > 0; pass += 1) {
       const ready = [];
@@ -2495,7 +2550,11 @@
       for (const entry of owed) {
         const parent = entry.dependsOn ? statusOf.get(entry.dependsOn) : undefined;
         if (entry.dependsOn && parent === OUTBOX_REFUSED) {
-          await settleOutboxEntry(entry, { status: OUTBOX_REFUSED, lastError: "The message it belongs to was not taken." });
+          const owner = entries.find(function (item) { return item.eventId === entry.dependsOn; });
+          const why = refusalOf.get(entry.dependsOn);
+          await settleOutboxEntry(entry, { status: OUTBOX_REFUSED, lastError: owner && owner.kind === "conversation.create"
+            ? "The chat was not created" + (why ? ": " + why : ".")
+            : "The message it belongs to was not taken." });
           continue;
         }
         if (entry.dependsOn && parent !== undefined && parent !== OUTBOX_SENT) {
@@ -2511,6 +2570,8 @@
             await settleOutboxEntry(entry, { status: OUTBOX_REFUSED, lastError: reason });
             await recordSendFailure(sendFailureRecord(entry, { cause: "phone", reason: reason }));
             statusOf.set(entry.eventId, OUTBOX_REFUSED);
+            refusalOf.set(entry.eventId, reason);
+            if (entry.kind === "conversation.create") forgetStartedChat(entry.conversationId);
             continue;
           }
           ready.push({ entry: entry, op: op, bytes: bytes });
@@ -2558,6 +2619,8 @@
             await settleOutboxEntry(item.entry, { status: OUTBOX_REFUSED, lastError: reason });
             await recordSendFailure(sendFailureRecord(item.entry, { cause: "refused", reason: "Your server did not take it: " + reason }));
             statusOf.set(item.entry.eventId, OUTBOX_REFUSED);
+            refusalOf.set(item.entry.eventId, reason);
+            if (item.entry.kind === "conversation.create") forgetStartedChat(item.entry.conversationId);
           } else {
             await noteFailedAttempt(item.entry, { cause: "http", reason: "Your server answered without a word about it." });
           }
@@ -2717,6 +2780,8 @@
       text = "Stop" + (member ? " @" + member.handle : "");
     } else if (entry.kind === "card.answer") {
       text = String(payload.label || "Your answer");
+    } else if (entry.kind === "conversation.create") {
+      text = String(payload.conversation && payload.conversation.title || "");
     }
     return {
       entryId: entry.eventId,
@@ -2817,6 +2882,7 @@
     if (record.kind === "turn.stop") return "";
     if (record.kind === "card.answer") return "Answer: ";
     if (record.kind === "message.system") return "Note ";
+    if (record.kind === "conversation.create") return "New chat: ";
     return "Message ";
   }
 
@@ -2927,6 +2993,239 @@
     sheet?.addEventListener("click", function (event) {
       if (event.target instanceof Element && event.target.dataset.sendLogClose === "1") closeSendLog();
     });
+  }
+
+  // --- New chat -----------------------------------------------------------
+
+  // What the computer's New chat offers, as the server holds it (the User,
+  // 2026-10-29: the phone's New chat is the computer's): its projects, the
+  // folder a chat starts in, the Chat Assistant and the saved members, each
+  // as the computer would add it.
+  let newChatOffer;
+  // What the panel says, kept while it is redrawn (a reason no chat can be
+  // started, a refusal, a read that failed).
+  let newChatSaid;
+  let newChatChosen = new Set();
+  let newChatToken = 0;
+  let newChatStarting = false;
+
+  async function openNewChat() {
+    const sheet = document.getElementById("new-chat-sheet");
+    if (!sheet) return;
+    const token = ++newChatToken;
+    newChatOffer = undefined;
+    newChatSaid = undefined;
+    newChatChosen = new Set();
+    renderNewChat("Reading what your Mac offers\u2026");
+    sheet.hidden = false;
+    applyDock();
+    let answer;
+    try {
+      answer = await serverPhoneGet("/v1/phone/new-chat", {});
+    } catch (error) {
+      if (token !== newChatToken) return;
+      // A server from before New chat on the phone: it updates once the Mac does.
+      renderNewChat(error && error.serverStatus === 404
+        ? "Your server does not start chats from the phone yet. It will once AccordAgents on your Mac has updated."
+        : "Could not reach your server: " + (error && error.message ? error.message : String(error)));
+      return;
+    }
+    if (token !== newChatToken) return;
+    newChatOffer = answer && answer.options ? { options: answer.options, roles: answer.roles || {}, machines: answer.machines || {} } : undefined;
+    renderNewChat(answer && answer.unavailable ? answer.unavailable : "", true);
+  }
+
+  function closeNewChat() {
+    newChatToken += 1;
+    const sheet = document.getElementById("new-chat-sheet");
+    if (sheet) sheet.hidden = true;
+    const input = document.getElementById("new-chat-input");
+    if (input) input.blur();
+    applyDock();
+  }
+
+  /** The saved members as the computer's New chat lists them: the most used
+   *  first, the rest in the order they were saved. */
+  function newChatMemberOrder(members) {
+    return members.map(function (member, index) { return { member: member, index: index }; })
+      .sort(function (left, right) { return ((right.member.uses || 0) - (left.member.uses || 0)) || (left.index - right.index); })
+      .map(function (item) { return item.member; });
+  }
+
+  function newChatMemberRow(participant, options) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "members-sheet-row new-chat-member";
+    row.dataset.handle = participant.handle;
+    row.setAttribute("aria-pressed", options.chosen ? "true" : "false");
+    if (options.locked || options.unavailable) row.setAttribute("aria-disabled", "true");
+    if (options.unavailable) row.dataset.unavailable = "1";
+    const avatar = document.createElement("span");
+    avatar.className = "mobile-mention-avatar";
+    const assistant = participant.roleConfigId === "administrator";
+    paintAvatar(avatar, avatarForMember({ id: participant.id, handle: participant.handle, kind: participant.kind, avatarId: participant.avatarId,
+      displayName: assistant ? "Chat Assistant" : "@" + participant.handle, isAssistant: assistant }), undefined);
+    const copy = document.createElement("span");
+    copy.className = "members-sheet-copy";
+    const name = document.createElement("strong");
+    name.textContent = assistant ? "Chat Assistant" : "@" + participant.handle;
+    const role = document.createElement("span");
+    role.className = "members-sheet-role";
+    role.textContent = [newChatOffer && newChatOffer.roles[participant.roleConfigId], memberKindLabel(participant.kind)].filter(Boolean).join(" \u00b7 ");
+    const where = document.createElement("span");
+    where.className = "members-sheet-location";
+    where.textContent = options.unavailable || memberLocationLabel({ homeMachineId: participant.homeMachineId,
+      homeMachineName: participant.homeMachineId && newChatOffer ? newChatOffer.machines[participant.homeMachineId] : undefined });
+    copy.append(name, role, where);
+    const check = document.createElement("span");
+    check.className = "new-chat-check";
+    check.setAttribute("aria-hidden", "true");
+    check.textContent = options.chosen ? "\u2713" : "";
+    row.append(avatar, copy, check);
+    return row;
+  }
+
+  function renderNewChat(note, fresh) {
+    if (note !== undefined) newChatSaid = note;
+    note = newChatSaid;
+    const folder = document.getElementById("new-chat-folder");
+    const list = document.getElementById("new-chat-members");
+    const noteNode = document.getElementById("new-chat-note");
+    const start = document.getElementById("new-chat-start");
+    const input = document.getElementById("new-chat-input");
+    const offer = newChatOffer && newChatOffer.options;
+    if (folder && (fresh || !offer)) {
+      folder.replaceChildren();
+      const projects = offer ? offer.projects.slice() : [];
+      const preferred = offer && offer.defaultProject;
+      if (preferred && !projects.some(function (project) { return project.path === preferred; })) {
+        projects.unshift({ path: preferred, label: preferred.split(/[\\/]+/).filter(Boolean).pop() || preferred });
+      }
+      for (const project of projects) {
+        const option = document.createElement("option");
+        option.value = project.path;
+        option.textContent = project.label;
+        folder.append(option);
+      }
+      // As on the computer: a chat may work without a folder.
+      const none = document.createElement("option");
+      none.value = "";
+      none.textContent = "Work without a folder";
+      folder.append(none);
+      folder.value = preferred || "";
+      folder.disabled = !offer;
+    }
+    if (list) {
+      list.replaceChildren();
+      if (offer) {
+        list.append(newChatMemberRow(offer.assistant, { chosen: true, locked: true }));
+        for (const member of newChatMemberOrder(offer.members)) {
+          const row = newChatMemberRow(member.participant, { chosen: newChatChosen.has(member.configId), unavailable: member.unavailable });
+          row.addEventListener("click", function () {
+            if (member.unavailable) return;
+            if (newChatChosen.has(member.configId)) newChatChosen.delete(member.configId);
+            else newChatChosen.add(member.configId);
+            renderNewChat("");
+          });
+          list.append(row);
+        }
+      }
+    }
+    const blocked = !offer ? note : offer.unavailable;
+    const shown = note || blocked;
+    if (noteNode) {
+      noteNode.textContent = shown || "";
+      noteNode.hidden = !shown;
+    }
+    if (start) start.disabled = newChatStarting || !offer || Boolean(offer.unavailable) || !(input && input.value.trim());
+  }
+
+  /** Starts the chat: made on the server as the computer makes one (its
+   *  members, the line it starts with, its title), then the first message,
+   *  each its own operation, in that order. */
+  async function startNewChat() {
+    const input = document.getElementById("new-chat-input");
+    const folder = document.getElementById("new-chat-folder");
+    const offer = newChatOffer && newChatOffer.options;
+    const shared = mobileSharedRules();
+    const text = input ? input.value.trim() : "";
+    if (!offer || offer.unavailable || !text || !shared || newChatStarting) return;
+    // Each member it gets, chosen or named with @, must be one the computer
+    // could add now, as the computer's New chat checks them all.
+    const blocked = shared.newChatPickedMembers({ members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text })
+      .find(function (member) { return member.unavailable; });
+    if (blocked) {
+      renderNewChat(blocked.unavailable);
+      return;
+    }
+    newChatStarting = true;
+    renderNewChat();
+    const conversationId = createEventId();
+    let listed = false;
+    try {
+      const createdAt = nowIso();
+      const participants = shared.newChatParticipants({
+        assistant: offer.assistant, members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text, newId: createEventId
+      });
+      const repoPath = folder && folder.value ? folder.value : undefined;
+      const title = shared.newChatTitle(text);
+      // In the list at once, as the computer's sidebar shows a chat it made
+      // (the first message finds its members there).
+      listed = true;
+      saveStartedChats([{
+        id: conversationId, title: title, group: shared.mobileChatGroupLabel(repoPath), snippet: shared.mobileSnippet(text), who: "you:", updatedAt: createdAt,
+        running: false, startedHere: true, deviceId: (loadPairing() || {}).deviceId,
+        participants: participants.map(function (participant) { return "@" + participant.handle; }).slice(0, 4),
+        members: participants.map(function (participant) {
+          const assistant = participant.roleConfigId === "administrator";
+          return normalizeMobileMember({ id: participant.id, handle: participant.handle, mentionHandle: participant.handle,
+            displayName: assistant ? "Chat Assistant" : "@" + participant.handle, roleLabel: newChatOffer.roles[participant.roleConfigId] || "",
+            roleConfigId: participant.roleConfigId, kind: participant.kind, avatarId: participant.avatarId, isAssistant: assistant,
+            homeMachineId: participant.homeMachineId });
+        }).filter(Boolean)
+      }].concat(loadStartedChats()));
+      const create = await createOutboxEvent({
+        conversationId: conversationId, kind: "conversation.create", createdAt: createdAt,
+        payload: { conversation: { title: title, kind: "chat", createdAt: createdAt, ...(repoPath ? { repoPath: repoPath } : {}), metadata: { participants: participants } } }
+      });
+      const introId = createEventId();
+      const intro = await createOutboxEvent({
+        eventId: introId, conversationId: conversationId, kind: "message.system", createdAt: createdAt, dependsOn: create.eventId,
+        payload: { message: { id: introId, role: "system", content: shared.newChatIntro(participants.map(function (participant) { return participant.handle; })),
+          createdAt: createdAt, status: "done", metadata: { threadId: "system" } } }
+      });
+      const message = await messageOutboxEntries({ conversationId: conversationId, content: text, dependsOn: create.eventId });
+      // One transaction: the chat is never queued without its first message.
+      await putOutboxEntries([create, intro].concat(message));
+      listed = false;
+    } catch (error) {
+      // Nothing was queued: the chat is not in the list, and the panel says why.
+      if (listed) forgetStartedChat(conversationId);
+      newChatStarting = false;
+      renderNewChat("Could not start the chat: " + (error && error.message ? error.message : String(error)));
+      return;
+    }
+    newChatStarting = false;
+    if (input) input.value = "";
+    closeNewChat();
+    renderNewChat("");
+    await openConversation(conversationId);
+    void sendNow();
+  }
+
+  function wireNewChat() {
+    const button = document.getElementById("new-chat-button");
+    const sheet = document.getElementById("new-chat-sheet");
+    const close = document.getElementById("new-chat-close");
+    const input = document.getElementById("new-chat-input");
+    const start = document.getElementById("new-chat-start");
+    button?.addEventListener("click", function () { void openNewChat(); });
+    close?.addEventListener("click", closeNewChat);
+    sheet?.addEventListener("click", function (event) {
+      if (event.target instanceof Element && event.target.dataset.newChatClose === "1") closeNewChat();
+    });
+    input?.addEventListener("input", function () { renderNewChat(); });
+    start?.addEventListener("click", function () { void startNewChat(); });
   }
 
   // Who waits for this phone's part of the next hand-over to be done.
@@ -3969,33 +4268,10 @@
     }
   }
 
-  // The marks a message of the User's carries, the same words on every
-  // device (agreements Д3, Д5): not answered by the server yet, taken by it,
-  // and taken to work by each member's own device.
-  const MARK_NOT_SENT = "Not sent, retrying";
-  const MARK_SENT = "Sent";
-  const MARK_TAKEN = "Taken to work";
+  // A message of the User's is faded until her server took it, then shown
+  // as any message; a member's reply appearing under it is the sign that
+  // work started (the User, 2026-10-29). Only a refusal says something.
   const MARK_REFUSED = "Not taken by your server";
-
-  /** "@a", "@a and @b", "@a, @b and @c". */
-  function handleList(handles) {
-    if (handles.length <= 1) return handles[0] || "";
-    return handles.slice(0, -1).join(", ") + " and " + handles[handles.length - 1];
-  }
-
-  /** "Sent", or "Taken to work by @a" once a member's own device claimed the
-   *  turn the message asked of it (or ran it since). */
-  function sentMark(conversationId, turns) {
-    const chat = loadChats().find(function (item) { return item.id === conversationId; });
-    const members = chat && Array.isArray(chat.members) ? chat.members : [];
-    const taken = (Array.isArray(turns) ? turns : []).filter(function (turn) {
-      return turn && (turn.state === "claimed" || turn.state === "finished");
-    }).map(function (turn) {
-      const member = members.find(function (item) { return item.id === turn.participantId; });
-      return member ? "@" + member.handle : "a member";
-    });
-    return taken.length ? MARK_TAKEN + " by " + handleList(taken) : MARK_SENT;
-  }
 
   // Waiting with no feedback reads as "nothing is happening", so the wait is
   // timed and named, and a long silence says the chats have not come.
@@ -5964,8 +6240,9 @@
     // backdrop is a way around it. The live-reply view is a screen of the
     // chat rather than a dialog, so the bar stays under that one.
     const sendLog = document.getElementById("send-log-sheet");
+    const newChat = document.getElementById("new-chat-sheet");
     const covered = (name === "activity" && Boolean(openActivityCardId)) ||
-      Boolean(sendLog && !sendLog.hidden) ||
+      Boolean(sendLog && !sendLog.hidden) || Boolean(newChat && !newChat.hidden) ||
       (inChat && CHAT_DIALOG_IDS.some(function (id) {
         const node = document.getElementById(id);
         return Boolean(node && !node.hidden);
@@ -7066,6 +7343,12 @@
       showScreen("chats");
       return;
     }
+    // A phone paired for every chat starts new ones, as the computer does.
+    const newChatButton = document.getElementById("new-chat-button");
+    if (newChatButton) {
+      const pairing = loadPairing();
+      newChatButton.hidden = !(isHubPairing(pairing) && !pairing.conversationId);
+    }
     // W5: offer the doorbell once paired. iOS only grants Notification
     // permission from a user gesture, so this is a visible button, shown only
     // while permission is still undecided.
@@ -7195,8 +7478,7 @@
           })
           : undefined,
         status: refused ? "Refused" : notSent ? "Queued" : "Sent",
-        mark: refused ? MARK_REFUSED + ": " + (entry.lastError || "No reason was given.")
-          : notSent ? MARK_NOT_SENT : sentMark(entry.conversationId, serverCopy && serverCopy.turns),
+        ...(refused ? { mark: MARK_REFUSED + ": " + (entry.lastError || "No reason was given.") } : {}),
         onItsWay: notSent,
         refused: refused,
         createdAt: entry.createdAt
@@ -7232,9 +7514,6 @@
         cancellable: !isScaffoldingEntry(entry),
         content: entry.content,
         status: entry.role === "you" ? "Sent" : entry.status === "error" ? "Error" : entry.status === "done" ? "Done" : "Running",
-        // The User's message from another device: on the server, and taken
-        // to work by each member whose device claimed its turn.
-        ...(entry.role === "you" ? { mark: sentMark(entry.conversationId, entry.turns) } : {}),
         // What a Stop names the member's turn on the server by.
         ...(entry.participantId ? { participantId: entry.participantId } : {}),
         ...(entry.sourceMessageId ? { sourceMessageId: entry.sourceMessageId } : {}),
@@ -7632,14 +7911,10 @@
   }
 
   function messageStatusLabel(entry) {
-    // The User's message says where it stands, in the same words on every
-    // device: not sent yet (and faded), sent, taken to work, or not taken
-    // and why. Sent and taken carry the time it was written.
-    if (entry.author === "you" && entry.mark) {
-      const time = entry.status === "Sent" ? formatClockTime(entry.createdAt) : "";
-      return time ? time + " · " + entry.mark : entry.mark;
-    }
-    if (entry.status === "Done" || entry.status === "Sent") {
+    // A refused message of the User's says why; one not sent yet is faded
+    // and shows its time like any other.
+    if (entry.author === "you" && entry.mark) return entry.mark;
+    if (entry.author === "you" || entry.status === "Done" || entry.status === "Sent") {
       return formatClockTime(entry.createdAt) || entry.status;
     }
     return entry.status;
@@ -7736,7 +8011,7 @@
       if (Date.now() - Date.parse(ask.createdAt) > ROUTED_ROW_MAX_MS) continue;
       for (const participantId of ask.targets) {
         const turn = ask.turns ? ask.turns.find(function (item) { return item.participantId === participantId; }) : undefined;
-        // Taken to work, stopped or done: the bubble's mark says so.
+        // Taken by its device, stopped or done: the member's own row says so.
         if (turn && turn.state !== "requested") continue;
         const runId = turn ? turn.runId : globalThis.AccordHubClient.hubTurnRunId(ask.messageId, participantId);
         if (runIds.has(runId)) continue;
@@ -8686,6 +8961,7 @@
     wireHomeDock();
     wireMembersSheet();
     wireSendLog();
+    wireNewChat();
     wireImageViewer();
     wireWorkerMessages();
     // Opened from a notification while the app was not running: the worker

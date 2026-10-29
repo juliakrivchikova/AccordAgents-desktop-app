@@ -415,8 +415,10 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /kind: "turn\.stop"/);
   assert.match(app, /kind: "card\.answer"/);
   assert.doesNotMatch(app, /mintHubEvent|pushEvents|hubLogicalTs|rechainFrom|repairHubGaps/);
-  assert.match(app, /"Not sent, retrying"/);
-  assert.match(app, /"Taken to work"/);
+  // A message is faded until the server took it and then says nothing; only
+  // a refusal says why (the User, 2026-10-29).
+  assert.doesNotMatch(app, /"Not sent, retrying"|"Taken to work"/);
+  assert.match(app, /"Not taken by your server"/);
   assert.match(app, /sha256Hex/);
   assert.match(app, /mobile\.timeline\.events/);
   assert.match(app, /stopRunFromPhone/);

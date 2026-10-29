@@ -149,13 +149,12 @@ folds the card at once to what was answered ("Your answer: …") and fades it, o
 its Activity row, a little, and says nothing about how far it has got; once the
 chat on the server states it answered the card reads "Answered: …" at full strength. A failure, or
 that the answer can be given again, still opens the card and says so (the User,
-2026-09-24). A message of the User's says where it stands, in the same words
-on every device (agreements Д3 and Д5 of 2026-10-28, which replaced the silent
-fade of 2026-09-24): "Not sent, retrying" (faded) until the User's server has
-answered it, then the time and "Sent" once the server accepted it, then "Taken
-to work by @x" once a member's own device claimed the turn the message asked
-of it; a message the server refused reads "Not taken by your server:" and the
-server's reason. The header does not report sends on their way: it says
+2026-09-24). A message of the User's is shown the same way on every device
+(the User, 2026-10-29, replacing the words of agreements Д3 and Д5 of
+2026-10-28): faded until her server accepted it, then as any message, with
+only its time; a member's reply appearing under it is the sign that work
+started. Only a message the server refused says something: "Not taken by
+your server:" and the server's reason, in one line under it. The header does not report sends on their way: it says
 "Synced", or "Not connected" from a send that could reach nothing until a send
 gets through.
 - Finished — finished member messages from the last 7 days, one row per chat

@@ -2,11 +2,12 @@
  * What the phone says about what it sent, driven through the real PWA in a
  * browser against a real hub (the User's own server).
  *
- * The agreements of 2026-10-28 (artifact "Сервер — хозяин переписки"):
- * "Sent" is the server having accepted the message, and until then the phone
- * says "Not sent, retrying" (Д3); "Taken to work" is a member's own device
- * having claimed the turn the message asked of it (Д5); every failed try is
- * written to a log the User can read on the phone, with its reason (Д12).
+ * The agreements of 2026-10-28 (artifact "Сервер — хозяин переписки") as the
+ * User set them on 2026-10-29: a message is faded until the server accepted
+ * it, then shown as any message, with no words about it; a member's reply
+ * under it is the sign that work started; only a refusal says something, with
+ * its reason. Every failed try is written to a log the User can read on the
+ * phone, with its reason (Д12).
  * The incident behind them: two messages sat 9–12 minutes on the phone while
  * the app was open and the server reachable, and nothing said why.
  *
@@ -61,8 +62,8 @@ test("a message the server cannot take says so, its failed tries are in the log 
   // The connection drops on every write: nothing reaches the server.
   hub.setGate(async (request) => request.method === "POST" && request.path === "/v3/ops" ? { drop: true } : undefined);
   await send("@drew are you there?");
-  await app.waitFor(`(async () => { const rows = await (${ownRowsSource()}); const row = rows.find((item) => item.text === "@drew are you there?"); return Boolean(row && row.status === "Not sent, retrying" && row.faded); })()`,
-    "the message says it was not sent, and fades");
+  await app.waitFor(`(async () => { const rows = await (${ownRowsSource()}); const row = rows.find((item) => item.text === "@drew are you there?"); return Boolean(row && /^\\d{2}:\\d{2}$/.test(row.status) && row.faded); })()`,
+    "the message fades, with only its time under it");
   await app.waitFor(`document.getElementById("connection-state").textContent === "Not connected"`, "the header says nothing could be reached");
   // Tried again by itself while the app is open, the pauses growing.
   await app.waitFor(`AccordAgentsMobile.listSendFailures().then((rows) => rows.filter((row) => row.kind === "message.created").length >= 3)`,
@@ -84,7 +85,7 @@ test("a message the server cannot take says so, its failed tries are in the log 
   const answered = (await app.evaluate(`AccordAgentsMobile.listSendFailures()`))[0];
   assert.equal(answered.cause, "http");
   assert.equal(answered.reason, "Your server answered 503: The hub could not answer.");
-  assert.equal((await ownRows()).find((row) => row.text === "@drew are you there?").status, "Not sent, retrying", "still not sent");
+  assert.equal((await ownRows()).find((row) => row.text === "@drew are you there?").faded, true, "still not sent");
 
   // The log, from the chat's header, beside where it says it is not connected.
   await app.waitFor(`!document.getElementById("send-log-button").hidden && document.getElementById("send-log-spacer").hidden`, "the header's way to the log");
@@ -110,7 +111,7 @@ test("a message the server cannot take says so, its failed tries are in the log 
 
   // Back: taken at the next try, once, however many tries came before.
   hub.setGate(undefined);
-  await app.waitFor(`(async () => { const rows = await (${ownRowsSource()}); const row = rows.find((item) => item.text === "@drew are you there?"); return Boolean(row && / · (Sent|Taken to work by @drew)$/.test(row.status) && !row.faded); })()`,
+  await app.waitFor(`(async () => { const rows = await (${ownRowsSource()}); const row = rows.find((item) => item.text === "@drew are you there?"); return Boolean(row && /^\\d{2}:\\d{2}$/.test(row.status) && !row.faded); })()`,
     "the message to be taken by the server when it is back", 40_000);
   await app.waitFor(`document.getElementById("connection-state").textContent === "Synced"`, "the header to say Synced once a send got through");
   const entry = await entryOf("@drew are you there?");
@@ -157,9 +158,9 @@ test("a message the server refuses says it was not taken, and why, and is not tr
   t.diagnostic(JSON.stringify(await ownRows()));
 });
 
-test("a message's marks come in order: not sent, sent, taken to work", { timeout: 120_000 }, async (t) => {
+test("a message is faded until the server takes it, then shown as any message, and says nothing when a member takes it", { timeout: 120_000 }, async (t) => {
   const { hub, app, send, entryOf } = await phone(t, { site: 8335, cdp: 9475 });
-  // The server's answer is held for a while, so "not sent" can be seen.
+  // The server's answer is held for a while, so the faded message can be seen.
   hub.setGate(async (request) => request.method === "POST" && request.path === "/v3/ops" ? { delayMs: 1_500 } : undefined);
   await app.evaluate(`(() => {
     window.__marks = [];
@@ -168,26 +169,29 @@ test("a message's marks come in order: not sent, sent, taken to work", { timeout
       for (const row of list.querySelectorAll('.message-row[data-author="you"]')) {
         if (row.querySelector(".message-content").textContent !== "@drew mark this") continue;
         const status = row.querySelector(".message-status").textContent;
-        if (window.__marks[window.__marks.length - 1] !== status) window.__marks.push(status);
+        const shown = (row.classList.contains("is-on-its-way") ? "faded " : "plain ") + status;
+        if (window.__marks[window.__marks.length - 1] !== shown) window.__marks.push(shown);
       }
     };
-    new MutationObserver(read).observe(list, { childList: true, subtree: true, characterData: true });
+    new MutationObserver(read).observe(list, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class"] });
     return true;
   })()`);
   await send("@drew mark this");
-  await app.waitFor(`window.__marks.some((mark) => / · Sent$/.test(mark))`, "Sent", 20_000);
+  await app.waitFor(`window.__marks.some((mark) => mark.startsWith("plain "))`, "the message to be taken by the server", 20_000);
   const entry = await entryOf("@drew mark this");
   hub.setGate(undefined);
   // The member's own device (the Mac, for a member that runs there) takes
-  // the turn the message asked of it.
+  // the turn the message asked of it: the message says nothing about it.
   const turn = await hub.turn(entry.eventId, DREW.id);
   assert.equal(turn.state, "requested", "the server asked a turn of the member the message names");
+  const waitingRow = `Boolean(document.querySelector('#message-list .message-row[data-row-key^="routed"]'))`;
+  await app.waitFor(waitingRow, "the member's waiting row while its turn waits", 20_000);
   await hub.claimTurn(CHAT, entry.eventId, DREW.id);
-  await app.waitFor(`window.__marks.some((mark) => / · Taken to work by @drew$/.test(mark))`, "Taken to work", 20_000);
+  // The phone saw the claim: the member's waiting row went.
+  await app.waitFor(`!${waitingRow}`, "the waiting row to go once the member's device took the turn", 20_000);
   const marks = await app.evaluate(`window.__marks`);
   t.diagnostic(`marks: ${JSON.stringify(marks)}`);
-  const kinds = marks.map((mark) => mark === "Not sent, retrying" ? "not-sent" : / · Sent$/.test(mark) ? "sent" : / · Taken to work by @drew$/.test(mark) ? "taken" : mark);
-  assert.deepEqual(kinds, ["not-sent", "sent", "taken"], `the three marks, in order: ${JSON.stringify(marks)}`);
+  assert.deepEqual(marks.map((mark) => mark.replace(/\d{2}:\d{2}$/, "HH:MM")), ["faded HH:MM", "plain HH:MM"], `faded, then plain, only its time: ${JSON.stringify(marks)}`);
 });
 
 test("a Stop on a member still waiting for its device stops the turn on the server; two messages with the same words stay two", { timeout: 120_000 }, async (t) => {
@@ -208,7 +212,8 @@ test("a Stop on a member still waiting for its device stops the turn on the serv
   const claim = await hub.ops([{ opId: hub.nextOpId(), kind: "turn.claim", conversationId: CHAT, runId: turn.runId, messageId: entry.eventId, participantId: DREW.id }]);
   assert.equal(claim.results[0].claim, "stopped", "a stopped turn is never started");
   await app.waitFor(`!document.querySelector('#message-list .message-row[data-row-key^="routed"]')`, "the waiting row to go");
-  assert.match((await ownRows()).find((row) => row.text === "@drew do not start this").status, / · Sent$/, "the message itself was sent, and nobody took it to work");
+  const stopped = (await ownRows()).find((row) => row.text === "@drew do not start this");
+  assert.ok(/^\d{2}:\d{2}$/.test(stopped.status) && !stopped.faded, "the message itself was sent, shown as any message");
 
   // Two messages with the same words, and a third written on the desktop:
   // three messages, told apart by their ids, never folded by their text.
@@ -222,7 +227,7 @@ test("a Stop on a member still waiting for its device stops the turn on the serv
   await sleep(500);
   const same = (await ownRows()).filter((row) => row.text === "same words");
   assert.equal(same.length, 3, `three messages, three rows: ${JSON.stringify(same)}`);
-  assert.ok(same.every((row) => / · Sent$/.test(row.status)), "each of them sent");
+  assert.ok(same.every((row) => /^\d{2}:\d{2}$/.test(row.status) && !row.faded), "each of them sent");
   const copies = (await hub.storage.getConversation(CHAT)).messages.filter((message) => message.content === "same words");
   assert.equal(copies.length, 3, "and three on the server");
 });

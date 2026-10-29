@@ -738,3 +738,15 @@ test("documents: a chat deleted on the server takes its documents with it, and n
   assert.equal(late.body.results[0].status, "rejected");
   assert.deepEqual((await h.call<{ artifacts: unknown[] }>(h.owner, "GET", `/v3/artifacts?conversationId=${chat}`)).body.artifacts, []);
 });
+
+test("a phone paired for one chat (an old pairing) starts no other; one paired for every chat does", async (t) => {
+  const h = await hub(t);
+  const chat = id("chat");
+  const create = () => createChat(id("chat"));
+  const oldPhone = { ...h.phone, deviceId: h.phone.originId, role: "phone" as const, name: "Old phone", addedAt: new Date().toISOString(), scope: { scope: "conversation" as const, conversationId: chat } };
+  const refused = await h.ops.apply(oldPhone as never, { ops: [create()] });
+  assert.equal(refused.results[0].status, "rejected");
+  assert.match((refused.results[0] as { reason?: string }).reason ?? "", /paired for one chat/);
+  const everyChat = { ...oldPhone, scope: { scope: "device" as const } };
+  assert.equal((await h.ops.apply(everyChat as never, { ops: [create()] })).results[0].status, "accepted");
+});
