@@ -11625,6 +11625,27 @@ test("only the member's home raises a card for its approval on the User's server
   assert.deepEqual(wanted(), ["owner-card"], "its machine raises it, and only while it waits");
 });
 
+test("a member's choice moved as this computer's but asked by a member of a machine is not raised here", async () => {
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-gone" };
+  const conversation = chatConversation([participant]);
+  conversation.metadata.pendingAppToolApprovals = [];
+  conversation.messages.push({
+    id: "machine-choice", role: "participant", participantId: participant.id, participantLabel: `@${participant.handle}`, content: "Which one?",
+    createdAt: new Date().toISOString(), status: "done",
+    // The machine was no longer on the server's devices when the chats
+    // moved: the server took the message as this computer's.
+    metadata: { serverWriter: "this-computer", serverSeq: 0, pendingChoice: { id: "choice-1", title: "Pick", question: "Which one?", status: "pending",
+      options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] } }
+  } as ChatMessage);
+  const { service } = testService({ conversation });
+  (service as any).serverLink = { deviceId: () => "this-computer" };
+  const wanted = () => ((service as any).wantedServerCards(conversation) as Array<{ cardId: string }>).map((card) => card.cardId);
+  assert.deepEqual(wanted(), [], "its member does not run here: the server would refuse it every start");
+  service.setHostMachineId("machine-gone");
+  (service as any).serverLink = { deviceId: () => "the-machine" };
+  assert.deepEqual(wanted(), [], "nor on a machine whose own messages are another device's");
+});
+
 test("startAccord rejects Chat Assistant as facilitator", async () => {
   const assistant = {
     ...chatParticipant("codex-cli"),

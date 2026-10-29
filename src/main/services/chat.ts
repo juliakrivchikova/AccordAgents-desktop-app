@@ -20956,9 +20956,12 @@ export class ChatService {
     return wantedHubCards(conversation, {
       approval: (approval) => this.isChatAppToolApproval(approval) && (!approval.homeMachineId || approval.homeMachineId === this.hostMachineId) &&
         memberHere(approval.requesterParticipantId),
+      // Only for a member that runs here, as the server allows: a member of
+      // a machine no longer on the server's devices (its messages moved as
+      // this computer's) has nobody to answer it.
       message: (message) => {
         const writer = message.metadata?.serverWriter;
-        if (typeof writer === "string") return Boolean(me) && writer === me;
+        if (typeof writer === "string" && (!me || writer !== me)) return false;
         return memberHere(message.participantId);
       }
     });
