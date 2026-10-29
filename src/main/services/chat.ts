@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
 import { chatChangeBaseline, diffChatChanges, type ChatChangeBaseline, isSafeChatId } from "./chatChanges";
+import { newChatIntro, participantConfigUsage, participantConfigUsageCount, type NewChatMemberOption } from "../../shared/newChat";
+import type { HubNewChatOptions } from "../../shared/hubProtocol";
 import { chatChangesToOps, furthestTurnMarks, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
 import { hubTurnRunId, isHubTurnRunId, type HubCard, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
@@ -101,6 +103,7 @@ import type {
   ChatToolPermissionRequest,
   CompactChatParticipantRequest,
   Conversation,
+  ConversationSummary,
   ConversationUpdate,
   ChatPromptSuggestion,
   ChatPromptSuggestionsUpdate,
@@ -1488,6 +1491,96 @@ export class ChatService {
         roleConfigId: participant.roleConfigId
       })),
       messageCount: conversation.messages.length
+    };
+  }
+
+  /**
+   * What the phone's New chat offers, as this computer's New chat screen
+   * does (the User, 2026-10-29): its projects (the folders its chats are in,
+   * newest first), the folder a new chat starts in, the Chat Assistant and
+   * every saved member as this computer would add them, and why none could
+   * be started now. The phone puts the chat together from these
+   * (src/shared/newChat) and writes it to the User's server.
+   */
+  async newChatOptions(summaries: ConversationSummary[]): Promise<HubNewChatOptions | undefined> {
+    const agents = await this.detectAgentsForReadiness("submit");
+    await this.settings.ensureAssistantProviderDefault(agents);
+    const settings = await this.settings.ensureGenericChatParticipantSeeds(agents);
+    const assistantKind = resolveAssistantProviderKind({ agents, providers: settings.providers, explicitKind: settings.assistantProviderKind });
+    const [assistant] = await this.ensureAdministratorParticipant([], assistantKind);
+    if (!assistant) return undefined;
+    const readyKinds = readyProviderKinds(agents, settings.providers);
+    let unavailable: string | undefined;
+    if (readyKinds.length === 0) unavailable = "Set up and sign in to at least one CLI provider before creating a chat.";
+    else if (!assistantKind) {
+      const savedKind = settings.assistantProviderKind;
+      const label = savedKind ? cliProviderMetadata(savedKind).label : undefined;
+      unavailable = savedKind && label
+        ? `${agentReadinessReason(readinessForProvider(savedKind, agents, settings.providers), label) ?? `${label} is not ready.`} Change the Assistant provider in General Settings.`
+        : "Could not initialize an Assistant provider. Check General Settings and try again.";
+    }
+    const usage = participantConfigUsage(summaries);
+    const members: NewChatMemberOption[] = [];
+    for (const config of settings.chatParticipantConfigs) {
+      if (config.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID || config.handle.trim().replace(/^@/, "").toLowerCase() === CHAT_ADMINISTRATOR_HANDLE) continue;
+      const input: CreateChatConversationRequest["participants"][number] = {
+        participantConfigId: config.id,
+        handle: config.handle,
+        roleConfigId: config.roleConfigId,
+        behaviorRuleIds: config.behaviorRuleIds,
+        kind: config.kind,
+        model: config.model,
+        reasoningEffort: config.reasoningEffort,
+        avatarId: config.avatarId,
+        hostId: config.hostId,
+        agentMode: config.agentMode,
+        permissions: config.permissions,
+        remoteExecution: config.remoteExecution,
+        homeMachineId: config.homeMachineId,
+        cloudRun: config.cloudRun,
+        skipToolchainPreflight: config.skipToolchainPreflight,
+        autoWatch: config.roleConfigId === WORKFLOW_MANAGER_ROLE_ID || config.autoWatchEnabled === true
+      };
+      let participant: ChatParticipant | undefined;
+      try {
+        [participant] = await this.validateParticipants([input], [], true);
+      } catch {
+        // One this computer could not add at all (a deleted role) is not offered.
+        continue;
+      }
+      if (!participant) continue;
+      let reason: string | undefined;
+      try {
+        this.assertParticipantProvidersReady([input], agents, settings.providers, settings.cliProviderHosts ?? []);
+      } catch (error) {
+        reason = error instanceof Error ? error.message : String(error);
+      }
+      members.push({ configId: config.id, participant, uses: participantConfigUsageCount(config, usage), ...(reason ? { unavailable: reason } : {}) });
+    }
+    const projects: Array<{ path: string; label: string; updatedAt: string }> = [];
+    for (const summary of summaries) {
+      if (summary.kind !== "chat" || summary.archived) continue;
+      const path = summary.repoPath?.trim().replace(/[\\/]+$/g, "");
+      if (!path) continue;
+      const known = projects.find((project) => project.path === path);
+      if (known) {
+        if (summary.updatedAt > known.updatedAt) known.updatedAt = summary.updatedAt;
+        continue;
+      }
+      projects.push({ path, label: path.split(/[\\/]+/).filter(Boolean).pop() ?? path, updatedAt: summary.updatedAt });
+    }
+    projects.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.label.localeCompare(right.label));
+    // The folder the computer's New chat starts in when no chat is open: the
+    // last one chosen, or the newest chat's.
+    const newest = [...summaries].filter((summary) => summary.kind === "chat" && !summary.archived)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+    const defaultProject = settings.lastRepoPath?.trim() || newest?.repoPath?.trim() || undefined;
+    return {
+      projects: projects.map(({ path, label }) => ({ path, label })),
+      ...(defaultProject ? { defaultProject: defaultProject.replace(/[\\/]+$/g, "") } : {}),
+      assistant,
+      members,
+      ...(unavailable ? { unavailable } : {})
     };
   }
 
@@ -17881,12 +17974,7 @@ export class ChatService {
   }
 
   private chatIntro(participants: ChatParticipant[]): string {
-    return [
-      "Chat started.",
-      "Members:",
-      "- User",
-      ...participants.map((participant) => `- @${participant.handle}`)
-    ].join("\n");
+    return newChatIntro(participants.map((participant) => participant.handle));
   }
 
   private normalizeChatTitle(value: string): string {

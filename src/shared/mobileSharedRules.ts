@@ -26,3 +26,7 @@ export { CHAT_DELIVERY_POLICY_OPTIONS, resolveChatDeliveryTargets } from "./chat
 // `/goal` from the phone: the same parse and objective the desktop's composer
 // makes, carried on the message.
 export { nativeGoalObjective, parseNativeGoalCommand } from "./nativeGoalCommand";
+// A new chat from the phone, made as the computer's New chat makes it: its
+// members from what the computer prepared, its first system line and its
+// title (the User, 2026-10-29).
+export { newChatIntro, newChatParticipants, newChatTitle } from "./newChat";

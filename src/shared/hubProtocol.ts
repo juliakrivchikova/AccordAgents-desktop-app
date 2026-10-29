@@ -8,7 +8,8 @@
  * only devices on its roster, which the desktop that set it up keeps.
  */
 
-import type { ChatProviderKind, ChatSkillMention } from "./types";
+import type { ChatParticipant, ChatProviderKind, ChatSkillMention } from "./types";
+import type { NewChatMemberOption } from "./newChat";
 import type { MachineProgressFrame } from "./machineProgress";
 import { stableJson } from "./stableJson";
 
@@ -269,6 +270,23 @@ export interface HubComposerCatalog {
   skills: Array<ChatSkillMention & { providerKinds: ChatProviderKind[] }>;
   /** Custom avatars by id, as blobs the hub holds. */
   avatars: Record<string, { mimeType: string; blob: { type: "device.event.blob"; blobHash: string; byteLength: number; fragments: number } }>;
+  /** What the phone's New chat offers, as the computer's does. */
+  newChat?: HubNewChatOptions;
+}
+
+/** A new chat as the computer's New chat screen offers it, prepared by the
+ *  computer so the phone puts it together the same way (src/shared/newChat). */
+export interface HubNewChatOptions {
+  /** The folders the computer's chats are in (its projects), newest first. */
+  projects: Array<{ path: string; label: string }>;
+  /** The folder a new chat starts in; none: without a folder. */
+  defaultProject?: string;
+  /** The Chat Assistant every new chat has. */
+  assistant: ChatParticipant;
+  /** The saved members, as the computer would add each. */
+  members: NewChatMemberOption[];
+  /** Why no chat can be started now, in the computer's words. */
+  unavailable?: string;
 }
 
 /** PUT /v1/machine-wake (owner only): the key the hub may use to start a

@@ -170,6 +170,8 @@ export class HubOps {
     });
 
     if (op.kind === "conversation.create") {
+      // A phone paired for one chat starts no other.
+      if (device.role === "phone" && device.scope?.scope !== "device") return reject(opId, "This phone was paired for one chat, so it does not start new ones.");
       if (await this.load(op.conversationId)) return reject(opId, "This chat already exists.");
       const fields = conversationFields(op.conversation);
       const conversation: Conversation = {
