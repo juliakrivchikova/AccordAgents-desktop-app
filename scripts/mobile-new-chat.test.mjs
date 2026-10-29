@@ -10,10 +10,14 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { rm } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { attachApp, launchChrome, member, pairPage, serveMobileShell, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
 
-test("the phone starts a chat the way the computer would: in the folder chosen, with the members chosen, asking the member named", { timeout: 120_000 }, async (t) => {
+// A 1x1 PNG: what a photo from the phone's library stands for here.
+const PICTURE = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
+
+test("the phone starts a chat the way the computer would: in the project chosen, with the members chosen, asking the member named", { timeout: 120_000 }, async (t) => {
   const hub = await startMobileHub();
   const site = await serveMobileShell({ port: 8341, hubOrigins: [hub.base] });
   const profile = await tempProfile("aa-mobile-new-chat-");
@@ -69,7 +73,7 @@ test("the phone starts a chat the way the computer would: in the folder chosen, 
     const input = document.getElementById("new-chat-input"); input.value = "this one fails"; input.dispatchEvent(new Event("input", { bubbles: true }));
     document.getElementById("new-chat-start").click(); })()`);
   await app.waitFor(`${note}.indexOf("Could not start the chat: QA: the phone's storage is full") >= 0`, "the failure, in the panel");
-  const failed = await app.evaluate(`({ open: !document.getElementById("new-chat-sheet").hidden, text: document.getElementById("new-chat-input").value,
+  const failed = await app.evaluate(`({ open: !document.getElementById("new-chat-screen").hidden, text: document.getElementById("new-chat-input").value,
     started: localStorage.getItem("accordagents.mobile.startedChats.v1"), start: document.getElementById("new-chat-start").disabled })`);
   assert.deepEqual(failed, { open: true, text: "this one fails", started: null, start: false }, "nothing left behind, and it can be tried again");
   assert.equal((await hub.storage.listConversations()).some((summary) => summary.title === "this one fails"), false);
@@ -90,10 +94,21 @@ test("the phone starts a chat the way the computer would: in the folder chosen, 
   assert.equal(await app.evaluate(`document.getElementById("chat-list").innerText.indexOf("refused chat") >= 0`), false, "the list does not show it");
   assert.equal((await hub.storage.listConversations()).some((summary) => summary.title === "refused chat"), false);
   await app.evaluate(`document.getElementById("new-chat-button").click()`);
-  await app.waitFor(`document.querySelectorAll("#new-chat-members .new-chat-member").length === 4`, "the panel again");
+  await app.waitFor(`document.querySelectorAll("#new-chat-members .new-chat-member").length === 4`, "the screen again");
+  // A screen of its own, the card's two lists closed until asked for.
+  assert.deepEqual(await app.evaluate(`({
+    projectsOpen: !document.getElementById("new-chat-projects-sheet").hidden, membersOpen: !document.getElementById("new-chat-members-sheet").hidden,
+    project: document.getElementById("new-chat-project-label").textContent, members: document.getElementById("new-chat-members-button").getAttribute("aria-label"),
+    dock: document.getElementById("home-dock").hidden
+  })`), { projectsOpen: false, membersOpen: false, project: "site", members: "Members: Chat Assistant", dock: true });
+  await app.evaluate(`document.getElementById("new-chat-project").click()`);
+  await app.waitFor(`!document.getElementById("new-chat-projects-sheet").hidden`, "the project list");
+  await app.evaluate(`document.querySelector('#new-chat-projects-sheet .members-sheet-close').click()`);
+  await app.evaluate(`document.getElementById("new-chat-members-button").click()`);
+  await app.waitFor(`!document.getElementById("new-chat-members-sheet").hidden && document.getElementById("new-chat-projects-sheet").hidden`, "the member list, alone");
   const panel = await app.evaluate(`({
     rows: [...document.querySelectorAll("#new-chat-members .new-chat-member")].map((row) => row.dataset.handle + ":" + row.getAttribute("aria-pressed")),
-    folders: [...document.getElementById("new-chat-folder").options].map((option) => option.textContent + (option.selected ? "*" : ""))
+    folders: [...document.querySelectorAll("#new-chat-projects .new-chat-option")].map((row) => row.querySelector("strong").textContent + (row.getAttribute("aria-pressed") === "true" ? "*" : ""))
   })`);
   assert.deepEqual(panel.rows, ["assistant:true", "drew:false", "gera:false", "cass:false"], "the Assistant first and chosen, then the most used");
   assert.equal(await app.evaluate(`document.querySelector('#new-chat-members [data-handle="cass"]').dataset.unavailable`), "1", "one the computer cannot add now is shown so");
@@ -104,10 +119,24 @@ test("the phone starts a chat the way the computer would: in the folder chosen, 
     document.getElementById("new-chat-start").click(); })()`);
   await app.waitFor(`${note} === "QA: Claude Code is not signed in."`, "the member's reason");
   assert.equal(await app.evaluate(`localStorage.getItem("accordagents.mobile.startedChats.v1")`), null, "no chat started");
-  assert.deepEqual(panel.folders, ["site*", "api", "Work without a folder"], "the computer's projects, its folder first, and none");
+  assert.deepEqual(panel.folders, ["site*", "api", "No project"], "the computer's projects, its own first, and none");
+  assert.equal(await app.evaluate(`document.querySelector('#new-chat-projects [data-path="/Users/u/api"] .members-sheet-location').textContent`), "~/api", "where it is, the home folder as ~");
   await app.evaluate(`[...document.querySelectorAll("#new-chat-members .new-chat-member")].find((row) => row.dataset.handle === "gera").click()`);
-  await app.evaluate(`(() => { const folder = document.getElementById("new-chat-folder"); folder.value = "/Users/u/api"; folder.dispatchEvent(new Event("change", { bubbles: true }));
-    const input = document.getElementById("new-chat-input"); input.value = "@drew start with the login page"; input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await app.waitFor(`document.getElementById("new-chat-members-button").getAttribute("aria-label") === "Members: Chat Assistant, @gera"`, "the members on the card");
+  assert.equal(await app.evaluate(`document.querySelectorAll("#new-chat-avatars .mobile-mention-avatar").length`), 2, "their faces on the card");
+  await app.evaluate(`document.querySelector('#new-chat-members-sheet .members-sheet-close').click()`);
+  await app.evaluate(`document.getElementById("new-chat-project").click()`);
+  await app.evaluate(`document.querySelector('#new-chat-projects [data-path="/Users/u/api"]').click()`);
+  await app.waitFor(`document.getElementById("new-chat-projects-sheet").hidden && document.getElementById("new-chat-project-label").textContent === "api"`, "the project picked, the list closed");
+  // A picture goes with the first message, as from the chat's composer.
+  const picture = path.join(profile, "dot.png");
+  await writeFile(picture, PICTURE);
+  await app.send("DOM.enable");
+  const { root } = await app.send("DOM.getDocument", { depth: -1, pierce: true });
+  const { nodeId } = await app.send("DOM.querySelector", { nodeId: root.nodeId, selector: "#new-chat-image-input" });
+  await app.send("DOM.setFileInputFiles", { nodeId, files: [picture] });
+  await app.waitFor(`document.querySelectorAll("#new-chat-attachments .composer-attachment-thumb").length === 1`, "the picture on the card");
+  await app.evaluate(`(() => { const input = document.getElementById("new-chat-input"); input.value = "@drew start with the login page"; input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
   await app.evaluate(`document.getElementById("new-chat-start").click()`);
   await app.waitFor(`document.getElementById("timeline-screen").classList.contains("is-active") && document.getElementById("chat-title").textContent === "start with the login page"`, "the new chat opened, titled as the computer titles it");
   let created;
@@ -132,6 +161,21 @@ test("the phone starts a chat the way the computer would: in the folder chosen, 
   const message = chat.messages.find((item) => item.role === "user");
   const drewId = chat.metadata.participants.find((participant) => participant.handle === "drew").id;
   assert.deepEqual(message.metadata.deliveryTargets, [drewId], "the member named is asked");
+  const pictures = message.metadata.imageAttachments || [];
+  assert.equal(pictures.length, 1, "the picture is on the first message");
+  assert.equal(pictures[0].filename, "dot.png");
+  assert.ok(pictures[0].hubBlob, "held by the server, where the computer reads it");
   await app.waitFor(`JSON.parse(localStorage.getItem("accordagents.mobile.chatList.v1") || "[]").some((item) => item.id === ${JSON.stringify(created.id)})`, "the server's list names it", 20_000);
   assert.equal(await app.evaluate(`localStorage.getItem("accordagents.mobile.startedChats.v1")`), null, "kept here only until the server listed it");
+
+  // As on the computer, a picture on its own starts a chat, named after it.
+  await app.evaluate(`document.getElementById("back-to-chats").click()`);
+  await app.evaluate(`document.getElementById("new-chat-button").click()`);
+  await app.waitFor(`document.querySelectorAll("#new-chat-members .new-chat-member").length === 4 && document.getElementById("new-chat-start").disabled`, "an empty card, nothing to start yet");
+  const again = await app.send("DOM.getDocument", { depth: -1, pierce: true });
+  const field = await app.send("DOM.querySelector", { nodeId: again.root.nodeId, selector: "#new-chat-image-input" });
+  await app.send("DOM.setFileInputFiles", { nodeId: field.nodeId, files: [picture] });
+  await app.waitFor(`!document.getElementById("new-chat-start").disabled`, "a picture is enough to start");
+  await app.evaluate(`document.getElementById("new-chat-start").click()`);
+  await app.waitFor(`document.getElementById("timeline-screen").classList.contains("is-active") && document.getElementById("chat-title").textContent === "Image: dot.png"`, "the picture's chat, titled as the computer titles it");
 });
