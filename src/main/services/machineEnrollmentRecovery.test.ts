@@ -26,7 +26,7 @@ test("restoring an enrollment commits the sealed route before reconnect, survive
   const connections: string[] = [];
   const settings = make();
   const link = new MachineLinkService(settings, { write: async () => {} }, {
-    appVersion: "test", desktopDeviceId: "desktop", eventStorage: {} as any, eventLog: {} as any,
+    appVersion: "test", desktopDeviceId: "desktop", deviceIdentity: {} as any,
     createClient: pairing => {
       const client = Object.assign(new EventEmitter(), { close: () => {}, connect: async () => {
         const disk = make();
@@ -91,7 +91,7 @@ test("a failed enrollment save retains the old in-memory and on-disk route for r
     assert.equal((await settings.listMachines())[0].pairingKey, installed.rendezvousId);
     await settings.saveMachine({ ...record, id: "two" }, old);
     await assert.rejects(settings.restoreMachineEnrollment("two", old, installed), /already connected/);
-    await settings.saveMachine({ ...record, pendingRuns: [{ runId: "pending", conversationId: "chat" }] }, old);
+    await settings.saveMachine({ ...record, lastHello: { deviceId: "machine-device", machineName: "m", appVersion: "1", platform: "linux", providers: [], activeRunIds: ["running"] } }, old);
     await assert.rejects(settings.restoreMachineEnrollment(record.id, old, installed), /pending actions/);
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
 });

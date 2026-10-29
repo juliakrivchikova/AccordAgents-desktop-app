@@ -1,19 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { importChatCopy } from "../main/services/chatCopy";
 import { ChatSearchService } from "../main/services/chatSearch";
 import { deviceIdForPublicKey } from "../main/services/hubAuth";
 import { StorageService } from "../main/services/storage";
 import { createHeadlessPlatform, setHostPlatform, userDataPath } from "../main/platform";
-import { HubFolder } from "./hubFolder";
-import { hubApplyPolicy } from "./hubPolicy";
-import { HubLog } from "./hubLog";
+import { HubOps } from "./hubOps";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
 import { HubRetention, hubRetentionConfig } from "./hubRetention";
 import { HubChangeFeed, HubPhoneApi } from "./hubPhone";
-import { HUB_CARD_EVENT_KINDS, HubProgress, HubWaker, approvalNotice, foldApprovalCards, phoneMessageHomes, replyNotice } from "./hubPhoneState";
-import { HUB_APPROVAL_CARD_EVENT_KIND } from "../shared/hubProtocol";
+import { HubProgress, HubWaker, cardNotice, phoneMessageHomes, replyNotice } from "./hubPhoneState";
 import { isDeviceEventBlobReference } from "../shared/deviceEventBlobs";
 import { HubServer } from "./hubServer";
 
@@ -24,8 +20,6 @@ interface HubArgs {
   userDataDir?: string;
   /** Setup only: the owner desktop's identity on stdin, then exit. */
   setOwner?: boolean;
-  /** Setup only: import the desktop's chat copy from this directory, then exit. */
-  importChatCopy?: string;
   httpPort: number;
   httpsPort: number;
   host?: string;
@@ -47,7 +41,6 @@ function parseArgs(argv: string[]): HubArgs {
     };
     if (arg === "--user-data") args.userDataDir = next();
     else if (arg === "--set-owner") args.setOwner = true;
-    else if (arg === "--import-chat-copy") args.importChatCopy = path.resolve(next());
     else if (arg === "--http-port") args.httpPort = Number(next());
     else if (arg === "--https-port") args.httpsPort = Number(next());
     else if (arg === "--host") args.host = next();
@@ -82,13 +75,8 @@ function finish(result: unknown): Promise<never> {
 /** Who the hub's pushes say they come from. */
 const PUSH_SUBJECT = "mailto:push@accordagents.com";
 
-/** Present once the desktop's first copy of the chats is in. */
-function chatCopyMark(): string {
-  return path.join(userDataPath(), "chat-copy.json");
-}
-
-function hubId(): string {
-  const file = path.join(userDataPath(), "hub-id.json");
+export function hubId(dir = userDataPath()): string {
+  const file = path.join(dir, "hub-id.json");
   if (existsSync(file)) {
     const stored = JSON.parse(readFileSync(file, "utf8")) as { hubId?: string };
     if (stored.hubId) return stored.hubId;
@@ -99,9 +87,10 @@ function hubId(): string {
 }
 
 /**
- * The hub's parts and how they hear of each other: the order, the folding of
- * chats, and what the phone is shown and rung for. Shared by the program and
- * its tests, so a test runs the hub as it is put together.
+ * The hub's parts and how they hear of each other: the chats as the server
+ * owns them (operations, the feed, turns, cards), and what the phone is shown
+ * and rung for. Shared by the program, the server inside the app and their
+ * tests, so a test runs the hub as it is put together.
  */
 export function composeHub(options: {
   storage: StorageService;
@@ -117,8 +106,6 @@ export function composeHub(options: {
   pushDebounceMs?: number;
 }) {
   const { storage, log } = options;
-  const policy = hubApplyPolicy(storage);
-  const hubLog = new HubLog(storage);
   // Which chats' copies changed, for the phones reading them here.
   const feed = new HubChangeFeed();
   const progress = new HubProgress();
@@ -134,45 +121,70 @@ export function composeHub(options: {
     const seq = await storage.hub().addNotice(notice);
     await push.noteNotice({ seq, conversationId: notice.conversationId });
   };
-  const isPhone = async (originId: string): Promise<boolean> =>
-    (await storage.hub().devices()).some((device) => device.deviceId === originId && device.role === "phone");
-  const folder = new HubFolder(storage, policy, log, (conversationId, details) => {
-    feed.note(conversationId);
-    for (const message of details.settled) {
+  // The chats as the server owns them (agreements Д1–Д5): devices' writes,
+  // the feed they read, and turns.
+  const ops = new HubOps(storage, log);
+  /** The machine a member of a chat runs on, if it runs on one. Read
+   *  without the chat's messages: a chat can be thousands of them. */
+  const turnHome = async (conversationId: string, participantId: string): Promise<string | undefined> => {
+    const opened = await storage.openConversation(conversationId, 1);
+    const participants = Array.isArray(opened?.conversation.metadata?.participants)
+      ? opened!.conversation.metadata.participants as Array<{ id?: unknown; homeMachineId?: unknown }> : [];
+    const home = participants.find((participant) => participant?.id === participantId)?.homeMachineId;
+    return typeof home === "string" && home ? home : undefined;
+  };
+  ops.onApplied(({ entry, conversation, previous }) => {
+    const effect = entry.effect;
+    // A document changed: no chat did (its note is a message of its own).
+    if (effect.kind.startsWith("artifact.")) return;
+    feed.note(entry.conversationId);
+    // A card raised for the User rings the phone once: raised again while
+    // it waits (what it shows changed), it keeps the moment it was raised.
+    // One its member's device decided itself (an addition its policy
+    // allowed, shown waiting to be made) asks nothing and rings nobody; nor
+    // does one the phone does not show (mentions of an older message).
+    const asked = (effect.kind === "card.raise" ? (effect.card.card as { approval?: { status?: unknown } }).approval?.status : undefined) ?? "pending";
+    if (effect.kind === "card.raise" && conversation && effect.card.state === "pending" && effect.card.raisedAt === entry.acceptedAt && asked === "pending" &&
+        effect.card.cardKind !== "mention") {
+      void notify(cardNotice(conversation, effect.card)).catch((error) => log("hub.notice.error", { message: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
+    // The User's answer to a card of a member on a machine is work for that
+    // machine: it applies the answer, as the computer applies one for its
+    // own members (a stopped machine is woken for it).
+    if (effect.kind === "card.answer" && effect.card.state === "answered" && effect.card.participantId) {
+      void turnHome(effect.card.conversationId, effect.card.participantId).then((machineId) => {
+        if (machineId) waker.noteWork(machineId, entry.seq);
+      }).catch(() => undefined);
+      return;
+    }
+    // A turn asked of a member on a machine (a continuation, another
+    // member's request, a compaction) is work for that machine too.
+    if (effect.kind === "turn.request" && effect.turn.state === "requested") {
+      void turnHome(effect.turn.conversationId, effect.turn.participantId).then((machineId) => {
+        if (machineId) waker.noteWork(machineId, entry.seq);
+      }).catch(() => undefined);
+      return;
+    }
+    if (!conversation || (effect.kind !== "message.create" && effect.kind !== "message.update")) return;
+    const message = effect.message;
+    // A member's reply that is done now and was running (or new and done).
+    const settled = message.role === "participant" && (message.status === "done" || message.status === "error") &&
+      (effect.kind === "message.create" || previous?.status === "pending");
+    if (settled) {
       const runId = typeof message.metadata?.runId === "string" ? message.metadata.runId : undefined;
       if (runId) progress.settle(runId);
       // A member's line that is not the User's to see rings nobody.
-      if (message.metadata?.hiddenFromTimeline === true) continue;
-      void notify(replyNotice(details.conversation, message)).catch((error) => log("hub.notice.error", { message: error instanceof Error ? error.message : String(error) }));
-    }
-    // A message for a member on a machine that is not reading: woken soon.
-    for (const { message, hubSeq } of details.phoneMessages) {
-      for (const machineId of phoneMessageHomes(details.conversation, message)) waker.noteWork(machineId, hubSeq);
-    }
-  }, isPhone);
-  const search = new ChatSearchService(storage);
-  let views: Promise<void> = Promise.resolve();
-  hubLog.onAppended(({ changedConversationIds, events }) => {
-    folder.enqueue(changedConversationIds);
-    // In the order the events were placed: a card answered right after it
-    // was raised must not fold before it.
-    views = views.then(async () => {
-      for (const item of events) {
-        if (item.event.kind !== "machine.turn.progress.delta") continue;
-        const payload = await storage.deviceEventBlobs().hydrate(item.event.payload).catch(() => undefined);
-        progress.note(item.event, payload);
+      if (message.metadata?.hiddenFromTimeline !== true) {
+        void notify(replyNotice(conversation, message)).catch((error) => log("hub.notice.error", { message: error instanceof Error ? error.message : String(error) }));
       }
-      const pending = await foldApprovalCards(storage, events);
-      const touched = new Set(events.filter((item) => item.event.kind === HUB_APPROVAL_CARD_EVENT_KIND || item.event.kind.startsWith("machine.approval.")).map((item) => item.event.conversationId));
-      for (const conversationId of touched) feed.note(conversationId);
-      if (pending.length === 0) return;
-      const summaries = await storage.listConversations().catch(() => []);
-      for (const card of pending) {
-        const title = summaries.find((summary) => summary.id === card.conversationId)?.title ?? "";
-        await notify(approvalNotice(card.conversationId, title, card.approval));
-      }
-    }).catch((error) => log("hub.phone-views.error", { message: error instanceof Error ? error.message : String(error) }));
+    }
+    // Work for a member on a machine that is not reading: woken soon.
+    if (effect.kind === "message.create" && message.role === "user") {
+      for (const machineId of phoneMessageHomes(conversation, message)) waker.noteWork(machineId, entry.seq);
+    }
   });
+  const search = new ChatSearchService(storage);
   phone = new HubPhoneApi({
     store: storage,
     feed,
@@ -185,38 +197,28 @@ export function composeHub(options: {
   });
   const phoneApi = phone;
   const server = new HubServer({
-    hubId: options.hubId, version: options.version, storage, log: hubLog, search, vapidPublicKey: options.keys.publicKey,
+    hubId: options.hubId, version: options.version, storage, search, vapidPublicKey: options.keys.publicKey,
     ...(options.acmeWebroot ? { acmeWebroot: options.acmeWebroot } : {}), debugLog: log,
     phone: phoneApi,
     onCatalogChanged: () => phoneApi.catalogChanged(),
-    onProgress: (frames) => { for (const frame of frames) progress.noteFrame(frame); }
+    onProgress: (frames) => { for (const frame of frames) progress.noteFrame(frame); },
+    ops
   });
   waker.start();
+  // What the server kept for the order of signed events it had before it
+  // owned the chats (Д7): nothing reads it any more, and it goes once, in the
+  // background. The bodies (pictures, avatars) are the server's and stay.
+  const dropping = new AbortController();
+  const dropped = storage.dropLegacyEventTables({ keepBodies: true, signal: dropping.signal, log })
+    .catch((error: unknown) => log("hub.legacy-tables.error", { message: error instanceof Error ? error.message : String(error) }));
   return {
-    server, folder, push, waker, feed, progress, phone: phoneApi, hubLog,
-    /** Resolves once the phone's views have taken in what was placed so far. */
-    viewsIdle: async () => { await views; },
-    /** At start: the cards of the newest card events are folded again, so
-     *  a card placed just before a stop (or before this program kept cards)
-     *  is shown. Nobody is rung for them again. */
-    catchUpCards: async () => {
-      views = views.then(async () => {
-        const events = await storage.hub().newestOfKinds(HUB_CARD_EVENT_KINDS, 1_000);
-        await foldApprovalCards(storage, events);
-        for (const conversationId of new Set(events.map((item) => item.event.conversationId))) feed.note(conversationId);
-      }).catch((error) => log("hub.phone-views.catch-up-error", { message: error instanceof Error ? error.message : String(error) }));
-      await views;
-    },
+    server, push, waker, feed, progress, phone: phoneApi, ops,
     close: async () => {
       push.close();
       waker.close();
-      // The folding stops after the chat it is on; what is left is folded on
-      // the next start (it is read from the order, not kept in memory).
-      folder.close();
+      dropping.abort();
       await server.close();
-      await folder.idle();
-      // What was placed before the stop reaches the phone's views (cards).
-      await views;
+      await dropped;
     }
   };
 }
@@ -240,14 +242,7 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
       return finish({ ok: false, reason: "another-owner", hubId: hubId() });
     }
     await storage.hub().setOwner({ deviceId: owner.deviceId, publicKeyDerBase64: owner.publicKeyDerBase64, name: owner.name || "Desktop", addedAt: new Date().toISOString() });
-    // Already this desktop's, and its chats copied: its cursors stand.
-    return finish({ ok: true, hubId: hubId(), alreadyOwner: Boolean(before), chatsCopied: existsSync(chatCopyMark()) });
-  }
-  if (args.importChatCopy) {
-    const summary = await importChatCopy(storage, args.importChatCopy, {});
-    // Written last: a copy that stopped half way is copied again.
-    writeFileSync(chatCopyMark(), JSON.stringify({ at: new Date().toISOString(), ...summary }), { mode: 0o600 });
-    return finish({ ok: true, ...summary });
+    return finish({ ok: true, hubId: hubId(), alreadyOwner: Boolean(before) });
   }
 
   const keys = loadOrCreateVapidKeys(path.join(userDataPath(), "vapid.json"));
@@ -257,7 +252,7 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
     // never goes to any other address than AWS's own.
     ec2Endpoint: loopbackEndpoint(process.env.ACCORDAGENTS_HUB_EC2_ENDPOINT)
   });
-  const { server, folder } = hub;
+  const { server } = hub;
   const https = Boolean(args.cert && args.key && existsSync(args.cert) && existsSync(args.key));
   if (https) {
     await server.listenHttps(args.httpsPort, { cert: args.cert!, key: args.key! }, args.host);
@@ -267,14 +262,13 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
   // Plain HTTP serves the certificate challenge and, before there is a
   // certificate, the health check the setup reads.
   await server.listenHttp(args.httpPort, args.host, { openOnly: !args.insecureHttp });
-  await folder.start();
-  await hub.catchUpCards();
   // Bodies the chats and the catalog name, pinned once on a server updated
   // from a program that did not pin them (the sweep would take them).
   await pinNamedBodies(storage).catch((error: unknown) => log("hub.blob-pins.error", { message: error instanceof Error ? error.message : String(error) }));
   // Rings the stopped program had scheduled and did not ring.
   await hub.push.rearm().catch((error: unknown) => log("hub.push.rearm-error", { message: error instanceof Error ? error.message : String(error) }));
-  // The order stays bounded: what every reader read, past its grace period.
+  // The feed stays bounded: what every reader read, past its grace period;
+  // and so do the bodies (what nothing names any more).
   const retention = new HubRetention({
     storage, config: hubRetentionConfig(), log,
     bodiesReady: async () => Boolean(await storage.hub().document(BLOB_PINS_DONE_KEY)),

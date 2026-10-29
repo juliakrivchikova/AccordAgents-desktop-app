@@ -1,27 +1,26 @@
 /**
  * One of the User's devices talking to her server with nothing but WebCrypto
  * and fetch: the phone's app and its service worker (bundled by
- * scripts/build-mobile-shell.mjs as `AccordHubClient`). The same bytes the
- * desktop signs (hubRequestSigningText, the chat event hash), so the server
- * and every device check a phone's request and its events exactly as they
- * check the desktop's.
+ * scripts/build-mobile-shell.mjs as `AccordHubClient`). Every request is
+ * signed with the same bytes the desktop signs (hubRequestSigningText), so
+ * the server checks a phone's request exactly as it checks the desktop's.
+ * What the phone writes travels as the server's operations (Д1, Д10): no
+ * record carries a signature of its own, only the request that carries it.
  */
 
-import type { ChatEventEnvelope } from "./chatEvents";
 import {
   HUB_AUTH_SCHEME,
   hubBlobFragmentPath,
   hubPhoneEnrollmentSigningText,
   hubRequestSigningText,
-  type HubEventPushResponse,
   type HubHealth,
   type HubPhoneEnrollResponse,
   type HubPhoneEnrollment
 } from "./hubProtocol";
-// The run id a phone's turn takes on its member's home: the phone names it
-// in Stop before the turn exists, so it must be built exactly the same way.
-export { phoneTurnRunId } from "./hubProtocol";
-import { stableJson } from "./stableJson";
+import { HUB_OPS_PATH, type HubOp, type HubOpsResponse } from "./hubOps";
+// The turn a User's message asks of each member it names: the phone names
+// it in Stop before anyone took it, so it must be built exactly the same way.
+export { hubTurnRunId, HUB_OP_MAX_BYTES, HUB_OPS_MAX_PER_REQUEST } from "./hubOps";
 
 /** The fragment size every device splits a large body by. */
 export const HUB_CLIENT_BLOB_FRAGMENT_BYTES = 384 * 1024;
@@ -41,9 +40,13 @@ export interface HubBlobReference {
   fragments: number;
 }
 
-/** A failure that says nothing about the request: no answer came. */
+/** A failure that says nothing about the request: no answer came. A request
+ *  that ran out of time says so (`timedOut`): the server may have taken it. */
 export class HubUnreachableError extends Error {
   readonly unreachable = true;
+  constructor(message: string, readonly timedOut = false) {
+    super(message);
+  }
 }
 
 export class HubAnswerError extends Error {
@@ -156,44 +159,6 @@ export async function signHubRequestWeb(identity: Pick<HubDeviceIdentity, "devic
   return `${HUB_AUTH_SCHEME} ${identity.deviceId}.${timestampMs}.${nonce}.${base64Url(await sign(identity, text))}`;
 }
 
-/** One signed event in the envelope every device verifies
- *  (chatEventLog.createSignedChatEvent, verifySignedChatEvent). */
-export async function mintHubEvent<Payload>(identity: Pick<HubDeviceIdentity, "deviceId" | "keyId" | "privateKeyDerBase64">, request: {
-  eventId: string;
-  conversationId: string;
-  logScopeId: string;
-  kind: string;
-  payload: Payload;
-  originSeq: number;
-  prevHash?: string;
-  logicalTs: string;
-  createdAt: string;
-}): Promise<ChatEventEnvelope<Payload>> {
-  const payloadHash = `sha256:${await sha256Hex(stableJson(request.payload))}`;
-  const unsigned = {
-    eventId: request.eventId,
-    conversationId: request.conversationId,
-    logScopeId: request.logScopeId,
-    originId: identity.deviceId,
-    originSeq: request.originSeq,
-    logicalTs: request.logicalTs,
-    kind: request.kind,
-    payloadHash,
-    prevHash: request.prevHash ?? null,
-    keyId: identity.keyId,
-    createdAt: request.createdAt
-  };
-  const eventHash = `sha256:${await sha256Hex(stableJson(unsigned))}`;
-  const signature = bytesToBase64(await sign(identity, eventHash));
-  return {
-    ...unsigned,
-    prevHash: request.prevHash,
-    payload: request.payload,
-    eventHash,
-    signature
-  } as ChatEventEnvelope<Payload>;
-}
-
 /** Pairs a phone with the server: shows the invite's token and signs the
  *  acceptance with the phone's own key. */
 export async function enrollHubPhone(options: {
@@ -233,7 +198,9 @@ async function reach(fetchImpl: typeof fetch, url: string, init: RequestInit): P
   try {
     return await fetchImpl(url, init);
   } catch (error) {
-    throw new HubUnreachableError(`The server could not be reached: ${error instanceof Error ? error.message : String(error)}`);
+    const name = (error as { name?: unknown } | undefined)?.name;
+    const timedOut = name === "TimeoutError" || name === "AbortError";
+    throw new HubUnreachableError(timedOut ? "The server did not answer in time." : `The server could not be reached: ${error instanceof Error ? error.message : String(error)}`, timedOut);
   }
 }
 
@@ -282,8 +249,10 @@ export function createHubDeviceClient(options: {
     async postJson<T = unknown>(path: string, body: unknown, init?: { timeoutMs?: number }): Promise<T> {
       return (await request("POST", path, JSON.stringify(body), { ...init, contentType: "application/json" })).json() as Promise<T>;
     },
-    async pushEvents(events: ChatEventEnvelope[]): Promise<HubEventPushResponse> {
-      return (await request("POST", "/v1/events", JSON.stringify({ events }), { contentType: "application/json", timeoutMs: 60_000 })).json() as Promise<HubEventPushResponse>;
+    /** Writes operations to the server; it answers each one (accepted, a
+     *  duplicate of one it already took, or rejected with its reason). */
+    async postOps(ops: HubOp[], init?: { timeoutMs?: number }): Promise<HubOpsResponse> {
+      return (await request("POST", HUB_OPS_PATH, JSON.stringify({ ops }), { contentType: "application/json", timeoutMs: init?.timeoutMs ?? 30_000 })).json() as Promise<HubOpsResponse>;
     },
     /** Puts bytes on the server as a body named by its hash. */
     async uploadBlob(bytes: Uint8Array): Promise<HubBlobReference> {

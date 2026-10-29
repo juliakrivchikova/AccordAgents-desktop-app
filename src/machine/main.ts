@@ -1,11 +1,13 @@
 /**
- * AccordAgents machine runtime (machines transport, work item 2).
+ * AccordAgents machine runtime.
  *
  * A headless instance of the app: the same services the desktop runs, composed
- * without Electron, enrolled with one desktop through a machine pairing. It
- * hosts the participants whose home it is, serves the full App MCP tool
- * registry from its own copy of the chats, and talks to the desktop only
- * through the User's own server.
+ * without Electron, set up by one desktop through a machine pairing. It is a
+ * plain client of the User's server (agreements Д1–Д13): it reads the chats
+ * there, takes the turns asked there of the members whose home it is, runs
+ * them with the full App MCP tool registry, and writes their replies there.
+ * It meets the desktop that set it up in its room on that server only for
+ * live control (status, scripts, pictures, live progress).
  *
  * Usage:
  *   node dist/main/machine/main.js --enrollment <pairing.json> [--user-data <dir>] [--name <machine name>]
@@ -17,27 +19,23 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { artifactMembersForConversation } from "../shared/artifacts";
 import { assertMobilePairingPackage, type MobilePairingPackage } from "../shared/mobilePairing";
+import { deriveMachineChannelKey } from "../shared/machineChannelKey";
+import { isMachineSettingsDocument } from "../shared/machineLink";
 import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "../main/appToolWiring";
 import { createHeadlessPlatform, setHostPlatform, userDataPath } from "../main/platform";
 import { AgentEnvironmentService } from "../main/services/agentEnvironment";
 import { AppMcpService } from "../main/services/appMcp";
 import { AppSkillsService } from "../main/services/appSkills";
-import { ArtifactService } from "../main/services/artifacts";
+import { ArtifactClient } from "../main/services/artifactClient";
 import { ArtifactStore } from "../main/services/artifactStore";
-import { artifactEventWriter, artifactProjectionPort } from "../main/services/artifactReplication";
-import { createChatChangeTransport, scheduleChatChangePruning } from "../main/services/chatChangeTransport";
-import { importChatCopy } from "../main/services/chatCopy";
-import { ChatEventLogService } from "../main/services/chatEventLog";
-import { ChatEventMirrorService, chatEventMirrorOptionsFromEnv } from "../main/services/chatEventMirror";
+import { DeviceIdentityService } from "../main/services/deviceIdentity";
 import { ChatService } from "../main/services/chat";
 import { CliAgentRunner } from "../main/services/cliAgents";
 import { setCommandDebugLogger } from "../main/services/command";
 import { DebugLogService } from "../main/services/debugLogs";
 import { MachineHostService } from "../main/services/machineHost";
-import { CHAT_ACTION_LOG_SCOPE } from "../shared/chatActionEvents";
-import { ChatActionApplier } from "../main/services/chatActionApplier";
-import { ChatActionEmitter } from "../main/services/chatActionEmitter";
-import { createChatActionEffects } from "../main/services/chatActionEffects";
+import { MachineServerSettings } from "../main/services/machineServerSettings";
+import { openChannelPayload } from "../main/services/machineChannelSealing";
 import { MachineIdlePower, assertNativeRegistryClosed } from "../main/services/machineIdlePower";
 import { MachineHostPowerRegistry, type MachineHostAdmission } from "../main/services/machineHostPower";
 import { NATIVE_PROCESS_REGISTRY_FILE } from "../main/services/nativeProcessRegistry";
@@ -53,14 +51,10 @@ import { StorageService } from "../main/services/storage";
 import { UserSkillsService } from "../main/services/userSkills";
 import { ScriptService, handleScriptsOperation } from "../main/services/scripts";
 import { HubTunnelClient } from "../main/services/hubTunnelClient";
-import { HUB_SCOPE_PREFIXES, HubSync, PULLED_KEY, hubChatChangeApplier, hubPushedThrough } from "../main/services/hubSync";
 import { HubClient } from "../main/services/hubClient";
-import { scheduleHubDeviceRetention } from "../main/services/deviceRetention";
-import type { DeviceEventGap } from "../shared/deviceEventDelivery";
+import { ServerChatLink } from "../main/services/serverChatLink";
 import { ScriptSecretStore, ScriptStore } from "../main/services/scriptStore";
 import { machineScriptHostPhrase } from "../shared/scripts";
-import { PHONE_TURN_RESUME_EVERY_MS, PHONE_TURN_RESUME_WINDOW_MS } from "../shared/hubProtocol";
-import { phoneTurnsSince } from "../main/services/phoneTurnClaims";
 
 interface MachineArgs {
   enrollmentPath: string;
@@ -75,10 +69,6 @@ interface MachineArgs {
   maintenanceCommand?: string[];
   /** Setup only: print this machine's device identity (creating it once). */
   deviceIdentity?: boolean;
-  /** Setup only: import a chat copy the desktop exported into this directory. */
-  importChatCopy?: string;
-  /** The desktop's id for this machine, for which members' replies are its own. */
-  machineId?: string;
 }
 
 function parseArgs(argv: string[]): MachineArgs {
@@ -89,8 +79,6 @@ function parseArgs(argv: string[]): MachineArgs {
   let checkPower = false;
   let revertPower = false;
   let deviceIdentity = false;
-  let importChatCopy: string | undefined;
-  let machineId: string | undefined;
   let maintenance = false;
   let maintenanceCommand: string[] | undefined;
   for (let index = 0; index < argv.length; index += 1) {
@@ -122,10 +110,6 @@ function parseArgs(argv: string[]): MachineArgs {
       revertPower = true;
     } else if (arg === "--device-identity") {
       deviceIdentity = true;
-    } else if (arg === "--import-chat-copy") {
-      importChatCopy = next();
-    } else if (arg === "--machine-id") {
-      machineId = next();
     } else if (arg === "--help" || arg === "-h") {
       console.log("Usage: accordagents-machine --enrollment <pairing.json> [--user-data <dir>] [--name <machine name>]\nSetup only: accordagents-machine --check-power (bounded JSON on stdin; asks AWS, writes nothing)\nSetup only: accordagents-machine --configure-power --user-data <dir> (bounded JSON on stdin; keys never in argv)\nSetup only: accordagents-machine --revert-power --user-data <dir> (puts back the key the last --configure-power replaced)");
       process.exit(0);
@@ -135,14 +119,14 @@ function parseArgs(argv: string[]): MachineArgs {
   if (maintenance && (!maintenanceCommand?.length || !userDataDir || configurePower || revertPower || checkPower)) {
     throw new Error("Maintenance requires --user-data <dir> -- <command> [args] and cannot configure power at the same time.");
   }
-  if ((deviceIdentity || importChatCopy) && !userDataDir) {
+  if (deviceIdentity && !userDataDir) {
     throw new Error("Setup commands require --user-data <dir>.");
   }
-  if (!enrollmentPath && !configurePower && !revertPower && !checkPower && !maintenance && !deviceIdentity && !importChatCopy) {
+  if (!enrollmentPath && !configurePower && !revertPower && !checkPower && !maintenance && !deviceIdentity) {
     throw new Error("A machine enrollment file is required (--enrollment <pairing.json> or ACCORDAGENTS_MACHINE_ENROLLMENT).");
   }
   return { enrollmentPath: path.resolve(enrollmentPath || "."), userDataDir, machineName, configurePower, checkPower, revertPower, maintenanceCommand,
-    deviceIdentity, importChatCopy: importChatCopy ? path.resolve(importChatCopy) : undefined, machineId };
+    deviceIdentity };
 }
 
 async function runMachineMaintenance(args: MachineArgs): Promise<void> {
@@ -181,14 +165,15 @@ async function runMachineMaintenance(args: MachineArgs): Promise<void> {
   }
 }
 
-/** Setup only: the identity this machine signs its events with, created once
- *  and kept in its own database, so the desktop can address chat changes to
- *  it before the runtime first connects. The private key never leaves. */
+/** Setup only: the identity this machine signs its requests to the User's
+ *  server with, created once and kept in its own database, so the desktop
+ *  can name it on the server's roster (and seal its settings for it) before
+ *  the runtime first connects. The private key never leaves. */
 async function printDeviceIdentity(args: MachineArgs): Promise<void> {
   setHostPlatform(createHeadlessPlatform({ userDataDir: args.userDataDir }));
   const storage = new StorageService({ sqliteExecutable: "sqlite3" });
   await storage.init();
-  const identity = await new ChatEventLogService(storage).getOrCreateDeviceIdentity();
+  const identity = await new DeviceIdentityService(storage).getOrCreateDeviceIdentity();
   await finishSetupCommand({ originId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64 });
 }
 
@@ -198,19 +183,6 @@ function finishSetupCommand(result: unknown): Promise<never> {
   return new Promise(() => {
     process.stdout.write(`${JSON.stringify(result)}\n`, () => process.exit(0));
   });
-}
-
-/** Setup only: merges the desktop's chat copy into this machine's database.
- *  Runs while the runtime is stopped; nothing it writes is emitted. */
-async function runChatCopyImport(args: MachineArgs): Promise<void> {
-  setHostPlatform(createHeadlessPlatform({ userDataDir: args.userDataDir }));
-  const storage = new StorageService({ sqliteExecutable: "sqlite3" });
-  await storage.init();
-  // The artifact tables the copy fills are created by the artifact store.
-  await new ArtifactStore(path.join(userDataPath(), "accordagents.sqlite3"), "sqlite3").init();
-  const identity = await new ChatEventLogService(storage).getOrCreateDeviceIdentity();
-  const summary = await importChatCopy(storage, args.importChatCopy!, { hostMachineId: args.machineId, localOriginId: identity.originId });
-  await finishSetupCommand({ ok: true, ...summary });
 }
 
 const POWER_KEY_CHECK_RETRY_MS = 5_000;
@@ -302,6 +274,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   const storageService = new StorageService({ sqliteExecutable: "sqlite3" });
   const debugLogService = new DebugLogService();
   setCommandDebugLogger(debugLogService);
+  const log = (event: string, payload: Record<string, unknown>): void => { void debugLogService.write(event, payload); };
   const agentEnvironmentService = new AgentEnvironmentService(settingsService);
   void agentEnvironmentService;
   const cliAgentRunner = new CliAgentRunner(
@@ -322,13 +295,10 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   });
   void appSkillsService;
   const appMcpService = new AppMcpService(debugLogService);
-  const chatEventLogService = new ChatEventLogService(storageService);
-  const chatEventMirrorService = new ChatEventMirrorService(
-    storageService,
-    chatEventLogService,
-    debugLogService,
-    chatEventMirrorOptionsFromEnv()
-  );
+  // The device identity this machine signs its requests to the User's server
+  // with, and what it seals and signs in its room.
+  const deviceIdentityService = new DeviceIdentityService(storageService);
+  const deviceIdentity = () => deviceIdentityService.getOrCreateDeviceIdentity();
   let hostRef: MachineHostService | undefined;
   const chatService = new ChatService(
     storageService,
@@ -336,60 +306,34 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     cliAgentRunner,
     debugLogService,
     appMcpService,
-    (conversation) => {
-      hostRef?.noteConversationSnapshot(conversation);
-    },
+    undefined,
     userSkillsService,
-    (progress) => hostRef?.noteNativeProgress(progress),
-    chatEventMirrorService
+    (progress) => hostRef?.noteNativeProgress(progress)
   );
-  // Until enrollment supplies our identity, no member belongs to this runtime.
+  // Until the User's server says which machine this is, no member belongs to
+  // this runtime and nothing runs here.
   chatService.setHostMachineId(undefined);
   wireChatAppToolHandlers(appMcpService, chatService);
+  // Documents are the User's server's (Д9): this machine keeps a copy and
+  // writes every change its members make through the server, exactly as the
+  // computer does for its own members.
   const artifactStore = new ArtifactStore(path.join(userDataPath(), "accordagents.sqlite3"), "sqlite3");
-  const artifactService = new ArtifactService({
+  const artifactService = new ArtifactClient({
     store: artifactStore,
     getMembers: async (conversationId) => {
-      const conversation = await storageService.getConversation(conversationId);
-      if (!conversation || conversation.kind !== "chat") {
-        return undefined;
-      }
-      return artifactMembersForConversation(conversation);
+      const opened = await storageService.openConversation(conversationId, 1);
+      return opened?.conversation.kind === "chat" ? artifactMembersForConversation(opened.conversation) : undefined;
     },
     postNote: (conversationId, eventId, content) => chatService.postArtifactChatNote(conversationId, eventId, content),
-    onChanged: () => undefined,
-    // Through the User's hub nobody is waited on (see MachineHostService).
-    ...artifactEventWriter(storageService, chatEventLogService, () => hostRef?.chatActionRecipients() ?? [], artifactStore),
-    logger: (event, payload) => {
-      void debugLogService.write(event, payload);
-    }
+    hasChat: async (conversationId) => (await storageService.openConversation(conversationId, 1))?.conversation.kind === "chat",
+    logger: log
   });
   chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
   wireArtifactToolHandler(appMcpService, chatService, createArtifactToolDispatcher(artifactService));
 
   await appMcpService.start();
   await storageService.init();
-  // The machine records its own decisions and effects in the same log the
-  // desktop uses, so a permission answered from the phone is told to the
-  // provider here exactly once.
-  const chatActionEmitter = new ChatActionEmitter({
-    executedBy: args.machineName || "machine",
-    hasEvent: async (eventId) => Boolean(await storageService.getChatEvent(eventId)),
-    publish: async (action) => {
-      await chatEventLogService.appendLocalEvent({
-        conversationId: action.conversationId,
-        logScopeId: CHAT_ACTION_LOG_SCOPE,
-        kind: action.kind,
-        payload: action.payload,
-        eventId: `chat-action:${action.payload.operationId}`
-      });
-    },
-    logger: (event, payload) => {
-      void debugLogService.write(event, payload);
-    }
-  });
-  const identity = await chatEventLogService.getOrCreateDeviceIdentity();
-  await storageService.machineProgress().recoverLocal(identity.originId);
+  const identity = await deviceIdentity();
 
   let idlePower: MachineIdlePower | undefined;
   /** The switch as this machine last read it; reported in every hello. */
@@ -416,16 +360,16 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       const cleared = await presence.adoptOwnStaleClaims(
         () => assertNativeRegistryClosed(nativeProcessDbPath, hostIdentity)
       ).catch((error) => {
-        void debugLogService.write("machine.host-power.adopt-failed", { message: error instanceof Error ? error.message : String(error) });
+        log("machine.host-power.adopt-failed", { message: error instanceof Error ? error.message : String(error) });
         return 0;
       });
       await presence.withLock(() => presence!.publish(true));
       presenceWarning = "";
-      if (cleared) void debugLogService.write("machine.host-power.adopted", { cleared });
+      if (cleared) log("machine.host-power.adopted", { cleared });
     } catch (error) {
       presence = undefined;
       presenceWarning = `Host-wide admission is unavailable; native work remains queued: ${error instanceof Error ? error.message : String(error)}`;
-      void debugLogService.write("machine.host-power.unavailable", { message: error instanceof Error ? error.message : String(error) });
+      log("machine.host-power.unavailable", { message: error instanceof Error ? error.message : String(error) });
     }
   }
   // Refused before a provider (or a scheduled script) is started, not
@@ -442,47 +386,37 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     .then((name) => typeof name === "string" && name.trim() ? name.trim() : undefined)
     .catch(() => undefined);
   const hubUrl = enrollment.hubUrl;
-  // Set once the hub link exists; a channel's gap is asked of the hub through it.
-  let hubSyncRef: HubSync | undefined;
-  const hubRoom = (url: string, rendezvousId: string) => new HubTunnelClient({
-    hubUrl: url, rendezvousId, role: "machine",
-    identity: () => chatEventLogService.getOrCreateDeviceIdentity()
+  const hubClient = new HubClient({ url: hubUrl, identity: deviceIdentity });
+  // The User's server owns every chat (Д1): this machine writes its members'
+  // replies there and takes their turns from there, like every device (Д2).
+  // It moves nothing there: the computer did that.
+  const serverChatLink = new ServerChatLink({
+    storage: storageService,
+    chat: chatService,
+    identity: deviceIdentity,
+    hubConfig: async () => ({ url: hubUrl }),
+    machineNames: async () => [],
+    movesChats: false,
+    artifacts: artifactService,
+    log
   });
-  const host: MachineHostService = new MachineHostService(chatService, storageService, settingsService, debugLogService, {
-    // A signature or a superseded change that arrives here has to become part
-    // of this machine's own state, not just a stored event.
-    chatActions: new ChatActionApplier({
-      effects: createChatActionEffects({
-        chat: chatService as unknown as Parameters<typeof createChatActionEffects>[0]["chat"],
-        emitter: chatActionEmitter,
-        applyApproval: (event, payload) => host.applyApprovalAction(event, payload),
-        applyChoice: (event, payload) => host.applyChoiceAction(event, payload),
-        homeMachineId: () => host.enrolledMachineId(),
-        storage: { getConversation: (id) => storageService.getConversation(id) }
-      }),
-      artifacts: artifactProjectionPort(artifactStore, () => undefined),
-      logger: (event, payload) => {
-        void debugLogService.write(event, payload);
-      }
-    }),
-    serveChatActionDependency: async (dependency) => dependency.targetKey.startsWith("artifact:")
-      && artifactService.emitRevisionActionFor(dependency.targetKey.slice("artifact:".length), dependency.stateId),
+  const host: MachineHostService = new MachineHostService(chatService, debugLogService, {
     pairing: enrollment,
-    // This machine meets its devices in the rooms of the User's server and
-    // its events travel in the server's order.
-    hubRepair: (gap: DeviceEventGap) => { void hubSyncRef?.repairGap(gap); },
-    createClient: (pairing: MobilePairingPackage) => hubRoom(hubUrl, pairing.rendezvousId),
-    createPeerClient: (room: { rendezvousId: string }) => hubRoom(hubUrl, room.rendezvousId),
     deviceId: identity.originId,
     machineName: args.machineName,
     appVersion: platform.appVersion(),
-    eventStorage: storageService,
-    eventLog: chatEventLogService,
     publicKeyDerBase64: identity.publicKeyDerBase64,
-    outboxPath: path.join(userDataPath(), "machine-outbox.json"),
-    nativeProcessDbPath: path.join(userDataPath(), NATIVE_PROCESS_REGISTRY_FILE),
-    // A stop another deployment has made final holds this one's queued
-    // commands in the durable inbox instead of failing them as turns.
+    identity: deviceIdentity,
+    // This machine meets the computer that set it up in its room on the
+    // User's server, for live control only.
+    createClient: (pairing: MobilePairingPackage) => new HubTunnelClient({
+      hubUrl, rendezvousId: pairing.rendezvousId, role: "machine", identity: deviceIdentity
+    }),
+    storage: storageService,
+    instancePath: path.join(userDataPath(), "machine-instance.json"),
+    nativeProcessDbPath,
+    // A stop another deployment has made final keeps this one from taking
+    // new turns: they wait on the server for the next start.
     hostStopCommitted: () => {
       try { return !presence || presence.stopIntent()?.phase === "committed"; }
       catch { return true; }
@@ -491,22 +425,12 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     onNativeActivitySettled: () => idlePower?.noteActivity() ?? Promise.resolve(),
     idleStopWarning: () => presenceWarning || idlePower?.warning(),
     autoStopEnabled: () => autoStopEnabled,
-    onSettingsImported: async () => {
-      cliAgentRunner.setRunTimeoutMs(await settingsService.getCliAgentRunTimeoutMs());
-      // The User's automatic-stop switch arrives with the settings. Switched
-      // on again, idle counts from now; either way the desktop is told what
-      // this machine now has, so the two cannot silently disagree.
-      const enabled = await settingsService.getMachineAutoStopEnabled().catch(() => undefined);
-      if (enabled === autoStopEnabled) return;
-      // The new idle start is written before the switch reads on here: a
-      // failed write keeps it off, and the next import tries again.
-      if (enabled === true && autoStopEnabled === false) await idlePower?.switchedOn();
-      autoStopEnabled = enabled;
-      void hostRef?.publishPowerStatus().catch(() => undefined);
+    unsentServerWrites: async () => {
+      const status = await serverChatLink.status();
+      return status ? { queued: status.queued, ...(status.lastError ? { lastError: status.lastError } : {}) } : undefined;
     },
-    onDesktopMachineId: (machineId) => {
-      chatService.setHostMachineId(machineId);
-    },
+    // Its members' live progress, for the phone (the server keeps none of it).
+    postProgress: async (frames) => { await hubClient.postProgress(frames); },
     // These two reach `scriptService`, built below: the desktop's greeting and
     // its requests arrive only after host.start(), further down.
     onDesktopMachineName: (name) => {
@@ -520,40 +444,9 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       handle: (operation) => handleScriptsOperation(scriptService, operation),
       keepsHostAwake: () => scriptService.keepsHostAwake(),
       scheduledCount: () => scriptService.scheduledCount(),
-    },
-    // Chats reach this machine as change events from the desktop.
-    applyChatChanges: (event, payload) => chatService.applyRemoteChatChanges(event, payload)
+    }
   });
   hostRef = host;
-  // This machine's own changes (its members' replies, messages typed into it
-  // while the desktop is away) go to the desktop and the other machines the
-  // same way.
-  chatService.setChatChangeTransport(createChatChangeTransport({
-    role: "machine",
-    storage: storageService,
-    log: chatEventLogService,
-    recipients: () => host.chatChangeRecipients(),
-    onCommitted: () => host.nudgeEventChannel(),
-    hostMachineId: () => host.enrolledMachineId(),
-    desktopOriginId: () => enrollment.issuer.originId,
-    machineOriginId: (machineId) => host.machineOriginId(machineId),
-    alwaysEmit: () => true
-  }));
-  const stopChatChangePruning = scheduleChatChangePruning({
-    storage: storageService,
-    originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
-    unpushedAfter: async () => hubPushedThrough(storageService),
-    log: (event, payload) => { void debugLogService.write(event, payload); }
-  });
-  // Through the hub, this machine's own channel events go once the hub has
-  // them and they are a week old; bodies nothing refers to go too.
-  const stopDeviceRetention = scheduleHubDeviceRetention({
-    storage: storageService,
-    originId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
-    hubScopes: async () => ["device:"],
-    pushedThrough: () => hubPushedThrough(storageService),
-    log: (event, payload) => { void debugLogService.write(event, payload); }
-  });
   // Scheduled scripts that live on this machine: they run here with the lid
   // of the laptop closed, keep the instance awake while one is switched on,
   // and wake the members that run here.
@@ -573,9 +466,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     node: { command: process.execPath, env: {} },
     admit: admitHostWork,
     localMembersOnly: true,
-    debugLog: (event, payload) => {
-      void debugLogService.write(event, payload);
-    },
+    debugLog: log,
     onChanged: () => {
       host.noteScriptsChanged();
       // Whether it must stay awake, and for how many scripts, is part of
@@ -589,22 +480,53 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   });
   chatService.setScriptHost(scriptService);
   appMcpService.setScriptApiHandler((context, _route, body) => scriptService.postFromScript(context, body));
-  // A member here asking other members goes through the desktop: it owns the
-  // roster and runs each target where that member lives.
-  chatService.setParticipantRequestDelegate({
-    delegateParticipantRequest: (request) => host.delegateParticipantRequest(request)
-  });
-  // A member here compacting its own context goes through the desktop too,
-  // when it is there, so the User sees and can stop it as one they started.
-  chatService.setCompactionDelegate({
-    canDelegateCompaction: () => host.canDelegateCompaction(),
-    delegateCompaction: (request) => host.delegateCompaction(request)
-  });
-  // And a picture the User attached is read from the desktop too: the chat's
-  // text is replicated here, its attachment files are not.
+  // A picture the User attached on the computer is read from the computer;
+  // one she sent from her phone is read from her server.
   chatService.setMachineLink({
-    runTurn: async () => { throw new Error("A machine does not dispatch turns to another machine."); },
     fetchAttachment: (conversationId, attachmentId) => host.requestAttachment(conversationId, attachmentId)
+  });
+  chatService.setHubBlobReader((reference) => hubClient.downloadBytes(reference));
+  // The settings the computer published for this machine on the User's
+  // server, sealed for it alone.
+  const machineSettings = new MachineServerSettings({
+    read: (since) => hubClient.machineSettings(since),
+    open: async (sealed) => {
+      const document = await openChannelPayload<unknown>(sealed, deriveMachineChannelKey(await deviceIdentity(), enrollment.issuer.publicKeyDerBase64, enrollment.rendezvousId));
+      if (!isMachineSettingsDocument(document)) throw new Error("The settings published for this machine are not readable by this runtime.");
+      return document;
+    },
+    apply: async (document) => {
+      await settingsService.importMachineSettingsSnapshot(document.settings);
+      chatService.setMachineProjects(document.projects);
+    },
+    onImported: async () => {
+      cliAgentRunner.setRunTimeoutMs(await settingsService.getCliAgentRunTimeoutMs());
+      // The User's automatic-stop switch arrives with the settings. Switched
+      // on again, idle counts from now; either way the desktop is told what
+      // this machine now has, so the two cannot silently disagree.
+      const enabled = await settingsService.getMachineAutoStopEnabled().catch(() => undefined);
+      if (enabled === autoStopEnabled) return;
+      // The new idle start is written before the switch reads on here: a
+      // failed write keeps it off, and the next import tries again.
+      if (enabled === true && autoStopEnabled === false) await idlePower?.switchedOn();
+      autoStopEnabled = enabled;
+      void host.publishPowerStatus().catch(() => undefined);
+    },
+    log
+  });
+  // Before a member here starts a turn the server asked of it: nothing new
+  // while this machine stops; its settings and its project folder as the
+  // computer last published them.
+  chatService.setServerTurnPreparation(async (turn) => {
+    if (!host.takesNewWork()) return false;
+    await machineSettings.refresh("turn");
+    await chatService.refreshMachineRepository(turn.conversationId);
+    return host.takesNewWork();
+  });
+  host.onFenceLifted(() => {
+    void chatService.resumeServerTurns().catch((error) => log("machine.server-turns.resume-error", { message: error instanceof Error ? error.message : String(error) }));
+    // Answers to its members' cards that waited while it took nothing new.
+    void chatService.resumeServerCards({ messages: false }).catch((error) => log("machine.server-cards.resume-error", { message: error instanceof Error ? error.message : String(error) }));
   });
   const powerConfig = await settingsService.getMachinePower();
   if (!powerConfig) {
@@ -626,64 +548,41 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
         if (autoStopEnabled === undefined) throw new Error("Settings could not be read; automatic stop waits until they can.");
         return autoStopEnabled;
       },
-      log: (event, payload) => { void debugLogService.write(event, payload); } });
+      log });
     await idlePower.start();
   }
   await host.start();
-  // Approved roster changes left waiting by a restart are the desktop's to
-  // apply (it owns the member list); a machine resumes none.
-  const hubClient = new HubClient({ url: hubUrl, identity: () => chatEventLogService.getOrCreateDeviceIdentity(), storage: storageService });
-  // A picture the User sent from her phone is read from her server.
-  chatService.setHubBlobReader((reference) => hubClient.downloadBytes(reference));
-  // A message the User wrote on her phone starts the members that live here.
-  const isUsersPhone = (originId: string): boolean | Promise<boolean> => host.isPhone(originId);
-  chatService.setPhoneOrigins(isUsersPhone, await phoneTurnsSince(storageService.hub(), PULLED_KEY, Date.now(), PHONE_TURN_RESUME_WINDOW_MS)
-    .catch(() => new Date().toISOString()));
-  // Phone messages taken in but never started here (a restart between the
-  // two, or an older runtime took them in) start once the roster is known.
-  let phoneTurnsStopped = false;
-  const resumePhoneTurns = (): void => {
-    if (phoneTurnsStopped) return;
-    void chatService.resumePhoneTurns(new Date(Date.now() - PHONE_TURN_RESUME_WINDOW_MS).toISOString()).catch((error) => {
-      void debugLogService.write("chat.phone-turns.resume-error", { message: error instanceof Error ? error.message : String(error) });
-    });
-  };
-  const phoneTurnsFirst = setTimeout(resumePhoneTurns, 30_000);
-  const phoneTurnsEvery = setInterval(resumePhoneTurns, PHONE_TURN_RESUME_EVERY_MS);
-  phoneTurnsFirst.unref?.();
-  phoneTurnsEvery.unref?.();
-  const hubSync = new HubSync({
-    client: hubClient,
-    storage: storageService,
-    localOriginId: async () => (await chatEventLogService.getOrCreateDeviceIdentity()).originId,
-    trustedKey: async (originId) => host.trustedKey(originId),
-    // A phone paired while the desktop was away proves itself here.
-    admit: (event, fetchBody) => host.admitPhoneCertificate(event, fetchBody),
-    deliver: (event, fetchBody) => host.receiveFromHub(event, fetchBody),
-    applyChatChange: hubChatChangeApplier(storageService, chatService),
-    onPushed: (eventIds) => storageService.hub().acknowledgeOutbox(eventIds, new Date().toISOString()),
-    scopePrefixes: HUB_SCOPE_PREFIXES,
-    // Where it starts again (a first start, or after being away while the
-    // hub forgot what it needed): before anything of its own channel.
-    ownScopes: async () => host.hubChannelScopes(),
-    mergeCopy: async (copied) => chatService.mergeServerCopy(copied, {
-      desktopOriginId: enrollment.issuer.originId,
-      localOriginId: (await chatEventLogService.getOrCreateDeviceIdentity()).originId
-    }),
-    log: (event, payload) => { void debugLogService.write(event, payload); }
+  // The server's live word: its settings changed (or the link came back and
+  // a word may have been missed).
+  const stopLive = hubClient.live((connected) => {
+    if (connected) void machineSettings.refresh("reconnected");
+  }, (frame) => {
+    if (frame.type === "settings") void machineSettings.refresh("published");
   });
-  hubSyncRef = hubSync;
-  chatEventLogService.onLocalAppend(() => hubSync.nudgePush());
-  hubSync.start();
-  void scriptService.start().catch((error) => debugLogService.write("scripts.start.error", { message: String(error) }));
-  // Repair artifact actions written by runtimes whose event writer was absent.
-  // The ids are immutable, so a restart cannot create another version or signature.
-  void (async () => {
-    for (const conversation of await storageService.listConversations()) {
-      if (conversation.kind === "chat") await artifactService.recoverActionEvents(conversation.id);
+  // Which machine this is, as the server's roster says (its members are the
+  // ones whose home is that machine), then its settings, then its chats and
+  // turns. A machine the roster does not name yet runs nothing and asks again.
+  let stopping = false;
+  const linking = (async () => {
+    for (let attempt = 1; !stopping; attempt += 1) {
+      try {
+        const me = await hubClient.me();
+        if (me.role !== "machine" || !me.machineId) throw new Error(`The server knows this device as ${me.role}, not as a machine.`);
+        chatService.setHostMachineId(me.machineId);
+        log("machine.server.identified", { machineId: me.machineId, attempt });
+        break;
+      } catch (error) {
+        log("machine.server.identify-failed", { attempt, message: error instanceof Error ? error.message : String(error) });
+        await new Promise((resolve) => setTimeout(resolve, Math.min(60_000, 2_000 * 2 ** Math.min(5, attempt - 1))).unref?.());
+      }
     }
-    await artifactService.flushPendingArtifactEvents();
-  })().catch(error => debugLogService.write("artifact.action.recover-failed", { message: String(error) }));
+    if (stopping) return;
+    await machineSettings.refresh("start");
+    machineSettings.start();
+    if (stopping) return;
+    await serverChatLink.start();
+  })().catch((error) => log("machine.server.link-error", { message: error instanceof Error ? error.message : String(error) }));
+  void scriptService.start().catch((error) => debugLogService.write("scripts.start.error", { message: String(error) }));
   idlePower?.ready();
   // A runtime with no AWS key is still an equal deployment on this host: it
   // publishes both busy and idle, and may veto another runtime's stop.
@@ -705,31 +604,33 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   console.log(`AccordAgents machine ${identity.originId} connected to ${enrollment.hubUrl} (user data: ${userDataPath()})`);
 
   // One stop, whoever asks for it (the service manager's SIGTERM): a second
-  // request waits for the first instead of running the shutdown again. A stop that failed may be asked for again.
-  let stopping: Promise<void> | undefined;
+  // request waits for the first instead of running the shutdown again. A stop
+  // that failed may be asked for again.
+  let stopRequest: Promise<void> | undefined;
   const stopOnce = async (): Promise<void> => {
-    // Nothing new is claimed while the runtime stops (it could not run it).
-    phoneTurnsStopped = true;
-    clearTimeout(phoneTurnsFirst);
-    clearInterval(phoneTurnsEvery);
+    stopping = true;
     presenceClosed = true;
-    stopChatChangePruning();
-    stopDeviceRetention();
     if (presenceTimer) clearInterval(presenceTimer);
     await presenceRefresh;
     try { presence?.publish(true); } catch (error) {
-      void debugLogService.write("machine.host-power.shutdown-claim-failed", { message: String(error) });
+      log("machine.host-power.shutdown-claim-failed", { message: String(error) });
     }
     await scriptService.stop();
-    // The channels close with the host: nothing is read into them any more,
-    // so nothing read now is lost; it is read again on the next start.
-    hubSync.pausePulls();
+    // Nothing new is taken from here on; the members running now end, and
+    // what they wrote last (their replies, their turns' ends) is queued for
+    // the server while the link still stands.
     await host.shutdown(() => cliAgentRunner.shutdownWarmAgents());
-    // What the shutdown itself wrote (interrupted turns) goes up before the
-    // link closes; an unreachable hub gets it on the next start instead.
-    hubSync.nudgePush();
-    await Promise.race([hubSync.idle(), new Promise((resolve) => setTimeout(resolve, 5_000).unref())]);
-    hubSync.stop();
+    await linking;
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const status = await serverChatLink.status().catch(() => undefined);
+      if (!status || status.queued === 0 || Date.now() > deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    // An unreachable server gets what is left at the next start.
+    await serverChatLink.stop();
+    machineSettings.stop();
+    stopLive();
     idlePower?.close();
     await idlePower?.releaseAfterShutdown();
     // The registration outlives the idle scheduler: it is released only once
@@ -743,11 +644,11 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     await appMcpService.stop();
   };
   return () => {
-    stopping ??= stopOnce().catch((error: unknown) => {
-      stopping = undefined;
+    stopRequest ??= stopOnce().catch((error: unknown) => {
+      stopRequest = undefined;
       throw error;
     });
-    return stopping;
+    return stopRequest;
   };
 }
 
@@ -755,7 +656,6 @@ if (require.main === module) {
   const args = parseArgs(process.argv.slice(2));
   (args.maintenanceCommand ? runMachineMaintenance(args).then(() => undefined) :
     args.deviceIdentity ? printDeviceIdentity(args).then(() => undefined) :
-    args.importChatCopy ? runChatCopyImport(args).then(() => undefined) :
     args.configurePower ? configureMachinePower(args).then(() => undefined) :
     args.checkPower ? checkMachinePower().then(() => undefined) :
     args.revertPower ? revertMachinePower(args).then(() => undefined) : startMachine(args))

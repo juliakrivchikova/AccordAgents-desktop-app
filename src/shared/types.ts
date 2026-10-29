@@ -1427,15 +1427,20 @@ export interface ChatAppToolApproval {
    *  member's roster change, so an older copy of the card from the machine
    *  does not bring the waiting state back. */
   rosterChangeSettledAt?: string;
-  /** Machines transport: the approval was raised by a member on this machine;
-   *  the desktop shows it and forwards the decision there. */
+  /** The desktop's view of a card a member on this machine raised on the
+   *  User's server: the desktop shows it, and answers it there. */
   homeMachineId?: string;
+  /** Answered on the User's server (from any device), not applied by the
+   *  member's machine yet. */
   machineDecisionPending?: { decisionId: string; machineName: string; approve: boolean; at: string };
   machineDecisionReceiptId?: string;
-  /** Desktop only: the User's answer (its signed event) the card's machine
-   *  reports it applied; a machine member's roster change is applied here
-   *  only once that answer is confirmed (an approval the User gave). */
+  /** Desktop only: the User's answer to a machine member's roster change, as
+   *  the User's server holds it (`server:<card>@<answered at>`); the desktop
+   *  applies the change only for that answer. */
   machineAppliedDecisionId?: string;
+  /** Answers its device could not apply (the last few), by the operation
+   *  each was sent under: the card is asked again and says why. */
+  cardRefusals?: ChatCardRefusal[];
 }
 
 export interface ChatAppToolApprovalPolicy {
@@ -1469,7 +1474,48 @@ export interface ChatRosterChangeOutcome {
   error?: string;
 }
 
+/** An answer a member's device could not apply, by the operation it was
+ *  sent under on the User's server. */
+export interface ChatCardRefusal {
+  operationId: string;
+  reason: string;
+  at: string;
+}
+
+/** A card answered on the User's server for a member that runs elsewhere,
+ *  while its device has not applied the answer yet. */
+export interface ChatServerCardMark {
+  cardId: string;
+  state: "answered";
+  answer: Record<string, unknown>;
+  answeredAt: string;
+  /** Where the member runs ("the machine" when unnamed). */
+  machineName: string;
+}
+
 export interface ChatMessageMetadata {
+  /** The message's place in the User's server's order (agreement Д1): set
+   *  by the server when it accepted the message, the same on every device. */
+  serverSeq?: number;
+  /** The device that wrote the message on the server, the only one that may
+   *  change it (agreement Д2). */
+  serverWriter?: string;
+  /** This device's view of the turns the message asked for, by member: the
+   *  "taken to work" mark (agreement Д5). Never sent to the server. */
+  serverTurns?: Record<string, { runId: string; state: "requested" | "claimed" | "stopped" | "finished"; executorDeviceId?: string; stopRequested?: boolean; outcome?: "done" | "error" | "stopped" | "interrupted" }>;
+  /** A bubble shown here for a member that runs on another device, until that
+   *  device writes the real one. Never sent to the server. */
+  serverPlaceholder?: boolean;
+  /** The User's server refused this message, with its reason (agreement Д3:
+   *  shown instead of "sent"). Never sent to the server. */
+  serverRejected?: string;
+  /** This device's view of a card the message's member waits on that runs
+   *  on another device: answered (from any device), and not applied there
+   *  yet. Shown as answered and waiting; never sent to the server. */
+  serverCard?: ChatServerCardMark;
+  /** Answers to this message's mention approvals its device could not apply
+   *  (the last few), shown with the card asked again. */
+  mentionCardRefusals?: ChatCardRefusal[];
   rosterChange?: ChatRosterChangeOutcome;
   /** Machines transport, Rule 2: a Stop was requested but the member's
    *  machine has not confirmed it yet (shown honestly instead of "stopped");
@@ -2611,8 +2657,10 @@ export interface StartReviewResult {
 // --- Artifacts -------------------------------------------------------------
 // Named, versioned, signable work products scoped to one chat. Artifacts live
 // in their own SQLite tables (not in conversation payloads) so they survive
-// context compaction, agent session resets, and app restarts. Members are
-// addressed by normalized handle ("gera") or the reserved "user" for the human.
+// context compaction, agent session resets, and app restarts. The User's
+// server owns them and decides every change; each device keeps a copy it
+// reads. Members are addressed by normalized handle ("gera") or the reserved
+// "user" for the human.
 
 export const ARTIFACT_USER_MEMBER = "user";
 
@@ -2739,7 +2787,10 @@ export type ArtifactErrorCode =
   | "access_denied"
   | "stale_version"
   | "name_taken"
-  | "invalid_request";
+  | "invalid_request"
+  // The User's server, which owns documents, did not confirm the change
+  // (unreachable, or no answer in time): nothing is shown as done.
+  | "server_unavailable";
 
 export interface ArtifactError {
   code: ArtifactErrorCode;
@@ -3027,8 +3078,6 @@ export interface AppBridge {
   getHubSetupCommand(request: import("./hubSetup").HubSetupCommandRequest): Promise<import("./hubSetup").HubSetupCommandResult>;
   installHub(request: import("./hubSetup").HubInstallRequest): Promise<import("./hubSetup").HubSetupState>;
   onHubSetupProgress(callback: (state: import("./hubSetup").HubSetupState) => void): () => void;
-  /** Hides one of the server's dismissable lines (by its id) on this desktop. */
-  dismissHubNotice(id: string): Promise<import("./hubSetup").HubSetupState>;
   startReview(request: ReviewRequest): Promise<StartReviewResult>;
   continueReview(request: ContinueReviewRequest): Promise<StartReviewResult>;
   askPlanDecisionClarification(request: PlanDecisionClarificationRequest): Promise<StartReviewResult>;

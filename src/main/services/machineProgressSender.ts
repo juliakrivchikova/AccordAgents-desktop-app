@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { ChatEventEnvelope } from "../../shared/chatEvents";
 import { encodeMachineProgress, machineProgressEventId, progressStructure, type MachineProgressFrame } from "../../shared/machineProgress";
 import type { ReviewProgress } from "../../shared/types";
 
@@ -7,7 +6,7 @@ interface PendingProgress { structure: string; frame: MachineProgressFrame; froz
 
 /** Text snapshots coalesce before the next flush; observed state changes do
  * not. A failed write retains the identical frame/id ahead of later updates. */
-export class MachineProgressSender<Published = ChatEventEnvelope> {
+export class MachineProgressSender<Published = void> {
   private readonly streamId = randomUUID();
   private readonly pending: PendingProgress[] = [];
   private latest?: ReviewProgress;

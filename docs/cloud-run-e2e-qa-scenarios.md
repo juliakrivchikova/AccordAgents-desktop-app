@@ -24,8 +24,9 @@
 > - **The phone with the desktop closed** was proven by
 >   `scripts/mobile-phone-machine-e2e.mjs` against the relay; that script went
 >   with the relay on 2026-10-26. Through the User's server,
->   `scripts/machine-hub-order.test.mjs` covers a machine whose reply the
->   server folds with the desktop away, and `scripts/hub-phone-http.test.mjs`
+>   `scripts/machine-runtime-hub.test.mjs` covers the built machine runtime
+>   taking a phone's message from the server and answering it with the desktop
+>   away, and `scripts/hub-phone-http.test.mjs`
 >   the phone's pairing and reads. A run of the shipped PWA with a real server,
 >   a machine and the desktop closed has not been redone.
 > - **Durable native admission for approvals and choices, machine deletion,
@@ -296,8 +297,9 @@ New on this branch. Nothing here is QA-proven beyond Drew's single live PASS, an
 ## 9. P — PWA control plane
 
 Since 2026-10-26 the phone talks only to the User's server: it pairs by a
-one-time code the desktop shows, reads chats from the server's copy, writes
-signed events there, and the server rings it. Evidence below dated before then
+one-time code the desktop shows, reads chats from the server, writes its
+messages, card answers and Stops there (as operations since 2026-10-29, when
+the server came to own the chats), and the server rings it. Evidence below dated before then
 was gathered over the relay and its mailbox, so a `VERIFIED` row holds for that
 path until it is run again against the server.
 

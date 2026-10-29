@@ -3,42 +3,38 @@ import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { MachineChoiceExecutor, machineChoiceResultId } from "./chatActionNativeClaims";
+import { MachineChoiceExecutor, MachineMentionExecutor } from "./chatActionNativeClaims";
 import { ChatChoicePersistenceError } from "./chat";
 import { StorageService } from "./storage";
-import { ChatEventLogService } from "./chatEventLog";
-import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import type { MachineChoiceResultBody } from "../../shared/machineLink";
-import type { RespondToChatChoiceRequest } from "../../shared/types";
-import type { ChatActionPayload } from "../../shared/chatActionEvents";
+import { cardAnswerKey } from "./machineApprovalExecutor";
+import type { HubCard } from "../../shared/hubOps";
+import type { Conversation, RespondToChatChoiceRequest, RespondToChatMentionsRequest } from "../../shared/types";
 
 const CONVERSATION = "choice-chat";
 const CHOICE = "choice-7";
-const TARGET = `choice:${CHOICE}`;
 const SOURCE = "m1";
+const TARGET = `choice:${CHOICE}`;
 
 /**
- * Answering a choice wakes a member that is waiting, and that can happen once.
- *
- * It used to be admitted by asking whether a receipt event existed, which is a
- * read and not a claim: two answers arriving together both continued the turn,
- * and a crash between continuing it and writing the receipt continued it again
- * on the next start. The desktop's own IPC answered directly *and* published
- * the canonical action, so the member's home ran it a second time.
- *
- * These drive the real executor against real SQLite. The chat is a faithful
- * stand-in for the guard contract ChatService implements: the answer is saved
- * before anything native is claimed, the claim happens inside `beforeApply`,
- * and a disk that refuses the save is a distinct failure from one that refuses
- * the claim.
+ * Answering a choice wakes a member that is waiting, and that happens once.
+ * The answer comes from the User's server (a card answered from any device);
+ * the device the member runs on saves it before anything native is claimed,
+ * claims inside `beforeApply`, and a disk that refuses the save is a
+ * distinct failure from one that refuses the claim. These drive the real
+ * executor against real SQLite; the chat is a stand-in for that contract.
  */
 async function box(options: { failSave?: () => boolean } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-choice-executor-"));
   const storage = new StorageService({ dbPath: path.join(dir, "state.sqlite3") });
-  const eventLog = new ChatEventLogService(storage);
-  const device = await eventLog.getOrCreateDeviceIdentity();
+  await storage.saveConversation({
+    id: CONVERSATION, title: "Choice", kind: "chat", createdAt: "2026-10-28T08:00:00.000Z", updatedAt: "2026-10-28T08:00:00.000Z", findings: [],
+    messages: [{ id: SOURCE, role: "participant", participantId: "p1", content: "Which one?", createdAt: "2026-10-28T08:00:00.000Z", status: "done",
+      metadata: { pendingChoice: { id: CHOICE, title: "One", question: "Which one?", status: "pending", options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] },
+        pendingMentions: [{ targetParticipantId: "p2", targetHandle: "drew", status: "pending" }] } }],
+    metadata: { participants: [], participantSessions: [], running: false, warnings: [] }
+  } as unknown as Conversation);
   const continued: string[] = [];
-  const published: MachineChoiceResultBody[] = [];
+  const asked: RespondToChatMentionsRequest[] = [];
   let saves = 0;
 
   const chat = {
@@ -53,147 +49,106 @@ async function box(options: { failSave?: () => boolean } = {}) {
       saves += 1;
       await execution?.beforeApply("p1");
       continued.push(`${request.choiceId}:${request.selectedOptionId ?? ""}`);
-      return {
-        conversation: {
-          id: CONVERSATION, kind: "chat", messages: [{
-            id: SOURCE, role: "participant", participantId: "p1", content: "Which one?",
-            createdAt: new Date().toISOString(), status: "done",
-            metadata: { pendingChoice: { id: CHOICE, status: "selected", options: [], selectedOptionId: request.selectedOptionId } }
-          }]
-        },
-        warnings: []
-      } as never;
+      return { conversation: {} as Conversation, warnings: [] };
+    },
+    respondToMentions: async (request: RespondToChatMentionsRequest) => {
+      asked.push(request);
+      return { conversation: {} as Conversation, warnings: [] };
     }
   };
 
   const build = (settings: { runtimeId?: string; canApply?: () => boolean } = {}) => new MachineChoiceExecutor({
-    storage, deviceId: device.originId, chat: chat as never,
+    storage, chat: chat as never,
     runtimeIdentity: async () => ({ runtimeId: settings.runtimeId ?? "runtime-a", pid: 4321, startedAt: "synthetic-start" }),
-    ...(settings.canApply ? { canApply: settings.canApply } : {}),
-    publish: async (body) => {
-      published.push(body);
-      await eventLog.appendLocalEvent({
-        conversationId: body.conversationId, logScopeId: `choice:${body.choiceId}`,
-        kind: body.type, eventId: machineChoiceResultId(body.decisionId), payload: body
-      });
-    }
+    ...(settings.canApply ? { canApply: settings.canApply } : {})
+  });
+  const mentions = (runtimeId = "runtime-a") => new MachineMentionExecutor({ storage, chat: chat as never,
+    runtimeIdentity: async () => ({ runtimeId, pid: 4321, startedAt: "synthetic-start" }) });
+
+  /** The card on the User's server, answered. */
+  const answer = (optionId: string, answeredAt = "2026-10-28T08:01:00.000Z"): HubCard => ({
+    cardId: `choice:${SOURCE}`, conversationId: CONVERSATION, cardKind: "choice", participantId: "p1", messageId: SOURCE, raisedBy: "device-home",
+    raisedAt: "2026-10-28T08:00:00.000Z", card: {}, state: "answered", answer: { selectedOptionId: optionId }, answeredBy: "device-phone", answeredAt
   });
 
-  /** A real signed answer, so the claim's SQL finds its event. */
-  const answer = async (optionId: string) => {
-    const { event } = await eventLog.appendLocalEvent({
-      conversationId: CONVERSATION, logScopeId: "chat:actions", kind: "choice.answered",
-      payload: { operationId: `choice:${CHOICE}:${optionId}`, targetKey: TARGET, stateId: optionId,
-        detail: { sourceMessageId: SOURCE, selectedOptionId: optionId } }
-    });
-    return event as ChatEventEnvelope;
-  };
-
   return {
-    storage, eventLog, continued, published, build, answer,
+    storage, continued, asked, build, mentions, answer,
     saves: () => saves,
     cleanup: async () => { await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
   };
 }
 
-function payloadOf(event: ChatEventEnvelope): ChatActionPayload {
-  return event.payload as ChatActionPayload;
-}
-
-test("two answers to the same choice continue the member once", async () => {
-  const held = await box();
+test("the same answer read twice at once continues the member once", async () => {
+  const h = await box();
   try {
-    const executor = held.build();
-    const first = await held.answer("a");
-    const second = await held.answer("b");
-    const [one, two] = await Promise.all([
-      executor.applyAction(first, payloadOf(first)),
-      executor.applyAction(second, payloadOf(second))
-    ]);
-    assert.equal(held.continued.length, 1, `the member is continued once: ${JSON.stringify(held.continued)}`);
-    const loser = [one, two].find((result) => !result.ok);
-    assert.ok(loser, "the answer that lost says so rather than claiming it was carried out");
-    assert.match(loser.error ?? "", /already been answered|not repeated|claimed this choice/);
-  } finally { await held.cleanup(); }
+    const executor = h.build();
+    const card = h.answer("a");
+    const [first, second] = await Promise.all([executor.apply(card, "op-1"), executor.apply(card, "op-1")]);
+    assert.deepEqual([first, second], [{ kind: "applied" }, { kind: "applied" }]);
+    assert.deepEqual(h.continued, [`${CHOICE}:a`]);
+  } finally { await h.cleanup(); }
 });
 
-test("a crash between continuing the member and writing the result does not continue it again", async () => {
-  const held = await box();
+test("a crash between continuing the member and settling the card does not continue it again", async () => {
+  const h = await box();
   try {
-    const answer = await held.answer("a");
-    // A claim on disk with no result: exactly what a process that died inside
-    // the continuation leaves behind.
-    assert.equal(await held.storage.nativeCommands().claimTarget({
-      runtimeId: "runtime-gone", pid: 999, startedAt: "gone",
-      eventId: answer.eventId, conversationId: CONVERSATION, targetKey: TARGET, participantId: "p1"
-    }), true);
-
-    const result = await held.build().applyAction(answer, payloadOf(answer));
-    assert.equal(result.ok, false);
-    assert.equal(result.uncertain, true, "an unconfirmed continuation is reported as such, not as success");
-    assert.deepEqual(held.continued, [], "and the member is not woken a second time");
-  } finally { await held.cleanup(); }
-});
-
-test("the same signed answer redelivered after a restart is not carried out again", async () => {
-  const held = await box();
-  try {
-    const answer = await held.answer("a");
-    const first = await held.build().applyAction(answer, payloadOf(answer));
-    assert.equal(first.ok, true);
-    assert.deepEqual(held.continued, [`${CHOICE}:a`]);
-
-    // A new runtime over the same disk, replaying the same event.
-    const again = await held.build({ runtimeId: "runtime-b" }).applyAction(answer, payloadOf(answer));
-    assert.equal(again.ok, true, "the stored result is returned rather than recomputed");
-    assert.equal(held.continued.length, 1, "a restart replays the event, not the continuation");
-    assert.equal(held.published.length, 1,
-      "and the result is not published twice: the one already in the log is what the asker is owed");
-  } finally { await held.cleanup(); }
+    const card = h.answer("a");
+    assert.deepEqual(await h.build().apply(card), { kind: "applied" });
+    assert.equal((await h.storage.nativeCommands().targetEffect(CONVERSATION, TARGET))?.eventId, cardAnswerKey(card));
+    // The process dies before its settle reached the server; the next one
+    // reads the same answer again.
+    const restarted = h.build({ runtimeId: "runtime-b" });
+    const again = await restarted.apply(card);
+    assert.equal(again.kind, "uncertain");
+    assert.deepEqual(h.continued, [`${CHOICE}:a`], "continued once");
+    // A later answer (the card asked again) is not this choice's any more.
+    assert.equal((await restarted.apply(h.answer("b", "2026-10-28T08:09:00.000Z"))).kind, "refused");
+    assert.deepEqual(h.continued, [`${CHOICE}:a`]);
+  } finally { await h.cleanup(); }
 });
 
 test("a runtime that is shutting down keeps the answer instead of half-applying it", async () => {
-  const held = await box();
+  const h = await box();
   try {
-    const answer = await held.answer("a");
-    await assert.rejects(() => held.build({ canApply: () => false }).applyAction(answer, payloadOf(answer)),
-      /remains queued/, "the answer is kept for a runtime that can carry it out");
-    assert.deepEqual(held.continued, []);
-    assert.equal(await held.storage.nativeCommands().targetEffect(CONVERSATION, TARGET), undefined,
-      "and nothing was claimed on the way out");
-  } finally { await held.cleanup(); }
+    const result = await h.build({ canApply: () => false }).apply(h.answer("a"));
+    assert.equal(result.kind, "retry");
+    assert.equal(h.saves(), 0);
+    assert.equal(await h.storage.nativeCommands().targetEffect(CONVERSATION, TARGET), undefined);
+  } finally { await h.cleanup(); }
 });
 
 test("a disk that cannot save the answer is a held answer, not a lost one", async () => {
-  let broken = true;
-  const held = await box({ failSave: () => broken });
+  let failing = true;
+  const h = await box({ failSave: () => failing });
   try {
-    const answer = await held.answer("a");
-    await assert.rejects(() => held.build().applyAction(answer, payloadOf(answer)), ChatChoicePersistenceError,
-      "a save that failed is not turned into a terminal refusal of a real decision");
-    assert.deepEqual(held.continued, []);
-    assert.equal(await held.storage.nativeCommands().targetEffect(CONVERSATION, TARGET), undefined,
-      "nothing is claimed for an answer that was never saved");
-    assert.deepEqual(held.published, [], "and nothing is published about it either");
-
-    broken = false;
-    const recovered = await held.build().applyAction(answer, payloadOf(answer));
-    assert.equal(recovered.ok, true);
-    assert.deepEqual(held.continued, [`${CHOICE}:a`], "it is carried out once, when the disk allows it");
-  } finally { await held.cleanup(); }
+    const card = h.answer("a");
+    assert.equal((await h.build().apply(card)).kind, "retry");
+    assert.equal(await h.storage.nativeCommands().targetEffect(CONVERSATION, TARGET), undefined, "nothing claimed");
+    failing = false;
+    assert.deepEqual(await h.build().apply(card), { kind: "applied" });
+    assert.deepEqual(h.continued, [`${CHOICE}:a`]);
+  } finally { await h.cleanup(); }
 });
 
-test("an answer with no source message is refused before anything is claimed", async () => {
-  const held = await box();
+test("an answer to a choice that is not here is refused before anything is claimed", async () => {
+  const h = await box();
   try {
-    const { event } = await held.eventLog.appendLocalEvent({
-      conversationId: CONVERSATION, logScopeId: "chat:actions", kind: "choice.answered",
-      payload: { operationId: "choice:broken", targetKey: TARGET, stateId: "a", detail: {} }
-    });
-    // Rejected before any work: the guard is in applyAction itself, so it
-    // throws on the way in rather than returning a failed result.
-    await assert.rejects(async () => held.build().applyAction(event as ChatEventEnvelope,
-      payloadOf(event as ChatEventEnvelope)), /invalid identities/);
-    assert.equal(await held.storage.nativeCommands().targetEffect(CONVERSATION, TARGET), undefined);
-  } finally { await held.cleanup(); }
+    const result = await h.build().apply({ ...h.answer("a"), messageId: "not-here", cardId: "choice:not-here" });
+    assert.equal(result.kind, "refused");
+    assert.equal(await h.storage.nativeCommands().targetEffect(CONVERSATION, TARGET), undefined);
+  } finally { await h.cleanup(); }
+});
+
+test("mentions waiting for approval are asked once per answer, at most", async () => {
+  const h = await box();
+  try {
+    const card: HubCard = { ...h.answer("a"), cardId: `mention:${SOURCE}`, cardKind: "mention", answer: { approve: true, targetParticipantIds: ["p2"] } };
+    const [first, second] = await Promise.all([h.mentions().apply(card), h.mentions().apply(card)]);
+    assert.ok([first.kind, second.kind].includes("applied"));
+    assert.equal(h.asked.length, 1, "asked once");
+    assert.equal((await h.mentions("runtime-b").apply(card)).kind, "uncertain", "never twice, even after a restart");
+    assert.equal(h.asked.length, 1);
+    const none: HubCard = { ...card, answeredAt: "2026-10-28T08:09:00.000Z", answer: { approve: true, targetParticipantIds: ["someone-else"] } };
+    assert.equal((await h.mentions().apply(none)).kind, "refused");
+  } finally { await h.cleanup(); }
 });

@@ -8,14 +8,14 @@ import {
   mobileControlSettingsFromEnvironment,
   parseMobilePairingPayload
 } from "../../shared/mobilePairing";
-import { ChatEventLogService } from "./chatEventLog";
+import { DeviceIdentityService } from "./deviceIdentity";
 import { MobilePairingService } from "./mobilePairing";
 import { StorageService } from "./storage";
 
 test("a machine enrollment names the User's server and keeps its room apart from its routing identity", async () => {
   const { storage, cleanup } = await testStorage();
   try {
-    const service = new MobilePairingService(new ChatEventLogService(storage, fixedClock()), fixedClock());
+    const service = new MobilePairingService(new DeviceIdentityService(storage, fixedClock()), fixedClock());
     const result = await service.createPairing({ purpose: "machine-host", hubUrl: "https://hub.example.test", ttlMinutes: 5 });
     const parsed = parseMobilePairingPayload(result.qrPayload, new Date("2026-08-06T00:04:00.000Z"));
     const capability = parsed.capabilities[0];
@@ -43,7 +43,7 @@ test("a machine enrollment names the User's server and keeps its room apart from
 test("no machine enrollment without the User's server, and no phone pairing here at all", async () => {
   const { storage, cleanup } = await testStorage();
   try {
-    const service = new MobilePairingService(new ChatEventLogService(storage, fixedClock()), fixedClock());
+    const service = new MobilePairingService(new DeviceIdentityService(storage, fixedClock()), fixedClock());
     await assert.rejects(service.createPairing({ purpose: "machine-host" }), /Set up your server first/);
     await assert.rejects(service.createPairing({ purpose: "machine-host", hubUrl: "http://hub.example.test" }), /HTTPS/);
     await assert.rejects(service.createPairing({ purpose: "phone-control" as never, hubUrl: "https://hub.example.test" }), /pairs with your server/);
@@ -58,7 +58,7 @@ test("no machine enrollment without the User's server, and no phone pairing here
 test("parseMobilePairingPayload rejects expired packages, other purposes and unsafe server addresses", async () => {
   const { storage, cleanup } = await testStorage();
   try {
-    const service = new MobilePairingService(new ChatEventLogService(storage, fixedClock()), fixedClock());
+    const service = new MobilePairingService(new DeviceIdentityService(storage, fixedClock()), fixedClock());
     const result = await service.createPairing({ purpose: "machine-host", hubUrl: "https://hub.example.test", ttlMinutes: 1 });
 
     assert.throws(() => parseMobilePairingPayload(result.qrPayload, new Date("2026-08-06T00:02:00.000Z")), /expired/);

@@ -1,5 +1,6 @@
-import { BLOB_FRAGMENT_MAX_BYTES } from "./machineEvents";
-
+/** A body kept on the User's server by its content (a picture a phone sent,
+ *  an avatar the composer's catalog names): messages and the catalog name it
+ *  by this reference. The type tag is the stored form and does not change. */
 export interface DeviceEventBlobReference {
   type: "device.event.blob";
   blobHash: string;
@@ -13,7 +14,8 @@ export interface DeviceEventBlobFragment {
   bytesBase64: string;
 }
 
-export const DEVICE_EVENT_INLINE_BYTES = 32 * 1024;
+/** A body travels and is stored in fragments of at most this many bytes. */
+export const BLOB_FRAGMENT_MAX_BYTES = 384 * 1024;
 
 export function isDeviceEventBlobReference(value: unknown): value is DeviceEventBlobReference {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -25,7 +27,7 @@ export function isDeviceEventBlobReference(value: unknown): value is DeviceEvent
 
 export function fragmentByteLength(reference: DeviceEventBlobReference, index: number): number {
   if (!isDeviceEventBlobReference(reference) || !Number.isSafeInteger(index) || index < 0 || index >= reference.fragments) {
-    throw new Error("Invalid device event blob fragment identity.");
+    throw new Error("Invalid blob fragment identity.");
   }
   return index === reference.fragments - 1
     ? reference.byteLength - index * BLOB_FRAGMENT_MAX_BYTES

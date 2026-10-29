@@ -273,9 +273,6 @@ interface StoredSettings {
   relayRemovalFailures?: RelayRemovalFailure[];
   /** When this desktop last asked about machines that stopped being used. */
   machineInactivityCheckAt?: string;
-  /** Removed machines whose kept chat changes may not be dropped yet (the
-   *  app stopped in between); dropped at the next start. */
-  removedMachineOutboxes?: Array<{ pairingKey: string; deviceId: string }>;
 }
 
 /** What was set up through the shared relay and taken off this desktop when
@@ -2688,21 +2685,6 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
-  /** Removed machines whose kept chat changes still have to be dropped. */
-  async listRemovedMachineOutboxes(): Promise<Array<{ pairingKey: string; deviceId: string }>> {
-    const entries = (await this.readStored()).removedMachineOutboxes;
-    return Array.isArray(entries)
-      ? entries.filter((entry) => typeof entry?.pairingKey === "string" && typeof entry?.deviceId === "string" && entry.deviceId.length > 0)
-      : [];
-  }
-
-  async clearRemovedMachineOutbox(deviceId: string): Promise<void> {
-    const stored = await this.readStored();
-    const entries = (stored.removedMachineOutboxes ?? []).filter((entry) => entry.deviceId !== deviceId);
-    stored.removedMachineOutboxes = entries.length ? entries : undefined;
-    await this.writeStored(stored);
-  }
-
   async getMachineInactivityCheckAt(): Promise<string | undefined> {
     return (await this.readStored()).machineInactivityCheckAt;
   }
@@ -3087,11 +3069,7 @@ export class SettingsService {
         })) : undefined,
       // Read back too: dropped here, the 10-day rhythm of the question about
       // unused machines restarted with every launch.
-      machineInactivityCheckAt: typeof settings.machineInactivityCheckAt === "string" ? settings.machineInactivityCheckAt : undefined,
-      removedMachineOutboxes: Array.isArray(settings.removedMachineOutboxes)
-        ? settings.removedMachineOutboxes.filter((entry) => typeof entry?.pairingKey === "string" && typeof entry?.deviceId === "string" && entry.deviceId)
-          .map((entry) => ({ pairingKey: entry.pairingKey, deviceId: entry.deviceId }))
-        : undefined
+      machineInactivityCheckAt: typeof settings.machineInactivityCheckAt === "string" ? settings.machineInactivityCheckAt : undefined
     };
   }
 
@@ -3133,46 +3111,11 @@ export class SettingsService {
         pairingKey: record.pairingKey.trim(),
         createdAt: typeof record.createdAt === "string" ? record.createdAt : new Date(0).toISOString(),
         ...(typeof record.lastSeenAt === "string" ? { lastSeenAt: record.lastSeenAt } : {}),
-        pendingRuns: this.normalizeMachineRunRecords(record.pendingRuns),
-        pendingCancels: this.normalizeMachineRunRecords(record.pendingCancels),
         ...(record.lastHello && typeof record.lastHello === "object" ? { lastHello: record.lastHello } : {}),
-        ...(typeof record.devicePublicKeyDerBase64 === "string" && record.devicePublicKeyDerBase64 ? { devicePublicKeyDerBase64: record.devicePublicKeyDerBase64 } : {}),
-        ...(record.chatChanges === true ? { chatChanges: true } : {}),
-        ...(this.normalizeMachinePublished(record.published) ?? {})
+        ...(typeof record.devicePublicKeyDerBase64 === "string" && record.devicePublicKeyDerBase64 ? { devicePublicKeyDerBase64: record.devicePublicKeyDerBase64 } : {})
       }];
     });
     return machines.length > 0 ? machines : undefined;
-  }
-
-  /** What the desktop last published to the machine's runtime (digests only):
-   *  kept across restarts so a restart does not publish the same again. */
-  private normalizeMachinePublished(value: unknown): Pick<MachineRecord, "published"> | undefined {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-    const record = value as Record<string, unknown>;
-    const text = (field: unknown): string | undefined => typeof field === "string" && field.length > 0 && field.length <= 256 ? field : undefined;
-    const published = {
-      ...(text(record.instanceId) ? { instanceId: text(record.instanceId) } : {}),
-      ...(text(record.settings) ? { settings: text(record.settings) } : {}),
-      ...(text(record.roster) ? { roster: text(record.roster) } : {})
-    };
-    return Object.keys(published).length ? { published } : undefined;
-  }
-
-  private normalizeMachineRunRecords(value: unknown): Array<{ runId: string; conversationId: string }> {
-    if (!Array.isArray(value)) {
-      return [];
-    }
-    const records = new Map<string, { runId: string; conversationId: string }>();
-    for (const entry of value) {
-      if (!entry || typeof entry !== "object") {
-        continue;
-      }
-      const { runId, conversationId } = entry as Record<string, unknown>;
-      if (typeof runId === "string" && runId.trim() && typeof conversationId === "string" && conversationId.trim()) {
-        records.set(runId.trim(), { runId: runId.trim(), conversationId: conversationId.trim() });
-      }
-    }
-    return [...records.values()];
   }
 
   private normalizeChatProviderKind(value: unknown): ChatProviderKind | undefined {
@@ -3496,7 +3439,7 @@ export class SettingsService {
       throw new Error("Machine not found.");
     }
     if (record.id === installedMachineId && record.pairingKey === installed.rendezvousId && isDeepStrictEqual(pairings[record.pairingKey], installed)) return { ...record };
-    if (record.pendingRuns?.length || record.pendingCancels?.length || record.lastHello?.activeRunIds?.length) {
+    if (record.lastHello?.activeRunIds?.length) {
       throw new Error("The machine has pending actions. Finish them before restoring its connection.");
     }
     if (record.pairingKey !== requested.rendezvousId || !isDeepStrictEqual(pairings[record.pairingKey], requested)) {
@@ -3525,14 +3468,6 @@ export class SettingsService {
     const stored = await this.readStored();
     const removed = (stored.machines ?? []).find((machine) => machine.id === id);
     stored.machines = (stored.machines ?? []).filter((machine) => machine.id !== id);
-    // What was kept for it is dropped after this write; should the app stop in
-    // between, the next start finishes it.
-    if (removed?.deviceId) {
-      stored.removedMachineOutboxes = [
-        ...(stored.removedMachineOutboxes ?? []).filter((entry) => entry.deviceId !== removed.deviceId),
-        { pairingKey: removed.pairingKey, deviceId: removed.deviceId }
-      ].slice(-50);
-    }
     // A removed machine must not leave this desktop's way into it behind.
     const installs = (stored.machineInstalls ?? []).filter((record) => record.machineId !== id);
     stored.machineInstalls = installs.length ? installs : undefined;
@@ -3956,7 +3891,6 @@ export class SettingsService {
       relayRemovalPending: _relayRemovalPending,
       relayRemovalFailures: _relayRemovalFailures,
       machineInactivityCheckAt: _machineInactivityCheckAt,
-      removedMachineOutboxes: _removedMachineOutboxes,
       lastRepoPath: _lastRepoPath,
       ...shareable
     } = stored;
@@ -4028,7 +3962,6 @@ export class SettingsService {
       relayRemovalPending: stored.relayRemovalPending,
       relayRemovalFailures: stored.relayRemovalFailures,
       machineInactivityCheckAt: stored.machineInactivityCheckAt,
-      removedMachineOutboxes: stored.removedMachineOutboxes,
       lastRepoPath: stored.lastRepoPath
     };
     // One atomic settings write replaces both configuration and environment.

@@ -72,7 +72,10 @@ test("a handover that did not work puts the previous machine power key back, and
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
 });
 
-test("machine run intents and held stops survive a fresh SettingsService reading the disk", async () => {
+test("a machine record from before the server owned the chats sheds the old dispatch bookkeeping on the next read and save", async () => {
+  // Turns, Stops and settings travel through the User's server now: the run
+  // intents, held stops and publication digests the desktop kept per machine
+  // mean nothing any more and are not carried forward.
   const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-settings-"));
   const file = path.join(dir, "settings.json");
   const instance = (): SettingsService => {
@@ -81,48 +84,22 @@ test("machine run intents and held stops survive a fresh SettingsService reading
     return service;
   };
   try {
-    const record = {
-      id: "machine-1", name: "Test machine", deviceId: "device-machine", pairingKey: "pairing-1",
-      createdAt: "2026-09-06T00:00:00.000Z",
+    const record = { id: "machine-1", name: "Test machine", deviceId: "device-machine", pairingKey: "pairing-1", createdAt: "2026-09-06T00:00:00.000Z" };
+    await instance().saveMachine(record);
+    const disk = JSON.parse(await readFile(file, "utf8"));
+    Object.assign(disk.machines[0], {
       pendingRuns: [{ runId: "run-live", conversationId: "chat-1" }],
-      pendingCancels: [{ runId: "run-stopped", conversationId: "chat-2" }]
-    };
-    await instance().saveMachine(record);
-    assert.deepEqual((await instance().listMachines())[0].pendingRuns, record.pendingRuns);
-    assert.deepEqual((await instance().listMachines())[0].pendingCancels, record.pendingCancels);
-    const disk = JSON.parse(await readFile(file, "utf8"));
-    disk.machines[0].pendingRuns.push(null, {}, { runId: 12, conversationId: "chat" }, { runId: " ", conversationId: "chat" }, { runId: "run-live", conversationId: "chat-1" });
+      pendingCancels: [{ runId: "run-stopped", conversationId: "chat-2" }],
+      chatChanges: true,
+      published: { instanceId: "runtime-run-1", settings: "digest", roster: "digest" }
+    });
     await writeFile(file, JSON.stringify(disk));
-    const restarted = instance();
-    assert.deepEqual((await restarted.listMachines())[0].pendingRuns, record.pendingRuns);
-    await restarted.saveMachine({ ...record, pendingRuns: [], pendingCancels: [] });
-    assert.deepEqual((await instance().listMachines())[0].pendingRuns, []);
-    assert.deepEqual((await instance().listMachines())[0].pendingCancels, []);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("what the desktop published to a machine's runtime survives a fresh SettingsService reading the disk", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-published-"));
-  const file = path.join(dir, "settings.json");
-  const instance = (): SettingsService => {
-    const service = new SettingsService();
-    (service as any).settingsPath = file;
-    return service;
-  };
-  try {
-    const published = { instanceId: "runtime-run-1", settings: "digest-of-settings", roster: "digest-of-roster" };
-    const record = { id: "machine-p", name: "Published", deviceId: "device-p", pairingKey: "pairing-p", createdAt: "2026-10-22T00:00:00.000Z", published };
-    await instance().saveMachine(record);
-    assert.deepEqual((await instance().listMachines())[0].published, published, "a desktop restart remembers it, so it publishes nothing again");
-    const disk = JSON.parse(await readFile(file, "utf8"));
-    disk.machines[0].published = { instanceId: 7, settings: "x".repeat(300), roster: "kept" };
-    await writeFile(file, JSON.stringify(disk));
-    assert.deepEqual((await instance().listMachines())[0].published, { roster: "kept" }, "malformed parts are dropped, so they are published again");
-    disk.machines[0].published = "nonsense";
-    await writeFile(file, JSON.stringify(disk));
-    assert.equal((await instance().listMachines())[0].published, undefined);
+    const read = (await instance().listMachines())[0] as unknown as Record<string, unknown>;
+    for (const key of ["pendingRuns", "pendingCancels", "chatChanges", "published"]) assert.equal(key in read, false, `${key} is not read`);
+    assert.equal(read.deviceId, "device-machine");
+    await instance().saveMachine((await instance().listMachines())[0]);
+    const saved = JSON.parse(await readFile(file, "utf8")).machines[0] as Record<string, unknown>;
+    for (const key of ["pendingRuns", "pendingCancels", "chatChanges", "published"]) assert.equal(key in saved, false, `${key} is not written back`);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -273,13 +250,13 @@ test("a machine's install record never travels to a machine and dies with the ma
 });
 
 test("controller trust stays local when settings are exported or imported", async () => {
-  const { createChatEventDeviceIdentity } = await import("./chatEventLog");
+  const { createDeviceIdentity } = await import("./deviceIdentity");
   const dir = await mkdtemp(path.join(tmpdir(), "accord-trust-settings-"));
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   const service = new SettingsService();
   (service as any).settingsPath = path.join(dir, "settings.json");
   try {
-    const identity = createChatEventDeviceIdentity(new Date().toISOString());
+    const identity = createDeviceIdentity(new Date().toISOString());
     const record = { deviceId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64,
       role: "desktop" as const, name: "Local controller", addedAt: identity.createdAt };
     await service.saveTrustedDevice(record);
@@ -291,16 +268,16 @@ test("controller trust stays local when settings are exported or imported", asyn
 });
 
 test("the devices the owner trusts, and the ones removed, survive a restart", async () => {
-  const { createChatEventDeviceIdentity } = await import("./chatEventLog");
+  const { createDeviceIdentity } = await import("./deviceIdentity");
   const dir = await mkdtemp(path.join(tmpdir(), "accord-trust-restart-"));
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   const settingsPath = path.join(dir, "settings.json");
   const service = new SettingsService();
   (service as any).settingsPath = settingsPath;
   try {
-    const phone = createChatEventDeviceIdentity(new Date().toISOString());
-    const removedPhone = createChatEventDeviceIdentity(new Date().toISOString());
-    const laptop = createChatEventDeviceIdentity(new Date().toISOString());
+    const phone = createDeviceIdentity(new Date().toISOString());
+    const removedPhone = createDeviceIdentity(new Date().toISOString());
+    const laptop = createDeviceIdentity(new Date().toISOString());
     const now = new Date().toISOString();
     await service.savePhoneInvite({ inviteId: "invite-1", issuedAt: now, expiresAt: new Date(Date.now() + 600_000).toISOString() });
     assert.equal(await service.admitInvitedPhone({ deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64,
@@ -332,13 +309,13 @@ test("the devices the owner trusts, and the ones removed, survive a restart", as
 });
 
 test("a phone paired again replaces its own entry, and its old code can no longer take it off", async () => {
-  const { createChatEventDeviceIdentity } = await import("./chatEventLog");
+  const { createDeviceIdentity } = await import("./deviceIdentity");
   const dir = await mkdtemp(path.join(tmpdir(), "accord-phone-repair-"));
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   const service = new SettingsService();
   (service as any).settingsPath = path.join(dir, "settings.json");
   try {
-    const phone = createChatEventDeviceIdentity(new Date().toISOString());
+    const phone = createDeviceIdentity(new Date().toISOString());
     const now = new Date().toISOString();
     const later = new Date(Date.now() + 600_000).toISOString();
     const admit = (inviteId: string) => service.admitInvitedPhone({ deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64,
@@ -358,7 +335,7 @@ test("a phone paired again replaces its own entry, and its old code can no longe
 });
 
 test("what the shared relay set up is taken off once: its machines are named for removal, its phones and files go", async () => {
-  const { createChatEventDeviceIdentity } = await import("./chatEventLog");
+  const { createDeviceIdentity } = await import("./deviceIdentity");
   const dir = await mkdtemp(path.join(tmpdir(), "accord-relay-removal-"));
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   const settingsPath = path.join(dir, "settings.json");
@@ -372,9 +349,9 @@ test("what the shared relay set up is taken off once: its machines are named for
     const service = make();
     await service.saveMachine({ id: "relay-box", name: "Relay box", deviceId: "", pairingKey: "rv-relay", createdAt: "2026-09-01T00:00:00.000Z" }, pairing("rv-relay"));
     await service.saveMachine({ id: "server-box", name: "Server box", deviceId: "", pairingKey: "rv-server", createdAt: "2026-10-01T00:00:00.000Z" }, pairing("rv-server", "https://hub.example/"));
-    const relayPhone = createChatEventDeviceIdentity(new Date().toISOString());
-    const serverPhone = createChatEventDeviceIdentity(new Date().toISOString());
-    const desktop = createChatEventDeviceIdentity(new Date().toISOString());
+    const relayPhone = createDeviceIdentity(new Date().toISOString());
+    const serverPhone = createDeviceIdentity(new Date().toISOString());
+    const desktop = createDeviceIdentity(new Date().toISOString());
     const now = new Date().toISOString();
     await service.saveTrustedDevice({ deviceId: relayPhone.originId, publicKeyDerBase64: relayPhone.publicKeyDerBase64, role: "phone", name: "iPhone", addedAt: now });
     await service.saveTrustedDevice({ deviceId: desktop.originId, publicKeyDerBase64: desktop.publicKeyDerBase64, role: "desktop", name: "Laptop", addedAt: now });
@@ -466,7 +443,7 @@ test("an unreadable settings file never reads as automatic stop left on, and is 
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("a removed machine is remembered until what was kept for it has been dropped, and the question's rhythm survives a restart", async () => {
+test("the question about unused machines keeps its rhythm across a restart, and a removed machine leaves nothing in what machines are sent", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-machine-removed-"));
   const file = path.join(dir, "settings.json");
   const instance = (): SettingsService => {
@@ -479,16 +456,13 @@ test("a removed machine is remembered until what was kept for it has been droppe
     await instance().saveMachine({ id: "machine-2", name: "Never introduced", deviceId: "", pairingKey: "room-new", createdAt: "2026-09-06T00:00:00.000Z" });
     await instance().removeMachine("machine-1");
     await instance().removeMachine("machine-2");
-    // A fresh start still knows what is left to drop, and only for a machine that had an identity.
-    assert.deepEqual(await instance().listRemovedMachineOutboxes(), [{ pairingKey: "room-gone", deviceId: "device-gone" }]);
-    // So does the time the User was last asked about unused machines, through an unrelated save too.
+    assert.deepEqual((await instance().listMachines()).map((machine) => machine.id), []);
+    // The time the User was last asked about unused machines survives a restart, through an unrelated save too.
     await instance().saveMachineInactivityCheckAt("2026-10-01T12:00:00.000Z");
     await instance().saveMachine({ id: "machine-3", name: "Other", deviceId: "device-3", pairingKey: "room-3", createdAt: "2026-09-06T00:00:00.000Z" });
     assert.equal(await instance().getMachineInactivityCheckAt(), "2026-10-01T12:00:00.000Z");
     assert.equal(JSON.stringify((await instance().exportMachineSettingsSnapshot()).settingsJson).includes("room-gone"), false,
       "not part of what machines are sent");
-    await instance().clearRemovedMachineOutbox("device-gone");
-    assert.deepEqual(await instance().listRemovedMachineOutboxes(), []);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

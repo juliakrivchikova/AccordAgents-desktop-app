@@ -1,8 +1,9 @@
 /**
  * A member removal card on the phone, driven through the real PWA in a browser
- * against a real hub: it asks in the desktop card's words, the answer goes in
- * the server's order, and once approved it stays visible (without buttons)
- * while it waits for running turns and for the Mac to apply it, then leaves.
+ * against a real hub: it asks in the desktop card's words, the answer is the
+ * card's one answer on the server, and once approved it stays visible
+ * (without buttons) while it waits for running turns and for the Mac to apply
+ * it, then leaves when the card is settled.
  *
  * A browser check, not the installed phone: it runs the files the phone runs.
  */
@@ -40,7 +41,7 @@ test("a removal card asks in the desktop's words, and waits visibly once approve
   let app;
   try {
     await hub.createChat(CONVERSATION, { title: "Removal QA", participants: [DREW, GERA], messages: [] });
-    await hub.raiseApproval(CONVERSATION, removal);
+    await hub.raiseApproval(CONVERSATION, removal, { participantId: DREW.id });
     app = await attachApp({ port: CDP_PORT });
     await pairPage(app, { hub, siteOrigin: site.origin });
     await openChat(app, CONVERSATION);
@@ -61,17 +62,16 @@ test("a removal card asks in the desktop's words, and waits visibly once approve
     assert.deepEqual(shown.options, [["allow", "Yes, remove @gera"], ["deny", "No, keep @gera in this chat"]]);
 
     await app.evaluate(`(() => { document.querySelector('[data-card-id="removal-qa-1"] [data-option-id="allow"]').click(); return true; })()`);
-    for (let i = 0; i < 60 && hub.phoneEvents("permission.decided").length === 0; i += 1) {
+    let placed = [];
+    for (let i = 0; i < 60 && placed.length === 0; i += 1) {
       await sleep(250);
-      await hub.settle();
+      placed = await hub.phoneOps("card.answer");
     }
-    const placed = hub.phoneEvents("permission.decided");
     assert.equal(placed.length, 1, "the answer reached the server");
-    assert.equal(placed[0].payload.detail.approve, true);
-    assert.deepEqual(placed[0].payload.detail.draftOverride, removal.request);
+    assert.equal(placed[0].effect.card.answer.approve, true);
+    assert.deepEqual(placed[0].effect.card.answer.draftOverride, removal.request);
 
     // Approved, waiting for running turns and the Mac.
-    await hub.raiseApproval(CONVERSATION, { ...removal, status: "approved", approvalScope: "once", memberRemovalQueuedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     let waiting = null;
     for (let i = 0; i < 60 && !(waiting && waiting.waiting); i += 1) {
       waiting = await card();
@@ -84,9 +84,8 @@ test("a removal card asks in the desktop's words, and waits visibly once approve
     const pendingCount = await app.evaluate(`document.querySelectorAll('#control-cards .control-card:not(.control-card-waiting)').length`);
     assert.equal(pendingCount, 0, "it is not offered as a question");
 
-    // Applied: it leaves.
-    const { memberRemovalQueuedAt: _queued, ...applied } = { ...removal, status: "approved", memberRemovalQueuedAt: "" };
-    await hub.raiseApproval(CONVERSATION, { ...applied, appliedParticipantIds: [GERA.id], updatedAt: new Date(Date.now() + 1000).toISOString() });
+    // Applied (the card settled by the device that raised it): it leaves.
+    await hub.settleCard(CONVERSATION, removal.id, { applied: true, appliedParticipantIds: [GERA.id] });
     let gone = false;
     for (let i = 0; i < 60 && !gone; i += 1) {
       gone = await app.evaluate(`document.querySelector('[data-card-id="removal-qa-1"]') === null`) === true;

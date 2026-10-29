@@ -1,21 +1,15 @@
-import type { ChatAppToolApproval, Conversation, ReviewProgress } from "../../shared/types";
-import {
-  HUB_APPROVAL_CARD_EVENT_KIND,
-  HUB_APPROVAL_CARD_SCOPE,
-  type HubComposerCatalog,
-  type HubMachineWakeRequest
-} from "../../shared/hubProtocol";
-import type { ChatEventLogService } from "./chatEventLog";
+import type { Conversation, ReviewProgress } from "../../shared/types";
+import type { HubComposerCatalog, HubMachineWakeRequest } from "../../shared/hubProtocol";
 import type { HubClient } from "./hubClient";
 import { MachineProgressSender } from "./machineProgressSender";
-import type { StorageService } from "./storage";
 
 /**
  * What the desktop puts on the User's server for her phone, so the phone
- * needs nothing from the desktop itself: the approval cards of its own
- * members, its own members' live progress, the composer's catalog and the key
- * the server may wake a stopped machine with. A member on a machine is that
- * machine's to publish; the desktop says nothing for it.
+ * needs nothing from the desktop itself: its own members' live progress, the
+ * composer's catalog and the key the server may wake a stopped machine with.
+ * A member on a machine is that machine's to publish; the desktop says
+ * nothing for it. Cards a member waits on are the User's server's own
+ * (ChatService raises them there, agreement Д9).
  */
 
 /** How often a running member's text goes to the server, at most. */
@@ -26,12 +20,6 @@ const PHONES_RECHECK_MS = 30_000;
 const PROGRESS_RUNS_MAX = 32;
 
 export class HubPhonePublisher {
-  /** Each local approval as last published: its status and update stamp. */
-  private readonly publishedApprovals = new Map<string, string>();
-  /** Local approvals noted and not published yet (no server link or no
-   *  phone at the time), the newest word on each. */
-  private readonly unpublished = new Map<string, { conversationId: string; approval: ChatAppToolApproval; stamp: string }>();
-  private approvalQueue: Promise<void> = Promise.resolve();
   /** Members by chat that live on a machine: their progress is not ours. */
   private readonly machineMembers = new Map<string, Set<string>>();
   private readonly progress = new Map<string, MachineProgressSender<void>>();
@@ -49,13 +37,8 @@ export class HubPhonePublisher {
   /** The catalog last published, without its stamp: an unchanged one is not
    *  sent again (settings are written often, the catalog rarely changes). */
   private catalogPublished?: string;
-  /** When this desktop started publishing: a machine member's roster card it
-   *  settles from then on is its word to publish. */
-  private readonly startedAt = new Date().toISOString();
 
   constructor(private readonly options: {
-    storage: Pick<StorageService, "deviceEventBlobs">;
-    eventLog: Pick<ChatEventLogService, "appendLocalEvent">;
     /** The link to the server, when there is one and it took this desktop as
      *  its owner. */
     client: () => HubClient | undefined;
@@ -71,53 +54,12 @@ export class HubPhonePublisher {
     log: (event: string, payload: Record<string, unknown>) => void;
   }) {}
 
-  /** A chat saved here: its local approvals that changed go to the server,
-   *  and which members live on machines is noted. */
+  /** A chat saved here: which of its members live on machines is noted. */
   noteConversation(conversation: Conversation): void {
     const participants = Array.isArray(conversation.metadata?.participants) ? conversation.metadata.participants as Array<{ id?: string; homeMachineId?: string }> : [];
     const onMachines = new Set(participants.filter((participant) => participant?.id && participant.homeMachineId).map((participant) => participant.id as string));
     this.machineMembers.set(conversation.id, onMachines);
     if (this.machineMembers.size > 500) this.machineMembers.delete(this.machineMembers.keys().next().value!);
-    const approvals = (conversation.metadata as { pendingAppToolApprovals?: ChatAppToolApproval[] } | undefined)?.pendingAppToolApprovals ?? [];
-    for (const approval of approvals) {
-      // A machine's member's card is published by that machine, except the
-      // outcome of a roster change it asked for: this desktop applies those
-      // (it owns the member list), and the phone hears it from here at once,
-      // also while that machine is stopped.
-      const settledHere = typeof approval.rosterChangeSettledAt === "string" && approval.rosterChangeSettledAt >= this.startedAt;
-      if (approval.homeMachineId && !settledHere) continue;
-      const key = `${conversation.id}\n${approval.id}`;
-      const stamp = `${approval.status}\u0000${approval.updatedAt}`;
-      if (this.publishedApprovals.get(key) === stamp) continue;
-      // An approval settled long before this desktop started needs no card.
-      if (!this.publishedApprovals.has(key) && !this.unpublished.has(key) && approval.status !== "pending" && !(approval.homeMachineId && settledHere)) {
-        this.publishedApprovals.set(key, stamp);
-        continue;
-      }
-      this.unpublished.set(key, { conversationId: conversation.id, approval, stamp });
-    }
-    if (this.publishedApprovals.size > 5_000) this.publishedApprovals.clear();
-    this.flushApprovals();
-  }
-
-  /** Publishes the cards noted but not on the server yet: at once when it
-   *  can, again once the server confirms this desktop or a phone pairs. */
-  flushApprovals(): void {
-    if (this.unpublished.size === 0) return;
-    this.approvalQueue = this.approvalQueue.then(async () => {
-      if (!this.options.client() || !await this.options.hasPhones()) return;
-      for (const [key, card] of [...this.unpublished]) {
-        if (this.unpublished.get(key) !== card) continue;
-        try {
-          const payload = await this.options.storage.deviceEventBlobs().prepare({ conversationId: card.conversationId, approval: card.approval });
-          await this.options.eventLog.appendLocalEvent({ conversationId: card.conversationId, logScopeId: HUB_APPROVAL_CARD_SCOPE, kind: HUB_APPROVAL_CARD_EVENT_KIND, payload });
-          this.publishedApprovals.set(key, card.stamp);
-          if (this.unpublished.get(key) === card) this.unpublished.delete(key);
-        } catch (error) {
-          this.options.log("hub.phone.card-error", { conversationId: card.conversationId, message: error instanceof Error ? error.message : String(error) });
-        }
-      }
-    }).catch(() => undefined);
   }
 
   /** A run's progress, as the desktop's own window sees it: a local member's
@@ -264,8 +206,6 @@ export class HubPhonePublisher {
 
   /** Another server (or none): everything is published again. */
   reset(): void {
-    this.publishedApprovals.clear();
-    this.unpublished.clear();
     this.uploadedAvatars.clear();
     this.phones = undefined;
     this.wakePublished = undefined;

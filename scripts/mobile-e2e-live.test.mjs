@@ -29,11 +29,9 @@ test("live end-to-end: the in-progress row holds, streams, and becomes the answe
   const site = await serveMobileShell({ port: SITE_PORT, hubOrigins: [hub.base] });
 
   // The desktop's link to its server and its publisher, as main.ts wires them.
-  const client = new HubClient({ url: hub.base, identity: async () => hub.owner, storage: hub.storage });
+  const client = new HubClient({ url: hub.base, identity: async () => hub.owner });
   const logged = [];
   const publisher = new HubPhonePublisher({
-    storage: hub.storage,
-    eventLog: { appendLocalEvent: async () => undefined },
     client: () => client,
     hasPhones: async () => (await hub.phones()).length > 0,
     buildCatalog: async () => ({ roles: {}, prompts: [], skills: [] }),

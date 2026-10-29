@@ -1,102 +1,105 @@
+// A machine's idle stop against its live control (MachineHostService): a
+// machine is a plain client of the User's server, so the work an idle stop
+// must wait for is a member running here, a run still ending, a scheduled
+// script that needs it awake, and anything it wrote that the server has not
+// taken yet. Once the stop is fenced, a turn the server asks of a member
+// here waits there for the next start instead of being taken.
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { StorageService } from "../dist/main/main/services/storage.js";
-import { ChatEventLogService } from "../dist/main/main/services/chatEventLog.js";
+import { DeviceIdentityService } from "../dist/main/main/services/deviceIdentity.js";
 import { MachineHostService } from "../dist/main/main/services/machineHost.js";
 import { MachineHostPowerRegistry } from "../dist/main/main/services/machineHostPower.js";
 import { MachineIdleScheduler } from "../dist/main/main/services/machineIdle.js";
 import { MachineIdlePower } from "../dist/main/main/services/machineIdlePower.js";
 import { MACHINE_IDLE_STOP_MS } from "../dist/main/shared/machinePower.js";
-import { openMachinePayload } from "../dist/main/main/services/machineChannelSealing.js";
 
-test("idle fences the actual host admission path; retained results resend and late turns wait for a new boot", async () => {
+test("idle waits for the members running here and for what the server has not taken; once fenced, new turns wait on the server, and a restart in the same boot keeps the fence", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-host-"));
   let host; let scheduler;
   try {
     const storage = new StorageService({ dbPath: path.join(dir, "host.sqlite3") });
     const source = new StorageService({ dbPath: path.join(dir, "source.sqlite3") });
-    const eventLog = new ChatEventLogService(storage); const sourceLog = new ChatEventLogService(source);
-    const [identity, sender] = await Promise.all([eventLog.getOrCreateDeviceIdentity(), sourceLog.getOrCreateDeviceIdentity()]);
+    const deviceIdentity = new DeviceIdentityService(storage); const sourceIdentity = new DeviceIdentityService(source);
+    const [identity, sender] = await Promise.all([deviceIdentity.getOrCreateDeviceIdentity(), sourceIdentity.getOrCreateDeviceIdentity()]);
     const pairing = { version: 1, purpose: "machine-host", issuer: sender, rendezvousId: "idle-room", stableRoutingId: "idle-route",
       relaySealKeyBase64: Buffer.alloc(32, 6).toString("base64url"), hubUrl: "http://127.0.0.1:1",
       capabilities: [{ scope: "device", canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }],
       fingerprint: "idle-test", createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString() };
-    const sent = []; const conversations = new Map(); const runs = []; let finish;
-    let activityCalls = 0; let nativeCloses = 0; let nativeFenced = false;
-    const gate = new Promise(resolve => { finish = resolve; });
-    const client = { on: () => () => undefined, connect: async () => undefined, close: () => undefined,
-      // The machine seals for the device it is answering, so the desktop reads
-      // its own frames with its own key rather than a key the room shares.
-      sendCiphertext: async request => {
-        sent.push(await openMachinePayload(request.ciphertext,
-          { publicKeyDerBase64: sender.publicKeyDerBase64, privateKeyDerBase64: sender.privateKeyDerBase64 },
-          undefined, pairing.rendezvousId));
-        return [];
-      } };
-    const chat = { activeParticipantRuns: () => [], cancelRun: () => true,
-      runMachineHostedTurn: async request => { runs.push(request.runId); await gate; return { messages: [], warnings: [] }; },
-      applyReplicatedConversation: async (id, merge) => { const value = merge(conversations.get(id)); if (value) conversations.set(id, value); } };
-    const options = { eventStorage: storage, eventLog, publicKeyDerBase64: identity.publicKeyDerBase64, deviceId: identity.originId,
-      pairing, appVersion: "test", createClient: () => client, outboxPath: path.join(dir, "outbox.json"),
-      onNativeActivitySettled: async () => { activityCalls++; await scheduler.noteActivity(); } };
-    const create = () => new MachineHostService(chat, { getConversation: async id => conversations.get(id) },
-      { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined }, options);
+    const client = { on: () => () => undefined, connect: async () => undefined, close: () => undefined, sendCiphertext: async () => [] };
+    let running = []; let ending = []; let unsent = { queued: 0 };
+    let activityCalls = 0; let nativeCloses = 0; let nativeFenced = false; let lifted = 0;
+    const settled = [];
+    const chat = {
+      respondToChoice: async () => undefined, respondToAppToolApproval: async () => undefined,
+      activeParticipantRuns: () => running, liveRunIds: () => ending,
+      onParticipantRunSettled: (listener) => { settled.push(listener); return () => undefined; }
+    };
+    const create = () => new MachineHostService(chat, { write: async () => undefined }, {
+      pairing, deviceId: identity.originId, appVersion: "test", publicKeyDerBase64: identity.publicKeyDerBase64,
+      identity: () => deviceIdentity.getOrCreateDeviceIdentity(), createClient: () => client, storage,
+      unsentServerWrites: async () => unsent,
+      onNativeActivitySettled: async () => { activityCalls++; await scheduler.noteActivity(); } });
     host = create();
+    host.onFenceLifted(() => { lifted += 1; });
     const power = storage.machinePower(); let now = 10;
     scheduler = new MachineIdleScheduler({ state: power, bootId: "boot", uptimeMs: () => now,
       isBusy: () => host.hasWorkForIdleStop(), prepareStop: async () => undefined, onError: () => undefined });
     await scheduler.check(); await host.start();
-    await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: sender.originId, machineId: "home", appVersion: "test" });
-    const send = async (body, eventId) => {
-      const event = (await sourceLog.appendLocalEvent({ conversationId: body.conversationId ?? body.conversation.id,
-        kind: body.type, payload: body, eventId, logScopeId: `device:idle-room:${JSON.stringify(["chat", "actions"])}` })).event;
-      // A durable event reaches the machine only through the server's order.
-      assert.equal(await host.receiveFromHub(event), "delivered");
-      return event;
-    };
-    const conversation = { id: "chat", kind: "chat", title: "Idle test", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      metadata: { participants: [{ id: "p1", handle: "machine", kind: "codex-cli", homeMachineId: "home" }] },
-      messages: [{ id: "user", role: "user", content: "Run", createdAt: new Date().toISOString(), status: "done" }], findings: [] };
-    const request = runId => ({ type: "machine.turn.request", conversationId: "chat", participantId: "p1", participant: conversation.metadata.participants[0],
-      runId, messageId: "user", pendingMessageId: `pending-${runId}`, requestedAt: conversation.createdAt });
-    // The turn arrives before its chat's change events: it waits, and waiting is work.
-    await send(request("active"), "machine-command:active");
-    assert.equal(await host.hasWorkForIdleStop(), true, "a turn waiting for its chat is busy even before a provider exists");
-    conversations.set("chat", conversation);
-    await until(() => runs.includes("active"));
-    assert.equal(await host.hasWorkForIdleStop(), true);
     const prepare = () => host.prepareIdleStop({ bootId: "boot", uptimeMs: now, idleSinceMs: 10,
       fenceNative: () => { nativeFenced = true; return () => { nativeFenced = false; }; }, stopProviders: async () => { nativeCloses++; } });
-    assert.equal(await prepare(), undefined); assert.equal(nativeFenced, false);
-    finish(); await until(async () => (await storage.nativeCommands().forRun("active"))?.phase === "finished");
-    await host.outbound; await until(async () => !await host.hasWorkForIdleStop());
-    assert.equal(activityCalls, 1); assert.equal((await power.read()).idleSinceMs, null);
-    assert.equal(host.pendingTerminals.size, 1, "a peer acknowledgement is deliberately withheld");
+
+    // A member is running a turn it took from the server.
+    running = [{ runId: "turn-a", conversationId: "chat" }];
+    assert.equal(await host.hasWorkForIdleStop(), true);
+    assert.equal(await prepare(), undefined, "not while a member runs");
+    assert.equal(nativeFenced, false); assert.equal(host.takesNewWork(), true, "a refused stop leaves admission open");
+    assert.equal(lifted, 0, "nothing was fenced, so nothing waits to be taken again");
+    // Its run ended, but its reply has not reached the server yet.
+    running = []; ending = ["turn-a"];
+    assert.equal(await prepare(), undefined, "not while a run is still ending");
+    ending = []; unsent = { queued: 1, lastError: "The server did not answer." };
+    for (const listener of settled) await listener();
+    assert.equal(activityCalls, 1, "a settled run counts as activity");
+    assert.equal((await power.read()).idleSinceMs, null);
+    assert.equal(await prepare(), undefined, "not before the server took what the member wrote");
+    unsent = { queued: 0 };
+    assert.equal(await host.hasWorkForIdleStop(), false);
+
     await power.write({ version: 1, bootId: "boot", idleSinceMs: 10 }); now = 100_000;
-    const drain = await prepare(); assert.equal(typeof drain, "function");
+    const drain = await prepare();
+    assert.equal(typeof drain, "function");
+    assert.equal(nativeFenced, true);
+    assert.ok(await power.stopFence("boot"), "the fence is stored before the stop");
+    assert.equal(host.takesNewWork(), false, "a turn the server asks now waits there for the next start");
     scheduler.close(); await drain();
-    assert.equal(nativeCloses, 1); assert.equal(activityCalls, 1, "resending a stored terminal cannot reset idle or deadlock the power drain");
-    const late = await send(request("late"), "machine-command:late");
-    assert.equal(await storage.nativeCommands().forRun("late"), undefined);
-    assert.equal(await storage.deviceEvents().receipt(late.eventId), undefined);
-    const beforeQuery = sent.length;
-    await host.handleBody({ type: "machine.turn.query", conversationId: "chat", runId: "late" });
-    assert.equal(sent.length, beforeQuery, "a held request must not receive a false unknown result");
-    await assert.rejects(storage.nativeCommands().accept({ commandId: late.eventId, eventId: late.eventId, conversationId: "chat", participantId: "p1",
-      runId: "late", terminalEventId: "machine-terminal:machine-command:late" }), /not stored/);
+    assert.equal(nativeCloses, 1);
+    assert.equal(activityCalls, 1, "the drain itself is no activity");
+
+    // The runtime restarts in the same boot with the fence kept: it takes nothing.
     host.close(); host = create(); host.retainIdleFence(); await host.start();
-    await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: sender.originId, machineId: "home", appVersion: "test" });
-    assert.deepEqual(runs, ["active"], "the same-boot replacement leaves the late native command unapplied");
-    assert.equal(activityCalls, 1);
+    assert.equal(host.takesNewWork(), false, "a same-boot replacement keeps the fence");
+    let liftedAfterRestart = 0;
+    host.onFenceLifted(() => { liftedAfterRestart += 1; });
+    assert.equal(await host.recoverIdleFence("boot"), true, "a stored fence holds");
+    assert.equal(host.takesNewWork(), false);
+    assert.equal(liftedAfterRestart, 0);
+    // A new boot has no fence: admission reopens and waiting turns are taken.
+    assert.equal(await host.recoverIdleFence("another-boot"), false);
+    assert.equal(host.takesNewWork(), true);
+    assert.equal(liftedAfterRestart, 1);
   } finally { scheduler?.close(); host?.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 
-async function until(predicate) {
-  const end = Date.now() + 5000;
-  while (!await predicate()) { if (Date.now() >= end) throw new Error("Idle lifecycle condition was not reached"); await new Promise(resolve => setTimeout(resolve, 10)); }
+/** A host with only what the idle preparation reads, over a real SQLite fence. */
+function bareHost(storage, extra = {}) {
+  const host = Object.create(MachineHostService.prototype);
+  Object.assign(host, { idleFenced: false, draining: false, closed: false, inbound: Promise.resolve(), scriptsQueue: Promise.resolve(), fenceListeners: [],
+    options: { storage }, debugLogs: { write: async () => {} }, hasWorkForIdleStop: async () => false, ...extra });
+  return host;
 }
 
 test("unknown fence writes recover in the same runtime after SQLite becomes readable", async () => {
@@ -115,10 +118,7 @@ test("unknown fence writes recover in the same runtime after SQLite becomes read
       unreadable = true;
       throw new Error("SQLITE_IOERR write response");
     };
-    const host = Object.create(MachineHostService.prototype);
-    Object.assign(host, { idleFenced: false, inbound: Promise.resolve(), eventChannel: { flush: async () => {}, retryHeldNow: () => {} }, peers: { peerDeviceIds: () => [], channel: () => undefined },
-      options: { eventStorage: storage }, debugLogs: { write: async () => {} },
-      hasWorkForIdleStop: async () => false, publishPowerStatus: async () => {}, shutdown: async () => {} });
+    const host = bareHost(storage, { publishPowerStatus: async () => {}, shutdown: async () => {} });
     const config = { version: 1, instanceId: "i-0123456789abcdef0", credentials: { accessKeyId: "synthetic", secretAccessKey: "synthetic", region: "us-east-1" } };
     const power = new MachineIdlePower({ config, store, host, nativeProcessDbPath: path.join(dir, "native.sqlite3"), log: () => {},
       runner: { hasActiveNativeWork: () => false, shutdownWarmAgents: async () => {},
@@ -161,10 +161,8 @@ test("host stop loss leaves no local fence; failure after local commit keeps adm
   const stopper = create("/stopper"), neighbour = create("/neighbour");
   let nativeFenced = false;
   // Exercise the real host preparation method and SQLite fence, with no
-  // provider work or relay traffic required for this persistence interleaving.
-  const host = Object.create(MachineHostService.prototype);
-  Object.assign(host, { idleFenced: false, inbound: Promise.resolve(), eventChannel: { flush: async () => {}, retryHeldNow: () => {} }, peers: { peerDeviceIds: () => [], channel: () => undefined },
-    options: { eventStorage: storage }, debugLogs: { write: async () => {} }, hasWorkForIdleStop: async () => false });
+  // provider work or server traffic required for this persistence interleaving.
+  const host = bareHost(storage);
   const request = commitHostStop => ({ bootId: "boot", uptimeMs: 10000, idleSinceMs: 1,
     fenceNative: () => { nativeFenced = true; return () => { nativeFenced = false; }; }, stopProviders: async () => {}, commitHostStop });
   try {

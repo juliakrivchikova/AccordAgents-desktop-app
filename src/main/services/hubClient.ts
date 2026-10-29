@@ -1,16 +1,39 @@
-import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
-import { BLOB_FRAGMENT_MAX_BYTES } from "../../shared/machineEvents";
-import type { ChatEventEnvelope } from "../../shared/chatEvents";
+import { BLOB_FRAGMENT_MAX_BYTES, isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import {
-  HUB_PROGRESS_PATH, HUB_PULL_MAX_EVENTS, hubBlobFragmentPath, hubWebSocketUrl,
-  type HubChainResponse, type HubComposerCatalog, type HubDevice, type HubEventPullResponse, type HubEventPushResponse, type HubHealth, type HubKnownDevicesResponse,
-  type HubLiveHead, type HubMachineWakeRequest, type HubPhoneInvite, type HubProgressPost, type HubReadReport, type HubReadersResponse, type HubSnapshotResponse
+  HUB_PROGRESS_PATH, hubBlobFragmentPath, hubWebSocketUrl,
+  type HubComposerCatalog, type HubDevice, type HubHealth, type HubMachineWakeRequest, type HubPhoneInvite, type HubProgressPost, type HubRosterResponse
 } from "../../shared/hubProtocol";
 import type { MachineProgressFrame } from "../../shared/machineProgress";
+import {
+  HUB_ARTIFACT_PATH,
+  HUB_ARTIFACTS_PATH,
+  HUB_CARDS_PATH,
+  HUB_CHAT_PATH,
+  HUB_CHATS_PATH,
+  HUB_FEED_PATH,
+  HUB_MACHINE_SETTINGS_PATH,
+  HUB_ME_PATH,
+  HUB_OPS_PATH,
+  HUB_TURNS_PATH,
+  type HubArtifactResponse,
+  type HubArtifactRevisionResponse,
+  type HubArtifactsResponse,
+  type HubCardsResponse,
+  type HubChatPage,
+  type HubChatsResponse,
+  type HubFeedResponse,
+  type HubMachineSettings,
+  type HubMachineSettingsPut,
+  type HubMe,
+  type HubOp,
+  type HubOpsResponse,
+  type HubTurnsResponse
+} from "../../shared/hubOps";
 import { sha256Hex, signHubRequest, type HubSigningIdentity } from "./hubAuth";
-import type { StorageService } from "./storage";
 
 const REQUEST_TIMEOUT_MS = 30_000;
+/** Writing a large page (a chat moving to the server) takes longer. */
+const OPS_TIMEOUT_MS = 120_000;
 
 /** The little of a WebSocket the live link uses. */
 interface LiveSocket {
@@ -36,12 +59,6 @@ export class HubHttpError extends Error {
   }
 }
 
-/** The hub forgot events this device would need after its position: the
- *  device starts again from the hub's copy (HubSync.resync). */
-export function isHubResyncRequired(error: unknown): error is HubHttpError {
-  return error instanceof HubHttpError && error.status === 410 && error.detail.resync === true;
-}
-
 /** The hub or the network was not there (no answer, a timeout): nothing is
  *  known about the request, which is tried again later. */
 export class HubTransientError extends Error {
@@ -62,9 +79,10 @@ async function reach(fetchImpl: typeof fetch, url: string, init: RequestInit): P
 }
 
 /**
- * Talks to the User's hub as one device: signed requests, the device's own
- * events pushed (blob fragments first), the order read back from a position,
- * and the live head the hub announces.
+ * Talks to the User's hub as one device: signed requests, the chats as the
+ * server owns them (operations, the feed, chat pages, turns, cards,
+ * documents), the roster and the phone's pairing, bodies (pictures, avatars),
+ * and the live word that the feed moved.
  */
 export class HubClient {
   private readonly base: string;
@@ -74,14 +92,13 @@ export class HubClient {
   constructor(private readonly options: {
     url: string;
     identity: () => Promise<HubSigningIdentity>;
-    storage: Pick<StorageService, "deviceEventBlobs">;
     fetchImpl?: typeof fetch;
     createSocket?: (url: string) => LiveSocket;
   }) {
     this.base = options.url.replace(/\/+$/, "");
   }
 
-  private async request<T>(method: string, pathWithQuery: string, body?: Buffer | string, contentType?: string): Promise<T> {
+  private async request<T>(method: string, pathWithQuery: string, body?: Buffer | string, contentType?: string, timeoutMs = REQUEST_TIMEOUT_MS, cancel?: AbortSignal): Promise<T> {
     const identity = await this.options.identity();
     const response = await reach(this.options.fetchImpl ?? fetch, `${this.base}${pathWithQuery}`, {
       method,
@@ -90,7 +107,7 @@ export class HubClient {
         ...(contentType ? { "content-type": contentType } : {})
       },
       ...(body !== undefined ? { body } : {}),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      signal: cancel ? AbortSignal.any([AbortSignal.timeout(timeoutMs), cancel]) : AbortSignal.timeout(timeoutMs)
     });
     this.receivedBytes += Number(response.headers.get("content-length")) || 0;
     if (!response.ok) {
@@ -106,88 +123,74 @@ export class HubClient {
     return await response.json() as HubHealth;
   }
 
-  /** Pushes this device's events in order. A large body is uploaded only
-   *  when the hub answers that it lacks it (`uploadBlob`). */
-  push(events: ChatEventEnvelope[], options: { anchor?: string[] } = {}): Promise<HubEventPushResponse> {
-    return this.request<HubEventPushResponse>("POST", "/v1/events", JSON.stringify({ events, ...(options.anchor?.length ? { anchor: options.anchor } : {}) }), "application/json");
+  // --- the chats as the server owns them (protocol v3) ---------------------
+
+  /** Writes operations; each is answered accepted, duplicate or rejected. */
+  writeOps(ops: HubOp[]): Promise<HubOpsResponse> {
+    return this.request<HubOpsResponse>("POST", HUB_OPS_PATH, JSON.stringify({ ops }), "application/json", OPS_TIMEOUT_MS);
   }
 
-  /** Uploads the fragments of one event's large body; false when this
-   *  device no longer holds them. */
-  async uploadBlob(event: ChatEventEnvelope): Promise<boolean> {
-    if (!isDeviceEventBlobReference(event.payload)) return true;
-    const reference = event.payload;
-    for (let index = 0; index < reference.fragments; index += 1) {
-      // Gone (never kept, or spoiled) is final; any other read failure is
-      // not, and fails the push to be tried again.
-      const fragment = await this.options.storage.deviceEventBlobs().fragment(reference, index).catch((error: unknown) => {
-        if (error instanceof Error && /corrupt/i.test(error.message)) return undefined;
-        throw error;
-      });
-      if (!fragment) return false;
-      await this.request("PUT", hubBlobFragmentPath(reference, index), Buffer.from(fragment.bytesBase64, "base64"), "application/octet-stream");
-    }
-    return true;
+  /** What the server accepted after `after`, waiting up to `waitMs` for news.
+   *  A HubHttpError with status 410 says it was forgotten (read the chats). */
+  feed(after: number, waitMs: number, cancel?: AbortSignal): Promise<HubFeedResponse> {
+    return this.request<HubFeedResponse>("GET", `${HUB_FEED_PATH}?after=${Math.max(0, Math.floor(after))}&waitMs=${Math.max(0, Math.floor(waitMs))}`,
+      undefined, undefined, waitMs + REQUEST_TIMEOUT_MS, cancel);
   }
 
-  /** The order after `after`. With `report` (what this device holds) the
-   *  hub keeps what it still needs, and answers 410 when it no longer has
-   *  it (isHubResyncRequired); `peek` reads without moving this device's place. */
-  pull(after: number, limit = HUB_PULL_MAX_EVENTS, report?: HubReadReport & { peek?: boolean }): Promise<HubEventPullResponse> {
-    const gaveUp = report?.gaveUp && report.gaveUpAt ? `&gaveUp=${Math.floor(report.gaveUp)}&gaveUpAt=${Math.floor(report.gaveUpAt)}` : "";
-    const reported = report
-      ? `&held=${Math.max(0, Math.floor(report.held))}&heldSince=${Math.max(0, Math.floor(report.heldSince))}&heldCount=${Math.max(0, Math.floor(report.heldCount))}${gaveUp}${report.peek ? "&peek=1" : ""}`
-      : "";
-    return this.request<HubEventPullResponse>("GET", `/v1/events?after=${after}&limit=${limit}${reported}`);
+  chats(): Promise<HubChatsResponse> {
+    return this.request<HubChatsResponse>("GET", HUB_CHATS_PATH);
   }
 
-  /** Where to start reading again (and, with `copy`, the hub's copy of the
-   *  chats), one page per call; see HubSnapshotResponse. */
-  snapshot(request: { page?: string; scopes?: readonly string[]; atMost?: number; since?: number; copy: boolean; chat?: string }): Promise<HubSnapshotResponse> {
-    const params = new URLSearchParams();
-    params.set("copy", request.copy ? "1" : "0");
-    if (request.chat) params.set("chat", request.chat);
-    if (request.page) params.set("page", request.page);
-    if (request.scopes?.length) params.set("scopes", request.scopes.join(","));
-    if (request.atMost !== undefined) params.set("atMost", String(Math.max(0, Math.floor(request.atMost))));
-    if (request.since !== undefined) params.set("since", String(Math.max(0, Math.floor(request.since))));
-    return this.request<HubSnapshotResponse>("GET", `/v1/snapshot?${params.toString()}`);
+  chatPage(conversationId: string, before?: string): Promise<HubChatPage> {
+    const query = new URLSearchParams({ conversationId, ...(before ? { before } : {}) });
+    return this.request<HubChatPage>("GET", `${HUB_CHAT_PATH}?${query.toString()}`);
   }
 
-  /** One chain's events in a range (a gap this device found). */
-  chain(originId: string, logScopeId: string, fromSeq: number, toSeq: number): Promise<HubChainResponse> {
-    const params = new URLSearchParams({ origin: originId, scope: logScopeId, from: String(fromSeq), to: String(toSeq) });
-    return this.request<HubChainResponse>("GET", `/v1/chain?${params.toString()}`);
+  /** A chat's documents as the server holds them, without revision bodies. */
+  artifacts(conversationId: string): Promise<HubArtifactsResponse> {
+    return this.request<HubArtifactsResponse>("GET", `${HUB_ARTIFACTS_PATH}?${new URLSearchParams({ conversationId }).toString()}`, undefined, undefined, OPS_TIMEOUT_MS);
   }
 
-  /** Which of these devices are on the roster now. */
-  known(deviceIds: readonly string[]): Promise<HubKnownDevicesResponse> {
-    return this.request<HubKnownDevicesResponse>("GET", `/v1/devices/known?ids=${deviceIds.map(encodeURIComponent).join(",")}`);
+  /** One document; a HubHttpError with status 404 when the server has none. */
+  artifact(artifactId: string): Promise<HubArtifactResponse> {
+    return this.request<HubArtifactResponse>("GET", `${HUB_ARTIFACT_PATH}?${new URLSearchParams({ artifactId }).toString()}`);
   }
 
-  /** The owner only: every reader, where it stands and what it holds. */
-  readers(): Promise<HubReadersResponse> {
-    return this.request<HubReadersResponse>("GET", "/v1/readers");
+  /** One revision's body (a revision never changes). */
+  artifactRevision(artifactId: string, versionEventId: string): Promise<HubArtifactRevisionResponse> {
+    return this.request<HubArtifactRevisionResponse>("GET", `${HUB_ARTIFACT_PATH}?${new URLSearchParams({ artifactId, revision: versionEventId }).toString()}`,
+      undefined, undefined, OPS_TIMEOUT_MS);
   }
 
-  /** Stores a pulled event's large body locally before the event is applied
-   *  (nothing to fetch when this device holds it already). */
-  async fetchBlob(event: ChatEventEnvelope): Promise<void> {
-    if (!isDeviceEventBlobReference(event.payload)) return;
-    const reference = event.payload;
-    if (await this.options.storage.deviceEventBlobs().verify(reference).catch(() => false)) return;
-    const identity = await this.options.identity();
-    for (let index = 0; index < reference.fragments; index += 1) {
-      const pathWithQuery = hubBlobFragmentPath(reference, index);
-      const response = await reach(this.options.fetchImpl ?? fetch, `${this.base}${pathWithQuery}`, {
-        headers: { authorization: signHubRequest(identity, { method: "GET", pathWithQuery }) },
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
-      });
-      if (!response.ok) throw new HubHttpError(response.status, `The hub could not give a fragment (${response.status}).`);
-      const bytes = Buffer.from(await response.arrayBuffer());
-      this.receivedBytes += bytes.length;
-      await this.options.storage.deviceEventBlobs().store({ reference, index, bytesBase64: bytes.toString("base64") });
-    }
+  waitingTurns(): Promise<HubTurnsResponse> {
+    return this.request<HubTurnsResponse>("GET", HUB_TURNS_PATH);
+  }
+
+  /** Cards not settled yet, in one chat or every chat, oldest first. */
+  openCards(conversationId?: string): Promise<HubCardsResponse> {
+    return this.request<HubCardsResponse>("GET", `${HUB_CARDS_PATH}${conversationId ? `?conversationId=${encodeURIComponent(conversationId)}` : ""}`);
+  }
+
+  /** This device as the server's roster has it (a machine: its machine id). */
+  me(): Promise<HubMe> {
+    return this.request<HubMe>("GET", HUB_ME_PATH);
+  }
+
+  /** The owner: a machine's settings, sealed for that machine. */
+  putMachineSettings(request: HubMachineSettingsPut): Promise<{ ok: boolean; updatedAt: string }> {
+    return this.request("PUT", HUB_MACHINE_SETTINGS_PATH, JSON.stringify(request), "application/json", OPS_TIMEOUT_MS);
+  }
+
+  /** A machine: its own settings, unless they are no newer than `since`. */
+  machineSettings(since?: string): Promise<HubMachineSettings> {
+    return this.request<HubMachineSettings>("GET", `${HUB_MACHINE_SETTINGS_PATH}${since ? `?since=${encodeURIComponent(since)}` : ""}`,
+      undefined, undefined, OPS_TIMEOUT_MS);
+  }
+
+  /** The owner only: the roster as the server holds it, with what each
+   *  phone that paired with an invite enrolled with. */
+  roster(): Promise<HubRosterResponse> {
+    return this.request<HubRosterResponse>("GET", "/v1/roster");
   }
 
   setRoster(devices: Array<Omit<HubDevice, "addedAt">>, resolvedInviteIds?: string[]): Promise<{ devices: HubDevice[] }> {
@@ -215,8 +218,8 @@ export class HubClient {
     return this.request("PUT", "/v1/machine-wake", JSON.stringify({ machines } satisfies HubMachineWakeRequest), "application/json");
   }
 
-  /** Puts bytes on the hub as a blob (a picture, an avatar) that an event or
-   *  a message names by its reference; fragments already there are sent
+  /** Puts bytes on the hub as a body (a picture, an avatar) that a message
+   *  or the catalog names by its reference; fragments already there are sent
    *  again harmlessly. */
   async uploadBytes(bytes: Buffer): Promise<DeviceEventBlobReference> {
     const reference: DeviceEventBlobReference = {
@@ -252,10 +255,11 @@ export class HubClient {
   }
 
   /**
-   * Keeps a live link that reports the hub's head; reconnects with backoff.
-   * Returns a function that closes it for good.
+   * Keeps a live link to the hub (it says when the feed moved, and that a
+   * machine's settings changed); reconnects with backoff. Returns a function
+   * that closes it for good.
    */
-  live(onHead: (head: number) => void, onState?: (connected: boolean) => void): () => void {
+  live(onState?: (connected: boolean) => void, onFrame?: (frame: { type: string } & Record<string, unknown>) => void): () => void {
     let closed = false;
     let socket: LiveSocket | undefined;
     let attempt = 0;
@@ -288,8 +292,8 @@ export class HubClient {
         };
         created.onmessage = (event) => {
           try {
-            const frame = JSON.parse(String(event.data)) as HubLiveHead;
-            if (frame.type === "head" && Number.isSafeInteger(frame.head)) onHead(frame.head);
+            const frame = JSON.parse(String(event.data)) as { type: string } & Record<string, unknown>;
+            if (frame && typeof frame.type === "string") onFrame?.(frame);
           } catch { /* a malformed frame is ignored */ }
         };
         created.onerror = () => undefined;

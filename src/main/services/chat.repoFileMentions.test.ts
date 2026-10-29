@@ -713,7 +713,9 @@ test("a durable choice answer is taken with the own-answer option and kept on th
   const serviceAny = service as any;
   serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
   serviceAny.runParticipantTurnSerialized = async () => [participantMessage(requester, "choice-reply", "Choice handled.")];
-  const guard = (operationId: string) => ({ decisionEventId: `chat-action:${operationId}`, beforeApply: async () => undefined });
+  // An answer from the User's server, as its card's device applies it: named
+  // by the card's answer, refused under the operation it came in.
+  const guard = (operationId: string) => ({ decisionEventId: `card-answer:choice:${sourceMessage.id}:${operationId}`, operationId, beforeApply: async () => undefined });
   const answer = (patch: Record<string, unknown>, operationId?: string) => service.respondToChoice({
     conversationId: conversation.id, sourceMessageId: sourceMessage.id, choiceId: "choice-1", ...patch
   } as never, undefined, undefined, operationId ? guard(operationId) : undefined);

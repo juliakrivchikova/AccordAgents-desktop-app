@@ -10,7 +10,6 @@ const STEP_LABELS: Record<HubSetupStep, string> = {
   preparing: "Packages",
   uploading: "Program",
   owner: "Owner",
-  chats: "Chats",
   starting: "Start",
   certificate: "Certificate",
   checking: "Check"
@@ -121,15 +120,6 @@ export function HubServerSection(): JSX.Element {
             {ready && !installing ? (state?.notices ?? []).map((notice) => (
               <div key={notice} className="gen-row-desc" data-testid="hub-server-notice">{notice}</div>
             )) : null}
-            {!installing ? (state?.dismissableNotices ?? []).map((notice) => (
-              <div key={notice.id} className="gen-row-desc" data-testid="hub-server-given-up">
-                {notice.text}{" "}
-                <Button type="button" variant="ghost" size="sm" data-testid="hub-server-given-up-dismiss"
-                  onClick={() => void window.consensus.dismissHubNotice(notice.id).then((next) => { if (mounted.current) setState(next); }).catch(() => undefined)}>
-                  Dismiss
-                </Button>
-              </div>
-            )) : null}
           </div>
           <Button type="button" variant="outline" size="sm" data-testid="hub-server-setup"
             onClick={() => (updateAvailable ? void run({}) : setOpen(true))}>
@@ -169,13 +159,12 @@ export function HubServerSection(): JSX.Element {
         {installing || state?.status === "failed" ? (
           <ol className="gen-aws-progress" data-testid="hub-server-progress" aria-label="Server setup progress">
             {HUB_SETUP_STEPS.map((step, index) => {
-              const skipped = state?.skipped?.includes(step);
-              const done = index < current && !skipped;
+              const done = index < current;
               const className = done ? "is-done" : index === current && installing ? "is-current" : index === failedStep ? "is-failed" : "";
               return (
                 <li key={step} className={className}>
-                  <span aria-hidden>{done ? "✓" : skipped ? "–" : index === failedStep ? "✕" : index + 1}</span>
-                  <span>{STEP_LABELS[step]}{skipped ? " (already there)" : ""}</span>
+                  <span aria-hidden>{done ? "✓" : index === failedStep ? "✕" : index + 1}</span>
+                  <span>{STEP_LABELS[step]}</span>
                 </li>
               );
             })}

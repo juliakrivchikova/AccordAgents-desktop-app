@@ -1,7 +1,4 @@
-import type { HubDevice } from "../shared/hubProtocol";
-import type { HubPruneResult, HubReaderFloor } from "../main/services/hubStorage";
 import type { StorageService } from "../main/services/storage";
-import { hubPairChannelId } from "../main/services/hubChannels";
 
 const HOUR_MS = 60 * 60_000;
 const DAY_MS = 24 * HOUR_MS;
@@ -11,47 +8,33 @@ const DAY_MS = 24 * HOUR_MS;
 export interface HubRetentionConfig {
   intervalMs: number;
   firstRunMs: number;
-  /** Folded chat changes: the chat's copy holds them. */
-  chatChangesMs: number;
-  /** Events of the channel between a desktop and a machine. */
-  pairMs: number;
-  /** A run's events, counted from the run's last event. */
-  runMs: number;
-  chatActionsMs: number;
-  /** A body no event refers to is deleted once a whole look at the events
-   *  older than this found no reference. */
-  blobGraceMs: number;
-  /** Events forgotten per transaction, and transactions per rule per run. */
+  /** Accepted operations every computer and machine has read. */
+  feedMs: number;
+  /** Operations forgotten per transaction, and transactions per run. */
   batch: number;
   maxBatches: number;
-  /** Events looked at per run in the search for unreferenced bodies. */
-  blobScanRows: number;
+  /** A computer or machine that has not read for this long (a machine
+   *  stopped for weeks) no longer keeps the feed: when it reads again, it
+   *  reads its chats again instead. */
+  silentReaderMs: number;
 }
 
 export const HUB_RETENTION_DEFAULTS: HubRetentionConfig = {
   intervalMs: HOUR_MS,
   firstRunMs: 5 * 60_000,
-  chatChangesMs: 7 * DAY_MS,
-  pairMs: 3 * DAY_MS,
-  runMs: DAY_MS,
-  chatActionsMs: 30 * DAY_MS,
-  blobGraceMs: HOUR_MS,
+  feedMs: 7 * DAY_MS,
   batch: 500,
   maxBatches: 40,
-  blobScanRows: 50_000
+  silentReaderMs: 45 * DAY_MS
 };
 
 const ENV_KEYS: Record<keyof HubRetentionConfig, string> = {
   intervalMs: "ACCORDAGENTS_HUB_RETENTION_INTERVAL_MS",
   firstRunMs: "ACCORDAGENTS_HUB_RETENTION_FIRST_MS",
-  chatChangesMs: "ACCORDAGENTS_HUB_KEEP_CHAT_CHANGES_MS",
-  pairMs: "ACCORDAGENTS_HUB_KEEP_PAIR_MS",
-  runMs: "ACCORDAGENTS_HUB_KEEP_RUN_MS",
-  chatActionsMs: "ACCORDAGENTS_HUB_KEEP_CHAT_ACTIONS_MS",
-  blobGraceMs: "ACCORDAGENTS_HUB_BLOB_GRACE_MS",
+  feedMs: "ACCORDAGENTS_HUB_KEEP_FEED_MS",
   batch: "ACCORDAGENTS_HUB_RETENTION_BATCH",
   maxBatches: "ACCORDAGENTS_HUB_RETENTION_MAX_BATCHES",
-  blobScanRows: "ACCORDAGENTS_HUB_BLOB_SCAN_ROWS"
+  silentReaderMs: "ACCORDAGENTS_HUB_SILENT_READER_MS"
 };
 
 /** The defaults, with whatever the environment sets (a positive integer). */
@@ -64,32 +47,32 @@ export function hubRetentionConfig(env: NodeJS.ProcessEnv = process.env): HubRet
   return config;
 }
 
+/** One forgotten stretch, as a retention run reports it. */
+export interface HubPruneResult {
+  events: number;
+  bytes: number;
+}
+
 export interface HubRetentionReport {
-  chatChanges: HubPruneResult;
-  chatActions: HubPruneResult;
-  pairs: HubPruneResult;
+  /** Accepted operations the server's feed forgot. */
+  ops: HubPruneResult;
+  /** Bodies (pictures, avatars) nothing names any more. */
   blobs: { deleted: number; bytes: number };
-  /** What the order holds after the run. */
-  log: { events: number; bytes: number };
-  /** The lowest floor among every reader of the shared scopes. */
-  sharedFloor: number;
 }
 
 /**
  * Keeps the hub's storage bounded without forgetting anything a reader
  * still needs.
  *
- * Every device that reads the order has a floor: the lowest position it may
- * still ask for (its cursor, or its lowest held place before it). The hub
- * forgets an event only when every reader of its scope is past it, and only
- * after a grace period: chat changes once folded into the chat's copy (the
- * copy is the compacted state) and a week old; chat actions after thirty
- * days; the channel between a desktop and a machine after three days, and a
- * run's events a day after the run's last event. A reader that does not
- * read holds everything after its floor until it reads or is removed; the
- * desktop shows it (never dropped automatically). Bodies no remaining event
- * refers to go too. One bounded batch per transaction, so the order keeps
- * taking pushes while this runs.
+ * The server's feed of accepted operations (agreements Д1–Д3) is read by
+ * every computer and machine on the roster; an operation goes once every one
+ * of them has read past it and it is a week old. A device that does not read
+ * holds everything after its place until it reads or is taken off the
+ * roster; a device that read less than what was forgotten reads its chats
+ * again (HubFeedGone). Bodies no pin keeps (a picture a message names, an
+ * avatar the catalog names, an upload waiting for its message) go too. One
+ * bounded batch per transaction, so the server keeps taking writes while
+ * this runs.
  */
 export class HubRetention {
   private first?: ReturnType<typeof setTimeout>;
@@ -143,119 +126,36 @@ export class HubRetention {
   }
 
   private async run(): Promise<HubRetentionReport> {
-    const hub = this.options.storage.hub();
     const config = this.config;
     const now = this.now();
-    const cutoff = (ms: number): string => new Date(now - ms).toISOString();
-    const devices = await hub.devices();
-    const reads = await hub.deviceReads();
-    const authors = await hub.pairAuthors();
-    // Readers' floors as they stand now: read again before every batch, so a
-    // reader that starts again meanwhile is not passed by what was picked.
-    const current = async () => readerFloors(devices, reads, await hub.readerFloors(), authors);
-    const floors = await current();
-    const report: HubRetentionReport = {
-      chatChanges: { events: 0, bytes: 0 }, chatActions: { events: 0, bytes: 0 }, pairs: { events: 0, bytes: 0 },
-      blobs: { deleted: 0, bytes: 0 }, log: { events: 0, bytes: 0 }, sharedFloor: floors.shared
-    };
-    const most = config.batch * config.maxBatches;
-    // One look per rule picks what may go; batches then forget it.
-    const drain = async (collect: () => Promise<number>, into: HubPruneResult): Promise<void> => {
-      if (this.closed || await collect() === 0) return;
-      for (let index = 0; index < config.maxBatches && !this.closed; index += 1) {
-        const now = await current();
-        const result = await hub.pruneCandidates(now.shared, now.pairs, config.batch);
-        into.events += result.events;
-        into.bytes += result.bytes;
-        if (result.events < config.batch) return;
-        // Pushes and reads in between.
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-    };
-    if (floors.shared > 0) {
-      await drain(() => hub.collectChatChanges(floors.shared, cutoff(config.chatChangesMs), most), report.chatChanges);
-      await drain(() => hub.collectChatActions(floors.shared, cutoff(config.chatActionsMs), most), report.chatActions);
+    const report: HubRetentionReport = { ops: { events: 0, bytes: 0 }, blobs: { deleted: 0, bytes: 0 } };
+    const devices = await this.options.storage.hub().devices();
+    // Every device that keeps copies of the chats reads the feed; a phone
+    // reads the server's own copy and holds nothing back, and neither does
+    // a computer or machine silent for weeks (it reads its chats again).
+    const reads = await this.options.storage.hubOps().cursorTimes();
+    const silentBefore = now - config.silentReaderMs;
+    const readers = devices.filter((device) => {
+      if (device.role === "phone") return false;
+      const last = Date.parse(reads.get(device.deviceId)?.updatedAt ?? device.addedAt ?? "");
+      return !Number.isFinite(last) || last >= silentBefore;
+    }).map((device) => device.deviceId);
+    const cutoff = new Date(now - config.feedMs).toISOString();
+    for (let index = 0; index < config.maxBatches && !this.closed; index += 1) {
+      const pruned = await this.options.storage.hubOps().prune(readers, cutoff, config.batch);
+      report.ops.events += pruned.events;
+      report.ops.bytes += pruned.bytes;
+      if (pruned.events < config.batch) break;
+      // Writes and reads in between.
+      await new Promise((resolve) => setImmediate(resolve));
     }
-    await drain(() => hub.collectPairEvents(floors.pairs, cutoff(config.pairMs), cutoff(config.runMs), most), report.pairs);
     if (!this.closed && (await this.options.bodiesReady?.().catch(() => false) ?? true)) {
       await this.options.renewPins?.().catch((error: unknown) => this.options.log?.("hub.retention.pins-error", { message: error instanceof Error ? error.message : String(error) }));
-      // The order is small once kept short: one look reaches most of it.
-      const blobs = await this.options.storage.deviceEventBlobs().collectOrphans({ now, graceMs: config.blobGraceMs, scanRows: config.blobScanRows });
-      report.blobs = { deleted: blobs.deleted, bytes: blobs.bytes };
+      if (!this.closed) report.blobs = await this.options.storage.deviceEventBlobs().collectOrphans({ now });
     }
-    report.log = await hub.logSize();
-    const forgot = report.chatChanges.events + report.chatActions.events + report.pairs.events + report.blobs.deleted;
-    this.options.log?.(forgot > 0 ? "hub.retention.pruned" : "hub.retention.kept", {
-      chatChanges: report.chatChanges.events, chatActions: report.chatActions.events, pairs: report.pairs.events,
-      bytes: report.chatChanges.bytes + report.chatActions.bytes + report.pairs.bytes,
-      blobs: report.blobs.deleted, blobBytes: report.blobs.bytes, logEvents: report.log.events, logBytes: report.log.bytes, sharedFloor: floors.shared
+    this.options.log?.(report.ops.events + report.blobs.deleted > 0 ? "hub.retention.pruned" : "hub.retention.kept", {
+      ops: report.ops.events, opsBytes: report.ops.bytes, blobs: report.blobs.deleted, blobBytes: report.blobs.bytes
     });
     return report;
   }
-}
-
-/**
- * Who reads which scopes, and how far each scope may be forgotten.
- *
- * Readers are the devices on the roster that read the order: the owner,
- * every device that has read here, and machines the desktop says read it.
- * A reader that has not read yet is kept for from where it was set up. Chat changes and
- * chat actions are read by all of them. A channel between two devices is
- * read by its two ends: the desktop and a machine it enrolled (`rv-...`,
- * the machine known from the roster or from what it wrote there), or any
- * two other devices (`pair-...`, named after both, which the hub computes
- * for every two devices on the roster). A device taken off the roster no
- * longer holds its channels; a channel with an end that does not read here
- * (a phone, a machine that never read) or whose ends are not known is kept
- * whole.
- */
-export function readerFloors(
-  devices: HubDevice[],
-  reads: Array<{ deviceId: string; reader: boolean; rendezvousId?: string }>,
-  floors: HubReaderFloor[],
-  pairAuthors: Array<{ rendezvousId: string; originId: string }>
-): { shared: number; pairs: Map<string, number> } {
-  const byId = new Map(devices.map((device) => [device.deviceId, device]));
-  // A reader that does not say what it holds (an older program) holds
-  // everything while it reads: what it holds cannot be told apart.
-  const floorById = new Map(floors.map((row) => [row.deviceId, row.reports ? row.floor : 0]));
-  const readFlag = new Map(reads.map((row) => [row.deviceId, row]));
-  const readers = new Set(devices.filter((device) => device.role !== "phone" &&
-    (device.role === "owner" || floorById.has(device.deviceId) || readFlag.get(device.deviceId)?.reader === true)).map((device) => device.deviceId));
-  const floorOf = (deviceId: string): number => floorById.get(deviceId) ?? 0;
-  const shared = readers.size ? Math.min(...[...readers].map(floorOf)) : 0;
-  const desktops = [...readers].filter((id) => byId.get(id)?.role === "owner" || byId.get(id)?.role === "desktop");
-  const desktopFloor = desktops.length ? Math.min(...desktops.map(floorOf)) : 0;
-  const ends = new Map<string, Set<string>>();
-  const note = (rid: string, deviceId: string): void => {
-    const set = ends.get(rid) ?? new Set<string>();
-    set.add(deviceId);
-    ends.set(rid, set);
-  };
-  for (const row of reads) if (row.rendezvousId) note(row.rendezvousId, row.deviceId);
-  for (const row of pairAuthors) note(row.rendezvousId, row.originId);
-  for (const [index, first] of devices.entries()) {
-    for (const second of devices.slice(index + 1)) {
-      if (first.role === "owner" || second.role === "owner") continue;
-      const rid = hubPairChannelId(first.deviceId, second.deviceId);
-      note(rid, first.deviceId);
-      note(rid, second.deviceId);
-    }
-  }
-  const pairs = new Map<string, number>();
-  for (const [rid, ids] of ends) {
-    const enrolled = !rid.startsWith("pair-");
-    // The desktop's own writing in a machine's channel says nothing about
-    // which machine is at its other end.
-    const members = [...ids].filter((id) => !(enrolled && (byId.get(id)?.role === "owner" || byId.get(id)?.role === "desktop")));
-    // An enrolled channel whose machine is not known at all is kept whole.
-    if (members.length === 0) continue;
-    const present = members.filter((id) => byId.has(id));
-    let floor = enrolled ? desktopFloor : Number.POSITIVE_INFINITY;
-    for (const id of present) floor = Math.min(floor, byId.get(id)?.role !== "phone" && readers.has(id) ? floorOf(id) : 0);
-    // Every end taken off the roster: what is left is the desktop's to read.
-    if (present.length === 0) floor = desktopFloor;
-    if (Number.isFinite(floor) && floor > 0) pairs.set(rid, floor);
-  }
-  return { shared, pairs };
 }

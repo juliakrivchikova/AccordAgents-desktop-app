@@ -4,11 +4,6 @@ import path from "node:path";
 import { userDataPath } from "../platform";
 import { SqliteSession } from "./sqliteSession";
 import type {
-  ChatEventAppendResult,
-  ChatEventEnvelope,
-  ChatEventProjectionRow
-} from "../../shared/chatEvents";
-import type {
   ChatMessage,
   ChatParticipant,
   Conversation,
@@ -33,15 +28,11 @@ import { clearChatRunMetadata, clearParticipantCompactions, readParticipantCompa
 import { normalizeInferredParticipantRequestThreads as normalizeInferredParticipantRequestThreadMetadata } from "../../shared/chatParticipantRequestThreads";
 import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import { sanitizeConversationWarnings } from "../../shared/warnings";
-import { formatHlcKey, logicalOrderKey, parseHlcKey, type HlcParts } from "../../shared/hlc";
-import { CHAT_ACTION_LOG_SCOPE } from "../../shared/chatActionEvents";
-import type { DeviceEventAppendOptions } from "../../shared/deviceEventDelivery";
-import { DEVICE_EVENT_SCHEMA_SQL, DeviceEventStorage, deviceEventAppendSql } from "./deviceEventStorage";
-import { DEVICE_EVENT_BLOB_SCHEMA_SQL, DeviceEventBlobStorage } from "./deviceEventBlobStorage";
+import { DeviceEventBlobStorage } from "./deviceEventBlobStorage";
 import { HubStorage } from "./hubStorage";
+import { HubOpsStore } from "./hubOpsStore";
+import { HubClientOpsStore } from "./hubOpsClient";
 import { NATIVE_COMMAND_SCHEMA_SQL, NativeCommandStore } from "./nativeCommandStore";
-import { PHONE_TURN_CLAIM_SCHEMA_SQL, PhoneTurnClaimStore } from "./phoneTurnClaims";
-import { MACHINE_PROGRESS_SCHEMA, MachineProgressStore } from "./machineProgressStore";
 import { MACHINE_POWER_SCHEMA, MachinePowerStore } from "./machinePowerStore";
 
 const DEFAULT_MESSAGE_PAGE_LIMIT = 80;
@@ -54,9 +45,8 @@ export const SUPPORTED_STORAGE_SCHEMA_VERSION = 2;
 /** What `prepareStorageForOlderVersion` puts the database back to. */
 export const PREVIOUS_STORAGE_SCHEMA_VERSION = 1;
 export const STORAGE_SCHEMA_VERSION_META_KEY = "storage-schema-version";
-export const CHAT_EVENT_PROJECTION_VERSION = 1;
-const CHAT_EVENT_DEVICE_IDENTITY_META_KEY = "chat-event-device-identity-v1";
-const CHAT_EVENT_CLOCK_META_KEY = "chat-event-clock-v1";
+/** Where this device's identity is kept (the key's name is the stored one). */
+const DEVICE_IDENTITY_META_KEY = "chat-event-device-identity-v1";
 const INFERRED_REQUEST_THREAD_MIGRATION_KEY = "inferred-participant-request-threads-v1";
 const CHAT_SEARCH_INDEX_META_KEY = "chat-search-index-version";
 const CHAT_SEARCH_INDEX_VERSION = 2;
@@ -79,7 +69,7 @@ function sqlString(value: string | undefined | null): string {
  *  the listed chats before the set is called incomplete. */
 const MAX_PENDING_CHOICE_ROWS = 500;
 
-function sqlStringList(values: string[]): string {
+function sqlStringList(values: readonly string[]): string {
   return values.length > 0 ? `(${values.map((value) => sqlString(value)).join(", ")})` : "('')";
 }
 
@@ -138,20 +128,13 @@ export class UnsupportedStorageSchemaVersionError extends Error {
   }
 }
 
-export interface ChatEventDeviceIdentityRecord {
+/** This device's ed25519 identity (see deviceIdentity.ts). */
+export interface DeviceIdentityRecord {
   originId: string;
   keyId: string;
   publicKeyDerBase64: string;
   privateKeyDerBase64: string;
   createdAt: string;
-}
-
-export interface ChatEventSequenceBasis {
-  originSeq: number;
-  prevHash?: string;
-  /** logicalTs of the latest local event in this origin/scope; restores the
-   *  hybrid logical clock after a restart. */
-  latestLogicalTs?: string;
 }
 
 /** One message as it is about to be written, with the hash used to decide
@@ -323,37 +306,61 @@ export interface StoredChatSearchQueryResult {
   matchedChatCount: number;
 }
 
-/** One chat's newest change event a chat copy covers, by origin. */
-export interface ChatCopyMark {
-  originId: string;
-  logScopeId: string;
-  originSeq: number;
-  eventHash: string;
-}
-
-/** Shared state a new machine gets with its chat copy: artifacts, and which
- *  chats were deleted. The artifact delivery outbox is device-local, and the
- *  pre-revision tables (`artifact_versions`, `artifact_signatures`,
- *  `artifact_version_sources`) are read-only history that a current store
- *  refuses writes to; their content lives in the revision tables below. */
-const CHAT_COPY_STATE_TABLES = [
-  "deleted_conversations",
-  "artifact_conversation_tombstones",
-  "artifacts",
-  "artifact_drafts",
-  "artifact_operations",
-  "artifact_revisions",
-  "artifact_state_events",
-  "artifact_version_projection",
-  "artifact_bound_signatures",
-  "artifact_bound_sources",
-  "artifact_revision_migration"
+/**
+ * The order of signed events every device kept before the User's server
+ * owned the chats, and everything only it used: the events and their
+ * projections, the native turn commands built on them, the per-device
+ * delivery queues, the phone's turn claims, a removed machine's deletion
+ * targets, the server's order, folding, readers and retention bookkeeping,
+ * and a device's held places. Tables that refer to others come first.
+ */
+const LEGACY_EVENT_TABLES = [
+  "native_commands",
+  "native_run_cancellations",
+  "native_run_outcomes",
+  "native_session_executors",
+  "device_event_outbox",
+  "device_event_inbox",
+  "device_event_applied_heads",
+  "device_replica_copies",
+  "device_replica_inventory",
+  "chat_event_projections",
+  "phone_turn_claims",
+  "conversation_deletion_targets",
+  "hub_client_held_events",
+  "hub_log",
+  "hub_fold_state",
+  "hub_device_cursors",
+  "hub_reader_floors",
+  "hub_device_reads",
+  "hub_pair_machines",
+  "hub_chain_marks",
+  "hub_prune_state",
+  "hub_retention_candidates",
+  "device_event_blob_gc",
+  "device_event_blob_gc_refs",
+  "chat_events"
 ] as const;
+/** Bodies: a device kept the large payloads of its events here; only the
+ *  User's server keeps bodies now (pictures, avatars). */
+const LEGACY_BODY_TABLES = ["device_event_blob_fragments", "device_event_blob_pins", "device_event_blobs"] as const;
+/** Where a device stood in the old order (hub_client_state keys). */
+const LEGACY_CLIENT_STATE_KEYS = ["pushed-rowid", "pulled-hub-seq", "hub-id", "given-up", "dismissed-notices"] as const;
+/** The old order's logical clock (schema_meta). */
+const LEGACY_META_KEYS = ["chat-event-clock-v1"] as const;
+/** Rows deleted per transaction while a legacy table is emptied, and the
+ *  pause between two batches (other work gets the database meanwhile): an
+ *  event row is a few KB with four indexes, so a batch holds the database
+ *  for a fraction of a second. */
+const LEGACY_DROP_BATCH_ROWS = 500;
+const LEGACY_DROP_PAUSE_MS = 100;
 
 export class StorageService {
   private sqliteSession?: SqliteSession;
-  private machineProgressStore?: MachineProgressStore;
   private hubStorage?: HubStorage;
+  private hubOpsStore?: HubOpsStore;
+  private hubClientOpsStore?: HubClientOpsStore;
+  private deviceEventBlobStorage?: DeviceEventBlobStorage;
   private savedMessageStateCache: Map<string, SavedMessageState> | undefined;
   private readonly dbPath: string;
   private readonly sqliteExecutable: string;
@@ -363,7 +370,6 @@ export class StorageService {
    *  the same column twice and stop the app from starting. */
   private initializing?: Promise<void>;
   private chatSearchIndexReady = false;
-  private chatEventClockBootstrap?: Promise<void>;
 
   constructor(options: StorageServiceOptions = {}) {
     this.dbPath = options.dbPath ?? path.join(userDataPath(), "accordagents.sqlite3");
@@ -426,12 +432,6 @@ export class StorageService {
         conversation_id text primary key,
         deleted_at text not null
       );
-      -- Targets remain until the existing device-event outbox owns delivery.
-      create table if not exists conversation_deletion_targets (
-        conversation_id text not null,
-        machine_id text not null,
-        primary key (conversation_id, machine_id)
-      );
       -- Enforce absence inside the write transaction, including stale writers
       -- in other processes and snapshots queued before deletion started.
       create trigger if not exists deleted_conversation_insert before insert on conversations
@@ -446,49 +446,14 @@ export class StorageService {
       create trigger if not exists deleted_message_update before update on conversation_messages
         when exists (select 1 from deleted_conversations where conversation_id = new.conversation_id)
         begin select raise(abort, 'Chat was permanently deleted.'); end;
-      create table if not exists chat_events (
-        event_id text primary key,
-        conversation_id text not null,
-        log_scope_id text not null,
-        origin_id text not null,
-        origin_seq integer not null,
-        logical_ts text not null,
-        kind text not null,
-        payload_json text not null,
-        payload_hash text not null,
-        event_hash text not null,
-        prev_hash text,
-        signature text,
-        key_id text,
-        envelope_json text not null,
-        received_at text not null,
-        unique(origin_id, log_scope_id, origin_seq)
-      );
-      create index if not exists idx_chat_events_conversation_scope_origin
-        on chat_events(conversation_id, log_scope_id, origin_id, origin_seq);
-      create index if not exists idx_chat_events_received_at on chat_events(received_at);
-      create table if not exists chat_event_projections (
-        conversation_id text not null,
-        projection_key text not null,
-        version integer not null,
-        last_event_id text,
-        payload_json text not null,
-        updated_at text not null,
-        primary key (conversation_id, projection_key)
-      );
-      ${DEVICE_EVENT_SCHEMA_SQL}
-      ${DEVICE_EVENT_BLOB_SCHEMA_SQL}
       ${NATIVE_COMMAND_SCHEMA_SQL}
-      ${PHONE_TURN_CLAIM_SCHEMA_SQL}
-      ${MACHINE_PROGRESS_SCHEMA}
       ${MACHINE_POWER_SCHEMA}
+      -- Where each relay mailbox was read to, from before the relay was removed.
+      drop table if exists device_event_mailbox_cursors;
     `);
     await this.pruneStaleRunCancelRequests();
     await this.ensureColumn("conversations", "body_json", "text");
     await this.ensureColumn("conversations", "save_token", "text");
-    await this.ensureColumn("device_event_inbox", "ack_delivered_at", "text");
-    await this.runSql(`create index if not exists idx_device_event_receipts_pending
-      on device_event_inbox(channel_id, device_id) where applied_at is not null and ack_delivered_at is null;`);
     await this.backfillConversationBodiesAndMessages();
     await this.backUpBeforeSchemaUpgrade();
     await this.setSchemaMeta(STORAGE_SCHEMA_VERSION_META_KEY, String(SUPPORTED_STORAGE_SCHEMA_VERSION));
@@ -628,28 +593,6 @@ export class StorageService {
       }
     }
     return { rows, truncated };
-  }
-
-  /** The most recently updated chats' bodies (no messages) that hold an
-   *  approval waiting for the User. */
-  async recentChatsWithPendingApprovals(limit: number): Promise<Conversation[]> {
-    await this.init();
-    const rows = await this.queryJson<{ id: string; bodyHex: string }>(`
-      select id, hex(coalesce(nullif(body_json, ''), json_set(payload_json, '$.messages', json_array()))) as bodyHex
-      from conversations where kind = 'chat'
-      order by updated_at desc limit ${normalizePositiveInteger(limit, 100)};
-    `);
-    const found: Conversation[] = [];
-    for (const row of rows) {
-      try {
-        const conversation = parseHexJson<Conversation>(row.bodyHex, `conversation ${row.id}`);
-        conversation.messages = [];
-        if (hasPendingAppToolApprovals(conversation)) found.push(conversation);
-      } catch {
-        // An unreadable chat holds no card to show.
-      }
-    }
-    return found;
   }
 
   async listChatActivity(request: ListChatActivityRequest = {}): Promise<ListChatActivityResult> {
@@ -792,7 +735,6 @@ export class StorageService {
     }
     conversation.metadata = clearLegacyAccordState(conversation.metadata);
     sanitizeConversationWarnings(conversation);
-    conversation.messages = await this.machineProgress().overlay(id, conversation.messages);
     return conversation;
   }
 
@@ -909,9 +851,9 @@ export class StorageService {
       `select count(*) as totalMessages from conversation_messages where conversation_id = ${sqlString(request.conversationId)};`
     );
     return {
-      messages: await this.machineProgress().overlay(request.conversationId, selectedRows.map((row) =>
+      messages: selectedRows.map((row) =>
         parseHexJson<ChatMessage>(row.payloadHex, `conversation message ${request.conversationId}:${row.sequence}`)
-      )),
+      ),
       oldestSequence: selectedRows[0]?.sequence,
       newestSequence: selectedRows[selectedRows.length - 1]?.sequence,
       hasMoreBefore: rows.length > limit,
@@ -1697,175 +1639,6 @@ export class StorageService {
   }
 
   /**
-   * The newest chat change of every chat this device holds: its own events,
-   * and the ones it applied from other devices. A chat copy made right after
-   * this read covers at least these, so the receiving machine continues from
-   * them instead of asking for history the relay no longer has.
-   *
-   * The chat-action log is marked too, per author: the copy carries its
-   * artifact actions, and the rest of it (choices, approvals, stops) is about
-   * runs elsewhere that a new machine has no use for.
-   */
-  async chatChangeMarks(localOriginId: string, extraOrigins: readonly string[] = []): Promise<ChatCopyMark[]> {
-    await this.init();
-    // Devices whose chat changes this device took through its server rather
-    // than a channel (the User's phones): their heads are their newest event.
-    const extra = [...new Set(extraOrigins)].filter((origin) => origin && origin !== localOriginId).slice(0, 50);
-    const extraHeads = extra.length ? `
-      union all
-      select originId, logScopeId, originSeq, eventHash from (
-        select e.origin_id as originId, e.log_scope_id as logScopeId, e.origin_seq as originSeq, e.event_hash as eventHash,
-          row_number() over (partition by e.origin_id, e.log_scope_id order by e.origin_seq desc) as rn
-        from chat_events e
-        where e.origin_id in (${extra.map(sqlString).join(", ")}) and e.log_scope_id >= 'chat-changes:' and e.log_scope_id < 'chat-changes;'
-      ) where rn = 1` : "";
-    return this.queryJson<ChatCopyMark>(`
-      select originId, logScopeId, originSeq, eventHash from (
-        select e.origin_id as originId, e.log_scope_id as logScopeId, e.origin_seq as originSeq, e.event_hash as eventHash,
-          row_number() over (partition by e.origin_id order by e.origin_seq desc) as rn
-        from chat_events e where e.log_scope_id = ${sqlString(CHAT_ACTION_LOG_SCOPE)}
-      ) where rn = 1
-      union all
-      select originId, logScopeId, originSeq, eventHash from (
-        select e.origin_id as originId, e.log_scope_id as logScopeId, e.origin_seq as originSeq, e.event_hash as eventHash,
-          row_number() over (partition by e.origin_id, e.log_scope_id order by e.origin_seq desc) as rn
-        from chat_events e
-        -- A range, so the (origin, scope, seq) index is read only for chat
-        -- change scopes, not for every event this device ever wrote.
-        where e.origin_id = ${sqlString(localOriginId)} and e.log_scope_id >= 'chat-changes:' and e.log_scope_id < 'chat-changes;'
-      ) where rn = 1
-      union all
-      select origin_id as originId, log_scope_id as logScopeId, origin_seq as originSeq, event_hash as eventHash
-      from device_event_applied_heads
-      where substr(log_scope_id, 1, 13) = 'chat-changes:' and origin_id <> ${sqlString(localOriginId)}
-        ${extra.length ? `and origin_id not in (${extra.map(sqlString).join(", ")})` : ""}
-      ${extraHeads};
-    `);
-  }
-
-  /** Copies artifact and deletion state into a separate SQLite file, so a new
-   *  machine gets it over the setup connection instead of as events. Device-
-   *  local delivery queues are not part of it. */
-  async exportChatCopyState(targetPath: string): Promise<{ tables: string[] }> {
-    await this.init();
-    const existing = new Set((await this.queryJson<{ name: string }>(
-      "select name from sqlite_master where type = 'table';"
-    )).map((row) => row.name));
-    const tables = CHAT_COPY_STATE_TABLES.filter((table) => existing.has(table));
-    await this.runSql(`
-      attach database ${sqlString(targetPath)} as copy;
-      begin immediate;
-      ${tables.map((table) => `create table copy.${table} as select * from main.${table};`).join("\n")}
-      create table copy.chat_events as select * from main.chat_events
-        where log_scope_id = ${sqlString(CHAT_ACTION_LOG_SCOPE)} and substr(kind, 1, 9) = 'artifact.';
-      create table copy.device_event_blobs as select * from main.device_event_blobs where blob_hash in (
-        select json_extract(payload_json, '$.blobHash') from copy.chat_events where json_extract(payload_json, '$.type') = 'device.event.blob');
-      create table copy.device_event_blob_fragments as select * from main.device_event_blob_fragments
-        where blob_hash in (select blob_hash from copy.device_event_blobs);
-      commit;
-      detach database copy;
-    `);
-    return { tables };
-  }
-
-  /** Merges artifact and deletion state from an exported file. Rows already
-   *  here win; running it twice changes nothing. */
-  async importChatCopyState(sourcePath: string): Promise<{ tables: Record<string, number> }> {
-    await this.init();
-    await this.runSql(`attach database ${sqlString(sourcePath)} as copy; detach database copy;`);
-    const counts: Record<string, number> = {};
-    const statements: string[] = [];
-    const sourceTables = new Set((await this.queryJson<{ name: string }>(
-      `attach database ${sqlString(sourcePath)} as copy; select name from copy.sqlite_master where type = 'table'; detach database copy;`
-    )).map((row) => row.name));
-    const localTables = new Set((await this.queryJson<{ name: string }>(
-      "select name from sqlite_master where type = 'table';"
-    )).map((row) => row.name));
-    // The artifact actions behind that state come along as the events they
-    // are, unchanged: without them this device would announce the same
-    // history again as its own and every peer would refuse it as a conflict.
-    for (const table of [...CHAT_COPY_STATE_TABLES, "chat_events", "device_event_blobs", "device_event_blob_fragments"]) {
-      if (!sourceTables.has(table) || !localTables.has(table)) continue;
-      const sourceColumns = new Set((await this.queryJson<{ name: string }>(
-        `attach database ${sqlString(sourcePath)} as copy; select name from pragma_table_info('${table}', 'copy'); detach database copy;`
-      )).map((row) => row.name));
-      const columns = (await this.queryJson<{ name: string }>(`select name from pragma_table_info('${table}');`))
-        .map((row) => row.name).filter((name) => sourceColumns.has(name));
-      if (!columns.length) continue;
-      const list = columns.map((column) => `"${column}"`).join(", ");
-      statements.push(`insert or ignore into main.${table} (${list}) select ${list} from copy.${table};`);
-      counts[table] = columns.length;
-    }
-    if (statements.length) {
-      await this.runSql(`
-        attach database ${sqlString(sourcePath)} as copy;
-        begin immediate;
-        ${statements.join("\n")}
-        commit;
-        detach database copy;
-      `);
-    }
-    // Events minted here from now on are ordered after everything copied.
-    await this.getChatEventClock();
-    const latest = (await this.queryJson<{ logicalTs: string | null }>(
-      `select max(logical_ts) as logicalTs from chat_events where log_scope_id = ${sqlString(CHAT_ACTION_LOG_SCOPE)};`
-    ))[0]?.logicalTs;
-    const clock = latest ? parseHlcKey(latest) : undefined;
-    if (clock) {
-      await this.runSql(`update schema_meta set value = max(value, ${sqlString(formatHlcKey({ ...clock, originId: "clock" }))})
-        where key = ${sqlString(CHAT_EVENT_CLOCK_META_KEY)};`);
-    }
-    return { tables: counts };
-  }
-
-  /** Records that this device's copy covers every chat change up to `marks`:
-   *  later events continue from there, and events up to them that already
-   *  arrived are acknowledged without being applied again. */
-  async applyChatCopyMarks(marks: ChatCopyMark[], at: string, localOriginId?: string): Promise<void> {
-    await this.init();
-    // The chat-action log is folded rather than replayed in sequence, so its
-    // mark only says how far its history was already seen: later actions
-    // still apply one by one, and none of them is confirmed unapplied.
-    const rows = marks.filter((mark) => mark.originId !== localOriginId && mark.originSeq > 0 &&
-      typeof mark.logScopeId === "string" && (mark.logScopeId.startsWith("chat-changes:") || mark.logScopeId === CHAT_ACTION_LOG_SCOPE));
-    const chunks: ChatCopyMark[][] = [];
-    for (let index = 0; index < rows.length; index += 200) chunks.push(rows.slice(index, index + 200));
-    for (const chunk of chunks) {
-      await this.runSql(`
-        begin immediate;
-        ${chunk.map((mark) => `insert into device_event_applied_heads(origin_id, log_scope_id, origin_seq, event_hash)
-          values (${sqlString(mark.originId)}, ${sqlString(mark.logScopeId)}, ${Math.floor(mark.originSeq)}, ${sqlString(mark.eventHash)})
-          on conflict(origin_id, log_scope_id) do update set
-            event_hash = case when excluded.origin_seq > device_event_applied_heads.origin_seq
-              then excluded.event_hash else device_event_applied_heads.event_hash end,
-            origin_seq = max(excluded.origin_seq, device_event_applied_heads.origin_seq);`).join("\n")}
-        commit;
-      `);
-    }
-    // Received but not applied yet, and contained in the copy: confirmed
-    // without being applied (the channel acknowledges them on its next pass).
-    await this.runSql(`
-      begin immediate;
-      update device_event_inbox set applied_at = ${sqlString(at)}, outcome = 'applied'
-        where applied_at is null and exists(
-          select 1 from chat_events e join device_event_applied_heads h
-            on h.origin_id = e.origin_id and h.log_scope_id = e.log_scope_id
-          where e.event_id = device_event_inbox.event_id
-            and substr(e.log_scope_id, 1, 13) = 'chat-changes:' and e.origin_seq <= h.origin_seq
-        );
-      commit;
-    `);
-  }
-
-  deviceEvents(): DeviceEventStorage {
-    return new DeviceEventStorage({
-      init: () => this.init(),
-      query: <T>(sql: string) => this.queryJson<T>(sql),
-      execute: (sql: string) => this.runSql(sql)
-    });
-  }
-
-  /**
    * Chats this device has been told are gone.
    *
    * A replicated copy cannot tell a new conversation from a stale snapshot of
@@ -1873,17 +1646,15 @@ export class StorageService {
    * the difference, and it has to outlive the rows and the process.
    */
   conversationTombstones(): {
-    mark(conversationId: string, deletedAt: string, machineIds?: string[]): Promise<void>;
+    mark(conversationId: string, deletedAt: string): Promise<void>;
     isDeleted(conversationId: string): Promise<boolean>;
     deletedAt(conversationId: string): Promise<string | undefined>;
     pendingCopies(): Promise<Array<{ conversationId: string; deletedAt: string }>>;
-    pendingDeliveries(after?: { conversationId: string; machineId: string }): Promise<Array<{ conversationId: string; machineId: string; deletedAt: string }>>;
-    delivered(conversationId: string, machineId: string): Promise<void>;
   } {
     return {
-      mark: async (conversationId, deletedAt, machineIds = []) => {
+      mark: async (conversationId, deletedAt) => {
         await this.init();
-        await this.runSql(`begin immediate; ${this.conversationDeletionSql(conversationId, deletedAt, machineIds)} commit;`);
+        await this.runSql(`begin immediate; ${this.conversationDeletionSql(conversationId, deletedAt)} commit;`);
       },
       isDeleted: async (conversationId) => Boolean(await this.conversationTombstones().deletedAt(conversationId)),
       deletedAt: async (conversationId) => {
@@ -1896,51 +1667,26 @@ export class StorageService {
         await this.init();
         return this.queryJson<{ conversationId: string; deletedAt: string }>(`select d.conversation_id as conversationId, d.deleted_at as deletedAt
           from deleted_conversations d join conversations c on c.id = d.conversation_id order by d.conversation_id limit 100;`);
-      },
-      pendingDeliveries: async (after) => {
-        await this.init();
-        return this.queryJson<{ conversationId: string; machineId: string; deletedAt: string }>(`select t.conversation_id as conversationId,
-          t.machine_id as machineId, d.deleted_at as deletedAt from conversation_deletion_targets t
-          join deleted_conversations d on d.conversation_id = t.conversation_id
-          ${after ? `where (t.conversation_id, t.machine_id) > (${sqlString(after.conversationId)}, ${sqlString(after.machineId)})` : ""}
-          order by t.conversation_id, t.machine_id limit 100;`);
-      },
-      delivered: async (conversationId, machineId) => {
-        await this.init();
-        await this.runSql(`delete from conversation_deletion_targets where conversation_id = ${sqlString(conversationId)} and machine_id = ${sqlString(machineId)};`);
       }
     };
   }
 
-  private conversationDeletionSql(conversationId: string, deletedAt: string, machineIds: string[]): string {
+  private conversationDeletionSql(conversationId: string, deletedAt: string): string {
     if (!conversationId.trim() || !deletedAt.trim()) throw new Error("A deletion tombstone requires stable identities.");
     return `insert into deleted_conversations(conversation_id, deleted_at)
-      values (${sqlString(conversationId)}, ${sqlString(deletedAt)}) on conflict(conversation_id) do nothing;
-      ${[...new Set(machineIds.filter(id => id.trim()))].map(machineId => `insert into conversation_deletion_targets(conversation_id, machine_id)
-        values (${sqlString(conversationId)}, ${sqlString(machineId)}) on conflict do nothing;`).join("\n")}`;
+      values (${sqlString(conversationId)}, ${sqlString(deletedAt)}) on conflict(conversation_id) do nothing;`;
   }
 
   nativeCommands(): NativeCommandStore {
     return new NativeCommandStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
   }
 
-  phoneTurnClaims(): PhoneTurnClaimStore {
-    return new PhoneTurnClaimStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
-  }
-
-  machineProgress(): MachineProgressStore {
-    return this.machineProgressStore ??= new MachineProgressStore({
-      init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql),
-      hydrate: payload => this.deviceEventBlobs().hydrate(payload)
-    });
-  }
-
   machinePower(): MachinePowerStore {
     return new MachinePowerStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
   }
 
-  /** The hub's tables: on the hub, its order, roster and push subscriptions;
-   *  on a device that uses one, its two cursors and the places it holds. */
+  /** The hub's tables: on the hub, its roster, phone pairing, notices and
+   *  push subscriptions; on a device that uses one, where it stands with it. */
   hub(): HubStorage {
     this.hubStorage ??= new HubStorage({
       init: () => this.init(),
@@ -1950,346 +1696,72 @@ export class StorageService {
     return this.hubStorage;
   }
 
-  deviceEventBlobs(): DeviceEventBlobStorage {
-    return new DeviceEventBlobStorage({
+  /** This device's operations for the User's server, and its failed sends. */
+  hubClientOps(): HubClientOpsStore {
+    this.hubClientOpsStore ??= new HubClientOpsStore({
       init: () => this.init(),
       query: <T>(sql: string) => this.queryJson<T>(sql),
       execute: (sql: string) => this.runSql(sql)
     });
+    return this.hubClientOpsStore;
   }
 
-  async appendChatEvent(event: ChatEventEnvelope, delivery: DeviceEventAppendOptions = {}): Promise<ChatEventAppendResult> {
-    return (await this.appendChatEvents([event], delivery))[0];
+  /** This database through its own session, for a store whose tables live
+   *  here too (the server's documents), so its changes and the server's
+   *  order can commit together. */
+  sqlExecutor(): { path: string; queryJson<T>(sql: string): Promise<T[]>; queryText(sql: string): Promise<string>; runSql(sql: string): Promise<void> } {
+    return {
+      path: this.dbPath,
+      queryJson: async <T>(sql: string) => {
+        await this.init();
+        return this.queryJson<T>(sql);
+      },
+      queryText: async (sql: string) => {
+        await this.init();
+        return this.queryText(sql);
+      },
+      runSql: async (sql: string) => {
+        await this.init();
+        await this.runSql(sql);
+      }
+    };
   }
 
-  async appendChatEvents(events: ChatEventEnvelope[], delivery: DeviceEventAppendOptions = {}): Promise<ChatEventAppendResult[]> {
-    await this.init();
-    if (events.length === 0) {
-      return [];
-    }
-    const envelopeJsons: string[] = [];
-    const eventIdCounts = new Map<string, number>();
-    const receivedAt = new Date().toISOString();
-    const valuesSql = events.map((event) => {
-      this.assertValidChatEventEnvelope(event);
-      const envelopeJson = JSON.stringify(event);
-      envelopeJsons.push(envelopeJson);
-      eventIdCounts.set(event.eventId, (eventIdCounts.get(event.eventId) ?? 0) + 1);
-      return this.chatEventInsertValuesSql(event, envelopeJson, receivedAt);
-    }).join(",\n");
-    // Every ingress (including the phone mailbox) persists the receive clock
-    // with the accepted event. A crash cannot leave an event ahead of the clock.
-    await this.getChatEventClock();
-    const clockCandidates = events.flatMap((event) => {
-      const clock = parseHlcKey(logicalOrderKey(event));
-      return clock ? [`(${sqlString(event.eventId)}, ${sqlString(event.eventHash)}, ${sqlString(event.logicalTs)}, ${sqlString(formatHlcKey({ ...clock, originId: "clock" }))})`] : [];
+  /** The server's accepted operations and turns (the User's server only). */
+  hubOps(): HubOpsStore {
+    this.hubOpsStore ??= new HubOpsStore({
+      init: () => this.init(),
+      query: <T>(sql: string) => this.queryJson<T>(sql),
+      execute: (sql: string) => this.runSql(sql)
     });
-    const deliverySql = deviceEventAppendSql(events, delivery);
-    const inserted = await this.queryJson<{ eventId: string }>(
-      `
-        pragma synchronous = full;
-        pragma fullfsync = on;
-        begin immediate;
-        ${chatEventInsertSql(valuesSql, clockCandidates, deliverySql, true)}
-        commit;
-      `
-    );
-    const insertedIds = new Set(inserted.map((row) => row.eventId));
-    const results: ChatEventAppendResult[] = [];
-    const reportedInserts = new Set<string>();
-    for (const [index, event] of events.entries()) {
-      if (insertedIds.has(event.eventId) && eventIdCounts.get(event.eventId) === 1) {
-        results.push({ status: "appended", eventId: event.eventId });
-        continue;
-      }
-      const envelopeJson = envelopeJsons[index];
-      const conflict = await this.readChatEventConflictRecord(event);
-      if (conflict?.source === "event-id" && conflict.envelopeJson === envelopeJson) {
-        const status = insertedIds.has(event.eventId) && !reportedInserts.has(event.eventId) ? "appended" : "duplicate";
-        reportedInserts.add(event.eventId);
-        results.push({ status, eventId: event.eventId });
-        continue;
-      }
-      results.push({
-        status: "conflict",
-        eventId: event.eventId,
-        existingEventId: conflict?.eventId,
-        conflictReason: conflict?.source === "origin-sequence" ? "origin-sequence-conflict" : "event-id-conflict"
-      });
-    }
-    return results;
+    return this.hubOpsStore;
   }
 
-  /**
-   * The same insert `appendChatEvents` runs, as text, for a caller that has to
-   * commit it together with something else.
-   *
-   * Two writes cannot be atomic across two transactions, and recovering after
-   * the fact is a weaker guarantee: an action the User already saw succeed must
-   * not be left without its outgoing event. This lets an artifact write and its
-   * event share one `begin immediate`, so a failure loses both or neither. The
-   * block carries no `begin`/`commit` of its own, and it reaches sqlite through
-   * stdin like every other statement here - never argv, whatever its size.
-   */
-  chatEventAppendSql(
-    event: ChatEventEnvelope,
-    delivery: DeviceEventAppendOptions = {},
-    /** A condition the surrounding transaction evaluates: the event is written
-     *  only when the change it describes actually happened. Without it a
-     *  refused change (a stale base, a guard that failed) would still announce
-     *  itself to every peer. */
-    onlyIfSql?: string
-  ): string {
-    this.assertValidChatEventEnvelope(event);
-    const envelopeJson = JSON.stringify(event);
-    const clock = parseHlcKey(logicalOrderKey(event));
-    const values = this.chatEventInsertValuesSql(event, envelopeJson, new Date().toISOString());
-    return chatEventInsertSql(
-      values,
-      clock
-        ? [`(${sqlString(event.eventId)}, ${sqlString(event.eventHash)}, ${sqlString(event.logicalTs)}, ${sqlString(formatHlcKey({ ...clock, originId: "clock" }))})`]
-        : [],
-      deviceEventAppendSql([event], delivery),
-      false,
-      onlyIfSql
-    );
+  /** The User's server's bodies (pictures, avatars); no other device keeps any. */
+  deviceEventBlobs(): DeviceEventBlobStorage {
+    this.deviceEventBlobStorage ??= new DeviceEventBlobStorage({
+      init: () => this.init(),
+      query: <T>(sql: string) => this.queryJson<T>(sql),
+      execute: (sql: string) => this.runSql(sql)
+    });
+    return this.deviceEventBlobStorage;
   }
 
-  /** Global across chats and origins. Only accepted events advance this floor;
-   * local minting must tick strictly after it, including after a restart. */
-  async getChatEventClock(): Promise<HlcParts> {
+  async getDeviceIdentityRecord(): Promise<DeviceIdentityRecord | undefined> {
     await this.init();
-    const readClock = () => this.queryJson<{ value: string }>(
-      `select value from schema_meta where key = ${sqlString(CHAT_EVENT_CLOCK_META_KEY)} limit 1;`
-    );
-    let rows = await readClock();
-    if (rows.length === 0) {
-      // Startup can ingest several scopes at once. Share the one-time scan
-      // rather than reading the entire old log for each first event.
-      if (!this.chatEventClockBootstrap) {
-        this.chatEventClockBootstrap = this.bootstrapChatEventClock().catch((error) => {
-          this.chatEventClockBootstrap = undefined;
-          throw error;
-        });
-      }
-      await this.chatEventClockBootstrap;
-      rows = await readClock();
-    }
-    const value = rows[0]?.value;
-    const clock = value === undefined ? undefined : parseHlcKey(value);
-    if (!clock || clock.originId !== "clock") {
-      throw new Error("Stored chat event clock is unreadable; refusing to reset event order.");
-    }
-    return clock;
-  }
-
-  private async bootstrapChatEventClock(): Promise<void> {
-    let clockKey = formatHlcKey({ wallMs: 0, counter: 0, originId: "clock" });
-    let afterRowId = 0;
-    const lastRowId = (await this.queryJson<{ lastRowId: number }>(
-      "select coalesce(max(rowid), 0) as lastRowId from chat_events;"
-    ))[0].lastRowId;
-    // One-time upgrade reads bounded headers, never transfers conversation
-    // snapshots or event payloads into Node. Legacy clocks need createdAt.
-    for (;;) {
-      const rows = await this.queryJson<{
-        rowId: number; logicalTs: string; originId: string; originSeq: number; createdAt?: string;
-      }>(`
-        select rowid as rowId, logical_ts as logicalTs, origin_id as originId, origin_seq as originSeq,
-          case when logical_ts not like 'hlc:%' then json_extract(envelope_json, '$.createdAt') end as createdAt
-        from chat_events where rowid > ${afterRowId} and rowid <= ${lastRowId} order by rowid limit 500;
-      `);
-      if (rows.length === 0) break;
-      for (const row of rows) {
-        const clock = parseHlcKey(logicalOrderKey(row));
-        if (clock) {
-          const candidate = formatHlcKey({ ...clock, originId: "clock" });
-          if (candidate > clockKey) clockKey = candidate;
-        }
-      }
-      afterRowId = rows[rows.length - 1].rowId;
-    }
-    // Another instance may have initialized/advanced the clock during the scan.
-    await this.runSql(`
-      pragma synchronous = full;
-      pragma fullfsync = on;
-      insert into schema_meta(key, value) values (${sqlString(CHAT_EVENT_CLOCK_META_KEY)}, ${sqlString(clockKey)})
-      on conflict(key) do update set value = max(value, excluded.value);
-    `);
-  }
-
-  async listChatEvents(conversationId: string, logScopeId: string): Promise<ChatEventEnvelope[]> {
-    await this.init();
-    const rows = await this.queryJson<{ envelopeHex: string }>(
-      `
-        select hex(envelope_json) as envelopeHex
-        from chat_events
-        where conversation_id = ${sqlString(conversationId)}
-          and log_scope_id = ${sqlString(logScopeId)}
-        order by origin_id, origin_seq;
-      `
-    );
-    return rows.map((row) => parseHexJson<ChatEventEnvelope>(row.envelopeHex, `chat event ${conversationId}:${logScopeId}`));
-  }
-
-  async getChatEvent(eventId: string): Promise<ChatEventEnvelope | undefined> {
-    await this.init();
-    const rows = await this.queryJson<{ envelopeHex: string }>(
-      `select hex(envelope_json) as envelopeHex from chat_events where event_id = ${sqlString(eventId)} limit 1;`
-    );
-    return rows[0] ? parseHexJson<ChatEventEnvelope>(rows[0].envelopeHex, `chat event ${eventId}`) : undefined;
-  }
-
-  /** Identity-only lookup: checking retained outcomes must not load growing
-   * conversation/terminal payloads. SQL stays on stdin in bounded pages. */
-  async storedChatEventIds(eventIds: readonly string[]): Promise<Set<string>> {
-    await this.init();
-    const found = new Set<string>();
-    for (let offset = 0; offset < eventIds.length; offset += 100) {
-      const page = eventIds.slice(offset, offset + 100);
-      const rows = await this.queryJson<{ eventId: string }>(`select event_id as eventId from chat_events where event_id in (${page.map(sqlString).join(",")});`);
-      for (const row of rows) found.add(row.eventId);
-    }
-    return found;
-  }
-
-  async hasChatEvent(conversationId: string, eventId: string): Promise<boolean> {
-    await this.init();
-    const normalizedConversationId = conversationId.trim();
-    const normalizedEventId = eventId.trim();
-    if (!normalizedConversationId || !normalizedEventId) {
-      return false;
-    }
-    const rows = await this.queryJson<{ found: number }>(
-      `
-        select 1 as found
-        from chat_events
-        where conversation_id = ${sqlString(normalizedConversationId)}
-          and event_id = ${sqlString(normalizedEventId)}
-        limit 1;
-      `
-    );
-    return rows.length > 0;
-  }
-
-  async saveChatEventProjection(row: ChatEventProjectionRow): Promise<void> {
-    await this.init();
-    if (!row.conversationId.trim() || !row.projectionKey.trim()) {
-      throw new Error("Chat event projection requires conversationId and projectionKey.");
-    }
-    if (!Number.isInteger(row.version) || row.version <= 0) {
-      throw new Error("Chat event projection version must be a positive integer.");
-    }
-    await this.runSql(`
-      insert into chat_event_projections (
-        conversation_id,
-        projection_key,
-        version,
-        last_event_id,
-        payload_json,
-        updated_at
-      )
-      values (
-        ${sqlString(row.conversationId)},
-        ${sqlString(row.projectionKey)},
-        ${Math.floor(row.version)},
-        ${sqlString(row.lastEventId)},
-        ${sqlString(JSON.stringify(row.payload))},
-        ${sqlString(row.updatedAt)}
-      )
-      on conflict(conversation_id, projection_key) do update set
-        version = excluded.version,
-        last_event_id = excluded.last_event_id,
-        payload_json = excluded.payload_json,
-        updated_at = excluded.updated_at;
-    `);
-  }
-
-  async getChatEventProjection<Projection = unknown>(
-    conversationId: string,
-    projectionKey: string
-  ): Promise<ChatEventProjectionRow<Projection> | undefined> {
-    await this.init();
-    const rows = await this.queryJson<{
-      conversationId: string;
-      projectionKey: string;
-      version: number;
-      lastEventId?: string | null;
-      payloadHex: string;
-      updatedAt: string;
-    }>(
-      `
-        select
-          conversation_id as conversationId,
-          projection_key as projectionKey,
-          version,
-          last_event_id as lastEventId,
-          hex(payload_json) as payloadHex,
-          updated_at as updatedAt
-        from chat_event_projections
-        where conversation_id = ${sqlString(conversationId)}
-          and projection_key = ${sqlString(projectionKey)}
-        limit 1;
-      `
-    );
-    const row = rows[0];
-    return row ? {
-      conversationId: row.conversationId,
-      projectionKey: row.projectionKey,
-      version: row.version,
-      lastEventId: row.lastEventId ?? undefined,
-      payload: parseHexJson<Projection>(row.payloadHex, `chat event projection ${conversationId}:${projectionKey}`),
-      updatedAt: row.updatedAt
-    } : undefined;
-  }
-
-  async getChatEventDeviceIdentityRecord(): Promise<ChatEventDeviceIdentityRecord | undefined> {
-    await this.init();
-    const raw = await this.getSchemaMeta(CHAT_EVENT_DEVICE_IDENTITY_META_KEY);
+    const raw = await this.getSchemaMeta(DEVICE_IDENTITY_META_KEY);
     if (!raw) {
       return undefined;
     }
-    const parsed = JSON.parse(raw) as ChatEventDeviceIdentityRecord;
-    this.assertValidChatEventDeviceIdentityRecord(parsed);
+    const parsed = JSON.parse(raw) as DeviceIdentityRecord;
+    this.assertValidDeviceIdentityRecord(parsed);
     return parsed;
   }
 
-  async saveChatEventDeviceIdentityRecord(record: ChatEventDeviceIdentityRecord): Promise<void> {
+  async saveDeviceIdentityRecord(record: DeviceIdentityRecord): Promise<void> {
     await this.init();
-    this.assertValidChatEventDeviceIdentityRecord(record);
-    await this.setSchemaMeta(CHAT_EVENT_DEVICE_IDENTITY_META_KEY, JSON.stringify(record));
-  }
-
-  async getChatEventSequenceBasis(originId: string, logScopeId: string): Promise<ChatEventSequenceBasis> {
-    await this.init();
-    if (!originId.trim() || !logScopeId.trim()) {
-      throw new Error("Chat event sequence basis requires originId and logScopeId.");
-    }
-    const rows = await this.queryJson<{ originSeq?: number | string | null; eventHash?: string | null; logicalTs?: string | null }>(
-      `
-        select origin_seq as originSeq, event_hash as eventHash, logical_ts as logicalTs
-        from chat_events
-        where origin_id = ${sqlString(originId)}
-          and log_scope_id = ${sqlString(logScopeId)}
-        order by origin_seq desc
-        limit 1;
-      `
-    );
-    const latest = rows[0];
-    if (!latest) {
-      return { originSeq: 1 };
-    }
-    const latestSeq = typeof latest.originSeq === "string"
-      ? Number.parseInt(latest.originSeq, 10)
-      : latest.originSeq;
-    if (latestSeq === undefined || latestSeq === null || !Number.isSafeInteger(latestSeq) || latestSeq < 1) {
-      throw new Error("Stored chat event sequence is invalid.");
-    }
-    return {
-      originSeq: latestSeq + 1,
-      prevHash: typeof latest.eventHash === "string" && latest.eventHash.trim() ? latest.eventHash : undefined,
-      latestLogicalTs: typeof latest.logicalTs === "string" && latest.logicalTs.trim() ? latest.logicalTs : undefined
-    };
+    this.assertValidDeviceIdentityRecord(record);
+    await this.setSchemaMeta(DEVICE_IDENTITY_META_KEY, JSON.stringify(record));
   }
 
   /** Puts this database back into the shape an older build can open: the full
@@ -2346,7 +1818,7 @@ export class StorageService {
     return backupPath;
   }
 
-  async deleteConversation(id: string, options: { machineIds?: string[] } = {}): Promise<boolean> {
+  async deleteConversation(id: string, options: { alsoCommitSql?: string } = {}): Promise<boolean> {
     await this.init();
     const exists = await this.queryText(
       `select id from conversations where id = ${sqlString(id)} limit 1;`
@@ -2356,13 +1828,70 @@ export class StorageService {
     }
     await this.runSql(`
       begin immediate;
-      ${this.conversationDeletionSql(id, new Date().toISOString(), options.machineIds ?? [])}
+      ${this.conversationDeletionSql(id, new Date().toISOString())}
       delete from conversation_messages where conversation_id = ${sqlString(id)};
       delete from conversations where id = ${sqlString(id)};
+      ${options.alsoCommitSql ?? ""}
       commit;
     `);
     this.savedMessageState.delete(id);
     return true;
+  }
+
+  /**
+   * Drops, once, what devices and the server kept for the order of signed
+   * events they used before the User's server owned the chats (agreement
+   * Д7): nothing reads any of it any more. A large table (the computer's
+   * event log is about 1.6 GB on the User's machine) is emptied a bounded
+   * batch at a time, each its own short transaction, so chats keep saving
+   * while it goes; the freed space stays in the file (no VACUUM: on a 4 GB
+   * database it would hold everything for minutes). `keepBodies` keeps the
+   * pictures and avatars the server holds. Stops early when `signal` aborts
+   * and carries on at the next call; a database without these tables is
+   * left alone at once.
+   */
+  async dropLegacyEventTables(options: {
+    keepBodies: boolean;
+    signal?: AbortSignal;
+    log?: (event: string, payload: Record<string, unknown>) => void;
+    batchRows?: number;
+    pauseMs?: number;
+  }): Promise<{ tables: string[]; rows: number; done: boolean }> {
+    await this.init();
+    const wanted = [...LEGACY_EVENT_TABLES, ...(options.keepBodies ? [] : LEGACY_BODY_TABLES)];
+    const present = new Set((await this.queryJson<{ name: string }>(
+      `select name from sqlite_master where type = 'table' and name in ${sqlStringList(wanted)};`
+    )).map((row) => row.name));
+    const batch = Math.max(1, Math.floor(options.batchRows ?? LEGACY_DROP_BATCH_ROWS));
+    const pauseMs = Math.max(0, Math.floor(options.pauseMs ?? LEGACY_DROP_PAUSE_MS));
+    const started = Date.now();
+    const dropped: string[] = [];
+    let rows = 0;
+    const stopped = (): boolean => options.signal?.aborted === true;
+    for (const table of wanted) {
+      if (!present.has(table)) continue;
+      for (;;) {
+        if (stopped()) return { tables: dropped, rows, done: false };
+        const [result] = await this.queryJson<{ deleted: number }>(
+          `delete from ${table} where rowid in (select rowid from ${table} limit ${batch}); select changes() as deleted;`
+        );
+        const deleted = Number(result?.deleted ?? 0) || 0;
+        rows += deleted;
+        if (deleted < batch) break;
+        await new Promise((resolve) => setTimeout(resolve, pauseMs));
+      }
+      await this.runSql(`drop table if exists ${table};`);
+      dropped.push(table);
+    }
+    // What this device kept about where it stood in the old order.
+    await this.runSql(`
+      delete from schema_meta where key in ${sqlStringList(LEGACY_META_KEYS)};
+      delete from hub_client_state where key in ${sqlStringList(LEGACY_CLIENT_STATE_KEYS)};
+    `).catch(() => undefined);
+    if (dropped.length > 0) {
+      options.log?.("storage.legacy-tables.dropped", { tables: dropped, rows, ms: Date.now() - started });
+    }
+    return { tables: dropped, rows, done: true };
   }
 
   private async ensureColumn(table: string, column: string, definition: string): Promise<void> {
@@ -2421,29 +1950,7 @@ export class StorageService {
     }
   }
 
-  private assertValidChatEventEnvelope(event: ChatEventEnvelope): void {
-    const requiredStrings = [
-      ["eventId", event.eventId],
-      ["conversationId", event.conversationId],
-      ["logScopeId", event.logScopeId],
-      ["originId", event.originId],
-      ["logicalTs", event.logicalTs],
-      ["kind", event.kind],
-      ["payloadHash", event.payloadHash],
-      ["eventHash", event.eventHash],
-      ["createdAt", event.createdAt]
-    ] as const;
-    for (const [field, value] of requiredStrings) {
-      if (typeof value !== "string" || !value.trim()) {
-        throw new Error(`Chat event requires ${field}.`);
-      }
-    }
-    if (!Number.isSafeInteger(event.originSeq) || event.originSeq <= 0) {
-      throw new Error("Chat event originSeq must be a positive safe integer.");
-    }
-  }
-
-  private assertValidChatEventDeviceIdentityRecord(record: ChatEventDeviceIdentityRecord): void {
+  private assertValidDeviceIdentityRecord(record: DeviceIdentityRecord): void {
     const requiredStrings = [
       ["originId", record.originId],
       ["keyId", record.keyId],
@@ -2453,68 +1960,9 @@ export class StorageService {
     ] as const;
     for (const [field, value] of requiredStrings) {
       if (typeof value !== "string" || !value.trim()) {
-        throw new Error(`Chat event device identity requires ${field}.`);
+        throw new Error(`This device's identity requires ${field}.`);
       }
     }
-  }
-
-  private chatEventInsertValuesSql(event: ChatEventEnvelope, envelopeJson: string, receivedAt: string): string {
-    return `(
-      ${sqlString(event.eventId)},
-      ${sqlString(event.conversationId)},
-      ${sqlString(event.logScopeId)},
-      ${sqlString(event.originId)},
-      ${Math.floor(event.originSeq)},
-      ${sqlString(event.logicalTs)},
-      ${sqlString(event.kind)},
-      ${sqlString(JSON.stringify(event.payload))},
-      ${sqlString(event.payloadHash)},
-      ${sqlString(event.eventHash)},
-      ${sqlString(event.prevHash)},
-      ${sqlString(event.signature)},
-      ${sqlString(event.keyId)},
-      ${sqlString(envelopeJson)},
-      ${sqlString(receivedAt)}
-    )`;
-  }
-
-  private async readChatEventConflictRecord(event: ChatEventEnvelope): Promise<{
-    source: "event-id" | "origin-sequence";
-    eventId: string;
-    envelopeJson: string;
-  } | undefined> {
-    const rows = await this.queryJson<{ source: "event-id" | "origin-sequence"; eventId: string; envelopeHex: string }>(
-      `
-        select source, eventId, envelopeHex
-        from (
-          select
-            0 as sortOrder,
-            'event-id' as source,
-            event_id as eventId,
-            hex(envelope_json) as envelopeHex
-          from chat_events
-          where event_id = ${sqlString(event.eventId)}
-          union all
-          select
-            1 as sortOrder,
-            'origin-sequence' as source,
-            event_id as eventId,
-            hex(envelope_json) as envelopeHex
-          from chat_events
-          where origin_id = ${sqlString(event.originId)}
-            and log_scope_id = ${sqlString(event.logScopeId)}
-            and origin_seq = ${Math.floor(event.originSeq)}
-        )
-        order by sortOrder
-        limit 1;
-      `
-    );
-    const row = rows[0];
-    return row ? {
-      source: row.source,
-      eventId: row.eventId,
-      envelopeJson: parseHexText(row.envelopeHex, `chat event conflict ${event.eventId}`)
-    } : undefined;
   }
 
   private async backfillConversationBodiesAndMessages(): Promise<void> {
@@ -2630,6 +2078,44 @@ export class StorageService {
       `coalesce(nullif(body_json, ''), payload_json) like '%"memberRemovalQueuedAt":%'` +
       ` or coalesce(nullif(body_json, ''), payload_json) like '%"memberAdditionQueuedAt":%'`
     );
+  }
+
+  /** Chats that may hold a card a member waits on: an approval waiting (or
+   *  an approved roster change not made yet), a member's choice waiting, its
+   *  mentions waiting for approval, or another device's card answered and
+   *  shown here as waiting. Read at a start and a reconnect, so the cards on
+   *  the User's server match them (ChatService.resumeServerCards). Without
+   *  `messages` only the chats' bodies are read (a reconnect): every message
+   *  row is read only at a start. */
+  async conversationIdsWithOpenCards(options: { messages?: boolean } = {}): Promise<string[]> {
+    await this.init();
+    const messages = options.messages !== false;
+    const bodies = `
+      select id from conversations
+        where kind = 'chat'
+          and coalesce(nullif(body_json, ''), payload_json) like '%"pendingAppToolApprovals":[{%'
+          and json_valid(coalesce(nullif(body_json, ''), payload_json))
+          and exists (
+            select 1 from json_each(coalesce(nullif(body_json, ''), payload_json), '$.metadata.pendingAppToolApprovals') as approval
+            where json_extract(approval.value, '$.status') = 'pending'
+              or json_extract(approval.value, '$.memberRemovalQueuedAt') is not null
+              or json_extract(approval.value, '$.memberAdditionQueuedAt') is not null
+              or json_extract(approval.value, '$.machineDecisionPending') is not null
+          )`;
+    const rows = await this.queryJson<{ id: string }>(`${bodies}${messages ? `
+      union
+      select distinct m.conversation_id as id from conversation_messages m
+        where (m.payload_json like '%"pendingChoice":%' or m.payload_json like '%"pendingMentions":%' or m.payload_json like '%"serverCard":%')
+          and json_valid(m.payload_json)
+          and (
+            json_extract(m.payload_json, '$.metadata.pendingChoice.status') = 'pending'
+            or json_extract(m.payload_json, '$.metadata.serverCard') is not null
+            or exists (
+              select 1 from json_each(m.payload_json, '$.metadata.pendingMentions') as mention
+              where json_extract(mention.value, '$.status') = 'pending'
+            )
+          )` : ""};`);
+    return rows.flatMap((row) => typeof row.id === "string" && row.id.trim() ? [row.id] : []);
   }
 
   private async queryConversationIds(whereSql: string): Promise<string[]> {
@@ -2869,50 +2355,4 @@ function messagePageInfo(page: ConversationMessagePage): ConversationMessagePage
     hasMoreBefore: page.hasMoreBefore,
     totalMessages: page.totalMessages
   };
-}
-
-/** The chat-event insert, its clock advance and its delivery rows, as one block
- *  with no transaction of its own so it can be committed alone or beside
- *  another write. `returning` is only useful to a caller that reads the rows. */
-function chatEventInsertSql(
-  valuesSql: string,
-  clockCandidates: string[],
-  deliverySql: string,
-  withReturning: boolean,
-  onlyIfSql?: string
-): string {
-  // A conditional insert cannot use VALUES, so the same tuple becomes a SELECT
-  // with the caller's condition. The tuple is built once either way.
-  const rows = onlyIfSql
-    ? `select ${valuesSql.trim().replace(/^\(/, "").replace(/\)$/, "")} where ${onlyIfSql}`
-    : `values ${valuesSql}`;
-  return `
-        insert or ignore into chat_events (
-          event_id,
-          conversation_id,
-          log_scope_id,
-          origin_id,
-          origin_seq,
-          logical_ts,
-          kind,
-          payload_json,
-          payload_hash,
-          event_hash,
-          prev_hash,
-          signature,
-          key_id,
-          envelope_json,
-          received_at
-        )
-        ${rows}
-        ${withReturning ? "returning event_id as eventId" : ""};
-        ${clockCandidates.length === 0 ? "" : `
-          with candidates(event_id, event_hash, logical_ts, clock_key) as (values ${clockCandidates.join(",")})
-          update schema_meta set value = max(value, coalesce((
-            select max(c.clock_key) from candidates c join chat_events e
-              on e.event_id = c.event_id and e.event_hash = c.event_hash and e.logical_ts = c.logical_ts
-          ), value)) where key = ${sqlString(CHAT_EVENT_CLOCK_META_KEY)};
-        `}
-        ${deliverySql}
-  `;
 }

@@ -38,8 +38,8 @@ const HIDDEN_FILLERS = Array.from({ length: 78 }, (_, index) => ({
 const FIRST_OF_LATEST_PAGE = "f-01";
 
 test("PWA polish: search, times, unread, members, earlier history, slash menu, refresh, foreground, pictures, notification wording", { timeout: 300_000 }, async () => {
-  const { createChatEventDeviceIdentity } = require("../dist/main/main/services/chatEventLog.js");
-  const office = createChatEventDeviceIdentity(new Date().toISOString());
+  const { createDeviceIdentity } = require("../dist/main/main/services/deviceIdentity.js");
+  const office = createDeviceIdentity(new Date().toISOString());
   const hub = await startMobileHub({ rosterDevices: [
     { deviceId: office.originId, publicKeyDerBase64: office.publicKeyDerBase64, role: "machine", name: "Office Mac", machineId: "machine-1" }
   ] });
@@ -69,7 +69,12 @@ test("PWA polish: search, times, unread, members, earlier history, slash menu, r
     .filter((request) => request.method === "GET" && request.path === "/v1/phone/timeline" && request.query.conversationId === conversationId)
     .map((request) => ({ conversationId, beforeMessageId: request.query.beforeMessageId }));
   const listAsks = () => hub.requests.filter((request) => request.method === "GET" && request.path === "/v1/phone/chats").length;
-  const sent = () => hub.phoneEvents("chat.changes").map((event) => event.payload.changes[0].message);
+  let sentByServer = [];
+  const sent = () => sentByServer;
+  const readSent = async () => {
+    sentByServer = (await hub.phoneOps("message.create")).map((entry) => entry.effect.message);
+    return sentByServer.length;
+  };
 
   const profile = await tempProfile("aa-polish-");
   const chrome = launchChrome({ port: CDP_PORT, profile, url: `${site.origin}/`, width: 430, height: 860 });
@@ -134,9 +139,11 @@ test("PWA polish: search, times, unread, members, earlier history, slash menu, r
     const rows = async () => await evaluate(`(() => [...document.querySelectorAll("#message-list .message-row")].map((n) => ({ status: n.dataset.status, label: (n.querySelector(".message-status") || {}).textContent, text: (n.querySelector(".message-content") || {}).textContent })))()`);
     await waitFor(rows, (list) => list.length === 2, "the latest page arrives from the server");
     const latest = await rows();
-    assert.equal(latest[0].status, "Done");
-    assert.match(latest[0].label, /^\d{2}:\d{2}$/, "a finished message shows the time it was written, not the word Done");
-    assert.match(latest[1].label, /^\d{2}:\d{2}$/, "for the member's row too");
+    // The User's own message says when it was written and that the server
+    // has it, in the words every device uses (agreement Д3).
+    assert.equal(latest[0].status, "Sent");
+    assert.match(latest[0].label, /^\d{2}:\d{2} · Sent$/, "the User's message shows its time and that it was sent");
+    assert.match(latest[1].label, /^\d{2}:\d{2}$/, "a finished member's message shows the time it was written, not the word Done");
     assert.equal(await evaluate(`(() => document.getElementById("load-earlier").hidden)()`), false, "the desktop said there is more before this page, so the phone offers it");
 
     await evaluate(`(() => { document.getElementById("chat-members-toggle").click(); return true; })()`);
@@ -187,7 +194,7 @@ test("PWA polish: search, times, unread, members, earlier history, slash menu, r
     assert.equal(await evaluate(`(() => document.getElementById("composer-input").value)()`), "@drew /review ", "picking a skill writes its token");
     assert.equal(await evaluate(`(() => document.getElementById("slash-menu").hidden)()`), true);
     await evaluate(`(() => { const i = document.getElementById("composer-input"); i.value = "@drew /review the diff"; i.dispatchEvent(new Event("input", { bubbles: true })); document.getElementById("composer-form").requestSubmit(); return true; })()`);
-    await waitFor(() => sent().length, (n) => n === 1, "the message reaches the server");
+    await waitFor(readSent, (n) => n === 1, "the message reaches the server");
     assert.equal(sent()[0].content, "@drew /review the diff");
     assert.equal(sent()[0].metadata.skillMentions?.[0]?.skillId, "skill-review", "carrying the picked skill, as the desktop composer would");
 

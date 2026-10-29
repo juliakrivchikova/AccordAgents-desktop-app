@@ -1,159 +1,149 @@
-import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import type { MachineApprovalDecisionBody, MachineApprovalResultBody } from "../../shared/machineLink";
+import type { HubCard } from "../../shared/hubOps";
+import { isHubApprovalCardAnswer } from "../../shared/hubCards";
 import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
-import type { ChatAppToolApproval, ChatAppToolApprovalPolicy, Conversation } from "../../shared/types";
+import type { ReviewProgress } from "../../shared/types";
 import type { ChatService } from "./chat";
 import type { StorageService } from "./storage";
 import { verifyNativeExecutorGone } from "./nativeExecutorRecovery";
-import type { ChatActionPayload } from "../../shared/chatActionEvents";
 import { approvalInstallsScriptCode } from "../../shared/scripts";
 
-export function machineApprovalResultId(decisionId: string): string { return `machine-approval-result:${decisionId}`; }
+/** The answer a card got, as the native ledger names it: one card answer,
+ *  whichever device gave it and however often it is read. */
+export function cardAnswerKey(card: Pick<HubCard, "cardId" | "answeredAt">): string {
+  return `card-answer:${card.cardId}:${card.answeredAt ?? ""}`;
+}
 
-/** The event delivery may retry; the approved native effect may not. Domain
- * validation runs before the SQL claim, and a native decision waits for the
- * provider adapter's delivery receipt before success is published. */
+/**
+ * What applying a card's answer came to on the member's device:
+ * - `applied`: it was applied (or the request was resolved by it);
+ * - `refused`: not applied and nothing was claimed; what it asked still
+ *   waits, so the card is asked again (`reason` says why);
+ * - `uncertain`: it crossed the point of no return without this device
+ *   seeing it through; it is never repeated;
+ * - `retry`: this device cannot take it right now (it is stopping, its disk
+ *   refused the claim); the answer stays and is tried again.
+ */
+export type CardApplyResult =
+  | { kind: "applied" }
+  | { kind: "refused"; reason: string }
+  | { kind: "uncertain"; reason: string }
+  | { kind: "retry"; reason: string };
+
+export class CardRetryError extends Error {}
+
+/** A script that installs code is approved only where its code is shown. */
+export const SCRIPT_CODE_APPROVED_ON_DESKTOP = "A script that runs code is approved on the desktop, where its code is shown.";
+
+/**
+ * Applies the User's answer to a permission or roster card, raised by this
+ * device for one of its members, exactly once (agreement Д9). The answer
+ * arrives from the User's server (from any device); domain validation runs
+ * before the durable claim, and a native decision waits for the provider's
+ * delivery receipt before it counts as applied. A claim without a confirmed
+ * outcome (this device stopped in between) is reported as uncertain and
+ * never repeated.
+ */
 export class MachineApprovalExecutor {
-  private readonly active = new Map<string, Promise<MachineApprovalResultBody>>();
-  private readonly results = new Map<string, MachineApprovalResultBody>();
-  private readonly outcomes = new Map<string, Pick<MachineApprovalResultBody, "ok" | "error" | "uncertain">>();
+  private readonly active = new Map<string, Promise<CardApplyResult>>();
+  /** Outcomes this runtime saw through, by answer: a second look (the feed
+   *  and a reconcile reach the same answer) reports the same. */
+  private readonly outcomes = new Map<string, CardApplyResult>();
 
   constructor(private readonly options: {
     storage: StorageService;
-    deviceId: string;
     chat: Pick<ChatService, "respondToAppToolApproval">;
-    progress?: (progress: import("../../shared/types").ReviewProgress) => void;
-    getConversation(id: string): Promise<Conversation | undefined>;
+    progress?: (progress: ReviewProgress, conversationId: string) => void;
     runtimeIdentity(): Promise<NativeRuntimeIdentity>;
     canApply?: () => boolean;
     nativeProcessDbPath?: string;
-    publish(body: MachineApprovalResultBody): Promise<void>;
-    /** True when this event was authored by the desktop whose card shows a
-     *  script's code (the enrolling desktop on a machine, this desktop on a
-     *  desktop). Only that desktop may approve a script that installs code. */
-    codeApprover?: (event: ChatEventEnvelope) => boolean;
+    /** The device whose card shows a script's code (this desktop on a
+     *  desktop, the desktop that set it up on a machine): only its answers
+     *  approve a script that installs code. */
+    codeApprover: () => string | undefined;
   }) {}
 
   hasActiveWork(): boolean { return this.active.size > 0; }
 
-  private async hasResult(decisionId: string, conversationId: string, approvalId: string): Promise<MachineApprovalResultBody | undefined> {
-    const event = await this.options.storage.getChatEvent(machineApprovalResultId(decisionId));
-    if (!event) return undefined;
-    if (event.originId !== this.options.deviceId || event.kind !== "machine.approval.result" || event.conversationId !== conversationId) {
-      throw new Error("The retained approval receipt has inconsistent ownership.");
-    }
-    const body = await this.options.storage.deviceEventBlobs().hydrate(event.payload) as Partial<MachineApprovalResultBody>;
-    if (body?.type !== event.kind || body.conversationId !== conversationId || body.approvalId !== approvalId || body.decisionId !== decisionId || typeof body.ok !== "boolean") {
-      throw new Error("The retained approval receipt has inconsistent identities.");
-    }
-    return body as MachineApprovalResultBody;
-  }
-
-  applyAction(event: ChatEventEnvelope, payload: ChatActionPayload): Promise<MachineApprovalResultBody> {
-    const detail = payload.detail;
-    if (event.kind !== "permission.decided" || !payload.targetKey?.startsWith("approval:") ||
-        !payload.targetKey.slice(9) || !detail || typeof detail.approve !== "boolean") {
-      throw new Error("The approval action has invalid identities or an invalid answer.");
-    }
-    // A phone's answer relayed by the desktop is signed by the desktop and
-    // says so in its detail.
-    return this.apply(event, {
-      type: "machine.approval.decision", decisionId: event.eventId, conversationId: event.conversationId,
-      approvalId: payload.targetKey.slice(9), approve: detail.approve, decidedAt: "",
-      ...(detail.scope === "once" || detail.scope === "chat" ? { scope: detail.scope } : {}),
-      ...(typeof detail.codexDecisionId === "string" ? { codexDecisionId: detail.codexDecisionId } : {}),
-      ...(detail.draftOverride && typeof detail.draftOverride === "object"
-        ? { draftOverride: detail.draftOverride as MachineApprovalDecisionBody["draftOverride"] } : {})
-    }, detail.decidedOn === "phone");
-  }
-
-  apply(event: ChatEventEnvelope, decision: MachineApprovalDecisionBody, decidedOnPhone = false): Promise<MachineApprovalResultBody> {
-    const current = this.active.get(event.eventId);
+  apply(card: HubCard): Promise<CardApplyResult> {
+    const key = cardAnswerKey(card);
+    const current = this.active.get(key);
     if (current) return current;
-    const work = this.applyOnce(event, decision, decidedOnPhone);
-    this.active.set(event.eventId, work);
-    void work.finally(() => this.active.delete(event.eventId)).catch(() => undefined);
+    const work = this.applyOnce(card, key);
+    this.active.set(key, work);
+    void work.finally(() => this.active.delete(key)).catch(() => undefined);
     return work;
   }
 
-  private async applyOnce(event: ChatEventEnvelope, decision: MachineApprovalDecisionBody, decidedOnPhone: boolean): Promise<MachineApprovalResultBody> {
-    if (!decision.decisionId || decision.decisionId !== event.eventId ||
-        (event.kind !== decision.type && event.kind !== "permission.decided") || event.conversationId !== decision.conversationId) {
-      throw new Error("The approval decision has inconsistent identities.");
+  private async applyOnce(card: HubCard, key: string): Promise<CardApplyResult> {
+    const known = this.outcomes.get(key);
+    if (known) return known;
+    const answer = card.answer;
+    if (card.state === "pending" || !card.answeredAt || !isHubApprovalCardAnswer(answer)) {
+      return { kind: "refused", reason: "This answer is not one this card takes." };
     }
     const { storage } = this.options;
-    const saved = await this.hasResult(event.eventId, decision.conversationId, decision.approvalId);
-    if (saved) return saved;
-    const retained = this.results.get(event.eventId);
-    if (retained) {
-      await this.options.publish(retained);
-      this.results.delete(event.eventId);
-      this.outcomes.delete(event.eventId);
-      return retained;
-    }
+    const conversationId = card.conversationId;
+    const approvalId = card.cardId;
     const owner = await this.options.runtimeIdentity();
-    const previous = await storage.nativeCommands().approvalEffect(decision.conversationId, decision.approvalId);
-    let result: Pick<MachineApprovalResultBody, "ok" | "error" | "uncertain">;
-    const knownOutcome = this.outcomes.get(event.eventId);
-    if (knownOutcome) result = knownOutcome;
-    else if (previous && await this.hasResult(previous.eventId, decision.conversationId, decision.approvalId)) {
-      result = { ok: false, error: "This approval has already been answered; its earlier execution receipt is unchanged." };
-    } else if (previous) {
-      if (previous.runtimeId !== owner.runtimeId && (!this.options.nativeProcessDbPath || !await verifyNativeExecutorGone({
+    const previous = await storage.nativeCommands().approvalEffect(conversationId, approvalId);
+    if (previous) {
+      if (previous.eventId !== key) {
+        // Another answer crossed the boundary before this one: what it did
+        // stands; this answer is not applied.
+        return { kind: "refused", reason: "This approval has already been answered; its earlier execution stands." };
+      }
+      if (previous.runtimeId !== owner.runtimeId && this.options.nativeProcessDbPath && !await verifyNativeExecutorGone({
         ...previous, generation: 0, released: false
-      }, this.options.nativeProcessDbPath))) {
-        throw new Error("Waiting for the previous approval executor's verified shutdown.");
+      }, this.options.nativeProcessDbPath)) {
+        return { kind: "retry", reason: "Waiting for the previous approval executor's verified shutdown." };
       }
-      result = { ok: false, uncertain: true, error: "This approval already crossed its execution boundary; delivery was not confirmed and the action was not repeated." };
-    } else {
-      let claimFailure: unknown;
-      let claimed = false;
-      // A phone or a second machine cannot approve code it never showed. The
-      // refusal is this decision's final outcome, not a retry, and nothing is
-      // claimed: the card stays pending for the desktop.
-      const mayApproveCode = Boolean(this.options.codeApprover?.(event)) && !decidedOnPhone;
-      try {
-        const conversation = await this.options.chat.respondToAppToolApproval({
-          conversationId: decision.conversationId, approvalId: decision.approvalId,
-          approve: decision.approve, scope: decision.scope, draftOverride: decision.draftOverride, codexDecisionId: decision.codexDecisionId
-        }, this.options.progress, {
-          awaitNativeDelivery: true,
-          beforeApply: async (approval) => {
-            if (decision.approve && this.options.codeApprover && !mayApproveCode && approvalInstallsScriptCode(approval)) {
-              throw new Error("A script that runs code is approved on the desktop, where its code is shown.");
-            }
-            try {
-              if (this.options.canApply?.() === false) throw new Error("The machine is shutting down; this decision remains queued.");
-              if (approval.homeMachineId) throw new Error("This approval is owned by another machine.");
-              claimed = await storage.nativeCommands().claimApproval({ ...owner, eventId: event.eventId,
-                conversationId: decision.conversationId, approvalId: decision.approvalId, participantId: approval.requesterParticipantId });
-              if (!claimed) throw new Error("Another executor claimed this approval; waiting for its receipt.");
-              if (this.options.canApply?.() === false) throw new Error("The machine shut down while recording the approval claim; native input was not repeated.");
-            } catch (error) { claimFailure = error; throw error; }
-          }
-        });
-        if (!conversation) throw new Error("The approval's conversation no longer exists.");
-        result = { ok: true };
-      } catch (error) {
-        // A failed pre-effect disk claim is retryable. Do not manufacture a
-        // terminal rejection and silently lose a valid User decision.
-        if (claimFailure) throw claimFailure;
-        result = { ok: false, ...(claimed ? { uncertain: true } : {}), error: error instanceof Error ? error.message : String(error) };
-      }
+      return this.remember(key, { kind: "uncertain", reason: "This approval already crossed its execution boundary; delivery was not confirmed and the action was not repeated." });
     }
-    this.outcomes.set(event.eventId, result);
-    const conversation = await this.options.getConversation(decision.conversationId);
-    const metadata = conversation?.metadata as { pendingAppToolApprovals?: ChatAppToolApproval[]; appToolApprovalPolicies?: ChatAppToolApprovalPolicy[] } | undefined;
-    const approval = metadata?.pendingAppToolApprovals?.find(item => item.id === decision.approvalId);
-    const body: MachineApprovalResultBody = {
-      type: "machine.approval.result", conversationId: decision.conversationId, approvalId: decision.approvalId,
-      decisionId: event.eventId, ...result, ...(approval ? { approval } : {}),
-      ...(metadata?.appToolApprovalPolicies ? { policies: metadata.appToolApprovalPolicies } : {})
-    };
-    this.results.set(event.eventId, body);
-    await this.options.publish(body);
-    this.results.delete(event.eventId);
-    this.outcomes.delete(event.eventId);
-    return body;
+    let claimFailure: unknown;
+    let claimed = false;
+    try {
+      const conversation = await this.options.chat.respondToAppToolApproval({
+        conversationId, approvalId, approve: answer.approve,
+        ...(answer.scope ? { scope: answer.scope } : {}),
+        ...(answer.draftOverride ? { draftOverride: answer.draftOverride } : {}),
+        ...(answer.codexDecisionId ? { codexDecisionId: answer.codexDecisionId } : {})
+      }, (progress) => this.options.progress?.(progress, conversationId), {
+        awaitNativeDelivery: true,
+        beforeApply: async (approval) => {
+          // A phone (or any device but the one that shows the code) cannot
+          // approve code it never showed: refused, nothing claimed, the card
+          // is asked again for the desktop.
+          if (answer.approve && approvalInstallsScriptCode(approval) && card.answeredBy !== this.options.codeApprover()) {
+            throw new Error(SCRIPT_CODE_APPROVED_ON_DESKTOP);
+          }
+          try {
+            if (this.options.canApply?.() === false) throw new CardRetryError("This machine is shutting down; the answer waits for its next start.");
+            claimed = await storage.nativeCommands().claimApproval({ ...owner, eventId: key, conversationId, approvalId,
+              participantId: approval.requesterParticipantId });
+            if (!claimed) throw new CardRetryError("Another executor claimed this approval; waiting for its outcome.");
+            if (this.options.canApply?.() === false) throw new Error("The machine shut down while recording the approval claim; native input was not repeated.");
+          } catch (error) { claimFailure = error; throw error; }
+        }
+      });
+      if (!conversation) return { kind: "refused", reason: "The approval's chat no longer exists." };
+      return this.remember(key, { kind: "applied" });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      // A failed admission (a runtime on its way out, a disk that refused
+      // the claim) never manufactures an outcome for a real answer.
+      if (claimFailure && !claimed) return { kind: "retry", reason };
+      if (claimed) return this.remember(key, { kind: "uncertain", reason });
+      return { kind: "refused", reason };
+    }
+  }
+
+  private remember(key: string, result: CardApplyResult): CardApplyResult {
+    this.outcomes.set(key, result);
+    while (this.outcomes.size > 500) {
+      const oldest = this.outcomes.keys().next().value;
+      if (oldest === undefined) break;
+      this.outcomes.delete(oldest);
+    }
+    return result;
   }
 }

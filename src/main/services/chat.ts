@@ -6,8 +6,24 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
-import { applyChatChanges, applyHeldReactions, CHAT_CHANGES_VERSION, chatChangeBaseline, diffChatChanges, isSupportedChatChangesVersion, type ChatChangeApplyPolicy, type ChatChangeBaseline, type ChatChangeDiffPolicy, type ChatChangesPayload, isSafeChatId } from "./chatChanges";
-import { mergeCopiedConversation, type CopiedConversation } from "./chatCopy";
+import { chatChangeBaseline, diffChatChanges, type ChatChangeBaseline, isSafeChatId } from "./chatChanges";
+import { chatChangesToOps, furthestTurnMarks, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
+import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
+import { hubTurnRunId, isHubTurnRunId, type HubCard, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
+import {
+  choiceCardId,
+  hubCardDigest,
+  hubCardOutcomeFrom,
+  mentionCardId,
+  pendingMentionsOf,
+  wantedHubCards,
+  type HubApprovalCardAnswer,
+  type HubApprovalCardPayload,
+  type HubCardOutcome,
+  type WantedHubCard
+} from "../../shared/hubCards";
+import { ServerCardBook, type CardApplyResult, type ChatCardAppliers } from "./chatCards";
+import { HUB_OP_TAKEN_BACK, type HubOpOutcome } from "./hubOpsClient";
 import type {
   AgentContextUsage,
   AgentHealth,
@@ -32,6 +48,7 @@ import type {
   ChatLastMessageByParticipant,
   ChatMessage,
   ChatMessageMetadata,
+  ChatServerCardMark,
   ChatExecutionLeaseMetadata,
   ChatMessageReactions,
   ChatParticipant,
@@ -48,7 +65,6 @@ import type {
   ChatParticipantChangeRequest,
   ChatParticipantChangeOperation,
   ChatParticipantRemovalRequest,
-  ChatRosterChangeOutcome,
   ChatParticipantRequestApprovalRequest,
   ChatParticipantRequestBatch,
   ChatParticipantRequestInput,
@@ -119,9 +135,7 @@ import type {
   RemoteRunSyncInfo
 } from "../../shared/types";
 import { isAutoWatchStableMessage, isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
-import type { ChatEventEnvelope } from "../../shared/chatEvents";
-import type { ChatActionPayload } from "../../shared/chatActionEvents";
-import { isMachineCompactionLine, normalizeMachineTurnCompaction, type MachineCompactionDelegateRequest, type MachineTurnCompaction } from "../../shared/machineLink";
+import { isMachineCompactionLine } from "../../shared/machineLink";
 import { machineStopPendingText, machineWaitingText } from "../../shared/machineWaitingText";
 import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
 import {
@@ -180,10 +194,7 @@ import {
   resolveChatDeliveryTargets,
   resolveChatMentionTargets
 } from "../../shared/chatDeliveryPolicy";
-import { chatActionOperationId } from "./chatActionEmitter";
-import { parsePhoneTurnRunId, phoneTurnRunId } from "../../shared/hubProtocol";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
-import type { ChatEventMirrorService } from "./chatEventMirror";
 import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
 import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
@@ -235,7 +246,7 @@ import {
   withParticipantCompactionsForRunRemoved
 } from "../../shared/chatRunState";
 import { INTERRUPTED_RUN_WARNING, sanitizeWarningList, sanitizeWarningText } from "../../shared/warnings";
-import { foldMachineTurnResult, markStopUnconfirmed, markStoppedByUser } from "./machineTurnOutcome";
+import { markStopUnconfirmed, markStoppedByUser } from "./machineTurnOutcome";
 import { NativeProcessUnavailableError } from "./nativeProcess";
 import { normalizeAutoChatTitle, normalizeManualChatTitle, sanitizeAutoChatTitleSuggestion } from "../../shared/chatTitles";
 import {
@@ -263,12 +274,19 @@ type MachineRosterDecision = { ok: true } | { ok: false; waiting: true } | { ok:
  *  the run (a Stop is then an ordinary one). `registered`: the run is in the
  *  chat's active runs, which then say the chat is busy; until then this entry
  *  says it. */
-interface PendingPhoneRun {
-  conversationId: string;
-  controller: AbortController;
-  started: boolean;
-  registered?: boolean;
+/** The members a User's message names, as resolved where it was written. */
+function deliveryTargetsOf(message: ChatMessage): string[] {
+  const value = (message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets;
+  return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
 }
+
+/** How a member's turn was opened on the User's server (Д4, Д5, Д13). */
+type ServerTurnOpen =
+  | { kind: "none" }
+  | { kind: "local"; serverRunId: string }
+  | { kind: "remote"; serverRunId: string; canonical: boolean }
+  | { kind: "stopped"; serverRunId: string }
+  | { kind: "skip"; serverRunId: string; reason: string };
 
 interface ChatParticipantSessionState {
   session: ChatParticipantSession;
@@ -683,19 +701,39 @@ export interface ChatApprovalExecutionGuard {
 }
 
 export interface ChatChoiceExecutionGuard {
+  /** The answer, as the native ledger names it (one card answer). */
   decisionEventId: string;
+  /** The operation the answer was sent under on the User's server, when
+   *  known: a refusal kept on the choice names it, so the device that sent
+   *  it says why. */
+  operationId?: string;
   /** Called after the validated answer is durably saved, before continuation. */
   beforeApply(participantId: string): Promise<void>;
 }
 
 export class ChatChoicePersistenceError extends Error {}
 
-/** How often a machine looks at its own copy while the desktop runs the
- *  targets, and how long it keeps looking before answering with what it has. */
-const DELEGATED_PARTICIPANT_REQUEST_POLL_MS = 1_000;
-const DELEGATED_PARTICIPANT_REQUEST_LIMIT_MS = 24 * 60 * 60 * 1_000;
-/** How long the desktop waits for the request message a delegation names. */
-const DELEGATED_PARTICIPANT_REQUEST_WAIT_MS = 10_000;
+/** A member elsewhere could not be asked: its machine or its project could
+ *  not be made ready on this device. */
+class RemoteTurnNotStartedError extends Error {}
+
+/** How long the end of a turn run here waits for the save that writes its
+ *  member's last bubble before it is sent anyway. */
+const DEFERRED_SERVER_FINISH_MS = 10_000;
+/** An answer this device could not take right now is tried again after this. */
+const CARD_APPLY_RETRY_MS = 15_000;
+/** How long a read of the open cards waits for the feed to reach it. */
+const CARD_RECONCILE_READ_WAIT_MS = 30_000;
+/** How long an answer given on this device's screen waits to be applied
+ *  here (a card raised here) before the screen is told it was sent. */
+const CARD_ANSWER_LOCAL_WAIT_MS = 30_000;
+/** Refused answers a card keeps (the last few). */
+const CARD_REFUSALS_KEPT = 5;
+/** How long an answer the server took waits for this device's copy to show
+ *  it before the screen is told it was sent. */
+const CARD_ANSWER_FEED_WAIT_MS = 10_000;
+/** A card the server refused to take is offered again after this. */
+const CARD_RAISE_RETRY_MS = 60_000;
 
 interface ParticipantRequestRunResult {
   batch: ChatParticipantRequestBatch;
@@ -746,104 +784,14 @@ interface RemoteRunTerminalizationResult {
   autoResumeRequestMessageIds: string[];
 }
 
-/** Machines transport: runs one participant turn on the participant's home
- *  machine. The desktop owns the pending bubble and applies the returned
- *  messages exactly as it would for a local turn. */
-export interface MachineTurnDispatchRequest {
-  conversation: Conversation;
-  participant: ChatParticipant;
-  triggerMessage: ChatMessage;
-  runId: string;
-  pendingMessageId: string;
-  signal?: AbortSignal;
-  progress?: ProgressCallback;
-  /** Rule 2 (docs/parity-requirements.md): called when a Stop has been
-   *  requested but the machine has not confirmed it, so the User sees the
-   *  honest state instead of a silent wait. */
-  onStopPending?: (machineName: string) => void;
-  /** The machine is not ready to take the turn: not connected, or its
-   *  runtime is being updated (`reason`). Shown on the pending bubble (on a
-   *  compaction's status line for a compaction). */
-  onMachineWaiting?: (machineName: string, reason?: string) => Promise<void>;
-}
-
-export interface MachineTurnDispatchResult {
-  /** "unconfirmed": a Stop was requested and the machine never confirmed the
-   *  run is gone (it restarted or reported the run unknown); Rule 2 forbids
-   *  showing it as stopped. */
-  status: "completed" | "interrupted" | "failed" | "unconfirmed";
-  messages: ChatMessage[];
-  warnings: string[];
-  error?: string;
-  /** The machine's finish time of this result (absent for outcomes the
-   *  desktop produced itself). */
-  finishedAt?: string;
-  receiptId?: string;
-  /** Called once the desktop has stored the result; the machine keeps it
-   *  until then. */
-  acknowledge?: () => void | Promise<void>;
-  /** False when the turn never left this desktop (refused, or stopped while
-   *  being prepared): the member's home only ever had its empty bubble. */
-  sent?: boolean;
-  /** The member's context use as its CLI reported it on the machine after
-   *  this run, shown here exactly as a local member's. */
-  contextUsage?: AgentContextUsage;
-}
-
-/** Compacts a member on the machine that hosts it, through the same command
- *  path as its turns (no message to answer, no bubble, no progress frames). */
-export type MachineCompactionDispatchRequest = Omit<MachineTurnDispatchRequest, "triggerMessage" | "pendingMessageId" | "progress"> & {
-  compaction: MachineTurnCompaction;
-};
-
-/** Machine side. Hands a compaction a member here asked for itself to the
- *  desktop, which runs it as one the User started (and so shows it and can
- *  stop it), and sends it back here as a compaction command. */
-export interface ChatCompactionDelegate {
-  /** False when the desktop cannot take it now; the compaction then runs
-   *  here directly, as it would without a desktop. */
-  canDelegateCompaction(): boolean;
-  delegateCompaction(request: MachineCompactionDelegateRequest): Promise<void>;
-}
-
-/** Machine side. Hands one prepared member request to the desktop; the answers
- *  come back with the conversation, like every other message. */
-export interface ChatParticipantRequestDelegate {
-  delegateParticipantRequest(request: {
-    conversationId: string;
-    requestMessageId: string;
-    batchId: string;
-    depth: number;
-    /** Where these members live: a machine id, or undefined for the desktop.
-     *  Exactly one device is asked for each group, so no two run the same
-     *  member. */
-    homeMachineId?: string;
-    targetParticipantIds: string[];
-    /** The rows the recipient needs to act on this request, for the case
-     *  where it is another machine that has not seen them. */
-    messages: ChatMessage[];
-  }): Promise<void>;
-}
-
-export interface MachineTurnDispatcher {
-  runTurn(request: MachineTurnDispatchRequest): Promise<MachineTurnDispatchResult>;
-  compactOnMachine?(request: MachineCompactionDispatchRequest): Promise<MachineTurnDispatchResult>;
-  cancelMachineRun?(request: { machineId: string; conversationId: string; runId: string; onStopPending?: (machineName: string) => Promise<void> }): Promise<void>;
+/** What a device's live link to its machines (the desktop) or to its desktop
+ *  (a machine) gives a chat. Turns, Stops and compactions never travel here:
+ *  they are the User's server's (agreements Д1, Д4). */
+export interface MachineLinkPort {
   /** The bytes of a picture this copy does not hold on disk. Only a machine
    *  supplies this: replication brings an attachment's metadata here without
    *  its file, and the desktop that owns the chat still has it. */
   fetchAttachment?(conversationId: string, attachmentId: string): Promise<{ dataBase64: string }>;
-  /** Forwards the desktop's decision on an approval raised on a machine. */
-  respondToMachineApproval?(request: {
-    machineId: string;
-    conversationId: string;
-    approvalId: string;
-    approve: boolean;
-    scope?: "once" | "chat";
-    draftOverride?: ChatAppToolApprovalRequest;
-    codexDecisionId?: string;
-    onQueued?: (decisionId: string, machineName: string) => Promise<void>;
-  }): Promise<void>;
 }
 
 export interface ChatParticipantRun {
@@ -874,30 +822,6 @@ interface CloudRunDoctorProbe {
  *  (see readStoredChatStateForRefresh). */
 function cloneJsonValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
-}
-
-/**
- * How a chat's changes leave this device: one signed `chat.changes` event per
- * save, committed in the same transaction as the save. Installed by the
- * desktop and by the machine runtime; absent in tests and when no other device
- * is enrolled, in which case saves behave exactly as before.
- */
-export interface ChatChangeTransport {
-  /** False when no other device should receive this device's chat changes. */
-  hasRecipients(): boolean;
-  /** The last change event this device committed for a chat (seq 0: none). */
-  head(conversationId: string): Promise<{ originId: string; logScopeId: string; originSeq: number }>;
-  diffPolicy(conversation: Conversation): ChatChangeDiffPolicy;
-  applyPolicy(conversation: Conversation | undefined): ChatChangeApplyPolicy;
-  /** Mints the event and hands its SQL to `write`, which saves the chat in the
-   *  same transaction. Returns the save token `write` produced. */
-  commit(
-    payload: ChatChangesPayload,
-    write: (also: { sql: string; onlyIfSql(condition: string): string }) => Promise<string>
-  ): Promise<{ token: string; committed: boolean; eventId: string }>;
-  /** How far this device has applied the changes the author had when it
-   *  wrote this (ChatChangesPayload.after). Undefined: nothing to wait for. */
-  dependency?(payload: ChatChangesPayload): Promise<{ needed: number; have: number } | undefined>;
 }
 
 export class ChatService {
@@ -991,23 +915,12 @@ export class ChatService {
   // to what the change diff needs. Loaded from the database when absent (after
   // a restart, an eviction or a failed save), never guessed.
   private readonly chatChangeBaselines = new Map<string, ChatChangeBaseline | undefined>();
-  /** Chat changes waiting for desktop changes they were written after: the
-   *  applied head seen when each was last tried (see applyRemoteChatChanges). */
-  private readonly waitingChatChanges = new Map<string, number>();
-  /** Which devices are the User's phones (their messages start turns here). */
-  private phoneOrigin?: (originId: string) => boolean | Promise<boolean>;
+  /** Reads a picture the phone sent from the User's server. */
   private hubBlobReader?: (reference: DeviceEventBlobReference) => Promise<Buffer>;
-  /** Turns for a phone's message this device is starting: the turn's run id
-   *  is known before its run begins, so a Stop for it is not lost. */
-  private readonly pendingPhoneRuns = new Map<string, PendingPhoneRun>();
-  /** Chats with a phone's message whose members are being claimed. */
-  private readonly phoneStartsInFlight = new Map<string, number>();
-  /** When this device began reading the User's server: a phone's message
-   *  from before then is not this device's to start (a new or recreated
-   *  machine reads the whole order, turns other homes ran long ago). */
-  private phoneTurnsSince?: number;
   private static readonly CHAT_CHANGE_BASELINE_LIMIT = 256;
-  private chatChangeTransport?: ChatChangeTransport;
+  /** The User's server, owner of every chat (agreements Д1–Д13): saves go
+   *  there as operations, and members' turns wait for it. */
+  private serverLink?: ChatServerLink;
   private readonly chatSavesInFlight = new Set<Promise<void>>();
   // Tracked chats are bounded by count and by retained serialized bytes; chats
   // with a run in flight are evicted last, so a settings sweep over many chats
@@ -1030,9 +943,6 @@ export class ChatService {
   private readonly memberAdditionApplies = new Map<string, Promise<void>>();
   private readonly memberAdditionApplyAgain = new Set<string>();
   private readonly memberAdditionRetries = new Map<string, number>();
-  /** Machine members' roster cards whose User answer this desktop confirmed
-   *  (`approvalId\ndecisionId`), so the signed answer is read once. */
-  private readonly confirmedRosterDecisions = new Set<string>();
   private readonly deletedConversationIds = new Set<string>();
   private readonly appMcpTokens = new Map<string, string>();
   /** The last app tool grant issued to each member's CLI process, so a reply
@@ -1074,15 +984,30 @@ export class ChatService {
   private readonly appToolApprovalDecisionListeners = new Set<(event: ChatAppToolApprovalDecisionEvent) => Promise<void> | void>();
   private readonly appInstanceId = randomUUID();
   private runOwnerHeartbeatTimer?: NodeJS.Timeout;
-  private machineLink?: MachineTurnDispatcher;
+  private machineLink?: MachineLinkPort;
   private scriptHost?: ChatScriptHost;
-  private participantRequestDelegate?: ChatParticipantRequestDelegate;
-  private compactionDelegate?: ChatCompactionDelegate;
-  /** Machine compactions in flight here: puts their status line back to
-   *  "Compacting" once the machine has started them. */
-  private readonly machineCompactionStatus = new Map<string, () => void>();
-  /** Run ids of compactions machines delegated here, so a redelivery is one run. */
-  private readonly delegatedCompactionRunIds = new Set<string>();
+  /** Compactions of machine members this desktop shows as runs while their
+   *  machine compacts them (asked by the member itself, on its machine). */
+  private readonly observedServerCompactions = new Set<string>();
+  /** The server turn of each such compaction while this desktop shows it,
+   *  by its run id (the same id the machine runs it under). */
+  private readonly observedCompactionTurns = new Map<string, HubTurn>();
+  /** Machine side: runs before a server turn asked of a member here starts
+   *  (the machine's settings are made current first); false leaves the turn
+   *  waiting on the server (an idle stop is under way). */
+  private serverTurnPreparation?: (turn: HubTurn) => Promise<boolean>;
+  /** Desktop side: why a machine cannot take turns right now (its runtime is
+   *  being updated), shown on a member's waiting bubble. */
+  private machineWaitReason?: (machineId: string) => string | undefined;
+  /** Desktop side: runs before a turn of a machine member is asked (the
+   *  machine's settings, with where its project lives, go to the server). */
+  private beforeRemoteTurn?: (machineId: string) => Promise<void>;
+  /** Desktop side: whether a chat's project is ready on a machine (a machine
+   *  set up from here has it copied before its member's first turn). */
+  private machineProjectReady?: (machineId: string, repoPath: string) => Promise<boolean>;
+  /** Machine side: where the computer's projects live here, by the
+   *  computer's path (from the settings it published for this machine). */
+  private machineProjects: Record<string, string> = {};
   private cloudRunAws?: CloudRunAwsResolver;
   private cloudRunDoctor?: CloudRunDoctorProbe;
   private artifactCleanup?: (conversationId: string) => Promise<void>;
@@ -1100,7 +1025,6 @@ export class ChatService {
     private readonly onConversationSnapshot?: (conversation: Conversation, update: ConversationUpdate) => void,
     private readonly userSkills?: UserSkillsService,
     private readonly onReviewProgress?: ProgressCallback,
-    private readonly chatEventMirror?: ChatEventMirrorService,
     /** W-C: an interrupted run has no terminal snapshot of its own — nothing
      *  finished, the process died. Recovery is the only thing that can tell a
      *  paired phone the run is over, so it is published explicitly here rather
@@ -1237,7 +1161,7 @@ export class ChatService {
     }
   }
 
-  setMachineLink(link: MachineTurnDispatcher | undefined): void {
+  setMachineLink(link: MachineLinkPort | undefined): void {
     this.machineLink = link;
   }
 
@@ -1282,16 +1206,46 @@ export class ChatService {
     this.scriptHost = host;
   }
 
-  /** Machines transport, machine side: hands a member request to the desktop,
-   *  which owns the roster and runs each target where that member lives. */
-  setParticipantRequestDelegate(delegate: ChatParticipantRequestDelegate | undefined): void {
-    this.participantRequestDelegate = delegate;
+  /** Machine side: what must happen before a turn the server asked of a
+   *  member here starts (see serverTurnPreparation). */
+  setServerTurnPreparation(prepare: ((turn: HubTurn) => Promise<boolean>) | undefined): void {
+    this.serverTurnPreparation = prepare;
   }
 
-  /** Machine side: where a member's own compaction request goes (see
-   *  ChatCompactionDelegate). */
-  setCompactionDelegate(delegate: ChatCompactionDelegate | undefined): void {
-    this.compactionDelegate = delegate;
+  /** Desktop side: why a machine cannot take turns right now, if it cannot. */
+  setMachineWaitReason(reason: ((machineId: string) => string | undefined) | undefined): void {
+    this.machineWaitReason = reason;
+  }
+
+  /** Desktop side: see beforeRemoteTurn and machineProjectReady. */
+  setRemoteTurnPreparation(preparation: {
+    beforeRemoteTurn?: (machineId: string) => Promise<void>;
+    machineProjectReady?: (machineId: string, repoPath: string) => Promise<boolean>;
+  } | undefined): void {
+    this.beforeRemoteTurn = preparation?.beforeRemoteTurn;
+    this.machineProjectReady = preparation?.machineProjectReady;
+  }
+
+  /** Machine side: where the computer's projects live on this machine. */
+  setMachineProjects(projects: Record<string, string>): void {
+    this.machineProjects = { ...projects };
+  }
+
+  /** Machine side: a chat's project folder here, as the computer's settings
+   *  for this machine say now (before a member works in it). */
+  async refreshMachineRepository(conversationId: string): Promise<void> {
+    if (!this.hostMachineId) return;
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") return;
+    const recorded = conversation.metadata.machineRepository as { sourcePath?: string } | undefined;
+    const sourcePath = recorded?.sourcePath ?? conversation.repoPath;
+    if (!sourcePath) return;
+    await this.withChatMutation(conversation, async () => {
+      const before = this.stableJson({ repository: conversation.metadata.machineRepository ?? null, repoPath: conversation.repoPath ?? null });
+      this.localizeRepoPath(conversation, sourcePath);
+      if (this.stableJson({ repository: conversation.metadata.machineRepository ?? null, repoPath: conversation.repoPath ?? null }) === before) return;
+      await this.saveConversation(conversation, { emitChanges: false });
+    });
   }
 
   setCloudRunAwsService(service: CloudRunAwsResolver): void {
@@ -1673,11 +1627,12 @@ export class ChatService {
         await (this.chatMutationQueues.get(conversation.id) ?? Promise.resolve()).catch(() => undefined);
         await this.waitForQueuedSave(conversation.id);
         const cleanupMarker = await this.enqueueDeletedConversationArtifactCleanup(conversation);
-        // The tombstone and target identities commit with row deletion. A
-        // crash before the transport is ready must not forget who holds a copy.
-        const machineIds = this.chatParticipants(conversation).map(participant => participant.homeMachineId)
-          .filter((id): id is string => typeof id === "string" && id.length > 0);
-        const deleted = await this.storage.deleteConversation(conversation.id, { machineIds });
+        // The User's server owns the chat (Д1): the deletion goes there with
+        // the rows (the tombstone commits with them too), and every other
+        // device (its machines too) takes it from there.
+        const serverDelete = this.serverLink?.queueSql([{ opId: newOpId(), kind: "conversation.delete", conversationId: conversation.id }]);
+        const deleted = await this.storage.deleteConversation(conversation.id, serverDelete ? { alsoCommitSql: serverDelete } : {});
+        if (deleted && serverDelete) this.serverLink?.nudge();
         if (!deleted) {
           await rm(cleanupMarker, { force: true });
           this.deletedConversationIds.delete(conversation.id);
@@ -2302,12 +2257,15 @@ export class ChatService {
   }
 
   /**
-   * Desktop side of compacting a member that runs on a machine. The machine
-   * runs this service's own compactParticipant for the member's session there
-   * and returns the outcome line it wrote; this desktop shows that same line,
-   * the same progress and the member's new context use. Whatever kept the
-   * machine from running it (not connected, an older runtime, stopped before
-   * it was sent) ends exactly as a local compaction that could not start.
+   * Desktop side of compacting a member that runs on a machine. The compaction
+   * is a turn of that member on the User's server (Д4): asked of its machine
+   * there, taken and run by it with this service's own compactParticipant,
+   * which writes the outcome line this desktop then shows, with the same
+   * status and Stop as a local compaction. Whatever kept the machine from
+   * running it (no server link, stopped before it was taken) ends exactly as a
+   * local compaction that could not start. A compaction the member's machine
+   * asked for itself (`observedServerTurns`) is shown here the same way,
+   * without being asked again.
    */
   private async compactParticipantOnMachine(
     conversation: Conversation,
@@ -2320,78 +2278,95 @@ export class ChatService {
     signal?: AbortSignal,
     progress?: ProgressCallback
   ): Promise<StartReviewResult> {
-    const link = this.machineLink;
-    let result: MachineTurnDispatchResult;
+    const link = this.serverLink;
+    const observed = this.observedCompactionTurns.get(runId);
+    const serverRunId = observed?.runId ?? (runId.startsWith("turn-") ? runId : `turn-${runId}`);
+    const compacting = `Compacting @${participant.handle}.`;
+    const status = (message: string): void => {
+      this.emitProgress(runId, progress, "initial", message, { participantLabel: `@${participant.handle}` });
+    };
+    let turn: HubTurn | undefined = observed;
+    let failure: { status: "interrupted" | "failed"; error?: string } | undefined;
+    let anchorId: string | undefined = observed?.messageId;
     if (signal?.aborted) {
-      result = { status: "interrupted", messages: [], warnings: [], sent: false };
-    } else if (!link?.compactOnMachine) {
-      result = { status: "failed", messages: [], warnings: [], sent: false, error: `@${participant.handle} is hosted on a machine, but the machine link is not available` };
+      failure = { status: "interrupted" };
+    } else if (!link) {
+      failure = { status: "failed", error: `@${participant.handle} runs on a cloud machine, which this device reaches only through your server; it is not linked to it yet` };
     } else {
-      // The compaction's own status line says what a turn's bubble says
-      // while its machine is away, and returns to "Compacting" once it runs.
-      const compacting = `Compacting @${participant.handle}.`;
-      const status = (message: string): void => {
-        this.emitProgress(runId, progress, "initial", message, { participantLabel: `@${participant.handle}` });
-      };
-      // Once Stop is waiting for the machine, that stays until the outcome,
-      // as on a turn's bubble.
-      let stopPending = false;
-      this.machineCompactionStatus.set(runId, () => { if (!stopPending) status(compacting); });
+      const machineName = participant.homeMachineId ? link.machineName(participant.homeMachineId) ?? "the machine" : "the machine";
+      const placed = (item: HubTurn) => item.state !== "requested";
+      const ended = (item: HubTurn) => item.state === "finished" || item.state === "stopped";
       try {
-        result = await link.compactOnMachine({
-          conversation,
-          participant,
-          runId,
-          signal,
-          compaction: normalizeMachineTurnCompaction({ ...request, instructions: compactInstructions }),
-          onMachineWaiting: async (machineName, reason) => {
-            if (!stopPending) status(`${compacting} ${machineWaitingText(machineName, reason)}`);
-          },
-          onStopPending: (machineName) => {
-            void this.debugLogs.write("chat.compaction.stop-pending", { conversationId: conversation.id, runId, machineName });
-            stopPending = true;
-            status(`${compacting} ${machineStopPendingText(machineName)}`);
+        if (!turn) {
+          const anchor = this.compactionAnchor(conversation, request);
+          if (!anchor) {
+            // Nothing in this chat reached the server yet: the member never
+            // ran in it, so it has no session there to compact.
+            return await this.compactionWithoutSession(conversation, participant, request, runId, warnings, auditBase);
           }
-        });
-      } finally {
-        this.machineCompactionStatus.delete(runId);
+          anchorId = anchor.id;
+          const opId = newOpId();
+          await link.enqueue([{
+            opId, kind: "turn.request", conversationId: conversation.id, runId: serverRunId, messageId: anchor.id, participantId: participant.id,
+            request: {
+              kind: "compaction",
+              triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
+              ...(compactInstructions ? { instructions: compactInstructions } : {}),
+              ...(request.threadId?.trim() ? { threadId: request.threadId.trim() } : {}),
+              ...(request.parentMessageId?.trim() ? { parentMessageId: request.parentMessageId.trim() } : {}),
+              ...(request.chatThreadRootId?.trim() ? { chatThreadRootId: request.chatThreadRootId.trim() } : {})
+            }
+          }]);
+          const asked = await link.opAnswered(opId, signal);
+          if (asked.status === "rejected") throw new Error(`@${participant.handle} could not be compacted on ${machineName}: ${asked.reason}`);
+          turn = asked.turn;
+        }
+        if (!turn || !placed(turn)) {
+          // The same words a turn's bubble shows while its machine has not
+          // taken it; back to "Compacting" once it has.
+          const reason = participant.homeMachineId ? this.machineWaitReason?.(participant.homeMachineId) : undefined;
+          status(`${compacting} ${machineWaitingText(machineName, reason)}`);
+          turn = await this.waitForServerTurn(serverRunId, placed, signal);
+          if (!ended(turn)) status(compacting);
+        }
+        if (!ended(turn)) turn = await this.waitForServerTurn(serverRunId, ended, signal);
+      } catch (error) {
+        if (!signal?.aborted) {
+          failure = { status: "failed", error: error instanceof Error ? error.message : String(error) };
+        } else if (anchorId) {
+          // Stop: asked on the server, and shown as waiting until the machine
+          // confirms (the approved parity exception), as on a turn's bubble.
+          void this.debugLogs.write("chat.compaction.stop-pending", { conversationId: conversation.id, runId, machineName });
+          await link.enqueue([{ opId: newOpId(), kind: "turn.stop", conversationId: conversation.id, runId: serverRunId, messageId: anchorId, participantId: participant.id }]);
+          status(`${compacting} ${machineStopPendingText(machineName)}`);
+          turn = await this.waitForServerTurn(serverRunId, ended);
+        } else {
+          failure = { status: "interrupted" };
+        }
       }
     }
-    // Only the lines the machine's compaction of this run wrote are taken.
-    const compactionLines = result.messages.filter((message) => isMachineCompactionLine(message, runId, participant.id));
+    // The lines the machine's compaction of this run wrote reached this
+    // device through the server, before the turn's end did.
+    const refreshed = await this.requireChat(conversation.id).catch(() => conversation);
+    const compactionLines = refreshed.messages.filter((message) => isMachineCompactionLine(message, serverRunId, participant.id));
     const outcomeMessage = compactionLines.at(-1);
     const reported = outcomeMessage?.metadata?.compaction?.outcome;
     let outcome: "completed" | "failed" | "no-active-session" = reported === "completed" || reported === "no-active-session" ? reported : "failed";
-    await this.withChatMutation(conversation, async () => {
-      if (outcomeMessage) {
-        for (const message of compactionLines) {
-          if (!conversation.messages.some((existing) => existing.id === message.id)) {
-            conversation.messages.push(message);
-          }
-        }
-        for (const warning of result.warnings) {
-          if (!warnings.includes(warning)) warnings.push(warning);
-        }
-      } else {
-        // It never ran on the machine: the same line a local compaction that
-        // could not start writes (a Stop before it started: word for word).
-        const content = machineCompactionFailureLine(participant.handle, result.status, result.error);
+    if (!outcomeMessage) {
+      // It never ran on the machine: the same line a local compaction that
+      // could not start writes (a Stop before it started: word for word).
+      const stoppedBeforeStart = turn?.state === "stopped" && !turn.executorDeviceId;
+      const content = failure
+        ? machineCompactionFailureLine(participant.handle, failure.status, failure.error)
+        : machineCompactionFailureLine(participant.handle, stoppedBeforeStart ? "interrupted" : "failed",
+          stoppedBeforeStart ? undefined : "the machine ended the compaction without saying how it went");
+      await this.withChatMutation(conversation, async () => {
         conversation.messages.push(this.message("system", content, undefined, this.compactMessageMetadata(request, participant.id, "failed")));
-        warnings.push(content);
-        outcome = "failed";
-      }
-      this.updateParticipantContextUsage(conversation, participant.id, normalizeAgentContextUsage(result.contextUsage));
-      conversation.updatedAt = new Date().toISOString();
-      await this.saveConversation(conversation);
-    });
-    // The machine keeps its result until this desktop has stored it.
-    if (await this.waitForQueuedSaveResult(conversation.id)) {
-      try { await result.acknowledge?.(); }
-      catch (error) {
-        void this.debugLogs.write("chat.compaction.ack-pending", { conversationId: conversation.id, runId, message: error instanceof Error ? error.message : String(error) });
-      }
-    } else {
-      void this.debugLogs.write("chat.compaction.not-stored", { conversationId: conversation.id, runId });
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+      });
+      warnings.push(content);
+      outcome = "failed";
     }
     if (outcome !== "no-active-session") {
       this.emitProgress(runId, progress, outcome === "completed" ? "done" : "error", outcome === "completed" ? `Compacted @${participant.handle}.` : `Could not compact @${participant.handle}.`, {
@@ -2404,39 +2379,46 @@ export class ChatService {
       participantHandle: participant.handle,
       outcome,
       homeMachineId: participant.homeMachineId,
-      machineStatus: result.status
+      serverTurn: turn ? { state: turn.state, outcome: turn.outcome } : undefined
     });
-    return { conversation, warnings };
+    return { conversation: refreshed, warnings };
   }
 
-  /** Machines transport, machine side: compacts one of this machine's members
-   *  for the desktop, with the run id the desktop chose. Returns the outcome
-   *  line written here and the member's context use after it. */
-  async runMachineHostedCompaction(
-    request: { conversationId: string; participantId: string; runId: string } & MachineTurnCompaction,
-    signal?: AbortSignal
-  ): Promise<{ messages: ChatMessage[]; warnings: string[]; contextUsage?: AgentContextUsage }> {
-    // Stop reaches it by run id as it reaches a turn (cancelRun), not only
-    // through the command's own controller.
-    const run = this.registerBackgroundRunController(request.runId, signal);
-    try {
-      const result = await this.compactParticipant({
-        conversationId: request.conversationId,
-        participantId: request.participantId,
-        runId: request.runId,
-        triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
-        ...(request.instructions ? { instructions: request.instructions } : {}),
-        ...(request.threadId ? { threadId: request.threadId } : {}),
-        ...(request.parentMessageId ? { parentMessageId: request.parentMessageId } : {}),
-        ...(request.chatThreadRootId ? { chatThreadRootId: request.chatThreadRootId } : {})
-      }, run.signal);
-      const conversation = result.conversation;
-      const messages = conversation.messages.filter((message) => isMachineCompactionLine(message, request.runId, request.participantId));
-      const contextUsage = this.agentContextUsageByParticipant(conversation)[request.participantId];
-      return { messages, warnings: result.warnings, ...(contextUsage ? { contextUsage } : {}) };
-    } finally {
-      run.cleanup();
+  /** The message a machine member's compaction turn is placed against on the
+   *  server: the one the User compacted from, or the chat's newest one the
+   *  server holds. */
+  private compactionAnchor(conversation: Conversation, request: { parentMessageId?: string }): ChatMessage | undefined {
+    const accepted = (message: ChatMessage) => serverSeqOf(message) !== undefined && !message.metadata?.serverPlaceholder;
+    const parentId = request.parentMessageId?.trim();
+    const parent = parentId ? conversation.messages.find((message) => message.id === parentId && accepted(message)) : undefined;
+    if (parent) return parent;
+    for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+      if (accepted(conversation.messages[index])) return conversation.messages[index];
     }
+    return undefined;
+  }
+
+  /** The line a compaction of a member that has no session writes. */
+  private async compactionWithoutSession(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    request: CompactChatParticipantRequest,
+    runId: string,
+    warnings: string[],
+    auditBase: Record<string, unknown>
+  ): Promise<StartReviewResult> {
+    await this.withChatMutation(conversation, async () => {
+      conversation.messages.push(this.message(
+        "system",
+        `@${participant.handle} does not have an active session to compact yet.`,
+        undefined,
+        this.compactMessageMetadata({ ...request, runId }, participant.id, "no-active-session")
+      ));
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+    });
+    await this.debugLogs.write("chat.compaction.finished", { ...auditBase, participantId: participant.id, participantHandle: participant.handle, outcome: "no-active-session" });
+    return { conversation, warnings };
   }
 
   async syncSavedParticipantAvatar(
@@ -2666,9 +2648,6 @@ export class ChatService {
         prepared.summary,
         "auto-applied"
       );
-      if (!this.appliesRosterChanges()) {
-        return this.queueMemberAdditionForDesktop(conversation, approval);
-      }
       const applied = this.applyPreparedRosterChange(conversation, prepared);
       approval.appliedParticipantIds = applied.map((participant) => participant.id);
       approval.updatedAt = new Date().toISOString();
@@ -3096,7 +3075,6 @@ export class ChatService {
       prepared.requestMessage.id,
       prepared.batch.depth,
       requesterProgress,
-      undefined,
       inlineParentSignal
     );
     // When replies come back in a fresh requester turn, there is nothing to
@@ -3646,16 +3624,6 @@ export class ChatService {
         participantRequest: request
       });
       if (manageRolesParticipants === "allow" && !prepared.managementEscalation) {
-        if (!this.appliesRosterChanges()) {
-          return this.queueMemberAdditionForDesktop(conversation, {
-            ...pendingRoleApproval.approval,
-            toolName: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
-            request: prepared.request,
-            summary: prepared.summary,
-            status: "auto-applied",
-            approvalScope: "chat"
-          });
-        }
         const applied = await this.applyPreparedRoleParticipantChange(conversation, prepared);
         const approval: ChatAppToolApproval = {
           ...pendingRoleApproval.approval,
@@ -3716,9 +3684,6 @@ export class ChatService {
         prepared.summary,
         "auto-applied"
       );
-      if (!this.appliesRosterChanges()) {
-        return this.queueMemberAdditionForDesktop(conversation, approval);
-      }
       const applied = await this.applyPreparedParticipantChange(conversation, prepared);
       approval.appliedParticipantIds = applied.map((participant) => participant.id);
       approval.updatedAt = new Date().toISOString();
@@ -3892,99 +3857,25 @@ export class ChatService {
       (approval.status === "pending" || (approval.status === "approved" && typeof approval.memberRemovalQueuedAt === "string"));
   }
 
-  /** Only the desktop changes a chat's member list: a machine's changes to
-   *  it are never sent, and the desktop and the server take it only from the
-   *  desktop. A roster change a machine member asked for is therefore
-   *  recorded on its machine and applied here, on the desktop. */
-  private appliesRosterChanges(): boolean {
-    return !this.machineRuntime;
-  }
-
-  /** An approved removal this host still has to apply: on the desktop, any
-   *  member's, a machine member's included (its card arrives from the
-   *  machine); on a machine, none. */
+  /** An approved removal this device still has to apply once the chat's
+   *  turns end (any device, Д2). */
   private isQueuedMemberRemovalApproval(approval: ChatAppToolApproval): approval is MemberRemovalApproval {
-    return this.appliesRosterChanges() &&
-      approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
+    return approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
       approval.status === "approved" &&
       typeof approval.memberRemovalQueuedAt === "string" &&
       this.isParticipantRemovalRequest(approval.request);
   }
 
-  /** An approved addition a machine member asked for, waiting here for the
-   *  desktop to apply it. */
+  /** An approved addition waiting here to be applied: one a machine member
+   *  asked for before every device applied its own members' changes (Д2). */
   private isQueuedMemberAdditionApproval(approval: ChatAppToolApproval): boolean {
-    return this.appliesRosterChanges() &&
-      typeof approval.memberAdditionQueuedAt === "string" &&
+    return typeof approval.memberAdditionQueuedAt === "string" &&
       (approval.status === "approved" || approval.status === "auto-applied") &&
       (
         (approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
           (this.isParticipantChangeRequest(approval.request) || this.isRoleParticipantChangeRequest(approval.request))) ||
         (approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL && this.isRosterChangeRequest(approval.request))
       );
-  }
-
-  /** On a machine, an auto-applied addition: recorded for the desktop, which
-   *  adds the member; the member asking is told it has not happened yet. The
-   *  same addition asked again while it waits is answered with that card. */
-  private async queueMemberAdditionForDesktop(conversation: Conversation, approval: ChatAppToolApproval): Promise<Record<string, unknown>> {
-    let queued = approval;
-    await this.withChatMutation(conversation, async () => {
-      // Who it adds (a preparation's ids differ each time).
-      const targets = JSON.stringify(this.memberAdditionTargets(approval.request));
-      const waiting = this.chatAppToolApprovals(conversation).find((item) =>
-        typeof item.memberAdditionQueuedAt === "string" &&
-        item.requesterParticipantId === approval.requesterParticipantId &&
-        item.toolName === approval.toolName &&
-        JSON.stringify(this.memberAdditionTargets(item.request)) === targets);
-      if (waiting) {
-        queued = waiting;
-        return;
-      }
-      const now = new Date().toISOString();
-      queued = { ...approval, memberAdditionQueuedAt: now, updatedAt: now };
-      this.upsertAppToolApproval(conversation, queued);
-      conversation.updatedAt = now;
-      await this.saveConversation(conversation);
-    });
-    return {
-      ok: true,
-      status: "approved_pending_apply",
-      approvalId: queued.id,
-      summary: queued.summary,
-      next: "Approved, not in effect yet: the desktop owns this chat's member list and adds the member when it applies the change, within seconds while it is on. Until then the member is not in the chat. The outcome is posted to the chat."
-    };
-  }
-
-  /** On a machine, the User approved an addition: recorded for the desktop to
-   *  apply. Nothing about the member list changes here; the desktop's message
-   *  saying what it did settles this card (settleRosterChangesFromDesktop). */
-  private async recordMemberAdditionForDesktop(
-    conversation: Conversation,
-    approval: ChatAppToolApproval,
-    request: ChatAppToolApprovalRequest,
-    scope: ChatAppToolApprovalScope = "chat"
-  ): Promise<void> {
-    await this.withChatMutation(conversation, async () => {
-      const current = this.chatAppToolApprovals(conversation).find((item) => item.id === approval.id);
-      if (!current || current.status !== "pending") {
-        throw new Error("App tool approval request has already been answered.");
-      }
-      const now = new Date().toISOString();
-      this.upsertAppToolApproval(conversation, {
-        ...current,
-        status: "approved",
-        request,
-        approvalScope: scope,
-        memberAdditionQueuedAt: now,
-        updatedAt: now
-      });
-      if (scope === "chat" && current.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL) {
-        this.upsertRosterChatPolicy(conversation, current, now);
-      }
-      conversation.updatedAt = now;
-      await this.saveConversation(conversation);
-    });
   }
 
   /** "Allow for chat" on a legacy roster card: later additions by the same
@@ -4000,34 +3891,6 @@ export class ChatService {
       createdAt: now,
       updatedAt: now
     });
-  }
-
-  /** On a machine: the desktop's messages saying what it did with roster
-   *  changes this machine's members asked for (applied, or refused with the
-   *  reason). Their cards here are settled to match, so the phone and the
-   *  desktop stop showing them as waiting. Only messages the desktop wrote. */
-  private settleRosterChangesFromDesktop(conversation: Conversation, desktopMessages: () => ChatMessage[]): void {
-    if (this.appliesRosterChanges()) {
-      return;
-    }
-    const waiting = this.chatAppToolApprovals(conversation).filter((approval) =>
-      typeof approval.memberRemovalQueuedAt === "string" || typeof approval.memberAdditionQueuedAt === "string");
-    if (waiting.length === 0) {
-      return;
-    }
-    const outcomes = new Map<string, ChatRosterChangeOutcome>();
-    for (const message of desktopMessages()) {
-      const outcome = message.role === "system" ? message.metadata?.rosterChange : undefined;
-      if (outcome && typeof outcome.approvalId === "string") outcomes.set(outcome.approvalId, outcome);
-    }
-    for (const approval of waiting) {
-      const outcome = outcomes.get(approval.id);
-      if (!outcome) continue;
-      const { memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition, ...settled } = approval;
-      this.upsertAppToolApproval(conversation, outcome.outcome === "applied"
-        ? { ...settled, appliedParticipantIds: Array.isArray(outcome.appliedParticipantIds) ? outcome.appliedParticipantIds.filter((id) => typeof id === "string") : [], updatedAt: this.laterThan(approval.updatedAt) }
-        : { ...settled, status: "cancelled", error: typeof outcome.error === "string" && outcome.error ? outcome.error : "The desktop could not apply this change.", updatedAt: this.laterThan(approval.updatedAt) });
-    }
   }
 
   /** Now, or strictly later than `previous`: the metadata merge keeps the
@@ -4052,50 +3915,20 @@ export class ChatService {
   }
 
   /** The User's answer behind a machine member's approved roster change, as
-   *  this desktop can confirm it: the signed answer this desktop or one of the
-   *  User's phones gave on this card, which the machine reports it applied.
-   *  `waiting`: not reported, or not read here, yet. */
+   *  the User's server holds it (Д10: the server's word, no signature): the
+   *  card the member's machine raised, answered "approve" (mirrorServerCard
+   *  notes it as `server:<card>@<answered at>`). `waiting`: not answered yet. */
   private async machineRosterDecision(
-    conversation: Conversation,
+    _conversation: Conversation,
     approval: ChatAppToolApproval
   ): Promise<MachineRosterDecision> {
     const decisionId = approval.machineAppliedDecisionId;
-    const storage = this.storage as Partial<Pick<StorageService, "getChatEvent" | "deviceEventBlobs" | "getChatEventDeviceIdentityRecord">>;
-    if (!decisionId || typeof storage.getChatEvent !== "function") {
+    if (!decisionId) {
       return { ok: false, waiting: true };
     }
-    const key = `${approval.id}\n${decisionId}`;
-    if (this.confirmedRosterDecisions.has(key)) {
-      return { ok: true };
+    if (!decisionId.startsWith(`server:${approval.id}@`)) {
+      return { ok: false, waiting: false, problem: "Your approval of this change could not be confirmed on this computer; ask for it again." };
     }
-    const event = await storage.getChatEvent.call(this.storage, decisionId);
-    if (!event) {
-      return { ok: false, waiting: true };
-    }
-    const refused = { ok: false as const, waiting: false as const, problem: "Your approval of this change could not be confirmed on this computer." };
-    if (event.conversationId !== conversation.id || event.kind !== "permission.decided") {
-      return refused;
-    }
-    const payload = await Promise.resolve(storage.deviceEventBlobs?.call(this.storage).hydrate(event.payload)).catch(() => undefined) as ChatActionPayload | undefined;
-    // `approval:<id>`, the target of a permission answer (approvalTarget).
-    if (payload?.targetKey !== `approval:${approval.id}` || payload.detail?.approve !== true) {
-      return refused;
-    }
-    const own = (await storage.getChatEventDeviceIdentityRecord?.call(this.storage))?.originId;
-    if (event.originId !== own) {
-      // A phone's answer: one of the User's paired phones. Until this app
-      // can tell (just started), it is not refused, only not applied yet.
-      const resolver = this.phoneOrigin;
-      if (!resolver) return { ok: false, waiting: true };
-      let phone: boolean;
-      try {
-        phone = await resolver(event.originId);
-      } catch {
-        return { ok: false, waiting: true };
-      }
-      if (!phone) return refused;
-    }
-    this.confirmedRosterDecisions.add(key);
     return { ok: true };
   }
 
@@ -4236,7 +4069,7 @@ export class ChatService {
       await refuse();
       return conversation;
     }
-    if (recorded && this.appliesRosterChanges()) {
+    if (recorded) {
       // Indexed only once the decision is stored, so any idle hook that sees
       // the index also finds the stored decision. On a machine the decision
       // waits for the desktop, which receives this card and applies it.
@@ -4450,9 +4283,6 @@ export class ChatService {
    *  machine members' additions not applied yet are. Only on the desktop: a
    *  machine applies no roster change. */
   async resumeQueuedRosterChanges(): Promise<void> {
-    if (!this.appliesRosterChanges()) {
-      return;
-    }
     const storage = this.storage as Partial<Pick<StorageService, "conversationIdsWithQueuedRosterChanges">>;
     if (typeof storage.conversationIdsWithQueuedRosterChanges !== "function") {
       return;
@@ -4500,9 +4330,6 @@ export class ChatService {
    *  policy here, or the User's confirmed answer). The chat says what
    *  happened only once it has. */
   private async applyQueuedMemberAdditions(conversationId: string): Promise<void> {
-    if (!this.appliesRosterChanges()) {
-      return;
-    }
     // The saved copy this process holds first: most chats it is asked about
     // (after a restart, say) hold only a waiting removal.
     await this.waitForQueuedSave(conversationId);
@@ -5405,18 +5232,6 @@ export class ChatService {
     return conversation;
   }
 
-  async ownsAppToolApproval(conversationId: string, approvalId: string): Promise<boolean | undefined> {
-    const conversation = await this.storage.getConversation(conversationId);
-    // A request is raised by a member on the peer that holds its chat, so a
-    // peer without the chat can never own the answer to it.
-    if (!conversation || conversation.kind !== "chat") return false;
-    const approval = this.chatAppToolApprovals(conversation).find(item => item.id === approvalId);
-    if (!approval) return undefined;
-    if (approval.homeMachineId && approval.homeMachineId !== this.hostMachineId) return false;
-    const participant = this.chatParticipants(conversation).find(item => item.id === approval.requesterParticipantId);
-    return Boolean(participant && this.ownsParticipant(participant));
-  }
-
   async respondToAppToolApproval(
     request: RespondToChatAppToolApprovalRequest,
     progress?: ProgressCallback,
@@ -5430,39 +5245,10 @@ export class ChatService {
     if (!approval) {
       throw new Error("App tool approval request was not found.");
     }
-    // Machines transport: an approval raised by a member on a machine is
-    // answered there; this desktop's copy updates when the machine reports
-    // the outcome.
-    if (approval.homeMachineId && !this.machineRuntime) {
-      if (approval.status !== "pending") {
-        throw new Error("App tool approval request has already been answered.");
-      }
-      const link = this.machineLink;
-      if (!link?.respondToMachineApproval) {
-        throw new Error("The machine link is not available, so this approval cannot be answered right now.");
-      }
-      // The whole card answer travels: an edited Codex proposal and the
-      // native decision id are applied on the machine exactly as they would
-      // be here, and the machine's outcome (or error) is this call's outcome.
-      await link.respondToMachineApproval({
-        machineId: approval.homeMachineId,
-        conversationId: conversation.id,
-        approvalId: approval.id,
-        approve: request.approve,
-        ...(request.scope === "chat" ? { scope: "chat" as const } : request.scope === "once" ? { scope: "once" as const } : {}),
-        ...(request.draftOverride ? { draftOverride: request.draftOverride } : {}),
-        ...(request.codexDecisionId ? { codexDecisionId: request.codexDecisionId } : {}),
-        onQueued: async (decisionId, machineName) => {
-          await this.withChatMutation(conversation, async () => {
-            const current = this.chatAppToolApprovals(conversation).find(item => item.id === approval.id);
-            if (current?.status === "pending" && current.machineDecisionReceiptId !== decisionId) this.upsertAppToolApproval(conversation, { ...current,
-              machineDecisionPending: { decisionId, machineName, approve: request.approve, at: new Date().toISOString() } });
-            this.queueSnapshot(conversation);
-          });
-          if (!await this.waitForQueuedSaveResult(conversation.id)) throw new Error("The decision was queued, but its local feedback could not be stored.");
-        }
-      });
-      return (await this.storage.getConversation(conversation.id)) ?? conversation;
+    // A card a member on another device raised is answered on the User's
+    // server and applied there (answerAppToolApprovalCard), never here.
+    if (approval.homeMachineId && approval.homeMachineId !== this.hostMachineId) {
+      throw new Error("This request is answered on the device its member runs on.");
     }
     const approvalOwner = this.chatParticipants(conversation).find(item => item.id === approval.requesterParticipantId);
     if (approvalOwner) this.assertOwnsParticipant(approvalOwner);
@@ -5640,10 +5426,6 @@ export class ChatService {
         return conversation;
       }
       await execution?.beforeApply(approval);
-      if (!this.appliesRosterChanges()) {
-        await this.recordMemberAdditionForDesktop(conversation, approval, prepared.request);
-        return conversation;
-      }
       const applied = await this.applyPreparedRoleParticipantChange(conversation, prepared);
       this.upsertAppToolApproval(conversation, {
         ...approval,
@@ -5723,10 +5505,6 @@ export class ChatService {
         return conversation;
       }
       await execution?.beforeApply(approval);
-      if (!this.appliesRosterChanges()) {
-        await this.recordMemberAdditionForDesktop(conversation, approval, prepared.request);
-        return conversation;
-      }
       const applied = await this.applyPreparedParticipantChange(conversation, prepared);
       this.upsertAppToolApproval(conversation, {
         ...approval,
@@ -5775,11 +5553,6 @@ export class ChatService {
       return conversation;
     }
     await execution?.beforeApply(approval);
-    if (!isPermissionApproval && !this.appliesRosterChanges()) {
-      // The legacy roster tool's addition: the desktop applies it too.
-      await this.recordMemberAdditionForDesktop(conversation, approval, approval.request, scope);
-      return conversation;
-    }
     const applied = isPermissionApproval
       ? scope === "once"
         ? [requester].filter((participant): participant is ChatParticipant => Boolean(participant))
@@ -6477,12 +6250,6 @@ export class ChatService {
     if (!mobileEventId) {
       return false;
     }
-    if (
-      typeof this.storage.hasChatEvent === "function" &&
-      await this.storage.hasChatEvent(conversationId, mobileEventId)
-    ) {
-      return true;
-    }
     const conversation = await this.storage.getConversation(conversationId);
     return Boolean(conversation && this.hasMobileEventMessage(conversation, mobileEventId));
   }
@@ -6624,8 +6391,28 @@ export class ChatService {
             ...dispatch,
             targets: this.allowParticipantRequestsForManualAccordIfSelected(conversation, skillValidation.skillMentions, dispatch.targets)
           };
+          if (this.serverLink && dispatch.targets.length > 0) {
+            // The members this message names, as this device resolved them:
+            // the server asks each one's device for its turn (Д4), and this
+            // process runs its own members' turns itself, under the same ids.
+            // A member whose cloud machine is not chosen yet, or whose machine
+            // has not got this chat's project yet, is asked by this device once
+            // that is done (runParticipantTurnRemote), not by the server at once.
+            const askedLater = new Set<string>();
+            for (const target of dispatch.targets) {
+              if (target.cloudRun && !target.homeMachineId) askedLater.add(target.id);
+              else if (target.homeMachineId && conversation.repoPath && this.machineProjectReady &&
+                  !await this.machineProjectReady(target.homeMachineId, conversation.repoPath).catch(() => false)) askedLater.add(target.id);
+            }
+            const deliveryTargets = dispatch.targets.filter((target) => !askedLater.has(target.id)).map((target) => target.id);
+            for (const message of conversation.messages) {
+              if (message.id === userMessage.id) message.metadata = { ...message.metadata, deliveryTargets } as ChatMessageMetadata;
+            }
+            userMessage.metadata = { ...userMessage.metadata, deliveryTargets } as ChatMessageMetadata;
+            for (const target of dispatch.targets) this.inProcessServerTurns.add(hubTurnRunId(userMessage.id, target.id));
+          }
           if (initialAutoTitleCandidate && dispatch.targets.length > 0) {
-            autoTitleTargetRunIds = new Map(dispatch.targets.map((target) => [target.id, randomUUID()]));
+            autoTitleTargetRunIds = new Map(dispatch.targets.map((target) => [target.id, this.serverLink ? hubTurnRunId(userMessage.id, target.id) : randomUUID()]));
             conversation.metadata = {
               ...conversation.metadata,
               autoTitleEligibility: this.initialAutoTitleEligibility(userMessage, dispatch.targets, autoTitleTargetRunIds)
@@ -6660,6 +6447,9 @@ export class ChatService {
     });
 
     const dispatchWarnings: string[] = [];
+    const serverTargetRunIds = this.serverLink && ingest.userMessage
+      ? new Map(ingest.dispatch.targets.map((target) => [target.id, hubTurnRunId(ingest.userMessage!.id, target.id)] as const))
+      : undefined;
     const dispatchPromise = this.runParticipantBatch(
       ingest.conversation,
       ingest.dispatch.targets,
@@ -6668,7 +6458,7 @@ export class ChatService {
       signal,
       progress,
       dispatchWarnings,
-      ingest.autoTitleTargetRunIds ? { targetRunIds: ingest.autoTitleTargetRunIds } : {}
+      ingest.autoTitleTargetRunIds ? { targetRunIds: ingest.autoTitleTargetRunIds } : serverTargetRunIds ? { targetRunIds: serverTargetRunIds } : {}
     );
     // Fire-and-track: ingest is already persisted, so return to the renderer now and let the
     // participant batch run in the background. Completion and per-participant failures surface
@@ -6820,7 +6610,7 @@ export class ChatService {
         // Saved before the refusal is published, so a restart in between does
         // not lose it; the last few are kept, so one refusal does not hide another.
         const refuse = async (reason: string): Promise<never> => {
-          const operationId = execution ? chatActionOperationId(execution.decisionEventId) : undefined;
+          const operationId = execution?.operationId;
           if (operationId && choice.status === "pending") {
             const refusals = [...(choice.refusals ?? []).filter(item => item.operationId !== operationId),
               { operationId, reason, at: new Date().toISOString() }].slice(-CHAT_CHOICE_REFUSALS_KEPT);
@@ -7280,6 +7070,35 @@ export class ChatService {
           });
           return;
         }
+        // The User's server first (Д4, Д13): the message this turn answers is
+        // on it, and the turn is taken here or asked of the member's device.
+        let serverTurn: ServerTurnOpen = { kind: "none" };
+        if (this.serverLink) {
+          try {
+            serverTurn = await this.openServerTurn(conversation, participant, triggerMessage, targetRunId, targetController.signal);
+          } catch (error) {
+            serverTurn = { kind: "skip", serverRunId: "", reason: error instanceof Error ? error.message : String(error) };
+            if (!targetController.signal.aborted) warnings.push(`@${participant.handle} could not start: ${serverTurn.reason}`);
+            else serverTurn = { kind: "stopped", serverRunId: "" };
+          }
+          if (serverTurn.kind === "stopped" || serverTurn.kind === "skip") {
+            if (serverTurn.kind === "stopped" && !this.turnShown(conversation, triggerMessage, participant, serverTurn.serverRunId)) {
+              await this.noteTurnStoppedBeforeStart(conversation, triggerMessage, participant);
+            }
+            this.serverTurnOpens.delete(targetRunId);
+            this.unregisterTargetRun(targetRunId, targetController);
+            writeGates.get(participant.id)?.markWritten();
+            await this.clearAutoTitleEligibilityForTerminalRun(conversation, targetRunId);
+            signal?.removeEventListener("abort", onParentAbort);
+            completed += 1;
+            this.emitProgress(runId, progress, "debate", `@${participant.handle} ${serverTurn.kind === "stopped" ? "stopped" : "skipped"}.`, {
+              participantLabel: `@${participant.handle}`,
+              completed,
+              total: participants.length
+            });
+            return;
+          }
+        }
         const turnReservation = this.reserveParticipantTurn(conversation.id, participant.id, this.participantTurnMode(participant, triggerMessage));
         // Pre-create the pending message inside the shared mutation queue, before
         // the per-participant turn queue wait, so the queued/streaming bubble is
@@ -7301,6 +7120,10 @@ export class ChatService {
         const pendingMessageIdOverride = options.pendingMessageIds?.get(participant.id);
         if (pendingMessageIdOverride) {
           pendingMessage.id = pendingMessageIdOverride;
+        }
+        if (serverTurn.kind === "remote") {
+          // Shown here until the member's own device writes the real bubble.
+          pendingMessage.metadata = { ...pendingMessage.metadata, serverPlaceholder: true, runId: serverTurn.serverRunId };
         }
         this.setTargetRunPendingMessageId(targetRunId, pendingMessage.id);
         // Register the run as active before persisting the pending bubble, and keep the
@@ -7336,13 +7159,21 @@ export class ChatService {
             turnReservation,
             writeGate: writeGates.get(participant.id)
           });
-          if (targetController.signal.aborted) {
+          if (serverTurn.kind === "remote") {
+            // The member's own device wrote its reply and ran what follows it.
+            await this.dropServerPlaceholder(conversation, pendingMessage.id);
+          } else if (targetController.signal.aborted) {
             await this.discardStoppedTargetRun(conversation, targetRunId, participant, pendingMessage.id);
           } else {
             await appendCompletedTurn(participant, messages);
           }
         } catch (error) {
-          if (targetController.signal.aborted) {
+          if (serverTurn.kind === "remote" && error instanceof RemoteTurnNotStartedError && !targetController.signal.aborted) {
+            await this.finalizeFailedPrecreatedPendingMessage(conversation, pendingMessage.id, participant, new Error(error.message));
+          } else if (serverTurn.kind === "remote") {
+            await this.dropServerPlaceholder(conversation, pendingMessage.id);
+            if (!targetController.signal.aborted) warnings.push(error instanceof Error ? error.message : String(error));
+          } else if (targetController.signal.aborted) {
             await this.discardStoppedTargetRun(conversation, targetRunId, participant, pendingMessage.id);
           } else {
             await this.finalizeFailedPrecreatedPendingMessage(conversation, pendingMessage.id, participant, error);
@@ -7368,340 +7199,6 @@ export class ChatService {
       })
     );
     await this.ensureHistoryFiles(conversation);
-  }
-
-  /** Machines transport, desktop side: the participant's home machine runs the
-   *  turn; the desktop waits for it under the same per-participant reservation
-   *  and cancellation rules as a local turn. Progress arrives through the same
-   *  callback; the returned messages are appended by the caller. */
-  private async runParticipantTurnOnMachine(
-    conversation: Conversation,
-    participant: ChatParticipant,
-    triggerMessage: ChatMessage,
-    runId: string,
-    signal: AbortSignal | undefined,
-    progress: ProgressCallback | undefined,
-    options: {
-      warnings: string[];
-      existingPendingMessage?: ChatMessage;
-      continuation?: boolean;
-      turnSegmentId: string;
-    }
-  ): Promise<ChatMessage[]> {
-    const link = this.machineLink;
-    if (!link) {
-      throw new Error(`@${participant.handle} is hosted on a machine, but the machine link is not available.`);
-    }
-    // The desktop owns the pending bubble exactly as for a local turn; a
-    // pre-created bubble (batch path) is reused, otherwise one is created here
-    // and finalized below (continuation and resume paths).
-    let pendingMessage: ChatMessage;
-    const ownsPendingMessage = !options.existingPendingMessage;
-    if (options.existingPendingMessage) {
-      pendingMessage = options.existingPendingMessage;
-    } else {
-      pendingMessage = this.message(
-        "participant",
-        "",
-        { id: participant.id, kind: participant.kind, label: `@${participant.handle}`, model: participant.model },
-        {
-          threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
-          parentMessageId: triggerMessage.id,
-          chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
-          sourceMessageId: triggerMessage.id,
-          requesterParticipantId: options.continuation ? triggerMessage.participantId : undefined,
-          approvedContinuation: options.continuation || undefined,
-          runId,
-          turnSegmentId: options.turnSegmentId
-        },
-        "pending"
-      );
-      this.setTargetRunPendingMessageId(runId, pendingMessage.id);
-      await this.withChatMutation(conversation, async () => {
-        this.resolveSupersededParticipantInteractions(conversation, participant.id, pendingMessage.id);
-        conversation.messages.push(pendingMessage);
-        this.recordLastMessageByParticipant(conversation, pendingMessage);
-        conversation.updatedAt = new Date().toISOString();
-        this.queueSnapshot(conversation);
-      });
-    }
-    // After refresh-then-merge the bubble object held here may no longer be
-    // the one inside conversation.messages; both are updated by id.
-    const bubbleObjects = (): ChatMessage[] => {
-      const inConversation = conversation.messages.find((message) => message.id === pendingMessage.id);
-      return inConversation && inConversation !== pendingMessage ? [pendingMessage, inConversation] : [pendingMessage];
-    };
-    const clearStopPending = (): void => {
-      for (const bubble of bubbleObjects()) {
-        if (bubble.metadata?.stopPending) {
-          const { stopPending: _stopPending, ...rest } = bubble.metadata;
-          bubble.metadata = rest;
-        }
-      }
-    };
-    // The machine keeps its result until this desktop has stored the
-    // outcome (whatever it is): store now, acknowledge only on a successful
-    // write, and leave the result on the machine otherwise.
-    const storeOutcomeAndAcknowledge = async (result: MachineTurnDispatchResult, extra: ChatMessage[] = []): Promise<void> => {
-      await this.withChatMutation(conversation, async () => {
-        for (const message of extra) {
-          if (!conversation.messages.some((existing) => existing.id === message.id)) {
-            conversation.messages.push(message);
-          }
-        }
-        this.updateParticipantContextUsage(conversation, participant.id, normalizeAgentContextUsage(result.contextUsage));
-        conversation.updatedAt = new Date().toISOString();
-        this.queueSnapshot(conversation);
-      });
-      const stored = await this.waitForQueuedSaveResult(conversation.id);
-      if (stored) {
-        try { await result.acknowledge?.(); }
-        catch (error) {
-          // The provider outcome is already safely stored. An outbox/receipt
-          // failure must retry delivery, never turn that outcome into failure.
-          void this.debugLogs.write("chat.machine-turn.ack-pending", { conversationId: conversation.id, runId, message: error instanceof Error ? error.message : String(error) });
-        }
-      } else {
-        void this.debugLogs.write("chat.machine-turn.not-stored", { conversationId: conversation.id, runId, status: result.status });
-      }
-    };
-    let dispatchResult: MachineTurnDispatchResult | undefined;
-    // A turn that never left this desktop is settled here, everywhere: the
-    // member's home machine only ever had its empty bubble.
-    const markTurnNotSent = (): void => {
-      for (const bubble of bubbleObjects()) bubble.metadata = { ...bubble.metadata, machineTurnNotSent: true };
-    };
-    // Set once the machine's result has been folded, stored and acknowledged:
-    // a failure raised after that (the run failed on its machine) leaves the
-    // bubble as folded and is never stored or acknowledged a second time.
-    let terminalHandled = false;
-    let dispatched = false;
-    let progressWrites = Promise.resolve();
-    const reportPreparation = (snapshot: CloudRunPreparationProgress): void => {
-      if (signal?.aborted) return;
-      this.emitProgress(runId, progress, "initial", snapshot.message, { participantLabel: `@${participant.handle}` });
-      progressWrites = progressWrites.then(() => this.withChatMutation(conversation, async () => {
-        if (signal?.aborted) return;
-        for (const bubble of bubbleObjects()) bubble.metadata = { ...bubble.metadata, cloudRunPreparation: snapshot };
-        this.queueSnapshot(conversation);
-      }));
-      void progressWrites.catch(() => {});
-    };
-    try {
-      signal?.throwIfAborted();
-      if (participant.cloudRun && !participant.homeMachineId) {
-        if (!this.prepareCloudSelection) throw new Error("Cloud setup is not available on this device.");
-        reportPreparation({ operationId: runId, message: "Preparing Cloud run…" });
-        const preparing = this.prepareCloudSelection(participant.cloudRun, participant.kind, reportPreparation);
-        let abort: (() => void) | undefined;
-        const cancelled = new Promise<never>((_resolve, reject) => {
-          abort = () => reject(signal?.reason ?? new Error("Chat run cancelled."));
-          signal?.addEventListener("abort", abort, { once: true });
-          if (signal?.aborted) abort();
-        });
-        let machineId: string;
-        try { machineId = await Promise.race([preparing, cancelled]); }
-        finally { if (abort) signal?.removeEventListener("abort", abort); }
-        signal?.throwIfAborted();
-        await this.withChatMutation(conversation, async () => {
-          signal?.throwIfAborted();
-          const members = this.chatParticipants(conversation);
-          const current = members.find(item => item.id === participant.id);
-          if (!current || JSON.stringify(current.cloudRun) !== JSON.stringify(participant.cloudRun)) {
-            throw new Error("The member's run location changed while Cloud was preparing.");
-          }
-          if (current.homeMachineId && current.homeMachineId !== machineId) {
-            throw new Error("The cloud machine identity changed. Re-add this member before running it there.");
-          }
-          const ready = { ...current, homeMachineId: machineId };
-          conversation.metadata = { ...conversation.metadata, participants: members.map(item => item.id === ready.id ? ready : item) };
-          await this.saveConversation(conversation);
-          participant = ready;
-        });
-      }
-      signal?.throwIfAborted();
-      await this.prepareParticipantProjects(conversation.repoPath, [participant], signal,
-        message => reportPreparation({ operationId: runId, message }));
-      await progressWrites;
-      signal?.throwIfAborted();
-      await this.withChatMutation(conversation, async () => {
-        for (const bubble of bubbleObjects()) if (bubble.metadata) delete bubble.metadata.cloudRunPreparation;
-        this.queueSnapshot(conversation);
-      });
-      if (!await this.waitForQueuedSaveResult(conversation.id)) throw new Error("The cloud run could not be saved before dispatch.");
-      signal?.throwIfAborted();
-      dispatched = true;
-      const result = await link.runTurn({
-        conversation,
-        participant,
-        triggerMessage,
-        runId,
-        pendingMessageId: pendingMessage.id,
-        signal,
-        progress,
-        onMachineWaiting: async (machineName, reason) => {
-          await this.withChatMutation(conversation, async () => {
-            for (const bubble of bubbleObjects().filter(item => item.status === "pending")) {
-              bubble.metadata = { ...bubble.metadata, machinePending: { machineName, at: new Date().toISOString(), ...(reason ? { reason } : {}) } };
-            }
-            this.queueSnapshot(conversation);
-          });
-          if (!await this.waitForQueuedSaveResult(conversation.id)) throw new Error("The waiting machine command could not be stored.");
-        },
-        onStopPending: (machineName) => {
-          void this.debugLogs.write("chat.stop-pending.requested", { conversationId: conversation.id, runId, pendingMessageId: pendingMessage.id });
-          void this.withChatMutation(conversation, async () => {
-            const bubbles = bubbleObjects().filter((bubble) => bubble.status === "pending");
-            void this.debugLogs.write("chat.stop-pending.mutation", { conversationId: conversation.id, runId, bubbles: bubbles.length, statuses: bubbleObjects().map((bubble) => bubble.status) });
-            if (bubbles.length === 0) {
-              return;
-            }
-            // Delivered text stays; the waiting state is a separate mark the
-            // renderer shows under the bubble.
-            const stopPending = { machineName, at: new Date().toISOString() };
-            for (const bubble of bubbles) {
-              bubble.metadata = { ...bubble.metadata, stopPending };
-            }
-            conversation.updatedAt = new Date().toISOString();
-            this.queueSnapshot(conversation);
-            void this.debugLogs.write("chat.stop-pending.marked", { conversationId: conversation.id, runId });
-          }).catch((error: unknown) => {
-            void this.debugLogs.write("chat.stop-pending.error", { conversationId: conversation.id, runId, message: error instanceof Error ? error.message : String(error) });
-          });
-        }
-      });
-      this.promptSuggestions.replyEnded(conversation.id, participant.id, runId);
-      clearStopPending();
-      dispatchResult = result;
-      if (result.sent === false) markTurnNotSent();
-      for (const warning of result.warnings) {
-        if (!options.warnings.includes(warning)) {
-          options.warnings.push(warning);
-        }
-      }
-      // Whatever the outcome, the machine's copy of the bubble (same id)
-      // contributes its text and the run's other messages, and the whole
-      // result is stored before the machine is told to drop it.
-      const status = result.status === "failed" && signal?.aborted ? "unconfirmed" : result.status;
-      const others = foldMachineTurnResult(pendingMessage, participant.handle, runId, { status, messages: result.messages, error: result.error, finishedAt: result.finishedAt, receiptId: result.receiptId });
-      for (const bubble of bubbleObjects()) {
-        if (bubble !== pendingMessage) {
-          bubble.content = pendingMessage.content;
-          bubble.status = pendingMessage.status;
-          bubble.metadata = pendingMessage.metadata;
-        }
-      }
-      await storeOutcomeAndAcknowledge(result, others);
-      terminalHandled = true;
-      if (status === "failed") {
-        throw new Error(result.error ?? `@${participant.handle} failed on its machine.`);
-      }
-      if (status === "interrupted" || status === "unconfirmed") {
-        return ownsPendingMessage ? [pendingMessage, ...others] : others;
-      }
-      return [pendingMessage, ...others];
-    } catch (error) {
-      if (terminalHandled) {
-        throw error;
-      }
-      clearStopPending();
-      if (!dispatched) markTurnNotSent();
-      if (!signal?.aborted) {
-        pendingMessage.status = "error";
-        pendingMessage.content = this.failedPrecreatedPendingMessageContent(participant, error);
-      } else if (!dispatched) {
-        this.markParticipantMessageStoppedByUser(pendingMessage, participant);
-      } else {
-        // Once dispatched, only the machine can confirm cancellation.
-        this.markParticipantMessageStopUnconfirmed(pendingMessage, participant, error instanceof Error ? error.message : String(error));
-      }
-      if (dispatchResult) {
-        await storeOutcomeAndAcknowledge(dispatchResult).catch(() => undefined);
-      }
-      throw error;
-    } finally {
-      await progressWrites.catch(() => {});
-      for (const bubble of bubbleObjects()) if (bubble.metadata) delete bubble.metadata.cloudRunPreparation;
-      if (ownsPendingMessage && (!signal?.aborted || !dispatched)) {
-        await this.finalizePendingParticipantMessage(conversation, participant, pendingMessage);
-      }
-    }
-  }
-
-  /** Machines transport, desktop side: an approval raised or answered by a
-   *  member on a machine lands in this desktop's copy as the same card, with
-   *  the machine's chat-wide policies merged in. */
-  async applyMachineApproval(request: {
-    conversationId: string;
-    approval: ChatAppToolApproval;
-    policies?: ChatAppToolApprovalPolicy[];
-    decisionId?: string;
-    /** With `decisionId`: whether the machine applied that decision. */
-    decisionApplied?: boolean;
-  }): Promise<Conversation | undefined> {
-    const conversation = await this.storage.getConversation(request.conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      throw new Error("The approval's chat is not available; its delivery has not been acknowledged.");
-    }
-    let rosterChange: "removal" | "addition" | undefined;
-    const result = await this.withChatMutation(conversation, async () => {
-      const current = this.chatAppToolApprovals(conversation).find(item => item.id === request.approval.id);
-      const queued = current?.machineDecisionPending;
-      const incoming = request.approval;
-      const claimsRosterChange = Boolean(incoming.memberRemovalQueuedAt || incoming.memberAdditionQueuedAt);
-      // The desktop applies a machine member's roster change; a copy of the
-      // card the machine sent before it learned that (or sends again on a
-      // reconnect), or an older copy still asking, must not bring the waiting
-      // or the pending state back here.
-      const settledHere = current?.rosterChangeSettledAt;
-      const rosterCardHere = Boolean(current && (current.memberRemovalQueuedAt || current.memberAdditionQueuedAt || settledHere));
-      const stale = Boolean((settledHere && claimsRosterChange) || (rosterCardHere && incoming.status === "pending" && current?.status !== "pending"));
-      let next: ChatAppToolApproval = stale && current
-        ? { ...current }
-        : { ...incoming, ...(settledHere ? { rosterChangeSettledAt: settledHere } : {}) };
-      // The User's answer the machine applied, by which a roster change is
-      // confirmed here (machineRosterDecision); a later answer it refused
-      // (already answered) does not replace it.
-      const appliedDecisionId = request.decisionId && request.decisionApplied ? request.decisionId : current?.machineAppliedDecisionId;
-      if (appliedDecisionId) next = { ...next, machineAppliedDecisionId: appliedDecisionId };
-      const problem = !stale && claimsRosterChange ? this.machineRosterCardProblem(conversation, current, incoming) : undefined;
-      if (problem) {
-        // Kept as a card that says why; never applied.
-        const decidedAt = this.laterThan(incoming.updatedAt);
-        const { memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition, ...refused } = next;
-        next = { ...refused, status: "cancelled", error: problem, rosterChangeSettledAt: decidedAt, updatedAt: decidedAt };
-        conversation.messages.push(this.message("system",
-          `Could not ${incoming.memberRemovalQueuedAt ? "remove" : "add"} ${this.rosterChangeTargetsText(incoming)} at ${this.requesterReference(conversation, incoming)}'s request: ${problem}`,
-          undefined, { threadId: "system", rosterChange: { approvalId: incoming.id, outcome: "refused", error: problem } }));
-      }
-      this.upsertAppToolApproval(conversation, { ...next, conversationId: conversation.id,
-        machineDecisionPending: queued && request.decisionId !== queued.decisionId ? queued : undefined,
-        machineDecisionReceiptId: request.decisionId ?? current?.machineDecisionReceiptId });
-      if (!stale && !problem && this.isQueuedMemberRemovalApproval(next)) rosterChange = "removal";
-      else if (!stale && !problem && this.isQueuedMemberAdditionApproval(next)) rosterChange = "addition";
-      for (const policy of request.policies ?? []) {
-        if (policy && typeof policy === "object" && typeof policy.id === "string") {
-          this.upsertAppToolApprovalPolicy(conversation, policy);
-        }
-      }
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
-      return conversation;
-    });
-    // The machine's decision outcome (and the card call behind it) waits for
-    // this write; a failed write is an error, not a silent success.
-    if (!(await this.waitForQueuedSaveResult(request.conversationId))) {
-      throw new Error("The approval could not be stored in this desktop's chat.");
-    }
-    // A machine member's approved roster change: applied here, by the owner
-    // of the member list, a removal once the chat is idle.
-    if (rosterChange === "removal") {
-      this.noteQueuedMemberRemoval(request.conversationId);
-      this.scheduleQueuedMemberRemovals(request.conversationId);
-    } else if (rosterChange === "addition") {
-      void this.applyQueuedMemberAdditionsOnce(request.conversationId);
-    }
-    return result;
   }
 
   /** Machines transport, machine side: stores a conversation replicated from
@@ -7739,9 +7236,7 @@ export class ChatService {
     }
     const conversation = await this.storage.getConversation(conversationId);
     const marker = conversation ? await this.enqueueDeletedConversationArtifactCleanup(conversation) : undefined;
-    const machineIds = conversation ? this.chatParticipants(conversation).map(participant => participant.homeMachineId)
-      .filter((id): id is string => typeof id === "string" && id.length > 0) : [];
-    await this.storage.conversationTombstones().mark(conversationId, deletedAt, machineIds);
+    await this.storage.conversationTombstones().mark(conversationId, deletedAt);
     await this.closeReplicatedConversationSessions(conversationId);
     await this.storage.deleteConversation(conversationId);
     if (conversation) {
@@ -7819,277 +7314,6 @@ export class ChatService {
         this.resetAutoWatchDepthForUserMessage(incoming);
       }
     }
-  }
-
-  /** Machines transport, desktop side: messages created or changed by turns
-   *  that started on a machine (a member resumed after an approval, a member
-   *  request run there) land in this desktop's copy under their own ids. */
-  async applyMachineBackDelta(request: {
-    conversationId: string;
-    messages: ChatMessage[];
-    /** The machine that sent them, and its device identity. A machine writes
-     *  only its own members' messages and what it created itself; anything
-     *  else it sends is refused, not stored and then sent on as this
-     *  desktop's own. */
-    machineId?: string;
-    machineOriginId?: string;
-  }): Promise<Conversation | undefined> {
-    if (this.deletedConversationIds.has(request.conversationId) || await this.storage.conversationTombstones?.().isDeleted(request.conversationId)) return undefined;
-    const conversation = await this.storage.getConversation(request.conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      return conversation;
-    }
-    return this.withChatMutation(conversation, async () => {
-      let changed = false;
-      const refused: string[] = [];
-      // Read as the chat change rules read it (chatChangeTransport).
-      const listed = Array.isArray(conversation.metadata.participants) ? conversation.metadata.participants as Array<{ id?: unknown; homeMachineId?: unknown }> : [];
-      const homeOf = (participantId: string | undefined): string | undefined => {
-        const home = participantId ? listed.find((participant) => participant?.id === participantId)?.homeMachineId : undefined;
-        return typeof home === "string" && home ? home : undefined;
-      };
-      const itsMember = (message: ChatMessage): boolean =>
-        message.role === "participant" && Boolean(message.participantId) && homeOf(message.participantId) === request.machineId;
-      const createdThere = (message: ChatMessage): boolean => Boolean(request.machineOriginId) &&
-        (message.metadata as Record<string, unknown> | undefined)?.remoteAuthorOriginId === request.machineOriginId;
-      for (const raw of request.messages) {
-        if (!raw || typeof raw.id !== "string") {
-          continue;
-        }
-        let incoming = raw;
-        const index = conversation.messages.findIndex((message) => message.id === incoming.id);
-        if (request.machineId) {
-          const current = index >= 0 ? conversation.messages[index] : undefined;
-          const allowed = current
-            ? (itsMember(current) || createdThere(current)) && (incoming.role !== "participant" || itsMember(incoming))
-            : incoming.role === "participant" ? itsMember(incoming) : incoming.role === "user" || incoming.role === "system";
-          if (!allowed) {
-            refused.push(incoming.id);
-            continue;
-          }
-          // Who created a message is this desktop's record, never the sender's
-          // claim. One the machine created stays its own here, through every
-          // later update: this desktop does not take it over as its own.
-          const { remoteAuthorOriginId: _claimed, ...metadata } = (incoming.metadata ?? {}) as Record<string, unknown>;
-          const author = current
-            ? (current.metadata as Record<string, unknown> | undefined)?.remoteAuthorOriginId
-            : incoming.role !== "participant" ? request.machineOriginId : undefined;
-          incoming = { ...incoming, metadata: { ...metadata, ...(typeof author === "string" && author ? { remoteAuthorOriginId: author } : {}) } as ChatMessage["metadata"] };
-        }
-        if (index >= 0) {
-          const current = conversation.messages[index];
-          // Never let a machine's copy demote a message this desktop already finished.
-          if (current.status !== "pending" && incoming.status === "pending") {
-            continue;
-          }
-          conversation.messages[index] = incoming;
-        } else {
-          conversation.messages.push(incoming);
-        }
-        if (incoming.role === "participant") {
-          this.recordLastMessageByParticipant(conversation, incoming);
-          // A reply the member started on its machine (its runs this desktop
-          // dispatched are already its newest).
-          const replyRunId = incoming.metadata?.runId;
-          if (index < 0 && incoming.participantId && replyRunId) {
-            this.promptSuggestions.replyStarted(conversation.id, incoming.participantId, replyRunId);
-          }
-        }
-        changed = true;
-      }
-      if (refused.length) {
-        void this.debugLogs.write("chat.machine-backdelta.refused", { conversationId: conversation.id, machineId: request.machineId, messageIds: refused.slice(0, 20) });
-      }
-      if (!changed) {
-        return conversation;
-      }
-      conversation.messages.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
-      return conversation;
-    }).then(async (result) => {
-      // Callers acknowledge to the machine only once the rows are stored; a
-      // failed write is an error here, so no acknowledgement follows it.
-      if (!(await this.waitForQueuedSaveResult(request.conversationId))) {
-        throw new Error("The machine's messages could not be stored in this desktop's chat.");
-      }
-      this.scheduleAutoWatchEvaluation(request.conversationId, "machine-messages");
-      return result;
-    });
-  }
-
-  async applyMachineRunStarted(request: { conversationId: string; runId: string }): Promise<void> {
-    if (this.deletedConversationIds.has(request.conversationId) || await this.storage.conversationTombstones?.().isDeleted(request.conversationId)) return;
-    // A compaction that waited for its machine is running now.
-    this.machineCompactionStatus.get(request.runId)?.();
-    const conversation = await this.requireChat(request.conversationId);
-    await this.withChatMutation(conversation, async () => {
-      for (const message of conversation.messages) {
-        if (message.status === "pending" && message.metadata?.runId === request.runId) delete message.metadata.machinePending;
-      }
-      // Retry the write even when a previous failed save already cleared the
-      // in-memory mark. Transport acknowledgement requires a stored projection.
-      this.queueSnapshot(conversation);
-    });
-    if (!await this.waitForQueuedSaveResult(conversation.id)) throw new Error("The machine's started state could not be stored.");
-  }
-
-  /** Machines transport, desktop side: a turn result (any status) for a run
-   *  this desktop no longer tracks, because it restarted meanwhile. The
-   *  bubble is folded exactly as for a live turn, the run's other messages
-   *  are inserted, and the result counts as applied only once stored; the
-   *  caller acknowledges to the machine (and drops a held stop) after that. */
-  async applyMachineLateTerminal(request: {
-    conversationId: string;
-    runId: string;
-    status: "completed" | "interrupted" | "failed" | "unconfirmed";
-    messages: ChatMessage[];
-    warnings?: string[];
-    error?: string;
-    finishedAt?: string;
-    receiptId?: string;
-    machineName: string;
-    /** The machine that sent it: context use is taken only for its own member. */
-    machineId?: string;
-    participantId?: string;
-    contextUsage?: AgentContextUsage;
-    /** A compaction of `participantId`: one that never wrote its outcome
-     *  line (stopped or failed before it ran) gets the line it would have. */
-    compaction?: { triggeredBy: "user" | "agent" };
-  }): Promise<void> {
-    // The tombstone is a durable disposition of a late result: acknowledge it
-    // without reviving a deleted chat or retaining its delivery forever.
-    if (this.deletedConversationIds.has(request.conversationId) || await this.storage.conversationTombstones?.().isDeleted(request.conversationId)) return;
-    const conversation = await this.storage.getConversation(request.conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      throw new Error(`The chat for the result from machine ${request.machineName} is unavailable; the result has not been stored.`);
-    }
-    await this.withChatMutation(conversation, async () => {
-      const bubble = conversation.messages.find((message) => message.role === "participant" && message.metadata?.runId === request.runId);
-      let others = request.messages;
-      if (bubble) {
-        const participant = this.chatParticipants(conversation).find((item) => item.id === bubble.participantId);
-        const handle = participant?.handle ?? bubble.participantLabel?.replace(/^@/, "") ?? "member";
-        others = foldMachineTurnResult(bubble, handle, request.runId, { status: request.status, messages: request.messages, error: request.error, finishedAt: request.finishedAt, receiptId: request.receiptId });
-        this.recordLastMessageByParticipant(conversation, bubble);
-      }
-      for (const incoming of others) {
-        const index = conversation.messages.findIndex((message) => message.id === incoming.id);
-        if (index >= 0) {
-          if (conversation.messages[index].status !== "pending" && incoming.status === "pending") {
-            continue;
-          }
-          conversation.messages[index] = incoming;
-        } else {
-          conversation.messages.push(incoming);
-        }
-        if (incoming.role === "participant") {
-          this.recordLastMessageByParticipant(conversation, incoming);
-        }
-      }
-      conversation.messages.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-      // The run's CLI warnings reach the chat exactly as a live turn's would.
-      for (const warning of request.warnings ?? []) {
-        this.addConversationWarning(conversation, warning);
-      }
-      const usageParticipantId = bubble?.participantId ?? request.participantId;
-      const usageMember = usageParticipantId ? this.chatParticipants(conversation).find((item) => item.id === usageParticipantId) : undefined;
-      const ownMember = usageMember && request.machineId && usageMember.homeMachineId === request.machineId ? usageMember : undefined;
-      if (ownMember) {
-        this.updateParticipantContextUsage(conversation, ownMember.id, normalizeAgentContextUsage(request.contextUsage));
-      }
-      if (ownMember && request.compaction && !bubble && request.status !== "completed" &&
-          !conversation.messages.some((message) => isMachineCompactionLine(message, request.runId, ownMember.id))) {
-        const line = machineCompactionFailureLine(ownMember.handle, request.status, request.error);
-        conversation.messages.push(this.message("system", line, undefined,
-          { ...this.compactMessageMetadata({ runId: request.runId, triggeredBy: request.compaction.triggeredBy }, ownMember.id, "failed"),
-            ...(request.compaction.triggeredBy === "agent" ? { threadId: "system" } : {}) }));
-      }
-      // A late result has no local run's finally block to clear its status.
-      // Publish and store that same final state, preserving other machines'
-      // concurrent runs rather than relying on a later storage read to sweep it.
-      const active = readActiveRunIds(conversation.metadata);
-      const compatibilityRunId = conversation.metadata.runId;
-      if (conversation.metadata.running && typeof compatibilityRunId === "string" && !active.includes(compatibilityRunId)) active.push(compatibilityRunId);
-      conversation.metadata = withActiveRunIdRemoved({ ...conversation.metadata, activeRunIds: active }, request.runId);
-      const owners = { ...this.chatRunOwners(conversation.metadata) };
-      delete owners[request.runId];
-      if (Object.keys(owners).length) conversation.metadata[ACTIVE_RUN_OWNERS_KEY] = owners;
-      else delete conversation.metadata[ACTIVE_RUN_OWNERS_KEY];
-      if (conversation.metadata.runId === request.runId) {
-        const remaining = readActiveRunIds(conversation.metadata);
-        if (remaining.length) conversation.metadata.runId = remaining[0];
-        else delete conversation.metadata.runId;
-      }
-      if ((this.backgroundRunnerCounts.get(conversation.id) ?? 0) > 0) conversation.metadata.running = true;
-      conversation.metadata = withParticipantCompactionsForRunRemoved(conversation.metadata, request.runId);
-      conversation.metadata = this.metadataAfterAutoTitleRunTerminal(conversation.id, conversation.metadata, request.runId);
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
-    });
-    if (!(await this.waitForQueuedSaveResult(request.conversationId))) {
-      throw new Error(`The result from machine ${request.machineName} could not be stored in this desktop's chat.`);
-    }
-  }
-
-  /** Machines transport, machine side: runs one participant turn for a message
-   *  that already exists in this machine's copy of the conversation, reusing
-   *  the run id and pending message id the desktop chose. Returns the
-   *  participant's messages for that run. */
-  async runMachineHostedTurn(
-    request: { conversationId: string; participantId: string; messageId: string; runId: string; pendingMessageId: string },
-    signal?: AbortSignal,
-    progress?: ProgressCallback
-  ): Promise<{ messages: ChatMessage[]; warnings: string[]; contextUsage?: AgentContextUsage }> {
-    // The desktop's pending bubble for this run is already in the copy; the
-    // run must count as live before the stale-run sweep in requireChat sees
-    // it, or the bubble is marked interrupted before the turn even starts.
-    this.activeRunIds.add(request.runId);
-    const warnings: string[] = [];
-    let participant: ChatParticipant | undefined;
-    try {
-      const conversation = await this.requireChat(request.conversationId);
-      participant = this.chatParticipants(conversation).find((item) => item.id === request.participantId);
-      if (!participant) {
-        throw new Error("Machine-hosted turn participant was not found in this machine's copy of the chat.");
-      }
-      this.assertOwnsParticipant(participant);
-      const triggerMessage = conversation.messages.find((message) => message.id === request.messageId);
-      if (!triggerMessage) {
-        throw new Error("Machine-hosted turn message was not found in this machine's copy of the chat.");
-      }
-      await this.runParticipantBatch(
-        conversation,
-        [participant],
-        triggerMessage,
-        request.runId,
-        signal,
-        progress,
-        warnings,
-        {
-          targetRunIds: new Map([[participant.id, request.runId]]),
-          pendingMessageIds: new Map([[participant.id, request.pendingMessageId]]),
-          onTargetRunBegun: async () => this.withChatMutation(conversation, async () => {
-            this.advanceAutoWatchCursorForDirectTargets(conversation, [participant!], triggerMessage);
-            await this.saveConversation(conversation);
-          })
-        }
-      );
-    } finally {
-      // The early registration above is dropped on every exit unless the
-      // batch's own ref-counted bookkeeping still holds the run.
-      if ((this.activeRunRefCounts.get(request.runId) ?? 0) === 0) {
-        this.activeRunIds.delete(request.runId);
-      }
-    }
-    const participantId = participant.id;
-    const refreshed = await this.requireChat(request.conversationId);
-    const messages = refreshed.messages.filter((message) =>
-      message.participantId === participantId && message.metadata?.runId === request.runId && message.status !== "pending"
-    );
-    // The desktop shows the member's context use from what its CLI reported here.
-    const contextUsage = this.agentContextUsageByParticipant(refreshed)[participantId];
-    return { messages, warnings, ...(contextUsage ? { contextUsage } : {}) };
   }
 
   private async discardStoppedTargetRun(
@@ -10463,6 +9687,7 @@ export class ChatService {
     conversation.metadata = this.mergeStoredChatMetadata(stored.metadata, conversation.metadata);
     conversation.title = title;
     this.applyRemovedChatMessageTombstones(conversation);
+    this.withoutGoneServerPlaceholders(conversation);
     conversation.updatedAt = stored.updatedAt > conversation.updatedAt ? stored.updatedAt : conversation.updatedAt;
   }
 
@@ -10572,13 +9797,31 @@ export class ChatService {
       !storedMetadata?.queuedBehind &&
       !storedMetadata?.activityEvents &&
       !storedMetadata?.processingTranscript &&
-      !storedMetadata?.remoteRunStatus
+      !storedMetadata?.remoteRunStatus &&
+      storedMetadata?.serverSeq === undefined &&
+      !storedMetadata?.serverTurns &&
+      !storedMetadata?.serverRejected &&
+      !storedMetadata?.serverCard
     ) {
       return undefined;
     }
     const merged: ChatMessage["metadata"] = {
       ...currentMetadata
     };
+    // What the User's server said of a message (its place, its writer, a
+    // refusal, the turns it asked for) only moves forward: a running turn's
+    // older copy of the message never takes it back (Д3, Д5).
+    if (merged.serverSeq === undefined && storedMetadata?.serverSeq !== undefined) {
+      merged.serverSeq = storedMetadata.serverSeq;
+      if (storedMetadata.serverWriter !== undefined) merged.serverWriter = storedMetadata.serverWriter;
+    }
+    if (!merged.serverRejected && storedMetadata?.serverRejected) merged.serverRejected = storedMetadata.serverRejected;
+    const serverTurns = furthestTurnMarks(storedMetadata?.serverTurns, currentMetadata?.serverTurns);
+    if (serverTurns) merged.serverTurns = cloneJsonValue(serverTurns);
+    // An answer elsewhere to a machine member's card, as the feed last said
+    // (only ever written through the stored copy): the stored one, or none.
+    if (storedMetadata?.serverCard) merged.serverCard = cloneJsonValue(storedMetadata.serverCard);
+    else delete merged.serverCard;
     if (storedMetadata?.reactions) {
       merged.reactions = cloneJsonValue(storedMetadata.reactions);
     } else {
@@ -11365,14 +10608,6 @@ export class ChatService {
           }
           const participant = this.activeAutoWatchParticipant(conversation);
           if (!participant) {
-            return;
-          }
-          // On a machine, a member whose approved removal waits for the
-          // desktop is not woken: the desktop applies it at this idle moment.
-          if (!this.appliesRosterChanges() && this.chatAppToolApprovals(conversation).some((approval) =>
-            approval.status === "approved" && typeof approval.memberRemovalQueuedAt === "string" &&
-            this.isParticipantRemovalRequest(approval.request) &&
-            approval.request.operations.some((operation) => operation.participantId === participant.id))) {
             return;
           }
           if (this.storedMetadataHasProtectedLiveRuns(conversation.metadata)) {
@@ -14229,140 +13464,11 @@ export class ChatService {
   }
 
 
-  /**
-   * Machine side. Hands each group to its home and waits for the answers to
-   * reach this machine's own copy of the chat.
-   *
-   * The request message is already on its way there through the ordinary
-   * back delta; the delegation also carries that row and its source in case
-   * it arrives first. Receivers fold it onto the same request message and
-   * only items still open and owned by that receiver are run.
-   */
-  private async delegateParticipantRequest(
-    conversationId: string,
-    requestMessageId: string,
-    targetIds: ReadonlySet<string>
-  ): Promise<ParticipantRequestRunResult> {
-    const delegate = this.participantRequestDelegate;
-    if (!delegate) throw new Error("This machine cannot reach the owner's other devices to ask other members.");
-    // One delegation per home: each member is run by the device it lives on,
-    // and no device is asked for a member that is not its own.
-    const conversation = await this.requireChat(conversationId);
-    const requestMessage = conversation.messages.find(message => message.id === requestMessageId);
-    const batch = requestMessage?.metadata?.participantRequest;
-    if (!requestMessage || !batch) throw new Error("Member request message was not found.");
-    const participants = this.chatParticipants(conversation);
-    const byHome = new Map<string, string[]>();
-    for (const item of batch.items) {
-      if (item.status !== "running" || !targetIds.has(item.targetParticipantId)) continue;
-      const target = participants.find((participant) => participant.id === item.targetParticipantId);
-      if (!target) throw new Error("The requested member is no longer in this chat.");
-      if (this.ownsParticipant(target)) throw new Error("A local member must not be delegated back to this machine.");
-      const home = target?.homeMachineId ?? "";
-      byHome.set(home, [...(byHome.get(home) ?? []), item.targetParticipantId]);
-    }
-    const carried = conversation.messages.filter((message) =>
-      message.id === requestMessage.id || message.id === requestMessage.metadata?.sourceMessageId);
-    for (const [home, targetParticipantIds] of byHome) {
-      await delegate.delegateParticipantRequest({
-        conversationId,
-        requestMessageId: requestMessage.id,
-        batchId: batch.id,
-        depth: batch.depth,
-        ...(home ? { homeMachineId: home } : {}),
-        targetParticipantIds,
-        messages: carried
-      });
-    }
-    const deadline = Date.now() + DELEGATED_PARTICIPANT_REQUEST_LIMIT_MS;
-    for (;;) {
-      const conversation = await this.requireChat(conversationId);
-      const message = conversation.messages.find((candidate) => candidate.id === requestMessageId);
-      const batch = message?.metadata?.participantRequest;
-      if (!batch) throw new Error("Member request message was not found.");
-      const items = batch.items.filter(item => targetIds.has(item.targetParticipantId));
-      if (!items.some((item) => this.isOpenParticipantRequestStatus(item.status)) || Date.now() >= deadline) {
-        return {
-          batch,
-          replies: items.map((item) => {
-            const reply = item.replyMessageId
-              ? conversation.messages.find((candidate) => candidate.id === item.replyMessageId)
-              : undefined;
-            return {
-              targetHandle: item.targetHandle,
-              messageId: reply?.id,
-              content: reply?.content,
-              error: item.error ?? (reply?.status === "error" ? reply.content : undefined)
-            };
-          })
-        };
-      }
-      await new Promise((resolve) => setTimeout(resolve, DELEGATED_PARTICIPANT_REQUEST_POLL_MS));
-    }
-  }
-
-  /**
-   * Desktop side. A member on a machine asked other members to answer; this
-   * runs them here, each where that member lives.
-   *
-   * Resuming the requester is deliberately not done here: the requester is
-   * that machine's own member, and that machine's runner is still waiting for
-   * these answers and resumes it once they arrive. Resuming it from here as
-   * well would give it two turns at once.
-   */
-  async runDelegatedParticipantRequest(request: {
-    conversationId: string;
-    requestMessageId: string;
-    depth: number;
-    /** Only these members are run here; the rest live elsewhere and were
-     *  asked for separately. */
-    targetParticipantIds?: string[];
-    /** Rows the asking device carried, for a machine that has not seen them. */
-    messages?: ChatMessage[];
-  }): Promise<void> {
-    if (request.messages?.length) {
-      await this.applyMachineBackDelta({ conversationId: request.conversationId, messages: request.messages });
-    }
-    await this.waitForQueuedSave(request.conversationId);
-    // The request message travels ahead of this on the same stream. Waiting a
-    // little rather than failing keeps a slow write from turning into a retry
-    // storm; if it truly is not here, this throws and the delegation is kept
-    // for retry instead of being acknowledged as done.
-    const deadline = Date.now() + DELEGATED_PARTICIPANT_REQUEST_WAIT_MS;
-    let ownedIds: Set<string>;
-    for (;;) {
-      const conversation = await this.requireChat(request.conversationId);
-      const message = conversation.messages.find((message) => message.id === request.requestMessageId);
-      if (message?.metadata?.participantRequest) {
-        const participants = this.chatParticipants(conversation);
-        ownedIds = new Set(participants.filter(participant => this.ownsParticipant(participant)).map(participant => participant.id));
-        if (request.targetParticipantIds?.some(id => !ownedIds.has(id))) {
-          throw new Error("The delegated request names a member that does not belong to this machine.");
-        }
-        if (request.targetParticipantIds) ownedIds = new Set(request.targetParticipantIds);
-        break;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error("The member request this machine delegated has not reached this desktop yet.");
-      }
-      await new Promise((resolve) => setTimeout(resolve, DELEGATED_PARTICIPANT_REQUEST_POLL_MS));
-    }
-    if (ownedIds.size === 0) return;
-    await this.startParticipantRequestRunner(
-      request.conversationId,
-      request.requestMessageId,
-      request.depth,
-      undefined,
-      ownedIds
-    );
-  }
-
   private startParticipantRequestRunner(
     conversationId: string,
     requestMessageId: string,
     depth: number,
     progress?: ProgressCallback,
-    onlyParticipantIds?: ReadonlySet<string>,
     inlineParentSignal?: AbortSignal
   ): Promise<ParticipantRequestRunResult> {
     const existing = this.participantRequestRunners.get(requestMessageId);
@@ -14371,7 +13477,7 @@ export class ChatService {
     }
     const runnerProgress = progress ?? this.onReviewProgress;
     this.incrementBackgroundRunner(conversationId);
-    const runner = this.runParticipantRequest(conversationId, requestMessageId, depth, runnerProgress, onlyParticipantIds, inlineParentSignal)
+    const runner = this.runParticipantRequest(conversationId, requestMessageId, depth, runnerProgress, inlineParentSignal)
       .finally(() => {
         this.participantRequestRunners.delete(requestMessageId);
         this.decrementBackgroundRunner(conversationId);
@@ -14421,9 +13527,6 @@ export class ChatService {
     requestMessageId: string,
     depth: number,
     progress?: ProgressCallback,
-    /** When a device was asked for specific members, it runs only those: the
-     *  others live elsewhere and are being run there. */
-    onlyParticipantIds?: ReadonlySet<string>,
     /** Set only for an inline request: the requester's own run, whose Stop
      *  also stops these targets. */
     inlineParentSignal?: AbortSignal
@@ -14436,21 +13539,10 @@ export class ChatService {
       throw new Error("Member request message was not found.");
     }
     const participants = this.chatParticipants(conversation);
-    const selectedItems = batch.items.filter((item) => item.status === "running"
-      && (!onlyParticipantIds || onlyParticipantIds.has(item.targetParticipantId)));
-    const delegatedItems = this.machineRuntime && !onlyParticipantIds
-      ? selectedItems.filter(item => {
-        const target = participants.find(participant => participant.id === item.targetParticipantId);
-        return target && !this.ownsParticipant(target);
-      }) : [];
-    const delegatedIds = new Set(delegatedItems.map(item => item.targetParticipantId));
-    const runnableItems = selectedItems.filter(item => !delegatedIds.has(item.targetParticipantId));
-    // Every request source (tool, inferred mention, approval, or retry) shares
-    // this split. Handle rejection immediately while local targets run.
-    const delegation = delegatedIds.size
-      ? this.delegateParticipantRequest(conversationId, requestMessageId, delegatedIds)
-        .then(result => ({ result, error: undefined }), error => ({ result: undefined, error }))
-      : undefined;
+    // Every target runs as its own turn: here when it is this device's
+    // member, otherwise on its own device, asked through the User's server
+    // (runParticipantTurnSerialized), wherever the request was made.
+    const runnableItems = batch.items.filter((item) => item.status === "running");
     const replies: ParticipantRequestRunResult["replies"] = [];
     await Promise.all(runnableItems.map(async (item) => {
       const target = participants.find((participant) => participant.id === item.targetParticipantId);
@@ -14575,21 +13667,6 @@ export class ChatService {
       this.queueSnapshot(conversation);
       this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
     }));
-    if (delegation) {
-      const outcome = await delegation;
-      await this.refreshStoredChatState(conversation);
-      if (outcome.error) {
-        const error = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-        this.updateParticipantRequestBatch(conversation, requestMessageId, current => ({
-          ...current,
-          items: current.items.map(item => delegatedIds.has(item.targetParticipantId) && this.isOpenParticipantRequestStatus(item.status)
-            ? { ...item, status: "failed", error, updatedAt: new Date().toISOString() } : item)
-        }));
-        replies.push(...delegatedItems.map(item => ({ targetHandle: item.targetHandle, error })));
-      } else if (outcome.result) {
-        replies.push(...outcome.result.replies);
-      }
-    }
     const updatedBatch = this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => {
       const status = this.rollupParticipantRequestStatus(current.items);
       return {
@@ -15090,6 +14167,8 @@ export class ChatService {
     const turnSegmentId = randomUUID();
     const reservation = options.turnReservation ?? this.reserveParticipantTurn(conversation.id, participant.id, this.participantTurnMode(participant, triggerMessage));
     let turnController: { signal: AbortSignal; cleanup: () => void } | undefined;
+    // Whether the turn this run took on the server was ended there.
+    let serverTurnEnded = false;
     try {
       turnController = this.ensureChatTurnController(conversation, participant, runId, signal);
       await this.waitForParticipantTurnReservation(reservation, turnController.signal);
@@ -15099,26 +14178,58 @@ export class ChatService {
       if (!this.machineRuntime) {
         this.promptSuggestions.replyStarted(conversation.id, participant.id, runId);
       }
-      // Machines transport: every path that runs a member's turn (first turn,
-      // continuations, request runners, resumes) goes through here, so a member
-      // whose home is a machine is dispatched there from exactly one place.
-      const onMachine = Boolean(participant.cloudRun || participant.homeMachineId) && !this.machineRuntime;
-      const messages = onMachine
-        ? await this.runParticipantTurnOnMachine(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
+      // Every path that runs a member's turn (first turn, continuations,
+      // request runners, resumes) goes through here: the User's server first
+      // (Д4, Д13), then here or on the member's own device.
+      const opened: ServerTurnOpen = this.serverLink
+        ? await this.openServerTurn(conversation, participant, triggerMessage, runId, turnController.signal)
+        : { kind: "none" };
+      if (opened.kind !== "local") serverTurnEnded = true;
+      if (opened.kind === "stopped" || opened.kind === "skip") {
+        this.serverTurnOpens.delete(runId);
+        if (opened.kind === "stopped" && !options.existingPendingMessage && !this.turnShown(conversation, triggerMessage, participant, opened.serverRunId)) {
+          await this.noteTurnStoppedBeforeStart(conversation, triggerMessage, participant);
+        }
+        return [];
+      }
+      // A member that runs on another device is reached only through the
+      // User's server (Д4, Д13): without a link to it, it does not start.
+      if (opened.kind === "none" && !this.runsHere(participant)) {
+        throw new Error(participant.homeMachineId || participant.cloudRun
+          ? `@${participant.handle} runs on a cloud machine, which this device reaches only through your server; it is not linked to it yet.`
+          : `@${participant.handle} runs on your computer, which this machine reaches only through your server; it is not linked to it yet.`);
+      }
+      let messages: ChatMessage[];
+      if (opened.kind === "remote") {
+        messages = await this.runParticipantTurnRemote(conversation, participant, triggerMessage, runId, opened, turnController.signal, progress, {
           warnings: options.warnings,
           existingPendingMessage: options.existingPendingMessage,
           continuation: options.continuation,
           turnSegmentId
-        })
-        : await this.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
-          ...options,
-          turnSegmentId
         });
+        this.serverTurnOpens.delete(runId);
+      } else {
+        let outcome: "done" | "error" | "stopped" = "error";
+        try {
+          messages = await this.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
+            ...options,
+            turnSegmentId
+          });
+          outcome = turnController.signal.aborted ? "stopped" : "done";
+        } catch (error) {
+          outcome = turnController.signal.aborted ? "stopped" : "error";
+          throw error;
+        } finally {
+          // Its context use goes with the turn's end, for every other device.
+          if (opened.kind === "local") this.finishServerTurn(runId, outcome, this.agentContextUsageByParticipant(conversation)[participant.id]);
+          serverTurnEnded = true;
+        }
+      }
       if (!this.machineRuntime && this.offersPromptSuggestionAfter(participant, triggerMessage, messages, turnController.signal)) {
         // A cloud member's machine is chosen while its turn is prepared.
         const machineId = this.chatParticipants(conversation).find((item) => item.id === participant.id)?.homeMachineId
           ?? participant.homeMachineId;
-        const source = onMachine ? machineId : CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE;
+        const source = opened.kind === "remote" ? machineId : CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE;
         if (source) {
           this.promptSuggestions.replyFinished(conversation.id, participant.id, runId, source);
         }
@@ -15126,8 +14237,21 @@ export class ChatService {
       return messages;
     } finally {
       reservation.release();
+      const stopped = turnController?.signal.aborted ?? false;
       turnController?.cleanup();
+      // Taken on the server before it waited its turn here (a send takes it
+      // first), and stopped or failed before it ran: ended there too, never
+      // left taken with every device showing it busy.
+      if (!serverTurnEnded) await this.endServerTurnNotRun(runId, stopped);
     }
+  }
+
+  private async endServerTurnNotRun(runId: string, stopped: boolean): Promise<void> {
+    const opening = this.serverTurnOpens.get(runId);
+    if (!opening) return;
+    const opened = await opening.catch(() => undefined);
+    if (opened?.kind === "local") this.finishServerTurn(runId, stopped ? "stopped" : "error");
+    else this.serverTurnOpens.delete(runId);
   }
 
   private async preparePromptContextForRun(
@@ -17182,75 +16306,75 @@ export class ChatService {
     request: ChatSelfCompactionRequest,
     runId: string
   ): void {
-    // A member on a machine asked for it there: the desktop runs it as one
-    // the User asked for, so it is shown and can be stopped the same way.
-    // Without a desktop to take it now, it runs here as before.
-    const delegate = this.machineRuntime ? this.compactionDelegate : undefined;
-    if (delegate?.canDelegateCompaction()) {
-      void delegate.delegateCompaction({
-        conversationId,
-        participantId: participant.id,
-        runId,
-        ...(request.instructions ? { instructions: request.instructions } : {})
-      }).then(() => this.debugLogs.write("chat.self-compaction.delegated", { conversationId, participantId: participant.id, runId }), async (error) => {
-        await this.debugLogs.write("chat.self-compaction.delegate-error", {
-          conversationId, participantId: participant.id, runId, message: error instanceof Error ? error.message : String(error)
-        });
-        this.runQueuedSelfCompaction(conversationId, participant, request, runId);
+    // A member on a machine asked for it there: it is a turn of that member
+    // on the User's server, which this machine takes and runs like any other
+    // (startServerTurn), and every other device sees and can stop.
+    if (this.machineRuntime && this.serverLink) {
+      void this.requestServerSelfCompaction(conversationId, participant, request, runId).catch(async (error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        await this.debugLogs.write("chat.self-compaction.request-error", { conversationId, participantId: participant.id, runId, message });
+        await this.recordSelfCompactionFailure(conversationId, participant, runId, request.instructions, message);
       });
       return;
     }
     this.runQueuedSelfCompaction(conversationId, participant, request, runId);
   }
 
-  /** Desktop side: a member on a machine asked to compact its own context.
-   *  Only the member's own machine may ask for it. */
-  async runDelegatedCompaction(request: MachineCompactionDelegateRequest & { machineId: string }): Promise<void> {
-    if (this.machineRuntime) return;
-    const refuse = (reason: string): Promise<void> => this.debugLogs.write("chat.self-compaction.delegation-refused", {
-      conversationId: request.conversationId, participantId: request.participantId, runId: request.runId, machineId: request.machineId, reason
+  /** Machine side: a member's own compaction, asked on the server. */
+  private async requestServerSelfCompaction(conversationId: string, participant: ChatParticipant, request: ChatSelfCompactionRequest, runId: string): Promise<void> {
+    const link = this.serverLink;
+    if (!link) throw new Error("This machine is not linked to your server.");
+    await this.waitForQueuedSave(conversationId);
+    const conversation = await this.requireChat(conversationId);
+    const anchor = this.compactionAnchor(conversation, {});
+    if (!anchor) throw new Error("Nothing in this chat has reached your server yet");
+    const serverRunId = runId.startsWith("turn-") ? runId : `turn-${runId}`;
+    const opId = newOpId();
+    await link.enqueue([{ opId, kind: "turn.request", conversationId, runId: serverRunId, messageId: anchor.id, participantId: participant.id,
+      request: { kind: "compaction", triggeredBy: "agent", ...(request.instructions ? { instructions: request.instructions } : {}) } }]);
+    const answer = await link.opAnswered(opId);
+    if (answer.status === "rejected") throw new Error(answer.reason);
+    void this.debugLogs.write("chat.self-compaction.requested", { conversationId, participantId: participant.id, runId: serverRunId });
+  }
+
+  /** Desktop side: a compaction of a machine member that another device asked
+   *  for (the member itself, on its machine, or the phone) is shown here as a
+   *  run while that machine compacts it, with the same status line and Stop as
+   *  one the User started here. Asked once per turn. */
+  private observeServerCompaction(turn: HubTurn): void {
+    const link = this.serverLink;
+    if (this.machineRuntime || !link || turn.request?.kind !== "compaction") return;
+    if (turn.state !== "requested" && turn.state !== "claimed") return;
+    if (turn.requestedBy === link.deviceId() || this.inProcessServerTurns.has(turn.runId) || this.observedServerCompactions.has(turn.runId)) return;
+    this.observedServerCompactions.add(turn.runId);
+    if (this.observedServerCompactions.size > 1_000) {
+      this.observedServerCompactions.delete(this.observedServerCompactions.values().next().value as string);
+    }
+    void (async () => {
+      const opened = typeof this.storage.openConversation === "function"
+        ? (await this.storage.openConversation(turn.conversationId, 1))?.conversation
+        : await this.storage.getConversation(turn.conversationId);
+      if (!opened || opened.kind !== "chat") return;
+      const participant = this.chatParticipants(opened).find((item) => item.id === turn.participantId);
+      if (!participant || this.runsHere(participant)) return;
+      const request = turn.request ?? {};
+      this.observedCompactionTurns.set(turn.runId, turn);
+      const run = this.registerBackgroundRunController(turn.runId, undefined);
+      try {
+        await this.compactParticipant({
+          conversationId: turn.conversationId,
+          participantId: participant.id,
+          runId: turn.runId,
+          triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
+          ...(typeof request.instructions === "string" ? { instructions: request.instructions } : {})
+        }, run.signal, this.onReviewProgress);
+      } finally {
+        run.cleanup();
+        this.observedCompactionTurns.delete(turn.runId);
+      }
+    })().catch((error) => {
+      void this.debugLogs.write("chat.compaction.observe-error", { conversationId: turn.conversationId, runId: turn.runId, message: error instanceof Error ? error.message : String(error) });
     });
-    // A run id becomes this desktop's own (run state, the machine's record):
-    // only a plain token is taken.
-    if (!isSafeChatId(request.runId)) return refuse("invalid-run-id");
-    if (this.deletedConversationIds.has(request.conversationId)) return refuse("deleted");
-    // Delivered again while this process runs it or ran it: one run.
-    if (this.delegatedCompactionRunIds.has(request.runId) || this.activeRunIds.has(request.runId) || this.chatRunControllers.has(request.runId)) {
-      return refuse("already-run");
-    }
-    // What a compaction just started here wrote must be read back.
-    await this.waitForQueuedSave(request.conversationId);
-    // Read without its messages: this runs in the machine's ordered event
-    // stream, and the chat can be thousands of messages long.
-    const stored = typeof this.storage.openConversation === "function"
-      ? (await this.storage.openConversation(request.conversationId, 1))?.conversation
-      : await this.storage.getConversation(request.conversationId);
-    if (!stored || stored.kind !== "chat") return refuse("no-chat");
-    const participant = this.chatParticipants(stored).find((item) => item.id === request.participantId);
-    if (!participant || participant.homeMachineId !== request.machineId) return refuse("not-its-member");
-    let instructions: string | undefined;
-    try {
-      instructions = this.normalizeCompactInstructions(request.instructions);
-    } catch (error) {
-      return refuse(error instanceof Error ? error.message : String(error));
-    }
-    // A compaction of this member already queued or running here (the User's)
-    // covers it, as it does for a local member asking at the same time.
-    if (readParticipantCompactions(stored.metadata)[participant.id]) return refuse("already-compacting");
-    this.delegatedCompactionRunIds.add(request.runId);
-    if (this.delegatedCompactionRunIds.size > 1_000) {
-      this.delegatedCompactionRunIds.delete(this.delegatedCompactionRunIds.values().next().value as string);
-    }
-    // The User's choice on this desktop holds, even before it reached the machine.
-    const permission = normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(participant.permissions).requestCompaction);
-    if (permission === "deny") {
-      await refuse("denied");
-      // Written off the machine's event stream, as a compaction would run.
-      void this.recordSelfCompactionFailure(request.conversationId, participant, request.runId, instructions, `Context compaction requests are disabled for @${participant.handle}`)
-        .catch((error) => this.debugLogs.write("chat.self-compaction.denied-line-error", { conversationId: request.conversationId, runId: request.runId, message: error instanceof Error ? error.message : String(error) }));
-      return;
-    }
-    this.runQueuedSelfCompaction(stored.id, participant, { type: "self_compaction", instructions }, request.runId);
   }
 
   /** The line a member's own compaction that could not run leaves. */
@@ -19935,6 +19059,7 @@ export class ChatService {
     if (this.deletedConversationIds.has(conversation.id)) {
       return;
     }
+    this.withoutGoneServerPlaceholders(conversation);
     const { snapshot, rows } = this.buildAndEmitSnapshot(conversation);
     const previous = this.saveQueues.get(conversation.id) ?? Promise.resolve();
     const outcome = previous
@@ -19967,9 +19092,6 @@ export class ChatService {
   }
 
   private buildSnapshot(conversation: Conversation): ReturnType<typeof buildConversationSnapshot> {
-    // Reactions that arrived before their message, which has since come by a
-    // finished turn or a back delta rather than as a chat change.
-    if (conversation.kind === "chat") applyHeldReactions(conversation);
     return buildConversationSnapshot(conversation, this.snapshotRowStates.get(conversation.id));
   }
 
@@ -20021,8 +19143,6 @@ export class ChatService {
     if (!targetRunId) {
       return false;
     }
-    // A phone's turn that is still being claimed: stopped before it starts.
-    this.pendingPhoneRuns.get(targetRunId)?.controller.abort();
     const controllers = this.chatRunControllers.get(targetRunId);
     void this.debugLogs.write("chat.cancel.requested", {
       runId: targetRunId,
@@ -20060,10 +19180,6 @@ export class ChatService {
     const fromMeta = this.chatRunMeta.get(targetRunId)?.conversationId;
     if (fromMeta) {
       return fromMeta;
-    }
-    const pendingPhone = this.pendingPhoneRuns.get(targetRunId)?.conversationId;
-    if (pendingPhone) {
-      return pendingPhone;
     }
     for (const [conversationId, runIds] of this.activeConversationRunIds) {
       if (runIds.has(targetRunId)) {
@@ -20134,20 +19250,11 @@ export class ChatService {
       // single-machine fallback is only for a run this copy cannot attribute at
       // all -- no row replicated yet, or a member since removed.
       const homeMachineId = participant ? participant.homeMachineId : this.soleMachineMemberHome(conversation);
-      if (knownHere && !runRow?.metadata?.cloudRunPreparation && homeMachineId && homeMachineId !== this.hostMachineId && this.machineLink?.cancelMachineRun) {
-        await this.machineLink.cancelMachineRun({
-          machineId: homeMachineId, conversationId: conversation.id, runId: targetRunId,
-          onStopPending: async (machineName) => {
-            if (!pending) return;
-            await this.withChatMutation(conversation, async () => {
-              const bubble = conversation.messages.find((message) => message.id === pending.id);
-              if (bubble?.status === "pending") {
-                bubble.metadata = { ...bubble.metadata, stopPending: { machineName, at: new Date().toISOString() } };
-                this.queueSnapshot(conversation);
-              }
-            });
-          }
-        });
+      // A run of a member on another device: its Stop is asked on the User's
+      // server, which the member's own device obeys (Д2, Д4).
+      if (knownHere && !runRow?.metadata?.cloudRunPreparation && this.serverLink &&
+          (participant ? !this.runsHere(participant) : Boolean(homeMachineId && homeMachineId !== this.hostMachineId)) &&
+          await this.requestServerStop(conversation, targetRunId, runRow)) {
         return true;
       }
       // A copied pending row is not evidence that this process owns its
@@ -20180,6 +19287,60 @@ export class ChatService {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Asks the User's server to stop a turn that another device runs, and
+   * shows the Stop as waiting on its bubble until that device confirms (the
+   * approved parity exception: a machine that cannot be reached shows
+   * waiting, never "stopped"). False when this device cannot name the turn.
+   */
+  private async requestServerStop(conversation: Conversation, runId: string, row: ChatMessage | undefined): Promise<boolean> {
+    const link = this.serverLink;
+    if (!link) return false;
+    const turn = this.knownServerTurn(conversation, runId, row);
+    if (!turn) return false;
+    await link.enqueue([{ opId: newOpId(), kind: "turn.stop", conversationId: conversation.id, runId: turn.runId, messageId: turn.messageId, participantId: turn.participantId }]);
+    void this.debugLogs.write("chat.cancel.server-stop", { conversationId: conversation.id, runId: turn.runId, participantId: turn.participantId });
+    const member = this.chatParticipants(conversation).find((item) => item.id === turn.participantId);
+    const machineName = member?.homeMachineId ? link.machineName(member.homeMachineId) ?? "the machine" : "this computer";
+    const mark = async (stopPending: { machineName: string; at: string } | undefined): Promise<void> => {
+      await this.withChatMutation(conversation, async () => {
+        let changed = false;
+        for (const message of conversation.messages) {
+          if (message.role !== "participant" || message.metadata?.runId !== turn.runId) continue;
+          if (stopPending && message.status === "pending") {
+            message.metadata = { ...message.metadata, stopPending };
+            changed = true;
+          } else if (!stopPending && message.metadata?.stopPending) {
+            const { stopPending: _waiting, ...rest } = message.metadata;
+            message.metadata = rest;
+            changed = true;
+          }
+        }
+        if (changed) this.queueSnapshot(conversation);
+      });
+    };
+    await mark({ machineName, at: new Date().toISOString() });
+    void this.waitForServerTurn(turn.runId, (item) => item.state === "finished" || item.state === "stopped")
+      .then(() => mark(undefined))
+      .catch(() => undefined);
+    return true;
+  }
+
+  /** The server turn a run of this chat belongs to: as the server last said,
+   *  as a message's turn marks keep it, or as the member's bubble names it. */
+  private knownServerTurn(conversation: Conversation, runId: string, row: ChatMessage | undefined): Pick<HubTurn, "runId" | "messageId" | "participantId"> | undefined {
+    const known = this.serverTurnStates.get(runId);
+    if (known && known.conversationId === conversation.id) return known;
+    for (const message of conversation.messages) {
+      for (const [participantId, mark] of Object.entries(message.metadata?.serverTurns ?? {})) {
+        if (mark?.runId === runId) return { runId, messageId: message.id, participantId };
+      }
+    }
+    const trigger = row?.metadata?.sourceMessageId ?? row?.metadata?.parentMessageId;
+    if (row?.participantId && trigger && isHubTurnRunId(runId)) return { runId, messageId: trigger, participantId: row.participantId };
+    return undefined;
   }
 
   private async cancelStoredOrphanedRun(conversation: Conversation, runId: string): Promise<void> {
@@ -20513,8 +19674,6 @@ export class ChatService {
   }
 
   private rememberActiveChatRun(conversationId: string, runId: string): void {
-    const pendingPhone = this.pendingPhoneRuns.get(runId);
-    if (pendingPhone) pendingPhone.registered = true;
     this.ensureRunOwnerHeartbeatTimer();
     this.activeRunRefCounts.set(runId, (this.activeRunRefCounts.get(runId) ?? 0) + 1);
     this.activeRunIds.add(runId);
@@ -20649,11 +19808,7 @@ export class ChatService {
   private chatHasLiveWork(conversationId: string): boolean {
     return (
       (this.activeConversationRunIds.get(conversationId)?.size ?? 0) > 0 ||
-      (this.backgroundRunnerCounts.get(conversationId) ?? 0) > 0 ||
-      // A phone's message whose members are still being claimed or started:
-      // their runs are not registered yet (a registered one is, or has ended).
-      (this.phoneStartsInFlight.get(conversationId) ?? 0) > 0 ||
-      [...this.pendingPhoneRuns.values()].some((pending) => pending.conversationId === conversationId && !pending.registered)
+      (this.backgroundRunnerCounts.get(conversationId) ?? 0) > 0
     );
   }
 
@@ -20725,6 +19880,7 @@ export class ChatService {
     if (pending) {
       await pending.catch(() => undefined);
     }
+    this.withoutGoneServerPlaceholders(conversation);
     const built = this.buildSnapshot(conversation);
     // Rows are remembered before the save so a snapshot queued while this one
     // is in flight diffs against them, and so the saved snapshot is kept for
@@ -20746,12 +19902,8 @@ export class ChatService {
     return run;
   }
 
-  /**
-   * Resolves once every chat save that had started when it was called has
-   * finished. A machine's first chat copy reads its marks after this, so a
-   * save that chose its recipients before the machine was one of them cannot
-   * land after the copy was taken.
-   */
+  /** Resolves once every chat save that had started when it was called has
+   *  finished (and so has queued what it changed for the User's server). */
   async settleChatSaves(): Promise<void> {
     await Promise.allSettled([...this.chatSavesInFlight]);
   }
@@ -20761,49 +19913,53 @@ export class ChatService {
     rows?: SnapshotMessageRow[],
     options: { emitChanges?: boolean } = {}
   ): Promise<void> {
-    const transport = this.chatChangeTransport;
-    const tracked = Boolean(transport) && snapshot.kind === "chat" && transport!.hasRecipients();
-    if (!tracked) this.chatChangeBaselines.delete(snapshot.id);
-    let payload: ChatChangesPayload | undefined;
-    if (tracked && options.emitChanges !== false) {
-      const diff = diffChatChanges(await this.chatChangeBaselineFor(snapshot.id), snapshot, transport!.diffPolicy(snapshot));
-      if (diff.suppressedMessageIds.length) {
-        void this.debugLogs.write("chat.changes.not-owner", { conversationId: snapshot.id, messageIds: diff.suppressedMessageIds.slice(0, 20) });
-      }
-      if (diff.changes.length) {
-        payload = { version: CHAT_CHANGES_VERSION, conversationId: snapshot.id, updatedAt: snapshot.updatedAt, changes: diff.changes };
-      }
-    }
-    // A save that must not emit (an incoming change being stored) still moves
-    // the baseline below, so the next local save does not echo it back.
-    try {
-      const previous = this.chatEventMirror?.isEnabled() ? await this.storage.getConversation(snapshot.id) : undefined;
-      if (payload) {
-        const outcome = await transport!.commit(payload, (also) => this.storage.saveConversation(snapshot, { rows, alsoCommit: also }));
-        if (!outcome.committed) {
-          void this.debugLogs.write("chat.changes.not-committed", { conversationId: snapshot.id, eventId: outcome.eventId });
+    const link = this.serverLink;
+    if (link && snapshot.kind === "chat") {
+      // What this save changed goes to the server (Д1), queued in the same
+      // transaction as the save: a crash keeps both or neither.
+      let ops: HubOp[] = [];
+      const finishes: Array<[string, { conversationId: string; participantId: string; op: HubOp; timer: ReturnType<typeof setTimeout> }]> = [];
+      // The cards this chat's members here wait on go up, change or settle
+      // with the save that made them so (Д9), whatever else it emits.
+      const cards = this.serverCardOpsFor(snapshot);
+      if (options.emitChanges !== false) {
+        const mayWrite = (message: ChatMessage) => this.mayWriteOnServer(snapshot, message);
+        const diff = diffChatChanges(await this.chatChangeBaselineFor(snapshot.id), snapshot, { emitsConversationFields: true, ownsMessage: mayWrite });
+        ops = chatChangesToOps(snapshot, diff.changes, mayWrite);
+        // The end of a turn run here goes after its member's last bubble, in
+        // the same transaction.
+        for (const [runId, deferred] of this.deferredServerFinishes) {
+          if (deferred.conversationId !== snapshot.id) continue;
+          if (snapshot.messages.some((message) => message.participantId === deferred.participantId && message.metadata?.runId === runId && message.status === "pending")) continue;
+          finishes.push([runId, deferred]);
         }
-        this.rememberLastSavedSnapshot(snapshot, outcome.token);
-      } else {
-        this.rememberLastSavedSnapshot(snapshot, await this.storage.saveConversation(snapshot, { rows }));
+        for (const [runId, deferred] of finishes) {
+          this.deferredServerFinishes.delete(runId);
+          ops.push(deferred.op);
+        }
       }
-      if (tracked) this.rememberChatChangeBaseline(snapshot.id, chatChangeBaseline(snapshot));
-      if (this.chatEventMirror?.isEnabled()) await this.chatEventMirror.mirrorSavedConversation(previous, snapshot);
-    } catch (error) {
-      // What the database holds after a failed save is unknown; the next save
-      // diffs against a fresh read instead.
-      this.chatChangeBaselines.delete(snapshot.id);
-      throw error;
+      ops.push(...cards.ops);
+      try {
+        const token = ops.length
+          ? await this.storage.saveConversation(snapshot, { rows, alsoCommit: { sql: link.queueSql(ops), onlyIfSql: (condition) => link.queueSql(ops, condition) } })
+          : await this.storage.saveConversation(snapshot, { rows });
+        this.rememberLastSavedSnapshot(snapshot, token);
+        this.rememberChatChangeBaseline(snapshot.id, chatChangeBaseline(snapshot));
+        cards.commit();
+      } catch (error) {
+        this.chatChangeBaselines.delete(snapshot.id);
+        // Not written: the ends wait for the next save (or their timer).
+        for (const [runId, deferred] of finishes) this.deferredServerFinishes.set(runId, deferred);
+        throw error;
+      }
+      for (const [, deferred] of finishes) clearTimeout(deferred.timer);
+      if (ops.length) link.nudge();
+      return;
     }
-  }
-
-  /** The chat change a machine must have applied before it runs a turn in
-   *  this chat: everything saved so far, including queued saves. */
-  async chatChangeHead(conversationId: string): Promise<{ originId: string; logScopeId: string; originSeq: number } | undefined> {
-    const transport = this.chatChangeTransport;
-    if (!transport) return undefined;
-    await this.waitForQueuedSave(conversationId);
-    return transport.head(conversationId);
+    // Not linked to a server (yet): the chat is only saved here. The next
+    // save with a link diffs against what the database holds then.
+    this.chatChangeBaselines.delete(snapshot.id);
+    this.rememberLastSavedSnapshot(snapshot, await this.storage.saveConversation(snapshot, { rows }));
   }
 
   /** Machine side: records where a chat's project lives here before a turn
@@ -20830,15 +19986,1556 @@ export class ChatService {
       return;
     }
     const current = conversation.metadata.machineRepository as { sourcePath?: string; paths?: Record<string, string> } | undefined;
-    const paths = current?.sourcePath === desktopRepoPath && current.paths ? current.paths : {};
+    let paths = current?.sourcePath === desktopRepoPath && current.paths ? current.paths : {};
+    // Where the computer said this project lives here wins.
+    const published = this.machineProjects[desktopRepoPath];
+    if (published) paths = { ...paths, [this.hostMachineId]: published };
     conversation.metadata = { ...conversation.metadata, machineRepository: { sourcePath: desktopRepoPath, paths } };
     conversation.repoPath = paths[this.hostMachineId] ?? desktopRepoPath;
   }
 
-  /** Installs (or removes) the path a chat's changes take to other devices. */
-  setChatChangeTransport(transport: ChatChangeTransport | undefined): void {
-    this.chatChangeTransport = transport;
+  // --- the User's server owns the chat (agreements Д1–Д13) -----------------
+
+  /** Server turns this process runs or waits for itself (its own sends):
+   *  the feed's executor leaves them alone. */
+  private readonly inProcessServerTurns = new Set<string>();
+  /** A local run's server turn (and its chat), and back (Stop from another device). */
+  private readonly serverRunOfLocal = new Map<string, { runId: string; conversationId: string; participantId: string }>();
+  /** Ends of turns run here, held until the save that writes the member's
+   *  last bubble of the run, so the server hears the end after the reply
+   *  (whoever waits for the end reads the reply then). */
+  private readonly deferredServerFinishes = new Map<string, { conversationId: string; participantId: string; op: HubOp; timer: ReturnType<typeof setTimeout> }>();
+  private readonly localRunOfServer = new Map<string, string>();
+  /** How each local run's turn was opened on the server (memoized per run). */
+  private readonly serverTurnOpens = new Map<string, Promise<ServerTurnOpen>>();
+  /** Waiting for a turn's state to change (a member running elsewhere). */
+  private readonly serverTurnWaiters = new Map<string, Array<(turn: HubTurn) => void>>();
+  /** Placeholders shown here for a member elsewhere that are gone (its own
+   *  bubble took their place, or its turn never ran). A copy of the chat read
+   *  before one went (another send's, the feed's) must not bring it back when
+   *  it merges with what is stored. Kept in memory: a placeholder belongs to
+   *  a run of this process. */
+  private readonly goneServerPlaceholders = new Set<string>();
+  /** The newest state heard of each recent turn, so a wait that starts late
+   *  does not miss what already happened. */
+  private readonly serverTurnStates = new Map<string, HubTurn>();
+  /** Turns the feed asked this device to run, while they are being started. */
+  private readonly pendingServerTurns = new Map<string, AbortController>();
+  /** Reads a chat whole from the server (set with the server link). */
+  private serverChatReader?: (conversationId: string) => Promise<{ conversation: Conversation; turns: HubTurn[] } | undefined>;
+  /** The cards this device raised for its members, as the server holds them. */
+  private readonly serverCards = new ServerCardBook();
+  /** What applies answers to this device's members' cards (set at start). */
+  private cardAppliers?: () => Promise<ChatCardAppliers>;
+  /** Answers given on this device's screen to its own cards, by operation,
+   *  waiting to hear how they were applied. */
+  private readonly cardAnswerWaiters = new Map<string, (result: CardApplyResult) => void>();
+  private readonly cardRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private cardsReconciling?: Promise<void>;
+  /** Where in the server's order this desktop last heard of another
+   *  device's card (its feed): a list of open cards read before that is
+   *  older than what the feed said. */
+  private readonly mirroredCardSeqs = new Map<string, number>();
+  private cardRaiseRetryTimer?: ReturnType<typeof setTimeout>;
+  private cardsReconcileAgain = false;
+  private cardsReconcileMessages = false;
+
+  setServerChatReader(reader: ((conversationId: string) => Promise<{ conversation: Conversation; turns: HubTurn[] } | undefined>) | undefined): void {
+    this.serverChatReader = reader;
+  }
+
+  /** Replaces this device's copy of a chat with the server's (a chat this
+   *  device does not hold, one moved to the server, or after the feed
+   *  forgot this device's place). Its own bookkeeping on messages stays. */
+  async reloadChatFromServer(conversationId: string): Promise<void> {
+    const read = await this.serverChatReader?.(conversationId);
+    if (!read) {
+      if (await this.storage.getConversation(conversationId) && this.serverChatReader) {
+        // Gone on the server.
+        await this.applyReplicatedConversationDeletion(conversationId, new Date().toISOString());
+      }
+      return;
+    }
+    const server = read.conversation;
+    const existing = await this.storage.getConversation(conversationId);
+    if (!existing) {
+      if (this.hostMachineId) this.localizeRepoPath(server, server.repoPath);
+      for (const turn of read.turns) this.markServerTurn(server, turn);
+      await this.saveConversation(server, { emitChanges: false });
+      for (const turn of read.turns) this.noteServerTurn(turn);
+      return;
+    }
+    await this.withChatMutation(existing, async () => {
+      const local = new Map(existing.messages.map((message) => [message.id, message]));
+      existing.title = server.title;
+      if (this.hostMachineId) this.localizeRepoPath(existing, server.repoPath);
+      else if (server.repoPath) existing.repoPath = server.repoPath; else delete existing.repoPath;
+      for (const key of SHARED_CONVERSATION_METADATA_KEYS) {
+        const value = (server.metadata as Record<string, unknown>)[key];
+        if (value === undefined) delete (existing.metadata as Record<string, unknown>)[key];
+        else (existing.metadata as Record<string, unknown>)[key] = value;
+      }
+      const me = this.serverLink?.deviceId();
+      const fromServer = new Set(server.messages.map((message) => message.id));
+      existing.messages = [
+        ...server.messages.map((message) => {
+          const mine = local.get(message.id);
+          if (!mine) return message;
+          const kept: Record<string, unknown> = {};
+          for (const key of LOCAL_MESSAGE_METADATA_KEYS) {
+            const value = mine.metadata?.[key as keyof ChatMessageMetadata];
+            if (value !== undefined && key !== "serverPlaceholder") kept[key] = value;
+          }
+          return { ...message, metadata: { ...(message.metadata ?? {}), ...kept } as ChatMessage["metadata"] };
+        }),
+        // What this device wrote and the server has not taken yet stays.
+        ...existing.messages.filter((message) => !fromServer.has(message.id) && serverSeqOf(message) === undefined &&
+          (message.metadata?.serverPlaceholder || !message.metadata?.serverWriter || message.metadata.serverWriter === me))
+      ];
+      for (const turn of read.turns) this.markServerTurn(existing, turn);
+      existing.messages = sortByServerOrder(existing.messages);
+      existing.updatedAt = server.updatedAt > existing.updatedAt ? server.updatedAt : existing.updatedAt;
+      await this.saveConversation(existing, { emitChanges: false });
+    });
+    for (const turn of read.turns) this.noteServerTurn(turn);
+  }
+
+  /** Applies what the server accepted (from any device, this one included),
+   *  in the server's order, to this device's copy. Stored without being sent
+   *  back; then members whose turns were asked here start (Д4). */
+  async applyServerEntries(entries: HubFeedEntry[]): Promise<void> {
+    const me = this.serverLink?.deviceId();
+    let index = 0;
+    while (index < entries.length) {
+      const conversationId = entries[index].conversationId;
+      const group: HubFeedEntry[] = [];
+      while (index < entries.length && entries[index].conversationId === conversationId) group.push(entries[index++]);
+      await this.applyServerEntriesFor(conversationId, group, me);
+    }
+    for (const entry of entries) {
+      for (const turn of turnsOfEffect(entry.effect)) this.noteServerTurn(turn);
+    }
+    this.noteServerCardEntries(entries);
+  }
+
+  private async applyServerEntriesFor(conversationId: string, entries: HubFeedEntry[], me: string | undefined): Promise<void> {
+    if (!isSafeChatId(conversationId)) return;
+    const deletion = entries.find((entry) => entry.effect.kind === "conversation.delete");
+    if (deletion) {
+      if (await this.storage.getConversation(conversationId)) await this.applyReplicatedConversationDeletion(conversationId, deletion.acceptedAt);
+      return;
+    }
+    if (await this.storage.conversationTombstones().isDeleted(conversationId)) return;
+    // Moved to the server by the computer that held it: that computer has it
+    // already; any other device reads it again.
+    if (entries.some((entry) => entry.effect.kind === "chat.import" && entry.deviceId !== me)) {
+      await this.reloadChatFromServer(conversationId);
+      return;
+    }
+    let conversation = await this.storage.getConversation(conversationId);
+    if (conversation && conversation.kind !== "chat") return;
+    if (!conversation) {
+      const create = entries.find((entry) => entry.effect.kind === "conversation.create");
+      if (!create || create.effect.kind !== "conversation.create") {
+        // A chat this device does not hold: read it whole.
+        await this.reloadChatFromServer(conversationId);
+        return;
+      }
+      const fields = create.effect.conversation;
+      conversation = {
+        id: conversationId,
+        title: fields.title,
+        kind: "chat",
+        createdAt: fields.createdAt,
+        updatedAt: create.effect.updatedAt,
+        ...(fields.repoPath ? { repoPath: fields.repoPath } : {}),
+        messages: [],
+        findings: [],
+        metadata: { participantSessions: [], warnings: [], running: false, ...fields.metadata } as Conversation["metadata"]
+      };
+      if (this.hostMachineId) this.localizeRepoPath(conversation, fields.repoPath);
+      await this.saveConversation(conversation, { emitChanges: false });
+    }
+    const target = conversation;
+    const dropped: ChatParticipant[] = [];
+    let archivedNow = false;
+    await this.withChatMutation(target, async () => {
+      const before = new Set(target.messages.map((message) => message.id));
+      // What the chat was before (members, archive, the User's messages):
+      // shallow, since applying replaces entries rather than editing them.
+      const previous: Conversation = { ...target, messages: [...target.messages], metadata: { ...target.metadata } };
+      for (const entry of entries) this.applyServerEffect(target, entry, me);
+      target.messages = sortByServerOrder(target.messages);
+      // A member that watches the chat here sees new User messages the way a
+      // local one does: a new one resets its wake chain.
+      this.reconcileReplicatedWatcher(previous, target);
+      dropped.push(...this.membersDroppedFrom(previous, target));
+      archivedNow = previous.metadata.archived !== true && target.metadata.archived === true;
+      await this.saveConversation(target, { emitChanges: false });
+    });
+    // An approved removal waits for every device's turns in the chat to end:
+    // another device's turn may just have ended.
+    this.scheduleQueuedMemberRemovals(conversationId);
+    // A member this device runs that the chat no longer has (removed on any
+    // device) ends its process here, as a local member's does.
+    this.retireRemovedMembers(conversationId, dropped);
+    // An archived chat closes its members' sessions, wherever it was archived.
+    if (archivedNow) await this.cliRunner.closeConversationSessions(conversationId).catch(() => undefined);
+    // New messages from other devices are what a watching member reads next.
+    if (entries.some((entry) => entry.deviceId !== me && entry.effect.kind === "message.create")) {
+      this.scheduleAutoWatchEvaluation(conversationId, "server-messages");
+    }
+  }
+
+  /** One accepted operation, folded into this device's copy. */
+  private applyServerEffect(conversation: Conversation, entry: HubFeedEntry, me: string | undefined): void {
+    const effect = entry.effect;
+    const fromHere = entry.deviceId === me;
+    switch (effect.kind) {
+      case "conversation.create":
+      case "conversation.update": {
+        if (fromHere) return;
+        const fields = effect.kind === "conversation.create"
+          ? { title: effect.conversation.title, repoPath: effect.conversation.repoPath ?? null, metadata: effect.conversation.metadata, removedMetadataKeys: [] as string[] }
+          : { title: effect.title, repoPath: effect.repoPath, metadata: effect.metadata ?? {}, removedMetadataKeys: effect.removedMetadataKeys ?? [] };
+        if (fields.title !== undefined) conversation.title = fields.title;
+        if (fields.repoPath !== undefined) {
+          if (this.hostMachineId) this.localizeRepoPath(conversation, fields.repoPath ?? undefined);
+          else if (fields.repoPath === null) delete conversation.repoPath;
+          else conversation.repoPath = fields.repoPath;
+        }
+        for (const [key, value] of Object.entries(fields.metadata)) (conversation.metadata as Record<string, unknown>)[key] = value;
+        for (const key of fields.removedMetadataKeys) delete (conversation.metadata as Record<string, unknown>)[key];
+        if (effect.updatedAt > conversation.updatedAt) conversation.updatedAt = effect.updatedAt;
+        return;
+      }
+      case "message.create":
+      case "message.update": {
+        const incoming = effect.message;
+        const removed = new Set(Array.isArray(conversation.metadata.removedChatMessageIds) ? conversation.metadata.removedChatMessageIds : []);
+        if (removed.has(incoming.id)) return;
+        const index = conversation.messages.findIndex((message) => message.id === incoming.id);
+        const existing = index >= 0 ? conversation.messages[index] : undefined;
+        let next: ChatMessage;
+        if (existing && fromHere && !existing.metadata?.serverPlaceholder) {
+          // Written here: what this device holds may be newer; only the
+          // server's place and writer are taken.
+          next = { ...existing, metadata: { ...(existing.metadata ?? {}), serverSeq: incoming.metadata?.serverSeq, serverWriter: incoming.metadata?.serverWriter } };
+        } else {
+          const local: Record<string, unknown> = {};
+          // What this device showed while the member's turn waited (for its
+          // machine, for a Stop to be confirmed) ends with the turn.
+          const waitingMarks = incoming.status === "pending" ? [] : ["stopPending", "machinePending", "cloudRunPreparation", "queuedBehind"];
+          for (const key of LOCAL_MESSAGE_METADATA_KEYS) {
+            const value = existing?.metadata?.[key as keyof ChatMessageMetadata];
+            if (value !== undefined && key !== "serverPlaceholder" && !waitingMarks.includes(key)) local[key] = value;
+          }
+          next = { ...incoming, metadata: { ...(incoming.metadata ?? {}), ...local } as ChatMessage["metadata"] };
+        }
+        if (index >= 0) conversation.messages[index] = next;
+        else {
+          // The member's real bubble replaces the placeholder shown for it here.
+          const runId = typeof incoming.metadata?.runId === "string" ? incoming.metadata.runId : undefined;
+          if (runId && incoming.role === "participant") {
+            this.removeServerPlaceholders(conversation, (message) => message.participantId === incoming.participantId && message.metadata?.runId === runId);
+          }
+          conversation.messages.push(next);
+        }
+        if (effect.kind === "message.create") {
+          for (const turn of effect.turns ?? []) this.markServerTurn(conversation, turn);
+        }
+        if (incoming.role === "participant") this.recordLastMessageByParticipant(conversation, next);
+        if (incoming.createdAt > conversation.updatedAt) conversation.updatedAt = incoming.createdAt;
+        return;
+      }
+      case "message.react": {
+        const index = conversation.messages.findIndex((message) => message.id === effect.messageId);
+        if (index < 0) return;
+        const metadata = { ...(conversation.messages[index].metadata ?? {}) } as ChatMessageMetadata;
+        if (effect.reactions && Object.keys(effect.reactions).length) metadata.reactions = effect.reactions; else delete metadata.reactions;
+        conversation.messages[index] = { ...conversation.messages[index], metadata };
+        return;
+      }
+      case "message.remove": {
+        const removed = Array.isArray(conversation.metadata.removedChatMessageIds) ? conversation.metadata.removedChatMessageIds : [];
+        if (!removed.includes(effect.messageId)) conversation.metadata.removedChatMessageIds = [...removed, effect.messageId].slice(-100);
+        conversation.messages = conversation.messages.filter((message) => message.id !== effect.messageId);
+        return;
+      }
+      case "turn.request":
+      case "turn.claim":
+      case "turn.stop":
+      case "turn.finish": {
+        this.markServerTurn(conversation, effect.turn);
+        // A member elsewhere: its context use, as its device said after the
+        // turn, is shown here as a local member's is.
+        const usage = effect.kind === "turn.finish" && effect.turn.contextUsage ? normalizeAgentContextUsage(effect.turn.contextUsage) : undefined;
+        const member = usage ? this.chatParticipants(conversation).find((item) => item.id === effect.turn.participantId) : undefined;
+        if (usage && member && !this.runsHere(member)) this.updateParticipantContextUsage(conversation, member.id, usage);
+        return;
+      }
+      case "card.raise":
+      case "card.answer":
+      case "card.settle":
+        // A card of a member elsewhere, as the desktop shows it. Cards this
+        // device raised are its own (noteServerCardEntries); a machine shows
+        // nothing.
+        if (this.machineRuntime || effect.card.raisedBy === me) return;
+        this.noteMirroredCardSeq(effect.card.cardId, entry.seq);
+        this.mirrorServerCard(conversation, effect.kind, effect.card, entry.opId);
+        return;
+      case "conversation.delete":
+      case "chat.import":
+        return;
+    }
+  }
+
+  /** The turn's mark on the message it answers ("taken to work", Д5). */
+  private markServerTurn(conversation: Conversation, turn: HubTurn): void {
+    const index = conversation.messages.findIndex((message) => message.id === turn.messageId);
+    if (index < 0) return;
+    const message = conversation.messages[index];
+    const marks = { ...(message.metadata?.serverTurns ?? {}) };
+    marks[turn.participantId] = turnMark(turn) as NonNullable<ChatMessageMetadata["serverTurns"]>[string];
+    conversation.messages[index] = { ...message, metadata: { ...(message.metadata ?? {}), serverTurns: marks } };
+  }
+
+  /** A turn changed on the server: start it here when it is this device's
+   *  to run, stop it when it was asked to stop, and tell whoever waits. */
+  private noteServerTurn(turn: HubTurn): void {
+    this.serverTurnStates.delete(turn.runId);
+    this.serverTurnStates.set(turn.runId, turn);
+    while (this.serverTurnStates.size > 2_000) {
+      const oldest = this.serverTurnStates.keys().next().value;
+      if (oldest === undefined) break;
+      this.serverTurnStates.delete(oldest);
+    }
+    const waiters = this.serverTurnWaiters.get(turn.runId);
+    if (waiters) for (const resolve of [...waiters]) resolve(turn);
+    const me = this.serverLink?.deviceId();
+    this.observeServerCompaction(turn);
+    if (turn.state === "requested") {
+      void this.startServerTurn(turn).catch((error) => {
+        void this.debugLogs.write("chat.server-turn.start-error", { runId: turn.runId, message: error instanceof Error ? error.message : String(error) });
+      });
+      return;
+    }
+    if (turn.state === "claimed" && turn.stopRequestedAt && turn.executorDeviceId === me) {
+      this.cancelRun(this.localRunOfServer.get(turn.runId) ?? turn.runId);
+      return;
+    }
+    if (turn.state === "stopped" && !turn.executorDeviceId) {
+      // Stopped before anyone took it: a start waiting here never begins, and
+      // the member's own device says so in the chat, once.
+      this.pendingServerTurns.get(turn.runId)?.abort();
+      void this.noteServerTurnStoppedBeforeStart(turn).catch(() => undefined);
+    }
+  }
+
+  private async noteServerTurnStoppedBeforeStart(turn: HubTurn): Promise<void> {
+    // A compaction that never started is said by the device that asked for
+    // it (compactParticipantOnMachine), with a compaction's own words.
+    if (this.inProcessServerTurns.has(turn.runId) || turn.request?.kind === "compaction") return;
+    const conversation = await this.storage.getConversation(turn.conversationId);
+    if (!conversation || conversation.kind !== "chat") return;
+    const participant = this.chatParticipants(conversation).find((item) => item.id === turn.participantId);
+    const message = conversation.messages.find((item) => item.id === turn.messageId);
+    if (!participant || !message || !this.runsHere(participant)) return;
+    if (this.turnShown(conversation, message, participant, turn.runId)) return;
+    await this.noteTurnStoppedBeforeStart(conversation, message, participant);
+  }
+
+  /** Runs, here, a turn the server asked of one of this device's members
+   *  (a User's message from any device, a request from a member elsewhere). */
+  async startServerTurn(turn: HubTurn): Promise<void> {
+    if (!this.serverLink || turn.state !== "requested") return;
+    const runId = turn.runId;
+    if (this.inProcessServerTurns.has(runId) || this.pendingServerTurns.has(runId) || this.conversationIdForRun(runId)) return;
+    // Taken here before anything awaits: the feed and a resume after a
+    // restart can both offer the same turn, and it runs once.
+    const controller = new AbortController();
+    this.pendingServerTurns.set(runId, controller);
+    const release = (): void => { if (this.pendingServerTurns.get(runId) === controller) this.pendingServerTurns.delete(runId); };
+    let started = false;
+    try {
+      started = await this.startServerTurnNow(turn, controller);
+    } finally {
+      if (!started) release();
+    }
+  }
+
+  /** startServerTurn once the turn is reserved here; false when it was not
+   *  started (not this device's, or this device takes nothing now). */
+  private async startServerTurnNow(turn: HubTurn, controller: AbortController): Promise<boolean> {
+    const runId = turn.runId;
+    let conversation = await this.storage.getConversation(turn.conversationId);
+    // A chat (or the message it answers) this device has not read yet (it is
+    // reading the server's chats for the first time): read it now.
+    if ((!conversation || !conversation.messages.some((item) => item.id === turn.messageId)) && this.serverChatReader &&
+        !await this.storage.conversationTombstones?.().isDeleted(turn.conversationId)) {
+      await this.reloadChatFromServer(turn.conversationId);
+      conversation = await this.storage.getConversation(turn.conversationId);
+    }
+    if (!conversation || conversation.kind !== "chat" || conversation.metadata.archived === true) return false;
+    const participant = this.chatParticipants(conversation).find((item) => item.id === turn.participantId);
+    if (!participant || !this.runsHere(participant)) return false;
+    const message = conversation.messages.find((item) => item.id === turn.messageId);
+    if (!message) return false;
+    // A machine makes its settings current first, and takes nothing while it
+    // stops (the turn waits on the server for its next start).
+    const prepared = await (this.serverTurnPreparation?.(turn) ?? Promise.resolve(true)).catch((error) => {
+      void this.debugLogs.write("chat.server-turn.prepare-error", { conversationId: turn.conversationId, runId, message: error instanceof Error ? error.message : String(error) });
+      return true;
+    });
+    if (!prepared || controller.signal.aborted) return false;
+    const warnings: string[] = [];
+    const chat = await this.requireChat(turn.conversationId);
+    try {
+      const settings = await this.settings.getPublicSettings();
+      this.assertParticipantProvidersEnabled([participant], settings.providers ?? []);
+      if (participant.autoWatch === true) {
+        await this.withChatMutation(chat, async () => {
+          this.advanceAutoWatchCursorForDirectTargets(chat, [participant], message);
+          this.queueSnapshot(chat);
+        });
+      }
+      const compact = message.role === "user" ? this.compactCommand(message.content) : undefined;
+      const request = turn.request ?? {};
+      if (request.kind === "compaction" || (compact && compact.handle.toLowerCase() === participant.handle.toLowerCase())) {
+        // Taken on the server first, like any turn (Д5); a Stop from any
+        // device reaches it by its run id.
+        if (await this.claimServerTurnHere(turn, controller.signal) !== "claimed") return true;
+        const run = this.registerBackgroundRunController(runId, controller.signal);
+        let outcome: "done" | "error" | "stopped" = "error";
+        let usage: AgentContextUsage | undefined;
+        const text = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : undefined;
+        try {
+          const compacted = await this.compactParticipant({
+            conversationId: chat.id, participantId: participant.id, handle: participant.handle,
+            instructions: typeof request.instructions === "string" ? request.instructions : compact?.instructions,
+            triggeredBy: request.triggeredBy === "agent" ? "agent" : "user", runId,
+            // Asked as a compaction: in the thread it was asked from (none for
+            // a member's own); typed as a message: under that message.
+            ...(request.kind === "compaction"
+              ? { threadId: text(request.threadId), parentMessageId: text(request.parentMessageId), chatThreadRootId: text(request.chatThreadRootId) }
+              : { threadId: message.metadata?.threadId ?? message.id, parentMessageId: message.id, chatThreadRootId: message.metadata?.chatThreadRootId })
+          }, run.signal, this.onReviewProgress);
+          usage = this.agentContextUsageByParticipant(compacted.conversation)[participant.id];
+          outcome = run.signal.aborted ? "stopped" : "done";
+        } catch (error) {
+          outcome = run.signal.aborted ? "stopped" : "error";
+          throw error;
+        } finally {
+          run.cleanup();
+          this.finishServerTurn(runId, outcome, usage);
+        }
+        return true;
+      }
+      await this.runParticipantBatch(chat, [participant], message, runId, controller.signal, this.onReviewProgress, warnings, {
+        targetRunIds: new Map([[participant.id, runId]]),
+        ...(turn.pendingMessageId ? { pendingMessageIds: new Map([[participant.id, turn.pendingMessageId]]) } : {})
+      });
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        const reason = error instanceof Error ? error.message : String(error);
+        void this.debugLogs.write("chat.server-turn.error", { conversationId: chat.id, runId, message: reason });
+        warnings.push(`@${participant.handle} could not start: ${reason}`);
+      }
+    } finally {
+      if (this.pendingServerTurns.get(runId) === controller) this.pendingServerTurns.delete(runId);
+      if (warnings.length > 0) await this.appendConversationWarnings(chat, warnings).catch(() => undefined);
+    }
+    return true;
+  }
+
+  /** Moves one chat to the server (the first link, 5.7): sent as this device
+   *  holds it, with its saves held meanwhile; what was queued for it is part
+   *  of the move. */
+  async exportChatForServer(conversationId: string, send: (conversation: Conversation) => Promise<void>): Promise<void> {
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") return;
+    await this.withChatMutation(conversation, async () => {
+      await this.waitForQueuedSave(conversationId);
+      const stored = await this.storage.getConversation(conversationId);
+      if (!stored) return;
+      await send(stored);
+      await this.serverLink?.settleMoved?.(conversationId);
+    });
+  }
+
+  /** After a start or a reconnect: every turn this device took and that
+   *  nothing runs any more is closed (it stopped or restarted in the middle
+   *  of it), and every turn asked of its members that nobody took yet starts
+   *  (the computer or machine was off). */
+  async resumeServerTurns(): Promise<void> {
+    const link = this.serverLink;
+    if (!link) return;
+    const { requested, claimed } = await link.waitingTurns();
+    for (const turn of claimed) {
+      await this.closeOrphanedServerTurn(turn).catch((error) => {
+        void this.debugLogs.write("chat.server-turn.orphan-error", { runId: turn.runId, message: error instanceof Error ? error.message : String(error) });
+      });
+    }
+    for (const turn of requested) await this.startServerTurn(turn).catch(() => undefined);
+  }
+
+  /** Takes a turn the server asked of a member here, for a run that has no
+   *  turn of its own to open it (a compaction). */
+  private async claimServerTurnHere(turn: HubTurn, signal: AbortSignal): Promise<"claimed" | "stopped" | "skip"> {
+    const link = this.serverLink;
+    if (!link) return "skip";
+    this.inProcessServerTurns.add(turn.runId);
+    this.serverRunOfLocal.set(turn.runId, { runId: turn.runId, conversationId: turn.conversationId, participantId: turn.participantId });
+    this.localRunOfServer.set(turn.runId, turn.runId);
+    const forget = () => {
+      this.serverRunOfLocal.delete(turn.runId);
+      this.localRunOfServer.delete(turn.runId);
+    };
+    try {
+      const opId = newOpId();
+      await link.enqueue([{ opId, kind: "turn.claim", conversationId: turn.conversationId, runId: turn.runId, messageId: turn.messageId, participantId: turn.participantId }]);
+      const answer = await link.opAnswered(opId, signal);
+      if (answer.status === "rejected") throw new Error(`The server did not give this turn: ${answer.reason}`);
+      void this.debugLogs.write("chat.server-turn.claim", { conversationId: turn.conversationId, runId: turn.runId, participantId: turn.participantId, claim: answer.claim });
+      if (answer.claim === "claimed" || answer.claim === "already-yours") return "claimed";
+      forget();
+      return answer.claim === "stopped" ? "stopped" : "skip";
+    } catch (error) {
+      forget();
+      throw error;
+    }
+  }
+
+  /**
+   * A turn this device took that nothing here runs any more: this device
+   * stopped or restarted while it ran. Its bubble here is closed (never as
+   * "stopped": a Stop asked meanwhile was not confirmed, the parity
+   * exception's "restarted before confirming the stop") and the turn is
+   * finished on the server as interrupted, so whoever waits for it stops
+   * waiting.
+   */
+  private async closeOrphanedServerTurn(turn: HubTurn): Promise<void> {
+    const link = this.serverLink;
+    if (!link || turn.state !== "claimed" || turn.executorDeviceId !== link.deviceId()) return;
+    if (this.inProcessServerTurns.has(turn.runId) || this.pendingServerTurns.has(turn.runId) || this.localRunOfServer.has(turn.runId) ||
+        this.activeRunIds.has(turn.runId) || this.chatRunControllers.has(turn.runId)) return;
+    this.inProcessServerTurns.add(turn.runId);
+    const conversation = await this.requireChat(turn.conversationId).catch(() => undefined);
+    if (conversation) {
+      const participant = this.chatParticipants(conversation).find((item) => item.id === turn.participantId);
+      const handle = participant?.handle ?? "member";
+      await this.withChatMutation(conversation, async () => {
+        let changed = false;
+        for (const message of conversation.messages) {
+          if (message.role !== "participant" || message.participantId !== turn.participantId || message.metadata?.runId !== turn.runId) continue;
+          const swept = message.metadata?.staleRunRecovery?.runId === turn.runId;
+          if (message.status !== "pending" && !swept) continue;
+          if (turn.stopRequestedAt) {
+            markStopUnconfirmed(message, handle, `${this.machineRuntime ? "The machine" : "This computer"} restarted before confirming the stop.`);
+          } else if (message.status === "pending") {
+            message.status = "error";
+            if (!message.content) message.content = "Interrupted before completion.";
+          }
+          changed = true;
+        }
+        if (changed) {
+          conversation.updatedAt = new Date().toISOString();
+          this.queueSnapshot(conversation);
+        }
+      });
+      await this.waitForQueuedSave(conversation.id);
+    }
+    void this.debugLogs.write("chat.server-turn.orphan-closed", { conversationId: turn.conversationId, runId: turn.runId, stopRequested: Boolean(turn.stopRequestedAt) });
+    await link.enqueue([{ opId: newOpId(), kind: "turn.finish", conversationId: turn.conversationId, runId: turn.runId, outcome: "interrupted" }]);
+  }
+
+  /** Opens a member's turn on the server before anything of it is shown or
+   *  run (Д4, Д5, Д13): the message it answers must be on the server first,
+   *  then the turn is taken here (a member that runs here) or asked of the
+   *  device it runs on. Memoized per local run. */
+  private openServerTurn(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage, localRunId: string, signal?: AbortSignal): Promise<ServerTurnOpen> {
+    const known = this.serverTurnOpens.get(localRunId);
+    if (known) return known;
+    const opening = this.openServerTurnNow(conversation, participant, triggerMessage, localRunId, signal);
+    this.serverTurnOpens.set(localRunId, opening);
+    void opening.catch(() => this.serverTurnOpens.delete(localRunId));
+    return opening;
+  }
+
+  private async openServerTurnNow(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage, localRunId: string, signal?: AbortSignal): Promise<ServerTurnOpen> {
+    const link = this.serverLink;
+    if (!link) return { kind: "none" };
+    const targets = deliveryTargetsOf(triggerMessage);
+    const canonical = triggerMessage.role === "user" && targets.includes(participant.id);
+    const serverRunId = canonical ? hubTurnRunId(triggerMessage.id, participant.id) : localRunId.startsWith("turn-") ? localRunId : `turn-${localRunId}`;
+    this.inProcessServerTurns.add(serverRunId);
+    this.serverRunOfLocal.set(localRunId, { runId: serverRunId, conversationId: conversation.id, participantId: participant.id });
+    this.localRunOfServer.set(serverRunId, localRunId);
+    let claimOpId: string | undefined;
+    try {
+      // Д13: the message this turn answers is on the server before the
+      // member starts — with no server reachable, it waits, visibly unsent.
+      await this.waitForQueuedSave(conversation.id);
+      const stored = conversation.messages.find((message) => message.id === triggerMessage.id) ?? triggerMessage;
+      if (serverSeqOf(stored) === undefined) {
+        const answer = await link.messageAccepted(conversation.id, triggerMessage.id, signal);
+        if (answer?.status === "rejected") throw new Error(`The server did not accept the message this turn answers: ${answer.reason}`);
+      }
+      if (!this.runsHere(participant)) return { kind: "remote", serverRunId, canonical };
+      const opId = newOpId();
+      claimOpId = opId;
+      await link.enqueue([{ opId, kind: "turn.claim", conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id }]);
+      const answer = await link.opAnswered(opId, signal);
+      if (answer.status === "rejected") throw new Error(`The server did not give @${participant.handle} this turn: ${answer.reason}`);
+      void this.debugLogs.write("chat.server-turn.claim", { conversationId: conversation.id, runId: serverRunId, participantId: participant.id, claim: answer.claim });
+      if (answer.claim === "claimed" || answer.claim === "already-yours") return { kind: "local", serverRunId };
+      if (answer.claim === "stopped") return { kind: "stopped", serverRunId };
+      return { kind: "skip", serverRunId, reason: answer.claim ?? "unknown" };
+    } catch (error) {
+      if (signal?.aborted) {
+        // Stopped while waiting for the server: the turn never starts anywhere.
+        void this.endAbortedServerTurn(link, { conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id }, claimOpId)
+          .catch(() => undefined);
+      }
+      this.serverRunOfLocal.delete(localRunId);
+      this.localRunOfServer.delete(serverRunId);
+      throw error;
+    }
+  }
+
+  /**
+   * A turn stopped before it ran here: never left taken on the server. The
+   * Stop goes first, whatever the claim's state (a turn only asked for is
+   * stopped by it); a claim nothing sent yet is taken back, and a turn the
+   * server gave this device (or may have, after a request carrying the
+   * claim failed) is also finished as stopped, since a Stop alone leaves
+   * it taken, every device showing it busy.
+   */
+  private async endAbortedServerTurn(link: ChatServerLink, turn: { conversationId: string; runId: string; messageId: string; participantId: string }, claimOpId?: string): Promise<void> {
+    const taken = claimOpId ? await link.withdraw?.(claimOpId) : undefined;
+    await link.enqueue([{ opId: newOpId(), kind: "turn.stop", ...turn }]);
+    if (!claimOpId || !taken || taken.status === "missing" || (taken.status === "withdrawn" && !taken.attempted)) return;
+    const outcome = taken.status === "withdrawn" ? undefined : taken.status === "answered" ? taken.outcome : await link.opAnswered(claimOpId);
+    const given = !outcome || (outcome.status === "accepted" && (outcome.claim === "claimed" || outcome.claim === "already-yours")) ||
+      (outcome.status === "rejected" && outcome.reason === HUB_OP_TAKEN_BACK);
+    if (given) await link.enqueue([{ opId: newOpId(), kind: "turn.finish", conversationId: turn.conversationId, runId: turn.runId, outcome: "stopped" }]);
+  }
+
+  /** The User's server refused a message this device wrote: the message
+   *  says so with the reason, instead of waiting to be sent (Д3). */
+  async markMessageRefused(conversationId: string, messageId: string, reason: string): Promise<void> {
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") return;
+    await this.withChatMutation(conversation, async () => {
+      const message = conversation.messages.find((item) => item.id === messageId);
+      if (!message || message.metadata?.serverRejected === reason) return;
+      message.metadata = { ...(message.metadata ?? {}), serverRejected: reason };
+      await this.saveConversation(conversation, { emitChanges: false });
+    });
+  }
+
+  /** A placeholder this device showed for a member elsewhere, once that
+   *  member's own bubble has taken its place (or the turn never ran). */
+  private async dropServerPlaceholder(conversation: Conversation, messageId: string): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      if (this.removeServerPlaceholders(conversation, (message) => message.id === messageId)) this.queueSnapshot(conversation);
+    });
+  }
+
+  /** Takes the placeholders `gone` names out of this copy, and remembers them
+   *  so that no other copy brings them back; true when one was here. */
+  private removeServerPlaceholders(conversation: Conversation, gone: (message: ChatMessage) => boolean): boolean {
+    const before = conversation.messages.length;
+    conversation.messages = conversation.messages.filter((message) => {
+      if (!message.metadata?.serverPlaceholder || !gone(message)) return true;
+      this.goneServerPlaceholders.add(message.id);
+      return false;
+    });
+    while (this.goneServerPlaceholders.size > 5_000) {
+      const oldest = this.goneServerPlaceholders.values().next().value;
+      if (oldest === undefined) break;
+      this.goneServerPlaceholders.delete(oldest);
+    }
+    return conversation.messages.length !== before;
+  }
+
+  /** A copy merged with what is stored, or about to be saved, keeps none of
+   *  the placeholders that went meanwhile. */
+  private withoutGoneServerPlaceholders(conversation: Conversation): void {
+    if (!this.goneServerPlaceholders.size) return;
+    const gone = (message: ChatMessage) => Boolean(message.metadata?.serverPlaceholder) && this.goneServerPlaceholders.has(message.id);
+    if (conversation.messages.some(gone)) conversation.messages = conversation.messages.filter((message) => !gone(message));
+  }
+
+  /** The end of a turn this device ran, said on the server. */
+  private finishServerTurn(localRunId: string, outcome: "done" | "error" | "stopped" | "interrupted", contextUsage?: AgentContextUsage): void {
+    const link = this.serverLink;
+    const server = this.serverRunOfLocal.get(localRunId);
+    this.serverTurnOpens.delete(localRunId);
+    if (!link || !server) return;
+    this.serverRunOfLocal.delete(localRunId);
+    this.localRunOfServer.delete(server.runId);
+    const op: HubOp = { opId: newOpId(), kind: "turn.finish", conversationId: server.conversationId, runId: server.runId, outcome,
+      ...(contextUsage ? { contextUsage: contextUsage as unknown as Record<string, unknown> } : {}) };
+    // The member's last bubble of the run is saved by the caller right after
+    // this: the end goes with that save (persistConversationSnapshotNow), or
+    // at once when nothing of the run is still pending here.
+    const timer = setTimeout(() => this.releaseDeferredServerFinish(server.runId), DEFERRED_SERVER_FINISH_MS);
+    timer.unref?.();
+    this.deferredServerFinishes.set(server.runId, { conversationId: server.conversationId, participantId: server.participantId, op, timer });
+    void (async () => {
+      await this.waitForQueuedSave(server.conversationId);
+      const stored = await this.storage.getConversation(server.conversationId);
+      const pending = stored?.messages.some((message) => message.participantId === server.participantId && message.metadata?.runId === server.runId && message.status === "pending");
+      if (!pending) this.releaseDeferredServerFinish(server.runId);
+    })().catch(() => this.releaseDeferredServerFinish(server.runId));
+  }
+
+  private releaseDeferredServerFinish(serverRunId: string): void {
+    const deferred = this.deferredServerFinishes.get(serverRunId);
+    if (!deferred) return;
+    this.deferredServerFinishes.delete(serverRunId);
+    clearTimeout(deferred.timer);
+    void this.serverLink?.enqueue([deferred.op]).catch(() => undefined);
+  }
+
+  /** Waits for a turn on the server to reach one of `states`. */
+  private waitForServerTurn(runId: string, done: (turn: HubTurn) => boolean, signal?: AbortSignal): Promise<HubTurn> {
+    return new Promise((resolve, reject) => {
+      const list = this.serverTurnWaiters.get(runId) ?? [];
+      const onAbort = () => { remove(); reject(signal?.reason ?? new Error("Chat run cancelled.")); };
+      const remove = () => {
+        const current = (this.serverTurnWaiters.get(runId) ?? []).filter((item) => item !== check);
+        if (current.length) this.serverTurnWaiters.set(runId, current); else this.serverTurnWaiters.delete(runId);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const check = (turn: HubTurn) => {
+        if (!done(turn)) return;
+        remove();
+        resolve(turn);
+      };
+      this.serverTurnWaiters.set(runId, [...list, check]);
+      if (signal?.aborted) return onAbort();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const known = this.serverTurnStates.get(runId);
+      if (known) check(known);
+    });
+  }
+
+  /** A member that runs on another device: its turn is asked of that device
+   *  on the server, and this device shows a placeholder until the member's
+   *  own bubble arrives, then waits for the turn to end there. Stop is asked
+   *  on the server too, and shown as waiting until that device confirms
+   *  (parity exception "Stop on an unreachable machine is shown waiting"). */
+  private async runParticipantTurnRemote(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    triggerMessage: ChatMessage,
+    localRunId: string,
+    opened: Extract<ServerTurnOpen, { kind: "remote" }>,
+    signal: AbortSignal | undefined,
+    progress: ProgressCallback | undefined,
+    options: { warnings: string[]; existingPendingMessage?: ChatMessage; continuation?: boolean; turnSegmentId: string }
+  ): Promise<ChatMessage[]> {
+    const link = this.serverLink!;
+    const serverRunId = opened.serverRunId;
+    let placeholder = options.existingPendingMessage;
+    if (!placeholder) {
+      placeholder = this.message(
+        "participant",
+        "",
+        { id: participant.id, kind: participant.kind, label: `@${participant.handle}`, model: participant.model },
+        {
+          threadId: triggerMessage.metadata?.threadId ?? triggerMessage.id,
+          parentMessageId: triggerMessage.id,
+          chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
+          sourceMessageId: triggerMessage.id,
+          requesterParticipantId: options.continuation ? triggerMessage.participantId : undefined,
+          approvedContinuation: options.continuation || undefined,
+          runId: serverRunId,
+          turnSegmentId: options.turnSegmentId
+        },
+        "pending"
+      );
+      placeholder.metadata = { ...placeholder.metadata, serverPlaceholder: true };
+      const created = placeholder;
+      await this.withChatMutation(conversation, async () => {
+        conversation.messages.push(created);
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+    }
+    const bubble = placeholder;
+    const setOnBubble = async (patch: (metadata: ChatMessageMetadata) => ChatMessageMetadata) => {
+      await this.withChatMutation(conversation, async () => {
+        for (const message of conversation.messages) {
+          if (message.participantId === participant.id && message.metadata?.runId === bubble.metadata?.runId && message.status === "pending") {
+            message.metadata = patch({ ...(message.metadata ?? {}) });
+          }
+        }
+        this.queueSnapshot(conversation);
+      });
+    };
+    try {
+      // A cloud member's machine is made ready first; the member then names it.
+      if (participant.cloudRun && !participant.homeMachineId) {
+        if (!this.prepareCloudSelection) throw new Error("Cloud setup is not available on this device.");
+        // What the preparation says (a sign-in it waits for) is on the bubble,
+        // and a Stop ends the wait at once.
+        const preparing = this.prepareCloudSelection(participant.cloudRun, participant.kind, (snapshot) => {
+          this.emitProgress(localRunId, progress, "initial", snapshot.message, { participantLabel: `@${participant.handle}` });
+          if (!signal?.aborted) void setOnBubble((metadata) => ({ ...metadata, cloudRunPreparation: snapshot })).catch(() => undefined);
+        });
+        let abort: (() => void) | undefined;
+        const cancelled = new Promise<never>((_resolve, reject) => {
+          abort = () => reject(signal?.reason ?? new Error("Chat run cancelled."));
+          signal?.addEventListener("abort", abort, { once: true });
+          if (signal?.aborted) abort();
+        });
+        void preparing.catch(() => undefined);
+        let machineId: string;
+        try { machineId = await Promise.race([preparing, cancelled]); }
+        finally { if (abort) signal?.removeEventListener("abort", abort); }
+        signal?.throwIfAborted();
+        await setOnBubble((metadata) => { delete metadata.cloudRunPreparation; return metadata; });
+        await this.withChatMutation(conversation, async () => {
+          const members = this.chatParticipants(conversation);
+          const ready = members.find((item) => item.id === participant.id);
+          if (!ready) throw new Error("The member left the chat while Cloud was preparing.");
+          conversation.metadata = { ...conversation.metadata, participants: members.map((item) => item.id === ready.id ? { ...ready, homeMachineId: machineId } : item) };
+          await this.saveConversation(conversation);
+          participant = { ...ready, homeMachineId: machineId };
+        });
+      }
+      if (participant.homeMachineId) {
+        const machineId = participant.homeMachineId;
+        // The chat's project is on the member's machine before its turn is
+        // asked there (copied once, never over what is there), and the machine
+        // knows where it is: its settings on the server say so.
+        if (conversation.repoPath && this.prepareMachineProject) {
+          await this.prepareParticipantProjects(conversation.repoPath, [participant], signal, (message) => {
+            this.emitProgress(localRunId, progress, "initial", message, { participantLabel: `@${participant.handle}` });
+            void setOnBubble((metadata) => ({ ...metadata, cloudRunPreparation: { operationId: localRunId, message } })).catch(() => undefined);
+          });
+          await setOnBubble((metadata) => { delete metadata.cloudRunPreparation; return metadata; });
+        }
+        await this.beforeRemoteTurn?.(machineId).catch((error: unknown) => {
+          void this.debugLogs.write("chat.remote-turn.prepare-error", { conversationId: conversation.id, machineId, message: error instanceof Error ? error.message : String(error) });
+        });
+        signal?.throwIfAborted();
+      }
+    } catch (error) {
+      // Stopped while its machine or project was made ready: the turn is
+      // stopped on the server too, so its machine never starts it (a User's
+      // message asked for it already).
+      if (signal?.aborted) {
+        await link.enqueue([{ opId: newOpId(), kind: "turn.stop", conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id }]).catch(() => undefined);
+        // A member whose cloud machine is not chosen yet has no device but
+        // this one: it says the member stopped, as for a local member stopped
+        // before it started (a machine says so for its own members).
+        const said = conversation.messages.some((item) => item.role === "system" && item.content === `@${participant.handle} stopped by user.` &&
+          item.metadata?.parentMessageId === triggerMessage.id);
+        if (!participant.homeMachineId && !said) await this.noteTurnStoppedBeforeStart(conversation, triggerMessage, participant);
+        throw error;
+      }
+      // It could not be made ready: the bubble says why, as a local member's
+      // that could not start does (only this device has it).
+      throw new RemoteTurnNotStartedError(error instanceof Error ? error.message : String(error));
+    }
+    const machineName = participant.homeMachineId ? link.machineName(participant.homeMachineId) ?? "the machine" : "this computer";
+    const placed = (turn: HubTurn) => turn.state !== "requested";
+    const ended = (turn: HubTurn) => turn.state === "finished" || turn.state === "stopped";
+    // Why the machine cannot take it right now (its runtime is being
+    // updated), when this device knows.
+    const waitReason = participant.homeMachineId ? this.machineWaitReason?.(participant.homeMachineId) : undefined;
+    await setOnBubble((metadata) => ({ ...metadata, machinePending: { machineName, at: new Date().toISOString(), ...(waitReason ? { reason: waitReason } : {}) } }));
+    // Asked of the member's device (a User's message asked it already).
+    const opId = newOpId();
+    await link.enqueue([{ opId, kind: "turn.request", conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id,
+      ...(bubble.metadata?.serverPlaceholder ? { pendingMessageId: bubble.id } : {}),
+      request: { kind: "turn", ...(options.continuation ? { continuation: true } : {}) } }]);
+    const asked = await link.opAnswered(opId);
+    if (asked.status === "rejected") throw new Error(`@${participant.handle} could not be started on ${machineName}: ${asked.reason}`);
+    let turn: HubTurn | undefined = asked.turn;
+    try {
+      if (!turn || !placed(turn)) turn = await this.waitForServerTurn(serverRunId, placed, signal);
+      await setOnBubble((metadata) => { delete metadata.machinePending; return metadata; });
+      // The member's device may have written its bubble before this one
+      // showed the placeholder: the placeholder goes.
+      await this.withChatMutation(conversation, async () => {
+        const real = conversation.messages.some((message) => !message.metadata?.serverPlaceholder && message.participantId === participant.id && message.metadata?.runId === serverRunId);
+        if (!real) return;
+        this.removeServerPlaceholders(conversation, (message) => message.participantId === participant.id && message.metadata?.runId === serverRunId);
+        this.queueSnapshot(conversation);
+      });
+      if (!ended(turn)) turn = await this.waitForServerTurn(serverRunId, ended, signal);
+    } catch (error) {
+      if (!signal?.aborted) throw error;
+      // Stop: asked on the server; shown as waiting until the member's
+      // device confirms (the approved parity exception).
+      await link.enqueue([{ opId: newOpId(), kind: "turn.stop", conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id }]);
+      await setOnBubble((metadata) => ({ ...metadata, stopPending: { machineName, at: new Date().toISOString() } }));
+      turn = await this.waitForServerTurn(serverRunId, ended);
+      // Confirmed: whatever the bubble's state now, it no longer waits.
+      await this.withChatMutation(conversation, async () => {
+        for (const message of conversation.messages) {
+          if (message.participantId === participant.id && message.metadata?.runId === serverRunId && message.metadata?.stopPending) {
+            const { stopPending: _confirmed, ...rest } = message.metadata;
+            message.metadata = rest;
+          }
+        }
+        this.queueSnapshot(conversation);
+      });
+    }
+    const refreshed = await this.requireChat(conversation.id);
+    if (turn.state === "stopped" && !turn.executorDeviceId) {
+      // Never taken: the placeholder goes, the stop is said once.
+      await this.withChatMutation(conversation, async () => {
+        this.removeServerPlaceholders(conversation, (message) => message.metadata?.runId === bubble.metadata?.runId);
+        this.queueSnapshot(conversation);
+      });
+      return [];
+    }
+    return refreshed.messages.filter((message) => message.participantId === participant.id && message.metadata?.runId === serverRunId && message.status !== "pending");
+  }
+
+  /** Installs (or removes) the link to the User's server (Д1). */
+  setServerLink(link: ChatServerLink | undefined): void {
+    this.serverLink = link;
     this.chatChangeBaselines.clear();
+    // The cards of another server (or none) are read again from it.
+    this.serverCards.reset();
+    this.mirroredCardSeqs.clear();
+  }
+
+  /** Whether this device writes this message on the server: one it wrote
+   *  there, or a new one it may write (a member's only where it runs, Д4).
+   *  Never a placeholder for a member that runs elsewhere. */
+  private mayWriteOnServer(conversation: Conversation, message: ChatMessage): boolean {
+    const link = this.serverLink;
+    if (!link || message.metadata?.serverPlaceholder) return false;
+    const writer = message.metadata?.serverWriter;
+    if (typeof writer === "string") return writer === link.deviceId();
+    if (message.role !== "participant") return true;
+    const participant = this.chatParticipants(conversation).find((item) => item.id === message.participantId);
+    return Boolean(participant) && this.runsHere(participant!);
+  }
+
+  /** Whether a member runs on this device (Д4): a machine runs the members
+   *  homed on it; the computer runs every member without a machine. */
+  runsHere(participant: Pick<ChatParticipant, "homeMachineId" | "cloudRun">): boolean {
+    if (this.machineRuntime) return Boolean(this.hostMachineId) && participant.homeMachineId === this.hostMachineId;
+    return !participant.homeMachineId && !participant.cloudRun;
+  }
+
+  // --- cards a member waits on, on the User's server (Д9) -------------------
+
+  /** Sets what applies the User's answers to this device's members' cards
+   *  (the native approval and choice executors). */
+  setCardAppliers(appliers: (() => Promise<ChatCardAppliers>) | undefined): void {
+    this.cardAppliers = appliers;
+  }
+
+  /** The card operations a save of this chat makes (Д9): cards raised for
+   *  its members here, raised again when what they show changed, settled
+   *  when what they asked is resolved here. Committed with the save. */
+  private serverCardOpsFor(snapshot: Conversation): { ops: HubOp[]; commit(): void } {
+    if (!this.serverLink || snapshot.kind !== "chat") return { ops: [], commit: () => undefined };
+    return this.serverCards.opsFor(snapshot, this.wantedServerCards(snapshot), newOpId);
+  }
+
+  /** The cards this chat holds for members that run on this device: a
+   *  machine's members' cards are that machine's to raise, never a copy's. */
+  private wantedServerCards(conversation: Conversation): WantedHubCard[] {
+    const participants = this.chatParticipants(conversation);
+    const me = this.serverLink?.deviceId();
+    const memberHere = (participantId: string | undefined): boolean => {
+      const participant = participants.find((item) => item.id === participantId);
+      return Boolean(participant) && this.runsHere(participant!);
+    };
+    return wantedHubCards(conversation, {
+      approval: (approval) => this.isChatAppToolApproval(approval) && (!approval.homeMachineId || approval.homeMachineId === this.hostMachineId) &&
+        memberHere(approval.requesterParticipantId),
+      // Only for a member that runs here, as the server allows: a member of
+      // a machine no longer on the server's devices (its messages moved as
+      // this computer's) has nobody to answer it.
+      message: (message) => {
+        const writer = message.metadata?.serverWriter;
+        if (typeof writer === "string" && (!me || writer !== me)) return false;
+        return memberHere(message.participantId);
+      }
+    });
+  }
+
+  /** The server answered one of this device's operations: for a card, how
+   *  it holds it now. A raise it refused is not sent again as it was. */
+  noteServerOpAnswered(op: HubOp, outcome: HubOpOutcome): void {
+    if (op.kind !== "card.raise" && op.kind !== "card.answer" && op.kind !== "card.settle") return;
+    if (outcome.status === "accepted") {
+      if (outcome.card && outcome.card.raisedBy === this.serverLink?.deviceId()) this.serverCards.noteServer(outcome.card, outcome.seq);
+      return;
+    }
+    void this.debugLogs.write("chat.card.op-refused", { kind: op.kind, cardId: op.cardId, conversationId: op.conversationId, reason: outcome.reason });
+    if (op.kind === "card.raise") {
+      this.serverCards.noteRaiseRefused(op.cardId, hubCardDigest(op.cardKind, op.card));
+      // Refused for now (the server does not know this device for the
+      // member yet, say): tried again a while later, not only at a reconnect.
+      if (!this.cardRaiseRetryTimer) {
+        this.cardRaiseRetryTimer = setTimeout(() => {
+          this.cardRaiseRetryTimer = undefined;
+          void this.resumeServerCards({ messages: false }).catch((error) => {
+            void this.debugLogs.write("chat.card.raise-retry-error", { message: error instanceof Error ? error.message : String(error) });
+          });
+        }, CARD_RAISE_RETRY_MS);
+        this.cardRaiseRetryTimer.unref?.();
+      }
+    }
+  }
+
+  /** Card changes in the feed for cards this device raised: their state, and
+   *  an answer to apply here (from any device, this one included). */
+  private noteServerCardEntries(entries: HubFeedEntry[]): void {
+    const me = this.serverLink?.deviceId();
+    if (!me) return;
+    for (const entry of entries) {
+      const effect = entry.effect;
+      if (effect.kind !== "card.raise" && effect.kind !== "card.answer" && effect.kind !== "card.settle") continue;
+      if (effect.card.raisedBy !== me) continue;
+      // An answer is applied only while it is the card's newest word here.
+      if (this.serverCards.noteServer(effect.card, entry.seq) && effect.kind === "card.answer") this.scheduleCardApply(effect.card, entry.opId);
+    }
+  }
+
+  /** Applies an answer to a card this device raised, once, then settles it
+   *  (or asks it again when the answer could not be applied). */
+  private scheduleCardApply(card: HubCard, feedOpId?: string): void {
+    // The operation the answer came in: a refusal is kept under it, so the
+    // device that sent it says why (after a restart too).
+    const answerOpId = feedOpId ?? card.answerOpId;
+    const me = this.serverLink?.deviceId();
+    if (!me || card.raisedBy !== me || card.state !== "answered") return;
+    // This device's own word on a card it decided itself: nothing to apply.
+    if ((card.answer as { auto?: unknown } | undefined)?.auto === true && card.answeredBy === me) return;
+    if (this.serverCards.applying.has(card.cardId)) return;
+    this.serverCards.applying.add(card.cardId);
+    const timer = this.cardRetryTimers.get(card.cardId);
+    if (timer) {
+      clearTimeout(timer);
+      this.cardRetryTimers.delete(card.cardId);
+    }
+    void (async () => {
+      let result: CardApplyResult;
+      try {
+        const applied = await this.applyCardAnswer(card, answerOpId);
+        if (!applied) {
+          this.serverCards.applying.delete(card.cardId);
+          if (answerOpId) {
+            const waiter = this.cardAnswerWaiters.get(answerOpId);
+            this.cardAnswerWaiters.delete(answerOpId);
+            waiter?.({ kind: "applied" });
+          }
+          return;
+        }
+        result = applied;
+      } catch (error) {
+        result = { kind: "retry", reason: error instanceof Error ? error.message : String(error) };
+      }
+      try {
+        await this.finishCardAnswer(card, result, answerOpId);
+      } catch (error) {
+        void this.debugLogs.write("chat.card.finish-error", { conversationId: card.conversationId, cardId: card.cardId,
+          message: error instanceof Error ? error.message : String(error) });
+        if (result.kind !== "retry") result = { kind: "retry", reason: error instanceof Error ? error.message : String(error) };
+      } finally {
+        this.serverCards.applying.delete(card.cardId);
+      }
+      if (answerOpId) {
+        const waiter = this.cardAnswerWaiters.get(answerOpId);
+        this.cardAnswerWaiters.delete(answerOpId);
+        waiter?.(result);
+      }
+      if (result.kind === "retry") this.retryCardApplyLater(card, answerOpId);
+    })();
+  }
+
+  private async applyCardAnswer(card: HubCard, answerOpId?: string): Promise<CardApplyResult | undefined> {
+    // Applied before and settled here, the settle not sent yet (it stopped,
+    // or the server is away): nothing to do again.
+    if (await this.serverLink?.cardSettleQueued?.(card.conversationId, card.cardId)) return undefined;
+    const appliers = await this.cardAppliers?.();
+    if (!appliers) return { kind: "retry", reason: "This device cannot apply answers yet." };
+    if (card.cardKind === "choice") return appliers.choice.apply(card, answerOpId);
+    if (card.cardKind === "mention") return appliers.mention.apply(card);
+    return appliers.approval.apply(card);
+  }
+
+  private retryCardApplyLater(card: HubCard, answerOpId?: string): void {
+    if (this.cardRetryTimers.has(card.cardId)) return;
+    const timer = setTimeout(() => {
+      this.cardRetryTimers.delete(card.cardId);
+      if (this.serverCards.known(card.cardId)?.state === "answered") this.scheduleCardApply(card, answerOpId);
+    }, CARD_APPLY_RETRY_MS);
+    timer.unref?.();
+    this.cardRetryTimers.set(card.cardId, timer);
+  }
+
+  /**
+   * What came of an answer, said on the server. Settled with the outcome, and
+   * the settle names the answer it is about (the server never lets it close
+   * a card asked again since). Refused while what it asked still waits here:
+   * settled with why, and asked again. Applied (or past its point of no
+   * return) while the member still waits on the same question (mentions
+   * approved one at a time): settled, and asked again for the rest. Applied
+   * while an approved roster change waits to be made: left answered until
+   * it is made (never asked again: the User answered it).
+   */
+  private async finishCardAnswer(card: HubCard, result: CardApplyResult, answerOpId?: string): Promise<void> {
+    const link = this.serverLink;
+    void this.debugLogs.write("chat.card.answer-applied", { conversationId: card.conversationId, cardId: card.cardId, cardKind: card.cardKind,
+      answeredBy: card.answeredBy ?? "", result: result.kind, ...(result.kind !== "applied" ? { reason: result.reason } : {}) });
+    if (!link || result.kind === "retry") return;
+    const settle = (outcome: HubCardOutcome): HubOp => ({ opId: newOpId(), kind: "card.settle", conversationId: card.conversationId, cardId: card.cardId,
+      outcome: { ...outcome, ...(answerOpId ? { answerOpId } : {}) } as unknown as Record<string, unknown> });
+    const raise = (again: WantedHubCard): HubOp => ({ opId: newOpId(), kind: "card.raise", conversationId: card.conversationId, cardId: again.cardId,
+      cardKind: again.cardKind, participantId: again.participantId, ...(again.messageId ? { messageId: again.messageId } : {}), card: again.card });
+    await this.waitForQueuedSave(card.conversationId);
+    let conversation = await this.storage.getConversation(card.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      await link.enqueue([settle({ result: "closed", reason: "The chat is gone." })]);
+      this.serverCards.noteState(card.cardId, card.conversationId, "settled");
+      return;
+    }
+    if (result.kind === "uncertain") {
+      // Never asked again: what it still asked is closed here with why.
+      await this.closeCardHere(conversation, card, result.reason);
+      conversation = await this.storage.getConversation(card.conversationId);
+      if (!conversation || conversation.kind !== "chat") {
+        await link.enqueue([settle({ result: "closed", reason: "The chat is gone." })]);
+        this.serverCards.noteState(card.cardId, card.conversationId, "settled");
+        return;
+      }
+    }
+    const waiting = this.wantedServerCards(conversation).find((item) => item.cardId === card.cardId);
+    // Whether the member still waits on the User for it (a question), or only
+    // on a roster change the User approved being made.
+    const stillAsks = Boolean(waiting) && (waiting!.cardKind === "choice" || waiting!.cardKind === "mention" ||
+      (waiting!.card as unknown as HubApprovalCardPayload).approval?.status === "pending");
+    if (result.kind === "refused" && waiting && !waiting.selfAnswer) {
+      // Not applied, and the member still waits: the card is asked again,
+      // and says why to the device that sent the answer.
+      await this.recordCardRefusal(conversation, card, result.reason, answerOpId);
+      const stored = await this.storage.getConversation(card.conversationId);
+      const again = stored ? this.wantedServerCards(stored).find((item) => item.cardId === card.cardId) : undefined;
+      await link.enqueue([settle({ result: "refused", reason: result.reason }), ...(again ? [raise(again)] : [])]);
+      this.serverCards.noteState(card.cardId, card.conversationId, again ? "pending" : "settled", again?.digest, { reopen: true });
+      return;
+    }
+    if (waiting && stillAsks && !waiting.selfAnswer) {
+      // Done, and the member still waits on the rest of it: asked again.
+      await link.enqueue([settle({ ...hubCardOutcomeFrom(conversation, card.cardId, result.kind === "applied" ? "applied" : "uncertain"),
+        ...(result.kind !== "applied" ? { reason: result.reason } : {}) }), raise(waiting)]);
+      this.serverCards.noteState(card.cardId, card.conversationId, "pending", waiting.digest, { reopen: true });
+      return;
+    }
+    // Applied, and an approved roster change waits to be made: settled when
+    // it is made (serverCardOpsFor), on the device whose member asked (Д2).
+    if (waiting && !stillAsks && result.kind !== "refused") return;
+    const final = result.kind === "applied" ? "applied" : result.kind === "uncertain" ? "uncertain" : "closed";
+    await link.enqueue([settle({ ...hubCardOutcomeFrom(conversation, card.cardId, final), ...(result.kind !== "applied" ? { reason: result.reason } : {}) })]);
+    this.serverCards.noteState(card.cardId, card.conversationId, "settled");
+  }
+
+  /** An answer that crossed its point of no return unconfirmed: what it
+   *  answered is closed here (never asked again). */
+  private async closeCardHere(conversation: Conversation, card: HubCard, reason: string): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      const now = new Date().toISOString();
+      let changed = false;
+      if (card.cardKind === "choice" || card.cardKind === "mention") {
+        const message = conversation.messages.find((item) => item.id === card.messageId);
+        const choice = message?.metadata?.pendingChoice;
+        if (message && card.cardKind === "choice" && choice?.status === "pending") {
+          this.updatePendingChoiceCancellation(message, choice.id);
+          changed = true;
+        }
+        const mentions = message ? pendingMentionsOf(message) : [];
+        if (message && card.cardKind === "mention" && mentions.length) {
+          this.updatePendingMentionStatus(message, new Set(mentions.map((mention) => mention.targetParticipantId)), "rejected");
+          changed = true;
+        }
+      } else {
+        const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === card.cardId);
+        if (approval?.status === "pending") {
+          this.upsertAppToolApproval(conversation, { ...approval, status: "cancelled", error: reason, updatedAt: this.laterThan(approval.updatedAt) });
+          changed = true;
+        }
+      }
+      if (!changed) return;
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+    });
+  }
+
+  /** Why an answer was not taken, kept with what it answered (the last few):
+   *  the card asked again carries it. A choice keeps its own (respondToChoice). */
+  private async recordCardRefusal(conversation: Conversation, card: HubCard, reason: string, answerOpId?: string): Promise<void> {
+    if (card.cardKind === "choice") return;
+    const refusal = { operationId: answerOpId ?? "", reason, at: new Date().toISOString() };
+    const merged = (list: Array<{ operationId: string; reason: string; at: string }> | undefined) =>
+      [...(list ?? []).filter((item) => !answerOpId || item.operationId !== answerOpId), refusal].slice(-CARD_REFUSALS_KEPT);
+    await this.withChatMutation(conversation, async () => {
+      if (card.cardKind === "mention") {
+        const index = conversation.messages.findIndex((item) => item.id === card.messageId);
+        if (index < 0) return;
+        const message = conversation.messages[index];
+        conversation.messages[index] = { ...message, metadata: { ...(message.metadata ?? {}), mentionCardRefusals: merged(message.metadata?.mentionCardRefusals) } };
+      } else {
+        const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === card.cardId);
+        if (!approval) return;
+        this.upsertAppToolApproval(conversation, { ...approval, cardRefusals: merged(approval.cardRefusals), updatedAt: this.laterThan(approval.updatedAt) });
+      }
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+    });
+  }
+
+  /**
+   * After a start or a reconnect: the server's open cards are read. Cards
+   * this device holds for its members are raised where the server lacks
+   * them (or lacks what they show now) and settled where they are resolved
+   * here; answers this device has not applied yet are applied; and the
+   * desktop's view of other devices' cards is brought up to date.
+   */
+  async resumeServerCards(options: { messages?: boolean } = {}): Promise<void> {
+    // Every message row is read for cards at a start (or after the feed forgot
+    // this device's place), not at each reconnect: what was raised meanwhile
+    // went up with its save, and the server's open cards name the rest.
+    if (options.messages !== false) this.cardsReconcileMessages = true;
+    if (this.cardsReconciling) {
+      this.cardsReconcileAgain = true;
+      return this.cardsReconciling;
+    }
+    const run = (async () => {
+      do {
+        this.cardsReconcileAgain = false;
+        const messages = this.cardsReconcileMessages;
+        this.cardsReconcileMessages = false;
+        try {
+          await this.reconcileServerCards({ messages });
+        } catch (error) {
+          // Not done (the server could not be read): the next one reads
+          // every message row, as this one was to.
+          if (messages) this.cardsReconcileMessages = true;
+          throw error;
+        }
+      } while (this.cardsReconcileAgain);
+    })();
+    this.cardsReconciling = run;
+    try {
+      await run;
+    } finally {
+      if (this.cardsReconciling === run) this.cardsReconciling = undefined;
+    }
+  }
+
+  private async reconcileServerCards(options: { messages: boolean }): Promise<void> {
+    const link = this.serverLink;
+    const me = link?.deviceId();
+    if (!link?.openCards || !me) return;
+    const read = await link.openCards();
+    if (!read) return;
+    // The feed read up to the list's place first: nothing older is applied
+    // after it, and the view of other devices' cards is as current as it.
+    await link.readThrough?.(read.head, CARD_RECONCILE_READ_WAIT_MS);
+    const mine = read.cards.filter((card) => card.raisedBy === me);
+    this.serverCards.noteOpenCards(mine, read.head);
+    const storage = this.storage as Partial<Pick<StorageService, "conversationIdsWithOpenCards">>;
+    const local = typeof storage.conversationIdsWithOpenCards === "function"
+      ? await storage.conversationIdsWithOpenCards.call(this.storage, { messages: options.messages }) : [];
+    const chats = new Set<string>([...local, ...mine.map((card) => card.conversationId)]);
+    for (const conversationId of chats) {
+      if (await this.storage.conversationTombstones?.().isDeleted(conversationId)) continue;
+      const conversation = await this.storage.getConversation(conversationId);
+      if (!conversation || conversation.kind !== "chat") continue;
+      // Decided on the chat's newest copy, between its saves: a card a save
+      // raised meanwhile is never taken for one resolved here.
+      await this.withChatMutation(conversation, async () => {
+        const { ops, commit } = this.serverCards.opsFor(conversation, this.wantedServerCards(conversation), newOpId);
+        if (ops.length === 0) return;
+        await link.enqueue(ops);
+        commit();
+        void this.debugLogs.write("chat.card.reconciled", { conversationId, ops: ops.map((op) => `${op.kind}:${"cardId" in op ? op.cardId : ""}`).slice(0, 20) });
+      });
+    }
+    for (const card of mine) if (card.state === "answered") this.scheduleCardApply(card);
+    this.serverCards.reconciled = true;
+    if (!this.machineRuntime) await this.reconcileCardMirrors(read.cards.filter((card) => card.raisedBy !== me), local, read.head);
+  }
+
+  /** The desktop's view of other devices' cards, as the server holds them
+   *  now: a card it showed that is not open there any more is closed. */
+  private async reconcileCardMirrors(others: HubCard[], localChats: string[], head: number): Promise<void> {
+    const open = new Map(others.map((card) => [card.cardId, card]));
+    // What the feed said of a card after the list was read is newer than the
+    // list: it is left as the feed said.
+    const newer = (cardId: string): boolean => (this.mirroredCardSeqs.get(cardId) ?? 0) > head;
+    const byChat = new Map<string, HubCard[]>();
+    for (const card of others) byChat.set(card.conversationId, [...(byChat.get(card.conversationId) ?? []), card]);
+    for (const conversationId of new Set([...byChat.keys(), ...localChats])) {
+      if (await this.storage.conversationTombstones?.().isDeleted(conversationId)) continue;
+      const conversation = await this.storage.getConversation(conversationId);
+      if (!conversation || conversation.kind !== "chat") continue;
+      await this.withChatMutation(conversation, async () => {
+        // What this chat shows of other devices' cards: read again as the
+        // server holds them, it is saved only when that differs.
+        const shown = (): string => this.stableJson({
+          approvals: this.chatAppToolApprovals(conversation).map((approval) => ({ ...approval, updatedAt: "" })),
+          marks: conversation.messages.flatMap((message) => message.metadata?.serverCard ? [[message.id, message.metadata.serverCard]] : [])
+        });
+        const before = shown();
+        for (const card of byChat.get(conversationId) ?? []) {
+          if (newer(card.cardId)) continue;
+          this.mirrorServerCard(conversation, card.state === "answered" ? "card.answer" : "card.raise", card, undefined);
+        }
+        let changed = shown() !== before;
+        const now = new Date().toISOString();
+        for (const approval of this.chatAppToolApprovals(conversation)) {
+          if (!approval.homeMachineId || approval.homeMachineId === this.hostMachineId || open.has(approval.id) || newer(approval.id)) continue;
+          if (approval.status !== "pending" && !approval.machineDecisionPending) continue;
+          this.upsertAppToolApproval(conversation, { ...approval, machineDecisionPending: undefined,
+            ...(approval.status === "pending" ? { status: "expired" as const, error: "This request is not waiting on its machine any more." } : {}),
+            updatedAt: this.laterThan(approval.updatedAt) });
+          changed = true;
+        }
+        conversation.messages = conversation.messages.map((message) => {
+          const mark = message.metadata?.serverCard;
+          if (!mark || open.has(mark.cardId) || newer(mark.cardId)) return message;
+          const { serverCard: _gone, ...metadata } = message.metadata!;
+          changed = true;
+          return { ...message, metadata };
+        });
+        if (!changed) return;
+        conversation.updatedAt = now;
+        await this.saveConversation(conversation, { emitChanges: false });
+      });
+    }
+  }
+
+  /**
+   * The desktop's view of a card a member on another device raised: an
+   * approval is shown as that member's card here (with the answer it got,
+   * waiting for its machine); a choice or mentions answered elsewhere are
+   * marked answered on the member's message until its machine applies them.
+   * A machine member's roster change is made by its machine (Д2): here its
+   * card waits for that machine's outcome. True when the chat changed.
+   */
+  private mirrorServerCard(
+    conversation: Conversation,
+    kind: "card.raise" | "card.answer" | "card.settle",
+    card: HubCard,
+    opId: string | undefined
+  ): boolean {
+    const member = this.chatParticipants(conversation).find((item) => item.id === card.participantId);
+    const homeMachineId = member?.homeMachineId;
+    const machineName = (homeMachineId ? this.serverLink?.machineName(homeMachineId) : undefined) ?? "the machine";
+    if (card.cardKind === "choice" || card.cardKind === "mention") {
+      const index = conversation.messages.findIndex((item) => item.id === card.messageId);
+      if (index < 0) return false;
+      const message = conversation.messages[index];
+      const metadata: ChatMessageMetadata = { ...(message.metadata ?? {}) };
+      if (kind === "card.answer" && card.state === "answered") {
+        const mark: ChatServerCardMark = { cardId: card.cardId, state: "answered", answer: card.answer ?? {}, answeredAt: card.answeredAt ?? new Date().toISOString(), machineName };
+        // Read again (a reconnect lists the open cards): nothing changed.
+        if (this.stableJson(metadata.serverCard ?? null) === this.stableJson(mark)) return false;
+        metadata.serverCard = mark;
+      } else if (metadata.serverCard?.cardId === card.cardId) {
+        delete metadata.serverCard;
+      } else {
+        return false;
+      }
+      conversation.messages[index] = { ...message, metadata };
+      return true;
+    }
+    const payload = card.card as Partial<HubApprovalCardPayload>;
+    const raised = payload.approval;
+    if (!raised || raised.id !== card.cardId || raised.requesterParticipantId !== card.participantId || !homeMachineId) return false;
+    const current = this.chatAppToolApprovals(conversation).find((item) => item.id === card.cardId);
+    // Made here already (a machine member's roster change): no older word
+    // from the machine brings the waiting state back.
+    const settledHere = current?.rosterChangeSettledAt;
+    const decided = (approval: ChatAppToolApproval): ChatAppToolApproval => ({ ...approval, conversationId: conversation.id, homeMachineId,
+      updatedAt: this.laterThan(current?.updatedAt) });
+    // The same word read again (a reconnect lists the open cards, the feed
+    // may repeat a raise) changes nothing here.
+    const put = (next: ChatAppToolApproval): boolean => {
+      if (current && this.stableJson({ ...current, updatedAt: "" }) === this.stableJson({ ...next, updatedAt: "" })) return false;
+      this.upsertAppToolApproval(conversation, next);
+      return true;
+    };
+    if (kind === "card.raise") {
+      if (settledHere) return false;
+      const { machineDecisionPending: _pending, machineAppliedDecisionId: _decision, memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition,
+        cardRefusals: _refusals, ...shown } = raised;
+      return put(decided({ ...shown, ...(payload.refusals?.length ? { cardRefusals: payload.refusals } : {}) } as ChatAppToolApproval));
+    }
+    if (kind === "card.answer") {
+      if (settledHere || card.state !== "answered") return false;
+      const base = current ?? decided(raised);
+      const answer = (card.answer ?? {}) as Partial<HubApprovalCardAnswer>;
+      const answeredAt = card.answeredAt ?? new Date().toISOString();
+      // A roster change too: the member's own machine makes it (Д2) and
+      // settles the card; here it waits for that.
+      const known = base.machineDecisionPending?.at === answeredAt ? base.machineDecisionPending.decisionId : undefined;
+      return put(decided({ ...base,
+        machineDecisionPending: { decisionId: known ?? opId ?? `server:${card.cardId}@${answeredAt}`, machineName, approve: answer.approve === true, at: answeredAt } }));
+    }
+    const outcome = (card.outcome ?? {}) as Partial<HubCardOutcome>;
+    if (!current) return false;
+    if (outcome.result === "refused") {
+      // Asked again (a raise follows): its answer was not taken.
+      if (settledHere) return false;
+      const { machineDecisionPending: _pending, machineAppliedDecisionId: _decision, memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition, ...open } = current;
+      return put(decided({ ...open, status: "pending" } as ChatAppToolApproval));
+    }
+    if (outcome.approval && outcome.approval.id === card.cardId) {
+      const final: ChatAppToolApproval = { ...outcome.approval };
+      if (settledHere) {
+        delete final.memberRemovalQueuedAt;
+        delete final.memberAdditionQueuedAt;
+      }
+      return put(decided({ ...final, machineDecisionPending: undefined,
+        ...(settledHere ? { rosterChangeSettledAt: settledHere } : {}),
+        ...(current.machineAppliedDecisionId ? { machineAppliedDecisionId: current.machineAppliedDecisionId } : {}) }));
+    }
+    if (current.status !== "pending" && !current.machineDecisionPending) return false;
+    this.upsertAppToolApproval(conversation, decided({ ...current, machineDecisionPending: undefined,
+      ...(current.status === "pending" ? { status: "cancelled" as const, error: outcome.reason || `Closed on ${machineName}.` } : {}) }));
+    return true;
+  }
+
+  private noteMirroredCardSeq(cardId: string, seq: number): void {
+    this.mirroredCardSeqs.delete(cardId);
+    this.mirroredCardSeqs.set(cardId, Math.max(seq, this.mirroredCardSeqs.get(cardId) ?? 0));
+    while (this.mirroredCardSeqs.size > 5_000) {
+      const oldest = this.mirroredCardSeqs.keys().next().value;
+      if (oldest === undefined) break;
+      this.mirroredCardSeqs.delete(oldest);
+    }
+  }
+
+  /**
+   * The User answered a card on this device's screen: the answer is written
+   * to the User's server and this resolves once the server accepted it (its
+   * refusal is the error). A card raised here is applied here from the feed
+   * (exactly once, whoever answered); this waits for that too, a little, so
+   * a refusal of this device's own (a script's missing keys) is shown.
+   */
+  async answerServerCard(request: { conversationId: string; cardId: string; answer: Record<string, unknown>; raisedHere: boolean }): Promise<void> {
+    const link = this.serverLink;
+    if (!link) throw new Error("This computer is not linked to your server yet; try again in a moment.");
+    const opId = newOpId();
+    let applied: Promise<CardApplyResult | undefined> | undefined;
+    if (request.raisedHere) {
+      applied = new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          this.cardAnswerWaiters.delete(opId);
+          resolve(undefined);
+        }, CARD_ANSWER_LOCAL_WAIT_MS);
+        timer.unref?.();
+        this.cardAnswerWaiters.set(opId, (result) => {
+          clearTimeout(timer);
+          resolve(result);
+        });
+      });
+    }
+    try {
+      await link.enqueue([{ opId, kind: "card.answer", conversationId: request.conversationId, cardId: request.cardId, answer: request.answer }]);
+      const outcome = await link.opAnswered(opId);
+      if (outcome.status === "rejected") {
+        // Not put up yet: by this computer (it is still sending it), or by
+        // the device the member runs on (it is off, or has not read this chat
+        // since it asked).
+        if (outcome.reason === "There is no such card.") {
+          throw new Error(request.raisedHere
+            ? "This question is not on your server yet. Try again in a moment."
+            : "This question is not on your server yet: the device its member runs on has not put it there. Try again when that device is on.");
+        }
+        throw new Error(outcome.reason);
+      }
+      // What the server took is shown here before this returns: a card of a
+      // member elsewhere reads answered, rather than asking again until the
+      // feed brings the answer back.
+      if (outcome.seq > 0) await link.readThrough?.(outcome.seq, CARD_ANSWER_FEED_WAIT_MS);
+    } catch (error) {
+      this.cardAnswerWaiters.delete(opId);
+      throw error;
+    }
+    const result = await applied;
+    if (result?.kind === "refused" || result?.kind === "uncertain") throw new Error(result.reason);
+  }
+
+  /** Whether a card's subject is this device's: what it raised (or would). */
+  private cardRaisedHere(conversation: Conversation, cardId: string): boolean {
+    return this.wantedServerCards(conversation).some((card) => card.cardId === cardId) || this.serverCards.known(cardId) !== undefined;
+  }
+
+  /** The User's answer to an app-tool approval (a permission or a roster
+   *  change), from this device's card: written to the User's server. */
+  async answerAppToolApprovalCard(request: RespondToChatAppToolApprovalRequest): Promise<void> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") throw new Error("The chat is not available.");
+    const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === request.approvalId);
+    if (!approval) throw new Error("App tool approval request was not found.");
+    if (approval.status !== "pending" || approval.machineDecisionPending) throw new Error("App tool approval request has already been answered.");
+    const answer: HubApprovalCardAnswer = {
+      approve: request.approve,
+      ...(request.scope === "once" || request.scope === "chat" ? { scope: request.scope } : {}),
+      ...(request.codexDecisionId ? { codexDecisionId: request.codexDecisionId } : {}),
+      ...(request.draftOverride ? { draftOverride: request.draftOverride } : {})
+    };
+    await this.answerServerCard({ conversationId: conversation.id, cardId: approval.id, answer: answer as unknown as Record<string, unknown>,
+      raisedHere: this.cardRaisedHere(conversation, approval.id) });
+  }
+
+  /** The User's answer to a member's choice, from this device's card. */
+  async answerChoiceCard(request: RespondToChatChoiceRequest): Promise<void> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") throw new Error("The chat is not available.");
+    const message = conversation.messages.find((item) => item.id === request.sourceMessageId);
+    const choice = message?.metadata?.pendingChoice;
+    if (!message || !choice || choice.id !== request.choiceId) throw new Error("Choice request was not found.");
+    if (choice.status !== "pending" || message.metadata?.serverCard) throw new Error("Choice request has already been answered.");
+    const cardId = choiceCardId(message.id);
+    await this.answerServerCard({ conversationId: conversation.id, cardId, raisedHere: this.cardRaisedHere(conversation, cardId), answer: {
+      ...(request.selectedOptionId !== undefined ? { selectedOptionId: request.selectedOptionId } : {}),
+      ...(request.customAnswer !== undefined ? { customAnswer: request.customAnswer } : {}),
+      ...(request.note !== undefined ? { note: request.note } : {}),
+      ...(request.cancel ? { cancel: true } : {})
+    } });
+  }
+
+  /** The User's answer to a member's mentions waiting for approval, from
+   *  this device's card. Continuing the member after its mentions were all
+   *  answered asks nothing of anyone's card: it is a turn of that member,
+   *  started here and run where the member runs. */
+  async answerMentionsCard(request: RespondToChatMentionsRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") throw new Error("The chat is not available.");
+    const message = conversation.messages.find((item) => item.id === request.sourceMessageId);
+    if (!message) throw new Error("Source message was not found.");
+    const pending = pendingMentionsOf(message);
+    if (pending.length === 0) {
+      if (request.approve && request.continueRequester && message.participantId) return this.respondToMentions(request, signal, progress);
+      throw new Error("These mentions were already answered.");
+    }
+    if (message.metadata?.serverCard) throw new Error("These mentions were already answered.");
+    const cardId = mentionCardId(message.id);
+    await this.answerServerCard({ conversationId: conversation.id, cardId, raisedHere: this.cardRaisedHere(conversation, cardId), answer: {
+      approve: request.approve,
+      targetParticipantIds: request.approve ? request.targetParticipantIds : pending.map((mention) => mention.targetParticipantId),
+      ...(request.continueRequester ? { continueRequester: true } : {})
+    } });
+    return { conversation: (await this.storage.getConversation(conversation.id)) ?? conversation, warnings: [] };
   }
 
   private async chatChangeBaselineFor(conversationId: string): Promise<ChatChangeBaseline | undefined> {
@@ -20863,373 +21560,23 @@ export class ChatService {
     }
   }
 
-  /**
-   * Folds a `chat.changes` event from another device into this device's copy.
-   * The result is stored without being emitted again. "missing-conversation"
-   * means the event refers to a chat this device does not have yet; the caller
-   * holds it and asks for the chat.
-   */
-  async applyRemoteChatChanges(event: ChatEventEnvelope, payload: ChatChangesPayload): Promise<"applied" | "missing-conversation" | "waiting"> {
-    const transport = this.chatChangeTransport;
-    if (!transport) throw new Error("This device has no chat change transport.");
-    if (payload.conversationId !== event.conversationId) throw new Error("Chat change event names another chat.");
-    const conversationId = payload.conversationId;
-    if (this.deletedConversationIds.has(conversationId) || await this.storage.conversationTombstones?.().isDeleted(conversationId)) {
-      return "applied";
-    }
-    // Held, not skipped: a newer version's changes wait for this device's update.
-    if (!isSupportedChatChangesVersion(payload)) return "waiting";
-    // Written after desktop changes that have not reached this device yet. A
-    // change refused only for want of them (a member it names, that member's
-    // home) waits for them; one that applies anyway does not wait. While it
-    // waits it is looked at again only once more of them have arrived: trying
-    // it means reading the whole chat.
-    const dependency = transport.dependency ? await transport.dependency(payload) : undefined;
-    const dependencyMet = !dependency || dependency.have >= dependency.needed;
-    if (dependency && !dependencyMet && this.waitingChatChanges.get(event.eventId) === dependency.have) return "waiting";
-    const wait = (): "waiting" => {
-      this.waitingChatChanges.delete(event.eventId);
-      this.waitingChatChanges.set(event.eventId, dependency?.have ?? 0);
-      while (this.waitingChatChanges.size > 1_000) {
-        const oldest = this.waitingChatChanges.keys().next().value;
-        if (oldest === undefined) break;
-        this.waitingChatChanges.delete(oldest);
-      }
-      return "waiting";
-    };
-    const logIgnored = (ignored: string[]): void => {
-      if (ignored.length) {
-        void this.debugLogs.write("chat.changes.ignored", { conversationId, originId: event.originId, eventId: event.eventId, ignored: ignored.slice(0, 20) });
-      }
-    };
-    const existing = await this.storage.getConversation(conversationId);
-    if (!existing) {
-      const result = applyChatChanges(undefined, payload, event.originId, transport.applyPolicy(undefined));
-      if (result.status === "missing-conversation") return "missing-conversation";
-      if (!dependencyMet && result.ignored.length) return wait();
-      this.waitingChatChanges.delete(event.eventId);
-      logIgnored(result.ignored);
-      if (result.status === "ignored") return "applied";
-      this.localizeRepoPath(result.conversation, result.conversation.repoPath);
-      await this.saveConversation(result.conversation, { emitChanges: false });
-      this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
-      return "applied";
-    }
-    if (existing.kind !== "chat") return "applied";
-    let waiting = false;
-    const dropped: ChatParticipant[] = [];
-    // The phone's messages this application adds (one applied before, a
-    // redelivery, starts nothing again).
-    let addedMessageIds = new Set<string>();
-    await this.withChatMutation(existing, async () => {
-      const result = applyChatChanges(existing, payload, event.originId, transport.applyPolicy(existing));
-      if (result.status !== "applied") return;
-      const held = new Set(existing.messages.map((message) => message.id));
-      addedMessageIds = new Set(result.conversation.messages.filter((message) => !held.has(message.id)).map((message) => message.id));
-      if (!dependencyMet && result.ignored.length) {
-        waiting = true;
-        return;
-      }
-      logIgnored(result.ignored);
-      if (!result.changed) return;
-      // A member that watches the chat here sees new user messages the way a
-      // local one does: a new one resets its wake chain.
-      this.reconcileReplicatedWatcher(existing, result.conversation);
-      const droppedHere = this.membersDroppedFrom(existing, result.conversation);
-      const wasArchived = existing.metadata.archived === true;
-      existing.title = result.conversation.title;
-      const repoChanged = payload.changes.some((change) => change.type === "conversation.updated" && change.repoPath !== undefined);
-      if (this.hostMachineId) {
-        // The incoming path is the desktop's; this machine keeps its own copy.
-        if (repoChanged) this.localizeRepoPath(result.conversation, result.conversation.repoPath);
-        else if (existing.repoPath) result.conversation.repoPath = existing.repoPath;
-      }
-      if (result.conversation.repoPath) existing.repoPath = result.conversation.repoPath;
-      else delete existing.repoPath;
-      existing.messages = result.conversation.messages;
-      existing.metadata = result.conversation.metadata;
-      existing.updatedAt = result.conversation.updatedAt;
-      const touched = new Set(payload.changes.flatMap((change) =>
-        change.type === "message.created" || change.type === "message.updated" ? [change.message.id] : []));
-      // The desktop's word on roster changes this machine's members asked for.
-      if (transport.applyPolicy(existing).acceptsConversationFields(event.originId)) {
-        this.settleRosterChangesFromDesktop(existing, () => existing.messages.filter((message) => touched.has(message.id)));
-      }
-      for (const message of existing.messages) {
-        if (message.role === "participant" && touched.has(message.id)) this.recordLastMessageByParticipant(existing, message);
-      }
-      if (!wasArchived && existing.metadata.archived === true) await this.cliRunner.closeConversationSessions(conversationId);
-      await this.saveConversation(existing, { emitChanges: false });
-      dropped.push(...droppedHere);
-    });
-    // A member this host runs that the member list no longer has (removed on
-    // the desktop) ends its process here, as a local member's does there.
-    this.retireRemovedMembers(conversationId, dropped);
-    if (waiting) return wait();
-    this.waitingChatChanges.delete(event.eventId);
-    this.scheduleAutoWatchEvaluation(conversationId, "replicated-messages");
-    this.notePhoneMessages(event.originId, conversationId, payload, addedMessageIds);
-    return "applied";
-  }
-
   /** Reads a body from the User's server by its reference (a picture sent
    *  from the phone). */
   setHubBlobReader(reader: ((reference: DeviceEventBlobReference) => Promise<Buffer>) | undefined): void {
     this.hubBlobReader = reader;
   }
 
-  /** Says which devices are the User's phones. A message one of them wrote
-   *  starts its members here when they live here (see startPhoneTurns). */
-  setPhoneOrigins(resolver: ((originId: string) => boolean | Promise<boolean>) | undefined, since?: string): void {
-    this.phoneOrigin = resolver;
-    const at = since ? Date.parse(since) : NaN;
-    this.phoneTurnsSince = Number.isFinite(at) ? at : undefined;
-  }
-
-  private notePhoneMessages(originId: string, conversationId: string, payload: ChatChangesPayload, added: Set<string>): void {
-    const resolver = this.phoneOrigin;
-    if (!resolver) return;
-    const messages = payload.changes.flatMap((change) =>
-      change.type === "message.created" && change.message.role === "user" && added.has(change.message.id) ? [change.message] : []);
-    if (messages.length === 0) return;
-    // Until its members are claimed the chat counts as busy, so a watcher
-    // evaluating meanwhile does not take the same message as well.
-    this.phoneStartsInFlight.set(conversationId, (this.phoneStartsInFlight.get(conversationId) ?? 0) + 1);
-    void Promise.resolve(resolver(originId)).then((phone) => {
-      if (phone) return this.startPhoneTurns(conversationId, messages);
-      return undefined;
-    }).catch((error) => {
-      void this.debugLogs.write("chat.phone-turns.error", { conversationId, message: error instanceof Error ? error.message : String(error) });
-    }).finally(() => {
-      const left = (this.phoneStartsInFlight.get(conversationId) ?? 1) - 1;
-      if (left > 0) {
-        this.phoneStartsInFlight.set(conversationId, left);
-        return;
-      }
-      this.phoneStartsInFlight.delete(conversationId);
-      // A message whose turns all ended before registering (taken elsewhere,
-      // stopped) left no run whose end says the chat went idle.
-      this.scheduleQueuedMemberRemovals(conversationId);
-    });
-  }
-
-  /**
-   * Phone messages this device took in recently whose members living here
-   * were never started: the device stopped (a quit, a crash, an update)
-   * between taking a message in and claiming its turns, or this program is
-   * newer than the one that took it in. Their claims keep the ones that did
-   * start from starting again.
-   */
-  async resumePhoneTurns(sinceIso: string): Promise<void> {
-    const resolver = this.phoneOrigin;
-    if (!resolver) return;
-    const claims = this.storage.phoneTurnClaims();
-    const phones: string[] = [];
-    for (const originId of await claims.chatChangeOriginsSince(sinceIso)) {
-      if (await Promise.resolve(resolver(originId)).catch(() => false)) phones.push(originId);
-    }
-    if (phones.length === 0) return;
-    const byChat = new Map<string, ChatMessage[]>();
-    for (const row of await claims.chatChangesFrom(phones, sinceIso, 500)) {
-      try {
-        const envelope = JSON.parse(Buffer.from(row.envelopeHex, "hex").toString("utf8")) as ChatEventEnvelope;
-        const payload = await this.storage.deviceEventBlobs().hydrate(envelope.payload) as ChatChangesPayload;
-        for (const change of Array.isArray(payload?.changes) ? payload.changes : []) {
-          if (change.type !== "message.created" || change.message.role !== "user") continue;
-          byChat.set(envelope.conversationId, [...(byChat.get(envelope.conversationId) ?? []), change.message]);
-        }
-      } catch {
-        // An event this device cannot read back is not one it can start.
-      }
-    }
-    for (const [conversationId, messages] of byChat) {
-      await this.startPhoneTurns(conversationId, messages).catch((error) => {
-        void this.debugLogs.write("chat.phone-turns.error", { conversationId, message: error instanceof Error ? error.message : String(error) });
-      });
-    }
-  }
-
-  /** Whether this device starts this member's turns: the desktop starts its
-   *  own members (and prepares cloud ones), a machine the members it hosts. */
-  private startsPhoneTurnFor(participant: ChatParticipant): boolean {
-    const home = chatParticipantHome(participant);
-    return this.machineRuntime
-      ? Boolean(this.hostMachineId) && home.kind === "machine" && home.machineId === this.hostMachineId
-      : home.kind !== "machine";
-  }
-
-  /** The members a phone's message is for: the ones the phone resolved when
-   *  the User sent it (by the desktop's rules, from what the phone showed),
-   *  or, for a message that names none, the same rules here. */
-  private phoneMessageTargets(conversation: Conversation, message: ChatMessage): ChatParticipant[] {
-    const participants = this.chatParticipants(conversation);
-    const named = (message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets;
-    if (Array.isArray(named)) {
-      return named.flatMap((id) => {
-        const participant = typeof id === "string" ? participants.find((item) => item.id === id) : undefined;
-        return participant ? [participant] : [];
-      });
-    }
-    return this.resolveDispatchTargetsForContent(conversation, message.content, this.replyContextFromMessage(message)).targets;
-  }
-
-  /**
-   * The User wrote a message on her phone; it reached this device through the
-   * hub. The members it is for whose home is here start now, as they would for
-   * a message typed here; members that live elsewhere are started by their own
-   * home. Each turn is claimed under its run id before it starts (the same id
-   * on every device), so applying the message again — a redelivery, a
-   * restart — never runs a member twice, and a Stop that came first keeps it
-   * from starting.
-   */
-  async startPhoneTurns(conversationId: string, messages: ChatMessage[]): Promise<void> {
-    const presence = await this.storage.conversationPresence(conversationId);
-    if (!presence || presence.kind !== "chat") return;
-    // The chat's body names its members; the whole chat is read only when a
-    // member of this message lives here.
-    const opened = await this.storage.openConversation(conversationId, 1);
-    if (!opened || opened.conversation.metadata.archived === true) return;
-    let conversation: Conversation | undefined;
-    for (const message of messages) {
-      if (message.role !== "user") continue;
-      // Written before this device read the server: another home's.
-      if (this.phoneTurnsSince !== undefined && Date.parse(message.createdAt) < this.phoneTurnsSince - PHONE_TURN_CLOCK_SKEW_MS) continue;
-      const named = Array.isArray((message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets);
-      if (named) {
-        const here = this.phoneMessageTargets(opened.conversation, message).filter((participant) => this.startsPhoneTurnFor(participant));
-        if (here.length === 0) continue;
-        // Every turn here claimed already (the sweep finds most so): the
-        // whole chat is not read for them.
-        const claimed = await this.storage.phoneTurnClaims().claimedRunIds(here.map((participant) => phoneTurnRunId(message.id, participant.id)));
-        if (here.every((participant) => claimed.has(phoneTurnRunId(message.id, participant.id)))) continue;
-      }
-      conversation ??= await this.requireChat(conversationId);
-      const stored = conversation.messages.find((item) => item.id === message.id && item.role === "user");
-      if (!stored) continue;
-      const everyTarget = this.phoneMessageTargets(conversation, stored);
-      // What the desktop refuses to send it refuses here too, said once (by
-      // the home of the first member named) and nobody starts.
-      const goal = parseNativeGoalCommand(stored.content);
-      const refusal = goal.kind === "invalid" ? goal.error
-        : goal.kind === "valid" && everyTarget.length !== 1 ? "/goal requires exactly one resolved chat member." : undefined;
-      if (refusal) {
-        // Said by the first member's home, or by the desktop when it names none.
-        if (everyTarget[0] ? this.startsPhoneTurnFor(everyTarget[0]) : !this.machineRuntime) await this.notePhoneMessageRefused(conversation, stored, refusal);
-        continue;
-      }
-      const targets = everyTarget.filter((participant) => this.startsPhoneTurnFor(participant));
-      if (targets.length === 0) continue;
-      await this.startPhoneTurnsFor(conversation, stored, targets);
-    }
-  }
-
-  private async startPhoneTurnsFor(conversation: Conversation, message: ChatMessage, targets: ChatParticipant[]): Promise<void> {
-    const conversationId = conversation.id;
-    // A watcher member addressed directly has seen this message, as for a
-    // message typed here.
-    if (targets.some((participant) => participant.autoWatch === true)) {
-      await this.withChatMutation(conversation, async () => {
-        const before = JSON.stringify(conversation.metadata.participantWatchers ?? null);
-        this.advanceAutoWatchCursorForDirectTargets(conversation, targets, message);
-        if (JSON.stringify(conversation.metadata.participantWatchers ?? null) === before) return;
-        conversation.updatedAt = new Date().toISOString();
-        this.queueSnapshot(conversation);
-      });
-    }
-    const compact = this.compactCommand(message.content);
-    for (const participant of targets) {
-      const runId = phoneTurnRunId(message.id, participant.id);
-      if (this.pendingPhoneRuns.has(runId) || this.conversationIdForRun(runId)) continue;
-      // Its turn already shows in the chat (another home ran or stopped it,
-      // the member moved since): not again here.
-      if (this.phoneTurnShown(conversation, message, participant, runId)) continue;
-      const controller = new AbortController();
-      // Registered before anything is awaited, so a second start (the live
-      // one and a sweep) finds it, and a Stop arriving meanwhile stops the
-      // turn before it starts.
-      const pending: PendingPhoneRun = { conversationId, controller, started: false };
-      this.pendingPhoneRuns.set(runId, pending);
-      const release = (): void => {
-        if (this.pendingPhoneRuns.get(runId) !== pending) return;
-        this.pendingPhoneRuns.delete(runId);
-        // A turn that never registered left no run whose end says the chat
-        // went idle; an approved member removal may be waiting for exactly that.
-        if (!pending.registered) this.scheduleQueuedMemberRemovals(conversationId);
-      };
-      let outcome: Awaited<ReturnType<ReturnType<StorageService["phoneTurnClaims"]>["claim"]>>;
-      try {
-        outcome = await this.storage.phoneTurnClaims().claim({ runId, conversationId, messageId: message.id, participantId: participant.id, at: new Date().toISOString() });
-      } catch (error) {
-        // Not claimed: the next resume tries again. The other members go on.
-        release();
-        void this.debugLogs.write("chat.phone-turn.claim-error", { conversationId, runId, message: error instanceof Error ? error.message : String(error) });
-        continue;
-      }
-      if (outcome === "taken") {
-        release();
-        continue;
-      }
-      void this.debugLogs.write("chat.phone-turn", { conversationId, runId, participantId: participant.id, outcome });
-      if (outcome === "cancelled" || controller.signal.aborted) {
-        release();
-        await this.notePhoneTurnStoppedBeforeStart(conversation, message, participant);
-        continue;
-      }
-      const warnings: string[] = [];
-      pending.started = true;
-      const started = (async () => {
-        const settings = await this.settings.getPublicSettings();
-        // What a message typed here checks before it starts a member.
-        this.assertParticipantProvidersEnabled([participant], settings.providers ?? []);
-        if (compact && compact.handle.toLowerCase() === participant.handle.toLowerCase()) {
-          await this.compactParticipant({
-            conversationId, participantId: participant.id, handle: participant.handle, instructions: compact.instructions, triggeredBy: "user", runId,
-            threadId: message.metadata?.threadId ?? message.id, parentMessageId: message.id, chatThreadRootId: message.metadata?.chatThreadRootId
-          }, controller.signal, this.onReviewProgress);
-          return;
-        }
-        await this.runParticipantBatch(conversation, [participant], message, runId, controller.signal, this.onReviewProgress, warnings, {
-          targetRunIds: new Map([[participant.id, runId]])
-        });
-      })();
-      void started.catch(async (error) => {
-        const reason = error instanceof Error ? error.message : String(error);
-        void this.debugLogs.write("chat.phone-turn.error", { conversationId, runId, message: reason });
-        // Said in the chat, where the User sees it on her phone too.
-        warnings.push(`@${participant.handle} could not start for your message: ${reason}`);
-      }).finally(async () => {
-        release();
-        if (warnings.length > 0) await this.appendConversationWarnings(conversation, warnings).catch(() => undefined);
-      });
-    }
-  }
-
-  /** A phone's message the desktop would not have sent: the reason, under
-   *  it, once (a claim keeps a redelivery from saying it again). */
-  private async notePhoneMessageRefused(conversation: Conversation, message: ChatMessage, reason: string): Promise<void> {
-    const outcome = await this.storage.phoneTurnClaims().claim({ runId: `phone-refused-${message.id}`, conversationId: conversation.id, messageId: message.id,
-      participantId: "", at: new Date().toISOString() });
-    if (outcome !== "claimed") return;
-    await this.withChatMutation(conversation, async () => {
-      conversation.messages.push(this.message("system", reason, undefined, {
-        threadId: message.metadata?.threadId ?? message.id,
-        parentMessageId: message.id,
-        chatThreadRootId: message.metadata?.chatThreadRootId
-      }));
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
-    });
-  }
-
-  private phoneTurnShown(conversation: Conversation, message: ChatMessage, participant: ChatParticipant, runId: string): boolean {
+  /** Whether a member's turn for a message already shows in the chat (its
+   *  bubble, or the line saying it was stopped). */
+  private turnShown(conversation: Conversation, message: ChatMessage, participant: ChatParticipant, runId: string): boolean {
     const stopped = `@${participant.handle} stopped by user.`;
     return conversation.messages.some((item) => item.metadata?.runId === runId ||
       (item.role === "system" && item.content === stopped && item.metadata?.parentMessageId === message.id));
   }
 
-  /** A member stopped before its turn for a phone's message started: the
-   *  line a member stopped while queued gets. */
-  private async notePhoneTurnStoppedBeforeStart(conversation: Conversation, message: ChatMessage, participant: ChatParticipant): Promise<void> {
+  /** A member stopped before its turn started (on the server, from any
+   *  device): the line a member stopped while queued gets. */
+  private async noteTurnStoppedBeforeStart(conversation: Conversation, message: ChatMessage, participant: ChatParticipant): Promise<void> {
     await this.withChatMutation(conversation, async () => {
       conversation.messages.push(this.message("system", `@${participant.handle} stopped by user.`, undefined, {
         threadId: message.metadata?.threadId ?? message.id,
@@ -21239,152 +21586,6 @@ export class ChatService {
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
     });
-  }
-
-  /** A Stop for a phone's turn that is not running here. True when this
-   *  device is that member's home: the turn is then recorded as stopped and
-   *  never starts (or was stopped while starting). */
-  async stopUnstartedPhoneRun(conversationId: string, runId: string): Promise<boolean> {
-    const parsed = parsePhoneTurnRunId(runId);
-    if (!parsed) return false;
-    const pending = this.pendingPhoneRuns.get(runId);
-    if (pending) {
-      // Still being claimed: it never starts. Started: a Stop like any other.
-      if (pending.started) return false;
-      pending.controller.abort();
-      return true;
-    }
-    // The chat's newest messages: a turn the Stop names is a recent one.
-    const opened = await this.storage.openConversation(conversationId, PHONE_TURN_STOP_WINDOW);
-    if (!opened || opened.conversation.kind !== "chat") return false;
-    const participant = this.chatParticipants(opened.conversation).find((item) => item.id === parsed.participantId);
-    if (!participant || !this.startsPhoneTurnFor(participant)) return false;
-    // It ran already (on the member's earlier home): not stopped here.
-    if (opened.conversation.messages.some((item) => item.metadata?.runId === runId)) return false;
-    const cancelled = await this.storage.phoneTurnClaims().cancelUnstarted({
-      runId, conversationId, messageId: parsed.messageId, participantId: participant.id, at: new Date().toISOString()
-    });
-    // Claimed before: it ran (or runs, and the ordinary Stop reaches it).
-    if (!cancelled) return false;
-    // The message is here already but the start had not decided yet: it reads
-    // the cancelled claim and writes the stopped line itself.
-    return true;
-  }
-
-  /** Whether a run named in a Stop is a phone turn whose member lives here;
-   *  undefined while this copy of the chat does not know the member yet (the
-   *  Stop waits for it rather than being lost). */
-  async ownsPhoneRun(conversationId: string, runId: string): Promise<boolean | undefined> {
-    const parsed = parsePhoneTurnRunId(runId);
-    if (!parsed) return false;
-    if (this.pendingPhoneRuns.has(runId)) return true;
-    // The chat's body names its members: no need to read every message.
-    const opened = await this.storage.openConversation(conversationId, 1);
-    if (!opened || opened.conversation.kind !== "chat") return false;
-    const participant = this.chatParticipants(opened.conversation).find((item) => item.id === parsed.participantId);
-    if (!participant) return undefined;
-    return this.startsPhoneTurnFor(participant);
-  }
-
-  /**
-   * One chat of the User's server's copy, for a device that starts again
-   * from it (events it needed were forgotten while it was away, or a chain
-   * of this chat's changes was): merged the way a machine merges its first
-   * copy. The copy's shared content wins; this device keeps its own run
-   * bookkeeping, sessions and what it wrote itself. Saved without being
-   * announced (it is nobody's new change), and a chat deleted here stays
-   * deleted.
-   */
-  async mergeServerCopy(copied: CopiedConversation, options: {
-    desktopOriginId: string;
-    localOriginId?: string;
-    /** The desktop: the device a chat's own fields (title, members and their
-     *  permissions, the project) come from. From the copy it takes only the
-     *  messages it does not have yet, into chats it has, never those fields:
-     *  its own changes the server has not folded yet would be rolled back. */
-    ownsSharedFields?: boolean;
-  }): Promise<void> {
-    if (this.deletedConversationIds.has(copied.id) || await this.storage.conversationTombstones?.().isDeleted(copied.id)) return;
-    const merge = (local: Conversation | undefined): Conversation => mergeCopiedConversation(local, copied, {
-      desktopOriginId: options.desktopOriginId,
-      ...(options.localOriginId ? { localOriginId: options.localOriginId } : {}),
-      ...(this.hostMachineId ? { hostMachineId: this.hostMachineId } : {})
-    });
-    const existing = await this.storage.getConversation(copied.id);
-    if (existing && existing.kind !== "chat") return;
-    const held = new Set((existing?.messages ?? []).map((message) => message.id));
-    // A phone's messages this copy brings (they reached the server while this
-    // device could not read them) start their members here as if read in
-    // order; the same guards keep an old or already-run turn from starting.
-    const startPhoneMessagesFrom = (conversation: Conversation): void => {
-      const byOrigin = new Map<string, string[]>();
-      for (const message of conversation.messages) {
-        const author = copied.authors?.[message.id];
-        if (message.role !== "user" || held.has(message.id) || !author) continue;
-        byOrigin.set(author, [...(byOrigin.get(author) ?? []), message.id]);
-      }
-      for (const [author, ids] of byOrigin) {
-        const changes = conversation.messages.filter((message) => ids.includes(message.id)).map((message) => ({ type: "message.created" as const, message }));
-        this.notePhoneMessages(author, conversation.id, { version: CHAT_CHANGES_VERSION, conversationId: conversation.id, updatedAt: conversation.updatedAt, changes }, new Set(ids));
-      }
-    };
-    if (!existing) {
-      if (options.ownsSharedFields) return;
-      const created = merge(undefined);
-      await this.saveConversation(created, { emitChanges: false });
-      startPhoneMessagesFrom(created);
-      return;
-    }
-    const dropped: ChatParticipant[] = [];
-    await this.withChatMutation(existing, async () => {
-      if (options.ownsSharedFields) {
-        // Messages it lacks, and the copy's version of those another device
-        // wrote (a machine member's finished reply); its own stay as they are.
-        const merged = new Map(merge(existing).messages.map((message) => [message.id, message]));
-        const theirs = (id: string): boolean => {
-          const author = copied.authors?.[id];
-          return Boolean(author) && author !== options.localOriginId && author !== options.desktopOriginId;
-        };
-        let changed = false;
-        const messages = existing.messages.map((message) => {
-          const incoming = merged.get(message.id);
-          if (!incoming || !theirs(message.id) || JSON.stringify(incoming) === JSON.stringify(message)) return message;
-          changed = true;
-          return incoming;
-        });
-        const known = new Set(existing.messages.map((message) => message.id));
-        const added = [...merged.values()].filter((message) => !known.has(message.id));
-        if (!changed && added.length === 0) return;
-        existing.messages = [...messages, ...added]
-          .map((message, index) => ({ message, index }))
-          .sort((left, right) => left.message.createdAt.localeCompare(right.message.createdAt) || left.index - right.index)
-          .map((entry) => entry.message);
-        await this.saveConversation(existing, { emitChanges: false });
-        startPhoneMessagesFrom(existing);
-        return;
-      }
-      const merged = merge(existing);
-      // A copy without a member list (an older server's) says nothing about
-      // who left: no member's process is ended for it.
-      const droppedHere = Array.isArray(copied.shared?.metadata?.participants)
-        ? this.membersDroppedFrom(existing, merged)
-        : [];
-      existing.title = merged.title;
-      existing.messages = merged.messages;
-      existing.metadata = merged.metadata;
-      // The desktop's word on roster changes this machine's members asked for.
-      this.settleRosterChangesFromDesktop(existing, () => existing.messages.filter((message) =>
-        (message.metadata as { remoteAuthorOriginId?: string } | undefined)?.remoteAuthorOriginId === options.desktopOriginId));
-      existing.updatedAt = merged.updatedAt;
-      if (merged.repoPath) existing.repoPath = merged.repoPath;
-      else delete existing.repoPath;
-      await this.saveConversation(existing, { emitChanges: false });
-      dropped.push(...droppedHere);
-      startPhoneMessagesFrom(existing);
-    });
-    // A member this host runs that the copied member list no longer has ends
-    // its process here, as on a chat change (applyRemoteChatChanges).
-    this.retireRemovedMembers(copied.id, dropped);
   }
 
   private clone(conversation: Conversation): Conversation {
@@ -21702,10 +21903,8 @@ export class ChatService {
 }
 
 /** How far a phone's clock may be off from this device's. */
-const PHONE_TURN_CLOCK_SKEW_MS = 10 * 60_000;
 /** The newest messages a Stop for a phone turn not running here is checked
  *  against. */
-const PHONE_TURN_STOP_WINDOW = 200;
 
 function mobileEventIdFromChatTrigger(triggerMessage: ChatMessage): string | undefined {
   if (triggerMessage.metadata?.appMessageSource !== "mobile-relay") {

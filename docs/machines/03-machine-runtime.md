@@ -1,5 +1,18 @@
 # Machines transport — the machine runtime
 
+> **Current state (2026-10-29).** The User's server owns every chat (agreements
+> Д1–Д13, `docs/parity-requirements.md`). A machine is a plain client of it:
+> it reads the chats from the server's feed (`src/main/services/serverChatLink.ts`,
+> `hubOpsClient.ts`), takes the turns asked there of the members it hosts,
+> writes their replies, cards and turn ends as operations, and reads its
+> settings from the server, sealed for it alone (`machineServerSettings.ts`).
+> Its room on the server carries only live control with the computer that set
+> it up: greeting and status, power, scheduled scripts, a picture asked for,
+> prompt suggestions, background tasks, live progress and turn holds. The
+> signed device events, the `chat.changes` copy of every chat and the chat
+> copy made at setup that the sections below describe are removed (Д7); they
+> are kept here as history.
+
 A **machine** is a computer that runs AccordAgents without a window and hosts chat members. It is the same application code the desktop runs (`src/machine/main.ts` composes the same services through `src/main/platform.ts`), enrolled with one desktop through a machine-host pairing, and reachable only through the User's own server: it meets the owner's devices in the server's rooms, and every durable event goes through the server's one order (`02-event-contract.md`). Without a server there is no machine ("Set up your server first"). There is no worker and no SSH turn pipeline: the machine keeps its own copy of every chat of its owner, its own provider sessions, and the settings the desktop sends it.
 
 ## What travels between the desktop and a machine

@@ -9,3 +9,9 @@ export function machineWaitingText(machineName: string, reason?: string): string
 export function machineStopPendingText(machineName: string): string {
   return `Stop requested — waiting for machine ${machineName}`;
 }
+
+/** What a card of a member on a machine says once it was answered (here or
+ *  on another device) and the machine has not applied the answer yet. */
+export function machineAnswerPendingText(machineName: string): string {
+  return `Answer saved. Waiting for machine ${machineName} to confirm it.`;
+}

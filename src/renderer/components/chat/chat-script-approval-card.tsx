@@ -155,6 +155,9 @@ export function ChatScriptApprovalCard(props: {
           {pending ? (
             <div className="chat-script-approval-content">
               <h3 className="chat-script-approval-title">{title}</h3>
+              {approval.cardRefusals?.length ? (
+                <p className="chat-script-approval-error">Your earlier answer was not applied: {approval.cardRefusals[approval.cardRefusals.length - 1].reason}</p>
+              ) : null}
               <div className="chat-script-approval-name">{request.name}</div>
               {request.description && <p className="chat-script-approval-description">{request.description}</p>}
               <dl className="chat-script-approval-facts">

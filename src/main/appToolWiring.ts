@@ -2,14 +2,15 @@
  * App tool wiring shared by the desktop main process and the headless machine
  * runtime (machines transport, work item 2). Every machine serves the full App
  * MCP tool registry from its own copy, so the handler set must be identical
- * wherever ChatService and ArtifactService run.
+ * wherever ChatService and the documents (ArtifactClient, which writes every
+ * change through the User's server) run.
  */
 
 import type {
   ArtifactDraftAudiencePolicyByAuthor,
   PublishArtifactSourceRequest
 } from "../shared/types";
-import type { ArtifactService } from "./services/artifacts";
+import type { ArtifactOperations } from "./services/artifactClient";
 import { validateArtifactCreateToolRequest } from "./services/artifactToolRequest";
 import type { ChatService } from "./services/chat";
 import {
@@ -87,7 +88,7 @@ export function wireArtifactToolHandler(
   });
 }
 
-export function createArtifactToolDispatcher(artifactService: ArtifactService): ArtifactToolDispatcher {
+export function createArtifactToolDispatcher(artifactService: ArtifactOperations): ArtifactToolDispatcher {
   return async (member, conversationId, toolName, rawRequest) => {
     const args = rawRequest && typeof rawRequest === "object" && !Array.isArray(rawRequest)
       ? rawRequest as Record<string, unknown>

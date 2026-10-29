@@ -1,17 +1,28 @@
+// The machine side of the live control between a machine and the computer
+// that set it up (MachineHostService). A machine is a plain client of the
+// User's server: its members' turns, replies, Stops and settings travel
+// through the server (chat.machineServer.test, machine-runtime-hub.test).
+// What its room still carries, and what is tested here, is live and never
+// stored: the greeting, scheduled scripts, a picture read from the computer,
+// background-task labels, a hold on new turns while its runtime is replaced,
+// and live progress (to the computer's window, and to the server for the
+// phone). The room is a stand-in client; frames are signed and sealed as the
+// computer seals them.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { desktopEvents, hostEvents, DESKTOP_ID, MACHINE_ID, DESKTOP_ISSUER } from "./machine-test-events.mjs";
 
 const { sealMachinePayload, openMachinePayload } = await import("../dist/main/main/services/machineChannelSealing.js");
-const { isMachineDurableMessage } = await import("../dist/main/shared/machineLink.js");
 const { signMachineControl } = await import("../dist/main/main/services/machineControlAuthentication.js");
+const { createDeviceIdentity } = await import("../dist/main/main/services/deviceIdentity.js");
+const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+const { decodeMachineProgress } = await import("../dist/main/shared/machineProgress.js");
 
 const SEAL_KEY = Buffer.from(new Uint8Array(32).map((_, index) => index + 1)).toString("base64url");
 let pairings = 0;
 
 /** An enrollment that names the User's server (the only place a machine
- *  meets its devices now). Nothing connects to it: the room is the stub
- *  client below, and the server's order is played by the test itself. */
+ *  meets its devices). Nothing connects to it: the room is the stub client. */
 function pairing() {
   const now = Date.now();
   pairings += 1;
@@ -19,7 +30,6 @@ function pairing() {
     version: 1,
     purpose: "machine-host",
     issuer: DESKTOP_ISSUER,
-    // Unique per enrollment: the event storage is shared by every test here.
     rendezvousId: `rv-host-test-${now}-${pairings}`,
     stableRoutingId: "route-host-test",
     relaySealKeyBase64: SEAL_KEY,
@@ -31,8 +41,8 @@ function pairing() {
   };
 }
 
-/** A room client stand-in: the test injects inbound messages and reads what the machine sends. */
-function stubClient() {
+/** A room client stand-in: the test injects inbound frames and reads what the machine sends. */
+function stubClient({ desktopPresent = true } = {}) {
   const listeners = new Map();
   const sent = [];
   return {
@@ -42,14 +52,14 @@ function stubClient() {
       return () => undefined;
     },
     emit(event, payload) {
-      for (const listener of listeners.get(event) ?? []) {
-        listener(payload);
-      }
+      for (const listener of listeners.get(event) ?? []) listener(payload);
     },
     async connect() {
-      this.emit("peer", { type: "ready", deviceId: MACHINE_ID, peerConnected: true, peers: [{ role: "desktop", deviceId: DESKTOP_ID }] });
+      this.emit("peer", { type: "ready", deviceId: MACHINE_ID, peerConnected: desktopPresent,
+        peers: desktopPresent ? [{ role: "desktop", deviceId: DESKTOP_ID }] : [] });
     },
     close() {},
+    currentState: () => "connected",
     async sendCiphertext(request) {
       sent.push(request);
       return [];
@@ -57,193 +67,64 @@ function stubClient() {
   };
 }
 
-/** A durable message from the desktop (a turn, a stop, an acknowledgement),
- *  as the desktop writes it: one signed event in its own log, on its channel
- *  with this machine. */
-async function desktopEvent(body, enrollment) {
-  const conversationId = body.type === "machine.conversation.sync" ? body.conversation.id : body.conversationId;
-  const { event } = await desktopEvents.eventLog.appendLocalEvent({ conversationId,
-    logScopeId: `device:${enrollment.rendezvousId}:${JSON.stringify([conversationId, "actions"])}`, kind: body.type, payload: body,
-    ...(body.type === "machine.turn.request" ? { eventId: `machine-command:${body.runId}` } : {}) });
-  return event;
+/** The machine's live control, as the machine runtime builds it. */
+function makeHost(client, { chat = {}, logs, ...options } = {}) {
+  return new MachineHostService(
+    { respondToChoice: async () => undefined, respondToAppToolApproval: async () => undefined, ...chat },
+    { write: async (event, payload) => { logs?.push({ event, payload }); } },
+    {
+      pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", publicKeyDerBase64: hostEvents.publicKeyDerBase64,
+      identity: () => hostEvents.deviceIdentity.getOrCreateDeviceIdentity(), createClient: () => client, storage: hostEvents.eventStorage,
+      ...options
+    }
+  );
 }
 
-/** A control message from the desktop (hello, query, a picture's parts),
- *  signed and sealed to this machine for the room. */
-async function controlFrame(body, enrollment) {
+/** A frame from the computer that set the machine up, signed and sealed to the machine. */
+async function controlFrame(body, enrollment, signer = desktopEvents.identity) {
   const payload = signMachineControl({ protocol: "accord-machine-link-v1", messageId: `m-${Math.random()}`,
-    sentAt: new Date().toISOString(), body }, desktopEvents.identity, enrollment.rendezvousId, MACHINE_ID);
-  return sealMachinePayload(payload, desktopEvents.identity, hostEvents.identity.publicKeyDerBase64, enrollment.rendezvousId);
+    sentAt: new Date().toISOString(), body }, signer, enrollment.rendezvousId, MACHINE_ID);
+  return sealMachinePayload(payload, signer, hostEvents.identity.publicKeyDerBase64, enrollment.rendezvousId);
 }
 
-/** Hands the machine what its desktop sends, the way it travels with only the
- *  User's server between them: a durable event goes into the desktop's log
- *  and reaches the machine in the server's order (HubSync hands it in through
- *  `receiveFromHub`, as here); a control message arrives through the room. */
-async function deliver(host, client, body) {
-  if (isMachineDurableMessage(body)) {
-    const outcome = await host.receiveFromHub(await desktopEvent(body, host.options.pairing));
-    assert.equal(outcome, "delivered", `the machine takes the desktop's ${body.type} from the server's order`);
-    return;
-  }
-  client.emit("message", { ciphertext: await controlFrame(body, host.options.pairing) });
+async function deliver(host, client, body, signer) {
+  client.emit("message", { ciphertext: await controlFrame(body, host.options.pairing, signer) });
   await host.inbound;
 }
 
-/** What the machine sent through the room: only control messages, each sealed
- *  to the desktop. Nothing durable travels there; through the server it goes
- *  in the server's order (see machineEvents). */
+/** What the machine sent through the room, each frame opened as the computer opens it. */
 async function controlBodies(client, enrollment) {
   const bodies = [];
   for (const request of client.sent) {
     const payload = await openMachinePayload(request.ciphertext, desktopEvents.identity, [hostEvents.identity.publicKeyDerBase64], enrollment.rendezvousId);
-    assert.notEqual(payload.protocol, "accord-device-events-v1", "through the server no device event, receipt or repair request goes over the room");
     bodies.push(payload.body);
   }
   return bodies;
-}
-
-/** The machine's own durable events on its channel with the desktop, in the
- *  order it wrote them: what HubSync pushes to the server, and so what the
- *  desktop receives. Only this enrollment's (the storage is shared). */
-async function machineEvents(enrollment) {
-  const prefix = `device:${enrollment.rendezvousId}:`;
-  const events = [];
-  let cursor = 0;
-  for (;;) {
-    const page = await hostEvents.eventStorage.hub().ownEventsAfter(MACHINE_ID, cursor, 1000, [prefix]);
-    for (const { rowid, event } of page) {
-      cursor = rowid;
-      events.push({ event, body: await hostEvents.eventStorage.deviceEventBlobs().hydrate(event.payload) });
-    }
-    if (page.length < 1000) return events;
-  }
-}
-
-async function durableBodies(enrollment) {
-  return (await machineEvents(enrollment)).map(({ body }) => body);
-}
-
-/** Delivery rows this machine keeps for its desktop channel: through the
- *  server there are none (a reader's place in the server's order is its only
- *  acknowledgement). */
-async function deliveryRows(enrollment, kind) {
-  return (await hostEvents.eventStorage.deviceEvents().listPending(enrollment.rendezvousId)).filter((row) => row.event.kind === kind);
 }
 
 function settle(ms = 150) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-test("a turn waiting for its chat state counts as held, and a stop removes it before the chat arrives", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
-  const client = stubClient();
-  const runs = [];
-  const store = new Map();
-  const logs = [];
-  const host = new MachineHostService(
-    {
-      runMachineHostedTurn: async (request) => { runs.push(request.runId); return { messages: [], warnings: [] }; },
-      cancelRun: () => true,
-      respondToAppToolApproval: async () => undefined,
-      applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) store.set(id, next); }
-    },
-    { getConversation: async (id) => store.get(id) },
-    { importMachineSettingsSnapshot: async () => undefined },
-    { write: async (event, payload) => { logs.push({ event, payload }); } },
-    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
-  );
-  await host.start();
-  await settle();
-  const inbound = async (body) => {
-    await deliver(host, client, body);
-    await host.outbound;
-    await host.eventChannel.flush();
-  };
-  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
-  store.set("conv-1", { id: "conv-1", kind: "chat", title: "t", createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z", metadata: { participants: [] }, messages: [], findings: [] });
-  // The desktop's chat change the request names has not arrived: the turn waits instead of running or failing.
-  const chatHead = { originId: DESKTOP_ID, logScopeId: "chat-changes:conv-1", originSeq: 3 };
-  await inbound({ type: "machine.turn.request", conversationId: "conv-1", participantId: "p1", participant: { id: "p1", handle: "bot", homeMachineId: "test-home" }, messageId: "m1", runId: "run-wait", pendingMessageId: "pending-wait", chatHead, requestedAt: new Date().toISOString() });
-  assert.deepEqual(runs, []);
-  assert.ok(logs.some((entry) => entry.event === "machine-host.turn.awaiting-chat" && entry.payload?.runId === "run-wait"));
-  // Asked about it, the machine holds it: no "unknown".
-  await inbound({ type: "machine.turn.query", conversationId: "conv-1", runId: "run-wait" });
-  assert.ok(!(await controlBodies(client, host.options.pairing)).some((body) => body.type === "machine.turn.unknown"), "a waiting turn is held, not unknown");
-  // Stop while waiting: a confirmed interruption is stored and reported, and the copy completing must not start it.
-  await inbound({ type: "machine.turn.cancel", conversationId: "conv-1", runId: "run-wait" });
-  // Reported in the machine's own log: the server's order takes it to the desktop.
-  const terminal = (await durableBodies(host.options.pairing)).find((body) => body.type === "machine.turn.finished" && body.runId === "run-wait");
-  assert.ok(terminal, "a stopped waiting turn reports a result");
-  assert.equal(terminal.status, "interrupted");
-  await settle(1_500);
-  assert.deepEqual(runs, [], "a stopped waiting turn never starts");
-  host.close();
-});
-
-test("a run the chat stopped on the User's stop action is reported as interrupted, not failed", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
-  const client = stubClient();
-  const store = new Map();
-  const host = new MachineHostService(
-    {
-      // The stop action reached the chat before this host's cancel: the chat
-      // ended the run and marked the bubble stopped by the User.
-      runMachineHostedTurn: async (request) => ({ messages: [{ id: request.pendingMessageId, role: "participant", participantId: "p1", content: "@bot stopped by user.",
-        createdAt: new Date().toISOString(), status: "error", metadata: { runId: request.runId, terminalReason: "user-stopped" } }], warnings: [] }),
-      cancelRun: () => true,
-      respondToAppToolApproval: async () => undefined,
-      applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) store.set(id, next); }
-    },
-    { getConversation: async (id) => store.get(id) },
-    { importMachineSettingsSnapshot: async () => undefined },
-    { write: async () => undefined },
-    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
-  );
-  await host.start();
-  await settle();
-  const inbound = async (body) => {
-    await deliver(host, client, body);
-    await host.outbound;
-    await host.eventChannel.flush();
-  };
-  const member = { id: "p1", handle: "bot", kind: "claude-code", homeMachineId: "test-home" };
-  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
-  store.set("conv-stop-action", { id: "conv-stop-action", kind: "chat", title: "t", createdAt: "2026-10-18T00:00:00.000Z", updatedAt: "2026-10-18T00:00:00.000Z",
-    metadata: { participants: [member] }, messages: [{ id: "m1", role: "user", content: "hi", createdAt: "2026-10-18T00:00:00.000Z" }], findings: [] });
-  await inbound({ type: "machine.turn.request", conversationId: "conv-stop-action", participantId: "p1", participant: member, messageId: "m1", runId: "run-stop-action", pendingMessageId: "pending-stop-action", requestedAt: new Date().toISOString() });
-  let terminal;
-  for (let attempt = 0; attempt < 40 && !terminal; attempt += 1) {
-    await settle(50);
-    await host.eventChannel.flush();
-    terminal = (await durableBodies(host.options.pairing)).find((body) => body.type === "machine.turn.finished" && body.runId === "run-stop-action");
+async function until(predicate, ms = 5_000) {
+  const deadline = Date.now() + ms;
+  while (!await predicate()) {
+    if (Date.now() > deadline) throw new Error("until timed out");
+    await settle(20);
   }
-  assert.ok(terminal, "the stopped run reports a result");
-  assert.equal(terminal.status, "interrupted", "a stop the chat confirmed is an interruption");
-  host.close();
-});
+}
 
-test("a picture arrives in parts and is reassembled; a desktop that leaves fails the read at once", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+function progress(runId, phase, state, partialContent) {
+  return { runId, phase, message: "working", createdAt: new Date().toISOString(),
+    agentProgress: { participantId: "p1", participantLabel: "@bot", state, partialContent } };
+}
+
+test("a picture arrives in parts and is reassembled; a refusal reaches the member; a desktop that leaves fails the read at once", async () => {
   const client = stubClient();
-  const store = new Map();
-  const host = new MachineHostService(
-    {
-      runMachineHostedTurn: async () => ({ messages: [], warnings: [] }),
-      cancelRun: () => true,
-      respondToAppToolApproval: async () => undefined,
-      applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) store.set(id, next); }
-    },
-    { getConversation: async (id) => store.get(id) },
-    { importMachineSettingsSnapshot: async () => undefined },
-    { write: async () => undefined },
-    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
-  );
+  const host = makeHost(client);
   await host.start();
   await settle();
-  const inbound = async (body) => {
-    await deliver(host, client, body);
-  };
+  const inbound = (body) => deliver(host, client, body);
   await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
 
   const answered = host.requestAttachment("conv-1", "att-1", 5000);
@@ -262,314 +143,43 @@ test("a picture arrives in parts and is reassembled; a desktop that leaves fails
   const refused = host.requestAttachment("conv-1", "att-2", 5000);
   await settle();
   const second = (await controlBodies(client, host.options.pairing)).filter((body) => body.type === "machine.attachment.request").at(-1);
-  await inbound({ type: "machine.attachment.result", requestId: second.requestId, conversationId: "conv-1", attachmentId: "att-2", ok: false, error: "This chat has no member on this machine." });
-  await assert.rejects(refused, /no member on this machine/);
+  await inbound({ type: "machine.attachment.result", requestId: second.requestId, conversationId: "conv-1", attachmentId: "att-2", ok: false, error: "This chat is not on this desktop." });
+  await assert.rejects(refused, /not on this desktop/);
 
   const orphaned = host.requestAttachment("conv-1", "att-3", 60_000);
   await settle();
   client.emit("peer", { type: "peer-disconnected", peer: { role: "desktop", deviceId: DESKTOP_ISSUER.originId } });
   await assert.rejects(Promise.race([orphaned, new Promise((_, reject) => setTimeout(() => reject(new Error("still waiting")), 1000))]),
     /desktop went away/, "a read outstanding when the desktop leaves fails now, not after the bound");
+  // With no desktop in the room the read fails at once.
+  await assert.rejects(host.requestAttachment("conv-1", "att-4", 60_000), /not connected/);
   host.close();
-});
-
-test("the machine's hello lists turns waiting for their chat as active", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
-  const client = stubClient();
-  const store = new Map();
-  const host = new MachineHostService(
-    {
-      runMachineHostedTurn: async () => ({ messages: [], warnings: [] }),
-      cancelRun: () => true,
-      respondToAppToolApproval: async () => undefined,
-      applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) store.set(id, next); }
-    },
-    { getConversation: async (id) => store.get(id) },
-    { importMachineSettingsSnapshot: async () => undefined },
-    { write: async () => undefined },
-    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
-  );
-  await host.start();
-  await settle();
-  const inbound = async (body) => {
-    await deliver(host, client, body);
-    await host.outbound;
-    await host.eventChannel.flush();
-  };
-  await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
-  store.set("conv-2", { id: "conv-2", kind: "chat", title: "t", createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z", metadata: { participants: [] }, messages: [], findings: [] });
-  await inbound({ type: "machine.turn.request", conversationId: "conv-2", participantId: "p1", participant: { id: "p1", handle: "bot", homeMachineId: "test-home" }, messageId: "m1", runId: "run-listed", pendingMessageId: "pending-listed",
-    chatHead: { originId: DESKTOP_ID, logScopeId: "chat-changes:conv-2", originSeq: 2 }, requestedAt: new Date().toISOString() });
-  // A fresh link announces itself again; the hello must list the waiting turn.
-  client.emit("peer", { type: "ready", deviceId: MACHINE_ID, peerConnected: true, peers: [{ role: "desktop", deviceId: DESKTOP_ID }] });
-  await settle();
-  const bodies = await controlBodies(client, host.options.pairing);
-  const hello = bodies.filter((body) => body.type === "machine.hello").pop();
-  assert.ok(hello.activeRunIds.includes("run-listed"));
-  host.close();
-});
-
-test("a turn waits for the chat change it names and then runs on the whole chat", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
-  const chatChanges = await import("../dist/main/main/services/chatChanges.js");
-  const enrollment = pairing();
-  const store = new Map();
-  const runs = [];
-  const host = new MachineHostService({
-    runMachineHostedTurn: async (request) => { runs.push(store.get(request.conversationId).messages.map((message) => message.id)); return { messages: [], warnings: [] }; },
-    cancelRun: () => true,
-    respondToAppToolApproval: async () => undefined,
-    applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) store.set(id, next); }
-  }, { getConversation: async (id) => store.get(id) }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
-  { ...hostEvents, pairing: enrollment, deviceId: MACHINE_ID, appVersion: "test", createClient: stubClient,
-    applyChatChanges: async (event, payload) => {
-      const result = chatChanges.applyChatChanges(store.get(payload.conversationId), payload, event.originId, { acceptsConversationFields: () => true, acceptsMessageUpdate: () => true, acceptsMessageCreate: () => true, acceptsMessageRemoval: () => true, holdsUnknownChats: true });
-      if (result.status !== "applied") return "missing-conversation";
-      store.set(payload.conversationId, result.conversation);
-      return "applied";
-    } });
-  const conversationId = "chat-head-" + Date.now();
-  const scope = chatChanges.chatChangesLogScope(conversationId);
-  const at = "2026-09-24T12:00:00.000Z";
-  const change = async (changes) => (await desktopEvents.eventLog.appendLocalEvent({ conversationId, logScopeId: scope, kind: chatChanges.CHAT_CHANGES_EVENT_KIND,
-    payload: { version: 1, conversationId, updatedAt: at, changes } })).event;
-  // The desktop's chat changes reach the machine in the server's order (HubSync's delivery).
-  const receive = async (event) => assert.equal(await host.receiveFromHub(event), "delivered");
-  try {
-    await host.start();
-    await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, machineId: "head-home", appVersion: "test" });
-    const first = await change([
-      { type: "conversation.created", conversation: { title: "t", kind: "chat", createdAt: at, metadata: { participants: [] } } },
-      { type: "message.created", message: { id: "m1", role: "user", content: "one", createdAt: at, status: "done" } }
-    ]);
-    const second = await change([{ type: "message.created", message: { id: "m2", role: "user", content: "two", createdAt: "2026-09-24T12:00:01.000Z", status: "done" } }]);
-    await receive(first);
-    await host.handleBody({ type: "machine.turn.request", conversationId, participantId: "p1", participant: { id: "p1", handle: "bot" }, messageId: "m2", runId: "head-run",
-      pendingMessageId: "pending", chatHead: { originId: DESKTOP_ID, logScopeId: scope, originSeq: second.originSeq }, requestedAt: at });
-    await settle(1_300);
-    assert.deepEqual(runs, [], "the chat has only its first change here: the member does not start on it");
-    await receive(second);
-    const deadline = Date.now() + 5_000;
-    while (!runs.length && Date.now() < deadline) await settle(100);
-    assert.deepEqual(runs, [["m1", "m2"]], "the turn runs once the named change is applied, on the whole chat");
-  } finally { host.close(); }
-});
-
-test("a ChatService native resume is listed, stopped and delivered through the host's result outbox", async (t) => {
-  const { ChatService } = await import("../dist/main/main/services/chat.js");
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
-  const client = stubClient();
-  const logs = { write: async () => undefined };
-  const chat = Object.create(ChatService.prototype);
-  Object.assign(chat, {
-    chatRunMeta: new Map(), chatRunControllers: new Map(), activeConversationRunIds: new Map(), activeRunIds: new Set(), pendingPhoneRuns: new Map(), phoneStartsInFlight: new Map(),
-    participantRequestRunners: new Map(), remoteRunHandlesByRun: new Map(), participantRunSettledListeners: new Set(),
-    appSendMessageCountsByRun: new Map(), appSendMessageImageBytesByRun: new Map(), debugLogs: logs,
-    memberBackgroundTasks: new Map(), backgroundTaskListeners: new Set(),
-    settledParticipantRunResult: async () => ({ messages: [{ id: "native-bubble", role: "participant", participantId: "p1", status: "error", content: "partial", createdAt: new Date().toISOString(), metadata: { runId: "native-resume", terminalReason: "user-stopped" } }], warnings: [] })
-  });
-  const host = new MachineHostService(chat, {}, {}, logs, { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client });
-  t.after(async () => { host.close(); await host.inbound; await host.outbound; await host.eventChannel.flush(); });
-  const controller = new AbortController();
-  chat.registerTargetRun("native-resume", controller, { conversationId: "native-chat", participantId: "p1", participantHandle: "bot" });
-  await host.start();
-  client.emit("peer", { type: "ready", peers: [{ role: "desktop", deviceId: DESKTOP_ID }] });
-  await settle();
-  assert.ok((await controlBodies(client, host.options.pairing)).find((body) => body.type === "machine.hello").activeRunIds.includes("native-resume"));
-  await deliver(host, client, { type: "machine.turn.query", conversationId: "native-chat", runId: "native-resume" });
-  await deliver(host, client, { type: "machine.turn.cancel", conversationId: "native-chat", runId: "native-resume" });
-  await settle();
-  assert.equal(controller.signal.aborted, true, "Stop reaches the actual ChatService controller");
-  assert.equal((await controlBodies(client, host.options.pairing)).filter((body) => body.type === "machine.turn.unknown").length, 0);
-  assert.equal((await durableBodies(host.options.pairing)).filter((body) => body.type === "machine.turn.finished").length, 0, "abort is not completion");
-  chat.unregisterTargetRun("native-resume", controller);
-  const finishDeadline = Date.now() + 5000;
-  while (!host.pendingTerminals.has("native-resume")) {
-    assert.ok(Date.now() < finishDeadline, "the native completion must be retained");
-    await settle(20);
-  }
-  await host.outbound;
-  await host.eventChannel.flush();
-  const terminal = (await durableBodies(host.options.pairing)).find((body) => body.type === "machine.turn.finished");
-  assert.equal(terminal.status, "interrupted");
-  assert.equal(terminal.messages[0].content, "partial");
-  assert.ok(host.pendingTerminals.has("native-resume"), "result stays until the desktop acknowledges its saved copy");
-  const newer = { ...terminal, receiptId: "newer-receipt", messages: [{ ...terminal.messages[0], content: "new result" }] };
-  host.pendingTerminals.set("native-resume", newer);
-  await deliver(host, client, { type: "machine.turn.finished.ack", conversationId: "native-chat", runId: "native-resume", receiptId: terminal.receiptId, finishedAt: terminal.finishedAt });
-  await settle();
-  assert.equal(host.pendingTerminals.get("native-resume"), newer, "an old ACK cannot remove a newer result, even with an equal finish timestamp");
-  await deliver(host, client, { type: "machine.turn.finished.ack", conversationId: "native-chat", runId: "native-resume", receiptId: newer.receiptId, finishedAt: newer.finishedAt });
-  await settle();
-  assert.equal(host.pendingTerminals.has("native-resume"), false);
-  host.close();
-});
-
-
-test("runtime shutdown stores the final outcome before closing its device channel", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
-  const client = stubClient();
-  let closed = false;
-  client.close = () => { closed = true; };
-  let finishRun;
-  const held = new Promise(resolve => { finishRun = resolve; });
-  const enrollment = pairing();
-  const host = new MachineHostService(
-    { runMachineHostedTurn: async () => held, cancelRun: () => true,
-      respondToAppToolApproval: async () => undefined, applyReplicatedConversation: async () => undefined },
-    { getConversation: async () => undefined },
-    { importMachineSettingsSnapshot: async () => undefined },
-    { write: async () => undefined },
-    { ...hostEvents, pairing: enrollment, deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
-  );
-  await host.start();
-  await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test" });
-  const request = { type: "machine.turn.request", conversationId: "shutdown-chat", participantId: "p", participant: {id:"p",handle:"bot"}, messageId:"input",runId:"shutdown-run",pendingMessageId:"reply",requestedAt:new Date().toISOString() };
-  await host.handleBody(request);
-  await host.shutdown(async () => {
-    assert.equal(closed, false);
-    finishRun({ messages: [{id:"reply",role:"participant",participantId:"p",status:"error",content:"The provider closed.",createdAt:new Date().toISOString()}], warnings:[] });
-  });
-  assert.equal(closed, true);
-  // Stored in the machine's own log, which the server's order takes to the
-  // desktop; no delivery row waits for anyone.
-  assert.ok((await durableBodies(enrollment)).some(body => body.type === "machine.turn.finished" && body.runId === "shutdown-run"),
-    "the final outcome is stored before the channel closes");
-  assert.deepEqual(await deliveryRows(enrollment, "machine.turn.finished"), [], "through the server no delivery row is kept for it");
-  assert.equal(host.pendingTerminals.get("shutdown-run").status, "failed", "runtime closure must not be presented as User Stop");
-});
-
-
-test("a member request from this machine reaches the desktop as one durable delegation", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
-  const client = stubClient();
-  const enrollment = pairing();
-  const host = new MachineHostService(
-    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true,
-      respondToAppToolApproval: async () => undefined, applyReplicatedConversation: async () => undefined },
-    { getConversation: async () => undefined },
-    { importMachineSettingsSnapshot: async () => undefined },
-    { write: async () => undefined },
-    { ...hostEvents, pairing: enrollment, deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
-  );
-  try {
-    await host.start();
-    await host.handleBody({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test" });
-    const request = { conversationId: "delegating-chat", requestMessageId: "request-1", batchId: "batch-1", depth: 1 };
-    await host.delegateParticipantRequest(request);
-    // The member asked once; a retry of the same ask is the same event.
-    await host.delegateParticipantRequest(request);
-    await host.outbound;
-    await host.eventChannel.flush();
-
-    // In the machine's own log, which the server's order takes to the desktop.
-    const delegations = (await machineEvents(enrollment)).filter(({ event }) => event.kind === "machine.participants.delegate");
-    assert.equal(delegations.length, 1, "one request message is one delegation, however often it is retried");
-    assert.deepEqual(await deliveryRows(enrollment, "machine.participants.delegate"), [], "through the server no delivery row is kept for it");
-    const body = delegations[0].body;
-    assert.equal(body.conversationId, "delegating-chat");
-    assert.equal(body.requestMessageId, "request-1");
-    assert.equal(body.batchId, "batch-1");
-    assert.equal(body.depth, 1);
-  } finally {
-    host.close();
-    await host.inbound;
-    await host.outbound;
-    await host.eventChannel.flush().catch(() => undefined);
-  }
-});
-
-test("a Claude member's turns on a machine run as soon as they are admitted; another member's turns wait for the previous one", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
-  for (const kind of ["claude-code", "codex-cli"]) {
-    const client = stubClient();
-    const started = [];
-    const store = new Map();
-    let releaseFirst;
-    const firstBlocked = new Promise((resolve) => { releaseFirst = resolve; });
-    const host = new MachineHostService(
-      {
-        runMachineHostedTurn: async (request) => {
-          started.push(request.runId);
-          if (request.runId.endsWith("-1")) await firstBlocked;
-          return { messages: [], warnings: [] };
-        },
-        cancelRun: () => true,
-        respondToAppToolApproval: async () => undefined,
-        applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) store.set(id, next); }
-      },
-      { getConversation: async (id) => store.get(id) },
-      { importMachineSettingsSnapshot: async () => undefined },
-      { write: async () => undefined },
-      { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
-    );
-    await host.start();
-    await settle();
-    const inbound = async (body) => {
-      await deliver(host, client, body);
-      await host.outbound;
-      await host.eventChannel.flush();
-    };
-    const conversationId = `conv-concurrent-${kind}`;
-    const member = { id: "p1", handle: "bot", kind, homeMachineId: "test-home" };
-    await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
-    const shell = { id: conversationId, kind: "chat", title: "t", createdAt: "2026-10-17T00:00:00.000Z", updatedAt: "2026-10-17T00:00:00.000Z", metadata: { participants: [member] }, messages: [], findings: [] };
-    // The chat, with the messages the member answers, is already on the
-    // machine (chats arrive as change events).
-    store.set(conversationId, { ...shell, messages: [1, 2].map((index) => ({ id: `m${index}`, role: "user", content: `hi ${index}`, createdAt: shell.createdAt })) });
-    for (const index of [1, 2]) {
-      await inbound({ type: "machine.turn.request", conversationId, participantId: "p1", participant: member, messageId: `m${index}`, runId: `${kind}-run-${index}`, pendingMessageId: `pending-${index}`, requestedAt: new Date().toISOString() });
-    }
-    await settle(400);
-    if (kind === "claude-code") {
-      assert.deepEqual(started, [`${kind}-run-1`, `${kind}-run-2`], "the second message reached the Claude member while the first was still running");
-    } else {
-      assert.deepEqual(started, [`${kind}-run-1`], "a non-Claude member's next turn waits for the running one");
-    }
-    releaseFirst();
-    await settle(400);
-    assert.deepEqual(started, [`${kind}-run-1`, `${kind}-run-2`]);
-    host.close();
-  }
 });
 
 test("the desktop's script requests are answered by the machine's scripts, off the inbound chain, and enabled scripts keep the machine awake", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
   const client = stubClient();
   const handled = [];
   const names = [];
   let awake = false;
   let releaseSlow;
-  const host = new MachineHostService(
-    {
-      runMachineHostedTurn: async () => ({ messages: [], warnings: [] }),
-      cancelRun: () => true,
-      respondToAppToolApproval: async () => undefined,
-      applyReplicatedConversation: async () => undefined
-    },
-    { getConversation: async () => undefined },
-    { importMachineSettingsSnapshot: async () => undefined },
-    { write: async () => undefined },
-    {
-      ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client,
-      onDesktopMachineName: (name) => names.push(name),
-      scripts: {
-        handle: async (operation) => {
-          handled.push(operation.op);
-          if (operation.op === "releaseHeld") await new Promise((resolve) => { releaseSlow = resolve; });
-          if (operation.op === "runNow") throw new Error("That script is switched off.");
-          return [{ id: "s1", name: "Alerts" }];
-        },
-        keepsHostAwake: () => awake
-      }
+  const host = makeHost(client, {
+    onDesktopMachineName: (name) => names.push(name),
+    scripts: {
+      handle: async (operation) => {
+        handled.push(operation.op);
+        if (operation.op === "releaseHeld") await new Promise((resolve) => { releaseSlow = resolve; });
+        if (operation.op === "runNow") throw new Error("That script is switched off.");
+        return [{ id: "s1", name: "Alerts" }];
+      },
+      keepsHostAwake: () => awake,
+      scheduledCount: () => (awake ? 1 : 0)
     }
-  );
+  });
   await host.start();
   await settle();
   const inbound = async (body) => {
     await deliver(host, client, body);
     await host.outbound;
-    await host.eventChannel.flush();
   };
   await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home", machineName: "  Box  " });
   await inbound({ type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home", machineName: "   " });
@@ -612,21 +222,15 @@ test("the desktop's script requests are answered by the machine's scripts, off t
   bodies = await controlBodies(client, host.options.pairing);
   const hello = bodies.filter((body) => body.type === "machine.hello").pop();
   assert.equal(hello.keepAwake, true);
+  assert.equal(hello.keepAwakeScripts, 1);
   assert.deepEqual(hello.activeRunIds ?? [], [], "keeping awake is not a run: the update gate does not wait for it");
   assert.equal(bodies.filter((body) => body.type === "machine.scripts.changed").length, 1);
   host.close();
 });
 
 test("a runtime without scheduled scripts answers the desktop instead of leaving it waiting", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
   const client = stubClient();
-  const host = new MachineHostService(
-    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined, applyReplicatedConversation: async () => undefined },
-    { getConversation: async () => undefined },
-    { importMachineSettingsSnapshot: async () => undefined },
-    { write: async () => undefined },
-    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
-  );
+  const host = makeHost(client);
   await host.start();
   await settle();
   await deliver(host, client, { type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
@@ -649,13 +253,8 @@ test("a phone cannot approve a machine script that runs code; the desktop can, a
     unreadable: { id: "unreadable", toolName: "app_scripts_request_change", status: "pending", requesterParticipantId: "p1", request: { kind: "script-change" } }
   };
   const answered = [];
-  const published = [];
   const executor = new MachineApprovalExecutor({
-    storage: {
-      getChatEvent: async () => undefined,
-      nativeCommands: () => ({ approvalEffect: async () => undefined, claimApproval: async () => true })
-    },
-    deviceId: MACHINE_ID,
+    storage: { nativeCommands: () => ({ approvalEffect: async () => undefined, claimApproval: async () => true }) },
     chat: {
       respondToAppToolApproval: async (request, _progress, guard) => {
         await guard.beforeApply(approvals[request.approvalId]);
@@ -663,107 +262,66 @@ test("a phone cannot approve a machine script that runs code; the desktop can, a
         return { id: "chat" };
       }
     },
-    getConversation: async () => ({ id: "chat", metadata: { pendingAppToolApprovals: Object.values(approvals) } }),
-    runtimeIdentity: async () => ({ runtimeId: "rt", instanceId: "i" }),
-    publish: async (body) => { published.push(body); },
-    codeApprover: (event) => event.originId === DESKTOP_ID
+    runtimeIdentity: async () => ({ runtimeId: "rt", pid: 1, startedAt: "s" }),
+    // The desktop that set this machine up shows a script's code: only its
+    // answer on the User's server approves one that installs code.
+    codeApprover: () => DESKTOP_ID
   });
-  const decide = (eventId, originId, approvalId, approve) => executor.apply(
-    { eventId, originId, kind: "machine.approval.decision", conversationId: "chat" },
-    { type: "machine.approval.decision", decisionId: eventId, conversationId: "chat", approvalId, approve, decidedAt: "" }
-  );
+  let at = 0;
+  const decide = (answeredBy, approvalId, approve) => executor.apply({ cardId: approvalId, conversationId: "chat", cardKind: "permission",
+    participantId: "p1", raisedBy: MACHINE_ID, raisedAt: "", card: {}, state: "answered", answer: { approve }, answeredBy,
+    answeredAt: `2026-10-28T08:00:0${at++}.000Z` });
 
-  const fromPhone = await decide("e1", "phone-device", "install", true);
-  assert.equal(fromPhone.ok, false);
-  assert.match(fromPhone.error, /approved on the desktop/);
+  const fromPhone = await decide("phone-device", "install", true);
+  assert.equal(fromPhone.kind, "refused");
+  assert.match(fromPhone.reason, /approved on the desktop/);
   assert.deepEqual(answered, [], "nothing was applied for the phone's approval");
-  assert.equal((await decide("e2", "phone-device", "pause", true)).ok, true, "switching a script off is not installing code");
-  assert.equal((await decide("e5", "phone-device", "unreadable", true)).ok, false, "a card it cannot read is treated as installing code");
-  assert.equal((await decide("e3", "phone-device", "install", false)).ok, true, "the phone may decline");
-  // A phone's answer relayed by the desktop is signed by the desktop but says it was given on the phone.
-  const relayed = await executor.applyAction({ eventId: "e6", originId: DESKTOP_ID, kind: "permission.decided", conversationId: "chat" },
-    { targetKey: "approval:install", detail: { approve: true, decidedOn: "phone" } });
-  assert.equal(relayed.ok, false, "a relayed phone approval of code is refused too");
-  assert.equal((await decide("e4", DESKTOP_ID, "install", true)).ok, true, "the desktop that shows the code may approve");
+  assert.equal((await decide("phone-device", "pause", true)).kind, "applied", "switching a script off is not installing code");
+  assert.equal((await decide("phone-device", "unreadable", true)).kind, "refused", "a card it cannot read is treated as installing code");
+  assert.equal((await decide("phone-device", "install", false)).kind, "applied", "the phone may decline");
+  assert.equal((await decide(DESKTOP_ID, "install", true)).kind, "applied", "the desktop that shows the code may approve");
   assert.deepEqual(answered, [["pause", true], ["install", false], ["install", true]]);
-  assert.equal(published.length, 6, "every decision has a published outcome; the refusal is not retried forever");
 });
 
-test("through the hub two machines name their channel after the pair, never after the room the desktop also uses", async () => {
-  const { MachinePeerFabric } = await import("../dist/main/main/services/machinePeerFabric.js");
-  const home = pairing();
-  const otherRoom = "rv-other-machine";
-  const other = { deviceId: DESKTOP_ID, publicKeyDerBase64: desktopEvents.identity.publicKeyDerBase64, role: "machine", name: "Other",
-    machineId: "machine-2", relayUrl: "ws://127.0.0.1:1/v1/room", rendezvousId: otherRoom, fingerprint: "F", chatChanges: true };
-  const fabric = new MachinePeerFabric({
-    selfDeviceId: MACHINE_ID, storage: hostEvents.eventStorage, eventLog: hostEvents.eventLog, home,
-    homeClient: stubClient(), createClient: () => stubClient(), isPeerConnected: () => false,
-    apply: async () => "applied", onError: () => undefined, logger: () => undefined
-  });
-  await fabric.reconcile([other]);
-  try {
-    const name = fabric.roomFor(DESKTOP_ID);
-    assert.ok(name.startsWith("pair-"), "through the hub, a name of the pair");
-    assert.notEqual(name, home.rendezvousId);
-    assert.notEqual(name, otherRoom);
-  } finally {
-    fabric.close();
-  }
-});
-
-test("through the hub a machine owes nothing to anyone: no delivery rows for devices that may never come", async () => {
-  const { MachinePeerFabric } = await import("../dist/main/main/services/machinePeerFabric.js");
-  const home = pairing();
-  // A device that never comes (a phone that does not read this machine) and
-  // another machine: neither is owed anything, both read the server's order.
-  const { createChatEventDeviceIdentity } = await import("../dist/main/main/services/chatEventLog.js");
-  const phone = createChatEventDeviceIdentity(new Date().toISOString());
-  const absentPhone = { deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone", name: "Phone",
-    relayUrl: "ws://127.0.0.1:1/v1/room", rendezvousId: home.rendezvousId, fingerprint: "F" };
-  const otherMachine = { deviceId: DESKTOP_ID, publicKeyDerBase64: desktopEvents.identity.publicKeyDerBase64, role: "machine", name: "Other",
-    machineId: "machine-2", relayUrl: "ws://127.0.0.1:1/v1/room", rendezvousId: "rv-other-machine", fingerprint: "F", chatChanges: true };
-  const fabric = new MachinePeerFabric({
-    selfDeviceId: MACHINE_ID, storage: hostEvents.eventStorage, eventLog: hostEvents.eventLog, home,
-    homeClient: stubClient(), createClient: () => stubClient(), isPeerConnected: () => true,
-    apply: async () => "applied", onError: () => undefined, logger: () => undefined
-  });
-  try {
-    await fabric.reconcile([absentPhone, otherMachine]);
-    fabric.start();
-    assert.equal(fabric.peerDeviceIds().length, 2, "the devices are still trusted: their events from the hub are taken");
-    // Even named as recipients, the devices are owed nothing.
-    const recipients = [absentPhone, otherMachine].map((peer) => ({ deviceId: peer.deviceId, channelId: fabric.roomFor(peer.deviceId) }));
-    const published = await fabric.channel(absentPhone.deviceId).publish({ conversationId: "chat", kind: "machine.turn.finished", payload: { runId: "r" },
-      recipients });
-    assert.ok(await hostEvents.eventStorage.getChatEvent(published.eventId));
-    for (const recipient of recipients) {
-      assert.equal((await hostEvents.eventStorage.deviceEvents().pressure(recipient.channelId)).events, 0, "a result keeps no delivery row");
+test("the machine's card executors are its chat's: an answer from the User's server is applied here, a phone's approval of code refused", async () => {
+  // Answers to cards of the members here come from the User's server, from
+  // any device (chat.cards.test); the machine applies each once with these.
+  const install = { id: "install-2", toolName: "app_scripts_request_change", status: "pending", requesterParticipantId: "p1",
+    request: { kind: "script-change", op: "create" } };
+  const applied = [];
+  let given;
+  const host = makeHost(stubClient(), { chat: {
+    setCardAppliers: (appliers) => { given = appliers; },
+    respondToMentions: async () => undefined,
+    respondToAppToolApproval: async (request, _progress, guard) => {
+      await guard.beforeApply(install);
+      applied.push([request.approvalId, request.approve]);
+      return { id: "chat-cards" };
     }
-  } finally {
-    fabric.close();
-  }
+  } });
+  assert.equal(typeof given, "function", "the host hands its executors to the chat");
+  const appliers = await given();
+  for (const kind of ["approval", "choice", "mention"]) assert.equal(typeof appliers[kind].apply, "function", kind);
+  const card = (answeredBy, answeredAt) => ({ cardId: install.id, conversationId: "chat-cards", cardKind: "permission", participantId: "p1",
+    raisedBy: MACHINE_ID, raisedAt: "", card: {}, state: "answered", answer: { approve: true }, answeredBy, answeredAt });
+  const fromPhone = await appliers.approval.apply(card("phone-device", "2026-10-28T09:00:00.000Z"));
+  assert.equal(fromPhone.kind, "refused");
+  assert.match(fromPhone.reason, /approved on the desktop/);
+  assert.deepEqual(applied, [], "nothing applied for the phone's approval");
+  const fromDesktop = await appliers.approval.apply(card(DESKTOP_ID, "2026-10-28T09:00:01.000Z"));
+  assert.equal(fromDesktop.kind, "applied", "the desktop that set this machine up shows the code and may approve it");
+  assert.deepEqual(applied, [[install.id, true]]);
+  host.close?.();
 });
 
 test("a member's background work on the machine is reported to the desktop as it changes and again with each hello", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
   const client = stubClient();
-  const store = new Map();
   let notify;
   const live = [{ conversationId: "conv-bg", participantId: "p1", labels: ["long build"] }];
-  const host = new MachineHostService(
-    {
-      runMachineHostedTurn: async () => ({ messages: [], warnings: [] }),
-      cancelRun: () => true,
-      respondToAppToolApproval: async () => undefined,
-      applyReplicatedConversation: async (id, merge) => { const next = merge(store.get(id)); if (next) store.set(id, next); },
-      onBackgroundTasksChanged: (listener) => { notify = listener; return () => { notify = undefined; }; },
-      localBackgroundTasks: () => live
-    },
-    { getConversation: async (id) => store.get(id) },
-    { importMachineSettingsSnapshot: async () => undefined },
-    { write: async () => undefined },
-    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
-  );
+  const host = makeHost(client, { chat: {
+    onBackgroundTasksChanged: (listener) => { notify = listener; return () => { notify = undefined; }; },
+    localBackgroundTasks: () => live
+  } });
   await host.start();
   await settle();
   const backgroundBodies = async () => (await controlBodies(client, host.options.pairing)).filter((body) => body.type === "machine.member.background");
@@ -787,151 +345,209 @@ test("a member's background work on the machine is reported to the desktop as it
   assert.equal(notify, undefined, "closing the host stops reporting");
 });
 
-test("a machine whose enrollment names no server of the User's is not started", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+test("a machine whose enrollment names no server of the User's is not started", () => {
   const { hubUrl: _hub, ...relayEra } = { ...pairing(), relayUrl: "wss://relay.accordagents.com/v1/relay" };
-  assert.throws(() => new MachineHostService(
-    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
-      applyReplicatedConversation: async () => undefined },
-    { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
-    { ...hostEvents, pairing: relayEra, deviceId: MACHINE_ID, appVersion: "test", createClient: () => stubClient() }
-  ), /does not name the User's server/);
+  assert.throws(() => makeHost(stubClient(), { pairing: relayEra }), /does not name the User's server/);
 });
 
-test("the desktop's new connection in the seat of its old one is greeted again, and events sent in the room are not taken", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
-  const { sealMachinePayload } = await import("../dist/main/main/services/machineChannelSealing.js");
+test("the hello says what runs here, what has not reached the server, and the automatic-stop switch; unsent writes keep the machine awake", async () => {
+  const client = stubClient();
+  let unsent = { queued: 2, lastError: "The server did not answer." };
+  let failRead = false;
+  let running = [{ runId: "run-a", conversationId: "c1" }];
+  let live = ["run-a", "run-b"];
+  const host = makeHost(client, {
+    chat: { activeParticipantRuns: () => running, liveRunIds: () => live },
+    autoStopEnabled: () => false,
+    idleStopWarning: () => "Host-wide idle state cannot be saved.",
+    unsentServerWrites: async () => { if (failRead) throw new Error("unreadable"); return unsent; }
+  });
+  await host.start();
+  await settle();
+  const hello = (await controlBodies(client, host.options.pairing)).filter((body) => body.type === "machine.hello").pop();
+  assert.deepEqual(hello.activeRunIds.sort(), ["run-a", "run-b"], "a member's run, and a run still writing its end, count once each");
+  assert.equal(hello.unsentWarning, "2 changes from this machine have not reached your server yet: The server did not answer.");
+  assert.equal(hello.autoStopEnabled, false);
+  assert.equal(hello.idleStopWarning, "Host-wide idle state cannot be saved.");
+  assert.equal(hello.deviceId, MACHINE_ID);
+  assert.equal(hello.publicKeyDerBase64, hostEvents.publicKeyDerBase64);
+  assert.ok(hello.instanceId && hello.instanceStartedAt);
+  for (const retired of ["pendingTerminalRunIds", "outboxError", "chatChanges", "compactionSupported"]) {
+    assert.equal(hello[retired], undefined, `${retired} is gone with the old order`);
+  }
+
+  running = []; live = [];
+  assert.equal(await host.hasWorkForIdleStop(), true, "a reply the server has not taken does not sleep with the machine");
+  unsent = { queued: 0 };
+  assert.equal(await host.hasWorkForIdleStop(), false);
+  failRead = true;
+  assert.equal(await host.hasWorkForIdleStop(), true, "unknown counts as unsent");
+  failRead = false;
+  live = ["run-c"];
+  assert.equal(await host.hasWorkForIdleStop(), true, "a run still ending is work");
+  host.close();
+});
+
+test("the computer holds this machine's new turns while its runtime is replaced, at most for a bounded time, and the turns go on once released", async () => {
+  const client = stubClient();
+  let stopCommitted = false;
+  let now = Date.now();
+  const logs = [];
+  const host = makeHost(client, { logs, now: () => new Date(now), hostStopCommitted: () => stopCommitted });
+  let lifted = 0;
+  host.onFenceLifted(() => { lifted += 1; });
+  await host.start();
+  await settle();
+  assert.equal(host.takesNewWork(), true);
+  await deliver(host, client, { type: "machine.turns.hold", reason: "updating the runtime", until: new Date(now + 60_000).toISOString() });
+  assert.equal(host.takesNewWork(), false, "a turn asked now waits on the server");
+  await deliver(host, client, { type: "machine.turns.release" });
+  assert.equal(host.takesNewWork(), true);
+  assert.equal(lifted, 1, "the turns that waited are taken at once");
+  await deliver(host, client, { type: "machine.turns.release" });
+  assert.equal(lifted, 1, "a release with nothing held lifts nothing");
+  // A hold already over is no hold.
+  await deliver(host, client, { type: "machine.turns.hold", reason: "late", until: new Date(now - 1_000).toISOString() });
+  assert.equal(host.takesNewWork(), true);
+  // A hold far ahead is bounded: a computer that stops renewing it never
+  // keeps the machine from working.
+  await deliver(host, client, { type: "machine.turns.hold", reason: "updating the runtime", until: new Date(now + 24 * 3_600_000).toISOString() });
+  assert.equal(host.takesNewWork(), false);
+  now += 31 * 60_000;
+  assert.equal(host.takesNewWork(), true, "lapsed after at most half an hour");
+  // Only the computer that set it up may hold it.
+  const stranger = createDeviceIdentity(new Date().toISOString());
+  client.emit("message", { ciphertext: await controlFrame({ type: "machine.turns.hold", reason: "x", until: new Date(now + 60_000).toISOString() }, host.options.pairing, stranger) });
+  await host.inbound;
+  assert.equal(host.takesNewWork(), true, "a frame not from the enrolling computer changes nothing");
+  assert.ok(logs.some((entry) => entry.event === "machine-host.message.error"));
+  // A stop another deployment on this host made final takes no new turns either.
+  stopCommitted = true;
+  assert.equal(host.takesNewWork(), false);
+  stopCommitted = false;
+  host.close();
+  assert.equal(host.takesNewWork(), false, "a closed runtime takes nothing");
+});
+
+test("a kind the old order carried, sent in the room, is not a link message and does nothing", async () => {
   const client = stubClient();
   const logs = [];
+  const host = makeHost(client, { logs });
+  await host.start();
+  await settle();
+  const before = client.sent.length;
+  for (const type of ["machine.turn.request", "machine.turn.cancel", "machine.settings", "machine.trust.roster", "machine.conversation.sync"]) {
+    await deliver(host, client, { type, conversationId: "c", runId: "r" });
+  }
+  await host.outbound;
+  assert.equal(client.sent.length, before, "nothing answered, nothing run");
+  assert.equal(logs.filter((entry) => entry.event === "machine-host.message").length, 0, "none of them was taken as a message");
+  host.close();
+});
+
+test("the desktop's new connection in the seat of its old one is greeted again", async () => {
+  const client = stubClient();
   const enrollment = pairing();
-  const host = new MachineHostService(
-    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
-      applyReplicatedConversation: async () => undefined },
-    { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined },
-    { write: async (event, payload) => { logs.push({ event, payload }); } },
-    { ...hostEvents, pairing: enrollment, deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
-  );
+  const host = makeHost(client, { pairing: enrollment });
   await host.start();
   await settle();
   const hellos = async () => (await controlBodies(client, enrollment)).filter((body) => body.type === "machine.hello").length;
   const first = await hellos();
   assert.ok(first >= 1, "greeted on its own link");
-  // The server seated the desktop's new connection (it had not seen the old
-  // one close) and says so: the desktop is greeted again.
   client.emit("peer", { type: "peer-connected", peer: { role: "desktop", deviceId: DESKTOP_ID } });
-  for (let i = 0; i < 400 && await hellos() < first + 1; i += 1) { await settle(25); await host.outbound; }
+  await until(async () => { await host.outbound; return await hellos() >= first + 1; });
   assert.equal(await hellos(), first + 1);
-  // A device event the desktop sent in the room (an old runtime would) is not taken.
-  let received = 0;
-  host.eventChannel.receive = async () => { received += 1; };
-  const packet = { protocol: "accord-device-events-v1", type: "event", from: DESKTOP_ID, to: MACHINE_ID, channelId: enrollment.rendezvousId, event: {} };
-  client.emit("message", { logicalMessageId: "x", ciphertext: await sealMachinePayload(packet, desktopEvents.identity, hostEvents.identity.publicKeyDerBase64, enrollment.rendezvousId) });
-  for (let i = 0; i < 400 && !logs.some((entry) => entry.event === "machine-host.room-event-dropped"); i += 1) await settle(25);
-  assert.ok(logs.some((entry) => entry.event === "machine-host.room-event-dropped"));
-  assert.equal(received, 0, "durable events come only through the server's order");
   host.close();
 });
 
-test("an event another machine sends in its room is not taken: durable events come only through the server's order", async () => {
-  const { MachinePeerFabric } = await import("../dist/main/main/services/machinePeerFabric.js");
-  const { sealMachinePayload } = await import("../dist/main/main/services/machineChannelSealing.js");
-  const { createChatEventDeviceIdentity } = await import("../dist/main/main/services/chatEventLog.js");
-  const home = pairing();
-  // Two machines meet in the room of the one whose id sorts first: the other
-  // one here sorts first, so they meet in its room (a peer room).
-  let otherIdentity = createChatEventDeviceIdentity(new Date().toISOString());
-  while (otherIdentity.originId > MACHINE_ID) otherIdentity = createChatEventDeviceIdentity(new Date().toISOString());
-  const other = { deviceId: otherIdentity.originId, publicKeyDerBase64: otherIdentity.publicKeyDerBase64, role: "machine", name: "Other",
-    machineId: "machine-2", relayUrl: "ws://127.0.0.1:1/v1/room", rendezvousId: "rv-other-room", fingerprint: "F", chatChanges: true };
-  const peerRoom = stubClient();
-  const logs = [];
-  const fabric = new MachinePeerFabric({
-    selfDeviceId: MACHINE_ID, storage: hostEvents.eventStorage, eventLog: hostEvents.eventLog, home,
-    homeClient: stubClient(), createClient: () => peerRoom, isPeerConnected: () => true,
-    apply: async () => "applied", onError: () => undefined, logger: (event, payload) => logs.push({ event, payload })
-  });
-  try {
-    await fabric.reconcile([other]);
-    let received = 0;
-    fabric.channel(other.deviceId).receive = async () => { received += 1; };
-    const packet = { protocol: "accord-device-events-v1", type: "event", from: other.deviceId, to: MACHINE_ID, channelId: "rv-other-room", event: {} };
-    const ciphertext = await sealMachinePayload(packet, otherIdentity, hostEvents.identity.publicKeyDerBase64, "rv-other-room");
-    peerRoom.emit("message", { logicalMessageId: "x", ciphertext });
-    peerRoom.emit("message", { logicalMessageId: "y", ciphertext });
-    for (let i = 0; i < 400 && !logs.some((entry) => entry.event === "machine-host.room-event-dropped"); i += 1) await settle(25);
-    await settle(100);
-    assert.equal(received, 0);
-    assert.equal(logs.filter((entry) => entry.event === "machine-host.room-event-dropped").length, 1, `said once per sender and kind: ${JSON.stringify(logs).slice(0, 600)}`);
-  } finally {
-    fabric.close();
-  }
-});
-
-test("a desktop that is not in the room after this machine's link comes back is not counted as present, so no compaction is handed to it", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
+test("a hello answer taken after this machine's link dropped, or after the desktop left, does not make the desktop look present", async () => {
   const client = stubClient();
-  const host = new MachineHostService(
-    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
-      applyReplicatedConversation: async () => undefined },
-    { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
-    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
-  );
+  const host = makeHost(client);
   await host.start();
   await settle();
-  await deliver(host, client, { type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home", compactionDelegation: true });
-  assert.equal(host.canDelegateCompaction(), true, "the desktop is here and takes compactions");
-  // This machine's own link drops: nothing is known of the desktop.
+  assert.equal(host.isDesktopConnected(), true);
   client.emit("state", "tunnel-reconnecting");
-  assert.equal(host.canDelegateCompaction(), false);
-  // Back, in a room without the desktop.
+  assert.equal(host.isDesktopConnected(), false, "nothing is known of the desktop while this machine's own link is down");
+  await deliver(host, client, { type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
+  assert.equal(host.isDesktopConnected(), false, "an answer read before the drop does not bring it back");
   client.emit("state", "connected");
   client.emit("peer", { type: "ready", deviceId: MACHINE_ID, peerConnected: false, peers: [] });
-  assert.equal(host.canDelegateCompaction(), false, "a compaction it asks for is not handed to a desktop that is not there");
-  // The desktop arrives.
+  assert.equal(host.isDesktopConnected(), false, "back, in a room without the desktop");
   client.emit("peer", { type: "peer-connected", peer: { role: "desktop", deviceId: DESKTOP_ID } });
-  assert.equal(host.canDelegateCompaction(), true);
-  // Let what the hello wrote finish before the shared event store is removed.
-  await host.inbound; await host.outbound; await settle();
-  host.close();
-});
-
-test("a hello answer taken after this machine's link dropped does not make the desktop look present", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
-  const client = stubClient();
-  const host = new MachineHostService(
-    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
-      applyReplicatedConversation: async () => undefined },
-    { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
-    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
-  );
-  await host.start();
-  await settle();
-  client.emit("state", "tunnel-reconnecting");
-  // An answer read from the room just before the drop, applied after it.
-  await deliver(host, client, { type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home", compactionDelegation: true });
-  assert.equal(host.canDelegateCompaction(), false, "nothing is handed to a desktop this machine cannot reach");
-  await host.inbound; await host.outbound; await settle();
-  host.close();
-});
-
-test("a hello answer applied after the desktop left the room does not bring it back", async () => {
-  const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
-  const client = stubClient();
-  const host = new MachineHostService(
-    { runMachineHostedTurn: async () => ({ messages: [], warnings: [] }), cancelRun: () => true, respondToAppToolApproval: async () => undefined,
-      applyReplicatedConversation: async () => undefined },
-    { getConversation: async () => undefined }, { importMachineSettingsSnapshot: async () => undefined }, { write: async () => undefined },
-    { ...hostEvents, pairing: pairing(), deviceId: MACHINE_ID, appVersion: "test", createClient: () => client }
-  );
-  await host.start();
-  await settle();
-  // The answer was read from the room before the desktop's leaving was, and
-  // is applied from the queue after it.
+  assert.equal(host.isDesktopConnected(), true);
   client.emit("peer", { type: "peer-disconnected", peer: { role: "desktop", deviceId: DESKTOP_ID } });
-  await deliver(host, client, { type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home", compactionDelegation: true });
-  assert.equal(host.canDelegateCompaction(), false, "a compaction is not handed to a desktop that left");
+  await deliver(host, client, { type: "machine.hello.ack", desktopDeviceId: DESKTOP_ID, appVersion: "test", machineId: "test-home" });
+  assert.equal(host.isDesktopConnected(), false, "an answer applied after the desktop left does not bring it back");
   await deliver(host, client, { type: "machine.hello.request" });
-  assert.equal(host.canDelegateCompaction(), false, "nor after an old greeting request");
-  await host.inbound; await host.outbound; await settle();
+  assert.equal(host.isDesktopConnected(), false, "nor an old greeting request");
+  await host.outbound; await settle();
   host.close();
+});
+
+test("a member's live progress goes to the computer's window in the room and to the server for the phone; nothing is kept once the run ends", async () => {
+  const client = stubClient();
+  const posted = [];
+  let failPosts = false;
+  const logs = [];
+  const host = makeHost(client, { logs, chat: { conversationIdForRun: (runId) => (runId.startsWith("run-") ? "conv-live" : undefined) },
+    postProgress: async (frames) => { if (failPosts) throw new Error("server away"); posted.push(...frames); } });
+  await host.start();
+  await settle();
+  host.noteNativeProgress(progress("run-1", "initial", "running", "Hel"));
+  host.noteNativeProgress(progress("run-1", "initial", "running", "Hello wor"));
+  host.noteNativeProgress(progress("run-1", "done", "finished", "Hello world"));
+  // A run of no chat here is not streamed.
+  host.noteNativeProgress(progress("other", "initial", "running", "?"));
+  await until(async () => posted.some((frame) => frame.progress.phase === "done"), 5_000);
+  await host.outbound;
+  const decode = (frames) => {
+    let state;
+    for (const frame of frames) state = decodeMachineProgress(state?.runId === frame.runId ? state : undefined, frame);
+    return state;
+  };
+  const room = (await controlBodies(client, host.options.pairing)).filter((body) => body.type === "machine.turn.progress.delta");
+  assert.ok(room.length >= 1, "the computer's window sees it live");
+  assert.ok(room.every((frame) => frame.conversationId === "conv-live" && frame.runId === "run-1"));
+  assert.equal(decode(room).agentProgress.partialContent, "Hello world");
+  assert.equal(decode(room).phase, "done");
+  assert.ok(posted.every((frame) => frame.runId === "run-1"), "the phone gets it from the server");
+  assert.equal(decode(posted).agentProgress.partialContent, "Hello world");
+  assert.equal(host.roomProgress.size + host.serverProgress.size, 0, "no stream is kept once the run ended");
+
+  // The desktop is away: the phone still gets it through the server.
+  client.emit("peer", { type: "peer-disconnected", peer: { role: "desktop", deviceId: DESKTOP_ID } });
+  const roomBefore = client.sent.length;
+  posted.length = 0;
+  host.noteNativeProgress(progress("run-2", "initial", "running", "Away"));
+  await until(async () => posted.length > 0, 5_000);
+  assert.equal(client.sent.length, roomBefore, "nothing is sent into a room without the desktop");
+  // The server refuses: that stream stops, and the next update starts whole.
+  failPosts = true;
+  host.noteNativeProgress(progress("run-2", "initial", "running", "Away from the desk"));
+  await until(async () => logs.some((entry) => entry.event === "machine-host.progress.not-sent"), 5_000);
+  failPosts = false;
+  posted.length = 0;
+  host.noteNativeProgress(progress("run-2", "initial", "running", "Away from the desk, still"));
+  await until(async () => posted.length > 0, 5_000);
+  assert.equal(posted[0].sequence, 1, "a new stream, taken whole by the reader");
+  assert.equal(decodeMachineProgress(undefined, posted[0]).agentProgress.partialContent, "Away from the desk, still");
+  host.close();
+});
+
+test("shutdown waits for the members running here and lets their last progress go before the room closes", async () => {
+  const client = stubClient();
+  let running = ["run-s"];
+  let stopCalls = 0;
+  const posted = [];
+  const host = makeHost(client, { chat: { liveRunIds: () => running, conversationIdForRun: () => "conv-s" },
+    postProgress: async (frames) => { posted.push(...frames); } });
+  await host.start();
+  await settle();
+  host.noteNativeProgress(progress("run-s", "initial", "running", "half"));
+  const done = host.shutdown(async () => { stopCalls += 1; if (stopCalls === 2) running = []; });
+  assert.equal(host.takesNewWork(), false, "nothing new is taken while it stops");
+  await done;
+  assert.ok(stopCalls >= 2, "providers stopped until nothing ran");
+  assert.ok(posted.length >= 1, "the last progress was sent");
+  assert.equal(host.takesNewWork(), false);
 });

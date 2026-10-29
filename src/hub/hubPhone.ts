@@ -1,14 +1,15 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ChatSavedPromptConfig, ConversationOpenResult, ConversationSummary } from "../shared/types";
+import type { ChatMessage, ChatParticipant, ChatSavedPromptConfig, Conversation, ConversationOpenResult, ConversationSummary } from "../shared/types";
 import { CHAT_DELIVERY_POLICY_OPTIONS, resolveChatDeliveryTargets } from "../shared/chatDeliveryPolicy";
 import { matchingChatSavedPrompts } from "../shared/chatSavedPrompts";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../shared/deviceEventBlobs";
 import type { HubComposerCatalog, HubDevice, HubPhoneScope } from "../shared/hubProtocol";
-import { approvalHasCard, controlCardFromApproval, controlCardFromChoiceMessage, type MobileControlCard } from "../shared/mobileControlCards";
+import type { HubCard } from "../shared/hubOps";
+import { controlCardFromChoiceMessage, controlCardFromHubCard, type MobileControlCard } from "../shared/mobileControlCards";
 import { MOBILE_CHAT_LIST_LIMIT, buildMobileChatList, buildMobileTimelinePage, mobileChatMembers } from "../main/services/mobileChatCatalog";
-import type { MobileChatListItem } from "../main/services/mobileTimeline";
+import type { MobileChatListItem, MobileTimelineEvent, MobileTimelineTurn } from "../main/services/mobileTimeline";
 import type { StorageService } from "../main/services/storage";
 import { liveTimelineEvents, scopeCovers, type HubProgress, type HubWaker } from "./hubPhoneState";
 /**
@@ -120,6 +121,28 @@ type Answer = { status: number; body: unknown };
 const PHONE_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024;
 /** The cards a chat's page carries at most. */
 const PHONE_CARDS_MAX = 30;
+/** Open cards read for the chat list at once; a read that fills it states
+ *  no chat's set (the phone keeps what it holds). */
+const OPEN_CARDS_READ_MAX = 1_000;
+
+/** The server's cards as the phone shows them; a choice names its member as
+ *  the chat does. */
+function phoneCards(cards: HubCard[], conversation: Conversation | undefined, machineNames?: Map<string, string>): MobileControlCard[] {
+  const members = mobileChatMembers(conversation);
+  const label = (participantId: string) => {
+    const member = members.find((item) => item.id === participantId);
+    return member ? `@${member.handle.replace(/^@/, "")}` : undefined;
+  };
+  const participants = Array.isArray(conversation?.metadata?.participants) ? conversation!.metadata.participants as Array<{ id?: unknown; homeMachineId?: unknown }> : [];
+  const machineName = (participantId: string) => {
+    const home = participants.find((item) => item?.id === participantId)?.homeMachineId;
+    return typeof home === "string" && home ? machineNames?.get(home) : undefined;
+  };
+  return cards.flatMap((card) => {
+    const shown = controlCardFromHubCard(card, label, machineName);
+    return shown ? [shown] : [];
+  });
+}
 const COMPOSER_TARGET_WINDOW = 200;
 /** A phone counts as looking at its app while its wait for news is open, and
  *  this long after it ended (the app asks again at once while it is open). */
@@ -233,20 +256,22 @@ export class HubPhoneApi {
     if (stale.size > 0) {
       const machineNames = await this.options.machineNames().catch(() => new Map<string, string>());
       const catalog = await this.catalog();
-      // Every card is here now: a choice from the copy, an approval as the
-      // device holding it last said. So the list names them all, and the
-      // phone drops a card the list leaves out.
-      const approvals = new Map<string, ChatAppToolApproval[]>();
-      for (const row of await this.options.store.hub().pendingApprovalCards([...stale])) {
-        const list = approvals.get(row.conversationId) ?? [];
-        list.push(JSON.parse(row.approvalJson) as ChatAppToolApproval);
-        approvals.set(row.conversationId, list);
+      // Every card waiting for the User is the server's own (Д9): the list
+      // names each chat's whole set, and the phone drops a card it leaves
+      // out. A set the read could not hold whole is not stated at all.
+      // Mention approvals are not the phone's to show: they never count.
+      const open = await this.options.store.hubOps().openCards(undefined, OPEN_CARDS_READ_MAX, { exceptKinds: ["mention"] });
+      const whole = open.length < OPEN_CARDS_READ_MAX;
+      const byChat = new Map<string, HubCard[]>();
+      for (const card of open) {
+        if (card.state !== "pending" || !stale.has(card.conversationId)) continue;
+        byChat.set(card.conversationId, [...(byChat.get(card.conversationId) ?? []), card]);
       }
       const built = await buildMobileChatList(this.options.store, {
         roleLabels: new Map(Object.entries(catalog?.roles ?? {})),
         machineNames,
-        pendingCards: true,
-        approvalsFor: (conversationId) => approvals.get(conversationId) ?? [],
+        pendingCardsFor: (conversationId, conversation) => whole
+          ? phoneCards(byChat.get(conversationId) ?? [], conversation, machineNames) : undefined,
         runningFromMessages: true,
         summaries,
         include: (summary: ConversationSummary) => stale.has(summary.id) && include(summary)
@@ -298,9 +323,10 @@ export class HubPhoneApi {
         ok: true,
         type: "mobile.timeline.events",
         conversationId,
-        events: page.events,
+        // The User's messages say where each turn they asked for stands.
+        events: await this.withTurns(conversationId, page.events, conversation.messages),
         // The newest page states the chat's cards, as the desktop's did.
-        ...(before ? {} : { cards: await this.cards(conversationId, conversation.messages) }),
+        ...(before ? {} : { cards: await this.cards(conversationId, conversation) }),
         page: {
           hasMoreBefore: page.hasMoreBefore,
           ...(page.beforeMessageId ? { beforeMessageId: page.beforeMessageId } : {}),
@@ -310,22 +336,42 @@ export class HubPhoneApi {
     };
   }
 
-  /** A chat's cards: its pending approvals, as the device holding each last
-   *  said, and the choices its members asked (pending anywhere in the chat,
-   *  answered ones in the page). */
-  private async cards(conversationId: string, pageMessages: ChatMessage[]): Promise<MobileControlCard[]> {
+  /** A chat's cards: the cards on the server not settled yet (waiting for
+   *  the User, or answered and waiting for the member's device), and the
+   *  choices the page's messages asked that were answered (the record under
+   *  each message). Only the server's card says a choice still waits. */
+  private async cards(conversationId: string, conversation: Conversation): Promise<MobileControlCard[]> {
     const cards = new Map<string, MobileControlCard>();
-    const hub = this.options.store.hub();
-    for (const row of [...await hub.waitingApprovalCards(conversationId, PHONE_CARDS_MAX), ...await hub.approvalCards(conversationId, PHONE_CARDS_MAX)]) {
-      const approval = JSON.parse(row.approvalJson) as ChatAppToolApproval;
-      if (approvalHasCard(approval)) cards.set(approval.id, controlCardFromApproval(conversationId, approval));
-    }
-    const pendingChoices = await this.options.store.listPendingChoiceMessages([conversationId]).catch(() => ({ rows: [] as Array<{ conversationId: string; message: ChatMessage }> }));
-    for (const message of [...pageMessages, ...pendingChoices.rows.map((row) => row.message)]) {
+    for (const message of conversation.messages) {
       const card = controlCardFromChoiceMessage(conversationId, message);
-      if (card) cards.set(card.id, card);
+      if (card && card.status !== "pending") cards.set(card.id, card);
     }
+    // A machine member's roster change the computer has made (it says so in
+    // the chat) waits for nothing more, even while that machine, which
+    // settles its card, is stopped.
+    const made = new Set(conversation.messages.flatMap((message) =>
+      message.role === "system" && typeof message.metadata?.rosterChange?.approvalId === "string" ? [message.metadata.rosterChange.approvalId] : []));
+    // The newest the phone shows (it shows no mention approvals): many old
+    // cards waiting in a chat never hide a new one.
+    const open = (await this.options.store.hubOps().openCards(conversationId, PHONE_CARDS_MAX, { newestFirst: true, exceptKinds: ["mention"] }))
+      .filter((card) => !(card.state === "answered" && card.cardKind === "roster" && made.has(card.cardId)));
+    const machineNames = await this.options.machineNames().catch(() => new Map<string, string>());
+    for (const card of phoneCards(open, conversation, machineNames)) cards.set(card.id, card);
     return [...cards.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt)).slice(-PHONE_CARDS_MAX);
+  }
+
+  /** Each of the User's messages with the turns it asked for, as the server
+   *  holds them: "Taken to work" once a member's own device claimed one.
+   *  A message that asked none says so (an empty list): nobody is waited for. */
+  private async withTurns(conversationId: string, events: MobileTimelineEvent[], messages: ChatMessage[]): Promise<MobileTimelineEvent[]> {
+    const asked = new Set(messages.filter((message) => message.role === "user").map((message) => message.id));
+    if (asked.size === 0) return events;
+    const byMessage = new Map<string, MobileTimelineTurn[]>();
+    for (const turn of await this.options.store.hubOps().turnsFor(conversationId, [...asked])) {
+      byMessage.set(turn.messageId, [...(byMessage.get(turn.messageId) ?? []), { participantId: turn.participantId, runId: turn.runId, state: turn.state }]);
+    }
+    return events.map((event) => event.role === "you" && event.messageId && asked.has(event.messageId)
+      ? { ...event, turns: byMessage.get(event.messageId) ?? [] } : event);
   }
 
   /** A chat's newest `limit` messages, read again only once it changed. */

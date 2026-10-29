@@ -7,7 +7,7 @@ import test from "node:test";
 import { HUB_SETUP_BLOB_PREFIX, parseHubServerBlob, type HubLinkConfig, type HubSetupState } from "../../shared/hubSetup";
 import { CommandError, type CommandOptions, type CommandResult } from "./command";
 import { buildHubSetupCommand, hubLaunchScript } from "./hubProvisioning";
-import { HubInstaller, hubActivateScript, hubCertificateScript, hubImportChatsScript, hubPrepareScript, hubServiceScript, hubServiceUnit, hubSetOwnerScript, hubStartOverScript, removeStaleHubTemp, sshQuoted, type HubLinkRequest } from "./hubInstaller";
+import { HubInstaller, hubActivateScript, hubCertificateScript, hubPrepareScript, hubServiceScript, hubServiceUnit, hubSetOwnerScript, hubStartOverScript, removeStaleHubTemp, sshQuoted, type HubLinkRequest } from "./hubInstaller";
 
 const KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG0eZ0lJqBq3mH5w2m7uQx0w8Y7j1o0a2n4b6c8d0e2f accordagents-hub";
 
@@ -48,7 +48,7 @@ test("the line the command prints is read back, with whatever was pasted around 
 
 test("every script the installer runs on the server is valid bash", () => {
   for (const script of [hubPrepareScript(), hubActivateScript("/home/ubuntu/accordagents-hub-1.0.0", "1.0.0"), hubSetOwnerScript(), hubStartOverScript("20261018"),
-    hubImportChatsScript(), hubServiceScript(), hubCertificateScript("3.14.15.92")]) {
+    hubServiceScript(), hubCertificateScript("3.14.15.92")]) {
     bashSyntax(script);
   }
   assert.throws(() => hubCertificateScript("3.14.15.92 && reboot"));
@@ -67,7 +67,6 @@ async function fixture(t: test.TestContext, behaviour: { owner: string[]; health
   await writeFile(path.join(payload, "package.json"), JSON.stringify({ version: "1.2.3" }));
   const calls: string[] = [];
   const argv: Array<{ command: string; args: string[] }> = [];
-  const streamed: string[] = [];
   const owners = [...behaviour.owner];
   const control = { failOn: behaviour.failOn };
   const run = async (command: string, args: string[], options: CommandOptions = {}): Promise<CommandResult> => {
@@ -81,14 +80,9 @@ async function fixture(t: test.TestContext, behaviour: { owner: string[]; health
       await writeFile(file, "PRIVATE");
       await writeFile(`${file}.pub`, `${KEY}\n`);
     }
-    if (command === "tar") await writeFile(args[args.indexOf("-czf") + 1], "archive");
     if (command === "ssh" && args.at(-1)?.includes("--set-owner")) {
       assert.ok(options.input?.includes("\"deviceId\":\"device-"), "the owner identity goes on stdin");
       return result(`${owners.shift()}\n`);
-    }
-    if (command === "ssh" && args.at(-1)?.includes("--import-chat-copy")) {
-      if (options.inputStream) streamed.push(line);
-      return result("{\"ok\":true,\"conversations\":3}\n");
     }
     return result("");
   };
@@ -98,7 +92,6 @@ async function fixture(t: test.TestContext, behaviour: { owner: string[]; health
     return new Response(JSON.stringify({ ok: true, protocol: 1, hubId: "hub-1", version: "1.2.3", head: 0 }), { status: 200 });
   }) as unknown as typeof fetch;
   const links: HubLinkRequest[] = [];
-  const exports: number[] = [];
   const states: HubSetupState[] = [];
   const keyDir = path.join(dir, behaviour.keyDirName ?? "keys");
   const installer = new HubInstaller({
@@ -106,13 +99,6 @@ async function fixture(t: test.TestContext, behaviour: { owner: string[]; health
     payloadDir: () => payload,
     bundledVersion: "1.2.3",
     identity: async () => ({ originId: "device-0123456789abcdef0123456789abcdef", publicKeyDerBase64: "MCowBQYDK2VwAyEA" }),
-    exportChatCopy: async () => {
-      const copy = path.join(dir, "copy");
-      await mkdir(copy, { recursive: true });
-      await writeFile(path.join(copy, "manifest.json"), "{}");
-      exports.push(1);
-      return { dir: copy, pushedThrough: 42, conversations: 3, cleanup: async () => undefined };
-    },
     link: async (request) => { links.push(request); },
     currentLink: async () => behaviour.linked,
     reachable: () => behaviour.reachable,
@@ -125,7 +111,7 @@ async function fixture(t: test.TestContext, behaviour: { owner: string[]; health
   // A line names the command this desktop issued.
   await installer.command("us-east-1");
   const nonce = Object.keys(JSON.parse(await readFile(path.join(keyDir, "commands.json"), "utf8")))[0];
-  return { installer, calls, argv, links, exports, states, streamed, nonce, keyDir, control };
+  return { installer, calls, argv, links, states, nonce, keyDir, control };
 }
 
 const OWNER_NEW = "{\"ok\":true,\"hubId\":\"hub-1\",\"alreadyOwner\":false}";
@@ -149,22 +135,19 @@ test("an ssh option value keeps quotes and backslashes in a path", () => {
   assert.equal(sshQuoted("/Users/a b/known_hosts"), "\"/Users/a b/known_hosts\"");
   assert.equal(sshQuoted("/tmp/q\"t\\b/known_hosts"), "\"/tmp/q\\\"t\\\\b/known_hosts\"");
 });
-const OWNER_DONE = "{\"ok\":true,\"hubId\":\"hub-1\",\"alreadyOwner\":true,\"chatsCopied\":true}";
-const OWNER_HALF = "{\"ok\":true,\"hubId\":\"hub-1\",\"alreadyOwner\":true,\"chatsCopied\":false}";
+const OWNER_DONE = "{\"ok\":true,\"hubId\":\"hub-1\",\"alreadyOwner\":true}";
 const OWNER_OTHER = "{\"ok\":false,\"reason\":\"another-owner\",\"hubId\":\"hub-1\"}";
 
-test("a first setup installs in order, streams the chats and starts sending after them", async (t) => {
+test("a first setup installs in order and links this desktop, which moves its chats there itself", async (t) => {
   const f = await fixture(t, { owner: [OWNER_NEW], healthFailures: 2 });
   const state = await f.installer.install({ blob: blobFor("3.14.15.92", { nonce: f.nonce, hostKeys: [HOST_KEY] }) });
   assert.equal(state.status, "ready", state.message);
   assert.equal(state.url, "https://3.14.15.92");
   assert.deepEqual(f.states.map((item) => item.phase).filter((phase, index, all) => all.indexOf(phase) === index),
-    ["connecting", "preparing", "uploading", "owner", "chats", "starting", "certificate", "checking", "ready"]);
-  assert.equal(f.exports.length, 1);
-  assert.equal(f.links[0].pushedThrough, 42, "the hub is not sent what the copy holds");
+    ["connecting", "preparing", "uploading", "owner", "starting", "certificate", "checking", "ready"]);
+  assert.deepEqual(f.links.map((link) => [link.url, link.hubId]), [["https://3.14.15.92", "hub-1"]]);
   assert.equal(f.links[0].server.installedVersion, "1.2.3");
-  assert.equal(f.streamed.length, 1, "the chats go on ssh's stdin, never into a file on the server");
-  assert.ok(!f.calls.some((call) => call.startsWith("scp ") && call.includes("chats")));
+  assert.ok(!f.calls.some((call) => /chat|import|tar /.test(call)), "no copy of the chats goes over the setup connection");
   // Exactly the host keys AWS reported are trusted.
   assert.equal(await readFile(path.join(f.keyDir, "known_hosts"), "utf8"), `3.14.15.92 ${HOST_KEY}\n`);
   assert.ok(f.calls.filter((call) => call.startsWith("ssh ")).every((call) => call.includes("StrictHostKeyChecking=yes")));
@@ -180,36 +163,12 @@ test("a line this computer's command did not print is refused before anything ru
   assert.equal(f.calls.length, before);
 });
 
-test("setting up again for the same desktop keeps the hub's chats and this desktop's cursors", async (t) => {
+test("setting up again for the same desktop links it again, and its chats stay on the server", async (t) => {
   const f = await fixture(t, { owner: [OWNER_DONE], linked: { url: "https://3.14.15.92", hubId: "hub-1" } });
   const state = await f.installer.install({ blob: blobFor("3.14.15.92", { nonce: f.nonce }) });
   assert.equal(state.status, "ready", state.message);
-  assert.equal(f.exports.length, 0, "no second copy");
-  assert.deepEqual(state.skipped, ["chats"]);
-  assert.equal(f.links[0].pushedThrough, undefined, "the cursors stand");
-});
-
-test("a copy taken by a setup that never linked this desktop is taken again", async (t) => {
-  // The import finished but the link did not: what this desktop wrote since
-  // is in neither the copy on the hub nor its push cursor.
-  const f = await fixture(t, { owner: [OWNER_DONE] });
-  const state = await f.installer.install({ blob: blobFor("3.14.15.92", { nonce: f.nonce }) });
-  assert.equal(state.status, "ready", state.message);
-  assert.equal(f.exports.length, 1);
-  assert.equal(f.links[0].pushedThrough, 42);
-  const other = await fixture(t, { owner: [OWNER_DONE], linked: { url: "https://3.14.15.92", hubId: "hub-0" } });
-  await other.installer.install({ blob: blobFor("3.14.15.92", { nonce: other.nonce }) });
-  assert.equal(other.exports.length, 1, "linked to another hub: copied");
-});
-
-test("linked to this very hub, a copy the hub never finished is taken again", async (t) => {
-  for (const owner of [OWNER_HALF, OWNER_NEW]) {
-    const f = await fixture(t, { owner: [owner], linked: { url: "https://3.14.15.92", hubId: "hub-1" } });
-    const state = await f.installer.install({ blob: blobFor("3.14.15.92", { nonce: f.nonce }) });
-    assert.equal(state.status, "ready", state.message);
-    assert.equal(f.exports.length, 1, owner);
-    assert.equal(f.links[0].pushedThrough, 42);
-  }
+  assert.deepEqual(f.links.map((link) => link.hubId), ["hub-1"]);
+  assert.ok(!f.calls.some((call) => call.includes("data.replaced-")), "nothing on the server is moved aside");
 });
 
 test("a yes to start over is for the server it was asked about", async (t) => {
@@ -228,23 +187,19 @@ test("pasting a line for another server keeps the keys of the one in use", async
   assert.ok(hosts.includes(`3.14.15.92 ${HOST_KEY}`) && hosts.includes(`3.14.15.93 ${HOST_KEY}`));
 });
 
-test("Settings is told whether the hub answers now and which region to offer", async (t) => {
+test("Settings is told whether the hub answers now, what this desktop's link says, and which region to offer", async (t) => {
   const none = await fixture(t, { owner: [], defaultRegion: "eu-west-2" });
   assert.deepEqual(await none.installer.state(), { status: "none", defaultRegion: "eu-west-2", bundledVersion: "1.2.3" });
   const down = await fixture(t, { owner: [], linked: { url: "https://3.14.15.92", hubId: "hub-1" }, reachable: false });
   const state = await down.installer.state();
   assert.equal(state.status, "ready");
   assert.equal(state.reachable, false);
-});
-
-test("the lines the User may dismiss are the server's own, and need a server", async (t) => {
-  const given = { id: "given-up:a:1", text: "Some changes could not be applied." };
-  const none = await fixture(t, { owner: [] });
-  (none.installer as unknown as { options: Record<string, unknown> }).options.dismissableNotices = async () => [given];
-  assert.equal((await none.installer.state()).dismissableNotices, undefined, "nothing is said before a server is set up");
-  const linked = await fixture(t, { owner: [], linked: { url: "https://3.14.15.92", hubId: "hub-1" } });
-  (linked.installer as unknown as { options: Record<string, unknown> }).options.dismissableNotices = async () => [given];
-  assert.deepEqual((await linked.installer.state()).dismissableNotices, [given]);
+  // The link's own lines, and only with a server.
+  const lines = ["2 changes from this computer are waiting to reach your server."];
+  (none.installer as unknown as { options: Record<string, unknown> }).options.notices = async () => lines;
+  assert.equal((await none.installer.state()).notices, undefined, "nothing is said before a server is set up");
+  (down.installer as unknown as { options: Record<string, unknown> }).options.notices = async () => lines;
+  assert.deepEqual((await down.installer.state()).notices, lines);
 });
 
 test("the service is never given up on, and every hub command keeps to the server's memory", () => {
@@ -252,11 +207,11 @@ test("the service is never given up on, and every hub command keeps to the serve
   assert.match(hubServiceUnit(), /\[Unit\][^[]*^StartLimitIntervalSec=0$/m);
   assert.match(hubServiceUnit(), /^RestartMaxDelaySec=60$/m);
   assert.match(hubSetOwnerScript(), /systemd-run .*--on-active=\d+min \/bin\/systemctl start accordagents-hub/);
-  for (const script of [hubSetOwnerScript(), hubImportChatsScript()]) assert.match(script, /NODE_OPTIONS=--max-old-space-size=\d+ node /);
+  assert.match(hubSetOwnerScript(), /NODE_OPTIONS=--max-old-space-size=\d+ node /);
   assert.match(hubPrepareScript(), /^set -eo pipefail$/m);
 });
 
-test("chat copies a setup left behind are removed, and only once no setup can still be using them", async (t) => {
+test("chat copies an older setup left behind are removed, and only old ones", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-temp-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const now = Date.now();
@@ -266,19 +221,6 @@ test("chat copies a setup left behind are removed, and only once no setup can st
   }
   assert.equal(await removeStaleHubTemp(dir, now), 2);
   assert.deepEqual((await readdir(dir)).sort(), ["accordagents-hub-copy-new", "unrelated-old"]);
-});
-
-test("a setup that failed while copying the chats copies them when run again", async (t) => {
-  const f = await fixture(t, { owner: [OWNER_NEW, OWNER_HALF], failOn: /--import-chat-copy/ });
-  const failed = await f.installer.install({ blob: blobFor("3.14.15.92", { nonce: f.nonce }) });
-  assert.equal(failed.status, "failed");
-  assert.equal(failed.phase, "chats");
-  assert.ok(f.calls.some((call) => call.includes("systemctl start accordagents-hub")), "a hub that ran before runs again");
-  f.control.failOn = undefined;
-  const state = await f.installer.install({ blob: blobFor("3.14.15.92", { nonce: f.nonce }) });
-  assert.equal(state.status, "ready", state.message);
-  assert.equal(f.exports.length, 2, "copied on the retry");
-  assert.equal(f.links.at(-1)?.pushedThrough, 42);
 });
 
 test("a server another desktop set up is started over only when the User says so, its data kept aside", async (t) => {
@@ -291,7 +233,7 @@ test("a server another desktop set up is started over only when the User says so
   const state = await f.installer.install({ blob: blobFor("3.14.15.92", { nonce: f.nonce }), startOver: true });
   assert.equal(state.status, "ready", state.message);
   assert.ok(f.calls.some((call) => call.includes("data.replaced-")), "kept aside, not deleted");
-  assert.equal(f.exports.length, 1);
+  assert.equal(f.links.length, 1);
 });
 
 test("a server whose keys AWS did not report is never trusted on the first key it shows", async (t) => {

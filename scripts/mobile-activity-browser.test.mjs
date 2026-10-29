@@ -1,8 +1,8 @@
 /**
  * Activity on the phone, driven through the real PWA in a browser.
  *
- * The desktop's part is played the way the desktop plays it now: its chat
- * changes and cards, signed and published on the User's own server (a real
+ * The desktop's part is played the way the desktop plays it now: its chats,
+ * messages and cards written as operations on the User's own server (a real
  * hub here), which the paired phone reads. Nothing is written into the
  * phone's storage by hand, and no chat is read for the test: Activity lists
  * what the server's chat list carries for every chat, and the pages of the
@@ -48,7 +48,7 @@ const question = (status) => doneMessage("q1", TAYLOR, "Review is green. Which t
 // A run still in progress: the member's message while it works.
 const taylorRun = {
   id: "t-run", role: "participant", participantId: TAYLOR.id, participantLabel: "@taylor",
-  content: "Reviewing the diff now.", status: "pending", createdAt: minutesAgo(0.5), metadata: { runId: "run-taylor-1" }
+  content: "Reviewing the diff now.", status: "pending", createdAt: minutesAgo(0.5), metadata: { runId: "run-taylor-1", sourceMessageId: "u1" }
 };
 const polishMessages = [
   { id: "u1", role: "user", content: "@drew can you check the unread dot?", status: "done", createdAt: minutesAgo(12) },
@@ -107,8 +107,8 @@ async function swipeLeft(app, selector) {
 }
 
 test("Activity lists what the server delivered and acts on it from the bottom bar", { timeout: 300_000 }, async (t) => {
-  const { createChatEventDeviceIdentity } = require("../dist/main/main/services/chatEventLog.js");
-  const machine = createChatEventDeviceIdentity(new Date().toISOString());
+  const { createDeviceIdentity } = require("../dist/main/main/services/deviceIdentity.js");
+  const machine = createDeviceIdentity(new Date().toISOString());
   const hub = await startMobileHub({ rosterDevices: [
     { deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Cloud machine", machineId: "m1" }
   ] });
@@ -119,8 +119,10 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
   try {
     await hub.createChat(CHAT_POLISH, { title: "PWA polish round", participants: [DREW, TAYLOR], createdAt: minutesAgo(30), messages: polishMessages });
     await hub.createChat(CHAT_CLOUD, { title: "Cloud machine setup", participants: [MORGAN], createdAt: minutesAgo(30), messages: cloudMessages });
-    await hub.raiseApproval(CHAT_POLISH, deployApproval);
-    await hub.raiseApproval(CHAT_CLOUD, cloudApproval);
+    await hub.raiseApproval(CHAT_POLISH, deployApproval, { participantId: DREW.id });
+    await hub.raiseApproval(CHAT_CLOUD, cloudApproval, { participantId: MORGAN.id });
+    await hub.raiseChoice(CHAT_POLISH, question("pending"), { participantId: TAYLOR.id });
+    await hub.raiseChoice(CHAT_CLOUD, cloudQuestion("pending"), { participantId: MORGAN.id });
     app = await attachApp({ port: CDP_PORT });
     const evaluate = app.evaluate;
     const waitFor = async (expr, label, tries = 60) => {
@@ -213,24 +215,25 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
       document.querySelector('[data-card-id="perm-deploy"] [data-option-id="deny"]').click();
       return true;
     })()`);
-    await waitFor(`document.querySelector('[data-card-id="perm-deploy"]')?.classList.contains("is-on-its-way") || null`, "the row to fade once answered");
-    const decisions = await storedEvents("outbox", "permission.decided");
+    // The row fades at the tap; once the server took the answer, nothing in
+    // it waits for the User and it leaves Pending.
+    await waitFor(`(() => { const row = document.querySelector('[data-card-id="perm-deploy"]'); return !row || row.classList.contains("is-on-its-way") || null; })()`, "the row to fade once answered");
+    await waitFor(`globalThis.AccordAgentsMobile.listOutboxEntries().then((rows) => rows.some((row) => row.kind === "card.answer" && row.status === "acked") ? true : null)`,
+      "the server to take the answer");
+    const decisions = await storedEvents("outbox", "card.answer");
     assert.equal(decisions.length, 1, "one answer per card");
     assert.equal(decisions[0].conversationId, CHAT_POLISH);
-    assert.equal(decisions[0].payload.targetKey, "approval:perm-deploy");
-    assert.equal(decisions[0].payload.detail.approve, true);
-    assert.equal(decisions[0].payload.detail.codexDecisionId, "native-decision-9");
+    assert.equal(decisions[0].payload.cardId, "perm-deploy");
+    assert.equal(decisions[0].payload.answer.approve, true);
+    assert.equal(decisions[0].payload.answer.codexDecisionId, "native-decision-9");
+    assert.equal((await hub.phoneOps("card.answer")).length, 1, "the one answer reached the server");
+    assert.equal((await hub.card("perm-deploy")).state, "answered");
+    await waitFor(`document.querySelector('[data-card-id="perm-deploy"]') ? null : true`, "the answered permission to leave Pending");
 
-    for (let i = 0; i < 40 && hub.phoneEvents("permission.decided").length === 0; i += 1) await sleep(250);
-    assert.equal(hub.phoneEvents("permission.decided").length, 1, "the one answer reached the server");
-
-    // Another chat's cards changing does not make that answer answerable again.
-    await hub.raiseApproval(CHAT_CLOUD, { ...cloudApproval, status: "denied", updatedAt: new Date().toISOString() });
+    // Another chat's card withdrawn by its member's device: it leaves too.
+    await hub.settleCard(CHAT_CLOUD, "perm-cloud", { withdrawn: true });
     await waitFor(`document.querySelector('[data-card-id="perm-cloud"]') ? null : true`, "the other chat's permission withdrawn");
-    assert.equal(await evaluate(`document.querySelector('[data-card-id="perm-deploy"] [data-option-id="allow"]').disabled`), true,
-      "an answer already sent stays sent when another chat's cards change");
-    assert.deepEqual(await evaluate(`(() => { const row = document.querySelector('[data-card-id="perm-deploy"]'); return { onItsWay: row.classList.contains("is-on-its-way"), text: row.querySelector(".act-state") ? row.querySelector(".act-state").innerText : "" }; })()`),
-      { onItsWay: true, text: "" }, "the row fades while the answer is on its way, and says nothing more");
+    assert.equal(await evaluate(`globalThis.AccordAgentsMobile.isCardSent("perm-deploy")`), false, "the answered card's mark has done its work");
 
     // The choice opens in full, with the bar out of reach behind it, and is
     // answered there.
@@ -262,16 +265,16 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
     assert.equal(underKeyboard, heldHeight, "the keyboard coming up does not shrink the screen under the focused note");
     // Picking selects; Submit answers, as on the desktop.
     await evaluate(`document.querySelector('#activity-item .control-card-submit').click()`);
-    await waitFor(`globalThis.AccordAgentsMobile.listOutboxEntries().then((rows) => rows.some((row) => row.kind === "choice.answered") ? true : null)`,
+    await waitFor(`globalThis.AccordAgentsMobile.listOutboxEntries().then((rows) => rows.some((row) => row.kind === "card.answer" && row.payload.cardId === "choice-deploy") ? true : null)`,
       "the choice answer in the phone's queue");
-    const answers = await storedEvents("outbox", "choice.answered");
+    const answers = (await storedEvents("outbox", "card.answer")).filter((row) => row.payload.cardId === "choice-deploy");
     assert.equal(answers.length, 1);
-    assert.equal(answers[0].payload.targetKey, "choice:choice-deploy");
-    assert.equal(answers[0].payload.detail.selectedOptionId, "staging");
-    assert.equal(answers[0].payload.detail.sourceMessageId, "q1");
-    // The desktop takes the answer and stops listing the card: the opened
-    // choice goes by itself, and the bar comes back.
+    assert.equal(answers[0].payload.answer.selectedOptionId, "staging");
+    // The server takes the answer and stops listing the card: the opened
+    // choice goes by itself, and the bar comes back. The member's device
+    // applies it.
     await hub.updateMessages(CHAT_POLISH, [question("selected")]);
+    await hub.settleCard(CHAT_POLISH, "choice-deploy", { applied: true });
     await waitFor(`document.getElementById("activity-item").hidden && !document.getElementById("home-dock").hidden ? true : null`,
       "the withdrawn choice to close");
 
@@ -292,11 +295,16 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
     assert.match(running, /Reviewing the diff now/);
     await sleep(TAP_SETTLE_MS);
     await evaluate(`document.querySelector('#activity-list .act-stop').click()`);
-    await waitFor(`globalThis.AccordAgentsMobile.listOutboxEntries().then((rows) => rows.some((row) => row.kind === "run.cancel.requested") ? true : null)`,
+    await waitFor(`globalThis.AccordAgentsMobile.listOutboxEntries().then((rows) => rows.some((row) => row.kind === "turn.stop") ? true : null)`,
       "the stop request queued for the server");
-    const cancels = await storedEvents("outbox", "run.cancel.requested");
+    const cancels = await storedEvents("outbox", "turn.stop");
     assert.equal(cancels[0].conversationId, CHAT_POLISH, "a stop from Activity names the run's own chat");
-    assert.equal(cancels[0].payload.runId, "run-taylor-1");
+    // The turn on the server: the device's name for the run, the message it
+    // answers and its member.
+    assert.deepEqual([cancels[0].payload.runId, cancels[0].payload.rowRunId, cancels[0].payload.messageId, cancels[0].payload.participantId],
+      ["turn-run-taylor-1", "run-taylor-1", "u1", TAYLOR.id]);
+    await waitFor(`globalThis.AccordAgentsMobile.listOutboxEntries().then((rows) => rows.some((row) => row.kind === "turn.stop" && row.status === "acked") ? true : null)`,
+      "the server to take the Stop");
 
     // Finished: one row per chat and member. @drew's newest is a thread reply,
     // so tapping the row opens that thread; coming back finds it read.
@@ -380,7 +388,7 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
     const badgeBefore = Number(await evaluate(`document.getElementById("activity-badge").textContent`));
     const chatBeforeBadge = await evaluate(`document.getElementById("message-list").childElementCount + ":" +
       document.getElementById("message-list").innerText.length`);
-    await hub.raiseApproval(CHAT_CLOUD, chatBarApproval);
+    await hub.raiseApproval(CHAT_CLOUD, chatBarApproval, { participantId: MORGAN.id });
     const countedInChat = await waitFor(`(() => {
       const badge = document.getElementById("activity-badge");
       return document.getElementById("timeline-screen").classList.contains("is-active") &&
@@ -551,6 +559,7 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
     // Swipe left on a waiting choice and it can be cancelled from the list,
     // the way the desktop's "Cancel pending card" does.
     await hub.addMessages(CHAT_POLISH, [swipeQuestion("pending")]);
+    await hub.raiseChoice(CHAT_POLISH, swipeQuestion("pending"), { participantId: TAYLOR.id });
     await evaluate(`document.querySelector('[data-activity-tab="pending"]').click()`);
     await waitFor(`document.querySelector('#activity-list .act-row[data-card-id="choice-swipe"]') ? true : null`,
       "the new waiting choice in Pending");
@@ -569,16 +578,18 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
     await sleep(TAP_SETTLE_MS);
     await evaluate(`document.querySelector('#activity-list .act-swipe[data-activity-key="${cancelKey}"] .act-swipe-cancel').click()`);
     const cancelled = await waitFor(`globalThis.AccordAgentsMobile.listOutboxEntries().then((rows) => {
-      const row = rows.filter((entry) => entry.kind === "choice.answered").find((entry) => entry.payload && entry.payload.detail && entry.payload.detail.cancel);
-      return row ? row.payload.targetKey : null;
+      const row = rows.filter((entry) => entry.kind === "card.answer").find((entry) => entry.payload && entry.payload.answer && entry.payload.answer.cancel);
+      return row ? row.payload.cardId : null;
     })`, "the cancel in the phone's queue");
-    assert.match(cancelled, /^choice:/, "the cancel is recorded against the choice card");
+    assert.equal(cancelled, "choice-swipe", "the cancel is the choice card's answer");
 
-    // The desktop settles the last cards: Pending empties.
+    // The members' devices settle the last cards: Pending empties.
     await hub.updateMessages(CHAT_POLISH, [swipeQuestion("cancelled")]);
-    await hub.raiseApproval(CHAT_POLISH, { ...deployApproval, status: "approved", updatedAt: new Date().toISOString() });
-    await hub.raiseApproval(CHAT_CLOUD, { ...chatBarApproval, status: "approved", updatedAt: new Date().toISOString() });
+    await hub.settleCard(CHAT_POLISH, "choice-swipe", { cancelled: true });
+    await hub.settleCard(CHAT_POLISH, "perm-deploy", { applied: true });
+    await hub.settleCard(CHAT_CLOUD, "perm-chat-bar", { withdrawn: true });
     await hub.updateMessages(CHAT_CLOUD, [cloudQuestion("cancelled")]);
+    await hub.settleCard(CHAT_CLOUD, "choice-cloud", { cancelled: true });
     await evaluate(`document.querySelector('[data-activity-tab="pending"]').click()`);
     const emptied = await waitFor(`(() => {
       const list = document.getElementById("activity-list");

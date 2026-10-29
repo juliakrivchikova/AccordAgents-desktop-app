@@ -27,6 +27,7 @@ import {
   AppMcpService
 } from "./appMcp";
 import { ChatService } from "./chat";
+import type { HubCard, HubFeedEntry, HubOp, HubOpEffect, HubTurn } from "../../shared/hubOps";
 import type { CodexServerRequestDelivery } from "./codexApprovals";
 import {
   chatAgentPermissionsEqual,
@@ -4185,24 +4186,28 @@ test("several Cloud choices do not block a local member, and Stop prevents a del
     progress({ operationId: "prep", message: "Waiting for cloud login" });
     return setup;
   });
-  const dispatched: string[] = [];
-  h.service.setMachineLink({ runTurn: async request => {
-    dispatched.push(request.participant.id);
-    return { status: "completed", messages: [], warnings: [] };
-  } });
+  const link = fakeServerLink();
+  h.service.setServerLink(link);
+  const asked = () => link.ops.filter((op) => op.kind === "turn.request");
   await h.service.sendMessage({ conversationId: conversation.id, content: "@local hello" });
   await waitFor(() => localCalls.length === 1);
   assert.deepEqual(prepared, []);
   await h.service.sendMessage({ conversationId: conversation.id, content: "@cloud-one hello" });
   await waitFor(() => h.storage.current.messages.some((item: ChatMessage) => item.metadata?.cloudRunPreparation?.message === "Waiting for cloud login"));
+  const sent = h.storage.current.messages.find((item: ChatMessage) => item.role === "user" && item.content === "@cloud-one hello");
+  assert.deepEqual(sent.metadata.deliveryTargets, [], "the server is not asked for a member whose machine is not ready yet");
   await h.service.sendMessage({ conversationId: conversation.id, content: "@local still available" });
   await waitFor(() => localCalls.length === 2);
   const pending = h.storage.current.messages.find((item: ChatMessage) => item.participantId === one.id && item.status === "pending");
   assert.equal(h.service.cancelRun(pending.metadata.runId), true);
-  await waitFor(() => h.storage.current.messages.some((item: ChatMessage) => item.id === pending.id && item.metadata?.terminalReason === "user-stopped"));
+  // Stopped while its machine was being made ready: it says so at once, as a
+  // local member stopped before it started does.
+  await waitFor(() => h.storage.current.messages.some((item: ChatMessage) => item.role === "system" && item.content === "@cloud-one stopped by user."));
+  await waitFor(() => !h.storage.current.messages.some((item: ChatMessage) => item.id === pending.id));
+  assert.ok(link.ops.some((op) => op.kind === "turn.stop" && op.runId === pending.metadata.runId), "stopped on the server too, so nothing ever starts it");
   finish("cloud-machine");
   await new Promise(resolve => setTimeout(resolve, 30));
-  assert.deepEqual(dispatched, []);
+  assert.deepEqual(asked(), [], "never asked of a machine");
   assert.deepEqual(prepared, ["codex-cli"]);
   assert.deepEqual(h.storage.current.metadata.participants[0].cloudRun, {});
 });
@@ -4211,42 +4216,46 @@ test("a saved Cloud choice survives setup failure and restart, and only the addr
   const one = { ...chatParticipant("codex-cli"), id: "cloud-one", handle: "cloud-one", cloudRun: {} };
   const two = { ...chatParticipant("claude-code"), id: "cloud-two", handle: "cloud-two", cloudRun: {} };
   const first = testService({ conversation: chatConversation([one, two]) });
+  const firstLink = fakeServerLink();
+  first.service.setServerLink(firstLink);
   first.service.setCloudRunPreparation(async () => { throw new Error("AWS unavailable"); });
-  first.service.setMachineLink({ runTurn: async () => { assert.fail("must not dispatch before preparation"); } });
   await first.service.sendMessage({ conversationId: first.storage.current.id, content: "@cloud-one hello" });
   await waitFor(() => first.storage.current.messages.some((item: ChatMessage) => item.content.includes("AWS unavailable")));
+  assert.equal(firstLink.ops.some((op) => op.kind === "turn.request"), false, "never asked of a machine before one is ready");
   assert.deepEqual(first.storage.current.metadata.participants[0].cloudRun, {});
   const next = testService({ conversation: first.storage.current });
+  const link = fakeServerLink();
+  next.service.setServerLink(link);
   const prepared: string[] = [];
   next.service.setCloudRunPreparation(async (_selection, provider) => { prepared.push(provider); return "cloud-machine"; });
-  const dispatched: string[] = [];
-  next.service.setMachineLink({ runTurn: async request => {
-    dispatched.push(request.participant.id);
-    assert.equal(request.participant.homeMachineId, "cloud-machine");
-    return { status: "completed", warnings: [], messages: [{
-      ...pendingParticipantMessage(request.participant, request.pendingMessageId, request.runId), status: "done", content: "CLOUD_REPLY"
-    }] };
-  } });
+  const asked = () => link.ops.filter((op): op is Extract<HubOp, { kind: "turn.request" }> => op.kind === "turn.request");
   await next.service.sendMessage({ conversationId: next.storage.current.id, content: "@cloud-two hello" });
+  await waitFor(() => asked().length === 1);
+  assert.equal(asked()[0].participantId, two.id);
+  assert.equal(next.storage.current.metadata.participants[1].homeMachineId, "cloud-machine", "named before its turn is asked of it");
+  await memberDeviceAnswers(next.service, asked()[0], { participant: two, content: "CLOUD_REPLY" });
   await waitFor(() => next.storage.current.messages.some((item: ChatMessage) => item.content === "CLOUD_REPLY"));
   assert.deepEqual(prepared, ["claude-code"]);
-  assert.deepEqual(dispatched, [two.id]);
   assert.equal(next.storage.current.metadata.participants[0].homeMachineId, undefined);
-  assert.equal(next.storage.current.metadata.participants[1].homeMachineId, "cloud-machine");
   next.service.setCloudRunPreparation(async () => { assert.fail("a started member keeps its assigned machine without preparing the current AWS selection again"); });
   await next.service.sendMessage({ conversationId: next.storage.current.id, content: "@cloud-two continue" });
-  await waitFor(() => dispatched.length === 2);
-  assert.deepEqual(dispatched, [two.id, two.id]);
+  await waitFor(() => asked().length === 2);
+  assert.deepEqual(asked().map((op) => op.participantId), [two.id, two.id]);
+  await memberDeviceAnswers(next.service, asked()[1], { participant: two, content: "CLOUD_AGAIN" });
+  await waitFor(() => !next.storage.current.metadata.running && next.storage.current.messages.some((item: ChatMessage) => item.content === "CLOUD_AGAIN"));
 });
 
 test("a machine member's context use after its turn is shown here as a local member's is", async () => {
   const member = { ...chatParticipant("claude-code"), id: "machine-member", handle: "remote", homeMachineId: "box" };
   const h = testService({ conversation: chatConversation([member]) });
   const usage = { usedTokens: 4200, contextWindowTokens: 200000, percentage: 2, source: "claude-code", updatedAt: "2026-10-22T00:00:00.000Z" };
-  h.service.setMachineLink({ runTurn: async request => ({ status: "completed", warnings: [], contextUsage: usage as any, messages: [{
-    ...pendingParticipantMessage(request.participant, request.pendingMessageId, request.runId), status: "done", content: "MACHINE_REPLY"
-  }] }) });
+  const link = fakeServerLink();
+  h.service.setServerLink(link);
   await h.service.sendMessage({ conversationId: h.storage.current.id, content: "@remote hello" });
+  await waitFor(() => link.ops.some((op) => op.kind === "turn.request"));
+  const request = link.ops.find((op): op is Extract<HubOp, { kind: "turn.request" }> => op.kind === "turn.request")!;
+  // The machine ends the turn with what its CLI said of the member's context.
+  await memberDeviceAnswers(h.service, request, { participant: member, content: "MACHINE_REPLY", contextUsage: usage });
   await waitFor(() => h.storage.current.messages.some((item: ChatMessage) => item.content === "MACHINE_REPLY"));
   await waitFor(() => h.storage.current.metadata.agentContextUsageByParticipant?.[member.id]?.usedTokens === 4200);
 });
@@ -6644,22 +6653,32 @@ test("a removal that is no longer valid when approved, or when applied, is close
   }
 });
 
-/** The User's signed answer on a card as the desktop holds it (its own, or a
- *  phone's), for the machine's report that it applied it. */
-function userAnswered(storage: any, approvalId: string, options: { origin?: string; approve?: boolean; conversationId?: string } = {}): string {
-  const decisionId = `chat-action:permission:${approvalId}:${options.approve === false ? "deny" : "allow"}:${options.origin ?? "desktop-origin"}`;
-  const events: Map<string, unknown> = storage.decisionEvents ??= new Map();
-  events.set(decisionId, {
-    eventId: decisionId,
-    conversationId: options.conversationId ?? "conversation-1",
-    kind: "permission.decided",
-    originId: options.origin ?? "desktop-origin",
-    payload: { operationId: decisionId, targetKey: `approval:${approvalId}`, detail: { approve: options.approve !== false } }
+/** The card a machine member's machine raised on the User's server for an
+ *  approval, as the desktop reads it in the feed (agreement Д9). */
+function machineCard(approval: ChatAppToolApproval, patch: Partial<HubCard> = {}): HubCard {
+  const { memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition, homeMachineId: _home, ...shown } = approval;
+  return {
+    cardId: approval.id, conversationId: approval.conversationId, cardKind: "roster", participantId: approval.requesterParticipantId,
+    raisedBy: "machine-device", raisedAt: NOW, state: "pending",
+    card: { approval: { ...shown, status: shown.status === "auto-applied" ? "auto-applied" : "pending" } },
+    ...patch
+  };
+}
+
+/** The card answered on the server: by the User (from any device), or by
+ *  the member's own machine for what its policy allowed (`auto`). */
+function answeredCard(card: HubCard, answer: Record<string, unknown>, answeredBy = "phone-device"): HubCard {
+  return { ...card, state: "answered", answer, answeredBy, answeredAt: new Date().toISOString() };
+}
+
+/** What the desktop does with a card change it reads in the server's feed. */
+async function feedCard(service: ChatService, kind: "card.raise" | "card.answer" | "card.settle", card: HubCard, opId = `op-${randomUUID()}`): Promise<void> {
+  const internals = service as any;
+  const conversation = await internals.storage.getConversation(card.conversationId);
+  await internals.withChatMutation(conversation, async () => {
+    internals.mirrorServerCard(conversation, kind, card, opId);
+    await internals.saveConversation(conversation, { emitChanges: false });
   });
-  storage.getChatEvent = async (id: string) => events.get(id);
-  storage.deviceEventBlobs = () => ({ hydrate: async (payload: unknown) => payload });
-  storage.getChatEventDeviceIdentityRecord = async () => ({ originId: "desktop-origin" });
-  return decisionId;
 }
 
 /** The asking member runs on a machine. */
@@ -6671,7 +6690,8 @@ function homeOnMachine(storage: any, participantId = "manager-participant", mach
 test("a machine member's approved removal is applied by the desktop once the User's answer is confirmed, also after a restart", async () => {
   const { service, storage, target } = memberRemovalFixture();
   homeOnMachine(storage);
-  const decisionId = userAnswered(storage, "queued-target");
+  // The User's answer as the server held it when the desktop read it.
+  const decisionId = `server:queued-target@${NOW}`;
   storage.current.metadata.pendingAppToolApprovals = [queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine", machineAppliedDecisionId: decisionId })];
   storage.conversationIdsWithQueuedRosterChanges = async () => [storage.current.id];
 
@@ -6687,150 +6707,109 @@ test("a machine member's approved removal is applied by the desktop once the Use
   assert.deepEqual(said[0].metadata?.rosterChange, { approvalId: "queued-target", outcome: "applied", appliedParticipantIds: [target.id] }, "the machine settles its card from this message");
 });
 
-test("a machine member's removal reaches the desktop as its card, waits for that member's turn there, and is applied once", async () => {
-  const { service, storage, target } = memberRemovalFixture({
-    messages: [{
-      id: "manager-bubble",
-      role: "participant",
-      participantId: "manager-participant",
-      participantLabel: "@manager",
-      content: "",
-      createdAt: NOW,
-      status: "pending",
-      metadata: { runId: "machine-run" }
-    }]
-  });
+test("a machine member's removal approved on the server is made by its machine: the desktop shows it waiting, then the machine's outcome (Д2)", async () => {
+  const { service, storage, target } = memberRemovalFixture();
   homeOnMachine(storage);
-  const closed: string[] = [];
-  (service as any).cliRunner.closeWarmAgents = async (_conversationId: string, participantId: string) => { closed.push(participantId); };
   const queued = queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine", updatedAt: new Date().toISOString() });
-  const decisionId = userAnswered(storage, queued.id, { origin: "phone-origin" });
-  service.setPhoneOrigins((origin) => origin === "phone-origin");
+  const card = machineCard(queued);
 
-  // The card arrives before the machine's report of the answer it applied.
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued });
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued, decisionId, decisionApplied: true });
+  // The machine raises its card on the server; the User approves it there
+  // (on her phone).
+  await feedCard(service, "card.raise", card);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending", "shown as the member's card");
+  const answer = answeredCard(card, { approve: true });
+  await feedCard(service, "card.answer", answer);
   await (service as any).applyQueuedMemberRemovalsOnce("conversation-1");
-  assert.ok(memberIds(storage.current).includes(target.id), "the asking member's turn on its machine is still running");
-  assert.equal(typeof storage.current.metadata.pendingAppToolApprovals[0].memberRemovalQueuedAt, "string");
+  const waiting = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
+  assert.equal(waiting.memberRemovalQueuedAt, undefined, "nothing is queued here");
+  assert.equal(waiting.machineDecisionPending?.approve, true, "it waits for its machine");
+  assert.ok(memberIds(storage.current).includes(target.id), "the desktop removes nobody itself");
+  assert.equal(storage.current.messages.some((message: ChatMessage) => message.content.startsWith("Removed ")), false);
 
-  // That turn's reply arrives from the machine.
-  storage.current.messages = storage.current.messages.map((message: ChatMessage) =>
-    message.id === "manager-bubble" ? { ...message, status: "done", content: "Asked for the removal." } : message);
-  (service as any).scheduleAutoWatchEvaluation("conversation-1", "machine-messages");
-  await waitFor(() => !memberIds(storage.current).includes(target.id));
-  const applied = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
-  assert.deepEqual(applied.appliedParticipantIds, [target.id]);
-  assert.equal(typeof applied.rosterChangeSettledAt, "string");
-  await waitFor(() => closed.length === 1);
-  assert.deepEqual(closed, [target.id], "the desktop-local target's process ends here");
-
-  // The machine sends its waiting copy again (a reconnect), and an older
-  // still-asking copy: nothing reverts, nothing is applied twice.
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued });
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: { ...queued, status: "pending", memberRemovalQueuedAt: undefined } });
+  // Read again (a reconnect lists the open cards): still only waiting.
+  await feedCard(service, "card.raise", card);
+  await feedCard(service, "card.answer", answer);
   await (service as any).applyQueuedMemberRemovalsOnce("conversation-1");
-  const after = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
-  assert.equal(after.status, "approved");
-  assert.equal(after.memberRemovalQueuedAt, undefined);
-  assert.deepEqual(after.appliedParticipantIds, [target.id]);
-  assert.equal(storage.current.messages.filter((message: ChatMessage) => message.content.startsWith("Removed @target")).length, 1);
-  assert.equal(storage.current.messages.some((message: ChatMessage) => message.content.includes("had already left")), false);
+  assert.ok(memberIds(storage.current).includes(target.id));
 
-  // Its settled copy, once the machine has the desktop's word, is taken as is.
+  // The machine made it and settles its card: taken as is.
   const { memberRemovalQueuedAt: _queued, ...settledOnMachine } = queued;
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: { ...settledOnMachine, appliedParticipantIds: [target.id], updatedAt: new Date(Date.now() + 1000).toISOString() } });
+  await feedCard(service, "card.settle", { ...answer, state: "settled", outcome: { result: "applied",
+    approval: { ...settledOnMachine, status: "approved", appliedParticipantIds: [target.id], updatedAt: new Date(Date.now() + 1000).toISOString() } } });
   const final = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
-  assert.equal(final.memberRemovalQueuedAt, undefined);
-  assert.equal(typeof final.rosterChangeSettledAt, "string");
+  assert.equal(final.status, "approved");
+  assert.deepEqual(final.appliedParticipantIds, [target.id]);
+  assert.equal(final.machineDecisionPending, undefined);
 });
 
-test("the desktop changes no member for a machine's card the User's answer does not confirm, or that another computer sent", async () => {
+test("the desktop changes no member for a machine member's card: it waits for the machine's word, whoever answered (Д2)", async () => {
   {
-    // The answer it reports is a refusal, or was not given by the User.
-    for (const answer of [{ approve: false }, { origin: "machine-origin" }]) {
-      const { service, storage, target } = memberRemovalFixture();
-      service.setPhoneOrigins((origin) => origin === "phone-origin");
-      homeOnMachine(storage);
-      const queued = queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" });
-      const decisionId = userAnswered(storage, queued.id, answer);
-      await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued, decisionId, decisionApplied: true });
-      await waitFor(() => (storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).status === "cancelled");
-      assert.ok(memberIds(storage.current).includes(target.id));
-      assert.match((storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).error ?? "", /could not be confirmed/);
-      assert.ok(storage.current.messages.some((message: ChatMessage) => message.content.startsWith("Could not remove @target at @manager's request:")));
+    // The User refused it: the machine applies the refusal; nothing is
+    // queued here, the desktop's card waits for the machine's word.
+    const { service, storage, target } = memberRemovalFixture();
+    homeOnMachine(storage);
+    const card = machineCard(queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" }));
+    await feedCard(service, "card.raise", card);
+    const refused = answeredCard(card, { approve: false });
+    await feedCard(service, "card.answer", refused, "op-refused");
+    const waiting = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
+    assert.equal(waiting.memberRemovalQueuedAt, undefined);
+    assert.equal(waiting.machineDecisionPending?.approve, false);
+    assert.equal(waiting.machineDecisionPending?.decisionId, "op-refused");
+    await (service as any).applyQueuedMemberRemovalsOnce("conversation-1");
+    assert.ok(memberIds(storage.current).includes(target.id));
+    await feedCard(service, "card.settle", { ...refused, state: "settled", outcome: { result: "applied",
+      approval: { ...(card.card as { approval: ChatAppToolApproval }).approval, status: "denied", updatedAt: new Date(Date.now() + 1000).toISOString() } } });
+    const closed = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
+    assert.equal(closed.status, "denied");
+    assert.equal(closed.machineDecisionPending, undefined);
+    assert.ok(memberIds(storage.current).includes(target.id));
+  }
+  const approvedCases: Array<{ name: string; card: () => HubCard; answeredBy: (card: HubCard) => string; auto?: boolean; home?: string }> = [
+    { name: "approved on the phone", card: () => machineCard(queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" })), answeredBy: () => "phone-device" },
+    { name: "approved by the member's own machine", card: () => machineCard(queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" })), answeredBy: (card) => card.raisedBy },
+    { name: "naming the member by another handle", card: () => machineCard(queuedRemovalApproval("target-participant", "someone-else", { homeMachineId: "machine" })), answeredBy: () => "phone-device" },
+    {
+      name: "an addition its machine's policy allowed", auto: true, home: "target-participant", answeredBy: (card) => card.raisedBy,
+      card: () => machineCard({
+        id: "machine-addition", conversationId: "conversation-1", requesterParticipantId: "target-participant", requesterHandle: "target", requesterRoleConfigId: ROLE.id,
+        toolName: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, capability: "participants.manage", status: "auto-applied", approvalScope: "chat",
+        request: { operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } }] },
+        summary: "Add @helper", homeMachineId: "machine", memberAdditionQueuedAt: NOW, createdAt: NOW, updatedAt: NOW
+      })
     }
+  ];
+  for (const item of approvedCases) {
+    const { service, storage } = memberRemovalFixture();
+    homeOnMachine(storage, item.home);
+    const members = memberIds(storage.current);
+    const card = item.card();
+    await feedCard(service, "card.raise", card);
+    await feedCard(service, "card.answer", answeredCard(card, { approve: true, ...(item.auto ? { auto: true } : {}) }, item.answeredBy(card)));
+    await (service as any).applyQueuedMemberRemovalsOnce("conversation-1");
+    await (service as any).applyQueuedMemberAdditionsOnce("conversation-1");
+    const approval = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
+    assert.equal(approval.machineDecisionPending?.approve, true, `${item.name}: waits for its machine`);
+    assert.equal(approval.memberRemovalQueuedAt, undefined, item.name);
+    assert.equal(approval.memberAdditionQueuedAt, undefined, item.name);
+    assert.deepEqual(memberIds(storage.current), members, `${item.name}: no member changed here`);
+    assert.equal(storage.current.messages.some((message: ChatMessage) => /^(Removed|Auto-applied|Applied|Could not)/.test(message.content)), false, item.name);
   }
   {
-    // A phone's answer before this app knows its phones: not applied yet, not
-    // refused either.
+    // A card that names another member than the one asking is not shown, and
+    // nothing is made for it.
     const { service, storage, target } = memberRemovalFixture();
     homeOnMachine(storage);
-    const queued = queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" });
-    await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued, decisionId: userAnswered(storage, queued.id, { origin: "phone-origin" }), decisionApplied: true });
+    const card = machineCard(queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" }), { participantId: "target-participant" });
+    await feedCard(service, "card.raise", card);
+    await feedCard(service, "card.answer", answeredCard(card, { approve: true }));
+    assert.equal(((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).some((item) => item.id === card.cardId), false);
     await (service as any).applyQueuedMemberRemovalsOnce("conversation-1");
     assert.ok(memberIds(storage.current).includes(target.id));
-    assert.equal((storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).status, "approved");
-    service.setPhoneOrigins((origin) => origin === "phone-origin");
-    (service as any).scheduleAutoWatchEvaluation("conversation-1", "run-idle");
-    await waitFor(() => !memberIds(storage.current).includes(target.id));
-  }
-  {
-    // A later answer the machine refused (already answered) does not replace
-    // the one it applied.
-    const { service, storage, target } = memberRemovalFixture();
-    homeOnMachine(storage);
-    const queued = queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" });
-    const approved = userAnswered(storage, queued.id);
-    const refused = userAnswered(storage, queued.id, { approve: false });
-    await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued, decisionId: approved, decisionApplied: true });
-    await service.applyMachineApproval({ conversationId: "conversation-1", approval: { ...queued, error: "This approval has already been answered." }, decisionId: refused, decisionApplied: false });
-    await waitFor(() => !memberIds(storage.current).includes(target.id));
-    assert.equal((storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).error, undefined, "the removal is not shown as failed");
-  }
-  {
-    // Sent by a computer the asking member does not run on.
-    const { service, storage, target } = memberRemovalFixture();
-    homeOnMachine(storage);
-    const queued = queuedRemovalApproval("target-participant", "target", { homeMachineId: "other-machine" });
-    await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued, decisionId: userAnswered(storage, queued.id), decisionApplied: true });
-    const card = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
-    assert.equal(card.status, "cancelled");
-    assert.equal(card.memberRemovalQueuedAt, undefined);
-    assert.match(card.error ?? "", /did not come from the computer @manager runs on/);
-    await (service as any).applyQueuedMemberRemovalsOnce("conversation-1");
-    assert.ok(memberIds(storage.current).includes(target.id));
-  }
-  {
-    // It names the member by another handle than the one it removes.
-    const { service, storage, target } = memberRemovalFixture();
-    homeOnMachine(storage);
-    const queued = queuedRemovalApproval("target-participant", "someone-else", { homeMachineId: "machine" });
-    await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued, decisionId: userAnswered(storage, queued.id), decisionApplied: true });
-    await waitFor(() => (storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).status === "cancelled");
-    assert.ok(memberIds(storage.current).includes(target.id));
-    assert.match((storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).error ?? "", /names @someone-else, but that member is @target/);
-  }
-  {
-    // An addition said to be auto-applied that this desktop's rules for the
-    // asking member would have put on a card.
-    const { service, storage, target } = memberRemovalFixture();
-    homeOnMachine(storage, target.id);
-    await service.applyMachineApproval({ conversationId: "conversation-1", approval: {
-      id: "forged-addition", conversationId: "conversation-1", requesterParticipantId: target.id, requesterHandle: "target", requesterRoleConfigId: target.roleConfigId,
-      toolName: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, capability: "participants.manage", status: "auto-applied", approvalScope: "chat",
-      request: { operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } }] },
-      summary: "Add @helper", homeMachineId: "machine", memberAdditionQueuedAt: NOW, createdAt: NOW, updatedAt: NOW
-    } });
-    await waitFor(() => (storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).status === "cancelled");
-    await (service as any).memberAdditionApplies.get("conversation-1");
-    assert.equal((storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "helper"), false);
-    assert.match((storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval).error ?? "", /may not make this change without your approval/);
-    assert.ok(storage.current.messages.some((message: ChatMessage) => message.content.startsWith("Could not add @helper at @target's request:")));
   }
 });
 
-test("on a machine, an approved removal or addition is recorded for the desktop and never applied there", async () => {
+test("on a machine, an approved removal or addition is applied there exactly as on the desktop (Д2)", async () => {
   {
     const { service, storage, actor, target } = memberRemovalFixture();
     service.setHostMachineId("machine");
@@ -6840,35 +6819,24 @@ test("on a machine, an approved removal or addition is recorded for the desktop 
     }) as { approvalId: string };
 
     await service.respondToAppToolApproval({ conversationId: "conversation-1", approvalId: requested.approvalId, approve: true });
-    (service as any).scheduleAutoWatchEvaluation("conversation-1", "run-idle");
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitFor(() => !memberIds(storage.current).includes(target.id));
 
     const approval = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
     assert.equal(approval.status, "approved");
-    assert.equal(typeof approval.memberRemovalQueuedAt, "string");
-    assert.ok(memberIds(storage.current).includes(target.id), "only the desktop changes the member list");
-    assert.equal(storage.current.messages.some((message: ChatMessage) => message.content.startsWith("Removed ")), false, "nothing claims it happened");
+    assert.equal(storage.current.messages.filter((message: ChatMessage) => message.content.startsWith("Removed @target")).length, 1);
   }
   {
-    // An addition the member's policy allows: not added here, and the member
-    // is told so; asking again while it waits gives the same card.
+    // An addition the member's policy allows: added at once, and said so.
     const { service, storage, actor } = memberRemovalFixture();
     service.setHostMachineId("machine");
     homeOnMachine(storage);
-    const ask = () => service.requestParticipantChangeFromTool(actor, {
+    const result = await service.requestParticipantChangeFromTool(actor, {
       operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } }]
-    }) as Promise<{ status: string; next: string; approvalId: string }>;
-    const result = await ask();
+    }) as { status: string };
 
-    assert.equal(result.status, "approved_pending_apply");
-    assert.match(result.next, /desktop/);
-    const approval = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
-    assert.equal(approval.status, "auto-applied");
-    assert.equal(typeof approval.memberAdditionQueuedAt, "string");
-    assert.equal((storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "helper"), false);
-    assert.equal(storage.current.messages.some((message: ChatMessage) => message.content.startsWith("Auto-applied")), false);
-    assert.equal((await ask()).approvalId, result.approvalId);
-    assert.equal(storage.current.metadata.pendingAppToolApprovals.length, 1);
+    assert.equal(result.status, "auto_applied");
+    assert.equal((storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "helper"), true);
+    assert.equal(storage.current.messages.filter((message: ChatMessage) => message.content.startsWith("Auto-applied")).length, 1);
   }
   {
     // An addition the User approves on its card (the Chat Assistant asks).
@@ -6881,67 +6849,12 @@ test("on a machine, an approved removal or addition is recorded for the desktop 
     assert.equal(requested.status, "pending_user_approval");
 
     await service.respondToAppToolApproval({ conversationId: "conversation-1", approvalId: requested.approvalId, approve: true });
+    await waitFor(() => (storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "helper"));
 
     const approval = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
     assert.equal(approval.status, "approved");
-    assert.equal(typeof approval.memberAdditionQueuedAt, "string");
-    assert.equal((storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "helper"), false);
-    assert.equal(storage.current.messages.some((message: ChatMessage) => message.content.startsWith("Applied ")), false);
+    assert.equal(approval.memberAdditionQueuedAt, undefined);
   }
-});
-
-test("a machine member's approved addition is applied by the desktop, once, and says so only then", async () => {
-  const { service, storage, manager } = memberRemovalFixture();
-  homeOnMachine(storage, manager.id);
-  const queued: ChatAppToolApproval = {
-    id: "machine-addition",
-    conversationId: "conversation-1",
-    requesterParticipantId: manager.id,
-    requesterHandle: manager.handle,
-    requesterRoleConfigId: manager.roleConfigId,
-    toolName: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
-    capability: "participants.manage",
-    status: "auto-applied",
-    approvalScope: "chat",
-    request: { operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } }] },
-    summary: "Add @helper",
-    homeMachineId: "machine",
-    memberAdditionQueuedAt: NOW,
-    createdAt: NOW,
-    updatedAt: NOW
-  };
-
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued });
-  await waitFor(() => (storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "helper"));
-  await (service as any).memberAdditionApplies.get("conversation-1");
-
-  const approval = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
-  assert.equal(approval.memberAdditionQueuedAt, undefined);
-  const settledAt = approval.rosterChangeSettledAt;
-  assert.equal(typeof settledAt, "string");
-  const helper = (storage.current.metadata.participants as ChatParticipant[]).find((participant) => participant.handle === "helper");
-  assert.deepEqual(approval.appliedParticipantIds, [helper?.id]);
-  const said = storage.current.messages.find((message: ChatMessage) => message.content === "Auto-applied member request from @manager: Add @helper.");
-  assert.deepEqual(said?.metadata?.rosterChange, { approvalId: "machine-addition", outcome: "applied", appliedParticipantIds: [helper?.id] });
-
-  // A reconnect sends the waiting copy again: not added twice, not refused.
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: queued });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  await (service as any).memberAdditionApplies.get("conversation-1");
-  assert.equal((storage.current.metadata.participants as ChatParticipant[]).filter((participant) => participant.handle === "helper").length, 1);
-  const again = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
-  assert.equal(again.status, "auto-applied");
-  assert.equal(again.memberAdditionQueuedAt, undefined);
-  assert.equal(again.rosterChangeSettledAt, settledAt);
-  assert.equal(storage.current.messages.some((message: ChatMessage) => message.content.startsWith("Could not add")), false);
-
-  // One the desktop cannot apply is closed with the reason, not claimed.
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval: { ...queued, id: "machine-addition-2", summary: "Add @helper",
-    request: { operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } }] } } });
-  await waitFor(() => (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).find((item) => item.id === "machine-addition-2")?.status === "cancelled");
-  const refusal = storage.current.messages.find((message: ChatMessage) => message.content.startsWith("Could not add @helper at @manager's request:"));
-  assert.equal(refusal?.metadata?.rosterChange?.outcome, "refused");
-  assert.equal(refusal?.metadata?.rosterChange?.approvalId, "machine-addition-2");
 });
 
 test("after a restart a removal keeps waiting while a turn another live instance owns still runs", async () => {
@@ -7240,8 +7153,9 @@ test("an approved removal still waiting when the app quit is applied after the r
   ));
 });
 
-test("a removal raised by a member on a machine is answered on that machine, as an addition is", async () => {
+test("a removal raised by a member on a machine is answered on the User's server and applied there, never on the desktop", async () => {
   const { service, storage, manager, target } = memberRemovalFixture();
+  homeOnMachine(storage);
   const approval: ChatAppToolApproval = {
     id: "machine-removal",
     conversationId: "conversation-1",
@@ -7253,23 +7167,17 @@ test("a removal raised by a member on a machine is answered on that machine, as 
     status: "pending",
     request: { kind: "participant_removal", operations: [{ type: "remove_participant_from_chat", participantId: target.id, handle: target.handle }] },
     summary: "Remove @target from this chat",
-    homeMachineId: "machine",
     createdAt: NOW,
     updatedAt: NOW
   };
-  await service.applyMachineApproval({ conversationId: "conversation-1", approval });
-  const forwarded: any[] = [];
-  service.setMachineLink({ runTurn: async () => { throw new Error("not a turn"); },
-    respondToMachineApproval: async (request) => { forwarded.push(request); }
-  });
+  await feedCard(service, "card.raise", machineCard(approval));
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].homeMachineId, "machine");
 
-  await service.respondToAppToolApproval({ conversationId: "conversation-1", approvalId: approval.id, approve: true, draftOverride: approval.request });
-
-  assert.equal(forwarded.length, 1);
-  assert.equal(forwarded[0].machineId, "machine");
-  assert.equal(forwarded[0].approvalId, approval.id);
-  assert.equal(forwarded[0].approve, true);
-  // Nothing is decided or removed on the desktop until the machine reports back.
+  // Not applied on the desktop directly...
+  await assert.rejects(service.respondToAppToolApproval({ conversationId: "conversation-1", approvalId: approval.id, approve: true, draftOverride: approval.request }),
+    /answered on the device its member runs on/);
+  // ...its answer goes to the User's server, and without one it waits.
+  await assert.rejects(service.answerAppToolApprovalCard({ conversationId: "conversation-1", approvalId: approval.id, approve: true }), /not linked to your server/);
   assert.ok(memberIds(storage.current).includes(target.id));
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
 });
@@ -9753,6 +9661,37 @@ test("refreshStoredChatState preserves stored completed messages over stale pend
   assert.equal(answer.metadata?.staleRunRecovery, undefined);
 });
 
+test("refreshStoredChatState never takes back what the User's server said of a message (Д3, Д5)", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  // A running turn's copy of the chat, taken before the server answered.
+  const staleConversation = clone(conversation);
+  const runId = `turn-user-message-${participant.id}`;
+  conversation.messages[0] = {
+    ...conversation.messages[0],
+    metadata: {
+      ...(conversation.messages[0].metadata ?? {}),
+      serverSeq: 12,
+      serverWriter: "device-a",
+      serverTurns: { [participant.id]: { runId, state: "claimed", executorDeviceId: "device-a" } }
+    }
+  };
+  const { service } = testService({ conversation });
+
+  await (service as any).refreshStoredChatState(staleConversation);
+
+  const message = staleConversation.messages.find((item: any) => item.id === "user-message")!;
+  assert.equal(message.metadata?.serverSeq, 12);
+  assert.equal(message.metadata?.serverWriter, "device-a");
+  assert.equal(message.metadata?.serverTurns?.[participant.id]?.state, "claimed");
+
+  // The newer copy of a turn wins, whichever side holds it.
+  message.metadata!.serverTurns![participant.id] = { runId, state: "finished", executorDeviceId: "device-a", outcome: "stopped" };
+  await (service as any).refreshStoredChatState(staleConversation);
+  assert.equal(message.metadata?.serverTurns?.[participant.id]?.state, "finished");
+  assert.equal(message.metadata?.serverTurns?.[participant.id]?.outcome, "stopped");
+});
+
 test("refreshStoredChatState unions warnings added by a concurrent tool mutation", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant], {
@@ -9944,29 +9883,28 @@ test("inside a machine runtime its own members' bubbles are swept like local one
   assert.equal(conversation.messages.find((message: any) => message.id === "pending-other")!.status, "pending");
 });
 
-test("Stop routes an unregistered machine resume to its owner and keeps its text while waiting", async () => {
+test("Stop routes a machine member's run this desktop does not run to the server, and keeps its text while waiting", async () => {
   const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1" };
   const conversation = chatConversation([participant]);
-  const pending = pendingParticipantMessage(participant, "pending-native-resume", "native-resume");
+  const pending = pendingParticipantMessage(participant, "pending-native-resume", "turn-native-resume", { metadata: { runId: "turn-native-resume", sourceMessageId: "user-message" } });
   pending.content = "Already streamed text";
   conversation.messages.push(pending);
   const { service, storage } = testService({ conversation });
-  const calls: string[] = [];
-  service.setMachineLink({
-    runTurn: async () => { throw new Error("Stop must not start a turn"); },
-    cancelMachineRun: async (request) => {
-      calls.push(`${request.machineId}/${request.conversationId}/${request.runId}`);
-      await request.onStopPending?.("Cloud machine");
-    }
-  });
-  assert.equal(await (service as any).cancelStoredRun("native-resume"), true);
+  const link = fakeServerLink();
+  service.setServerLink(link);
+  assert.equal(await (service as any).cancelStoredRun("turn-native-resume"), true);
   await (service as any).waitForQueuedSave(conversation.id);
-  assert.deepEqual(calls, [`machine-1/${conversation.id}/native-resume`]);
+  assert.deepEqual(link.ops.filter((op) => op.kind === "turn.stop").map((op) => [op.conversationId, (op as { runId: string }).runId, (op as { messageId: string }).messageId, (op as { participantId: string }).participantId]),
+    [[conversation.id, "turn-native-resume", "user-message", participant.id]]);
   const stored = storage.current.messages.find((message: ChatMessage) => message.id === pending.id);
   assert.equal(stored.status, "pending");
   assert.equal(stored.content, pending.content);
-  assert.equal(stored.metadata.stopPending.machineName, "Cloud machine");
+  assert.equal(stored.metadata.stopPending.machineName, "Cloud machine", "waiting until the machine confirms");
   assert.equal(stored.metadata.staleRunRecovery, undefined);
+  // The machine confirms: the waiting goes.
+  await service.applyServerEntries([fromServer(conversation.id, "machine-device", { kind: "turn.finish",
+    turn: { runId: "turn-native-resume", conversationId: conversation.id, messageId: "user-message", participantId: participant.id, state: "finished", outcome: "stopped", executorDeviceId: "machine-device" } })]);
+  await waitFor(() => !storage.current.messages.find((message: ChatMessage) => message.id === pending.id)?.metadata?.stopPending);
 });
 
 test("a native resume publishes its outcome after the caller appends final messages", async () => {
@@ -10955,7 +10893,7 @@ test("participant request permission allow runs without approval", async () => {
   assert.equal(storage.current.metadata.pendingAppToolApprovals, undefined);
 });
 
-test("a member on a machine never runs another member itself; the desktop does, and its answers come back", async () => {
+test("a member on a machine asks a member that lives elsewhere through the server, and the answer comes back to it", async () => {
   // Requester lives on this machine; the target lives on the desktop.
   const requester = { ...chatParticipant("codex-cli", { requestParticipants: "allow" }), id: "here", handle: "here", homeMachineId: "machine-1" };
   const target = { ...chatParticipant("claude-code"), id: "elsewhere", handle: "elsewhere" };
@@ -10967,77 +10905,27 @@ test("a member on a machine never runs another member itself; the desktop does, 
   });
   (service as any).ensureHistoryFiles = async () => tempRoot;
   service.setHostMachineId("machine-1");
-  const delegated: Array<{ conversationId: string; requestMessageId: string; batchId: string; depth: number }> = [];
-  service.setParticipantRequestDelegate({
-    delegateParticipantRequest: async (request) => {
-      delegated.push(request);
-      // The desktop ran the target where that member lives; its answer reaches
-      // this machine with the conversation, exactly like any other message.
-      const stored = storage.current;
-      const requestMessage = stored.messages.find((message: ChatMessage) => message.id === request.requestMessageId);
-      const reply: ChatMessage = {
-        id: "reply-from-desktop", role: "participant", content: "Answered on the desktop.",
-        status: "done", createdAt: new Date().toISOString(),
-        participantId: target.id, participantLabel: `@${target.handle}`,
-        metadata: { threadId: requestMessage.id, parentMessageId: requestMessage.id, sourceMessageId: requestMessage.id }
-      } as ChatMessage;
-      stored.messages.push(reply);
-      const batch = requestMessage.metadata.participantRequest;
-      batch.items = batch.items.map((item: any) => ({ ...item, status: "answered", replyMessageId: reply.id }));
-      batch.status = "answered";
-    }
-  });
-
-  const result = await service.requestParticipantsFromTool(participantRequestActor(requester), {
+  const link = fakeServerLink("machine-device");
+  service.setServerLink(link);
+  const asking = service.requestParticipantsFromTool(participantRequestActor(requester), {
     requests: [{ target: target.handle, prompt: "Please review." }],
     timeoutMs: 5000,
     resumeRequester: false
   });
-
+  await waitFor(() => link.ops.some((op) => op.kind === "turn.request"));
+  const request = link.ops.find((op): op is Extract<HubOp, { kind: "turn.request" }> => op.kind === "turn.request")!;
+  const requestMessage = storage.current.messages.find((message: ChatMessage) => message.metadata?.participantRequest);
+  assert.equal(request.participantId, target.id, "asked of the member that lives elsewhere");
+  assert.equal(request.messageId, requestMessage.id, "the turn answers the request message, which keeps its thread");
+  assert.ok(request.pendingMessageId, "named the bubble its reply takes");
+  await memberDeviceAnswers(service, request, { participant: target, content: "Answered on the desktop.", deviceId: "desktop-device" });
+  const result = await asking;
   assert.equal(result.ok, true);
   assert.deepEqual(runs, [], "a machine must not run a member that is not its own");
-  assert.equal(delegated.length, 1, "the request is handed to the desktop, which owns the roster");
-  assert.equal(delegated[0].conversationId, conversation.id);
-  const requestMessage = storage.current.messages.find((message: ChatMessage) => message.metadata?.participantRequest);
-  assert.equal(delegated[0].requestMessageId, requestMessage.id, "the delegation names the request message, not a new one");
-  assert.equal(delegated[0].batchId, requestMessage.metadata.participantRequest.id);
   const items = (result as any).batch.items as Array<{ target: string; status: string; reply?: string }>;
   assert.equal(items[0].status, "answered");
   assert.equal(items[0].reply, "Answered on the desktop.", "the answer is returned to the member that asked");
-});
-
-test("a delegated request keeps its own thread and is not turned into a second run", async () => {
-  const requester = { ...chatParticipant("codex-cli", { requestParticipants: "allow" }), id: "here", handle: "here", homeMachineId: "machine-1" };
-  const target = { ...chatParticipant("claude-code"), id: "elsewhere", handle: "elsewhere" };
-  const conversation = chatConversation([requester, target]);
-  const { service, storage, tempRoot } = testService({ conversation });
-  (service as any).ensureHistoryFiles = async () => tempRoot;
-  service.setHostMachineId("machine-1");
-  const delegated: string[] = [];
-  service.setParticipantRequestDelegate({
-    delegateParticipantRequest: async (request) => {
-      delegated.push(request.requestMessageId);
-      const stored = storage.current;
-      const requestMessage = stored.messages.find((message: ChatMessage) => message.id === request.requestMessageId);
-      const batch = requestMessage.metadata.participantRequest;
-      batch.items = batch.items.map((item: any) => ({ ...item, status: "answered" }));
-      batch.status = "answered";
-    }
-  });
-
-  const trigger = "trigger-message";
-  storage.current.messages.push({
-    id: trigger, role: "user", content: "Ask elsewhere.", status: "done", createdAt: new Date().toISOString()
-  } as ChatMessage);
-  await service.requestParticipantsFromTool(
-    { ...participantRequestActor(requester), triggerMessageId: trigger },
-    { requests: [{ target: target.handle, prompt: "Please review." }], timeoutMs: 5000, resumeRequester: false }
-  );
-
-  const requestMessage = storage.current.messages.find((message: ChatMessage) => message.metadata?.participantRequest);
-  assert.equal(requestMessage.metadata.sourceMessageId ?? requestMessage.metadata.parentMessageId, trigger,
-    "the request keeps the thread it was asked in");
-  assert.deepEqual(delegated, [requestMessage.id], "one request, one delegation");
+  assert.equal(link.ops.filter((op) => op.kind === "turn.request").length, 1, "one request, one turn");
 });
 
 test("inferred accord assignment allows facilitator participant requests before nested request", async () => {
@@ -11724,18 +11612,38 @@ test("startAccord creates structured accord skill mention and dispatches only th
   assert.equal(result.sourceMessageId, userMessage.id);
 });
 
-test("only the participant's home owns an approval, including completed receipts", async () => {
+test("only the member's home raises a card for its approval on the User's server", async () => {
   const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-home" };
   const conversation = chatConversation([participant]);
   conversation.metadata.pendingAppToolApprovals = [permissionApproval(participant,
-    { kind: "portable", permissions: ["repoRead"], reason: "Read the project" }, { id: "owner-card", status: "approved" })];
+    { kind: "portable", permissions: ["repoRead"], reason: "Read the project" }, { id: "owner-card" }),
+  permissionApproval(participant, { kind: "portable", permissions: ["repoRead"], reason: "Read the project" }, { id: "done-card", status: "approved" })];
   const { service } = testService({ conversation });
-  assert.equal(await service.ownsAppToolApproval(conversation.id, "owner-card"), false);
+  const wanted = () => ((service as any).wantedServerCards(conversation) as Array<{ cardId: string }>).map((card) => card.cardId);
+  assert.deepEqual(wanted(), [], "the desktop shows a machine member's card, never raises it");
   service.setHostMachineId("machine-home");
-  assert.equal(await service.ownsAppToolApproval(conversation.id, "owner-card"), true);
-  assert.equal(await service.ownsAppToolApproval(conversation.id, "not-arrived"), undefined);
-  assert.equal(await service.ownsAppToolApproval("chat-not-on-this-peer", "owner-card"), false,
-    "a peer without the chat can never own an answer from it");
+  assert.deepEqual(wanted(), ["owner-card"], "its machine raises it, and only while it waits");
+});
+
+test("a member's choice moved as this computer's but asked by a member of a machine is not raised here", async () => {
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-gone" };
+  const conversation = chatConversation([participant]);
+  conversation.metadata.pendingAppToolApprovals = [];
+  conversation.messages.push({
+    id: "machine-choice", role: "participant", participantId: participant.id, participantLabel: `@${participant.handle}`, content: "Which one?",
+    createdAt: new Date().toISOString(), status: "done",
+    // The machine was no longer on the server's devices when the chats
+    // moved: the server took the message as this computer's.
+    metadata: { serverWriter: "this-computer", serverSeq: 0, pendingChoice: { id: "choice-1", title: "Pick", question: "Which one?", status: "pending",
+      options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] } }
+  } as ChatMessage);
+  const { service } = testService({ conversation });
+  (service as any).serverLink = { deviceId: () => "this-computer" };
+  const wanted = () => ((service as any).wantedServerCards(conversation) as Array<{ cardId: string }>).map((card) => card.cardId);
+  assert.deepEqual(wanted(), [], "its member does not run here: the server would refuse it every start");
+  service.setHostMachineId("machine-gone");
+  (service as any).serverLink = { deviceId: () => "the-machine" };
+  assert.deepEqual(wanted(), [], "nor on a machine whose own messages are another device's");
 });
 
 test("startAccord rejects Chat Assistant as facilitator", async () => {
@@ -11880,35 +11788,41 @@ test("a durable approval claim precedes permission changes and a failed claim le
   assert.equal(normalizeChatAgentPermissions(storage.current.metadata.participants[0].permissions).webAccess, true);
 });
 
-test("machine approval feedback is local, survives notifications, and clears only for its matching receipt", async () => {
-  const participant = chatParticipant("codex-cli", { webAccess: false });
-  const approval = { ...permissionApproval(participant, { kind: "portable", permissions: ["webAccess"] }), homeMachineId: "machine" };
-  const conversation = chatConversation([participant], { pendingAppToolApprovals: [approval] });
+test("a machine member's card answered on the server waits on the desktop for its machine, and closes with the machine's outcome", async () => {
+  const participant = { ...chatParticipant("codex-cli", { webAccess: false }), homeMachineId: "machine" };
+  const approval = permissionApproval(participant, { kind: "portable", permissions: ["webAccess"] });
+  const conversation = chatConversation([participant]);
   const { service, storage } = testService({ conversation });
-  service.setMachineLink({ runTurn: async () => { throw new Error("not a turn"); },
-    respondToMachineApproval: async request => { await request.onQueued?.("decision", "Offline machine"); }
-  });
-  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: approval.id, approve: true });
+  const card = { ...machineCard(approval), cardKind: "permission" as const };
+  await feedCard(service, "card.raise", card);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
+  const answer = answeredCard(card, { approve: true });
+  await feedCard(service, "card.answer", answer, "decision");
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionPending.decisionId, "decision");
-  await service.applyMachineApproval({ conversationId: conversation.id, approval });
-  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionPending.decisionId, "decision");
-  await service.applyMachineApproval({ conversationId: conversation.id, approval: { ...approval, status: "approved" }, decisionId: "decision" });
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionPending.approve, true);
+  // Nothing of it changed here: the machine applies it.
+  assert.equal(normalizeChatAgentPermissions(storage.current.metadata.participants[0].permissions).webAccess, false);
+  await feedCard(service, "card.settle", { ...answer, state: "settled", outcome: { result: "applied", approval: { ...approval, status: "approved", updatedAt: new Date(Date.now() + 1000).toISOString() } } });
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionPending, undefined);
-  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionReceiptId, "decision");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "approved");
 });
 
-test("a fast rejected machine receipt cannot be overwritten by its later queued callback", async () => {
-  const participant = chatParticipant("codex-cli");
-  const approval = { ...permissionApproval(participant, { kind: "portable", permissions: ["webAccess"] }), homeMachineId: "machine" };
-  const conversation = chatConversation([participant], { pendingAppToolApprovals: [approval] });
+test("a machine member's card whose answer its machine refused is asked again on the desktop, saying why", async () => {
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine" };
+  const approval = permissionApproval(participant, { kind: "portable", permissions: ["webAccess"] });
+  const conversation = chatConversation([participant]);
   const { service, storage } = testService({ conversation });
-  service.setMachineLink({ runTurn: async () => { throw new Error("not a turn"); }, respondToMachineApproval: async request => {
-    await service.applyMachineApproval({ conversationId: conversation.id, approval: { ...approval, error: "Invalid decision" }, decisionId: "fast" });
-    await request.onQueued?.("fast", "Machine");
-  } });
-  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: approval.id, approve: true });
+  const card = { ...machineCard(approval), cardKind: "permission" as const };
+  await feedCard(service, "card.raise", card);
+  const answer = answeredCard(card, { approve: true });
+  await feedCard(service, "card.answer", answer, "fast");
+  await feedCard(service, "card.settle", { ...answer, state: "settled", outcome: { result: "refused", reason: "Invalid decision", answerOpId: "fast" } });
   assert.equal(storage.current.metadata.pendingAppToolApprovals[0].machineDecisionPending, undefined);
-  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].error, "Invalid decision");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
+  const refusals = [{ operationId: "fast", reason: "Invalid decision", at: NOW }];
+  await feedCard(service, "card.raise", { ...card, card: { ...card.card, refusals } });
+  assert.deepEqual(storage.current.metadata.pendingAppToolApprovals[0].cardRefusals, refusals, "the card says why");
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].status, "pending");
 });
 
 test("Codex approval compacts immediately while the provider receives the selected response", async () => {
@@ -13056,11 +12970,11 @@ test("a member on an added provider is refused on a machine runtime: the provide
   // run it: the gate is the member's home, not what happens to be configured.
   installHosts(service, [ZAI_CODEX_HOST], { [ZAI_CODEX_HOST.id]: "zai-secret" });
 
-  const result = await service.runMachineHostedTurn({ conversationId: conversation.id, participantId: participant.id,
-    messageId: "user-message", runId: "run-machine-host", pendingMessageId: "machine-host-pending" });
+  service.setServerLink(fakeServerLink("machine-device"));
+  await service.startServerTurn({ runId: "turn-run-machine-host", conversationId: conversation.id, messageId: "user-message", participantId: participant.id,
+    state: "requested", pendingMessageId: "machine-host-pending" });
   assert.equal(runs.length, 0);
-  const failed = result.messages.find((message) => message.status === "error");
-  assert.match(failed?.content ?? "", /run on this computer only/);
+  await waitFor(() => (storage.current.messages as ChatMessage[]).some((message) => message.status === "error"));
   assert.match((storage.current.messages as ChatMessage[]).find((message) => message.status === "error")?.content ?? "", /run on this computer only/);
 });
 
@@ -13150,9 +13064,10 @@ test("member ownership: direct machine turn advances its own watcher cursor", as
     return { participant, ok: true, content: "Direct answer", durationMs: 1 };
   } });
   service.setHostMachineId("machine-1");
+  service.setServerLink(fakeServerLink("machine-device"));
   (service as any).ensureHistoryFiles = async () => tempRoot;
-  await service.runMachineHostedTurn({ conversationId: conversation.id, participantId: participant.id,
-    messageId: "user-message", runId: "direct-machine-run", pendingMessageId: "direct-machine-pending" });
+  await service.startServerTurn({ runId: "turn-direct-machine-run", conversationId: conversation.id, messageId: "user-message", participantId: participant.id,
+    state: "requested", pendingMessageId: "direct-machine-pending" });
   await (service as any).runAutoWatchEvaluation(conversation.id, "after-direct-turn");
   assert.deepEqual(runs, [participant.id]);
   assert.equal(storage.current.metadata.participantWatchers[participant.id].lastSeenMessageId, "user-message");
@@ -13224,8 +13139,12 @@ test("member ownership: native entry and compact refuse a foreign member before 
   const conversation = chatConversation([participant]);
   const { service, storage } = testService({ conversation, run: async () => { throw new Error("must not run native"); } });
   service.setHostMachineId("machine-1");
-  await assert.rejects(service.runMachineHostedTurn({ conversationId: conversation.id, participantId: participant.id,
-    messageId: "user-message", runId: "foreign-run", pendingMessageId: "foreign-pending" }), /another machine/);
+  const link = fakeServerLink("machine-device");
+  service.setServerLink(link);
+  // A turn the server asks of a member that is not this machine's is not taken here.
+  await service.startServerTurn({ runId: "turn-foreign-run", conversationId: conversation.id, messageId: "user-message", participantId: participant.id, state: "requested" });
+  assert.equal(link.ops.some((op) => op.kind === "turn.claim"), false);
+  service.setServerLink(undefined);
   await assert.rejects(service.compactParticipant({ conversationId: conversation.id, participantId: participant.id }), /another machine/);
   await assert.rejects(service.requestParticipantsFromTool(participantRequestActor(participant), {
     requests: [{ target: "someone", prompt: "Do work" }]
@@ -13233,17 +13152,17 @@ test("member ownership: native entry and compact refuse a foreign member before 
   assert.equal(storage.current.metadata.participantSessions, undefined);
 });
 
-test("member ownership: unavailable machine link cannot fall back to the desktop CLI", async () => {
+test("member ownership: without a link to the User's server a machine member cannot fall back to the desktop CLI", async () => {
   const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1" };
   const conversation = chatConversation([participant]);
   const { service, storage } = testService({ conversation, run: async () => { throw new Error("must not run native"); } });
   await assert.rejects((service as any).runParticipantTurnSerialized(conversation, participant,
-    conversation.messages[0], "remote-run", undefined, undefined, { warnings: [] }), /machine/i);
+    conversation.messages[0], "remote-run", undefined, undefined, { warnings: [] }), /reaches only through your server/);
   assert.equal(storage.current.metadata.participantSessions, undefined);
 });
 
 for (const source of ["tool", "inferred", "approved"] as const) {
-  test(`member ownership: ${source} requests split same-host and foreign targets`, async () => {
+  test(`member ownership: ${source} requests run same-host targets here and ask the others of their own devices`, async () => {
     const requester = { ...chatParticipant("codex-cli", { requestParticipants: source === "approved" ? "ask" : "allow" }), homeMachineId: "machine-1" };
     const targets = [
       { ...chatParticipant("claude-code"), id: "same", handle: "same", homeMachineId: "machine-1" },
@@ -13252,24 +13171,14 @@ for (const source of ["tool", "inferred", "approved"] as const) {
     ];
     const conversation = chatConversation([requester, ...targets]);
     const native: string[] = [];
-    const delegated: Array<{ home?: string; ids: string[] }> = [];
     const { service, storage, tempRoot } = testService({ conversation, run: async participant => {
       native.push(participant.id);
       return { participant, ok: true, content: "Answered here", durationMs: 1 };
     } });
     service.setHostMachineId("machine-1");
     (service as any).ensureHistoryFiles = async () => tempRoot;
-    service.setParticipantRequestDelegate({ delegateParticipantRequest: async request => {
-      delegated.push({ home: request.homeMachineId, ids: request.targetParticipantIds! });
-      const message = storage.current.messages.find((m: ChatMessage) => m.id === request.requestMessageId);
-      for (const id of request.targetParticipantIds!) {
-        const target = targets.find(p => p.id === id)!;
-        const reply = participantReplyMessage(target, `reply-${id}`, `Answered on ${id}`);
-        storage.current.messages.push(reply);
-        message.metadata.participantRequest.items = message.metadata.participantRequest.items.map((item: any) =>
-          item.targetParticipantId === id ? { ...item, status: "answered", replyMessageId: reply.id } : item);
-      }
-    } });
+    const link = fakeServerLink("machine-1-device");
+    service.setServerLink(link);
     if (source === "inferred") {
       const message = participantReplyMessage(requester, "inferred-source", "@same @desktop @other Please review.");
       conversation.messages.push(message);
@@ -13278,26 +13187,26 @@ for (const source of ["tool", "inferred", "approved"] as const) {
       await storage.saveConversation(conversation);
       (service as any).startDeferredParticipantRequestRunners(conversation.id, requests);
     } else {
-      await service.requestParticipantsFromTool(participantRequestActor(requester), {
+      void service.requestParticipantsFromTool(participantRequestActor(requester), {
         requests: targets.map(target => ({ target: target.handle, prompt: "Please review." })),
         timeoutMs: 5000, resumeRequester: false
       });
       if (source === "approved") {
+        await waitFor(() => Boolean(storage.current.metadata.pendingAppToolApprovals?.[0]));
         const approval = storage.current.metadata.pendingAppToolApprovals[0];
         await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: approval.id, approve: true });
       }
     }
+    const asked = () => link.ops.filter((op): op is Extract<HubOp, { kind: "turn.request" }> => op.kind === "turn.request");
+    await waitFor(() => asked().length === 2, 2000);
+    assert.deepEqual(asked().map((op) => op.participantId).sort(), ["desktop", "other"], "each asked of its own device on the server, never run here");
+    for (const request of asked()) {
+      const target = targets.find((item) => item.id === request.participantId)!;
+      await memberDeviceAnswers(service, request, { participant: target, content: `Answered on ${target.id}`, deviceId: `${target.id}-device` });
+    }
     await waitFor(() => storage.current.messages.some((m: ChatMessage) =>
       m.metadata?.participantRequest?.items.every(item => item.status === "answered")), 2000);
     assert.deepEqual(native, ["same"]);
-    assert.deepEqual(delegated, [{ home: undefined, ids: ["desktop"] }, { home: "machine-2", ids: ["other"] }]);
-    const message = storage.current.messages.find((m: ChatMessage) => m.metadata?.participantRequest);
-    await service.runDelegatedParticipantRequest({ conversationId: conversation.id, requestMessageId: message.id,
-      depth: 1, targetParticipantIds: ["same"] });
-    assert.deepEqual(native, ["same"], "delivery of a finished request must not replay it");
-    await assert.rejects(service.runDelegatedParticipantRequest({ conversationId: conversation.id, requestMessageId: message.id,
-      depth: 1, targetParticipantIds: ["same", "other"] }), /does not belong/);
-    assert.deepEqual(native, ["same"], "reject a mixed-owner command before starting any member");
   });
 }
 
@@ -13414,6 +13323,10 @@ function testService(options: {
     },
     async saveConversation(conversation: Conversation): Promise<void> {
       this.current = clone(conversation);
+    },
+    // What the User's server's feed asks of a device's storage.
+    conversationTombstones() {
+      return { isDeleted: async () => false, mark: async () => undefined, pendingCopies: async () => [] };
     },
     cancelRequests: new Map<string, string>(),
     async requestRunCancel(conversationId: string, runId: string): Promise<void> {
@@ -13885,38 +13798,58 @@ function participantRequestApproval(
   };
 }
 
-test("a late machine result is not acknowledged when its chat is absent", async () => {
-  const service = Object.create(ChatService.prototype) as ChatService;
-  // A late result is first held against the chats this process knows are
-  // deleted, so the stand-in has to carry that set the way a real service does.
-  Object.assign(service, { storage: { getConversation: async () => undefined }, deletedConversationIds: new Set<string>() });
-  await assert.rejects(service.applyMachineLateTerminal({
-    conversationId: "missing-chat", runId: "run-1", status: "completed",
-    messages: [], machineName: "Box"
-  }), /has not been stored/);
+test("a turn this device took and left behind (it restarted) is closed as interrupted, never as stopped, with a Stop it never confirmed said so", async () => {
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1" };
+  const conversation = chatConversation([participant]);
+  conversation.messages.push(
+    pendingParticipantMessage(participant, "left-running", "turn-left-running", { content: "Half an answer", metadata: { runId: "turn-left-running", sourceMessageId: "user-message" } }),
+    pendingParticipantMessage(participant, "left-stopping", "turn-left-stopping", { content: "", metadata: { runId: "turn-left-stopping", sourceMessageId: "user-message" } }));
+  const { service, storage } = testService({ conversation });
+  service.setHostMachineId("machine-1");
+  const link = fakeServerLink("machine-device");
+  const claimed = (runId: string, stop: boolean): HubTurn => ({ runId, conversationId: conversation.id, messageId: "user-message", participantId: participant.id,
+    state: "claimed", executorDeviceId: "machine-device", claimedAt: NOW, ...(stop ? { stopRequestedAt: NOW } : {}) });
+  link.waitingTurns = async () => ({ requested: [], claimed: [claimed("turn-left-running", false), claimed("turn-left-stopping", true)] });
+  service.setServerLink(link);
+  await service.resumeServerTurns();
+  await waitFor(() => link.ops.filter((op) => op.kind === "turn.finish").length === 2);
+  assert.deepEqual(link.ops.filter((op) => op.kind === "turn.finish").map((op) => [(op as { runId: string }).runId, (op as { outcome: string }).outcome]),
+    [["turn-left-running", "interrupted"], ["turn-left-stopping", "interrupted"]], "ended for whoever waits, never as stopped");
+  const running = storage.current.messages.find((message: ChatMessage) => message.id === "left-running");
+  assert.equal(running.status, "error");
+  assert.equal(running.content, "Half an answer", "what it had written stays");
+  const stopping = storage.current.messages.find((message: ChatMessage) => message.id === "left-stopping");
+  assert.equal(stopping.metadata.terminalReason, "stop-unconfirmed");
+  assert.match(stopping.content, /restarted before confirming the stop/);
+  // Asked again (the link came back): closed once.
+  await service.resumeServerTurns();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(link.ops.filter((op) => op.kind === "turn.finish").length, 2);
 });
 
-test("late machine terminals publish the saved idle state and preserve other concurrent runs", async () => {
-  for (const status of ["completed", "failed", "interrupted", "unconfirmed"] as const) {
-    for (const concurrent of [false, true]) {
-      const participant = chatParticipant("codex-cli");
-      participant.homeMachineId = "machine";
-      const conversation = chatConversation([participant], {
-        running: true, runId: "finished", activeRunIds: concurrent ? ["finished", "other"] : ["finished"],
-        activeRunOwnersByRunId: { finished: { hostId: "old-desktop" }, ...(concurrent ? { other: { hostId: "other-machine" } } : {}) }
-      });
-      const snapshots: Conversation[] = [];
-      const { service, storage } = testService({ conversation, onSnapshot: snapshot => { snapshots.push(structuredClone(snapshot)); } });
-      await service.applyMachineLateTerminal({ conversationId: conversation.id, runId: "finished", status,
-        messages: [], machineName: "Box", finishedAt: NOW, receiptId: `receipt-${status}` });
-      for (const snapshot of [snapshots.at(-1)!, storage.current]) {
-        assert.equal(snapshot.metadata.running, concurrent);
-        assert.deepEqual(snapshot.metadata.activeRunIds, concurrent ? ["other"] : undefined);
-        assert.equal(snapshot.metadata.runId, concurrent ? "other" : undefined);
-        assert.ok(!(snapshot.metadata.activeRunOwnersByRunId as any)?.finished);
-      }
-    }
-  }
+test("a placeholder that went (its member's bubble arrived, or its turn never ran) does not come back with a copy of the chat read before it went", async () => {
+  const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1" };
+  const conversation = chatConversation([participant]);
+  conversation.messages.push(pendingParticipantMessage(participant, "placeholder-1", "turn-1", { metadata: { runId: "turn-1", serverPlaceholder: true, machinePending: { machineName: "Cloud machine", at: NOW } } }));
+  const { service, storage } = testService({ conversation });
+  const internals = service as unknown as {
+    withChatMutation<T>(conversation: Conversation, fn: () => Promise<T> | T): Promise<T>;
+    queueSnapshot(conversation: Conversation): void;
+    dropServerPlaceholder(conversation: Conversation, messageId: string): Promise<void>;
+  };
+  // Another send holds its own copy, read while the placeholder stood.
+  const stale = clone(storage.current) as Conversation;
+  const current = clone(storage.current) as Conversation;
+  await internals.dropServerPlaceholder(current, "placeholder-1");
+  await service.settleChatSaves();
+  assert.equal(storage.current.messages.some((message: ChatMessage) => message.id === "placeholder-1"), false);
+  // That copy writes next: what it adds stays, the placeholder does not return.
+  await internals.withChatMutation(stale, async () => {
+    stale.messages.push({ id: "later", role: "system", content: "Later.", createdAt: NOW, status: "done" } as ChatMessage);
+    internals.queueSnapshot(stale);
+  });
+  await service.settleChatSaves();
+  assert.deepEqual(storage.current.messages.map((message: ChatMessage) => message.id).filter((id: string) => id === "placeholder-1" || id === "later"), ["later"]);
 });
 
 function participantManagerActor(conversationId: string, participant: ChatParticipant): {
@@ -13933,6 +13866,65 @@ function participantManagerActor(conversationId: string, participant: ChatPartic
     roleConfigVersion: 1,
     capabilities: ["participants.manage"]
   };
+}
+
+/** The User's server as a chat sees it, played by the test: what the chat
+ *  writes is recorded, and each operation is accepted at once (a turn asked
+ *  is requested, a claim is this device's). What other devices do there
+ *  reaches the chat as feed entries (`fromServer`). */
+function fakeServerLink(deviceId = "desktop-device", machineNames: Record<string, string> = { "machine-1": "Cloud machine", machine: "Cloud machine" }) {
+  const ops: HubOp[] = [];
+  let seq = 1_000;
+  const turnOf = (op: HubOp, state: HubTurn["state"]): HubTurn | undefined => op.kind === "turn.request" || op.kind === "turn.claim"
+    ? { runId: op.runId, conversationId: op.conversationId, messageId: op.messageId, participantId: op.participantId, state,
+      ...(state === "requested" ? { requestedBy: deviceId } : { executorDeviceId: deviceId }),
+      ...(op.kind === "turn.request" && op.pendingMessageId ? { pendingMessageId: op.pendingMessageId } : {}),
+      ...(op.kind === "turn.request" && op.request ? { request: op.request } : {}) }
+    : undefined;
+  const link = {
+    ops,
+    deviceId: () => deviceId,
+    queueSql: (queued: HubOp[]) => { ops.push(...queued); return ""; },
+    enqueue: async (queued: HubOp[]) => { ops.push(...queued); },
+    nudge: () => undefined,
+    messageAccepted: async () => ({ status: "accepted" as const, seq: ++seq }),
+    opAnswered: async (opId: string) => {
+      const op = ops.find((item) => item.opId === opId);
+      if (op?.kind === "turn.request") return { status: "accepted" as const, seq: ++seq, turn: turnOf(op, "requested") };
+      if (op?.kind === "turn.claim") return { status: "accepted" as const, seq: ++seq, claim: "claimed" as const, turn: turnOf(op, "claimed") };
+      return { status: "accepted" as const, seq: ++seq };
+    },
+    waitingTurns: async () => ({ requested: [] as HubTurn[], claimed: [] as HubTurn[] }),
+    machineName: (machineId: string) => machineNames[machineId]
+  };
+  return link;
+}
+
+let feedSeq = 0;
+/** What another device did on the server, as this device's feed brings it. */
+function fromServer(conversationId: string, deviceId: string, effect: HubOpEffect): HubFeedEntry {
+  feedSeq += 1;
+  return { seq: 10_000 + feedSeq, opId: `feed-${feedSeq}`, deviceId, conversationId, acceptedAt: new Date().toISOString(), effect };
+}
+
+/** A member's device takes a turn asked on the server, writes its reply and
+ *  ends the turn there, as the feed brings it to this device. */
+async function memberDeviceAnswers(service: ChatService, request: Extract<HubOp, { kind: "turn.request" }>, options: {
+  deviceId?: string; content?: string; participant: ChatParticipant; contextUsage?: Record<string, unknown>; replyId?: string
+}): Promise<ChatMessage> {
+  const deviceId = options.deviceId ?? "machine-device";
+  const base: HubTurn = { runId: request.runId, conversationId: request.conversationId, messageId: request.messageId, participantId: request.participantId,
+    state: "claimed", executorDeviceId: deviceId, ...(request.pendingMessageId ? { pendingMessageId: request.pendingMessageId } : {}) };
+  const reply: ChatMessage = {
+    ...pendingParticipantMessage(options.participant, options.replyId ?? request.pendingMessageId ?? `reply-${request.runId}`, request.runId),
+    status: "done", content: options.content ?? "MACHINE_REPLY",
+    metadata: { runId: request.runId, sourceMessageId: request.messageId, parentMessageId: request.messageId, serverSeq: 20_000 + feedSeq, serverWriter: deviceId }
+  };
+  await service.applyServerEntries([fromServer(request.conversationId, deviceId, { kind: "turn.claim", turn: base })]);
+  await service.applyServerEntries([fromServer(request.conversationId, deviceId, { kind: "message.create", message: reply })]);
+  await service.applyServerEntries([fromServer(request.conversationId, deviceId, { kind: "turn.finish",
+    turn: { ...base, state: "finished", outcome: "done", ...(options.contextUsage ? { contextUsage: options.contextUsage } : {}) } })]);
+  return reply;
 }
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 1000): Promise<void> {
@@ -13985,22 +13977,20 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-test("Stop reaches the machine when this desktop holds a pending row for the run", async () => {
+test("Stop reaches the machine through the server when this desktop holds a pending row for the run", async () => {
   const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine" };
-  const conversation = chatConversation([participant], { activeRunIds: ["run-on-machine"] });
+  const conversation = chatConversation([participant], { activeRunIds: ["turn-run-on-machine"] });
   conversation.messages.push({
     id: "machine-bubble", role: "participant", participantId: participant.id, content: "",
-    status: "pending", createdAt: NOW, metadata: { runId: "run-on-machine" }
+    status: "pending", createdAt: NOW, metadata: { runId: "turn-run-on-machine", sourceMessageId: "user-message" }
   } as any);
   const { service } = testService({ conversation });
-  const cancels: Array<{ machineId: string; runId: string }> = [];
-  service.setMachineLink({
-    runTurn: async () => { throw new Error("not a turn"); },
-    cancelMachineRun: async (request: any) => { cancels.push({ machineId: request.machineId, runId: request.runId }); }
-  } as any);
-  assert.equal(service.cancelRun("run-on-machine"), true);
-  await waitFor(() => cancels.length === 1, 2000);
-  assert.deepEqual(cancels, [{ machineId: "machine", runId: "run-on-machine" }]);
+  const link = fakeServerLink();
+  service.setServerLink(link);
+  assert.equal(service.cancelRun("turn-run-on-machine"), true);
+  await waitFor(() => link.ops.some((op) => op.kind === "turn.stop"), 2000);
+  assert.deepEqual(link.ops.filter((op) => op.kind === "turn.stop").map((op) => [(op as { runId: string }).runId, (op as { participantId: string }).participantId]),
+    [["turn-run-on-machine", participant.id]]);
 });
 
 test("Stop still reaches the machine when this desktop has no pending row for the run", async () => {
@@ -14010,18 +14000,19 @@ test("Stop still reaches the machine when this desktop has no pending row for th
   // whose row this copy has already settled -- was therefore never cancelled
   // on the machine, while cancelRun reported success to the User all the same.
   // The machine owns the run; a missing row here is not evidence it stopped.
+  // With the User's server the run is named by the turn mark the message it
+  // answers keeps.
   const participant = { ...chatParticipant("codex-cli"), homeMachineId: "machine" };
-  const conversation = chatConversation([participant], { activeRunIds: ["run-on-machine"] });
+  const conversation = chatConversation([participant], { activeRunIds: ["turn-run-on-machine"] });
+  conversation.messages[0].metadata = { ...conversation.messages[0].metadata,
+    serverTurns: { [participant.id]: { runId: "turn-run-on-machine", state: "claimed", executorDeviceId: "machine-device" } } } as any;
   const { service } = testService({ conversation });
-  const cancels: Array<{ machineId: string; runId: string }> = [];
-  service.setMachineLink({
-    runTurn: async () => { throw new Error("not a turn"); },
-    cancelMachineRun: async (request: any) => { cancels.push({ machineId: request.machineId, runId: request.runId }); }
-  } as any);
-  assert.equal(service.cancelRun("run-on-machine"), true);
-  await waitFor(() => cancels.length === 1, 2000);
-  assert.deepEqual(cancels, [{ machineId: "machine", runId: "run-on-machine" }],
-    "a Stop for a machine-hosted run must be published to that machine");
+  const link = fakeServerLink();
+  service.setServerLink(link);
+  assert.equal(service.cancelRun("turn-run-on-machine"), true);
+  await waitFor(() => link.ops.some((op) => op.kind === "turn.stop"), 2000);
+  assert.deepEqual(link.ops.filter((op) => op.kind === "turn.stop").map((op) => [(op as { runId: string }).runId, (op as { messageId: string }).messageId]),
+    [["turn-run-on-machine", "user-message"]], "a Stop for a machine-hosted run must reach that machine");
 });
 
 test("Stop for a local member's run stays local even when the chat also has a machine member", async () => {
@@ -14037,17 +14028,14 @@ test("Stop for a local member's run stays local even when the chat also has a ma
     status: "pending", createdAt: NOW, metadata: { runId: "run-local" }
   } as any);
   const { service, storage } = testService({ conversation });
-  const cancels: Array<{ machineId: string; runId: string }> = [];
-  service.setMachineLink({
-    runTurn: async () => { throw new Error("not a turn"); },
-    cancelMachineRun: async (request: any) => { cancels.push({ machineId: request.machineId, runId: request.runId }); }
-  } as any);
+  const link = fakeServerLink();
+  service.setServerLink(link);
   assert.equal(service.cancelRun("run-local"), true);
   await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
     message.id === "local-bubble" && message.metadata?.terminalReason === "user-stopped"));
   assert.equal(storage.current.messages.find((message: ChatMessage) => message.id === "local-bubble")?.metadata?.terminalReason, "user-stopped",
     "the local run is swept here");
-  assert.deepEqual(cancels, [], "no cancel is published to a machine that does not own the run");
+  assert.equal(link.ops.some((op) => op.kind === "turn.stop"), false, "no Stop is asked of a machine that does not own the run");
 });
 
 test("a picture a machine does not hold is fetched from the desktop that owns the chat", async () => {
@@ -14072,7 +14060,6 @@ test("a picture a machine does not hold is fetched from the desktop that owns th
   const asked: Array<{ conversationId: string; attachmentId: string }> = [];
   const bytes = Buffer.from("PNG").toString("base64");
   service.setMachineLink({
-    runTurn: async () => { throw new Error("not a turn"); },
     fetchAttachment: async (conversationId: string, attachmentId: string) => {
       asked.push({ conversationId, attachmentId });
       return { dataBase64: bytes };
@@ -14097,7 +14084,6 @@ test("a picture the owner cannot supply is reported as unavailable with the reas
   } as any);
   const { service } = testService({ conversation });
   service.setMachineLink({
-    runTurn: async () => { throw new Error("not a turn"); },
     fetchAttachment: async () => { throw new Error("The desktop did not answer with this picture in time."); }
   } as any);
   // The desktop was asked and could not supply it: the picture is not lost,

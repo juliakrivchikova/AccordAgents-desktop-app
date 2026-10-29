@@ -120,9 +120,15 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     await pairPage(app, { hub, siteOrigin: site.origin });
     hub.setGate(async (request) => {
       if (serverDown) return { drop: true };
-      if (holdPushes && request.method === "POST" && request.path === "/v1/events") return { status: 503, body: { ok: false } };
-      if (rejectPushes && request.method === "POST" && request.path === "/v1/events") {
-        return { status: 200, body: { results: Array.from({ length: 50 }, () => ({ status: "rejected", error: "Not taken in this test." })) } };
+      if (request.method === "POST" && request.path === "/v3/ops") {
+        const ops = request.ops || [];
+        if (holdPushes) return { status: 503, body: { ok: false } };
+        if (rejectPushes) return { status: 200, body: { results: ops.map((op) => ({ opId: op.opId, status: "rejected", reason: "Not taken in this test." })), head: 0 } };
+        // The cards here are this test's own, never raised on the server:
+        // their answers are taken the way the server takes an answer.
+        if (ops.length > 0 && ops.every((op) => op.kind === "card.answer")) {
+          return { status: 200, body: { results: ops.map((op, index) => ({ opId: op.opId, status: "accepted", seq: index + 1 })), head: ops.length } };
+        }
       }
       if (request.method === "GET" && request.path.startsWith("/v1/phone/")) return { status: 503, body: { ok: false } };
       return undefined;
@@ -210,8 +216,8 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     assert.equal(await evaluate(`AccordAgentsMobile.isCardLocked("card-recommended")`), false, "a pick is not an answer");
     await tapAt(await center("#control-cards .control-card-submit"));
     await waitFor(`AccordAgentsMobile.isCardLocked("card-recommended")`, "Submit to be taken on the first tap", 3_000);
-    const sentChoice = await evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.filter((entry) => entry.kind === "choice.answered").map((entry) => entry.payload.detail))`);
-    assert.deepEqual(sentChoice.map((detail) => [detail.selectedOptionId, detail.note]), [["yes", "after lunch"]], "the pick goes with its note");
+    const sentChoice = await evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.filter((entry) => entry.kind === "card.answer").map((entry) => entry.payload.answer))`);
+    assert.deepEqual(sentChoice.map((answer) => [answer.selectedOptionId, answer.note]), [["yes", "after lunch"]], "the pick goes with its note");
     await waitFor(dockShown, "the bar to come back once Submit has landed");
 
     // --- Cancel on the card cancels the choice --------------------------------
@@ -221,7 +227,7 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     await waitFor(`AccordAgentsMobile.isCardLocked("card-cancel")`, "Cancel to be taken on the first tap", 3_000);
     await waitFor(`(() => { const panel = document.querySelector('#control-cards [data-card-id="card-cancel"] .control-card-note'); return !panel || panel.hidden; })()`,
       "a note typed before Cancel not to be shown as if it went with it", 3_000);
-    const cancelled = await evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.filter((entry) => entry.kind === "choice.answered" && entry.payload.targetKey === "choice:card-cancel").map((entry) => entry.payload.detail.cancel))`);
+    const cancelled = await evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.filter((entry) => entry.kind === "card.answer" && entry.payload.cardId === "card-cancel").map((entry) => entry.payload.answer.cancel))`);
     assert.deepEqual(cancelled, [true], "the choice is answered as cancelled");
 
     // --- a card's own answer, sent with one tap -----------------------------
@@ -253,14 +259,15 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     await waitFor(dockShown, "the bar to come back once the tap has landed");
     // Marked as an own answer the way the desktop marks one: without it the
     // desktop looked for an option of that name and refused the answer.
-    const ownAnswer = await evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.filter((entry) => entry.payload && entry.payload.targetKey === "choice:card-custom").map((entry) => [entry.payload.stateId, entry.payload.detail.selectedOptionId, entry.payload.detail.customAnswer]))`);
-    assert.deepEqual(ownAnswer, [["__custom__", "__custom__", "the third one"]], "an own answer goes out as the desktop's own-answer option");
+    const ownAnswer = await evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.filter((entry) => entry.payload && entry.payload.cardId === "card-custom").map((entry) => [entry.payload.answer.selectedOptionId, entry.payload.answer.customAnswer]))`);
+    assert.deepEqual(ownAnswer, [["__custom__", "the third one"]], "an own answer goes out as the desktop's own-answer option");
 
     // --- an answer the desktop refused ---------------------------------------
     // Refused, it stayed folded and pale "on its way" for an hour, the desktop
     // saying nothing (the User, 2026-10-01). The card the desktop sends now
     // names the refused answer; the phone stops waiting for that one only.
-    const sentOperation = await evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.find((entry) => entry.payload && entry.payload.targetKey === "choice:card-custom").payload.operationId)`);
+    // The answer's operation id names it, on the server and in a refusal.
+    const sentOperation = await evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.find((entry) => entry.payload && entry.payload.cardId === "card-custom").eventId)`);
     const refuse = (operationId) => evaluate(`AccordAgentsMobile.handleRelayTimelinePayload(${JSON.stringify({
       type: "mobile.timeline.events", conversationId: CHAT, events: [],
       cards: [{ ...card("card-custom"), refusedAnswers: [{ operationId, reason: "Selected option was not found." }] }]
@@ -271,7 +278,7 @@ test("a tap above the composer while the keyboard is up lands the first time", {
       return { locked: AccordAgentsMobile.isCardLocked("card-custom"), folded: Boolean(node && node.classList.contains("control-card-folded")),
         state: state && !state.hidden ? state.textContent : "" };
     })()`;
-    await refuse("choice:card-custom:another-answer");
+    await refuse("another-answer");
     assert.deepEqual(await evaluate(cardState), { locked: true, folded: true, state: "Your answer: the third one" },
       "a refusal of some other answer leaves this phone's answer on its way");
     await refuse(sentOperation);
@@ -290,8 +297,12 @@ test("a tap above the composer while the keyboard is up lands the first time", {
       return { folded: node.classList.contains("control-card-folded"), state: node.querySelector(".control-card-state").textContent };
     })()`), { folded: true, state: "Your answer: the third one" }, "an answer given again folds at the tap, without the old reason");
     await waitFor(`AccordAgentsMobile.isCardLocked("card-custom")`, "the answer given again to be taken");
+    // Each answer is its own operation; the newest is the one on its way.
+    const newestOperation = () => evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.filter((entry) => entry.payload && entry.payload.cardId === "card-custom").sort((left, right) => left.order - right.order).pop().eventId)`);
+    const againOperation = await newestOperation();
+    assert.notEqual(againOperation, sentOperation, "an answer given again is a new operation");
     // The same answer is refused again under the card the phone already holds.
-    await refuse(sentOperation);
+    await refuse(againOperation);
     await waitFor(`!AccordAgentsMobile.isCardLocked("card-custom") && !document.querySelector('#message-list [data-card-id="card-custom"]').classList.contains("control-card-folded")`,
       "the same answer, refused again under an unchanged card, to open the card again");
     // A refusal that gives no reason, from the member's home or from the
@@ -303,24 +314,29 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     await waitFor(submitReady, "the reopened card to take an answer");
     await evaluate(submitCustom);
     await waitFor(`AccordAgentsMobile.isCardLocked("card-custom")`, "the answer given after a refusal to be taken");
+    const thirdOperation = await newestOperation();
     await evaluate(`AccordAgentsMobile.handleRelayTimelinePayload(${JSON.stringify({
       type: "mobile.timeline.events", conversationId: CHAT, events: [],
-      cards: [{ ...card("card-custom"), refusedAnswers: [{ operationId: sentOperation }] }]
+      cards: [{ ...card("card-custom"), refusedAnswers: [{ operationId: thirdOperation }] }]
     })}, ${JSON.stringify(CHAT)}).then(() => true)`);
     await waitFor(cardOpenAgain, "an answer the member's home refused without a reason to open the card");
     assert.equal((await evaluate(cardState)).state, refusedText, "a refusal from the member's home without a reason");
     rejectPushes = true;
     await waitFor(submitReady, "the card to take an answer again");
     await evaluate(submitCustom);
-    await waitFor(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.some((entry) => entry.kind === "choice.answered" && entry.status === "refused"))`,
+    await waitFor(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.some((entry) => entry.kind === "card.answer" && entry.status === "refused"))`,
       "the server to refuse the answer");
     await waitFor(`!AccordAgentsMobile.isCardLocked("card-custom")`, "the refused answer to stop holding the card");
     rejectPushes = false;
     // In place, with nothing else drawing the chat: every read is refused
     // here, so no later redraw comes to the rescue. It stayed folded and
-    // "on its way" until the User left the chat and came back.
-    await waitFor(`(${cardOpenAgain}) && document.querySelector('#message-list [data-card-id="card-custom"] .control-card-state').textContent === ${JSON.stringify(refusedText)}`,
-      "an answer the server refused to open the card and say so", 3_000);
+    // "on its way" until the User left the chat and came back. The server's
+    // own reason is said (agreement Д3).
+    const serverRefusedText = "Not taken by your server: Not taken in this test. You can answer again.";
+    await waitFor(`(${cardOpenAgain}) && document.querySelector('#message-list [data-card-id="card-custom"] .control-card-state').textContent === ${JSON.stringify(serverRefusedText)}`,
+      "an answer the server refused to open the card and say why", 3_000);
+    const logged = await evaluate(`AccordAgentsMobile.listSendFailures()`);
+    assert.ok(logged.some((row) => row.kind === "card.answer" && row.cause === "refused" && /Not taken in this test\./.test(row.reason)), "the refusal is in the send log");
 
     // --- a field a pick opens comes into sight in the chat -------------------
     // Picking "Write your own answer" at the bottom edge opened its box below
@@ -416,11 +432,11 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     assert.deepEqual(afterSend.clicks, ["send-button"], `the tap's click lands on Send, not on the text field: ${JSON.stringify(afterSend)}`);
     assert.notEqual(afterSend.active, "composer-input", "the text field is not focused again after the send");
 
-    // --- a message on its way fades and says nothing about it -------------
-    // "Waiting to sync" under the message and in the header was detail the
-    // User does not need; the message fades until it is delivered (the User,
-    // 2026-09-24). The server takes nothing for now, so the message stays on
-    // its way while it is looked at.
+    // --- a message the server has not taken says so, and fades ------------
+    // Until the server answers, the message fades and says "Not sent,
+    // retrying" (agreement Д3, which replaced the silent fade of 2026-09-24).
+    // The server takes nothing for now, so the message stays unsent while it
+    // is looked at; the header says nothing about it.
     holdPushes = true;
     await evaluate(`AccordAgentsMobile.enqueueMessage({ conversationId: ${JSON.stringify(CHAT)}, content: "still on its way" }).then(() => { document.dispatchEvent(new Event("visibilitychange")); return true; })`);
     const pendingMessage = await waitFor(`(() => {
@@ -431,7 +447,8 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     })()`, "the queued message on screen");
     assert.equal(pendingMessage.onItsWay, true, "the message on its way is faded");
     assert.equal(pendingMessage.opacity, "0.6");
-    assert.doesNotMatch(pendingMessage.status + " " + pendingMessage.header, /Waiting to sync|Syncing/, "nothing says how far it has got");
+    assert.equal(pendingMessage.status, "Not sent, retrying", "the message says it was not sent");
+    assert.doesNotMatch(pendingMessage.header, /Waiting to sync|Syncing|Not sent/, "the header does not report a send on its way");
     // A send that could not get through at all is still said, in the header:
     // nothing else would say it.
     assert.deepEqual(await evaluate(`["waiting-to-sync", undefined].map(AccordAgentsMobile.connectionStatusText)`), ["Synced", "Synced"],

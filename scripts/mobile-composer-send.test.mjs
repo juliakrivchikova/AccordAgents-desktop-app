@@ -12,7 +12,8 @@
  * queue before it was written.
  *
  * This holds the server's answer for a while, sends twice inside that wait,
- * and expects both messages queued and both handed over promptly. The phone
+ * and expects both messages queued and both taken by the server promptly,
+ * in order. The phone
  * is paired with a real hub (the User's own server) and sends to it exactly as
  * it does on her phone. Desktop Chrome, not the installed phone.
  */
@@ -47,18 +48,17 @@ test("a message sent while the previous one is still going out is queued and han
     await hub.createChat(CHAT, { title: "Send", participants: [member("drew")] });
     app = await attachApp({ port: CDP_PORT });
     await pairPage(app, { hub, siteOrigin: site.origin });
-    // Pairing writes one entry of its own (the certificate); it is handed
-    // over before the messages, so the hold below meets only them.
-    await app.waitFor(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.length > 0 && entries.every((entry) => entry.status === "acked"))`,
-      "the pairing certificate was handed over");
+    // Pairing writes nothing to the queue: the server put the phone on its
+    // roster as it enrolled.
+    assert.equal(await app.evaluate(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.length)`), 0, "pairing queued nothing");
     await app.evaluate(`document.querySelector('.mobile-chat-row[data-conversation-id=${JSON.stringify(CHAT)}]').click()`);
     await app.waitFor(`Boolean(globalThis.AccordAgentsMobile && document.getElementById("composer-input") && document.getElementById("composer-form")) && document.getElementById("timeline-screen").classList.contains("is-active")`,
       "the chat came up with its composer");
 
-    // Every push of the phone's events is held by the server for a while.
+    // Every request of the phone's operations is held for a while.
     const pushed = [];
     hub.setGate(async (request) => {
-      if (request.method === "POST" && request.path === "/v1/events") {
+      if (request.method === "POST" && request.path === "/v3/ops") {
         pushed.push(request.at);
         return { delayMs: APPEND_HOLD_MS };
       }
@@ -83,13 +83,13 @@ test("a message sent while the previous one is still going out is queued and han
     assert.equal(await app.evaluate(`document.getElementById("composer-input").value`), "", "the second message left the field");
     await waitFor(queued, (rows) => rows.length === 2, "the second message is queued while the first is still going out");
     // Both handed over: the second right behind the first, not on the retry
-    // tick half a minute later. Each hand-over is a signed push the server
-    // writes before it answers, so the budget is the two holds and the
-    // server's own work, well inside the half minute.
+    // tick. Each hand-over is a signed request the server answers once it
+    // wrote what it carries, so the budget is the two holds and the
+    // server's own work.
     await waitFor(queued, (rows) => rows.every((row) => row.endsWith(":acked")), "both messages are handed over", APPEND_HOLD_MS * 2 + 10_000);
     await hub.settle();
-    const messages = hub.phoneEvents("chat.changes");
-    assert.equal(messages.length, 2, "the server received both");
+    const messages = await hub.phoneOps("message.create");
+    assert.deepEqual(messages.map((entry) => entry.effect.message.content), ["first", "second"], "the server took both, in the order they were sent");
     t.diagnostic(`pushes: ${pushed.length}, queue: ${JSON.stringify(await queued())}`);
   } finally {
     app?.close();
@@ -122,8 +122,6 @@ test("a sent message goes to the server before the chat is drawn again", { timeo
     await hub.createChat(CHAT_LONG, { title: "Long chat", participants: [drew], messages: history });
     app = await attachApp({ port: 9427 });
     await pairPage(app, { hub, siteOrigin: site.origin });
-    await app.waitFor(`AccordAgentsMobile.listOutboxEntries().then((entries) => entries.length > 0 && entries.every((entry) => entry.status === "acked"))`,
-      "the pairing certificate was handed over");
     await app.evaluate(`document.querySelector('.mobile-chat-row[data-conversation-id=${JSON.stringify(CHAT_LONG)}]').click()`);
     await app.waitFor(`document.getElementById("message-list").innerText.includes("Earlier line 39")`, "the long chat is drawn");
     await hub.quiet();
@@ -138,7 +136,7 @@ test("a sent message goes to the server before the chat is drawn again", { timeo
       const fetchBefore = window.fetch;
       let postAt;
       window.fetch = function (input, init) {
-        if (postAt === undefined && init && init.method === "POST" && String(input && input.url || input).includes("/v1/events")) postAt = performance.now();
+        if (postAt === undefined && init && init.method === "POST" && String(input && input.url || input).includes("/v3/ops")) postAt = performance.now();
         return fetchBefore.call(this, input, init);
       };
       let drawnAt;
@@ -161,17 +159,7 @@ test("a sent message goes to the server before the chat is drawn again", { timeo
     assert.ok(timing.post !== null && timing.drawn !== null, `the message was sent and drawn: ${JSON.stringify(timing)}`);
     assert.ok(timing.post < timing.drawn, `the message went to the server before the slow redraw drew it: ${JSON.stringify(timing)}`);
     await hub.settle();
-    assert.equal(hub.phoneEvents("chat.changes").length, 1, "the server received it");
-
-    // The stamp every event carries is read and advanced in one transaction:
-    // asked for twenty times at once, it still gives twenty different stamps,
-    // each after the one asked for before it.
-    const stamps = await app.evaluate(`(() => {
-      const deviceId = AccordAgentsMobile.loadHubPairing().deviceId;
-      return Promise.all(Array.from({ length: 20 }, () => AccordAgentsMobile.hubLogicalTs(deviceId)));
-    })()`);
-    assert.equal(new Set(stamps).size, 20, `twenty distinct stamps: ${JSON.stringify(stamps)}`);
-    assert.deepEqual(stamps, [...stamps].sort(), "each later than the one asked for before it");
+    assert.equal((await hub.phoneOps("message.create")).length, 1, "the server received it");
   } finally {
     app?.close();
     chrome.kill("SIGKILL");

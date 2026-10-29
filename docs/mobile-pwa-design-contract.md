@@ -149,10 +149,15 @@ folds the card at once to what was answered ("Your answer: …") and fades it, o
 its Activity row, a little, and says nothing about how far it has got; once the
 chat on the server states it answered the card reads "Answered: …" at full strength. A failure, or
 that the answer can be given again, still opens the card and says so (the User,
-2026-09-24). A message sent from the phone and not yet delivered is faded the
-same way, with its time and no "Waiting to sync", and the header does not report
-sends on their way: it says "Synced", or "Not connected" from a send that could
-reach nothing until a send gets through.
+2026-09-24). A message of the User's says where it stands, in the same words
+on every device (agreements Д3 and Д5 of 2026-10-28, which replaced the silent
+fade of 2026-09-24): "Not sent, retrying" (faded) until the User's server has
+answered it, then the time and "Sent" once the server accepted it, then "Taken
+to work by @x" once a member's own device claimed the turn the message asked
+of it; a message the server refused reads "Not taken by your server:" and the
+server's reason. The header does not report sends on their way: it says
+"Synced", or "Not connected" from a send that could reach nothing until a send
+gets through.
 - Finished — finished member messages from the last 7 days, one row per chat
   and member, with a count badge when the row stands for more than one run
   (accent while unseen, grey once seen). The message a waiting question belongs
@@ -185,9 +190,13 @@ Now:
   it). Answered cards are kept: they are the record under their messages.
 - The page a chat is opened with carries the chat's cards, so opening a chat
   reconciles it too.
-- After a phone's answer, whatever became of it, the desktop sends the chat's
-  cards as it holds them now — "still pending" included — so a card the
-  desktop could not act on is never answered on the phone for ever.
+- The cards are the server's own (since 2026-10-28, agreement Д9): raised by
+  the device the member runs on, answered once from any device (a second
+  answer is refused), settled by the raising device. The chat list names each
+  chat's cards that wait for the User; a chat's page carries its cards that
+  wait or were answered and wait to be applied ("Allowed. Waiting for it to be
+  applied.", an approved removal as the desktop words it), and a choice's
+  answer stays under its message as the record. A settled card leaves.
 - An answer sent is a mark the phone keeps across launches, named after the
   queue entry that carries the answer; while it holds, the card is faded and
   says nothing more (whether the entry has reached the server yet is not
@@ -195,8 +204,9 @@ Now:
   server states the card answered or withdrawn. A mark older than ten minutes
   with the card still waiting has stopped meaning anything — the answer was lost on its way
   or refused — so the card unlocks and says "Answer sent, but not applied yet.
-  You can answer again."; an answer the server refused unlocks at once ("The
-  desktop did not take this answer. You can answer again."). A second answer
+  You can answer again."; an answer the server refused unlocks at once and
+  says the server's reason ("Not taken by your server: … You can answer
+  again."). A second answer
   replaces the first one still on its way rather than racing it: the earlier queue entry is set aside, never sent. An answer the server
   has already taken is not lost, only waiting for the member's home (the
   desktop, or the machine that hosts the member) to apply it: that card stays
@@ -211,12 +221,21 @@ Now:
   picked and typed (the User, 2026-10-01: an own answer refused this way stayed
   "on its way" for an hour). An own answer goes out under the desktop's
   own-answer option, `__custom__`.
-- The server refuses an event for good only when it rejects it (malformed,
-  too large, something a phone may not write, a signature that does not
-  verify, or a conflict in its chain); the entry then reads "Not taken by your
-  server". Any other failure — the server not answering, a dropped
-  connection — leaves the entry waiting to sync, and it is offered again; the
-  server keeps one copy of whatever arrives twice.
+- Everything the phone writes is one operation of the server's (`POST
+  /v3/ops`): a message, a Stop, an answer to a card, each kept on the phone
+  under its own id until the server answers it. Accepted (or a repeat of one it
+  took) is sent; rejected is not taken, for good, with the server's reason on
+  the message or the card. Any other failure — no connection, a timeout, an
+  error of the server's own — leaves it waiting, and it is offered again; the
+  server takes an operation once however often it arrives. Two messages with
+  the same words are two messages: the phone matches its own messages with the
+  server's copies by id, never by text.
+- Every failed try to send is written to the send log on the phone (agreement
+  Д12): when, what (a message and a little of its text, a Stop, an answer),
+  its chat, and why. The newest two hundred are kept. The log opens from the
+  chat's header — a warning button takes the place of the header's spacer
+  while something sent has not reached the server, or after a refusal not yet
+  looked at — and from Settings → This phone → Send log.
 - Sending twice in a row works: the second message is queued while the first
   is still going out, and goes out right behind it. A tap on a row in
   Activity is dropped only for half a second after rows have actually moved,
@@ -241,8 +260,11 @@ Now:
 - A change the desktop or a machine cannot apply is held and tried again;
   after two weeks it is given up, never in silence (Settings → Your server
   says so; `docs/parity-requirements.md`).
-- The queue is offered to the server for every chat, on launch, on return to
-  the foreground and while the app is open. Clearing a finished row in
+- The queue is offered to the server for every chat at once on a send, on
+  launch, when the network comes back and on return to the foreground, and
+  while the app is open again two seconds after a try that got no answer,
+  then twice as long each time up to half a minute. One try at a time; one that
+  has not finished in two minutes no longer holds the queue back. Clearing a finished row in
   Activity names the update under every identity it goes by (its run and its message), so a later copy
   of the same message from another path cannot bring it back.
 - The timeline store is read by chat, through an index: applying one delivered

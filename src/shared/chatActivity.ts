@@ -343,7 +343,9 @@ function pendingApprovalItems(
   return approvals.flatMap((approval) => {
     // A cancelled or denied approval is finished business: it stays visible on the card in the
     // chat timeline and leaves activity entirely instead of piling up in the finished list.
-    if (approval.status !== "pending") {
+    // Answered on the User's server and waiting for its member's machine:
+    // not the User's to answer any more.
+    if (approval.status !== "pending" || approval.machineDecisionPending) {
       return [];
     }
     const triggerMessageId = cleanString(approval.resumeContext?.triggerMessageId);
@@ -451,7 +453,10 @@ function pendingMessageItems(
   };
   const updatedAt = message.createdAt;
 
-  if (message.metadata?.pendingChoice?.status === "pending") {
+  // A card answered (on any device) and not applied by its member's machine
+  // yet waits for that machine, not for the User.
+  const answeredElsewhere = message.metadata?.serverCard?.state === "answered";
+  if (message.metadata?.pendingChoice?.status === "pending" && !answeredElsewhere) {
     items.push({
       id: `choice:${conversation.id}:${message.id}:${message.metadata.pendingChoice.id}`,
       conversationId: conversation.id,
@@ -474,7 +479,7 @@ function pendingMessageItems(
   const pendingMentions = Array.isArray(message.metadata?.pendingMentions)
     ? message.metadata.pendingMentions.filter((mention) => mention.status === "pending")
     : [];
-  if (pendingMentions.length > 0) {
+  if (pendingMentions.length > 0 && !answeredElsewhere) {
     items.push({
       id: `mention:${conversation.id}:${message.id}`,
       conversationId: conversation.id,

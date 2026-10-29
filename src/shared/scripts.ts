@@ -217,17 +217,6 @@ export function approvalInstallsScriptCode(approval: { toolName?: string; reques
     (!isChatScriptChangeRequest(approval.request) || scriptChangeInstallsCode(approval.request));
 }
 
-/** A card answer from the phone that approves such a card: the desktop
- *  refuses it (the phone may decline it, never approve it). `approvals` are
- *  the cards the chat holds now. */
-export function phoneAnswerApprovesScriptCode(kind: string, payload: unknown, approvals: ReadonlyArray<{ id: string; toolName?: string; request?: unknown }>): boolean {
-  const answer = (payload ?? {}) as { targetKey?: unknown; stateId?: unknown; detail?: { approve?: unknown } };
-  const approving = answer.stateId === "approved" || answer.detail?.approve === true;
-  if (kind !== "permission.decided" || !approving || typeof answer.targetKey !== "string" || !answer.targetKey.startsWith("approval:")) return false;
-  const approvalId = answer.targetKey.slice("approval:".length);
-  return approvalInstallsScriptCode(approvals.find((item) => item.id === approvalId));
-}
-
 export interface ScriptRevisionContent {
   scriptId: string;
   revisionId?: string;

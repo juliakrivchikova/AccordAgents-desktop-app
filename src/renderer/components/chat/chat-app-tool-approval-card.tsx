@@ -132,6 +132,9 @@ function GenericChatAppToolApprovalCard(props: {
   const displayPrompt = rosterApproval ? rosterApprovalQuestion(props.approval, added) : approvalPrompt;
 
   const queuedDecision = props.approval.machineDecisionPending;
+  // An answer the member's device could not apply: the card asks again, and
+  // says why (a script's keys missing, a phone's approval of a script's code).
+  const lastRefusal = props.approval.status === "pending" ? props.approval.cardRefusals?.at(-1) : undefined;
   if (queuedDecision) {
     return (
       <section className="chat-app-tool-approval-card is-compact-result" aria-label={displayPrompt}
@@ -261,6 +264,7 @@ function GenericChatAppToolApprovalCard(props: {
             </div>
           )}
           {!reviewChange && <h3>{rosterApproval ? <RosterApprovalTitle requesterHandle={props.approval.requesterHandle} added={added} /> : displayPrompt}</h3>}
+          {lastRefusal && <div className="chat-app-tool-approval-reason">Your earlier answer was not applied: {lastRefusal.reason}</div>}
           {readOnly && <ChatAppToolReviewStatus approval={props.approval} />}
           <fieldset className="chat-app-tool-review-fieldset" disabled={props.submitting}>
           {codexRequest ? (

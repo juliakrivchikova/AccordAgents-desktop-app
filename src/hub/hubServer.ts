@@ -22,30 +22,32 @@ import {
   isHubPhoneScope,
   type HubDevice,
   type HubHealth,
-  type HubLiveHead,
+  type HubLiveOps,
   type HubPhoneCertificate,
   type HubPhoneEnrollRequest,
   type HubPhoneEnrollResponse,
   type HubPhoneEnrollment,
   type HubPhoneInvite,
   type HubProgressPost,
-  type HubReadReport,
-  type HubResyncRequired,
-  type HubRosterRequest
+  type HubRosterRequest,
+  type HubRosterResponse
 } from "../shared/hubProtocol";
 import type { MachineProgressFrame } from "../shared/machineProgress";
 import { HubNonceCache, deviceIdForPublicKey, parseHubAuthorization, sha256Hex, verifyHubRequest, verifyHubText, type ParsedHubAuthorization } from "../main/services/hubAuth";
 import type { ChatSearchService } from "../main/services/chatSearch";
 import type { StorageService } from "../main/services/storage";
-import { HubRequestError, HubResyncRequiredError, type HubLog } from "./hubLog";
 import { isAllowedPushEndpoint } from "./hubPush";
 import { HUB_PHONE_PATHS, type HubPhoneApi } from "./hubPhone";
+import { HubOpsRequestError, type HubOps } from "./hubOps";
+import {
+  HUB_ARTIFACT_PATH, HUB_ARTIFACTS_PATH, HUB_CARDS_PATH, HUB_CHAT_PATH, HUB_CHATS_PATH, HUB_FEED_PATH, HUB_MACHINE_SETTINGS_PATH, HUB_ME_PATH, HUB_OPS_PATH, HUB_TURNS_PATH,
+  type HubCardsResponse, type HubFeedGone, type HubLiveSettings, type HubMachineSettings, type HubMachineSettingsPut, type HubMe, type HubTurnsResponse
+} from "../shared/hubOps";
 
 export interface HubServerOptions {
   hubId: string;
   version: string;
   storage: StorageService;
-  log: HubLog;
   search: ChatSearchService;
   vapidPublicKey: string;
   /** Files Let's Encrypt validation reads over plain HTTP. */
@@ -56,6 +58,8 @@ export interface HubServerOptions {
   onCatalogChanged?: () => void;
   /** The owner's members' live progress (kept in memory, never stored). */
   onProgress?: (frames: MachineProgressFrame[]) => void;
+  /** The chats as the server owns them: operations, the feed, chat pages. */
+  ops?: HubOps;
   now?: () => number;
   debugLog?: (event: string, payload: Record<string, unknown>) => void;
 }
@@ -83,8 +87,6 @@ const HEARTBEAT_MS = 30_000;
 /** A device that cannot keep up with its room is disconnected rather than
  *  buffered without end; it reconnects and continues. */
 const ROOM_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
-/** Pages of the chat copy (/v1/snapshot?copy=1) built at the same time. */
-const COPY_PAGES_IN_FLIGHT_MAX = 1;
 /** Requests slower than this are logged; the rest only count. */
 const SLOW_REQUEST_MS = 500;
 /** Search text and cursors are plain text. */
@@ -104,12 +106,6 @@ interface LiveSocketServer {
 }
 const { WebSocketServer } = require("ws") as { WebSocketServer: new (options: { noServer: true; maxPayload: number }) => LiveSocketServer };
 
-/**
- * The hub's HTTP surface. Every route but the health check and the VAPID key
- * is signed by a device on the roster. The live socket only says where the
- * order's head is, and devices read the rest over HTTP; rooms forward live
- * messages between the User's devices without keeping them.
- */
 /** How long a body a phone put up is kept before a message names it. */
 const PHONE_UPLOAD_PIN_MS = 30 * 24 * 60 * 60_000;
 const UPLOAD_PIN_MS = 24 * 60 * 60_000;
@@ -121,11 +117,23 @@ const ENROLL_ATTEMPTS_ALL = 600;
 /** What the hub answers a signed request from a device not on its roster. */
 export const HUB_NOT_ON_ROSTER = "This device is not on the hub's roster.";
 
+/** A request the hub refuses, with the status it answers. */
+export class HubRequestError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+/**
+ * The hub's HTTP surface. Every route but the health check and the VAPID key
+ * is signed by a device on the roster. The live socket only says where the
+ * server's feed stands (and that a machine's settings changed), and devices
+ * read the rest over HTTP; rooms forward live messages between the User's
+ * devices without keeping them.
+ */
 export class HubServer {
   private readonly nonces = new HubNonceCache();
-  /** Pages of the chat copy being built now. */
-  private copyPagesInFlight = 0;
-  /** Live head sockets and the device each one belongs to. */
+  /** Live sockets and the device each one belongs to. */
   private readonly live = new Map<LiveSocket, string>();
   private readonly sockets: LiveSocketServer = new WebSocketServer({ noServer: true, maxPayload: 1024 });
   private readonly roomSockets: LiveSocketServer = new WebSocketServer({ noServer: true, maxPayload: HUB_ROOM_MAX_MESSAGE_BYTES });
@@ -138,7 +146,7 @@ export class HubServer {
 
   constructor(private readonly options: HubServerOptions) {
     this.now = options.now ?? Date.now;
-    options.log.onAppended(({ head }) => this.broadcastHead(head));
+    options.ops?.onApplied(({ entry }) => this.broadcastOps(entry.seq));
   }
 
   /** The roster changed (or may have): read it again on the next request. */
@@ -259,8 +267,114 @@ export class HubServer {
     this.servers = [];
   }
 
-  private broadcastHead(head: number): void {
-    const frame = JSON.stringify({ type: "head", head } satisfies HubLiveHead);
+  /** The chats as the server owns them (agreements Д1–Д3): any device on the
+   *  roster writes operations and reads the feed and chat pages. */
+  private async handleOps(request: IncomingMessage, response: ServerResponse, url: URL, device: HubDevice, body: Buffer): Promise<number> {
+    const ops = this.options.ops as HubOps;
+    if (request.method === "POST" && url.pathname === HUB_OPS_PATH) {
+      json(response, 200, await ops.apply(device, parseJson(body)));
+      return 200;
+    }
+    if (request.method === "GET" && url.pathname === HUB_FEED_PATH) {
+      const after = Number(url.searchParams.get("after") ?? "0");
+      const waitMs = Number(url.searchParams.get("waitMs") ?? "0");
+      if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(waitMs) || waitMs < 0) throw new HubRequestError(400, "Invalid position.");
+      const closed = new Promise<void>((resolve) => { request.once("close", () => resolve()); response.once("close", () => resolve()); });
+      const answer = await ops.feed(after, waitMs, closed, device.deviceId);
+      if ("gone" in answer) {
+        this.options.debugLog?.("hub.feed.gone", { deviceId: device.deviceId, after, head: answer.head });
+        json(response, 410, { ok: false, error: "The server no longer holds what comes after this place; read the chats again.", gone: true, head: answer.head } satisfies HubFeedGone);
+        return 410;
+      }
+      json(response, 200, answer);
+      return 200;
+    }
+    if (request.method === "GET" && url.pathname === HUB_CHATS_PATH) {
+      json(response, 200, await ops.chats());
+      return 200;
+    }
+    if (request.method === "GET" && url.pathname === HUB_CARDS_PATH) {
+      const conversationId = url.searchParams.get("conversationId") ?? undefined;
+      // The place first: a card that changes while the list is read is never
+      // stated as older than the place it is read at.
+      const head = await ops.head();
+      json(response, 200, { cards: await ops.openCards(conversationId || undefined), head } satisfies HubCardsResponse);
+      return 200;
+    }
+    if (request.method === "GET" && url.pathname === HUB_TURNS_PATH) {
+      json(response, 200, { turns: await ops.waitingTurns(device), claimed: await ops.claimedTurns(device), head: await ops.head() } satisfies HubTurnsResponse);
+      return 200;
+    }
+    if (request.method === "GET" && url.pathname === HUB_CHAT_PATH) {
+      json(response, 200, await ops.chatPage(url.searchParams.get("conversationId") ?? "", url.searchParams.get("before") ?? undefined));
+      return 200;
+    }
+    // Documents, as the server owns them (Д9): a chat's (without revision
+    // bodies), one whole, or one revision's body.
+    if (request.method === "GET" && url.pathname === HUB_ARTIFACTS_PATH) {
+      json(response, 200, await ops.artifactStates(url.searchParams.get("conversationId") ?? ""));
+      return 200;
+    }
+    if (request.method === "GET" && url.pathname === HUB_ARTIFACT_PATH) {
+      const artifactId = url.searchParams.get("artifactId") ?? "";
+      const revision = url.searchParams.get("revision");
+      json(response, 200, revision ? await ops.artifactRevision(artifactId, revision) : await ops.artifactState(artifactId));
+      return 200;
+    }
+    throw new HubRequestError(404, "Not found.");
+  }
+
+  /**
+   * A machine's settings, sealed for it by the computer that set it up: the
+   * owner puts them, the machine reads its own (by the machine id the roster
+   * gives it). The server keeps the sealed text and never opens it; a put is
+   * told to the machine at once on its live socket.
+   */
+  private async handleMachineSettings(request: IncomingMessage, response: ServerResponse, url: URL, device: HubDevice, body: Buffer): Promise<number> {
+    const hub = this.options.storage.hub();
+    if (request.method === "PUT") {
+      if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub publishes a machine's settings.");
+      const parsed = parseJson(body) as Partial<HubMachineSettingsPut> | undefined;
+      if (!parsed || typeof parsed.machineId !== "string" || !MACHINE_ID.test(parsed.machineId) ||
+          typeof parsed.sealed !== "string" || parsed.sealed.length === 0 || parsed.sealed.length > HUB_MAX_BODY_BYTES) {
+        throw new HubRequestError(400, "Invalid machine settings.");
+      }
+      const updatedAt = new Date(this.now()).toISOString();
+      await hub.setDocument(machineSettingsKey(parsed.machineId), { sealed: parsed.sealed, updatedAt }, updatedAt);
+      this.tellMachine(parsed.machineId, { type: "settings" } satisfies HubLiveSettings);
+      this.options.debugLog?.("hub.machine-settings.published", { machineId: parsed.machineId, bytes: parsed.sealed.length });
+      json(response, 200, { ok: true, updatedAt });
+      return 200;
+    }
+    if (request.method === "GET") {
+      if (device.role !== "machine" || !device.machineId) throw new HubRequestError(403, "Only a machine reads its settings, and only its own.");
+      const stored = (await hub.document(machineSettingsKey(device.machineId)))?.value as { sealed?: unknown; updatedAt?: unknown } | undefined;
+      const sealed = typeof stored?.sealed === "string" ? stored.sealed : undefined;
+      const updatedAt = typeof stored?.updatedAt === "string" ? stored.updatedAt : undefined;
+      const since = url.searchParams.get("since") ?? undefined;
+      if (sealed && updatedAt && since && updatedAt <= since) {
+        json(response, 200, { updatedAt, unchanged: true } satisfies HubMachineSettings);
+        return 200;
+      }
+      json(response, 200, (sealed && updatedAt ? { sealed, updatedAt } : {}) satisfies HubMachineSettings);
+      return 200;
+    }
+    throw new HubRequestError(404, "Not found.");
+  }
+
+  /** A live word to the devices of one machine (its settings changed). */
+  private tellMachine(machineId: string, frame: HubLiveSettings): void {
+    void this.options.storage.hub().devices().then((devices) => {
+      const ids = new Set(devices.filter((item) => item.role === "machine" && item.machineId === machineId).map((item) => item.deviceId));
+      const text = JSON.stringify(frame);
+      for (const [socket, deviceId] of this.live) {
+        if (ids.has(deviceId) && socket.readyState === socket.OPEN) socket.send(text);
+      }
+    }).catch(() => undefined);
+  }
+
+  private broadcastOps(head: number): void {
+    const frame = JSON.stringify({ type: "ops", head } satisfies HubLiveOps);
     for (const socket of this.live.keys()) {
       if (socket.readyState === socket.OPEN) socket.send(frame);
     }
@@ -305,8 +419,8 @@ export class HubServer {
         this.watch(ws);
         ws.on("close", () => this.live.delete(ws));
         ws.on("error", () => this.live.delete(ws));
-        void this.options.log.head().then((value) => {
-          if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "head", head: value } satisfies HubLiveHead));
+        void this.options.ops?.head().then((value) => {
+          if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "ops", head: value } satisfies HubLiveOps));
         });
       });
     } catch (error) {
@@ -385,6 +499,7 @@ export class HubServer {
   private async handle(request: IncomingMessage, response: ServerResponse, openOnly = false): Promise<void> {
     const started = this.now();
     let status = 200;
+    let failure: string | undefined;
     try {
       cors(response);
       if (request.method === "OPTIONS") {
@@ -399,7 +514,7 @@ export class HubServer {
       }
       if (request.method === "GET" && url.pathname === "/v1/health") {
         return json(response, 200, {
-          ok: true, protocol: HUB_PROTOCOL_VERSION, hubId: this.options.hubId, version: this.options.version, head: await this.options.log.head()
+          ok: true, protocol: HUB_PROTOCOL_VERSION, hubId: this.options.hubId, version: this.options.version, head: await this.options.ops?.head() ?? 0
         } satisfies HubHealth);
       }
       if (request.method === "GET" && url.pathname === "/v1/push/vapid") {
@@ -420,8 +535,10 @@ export class HubServer {
         return json(response, 401, { ok: false, error: "phone_revoked" });
       }
       const checked = await this.preauthenticate(request.headers.authorization);
-      const large = (request.method === "POST" && url.pathname === "/v1/events") || (request.method === "PUT" && BLOB_PATH.test(url.pathname)) ||
-        (request.method === "PUT" && url.pathname === "/v1/catalog") || (request.method === "POST" && url.pathname === HUB_PROGRESS_PATH);
+      const large = (request.method === "POST" && url.pathname === HUB_OPS_PATH) || (request.method === "PUT" && BLOB_PATH.test(url.pathname)) ||
+        (request.method === "PUT" && url.pathname === "/v1/catalog") || (request.method === "POST" && url.pathname === HUB_PROGRESS_PATH) ||
+        // A machine's settings carry the User's skills and environment.
+        (request.method === "PUT" && url.pathname === HUB_MACHINE_SETTINGS_PATH);
       const body = await readBody(request, large ? HUB_MAX_BODY_BYTES : HUB_MAX_SMALL_BODY_BYTES);
       const device = await this.authenticate(request.method ?? "GET", body, request.headers.authorization, pathWithQuery, checked);
       if (this.options.phone && HUB_PHONE_PATHS.has(url.pathname)) {
@@ -430,77 +547,18 @@ export class HubServer {
         status = await this.options.phone.handle(request, response, url, device, body);
         return;
       }
-      if (request.method === "POST" && url.pathname === "/v1/events") {
-        const parsed = parseJson(body) as { events?: unknown; anchor?: unknown };
-        const anchor = parsed?.anchor;
-        if (anchor !== undefined && (!Array.isArray(anchor) || anchor.length > 200 ||
-            !anchor.every((scope) => typeof scope === "string" && scope.length > 0 && scope.length <= 512 && !CONTROL_CHARACTER.test(scope)))) {
-          throw new HubRequestError(400, "Invalid anchor.");
-        }
-        return json(response, 200, await this.options.log.push(device, parsed?.events, anchor as string[] | undefined));
+      if (request.method === "GET" && url.pathname === HUB_ME_PATH) {
+        return json(response, 200, {
+          deviceId: device.deviceId, role: device.role, name: device.name, ...(device.machineId ? { machineId: device.machineId } : {})
+        } satisfies HubMe);
       }
-      if (request.method === "GET" && url.pathname === "/v1/events") {
-        const after = Number(url.searchParams.get("after") ?? "0");
-        const limit = Number(url.searchParams.get("limit") ?? "200");
-        if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1) throw new HubRequestError(400, "Invalid position.");
-        const report = readReport(url.searchParams);
-        try {
-          return json(response, 200, { ...await this.options.log.pull(device, after, limit, report), hubId: this.options.hubId });
-        } catch (error) {
-          if (!(error instanceof HubResyncRequiredError)) throw error;
-          status = 410;
-          this.options.debugLog?.("hub.resync.required", { deviceId: device.deviceId, after, prunedThrough: error.prunedThrough });
-          return json(response, 410, { ok: false, error: error.message, resync: true, prunedThrough: error.prunedThrough, hubId: this.options.hubId } satisfies HubResyncRequired & { hubId: string });
-        }
+      if (url.pathname === HUB_MACHINE_SETTINGS_PATH) {
+        status = await this.handleMachineSettings(request, response, url, device, body);
+        return;
       }
-      if (request.method === "GET" && url.pathname === "/v1/chain") {
-        if (device.role === "phone") throw new HubRequestError(403, "A phone reads the server's copy, not the order.");
-        const origin = url.searchParams.get("origin") ?? "";
-        const scope = url.searchParams.get("scope") ?? "";
-        const from = Number(url.searchParams.get("from"));
-        const to = Number(url.searchParams.get("to"));
-        if (!origin || !scope || origin.length > 512 || scope.length > 512 || CONTROL_CHARACTER.test(origin) || CONTROL_CHARACTER.test(scope) ||
-            !Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 1 || to < from) throw new HubRequestError(400, "Invalid chain range.");
-        return json(response, 200, await this.options.log.chain(origin, scope, from, to));
-      }
-      if (request.method === "GET" && url.pathname === "/v1/snapshot") {
-        if (device.role === "phone") throw new HubRequestError(403, "A phone reads the server's copy, not the order.");
-        const page = url.searchParams.get("page") ?? undefined;
-        const scopes = (url.searchParams.get("scopes") ?? "").split(",").filter(Boolean);
-        const atMostText = url.searchParams.get("atMost");
-        const atMost = atMostText === null ? undefined : Number(atMostText);
-        const sinceText = url.searchParams.get("since");
-        const since = sinceText === null ? undefined : Number(sinceText);
-        if (since !== undefined && (!Number.isSafeInteger(since) || since < 0)) throw new HubRequestError(400, "Invalid snapshot request.");
-        if ((page && (page.length > 2048 || CONTROL_CHARACTER.test(page))) || scopes.length > 200 ||
-            scopes.some((scope) => scope.length > 512 || CONTROL_CHARACTER.test(scope)) ||
-            (atMost !== undefined && (!Number.isSafeInteger(atMost) || atMost < 0))) throw new HubRequestError(400, "Invalid snapshot request.");
-        const chat = url.searchParams.get("chat") ?? undefined;
-        if (chat !== undefined && (!chat || chat.length > 256 || CONTROL_CHARACTER.test(chat))) throw new HubRequestError(400, "Invalid snapshot request.");
-        const copy = url.searchParams.get("copy") === "1";
-        // A page of the copy costs the small server about a hundred MB while
-        // it is built: one at a time, the others asked to come back.
-        if (copy && this.copyPagesInFlight >= COPY_PAGES_IN_FLIGHT_MAX) throw new HubRequestError(503, "The hub is busy; try again.");
-        if (copy) this.copyPagesInFlight += 1;
-        let snapshot;
-        try {
-          snapshot = await this.options.log.snapshot(device, {
-            ...(page ? { page } : {}), scopes, ...(atMost !== undefined ? { atMost } : {}), ...(since !== undefined ? { since } : {}), copy, ...(chat ? { chat } : {})
-          });
-        } finally {
-          if (copy) this.copyPagesInFlight -= 1;
-        }
-        if (!page) this.options.debugLog?.("hub.snapshot.started", { deviceId: device.deviceId, hubSeq: snapshot.hubSeq, copy: url.searchParams.get("copy") === "1", ...(chat ? { chat } : {}) });
-        return json(response, 200, { ...snapshot, hubId: this.options.hubId });
-      }
-      if (request.method === "GET" && url.pathname === "/v1/devices/known") {
-        const ids = (url.searchParams.get("ids") ?? "").split(",").filter(Boolean);
-        if (ids.length > 200 || ids.some((id) => id.length > 128 || CONTROL_CHARACTER.test(id))) throw new HubRequestError(400, "Invalid devices.");
-        return json(response, 200, await this.options.log.known(ids));
-      }
-      if (request.method === "GET" && url.pathname === "/v1/readers") {
-        if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub reads where its devices stand.");
-        return json(response, 200, await this.options.log.readers());
+      if (this.options.ops && url.pathname.startsWith("/v3/")) {
+        status = await this.handleOps(request, response, url, device, body);
+        return;
       }
       const blob = BLOB_PATH.exec(url.pathname);
       if (blob) {
@@ -510,16 +568,16 @@ export class HubServer {
         if (request.method === "PUT") {
           // A body is put up before what names it reaches the server: a
           // phone's picture (it may be offline in between) is kept a month
-          // for it, anyone else's (a catalog's avatar, an event's body) a day.
+          // for it, anyone else's (a catalog's avatar) a day.
           await this.options.storage.deviceEventBlobs().pin([reference.blobHash], device.role === "phone" ? "phone-upload" : "upload",
             this.now() + (device.role === "phone" ? PHONE_UPLOAD_PIN_MS : UPLOAD_PIN_MS));
-          await this.options.log.putBlobFragment(reference, index, body).catch((error: unknown) => {
+          await this.putBlobFragment(reference, index, body).catch((error: unknown) => {
             throw new HubRequestError(400, error instanceof Error ? error.message : String(error));
           });
           return json(response, 200, { ok: true });
         }
         if (request.method === "GET") {
-          const bytes = await this.options.log.blobFragment(reference, index);
+          const bytes = await this.blobFragment(reference, index);
           if (!bytes) throw new HubRequestError(404, "The hub does not hold that fragment.");
           response.writeHead(200, { "content-type": "application/octet-stream", "content-length": bytes.length, "cache-control": "no-store" });
           response.end(bytes);
@@ -552,7 +610,15 @@ export class HubServer {
       }
       if (url.pathname === "/v1/roster") {
         if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub changes its devices.");
-        if (request.method === "GET") return json(response, 200, { devices: await this.options.storage.hub().devices() });
+        // With what each phone enrolled: the owner learns a phone that paired
+        // while it was away from here, and names it from then on.
+        if (request.method === "GET") {
+          return json(response, 200, {
+            devices: await this.options.storage.hub().devices(),
+            enrollments: await this.options.storage.hub().phoneEnrollments(),
+            feedReads: [...(await this.options.storage.hubOps().cursorTimes())].map(([deviceId, read]) => ({ deviceId, readAt: read.updatedAt }))
+          } satisfies HubRosterResponse);
+        }
         if (request.method === "PUT") {
           const parsed = parseJson(body);
           const devices = validRoster(parsed);
@@ -592,9 +658,8 @@ export class HubServer {
         return json(response, 200, { ok: true, machines: entries.length });
       }
       if (url.pathname === HUB_PROGRESS_PATH && request.method === "POST") {
-        // The desktop's own members run there; a machine's progress travels
-        // in its channel, a phone runs nothing.
-        if (device.role !== "owner" && device.role !== "desktop") throw new HubRequestError(403, "Only a desktop posts its members' progress.");
+        // Members run on the computer and on machines; a phone runs nothing.
+        if (device.role === "phone") throw new HubRequestError(403, "Only a device that runs members posts their progress.");
         const frames = (parseJson(body) as Partial<HubProgressPost> | undefined)?.frames;
         if (!Array.isArray(frames) || frames.length > 100) throw new HubRequestError(400, "Invalid progress.");
         this.options.onProgress?.(frames);
@@ -602,15 +667,50 @@ export class HubServer {
       }
       throw new HubRequestError(404, "Not found.");
     } catch (error) {
-      status = error instanceof HubRequestError ? error.status : 500;
+      status = error instanceof HubRequestError || error instanceof HubOpsRequestError ? error.status : 500;
+      if (status !== 500 && error instanceof Error) failure = error.message;
       if (status === 500) this.options.debugLog?.("hub.request.error", { path: (request.url ?? "").split("?")[0], message: error instanceof Error ? error.message : String(error) });
       if (!response.headersSent) json(response, status, { ok: false, error: error instanceof Error && status !== 500 ? error.message : "The hub could not answer." });
     } finally {
       const ms = this.now() - started;
       const path = (request.url ?? "").split("?")[0];
       // A phone's wait for news is long on purpose.
-      if (status >= 500 || (ms > SLOW_REQUEST_MS && path !== "/v1/phone/changes")) this.options.debugLog?.("hub.request", { method: request.method, path, status, ms });
+      // Every refusal is logged with its reason, not only failures of the
+      // server's own (agreement Д12): a device that cannot write is visible.
+      if (status >= 500 || (status >= 400 && path.startsWith("/v3/")) ||
+          (ms > SLOW_REQUEST_MS && path !== "/v1/phone/changes" && path !== HUB_FEED_PATH)) {
+        this.options.debugLog?.("hub.request", { method: request.method, path, status, ms, ...(failure ? { reason: failure } : {}) });
+      }
     }
+  }
+
+  private async blobComplete(reference: DeviceEventBlobReference): Promise<boolean> {
+    try {
+      return await this.options.storage.deviceEventBlobs().verify(reference);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * One fragment of a picture or an avatar, put up before the message (or
+   * the catalog) that names it. A body that is complete is never touched
+   * again, and while it is incomplete a fragment that differs replaces the
+   * stored one: a wrong upload can delay a body, not spoil it.
+   */
+  private async putBlobFragment(reference: DeviceEventBlobReference, index: number, bytes: Buffer): Promise<void> {
+    if (await this.blobComplete(reference)) return;
+    const blobs = this.options.storage.deviceEventBlobs();
+    const existing = await blobs.fragment(reference, index).catch(() => null);
+    if (existing === null || (existing && existing.bytesBase64 !== bytes.toString("base64"))) {
+      await blobs.replaceFragment(reference, index);
+    }
+    await blobs.store({ reference, index, bytesBase64: bytes.toString("base64") });
+  }
+
+  private async blobFragment(reference: DeviceEventBlobReference, index: number): Promise<Buffer | undefined> {
+    const fragment = await this.options.storage.deviceEventBlobs().fragment(reference, index).catch(() => undefined);
+    return fragment ? Buffer.from(fragment.bytesBase64, "base64") : undefined;
   }
 
   /** Enrollment attempts per address in the last minute, and all together:
@@ -779,25 +879,11 @@ function blobReference(blobHash: string, params: URLSearchParams): DeviceEventBl
   return isDeviceEventBlobReference(reference) ? reference : undefined;
 }
 
-/** What a device says it holds on a read (absent: a device that does not
- *  report, which is read as before and never told to start again). */
-function readReport(params: URLSearchParams): (HubReadReport & { peek?: boolean }) | undefined {
-  if (!params.has("held")) return undefined;
-  const held = Number(params.get("held"));
-  const heldSince = Number(params.get("heldSince") ?? "0");
-  const heldCount = Number(params.get("heldCount") ?? "0");
-  // heldSince is a time: no later than any date can be.
-  if (![held, heldSince, heldCount].every((value) => Number.isSafeInteger(value) && value >= 0) || heldSince > MAX_DATE_MS) throw new HubRequestError(400, "Invalid read report.");
-  const gaveUp = params.has("gaveUp") ? Number(params.get("gaveUp")) : undefined;
-  const gaveUpAt = params.has("gaveUpAt") ? Number(params.get("gaveUpAt")) : undefined;
-  if (gaveUp !== undefined && (!Number.isSafeInteger(gaveUp) || gaveUp < 1 || !Number.isSafeInteger(gaveUpAt) || (gaveUpAt as number) < 1 || (gaveUpAt as number) > MAX_DATE_MS)) {
-    throw new HubRequestError(400, "Invalid read report.");
-  }
-  return { held, heldSince, heldCount, ...(gaveUp !== undefined ? { gaveUp, gaveUpAt } : {}), ...(params.get("peek") === "1" ? { peek: true } : {}) };
-}
+const MACHINE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
-const RENDEZVOUS_ID = /^[A-Za-z0-9._-]{1,128}$/;
-const MAX_DATE_MS = 8_640_000_000_000_000;
+function machineSettingsKey(machineId: string): string {
+  return `machine-settings:${machineId}`;
+}
 
 function validRoster(value: unknown): HubDevice[] {
   const devices = (value as HubRosterRequest | undefined)?.devices;
@@ -805,8 +891,7 @@ function validRoster(value: unknown): HubDevice[] {
   return devices.map((device) => {
     if (!device || typeof device.publicKeyDerBase64 !== "string" || deviceIdForPublicKey(device.publicKeyDerBase64) !== device.deviceId ||
         !(HUB_ROSTER_ROLES as readonly string[]).includes(device.role) || typeof device.name !== "string" || device.name.length > 200 || CONTROL_CHARACTER.test(device.name) ||
-        (device.machineId !== undefined && (typeof device.machineId !== "string" || device.machineId.length > 128)) ||
-        (device.rendezvousId !== undefined && (typeof device.rendezvousId !== "string" || !RENDEZVOUS_ID.test(device.rendezvousId)))) {
+        (device.machineId !== undefined && (typeof device.machineId !== "string" || device.machineId.length > 128))) {
       throw new HubRequestError(400, "Invalid roster entry.");
     }
     // A phone is on the roster for every chat (see validInvite).
@@ -817,9 +902,7 @@ function validRoster(value: unknown): HubDevice[] {
     return { deviceId: device.deviceId, publicKeyDerBase64: device.publicKeyDerBase64, role: device.role, name: device.name, addedAt: "",
       ...(device.machineId ? { machineId: device.machineId } : {}),
       ...(device.scope ? { scope: device.scope } : {}),
-      ...(device.inviteId ? { inviteId: device.inviteId } : {}),
-      ...(device.role === "machine" && device.reader === true ? { reader: true } : {}),
-      ...(device.role === "machine" && device.rendezvousId ? { rendezvousId: device.rendezvousId } : {}) };
+      ...(device.inviteId ? { inviteId: device.inviteId } : {}) };
   });
 }
 

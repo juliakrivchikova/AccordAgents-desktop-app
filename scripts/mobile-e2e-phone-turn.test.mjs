@@ -7,17 +7,17 @@
 // a "Thinking" row stayed above it forever.
 //
 // The phone talks to the User's own server only. It decides who its message
-// is for, by the desktop's own rules, and signs it into the server's order;
-// until the member's home starts the turn the phone shows the member it
-// addressed, waiting. The home starts the turn under the run id every device
-// computes for it (phone-<message>-<member>) and publishes the member's
-// message and its live text there. Here the server is a real hub, the live
-// text goes through the desktop's real publisher (HubPhonePublisher), and the
-// phone is the built PWA in a real browser, which sends by typing into its own
-// composer. The home's own turn logic is played by this harness, the way the
-// earlier harness played the desktop's chat sender: it answers each message
-// the phone placed in the server's order, in the shapes the desktop's chat
-// publishes.
+// is for, by the desktop's own rules, and writes it as an operation the
+// server takes (message.create); the server asks a turn of each member it
+// names, and until the member's home takes that turn the phone shows the
+// member it addressed, waiting. The home takes the turn under the run id
+// every device computes for it (turn-<message>-<member>) and writes the
+// member's message, and its live text goes to the server. Here the server is
+// a real hub, the live text goes through the desktop's real publisher
+// (HubPhonePublisher), and the phone is the built PWA in a real browser,
+// which sends by typing into its own composer. The home's own turn logic is
+// played by this harness: it answers each message the server took from the
+// phone, in the shapes the desktop's chat writes.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createRequire } from "node:module";
@@ -62,13 +62,11 @@ async function until(label, predicate, { timeoutMs = 25_000, stepMs = 400, detai
 test("live end-to-end: a phone-sent turn clears its own in-progress row", { timeout: 600_000 }, async (t) => {
   const { HubPhonePublisher } = require(path.join(repoRoot, "dist/main/main/services/hubPhonePublisher.js"));
   const { HubClient } = require(path.join(repoRoot, "dist/main/main/services/hubClient.js"));
-  const { phoneTurnRunId } = require(path.join(repoRoot, "dist/main/shared/hubProtocol.js"));
+  const { hubTurnRunId } = require(path.join(repoRoot, "dist/main/shared/hubOps.js"));
   const hub = await startMobileHub();
   const site = await serveMobileShell({ port: SITE_PORT, hubOrigins: [hub.base] });
-  const client = new HubClient({ url: hub.base, identity: async () => hub.owner, storage: hub.storage });
+  const client = new HubClient({ url: hub.base, identity: async () => hub.owner });
   const publisher = new HubPhonePublisher({
-    storage: hub.storage,
-    eventLog: { appendLocalEvent: async () => undefined },
     client: () => client,
     hasPhones: async () => true,
     buildCatalog: async () => ({ roles: {}, prompts: [], skills: [] }),
@@ -104,7 +102,8 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", { time
     if (members.length > 1 && fanoutGates.current) {
       const gates = fanoutGates.current;
       fanoutGates.current = undefined;
-      const turns = members.map((member) => ({ member, runId: phoneTurnRunId(message.id, member.id), id: `msg-${member.handle}-${seq}` }));
+      const turns = members.map((member) => ({ member, runId: hubTurnRunId(message.id, member.id), id: `msg-${member.handle}-${seq}` }));
+      for (const turn of turns) await hub.claimTurn(CONVERSATION, message.id, turn.member.id);
       await hub.addMessages(CONVERSATION, turns.map((turn) => memberMessage(turn.id, turn.member, turn.runId, message.id, "", "pending")));
       for (const turn of turns) progress(turn.runId, turn.member, turn.id, "running", `@${turn.member.handle} is typing something`);
       for (const turn of turns) {
@@ -122,7 +121,7 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", { time
     }
     const silent = content.includes("no progress yet");
     const multiStep = content.includes("multi step");
-    const runId = phoneTurnRunId(message.id, member.id);
+    const runId = hubTurnRunId(message.id, member.id);
     const answerId = `msg-answer-${seq}`;
     const tag = content.match(/#([a-z0-9-]+)/)?.[1];
     const text = tag ? `Answer for #${tag}.` : `Answer number ${seq}.`;
@@ -130,7 +129,9 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", { time
       await holdStart.current;
       holdStart.current = undefined;
     }
-    // The home starts the turn: the member's message, live under the run.
+    // The home takes the turn on the server and starts it: the member's
+    // message, live under the run.
+    await hub.claimTurn(CONVERSATION, message.id, member.id);
     await hub.addMessages(CONVERSATION, [memberMessage(answerId, member, runId, message.id, "", "pending")]);
     if (!silent) progress(runId, member, answerId, "running", text.slice(0, 8));
     if (multiStep) {
@@ -163,12 +164,11 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", { time
     progress(runId, member, answerId, "finished", text);
     await hub.updateMessages(CONVERSATION, [memberMessage(answerId, member, runId, message.id, text, "done")]);
   }
-  hub.composed.hubLog.onAppended(({ events }) => {
-    for (const { event } of events) {
-      if (event.originId === hub.owner.originId || event.kind !== "chat.changes" || event.conversationId !== CONVERSATION) continue;
-      const created = (event.payload.changes || []).find((change) => change.type === "message.created" && change.message.role === "user");
-      if (created) void answer(created.message).catch((error) => failures.push(String(error && error.stack || error)));
-    }
+  // Every message of the User's the server took from the phone, once.
+  hub.composed.ops.onApplied(({ entry }) => {
+    if (entry.deviceId === hub.owner.originId || entry.conversationId !== CONVERSATION) return;
+    if (entry.effect.kind !== "message.create" || entry.effect.message.role !== "user") return;
+    void answer(entry.effect.message).catch((error) => failures.push(String(error && error.stack || error)));
   });
 
   const profile = await tempProfile("aa-turn-");

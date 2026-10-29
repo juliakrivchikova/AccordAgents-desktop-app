@@ -1,7 +1,7 @@
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
 import type { MachineLinkEnvelope } from "../../shared/machineLink";
 import { stableJson } from "../../shared/stableJson";
-import type { ChatEventDeviceIdentityRecord } from "./storage";
+import type { DeviceIdentityRecord } from "./storage";
 
 interface ControlAuthentication {
   from: string;
@@ -19,7 +19,7 @@ export function machineControlSender(envelope: MachineLinkEnvelope): string | un
 
 /** The room's shared seal permits transport; it cannot grant the authority of
  * another device. Presence uses the same signing identity as durable events. */
-export function signMachineControl(envelope: MachineLinkEnvelope, identity: ChatEventDeviceIdentityRecord, room: string, to: string): SignedControl {
+export function signMachineControl(envelope: MachineLinkEnvelope, identity: DeviceIdentityRecord, room: string, to: string): SignedControl {
   const unsigned = { ...envelope, authentication: { from: identity.originId, to, room, publicKeyDerBase64: identity.publicKeyDerBase64 } };
   const signature = sign(null, Buffer.from(stableJson(unsigned)), createPrivateKey({
     key: Buffer.from(identity.privateKeyDerBase64, "base64"), format: "der", type: "pkcs8"
