@@ -9,7 +9,7 @@ import {
   type ChatProcessingTranscriptView,
   type ChatTranscriptSegment
 } from "../../../shared/processingTranscript";
-import { activityGroupKey, ChatInlineActivityGroup } from "./chat-inline-activity";
+import { activityGroupKey, ChatInlineActivityEvent, ChatInlineActivityGroup } from "./chat-inline-activity";
 import type { ChatThinkingRow } from "./chat-conversation-progress";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
@@ -79,6 +79,8 @@ export const ChatInlineTranscript = memo(function ChatInlineTranscript(props: {
     <div className="chat-inline-transcript">
       {blocks.map((block, index) => block.kind === "text" ? (
         <MarkdownText content={block.text} key={`text-${index}`} />
+      ) : block.kind === "activity" ? (
+        <ChatInlineActivityEvent activityDisclosure={props.activityDisclosure} event={block.event} key={block.event.id} />
       ) : (
         <ChatInlineActivityGroup
           activityDisclosure={props.activityDisclosure}
@@ -139,38 +141,38 @@ const StreamingMarkdownText = memo(function StreamingMarkdownText(props: {
 }): JSX.Element {
   const { activityEvents, content } = props;
   const { completed, tail, tailOffset } = useMemo(() => splitStreamingMarkdown(content), [content]);
-  const completedSegment = useMemo<ChatTranscriptSegment>(() => ({
-    key: "prefix",
-    content: completed,
-    startOffset: 0,
-    endOffset: tailOffset
-  }), [completed, tailOffset]);
-  const tailSegment = useMemo<ChatTranscriptSegment>(() => ({
-    key: "full",
-    content: tail,
-    startOffset: tailOffset,
-    endOffset: content.replace(/\r\n/g, "\n").length
-  }), [content, tail, tailOffset]);
+  // Activities before the first character of the paragraph in progress belong with the
+  // completed text: they sit in the same place on screen and are usually the same run, which
+  // must stay one line rather than split at the paragraph break.
+  const { completedEvents, tailEvents } = useMemo(() => {
+    const leadEnd = tail.search(/\S/);
+    const bound = tailOffset + (leadEnd < 0 ? tail.length : leadEnd);
+    return {
+      completedEvents: activityEvents.filter((event) => (event.afterContentLength ?? 0) <= bound),
+      tailEvents: activityEvents
+        .filter((event) => (event.afterContentLength ?? 0) > bound)
+        .map((event) => ({ ...event, afterContentLength: (event.afterContentLength ?? 0) - tailOffset }))
+    };
+  }, [activityEvents, tail, tailOffset]);
+  const showTail = Boolean(tail.trim()) || tailEvents.length > 0;
   return (
     <div className="streaming-message-text">
-      {(completed || chatActivityEventsForSegment(activityEvents, completedSegment).length > 0) && (
+      {(completed || completedEvents.length > 0) && (
         <ChatInlineTranscript
           activityDisclosure={props.activityDisclosure}
           content={completed}
-          activityEvents={activityEvents}
-          segment={completedSegment}
-          liveTail={!tail}
+          activityEvents={completedEvents}
+          liveTail={!showTail}
         />
       )}
-      {tail && (
+      {showTail && (
         <StreamingTailTranscript
           activityDisclosure={props.activityDisclosure}
           content={tail}
-          activityEvents={activityEvents}
-          segment={tailSegment}
+          activityEvents={tailEvents}
         />
       )}
-      {!tail && <span className="streaming-caret" aria-hidden="true" />}
+      {!showTail && <span className="streaming-caret" aria-hidden="true" />}
     </div>
   );
 });
@@ -179,7 +181,7 @@ const StreamingTailTranscript = memo(function StreamingTailTranscript(props: {
   activityDisclosure: ChatActivityDisclosureState;
   content: string;
   activityEvents: ChatAgentActivityEvent[];
-  segment: ChatTranscriptSegment;
+  segment?: ChatTranscriptSegment;
 }): JSX.Element {
   const blocks = chatInlineTranscriptBlocks(chatInlineTranscriptParts(props.content, props.activityEvents, props.segment));
   const lastBlock = blocks[blocks.length - 1];
@@ -190,6 +192,8 @@ const StreamingTailTranscript = memo(function StreamingTailTranscript(props: {
           {block.text}
           {index === blocks.length - 1 && <span className="streaming-caret" aria-hidden="true" />}
         </div>
+      ) : block.kind === "activity" ? (
+        <ChatInlineActivityEvent activityDisclosure={props.activityDisclosure} event={block.event} key={block.event.id} />
       ) : (
         <ChatInlineActivityGroup
           activityDisclosure={props.activityDisclosure}

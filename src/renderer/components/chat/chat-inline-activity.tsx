@@ -16,59 +16,54 @@ import { chatActivityGroupSummary } from "../../../shared/processingTranscript";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
 /**
- * One line per run of consecutive activities. While the run is still in it, the line shows the
- * current activity and the next one replaces it; once the member moves on, it becomes a count
- * that expands to the full list.
+ * One line per run of consecutive activities. While the member is still in the run, the line
+ * shows the current activity, shimmering, and the next one replaces it; once the member moves
+ * on, it shows the count. Either way it expands to the full list, which keeps growing while live.
  */
 export function ChatInlineActivityGroup(props: {
   activityDisclosure: ChatActivityDisclosureState;
   events: ChatAgentActivityEvent[];
   live: boolean;
 }): JSX.Element {
-  const { activityDisclosure, events } = props;
+  const { activityDisclosure, events, live } = props;
   const listId = useId();
-  const groupId = activityGroupKey(events);
-  const expanded = activityDisclosure.expandedActivityIds.has(groupId);
-  if (props.live) {
-    const current = events[events.length - 1];
-    return (
-      <ChatInlineActivityEvent
-        activityDisclosure={activityDisclosure}
-        event={current}
-        live
-        key={current.id}
-        onToggle={() => {
-          // Opening the live line's detail also opens its group, so the detail the User is reading
-          // stays on screen when the member moves on and the line becomes a count.
-          if (!activityDisclosure.expandedActivityIds.has(current.id) && !expanded) {
-            activityDisclosure.toggleActivity(groupId);
-          }
-          activityDisclosure.toggleActivity(current.id);
-        }}
-      />
-    );
-  }
-  const summary = chatActivityGroupSummary(events.length);
+  // The group is open while any of its events carries the open mark. Opening marks the newest
+  // event, so the state survives the oldest events being trimmed and the run being regrouped.
+  const disclosureKeys = events.map((event) => activityGroupDisclosureKey(event.id));
+  const openKeys = disclosureKeys.filter((key) => activityDisclosure.expandedActivityIds.has(key));
+  const expanded = openKeys.length > 0;
+  const toggle = () => {
+    if (expanded) {
+      openKeys.forEach((key) => activityDisclosure.toggleActivity(key));
+    } else if (disclosureKeys.length > 0) {
+      activityDisclosure.toggleActivity(disclosureKeys[disclosureKeys.length - 1]);
+    }
+  };
+  const current = events[events.length - 1];
+  const showCurrent = live && !expanded && Boolean(current);
+  const label = showCurrent ? current.label : chatActivityGroupSummary(events.length);
   return (
-    <div className="chat-inline-activity-group">
+    <div className={`chat-inline-activity-group${live ? " is-live" : ""}`}>
       <button
         type="button"
         className="chat-inline-activity-heading chat-inline-activity-toggle"
         aria-controls={expanded ? listId : undefined}
         aria-expanded={expanded}
-        onClick={() => activityDisclosure.toggleActivity(groupId)}
+        title={label}
+        onClick={toggle}
       >
         {expanded
           ? <ChevronDown className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />
           : <ChevronRight className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />}
-        <span>{summary}</span>
+        <span className={showCurrent ? "streaming-status-label" : undefined}>{label}</span>
       </button>
       {expanded && (
         <div id={listId} className="chat-inline-activity-group-list">
-          {events.map((event) => (
+          {events.map((event, index) => (
             <ChatInlineActivityEvent
               activityDisclosure={activityDisclosure}
               event={event}
+              live={live && index === events.length - 1}
               key={event.id}
             />
           ))}
@@ -82,11 +77,15 @@ export function activityGroupKey(events: ChatAgentActivityEvent[]): string {
   return `activity-group:${events[0]?.id ?? "empty"}`;
 }
 
-function ChatInlineActivityEvent(props: {
+/** Group disclosure shares the activity set with event ids; the prefix keeps the two apart. */
+function activityGroupDisclosureKey(eventId: string): string {
+  return `activity-group:${eventId}`;
+}
+
+export function ChatInlineActivityEvent(props: {
   activityDisclosure: ChatActivityDisclosureState;
   event: ChatAgentActivityEvent;
   live?: boolean;
-  onToggle?: () => void;
 }): JSX.Element {
   const { activityDisclosure, event } = props;
   const Icon = iconForActivityKind(event.kind);
@@ -109,7 +108,7 @@ function ChatInlineActivityEvent(props: {
           aria-controls={detailId}
           aria-expanded={activityExpanded}
           title={event.label}
-          onClick={props.onToggle ?? (() => activityDisclosure.toggleActivity(event.id))}
+          onClick={() => activityDisclosure.toggleActivity(event.id)}
         >
           {activityExpanded
             ? <ChevronDown className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />

@@ -343,12 +343,27 @@ test("inline transcript blocks group consecutive activities and only text splits
     event("e", 5, content.length)
   ]));
 
-  assert.deepEqual(blocks.map((block) => block.kind === "text" ? block.text.trim() : block.events.map((item) => item.id).join(",")), [
+  const describe = (items: ReturnType<typeof chatInlineTranscriptBlocks>) => items.map((block) => block.kind === "text"
+    ? block.text.trim()
+    : block.kind === "activity"
+      ? `alone:${block.event.id}`
+      : block.events.map((item) => item.id).join(","));
+  assert.deepEqual(describe(blocks), [
     first,
     "a,b,c",
     second,
     "d,e"
   ]);
+
+  const notices = chatInlineTranscriptBlocks(chatInlineTranscriptParts(content, [
+    event("a", 1, first.length),
+    { ...event("stall", 2, first.length), kind: "status" as const, label: "No provider output for 5 minutes" },
+    event("b", 3, first.length),
+    { ...event("review", 4, first.length), kind: "approval" as const, label: "Auto-reviewing approval request" },
+    { ...event("refused", 5, first.length), kind: "approval" as const, status: "failed" as const, label: "Could not approve" },
+    event("c", 6, first.length)
+  ]));
+  assert.deepEqual(describe(notices), [first, "a", "alone:stall", "b,review", "alone:refused", "c", second]);
   assert.deepEqual(chatInlineTranscriptBlocks([]), []);
   assert.equal(chatActivityGroupSummary(1), "1 command");
   assert.equal(chatActivityGroupSummary(12), "12 commands");

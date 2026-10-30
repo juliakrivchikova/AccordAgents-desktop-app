@@ -2995,7 +2995,8 @@
   max-width: min(760px, 100%);
 }
 
-.chat-inline-activity-event {
+.chat-inline-activity-event,
+.chat-inline-activity-group {
   display: grid;
   width: 100%;
   gap: 5px;
@@ -3007,14 +3008,7 @@
 }
 
 .chat-inline-activity-group {
-  display: grid;
-  width: 100%;
   gap: 8px;
-  justify-self: start;
-  max-width: min(760px, 100%);
-  color: var(--app-muted);
-  font-size: 13px;
-  line-height: 1.35;
 }
 
 .chat-inline-activity-group-list {
@@ -3024,9 +3018,15 @@
   margin-left: 23px;
 }
 
-/* The in-progress activity line shimmers like "Thinking" without the label's heavier weight. */
-.chat-inline-activity-event.is-live .streaming-status-label {
+/* The in-progress activity shimmers like "Thinking" without the label's heavier weight. */
+.chat-inline-activity-heading .streaming-status-label {
   font-weight: inherit;
+}
+
+.chat-inline-activity-toggle:hover .streaming-status-label,
+.chat-inline-activity-toggle:focus-visible .streaming-status-label {
+  color: inherit;
+  -webkit-text-fill-color: currentColor;
 }
 
 .chat-inline-activity-heading {
