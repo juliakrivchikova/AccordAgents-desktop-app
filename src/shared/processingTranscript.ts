@@ -18,6 +18,34 @@ export type ChatInlineTranscriptPart =
   | { kind: "text"; text: string }
   | { kind: "activity"; event: ChatAgentActivityEvent };
 
+export type ChatInlineTranscriptBlock =
+  | { kind: "text"; text: string }
+  | { kind: "activity-group"; events: ChatAgentActivityEvent[] };
+
+export function chatInlineTranscriptBlocks(parts: ChatInlineTranscriptPart[]): ChatInlineTranscriptBlock[] {
+  const blocks: ChatInlineTranscriptBlock[] = [];
+  for (const part of parts) {
+    if (part.kind === "text") {
+      // Whitespace between two activities renders nothing, so it must not split their group.
+      if (part.text.trim()) {
+        blocks.push({ kind: "text", text: part.text });
+      }
+      continue;
+    }
+    const last = blocks[blocks.length - 1];
+    if (last?.kind === "activity-group") {
+      last.events.push(part.event);
+    } else {
+      blocks.push({ kind: "activity-group", events: [part.event] });
+    }
+  }
+  return blocks;
+}
+
+export function chatActivityGroupSummary(count: number): string {
+  return `${count} ${count === 1 ? "command" : "commands"}`;
+}
+
 export function chatProcessingTranscriptPrefix(transcriptContent: string, finalContent: string): string {
   const transcript = normalizeComparableText(transcriptContent);
   const final = normalizeComparableText(finalContent);

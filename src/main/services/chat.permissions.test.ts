@@ -76,6 +76,8 @@ import { CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID } from "../../shared/codexApprov
 import { activeRunIdsForConversation } from "../../shared/chatActiveRuns";
 import {
   chatActivityEventsForSegment,
+  chatActivityGroupSummary,
+  chatInlineTranscriptBlocks,
   chatInlineTranscriptParts,
   chatProcessingTranscriptPrefix,
   chatProcessingTranscriptView,
@@ -319,6 +321,37 @@ test("inline transcript snaps activity rows to the next sentence boundary", () =
     `search:${firstSentence.length}`,
     " Next sentence."
   ]);
+});
+
+test("inline transcript blocks group consecutive activities and only text splits a group", () => {
+  const first = "Reading the diff.";
+  const second = "Checking the logs.";
+  const content = `${first}\n\n${second}`;
+  const event = (id: string, sequence: number, afterContentLength: number) => ({
+    id,
+    sequence,
+    kind: "command" as const,
+    label: "Using Bash",
+    createdAt: NOW,
+    afterContentLength
+  });
+  const blocks = chatInlineTranscriptBlocks(chatInlineTranscriptParts(content, [
+    event("a", 1, first.length),
+    event("b", 2, first.length + 1),
+    event("c", 3, first.length + 2),
+    event("d", 4, content.length),
+    event("e", 5, content.length)
+  ]));
+
+  assert.deepEqual(blocks.map((block) => block.kind === "text" ? block.text.trim() : block.events.map((item) => item.id).join(",")), [
+    first,
+    "a,b,c",
+    second,
+    "d,e"
+  ]);
+  assert.deepEqual(chatInlineTranscriptBlocks([]), []);
+  assert.equal(chatActivityGroupSummary(1), "1 command");
+  assert.equal(chatActivityGroupSummary(12), "12 commands");
 });
 
 test("inline transcript anchors activity rows at segment end when no boundary follows", () => {

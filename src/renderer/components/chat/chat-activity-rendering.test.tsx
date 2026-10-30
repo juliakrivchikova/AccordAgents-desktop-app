@@ -225,7 +225,7 @@ test("activity disclosure survives streaming to finished renderer and virtualize
   const event = activityEvent("command", 1, "Running command", "npm run typecheck");
   let renderer: ReactTestRenderer | undefined;
   await act(async () => {
-    renderer = create(<ActivityDisclosureHarness activityEvents={[event]} mode="stream-tail" />);
+    renderer = create(<ActivityDisclosureHarness activityEvents={[event]} mode="stream-empty" />);
   });
   await act(async () => buttonWithLabel(renderer!, event.label).props.onClick());
 
@@ -234,6 +234,7 @@ test("activity disclosure survives streaming to finished renderer and virtualize
   });
   assert.equal(buttonWithLabel(renderer!, "Show full stream").props["aria-expanded"], false);
   await act(async () => buttonWithLabel(renderer!, "Show full stream").props.onClick());
+  assert.equal(buttonWithLabel(renderer!, "1 command").props["aria-expanded"], true, "opening the live line opened its group");
   assert.equal(buttonWithLabel(renderer!, event.label).props["aria-expanded"], true, "finished renderer keeps activity open");
 
   await act(async () => {
@@ -253,10 +254,13 @@ test("timeline and thread copies share disclosure state across thread close and 
   await act(async () => {
     renderer = create(<ActivityDisclosureHarness activityEvents={[event]} mode="timeline-and-thread" />);
   });
-  const copies = renderer!.root.findAllByType("button");
+  const groups = renderer!.root.findAllByType("button");
+  assert.deepEqual(groups.map(textContent), ["1 command", "1 command"]);
+  await act(async () => groups[0].props.onClick());
+  const copies = renderer!.root.findAllByType("button").filter((button) => textContent(button).includes(event.label));
   assert.equal(copies.length, 2);
   await act(async () => copies[0].props.onClick());
-  assert.deepEqual(renderer!.root.findAllByType("button").map((button) => button.props["aria-expanded"]), [true, true]);
+  assert.deepEqual(renderer!.root.findAllByType("button").map((button) => button.props["aria-expanded"]), [true, true, true, true]);
 
   await act(async () => {
     renderer!.update(<ActivityDisclosureHarness activityEvents={[event]} mode="timeline-only" />);
@@ -265,7 +269,7 @@ test("timeline and thread copies share disclosure state across thread close and 
   await act(async () => {
     renderer!.update(<ActivityDisclosureHarness activityEvents={[event]} mode="timeline-and-thread" />);
   });
-  assert.deepEqual(renderer!.root.findAllByType("button").map((button) => button.props["aria-expanded"]), [true, true]);
+  assert.deepEqual(renderer!.root.findAllByType("button").map((button) => button.props["aria-expanded"]), [true, true, true, true]);
   await act(async () => renderer!.unmount());
 });
 
@@ -282,6 +286,74 @@ test("activity disclosure state clears synchronously when the conversation chang
     renderer!.update(<ActivityDisclosureHarness activityEvents={[event]} conversationId="conversation-2" />);
   });
   assert.equal(buttonWithLabel(renderer!, event.label).props["aria-expanded"], false);
+  await act(async () => renderer!.unmount());
+});
+
+test("a live run shows only its current activity on one shimmering line", async () => {
+  const events = [
+    activityEvent("tool", 1, "Reading file"),
+    activityEvent("command", 2, "Using Bash"),
+    activityEvent("command", 3, "Using Bash again")
+  ];
+  let renderer: ReactTestRenderer | undefined;
+  await act(async () => {
+    renderer = create(<ActivityDisclosureHarness activityEvents={events} mode="stream-empty" />);
+  });
+  assert.deepEqual(activityRowLabels(renderer!), ["Using Bash again"]);
+  assert.match(liveRow(renderer!).props.className, /is-live/);
+  assert.equal(liveRow(renderer!).findAll((node) => /streaming-status-label/.test(String(node.props.className ?? ""))).length, 1);
+  assert.doesNotMatch(textContent(renderer!.root), /commands?/);
+
+  const next = [...events, activityEvent("web", 4, "Using web search")];
+  await act(async () => {
+    renderer!.update(<ActivityDisclosureHarness activityEvents={next} mode="stream-empty" />);
+  });
+  assert.deepEqual(activityRowLabels(renderer!), ["Using web search"], "the next activity replaces the line");
+  await act(async () => renderer!.unmount());
+});
+
+test("activities the member moved past become a count that expands to the full list", async () => {
+  const events = [
+    activityEvent("tool", 1, "Reading file"),
+    activityEvent("command", 2, "Using Bash")
+  ];
+  let renderer: ReactTestRenderer | undefined;
+  await act(async () => {
+    renderer = create(<ActivityDisclosureHarness activityEvents={events} mode="stream-tail" />);
+  });
+  const group = buttonWithLabel(renderer!, "2 commands");
+  assert.equal(group.props["aria-expanded"], false);
+  assert.deepEqual(activityRowLabels(renderer!), []);
+  const groupRoot = renderer!.root.findByProps({ className: "chat-inline-activity-group" });
+  assert.equal(groupRoot.findAll((node) => /streaming-status-label/.test(String(node.props.className ?? ""))).length, 0, "a past group does not shimmer");
+
+  await act(async () => group.props.onClick());
+  assert.equal(buttonWithLabel(renderer!, "2 commands").props["aria-expanded"], true);
+  const list = renderer!.root.findByProps({ className: "chat-inline-activity-group-list" });
+  assert.equal(list.props.id, buttonWithLabel(renderer!, "2 commands").props["aria-controls"]);
+  assert.deepEqual(activityRowLabels(renderer!), ["Reading file", "Using Bash"]);
+  assert.equal(renderer!.root.findAll((node) => /is-live/.test(String(node.props.className ?? ""))).length, 0);
+  await act(async () => renderer!.unmount());
+});
+
+test("activities after the streamed text stay live, and a finished reply counts one as 1 command", async () => {
+  const offset = "First paragraph.".length;
+  const events = [
+    { ...activityEvent("command", 1, "Using Bash"), afterContentLength: offset },
+    { ...activityEvent("tool", 2, "Reading file"), afterContentLength: offset }
+  ];
+  let renderer: ReactTestRenderer | undefined;
+  await act(async () => {
+    renderer = create(<ActivityDisclosureHarness activityEvents={events} mode="stream-tail" />);
+  });
+  assert.deepEqual(activityRowLabels(renderer!), ["Reading file"]);
+  assert.match(liveRow(renderer!).props.className, /is-live/);
+
+  await act(async () => {
+    renderer!.update(<ActivityDisclosureHarness activityEvents={[{ ...events[0], afterContentLength: 0 }]} mode="finished" />);
+  });
+  await act(async () => buttonWithLabel(renderer!, "Show full stream").props.onClick());
+  assert.equal(buttonWithLabel(renderer!, "1 command").props["aria-expanded"], false);
   await act(async () => renderer!.unmount());
 });
 
@@ -365,6 +437,16 @@ function buttonWithLabel(renderer: ReactTestRenderer, label: string): ReactTestR
   const button = renderer.root.findAllByType("button").find((item) => textContent(item).includes(label));
   assert.ok(button, `expected ${label} button`);
   return button;
+}
+
+function activityRowLabels(renderer: ReactTestRenderer): string[] {
+  return renderer.root
+    .findAll((node) => typeof node.type === "string" && /(^| )chat-inline-activity-event( |$)/.test(String(node.props.className ?? "")))
+    .map((row) => row.props.title ?? textContent(row.findAll((node) => typeof node.type === "string" && /chat-inline-activity-heading/.test(String(node.props.className ?? "")))[0]));
+}
+
+function liveRow(renderer: ReactTestRenderer): ReactTestRenderer["root"] {
+  return renderer.root.find((node) => typeof node.type === "string" && /chat-inline-activity-event/.test(String(node.props.className ?? "")) && /is-live/.test(String(node.props.className ?? "")));
 }
 
 function activityContent(renderer: ReactTestRenderer): ReactTestRenderer["root"] {

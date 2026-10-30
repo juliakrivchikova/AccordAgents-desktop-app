@@ -3006,6 +3006,29 @@
   line-height: 1.35;
 }
 
+.chat-inline-activity-group {
+  display: grid;
+  width: 100%;
+  gap: 8px;
+  justify-self: start;
+  max-width: min(760px, 100%);
+  color: var(--app-muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.chat-inline-activity-group-list {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  margin-left: 23px;
+}
+
+/* The in-progress activity line shimmers like "Thinking" without the label's heavier weight. */
+.chat-inline-activity-event.is-live .streaming-status-label {
+  font-weight: inherit;
+}
+
 .chat-inline-activity-heading {
   display: inline-grid;
   grid-template-columns: 16px minmax(0, auto);
