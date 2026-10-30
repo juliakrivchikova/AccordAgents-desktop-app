@@ -13,6 +13,7 @@
 @import "./views/chat-conversation.css" layer(components);
 @import "./views/chat-scripts.css" layer(components);
 @import "./views/artifacts.css" layer(components);
+@import "./views/terminal.css" layer(components);
 @import "./views/activity.css" layer(components);
 @import "./views/content-markdown.css" layer(components);
 @import "./views/visual-normalization.css" layer(components);

@@ -216,6 +216,29 @@
   --sidebar-accent-foreground: #1a1c1f;
   --sidebar-border: #e7e9ee;
   --sidebar-ring: var(--app-focus-border);
+  /* Terminal panel: xterm.js reads these at run time (it needs real colors,
+     not CSS). The ANSI palette is VS Code's Light+, readable on white. */
+  --app-terminal-font: "SF Mono", Menlo, Monaco, Consolas, "Courier New", monospace;
+  --app-terminal-bg: #ffffff;
+  --app-terminal-fg: #1f2328;
+  --app-terminal-cursor: #1f2328;
+  --app-terminal-selection: rgba(0, 92, 197, 0.22);
+  --app-terminal-black: #000000;
+  --app-terminal-red: #cd3131;
+  --app-terminal-green: #107c10;
+  --app-terminal-yellow: #949800;
+  --app-terminal-blue: #0451a5;
+  --app-terminal-magenta: #bc05bc;
+  --app-terminal-cyan: #0598bc;
+  --app-terminal-white: #555555;
+  --app-terminal-bright-black: #666666;
+  --app-terminal-bright-red: #cd3131;
+  --app-terminal-bright-green: #14ce14;
+  --app-terminal-bright-yellow: #b5ba00;
+  --app-terminal-bright-blue: #0451a5;
+  --app-terminal-bright-magenta: #bc05bc;
+  --app-terminal-bright-cyan: #0598bc;
+  --app-terminal-bright-white: #a5a5a5;
 }
 
 .dark {
@@ -344,6 +367,27 @@
   --chart-3: #f1c86c;
   --chart-4: #ff8b7e;
   --chart-5: #d5a7ff;
+  /* Terminal panel, dark: VS Code's Dark+ ANSI palette. */
+  --app-terminal-bg: #181818;
+  --app-terminal-fg: #d4d4d4;
+  --app-terminal-cursor: #d4d4d4;
+  --app-terminal-selection: rgba(38, 79, 120, 0.6);
+  --app-terminal-black: #000000;
+  --app-terminal-red: #cd3131;
+  --app-terminal-green: #0dbc79;
+  --app-terminal-yellow: #e5e510;
+  --app-terminal-blue: #2472c8;
+  --app-terminal-magenta: #bc3fbc;
+  --app-terminal-cyan: #11a8cd;
+  --app-terminal-white: #e5e5e5;
+  --app-terminal-bright-black: #666666;
+  --app-terminal-bright-red: #f14c4c;
+  --app-terminal-bright-green: #23d18b;
+  --app-terminal-bright-yellow: #f5f543;
+  --app-terminal-bright-blue: #3b8eea;
+  --app-terminal-bright-magenta: #d670d6;
+  --app-terminal-bright-cyan: #29b8db;
+  --app-terminal-bright-white: #e5e5e5;
 }
 
 * {

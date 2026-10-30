@@ -63,6 +63,18 @@ Stated repeatedly by the User; recorded 2026-08-20 after app-managed
 per-participant worktrees were proposed again. `docs/cloud-runs-workspace-parity.md`
 carries the operational detail.
 
+### The terminal panel is a shell on this computer, in every chat
+
+The terminal panel under the chat (Ctrl+`, as in the Codex desktop app) is a
+regular shell on the User's own computer. It opens in the open chat's project
+folder (home when the chat has none, or when that folder is not on this
+computer), with the same environment local members get. It is the same in a
+chat whose members run in the cloud: it does not open on the cloud machine.
+It is not a member and not a member's tool — members neither see nor drive it.
+
+Decided by the User on 2026-10-30 (design "Панель терминала", chat artifact),
+choosing this over a terminal that follows the chat onto its cloud machine.
+
 ### Independent laptop environments may share one AWS instance
 
 The User's home and work laptops have unrelated projects and chats but share an

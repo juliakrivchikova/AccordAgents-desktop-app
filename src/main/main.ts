@@ -1,10 +1,13 @@
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { HubInstaller, removeStaleHubTemp } from "./services/hubInstaller";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { app, autoUpdater, BrowserWindow, dialog, ipcMain, powerMonitor, shell } from "electron";
+import { app, autoUpdater, BrowserWindow, dialog, ipcMain, MessageChannelMain, powerMonitor, shell, utilityProcess } from "electron";
+import { TerminalService } from "./terminal/terminalService";
+import type { CreateTerminalRequest } from "../shared/terminal";
 import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
 import type {
   AddChatParticipantRequest,
@@ -236,6 +239,31 @@ const sqliteExecutable = resolveSqliteExecutable({
 const storageService = new StorageService({ sqliteExecutable });
 const debugLogService = new DebugLogService();
 const chatSearchService = new ChatSearchService(storageService, debugLogService);
+// The terminal panel: shells run in their own utility process, so heavy output
+// or a crash of the native terminal module never reaches this process.
+const terminalService = new TerminalService({
+  forkHost: () => {
+    const host = utilityProcess.fork(path.join(__dirname, "terminal", "terminalHost.js"), [], {
+      serviceName: "AccordAgents Terminal",
+      stdio: ["ignore", "ignore", "pipe"]
+    });
+    host.stderr?.on("data", (chunk: Buffer) => {
+      void debugLogService.write("terminal.host-stderr", { text: chunk.toString("utf8").slice(0, 2_000) });
+    });
+    return host;
+  },
+  createChannel: () => {
+    const { port1, port2 } = new MessageChannelMain();
+    return { hostEnd: port1, windowEnd: port2 };
+  },
+  // A shell gets what local members get: the login shell's environment and
+  // the variables enabled in Settings.
+  environment: async () => {
+    await ensureLoginShellEnvPrimed();
+    return { ...commandEnvironment(), ...(await settingsService.getManualAgentEnvironment()).env };
+  },
+  log: (event, payload) => { void debugLogService.write(event, payload); }
+});
 const localFileOpenerService = new LocalFileOpenerService(storageService, settingsService);
 const providerRunner = new ProviderRunner();
 setCommandDebugLogger(debugLogService);
@@ -1249,6 +1277,31 @@ function updatePromptWindow(): BrowserWindow | undefined {
   return BrowserWindow.getAllWindows().find((window) => !window.isDestroyed() && !isServerUpdateLoaderWindow(window));
 }
 
+/** Whether a frame shows the app's own page: the dev server's in a dev run,
+ *  else the bundled index.html, compared as file paths (URL encodings of the
+ *  same path may differ). */
+function isAppPageUrl(url: string): boolean {
+  const devServerUrl = process.env.VITE_DEV_SERVER_URL;
+  if (devServerUrl) return url.startsWith(devServerUrl);
+  if (!url.startsWith("file:")) return false;
+  try {
+    return path.resolve(fileURLToPath(url.split(/[?#]/)[0] ?? "")) === path.resolve(__dirname, "../../renderer/index.html");
+  } catch {
+    return false;
+  }
+}
+
+/** Refuses a call that does not come from the app's own page in a window's
+ *  main frame (a subframe, or a document the window navigated to). */
+function assertAppPage(event: Electron.IpcMainInvokeEvent): void {
+  const frame = event.senderFrame;
+  const fromAppPage = Boolean(frame) && frame === event.sender.mainFrame && isAppPageUrl(frame?.url ?? "");
+  if (!fromAppPage) {
+    void debugLogService.write("terminal.refused-sender", { url: frame?.url ?? null });
+    throw new Error("The terminal is only available to the app's own window.");
+  }
+}
+
 function createWindow(): void {
   const windowTitle = process.env.ACCORDAGENTS_WINDOW_TITLE?.trim() || "AccordAgents";
   const window = new BrowserWindow({
@@ -1521,6 +1574,34 @@ function registerIpc(): void {
   ipcMain.handle("app:get-version", () => app.getVersion());
   ipcMain.handle("app:open-external", (_event, url: unknown) => openExternalUrl(url));
   ipcMain.handle("app:open-terminal", () => openTerminal());
+  // A shell is the most powerful thing the window can ask for: only the
+  // app's own page may, never a document the window was navigated to.
+  ipcMain.handle("terminal:list", (event) => {
+    assertAppPage(event);
+    terminalService.watchWindow(event.sender);
+    return terminalService.list();
+  });
+  ipcMain.handle("terminal:create", (event, request: CreateTerminalRequest | undefined) => {
+    assertAppPage(event);
+    terminalService.watchWindow(event.sender);
+    return terminalService.create(request ?? {});
+  });
+  ipcMain.handle("terminal:kill", (event, terminalId: string) => {
+    assertAppPage(event);
+    terminalService.kill(String(terminalId));
+  });
+  ipcMain.handle("terminal:connect", (event) => {
+    assertAppPage(event);
+    return terminalService.connect(event.sender);
+  });
+  ipcMain.handle("terminal:restart", (event) => {
+    assertAppPage(event);
+    return terminalService.restartLost();
+  });
+  ipcMain.handle("terminal:workspace-root", (event, repoPath: string | undefined) => {
+    assertAppPage(event);
+    return terminalService.workspaceRoot(typeof repoPath === "string" ? repoPath : undefined);
+  });
   ipcMain.handle("app:inspect-local-file", (_event, request: InspectLocalFileRequest) => localFileOpenerService.inspectLocalFile(request));
   ipcMain.handle("app:open-local-file", (_event, request: OpenLocalFileRequest) => localFileOpenerService.openLocalFile(request));
   ipcMain.handle("settings:get", () => settingsService.getPublicSettings());
@@ -2501,13 +2582,17 @@ void app.whenReady().then(async () => {
   // restarting kills the local members' CLI processes, and the new desktop
   // then upgrades every machine's runtime, which kills the members there.
   const updateRestartGate = createUpdateRestartGate({
+    // A command running in the terminal panel (not a shell at its prompt)
+    // holds the restart too, the way a working member does.
     isBusy: async () => chatService.liveRunIds().length > 0
       || machineInstallerService.hasActiveOperations()
-      || (await machineLinkService?.anyMachineBusy().catch(() => true)) === true,
+      || (await machineLinkService?.anyMachineBusy().catch(() => true)) === true
+      || await terminalService.hasRunningCommand(),
     onActivitySettled: (listener) => {
       const offRun = chatService.onParticipantRunSettled(() => listener());
       const offHello = machineLinkService?.onHello(() => listener());
-      return () => { offRun(); offHello?.(); };
+      const offTerminal = terminalService.onCommandsSettled(() => listener());
+      return () => { offRun(); offHello?.(); offTerminal(); };
     },
     // The question is asked on a window; one waiting for a window is asked as
     // soon as the User brings one up.
@@ -2967,6 +3052,9 @@ app.on("before-quit", (event) => {
 
 app.on("will-quit", () => {
   debugLogService.writeNow("app-quit.will-quit", { forUpdate: quittingForUpdate });
+  // Here and not in before-quit, which an update's restart skips: every
+  // shell in the terminal panel gets its hangup on any kind of quit.
+  terminalService.shutdown();
 });
 
 app.on("quit", (_event, exitCode) => {
