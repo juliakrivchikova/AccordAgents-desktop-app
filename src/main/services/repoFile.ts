@@ -28,7 +28,7 @@ export type LocalFileResolution =
   | { ok: true; absolutePath: string; realPath: string; insideWorkspace: boolean }
   | { ok: false; reason: LocalFileResolutionFailureReason };
 
-function isPathInside(parentPath: string, childPath: string): boolean {
+export function isPathInside(parentPath: string, childPath: string): boolean {
   const relative = path.relative(parentPath, childPath);
   return relative === "" || Boolean(relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }

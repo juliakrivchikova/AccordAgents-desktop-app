@@ -10,6 +10,7 @@ import type {
   CloudRunsSettingsUpdate,
   DeleteAgentEnvironmentVariableRequest,
   ProviderSettings,
+  RepoFileExternalOpenAction,
   RepoFileOpenAction,
   SaveAgentEnvironmentVariableRequest
 } from "../../shared/types";
@@ -20,6 +21,7 @@ export interface SettingsActions {
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean; model?: string }) => Promise<void>;
   setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
+  setRepoFileExternalOpenPreference: (action: RepoFileExternalOpenAction) => Promise<void>;
   setBetaUpdates: (enabled: boolean) => Promise<void>;
   setCrashReports: (enabled: boolean) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
@@ -76,6 +78,10 @@ export function useSettingsActions(state: AppState): SettingsActions {
 
   async function setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<void> {
     await updateSettings(() => window.consensus.setRepoFileOpenPreference(action));
+  }
+
+  async function setRepoFileExternalOpenPreference(action: RepoFileExternalOpenAction): Promise<void> {
+    await updateSettings(() => window.consensus.setRepoFileExternalOpenPreference(action));
   }
 
   async function setBetaUpdates(enabled: boolean): Promise<void> {
@@ -232,6 +238,7 @@ export function useSettingsActions(state: AppState): SettingsActions {
     updateProvider,
     setAssistantProviderKind,
     setRepoFileOpenPreference,
+    setRepoFileExternalOpenPreference,
     setBetaUpdates,
     setCrashReports,
     setCliAgentRunTimeoutMs,

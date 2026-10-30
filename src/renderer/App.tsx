@@ -22,6 +22,7 @@ import { SettingsSidebar } from "./components/settings/settings-sidebar";
 import { ConversationPanel } from "./components/conversation/conversation-panel";
 import { ChatParticipantMenu } from "./components/chat/chat-participant-menu";
 import { useArtifacts } from "./components/artifacts/use-artifacts";
+import { useFileEditLifecycle } from "./app/use-file-edit-lifecycle";
 import { IconButton } from "./components/primitives";
 import { ChatAccordLauncherDialog } from "./components/chat/chat-accord-launcher-dialog";
 import { NewChatScreen } from "./components/chat/new-chat-screen";
@@ -90,6 +91,7 @@ function App(): JSX.Element {
   }>();
 
   const navigation = useAppNavigation(state, conversationActions);
+  useFileEditLifecycle({ conversationId: state.conversation?.id, artifacts, openChat: navigation.openChat });
   const { openSettingsSection } = navigation;
   // A control that hides itself (a sidebar toggle, Activity, Settings, Back)
   // hands focus to its counterpart, so the keyboard and VoiceOver keep their
@@ -281,8 +283,9 @@ function App(): JSX.Element {
             label="Artifacts"
             icon={FileBox}
             data-artifacts-trigger="true"
-            pressed={artifacts.panelOpen}
-            onClick={() => (artifacts.panelOpen ? artifacts.closePanel() : artifacts.openPanel())}
+            pressed={artifacts.panelOpen && !artifacts.fileTarget}
+            // While a file is shown, the button switches the panel to artifacts.
+            onClick={() => (artifacts.panelOpen && !artifacts.fileTarget ? artifacts.closePanel() : artifacts.openPanel())}
             tooltip="Artifacts — durable shared documents (plans, QA cases, decisions) with versions and sign-off"
           />
           <ChatParticipantMenu
@@ -456,6 +459,7 @@ function App(): JSX.Element {
           saveCliProviderHost={settingsActions.saveCliProviderHost}
           deleteCliProviderHost={settingsActions.deleteCliProviderHost}
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
+          setRepoFileExternalOpenPreference={settingsActions.setRepoFileExternalOpenPreference}
           setBetaUpdates={settingsActions.setBetaUpdates}
           setCrashReports={settingsActions.setCrashReports}
           setCliAgentRunTimeoutMs={settingsActions.setCliAgentRunTimeoutMs}

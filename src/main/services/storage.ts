@@ -698,6 +698,17 @@ export class StorageService {
     return this.readWholeConversation(id);
   }
 
+  /** A chat's project folder, without reading a conversation that can be
+   *  thousands of messages long. `undefined` when the chat is not stored. */
+  async conversationRepoPath(id: string): Promise<{ repoPath?: string } | undefined> {
+    await this.init();
+    const [row] = await this.queryJson<{ repoPath: string | null }>(
+      `select repo_path as repoPath from conversations where id = ${sqlString(id)} limit 1;`
+    );
+    if (!row) return undefined;
+    return typeof row.repoPath === "string" && row.repoPath.trim() ? { repoPath: row.repoPath } : {};
+  }
+
   /** Whether a chat is stored here (and holds one message), without reading
    *  a conversation that can be thousands of messages long. */
   async conversationPresence(id: string, messageId?: string): Promise<{ kind: Conversation["kind"]; hasMessage: boolean } | undefined> {

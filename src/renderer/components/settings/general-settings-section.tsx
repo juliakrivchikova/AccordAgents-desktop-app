@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, Code2, ExternalLink, FolderOpen, HelpCircle } from "lucide-react";
+import { Check, ChevronDown, Code2, ExternalLink, FolderOpen, HelpCircle, PanelRight } from "lucide-react";
 
 import type {
   AgentHealth,
@@ -13,6 +13,7 @@ import type {
   MobileControlSettings,
   ProviderKind,
   ProviderSettings,
+  RepoFileExternalOpenAction,
   RepoFileOpenAction
 } from "../../../shared/types";
 import {
@@ -61,6 +62,7 @@ export function GeneralSettingsSection(props: {
   agents: AgentHealth[];
   assistantProviderKind?: ChatProviderKind;
   repoFileOpenAction?: RepoFileOpenAction;
+  repoFileExternalOpenAction?: RepoFileExternalOpenAction;
   betaUpdates: boolean;
   crashReports: boolean;
   cliAgentRunTimeoutMs: number;
@@ -72,6 +74,7 @@ export function GeneralSettingsSection(props: {
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
+  setRepoFileExternalOpenPreference: (action: RepoFileExternalOpenAction) => Promise<void>;
   setBetaUpdates: (enabled: boolean) => Promise<void>;
   setCrashReports: (enabled: boolean) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
@@ -184,7 +187,23 @@ export function GeneralSettingsSection(props: {
                 What happens when you click an inside-workspace file reference in chat.
               </div>
             </div>
-            <FileOpenDropdown action={props.repoFileOpenAction} onChange={props.setRepoFileOpenPreference} />
+            <FileOpenDropdown options={FILE_OPEN_OPTIONS} action={props.repoFileOpenAction ?? null} onChange={props.setRepoFileOpenPreference} />
+          </div>
+          <div className="gen-card-divider" />
+          <div className="gen-row">
+            <div className="gen-row-text">
+              <div className="gen-row-title">Side panel “Open in” button</div>
+              <div className="gen-row-desc">
+                Where a file shown in the side panel opens, and where files the panel does not show open.
+              </div>
+            </div>
+            <FileOpenDropdown
+              options={EXTERNAL_OPEN_OPTIONS}
+              action={props.repoFileExternalOpenAction ?? "open"}
+              onChange={async (action) => {
+                if (action === "open" || action === "intellij-idea") await props.setRepoFileExternalOpenPreference(action);
+              }}
+            />
           </div>
           <div className="gen-card-divider" />
           <div className="gen-row">
@@ -289,13 +308,21 @@ export function GeneralSettingsSection(props: {
   );
 }
 
-const FILE_OPEN_OPTIONS: Array<{
-  key: "open" | "reveal" | "intellij-idea" | "ask";
+interface FileOpenOption {
+  key: "panel" | "open" | "reveal" | "intellij-idea" | "ask";
   value: RepoFileOpenAction | null;
   pillLabel: string;
   menuLabel: string;
   icon: typeof ExternalLink;
-}> = [
+}
+
+const EXTERNAL_OPEN_OPTIONS: FileOpenOption[] = [
+  { key: "open", value: "open", pillLabel: "Open with default app", menuLabel: "Open with default app", icon: ExternalLink },
+  { key: "intellij-idea", value: "intellij-idea", pillLabel: "Open in IntelliJ IDEA", menuLabel: "Open in IntelliJ IDEA", icon: Code2 }
+];
+
+const FILE_OPEN_OPTIONS: FileOpenOption[] = [
+  { key: "panel", value: "panel", pillLabel: "Open in side panel", menuLabel: "Open in side panel", icon: PanelRight },
   { key: "open", value: "open", pillLabel: "Open with default app", menuLabel: "Open with default app", icon: ExternalLink },
   { key: "reveal", value: "reveal", pillLabel: "Reveal in file manager", menuLabel: "Reveal in file manager", icon: FolderOpen },
   { key: "intellij-idea", value: "intellij-idea", pillLabel: "Open in IntelliJ IDEA", menuLabel: "Open in IntelliJ IDEA", icon: Code2 },
@@ -303,23 +330,17 @@ const FILE_OPEN_OPTIONS: Array<{
 ];
 
 function FileOpenDropdown(props: {
-  action?: RepoFileOpenAction;
+  options: FileOpenOption[];
+  action: RepoFileOpenAction | null;
   onChange: (action: RepoFileOpenAction | null) => Promise<void>;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const currentKey = props.action === "open"
-    ? "open"
-    : props.action === "reveal"
-      ? "reveal"
-      : props.action === "intellij-idea"
-        ? "intellij-idea"
-        : "ask";
-  const current = FILE_OPEN_OPTIONS.find((option) => option.key === currentKey)
-    ?? FILE_OPEN_OPTIONS.find((option) => option.key === "ask")
-    ?? FILE_OPEN_OPTIONS[0];
+  const current = props.options.find((option) => option.value === props.action)
+    ?? props.options.find((option) => option.key === "ask")
+    ?? props.options[0];
 
   const closeMenu = (returnFocus: boolean): void => {
     setOpen(false);
@@ -420,7 +441,7 @@ function FileOpenDropdown(props: {
           role="menu"
           style={{ position: "fixed", top: menuPos.top, right: menuPos.right }}
         >
-          {FILE_OPEN_OPTIONS.map((option) => {
+          {props.options.map((option) => {
             const Icon = option.icon;
             const selected = option.key === current.key;
             return (

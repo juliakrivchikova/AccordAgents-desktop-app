@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 import { ImagePlus } from "lucide-react";
 
 import {
@@ -9,6 +9,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog";
 import type { ChatImageAttachment } from "../../../shared/types";
+import { AttachmentPanelContext, FilePanelOriginContext } from "../files/file-panel-context";
 import { formatBytes } from "./chat-format";
 
 export function ChatImageAttachmentStrip(props: {
@@ -26,6 +27,9 @@ export function ChatImageAttachmentStrip(props: {
     [props.attachments, selectedId]
   );
   const selectedData = selectedId ? dataById[selectedId]?.dataUrl : undefined;
+  // In a chat the image opens in the side panel, with zoom; elsewhere in a dialog.
+  const { openAttachment } = useContext(AttachmentPanelContext);
+  const { threadRootId } = useContext(FilePanelOriginContext);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,7 +75,20 @@ export function ChatImageAttachmentStrip(props: {
               type="button"
               className={`chat-image-attachment ${imageData?.error ? "error" : ""}`}
               disabled={!imageData?.dataUrl}
-              onClick={() => setSelectedId(attachment.id)}
+              onClick={() => {
+                const dataUrl = imageData?.dataUrl;
+                if (openAttachment && dataUrl) {
+                  openAttachment({
+                    attachmentId: attachment.id,
+                    filename: attachment.filename,
+                    dataUrl,
+                    description: `${attachment.width}x${attachment.height} · ${formatBytes(attachment.sizeBytes)}`,
+                    returnThreadRootId: threadRootId
+                  });
+                  return;
+                }
+                setSelectedId(attachment.id);
+              }}
               title={imageData?.error ?? attachment.filename}
               key={attachment.id}
             >

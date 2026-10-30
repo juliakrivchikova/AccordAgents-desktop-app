@@ -1,26 +1,37 @@
 import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import type { LocalFileOpenAction, OpenLocalFileResult, RepoFileOpenAction } from "../../../shared/types";
+import { filePreviewKindForPath } from "../../../shared/filePreview";
+import type {
+  LocalFileOpenAction,
+  OpenLocalFileResult,
+  RepoFileExternalOpenAction,
+  RepoFileOpenAction
+} from "../../../shared/types";
 import type { FileLinkRef } from "../content/local-file-link";
 
 export function useChatLocalFileOpen(props: {
   conversationId: string;
   repoFileOpenAction: RepoFileOpenAction | null | undefined;
+  repoFileExternalOpenAction: RepoFileExternalOpenAction | null | undefined;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
+  /** Shows the file in the chat's side panel. */
+  openInPanel: (ref: FileLinkRef) => void;
 }): {
   chooserFileRef: FileLinkRef | null;
   chooserOpen: boolean;
-  chooseLocalFileOpenAction: (action: LocalFileOpenAction) => Promise<void>;
+  chooseLocalFileOpenAction: (action: RepoFileOpenAction) => Promise<void>;
   handleLocalFileChooserOpenChange: (open: boolean) => void;
   localFileLinkContext: {
     conversationId: string;
     requestOpenFile: (ref: FileLinkRef) => void;
   };
+  openFileOutside: (ref: FileLinkRef, action?: LocalFileOpenAction) => Promise<OpenLocalFileResult | undefined>;
   resetLocalFileChooser: () => void;
 } {
   const [chooserOpen, setChooserOpen] = useState(false);
   const [chooserFileRef, setChooserFileRef] = useState<FileLinkRef | null>(null);
+  const externalAction: LocalFileOpenAction = props.repoFileExternalOpenAction ?? "open";
 
   const openLocalFileReference = useCallback(async (
     ref: FileLinkRef,
@@ -47,6 +58,11 @@ export function useChatLocalFileOpen(props: {
     }
   }, [props.conversationId]);
 
+  const openFileOutside = useCallback(
+    (ref: FileLinkRef, action?: LocalFileOpenAction) => openLocalFileReference(ref, action ?? externalAction),
+    [externalAction, openLocalFileReference]
+  );
+
   const requestOpenFile = useCallback((ref: FileLinkRef) => {
     void window.consensus.inspectLocalFile({
       conversationId: props.conversationId,
@@ -60,7 +76,16 @@ export function useChatLocalFileOpen(props: {
         insideWorkspace: inspection.insideWorkspace
       };
       const preference = props.repoFileOpenAction;
-      if (inspection.insideWorkspace && preference) {
+      if (inspection.insideWorkspace && preference === "panel") {
+        // Kinds the panel does not show (Excel, archives…) open the way they did before.
+        if (filePreviewKindForPath(inspection.absolutePath) === "unsupported") {
+          void openLocalFileReference(nextRef, externalAction);
+        } else {
+          props.openInPanel(nextRef);
+        }
+        return;
+      }
+      if (inspection.insideWorkspace && preference && preference !== "panel") {
         void openLocalFileReference(nextRef, preference);
         return;
       }
@@ -69,19 +94,26 @@ export function useChatLocalFileOpen(props: {
     }).catch((error) => {
       toast.error(error instanceof Error ? error.message : "Could not inspect the file.");
     });
-  }, [openLocalFileReference, props.conversationId, props.repoFileOpenAction]);
+  }, [externalAction, openLocalFileReference, props.conversationId, props.openInPanel, props.repoFileOpenAction]);
 
-  const chooseLocalFileOpenAction = useCallback(async (action: LocalFileOpenAction): Promise<void> => {
+  const chooseLocalFileOpenAction = useCallback(async (action: RepoFileOpenAction): Promise<void> => {
     const ref = chooserFileRef;
     setChooserOpen(false);
     if (!ref) {
+      return;
+    }
+    if (action === "panel") {
+      props.openInPanel(ref);
+      if (ref.insideWorkspace) {
+        await props.setRepoFileOpenPreference("panel");
+      }
       return;
     }
     const result = await openLocalFileReference(ref, action);
     if (ref.insideWorkspace && result?.action === action) {
       await props.setRepoFileOpenPreference(action);
     }
-  }, [chooserFileRef, openLocalFileReference, props.setRepoFileOpenPreference]);
+  }, [chooserFileRef, openLocalFileReference, props.openInPanel, props.setRepoFileOpenPreference]);
 
   const handleLocalFileChooserOpenChange = useCallback((open: boolean): void => {
     setChooserOpen(open);
@@ -103,6 +135,7 @@ export function useChatLocalFileOpen(props: {
     chooseLocalFileOpenAction,
     handleLocalFileChooserOpenChange,
     localFileLinkContext,
+    openFileOutside,
     resetLocalFileChooser
   };
 }

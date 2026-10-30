@@ -18,6 +18,7 @@ import type {
 import { Avatar } from "../avatar/avatar";
 import { MentionDirectoryContext, type ParticipantCompactHandler } from "../content/participant-hover-card";
 import { IconButton } from "../primitives";
+import { FilePanelOriginContext } from "../files/file-panel-context";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatComposer } from "./chat-composer";
 import {
@@ -75,6 +76,7 @@ export function ChatThreadPanel(props: {
   const replyLabel = `${props.replies.length} ${props.replies.length === 1 ? "reply" : "replies"}`;
   return (
     <MentionDirectoryContext.Provider value={mentionDirectory}>
+    <FilePanelOriginContext.Provider value={{ threadRootId: props.rootMessage.id }}>
     <section className="chat-thread-panel" aria-label="Chat thread" data-testid="chat-thread-panel">
       <header className="thread-panel-head chat-thread-head" data-titlebar>
         <div>
@@ -164,6 +166,7 @@ export function ChatThreadPanel(props: {
         participantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
       />
     </section>
+    </FilePanelOriginContext.Provider>
     </MentionDirectoryContext.Provider>
   );
 }

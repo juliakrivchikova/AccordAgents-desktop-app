@@ -117,6 +117,26 @@ const bridge: AppBridge = {
   inspectLocalFile: (request: InspectLocalFileRequest) => ipcRenderer.invoke("app:inspect-local-file", request),
   openLocalFile: (request: OpenLocalFileRequest) => ipcRenderer.invoke("app:open-local-file", request),
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => ipcRenderer.invoke("settings:set-repo-file-open-preference", action),
+  setRepoFileExternalOpenPreference: (action) => ipcRenderer.invoke("settings:set-repo-file-external-open-preference", action),
+  readFilePreview: (request) => ipcRenderer.invoke("files:read", request),
+  writeFilePreview: (request) => ipcRenderer.invoke("files:write", request),
+  watchFilePreview: (request) => ipcRenderer.invoke("files:watch", request),
+  unwatchFilePreview: (realPath) => ipcRenderer.invoke("files:unwatch", realPath),
+  releaseFilePreview: (realPath) => ipcRenderer.invoke("files:release", realPath),
+  onFilePreviewChanged: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+    ipcRenderer.on("files:changed", listener);
+    return () => ipcRenderer.removeListener("files:changed", listener);
+  },
+  saveUnsavedFileEdit: (edit) => ipcRenderer.invoke("files:unsaved-save", edit),
+  clearUnsavedFileEdit: (realPath) => ipcRenderer.invoke("files:unsaved-clear", realPath),
+  listUnsavedFileEdits: () => ipcRenderer.invoke("files:unsaved-list"),
+  onFlushFileEdits: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, requestId: string) => callback(requestId);
+    ipcRenderer.on("files:flush", listener);
+    return () => ipcRenderer.removeListener("files:flush", listener);
+  },
+  fileEditsFlushed: (requestId) => ipcRenderer.send("files:flush-done", requestId),
   setBetaUpdates: (enabled: boolean) => ipcRenderer.invoke("settings:set-beta-updates", enabled),
   setCrashReports: (enabled: boolean) => ipcRenderer.invoke("settings:set-crash-reports", enabled),
   crashReportsActive: process.argv.includes(CRASH_REPORTS_ACTIVE_ARG),

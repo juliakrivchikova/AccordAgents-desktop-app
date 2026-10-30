@@ -1,0 +1,332 @@
+/* A local file or an attached image in the chat's side panel (shares the artifacts panel's frame). */
+
+.file-panel-header {
+  min-height: var(--app-header-height);
+}
+
+.file-panel-title-block {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.file-panel-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--app-muted);
+}
+
+.file-panel-subtitle > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.file-panel-status {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--app-muted);
+}
+
+.file-panel-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.file-panel-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.file-panel-notices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px 0;
+}
+
+.file-panel-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--app-warning-border);
+  border-radius: 8px;
+  background: var(--app-warning-soft);
+  color: var(--app-text-strong);
+  font-size: 12.5px;
+}
+
+.file-panel-banner > span {
+  flex: 1 1 200px;
+}
+
+.file-panel-note {
+  margin: 0;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--app-muted);
+}
+
+.file-panel-message {
+  margin: 0;
+  padding: 24px 16px;
+  font-size: 13px;
+  color: var(--app-muted);
+  text-align: center;
+}
+
+/* Toolbars inside viewers. */
+
+.file-viewer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--app-border-subtle);
+}
+
+.file-viewer-zoom-value {
+  min-width: 44px;
+  text-align: center;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--app-text);
+}
+
+.file-viewer-text-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.file-viewer-text-button:hover {
+  background: var(--app-surface-hover);
+}
+
+.file-viewer-text-button[aria-pressed="true"],
+.file-viewer-text-button[aria-selected="true"] {
+  background: var(--app-surface-active);
+  border-color: var(--app-border);
+  color: var(--app-text-strong);
+}
+
+.file-viewer-meta {
+  margin-left: auto;
+  font-size: 11.5px;
+  color: var(--app-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.file-viewer-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  color: var(--app-muted);
+}
+
+.file-viewer-search input {
+  width: 120px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--app-text);
+  font-size: 12px;
+}
+
+.file-mode-switch {
+  display: flex;
+  gap: 2px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--app-border-subtle);
+}
+
+.file-split-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Images. */
+
+.file-image-viewer {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.file-image-frame {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--app-surface-subtle);
+  cursor: grab;
+  touch-action: none;
+}
+
+.file-image-frame:active {
+  cursor: grabbing;
+}
+
+.file-image-frame img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: none;
+  user-select: none;
+  image-rendering: auto;
+}
+
+/* Text and code. */
+
+.file-code-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.file-markdown-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 16px 24px;
+}
+
+/* Tables. */
+
+.file-csv {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.file-csv-scroll {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  font-size: 12px;
+}
+
+.file-csv-row {
+  display: grid;
+  width: max-content;
+  min-width: 100%;
+  height: 28px;
+  border-bottom: 1px solid var(--app-border-subtle);
+}
+
+.file-csv-body {
+  position: relative;
+}
+
+.file-csv-body > .file-csv-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.file-csv-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--app-surface-subtle);
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
+.file-csv-cell,
+.file-csv-index {
+  overflow: hidden;
+  padding: 0 8px;
+  line-height: 28px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-right: 1px solid var(--app-border-subtle);
+}
+
+.file-csv-index {
+  position: sticky;
+  left: 0;
+  background: var(--app-surface-subtle);
+  color: var(--app-muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* PDF (pdf.js needs an absolutely positioned scrolling container). */
+
+.file-pdf-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.file-pdf-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--app-surface-muted);
+}
+
+.file-pdf-container {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+}
+
+.file-pdf-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* HTML pages. */
+
+.file-html-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  background: var(--app-surface);
+}
+
+/* A cloud member's file link: shown, not opened. */
+
+.file-link-static[data-cloud-file-link="true"] {
+  cursor: help;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}

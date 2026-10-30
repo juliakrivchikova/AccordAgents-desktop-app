@@ -10,7 +10,6 @@ import type {
   Conversation,
   RepoFileMention
 } from "../../../shared/types";
-import { artifactMembersForConversation } from "../../../shared/artifacts";
 import { activeRunSummaryForConversation } from "../../../shared/chatActiveRuns";
 import { Avatar } from "../avatar/avatar";
 import { LocalFileLinkContext, LocalFileOpenChooser } from "../content/local-file-link";
@@ -37,7 +36,8 @@ import {
   liveMessageProgressById
 } from "./chat-conversation-data";
 import { ArtifactsContext } from "../artifacts/artifacts-context";
-import { ArtifactsPanel } from "../artifacts/artifacts-panel";
+import { AttachmentPanelContext } from "../files/file-panel-context";
+import { ChatSidePanel, useChatSidePanel } from "./chat-side-panel";
 import { ChatConversationTimeline } from "./chat-conversation-timeline";
 import type { ChatConversationViewProps } from "./chat-conversation-types";
 import { ChatThreadPanel } from "./chat-thread-panel";
@@ -122,10 +122,14 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     onStopRun: props.onStopRun,
     runChoiceWithSubmittingId: choiceSubmission.runWithSubmittingId
   });
+  const chatRoot = useCallback(() => document.querySelector<HTMLElement>("[data-testid=\"chat-view\"]"), []);
+  const sidePanel = useChatSidePanel({ artifacts, root: chatRoot, selectThread: setSelectedThreadRootId });
   const localFileOpen = useChatLocalFileOpen({
     conversationId: props.conversation.id,
     repoFileOpenAction: props.settings.repoFileOpenAction,
-    setRepoFileOpenPreference: props.setRepoFileOpenPreference
+    repoFileExternalOpenAction: props.settings.repoFileExternalOpenAction,
+    setRepoFileOpenPreference: props.setRepoFileOpenPreference,
+    openInPanel: sidePanel.openInPanel
   });
   const latestProgress = props.progress[props.progress.length - 1];
   const latestComposerProgress = useMemo(() => latestNonMessageProgress(props.progress), [props.progress]);
@@ -330,6 +334,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
       <ArtifactsContext.Provider value={artifacts.context}>
       <LocalFileLinkContext.Provider value={localFileOpen.localFileLinkContext}>
+      <AttachmentPanelContext.Provider value={sidePanel.attachmentContext}>
         <div
           className={`chat-view ${hasInlineTopBar ? "with-inline-topbar" : ""} ${hasThread ? "thread-open" : ""} ${showArtifactsPanel ? "artifacts-open" : ""} ${isResizingThread ? "resizing-thread" : ""}`}
           data-testid="chat-view"
@@ -455,13 +460,12 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
             />
           )}
           {showArtifactsPanel && (
-            <ArtifactsPanel
-              conversationId={props.conversation.id}
-              members={artifactMembersForConversation(props.conversation)}
-              artifacts={artifacts.artifacts}
-              selectedId={artifacts.selectedId}
-              onSelect={artifacts.selectArtifact}
-              onClose={artifacts.closePanel}
+            <ChatSidePanel
+              conversation={props.conversation}
+              settings={props.settings}
+              artifacts={artifacts}
+              backToThread={sidePanel.backToThread}
+              openFileOutside={(ref) => void localFileOpen.openFileOutside(ref)}
             />
           )}
           <LocalFileOpenChooser
@@ -471,6 +475,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
             onOpenChange={localFileOpen.handleLocalFileChooserOpenChange}
           />
         </div>
+      </AttachmentPanelContext.Provider>
       </LocalFileLinkContext.Provider>
       </ArtifactsContext.Provider>
     </MessageLinkContext.Provider>

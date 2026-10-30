@@ -47,7 +47,7 @@ function serviceWithDeps(options: {
   };
   const service = new LocalFileOpenerService(
     {
-      getConversation: async () => conversation(options.repoPath)
+      conversationRepoPath: async () => ({ repoPath: conversation(options.repoPath).repoPath })
     } as any,
     {
       getRepoFileOpenAction: async () => options.savedAction

@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import { Code2, ExternalLink, FolderOpen } from "lucide-react";
+import { Code2, ExternalLink, FolderOpen, PanelRight } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -9,7 +9,8 @@ import {
   DialogHeader,
   DialogTitle
 } from "@/components/ui/dialog";
-import type { LocalFileOpenAction } from "../../../shared/types";
+import type { RepoFileOpenAction } from "../../../shared/types";
+import { CLOUD_FILE_LINK_TITLE, FileLinkAuthorContext, FilePanelOriginContext } from "../files/file-panel-context";
 
 export interface FileLinkRef {
   path: string;
@@ -17,6 +18,8 @@ export interface FileLinkRef {
   insideWorkspace?: boolean;
   line?: number;
   column?: number;
+  /** Clicked inside this thread; the panel offers to go back to it. */
+  returnThreadRootId?: string;
 }
 
 // Provided by the chat view so file links inside rendered markdown can request an open action.
@@ -44,16 +47,20 @@ export function FileLink({
   variant
 }: FileLinkRef & { label: string; variant?: "inline-code" }): JSX.Element {
   const { requestOpenFile } = useContext(LocalFileLinkContext);
-  const ref: FileLinkRef = { path, line, column };
+  const { cloud } = useContext(FileLinkAuthorContext);
+  const { threadRootId } = useContext(FilePanelOriginContext);
+  const ref: FileLinkRef = { path, line, column, returnThreadRootId: threadRootId };
   const className = variant === "inline-code"
     ? "message-link file-link file-link-inline-code"
     : "message-link file-link";
 
-  if (!requestOpenFile) {
+  // A member on a cloud machine names a file on that machine: it does not open here.
+  if (!requestOpenFile || cloud) {
     return (
       <span
         className={variant === "inline-code" ? "file-link file-link-static file-link-inline-code" : "file-link file-link-static"}
-        title={fileLinkTitle(ref)}
+        title={cloud ? `${fileLinkTitle(ref)}\n${CLOUD_FILE_LINK_TITLE}` : fileLinkTitle(ref)}
+        data-cloud-file-link={cloud ? "true" : undefined}
       >
         {label}
       </span>
@@ -85,7 +92,7 @@ export function FileLink({
 export function LocalFileOpenChooser(props: {
   fileRef?: FileLinkRef | null;
   open: boolean;
-  onChoose: (action: LocalFileOpenAction) => void;
+  onChoose: (action: RepoFileOpenAction) => void;
   onOpenChange: (open: boolean) => void;
 }): JSX.Element {
   const isOutsideWorkspace = props.fileRef?.insideWorkspace === false;
@@ -102,6 +109,12 @@ export function LocalFileOpenChooser(props: {
     <Button variant="outline" onClick={() => props.onChoose("reveal")}>
       <FolderOpen size={16} />
       Reveal in file manager
+    </Button>
+  );
+  const panelButton = (
+    <Button variant="outline" onClick={() => props.onChoose("panel")}>
+      <PanelRight size={16} />
+      {isOutsideWorkspace ? "View in side panel" : "Open in side panel"}
     </Button>
   );
   const intellijButton = (
@@ -125,6 +138,7 @@ export function LocalFileOpenChooser(props: {
           </DialogDescription>
         </DialogHeader>
         <div className="repo-file-open-actions">
+          {panelButton}
           {isOutsideWorkspace ? revealButton : openButton}
           {isOutsideWorkspace ? openButton : revealButton}
           {intellijButton}
