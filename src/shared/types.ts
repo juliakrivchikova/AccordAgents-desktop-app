@@ -1101,8 +1101,10 @@ export interface ChatParticipantRemoveOperation {
   handle: string;
 }
 
-// Always reviewed by the User on a card, never auto-applied; once approved it
-// is applied when the chat has no live work (see ChatAppToolApproval.memberRemovalQueuedAt).
+// Decided by the asking member's Manage members setting, like an addition:
+// allow records it as auto-applied, ask puts it on a card for the User. Once
+// decided it is applied when the chat has no live work (see
+// ChatAppToolApproval.memberRemovalQueuedAt).
 export interface ChatParticipantRemovalRequest {
   kind: "participant_removal";
   reason?: string;
@@ -1415,10 +1417,10 @@ export interface ChatAppToolApproval {
   };
   consumedAt?: string;
   error?: string;
-  /** An approved member removal that is waiting for the chat's running turns
-   *  to finish; cleared when the removal is applied or could not be. Only the
-   *  desktop applies it (it owns the member list); a machine member's removal
-   *  waits on the machine until the desktop has. */
+  /** A member removal decided (approved by the User, or auto-applied under
+   *  the member's Manage members setting) and waiting for the chat's running
+   *  turns to finish; cleared when the removal is applied or could not be.
+   *  The asking member's own device applies it (Д2). */
   memberRemovalQueuedAt?: string;
   /** An approved (or auto-applied) addition requested by a member on a
    *  machine, waiting for the desktop, which owns the member list, to apply it. */

@@ -424,6 +424,50 @@ test("a machine member's request to remove a member is raised by its machine, ap
   assert.deepEqual(serverChat.conversation.metadata.participants.map((member) => member.id), [remote.id], "the member list on the server");
 });
 
+test("a machine member whose Manage members setting allows it removes a member without a card: its machine decides, makes and settles it, the phone shows it waiting, and nobody is asked", async (t) => {
+  const allowing: ChatParticipant = { ...remote, permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), manageRolesParticipants: "allow" }) };
+  const h = await linkedDesktop(t, chat("cards-allow", { participants: [desk, allowing] }));
+  await h.startMachine();
+  await until(() => h.machineStorage.getConversation("cards-allow"), (item) => Boolean(item));
+  // The asking member's turn is running on the machine, as when it calls the tool.
+  const machineCopy = (await h.machineStorage.getConversation("cards-allow"))!;
+  const machineRuns = h.machineChat as unknown as { beginChatRun(c: Conversation, runId: string): Promise<void>; endChatRun(c: Conversation, runId: string): Promise<void> };
+  await machineRuns.beginChatRun(machineCopy, "drew-run");
+  const result = await h.machineChat.requestParticipantChangeFromTool(
+    { conversationId: "cards-allow", participantId: allowing.id, roleConfigId: allowing.roleConfigId, roleConfigVersion: 1, capabilities: ["participants.manage"] } as never,
+    { reason: "Done here.", operations: [{ type: "remove_participant_from_chat", handle: desk.handle }] }
+  ) as { status: string; approvalId: string };
+  assert.equal(result.status, "auto_approved");
+  // Raised and answered by the machine itself while the turn runs: nobody is
+  // asked, and the phone shows it waiting.
+  const answered = await until(() => h.card(result.approvalId), (item) => item?.state === "answered");
+  assert.equal(answered!.answeredBy, h.machineIdentity.originId);
+  const onPhone = controlCardFromHubCard(answered!);
+  assert.deepEqual([onPhone?.status, onPhone?.title, onPhone?.waiting, onPhone?.options], ["answered", "Removal approved", true, []], "never a question");
+  const waitingOnDesktop = await until(() => approvalOf(h.desktopStorage, "cards-allow", result.approvalId), (item) => Boolean(item?.machineDecisionPending));
+  assert.equal(waitingOnDesktop!.machineDecisionPending!.approve, true);
+  assert.ok(((await h.desktopStorage.getConversation("cards-allow"))!.metadata.participants as ChatParticipant[]).some((member) => member.id === desk.id),
+    "nothing is made while the turn runs");
+  await machineRuns.endChatRun(machineCopy, "drew-run");
+  const removedLine = "Removed @taylor from this chat at @drew's request.";
+  const desktopCopy = await until(() => h.desktopStorage.getConversation("cards-allow"), (item) =>
+    !((item?.metadata.participants ?? []) as ChatParticipant[]).some((member) => member.id === desk.id) &&
+    Boolean(item?.messages.some((message) => message.content === removedLine)));
+  const said = desktopCopy!.messages.filter((message) => message.content === removedLine);
+  assert.equal(said.length, 1);
+  assert.equal(said[0].metadata?.serverWriter, h.machineIdentity.originId, "written by the machine, once");
+  assert.equal(desktopCopy!.messages.some((message) => message.content.includes("approval needed")), false);
+  const settled = await until(() => h.card(result.approvalId), (item) => item?.state === "settled");
+  assert.equal((settled!.outcome as { result?: string }).result, "applied");
+  const onMachine = await approvalOf(h.machineStorage, "cards-allow", result.approvalId);
+  assert.equal(onMachine?.status, "auto-applied");
+  assert.equal(onMachine?.memberRemovalQueuedAt, undefined);
+  // The desktop never asks and never makes it a second time.
+  const onDesktop = await until(() => approvalOf(h.desktopStorage, "cards-allow", result.approvalId), (item) => Boolean(item) && !item!.machineDecisionPending);
+  assert.equal(onDesktop!.status, "auto-applied");
+  assert.equal(onDesktop!.memberRemovalQueuedAt, undefined);
+});
+
 test("a machine member's choice answered while its machine was stopped is applied once when the machine starts again", async (t) => {
   const h = await linkedDesktop(t, chat("cards-g"));
   await h.startMachine();

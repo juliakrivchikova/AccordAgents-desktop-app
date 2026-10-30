@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { approvalHasCard, controlCardFromApproval, controlCardFromChoiceMessage, controlCardFromHubCard } from "./mobileControlCards";
+import { wantedHubCards } from "./hubCards";
 import type { HubCard } from "./hubOps";
 import type { ChatAppToolApproval, ChatMessage } from "./types";
 
@@ -129,6 +130,12 @@ test("a member removal reaches the phone in the desktop card's words, and stays 
   assert.deepEqual(waiting.options, []);
   assert.equal(waiting.draftOverride, undefined, "nothing to answer");
 
+  // Allowed by the member's Manage members setting: the same waiting card.
+  const allowed = removalApproval({ status: "auto-applied", memberRemovalQueuedAt: "2026-10-26T09:01:00.000Z" });
+  assert.equal(approvalHasCard(allowed), true);
+  assert.deepEqual(controlCardFromApproval("conversation-1", allowed), waiting);
+  assert.equal(approvalHasCard(removalApproval({ status: "auto-applied", appliedParticipantIds: ["gera-id"] })), false);
+
   const applied = removalApproval({ status: "approved", appliedParticipantIds: ["gera-id", "taylor-id"] });
   assert.equal(approvalHasCard(applied), false, "an applied removal has no card");
   assert.equal(approvalHasCard(removalApproval({ status: "denied" })), false);
@@ -174,6 +181,17 @@ test("a card on the User's server is the phone's card: answerable while it waits
   const onMachine = controlCardFromHubCard(hubCard({ cardId: removal.id, cardKind: "roster", participantId: "drew-id", card: { approval: removal },
     state: "answered", answer: { approve: true } }), undefined, (participantId) => participantId === "drew-id" ? "Box" : undefined);
   assert.equal(onMachine?.outcome, "Waiting for running turns to finish and for Box to apply it, then @gera and @taylor leave this chat.");
+  // Allowed by its member's Manage members setting: waiting, never a
+  // question, even read before its device's own answer lands.
+  for (const state of ["pending", "answered"] as const) {
+    const allowed = controlCardFromHubCard(hubCard({ cardId: removal.id, cardKind: "roster", card: { approval: { ...removal, status: "auto-applied" } }, state,
+      ...(state === "answered" ? { answer: { approve: true, auto: true } } : {}) }));
+    assert.deepEqual([allowed?.status, allowed?.title, allowed?.waiting, allowed?.options], ["answered", "Removal approved", true, []], state);
+  }
+  const addition = { ...removal, id: "addition-1", status: "auto-applied" as const, summary: "Add @helper", toolName: "app_participants_request_change",
+    request: { operations: [{ type: "add_new_participant_to_chat" as const, participant: { handle: "helper", roleConfigId: "generic-participant", kind: "claude-code" as const } }] } };
+  const allowedAddition = controlCardFromHubCard(hubCard({ cardId: addition.id, cardKind: "roster", card: { approval: addition } }));
+  assert.deepEqual([allowedAddition?.status, allowedAddition?.title, allowedAddition?.waiting, allowedAddition?.options], ["answered", "Addition approved", true, []]);
   const declined = controlCardFromHubCard(hubCard({ cardId: removal.id, cardKind: "roster", card: { approval: removal }, state: "answered", answer: { approve: false } }));
   assert.equal(declined?.outcome, "No, keep @gera and @taylor in this chat. Waiting for it to be applied.", "a worded answer is said in its words");
 
@@ -204,4 +222,17 @@ test("a permission card asked again after its device refused an answer tells the
   assert.deepEqual(asked?.refusedAnswers, [{ operationId: "op-phone-1", reason: "A script that runs code is approved on the desktop, where its code is shown." }]);
   const plain = controlCardFromHubCard(hubCard({ cardId: "approval-2", card: { approval } }));
   assert.equal(plain?.refusedAnswers, undefined);
+});
+
+test("a decided roster change keeps its card on the server until it is made, even when its member has left", () => {
+  const removal = removalApproval({ status: "auto-applied", memberRemovalQueuedAt: "2026-10-26T09:01:00.000Z" });
+  const chatWith = (participants: string[], approvals: ChatAppToolApproval[]) => ({
+    id: "conversation-1", kind: "chat", title: "", createdAt: "", updatedAt: "", findings: [], messages: [],
+    metadata: { participants: participants.map((id) => ({ id })), pendingAppToolApprovals: approvals }
+  }) as unknown as Parameters<typeof wantedHubCards>[0];
+  const owns = { approval: () => true, message: () => true };
+  assert.deepEqual(wantedHubCards(chatWith(["gera-id"], [removal]), owns).map((card) => card.cardId), [removal.id], "its member left: still waiting");
+  assert.equal(wantedHubCards(chatWith(["gera-id"], [removal]), owns)[0].selfAnswer?.approve, true);
+  // A question from a member that left asks nobody.
+  assert.deepEqual(wantedHubCards(chatWith(["gera-id"], [removalApproval()]), owns), []);
 });

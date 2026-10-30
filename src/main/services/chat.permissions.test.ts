@@ -6325,20 +6325,21 @@ test("removeParticipant rejects unsafe removal requests", async () => {
   }
 });
 
-function memberRemovalFixture(options: { metadata?: Record<string, any>; messages?: ChatMessage[] } = {}) {
-  // manageRolesParticipants "allow": additions would be auto-applied, a removal never is.
-  const allowingRole: ChatRoleConfig = {
+function memberRemovalFixture(options: { metadata?: Record<string, any>; messages?: ChatMessage[]; manage?: "ask" | "allow" } = {}) {
+  // The manager's Manage members setting decides a removal as it does an
+  // addition: "ask" puts it on a card, "allow" makes it without one.
+  const managerRole: ChatRoleConfig = {
     ...ROLE,
-    id: "allowing-manager",
-    label: "Allowing Manager",
+    id: "removal-manager",
+    label: "Removal Manager",
     participantDefaults: {
       autoWatch: false,
       requestParticipants: "ask",
-      manageRolesParticipants: "allow"
+      manageRolesParticipants: options.manage ?? "ask"
     }
   };
   const assistant = { ...chatParticipant("codex-cli"), id: "assistant-participant", handle: "assistant", roleConfigId: ADMIN_ROLE.id };
-  const manager = { ...chatParticipant("claude-code"), id: "manager-participant", handle: "manager", roleConfigId: allowingRole.id };
+  const manager = { ...chatParticipant("claude-code"), id: "manager-participant", handle: "manager", roleConfigId: managerRole.id };
   const target = { ...chatParticipant("codex-cli"), id: "target-participant", handle: "target" };
   const conversation = chatConversation([assistant, manager, target], {
     participantSessions: [{
@@ -6355,7 +6356,7 @@ function memberRemovalFixture(options: { metadata?: Record<string, any>; message
   conversation.messages.push(...(options.messages ?? []));
   const fixture = testService({
     conversation,
-    settings: { chatRoleConfigs: [ADMIN_ROLE, allowingRole, ROLE], chatParticipantConfigs: [] }
+    settings: { chatRoleConfigs: [ADMIN_ROLE, managerRole, ROLE], chatParticipantConfigs: [] }
   });
   return { ...fixture, conversation, assistant, manager, target, actor: participantManagerActor(conversation.id, manager) };
 }
@@ -6364,8 +6365,8 @@ function memberIds(conversation: Conversation): string[] {
   return (conversation.metadata.participants as ChatParticipant[]).map((participant) => participant.id);
 }
 
-test("member removal always asks the User, even with an allow policy", async () => {
-  const { service, storage, actor, target } = memberRemovalFixture();
+test("member removal asks the User on a card when the member's Manage members setting is ask", async () => {
+  const { service, storage, actor, target } = memberRemovalFixture({ manage: "ask" });
 
   const result = await service.requestParticipantChangeFromTool(actor, {
     reason: "No longer needed.",
@@ -6396,7 +6397,7 @@ test("an approved member removal in an idle chat uses the shared removal cleanup
           kind: "portable",
           permissions: ["webAccess"]
         }, { id: "target-permission" }),
-        participantRequestApproval({ ...chatParticipant("claude-code"), id: "manager-participant", handle: "manager", roleConfigId: "allowing-manager" }, [{
+        participantRequestApproval({ ...chatParticipant("claude-code"), id: "manager-participant", handle: "manager", roleConfigId: "removal-manager" }, [{
           target: "target",
           prompt: "Please review this."
         }], { id: "request-target-approval", requestMessageId: "request-message", batchId: "batch-1" })
@@ -6566,7 +6567,7 @@ function queuedRemovalApproval(targetId: string, handle: string, patch: Partial<
     conversationId: "conversation-1",
     requesterParticipantId: "manager-participant",
     requesterHandle: "manager",
-    requesterRoleConfigId: "allowing-manager",
+    requesterRoleConfigId: "removal-manager",
     toolName: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
     capability: "participants.manage",
     status: "approved",
@@ -6727,7 +6728,7 @@ test("a removal that is no longer valid when approved, or when applied, is close
 
     const refused = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).find((item) => item.id === requested.approvalId);
     assert.equal(refused?.status, "denied");
-    assert.match(refused?.error ?? "", /already waiting for the User/);
+    assert.match(refused?.error ?? "", /A removal of @target is already waiting to be made/);
     assert.ok(storage.current.messages.some((message: ChatMessage) => message.content.startsWith("Could not remove @target at @manager's request:")));
   }
   {
@@ -6805,6 +6806,64 @@ test("a machine member's approved removal is applied by the desktop once the Use
   assert.deepEqual(said[0].metadata?.rosterChange, { approvalId: "queued-target", outcome: "applied", appliedParticipantIds: [target.id] }, "the machine settles its card from this message");
 });
 
+test("a machine resumes its members' decided removals after a restart (Д2)", async () => {
+  const { service, storage, target } = memberRemovalFixture({ manage: "allow" });
+  service.setHostMachineId("machine");
+  homeOnMachine(storage);
+  storage.current.metadata.pendingAppToolApprovals = [{ ...queuedRemovalApproval("target-participant", "target"), status: "auto-applied", approvalScope: undefined }];
+  storage.conversationIdsWithQueuedRosterChanges = async () => [storage.current.id];
+
+  await service.resumeQueuedMemberRemovals();
+
+  assert.equal(memberIds(storage.current).includes(target.id), false);
+  assert.equal(storage.current.metadata.pendingAppToolApprovals[0].memberRemovalQueuedAt, undefined);
+});
+
+test("the desktop's copy of a machine member's card never carries a waiting marker, however it first hears of it", async () => {
+  const { service, storage, target } = memberRemovalFixture({ manage: "allow" });
+  homeOnMachine(storage);
+  const raisedPayload = { ...queuedRemovalApproval("target-participant", "target"), status: "auto-applied" as const, approvalScope: undefined };
+  // Only the answer reaches it (a restart, a feed read from a later place),
+  // with the payload the machine raised, marker and all.
+  const card = answeredCard({ ...machineCard(raisedPayload), card: { approval: raisedPayload } }, { approve: true, auto: true }, "machine-device");
+  await feedCard(service, "card.answer", card);
+  let copy = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
+  assert.equal(copy.memberRemovalQueuedAt, undefined);
+  assert.equal(copy.machineDecisionPending?.approve, true);
+  // Nothing is queued here, so nothing is made here.
+  assert.equal((service as any).queuedMemberRemovalChats.has("conversation-1"), false);
+  await (service as any).applyQueuedMemberRemovalsOnce("conversation-1");
+  assert.ok(memberIds(storage.current).includes(target.id));
+  // Settled by the machine with a copy still marked: the desktop takes the outcome, not the marker.
+  await feedCard(service, "card.settle", { ...card, state: "settled", outcome: { result: "applied",
+    approval: { ...raisedPayload, updatedAt: new Date(Date.now() + 1000).toISOString() } } });
+  copy = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
+  assert.equal(copy.memberRemovalQueuedAt, undefined);
+});
+
+test("an older machine card's removal its member's policy allowed is made by the desktop only under the desktop's own rules", async () => {
+  for (const manage of ["ask", "allow"] as const) {
+    const { service, storage, target } = memberRemovalFixture({ manage });
+    homeOnMachine(storage);
+    storage.current.metadata.pendingAppToolApprovals = [queuedRemovalApproval("target-participant", "target", {
+      homeMachineId: "machine", status: "auto-applied", approvalScope: undefined, machineAppliedDecisionId: `server:queued-target@${NOW}`
+    })];
+    storage.conversationIdsWithQueuedRosterChanges = async () => [storage.current.id];
+
+    await service.resumeQueuedRosterChanges();
+
+    const approval = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
+    assert.equal(approval.memberRemovalQueuedAt, undefined, manage);
+    if (manage === "allow") {
+      assert.equal(memberIds(storage.current).includes(target.id), false);
+    } else {
+      assert.ok(memberIds(storage.current).includes(target.id), "ask: refused here");
+      assert.equal(approval.status, "cancelled");
+      assert.match(approval.error ?? "", /may not make this change without your approval/);
+    }
+  }
+});
+
 test("a machine member's removal approved on the server is made by its machine: the desktop shows it waiting, then the machine's outcome (Д2)", async () => {
   const { service, storage, target } = memberRemovalFixture();
   homeOnMachine(storage);
@@ -6868,6 +6927,10 @@ test("the desktop changes no member for a machine member's card: it waits for th
     { name: "approved by the member's own machine", card: () => machineCard(queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine" })), answeredBy: (card) => card.raisedBy },
     { name: "naming the member by another handle", card: () => machineCard(queuedRemovalApproval("target-participant", "someone-else", { homeMachineId: "machine" })), answeredBy: () => "phone-device" },
     {
+      name: "a removal its machine's policy allowed", auto: true, answeredBy: (card) => card.raisedBy,
+      card: () => machineCard(queuedRemovalApproval("target-participant", "target", { homeMachineId: "machine", status: "auto-applied", approvalScope: undefined }))
+    },
+    {
       name: "an addition its machine's policy allowed", auto: true, home: "target-participant", answeredBy: (card) => card.raisedBy,
       card: () => machineCard({
         id: "machine-addition", conversationId: "conversation-1", requesterParticipantId: "target-participant", requesterHandle: "target", requesterRoleConfigId: ROLE.id,
@@ -6925,7 +6988,7 @@ test("on a machine, an approved removal or addition is applied there exactly as 
   }
   {
     // An addition the member's policy allows: added at once, and said so.
-    const { service, storage, actor } = memberRemovalFixture();
+    const { service, storage, actor } = memberRemovalFixture({ manage: "allow" });
     service.setHostMachineId("machine");
     homeOnMachine(storage);
     const result = await service.requestParticipantChangeFromTool(actor, {
@@ -6952,6 +7015,22 @@ test("on a machine, an approved removal or addition is applied there exactly as 
     const approval = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
     assert.equal(approval.status, "approved");
     assert.equal(approval.memberAdditionQueuedAt, undefined);
+  }
+  {
+    // A removal the member's policy allows: no card, made there once idle.
+    const { service, storage, actor, target } = memberRemovalFixture({ manage: "allow" });
+    service.setHostMachineId("machine");
+    homeOnMachine(storage);
+    const result = await service.requestParticipantChangeFromTool(actor, {
+      operations: [{ type: "remove_participant_from_chat", handle: "target" }]
+    }) as { status: string };
+    assert.equal(result.status, "auto_approved");
+    await waitFor(() => !memberIds(storage.current).includes(target.id));
+
+    const approval = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
+    assert.equal(approval.status, "auto-applied");
+    assert.equal(approval.memberRemovalQueuedAt, undefined);
+    assert.equal(storage.current.messages.filter((message: ChatMessage) => message.content.startsWith("Removed @target")).length, 1);
   }
 });
 
@@ -7122,13 +7201,9 @@ test("a denied member removal changes nothing and tells the asking member", asyn
   ));
 });
 
-test("a member cannot remove itself, the Chat Assistant, the unknown, or mix removals with additions", async () => {
-  const { service, storage, actor, manager, assistant } = memberRemovalFixture();
+test("a member cannot remove the Chat Assistant, the last member, or someone not in the chat", async () => {
+  const { service, storage, actor, assistant } = memberRemovalFixture();
 
-  await assert.rejects(
-    () => service.requestParticipantChangeFromTool(actor, { operations: [{ type: "remove_participant_from_chat", participantId: manager.id }] }),
-    /You cannot remove yourself from the chat/
-  );
   await assert.rejects(
     () => service.requestParticipantChangeFromTool(actor, { operations: [{ type: "remove_participant_from_chat", handle: assistant.handle }] }),
     /Chat Assistant cannot be removed from the chat/
@@ -7141,17 +7216,225 @@ test("a member cannot remove itself, the Chat Assistant, the unknown, or mix rem
     () => service.requestParticipantChangeFromTool(actor, { operations: [{ type: "remove_participant_from_chat" }] }),
     /needs the participantId or handle/
   );
+  // Operation numbers count from the whole request, additions included.
   await assert.rejects(
     () => service.requestParticipantChangeFromTool(actor, {
       operations: [
-        { type: "remove_participant_from_chat", handle: "target" },
-        { type: "add_new_participant_to_chat", participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } }
+        { type: "add_new_participant_to_chat", participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } },
+        { type: "remove_participant_from_chat", handle: "nobody" }
       ]
     }),
-    /Request member removals on their own/
+    /Member operation 2: @nobody is not a member of this chat/
   );
+  await assert.rejects(
+    () => service.requestParticipantChangeFromTool(actor, {
+      operations: ["assistant-participant", "manager-participant", "target-participant"].map((participantId) => ({ type: "remove_participant_from_chat", participantId }))
+    }),
+    /Chat Assistant cannot be removed/
+  );
+  // An invalid removal in a combined request adds nobody either.
   assert.deepEqual(storage.current.metadata.pendingAppToolApprovals ?? [], []);
   assert.equal(memberIds(storage.current).length, 3);
+  storage.current.metadata.participants = storage.current.metadata.participants.filter((participant: ChatParticipant) => participant.id === "manager-participant");
+  await assert.rejects(
+    () => service.requestParticipantChangeFromTool(actor, { operations: [{ type: "remove_participant_from_chat", handle: "manager" }] }),
+    /The last chat member cannot be removed/
+  );
+});
+
+test("a member may ask to remove itself, as the member list allows", async () => {
+  const { service, storage, actor, manager } = memberRemovalFixture();
+  const requested = await service.requestParticipantChangeFromTool(actor, {
+    operations: [{ type: "remove_participant_from_chat", participantId: manager.id }]
+  }) as { status: string; approvalId: string; summary: string };
+  assert.equal(requested.status, "pending_user_approval");
+  assert.equal(requested.summary, "Remove @manager from this chat");
+
+  await service.respondToAppToolApproval({ conversationId: storage.current.id, approvalId: requested.approvalId, approve: true });
+
+  assert.equal(memberIds(storage.current).includes(manager.id), false);
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.content === "Removed @manager from this chat at @manager's request."));
+});
+
+test("with Manage members allow, a removal needs no card and is made once the asking member's turn ends", async () => {
+  const { service, storage, actor, target } = memberRemovalFixture({ manage: "allow" });
+  const live = await storage.getConversation("conversation-1") as Conversation;
+  await (service as any).beginChatRun(live, "manager-run");
+  await (service as any).waitForQueuedSave(live.id);
+
+  const result = await service.requestParticipantChangeFromTool(actor, {
+    operations: [{ type: "remove_participant_from_chat", handle: "target" }]
+  }) as { status: string; approvalId: string; summary: string };
+
+  assert.equal(result.status, "auto_approved");
+  assert.equal(result.summary, "Remove @target from this chat");
+  let approval = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0];
+  assert.equal(approval.status, "auto-applied");
+  assert.equal(typeof approval.memberRemovalQueuedAt, "string");
+  // Nothing asks the User: no pending card, no "approval needed" message;
+  // the chat says who decided it, as for an allowed addition.
+  assert.equal((storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).some((item) => item.status === "pending"), false);
+  assert.equal(storage.current.messages.some((message: ChatMessage) => message.content.includes("approval needed")), false);
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.content === "Auto-approved member removal from @manager: Remove @target from this chat."));
+  // The turn that asked is still running: the member is still here.
+  assert.ok(memberIds(storage.current).includes(target.id));
+  // A second removal of the same member is refused while the first waits.
+  await assert.rejects(
+    () => service.requestParticipantChangeFromTool(actor, { operations: [{ type: "remove_participant_from_chat", handle: "target" }] }),
+    /A removal of @target is already waiting to be made/
+  );
+
+  await (service as any).endChatRun(live, "manager-run");
+  await waitFor(() => !memberIds(storage.current).includes(target.id));
+
+  approval = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).find((item) => item.id === result.approvalId)!;
+  assert.equal(approval.status, "auto-applied");
+  assert.equal(approval.memberRemovalQueuedAt, undefined);
+  assert.deepEqual(approval.appliedParticipantIds, [target.id]);
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.content === "Removed @target from this chat at @manager's request."));
+});
+
+test("with Manage members allow, a removal the member's turn cannot see end is made after a restart", async () => {
+  const { service, storage, target } = memberRemovalFixture({
+    manage: "allow",
+    metadata: {
+      pendingAppToolApprovals: [{
+        ...queuedRemovalApproval("target-participant", "target"),
+        status: "auto-applied",
+        approvalScope: undefined
+      }]
+    }
+  });
+  storage.conversationIdsWithQueuedRosterChanges = async () => [storage.current.id];
+
+  await service.resumeQueuedRosterChanges();
+
+  assert.equal(memberIds(storage.current).includes(target.id), false);
+  const approval = storage.current.metadata.pendingAppToolApprovals[0] as ChatAppToolApproval;
+  assert.equal(approval.status, "auto-applied");
+  assert.equal(approval.memberRemovalQueuedAt, undefined);
+});
+
+test("with Manage members allow, a member removing itself stays until its own turn ends", async () => {
+  const { service, storage, actor, manager } = memberRemovalFixture({ manage: "allow" });
+  const live = await storage.getConversation("conversation-1") as Conversation;
+  await (service as any).beginChatRun(live, "manager-run");
+  await (service as any).waitForQueuedSave(live.id);
+
+  const result = await service.requestParticipantChangeFromTool(actor, {
+    operations: [{ type: "remove_participant_from_chat", participantId: manager.id }]
+  }) as { status: string };
+  assert.equal(result.status, "auto_approved");
+  // Its own reply is still being written: it is not taken out under it.
+  assert.ok(memberIds(storage.current).includes(manager.id));
+
+  await (service as any).endChatRun(live, "manager-run");
+  await waitFor(() => !memberIds(storage.current).includes(manager.id));
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.content === "Removed @manager from this chat at @manager's request."));
+});
+
+test("a combined request whose addition is invalid changes nothing, and one whose removal fails after the addition says so", async () => {
+  {
+    const { service, storage, actor, target } = memberRemovalFixture({ manage: "allow" });
+    await assert.rejects(
+      () => service.requestParticipantChangeFromTool(actor, {
+        operations: [
+          { type: "remove_participant_from_chat", handle: "target" },
+          // The handle of a member already here.
+          { type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "target", roleConfigId: ROLE.id, kind: "codex-cli" } }
+        ]
+      })
+    );
+    assert.deepEqual(storage.current.metadata.pendingAppToolApprovals ?? [], []);
+    assert.ok(memberIds(storage.current).includes(target.id));
+  }
+  {
+    const { service, storage, actor, target } = memberRemovalFixture({ manage: "allow" });
+    // Another removal of the same member is recorded while the addition is made.
+    const original = (service as any).requestParticipantAdditionFromTool.bind(service);
+    (service as any).requestParticipantAdditionFromTool = async (...args: unknown[]) => {
+      const added = await original(...args);
+      storage.current.metadata.pendingAppToolApprovals = [...storage.current.metadata.pendingAppToolApprovals, queuedRemovalApproval(target.id, "target")];
+      return added;
+    };
+    const result = await service.requestParticipantChangeFromTool(actor, {
+      operations: [
+        { type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } },
+        { type: "remove_participant_from_chat", handle: "target" }
+      ]
+    }) as { ok: boolean; status: string; additions: { status: string }; removals: { ok: boolean; error: string } };
+    assert.equal(result.ok, false);
+    assert.equal(result.status, "removal_failed");
+    assert.equal(result.additions.status, "auto_applied");
+    assert.equal(result.removals.ok, false);
+    assert.match(result.removals.error, /already waiting to be made/);
+    assert.ok((storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "helper"), "the addition stays");
+  }
+});
+
+test("a combined request numbers its errors as written, and may add a member and remove the asking one in a chat it had alone", async () => {
+  {
+    const { service, actor } = memberRemovalFixture({ manage: "allow" });
+    await assert.rejects(
+      () => service.requestParticipantChangeFromTool(actor, {
+        operations: [
+          { type: "remove_participant_from_chat", handle: "target" },
+          { type: "add_existing_participant_to_chat" }
+        ]
+      }),
+      /Member operation 2 needs participantConfigId/
+    );
+  }
+  {
+    const { service, storage, actor, manager } = memberRemovalFixture({ manage: "allow" });
+    storage.current.metadata.participants = (storage.current.metadata.participants as ChatParticipant[]).filter((participant) => participant.id === manager.id);
+    const result = await service.requestParticipantChangeFromTool(actor, {
+      operations: [
+        { type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } },
+        { type: "remove_participant_from_chat", handle: "manager" }
+      ]
+    }) as { status: string; removals: { status: string } };
+    assert.equal(result.status, "combined");
+    assert.equal(result.removals.status, "auto_approved");
+    await waitFor(() => !memberIds(storage.current).includes(manager.id));
+    assert.deepEqual((storage.current.metadata.participants as ChatParticipant[]).map((participant) => participant.handle), ["helper"]);
+  }
+});
+
+test("one request can add and remove members; each part follows the Manage members setting", async () => {
+  {
+    const { service, storage, actor, target } = memberRemovalFixture({ manage: "allow" });
+    const result = await service.requestParticipantChangeFromTool(actor, {
+      reason: "Swap reviewers.",
+      operations: [
+        { type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } },
+        { type: "remove_participant_from_chat", handle: "target" }
+      ]
+    }) as { ok: boolean; status: string; additions: { status: string }; removals: { status: string } };
+    assert.equal(result.ok, true);
+    assert.equal(result.status, "combined");
+    assert.equal(result.additions.status, "auto_applied");
+    assert.equal(result.removals.status, "auto_approved");
+    const members = storage.current.metadata.participants as ChatParticipant[];
+    assert.ok(members.some((participant) => participant.handle === "helper"));
+    // The chat is idle here, so the removal is made at once.
+    await waitFor(() => !memberIds(storage.current).includes(target.id));
+  }
+  {
+    const { service, storage, actor, target } = memberRemovalFixture({ manage: "ask" });
+    const result = await service.requestParticipantChangeFromTool(actor, {
+      operations: [
+        { type: "remove_participant_from_chat", handle: "target" },
+        { type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "helper", roleConfigId: ROLE.id, kind: "codex-cli" } }
+      ]
+    }) as { ok: boolean; additions: { status: string }; removals: { status: string } };
+    assert.equal(result.additions.status, "pending_user_approval");
+    assert.equal(result.removals.status, "pending_user_approval");
+    const pending = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).filter((item) => item.status === "pending");
+    assert.equal(pending.length, 2);
+    assert.ok(memberIds(storage.current).includes(target.id));
+    assert.equal((storage.current.metadata.participants as ChatParticipant[]).some((participant) => participant.handle === "helper"), false);
+  }
 });
 
 test("a second removal of the same member is refused while the first waits", async () => {
@@ -7202,7 +7485,7 @@ test("an approved removal still waiting when the app quit is applied after the r
     conversationId: "conversation-1",
     requesterParticipantId: "manager-participant",
     requesterHandle: "manager",
-    requesterRoleConfigId: "allowing-manager",
+    requesterRoleConfigId: "removal-manager",
     toolName: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
     capability: "participants.manage",
     status: "approved",
@@ -7284,14 +7567,17 @@ test("member tools describe the removal operation", async () => {
   const { service, actor } = memberRemovalFixture();
   const options = await service.describeParticipantOptionsForTool(actor) as { participantChange: { supportedOperations: string[]; removalPolicy: string } };
   assert.ok(options.participantChange.supportedOperations.includes("remove_participant_from_chat"));
-  assert.match(options.participantChange.removalPolicy, /always approves a removal on a card/);
+  assert.match(options.participantChange.removalPolicy, /follows your Manage members setting/);
+  assert.doesNotMatch(options.participantChange.removalPolicy, /on their own|always approves/);
 
   const appMcp = new AppMcpService();
   const tools = (appMcp as any).toolsForActor({ ...actor, roleConfigVersion: 1 }) as Array<{ name: string; description: string; inputSchema: any }>;
   const tool = tools.find((item) => item.name === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL);
   assert.ok(tool);
   assert.ok(tool.inputSchema.properties.operations.items.properties.type.enum.includes("remove_participant_from_chat"));
-  assert.match(tool.description, /removing another member/);
+  assert.match(tool.description, /removing a member from the chat/);
+  assert.match(tool.description, /same Manage members policy/);
+  assert.match(tool.description, /auto_approved/);
   const roster = tools.find((item) => item.name === APP_ROSTER_REQUEST_CHANGE_TOOL);
   assert.deepEqual(roster?.inputSchema.properties.operations.items.properties.type.enum, ["add"]);
 });

@@ -185,7 +185,7 @@ export function ParticipantRuntimeControls(props: {
             value={managePermission}
             prefix="Manage members:"
             displayLabel={managePermissionLabel}
-            tooltip="Controls whether this member can add or change roles and chat members."
+            tooltip="Controls whether this member can add, remove or change roles and chat members."
             muted={managePermission === "deny"}
             disabled={controlsDisabled}
             options={PARTICIPANT_REQUEST_PERMISSION_OPTIONS}

@@ -88,8 +88,8 @@ function removalRequest(approval: ChatAppToolApproval): ChatParticipantRemovalRe
  *  approved roster change that has not happened yet. */
 export function approvalHasCard(approval: ChatAppToolApproval): boolean {
   return approval.status === "pending" ||
-    (approval.status === "approved" && typeof approval.memberRemovalQueuedAt === "string") ||
-    ((approval.status === "approved" || approval.status === "auto-applied") && typeof approval.memberAdditionQueuedAt === "string");
+    ((approval.status === "approved" || approval.status === "auto-applied") &&
+      (typeof approval.memberRemovalQueuedAt === "string" || typeof approval.memberAdditionQueuedAt === "string"));
 }
 
 /** The card for one app-tool approval, in exactly the shape the desktop card
@@ -114,7 +114,7 @@ export function controlCardFromApproval(conversationId: string, approval: ChatAp
       allowsCancel: false,
       createdAt: approval.createdAt
     };
-    if (approval.status === "approved" && typeof approval.memberRemovalQueuedAt === "string") {
+    if ((approval.status === "approved" || approval.status === "auto-applied") && typeof approval.memberRemovalQueuedAt === "string") {
       // The waiting result, with what the phone cannot see: whether the
       // device that applies it (the asking member's own) is on.
       return {
@@ -242,7 +242,10 @@ export function controlCardFromHubCard(
   if ((card.cardKind === "permission" || card.cardKind === "roster") && raised.approval && typeof raised.approval === "object") {
     const pending = controlCardFromApproval(card.conversationId, { ...raised.approval, status: "pending" });
     const base: MobileControlCard = { ...pending, id: card.cardId, createdAt: raised.approval.createdAt || card.raisedAt };
-    if (card.state === "pending") {
+    // Decided by its member's own device (its Manage members setting allowed
+    // it): never a question, even read before that device's answer lands.
+    const decidedThere = raised.approval.status === "auto-applied";
+    if (card.state === "pending" && !decidedThere) {
       // Answers the member's device could not apply, asked again (a phone's
       // approval of a script's code, say): the phone that sent one says why.
       const refused = Array.isArray(raised.refusals)
@@ -252,7 +255,7 @@ export function controlCardFromHubCard(
         : [];
       return refused.length ? { ...base, refusedAnswers: refused.map((item) => ({ operationId: item.operationId, reason: item.reason })) } : base;
     }
-    const approve = card.answer?.approve === true;
+    const approve = decidedThere || card.answer?.approve === true;
     // An approved roster change waits as the desktop's card waits ("Removal
     // approved … then @x leaves this chat", "Addition approved").
     if (approve && (card.cardKind === "roster" || raised.approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL)) {

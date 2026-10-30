@@ -55,6 +55,11 @@ test("a removal card states each outcome the User can see", () => {
   const two = removal(["beta", "gamma"]);
   const states: Array<[Partial<ChatAppToolApproval>, string, string, string]> = [
     [{ status: "approved", memberRemovalQueuedAt: NOW }, "waiting", "Removal approved", "Waiting for running turns to finish, then @beta and @gamma leave this chat."],
+    // Allowed by the member's Manage members setting: the same wait, no question.
+    [{ status: "auto-applied", memberRemovalQueuedAt: NOW }, "waiting", "Removal approved", "Waiting for running turns to finish, then @beta and @gamma leave this chat."],
+    // A machine member's, shown on the desktop until its machine makes it.
+    [{ status: "auto-applied" }, "waiting", "Removal approved", "Waiting for running turns to finish, then @beta and @gamma leave this chat."],
+    [{ status: "auto-applied", appliedParticipantIds: ["beta-id", "gamma-id"] }, "done", "Members removed", "@beta and @gamma left this chat."],
     [{ status: "approved", appliedParticipantIds: ["beta-id", "gamma-id"] }, "done", "Members removed", "@beta and @gamma left this chat."],
     [{ status: "approved", appliedParticipantIds: ["beta-id"] }, "done", "Member removed", "@beta left this chat. @gamma had already left."],
     [{ status: "approved", appliedParticipantIds: [] }, "done", "Nothing to remove", "@beta and @gamma had already left this chat."],

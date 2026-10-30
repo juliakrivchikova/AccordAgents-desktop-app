@@ -627,7 +627,8 @@ const MEMBER_REMOVAL_RETRY_DELAY_MS = 30_000;
 /** A member's removal request before the targets are resolved against the chat. */
 interface ParticipantRemovalInput {
   reason?: string;
-  targets: Array<{ participantId?: string; handle?: string }>;
+  /** operationNumber: where the member put it in its request, for errors. */
+  targets: Array<{ participantId?: string; handle?: string; operationNumber?: number }>;
 }
 
 interface PreparedRoleParticipantChange {
@@ -3476,7 +3477,7 @@ export class ChatService {
       participantChange: {
         supportedOperations: ["add_new_participant_to_chat", "add_existing_participant_to_chat", "remove_participant_from_chat"],
         savePolicy: "For add_new_participant_to_chat, saveAsPreset defaults to true. Set it to false only for a one-off chat member. Do not use archived roles for new members; archived roles are returned only so existing saved/current references can still be understood.",
-        removalPolicy: "remove_participant_from_chat takes a current member's participantId or handle and takes that member out of this chat only; its saved preset is kept. Request removals on their own, not together with additions. The User always approves a removal on a card, even when member changes are otherwise auto-applied, and an approved removal takes effect after your turn ends and no member is running. You cannot remove yourself, the Chat Assistant, or the last member."
+        removalPolicy: "remove_participant_from_chat takes a current member's participantId or handle and takes that member out of this chat only; its saved preset is kept. It can be combined with additions in one request (the answer then has `additions` and `removals`). Like an addition, it follows your Manage members setting: with allow it needs no User approval (status auto_approved: decided, made after your turn), with ask the User approves it on a card. A removal takes effect after your turn ends and no member is running. The Chat Assistant and the last member cannot be removed."
       }
     };
   }
@@ -3730,11 +3731,52 @@ export class ChatService {
     await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
     const { requester, manageRolesParticipants } = await this.requireParticipantManager(conversation, actor);
-    const removal = this.normalizeParticipantRemovalInput(rawRequest);
-    if (removal) {
-      // A removal is never auto-applied, whatever this member's policy is.
-      return this.requestParticipantRemovalFromTool(conversation, requester, removal);
+    const { removal, additions, additionNumbers } = this.splitParticipantRemovalInput(rawRequest);
+    if (!removal) {
+      return this.requestParticipantAdditionFromTool(conversation, requester, manageRolesParticipants, rawRequest);
     }
+    if (!additions) {
+      return this.requestParticipantRemovalFromTool(conversation, requester, removal, manageRolesParticipants);
+    }
+    // Additions and removals in one request: each part goes exactly as it
+    // would on its own, under the same Manage members setting. The removal is
+    // checked first, so a request it cannot make changes nothing (the last
+    // member rule is checked once the additions are made).
+    this.prepareParticipantRemoval(conversation, requester.id, removal, undefined, { afterAdditions: true });
+    let added: Record<string, unknown>;
+    try {
+      added = await this.requestParticipantAdditionFromTool(conversation, requester, manageRolesParticipants, additions);
+    } catch (error) {
+      // Numbered as the member wrote its whole request.
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(message.replace(/Member operation (\d+)/g, (_text, number: string) =>
+        `Member operation ${additionNumbers?.[Number(number) - 1] ?? number}`));
+    }
+    let removed: Record<string, unknown>;
+    try {
+      removed = await this.requestParticipantRemovalFromTool(conversation, requester, removal, manageRolesParticipants);
+    } catch (error) {
+      removed = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (removed.ok === false) {
+      return {
+        ok: false,
+        status: "removal_failed",
+        additions: added,
+        removals: removed,
+        next: "The additions went as `additions` says; only the removal failed. Do not ask for the additions again."
+      };
+    }
+    return { ok: true, status: "combined", additions: added, removals: removed };
+  }
+
+  /** The additions of a member change request (everything but removals). */
+  private async requestParticipantAdditionFromTool(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    manageRolesParticipants: ChatParticipantRequestPermission,
+    rawRequest: unknown
+  ): Promise<Record<string, unknown>> {
     const request = this.normalizeParticipantChangeRequest(rawRequest);
     const pendingRoleApproval = this.pendingRoleApprovalForParticipantRequest(conversation, requester, request);
     if (pendingRoleApproval) {
@@ -3848,11 +3890,18 @@ export class ChatService {
     };
   }
 
+  /** A member's removal request. The asking member's Manage members setting
+   *  decides, exactly as for an addition: "allow" makes it without a card,
+   *  "ask" puts it on a card for the User. Either way it is made once the
+   *  chat has no live work, the asking member's own turn included, by the
+   *  same removal core as the member list (applyQueuedMemberRemovals). */
   private async requestParticipantRemovalFromTool(
     conversation: Conversation,
     requester: ChatParticipant,
-    input: ParticipantRemovalInput
+    input: ParticipantRemovalInput,
+    manageRolesParticipants: ChatParticipantRequestPermission
   ): Promise<Record<string, unknown>> {
+    const allowed = manageRolesParticipants === "allow";
     let result!: Record<string, unknown>;
     await this.withChatMutation(conversation, async () => {
       const prepared = this.prepareParticipantRemoval(conversation, requester.id, input);
@@ -3864,59 +3913,83 @@ export class ChatService {
         "participants.manage",
         prepared.request,
         prepared.summary,
-        "pending"
+        allowed ? "auto-applied" : "pending"
       );
+      if (allowed) {
+        approval.memberRemovalQueuedAt = approval.createdAt;
+        conversation.messages.push(this.message("system", `Auto-approved member removal from @${current.handle}: ${prepared.summary}.`, undefined, {
+          threadId: "system"
+        }));
+      } else {
+        conversation.messages.push(this.message("system", `Member removal approval needed from @${current.handle}: ${prepared.summary}.`, undefined, {
+          threadId: "system"
+        }));
+      }
       this.upsertAppToolApproval(conversation, approval);
-      conversation.messages.push(this.message("system", `Member removal approval needed from @${current.handle}: ${prepared.summary}.`, undefined, {
-        threadId: "system"
-      }));
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      result = {
-        ok: true,
-        status: "pending_user_approval",
-        approvalId: approval.id,
-        summary: prepared.summary,
-        next: "The User decides on a removal card. If approved, the removal takes effect after your turn ends and no member is running; the outcome is posted to the chat as a system message. Do not say the member was removed before that."
-      };
+      result = allowed
+        ? {
+            ok: true,
+            status: "auto_approved",
+            approvalId: approval.id,
+            summary: prepared.summary,
+            next: "Your Manage members setting allows this removal without asking the User. It takes effect after your turn ends and no member is running; the outcome is posted to the chat as a system message. Do not say the member was removed before that."
+          }
+        : {
+            ok: true,
+            status: "pending_user_approval",
+            approvalId: approval.id,
+            summary: prepared.summary,
+            next: "The User decides on a removal card. If approved, the removal takes effect after your turn ends and no member is running; the outcome is posted to the chat as a system message. Do not say the member was removed before that."
+          };
     });
+    if (allowed) {
+      // Indexed only once the decision is stored (see approveParticipantRemoval).
+      this.noteQueuedMemberRemoval(conversation.id);
+      await this.applyQueuedMemberRemovalsOnce(conversation.id, conversation);
+    }
     return result;
   }
 
-  /** A removal request from the tool, or undefined when it asks for additions
-   *  only. Removals and additions are not mixed: a removal always waits for
-   *  the User and for an idle chat, an addition may apply at once. */
-  private normalizeParticipantRemovalInput(raw: unknown): ParticipantRemovalInput | undefined {
+  /** The removals of a member change request and the rest of it (additions),
+   *  or no removal when it asks for additions only. */
+  private splitParticipantRemovalInput(raw: unknown): { removal?: ParticipantRemovalInput; additions?: Record<string, unknown>; additionNumbers?: number[] } {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      return undefined;
+      return {};
     }
-    const record = raw as { reason?: unknown; operations?: unknown };
+    const record = raw as Record<string, unknown> & { reason?: unknown; operations?: unknown };
     if (!Array.isArray(record.operations)) {
-      return undefined;
+      return {};
     }
+    const operations: unknown[] = record.operations;
     const isRemoval = (operation: unknown): boolean =>
       Boolean(operation && typeof operation === "object" && (operation as { type?: unknown }).type === "remove_participant_from_chat");
-    const removals = record.operations.filter(isRemoval).length;
-    if (removals === 0) {
-      return undefined;
+    if (!operations.some(isRemoval)) {
+      return {};
     }
-    if (removals !== record.operations.length) {
-      throw new Error("Request member removals on their own: do not combine remove_participant_from_chat with additions in one request.");
-    }
-    if (record.operations.length > CHAT_ROSTER_CHANGE_MAX_OPERATIONS) {
+    if (operations.length > CHAT_ROSTER_CHANGE_MAX_OPERATIONS) {
       throw new Error("Member change request is too large.");
     }
+    const targets: ParticipantRemovalInput["targets"] = [];
+    for (const [index, operation] of operations.entries()) {
+      if (!isRemoval(operation)) continue;
+      const operationRecord = operation as Record<string, unknown>;
+      const participantId = typeof operationRecord.participantId === "string" ? operationRecord.participantId.trim() : "";
+      const handle = typeof operationRecord.handle === "string" ? operationRecord.handle.trim().replace(/^@/, "") : "";
+      if (!participantId && !handle) {
+        throw new Error(`Member operation ${index + 1} needs the participantId or handle of the member to remove.`);
+      }
+      targets.push({ ...(participantId ? { participantId } : { handle }), operationNumber: index + 1 });
+    }
+    const rest = operations.filter((operation) => !isRemoval(operation));
+    const additionNumbers = operations.flatMap((operation, index) => isRemoval(operation) ? [] : [index + 1]);
     return {
-      reason: typeof record.reason === "string" ? record.reason.trim().slice(0, 500) || undefined : undefined,
-      targets: record.operations.map((operation, index) => {
-        const operationRecord = operation as Record<string, unknown>;
-        const participantId = typeof operationRecord.participantId === "string" ? operationRecord.participantId.trim() : "";
-        const handle = typeof operationRecord.handle === "string" ? operationRecord.handle.trim().replace(/^@/, "") : "";
-        if (!participantId && !handle) {
-          throw new Error(`Member operation ${index + 1} needs the participantId or handle of the member to remove.`);
-        }
-        return participantId ? { participantId } : { handle };
-      })
+      removal: {
+        reason: typeof record.reason === "string" ? record.reason.trim().slice(0, 500) || undefined : undefined,
+        targets
+      },
+      ...(rest.length > 0 ? { additions: { ...record, operations: rest }, additionNumbers } : {})
     };
   }
 
@@ -3926,7 +3999,8 @@ export class ChatService {
     conversation: Conversation,
     requesterId: string,
     input: ParticipantRemovalInput,
-    excludingApprovalId?: string
+    excludingApprovalId?: string,
+    options: { afterAdditions?: boolean } = {}
   ): { request: ChatParticipantRemovalRequest; summary: string } {
     const participants = this.chatParticipants(conversation);
     const requester = participants.find((participant) => participant.id === requesterId);
@@ -3940,13 +4014,12 @@ export class ChatService {
         ? participants.find((participant) => participant.id === target.participantId)
         : this.participantForMentionHandle(participants, target.handle ?? "");
       if (!member) {
+        const number = target.operationNumber ?? index + 1;
         throw new Error(target.participantId
-          ? `Member operation ${index + 1}: no member of this chat has id ${target.participantId}.`
-          : `Member operation ${index + 1}: @${target.handle} is not a member of this chat.`);
+          ? `Member operation ${number}: no member of this chat has id ${target.participantId}.`
+          : `Member operation ${number}: @${target.handle} is not a member of this chat.`);
       }
-      if (member.id === requester.id) {
-        throw new Error("You cannot remove yourself from the chat. If you should leave, tell the User; they can remove you from the member list.");
-      }
+      // The member list's rules, no more: a member may remove itself too.
       if (member.id === assistantId) {
         throw new Error("Chat Assistant cannot be removed from the chat.");
       }
@@ -3954,7 +4027,7 @@ export class ChatService {
         operations.push({ type: "remove_participant_from_chat", participantId: member.id, handle: member.handle });
       }
     }
-    if (participants.length - operations.length < 1) {
+    if (!options.afterAdditions && participants.length - operations.length < 1) {
       throw new Error("The last chat member cannot be removed.");
     }
     const open = this.chatAppToolApprovals(conversation).find((approval): approval is MemberRemovalApproval =>
@@ -3965,24 +4038,26 @@ export class ChatService {
       )
     );
     if (open) {
-      throw new Error(`A removal of ${this.memberRemovalHandles(open.request)} is already waiting for the User.`);
+      throw new Error(`A removal of ${this.memberRemovalHandles(open.request)} is already waiting ${open.status === "pending" ? "for the User" : "to be made"}.`);
     }
     const request: ChatParticipantRemovalRequest = { kind: "participant_removal", reason: input.reason, operations };
     return { request, summary: `Remove ${this.memberRemovalHandles(request)} from this chat` };
   }
 
-  /** Pending, or approved and not applied yet, wherever it is applied. */
+  /** Pending, or decided (by the User, or by the member's Manage members
+   *  setting) and not applied yet, wherever it is applied. */
   private isOpenMemberRemovalApproval(approval: ChatAppToolApproval): approval is MemberRemovalApproval {
     return approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
       this.isParticipantRemovalRequest(approval.request) &&
-      (approval.status === "pending" || (approval.status === "approved" && typeof approval.memberRemovalQueuedAt === "string"));
+      (approval.status === "pending" || this.isQueuedMemberRemovalApproval(approval));
   }
 
-  /** An approved removal this device still has to apply once the chat's
-   *  turns end (any device, Д2). */
+  /** A removal the User approved, or the member's Manage members setting
+   *  allowed, that this device still has to apply once the chat's turns end
+   *  (any device, Д2). */
   private isQueuedMemberRemovalApproval(approval: ChatAppToolApproval): approval is MemberRemovalApproval {
     return approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
-      approval.status === "approved" &&
+      (approval.status === "approved" || approval.status === "auto-applied") &&
       typeof approval.memberRemovalQueuedAt === "string" &&
       this.isParticipantRemovalRequest(approval.request);
   }
@@ -4354,9 +4429,16 @@ export class ChatService {
               continue;
             }
             const remaining = { ...request, operations: request.operations.filter((operation) => present.has(operation.participantId)) };
+            // One its member's policy allowed: only under this desktop's own
+            // rules for that member, exactly as a machine member's addition.
+            const requesterHere = this.chatParticipants(conversation).find((participant) => participant.id === approval.requesterParticipantId);
+            const policyProblem = approval.status === "auto-applied" &&
+              (!requesterHere || await this.manageRolesParticipantsPermissionForParticipant(requesterHere) !== "allow")
+              ? `@${approval.requesterHandle} may not make this change without your approval; it can ask again.`
+              : undefined;
             const problem = !decision.ok
               ? decision.problem
-              : this.machineRosterCardProblem(conversation, undefined, approval) ??
+              : policyProblem ?? this.machineRosterCardProblem(conversation, undefined, approval) ??
                 (remaining.operations.length > 0 ? this.memberRemovalProblem(conversation, approval, remaining) ?? this.machineRemovalHandleProblem(conversation, remaining) : undefined);
             if (problem) {
               refuse(problem);
@@ -4398,11 +4480,11 @@ export class ChatService {
     });
   }
 
-  /** After a restart nothing of this process runs any more, so approved
-   *  removals that were waiting for a turn to end are applied now (a turn a
-   *  machine still runs keeps them waiting, see memberRemovalMustWait), and
-   *  machine members' additions not applied yet are. Only on the desktop: a
-   *  machine applies no roster change. */
+  /** After a restart nothing of this process runs any more, so decided
+   *  removals that were waiting for a turn to end are applied now (a turn
+   *  another device still runs keeps them waiting, see memberRemovalMustWait),
+   *  and machine members' additions recorded before Д2 are. On the desktop;
+   *  a machine resumes only its removals (resumeQueuedMemberRemovals). */
   async resumeQueuedRosterChanges(): Promise<void> {
     const storage = this.storage as Partial<Pick<StorageService, "conversationIdsWithQueuedRosterChanges">>;
     if (typeof storage.conversationIdsWithQueuedRosterChanges !== "function") {
@@ -4411,6 +4493,20 @@ export class ChatService {
     const ids = await storage.conversationIdsWithQueuedRosterChanges.call(this.storage);
     for (const conversationId of ids) {
       await this.applyQueuedMemberAdditionsOnce(conversationId);
+      this.noteQueuedMemberRemoval(conversationId);
+      await this.applyQueuedMemberRemovalsOnce(conversationId, undefined, { afterRestart: true });
+    }
+  }
+
+  /** On a machine after a restart: its own members' decided removals still
+   *  waiting (Д2: the asking member's device makes them). The waiting index
+   *  lives only in memory, so without this they would wait forever. */
+  async resumeQueuedMemberRemovals(): Promise<void> {
+    const storage = this.storage as Partial<Pick<StorageService, "conversationIdsWithQueuedRosterChanges">>;
+    if (typeof storage.conversationIdsWithQueuedRosterChanges !== "function") {
+      return;
+    }
+    for (const conversationId of await storage.conversationIdsWithQueuedRosterChanges.call(this.storage)) {
       this.noteQueuedMemberRemoval(conversationId);
       await this.applyQueuedMemberRemovalsOnce(conversationId, undefined, { afterRestart: true });
     }
@@ -8912,7 +9008,7 @@ export class ChatService {
       "Call the describe tools first when you need exact role IDs, saved participant IDs, provider availability, model IDs, reasoning-effort options, configured models, or handle constraints.",
       "App tools: `app_roles_request_change` is available for proposed role creation, custom-role editing, or deleting unused custom roles with `archive_role`. Use `create_role` when no built-in role fits. Do not edit or delete built-in roles.",
       "App tools: `app_participants_request_change` is available for User-requested member changes. Use `add_existing_participant_to_chat` for a matching saved member preset, or `add_new_participant_to_chat` with `saveAsPreset` for a new chat member.",
-      "To take a member out of this chat when User asks, call `app_participants_request_change` with `remove_participant_from_chat` and that member's `participantId` or `handle`, in a request of its own. A removal always waits for User approval on a card, even when other member changes are auto-applied, and takes effect only after your turn ends and no member is running; the outcome is posted to the chat. You cannot remove yourself or the Chat Assistant.",
+      "To take a member out of this chat when User asks, call `app_participants_request_change` with `remove_participant_from_chat` and that member's `participantId` or `handle`. A removal follows the same policy as an addition and takes effect only after your turn ends and no member is running; the outcome is posted to the chat. The Chat Assistant and the last member cannot be removed.",
       "Do not choose roles marked archived for new members; archived roles are kept only so existing saved/current references remain understandable.",
       ...roleParticipantWorkflowLines,
       "`app_roster_request_change` is legacy compatibility only; do not use it for the v1 member setup flow."
@@ -21506,8 +21602,12 @@ export class ChatService {
     // Made here already (a machine member's roster change): no older word
     // from the machine brings the waiting state back.
     const settledHere = current?.rosterChangeSettledAt;
-    const decided = (approval: ChatAppToolApproval): ChatAppToolApproval => ({ ...approval, conversationId: conversation.id, homeMachineId,
-      updatedAt: this.laterThan(current?.updatedAt) });
+    // Never with a waiting marker: only the member's own device makes its
+    // roster change (Д2), and a marker here would queue it on this desktop.
+    const decided = (approval: ChatAppToolApproval): ChatAppToolApproval => {
+      const { memberRemovalQueuedAt: _removal, memberAdditionQueuedAt: _addition, ...shown } = approval;
+      return { ...shown, conversationId: conversation.id, homeMachineId, updatedAt: this.laterThan(current?.updatedAt) };
+    };
     // The same word read again (a reconnect lists the open cards, the feed
     // may repeat a raise) changes nothing here.
     const put = (next: ChatAppToolApproval): boolean => {
