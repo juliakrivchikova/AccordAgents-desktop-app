@@ -12,13 +12,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
 import { attachApp, launchChrome, member, pairPage, serveMobileShell, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
 
 // A 1x1 PNG: what a photo from the phone's library stands for here.
 const PICTURE = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
 
 test("the phone starts a chat the way the computer would: in the project chosen, with the members chosen, asking the member named", { timeout: 120_000 }, async (t) => {
-  const hub = await startMobileHub();
+  // The cloud member's machine is one of the server's devices.
+  const { createDeviceIdentity } = require("../dist/main/main/services/deviceIdentity.js");
+  const cloudMachine = createDeviceIdentity(new Date().toISOString());
+  const hub = await startMobileHub({ rosterDevices: [
+    { deviceId: cloudMachine.originId, publicKeyDerBase64: cloudMachine.publicKeyDerBase64, role: "machine", name: "Cloud run", machineId: "m-cloud" }
+  ] });
   const site = await serveMobileShell({ port: 8341, hubOrigins: [hub.base] });
   const profile = await tempProfile("aa-mobile-new-chat-");
   const chrome = launchChrome({ port: 9481, profile, url: `${site.origin}/`, width: 430, height: 860 });
@@ -39,7 +46,7 @@ test("the phone starts a chat the way the computer would: in the project chosen,
     members: [{ configId: "c-gera", uses: 1, participant: gera }, { configId: "c-drew", uses: 4, participant: drew },
       { configId: "c-cass", uses: 0, participant: member("cass", { id: "t-cass", participantConfigId: "c-cass", kind: "claude-code" }), unavailable: "QA: Claude Code is not signed in." },
       // A Cloud run member: its machine has only the api project.
-      { configId: "c-cloudy", uses: 0, participant: member("cloudy", { id: "t-cloudy", participantConfigId: "c-cloudy", kind: "claude-code", homeMachineId: "m-cloud", cloudRun: {} }), projects: ["/Users/u/api"] }]
+      { configId: "c-cloudy", uses: 0, participant: member("cloudy", { id: "t-cloudy", participantConfigId: "c-cloudy", kind: "claude-code", cloudRun: {} }), machineId: "m-cloud", projects: ["/Users/u/api"] }]
   };
   const published = await hub.call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(), roles: { "software-engineer": "Engineer", administrator: "Chat Assistant" }, prompts: [], skills: [], avatars: {}, newChat } });
   assert.equal(published.ok, true);
@@ -223,7 +230,7 @@ test("the phone starts a chat the way the computer would: in the project chosen,
   await pickProject("/Users/u/api");
   await app.waitFor(`${handles}.includes("cloudy")`, "offered in the project its machine has");
   const where = await app.evaluate(`document.querySelector('#new-chat-members [data-handle="cloudy"] .members-sheet-location').textContent`);
-  assert.notEqual(where, "Local · desktop", "said to run on its machine, not here");
+  assert.equal(where, "Cloud run", "said to run on its machine, by its name, not here");
   await app.evaluate(`document.querySelector('#new-chat-members [data-handle="cloudy"]').click()`);
   await app.waitFor(`document.getElementById("new-chat-members-button").getAttribute("aria-label").indexOf("@cloudy") >= 0`, "chosen");
   await pickProject("/Users/u/site");
@@ -255,5 +262,9 @@ test("the phone starts a chat the way the computer would: in the project chosen,
   assert.equal(cloudChat.repoPath, "/Users/u/api");
   const cloudMember = cloudChat.metadata.participants.find((participant) => participant.handle === "cloudy");
   assert.equal(cloudMember.homeMachineId, "m-cloud", "on its machine, which takes its turns from the server");
-  assert.deepEqual(cloudChat.messages.find((item) => item.role === "user").metadata.deliveryTargets, [cloudMember.id]);
+  const cloudAsk = cloudChat.messages.find((item) => item.role === "user");
+  assert.deepEqual(cloudAsk.metadata.deliveryTargets, [cloudMember.id]);
+  // The server asks the machine for the turn: no computer in between.
+  const turns = await hub.storage.hubOps().turnsFor(cloudChat.id, [cloudAsk.id]);
+  assert.deepEqual(turns.map((turn) => ({ participantId: turn.participantId, state: turn.state })), [{ participantId: cloudMember.id, state: "requested" }]);
 });

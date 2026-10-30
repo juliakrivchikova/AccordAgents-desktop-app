@@ -75,3 +75,10 @@ test("a member on a machine fits a chat in a project that machine has, or in one
   assert.equal(newChatMemberFitsProject({ projects: [] }, "/Users/u/api"), false, "a machine with no project copied yet");
   assert.equal(newChatMemberFitsProject({}, "/Users/u/site"), true, "a member of this computer, or a machine with its own folders");
 });
+
+test("a member on a machine joins a chat started off the computer on that machine", () => {
+  const cloud = { configId: "c-cloud", uses: 0, machineId: "m-cloud", participant: { id: "template-cloud", participantConfigId: "c-cloud", handle: "cloudy", roleConfigId: "generic-participant", kind: "claude-code", cloudRun: {} } as ChatParticipant };
+  const participants = newChatParticipants({ assistant, members: [cloud], chosenConfigIds: ["c-cloud"], firstMessage: "hi", newId: () => "id" });
+  assert.equal(participants[1].homeMachineId, "m-cloud");
+  assert.deepEqual(participants[1].cloudRun, {}, "still a Cloud run member, its machine chosen");
+});

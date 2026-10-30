@@ -123,8 +123,13 @@ export interface NewChatMemberOption {
   /** Why it cannot be added now (its CLI is not ready, say), as the
    *  computer's New chat screen says it. */
   unavailable?: string;
-  /** For a member that runs on a machine: the projects that machine has. A
-   *  chat in any other project would wait for the computer to copy it there,
+  /** The machine it runs on, when it runs on one: for a Cloud run member,
+   *  the machine on the computer's AWS instance. A chat started off the
+   *  computer goes straight there (the server asks the machine for its turns
+   *  and wakes it). */
+  machineId?: string;
+  /** For a member that runs on a machine: the projects that machine has. In
+   *  any other project its turn would not find the project's files there,
    *  so it is offered only for these, and for a chat without a project.
    *  Absent: any project (a member of this computer, or a machine set up by
    *  hand, which keeps its own folders). */
@@ -165,7 +170,7 @@ export function newChatParticipants(input: {
   const members = picked.map((member) => {
     const autoWatch = member.participant.autoWatch === true && !watching;
     if (autoWatch) watching = true;
-    return { ...member.participant, id: input.newId(), autoWatch };
+    return { ...member.participant, ...(member.machineId ? { homeMachineId: member.machineId } : {}), id: input.newId(), autoWatch };
   });
   const taken = new Set(members.map((member) => member.handle.toLowerCase()));
   let handle = input.assistant.handle;

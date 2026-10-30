@@ -3207,8 +3207,9 @@
     role.textContent = [newChatOffer && newChatOffer.roles[participant.roleConfigId], memberKindLabel(participant.kind)].filter(Boolean).join(" · ");
     const where = document.createElement("span");
     where.className = "members-sheet-location";
-    where.textContent = options.unavailable || memberLocationLabel({ homeMachineId: participant.homeMachineId, cloudRun: participant.cloudRun,
-      homeMachineName: participant.homeMachineId && newChatOffer ? newChatOffer.machines[participant.homeMachineId] : undefined });
+    const machineId = options.machineId || participant.homeMachineId;
+    where.textContent = options.unavailable || memberLocationLabel({ homeMachineId: machineId, cloudRun: participant.cloudRun,
+      homeMachineName: machineId && newChatOffer ? newChatOffer.machines[machineId] : undefined });
     copy.append(name, role, where);
     row.append(newChatAvatar(participant), copy, newChatCheck(options.chosen));
     return row;
@@ -3243,7 +3244,7 @@
       if (offer) {
         list.append(newChatMemberRow(offer.assistant, { chosen: true, locked: true }));
         for (const member of newChatVisibleMembers(offer)) {
-          const row = newChatMemberRow(member.participant, { chosen: newChatChosen.has(member.configId), unavailable: member.unavailable });
+          const row = newChatMemberRow(member.participant, { chosen: newChatChosen.has(member.configId), unavailable: member.unavailable, machineId: member.machineId });
           row.addEventListener("click", function () {
             if (member.unavailable) return;
             if (newChatChosen.has(member.configId)) newChatChosen.delete(member.configId);
@@ -3369,7 +3370,8 @@
     // wait for the computer to copy it there.
     const elsewhere = picked.find(function (member) { return !shared.newChatMemberFitsProject(member, newChatProject); });
     if (elsewhere) {
-      const machine = elsewhere.participant.homeMachineId && newChatOffer.machines[elsewhere.participant.homeMachineId];
+      const elsewhereMachine = elsewhere.machineId || elsewhere.participant.homeMachineId;
+      const machine = elsewhereMachine && newChatOffer.machines[elsewhereMachine];
       renderNewChat("@" + elsewhere.participant.handle + " runs on " + (machine || "a cloud machine") +
         ", which does not have this project. Choose a project it has, or No project.");
       return;
@@ -3397,7 +3399,8 @@
           return normalizeMobileMember({ id: participant.id, handle: participant.handle, mentionHandle: participant.handle,
             displayName: assistant ? "Chat Assistant" : "@" + participant.handle, roleLabel: newChatOffer.roles[participant.roleConfigId] || "",
             roleConfigId: participant.roleConfigId, kind: participant.kind, avatarId: participant.avatarId, isAssistant: assistant,
-            homeMachineId: participant.homeMachineId });
+            homeMachineId: participant.homeMachineId, cloudRun: participant.cloudRun,
+            homeMachineName: participant.homeMachineId ? newChatOffer.machines[participant.homeMachineId] : undefined });
         }).filter(Boolean)
       }].concat(loadStartedChats()));
       const create = await createOutboxEvent({
@@ -3530,7 +3533,11 @@
     // The caret moved (a tap, an arrow key): the list follows what is before it.
     input?.addEventListener("keyup", renderNewChatMentions);
     input?.addEventListener("click", renderNewChatMentions);
-    input?.addEventListener("blur", closeNewChatMentions);
+    // Gone once the field has really lost the focus: a tap on the list keeps
+    // it (and where a browser moves it there, the pick lands first).
+    input?.addEventListener("blur", function () {
+      setTimeout(function () { if (document.activeElement !== input) closeNewChatMentions(); }, 200);
+    });
     start?.addEventListener("click", function () { void startNewChat(); });
     if (attach && imageInput) {
       attach.addEventListener("click", function () { imageInput.click(); });
