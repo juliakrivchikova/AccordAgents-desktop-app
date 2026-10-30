@@ -79,7 +79,13 @@ for (const platform of ["darwin", "win32"]) {
         "docs/example.md", "assets/icon.icns", "src/main/main.ts",
         "dist/renderer-tests/example.js", "dist/main/main/services/chat.test.js"
       ];
-      for (const file of [...runtime, ...workspace, "node_modules/node-pty/package.json"]) {
+      const nodePty = [
+        "node_modules/node-pty/package.json", "node_modules/node-pty/lib/index.js",
+        "node_modules/node-pty/prebuilds/darwin-arm64/pty.node", "node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper",
+        "node_modules/node-pty/prebuilds/win32-x64/conpty.node", "node_modules/node-pty/src/unix/pty.cc",
+        "node_modules/node-pty/deps/winpty/README.md", "node_modules/node-pty/binding.gyp"
+      ];
+      for (const file of [...runtime, ...workspace, ...nodePty]) {
         await mkdir(path.dirname(path.join(input, file)), { recursive: true });
         await writeFile(path.join(input, file), "fixture");
       }
@@ -96,7 +102,14 @@ for (const platform of ["darwin", "win32"]) {
       if (platform === "win32") {
         assert.equal(await readFile(path.join(output, "node_modules/node-pty/package.json"), "utf8"), "fixture");
       } else {
-        await assert.rejects(readFile(path.join(output, "node_modules/node-pty/package.json")), { code: "ENOENT" });
+        // The terminal panel ships node-pty on macOS: its own prebuilds only,
+        // without the Windows binaries or the sources.
+        for (const file of nodePty.slice(0, 4)) {
+          assert.equal(await readFile(path.join(output, file), "utf8"), "fixture", file);
+        }
+        for (const file of nodePty.slice(4)) {
+          await assert.rejects(readFile(path.join(output, file)), { code: "ENOENT" }, file);
+        }
       }
     } finally {
       await rm(temporary, { recursive: true, force: true });

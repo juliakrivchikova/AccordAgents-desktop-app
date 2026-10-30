@@ -14,6 +14,8 @@ export interface AppShellProps {
   sidebar: React.ReactNode;
   topBar: React.ReactNode;
   children: React.ReactNode;
+  /** Under the content, across the workspace: the terminal panel. */
+  bottomPanel?: React.ReactNode;
   sidebarCollapsed?: boolean;
   sidebarHidden?: boolean;
   sidebarWidth: number;
@@ -26,6 +28,7 @@ export const AppShell = ({
   sidebar,
   topBar,
   children,
+  bottomPanel,
   sidebarCollapsed = false,
   sidebarHidden = false,
   sidebarWidth,
@@ -143,6 +146,7 @@ export const AppShell = ({
       >
         {topBar}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
+        {bottomPanel}
       </main>
     </div>
   );

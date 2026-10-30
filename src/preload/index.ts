@@ -1,5 +1,6 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { ScriptsUpdatedEvent } from "../shared/scripts";
+import type { CreateTerminalRequest, TerminalHostStateEvent } from "../shared/terminal";
 import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
 import type { HubInstallRequest, HubSetupCommandRequest, HubSetupState } from "../shared/hubSetup";
 import type {
@@ -114,6 +115,24 @@ const bridge: AppBridge = {
   getAppVersion: () => ipcRenderer.invoke("app:get-version"),
   openExternal: (url: string) => ipcRenderer.invoke("app:open-external", url),
   openTerminal: () => ipcRenderer.invoke("app:open-terminal"),
+  listTerminals: () => ipcRenderer.invoke("terminal:list"),
+  createTerminal: (request?: CreateTerminalRequest) => ipcRenderer.invoke("terminal:create", request),
+  killTerminal: (terminalId: string) => ipcRenderer.invoke("terminal:kill", terminalId),
+  connectTerminals: () => ipcRenderer.invoke("terminal:connect"),
+  restartTerminals: () => ipcRenderer.invoke("terminal:restart"),
+  terminalWorkspaceRoot: (repoPath?: string) => ipcRenderer.invoke("terminal:workspace-root", repoPath),
+  terminalPathForFile: (file: unknown) => {
+    try {
+      return webUtils.getPathForFile(file as Parameters<typeof webUtils.getPathForFile>[0]);
+    } catch {
+      return "";
+    }
+  },
+  onTerminalHostState: (callback: (event: TerminalHostStateEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, update: TerminalHostStateEvent) => callback(update);
+    ipcRenderer.on("terminal:host-state", listener);
+    return () => ipcRenderer.removeListener("terminal:host-state", listener);
+  },
   inspectLocalFile: (request: InspectLocalFileRequest) => ipcRenderer.invoke("app:inspect-local-file", request),
   openLocalFile: (request: OpenLocalFileRequest) => ipcRenderer.invoke("app:open-local-file", request),
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => ipcRenderer.invoke("settings:set-repo-file-open-preference", action),
@@ -351,3 +370,15 @@ const bridge: AppBridge = {
 };
 
 contextBridge.exposeInMainWorld("consensus", bridge);
+
+// The terminal port: a MessagePort cannot cross contextBridge, so the
+// preload hands it to the page the way Electron documents for isolated
+// worlds. Must match TERMINAL_PORT_WINDOW_MESSAGE in shared/terminal.ts (a
+// sandboxed preload cannot load that file at run time).
+// The preload compiles without the DOM library, so the page is typed here.
+const page = globalThis as unknown as {
+  postMessage(message: unknown, targetOrigin: string, transfer?: unknown[]): void;
+};
+ipcRenderer.on("terminal:port", (event) => {
+  page.postMessage({ type: "accordagents:terminal-port" }, "*", event.ports);
+});

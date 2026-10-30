@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
 import asar from "@electron/asar";
@@ -50,6 +51,32 @@ test("packaged Windows application excludes generated renderer test bundles", (t
   // to a machine, and nothing inside an asar has a path on disk.
   const payloadEntries = entries.filter((entry) => /\/dist\/(?:machine|hub)(?:\/|$)/.test(entry));
   assert.deepEqual(payloadEntries, [], "the machine and hub programs must ship as loose resources, not inside the asar");
+});
+
+// Only meaningful after `npm run package -- --platform=darwin`. The terminal
+// panel's host loads node-pty from real files and execs its spawn-helper: both
+// must sit unpacked, the helper executable and signed with the app, or every
+// terminal fails with "posix_spawnp failed".
+test("packaged macOS application ships a working node-pty for the terminal panel", (t) => {
+  const appDir = ["arm64", "x64"].map((arch) => path.join(rootDir, "out", `AccordAgents-darwin-${arch}`, "AccordAgents.app"))
+    .find((candidate) => existsSync(candidate));
+  if (!appDir) {
+    t.skip("no macOS package in out/");
+    return;
+  }
+  const resources = path.join(appDir, "Contents", "Resources");
+  const prebuilds = path.join(resources, "app.asar.unpacked", "node_modules", "node-pty", "prebuilds");
+  const dirs = readdirSync(prebuilds);
+  assert.deepEqual(dirs.filter((dir) => !dir.startsWith("darwin-")), [], "only macOS prebuilds ship in a macOS package");
+  for (const dir of dirs) {
+    assert.equal(existsSync(path.join(prebuilds, dir, "pty.node")), true, `${dir}/pty.node`);
+    const helper = path.join(prebuilds, dir, "spawn-helper");
+    assert.equal(statSync(helper).mode & 0o111, 0o111, `${dir}/spawn-helper must be executable`);
+  }
+  const entries = asar.listPackage(path.join(resources, "app.asar")).map((entry) => entry.replaceAll("\\", "/"));
+  assert.equal(entries.includes("/dist/main/main/terminal/terminalHost.js"), true, "terminal host entry point");
+  assert.deepEqual(entries.filter((entry) => /\/node_modules\/node-pty\/(?:src|deps|third_party)(?:\/|$)/.test(entry)), []);
+  execFileSync("codesign", ["--verify", "--strict", path.join(prebuilds, dirs[0], "spawn-helper")]);
 });
 
 // Every packaged application must be able to install a machine without a

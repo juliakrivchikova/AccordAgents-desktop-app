@@ -9,6 +9,7 @@ await mkdir(outdir, { recursive: true });
 await build({
   entryPoints: [
     "renderer/app/chat-creation.test.tsx",
+    "renderer/components/terminal/terminal-port.test.ts",
     "renderer/components/codex-device-auth.test.tsx",
     "renderer/components/cloud-provider-auth.test.tsx",
     "renderer/components/avatar/avatar-studio-dialog.test.tsx",

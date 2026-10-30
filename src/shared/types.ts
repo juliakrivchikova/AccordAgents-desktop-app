@@ -1,3 +1,4 @@
+import type { CreateTerminalRequest, TerminalHostStateEvent, TerminalListResult, TerminalSummary } from "./terminal";
 import type { ChatScriptChangeRequest } from "./scripts";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import type {
@@ -3036,6 +3037,17 @@ export interface AppBridge {
   listProviderModels(kind: ProviderKind): Promise<ProviderModelCatalog>;
   detectAgents(request?: AgentDetectionRequest): Promise<AgentHealth[]>;
   openTerminal(): Promise<void>;
+  /** The terminal panel. Output and input go over a MessagePort the window
+   *  gets after connectTerminals(); these only manage the terminals. */
+  listTerminals(): Promise<TerminalListResult>;
+  createTerminal(request?: CreateTerminalRequest): Promise<TerminalSummary>;
+  killTerminal(terminalId: string): Promise<void>;
+  connectTerminals(): Promise<boolean>;
+  restartTerminals(): Promise<TerminalListResult>;
+  terminalWorkspaceRoot(repoPath?: string): Promise<string | null>;
+  /** The path of a file dropped on a terminal ("" when it has none). */
+  terminalPathForFile(file: unknown): string;
+  onTerminalHostState(callback: (event: TerminalHostStateEvent) => void): () => void;
   selectRepoDirectory(): Promise<string | undefined>;
   inspectRepo(repoPath: string): Promise<GitRepoInfo>;
   getDiff(request: GitDiffRequest): Promise<GitDiffResult>;

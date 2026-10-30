@@ -8,7 +8,7 @@ import type {
   PluginCatalogItem,
   StartReviewResult
 } from "../shared/types";
-import { ArrowLeft, ArrowRight, FileBox, RefreshCw, XCircle } from "lucide-react";
+import { ArrowLeft, ArrowRight, FileBox, RefreshCw, SquareTerminal, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
@@ -52,6 +52,8 @@ import { errorText } from "./components/review/review-conversation-data";
 import { isCodexActivityApprovalItem } from "../shared/chatActivity";
 import { CHAT_SPLIT_WORKSPACE_MIN_WIDTH } from "./lib/chat-split-sizing";
 import { ChatBackgroundTasksContext } from "./components/chat/chat-roster-status";
+import { TerminalPanel } from "./components/terminal/terminal-panel";
+import { useTerminalPanel } from "./components/terminal/use-terminal-panel";
 import "./styles/app.css";
 function App(): JSX.Element {
   const state = useAppState();
@@ -77,6 +79,11 @@ function App(): JSX.Element {
   );
   const view = useAppViewModel(state);
   const artifacts = useArtifacts(state.conversation?.id);
+  // A new terminal opens in the project of the chat in view, or of the new
+  // chat being set up; with neither, in the home folder.
+  const terminal = useTerminalPanel(
+    view.activeChatConversation?.repoPath ?? (!state.initializing && !view.hasResultContext ? state.repoPath : undefined)
+  );
   const activityUnreadCount = state.activityItems.reduce(
     (count, item) => count + (item.read || item.status === "running" ? 0 : 1),
     0
@@ -267,8 +274,19 @@ function App(): JSX.Element {
           ? "Add at least two members to start Accord."
           : undefined;
   const canStartAccord = Boolean(view.activeChatConversation && !accordDisabledReason);
-  const topBarActions = isNewChatScreen ? undefined : (
+  const terminalToggle = (
+    <IconButton
+      label="Terminal"
+      icon={SquareTerminal}
+      data-testid="terminal-toggle"
+      pressed={terminal.open}
+      onClick={terminal.toggle}
+      tooltip="Terminal (Ctrl+`)"
+    />
+  );
+  const topBarActions = isNewChatScreen ? terminalToggle : (
     <>
+      {terminalToggle}
       {state.busy && (
         <Button variant="outline" size="sm" onClick={() => void conversationActions.cancelReview()}>
           <XCircle aria-hidden />
@@ -402,6 +420,14 @@ function App(): JSX.Element {
         )
       }
       topBar={shellTopBar}
+      bottomPanel={(
+        <TerminalPanel
+          state={terminal}
+          chat={state.railView === "chats" && view.activeChatConversation
+            ? { id: view.activeChatConversation.id, repoPath: view.activeChatConversation.repoPath }
+            : undefined}
+        />
+      )}
     >
       <AppNotices
         error={state.error}

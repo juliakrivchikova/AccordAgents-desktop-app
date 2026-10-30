@@ -68,9 +68,11 @@ const config = {
     name: productName,
     executableName: productName,
     appBundleId: process.env.MACOS_BUNDLE_ID || "com.juliakrivchikova.accordagents",
+    // node-pty's native parts run from real files: the terminal panel's host
+    // loads pty.node and execs spawn-helper, which cannot be inside an asar.
     asar: process.platform === "win32"
       ? { unpack: path.join("**", "node_modules", "node-pty", "prebuilds", "win32-x64", "**", "*.{node,dll,exe}") }
-      : true,
+      : { unpack: "**/node_modules/node-pty/prebuilds/darwin-*/{pty.node,spawn-helper}" },
     icon: process.platform === "win32" ? iconBasePath : iconPath,
     extraResource: [
       ...(process.platform === "win32" ? [sqliteResourcePath] : []),
@@ -85,7 +87,13 @@ const config = {
     ignore: [
       // Only runtime roots belong in the app; local worktrees and data must never ship.
       /^\/(?!(?:dist|node_modules)(?:\/|$)|package\.json$).+/,
-      ...(process.platform === "win32" ? [] : [/^\/node_modules\/node-pty(?:\/|$)/]),
+      // The terminal panel's native module ships with its own platform's
+      // ready-made binaries only (the Windows ones are 58 MB), and without
+      // the sources it would be built from.
+      ...(process.platform === "win32" ? [] : [
+        /^\/node_modules\/node-pty\/prebuilds\/(?!darwin-)/,
+        /^\/node_modules\/node-pty\/(?:src|deps|third_party|scripts|binding\.gyp)(?:\/|$)/
+      ]),
       // Shipped as a loose resource instead (machinePayloadPath); keeping it in
       // the asar as well would ship the same 6 MB twice and still be unusable.
       /^\/dist\/machine(?:\/|$)/,
@@ -101,8 +109,24 @@ const config = {
     ...(osxSignOptions ? { osxSign: osxSignOptions } : {}),
     ...(osxNotarizeOptions ? { osxNotarize: osxNotarizeOptions } : {})
   },
-  // node-pty ships N-API Windows binaries, so rebuilding it on Windows is unnecessary.
-  rebuildConfig: process.platform === "win32" ? { onlyModules: [] } : {},
+  hooks: {
+    // npm leaves node-pty's spawn-helper without the execute bit, and every
+    // terminal fails to start without it. Set before signing and before the
+    // asar step copies it out unpacked.
+    packageAfterPrune: async (_config: unknown, buildPath: string, _electronVersion: string, platform: string) => {
+      if (platform !== "darwin") return;
+      const { chmod, readdir } = await import("node:fs/promises");
+      const prebuilds = path.join(buildPath, "node_modules", "node-pty", "prebuilds");
+      for (const entry of await readdir(prebuilds).catch(() => [] as string[])) {
+        if (!entry.startsWith("darwin-")) continue;
+        await chmod(path.join(prebuilds, entry, "spawn-helper"), 0o755);
+      }
+    }
+  },
+  // node-pty ships ready-made N-API binaries for Windows and macOS, so it is
+  // never rebuilt; it is the app's only native production dependency. A
+  // rebuild would also put a build/Release copy ahead of the prebuild.
+  rebuildConfig: { onlyModules: [] },
   makers: [
     new MakerZIP({}, ["darwin"]),
     new MakerDMG({
