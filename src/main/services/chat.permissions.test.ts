@@ -4169,14 +4169,17 @@ test("a Cloud run member is found as Cloud run finds its machine, and says why w
   };
   // Tied to an instance this computer no longer uses: in the computer's words.
   const [old] = await offer([{ id: "m-old", name: "Old", awsInstanceId: "i-old", deviceId: "d-old" }], [], [preset("old", { cloudRun: { instanceId: "i-old" } })]);
-  assert.equal(old.unavailable, "This machine belongs to a different AWS instance. Select Cloud run to use the instance currently shown in Settings.");
+  assert.equal(old.machineUnavailable, "This machine belongs to a different AWS instance. Select Cloud run to use the instance currently shown in Settings.");
+  assert.equal(old.unavailable, undefined, "a phone from before still hands it to this computer, which prepares it");
   // A machine record without the instance: the setup that put the program there names it.
   const [byAlias] = await offer([{ id: "m-now", name: "Cloud run", deviceId: "d-now" }], [{ machineId: "m-now", target: { hostKeyAlias: "accordagents-i-now" } }], [preset("alias", {})]);
   assert.equal(byAlias.machineId, "m-now");
   assert.equal(byAlias.unavailable, undefined);
-  // The machine said its CLI is not there.
-  const [noCli] = await offer([{ id: "m-now", name: "Cloud run", awsInstanceId: "i-now", deviceId: "d-now", lastHello: { providers: [{ kind: "claude-code", installed: false }] } }], [], [preset("nocli", {})]);
-  assert.equal(noCli.unavailable, "Claude Code is not installed on Cloud run.");
+  // What the machine last said of its CLIs can be stale (a probe that timed
+  // out at boot, a CLI installed since): it does not hold the member back.
+  const [staleHello] = await offer([{ id: "m-now", name: "Cloud run", awsInstanceId: "i-now", deviceId: "d-now", lastHello: { providers: [{ kind: "claude-code", installed: false }] } }], [], [preset("stale", {})]);
+  assert.equal(staleHello.machineId, "m-now");
+  assert.equal(staleHello.machineUnavailable, undefined);
 });
 
 test("a member whose machine is not one of the server's devices says so instead of waiting unanswered", { timeout: 10_000 }, async () => {
@@ -4184,7 +4187,7 @@ test("a member whose machine is not one of the server's devices says so instead 
   const { service } = testService({ agents: installedChatAgents(), settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], chatParticipantConfigs: [homed] },
     machines: [{ id: "m-old", name: "Old box" }] });
   const offered = await service.newChatOptions([]);
-  assert.equal(offered?.members.find((member) => member.configId === homed.id)?.unavailable,
+  assert.equal(offered?.members.find((member) => member.configId === homed.id)?.machineUnavailable,
     "Its machine is not connected to your server yet. Open Settings → Machines on your Mac.");
 });
 
@@ -4193,7 +4196,8 @@ test("with no cloud machine set up, a Cloud run member is offered and says why i
   const { service } = testService({ agents: installedChatAgents(), settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], chatParticipantConfigs: [cloud] } });
   const offered = await service.newChatOptions([]);
   const remote = offered?.members.find((member) => member.configId === cloud.id);
-  assert.equal(remote?.unavailable, "Its cloud machine is not set up yet. Set it up in Settings → AWS on your Mac.");
+  assert.equal(remote?.machineUnavailable, "Its cloud machine is not set up yet. Set it up in Settings → AWS on your Mac.");
+  assert.equal(remote?.unavailable, undefined);
   assert.ok(remote?.participant.cloudRun, "shown as a Cloud run member");
 });
 

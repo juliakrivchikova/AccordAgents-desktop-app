@@ -128,6 +128,10 @@ export interface NewChatMemberOption {
    *  computer goes straight there (the server asks the machine for its turns
    *  and wakes it). */
   machineId?: string;
+  /** Why it cannot be started straight on its machine (no cloud machine yet,
+   *  one the server does not know): a chat started off the computer cannot
+   *  have it. */
+  machineUnavailable?: string;
   /** For a member that runs on a machine: the projects that machine has. In
    *  any other project its turn would not find the project's files there,
    *  so it is offered only for these, and for a chat without a project.

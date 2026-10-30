@@ -3244,9 +3244,10 @@
       if (offer) {
         list.append(newChatMemberRow(offer.assistant, { chosen: true, locked: true }));
         for (const member of newChatVisibleMembers(offer)) {
-          const row = newChatMemberRow(member.participant, { chosen: newChatChosen.has(member.configId), unavailable: member.unavailable, machineId: member.machineId });
+          const unavailable = member.unavailable || member.machineUnavailable;
+          const row = newChatMemberRow(member.participant, { chosen: newChatChosen.has(member.configId), unavailable: unavailable, machineId: member.machineId });
           row.addEventListener("click", function () {
-            if (member.unavailable) return;
+            if (unavailable) return;
             if (newChatChosen.has(member.configId)) newChatChosen.delete(member.configId);
             else newChatChosen.add(member.configId);
             renderNewChat("");
@@ -3361,9 +3362,9 @@
     // Each member it gets, chosen or named with @, must be one the computer
     // could add now, as the computer's New chat checks them all.
     const picked = shared.newChatPickedMembers({ members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text });
-    const blocked = picked.find(function (member) { return member.unavailable; });
+    const blocked = picked.find(function (member) { return member.unavailable || member.machineUnavailable; });
     if (blocked) {
-      renderNewChat(blocked.unavailable);
+      renderNewChat(blocked.unavailable || blocked.machineUnavailable);
       return;
     }
     // Named with @, a member whose machine does not have this project would
@@ -3448,7 +3449,7 @@
         participant: participant, configId: configId };
     };
     return [option(offer.assistant)].concat(newChatVisibleMembers(offer)
-      .filter(function (member) { return !member.unavailable; })
+      .filter(function (member) { return !member.unavailable && !member.machineUnavailable; })
       .map(function (member) { return option(member.participant, member.configId); }));
   }
 

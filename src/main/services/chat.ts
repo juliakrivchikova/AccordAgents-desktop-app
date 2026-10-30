@@ -1552,25 +1552,24 @@ export class ChatService {
       // The machine it runs on: its own, or for Cloud run the machine on the
       // AWS instance this computer uses, found as Cloud run's own preparation
       // finds it (the instance, then the setup that put the program there).
+      // Why it cannot go straight to a machine: only a phone that starts the
+      // chat there reads it (machineUnavailable); one from before hands the
+      // chat to this computer, which prepares the machine, as it always did.
+      let machineReason: string | undefined;
       let machineId = input.homeMachineId;
       if (input.cloudRun && !input.homeMachineId) {
         if (input.cloudRun.instanceId && input.cloudRun.instanceId !== cloudInstanceId) {
-          reason = "This machine belongs to a different AWS instance. Select Cloud run to use the instance currently shown in Settings.";
+          machineReason = "This machine belongs to a different AWS instance. Select Cloud run to use the instance currently shown in Settings.";
         } else if (cloudInstanceId) {
           machineId = machines.find((item) => item.awsInstanceId === cloudInstanceId)?.id
             ?? installs.find((record) => record.target?.hostKeyAlias === `accordagents-${cloudInstanceId}`)?.machineId;
         }
-        if (!reason && !machineId) reason = "Its cloud machine is not set up yet. Set it up in Settings → AWS on your Mac.";
+        if (!machineReason && !machineId) machineReason = "Its cloud machine is not set up yet. Set it up in Settings → AWS on your Mac.";
       }
-      const machine = machineId ? machines.find((item) => item.id === machineId) : undefined;
       // The server asks a machine for its turns only once the machine is one
       // of its devices; until then nothing would answer from the phone.
-      if (!reason && machineId && !machine?.deviceId) {
-        reason = "Its machine is not connected to your server yet. Open Settings → Machines on your Mac.";
-      }
-      // What the machine said it has: a CLI that is not there cannot answer.
-      if (!reason && machine?.lastHello && !machine.lastHello.providers?.some((provider) => provider.kind === input.kind && provider.installed)) {
-        reason = `${cliProviderMetadata(input.kind as ChatProviderKind).label} is not installed on ${machine.name}.`;
+      if (!machineReason && machineId && !machines.find((item) => item.id === machineId)?.deviceId) {
+        machineReason = "Its machine is not connected to your server yet. Open Settings → Machines on your Mac.";
       }
       const install = machineId ? installs.find((record) => record.machineId === machineId) : undefined;
       const projects = install ? Object.keys(install.projects ?? {}) : undefined;
@@ -1589,7 +1588,8 @@ export class ChatService {
       // this sends a Cloud run member's chat to this computer, which prepares
       // the machine (and copies the project) as before.
       members.push({ configId: config.id, participant: { ...shown, id: config.id }, uses: participantConfigUsageCount(config, usage),
-        ...(reason ? { unavailable: reason } : {}), ...(machineId ? { machineId } : {}), ...(projects ? { projects } : {}) });
+        ...(reason ? { unavailable: reason } : {}), ...(machineId && !machineReason ? { machineId } : {}),
+        ...(machineReason ? { machineUnavailable: machineReason } : {}), ...(projects ? { projects } : {}) });
     }
     const { projects, defaultProject } = newChatProjects(summaries, settings.lastRepoPath);
     return {
