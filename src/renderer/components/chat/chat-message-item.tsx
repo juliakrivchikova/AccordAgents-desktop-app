@@ -47,6 +47,7 @@ import { ChatMessageReactionList } from "./chat-message-reactions";
 import { chatReplyPreviewAvatars } from "./chat-reply-preview";
 import { Avatar, avatarForMessage } from "../avatar/avatar";
 import { MarkdownText } from "../content/markdown-text";
+import { FileLinkAuthorContext } from "../files/file-panel-context";
 import { AgentAvatarWithDetails, type ParticipantCompactContext, type ParticipantCompactHandler } from "../content/participant-hover-card";
 import { CHAT_ASSISTANT_ROLE_ID, authorForMessage, chatParticipantReference } from "../conversation/conversation-display";
 import { IconButton, StatusBadge } from "../primitives";
@@ -67,6 +68,10 @@ export type ChatChoiceResponse = {
   customAnswer?: string;
   note?: string;
 };
+
+// A cloud member's file links name files on its machine (see FileLinkAuthorContext).
+const CLOUD_AUTHOR = { cloud: true };
+const LOCAL_AUTHOR = { cloud: false };
 
 export const ChatMessageItem = memo(function ChatMessageItem(props: {
   activityDisclosure: ChatActivityDisclosureState;
@@ -346,6 +351,8 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             )}
           </div>
           {showWorkedRow && <WorkedRow workedMs={workedMs} />}
+          {/* Every rendering of the content (streaming, transcript, final) knows its author. */}
+          <FileLinkAuthorContext.Provider value={participant?.cloudRun || participant?.homeMachineId ? CLOUD_AUTHOR : LOCAL_AUTHOR}>
           <div className="message-content">
             {isStreaming ? (
               <StreamingMessageContent
@@ -373,6 +380,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               </>
             )}
           </div>
+          </FileLinkAuthorContext.Provider>
           {props.appToolApprovals && props.appToolApprovals.length > 0 && props.onRespondToAppToolApproval && (
             <div className="chat-message-embedded-approvals">
               <ChatAppToolApprovalList

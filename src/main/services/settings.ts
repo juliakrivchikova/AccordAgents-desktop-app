@@ -48,6 +48,7 @@ import type {
   ProviderKind,
   ProviderSettings,
   ProviderSettingsUpdate,
+  RepoFileExternalOpenAction,
   RepoFileOpenAction,
   RemoteParticipantSessionHandle,
   SaveAgentEnvironmentVariableRequest
@@ -220,6 +221,10 @@ interface StoredSettings {
   lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
+  /** What the file panel's "Open in…" button does; the User's OS choice from before the panel existed. */
+  repoFileExternalOpenAction?: RepoFileExternalOpenAction;
+  /** Set once the file panel became the default click (2026-10-30), so the switch happens once. */
+  repoFileOpenPanelMigrated?: boolean;
   providers: StoredProviderSettings[];
   chatRoleConfigs?: ChatRoleConfig[];
   chatBehaviorRules?: ChatBehaviorRuleConfig[];
@@ -1980,6 +1985,7 @@ export class SettingsService {
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
       lastRepoPath: stored.lastRepoPath,
       repoFileOpenAction: stored.repoFileOpenAction,
+      repoFileExternalOpenAction: stored.repoFileExternalOpenAction,
       chatRoleConfigs: stored.chatRoleConfigs ?? DEFAULT_CHAT_ROLES,
       chatBehaviorRules: stored.chatBehaviorRules ?? [],
       chatSavedPrompts: stored.chatSavedPrompts ?? [],
@@ -2711,6 +2717,23 @@ export class SettingsService {
   async setRepoFileOpenAction(action: RepoFileOpenAction | null): Promise<AppSettings> {
     const stored = await this.readStored();
     stored.repoFileOpenAction = this.normalizeRepoFileOpenAction(action);
+    stored.repoFileOpenPanelMigrated = true;
+    await this.writeStored(stored);
+    return this.getPublicSettings();
+  }
+
+  /** Undefined until the User chose (or had chosen before the panel): files the panel does not show then ask. */
+  async getRepoFileExternalOpenAction(): Promise<RepoFileExternalOpenAction | undefined> {
+    const stored = await this.readStored();
+    return stored.repoFileExternalOpenAction;
+  }
+
+  async setRepoFileExternalOpenAction(action: unknown): Promise<AppSettings> {
+    const normalized = this.normalizeRepoFileExternalOpenAction(action);
+    if (!normalized && action !== null) throw new Error("Choose IntelliJ IDEA, the default app, or to be asked.");
+    const stored = await this.readStored();
+    stored.repoFileExternalOpenAction = normalized;
+    stored.repoFileOpenPanelMigrated = true;
     await this.writeStored(stored);
     return this.getPublicSettings();
   }
@@ -3021,7 +3044,7 @@ export class SettingsService {
       assistantProviderKind: this.normalizeChatProviderKind(settings.assistantProviderKind),
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(settings.lastSuccessfulChatProviderKind),
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
-      repoFileOpenAction: this.normalizeRepoFileOpenAction(settings.repoFileOpenAction),
+      ...this.mergeRepoFileOpenSettings(settings),
       providers,
       chatRoleConfigs,
       chatBehaviorRules: this.normalizeBehaviorRules(settings.chatBehaviorRules),
@@ -3224,7 +3247,29 @@ export class SettingsService {
   }
 
   private normalizeRepoFileOpenAction(action: unknown): RepoFileOpenAction | undefined {
-    return action === "open" || action === "reveal" || action === "intellij-idea" ? action : undefined;
+    return action === "open" || action === "reveal" || action === "intellij-idea" || action === "panel" ? action : undefined;
+  }
+
+  private normalizeRepoFileExternalOpenAction(action: unknown): RepoFileExternalOpenAction | undefined {
+    return action === "open" || action === "intellij-idea" ? action : undefined;
+  }
+
+  /**
+   * The file panel became the default click on 2026-10-30. The first read after
+   * that moves the User's earlier choice to the panel's "Open in…" button and
+   * makes the click open the panel, once: the flag is read back here, so a later
+   * choice is never overwritten.
+   */
+  private mergeRepoFileOpenSettings(settings: StoredSettings): Pick<StoredSettings, "repoFileOpenAction" | "repoFileExternalOpenAction" | "repoFileOpenPanelMigrated"> {
+    const action = this.normalizeRepoFileOpenAction(settings.repoFileOpenAction);
+    const external = this.normalizeRepoFileExternalOpenAction(settings.repoFileExternalOpenAction);
+    if (settings.repoFileOpenPanelMigrated === true) {
+      return { repoFileOpenAction: action, repoFileExternalOpenAction: external, repoFileOpenPanelMigrated: true };
+    }
+    // Only an explicit earlier choice is carried over. Without one, a file the
+    // panel does not show (an installer, an archive) still asks, as before.
+    const carried = action === "intellij-idea" || action === "open" ? action : undefined;
+    return { repoFileOpenAction: "panel", repoFileExternalOpenAction: carried ?? external, repoFileOpenPanelMigrated: true };
   }
 
   private normalizeBetaUpdates(value: unknown): boolean {

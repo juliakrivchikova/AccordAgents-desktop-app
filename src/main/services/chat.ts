@@ -8913,6 +8913,10 @@ export class ChatService {
       "- User is the human conversation owner, requirements authority, and clarification source. User messages appear as `User` in the transcript.",
       "- Ask User directly when goals, requirements, preferences, acceptance criteria, or user intent are unclear.",
       "- Do not ask another participant for user-owned clarification.",
+      // A member on a cloud machine: its files are not on User's computer, and
+      // the app shows a path it writes as plain text that does not open
+      // (decided by the User 2026-10-30, file panel design).
+      ...(this.machineRuntime ? ["- You run on a cloud machine, not on User's computer. Files on this machine are not reachable by User: a file path you write will not open for them. To show User a file, publish it as an artifact or attach an image to a message."] : []),
       "",
       "App MCP policy:",
       this.appToolPromptPolicy(session, includeParticipantActivityTool),

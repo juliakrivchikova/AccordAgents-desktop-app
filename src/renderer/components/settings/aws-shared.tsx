@@ -2,10 +2,7 @@ import { AWS_WORKER_INSTANCE_TYPE_SPECS } from "../../../shared/cloudRuns";
 import type { AwsWorkerActualSpec, AwsWorkerOperationSnapshot } from "../../../shared/types";
 
 /** The reason only: Electron prefixes errors thrown in the main process. */
-export function cleanError(cause: unknown): string {
-  const text = cause instanceof Error ? cause.message : String(cause);
-  return text.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
-}
+export { cleanIpcError as cleanError } from "../../lib/ipc-error";
 
 /** What each confirmed action does to the shared instance, stated before the
  *  click rather than discovered after it. */

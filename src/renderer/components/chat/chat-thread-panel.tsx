@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { X } from "lucide-react";
 
 import type {
@@ -18,6 +19,7 @@ import type {
 import { Avatar } from "../avatar/avatar";
 import { MentionDirectoryContext, type ParticipantCompactHandler } from "../content/participant-hover-card";
 import { IconButton } from "../primitives";
+import { FilePanelOriginContext } from "../files/file-panel-context";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatComposer } from "./chat-composer";
 import {
@@ -73,8 +75,11 @@ export function ChatThreadPanel(props: {
 }): JSX.Element {
   const mentionDirectory = chatMentionDirectory(props.participants, props.settings.chatRoleConfigs, props.sessionsByParticipant, props.contextUsageByParticipant);
   const replyLabel = `${props.replies.length} ${props.replies.length === 1 ? "reply" : "replies"}`;
+  // Stable, so file links and images in the thread do not re-render on every chat update.
+  const origin = useMemo(() => ({ threadRootId: props.rootMessage.id }), [props.rootMessage.id]);
   return (
     <MentionDirectoryContext.Provider value={mentionDirectory}>
+    <FilePanelOriginContext.Provider value={origin}>
     <section className="chat-thread-panel" aria-label="Chat thread" data-testid="chat-thread-panel">
       <header className="thread-panel-head chat-thread-head" data-titlebar>
         <div>
@@ -164,6 +169,7 @@ export function ChatThreadPanel(props: {
         participantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
       />
     </section>
+    </FilePanelOriginContext.Provider>
     </MentionDirectoryContext.Provider>
   );
 }

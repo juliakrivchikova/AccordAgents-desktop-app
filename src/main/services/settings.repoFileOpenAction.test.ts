@@ -68,3 +68,77 @@ test("setRepoFileOpenAction clears invalid file open actions", async () => {
   assert.equal(stored().repoFileOpenAction, undefined);
   assert.equal(settings.repoFileOpenAction, undefined);
 });
+
+test("setRepoFileOpenAction keeps the side panel as a saved choice", async () => {
+  const { service, stored } = settingsServiceWithStoredSettings();
+
+  const settings = await service.setRepoFileOpenAction("panel");
+
+  assert.equal(stored().repoFileOpenAction, "panel");
+  assert.equal(settings.repoFileOpenAction, "panel");
+});
+
+async function settingsOnDisk(contents: Record<string, unknown>) {
+  const { mkdtemp, readFile, writeFile } = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "aa-file-open-settings-"));
+  const file = path.join(dir, "settings.json");
+  await writeFile(file, JSON.stringify({ settingsVersion: 1, roundLimitDefault: 1, providers: [], ...contents }));
+  const make = () => {
+    const service = new SettingsService();
+    (service as any).settingsPath = file;
+    return service;
+  };
+  return { make, read: async () => JSON.parse(await readFile(file, "utf8")) };
+}
+
+test("the side panel becomes the click once, and the earlier choice moves to its Open in button", async () => {
+  const disk = await settingsOnDisk({ repoFileOpenAction: "intellij-idea" });
+
+  const first = await disk.make().getPublicSettings();
+  assert.equal(first.repoFileOpenAction, "panel");
+  assert.equal(first.repoFileExternalOpenAction, "intellij-idea");
+
+  // The User then chooses IntelliJ again; nothing turns it back into the panel.
+  const service = disk.make();
+  await service.setRepoFileOpenAction("intellij-idea");
+  assert.equal((await disk.read()).repoFileOpenPanelMigrated, true);
+  const later = await disk.make().getPublicSettings();
+  assert.equal(later.repoFileOpenAction, "intellij-idea");
+  assert.equal(later.repoFileExternalOpenAction, "intellij-idea");
+});
+
+test("a fresh install clicks into the side panel and has no outside-open choice yet", async () => {
+  const disk = await settingsOnDisk({});
+
+  const settings = await disk.make().getPublicSettings();
+
+  assert.equal(settings.repoFileOpenAction, "panel");
+  assert.equal(settings.repoFileExternalOpenAction, undefined);
+});
+
+test("reveal or no earlier choice is not turned into opening files with the default app", async () => {
+  const disk = await settingsOnDisk({ repoFileOpenAction: "reveal" });
+
+  const settings = await disk.make().getPublicSettings();
+
+  assert.equal(settings.repoFileOpenAction, "panel");
+  assert.equal(settings.repoFileExternalOpenAction, undefined);
+});
+
+test("a later write keeps the Open in choice and the migration flag", async () => {
+  const disk = await settingsOnDisk({ repoFileOpenAction: "open" });
+  const service = disk.make();
+
+  await service.setRepoFileExternalOpenAction("intellij-idea");
+  await service.setBetaUpdates(true);
+
+  const written = await disk.read();
+  assert.equal(written.repoFileExternalOpenAction, "intellij-idea");
+  assert.equal(written.repoFileOpenPanelMigrated, true);
+  assert.equal(written.repoFileOpenAction, "panel");
+  await assert.rejects(service.setRepoFileExternalOpenAction("reveal"), /IntelliJ IDEA, the default app, or to be asked/);
+  await service.setRepoFileExternalOpenAction(null);
+  assert.equal((await disk.read()).repoFileExternalOpenAction, undefined);
+});

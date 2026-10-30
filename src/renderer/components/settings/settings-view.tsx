@@ -14,6 +14,7 @@ import type {
   DeleteAgentEnvironmentVariableRequest,
   PluginCatalogItem,
   ProviderSettings,
+  RepoFileExternalOpenAction,
   RepoFileOpenAction,
   SaveAgentEnvironmentVariableRequest
 } from "../../../shared/types";
@@ -49,6 +50,7 @@ export function SettingsView(props: {
   saveCliProviderHost: (update: CliProviderHostUpdate) => Promise<void>;
   deleteCliProviderHost: (id: string) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
+  setRepoFileExternalOpenPreference: (action: RepoFileExternalOpenAction | null) => Promise<void>;
   setBetaUpdates: (enabled: boolean) => Promise<void>;
   setCrashReports: (enabled: boolean) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
@@ -158,6 +160,7 @@ export function SettingsView(props: {
             agents={props.agents}
             assistantProviderKind={props.settings.assistantProviderKind}
             repoFileOpenAction={props.settings.repoFileOpenAction}
+            repoFileExternalOpenAction={props.settings.repoFileExternalOpenAction}
             betaUpdates={props.settings.betaUpdates}
             crashReports={props.settings.crashReports}
             cliAgentRunTimeoutMs={props.settings.cliAgentRunTimeoutMs}
@@ -169,6 +172,7 @@ export function SettingsView(props: {
             updateProvider={props.updateProvider}
             setAssistantProviderKind={props.setAssistantProviderKind}
             setRepoFileOpenPreference={props.setRepoFileOpenPreference}
+            setRepoFileExternalOpenPreference={props.setRepoFileExternalOpenPreference}
             setBetaUpdates={props.setBetaUpdates}
             setCrashReports={props.setCrashReports}
             setCliAgentRunTimeoutMs={props.setCliAgentRunTimeoutMs}

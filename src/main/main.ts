@@ -5,7 +5,7 @@ import { HubInstaller, removeStaleHubTemp } from "./services/hubInstaller";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { app, autoUpdater, BrowserWindow, dialog, ipcMain, MessageChannelMain, powerMonitor, shell, utilityProcess } from "electron";
+import { app, autoUpdater, BrowserWindow, dialog, ipcMain, MessageChannelMain, powerMonitor, protocol, shell, utilityProcess, type WebContents } from "electron";
 import { TerminalService } from "./terminal/terminalService";
 import type { CreateTerminalRequest } from "../shared/terminal";
 import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
@@ -38,6 +38,9 @@ import type {
   DismissConversationWarningsRequest,
   GitDiffRequest,
   InspectLocalFileRequest,
+  ReadFilePreviewRequest,
+  UnsavedFileEdit,
+  WriteFilePreviewRequest,
   ListChatActivityRequest,
   OpenLocalFileRequest,
   PlanDecisionClarificationRequest,
@@ -170,6 +173,16 @@ import { ProviderRunner } from "./services/providers";
 import { DefaultRemoteAgentSetupSync } from "./services/remoteAgentSetup";
 import { acquireWorkerOperationLease, renewWorkerOperationLease, releaseWorkerOperationLease } from "./services/remoteWorkerLease";
 import { LocalFileOpenerService } from "./services/localFileOpener";
+import { FilePreviewService } from "./services/filePreview";
+import {
+  createExternalOpenLimiter,
+  createFileEditFlusher,
+  FILE_EDIT_FLUSH_TIMEOUT_MS,
+  filePreviewNavigationDecision,
+  shouldFlushBeforeClose
+} from "./services/filePanelWindow";
+import { WorkspaceFileResolver } from "./services/workspaceFiles";
+import { FILE_PREVIEW_PROTOCOL } from "../shared/filePreview";
 import { SettingsService } from "./services/settings";
 import { StorageService } from "./services/storage";
 import { ChatSearchService } from "./services/chatSearch";
@@ -264,7 +277,35 @@ const terminalService = new TerminalService({
   },
   log: (event, payload) => { void debugLogService.write(event, payload); }
 });
-const localFileOpenerService = new LocalFileOpenerService(storageService, settingsService);
+const workspaceFileResolver = new WorkspaceFileResolver();
+const localFileOpenerService = new LocalFileOpenerService(storageService, settingsService, { resolver: workspaceFileResolver });
+const filePreviewService = new FilePreviewService(storageService, workspaceFileResolver, app.getPath("userData"), (event) => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("files:changed", event);
+});
+// Images and HTML pages the chat's side panel shows load through this scheme,
+// only by tokens the panel was handed for the file it opened. It has to be
+// declared before the app is ready.
+protocol.registerSchemesAsPrivileged([
+  { scheme: FILE_PREVIEW_PROTOCOL, privileges: { standard: true, secure: true, stream: true } }
+]);
+const fileEditFlusher = createFileEditFlusher({
+  send: (requestId) => {
+    const window = mainWindow;
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return false;
+    window.webContents.send("files:flush", requestId);
+    return true;
+  },
+  log: (event, payload) => { void debugLogService.write(event, payload); }
+});
+/**
+ * Asks the window to save every file open in its panel and waits for it, at
+ * most FILE_EDIT_FLUSH_TIMEOUT_MS. Unsaved text is also kept in userData, so a
+ * window that does not answer loses nothing; it is offered again at the next start.
+ */
+function flushRendererFileEdits(): Promise<void> {
+  return fileEditFlusher.flush(FILE_EDIT_FLUSH_TIMEOUT_MS);
+}
+const allowFilePreviewOutsideOpen = createExternalOpenLimiter();
 const providerRunner = new ProviderRunner();
 setCommandDebugLogger(debugLogService);
 void debugLogService.write("crash-reports.start", { ...crashReportingStart });
@@ -1253,6 +1294,34 @@ async function openExternalUrl(url: unknown): Promise<void> {
   await shell.openExternal(normalizeExternalUrlForOpen(url));
 }
 
+/**
+ * An HTML page in the file panel runs in a sandboxed frame. Its navigation stays
+ * inside what the panel granted; a link out goes to the system browser, and
+ * nothing it does can navigate the app's own window.
+ */
+function guardFilePreviewNavigation(contents: WebContents): void {
+  contents.on("will-frame-navigate", (event) => {
+    const decision = filePreviewNavigationDecision({
+      url: event.url,
+      isMainFrame: event.isMainFrame,
+      // Compared by id: frame objects are not guaranteed to be the same instance.
+      isPanelFrame: event.frame?.parent?.frameTreeNodeId === contents.mainFrame.frameTreeNodeId,
+      granted: filePreviewService.isGrantedUrl(event.url)
+    }, allowFilePreviewOutsideOpen);
+    if (decision === "allow") return;
+    event.preventDefault();
+    if (decision === "open-outside") void openExternalUrl(event.url).catch(() => undefined);
+  });
+  // window.open from a page in the panel; the app itself opens outside links through IPC.
+  contents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url) && allowFilePreviewOutsideOpen()) void openExternalUrl(url).catch(() => undefined);
+    return { action: "deny" };
+  });
+  contents.on("did-start-navigation", (details) => {
+    if (details.isMainFrame && !details.isSameDocument) filePreviewService.releaseAll();
+  });
+}
+
 async function openTerminal(): Promise<void> {
   if (process.platform !== "darwin") {
     throw new Error("Open Terminal is available on macOS only.");
@@ -1330,7 +1399,25 @@ function createWindow(): void {
   // window closed, which did not, and why a renderer could not answer.
   const windowId = window.id;
   void debugLogService.write("app-window.created", { windowId, windows: BrowserWindow.getAllWindows().length });
-  window.on("close", () => {
+  let fileEditsFlushedForClose = false;
+  window.on("close", (event) => {
+    // Closing the window without quitting (Cmd+W): the panel saves its open
+    // file first. Never while quitting or restarting for an update: a prevented
+    // close then cancels the quit (2026-10-20), and both of those save through
+    // their own step.
+    if (shouldFlushBeforeClose({
+      alreadyFlushed: fileEditsFlushedForClose,
+      quittingForUpdate,
+      quitCleanupStarted,
+      isMainWindow: mainWindow === window
+    })) {
+      event.preventDefault();
+      fileEditsFlushedForClose = true;
+      void flushRendererFileEdits().finally(() => {
+        if (!window.isDestroyed()) window.close();
+      });
+      return;
+    }
     debugLogService.writeNow("app-window.close", { windowId, forUpdate: quittingForUpdate, quitting: quitCleanupStarted });
     if (mainWindow === window) {
       mainWindow = undefined;
@@ -1338,7 +1425,9 @@ function createWindow(): void {
   });
   window.on("closed", () => {
     debugLogService.writeNow("app-window.closed", { windowId, windows: BrowserWindow.getAllWindows().length });
+    filePreviewService.releaseAll();
   });
+  guardFilePreviewNavigation(window.webContents);
   window.on("unresponsive", () => {
     void debugLogService.write("app-window.unresponsive", { windowId });
   });
@@ -1354,6 +1443,7 @@ function createWindow(): void {
     }
   });
   window.webContents.on("render-process-gone", (_event, details) => {
+    filePreviewService.releaseAll();
     void debugLogService.write("app-window.renderer-gone", { windowId, reason: details.reason, exitCode: details.exitCode });
     if (mainWindow === window) {
       mainWindow = undefined;
@@ -1606,6 +1696,16 @@ function registerIpc(): void {
   ipcMain.handle("app:open-local-file", (_event, request: OpenLocalFileRequest) => localFileOpenerService.openLocalFile(request));
   ipcMain.handle("settings:get", () => settingsService.getPublicSettings());
   ipcMain.handle("settings:set-repo-file-open-preference", (_event, action: unknown) => localFileOpenerService.setOpenPreference(action));
+  ipcMain.handle("settings:set-repo-file-external-open-preference", (_event, action: unknown) => settingsService.setRepoFileExternalOpenAction(action));
+  ipcMain.handle("files:read", (_event, request: ReadFilePreviewRequest) => filePreviewService.read(request));
+  ipcMain.handle("files:write", (_event, request: WriteFilePreviewRequest) => filePreviewService.write(request));
+  ipcMain.handle("files:watch", (_event, request: ReadFilePreviewRequest) => filePreviewService.watch(request));
+  ipcMain.handle("files:unwatch", (_event, realPath: unknown) => filePreviewService.unwatch(realPath));
+  ipcMain.handle("files:release", (_event, realPath: unknown) => filePreviewService.release(realPath));
+  ipcMain.handle("files:unsaved-save", (_event, edit: UnsavedFileEdit) => filePreviewService.saveUnsaved(edit));
+  ipcMain.handle("files:unsaved-clear", (_event, realPath: unknown) => filePreviewService.clearUnsaved(realPath));
+  ipcMain.handle("files:unsaved-list", () => filePreviewService.listUnsaved());
+  ipcMain.on("files:flush-done", (_event, requestId: unknown) => fileEditFlusher.acknowledge(requestId));
   ipcMain.handle("settings:set-beta-updates", (_event, enabled: boolean) => {
     return settingsService.setBetaUpdates(enabled);
   });
@@ -2569,6 +2669,7 @@ async function resolvePluginListRequest(request?: PluginListRequest): Promise<{
 
 void app.whenReady().then(async () => {
   await validateSqliteExecutable({ executable: sqliteExecutable });
+  protocol.handle(FILE_PREVIEW_PROTOCOL, (request) => filePreviewService.handleProtocolRequest(request));
   registerIpc();
   let betaUpdates = false;
   try {
@@ -2603,15 +2704,20 @@ void app.whenReady().then(async () => {
     },
     canPrompt: () => updatePromptWindowShown(updatePromptWindow()),
     prompt: (info) => showUpdateRestartPrompt(info, updatePromptWindow()),
-    quitAndInstall: createUpdateRestart({
-      quitAndInstall: () => {
-        updateRestartRequested = true;
-        quitAndInstallUpdate();
-      },
-      windows: currentUpdateWindows,
-      appHidden: appHiddenForUpdate,
-      log: (event, payload) => { debugLogService.writeNow(event, payload); }
-    }),
+    quitAndInstall: (() => {
+      const restart = createUpdateRestart({
+        quitAndInstall: () => {
+          updateRestartRequested = true;
+          quitAndInstallUpdate();
+        },
+        windows: currentUpdateWindows,
+        appHidden: appHiddenForUpdate,
+        log: (event, payload) => { debugLogService.writeNow(event, payload); }
+      });
+      // A restart for an update skips the normal quit cleanup, so the file
+      // panel saves here, before the windows close.
+      return () => { void flushRendererFileEdits().finally(restart); };
+    })(),
     log: (event, payload) => { void debugLogService.write(event, payload); }
   });
   bootstrapAppUpdater(debugLogService, betaUpdates, updateRestartGate);
@@ -3030,6 +3136,8 @@ app.on("before-quit", (event) => {
   const cleanupStartedAt = Date.now();
   let cleanupDone = false;
   const cleanup = Promise.allSettled([
+    // The file panel saves first; its unsaved text is also in userData if it cannot.
+    flushRendererFileEdits(),
     serverChatLink.stop(),
     cliAgentRunner.shutdownWarmAgents(),
     scriptService.stop().then(() => appMcpService.stop())

@@ -64,6 +64,18 @@
   --app-accent: #7d5fd3;
   --app-accent-soft: #efebfb;
   --app-accent-border: #cdbcf0;
+  /* Code in the file panel (CodeMirror). */
+  --app-code-keyword: #8a3ab9;
+  --app-code-string: #a3412b;
+  --app-code-number: #1f6feb;
+  --app-code-comment: #6e7781;
+  --app-code-function: #0b6a8a;
+  --app-code-type: #9a5b00;
+  --app-code-property: #24537a;
+  --app-code-meta: #57606a;
+  --app-code-invalid: #cf222e;
+  --app-code-selection: #d9d2f5;
+  --app-code-cursor: #16191f;
   --app-user-bub: #e9e9e9;
   --app-success: #08794e;
   --app-success-soft: #e8f8f1;
@@ -288,6 +300,17 @@
   --app-accent: #b39ef0;
   --app-accent-soft: rgba(179, 158, 240, 0.16);
   --app-accent-border: #4a3f7a;
+  --app-code-keyword: #d2a8ff;
+  --app-code-string: #f2a37b;
+  --app-code-number: #79c0ff;
+  --app-code-comment: #8b949e;
+  --app-code-function: #7ee2ff;
+  --app-code-type: #f0c674;
+  --app-code-property: #a5d6ff;
+  --app-code-meta: #9da5b0;
+  --app-code-invalid: #ff7b72;
+  --app-code-selection: #3b3554;
+  --app-code-cursor: #f1f3f7;
   --app-user-bub: #2d2d2d;
   --app-success: #78d9aa;
   --app-success-soft: #143b2c;

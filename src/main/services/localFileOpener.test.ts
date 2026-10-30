@@ -32,7 +32,8 @@ function conversation(repoPath: string): Conversation {
 
 function serviceWithDeps(options: {
   repoPath: string;
-  savedAction?: LocalFileOpenAction;
+  savedAction?: LocalFileOpenAction | "panel";
+  externalAction?: "open" | "intellij-idea";
   intellijResult: IntellijOpenResult;
   openPathResult?: string;
 }) {
@@ -47,10 +48,11 @@ function serviceWithDeps(options: {
   };
   const service = new LocalFileOpenerService(
     {
-      getConversation: async () => conversation(options.repoPath)
+      conversationRepoPath: async () => ({ repoPath: conversation(options.repoPath).repoPath })
     } as any,
     {
-      getRepoFileOpenAction: async () => options.savedAction
+      getRepoFileOpenAction: async () => options.savedAction,
+      getRepoFileExternalOpenAction: async () => options.externalAction
     } as any,
     {
       intellijLauncher,
@@ -134,6 +136,24 @@ test("openLocalFile does not fall back silently when explicit IntelliJ action fa
       /IntelliJ IDEA launcher was not found/
     );
     assert.deepEqual(openPaths, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a link opened outside while the side panel is the click uses the panel's Open choice", async () => {
+  const { repo, cleanup } = await makeWorkspace();
+  try {
+    const { service, openPaths, intellijRequests } = serviceWithDeps({
+      repoPath: repo,
+      savedAction: "panel",
+      externalAction: "intellij-idea",
+      intellijResult: { opened: true, lineNavigationSupported: true }
+    });
+    const result = await service.openLocalFile({ conversationId: "conversation-1", path: "src/main.ts" });
+    assert.equal(result.action, "intellij-idea");
+    assert.equal(intellijRequests.length, 1);
+    assert.equal(openPaths.length, 0);
   } finally {
     await cleanup();
   }
