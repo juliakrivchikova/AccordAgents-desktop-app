@@ -4131,6 +4131,76 @@ test("with no CLI ready the phone's New chat says why in the computer's words, a
   assert.deepEqual(offered.members.map((member) => member.configId), ["saved-drew"]);
 });
 
+test("the phone's New chat puts a Cloud run member on the instance's machine, with the projects that machine has", { timeout: 10_000 }, async () => {
+  // The User, 2026-10-30: a cloud member asked from the phone needs no Mac.
+  // The phone starts the chat straight on the member's machine, so the offer
+  // names the machine and what projects are there.
+  const cloud: ChatParticipantConfig = { id: "saved-remote", handle: "remote-claude", roleConfigId: ROLE.id, behaviorRuleIds: [], kind: "claude-code", cloudRun: {}, updatedAt: NOW };
+  const homed: ChatParticipantConfig = { id: "saved-homed", handle: "homed", roleConfigId: ROLE.id, behaviorRuleIds: [], kind: "codex-cli", homeMachineId: "m-hand", updatedAt: NOW };
+  const local: ChatParticipantConfig = { id: "saved-drew", handle: "drew", roleConfigId: ROLE.id, behaviorRuleIds: [], kind: "codex-cli", updatedAt: NOW };
+  const { service } = testService({ agents: installedChatAgents(),
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], chatParticipantConfigs: [cloud, homed, local], cloudRuns: { awsHandle: { instanceId: "i-cloud" } } as Partial<AppSettings["cloudRuns"]> },
+    machines: [{ id: "m-cloud", name: "Cloud run", awsInstanceId: "i-cloud", deviceId: "device-cloud" }, { id: "m-hand", name: "Studio", deviceId: "device-hand" }],
+    machineInstalls: [{ machineId: "m-cloud", projects: { "/Users/u/api": "/home/ubuntu/projects/api" } }] });
+  const offered = await service.newChatOptions([]);
+  assert.ok(offered);
+  const remote = offered.members.find((member) => member.configId === cloud.id);
+  assert.equal(remote?.unavailable, undefined);
+  assert.equal(remote?.machineId, "m-cloud", "the machine on the AWS instance this computer uses");
+  assert.equal(remote?.participant.homeMachineId, undefined, "beside the member: a phone from before sends its chat to this computer, which prepares it");
+  assert.deepEqual(remote?.projects, ["/Users/u/api"], "only what was copied there");
+  const byHand = offered.members.find((member) => member.configId === homed.id);
+  assert.equal(byHand?.machineId, "m-hand");
+  assert.equal(byHand?.participant.homeMachineId, "m-hand");
+  assert.equal(byHand?.projects, undefined, "a machine set up by hand keeps its own folders: any project");
+  const here = offered.members.find((member) => member.configId === local.id);
+  assert.equal(here?.participant.homeMachineId, undefined);
+  assert.equal(here?.projects, undefined);
+});
+
+test("a Cloud run member is found as Cloud run finds its machine, and says why when it cannot run there", { timeout: 10_000 }, async () => {
+  const preset = (id: string, extra: Partial<ChatParticipantConfig>): ChatParticipantConfig =>
+    ({ id, handle: id, roleConfigId: ROLE.id, behaviorRuleIds: [], kind: "claude-code", cloudRun: {}, updatedAt: NOW, ...extra });
+  const offer = async (machines: NonNullable<Parameters<typeof testService>[0]>["machines"], installs: NonNullable<Parameters<typeof testService>[0]>["machineInstalls"], configs: ChatParticipantConfig[]) => {
+    const { service } = testService({ agents: installedChatAgents(),
+      settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], chatParticipantConfigs: configs, cloudRuns: { awsHandle: { instanceId: "i-now" } } as Partial<AppSettings["cloudRuns"]> },
+      machines, machineInstalls: installs });
+    return (await service.newChatOptions([]))!.members;
+  };
+  // Tied to an instance this computer no longer uses: in the computer's words.
+  const [old] = await offer([{ id: "m-old", name: "Old", awsInstanceId: "i-old", deviceId: "d-old" }], [], [preset("old", { cloudRun: { instanceId: "i-old" } })]);
+  assert.equal(old.machineUnavailable, "This machine belongs to a different AWS instance. Select Cloud run to use the instance currently shown in Settings.");
+  assert.equal(old.unavailable, undefined, "a phone from before still hands it to this computer, which prepares it");
+  // A machine record without the instance: the setup that put the program there names it.
+  const [byAlias] = await offer([{ id: "m-now", name: "Cloud run", deviceId: "d-now" }], [{ machineId: "m-now", target: { hostKeyAlias: "accordagents-i-now" } }], [preset("alias", {})]);
+  assert.equal(byAlias.machineId, "m-now");
+  assert.equal(byAlias.unavailable, undefined);
+  // What the machine last said of its CLIs can be stale (a probe that timed
+  // out at boot, a CLI installed since): it does not hold the member back.
+  const [staleHello] = await offer([{ id: "m-now", name: "Cloud run", awsInstanceId: "i-now", deviceId: "d-now", lastHello: { providers: [{ kind: "claude-code", installed: false }] } }], [], [preset("stale", {})]);
+  assert.equal(staleHello.machineId, "m-now");
+  assert.equal(staleHello.machineUnavailable, undefined);
+});
+
+test("a member whose machine is not one of the server's devices says so instead of waiting unanswered", { timeout: 10_000 }, async () => {
+  const homed: ChatParticipantConfig = { id: "saved-homed", handle: "homed", roleConfigId: ROLE.id, behaviorRuleIds: [], kind: "codex-cli", homeMachineId: "m-old", updatedAt: NOW };
+  const { service } = testService({ agents: installedChatAgents(), settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], chatParticipantConfigs: [homed] },
+    machines: [{ id: "m-old", name: "Old box" }] });
+  const offered = await service.newChatOptions([]);
+  assert.equal(offered?.members.find((member) => member.configId === homed.id)?.machineUnavailable,
+    "Its machine is not connected to your server yet. Open Settings → Machines on your Mac.");
+});
+
+test("with no cloud machine set up, a Cloud run member is offered and says why it cannot join from the phone", { timeout: 10_000 }, async () => {
+  const cloud: ChatParticipantConfig = { id: "saved-remote", handle: "remote-claude", roleConfigId: ROLE.id, behaviorRuleIds: [], kind: "claude-code", cloudRun: {}, updatedAt: NOW };
+  const { service } = testService({ agents: installedChatAgents(), settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], chatParticipantConfigs: [cloud] } });
+  const offered = await service.newChatOptions([]);
+  const remote = offered?.members.find((member) => member.configId === cloud.id);
+  assert.equal(remote?.machineUnavailable, "Its cloud machine is not set up yet. Set it up in Settings → AWS on your Mac.");
+  assert.equal(remote?.unavailable, undefined);
+  assert.ok(remote?.participant.cloudRun, "shown as a Cloud run member");
+});
+
 test("new cloud chat saves every Cloud choice without waiting for project preparation", { timeout: 10_000 }, async () => {
   const { service, storage } = testService({ agents: installedChatAgents() });
   service.setMachineProjectPreparation(async () => { assert.fail("chat creation must not wait for a project copy"); });
@@ -13378,6 +13448,8 @@ function testService(options: {
     assistantProviderKind?: ChatProviderKind;
     lastSuccessfulChatProviderKind?: ChatProviderKind;
   };
+  machines?: Array<{ id: string; name: string; awsInstanceId?: string; deviceId?: string; lastHello?: { providers: Array<{ kind: string; installed: boolean }> } }>;
+  machineInstalls?: Array<{ machineId: string; projects?: Record<string, string>; target?: { hostKeyAlias?: string } }>;
 } = {}): { service: ChatService; storage: any; settingsState: {
   chatRoleConfigs: ChatRoleConfig[];
   chatBehaviorRules: ChatBehaviorRuleConfig[];
@@ -13449,7 +13521,8 @@ function testService(options: {
       awsInstanceType: options.settings?.cloudRuns?.awsInstanceType ?? "t3.small",
       awsRootVolumeSizeGb: options.settings?.cloudRuns?.awsRootVolumeSizeGb ?? 8,
       maxRuntimeMs: options.settings?.cloudRuns?.maxRuntimeMs ?? 24 * 60 * 60_000,
-      pollIntervalMs: options.settings?.cloudRuns?.pollIntervalMs ?? 2_500
+      pollIntervalMs: options.settings?.cloudRuns?.pollIntervalMs ?? 2_500,
+      ...(options.settings?.cloudRuns?.awsHandle ? { awsHandle: options.settings.cloudRuns.awsHandle } : {})
     },
     mobileControl: options.settings?.mobileControl ?? EMPTY_MOBILE_CONTROL_SETTINGS,
     providers: clone(options.settings?.providers ?? [
@@ -13476,6 +13549,12 @@ function testService(options: {
         ?? options.settings?.lastSuccessfulChatProviderKind
         ?? preferredReadyAssistantProviderKind(agents, publicSettings().providers);
       return publicSettings();
+    },
+    async listMachines() {
+      return clone(options.machines ?? []);
+    },
+    async listMachineInstalls() {
+      return clone(options.machineInstalls ?? []);
     },
     async ensureGenericChatParticipantSeeds(): Promise<AppSettings> {
       return publicSettings();

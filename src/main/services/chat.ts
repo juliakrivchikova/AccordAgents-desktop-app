@@ -1516,6 +1516,14 @@ export class ChatService {
     if (!assistant) return undefined;
     const usage = participantConfigUsage(summaries);
     const members: NewChatMemberOption[] = [];
+    // A member on a machine runs there whoever starts the chat: the phone
+    // starts it straight on the machine (the server asks the machine for its
+    // turns and wakes it), so it is told which machine and what projects that
+    // machine has. A Cloud run member's machine is the one on the AWS
+    // instance this computer uses, as its own Cloud run preparation finds it.
+    const machines = await Promise.resolve().then(() => this.settings.listMachines()).catch(() => []);
+    const installs = await Promise.resolve().then(() => this.settings.listMachineInstalls()).catch(() => []);
+    const cloudInstanceId = settings.cloudRuns?.awsHandle?.instanceId;
     for (const config of settings.chatParticipantConfigs) {
       // The Assistant's own presets are not offered (isChatAssistantParticipant).
       if (config.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID || config.handle.trim().replace(/^@/, "").toLowerCase() === "admin") continue;
@@ -1541,17 +1549,47 @@ export class ChatService {
       };
       let participant: ChatParticipant | undefined;
       let reason: string | undefined;
-      try {
+      // The machine it runs on: its own, or for Cloud run the machine on the
+      // AWS instance this computer uses, found as Cloud run's own preparation
+      // finds it (the instance, then the setup that put the program there).
+      // Why it cannot go straight to a machine: only a phone that starts the
+      // chat there reads it (machineUnavailable); one from before hands the
+      // chat to this computer, which prepares the machine, as it always did.
+      let machineReason: string | undefined;
+      let machineId = input.homeMachineId;
+      if (input.cloudRun && !input.homeMachineId) {
+        if (input.cloudRun.instanceId && input.cloudRun.instanceId !== cloudInstanceId) {
+          machineReason = "This machine belongs to a different AWS instance. Select Cloud run to use the instance currently shown in Settings.";
+        } else if (cloudInstanceId) {
+          machineId = machines.find((item) => item.awsInstanceId === cloudInstanceId)?.id
+            ?? installs.find((record) => record.target?.hostKeyAlias === `accordagents-${cloudInstanceId}`)?.machineId;
+        }
+        if (!machineReason && !machineId) machineReason = "Its cloud machine is not set up yet. Set it up in Settings → AWS on your Mac.";
+      }
+      // The server asks a machine for its turns only once the machine is one
+      // of its devices; until then nothing would answer from the phone.
+      if (!machineReason && machineId && !machines.find((item) => item.id === machineId)?.deviceId) {
+        machineReason = "Its machine is not connected to your server yet. Open Settings → Machines on your Mac.";
+      }
+      const install = machineId ? installs.find((record) => record.machineId === machineId) : undefined;
+      const projects = install ? Object.keys(install.projects ?? {}) : undefined;
+      if (!reason) try {
         [participant] = await this.validateParticipants([input], [], true);
         this.assertParticipantProvidersReady([input], agents, settings.providers, settings.cliProviderHosts ?? []);
       } catch (error) {
         // Offered, and why it cannot be added, as the computer's screen shows it.
         reason = error instanceof Error ? error.message : String(error);
       }
-      const shown = participant ?? { id: config.id, handle: config.handle, roleConfigId: config.roleConfigId, kind: config.kind, avatarId: input.avatarId, homeMachineId: input.homeMachineId };
+      const shown = participant ?? { id: config.id, handle: config.handle, roleConfigId: config.roleConfigId, kind: config.kind, avatarId: input.avatarId,
+        homeMachineId: input.homeMachineId, ...(input.cloudRun ? { cloudRun: input.cloudRun } : {}) };
       // Named by its preset, not a fresh id: the phone gives each its own id
       // (newChatParticipants), and an unchanged offer is not published again.
-      members.push({ configId: config.id, participant: { ...shown, id: config.id }, uses: participantConfigUsageCount(config, usage), ...(reason ? { unavailable: reason } : {}) });
+      // The machine travels beside the member, not in it: a phone from before
+      // this sends a Cloud run member's chat to this computer, which prepares
+      // the machine (and copies the project) as before.
+      members.push({ configId: config.id, participant: { ...shown, id: config.id }, uses: participantConfigUsageCount(config, usage),
+        ...(reason ? { unavailable: reason } : {}), ...(machineId && !machineReason ? { machineId } : {}),
+        ...(machineReason ? { machineUnavailable: machineReason } : {}), ...(projects ? { projects } : {}) });
     }
     const { projects, defaultProject } = newChatProjects(summaries, settings.lastRepoPath);
     return {

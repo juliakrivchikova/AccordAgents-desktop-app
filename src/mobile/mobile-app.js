@@ -1496,6 +1496,8 @@
       homeMachineName: typeof value.homeMachineName === "string" && value.homeMachineName.trim()
         ? value.homeMachineName.trim()
         : undefined,
+      // A Cloud run member whose machine is not chosen yet.
+      cloudRun: Boolean(value.cloudRun) || Boolean(value.participant && value.participant.cloudRun),
       participant: value.participant && typeof value.participant === "object" ? value.participant : undefined
     };
   }
@@ -3067,6 +3069,7 @@
 
   function closeNewChat() {
     newChatToken += 1;
+    closeNewChatMentions();
     closeNewChatPickers();
     const screen = document.getElementById("new-chat-screen");
     if (screen) screen.hidden = true;
@@ -3101,6 +3104,26 @@
     return members.map(function (member, index) { return { member: member, index: index }; })
       .sort(function (left, right) { return ((right.member.uses || 0) - (left.member.uses || 0)) || (left.index - right.index); })
       .map(function (item) { return item.member; });
+  }
+
+  /** The members this chat can have in its project (the User, 2026-10-30):
+   *  a member that runs on a machine only where that machine has the
+   *  project, or in a chat without one. Changing the project changes them. */
+  function newChatVisibleMembers(offer) {
+    const shared = mobileSharedRules();
+    return newChatMemberOrder(offer.members).filter(function (member) {
+      return !shared || typeof shared.newChatMemberFitsProject !== "function" || shared.newChatMemberFitsProject(member, newChatProject);
+    });
+  }
+
+  /** A member chosen for one project and hidden in the next is not in the chat. */
+  function pruneNewChatChosen() {
+    const offer = newChatOffer && newChatOffer.options;
+    if (!offer) return;
+    const visible = new Set(newChatVisibleMembers(offer).map(function (member) { return member.configId; }));
+    for (const configId of Array.from(newChatChosen)) {
+      if (!visible.has(configId)) newChatChosen.delete(configId);
+    }
   }
 
   /** The projects the computer offers, the one it would start in first even
@@ -3160,6 +3183,7 @@
     row.append(icon, copy, newChatCheck(chosen));
     row.addEventListener("click", function () {
       newChatProject = project ? project.path : "";
+      pruneNewChatChosen();
       closeNewChatPickers();
       renderNewChat();
     });
@@ -3183,8 +3207,9 @@
     role.textContent = [newChatOffer && newChatOffer.roles[participant.roleConfigId], memberKindLabel(participant.kind)].filter(Boolean).join(" · ");
     const where = document.createElement("span");
     where.className = "members-sheet-location";
-    where.textContent = options.unavailable || memberLocationLabel({ homeMachineId: participant.homeMachineId,
-      homeMachineName: participant.homeMachineId && newChatOffer ? newChatOffer.machines[participant.homeMachineId] : undefined });
+    const machineId = options.machineId || participant.homeMachineId;
+    where.textContent = options.unavailable || memberLocationLabel({ homeMachineId: machineId, cloudRun: participant.cloudRun,
+      homeMachineName: machineId && newChatOffer ? newChatOffer.machines[machineId] : undefined });
     copy.append(name, role, where);
     row.append(newChatAvatar(participant), copy, newChatCheck(options.chosen));
     return row;
@@ -3194,7 +3219,7 @@
    *  chosen, in the order the list shows them. */
   function newChatChosenParticipants(offer) {
     if (!offer) return [];
-    return [offer.assistant].concat(newChatMemberOrder(offer.members)
+    return [offer.assistant].concat(newChatVisibleMembers(offer)
       .filter(function (member) { return newChatChosen.has(member.configId); })
       .map(function (member) { return member.participant; }));
   }
@@ -3218,10 +3243,11 @@
       list.replaceChildren();
       if (offer) {
         list.append(newChatMemberRow(offer.assistant, { chosen: true, locked: true }));
-        for (const member of newChatMemberOrder(offer.members)) {
-          const row = newChatMemberRow(member.participant, { chosen: newChatChosen.has(member.configId), unavailable: member.unavailable });
+        for (const member of newChatVisibleMembers(offer)) {
+          const unavailable = member.unavailable || member.machineUnavailable;
+          const row = newChatMemberRow(member.participant, { chosen: newChatChosen.has(member.configId), unavailable: unavailable, machineId: member.machineId });
           row.addEventListener("click", function () {
-            if (member.unavailable) return;
+            if (unavailable) return;
             if (newChatChosen.has(member.configId)) newChatChosen.delete(member.configId);
             else newChatChosen.add(member.configId);
             renderNewChat("");
@@ -3335,10 +3361,20 @@
     if (!offer || offer.unavailable || (!text && attachments.length === 0) || !shared || newChatStarting) return;
     // Each member it gets, chosen or named with @, must be one the computer
     // could add now, as the computer's New chat checks them all.
-    const blocked = shared.newChatPickedMembers({ members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text })
-      .find(function (member) { return member.unavailable; });
+    const picked = shared.newChatPickedMembers({ members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text });
+    const blocked = picked.find(function (member) { return member.unavailable || member.machineUnavailable; });
     if (blocked) {
-      renderNewChat(blocked.unavailable);
+      renderNewChat(blocked.unavailable || blocked.machineUnavailable);
+      return;
+    }
+    // Named with @, a member whose machine does not have this project would
+    // wait for the computer to copy it there.
+    const elsewhere = picked.find(function (member) { return !shared.newChatMemberFitsProject(member, newChatProject); });
+    if (elsewhere) {
+      const elsewhereMachine = elsewhere.machineId || elsewhere.participant.homeMachineId;
+      const machine = elsewhereMachine && newChatOffer.machines[elsewhereMachine];
+      renderNewChat("@" + elsewhere.participant.handle + " runs on " + (machine || "a cloud machine") +
+        ", which does not have this project. Choose a project it has, or No project.");
       return;
     }
     newChatStarting = true;
@@ -3364,7 +3400,8 @@
           return normalizeMobileMember({ id: participant.id, handle: participant.handle, mentionHandle: participant.handle,
             displayName: assistant ? "Chat Assistant" : "@" + participant.handle, roleLabel: newChatOffer.roles[participant.roleConfigId] || "",
             roleConfigId: participant.roleConfigId, kind: participant.kind, avatarId: participant.avatarId, isAssistant: assistant,
-            homeMachineId: participant.homeMachineId });
+            homeMachineId: participant.homeMachineId, cloudRun: participant.cloudRun,
+            homeMachineName: participant.homeMachineId ? newChatOffer.machines[participant.homeMachineId] : undefined });
         }).filter(Boolean)
       }].concat(loadStartedChats()));
       const create = await createOutboxEvent({
@@ -3401,6 +3438,80 @@
     void sendNow();
   }
 
+  /** What an @ in the first message can name: the Chat Assistant and each
+   *  member this chat can have, as the computer's New chat lists them. */
+  function newChatMentionMembers() {
+    const offer = newChatOffer && newChatOffer.options;
+    if (!offer) return [];
+    const option = function (participant, configId) {
+      return { handle: participant.handle, mentionHandle: participant.handle, displayName: newChatMemberName(participant),
+        roleLabel: [newChatOffer.roles[participant.roleConfigId], memberKindLabel(participant.kind)].filter(Boolean).join(" \u00b7 "),
+        participant: participant, configId: configId };
+    };
+    return [option(offer.assistant)].concat(newChatVisibleMembers(offer)
+      .filter(function (member) { return !member.unavailable && !member.machineUnavailable; })
+      .map(function (member) { return option(member.participant, member.configId); }));
+  }
+
+  function closeNewChatMentions() {
+    const menu = document.getElementById("new-chat-mention-menu");
+    const input = document.getElementById("new-chat-input");
+    if (menu) {
+      menu.hidden = true;
+      menu.replaceChildren();
+    }
+    if (input) input.setAttribute("aria-expanded", "false");
+  }
+
+  /** The @ list for what is typed before the caret; picking a member writes
+   *  its handle and adds it to the chat, as on the computer. */
+  function renderNewChatMentions() {
+    const menu = document.getElementById("new-chat-mention-menu");
+    const input = document.getElementById("new-chat-input");
+    if (!menu || !input) return;
+    const caret = typeof input.selectionStart === "number" ? input.selectionStart : input.value.length;
+    const options = document.activeElement === input ? mentionOptions(input.value.slice(0, caret), newChatMentionMembers()).slice(0, 6) : [];
+    if (options.length === 0) {
+      closeNewChatMentions();
+      return;
+    }
+    menu.replaceChildren();
+    const title = document.createElement("div");
+    title.className = "mobile-mention-title";
+    title.textContent = "Members";
+    menu.append(title);
+    for (const member of options) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "mobile-mention-option";
+      row.dataset.handle = member.handle;
+      row.setAttribute("role", "option");
+      // The field keeps the keyboard while a member is picked.
+      row.addEventListener("pointerdown", function (event) { event.preventDefault(); });
+      row.addEventListener("click", function () {
+        const at = typeof input.selectionStart === "number" ? input.selectionStart : input.value.length;
+        const edit = replaceMentionAtCaret(input.value, member.mentionHandle, at);
+        input.value = edit.value;
+        input.focus();
+        input.setSelectionRange(edit.caret, edit.caret);
+        if (member.configId) newChatChosen.add(member.configId);
+        closeNewChatMentions();
+        renderNewChat("");
+      });
+      const copy = document.createElement("span");
+      copy.className = "mobile-mention-copy";
+      const name = document.createElement("strong");
+      name.textContent = member.displayName;
+      const role = document.createElement("span");
+      role.textContent = member.roleLabel;
+      copy.append(name, role);
+      row.append(newChatAvatar(member.participant), copy);
+      menu.append(row);
+    }
+    menu.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+  }
+
   function wireNewChat() {
     const button = document.getElementById("new-chat-button");
     const screen = document.getElementById("new-chat-screen");
@@ -3416,7 +3527,18 @@
     });
     document.getElementById("new-chat-project")?.addEventListener("click", function () { openNewChatPicker("new-chat-projects-sheet"); });
     document.getElementById("new-chat-members-button")?.addEventListener("click", function () { openNewChatPicker("new-chat-members-sheet"); });
-    input?.addEventListener("input", function () { renderNewChatState(); });
+    input?.addEventListener("input", function () {
+      renderNewChatState();
+      renderNewChatMentions();
+    });
+    // The caret moved (a tap, an arrow key): the list follows what is before it.
+    input?.addEventListener("keyup", renderNewChatMentions);
+    input?.addEventListener("click", renderNewChatMentions);
+    // Gone once the field has really lost the focus: a tap on the list keeps
+    // it (and where a browser moves it there, the pick lands first).
+    input?.addEventListener("blur", function () {
+      setTimeout(function () { if (document.activeElement !== input) closeNewChatMentions(); }, 200);
+    });
     start?.addEventListener("click", function () { void startNewChat(); });
     if (attach && imageInput) {
       attach.addEventListener("click", function () { imageInput.click(); });
@@ -8667,6 +8789,9 @@
   function memberLocationLabel(member) {
     if (member.homeMachineId) {
       return member.homeMachineName || "Machine";
+    }
+    if (member.cloudRun) {
+      return "Cloud run · AWS";
     }
     return "Local · desktop";
   }

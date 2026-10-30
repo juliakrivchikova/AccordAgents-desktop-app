@@ -102,7 +102,8 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
               : {}),
             participant
           }
-          : {})
+          // A Cloud run member whose machine is not chosen yet is not local.
+          : participant.cloudRun ? { cloudRun: true } : {})
       }))
     });
   }

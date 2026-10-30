@@ -123,6 +123,29 @@ export interface NewChatMemberOption {
   /** Why it cannot be added now (its CLI is not ready, say), as the
    *  computer's New chat screen says it. */
   unavailable?: string;
+  /** The machine it runs on, when it runs on one: for a Cloud run member,
+   *  the machine on the computer's AWS instance. A chat started off the
+   *  computer goes straight there (the server asks the machine for its turns
+   *  and wakes it). */
+  machineId?: string;
+  /** Why it cannot be started straight on its machine (no cloud machine yet,
+   *  one the server does not know): a chat started off the computer cannot
+   *  have it. */
+  machineUnavailable?: string;
+  /** For a member that runs on a machine: the projects that machine has. In
+   *  any other project its turn would not find the project's files there,
+   *  so it is offered only for these, and for a chat without a project.
+   *  Absent: any project (a member of this computer, or a machine set up by
+   *  hand, which keeps its own folders). */
+  projects?: string[];
+}
+
+/** Whether a member can be in a new chat in this project ("" or none: a
+ *  chat without one). */
+export function newChatMemberFitsProject(member: Pick<NewChatMemberOption, "projects">, project: string | undefined): boolean {
+  const path = normalizeProjectPath(project);
+  if (!path || !member.projects) return true;
+  return member.projects.some((item) => normalizeProjectPath(item) === path);
 }
 
 /** The saved members a new chat gets: each chosen, and each the first
@@ -151,7 +174,7 @@ export function newChatParticipants(input: {
   const members = picked.map((member) => {
     const autoWatch = member.participant.autoWatch === true && !watching;
     if (autoWatch) watching = true;
-    return { ...member.participant, id: input.newId(), autoWatch };
+    return { ...member.participant, ...(member.machineId ? { homeMachineId: member.machineId } : {}), id: input.newId(), autoWatch };
   });
   const taken = new Set(members.map((member) => member.handle.toLowerCase()));
   let handle = input.assistant.handle;

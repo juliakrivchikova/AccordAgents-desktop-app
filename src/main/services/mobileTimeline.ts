@@ -47,6 +47,8 @@ export interface MobileChatMember {
   homeMachineId?: string;
   /** That machine's name, as Settings shows it, for the phone's member list. */
   homeMachineName?: string;
+  /** A Cloud run member whose machine is not chosen yet: not local. */
+  cloudRun?: boolean;
   /** The member's role, which the phone resolves a draft's administrator by. */
   roleConfigId?: string;
   /** The member record a machine needs to run a turn. Sent only for members
