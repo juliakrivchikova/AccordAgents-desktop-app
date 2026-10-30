@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { newChatIntro, newChatParticipants, newChatPickedMembers, newChatProjects, newChatTitle, normalizeProjectPath, orderByParticipantUsage } from "./newChat";
+import { newChatIntro, newChatMemberFitsProject, newChatParticipants, newChatPickedMembers, newChatProjects, newChatTitle, normalizeProjectPath, orderByParticipantUsage } from "./newChat";
 import type { ChatParticipant, ConversationSummary } from "./types";
 
 const assistant = { id: "template-assistant", handle: "assistant", roleConfigId: "administrator", kind: "codex-cli", autoWatch: false } as ChatParticipant;
@@ -64,4 +64,14 @@ test("the projects are the folders of the chats not archived, newest first; a ne
 test("the members a new chat gets are those chosen and those the first message names, a name only as a whole handle", () => {
   const members = [member("c-drew", "drew"), member("c-drew2", "drew-2"), member("c-gera", "gera")];
   assert.deepEqual(newChatPickedMembers({ members, chosenConfigIds: ["c-gera"], firstMessage: "@Drew-2 and @drewx" }).map((item) => item.configId), ["c-drew2", "c-gera"]);
+});
+
+test("a member on a machine fits a chat in a project that machine has, or in one without a project", () => {
+  const cloud = { projects: ["/Users/u/api/"] };
+  assert.equal(newChatMemberFitsProject(cloud, "/Users/u/api"), true, "the same folder, written either way");
+  assert.equal(newChatMemberFitsProject(cloud, "/Users/u/site"), false);
+  assert.equal(newChatMemberFitsProject(cloud, ""), true, "no project");
+  assert.equal(newChatMemberFitsProject(cloud, undefined), true);
+  assert.equal(newChatMemberFitsProject({ projects: [] }, "/Users/u/api"), false, "a machine with no project copied yet");
+  assert.equal(newChatMemberFitsProject({}, "/Users/u/site"), true, "a member of this computer, or a machine with its own folders");
 });

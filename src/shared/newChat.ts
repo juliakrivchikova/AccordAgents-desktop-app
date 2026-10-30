@@ -123,6 +123,20 @@ export interface NewChatMemberOption {
   /** Why it cannot be added now (its CLI is not ready, say), as the
    *  computer's New chat screen says it. */
   unavailable?: string;
+  /** For a member that runs on a machine: the projects that machine has. A
+   *  chat in any other project would wait for the computer to copy it there,
+   *  so it is offered only for these, and for a chat without a project.
+   *  Absent: any project (a member of this computer, or a machine set up by
+   *  hand, which keeps its own folders). */
+  projects?: string[];
+}
+
+/** Whether a member can be in a new chat in this project ("" or none: a
+ *  chat without one). */
+export function newChatMemberFitsProject(member: Pick<NewChatMemberOption, "projects">, project: string | undefined): boolean {
+  const path = normalizeProjectPath(project);
+  if (!path || !member.projects) return true;
+  return member.projects.some((item) => normalizeProjectPath(item) === path);
 }
 
 /** The saved members a new chat gets: each chosen, and each the first

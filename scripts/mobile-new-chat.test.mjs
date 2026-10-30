@@ -37,7 +37,9 @@ test("the phone starts a chat the way the computer would: in the project chosen,
   const newChat = {
     projects: [{ path: "/Users/u/site", label: "site" }, { path: "/Users/u/api", label: "api" }], defaultProject: "/Users/u/site", assistant,
     members: [{ configId: "c-gera", uses: 1, participant: gera }, { configId: "c-drew", uses: 4, participant: drew },
-      { configId: "c-cass", uses: 0, participant: member("cass", { id: "t-cass", participantConfigId: "c-cass", kind: "claude-code" }), unavailable: "QA: Claude Code is not signed in." }]
+      { configId: "c-cass", uses: 0, participant: member("cass", { id: "t-cass", participantConfigId: "c-cass", kind: "claude-code" }), unavailable: "QA: Claude Code is not signed in." },
+      // A Cloud run member: its machine has only the api project.
+      { configId: "c-cloudy", uses: 0, participant: member("cloudy", { id: "t-cloudy", participantConfigId: "c-cloudy", kind: "claude-code", homeMachineId: "m-cloud", cloudRun: {} }), projects: ["/Users/u/api"] }]
   };
   const published = await hub.call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(), roles: { "software-engineer": "Engineer", administrator: "Chat Assistant" }, prompts: [], skills: [], avatars: {}, newChat } });
   assert.equal(published.ok, true);
@@ -192,6 +194,7 @@ test("the phone starts a chat the way the computer would: in the project chosen,
   await app.waitFor(`!document.getElementById("new-chat-start").disabled`, "the picture again");
   await app.evaluate(`document.getElementById("new-chat-start").click()`);
   await app.waitFor(`document.getElementById("timeline-screen").classList.contains("is-active") && document.getElementById("chat-title").textContent === "Image: dot.png"`, "the picture's chat, titled as the computer titles it");
+  await app.evaluate(`document.getElementById("back-to-chats").click()`);
   let pictureChat;
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const summary = (await hub.storage.listConversations()).find((item) => item.title === "Image: dot.png");
@@ -205,4 +208,52 @@ test("the phone starts a chat the way the computer would: in the project chosen,
   assert.ok(first.metadata.imageAttachments[0].hubBlob, "the picture is on the server");
   const assistantId = pictureChat.metadata.participants.find((participant) => participant.roleConfigId === "administrator").id;
   assert.deepEqual(first.metadata.deliveryTargets, [assistantId], "unaddressed, it is for the Chat Assistant, as on the computer");
+
+  // A cloud member is offered only where its machine has the project (the
+  // User, 2026-10-30), and the chat goes straight to that machine.
+  await app.evaluate(`document.getElementById("new-chat-button").click()`);
+  await app.waitFor(`document.querySelectorAll("#new-chat-members .new-chat-member").length >= 4`, "the screen for the cloud member");
+  const handles = `[...document.querySelectorAll("#new-chat-members .new-chat-member")].map((row) => row.dataset.handle)`;
+  const pickProject = async (path) => {
+    await app.evaluate(`document.getElementById("new-chat-project").click()`);
+    await app.evaluate(`document.querySelector('#new-chat-projects [data-path=${JSON.stringify(path)}]').click()`);
+  };
+  await pickProject("/Users/u/site");
+  assert.equal((await app.evaluate(handles)).includes("cloudy"), false, "not in a project its machine does not have");
+  await pickProject("/Users/u/api");
+  await app.waitFor(`${handles}.includes("cloudy")`, "offered in the project its machine has");
+  const where = await app.evaluate(`document.querySelector('#new-chat-members [data-handle="cloudy"] .members-sheet-location').textContent`);
+  assert.notEqual(where, "Local · desktop", "said to run on its machine, not here");
+  await app.evaluate(`document.querySelector('#new-chat-members [data-handle="cloudy"]').click()`);
+  await app.waitFor(`document.getElementById("new-chat-members-button").getAttribute("aria-label").indexOf("@cloudy") >= 0`, "chosen");
+  await pickProject("/Users/u/site");
+  await app.waitFor(`document.getElementById("new-chat-members-button").getAttribute("aria-label").indexOf("@cloudy") < 0 && !${handles}.includes("cloudy")`, "a project change takes it out");
+  await pickProject("");
+  await app.waitFor(`${handles}.includes("cloudy")`, "a chat without a project can have it");
+  // Named with @ where its machine lacks the project, it stops the start.
+  await pickProject("/Users/u/site");
+  await app.evaluate(`(() => { const input = document.getElementById("new-chat-input"); input.value = "@cloudy check the deploy"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.getElementById("new-chat-start").click(); })()`);
+  await app.waitFor(`${note}.indexOf("@cloudy runs on") === 0 && ${note}.indexOf("does not have this project") > 0`, "why it cannot start there");
+  // The @ list, as on the computer: typing offers the members, a pick writes
+  // the handle and adds the member.
+  await pickProject("/Users/u/api");
+  await app.evaluate(`(() => { const input = document.getElementById("new-chat-input"); input.focus(); input.value = "@clo"; input.setSelectionRange(4, 4); input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await app.waitFor(`!document.getElementById("new-chat-mention-menu").hidden && [...document.querySelectorAll("#new-chat-mention-menu .mobile-mention-option")].map((row) => row.dataset.handle).join() === "cloudy"`, "the @ list offers the member");
+  await app.evaluate(`document.querySelector('#new-chat-mention-menu [data-handle="cloudy"]').click()`);
+  assert.equal(await app.evaluate(`document.getElementById("new-chat-input").value`), "@cloudy ", "the handle is written");
+  await app.waitFor(`document.getElementById("new-chat-members-button").getAttribute("aria-label").indexOf("@cloudy") >= 0 && document.getElementById("new-chat-mention-menu").hidden`, "and the member is in the chat");
+  await app.evaluate(`(() => { const input = document.getElementById("new-chat-input"); input.value = "@cloudy check the deploy"; input.dispatchEvent(new Event("input", { bubbles: true })); document.getElementById("new-chat-start").click(); })()`);
+  await app.waitFor(`document.getElementById("timeline-screen").classList.contains("is-active") && document.getElementById("chat-title").textContent === "check the deploy"`, "the cloud member's chat opened");
+  let cloudChat;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const summary = (await hub.storage.listConversations()).find((item) => item.title === "check the deploy");
+    cloudChat = summary ? await hub.storage.getConversation(summary.id) : undefined;
+    if (cloudChat && cloudChat.messages.some((item) => item.role === "user")) break;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.equal(cloudChat.repoPath, "/Users/u/api");
+  const cloudMember = cloudChat.metadata.participants.find((participant) => participant.handle === "cloudy");
+  assert.equal(cloudMember.homeMachineId, "m-cloud", "on its machine, which takes its turns from the server");
+  assert.deepEqual(cloudChat.messages.find((item) => item.role === "user").metadata.deliveryTargets, [cloudMember.id]);
 });

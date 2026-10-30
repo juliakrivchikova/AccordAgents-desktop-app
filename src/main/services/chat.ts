@@ -1516,6 +1516,14 @@ export class ChatService {
     if (!assistant) return undefined;
     const usage = participantConfigUsage(summaries);
     const members: NewChatMemberOption[] = [];
+    // A member on a machine runs there whoever starts the chat: the phone
+    // starts it straight on the machine (the server asks the machine for its
+    // turns and wakes it), so it is told which machine and what projects that
+    // machine has. A Cloud run member's machine is the one on the AWS
+    // instance this computer uses, as its own Cloud run preparation finds it.
+    const machines = await Promise.resolve().then(() => this.settings.listMachines()).catch(() => []);
+    const installs = await Promise.resolve().then(() => this.settings.listMachineInstalls()).catch(() => []);
+    const cloudInstanceId = settings.cloudRuns?.awsHandle?.instanceId;
     for (const config of settings.chatParticipantConfigs) {
       // The Assistant's own presets are not offered (isChatAssistantParticipant).
       if (config.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID || config.handle.trim().replace(/^@/, "").toLowerCase() === "admin") continue;
@@ -1541,17 +1549,27 @@ export class ChatService {
       };
       let participant: ChatParticipant | undefined;
       let reason: string | undefined;
-      try {
+      if (input.cloudRun && !input.homeMachineId) {
+        const instanceId = input.cloudRun.instanceId ?? cloudInstanceId;
+        const machine = instanceId ? machines.find((item) => item.awsInstanceId === instanceId) : undefined;
+        if (machine) input.homeMachineId = machine.id;
+        else reason = "Its cloud machine is not set up yet. Set it up in Settings → AWS on your Mac.";
+      }
+      const install = input.homeMachineId ? installs.find((record) => record.machineId === input.homeMachineId) : undefined;
+      const projects = install ? Object.keys(install.projects ?? {}) : undefined;
+      if (!reason) try {
         [participant] = await this.validateParticipants([input], [], true);
         this.assertParticipantProvidersReady([input], agents, settings.providers, settings.cliProviderHosts ?? []);
       } catch (error) {
         // Offered, and why it cannot be added, as the computer's screen shows it.
         reason = error instanceof Error ? error.message : String(error);
       }
-      const shown = participant ?? { id: config.id, handle: config.handle, roleConfigId: config.roleConfigId, kind: config.kind, avatarId: input.avatarId, homeMachineId: input.homeMachineId };
+      const shown = participant ?? { id: config.id, handle: config.handle, roleConfigId: config.roleConfigId, kind: config.kind, avatarId: input.avatarId,
+        homeMachineId: input.homeMachineId, ...(input.cloudRun ? { cloudRun: input.cloudRun } : {}) };
       // Named by its preset, not a fresh id: the phone gives each its own id
       // (newChatParticipants), and an unchanged offer is not published again.
-      members.push({ configId: config.id, participant: { ...shown, id: config.id }, uses: participantConfigUsageCount(config, usage), ...(reason ? { unavailable: reason } : {}) });
+      members.push({ configId: config.id, participant: { ...shown, id: config.id }, uses: participantConfigUsageCount(config, usage),
+        ...(reason ? { unavailable: reason } : {}), ...(projects ? { projects } : {}) });
     }
     const { projects, defaultProject } = newChatProjects(summaries, settings.lastRepoPath);
     return {
