@@ -18,6 +18,48 @@ export type ChatInlineTranscriptPart =
   | { kind: "text"; text: string }
   | { kind: "activity"; event: ChatAgentActivityEvent };
 
+export type ChatInlineTranscriptBlock =
+  | { kind: "text"; text: string }
+  | { kind: "activity-group"; events: ChatAgentActivityEvent[] }
+  | { kind: "activity"; event: ChatAgentActivityEvent };
+
+/**
+ * Consecutive activities form one group. Notices about the run itself (a stalled provider, a
+ * failed background task, a failed approval) are not commands: they stay visible as their own
+ * rows and end the group around them.
+ */
+export function chatInlineTranscriptBlocks(parts: ChatInlineTranscriptPart[]): ChatInlineTranscriptBlock[] {
+  const blocks: ChatInlineTranscriptBlock[] = [];
+  for (const part of parts) {
+    if (part.kind === "text") {
+      // Whitespace between two activities renders nothing, so it must not split their group.
+      if (part.text.trim()) {
+        blocks.push({ kind: "text", text: part.text });
+      }
+      continue;
+    }
+    if (chatActivityStandsAlone(part.event)) {
+      blocks.push({ kind: "activity", event: part.event });
+      continue;
+    }
+    const last = blocks[blocks.length - 1];
+    if (last?.kind === "activity-group") {
+      last.events.push(part.event);
+    } else {
+      blocks.push({ kind: "activity-group", events: [part.event] });
+    }
+  }
+  return blocks;
+}
+
+function chatActivityStandsAlone(event: ChatAgentActivityEvent): boolean {
+  return event.kind === "status" || (event.kind === "approval" && event.status === "failed");
+}
+
+export function chatActivityGroupSummary(count: number): string {
+  return `${count} ${count === 1 ? "command" : "commands"}`;
+}
+
 export function chatProcessingTranscriptPrefix(transcriptContent: string, finalContent: string): string {
   const transcript = normalizeComparableText(transcriptContent);
   const final = normalizeComparableText(finalContent);

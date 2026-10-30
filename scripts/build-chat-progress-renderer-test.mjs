@@ -11,6 +11,10 @@ await build({
       process.cwd(),
       "src/renderer/components/chat/chat-activity-rendering.test.tsx"
     ),
+    "chat-activity-groups.test": path.join(
+      process.cwd(),
+      "src/renderer/components/chat/chat-activity-groups.test.tsx"
+    ),
     "chat-progress-rendering.test": path.join(
       process.cwd(),
       "src/renderer/components/chat/chat-progress-rendering.test.tsx"

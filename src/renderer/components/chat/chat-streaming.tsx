@@ -1,24 +1,15 @@
-import { memo, useEffect, useId, useMemo, useState } from "react";
-import {
-  Activity,
-  ChevronDown,
-  ChevronRight,
-  FilePenLine,
-  Globe,
-  ShieldCheck,
-  Terminal,
-  Wrench,
-  type LucideIcon
-} from "lucide-react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import { MarkdownText } from "../content/markdown-text";
-import type { ChatAgentActivityEvent, ChatAgentActivityKind } from "../../../shared/types";
+import type { ChatAgentActivityEvent } from "../../../shared/types";
 import {
   chatActivityEventsForSegment,
+  chatInlineTranscriptBlocks,
   chatInlineTranscriptParts,
   type ChatProcessingTranscriptView,
   type ChatTranscriptSegment
 } from "../../../shared/processingTranscript";
+import { activityGroupKey, ChatInlineActivityEvent, ChatInlineActivityGroup } from "./chat-inline-activity";
 import type { ChatThinkingRow } from "./chat-conversation-progress";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
@@ -64,6 +55,7 @@ export const StreamingMessageContent = memo(function StreamingMessageContent(pro
           activityDisclosure={props.activityDisclosure}
           content=""
           activityEvents={props.activityEvents}
+          liveTail
         />
       )}
       {!hasContent && activity && !props.activityEvents?.length && <div className="streaming-message-activity">{activity}</div>}
@@ -76,20 +68,25 @@ export const ChatInlineTranscript = memo(function ChatInlineTranscript(props: {
   content: string;
   activityEvents: ChatAgentActivityEvent[];
   segment?: ChatTranscriptSegment;
+  /** The run is still streaming and nothing follows this transcript, so a trailing activity group is in progress. */
+  liveTail?: boolean;
 }): JSX.Element | null {
-  const parts = chatInlineTranscriptParts(props.content, props.activityEvents, props.segment);
-  if (parts.length === 0) {
+  const blocks = chatInlineTranscriptBlocks(chatInlineTranscriptParts(props.content, props.activityEvents, props.segment));
+  if (blocks.length === 0) {
     return null;
   }
   return (
     <div className="chat-inline-transcript">
-      {parts.map((part, index) => part.kind === "text" ? (
-        part.text.trim() ? <MarkdownText content={part.text} key={`text-${index}`} /> : null
+      {blocks.map((block, index) => block.kind === "text" ? (
+        <MarkdownText content={block.text} key={`text-${index}`} />
+      ) : block.kind === "activity" ? (
+        <ChatInlineActivityEvent activityDisclosure={props.activityDisclosure} event={block.event} key={block.event.id} />
       ) : (
-        <ChatInlineActivityEvent
+        <ChatInlineActivityGroup
           activityDisclosure={props.activityDisclosure}
-          event={part.event}
-          key={part.event.id}
+          events={block.events}
+          live={Boolean(props.liveTail) && index === blocks.length - 1}
+          key={activityGroupKey(block.events)}
         />
       ))}
     </div>
@@ -137,80 +134,6 @@ export const ChatExpandedProcessingTranscript = memo(function ChatExpandedProces
   );
 });
 
-function ChatInlineActivityEvent(props: {
-  activityDisclosure: ChatActivityDisclosureState;
-  event: ChatAgentActivityEvent;
-}): JSX.Element {
-  const { activityDisclosure, event } = props;
-  const Icon = iconForActivityKind(event.kind);
-  const detailId = useId();
-  const activityExpanded = activityDisclosure.expandedActivityIds.has(event.id);
-  const detailExpanded = activityDisclosure.fullyExpandedDetailIds.has(event.id);
-  const detailRevealed = activityDisclosure.revealedDetailIds.has(event.id);
-  const rawDetail = event.detail;
-  const maskedDetail = useMemo(() => rawDetail ? maskActivityDetailSecrets(rawDetail) : undefined, [rawDetail]);
-  const displayDetail = detailRevealed && activityExpanded ? rawDetail : maskedDetail;
-  const detailIsMasked = Boolean(rawDetail && maskedDetail && rawDetail !== maskedDetail);
-  const detailIsLong = Boolean(rawDetail && (rawDetail.length > 600 || rawDetail.split(/\n/).length > 6));
-  return (
-    <div className={`chat-inline-activity-event is-${event.kind}`}>
-      {displayDetail ? (
-        <button
-          type="button"
-          className="chat-inline-activity-heading chat-inline-activity-toggle"
-          aria-controls={detailId}
-          aria-expanded={activityExpanded}
-          title={event.label}
-          onClick={() => activityDisclosure.toggleActivity(event.id)}
-        >
-          {activityExpanded
-            ? <ChevronDown className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />
-            : <ChevronRight className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />}
-          <span>{event.label}</span>
-        </button>
-      ) : (
-        <div className="chat-inline-activity-heading" title={event.label}>
-          <Icon className="chat-inline-activity-kind-icon" size={14} aria-hidden />
-          <span>{event.label}</span>
-        </div>
-      )}
-      {displayDetail && (
-        <div id={detailId} className="chat-inline-activity-content" hidden={!activityExpanded}>
-          <pre className={`chat-inline-activity-detail ${detailIsLong && !detailExpanded ? "is-collapsed" : ""}`}>{displayDetail}</pre>
-          {(detailIsMasked || detailIsLong) && (
-            <div className="chat-inline-activity-actions">
-              {detailIsMasked && (
-                <button
-                  type="button"
-                  className="chat-inline-activity-action"
-                  onClick={() => activityDisclosure.toggleDetailReveal(event.id)}
-                >
-                  <span>{detailRevealed ? "Hide" : "Reveal"}</span>
-                </button>
-              )}
-              {detailIsLong && (
-                <button
-                  type="button"
-                  className="chat-inline-activity-action is-detail-length-toggle"
-                  onClick={() => activityDisclosure.toggleDetailLength(event.id)}
-                >
-                  <span>{detailExpanded ? "Show less" : "Show more"}</span>
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function maskActivityDetailSecrets(detail: string): string {
-  return detail
-    .replace(/\b(Authorization\s*:\s*Bearer\s+)([^\s"',;]+)/gi, "$1••••")
-    .replace(/((?:^|[\s,{])["']?[A-Za-z0-9_.-]*(?:token|key|password|secret)[A-Za-z0-9_.-]*["']?\s*(?:=|:)\s*["']?)([^\s"',;}]+)/gim, "$1••••");
-}
-
 const StreamingMarkdownText = memo(function StreamingMarkdownText(props: {
   activityDisclosure: ChatActivityDisclosureState;
   content: string;
@@ -218,37 +141,38 @@ const StreamingMarkdownText = memo(function StreamingMarkdownText(props: {
 }): JSX.Element {
   const { activityEvents, content } = props;
   const { completed, tail, tailOffset } = useMemo(() => splitStreamingMarkdown(content), [content]);
-  const completedSegment = useMemo<ChatTranscriptSegment>(() => ({
-    key: "prefix",
-    content: completed,
-    startOffset: 0,
-    endOffset: tailOffset
-  }), [completed, tailOffset]);
-  const tailSegment = useMemo<ChatTranscriptSegment>(() => ({
-    key: "full",
-    content: tail,
-    startOffset: tailOffset,
-    endOffset: content.replace(/\r\n/g, "\n").length
-  }), [content, tail, tailOffset]);
+  // Activities before the first character of the paragraph in progress belong with the
+  // completed text: they sit in the same place on screen and are usually the same run, which
+  // must stay one line rather than split at the paragraph break.
+  const { completedEvents, tailEvents } = useMemo(() => {
+    const leadEnd = tail.search(/\S/);
+    const bound = tailOffset + (leadEnd < 0 ? tail.length : leadEnd);
+    return {
+      completedEvents: activityEvents.filter((event) => (event.afterContentLength ?? 0) <= bound),
+      tailEvents: activityEvents
+        .filter((event) => (event.afterContentLength ?? 0) > bound)
+        .map((event) => ({ ...event, afterContentLength: (event.afterContentLength ?? 0) - tailOffset }))
+    };
+  }, [activityEvents, tail, tailOffset]);
+  const showTail = Boolean(tail.trim()) || tailEvents.length > 0;
   return (
     <div className="streaming-message-text">
-      {(completed || chatActivityEventsForSegment(activityEvents, completedSegment).length > 0) && (
+      {(completed || completedEvents.length > 0) && (
         <ChatInlineTranscript
           activityDisclosure={props.activityDisclosure}
           content={completed}
-          activityEvents={activityEvents}
-          segment={completedSegment}
+          activityEvents={completedEvents}
+          liveTail={!showTail}
         />
       )}
-      {tail && (
+      {showTail && (
         <StreamingTailTranscript
           activityDisclosure={props.activityDisclosure}
           content={tail}
-          activityEvents={activityEvents}
-          segment={tailSegment}
+          activityEvents={tailEvents}
         />
       )}
-      {!tail && <span className="streaming-caret" aria-hidden="true" />}
+      {!showTail && <span className="streaming-caret" aria-hidden="true" />}
     </div>
   );
 });
@@ -257,25 +181,28 @@ const StreamingTailTranscript = memo(function StreamingTailTranscript(props: {
   activityDisclosure: ChatActivityDisclosureState;
   content: string;
   activityEvents: ChatAgentActivityEvent[];
-  segment: ChatTranscriptSegment;
+  segment?: ChatTranscriptSegment;
 }): JSX.Element {
-  const parts = chatInlineTranscriptParts(props.content, props.activityEvents, props.segment);
-  const lastPart = parts[parts.length - 1];
+  const blocks = chatInlineTranscriptBlocks(chatInlineTranscriptParts(props.content, props.activityEvents, props.segment));
+  const lastBlock = blocks[blocks.length - 1];
   return (
     <div className="streaming-tail-transcript">
-      {parts.map((part, index) => part.kind === "text" ? (
+      {blocks.map((block, index) => block.kind === "text" ? (
         <div className="streaming-message-tail" key={`text-${index}`}>
-          {part.text}
-          {index === parts.length - 1 && <span className="streaming-caret" aria-hidden="true" />}
+          {block.text}
+          {index === blocks.length - 1 && <span className="streaming-caret" aria-hidden="true" />}
         </div>
+      ) : block.kind === "activity" ? (
+        <ChatInlineActivityEvent activityDisclosure={props.activityDisclosure} event={block.event} key={block.event.id} />
       ) : (
-        <ChatInlineActivityEvent
+        <ChatInlineActivityGroup
           activityDisclosure={props.activityDisclosure}
-          event={part.event}
-          key={part.event.id}
+          events={block.events}
+          live={index === blocks.length - 1}
+          key={activityGroupKey(block.events)}
         />
       ))}
-      {lastPart?.kind === "activity" && <span className="streaming-caret" aria-hidden="true" />}
+      {lastBlock?.kind !== "text" && <span className="streaming-caret" aria-hidden="true" />}
     </div>
   );
 });
@@ -295,25 +222,6 @@ function splitStreamingMarkdown(content: string): { completed: string; tail: str
     tail: normalized.slice(tailOffset),
     tailOffset
   };
-}
-
-function iconForActivityKind(kind: ChatAgentActivityKind): LucideIcon {
-  if (kind === "command") {
-    return Terminal;
-  }
-  if (kind === "tool") {
-    return Wrench;
-  }
-  if (kind === "file-edit") {
-    return FilePenLine;
-  }
-  if (kind === "web") {
-    return Globe;
-  }
-  if (kind === "approval") {
-    return ShieldCheck;
-  }
-  return Activity;
 }
 
 function formatElapsed(totalSeconds: number): string {

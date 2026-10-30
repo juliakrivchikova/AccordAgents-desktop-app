@@ -3,15 +3,17 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
-import type { ChatAgentActivityEvent, ChatAgentActivityKind } from "../../../shared/types";
+import type { ChatAgentActivityEvent } from "../../../shared/types";
 import {
-  ChatExpandedProcessingTranscript,
-  ChatInlineTranscript,
-  StreamingMessageContent
-} from "./chat-streaming";
-import { useChatActivityDisclosure } from "./use-chat-activity-disclosure";
-
-const NOW = "2026-07-12T12:00:00.000Z";
+  ActivityDisclosureHarness,
+  activityContent,
+  activityEvent,
+  buttonWithLabel,
+  NOW,
+  openGroups,
+  svgClassNames,
+  textContent
+} from "./chat-activity-test-harness";
 
 test("activity detail masks secrets and independently preserves reveal and length state", async () => {
   const detail = [
@@ -38,6 +40,7 @@ test("activity detail masks secrets and independently preserves reveal and lengt
       <ActivityDisclosureHarness activityEvents={[activityEvent]} />
     );
   });
+  await openGroups(renderer!);
 
   const activityToggle = buttonWithLabel(renderer!, "Using MCP tool");
   assert.equal(activityToggle.props["aria-expanded"], false);
@@ -98,6 +101,7 @@ test("every detailed activity kind has one disclosure icon and valid hidden sema
         <ActivityDisclosureHarness activityEvents={[activityEvent]} />
       );
     });
+    await openGroups(renderer!);
 
     const toggle = buttonWithLabel(renderer!, label);
     assert.equal(toggle.props["aria-expanded"], false, `${kind} starts collapsed`);
@@ -130,9 +134,11 @@ test("detail-less activity kinds are noninteractive and never use disclosure che
         <ActivityDisclosureHarness activityEvents={[activityEvent(kind, index + 1)]} />
       );
     });
-    assert.equal(renderer!.root.findAllByType("button").length, 0, `${kind} has no disclosure button`);
-    assert.equal(renderer!.root.findAllByType("svg").length, 1, `${kind} renders one semantic icon`);
-    assert.doesNotMatch(svgClassNames(renderer!.root)[0] ?? "", /chevron|disclosure/, `${kind} does not impersonate a disclosure`);
+    await openGroups(renderer!);
+    const row = renderer!.root.find((node) => typeof node.type === "string" && String(node.props.className ?? "").startsWith(`chat-inline-activity-event is-${kind}`));
+    assert.equal(row.findAllByType("button").length, 0, `${kind} has no disclosure button`);
+    assert.equal(row.findAllByType("svg").length, 1, `${kind} renders one semantic icon`);
+    assert.doesNotMatch(svgClassNames(row)[0] ?? "", /chevron|disclosure/, `${kind} does not impersonate a disclosure`);
     await act(async () => renderer!.unmount());
   }
 });
@@ -162,6 +168,7 @@ test("long activity detail uses a six-line preview and keeps Show more at the fa
       <ActivityDisclosureHarness activityEvents={[activityEvent]} />
     );
   });
+  await openGroups(renderer!);
 
   const toggle = buttonWithLabel(renderer!, "Running command");
   assert.equal(toggle.props["aria-expanded"], false);
@@ -205,11 +212,13 @@ test("activity disclosure survives no-content to first text and tail to complete
   await act(async () => {
     renderer = create(<ActivityDisclosureHarness activityEvents={[event]} mode="stream-empty" />);
   });
+  await openGroups(renderer!);
   await act(async () => buttonWithLabel(renderer!, event.label).props.onClick());
 
   await act(async () => {
     renderer!.update(<ActivityDisclosureHarness activityEvents={[event]} mode="stream-tail" />);
   });
+  assert.equal(buttonWithLabel(renderer!, "1 command").props["aria-expanded"], true, "the open group stays open once the member moves on");
   assert.equal(buttonWithLabel(renderer!, event.label).props["aria-expanded"], true, "first text keeps activity open");
   assert.equal(activityContent(renderer!).props.hidden, false);
 
@@ -225,8 +234,9 @@ test("activity disclosure survives streaming to finished renderer and virtualize
   const event = activityEvent("command", 1, "Running command", "npm run typecheck");
   let renderer: ReactTestRenderer | undefined;
   await act(async () => {
-    renderer = create(<ActivityDisclosureHarness activityEvents={[event]} mode="stream-tail" />);
+    renderer = create(<ActivityDisclosureHarness activityEvents={[event]} mode="stream-empty" />);
   });
+  await openGroups(renderer!);
   await act(async () => buttonWithLabel(renderer!, event.label).props.onClick());
 
   await act(async () => {
@@ -234,6 +244,7 @@ test("activity disclosure survives streaming to finished renderer and virtualize
   });
   assert.equal(buttonWithLabel(renderer!, "Show full stream").props["aria-expanded"], false);
   await act(async () => buttonWithLabel(renderer!, "Show full stream").props.onClick());
+  assert.equal(buttonWithLabel(renderer!, "1 command").props["aria-expanded"], true, "the group opened while live stays open");
   assert.equal(buttonWithLabel(renderer!, event.label).props["aria-expanded"], true, "finished renderer keeps activity open");
 
   await act(async () => {
@@ -253,10 +264,13 @@ test("timeline and thread copies share disclosure state across thread close and 
   await act(async () => {
     renderer = create(<ActivityDisclosureHarness activityEvents={[event]} mode="timeline-and-thread" />);
   });
-  const copies = renderer!.root.findAllByType("button");
+  const groups = renderer!.root.findAllByType("button");
+  assert.deepEqual(groups.map(textContent), ["1 command", "1 command"]);
+  await act(async () => groups[0].props.onClick());
+  const copies = renderer!.root.findAllByType("button").filter((button) => textContent(button).includes(event.label));
   assert.equal(copies.length, 2);
   await act(async () => copies[0].props.onClick());
-  assert.deepEqual(renderer!.root.findAllByType("button").map((button) => button.props["aria-expanded"]), [true, true]);
+  assert.deepEqual(renderer!.root.findAllByType("button").map((button) => button.props["aria-expanded"]), [true, true, true, true]);
 
   await act(async () => {
     renderer!.update(<ActivityDisclosureHarness activityEvents={[event]} mode="timeline-only" />);
@@ -265,7 +279,7 @@ test("timeline and thread copies share disclosure state across thread close and 
   await act(async () => {
     renderer!.update(<ActivityDisclosureHarness activityEvents={[event]} mode="timeline-and-thread" />);
   });
-  assert.deepEqual(renderer!.root.findAllByType("button").map((button) => button.props["aria-expanded"]), [true, true]);
+  assert.deepEqual(renderer!.root.findAllByType("button").map((button) => button.props["aria-expanded"]), [true, true, true, true]);
   await act(async () => renderer!.unmount());
 });
 
@@ -273,115 +287,17 @@ test("activity disclosure state clears synchronously when the conversation chang
   const event = activityEvent("web", 1, "Searched web", "query");
   let renderer: ReactTestRenderer | undefined;
   await act(async () => {
-    renderer = create(<ActivityDisclosureHarness activityEvents={[event]} conversationId="conversation-1" />);
+    renderer = create(<ActivityDisclosureHarness activityEvents={[event]} conversationId="conversation-1" mode="timeline-only" />);
   });
+  await openGroups(renderer!);
   await act(async () => buttonWithLabel(renderer!, event.label).props.onClick());
   assert.equal(buttonWithLabel(renderer!, event.label).props["aria-expanded"], true);
 
   await act(async () => {
-    renderer!.update(<ActivityDisclosureHarness activityEvents={[event]} conversationId="conversation-2" />);
+    renderer!.update(<ActivityDisclosureHarness activityEvents={[event]} conversationId="conversation-2" mode="timeline-only" />);
   });
+  assert.equal(buttonWithLabel(renderer!, "1 command").props["aria-expanded"], false);
+  await openGroups(renderer!);
   assert.equal(buttonWithLabel(renderer!, event.label).props["aria-expanded"], false);
   await act(async () => renderer!.unmount());
 });
-
-type ActivityHarnessMode =
-  | "stream-empty"
-  | "stream-tail"
-  | "stream-completed"
-  | "finished"
-  | "unmounted"
-  | "timeline-only"
-  | "timeline-and-thread";
-
-function ActivityDisclosureHarness(props: {
-  activityEvents: ChatAgentActivityEvent[];
-  conversationId?: string;
-  mode?: ActivityHarnessMode;
-}): JSX.Element | null {
-  const activityDisclosure = useChatActivityDisclosure(props.conversationId ?? "conversation-1");
-  const mode = props.mode ?? "stream-empty";
-  if (mode === "unmounted") {
-    return null;
-  }
-  if (mode === "finished") {
-    const transcriptOpen = activityDisclosure.expandedProcessingTranscriptMessageIds.has("message-1");
-    return (
-      <>
-        <button type="button" aria-expanded={transcriptOpen} onClick={() => activityDisclosure.toggleProcessingTranscript("message-1")}>
-          {transcriptOpen ? "Hide full stream" : "Show full stream"}
-        </button>
-        {transcriptOpen && (
-          <ChatExpandedProcessingTranscript activityDisclosure={activityDisclosure} activityEvents={props.activityEvents} view={{
-            leadingSegments: [{ key: "full", content: "Finished", startOffset: 0, endOffset: 8 }], renderFinalContent: false, notices: []
-          }} />
-        )}
-      </>
-    );
-  }
-  if (mode === "timeline-only" || mode === "timeline-and-thread") {
-    return (
-      <>
-        <ChatInlineTranscript activityDisclosure={activityDisclosure} content="" activityEvents={props.activityEvents} />
-        {mode === "timeline-and-thread" && (
-          <ChatInlineTranscript activityDisclosure={activityDisclosure} content="" activityEvents={props.activityEvents} />
-        )}
-      </>
-    );
-  }
-  const content = mode === "stream-tail"
-    ? "First paragraph."
-    : mode === "stream-completed"
-      ? "First paragraph.\n\nSecond paragraph."
-      : undefined;
-  return (
-    <StreamingMessageContent
-      activityDisclosure={activityDisclosure}
-      startedAt={NOW}
-      content={content}
-      activityEvents={props.activityEvents}
-    />
-  );
-}
-
-function activityEvent(
-  kind: ChatAgentActivityKind,
-  sequence: number,
-  label = `Activity ${kind}`,
-  detail?: string
-): ChatAgentActivityEvent {
-  return {
-    id: `activity-${kind}-${sequence}`,
-    sequence,
-    kind,
-    label,
-    detail,
-    createdAt: NOW,
-    afterContentLength: 0
-  };
-}
-
-function buttonWithLabel(renderer: ReactTestRenderer, label: string): ReactTestRenderer["root"] {
-  const button = renderer.root.findAllByType("button").find((item) => textContent(item).includes(label));
-  assert.ok(button, `expected ${label} button`);
-  return button;
-}
-
-function activityContent(renderer: ReactTestRenderer): ReactTestRenderer["root"] {
-  return renderer.root.findByProps({ className: "chat-inline-activity-content" });
-}
-
-function svgClassNames(node: ReactTestRenderer["root"]): string[] {
-  return node.findAllByType("svg").map((svg) => String(svg.props.className ?? ""));
-}
-
-function textContent(node: unknown): string {
-  if (typeof node === "string" || typeof node === "number") {
-    return String(node);
-  }
-  if (!node || typeof node !== "object") {
-    return "";
-  }
-  const record = node as { children?: unknown[] };
-  return Array.isArray(record.children) ? record.children.map(textContent).join("") : "";
-}
