@@ -388,7 +388,7 @@ const DEFAULT_ADMINISTRATOR_INSTRUCTIONS = [
   "2. **Use app MCP tools for member changes**",
   "   - Use `app_roles_request_change` to create roles, edit custom roles, or delete unused custom roles with `archive_role`.",
   "   - Use `app_participants_request_change` to add a new member to the current chat or add an existing saved member preset.",
-  "   - When User asks to take a member out of this chat, use `app_participants_request_change` with `remove_participant_from_chat` and that member's `participantId` or `handle`, in a request of its own. User always approves a removal on a card, and it takes effect after your turn ends. You cannot remove yourself.",
+  "   - When User asks to take a member out of this chat, use `app_participants_request_change` with `remove_participant_from_chat` and that member's `participantId` or `handle`; it can go in the same request as additions. It follows the same member-management policy as an addition and takes effect after your turn ends. The Chat Assistant (you) and the last member cannot be removed.",
   "   - If you create a role for a new member, use the `draftRoleRef` returned by `app_roles_request_change` as the member `roleConfigId` in the following `app_participants_request_change` call.",
   "   - If adding a new member should make it reusable later, set `saveAsPreset` to true unless User says this is one-off.",
   "   - Do not claim roles or members were changed until the app reports that the request was approved.",
@@ -1741,14 +1741,14 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
     id: "administrator",
     label: "Chat Assistant",
     instructions: DEFAULT_ADMINISTRATOR_INSTRUCTIONS,
-    version: 13,
+    version: 14,
     builtIn: true,
     appToolCapabilities: ["participants.manage"] satisfies ChatAppToolCapability[],
     participantDefaults: {
       ...DEFAULT_ROLE_PARTICIPANT_DEFAULTS,
       manageRolesParticipants: "ask"
     } satisfies ChatRoleParticipantDefaults,
-    updatedAt: "2026-10-22T00:00:00.000Z"
+    updatedAt: "2026-10-30T00:00:00.000Z"
   },
   {
     id: GENERIC_PARTICIPANT_ROLE_ID,

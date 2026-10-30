@@ -178,7 +178,10 @@ export function wantedHubCards(
   const approvals = Array.isArray(conversation.metadata?.pendingAppToolApprovals) ? conversation.metadata.pendingAppToolApprovals as ChatAppToolApproval[] : [];
   for (const approval of approvals) {
     if (!approval || typeof approval.id !== "string" || !approvalHasCard(approval) || !owns.approval(approval)) continue;
-    if (!members.has(approval.requesterParticipantId)) continue;
+    // A decided roster change keeps its card until it is made, even if its
+    // member left meanwhile: settling it now would say it was made.
+    const queued = typeof approval.memberRemovalQueuedAt === "string" || typeof approval.memberAdditionQueuedAt === "string";
+    if (!members.has(approval.requesterParticipantId) && !queued) continue;
     const payload: HubApprovalCardPayload = {
       approval: approvalForCard(approval),
       ...(approval.cardRefusals?.length ? { refusals: approval.cardRefusals } : {})

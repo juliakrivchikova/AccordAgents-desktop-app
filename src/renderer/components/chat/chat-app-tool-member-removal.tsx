@@ -61,7 +61,10 @@ export function memberRemovalResultSummary(
 ): { title: string; detail: string; tone: "done" | "waiting" | "refused" } {
   const handles = handleList(request.operations);
   const stays = request.operations.length === 1 ? "stays" : "stay";
-  if (approval.status === "approved" && approval.memberRemovalQueuedAt) {
+  // Approved by the User, or allowed by the member's Manage members setting
+  // and not made yet (here, or on the machine its member runs on).
+  if (((approval.status === "approved" || approval.status === "auto-applied") && approval.memberRemovalQueuedAt) ||
+    (approval.status === "auto-applied" && !approval.appliedParticipantIds && !approval.error)) {
     return {
       title: "Removal approved",
       detail: `Waiting for running turns to finish, then ${handles} ${request.operations.length === 1 ? "leaves" : "leave"} this chat.`,

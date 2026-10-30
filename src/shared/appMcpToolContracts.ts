@@ -1958,7 +1958,7 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
     capability: "participants.manage",
     desktop: {
       "title": "Request Member Change",
-      "description": "Request adding a new member to the current chat, optionally saving it as a reusable preset, adding an existing saved member preset to the chat, or removing another member from the chat. A removal always waits for the User's approval on a card and takes effect after your turn ends and no member is running; request removals on their own, not together with additions. You cannot remove yourself or the Chat Assistant.",
+      "description": "Request adding a new member to the current chat, optionally saving it as a reusable preset, adding an existing saved member preset to the chat, or removing a member from the chat. Removals can be combined with additions (the answer then has additions and removals, status combined, or removal_failed when only the removal failed) and follow the same Manage members policy: with allow a removal is approved without asking (status auto_approved), with ask the User approves it on a card (status pending_user_approval). Either way it is made after your turn ends and no member is running. The Chat Assistant and the last member cannot be removed.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

@@ -131,7 +131,9 @@ function GenericChatAppToolApprovalCard(props: {
       : memberRemoval ? memberRemovalQuestion(props.approval, memberRemoval) : approvalQuestion(props.approval, permissionRequest, effectiveRoleRequest, effectiveParticipantChange, participantRequest, selfCompactionRequest, toolPermissionRequest);
   const displayPrompt = rosterApproval ? rosterApprovalQuestion(props.approval, added) : approvalPrompt;
 
-  const queuedDecision = props.approval.machineDecisionPending;
+  // A removal its member's setting allowed asked nobody: no decision to
+  // confirm, it waits like a local member's (memberRemovalResultSummary).
+  const queuedDecision = memberRemoval && props.approval.status === "auto-applied" ? undefined : props.approval.machineDecisionPending;
   // An answer the member's device could not apply: the card asks again, and
   // says why (a script's keys missing, a phone's approval of a script's code).
   const lastRefusal = props.approval.status === "pending" ? props.approval.cardRefusals?.at(-1) : undefined;

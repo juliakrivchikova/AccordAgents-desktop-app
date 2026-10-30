@@ -581,6 +581,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     machineSettings.start();
     if (stopping) return;
     await serverChatLink.start();
+    // Its members' decided removals a restart left waiting (Д2: made here).
+    void chatService.resumeQueuedMemberRemovals().catch((error) => log("machine.member-removal.resume-error", { message: error instanceof Error ? error.message : String(error) }));
   })().catch((error) => log("machine.server.link-error", { message: error instanceof Error ? error.message : String(error) }));
   void scriptService.start().catch((error) => debugLogService.write("scripts.start.error", { message: String(error) }));
   idlePower?.ready();
