@@ -8,7 +8,7 @@
     <title>AccordAgents</title>
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="assets/accordagents-mark.png" />
-    <link rel="stylesheet" href="mobile-app.css?v=2026-10-29-phone-new-chat" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-10-29-new-chat-screen" />
   </head>
   <body>
     <div class="mobile-stage">
@@ -24,7 +24,7 @@
           <header class="mobile-chats-header">
             <h1>Chats</h1>
             <!-- A new chat, as the computer's New chat starts one. -->
-            <button id="new-chat-button" class="mobile-icon-button new-chat-button" type="button" aria-label="New chat" aria-haspopup="dialog" aria-controls="new-chat-sheet" hidden>
+            <button id="new-chat-button" class="mobile-icon-button new-chat-button" type="button" aria-label="New chat" aria-haspopup="dialog" aria-controls="new-chat-screen" hidden>
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M12 20h9"></path>
                 <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"></path>
@@ -248,42 +248,94 @@
             <div id="send-log-list" class="members-sheet-list send-log-list"></div>
           </div>
         </div>
-        <!-- The computer's New chat, on the phone: the first message, the
-             folder it works in (or none) and its members. -->
-        <div id="new-chat-sheet" class="members-sheet new-chat-sheet" role="dialog" aria-label="New chat" hidden>
-          <div class="members-sheet-backdrop" data-new-chat-close="1"></div>
-          <div class="members-sheet-panel">
-            <div class="members-sheet-grip" aria-hidden="true"></div>
-            <div class="members-sheet-head">
-              <strong>New chat</strong>
-              <button id="new-chat-close" class="members-sheet-close" type="button">Cancel</button>
+        <!-- The computer's New chat, on the phone: a screen of its own, the way
+             Claude's app starts a chat (the User, 2026-10-29) — the mark, and
+             one card at the bottom with the first message, its pictures, the
+             project it works in (or none), its members and Start. -->
+        <section id="new-chat-screen" class="new-chat-screen" role="dialog" aria-modal="true" aria-label="New chat" hidden>
+          <header class="new-chat-head">
+            <button id="new-chat-close" class="new-chat-back" type="button" aria-label="Back to chats">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m15 18-6-6 6-6"></path>
+              </svg>
+            </button>
+          </header>
+          <div class="new-chat-hero">
+            <div class="new-chat-logo" aria-hidden="true">
+              <span class="new-chat-logo-glow"></span>
+              <img src="assets/accordagents-mark.png" alt="" draggable="false" />
             </div>
-            <div class="new-chat-body">
-              <textarea id="new-chat-input" class="new-chat-input" rows="3" placeholder="What are you working on?" aria-label="What are you working on?" autocomplete="off"></textarea>
-              <label class="new-chat-field">
-                <span>Folder</span>
-                <select id="new-chat-folder" aria-label="Folder"></select>
-              </label>
-              <div id="new-chat-members-title" class="new-chat-section">Members</div>
-              <div id="new-chat-members" class="members-sheet-list new-chat-members" role="group" aria-labelledby="new-chat-members-title"></div>
-              <p id="new-chat-note" class="new-chat-note" role="status" hidden></p>
-              <button id="new-chat-start" class="new-chat-start" type="button" disabled>Start chat</button>
+            <h2>Start a new chat</h2>
+            <p>Coordinate AI agents in one workspace</p>
+            <p id="new-chat-note" class="new-chat-note" role="status" hidden></p>
+          </div>
+          <div class="new-chat-card">
+            <div id="new-chat-attachments" class="composer-attachments new-chat-attachments" aria-label="Attached pictures" hidden></div>
+            <input id="new-chat-image-input" class="composer-image-input" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden />
+            <textarea id="new-chat-input" class="new-chat-input" rows="2" placeholder="What are you working on?" aria-label="What are you working on?" autocomplete="off"></textarea>
+            <div class="new-chat-row">
+              <button id="new-chat-attach" class="new-chat-plus" type="button" aria-label="Attach a picture">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14"></path>
+                </svg>
+              </button>
+              <button id="new-chat-project" class="new-chat-chip new-chat-project-chip" type="button" aria-haspopup="dialog" aria-controls="new-chat-projects-sheet" disabled>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"></path>
+                </svg>
+                <span id="new-chat-project-label" class="new-chat-chip-label">No project</span>
+                <svg class="new-chat-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+              </button>
+              <button id="new-chat-members-button" class="new-chat-chip new-chat-members-chip" type="button" aria-haspopup="dialog" aria-controls="new-chat-members-sheet" aria-label="Members" disabled>
+                <span id="new-chat-avatars" class="new-chat-avatars" aria-hidden="true"></span>
+                <svg class="new-chat-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+              </button>
+              <span class="new-chat-spacer"></span>
+              <button id="new-chat-start" class="new-chat-send" type="button" aria-label="Start chat" disabled>
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12 19V5M5 12l7-7 7 7"></path>
+                </svg>
+              </button>
             </div>
           </div>
-        </div>
+          <!-- The projects the computer offers, then none, as its New chat
+               lists them. -->
+          <div id="new-chat-projects-sheet" class="members-sheet new-chat-picker" role="dialog" aria-modal="true" aria-label="Project" hidden>
+            <div class="members-sheet-backdrop" data-new-chat-picker-close="1"></div>
+            <div class="members-sheet-panel">
+              <div class="members-sheet-grip" aria-hidden="true"></div>
+              <div class="members-sheet-head">
+                <strong>Project</strong>
+                <button class="members-sheet-close" type="button" data-new-chat-picker-close="1">Done</button>
+              </div>
+              <div id="new-chat-projects" class="members-sheet-list new-chat-options" role="group" aria-label="Project"></div>
+            </div>
+          </div>
+          <div id="new-chat-members-sheet" class="members-sheet new-chat-picker" role="dialog" aria-modal="true" aria-label="Members" hidden>
+            <div class="members-sheet-backdrop" data-new-chat-picker-close="1"></div>
+            <div class="members-sheet-panel">
+              <div class="members-sheet-grip" aria-hidden="true"></div>
+              <div class="members-sheet-head">
+                <strong>Members</strong>
+                <button class="members-sheet-close" type="button" data-new-chat-picker-close="1">Done</button>
+              </div>
+              <div id="new-chat-members" class="members-sheet-list new-chat-options" role="group" aria-label="Members"></div>
+            </div>
+          </div>
+        </section>
         <div class="mobile-home-indicator" aria-hidden="true"><span></span></div>
       </main>
     </div>
     <!-- The database description both the page and the service worker load. -->
-    <script src="mobile-db.js?v=2026-10-29-phone-new-chat" defer></script>
-    <script src="jsqr.js?v=2026-10-29-phone-new-chat" defer></script>
+    <script src="mobile-db.js?v=2026-10-29-new-chat-screen" defer></script>
+    <script src="jsqr.js?v=2026-10-29-new-chat-screen" defer></script>
     <!-- How the phone talks to the User's server (signed requests carrying
          its operations), and the rules shared with the desktop verbatim
          (avatars, timeline visibility), bundled from src/shared by the mobile
          build. -->
-    <script src="mobile-hub-client.js?v=2026-10-29-phone-new-chat" defer></script>
-    <script src="mobile-shared.js?v=2026-10-29-phone-new-chat" defer></script>
-    <script src="mobile-activity.js?v=2026-10-29-phone-new-chat" defer></script>
-    <script src="mobile-app.js?v=2026-10-29-phone-new-chat" defer></script>
+    <script src="mobile-hub-client.js?v=2026-10-29-new-chat-screen" defer></script>
+    <script src="mobile-shared.js?v=2026-10-29-new-chat-screen" defer></script>
+    <script src="mobile-activity.js?v=2026-10-29-new-chat-screen" defer></script>
+    <script src="mobile-app.js?v=2026-10-29-new-chat-screen" defer></script>
   </body>
 </html>

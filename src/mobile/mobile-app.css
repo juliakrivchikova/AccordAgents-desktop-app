@@ -1990,115 +1990,357 @@ button.mobile-chat-group-title:active {
 
 /* --- New chat ------------------------------------------------------------- */
 
-/* Over the chats list and its bottom bar, as the computer's New chat is a
-   screen of its own. */
-.new-chat-sheet {
+/* A screen of its own over the chats list and its bottom bar, as the
+   computer's New chat is (the User, 2026-10-29, after Claude's app): the mark
+   in the middle, one card at the bottom. It is as tall as what the phone can
+   show, so with the keyboard up the card sits right above it. */
+.new-chat-screen {
+  position: absolute;
+  inset: 0;
   z-index: 13;
-}
-
-.new-chat-sheet .members-sheet-panel {
-  max-height: 88%;
-}
-
-.new-chat-body {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 4px 18px 6px;
-}
-
-.new-chat-input {
-  width: 100%;
-  min-height: 84px;
-  padding: 12px 14px;
-  border: 1px solid var(--bd);
-  border-radius: 14px;
+  /* Held sideways, clear of the notch and the rounded corners. */
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
   background: var(--surface);
-  color: var(--fg1);
-  font: 400 16px var(--sans);
-  resize: none;
 }
 
-.new-chat-field {
+.new-chat-screen[hidden] {
+  display: none;
+}
+
+.new-chat-head {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font: 500 14.5px var(--sans);
+  padding: calc(6px + env(safe-area-inset-top)) 12px 4px;
+}
+
+.new-chat-back {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 50%;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  background: var(--s2);
+  color: var(--fg1);
+  cursor: pointer;
+}
+
+/* Short (the keyboard up, the phone sideways), it scrolls from the top rather
+   than cutting the line that says why a start failed. */
+.new-chat-hero {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: safe center;
+  padding: 0 28px 20px;
+  text-align: center;
+}
+
+/* The desktop's mark: the logo over a soft glow of the members' colours. */
+.new-chat-logo {
+  position: relative;
+  width: 60px;
+  height: 60px;
+  flex-shrink: 0;
+  margin-bottom: 16px;
+}
+
+.new-chat-logo-glow {
+  position: absolute;
+  inset: -64%;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 34% 38%, color-mix(in srgb, var(--brand-codex) 34%, transparent), transparent 34%),
+    radial-gradient(circle at 70% 42%, color-mix(in srgb, var(--brand-anthropic) 30%, transparent), transparent 36%),
+    radial-gradient(circle at 54% 74%, color-mix(in srgb, var(--acc) 30%, transparent), transparent 38%);
+  filter: blur(20px);
+  opacity: 0.68;
+}
+
+.new-chat-logo img {
+  position: relative;
+  width: 60px;
+  height: 60px;
+  object-fit: contain;
+}
+
+.new-chat-hero h2 {
+  margin: 0;
+  font: 700 24px var(--disp);
+  letter-spacing: -0.02em;
+  color: var(--fg1);
+}
+
+.new-chat-hero p {
+  margin: 8px 0 0;
+  font: 400 14.5px var(--sans);
   color: var(--fg);
 }
 
-.new-chat-field select {
-  min-width: 0;
-  max-width: 64%;
-  padding: 8px 10px;
-  border: 1px solid var(--bd);
-  border-radius: 10px;
-  background: var(--surface);
-  color: var(--fg1);
-  font: 400 15px var(--sans);
+/* What stands in the way of a start (the Mac has offered nothing yet, a
+   member cannot be added, the start failed), under the heading. */
+.new-chat-hero .new-chat-note {
+  margin-top: 14px;
+  font: 400 14px var(--sans);
+  color: var(--danger);
 }
 
-.new-chat-section {
-  margin-top: 4px;
-  font: 600 13px var(--sans);
+.new-chat-hero .new-chat-note[data-tone="info"] {
   color: var(--mut);
 }
 
-.new-chat-members {
-  padding: 0;
+.new-chat-hero .new-chat-note[hidden] {
+  display: none;
 }
 
-.new-chat-member {
+.new-chat-card {
+  flex-shrink: 0;
+  margin: 0 10px calc(10px + env(safe-area-inset-bottom));
+  padding: 2px 6px 6px;
+  border: 1px solid var(--bd);
+  border-radius: 26px;
+  background: var(--s2);
+}
+
+/* The composer's strip floats above its bar; on the card it is a row inside it. */
+.new-chat-attachments {
+  position: static;
+  padding: 8px 6px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.new-chat-input {
+  display: block;
+  width: 100%;
+  min-height: 64px;
+  max-height: 160px;
+  padding: 14px 8px 6px;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--fg1);
+  font: 400 16.5px var(--sans);
+  line-height: 1.35;
+}
+
+.new-chat-input::placeholder {
+  color: var(--mut);
+  opacity: 1;
+}
+
+/* One row: a picture, the project, the members, Start. The project gives way
+   to the members when a long name does not fit; the members show as their
+   faces, so the project's name keeps the room it needs. */
+.new-chat-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.new-chat-plus {
+  position: relative;
+  width: 36px;
+  height: 40px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 50%;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--fg1);
+  cursor: pointer;
+}
+
+.new-chat-chip {
+  height: 40px;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid var(--bd);
+  border-radius: 20px;
+  background: var(--surface);
+  color: var(--fg1);
+  font: 500 14px var(--sans);
+  cursor: pointer;
+}
+
+.new-chat-chip:disabled {
+  color: var(--mut);
+  cursor: default;
+}
+
+.new-chat-chip svg {
+  flex-shrink: 0;
+}
+
+.new-chat-chevron {
+  color: var(--mut);
+}
+
+.new-chat-project-chip {
+  flex: 0 1 auto;
+}
+
+.new-chat-members-chip {
+  flex: 0 0 auto;
+}
+
+.new-chat-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-chat-avatars {
+  display: inline-flex;
+  align-items: center;
+}
+
+.new-chat-avatars .mobile-mention-avatar {
+  width: 26px;
+  height: 26px;
+  flex-basis: 26px;
+  margin-left: -8px;
+  border: 2px solid var(--surface);
+  font-size: 10px;
+}
+
+.new-chat-avatars .mobile-mention-avatar:first-child {
+  margin-left: 0;
+}
+
+.new-chat-avatars-more {
+  margin-left: 4px;
+  font: 600 12.5px var(--sans);
+  color: var(--fg);
+}
+
+.new-chat-spacer {
+  flex: 1;
+}
+
+.new-chat-send {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 50%;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  background: var(--fg1);
+  color: var(--surface-fg);
+  cursor: pointer;
+}
+
+/* 44px to a finger, whatever the drawn size. */
+.new-chat-plus::before,
+.new-chat-send::before {
+  content: "";
+  position: absolute;
+  inset: -3px -4px;
+}
+
+.new-chat-send:disabled {
+  background: var(--bd);
+  color: var(--mut);
+  cursor: default;
+}
+
+/* The two lists the card's buttons open: the members sheet's shape, over the
+   New chat screen. */
+.new-chat-picker {
+  z-index: 2;
+}
+
+.new-chat-picker .members-sheet-panel {
+  max-height: 78%;
+}
+
+.new-chat-option {
   width: 100%;
   border: 0;
   background: transparent;
   text-align: left;
+  color: inherit;
   cursor: pointer;
 }
 
-.new-chat-member[aria-pressed="true"] {
+.new-chat-option[aria-pressed="true"] {
   background: var(--accs);
 }
 
 /* The Chat Assistant is in every chat: chosen, not to be unchosen. */
-.new-chat-member[aria-disabled="true"] {
+.new-chat-option[aria-disabled="true"] {
   cursor: default;
 }
 
 /* A member that cannot be added now says why, faded. */
-.new-chat-member[data-unavailable="1"] {
-  opacity: 0.55;
+.new-chat-option[data-unavailable="1"] {
+  opacity: 0.5;
+}
+
+.new-chat-option .members-sheet-location {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-chat-project-icon {
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  border-radius: 11px;
+  display: grid;
+  place-items: center;
+  background: var(--s2);
+  color: var(--fg);
+}
+
+.new-chat-options-divider {
+  height: 1px;
+  margin: 6px 8px;
+  background: var(--bdf);
 }
 
 .new-chat-check {
   margin-left: auto;
+  width: 24px;
+  height: 24px;
   flex-shrink: 0;
-  font: 600 15px var(--sans);
-  color: var(--acc);
-}
-
-.new-chat-note {
-  margin: 0;
-  font: 400 13.5px var(--sans);
-  color: var(--danger);
-}
-
-.new-chat-start {
-  min-height: 46px;
-  border: 0;
-  border-radius: 14px;
-  background: var(--acc);
+  border: 1.5px solid var(--bd);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
   color: var(--surface-fg);
-  font: 600 16px var(--sans);
-  cursor: pointer;
 }
 
-.new-chat-start:disabled {
-  opacity: 0.45;
-  cursor: default;
+.new-chat-option[aria-pressed="true"] .new-chat-check {
+  border-color: var(--acc);
+  background: var(--acc);
+}
+
+.new-chat-option[aria-disabled="true"][aria-pressed="true"] .new-chat-check {
+  border-color: var(--bd);
+  background: var(--bd);
+  color: var(--fg);
 }
 
 /* --- Send log -------------------------------------------------------------- */

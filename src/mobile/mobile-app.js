@@ -1824,10 +1824,16 @@
     }
   }
 
-  async function addPendingAttachments(files) {
+  /** Prepares pictures picked for a message and adds them to its list: the
+   *  chat's composer's, unless another one is named (New chat's, as a
+   *  function giving its list). The list is read when it is used, not before
+   *  the picture is prepared: a send, a start or a removed picture meanwhile
+   *  replaces it, and a picture added to the replaced one was lost. */
+  async function addPendingAttachments(files, target) {
     const rejected = [];
+    const currentList = function () { return target ? target() : pendingAttachments; };
     for (const file of Array.from(files || [])) {
-      if (pendingAttachments.length >= MOBILE_UPLOAD_MAX_IMAGES) {
+      if (currentList().length >= MOBILE_UPLOAD_MAX_IMAGES) {
         rejected.push(file.name + " — too many pictures");
         continue;
       }
@@ -1855,14 +1861,19 @@
         }
         // Five 4 MB pictures would be a 27 MB base64 payload in IndexedDB and
         // one relay frame. The batch is bounded as well as each picture.
-        const pendingBytes = pendingAttachments.reduce(function (total, item) {
+        const list = currentList();
+        if (list.length >= MOBILE_UPLOAD_MAX_IMAGES) {
+          rejected.push(file.name + " — too many pictures");
+          continue;
+        }
+        const pendingBytes = list.reduce(function (total, item) {
           return total + Math.floor((item.dataBase64.length * 3) / 4);
         }, 0);
         if (pendingBytes + bytes > MOBILE_UPLOAD_MAX_TOTAL_BYTES) {
           rejected.push(file.name + " — over the 8 MB total");
           continue;
         }
-        pendingAttachments.push({
+        list.push({
           id: createEventId(),
           filename: prepared.filename,
           mimeType: prepared.mimeType,
@@ -2999,31 +3010,47 @@
 
   // What the computer's New chat offers, as the server holds it (the User,
   // 2026-10-29: the phone's New chat is the computer's): its projects, the
-  // folder a chat starts in, the Chat Assistant and the saved members, each
+  // project a chat starts in, the Chat Assistant and the saved members, each
   // as the computer would add it.
   let newChatOffer;
-  // What the panel says, kept while it is redrawn (a reason no chat can be
-  // started, a refusal, a read that failed).
+  // What the screen says, kept while it is redrawn (a reason no chat can be
+  // started, a refusal, a read that failed), and whether it is only that the
+  // offer is still being read.
   let newChatSaid;
+  let newChatReading = false;
   let newChatChosen = new Set();
+  // The project the chat works in: a path the computer offered, or "" for none.
+  let newChatProject = "";
+  // Pictures for the first message, prepared as the chat's composer prepares them.
+  let newChatAttachments = [];
+  // Pictures still being prepared: Start waits for them.
+  let newChatPreparing = 0;
+  const NEW_CHAT_REJECTED_PREFIX = "Not attached: ";
   let newChatToken = 0;
   let newChatStarting = false;
 
+  const NEW_CHAT_FOLDER_ICON = ["m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"];
+  const NEW_CHAT_NO_PROJECT_ICON = ["M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z", "m5.7 5.7 12.6 12.6"];
+  const NEW_CHAT_CHECK_ICON = ["M20 6 9 17l-5-5"];
+
   async function openNewChat() {
-    const sheet = document.getElementById("new-chat-sheet");
-    if (!sheet) return;
+    const screen = document.getElementById("new-chat-screen");
+    if (!screen) return;
     const token = ++newChatToken;
     newChatOffer = undefined;
-    newChatSaid = undefined;
     newChatChosen = new Set();
-    renderNewChat("Reading what your Mac offers\u2026");
-    sheet.hidden = false;
+    newChatProject = "";
+    newChatReading = true;
+    closeNewChatPickers();
+    renderNewChat("Reading what your Mac offers…");
+    screen.hidden = false;
     applyDock();
     let answer;
     try {
       answer = await serverPhoneGet("/v1/phone/new-chat", {});
     } catch (error) {
       if (token !== newChatToken) return;
+      newChatReading = false;
       // A server from before New chat on the phone: it updates once the Mac does.
       renderNewChat(error && error.serverStatus === 404
         ? "Your server does not start chats from the phone yet. It will once AccordAgents on your Mac has updated."
@@ -3031,17 +3058,41 @@
       return;
     }
     if (token !== newChatToken) return;
+    newChatReading = false;
     newChatOffer = answer && answer.options ? { options: answer.options, roles: answer.roles || {}, machines: answer.machines || {} } : undefined;
-    renderNewChat(answer && answer.unavailable ? answer.unavailable : "", true);
+    // As on the computer: the project it last worked in, or none.
+    newChatProject = newChatOffer && newChatOffer.options.defaultProject ? newChatOffer.options.defaultProject : "";
+    renderNewChat(answer && answer.unavailable ? answer.unavailable : "");
   }
 
   function closeNewChat() {
     newChatToken += 1;
-    const sheet = document.getElementById("new-chat-sheet");
-    if (sheet) sheet.hidden = true;
+    closeNewChatPickers();
+    const screen = document.getElementById("new-chat-screen");
+    if (screen) screen.hidden = true;
     const input = document.getElementById("new-chat-input");
     if (input) input.blur();
     applyDock();
+  }
+
+  /** One of the card's lists, over the screen. The keyboard goes down for it:
+   *  the list is what is being looked at. */
+  function openNewChatPicker(id) {
+    if (!newChatOffer) return;
+    const input = document.getElementById("new-chat-input");
+    if (input) input.blur();
+    closeNewChatPickers();
+    const sheet = document.getElementById(id);
+    if (sheet) sheet.hidden = false;
+    renderNewChatState();
+  }
+
+  function closeNewChatPickers() {
+    for (const id of ["new-chat-projects-sheet", "new-chat-members-sheet"]) {
+      const sheet = document.getElementById(id);
+      if (sheet) sheet.hidden = true;
+    }
+    renderNewChatState();
   }
 
   /** The saved members as the computer's New chat lists them: the most used
@@ -3052,69 +3103,117 @@
       .map(function (item) { return item.member; });
   }
 
-  function newChatMemberRow(participant, options) {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "members-sheet-row new-chat-member";
-    row.dataset.handle = participant.handle;
-    row.setAttribute("aria-pressed", options.chosen ? "true" : "false");
-    if (options.locked || options.unavailable) row.setAttribute("aria-disabled", "true");
-    if (options.unavailable) row.dataset.unavailable = "1";
+  /** The projects the computer offers, the one it would start in first even
+   *  when it is not among them (a folder no chat is in yet). */
+  function newChatProjectList(offer) {
+    const projects = offer ? offer.projects.slice() : [];
+    const preferred = offer && offer.defaultProject;
+    if (preferred && !projects.some(function (project) { return project.path === preferred; })) {
+      projects.unshift({ path: preferred, label: preferred.split(/[\\/]+/).filter(Boolean).pop() || preferred });
+    }
+    return projects;
+  }
+
+  /** Where a project is, as the User reads it: her home folder as "~". */
+  function newChatProjectPlace(path) {
+    return String(path || "").replace(/^\/Users\/[^/]+(?=\/|$)/, "~");
+  }
+
+  function newChatCheck(chosen) {
+    const check = document.createElement("span");
+    check.className = "new-chat-check";
+    check.setAttribute("aria-hidden", "true");
+    if (chosen) check.append(lineIcon(NEW_CHAT_CHECK_ICON, 14));
+    return check;
+  }
+
+  function newChatAvatar(participant) {
     const avatar = document.createElement("span");
     avatar.className = "mobile-mention-avatar";
     const assistant = participant.roleConfigId === "administrator";
     paintAvatar(avatar, avatarForMember({ id: participant.id, handle: participant.handle, kind: participant.kind, avatarId: participant.avatarId,
       displayName: assistant ? "Chat Assistant" : "@" + participant.handle, isAssistant: assistant }), undefined);
+    return avatar;
+  }
+
+  function newChatMemberName(participant) {
+    return participant.roleConfigId === "administrator" ? "Chat Assistant" : "@" + participant.handle;
+  }
+
+  function newChatProjectRow(project, chosen) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "members-sheet-row new-chat-option";
+    row.dataset.path = project ? project.path : "";
+    row.setAttribute("aria-pressed", chosen ? "true" : "false");
+    const icon = document.createElement("span");
+    icon.className = "new-chat-project-icon";
+    icon.append(lineIcon(project ? NEW_CHAT_FOLDER_ICON : NEW_CHAT_NO_PROJECT_ICON, 18));
     const copy = document.createElement("span");
     copy.className = "members-sheet-copy";
     const name = document.createElement("strong");
-    name.textContent = assistant ? "Chat Assistant" : "@" + participant.handle;
+    name.textContent = project ? project.label : "No project";
+    const where = document.createElement("span");
+    where.className = "members-sheet-location";
+    where.textContent = project ? newChatProjectPlace(project.path) : "The chat works without project files";
+    copy.append(name, where);
+    row.append(icon, copy, newChatCheck(chosen));
+    row.addEventListener("click", function () {
+      newChatProject = project ? project.path : "";
+      closeNewChatPickers();
+      renderNewChat();
+    });
+    return row;
+  }
+
+  function newChatMemberRow(participant, options) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "members-sheet-row new-chat-option new-chat-member";
+    row.dataset.handle = participant.handle;
+    row.setAttribute("aria-pressed", options.chosen ? "true" : "false");
+    if (options.locked || options.unavailable) row.setAttribute("aria-disabled", "true");
+    if (options.unavailable) row.dataset.unavailable = "1";
+    const copy = document.createElement("span");
+    copy.className = "members-sheet-copy";
+    const name = document.createElement("strong");
+    name.textContent = newChatMemberName(participant);
     const role = document.createElement("span");
     role.className = "members-sheet-role";
-    role.textContent = [newChatOffer && newChatOffer.roles[participant.roleConfigId], memberKindLabel(participant.kind)].filter(Boolean).join(" \u00b7 ");
+    role.textContent = [newChatOffer && newChatOffer.roles[participant.roleConfigId], memberKindLabel(participant.kind)].filter(Boolean).join(" · ");
     const where = document.createElement("span");
     where.className = "members-sheet-location";
     where.textContent = options.unavailable || memberLocationLabel({ homeMachineId: participant.homeMachineId,
       homeMachineName: participant.homeMachineId && newChatOffer ? newChatOffer.machines[participant.homeMachineId] : undefined });
     copy.append(name, role, where);
-    const check = document.createElement("span");
-    check.className = "new-chat-check";
-    check.setAttribute("aria-hidden", "true");
-    check.textContent = options.chosen ? "\u2713" : "";
-    row.append(avatar, copy, check);
+    row.append(newChatAvatar(participant), copy, newChatCheck(options.chosen));
     return row;
   }
 
-  function renderNewChat(note, fresh) {
+  /** The members the chat starts with: the Chat Assistant, then each one
+   *  chosen, in the order the list shows them. */
+  function newChatChosenParticipants(offer) {
+    if (!offer) return [];
+    return [offer.assistant].concat(newChatMemberOrder(offer.members)
+      .filter(function (member) { return newChatChosen.has(member.configId); })
+      .map(function (member) { return member.participant; }));
+  }
+
+  /** Everything on the screen, the two lists included. */
+  function renderNewChat(note) {
     if (note !== undefined) newChatSaid = note;
-    note = newChatSaid;
-    const folder = document.getElementById("new-chat-folder");
-    const list = document.getElementById("new-chat-members");
-    const noteNode = document.getElementById("new-chat-note");
-    const start = document.getElementById("new-chat-start");
-    const input = document.getElementById("new-chat-input");
     const offer = newChatOffer && newChatOffer.options;
-    if (folder && (fresh || !offer)) {
-      folder.replaceChildren();
-      const projects = offer ? offer.projects.slice() : [];
-      const preferred = offer && offer.defaultProject;
-      if (preferred && !projects.some(function (project) { return project.path === preferred; })) {
-        projects.unshift({ path: preferred, label: preferred.split(/[\\/]+/).filter(Boolean).pop() || preferred });
+    const projects = document.getElementById("new-chat-projects");
+    if (projects) {
+      projects.replaceChildren();
+      if (offer) {
+        for (const project of newChatProjectList(offer)) projects.append(newChatProjectRow(project, project.path === newChatProject));
+        const divider = document.createElement("div");
+        divider.className = "new-chat-options-divider";
+        projects.append(divider, newChatProjectRow(undefined, !newChatProject));
       }
-      for (const project of projects) {
-        const option = document.createElement("option");
-        option.value = project.path;
-        option.textContent = project.label;
-        folder.append(option);
-      }
-      // As on the computer: a chat may work without a folder.
-      const none = document.createElement("option");
-      none.value = "";
-      none.textContent = "Work without a folder";
-      folder.append(none);
-      folder.value = preferred || "";
-      folder.disabled = !offer;
     }
+    const list = document.getElementById("new-chat-members");
     if (list) {
       list.replaceChildren();
       if (offer) {
@@ -3131,25 +3230,109 @@
         }
       }
     }
+    renderNewChatState();
+  }
+
+  /** The card and the line above it, without the lists: what typing changes. */
+  function renderNewChatState() {
+    const offer = newChatOffer && newChatOffer.options;
+    const note = newChatSaid;
+    const noteNode = document.getElementById("new-chat-note");
+    const start = document.getElementById("new-chat-start");
+    const input = document.getElementById("new-chat-input");
+    const projectButton = document.getElementById("new-chat-project");
+    const projectLabel = document.getElementById("new-chat-project-label");
+    const membersButton = document.getElementById("new-chat-members-button");
+    const avatars = document.getElementById("new-chat-avatars");
+    if (projectButton) projectButton.disabled = !offer;
+    if (projectLabel) {
+      const project = offer && newChatProject ? newChatProjectList(offer).find(function (item) { return item.path === newChatProject; }) : undefined;
+      projectLabel.textContent = project ? project.label : "No project";
+      if (projectButton) projectButton.setAttribute("aria-label", "Project: " + projectLabel.textContent);
+    }
+    const chosen = newChatChosenParticipants(offer);
+    if (membersButton) {
+      membersButton.disabled = !offer;
+      membersButton.setAttribute("aria-label", chosen.length ? "Members: " + chosen.map(newChatMemberName).join(", ") : "Members");
+    }
+    if (avatars) {
+      const key = chosen.map(function (participant) { return participant.id; }).join(",");
+      if (avatars.dataset.key !== key) {
+        avatars.dataset.key = key;
+        avatars.replaceChildren();
+        for (const participant of chosen.slice(0, 3)) avatars.append(newChatAvatar(participant));
+        if (chosen.length > 3) {
+          const more = document.createElement("span");
+          more.className = "new-chat-avatars-more";
+          more.textContent = "+" + (chosen.length - 3);
+          avatars.append(more);
+        }
+      }
+    }
     const blocked = !offer ? note : offer.unavailable;
     const shown = note || blocked;
     if (noteNode) {
       noteNode.textContent = shown || "";
       noteNode.hidden = !shown;
+      if (newChatReading && !offer) noteNode.dataset.tone = "info";
+      else delete noteNode.dataset.tone;
     }
-    if (start) start.disabled = newChatStarting || !offer || Boolean(offer.unavailable) || !(input && input.value.trim());
+    const hasMessage = Boolean(input && input.value.trim()) || newChatAttachments.length > 0;
+    if (start) start.disabled = newChatStarting || newChatPreparing > 0 || !offer || Boolean(offer.unavailable) || !hasMessage;
+    // What is being started is what was on the card when Start was tapped.
+    if (input) input.readOnly = newChatStarting;
+    for (const id of ["new-chat-project", "new-chat-members-button"]) {
+      const button = document.getElementById(id);
+      const sheet = document.getElementById(id === "new-chat-project" ? "new-chat-projects-sheet" : "new-chat-members-sheet");
+      if (button) button.setAttribute("aria-expanded", sheet && !sheet.hidden ? "true" : "false");
+    }
+    if (input) {
+      // The field grows with what is typed, up to its limit, and scrolls past it.
+      input.style.height = "auto";
+      input.style.height = Math.min(input.scrollHeight, 160) + "px";
+    }
+  }
+
+  function renderNewChatAttachments() {
+    const strip = document.getElementById("new-chat-attachments");
+    if (!strip) return;
+    strip.replaceChildren();
+    strip.hidden = newChatAttachments.length === 0;
+    for (const attachment of newChatAttachments) {
+      const chip = document.createElement("div");
+      chip.className = "composer-attachment-chip";
+      const thumb = document.createElement("img");
+      thumb.className = "composer-attachment-thumb";
+      thumb.alt = attachment.filename;
+      thumb.src = "data:" + attachment.mimeType + ";base64," + attachment.dataBase64;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "composer-attachment-remove";
+      remove.setAttribute("aria-label", "Remove " + attachment.filename);
+      remove.textContent = "×";
+      remove.addEventListener("click", function () {
+        newChatAttachments = newChatAttachments.filter(function (item) { return item.id !== attachment.id; });
+        renderNewChatAttachments();
+        renderNewChatState();
+      });
+      chip.append(thumb, remove);
+      strip.append(chip);
+    }
   }
 
   /** Starts the chat: made on the server as the computer makes one (its
-   *  members, the line it starts with, its title), then the first message,
-   *  each its own operation, in that order. */
+   *  members, the line it starts with, its title), then the first message
+   *  with its pictures, each its own operation, in that order. */
   async function startNewChat() {
     const input = document.getElementById("new-chat-input");
-    const folder = document.getElementById("new-chat-folder");
     const offer = newChatOffer && newChatOffer.options;
     const shared = mobileSharedRules();
     const text = input ? input.value.trim() : "";
-    if (!offer || offer.unavailable || !text || !shared || newChatStarting) return;
+    const attachments = newChatAttachments.map(function (attachment) {
+      return { filename: attachment.filename, mimeType: attachment.mimeType, dataBase64: attachment.dataBase64 };
+    });
+    // As on the computer, a picture on its own starts a chat.
+    if (!offer || offer.unavailable || (!text && attachments.length === 0) || !shared || newChatStarting) return;
     // Each member it gets, chosen or named with @, must be one the computer
     // could add now, as the computer's New chat checks them all.
     const blocked = shared.newChatPickedMembers({ members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text })
@@ -3159,7 +3342,7 @@
       return;
     }
     newChatStarting = true;
-    renderNewChat();
+    renderNewChatState();
     const conversationId = createEventId();
     let listed = false;
     try {
@@ -3167,8 +3350,8 @@
       const participants = shared.newChatParticipants({
         assistant: offer.assistant, members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text, newId: createEventId
       });
-      const repoPath = folder && folder.value ? folder.value : undefined;
-      const title = shared.newChatTitle(text);
+      const repoPath = newChatProject || undefined;
+      const title = shared.newChatTitle(text, attachments.length ? attachments[0].filename : undefined);
       // In the list at once, as the computer's sidebar shows a chat it made
       // (the first message finds its members there).
       listed = true;
@@ -3194,12 +3377,15 @@
         payload: { message: { id: introId, role: "system", content: shared.newChatIntro(participants.map(function (participant) { return participant.handle; })),
           createdAt: createdAt, status: "done", metadata: { threadId: "system" } } }
       });
-      const message = await messageOutboxEntries({ conversationId: conversationId, content: text, dependsOn: create.eventId });
+      // The pictures travel as the chat's composer sends them: put up on the
+      // server first, then named by the message.
+      const message = await messageOutboxEntries({ conversationId: conversationId, content: text, dependsOn: create.eventId,
+        ...(attachments.length ? { payload: { content: text, attachments: attachments } } : {}) });
       // One transaction: the chat is never queued without its first message.
       await putOutboxEntries([create, intro].concat(message));
       listed = false;
     } catch (error) {
-      // Nothing was queued: the chat is not in the list, and the panel says why.
+      // Nothing was queued: the chat is not in the list, and the screen says why.
       if (listed) forgetStartedChat(conversationId);
       newChatStarting = false;
       renderNewChat("Could not start the chat: " + (error && error.message ? error.message : String(error)));
@@ -3207,6 +3393,8 @@
     }
     newChatStarting = false;
     if (input) input.value = "";
+    newChatAttachments = [];
+    renderNewChatAttachments();
     closeNewChat();
     renderNewChat("");
     await openConversation(conversationId);
@@ -3215,17 +3403,43 @@
 
   function wireNewChat() {
     const button = document.getElementById("new-chat-button");
-    const sheet = document.getElementById("new-chat-sheet");
+    const screen = document.getElementById("new-chat-screen");
     const close = document.getElementById("new-chat-close");
     const input = document.getElementById("new-chat-input");
     const start = document.getElementById("new-chat-start");
+    const attach = document.getElementById("new-chat-attach");
+    const imageInput = document.getElementById("new-chat-image-input");
     button?.addEventListener("click", function () { void openNewChat(); });
     close?.addEventListener("click", closeNewChat);
-    sheet?.addEventListener("click", function (event) {
-      if (event.target instanceof Element && event.target.dataset.newChatClose === "1") closeNewChat();
+    screen?.addEventListener("click", function (event) {
+      if (event.target instanceof Element && event.target.closest("[data-new-chat-picker-close]")) closeNewChatPickers();
     });
-    input?.addEventListener("input", function () { renderNewChat(); });
+    document.getElementById("new-chat-project")?.addEventListener("click", function () { openNewChatPicker("new-chat-projects-sheet"); });
+    document.getElementById("new-chat-members-button")?.addEventListener("click", function () { openNewChatPicker("new-chat-members-sheet"); });
+    input?.addEventListener("input", function () { renderNewChatState(); });
     start?.addEventListener("click", function () { void startNewChat(); });
+    if (attach && imageInput) {
+      attach.addEventListener("click", function () { imageInput.click(); });
+      imageInput.addEventListener("change", async function () {
+        const files = Array.from(imageInput.files || []);
+        // Clearing lets the same file be picked again after removing it.
+        imageInput.value = "";
+        newChatPreparing += 1;
+        renderNewChatState();
+        let rejected = [];
+        try {
+          rejected = await addPendingAttachments(files, function () { return newChatAttachments; });
+        } finally {
+          newChatPreparing -= 1;
+        }
+        renderNewChatAttachments();
+        // A refusal is said; a later pick that went through clears an earlier
+        // refusal, and nothing else that is said.
+        if (rejected.length > 0) renderNewChat(NEW_CHAT_REJECTED_PREFIX + rejected.join("; "));
+        else if (String(newChatSaid || "").indexOf(NEW_CHAT_REJECTED_PREFIX) === 0) renderNewChat("");
+        else renderNewChatState();
+      });
+    }
   }
 
   // Who waits for this phone's part of the next hand-over to be done.
@@ -6168,6 +6382,7 @@
    *  a tab can be tapped from inside one), the tab is remembered, and the
    *  screen redrawn. */
   function switchHomeTab(tab) {
+    closeNewChat();
     closeActivityItem();
     leaveOpenChat();
     setHomeTab(tab);
@@ -6209,7 +6424,7 @@
     // a choice opened from Activity: iOS lifts it, and the height must hold
     // there too or the screen shrinking would lift it a second time.
     return (active.tagName === "INPUT" || active.tagName === "TEXTAREA") &&
-      Boolean(active.closest && active.closest("#timeline-screen, #activity-item"));
+      Boolean(active.closest && active.closest("#timeline-screen, #activity-item, #new-chat-screen"));
   }
 
   /** What is on screen, read from the screens themselves rather than kept
@@ -6240,7 +6455,7 @@
     // backdrop is a way around it. The live-reply view is a screen of the
     // chat rather than a dialog, so the bar stays under that one.
     const sendLog = document.getElementById("send-log-sheet");
-    const newChat = document.getElementById("new-chat-sheet");
+    const newChat = document.getElementById("new-chat-screen");
     const covered = (name === "activity" && Boolean(openActivityCardId)) ||
       Boolean(sendLog && !sendLog.hidden) || Boolean(newChat && !newChat.hidden) ||
       (inChat && CHAT_DIALOG_IDS.some(function (id) {
@@ -8775,6 +8990,7 @@
    *  happened across every chat. A chat can be one of many and a reply can be
    *  inside a thread, so the list is the one place that always holds it. */
   function openActivityFromNotification(list) {
+    closeNewChat();
     leaveOpenChat();
     setHomeTab("activity");
     // The list the notification was about: an approval waits on Pending, a
