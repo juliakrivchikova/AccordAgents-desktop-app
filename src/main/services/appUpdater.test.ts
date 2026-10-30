@@ -338,3 +338,41 @@ test("with no window to ask on, an update waits without checking who is busy (th
   assert.deepEqual(log.slice(2), ["app-update-restarting", "quit"]);
   gate.dispose();
 });
+
+import { createUpdateCheckLoop, updateCheckIntervalMs, updateFeedUrl, UPDATE_CHECK_INTERVAL_MS } from "./appUpdater";
+
+test("update checks stop once an update is downloaded, so Restart still finds it ready", async () => {
+  // The User's desktop, 2026-10-29: beta.8 downloaded at 12:58, the hourly
+  // check at 13:58 found nothing new and cleared the native "ready" note, and
+  // Restart at 22:18 failed with "No update available, can't quit and install".
+  const log: string[] = [];
+  let checks = 0;
+  const loop = createUpdateCheckLoop({ check: () => { checks += 1; }, intervalMs: 15, log: (event) => { log.push(event); } });
+  try {
+    assert.equal(checks, 1, "asked at once");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.ok(checks >= 2, "and again every interval while nothing is downloaded");
+    loop.downloaded();
+    const atDownload = checks;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(checks, atDownload, "no check after the download");
+    assert.deepEqual(log, ["app-update-check-skipped"], "said once, not on every interval");
+  } finally {
+    loop.dispose();
+  }
+});
+
+test("the update check interval is the hour unless a test run shortens it, never under ten seconds", () => {
+  assert.equal(updateCheckIntervalMs({}), UPDATE_CHECK_INTERVAL_MS);
+  assert.equal(UPDATE_CHECK_INTERVAL_MS, 60 * 60_000);
+  assert.equal(updateCheckIntervalMs({ ACCORDAGENTS_UPDATE_CHECK_INTERVAL_MS: "20000" }), 20_000);
+  assert.equal(updateCheckIntervalMs({ ACCORDAGENTS_UPDATE_CHECK_INTERVAL_MS: "500" }), UPDATE_CHECK_INTERVAL_MS);
+  assert.equal(updateCheckIntervalMs({ ACCORDAGENTS_UPDATE_CHECK_INTERVAL_MS: "soon" }), UPDATE_CHECK_INTERVAL_MS);
+});
+
+test("the feed is the one update-electron-app asked", () => {
+  assert.equal(updateFeedUrl(BETA_UPDATE_REPO, "1.11.3-beta.8", "darwin", "arm64"),
+    "https://update.electronjs.org/juliakrivchikova/AccordAgents-Beta-Releases/darwin-arm64/1.11.3-beta.8");
+  assert.equal(updateFeedUrl(STABLE_UPDATE_REPO, "1.11.1", "win32", "x64", true),
+    "https://update.electronjs.org/juliakrivchikova/AccordAgents-Releases/win32-x64/msix/1.11.1");
+});

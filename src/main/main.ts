@@ -1,4 +1,5 @@
 import path from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { HubInstaller, removeStaleHubTemp } from "./services/hubInstaller";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
@@ -148,6 +149,7 @@ import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { CRASH_REPORTS_ACTIVE_ARG, crashReportingActive, startCrashReporting, stopCrashReporting } from "./services/crashReporting";
 import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "./services/crashReportPreferences";
+import { isServerUpdateLoaderWindow, openServerUpdateLoader, updateServerBeforeOpening } from "./services/serverUpdateLoader";
 import { ACTIVITY_RECHECK_MS, appHiddenForUpdate, bootstrapAppUpdater, createUpdateRestart, createUpdateRestartGate, currentUpdateWindows, quitAndInstallUpdate, showUpdateRestartPrompt, updatePromptWindowShown } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
 import { MachineRecoveryService } from "./services/machineRecovery";
@@ -181,6 +183,13 @@ let mainWindow: BrowserWindow | undefined;
 let quitCleanupStarted = false;
 let quitCleanupFinished = false;
 let quittingForUpdate = false;
+// The restart for an update this app asked for (the update prompt's
+// Restart). Electron keeps watching the windows after a restart that failed
+// and asks again every time they all close; those later asks are not one.
+let updateRestartRequested = false;
+// Only the loader is up while the User's server updates before the window
+// opens (serverUpdateLoader.ts): no window of the app's own yet.
+let serverUpdateLoaderOpen = false;
 
 function sendToMainWindow(channel: string, ...args: unknown[]): boolean {
   const window = mainWindow;
@@ -250,7 +259,9 @@ function recordMainProcessRuntimeError(kind: "uncaughtException" | "unhandledRej
     origin,
     ...details
   });
-  if (!mainWindow || mainWindow.isDestroyed()) {
+  // Before the app's window is up startup failed; while only the server
+  // update's loader is up, the window still comes once it is done.
+  if ((!mainWindow || mainWindow.isDestroyed()) && !serverUpdateLoaderOpen) {
     dialog.showErrorBox("AccordAgents failed", details.message);
     app.quit();
   }
@@ -396,7 +407,19 @@ const serverChatLink = new ServerChatLink({
 /** The link to the server follows the hub settings: a new server, or none. */
 async function restartServerChatLink(): Promise<void> {
   await serverChatLink.stop();
+  serverChatLinkStarted = true;
   await serverChatLink.start();
+}
+
+/** Whether the link to the server has been started in this run: at start,
+ *  or after the server's program was updated before the window opened. */
+let serverChatLinkStarted = false;
+async function startServerChatLinkOnce(): Promise<void> {
+  if (serverChatLinkStarted) return;
+  serverChatLinkStarted = true;
+  await serverChatLink.start().catch((error: unknown) => {
+    void debugLogService.write("chat.server.start-error", { message: error instanceof Error ? error.message : String(error) });
+  });
 }
 
 let lastNewChatOptions: import("../shared/hubProtocol").HubNewChatOptions | undefined;
@@ -642,7 +665,11 @@ const HUB_PROGRAM_UPDATE_DELAY_MS = 60_000;
 const HUB_PROGRAM_UPDATE_RETRY_MS = 30 * 60_000;
 const HUB_PROGRAM_UPDATE_MAX_TRIES = 3;
 
-function scheduleHubProgramUpdate(delayMs = HUB_PROGRAM_UPDATE_DELAY_MS): void {
+function scheduleHubProgramUpdate(delayMs = HUB_PROGRAM_UPDATE_DELAY_MS, options: { replace?: boolean } = {}): void {
+  if (hubProgramUpdateTimer && options.replace) {
+    clearTimeout(hubProgramUpdateTimer);
+    hubProgramUpdateTimer = undefined;
+  }
   if (hubProgramUpdateTimer) return;
   hubProgramUpdateTimer = setTimeout(() => {
     hubProgramUpdateTimer = undefined;
@@ -651,20 +678,54 @@ function scheduleHubProgramUpdate(delayMs = HUB_PROGRAM_UPDATE_DELAY_MS): void {
   hubProgramUpdateTimer.unref?.();
 }
 
-async function updateHubProgramIfBehind(): Promise<void> {
-  // Only the installed app updates the User's server by itself: a build run
-  // from a checkout (or pointed at a test server) never puts its program there.
-  if (!app.isPackaged || process.env.ACCORDAGENTS_HUB_URL?.trim()) return;
+/** The update the User's server's program is due, if any: only the installed
+ *  app updates it by itself (a build run from a checkout, or pointed at a
+ *  test server, never puts its program there), only a server this desktop
+ *  set up (it holds the key to it) and syncs with, and only when its program
+ *  is older than this desktop. */
+async function hubProgramUpdateDue(): Promise<{ from: string; to: string } | undefined> {
+  if (!app.isPackaged || process.env.ACCORDAGENTS_HUB_URL?.trim()) return undefined;
   const config = await settingsService.getHubConfig().catch(() => undefined);
   const installed = config?.server?.installedVersion;
   const desktop = app.getVersion();
-  // Only a server this desktop set up (it holds the key to it), and only
-  // when its program is older than this desktop.
-  if (!config?.server || !installed || compareVersions(desktop, installed) <= 0) return;
-  // The server this desktop syncs with is the one it would update, and it
-  // has just confirmed this desktop is its owner (only the owner sets its
-  // devices): a desktop that is not cannot replace the server's program.
-  if (new URL(config.url).hostname !== config.server.ip) return;
+  if (!config?.server || !installed || compareVersions(desktop, installed) <= 0) return undefined;
+  try {
+    if (new URL(config.url).hostname !== config.server.ip) return undefined;
+  } catch {
+    return undefined;
+  }
+  return { from: installed, to: desktop };
+}
+
+/** The update made before the app's window opens is running. */
+let hubProgramUpdatingBeforeOpening = false;
+
+/** Whether this start may update the server before opening: the first one
+ *  for this desktop version. Noted before it is tried, so a start that is
+ *  killed midway does not try again on every start. */
+async function claimServerUpdateBeforeOpening(version: string): Promise<boolean> {
+  const file = path.join(app.getPath("userData"), "hub", "update-before-opening.json");
+  try {
+    const noted = JSON.parse(await readFile(file, "utf8")) as { version?: unknown };
+    if (noted.version === version) return false;
+  } catch {
+    // Never tried, or unreadable: tried now.
+  }
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, JSON.stringify({ version, at: new Date().toISOString() }));
+  return true;
+}
+
+async function updateHubProgramIfBehind(): Promise<void> {
+  const due = await hubProgramUpdateDue();
+  if (!due) return;
+  const desktop = due.to;
+  if (hubProgramUpdatingBeforeOpening) {
+    scheduleHubProgramUpdate(5 * 60_000);
+    return;
+  }
+  // The server has just confirmed this desktop is its owner (only the owner
+  // sets its devices): a desktop that is not cannot replace its program.
   if (!hubOwnerConfirmed) {
     // Not confirmed yet (the server away, this desktop offline): asked again.
     scheduleHubProgramUpdate(5 * 60_000);
@@ -681,7 +742,7 @@ async function updateHubProgramIfBehind(): Promise<void> {
   const tries = hubProgramUpdateTries.get(desktop) ?? 0;
   if (tries >= HUB_PROGRAM_UPDATE_MAX_TRIES) return;
   hubProgramUpdateTries.set(desktop, tries + 1);
-  void debugLogService.write("hub.program-update.start", { from: installed, to: desktop, attempt: tries + 1 });
+  void debugLogService.write("hub.program-update.start", { from: due.from, to: desktop, attempt: tries + 1 });
   try {
     const state = await hubInstaller.install({});
     void debugLogService.write("hub.program-update.finished", { status: state.status, message: state.message ?? "" });
@@ -1185,7 +1246,7 @@ async function openTerminal(): Promise<void> {
  *  still open. */
 function updatePromptWindow(): BrowserWindow | undefined {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
-  return BrowserWindow.getAllWindows().find((window) => !window.isDestroyed());
+  return BrowserWindow.getAllWindows().find((window) => !window.isDestroyed() && !isServerUpdateLoaderWindow(window));
 }
 
 function createWindow(): void {
@@ -2458,7 +2519,10 @@ void app.whenReady().then(async () => {
     canPrompt: () => updatePromptWindowShown(updatePromptWindow()),
     prompt: (info) => showUpdateRestartPrompt(info, updatePromptWindow()),
     quitAndInstall: createUpdateRestart({
-      quitAndInstall: quitAndInstallUpdate,
+      quitAndInstall: () => {
+        updateRestartRequested = true;
+        quitAndInstallUpdate();
+      },
       windows: currentUpdateWindows,
       appHidden: appHiddenForUpdate,
       log: (event, payload) => { debugLogService.writeNow(event, payload); }
@@ -2466,11 +2530,30 @@ void app.whenReady().then(async () => {
     log: (event, payload) => { void debugLogService.write(event, payload); }
   });
   bootstrapAppUpdater(debugLogService, betaUpdates, updateRestartGate);
+  // The first start after this desktop updated, while the User's server still
+  // runs the older program: the server is updated before the app opens (the
+  // User, 2026-10-29), and until then only a loader is shown and no member
+  // starts — the link to the server, through which every turn comes, waits.
+  // Once per version of this desktop: a server that stays away, or an update
+  // that keeps failing, does not hold every later start; the regular update
+  // tries again while the app is open.
+  const serverUpdate = await hubProgramUpdateDue().then(async (due) => due && await claimServerUpdateBeforeOpening(due.to) ? due : undefined)
+    .catch(() => undefined);
+  const serverUpdateLoader = serverUpdate ? openServerUpdateLoader(path.join(__dirname, "../../renderer/assets")) : undefined;
+  if (serverUpdate) {
+    hubProgramUpdatingBeforeOpening = true;
+    serverUpdateLoaderOpen = true;
+  }
   await appMcpService.start();
   await storageService.init();
-  void scriptService.start().catch((error) => {
-    void debugLogService.write("scripts.start.error", { message: error instanceof Error ? error.message : String(error) });
-  });
+  // A scheduled script wakes members by writing into a chat: with the server
+  // being updated first, it starts once the chats go through the server.
+  const startScripts = (): void => {
+    void scriptService.start().catch((error) => {
+      void debugLogService.write("scripts.start.error", { message: error instanceof Error ? error.message : String(error) });
+    });
+  };
+  if (!serverUpdate) startScripts();
   // A laptop that slept through a due time runs it (or records it missed) on wake.
   powerMonitor.on("resume", () => {
     void scriptService.tick();
@@ -2529,9 +2612,8 @@ void app.whenReady().then(async () => {
       }
     }
     // Every chat is the server's (Д1): saves go there, its feed comes back.
-    await serverChatLink.start().catch((error: unknown) => {
-      void debugLogService.write("chat.server.start-error", { message: error instanceof Error ? error.message : String(error) });
-    });
+    // A server about to be updated is linked once its program is replaced.
+    if (!serverUpdate) await startServerChatLinkOnce();
     await startHubLink().catch((error: unknown) => {
       void debugLogService.write("hub.link.start-error", { message: error instanceof Error ? error.message : String(error) });
     });
@@ -2698,6 +2780,43 @@ void app.whenReady().then(async () => {
     void debugLogService.write("machine-link.init.error", { message: error instanceof Error ? error.message : String(error) });
     markMachineLinkReady();
   }
+  if (serverUpdate && serverUpdateLoader) {
+    const offProgress = hubInstaller.onProgress((state) => {
+      if (state.status === "installing" && state.message) serverUpdateLoader.status(state.message);
+    });
+    try {
+      let installing: Promise<{ status: string; message?: string }> | undefined;
+      const outcome = await updateServerBeforeOpening({
+        ownerConfirmed: () => hubOwnerConfirmed,
+        install: () => {
+          hubProgramUpdateTries.set(serverUpdate.to, (hubProgramUpdateTries.get(serverUpdate.to) ?? 0) + 1);
+          installing = hubInstaller.install({});
+          return installing;
+        },
+        loader: serverUpdateLoader,
+        log: (event, payload) => { void debugLogService.write(event, payload); },
+        from: serverUpdate.from,
+        to: serverUpdate.to
+      });
+      if (outcome === "timed-out" && installing) {
+        // It goes on behind the open app; the scheduled update waits for it.
+        void installing.finally(() => { hubProgramUpdatingBeforeOpening = false; }).catch(() => undefined);
+      } else {
+        hubProgramUpdatingBeforeOpening = false;
+      }
+      if (outcome === "failed") scheduleHubProgramUpdate(HUB_PROGRAM_UPDATE_RETRY_MS, { replace: true });
+    } catch (error) {
+      hubProgramUpdatingBeforeOpening = false;
+      void debugLogService.write("hub.program-update.error", { message: error instanceof Error ? error.message : String(error), beforeOpening: true });
+    } finally {
+      offProgress();
+    }
+    // Updated or not, the chats go through the server from here (an update
+    // that linked the server again has started the link already), and what
+    // writes into chats starts after it: below, and the scripts.
+    await startServerChatLinkOnce();
+    startScripts();
+  }
   // A document's chat note this computer wrote before documents moved to the
   // server and never got into the chat goes in now (later notes come with the
   // server's feed).
@@ -2723,6 +2842,8 @@ void app.whenReady().then(async () => {
     });
   });
   createWindow();
+  serverUpdateLoaderOpen = false;
+  serverUpdateLoader?.close();
   void ensureLoginShellEnvPrimed();
   await detectAgentsWithAppSkills().catch((error) => {
     void debugLogService.write("app-skills-startup-sync-error", {
@@ -2747,12 +2868,20 @@ void app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
   debugLogService.writeNow("app-window.all-closed", { forUpdate: quittingForUpdate, quitting: quitCleanupStarted });
-  if (process.platform !== "darwin") {
+  // The loader closed by hand while the server updates: the app's window
+  // still comes.
+  if (process.platform !== "darwin" && !serverUpdateLoaderOpen) {
     app.quit();
   }
 });
 
 autoUpdater.on("before-quit-for-update", () => {
+  if (!updateRestartRequested) {
+    // Electron asking again on its own after a restart that failed (every
+    // time the windows all close): not a restart, and nothing is stopped.
+    debugLogService.writeNow("app-update-before-quit-ignored", { windows: currentUpdateWindows() });
+    return;
+  }
   const again = quittingForUpdate;
   quittingForUpdate = true;
   debugLogService.writeNow("app-update-before-quit", { again, windows: currentUpdateWindows() });
@@ -2760,6 +2889,39 @@ autoUpdater.on("before-quit-for-update", () => {
   // process trees synchronously so detached background work cannot outlive the
   // app and keep mutating the repository during installation.
   cliAgentRunner.terminateWarmAgentsImmediately("update installation");
+});
+
+/**
+ * A restart for an update that did not happen. Electron closes every window
+ * for it and then asks the native updater to install; when that finds nothing
+ * to install ("No update available, can't quit and install") or cannot
+ * relaunch, it reports an error and the app goes on running with no window
+ * — on the User's desktop on 2026-10-29 it looked as if the app had updated,
+ * and it was still beta.7. The window comes back and says what to do: the
+ * downloaded update still installs when the app quits.
+ */
+autoUpdater.on("error", (error: Error) => {
+  if (!updateRestartRequested) return;
+  updateRestartRequested = false;
+  quittingForUpdate = false;
+  debugLogService.writeNow("app-update-restart-failed", { message: error instanceof Error ? error.message : String(error) });
+  setImmediate(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+    const window = mainWindow;
+    if (!window) return;
+    const say = (): void => {
+      if (window.isDestroyed()) return;
+      if (!window.isVisible()) window.show();
+      void dialog.showMessageBox(window, {
+        type: "warning",
+        buttons: ["OK"],
+        message: "The update was not installed",
+        detail: "Quit AccordAgents and open it again to finish installing it."
+      }).then(() => { void debugLogService.write("app-update-restart-failed-shown", {}); });
+    };
+    if (window.webContents.isLoading()) window.webContents.once("did-finish-load", say);
+    else say();
+  });
 });
 
 app.on("before-quit", (event) => {
