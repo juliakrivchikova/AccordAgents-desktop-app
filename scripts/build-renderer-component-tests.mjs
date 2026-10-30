@@ -12,6 +12,7 @@ await build({
     "renderer/components/codex-device-auth.test.tsx",
     "renderer/components/files/file-edit-buffers.test.ts",
     "renderer/components/files/editor-text.test.ts",
+    "renderer/components/files/code-editor.test.tsx",
     "renderer/components/cloud-provider-auth.test.tsx",
     "renderer/components/avatar/avatar-studio-dialog.test.tsx",
     "renderer/components/chat/chat-composer-mention-token.test.ts",

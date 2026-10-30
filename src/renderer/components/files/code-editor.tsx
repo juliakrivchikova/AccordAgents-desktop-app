@@ -14,7 +14,7 @@ import {
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 
-import { editorLineSeparator, editorText } from "./editor-text";
+import { editorLineEndings, editorText, replaceLineEndings } from "./editor-text";
 
 /** Marks a change that came from the disk, not from typing. */
 const externalUpdate = Annotation.define<boolean>();
@@ -88,7 +88,6 @@ export default function CodeEditor(props: {
   const languageSlot = useRef(new Compartment());
   const readOnlySlot = useRef(new Compartment());
   const lastEmitted = useRef(props.text);
-  const lineSeparator = useRef(editorLineSeparator(props.text));
   const handlers = useRef({ onChange: props.onChange, onSave: props.onSave });
   handlers.current = { onChange: props.onChange, onSave: props.onSave };
 
@@ -96,7 +95,6 @@ export default function CodeEditor(props: {
     const host = hostRef.current;
     if (!host) return undefined;
     lastEmitted.current = props.text;
-    lineSeparator.current = editorLineSeparator(props.text);
     const state = EditorState.create({
       doc: props.text,
       extensions: [
@@ -109,6 +107,8 @@ export default function CodeEditor(props: {
         highlightSelectionMatches(),
         syntaxHighlighting(highlightStyle),
         EditorView.lineWrapping,
+        // Saves write back each line's own ending: a CRLF file stays CRLF.
+        editorLineEndings(props.text),
         languageSlot.current.of([]),
         readOnlySlot.current.of([EditorState.readOnly.of(props.readOnly), EditorView.editable.of(!props.readOnly)]),
         keymap.of([
@@ -119,7 +119,7 @@ export default function CodeEditor(props: {
         ]),
         EditorView.updateListener.of((update) => {
           if (update.docChanged && update.transactions.some((transaction) => !transaction.annotation(externalUpdate))) {
-            const text = editorText(update.state, lineSeparator.current);
+            const text = editorText(update.state);
             lastEmitted.current = text;
             handlers.current.onChange?.(text);
           }
@@ -160,11 +160,11 @@ export default function CodeEditor(props: {
     const view = viewRef.current;
     if (!view || props.text === lastEmitted.current) return;
     lastEmitted.current = props.text;
-    lineSeparator.current = editorLineSeparator(props.text);
-    if (editorText(view.state, lineSeparator.current) === props.text) return;
+    if (editorText(view.state) === props.text) return;
     const scrollTop = view.scrollDOM.scrollTop;
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: props.text },
+      effects: replaceLineEndings.of(props.text),
       annotations: [externalUpdate.of(true), Transaction.addToHistory.of(false)]
     });
     view.scrollDOM.scrollTop = scrollTop;

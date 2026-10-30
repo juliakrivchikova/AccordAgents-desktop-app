@@ -88,6 +88,20 @@ function hasNulByte(bytes: Uint8Array): boolean {
   return false;
 }
 
+/** Why a text file opens read-only, in words for the User; undefined when it can be edited. */
+function readOnlyReason(file: { insideWorkspace: boolean; truncated: boolean; utf8: boolean; inGit: boolean; canWrite: boolean }): string | undefined {
+  if (!file.insideWorkspace) {
+    return file.truncated
+      ? "This file is outside the project and only its start is shown, so it opens read-only."
+      : "This file is outside the project, so it opens read-only.";
+  }
+  if (file.truncated) return "Only the start of this file is shown, so it cannot be edited here.";
+  if (!file.utf8) return "This file is not UTF-8 text, so it cannot be edited here.";
+  if (file.inGit) return "Files inside .git are not edited in the panel.";
+  if (!file.canWrite) return "You do not have permission to change this file.";
+  return undefined;
+}
+
 async function readPrefix(realFile: string, length: number): Promise<Buffer> {
   const handle = await open(realFile, "r");
   try {
@@ -216,19 +230,13 @@ export class FilePreviewService {
       text = new TextDecoder("utf-8").decode(shown);
     }
     const canWrite = await access(realFile, fsConstants.W_OK).then(() => true, () => false);
-    const reason = !resolution.insideWorkspace
-      ? truncated
-        ? "This file is outside the project and only its start is shown, so it opens read-only."
-        : "This file is outside the project, so it opens read-only."
-      : truncated
-        ? "Only the start of this file is shown, so it cannot be edited here."
-        : !utf8
-          ? "This file is not UTF-8 text, so it cannot be edited here."
-          : insideGitDirectory(realFile)
-            ? "Files inside .git are not edited in the panel."
-            : !canWrite
-              ? "You do not have permission to change this file."
-              : undefined;
+    const reason = readOnlyReason({
+      insideWorkspace: resolution.insideWorkspace,
+      truncated,
+      utf8,
+      inGit: insideGitDirectory(realFile),
+      canWrite
+    });
     if (!reason) this.writable.add(realFile);
     return { ...base, kind, hash, url, text, truncated, utf8, bom, editable: !reason, readOnlyReason: reason };
   }

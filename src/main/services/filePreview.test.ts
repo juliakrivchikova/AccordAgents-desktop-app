@@ -54,6 +54,15 @@ test("a text file in the project reads whole and editable; outside the project r
     const bigAway = await env.service.read({ conversationId: "chat", path: path.join(env.outside, "big.log") });
     assert.equal(bigAway.truncated, true);
     assert.match(bigAway.readOnlyReason ?? "", /outside the project and only its start is shown/);
+    // Exactly at the limit is the whole file: only the outside reason.
+    await writeFile(path.join(env.outside, "edge.log"), "x".repeat(FILE_PREVIEW_TEXT_EDIT_LIMIT));
+    const edge = await env.service.read({ conversationId: "chat", path: path.join(env.outside, "edge.log") });
+    assert.equal(edge.truncated, false);
+    assert.equal(edge.readOnlyReason, "This file is outside the project, so it opens read-only.");
+    // Inside the project a large file says only that its start is shown.
+    await writeFile(path.join(env.repo, "big-inside.log"), "x".repeat(FILE_PREVIEW_TEXT_EDIT_LIMIT + 10));
+    const bigInside = await env.service.read({ conversationId: "chat", path: "big-inside.log" });
+    assert.equal(bigInside.readOnlyReason, "Only the start of this file is shown, so it cannot be edited here.");
   } finally {
     await env.cleanup();
   }

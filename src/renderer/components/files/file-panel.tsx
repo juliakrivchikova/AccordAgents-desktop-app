@@ -61,7 +61,7 @@ function PanelFrame(props: {
         <div className="file-panel-subtitle">
           {/* The end of a long path stays visible; bdi keeps its slashes in order. */}
           <span title={props.subtitle}><bdi>{props.subtitle}</bdi></span>
-          {props.copyText && <CopyButton text={props.copyText} label="Copy path" />}
+          {props.copyText && <CopyButton text={props.copyText} label="Copy path" size="xs" />}
         </div>
       )}
       <div className="file-panel-body">{props.children}</div>
