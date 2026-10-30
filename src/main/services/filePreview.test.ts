@@ -49,6 +49,11 @@ test("a text file in the project reads whole and editable; outside the project r
     assert.equal(away.insideWorkspace, false);
     assert.equal(away.editable, false);
     assert.match(away.readOnlyReason ?? "", /outside the project/);
+    // A large file outside the project says both why it is read-only and that only its start is shown.
+    await writeFile(path.join(env.outside, "big.log"), "x".repeat(FILE_PREVIEW_TEXT_EDIT_LIMIT + 10));
+    const bigAway = await env.service.read({ conversationId: "chat", path: path.join(env.outside, "big.log") });
+    assert.equal(bigAway.truncated, true);
+    assert.match(bigAway.readOnlyReason ?? "", /outside the project and only its start is shown/);
   } finally {
     await env.cleanup();
   }

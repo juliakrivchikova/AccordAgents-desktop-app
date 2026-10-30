@@ -38,7 +38,7 @@ function MarkdownBesideFile(props: { text: string; absolutePath: string }): JSX.
   }), [directory, outer]);
   return (
     <LocalFileLinkContext.Provider value={value}>
-      <div className="file-markdown-preview">
+      <div className="file-markdown-preview artifact-content-markdown">
         <MarkdownText content={props.text} />
       </div>
     </LocalFileLinkContext.Provider>

@@ -51,18 +51,19 @@ function PanelFrame(props: {
           <h3 className="artifacts-panel-title" title={props.subtitle ?? props.title}>
             <span>{props.title}</span>
           </h3>
-          {props.subtitle && (
-            <div className="file-panel-subtitle">
-              {/* The end of a long path stays visible; bdi keeps its slashes in order. */}
-              <span title={props.subtitle}><bdi>{props.subtitle}</bdi></span>
-              {props.copyText && <CopyButton text={props.copyText} label="Copy path" />}
-            </div>
-          )}
         </div>
         {props.status && <span className="file-panel-status">{props.status}</span>}
         {props.actions}
         <IconButton label="Close file" icon={X} onClick={props.onClose} />
       </div>
+      {props.subtitle && (
+        // The header row has the app's fixed title height, so the path gets its own line.
+        <div className="file-panel-subtitle">
+          {/* The end of a long path stays visible; bdi keeps its slashes in order. */}
+          <span title={props.subtitle}><bdi>{props.subtitle}</bdi></span>
+          {props.copyText && <CopyButton text={props.copyText} label="Copy path" />}
+        </div>
+      )}
       <div className="file-panel-body">{props.children}</div>
     </div>
   );

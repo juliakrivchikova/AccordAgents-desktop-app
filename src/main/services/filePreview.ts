@@ -217,7 +217,9 @@ export class FilePreviewService {
     }
     const canWrite = await access(realFile, fsConstants.W_OK).then(() => true, () => false);
     const reason = !resolution.insideWorkspace
-      ? "This file is outside the project, so it opens read-only."
+      ? truncated
+        ? "This file is outside the project and only its start is shown, so it opens read-only."
+        : "This file is outside the project, so it opens read-only."
       : truncated
         ? "Only the start of this file is shown, so it cannot be edited here."
         : !utf8
