@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { isTextPreviewKind } from "../../../shared/filePreview";
+import { isEditablePreviewKind } from "../../../shared/filePreview";
 import type { FilePreview } from "../../../shared/types";
+import { cleanIpcError } from "../../lib/ipc-error";
 import { fileEditBuffers, type FileEditBuffer } from "./file-edit-buffers";
 
 const AUTOSAVE_DELAY_MS = 800;
@@ -20,10 +21,6 @@ export interface FileDocument {
   saveNow: () => void;
   keepMine: () => Promise<void>;
   takeDiskVersion: () => Promise<void>;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : String(error);
 }
 
 /**
@@ -50,7 +47,7 @@ export function useFileDocument(conversationId: string, path: string): FileDocum
       const next = await window.consensus.readFilePreview({ conversationId, path });
       if (seq !== loadSeq.current) return undefined;
       realPathRef.current = next.realPath;
-      if (isTextPreviewKind(next.kind) || next.kind === "html") {
+      if (isEditablePreviewKind(next.kind)) {
         if (typeof next.text === "string") {
           const buffer = fileEditBuffers.get(next.realPath);
           if (keepStatus && buffer && !buffer.dirty) {
@@ -68,7 +65,7 @@ export function useFileDocument(conversationId: string, path: string): FileDocum
       return next;
     } catch (cause) {
       if (seq !== loadSeq.current) return undefined;
-      setError(errorText(cause));
+      setError(cleanIpcError(cause));
       setStatus("error");
       return undefined;
     }
@@ -84,15 +81,24 @@ export function useFileDocument(conversationId: string, path: string): FileDocum
 
   const realPath = preview?.realPath;
 
-  // Re-render when the buffer changes (typing, a save, a conflict).
+  // Re-render when the buffer changes (typing, a save, a conflict). A buffer
+  // dropped elsewhere (Discard on the restore notice) is read again from disk,
+  // so typing keeps working.
+  const hasText = typeof preview?.text === "string";
   useEffect(() => {
     if (!realPath) return undefined;
     const detach = fileEditBuffers.attach(realPath);
     const unsubscribe = fileEditBuffers.subscribe((changed) => {
-      if (changed === realPath) setTick((value) => value + 1);
+      if (changed !== realPath) return;
+      if (hasText && !fileEditBuffers.get(realPath)) void load(true);
+      setTick((value) => value + 1);
     });
-    return () => { unsubscribe(); detach(); };
-  }, [realPath]);
+    return () => {
+      unsubscribe();
+      detach();
+      fileEditBuffers.forget(realPath);
+    };
+  }, [hasText, load, realPath]);
 
   // Watch the file on disk while it is shown.
   useEffect(() => {
@@ -158,7 +164,7 @@ export function useFileDocument(conversationId: string, path: string): FileDocum
       setDeleted(false);
       runSave();
     } catch (cause) {
-      setError(errorText(cause));
+      fileEditBuffers.setError(current, cleanIpcError(cause));
     }
   }, [conversationId, path, runSave]);
 

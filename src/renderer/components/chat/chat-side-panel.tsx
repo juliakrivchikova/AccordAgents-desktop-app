@@ -1,9 +1,9 @@
 import { useCallback, useMemo, useRef } from "react";
 
-import type { AppSettings, Conversation } from "../../../shared/types";
+import type { AppSettings, Conversation, LocalFileOpenAction } from "../../../shared/types";
 import { artifactMembersForConversation } from "../../../shared/artifacts";
 import { ArtifactsPanel } from "../artifacts/artifacts-panel";
-import type { ArtifactsState, PanelFileTarget } from "../artifacts/use-artifacts";
+import type { ArtifactsState } from "../artifacts/use-artifacts";
 import type { FileLinkRef } from "../content/local-file-link";
 import { AttachmentPanel, FilePanel } from "../files/file-panel";
 import { AttachmentPanelContext } from "../files/file-panel-context";
@@ -72,23 +72,21 @@ export function ChatSidePanel(props: {
   settings: AppSettings;
   artifacts: ArtifactsState;
   backToThread?: () => void;
-  openFileOutside: (ref: FileLinkRef) => void;
+  openFileOutside: (ref: FileLinkRef, action: LocalFileOpenAction) => void;
 }): JSX.Element {
   const { artifacts } = props;
   const target = artifacts.fileTarget;
   if (target?.kind === "file") {
     return (
       <FilePanel
-        key={`${target.path}:${target.line ?? ""}:${target.column ?? ""}`}
+        // One panel per file: another line of the same file moves the editor, it does not reload.
+        key={target.path}
         conversationId={props.conversation.id}
         target={target}
-        externalAction={props.settings.repoFileExternalOpenAction ?? "open"}
+        externalAction={props.settings.repoFileExternalOpenAction}
         onClose={artifacts.closePanel}
         onBackToThread={props.backToThread}
-        onUnsupported={(unsupported: PanelFileTarget) => {
-          artifacts.closePanel();
-          props.openFileOutside({ path: unsupported.path, line: unsupported.line, column: unsupported.column });
-        }}
+        openOutside={props.openFileOutside}
       />
     );
   }

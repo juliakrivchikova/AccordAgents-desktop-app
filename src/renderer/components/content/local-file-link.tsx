@@ -20,6 +20,8 @@ export interface FileLinkRef {
   column?: number;
   /** Clicked inside this thread; the panel offers to go back to it. */
   returnThreadRootId?: string;
+  /** A kind the side panel does not show (the chooser then offers only outside opens). */
+  panelCannotShow?: boolean;
 }
 
 // Provided by the chat view so file links inside rendered markdown can request an open action.
@@ -134,11 +136,15 @@ export function LocalFileOpenChooser(props: {
           <DialogTitle>Open file reference</DialogTitle>
           <DialogDescription>
             How should AccordAgents open <code>{displayPath}</code>?
-            {isOutsideWorkspace ? " This file is outside the selected workspace." : " You can change this later in Settings."}
+            {isOutsideWorkspace
+              ? " This file is outside the selected workspace."
+              : props.fileRef?.panelCannotShow
+                ? " The side panel does not show this kind of file; your choice is kept for such files and can be changed in Settings."
+                : " You can change this later in Settings."}
           </DialogDescription>
         </DialogHeader>
         <div className="repo-file-open-actions">
-          {panelButton}
+          {!props.fileRef?.panelCannotShow && panelButton}
           {isOutsideWorkspace ? revealButton : openButton}
           {isOutsideWorkspace ? openButton : revealButton}
           {intellijButton}

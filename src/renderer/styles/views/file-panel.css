@@ -127,6 +127,11 @@
   background: var(--app-surface-hover);
 }
 
+.file-viewer-text-button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 .file-viewer-text-button[aria-pressed="true"],
 .file-viewer-text-button[aria-selected="true"] {
   background: var(--app-surface-active);
@@ -150,6 +155,10 @@
   border: 1px solid var(--app-border);
   border-radius: 6px;
   color: var(--app-muted);
+}
+
+.file-viewer-search:focus-within {
+  border-color: var(--app-focus-border);
 }
 
 .file-viewer-search input {
@@ -198,6 +207,11 @@
   cursor: grabbing;
 }
 
+.file-image-frame:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 .file-image-frame img {
   position: absolute;
   top: 0;
@@ -232,6 +246,8 @@
 }
 
 .file-csv-scroll {
+  /* Must match ROW_HEIGHT in csv-table.tsx (the virtualizer's row size). */
+  --file-csv-row-height: 28px;
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
@@ -243,7 +259,7 @@
   display: grid;
   width: max-content;
   min-width: 100%;
-  height: 28px;
+  height: var(--file-csv-row-height);
   border-bottom: 1px solid var(--app-border-subtle);
 }
 
@@ -270,7 +286,7 @@
 .file-csv-index {
   overflow: hidden;
   padding: 0 8px;
-  line-height: 28px;
+  line-height: var(--file-csv-row-height);
   text-overflow: ellipsis;
   white-space: nowrap;
   border-right: 1px solid var(--app-border-subtle);

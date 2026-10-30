@@ -109,13 +109,22 @@ test("the side panel becomes the click once, and the earlier choice moves to its
   assert.equal(later.repoFileExternalOpenAction, "intellij-idea");
 });
 
-test("a fresh install clicks into the side panel and opens outside with the default app", async () => {
+test("a fresh install clicks into the side panel and has no outside-open choice yet", async () => {
   const disk = await settingsOnDisk({});
 
   const settings = await disk.make().getPublicSettings();
 
   assert.equal(settings.repoFileOpenAction, "panel");
-  assert.equal(settings.repoFileExternalOpenAction, "open");
+  assert.equal(settings.repoFileExternalOpenAction, undefined);
+});
+
+test("reveal or no earlier choice is not turned into opening files with the default app", async () => {
+  const disk = await settingsOnDisk({ repoFileOpenAction: "reveal" });
+
+  const settings = await disk.make().getPublicSettings();
+
+  assert.equal(settings.repoFileOpenAction, "panel");
+  assert.equal(settings.repoFileExternalOpenAction, undefined);
 });
 
 test("a later write keeps the Open in choice and the migration flag", async () => {
@@ -129,5 +138,7 @@ test("a later write keeps the Open in choice and the migration flag", async () =
   assert.equal(written.repoFileExternalOpenAction, "intellij-idea");
   assert.equal(written.repoFileOpenPanelMigrated, true);
   assert.equal(written.repoFileOpenAction, "panel");
-  await assert.rejects(service.setRepoFileExternalOpenAction("reveal"), /IntelliJ IDEA or the default app/);
+  await assert.rejects(service.setRepoFileExternalOpenAction("reveal"), /IntelliJ IDEA, the default app, or to be asked/);
+  await service.setRepoFileExternalOpenAction(null);
+  assert.equal((await disk.read()).repoFileExternalOpenAction, undefined);
 });

@@ -3043,7 +3043,8 @@ export interface AppBridge {
   inspectLocalFile(request: InspectLocalFileRequest): Promise<InspectLocalFileResult>;
   openLocalFile(request: OpenLocalFileRequest): Promise<OpenLocalFileResult>;
   setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<AppSettings>;
-  setRepoFileExternalOpenPreference(action: RepoFileExternalOpenAction): Promise<AppSettings>;
+  /** null: ask every time for a file the side panel does not show. */
+  setRepoFileExternalOpenPreference(action: RepoFileExternalOpenAction | null): Promise<AppSettings>;
   readFilePreview(request: ReadFilePreviewRequest): Promise<FilePreview>;
   writeFilePreview(request: WriteFilePreviewRequest): Promise<WriteFilePreviewResult>;
   watchFilePreview(request: ReadFilePreviewRequest): Promise<void>;

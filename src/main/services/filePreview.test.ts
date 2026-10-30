@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -198,17 +198,33 @@ test("the watcher reports another program's change, not the panel's own save, an
 
     const saved = await env.service.write({ conversationId: "chat", path: "w.txt", content: "b\n", baseHash: preview.hash });
     assert.equal(saved.ok, true);
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    assert.equal(env.events.length, 0, "the panel's own save is not a change");
 
     // An agent replaces the file the usual way: write a temp file, rename it over.
     await writeFile(`${file}.tmp`, "c\n");
     await rename(`${file}.tmp`, file);
-    await waitFor(() => env.events.some((event) => event.change === "changed"));
-    assert.equal(env.events.find((event) => event.change === "changed")?.hash, sha256(Buffer.from("c\n")));
+    await waitFor(() => env.events.some((event) => event.change === "changed"), 10_000);
+    // The only change reported is the agent's: the panel's own save was never one.
+    assert.deepEqual(env.events.map((event) => event.hash), [sha256(Buffer.from("c\n"))]);
 
     await rm(file);
-    await waitFor(() => env.events.some((event) => event.change === "deleted"));
+    await waitFor(() => env.events.some((event) => event.change === "deleted"), 10_000);
+  } finally {
+    env.service.releaseAll();
+    await env.cleanup();
+  }
+});
+
+test("an unwatch that arrives before its watch leaves nothing watching", async () => {
+  const env = await setup();
+  const file = path.join(env.repo, "u.txt");
+  try {
+    await writeFile(file, "a\n");
+    const preview = await env.service.read({ conversationId: "chat", path: "u.txt" });
+    env.service.unwatch(preview.realPath);
+    await env.service.watch({ conversationId: "chat", path: "u.txt" });
+    await writeFile(file, "changed\n");
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(env.events.length, 0);
   } finally {
     env.service.releaseAll();
     await env.cleanup();
@@ -250,7 +266,10 @@ test("a real git worktree of the chat's repository is read from git", async () =
   try {
     const repo = path.join(root, "repo");
     await mkdir(repo);
-    const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { stdio: "ignore" });
+    const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args], {
+      stdio: "ignore",
+      env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" }
+    });
     git("init", "-q");
     git("-c", "user.email=qa@example.invalid", "-c", "user.name=QA", "commit", "-q", "--allow-empty", "-m", "init");
     const worktree = path.join(root, "repo-task");
@@ -262,7 +281,157 @@ test("a real git worktree of the chat's repository is read from git", async () =
     await writeFile(path.join(root, "loose.ts"), "x\n");
     const loose = await resolver.resolve(repo, path.join(root, "loose.ts"));
     assert.equal(loose.ok && loose.insideWorkspace, false);
+
+    // A chat on a subfolder does not take in the rest of its repository.
+    await mkdir(path.join(repo, "sub"));
+    await mkdir(path.join(repo, "other"));
+    await writeFile(path.join(repo, "other", "x.ts"), "x\n");
+    const sibling = await new WorkspaceFileResolver().resolve(path.join(repo, "sub"), path.join(repo, "other", "x.ts"));
+    assert.equal(sibling.ok && sibling.insideWorkspace, false);
+    const linked = await new WorkspaceFileResolver().resolve(path.join(repo, "sub"), path.join(worktree, "x.ts"));
+    assert.equal(linked.ok && linked.insideWorkspace, true);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the worktree list is cached, and a miss asks git again only after a few seconds", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "aa-worktree-cache-"));
+  try {
+    const repo = path.join(root, "repo");
+    const tree = path.join(root, "tree");
+    await mkdir(repo);
+    await mkdir(tree);
+    await writeFile(path.join(tree, "a.ts"), "x");
+    await writeFile(path.join(root, "loose.ts"), "x");
+    const { realpath } = await import("node:fs/promises");
+    const realTree = await realpath(tree);
+    let now = 0;
+    let calls = 0;
+    const resolver = new WorkspaceFileResolver(async () => { calls += 1; return [realTree]; }, () => now);
+    assert.equal((await resolver.resolve(repo, path.join(tree, "a.ts"))).ok, true);
+    await resolver.resolve(repo, path.join(tree, "a.ts"));
+    assert.equal(calls, 1, "a hit uses the cached list");
+    await resolver.resolve(repo, path.join(root, "loose.ts"));
+    assert.equal(calls, 1, "a miss right after a read does not ask git again");
+    now = 6_000;
+    await resolver.resolve(repo, path.join(root, "loose.ts"));
+    assert.equal(calls, 2, "a later miss does");
+    const failing = new WorkspaceFileResolver(async () => { throw new Error("git missing"); });
+    const outside = await failing.resolve(repo, path.join(tree, "a.ts"));
+    assert.equal(outside.ok && outside.insideWorkspace, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the panel writes only files it read as editable, never inside .git, never too much", async () => {
+  const env = await setup();
+  try {
+    await writeFile(path.join(env.repo, "unread.txt"), "x");
+    const unread = await env.service.write({ conversationId: "chat", path: "unread.txt", content: "y", baseHash: sha256(Buffer.from("x")) });
+    assert.equal(unread.ok, false);
+    assert.equal(await readFile(path.join(env.repo, "unread.txt"), "utf8"), "x");
+
+    await mkdir(path.join(env.repo, ".git"), { recursive: true });
+    await writeFile(path.join(env.repo, ".git", "config"), "[core]\n");
+    const config = await env.service.read({ conversationId: "chat", path: ".git/config" });
+    assert.equal(config.editable, false);
+    const refused = await env.service.write({ conversationId: "chat", path: ".git/config", content: "[x]\n", baseHash: config.hash });
+    assert.equal(refused.ok, false);
+
+    await writeFile(path.join(env.repo, "small.txt"), "s");
+    const small = await env.service.read({ conversationId: "chat", path: "small.txt" });
+    const huge = await env.service.write({ conversationId: "chat", path: "small.txt", content: "z".repeat(FILE_PREVIEW_TEXT_EDIT_LIMIT + 10), baseHash: small.hash });
+    assert.equal(huge.ok, false);
+    assert.equal(await readFile(path.join(env.repo, "small.txt"), "utf8"), "s");
+
+    const html = path.join(env.repo, "page.html");
+    await writeFile(html, "<p>a</p>");
+    const page = await env.service.read({ conversationId: "chat", path: "page.html" });
+    assert.equal(page.editable, true);
+    const savedPage = await env.service.write({ conversationId: "chat", path: "page.html", content: "<p>b</p>", baseHash: page.hash });
+    assert.equal(savedPage.ok, true);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("a read-only file opens read-only and a save is refused", async () => {
+  const env = await setup();
+  const file = path.join(env.repo, "locked.txt");
+  try {
+    await writeFile(file, "x");
+    await chmod(file, 0o444);
+    const preview = await env.service.read({ conversationId: "chat", path: "locked.txt" });
+    assert.equal(preview.editable, false);
+    assert.match(preview.readOnlyReason ?? "", /permission/);
+  } finally {
+    await chmod(file, 0o644).catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("a text file too big to edit is read only as far as it is shown", async () => {
+  const env = await setup();
+  try {
+    const big = "a".repeat(FILE_PREVIEW_TEXT_EDIT_LIMIT + 1_000);
+    await writeFile(path.join(env.repo, "big.log"), big);
+    const preview = await env.service.read({ conversationId: "chat", path: "big.log" });
+    assert.equal(preview.truncated, true);
+    assert.equal(preview.text?.length, FILE_PREVIEW_TEXT_EDIT_LIMIT);
+    assert.match(preview.hash, /^\d+:/, "compared by size and time, not hashed whole");
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("the protocol never serves through a symlink out of the tree, a nested dot folder, or a sibling of an outside page", async () => {
+  const env = await setup();
+  try {
+    await mkdir(path.join(env.repo, "site", "assets", ".git"), { recursive: true });
+    await writeFile(path.join(env.repo, "site", "index.html"), "<p>hi</p>");
+    await writeFile(path.join(env.repo, "site", "assets", ".git", "config"), "x");
+    await writeFile(path.join(env.repo, "secret.txt"), "no");
+    await symlink(path.join(env.repo, "secret.txt"), path.join(env.repo, "site", "leak.txt"));
+    const page = await env.service.read({ conversationId: "chat", path: "site/index.html" });
+    const base = page.url!.slice(0, page.url!.lastIndexOf("/") + 1);
+    assert.equal((await env.service.handleProtocolRequest(new Request(`${base}leak.txt`))).status, 404);
+    assert.equal((await env.service.handleProtocolRequest(new Request(`${base}assets/.git/config`))).status, 404);
+
+    await writeFile(path.join(env.outside, "page.html"), "<p>out</p>");
+    await writeFile(path.join(env.outside, "sibling.txt"), "s");
+    const away = await env.service.read({ conversationId: "chat", path: path.join(env.outside, "page.html") });
+    const awayBase = away.url!.slice(0, away.url!.lastIndexOf("/") + 1);
+    assert.equal((await env.service.handleProtocolRequest(new Request(away.url!))).status, 200);
+    // A page outside the project gets only itself: a request for its neighbour returns the page, never the neighbour.
+    const neighbour = await env.service.handleProtocolRequest(new Request(`${awayBase}sibling.txt`));
+    assert.equal(await neighbour.text(), "<p>out</p>");
+    assert.equal(env.service.isGrantedUrl(page.url!), true);
+    env.service.releaseAll();
+    assert.equal(env.service.isGrantedUrl(page.url!), false);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("unsaved copies: too large is refused, a broken copy is skipped and kept, a clear after a save wins", async () => {
+  const env = await setup();
+  try {
+    await assert.rejects(env.service.saveUnsaved({
+      conversationId: "chat", path: "a", realPath: "/x/a", baseHash: "h", text: "z".repeat(9 * 1024 * 1024), updatedAt: ""
+    }));
+    const save = env.service.saveUnsaved({ conversationId: "chat", path: "a", realPath: "/x/a", baseHash: "h", text: "t", updatedAt: "" });
+    const clear = env.service.clearUnsaved("/x/a");
+    await Promise.all([save, clear]);
+    assert.equal((await env.service.listUnsaved()).length, 0);
+    await mkdir(path.join(env.userData, "unsaved-edits"), { recursive: true });
+    await writeFile(path.join(env.userData, "unsaved-edits", "broken.json"), "{not json");
+    await env.service.saveUnsaved({ conversationId: "chat", path: "b", realPath: "/x/b", baseHash: "h", text: "keep", updatedAt: "" });
+    const listed = await env.service.listUnsaved();
+    assert.deepEqual(listed.map((edit) => edit.text), ["keep"]);
+    assert.ok((await readdir(path.join(env.userData, "unsaved-edits"))).includes("broken.json"));
+  } finally {
+    await env.cleanup();
   }
 });

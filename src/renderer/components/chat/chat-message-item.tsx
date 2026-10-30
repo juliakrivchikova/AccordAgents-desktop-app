@@ -351,6 +351,8 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             )}
           </div>
           {showWorkedRow && <WorkedRow workedMs={workedMs} />}
+          {/* Every rendering of the content (streaming, transcript, final) knows its author. */}
+          <FileLinkAuthorContext.Provider value={participant?.cloudRun || participant?.homeMachineId ? CLOUD_AUTHOR : LOCAL_AUTHOR}>
           <div className="message-content">
             {isStreaming ? (
               <StreamingMessageContent
@@ -370,16 +372,15 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                     activityEvents={activityEvents}
                   />
                 ) : (
-                  <FileLinkAuthorContext.Provider value={participant?.cloudRun || participant?.homeMachineId ? CLOUD_AUTHOR : LOCAL_AUTHOR}>
-                    <MarkdownText
-                      content={displayContent}
-                      recognizedCommand={message.role === "user" ? message.metadata?.nativeCommand?.name : undefined}
-                    />
-                  </FileLinkAuthorContext.Provider>
+                  <MarkdownText
+                    content={displayContent}
+                    recognizedCommand={message.role === "user" ? message.metadata?.nativeCommand?.name : undefined}
+                  />
                 )}
               </>
             )}
           </div>
+          </FileLinkAuthorContext.Provider>
           {props.appToolApprovals && props.appToolApprovals.length > 0 && props.onRespondToAppToolApproval && (
             <div className="chat-message-embedded-approvals">
               <ChatAppToolApprovalList

@@ -2,9 +2,10 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { Maximize2, Minus, Plus } from "lucide-react";
 
 import { IconButton } from "../primitives";
+import { ZOOM_MAX, ZOOM_MIN, ZOOM_STEP } from "./zoom";
 
-const MIN_SCALE = 0.1;
-const MAX_SCALE = 8;
+/** Arrow keys move a zoomed image by this many pixels. */
+const PAN_STEP = 40;
 
 interface View {
   scale: number;
@@ -15,13 +16,14 @@ interface View {
 }
 
 function clampScale(scale: number): number {
-  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, scale));
 }
 
 /**
  * An image in the side panel. It starts fitted to the panel. The wheel and a
  * trackpad pinch zoom around the pointer; dragging moves a zoomed image;
- * "Fit" and "100%" set the scale; a double click switches between them.
+ * "Fit" and "100%" set the scale; a double click switches between them. From
+ * the keyboard: + and - zoom, 0 fits, the arrow keys move a zoomed image.
  */
 export function ImageViewer(props: { src: string; alt: string }): JSX.Element {
   const frameRef = useRef<HTMLDivElement>(null);
@@ -105,9 +107,9 @@ export function ImageViewer(props: { src: string; alt: string }): JSX.Element {
   return (
     <div className="file-image-viewer">
       <div className="file-viewer-toolbar" role="toolbar" aria-label="Image zoom">
-        <IconButton label="Zoom out" icon={Minus} onClick={() => zoomAt(1 / 1.25)} />
-        <span className="file-viewer-zoom-value" aria-live="polite">{percent}%</span>
-        <IconButton label="Zoom in" icon={Plus} onClick={() => zoomAt(1.25)} />
+        <IconButton label="Zoom out" icon={Minus} onClick={() => zoomAt(1 / ZOOM_STEP)} />
+        <span className="file-viewer-zoom-value">{percent}%</span>
+        <IconButton label="Zoom in" icon={Plus} onClick={() => zoomAt(ZOOM_STEP)} />
         <button type="button" className="file-viewer-text-button" aria-pressed={view.fit} onClick={() => { const next = fitView(); if (next) setView(next); }}>
           <Maximize2 size={13} aria-hidden /> Fit
         </button>
@@ -119,8 +121,23 @@ export function ImageViewer(props: { src: string; alt: string }): JSX.Element {
       <div
         ref={frameRef}
         className="file-image-frame"
-        data-dragging={drag.current ? "true" : undefined}
         data-testid="file-image-frame"
+        tabIndex={0}
+        role="group"
+        aria-label={`${props.alt}, ${percent}%. Plus and minus zoom, 0 fits, arrow keys move.`}
+        onKeyDown={(event) => {
+          const pan: Record<string, [number, number]> = {
+            ArrowLeft: [PAN_STEP, 0], ArrowRight: [-PAN_STEP, 0], ArrowUp: [0, PAN_STEP], ArrowDown: [0, -PAN_STEP]
+          };
+          if (event.key === "+" || event.key === "=") zoomAt(ZOOM_STEP);
+          else if (event.key === "-") zoomAt(1 / ZOOM_STEP);
+          else if (event.key === "0") { const next = fitView(); if (next) setView(next); }
+          else if (pan[event.key]) {
+            const [dx, dy] = pan[event.key];
+            setView((value) => ({ ...value, x: value.x + dx, y: value.y + dy, fit: false }));
+          } else return;
+          event.preventDefault();
+        }}
         onDoubleClick={() => {
           const next = view.fit ? actualSize() : fitView();
           if (next) setView(next);

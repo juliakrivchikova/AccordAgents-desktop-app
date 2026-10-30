@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { X } from "lucide-react";
 
 import type {
@@ -74,9 +75,11 @@ export function ChatThreadPanel(props: {
 }): JSX.Element {
   const mentionDirectory = chatMentionDirectory(props.participants, props.settings.chatRoleConfigs, props.sessionsByParticipant, props.contextUsageByParticipant);
   const replyLabel = `${props.replies.length} ${props.replies.length === 1 ? "reply" : "replies"}`;
+  // Stable, so file links and images in the thread do not re-render on every chat update.
+  const origin = useMemo(() => ({ threadRootId: props.rootMessage.id }), [props.rootMessage.id]);
   return (
     <MentionDirectoryContext.Provider value={mentionDirectory}>
-    <FilePanelOriginContext.Provider value={{ threadRootId: props.rootMessage.id }}>
+    <FilePanelOriginContext.Provider value={origin}>
     <section className="chat-thread-panel" aria-label="Chat thread" data-testid="chat-thread-panel">
       <header className="thread-panel-head chat-thread-head" data-titlebar>
         <div>

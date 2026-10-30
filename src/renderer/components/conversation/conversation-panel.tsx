@@ -102,6 +102,7 @@ export function ConversationPanel({
           onToggleReaction={(messageId, emoji) => void chatActions.toggleChatReaction(messageId, emoji)}
           onRespondToAppToolApproval={chatActions.respondToChatAppToolApproval}
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
+          setRepoFileExternalOpenPreference={settingsActions.setRepoFileExternalOpenPreference}
           onCompactParticipant={(participantId) => chatActions.compactChatParticipant(participantId)}
           onStopRun={(runId) => void window.consensus.cancelReview(runId)}
           onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}

@@ -171,6 +171,13 @@ import { DefaultRemoteAgentSetupSync } from "./services/remoteAgentSetup";
 import { acquireWorkerOperationLease, renewWorkerOperationLease, releaseWorkerOperationLease } from "./services/remoteWorkerLease";
 import { LocalFileOpenerService } from "./services/localFileOpener";
 import { FilePreviewService } from "./services/filePreview";
+import {
+  createExternalOpenLimiter,
+  createFileEditFlusher,
+  FILE_EDIT_FLUSH_TIMEOUT_MS,
+  filePreviewNavigationDecision,
+  shouldFlushBeforeClose
+} from "./services/filePanelWindow";
 import { WorkspaceFileResolver } from "./services/workspaceFiles";
 import { FILE_PREVIEW_PROTOCOL } from "../shared/filePreview";
 import { SettingsService } from "./services/settings";
@@ -253,35 +260,24 @@ const filePreviewService = new FilePreviewService(storageService, workspaceFileR
 protocol.registerSchemesAsPrivileged([
   { scheme: FILE_PREVIEW_PROTOCOL, privileges: { standard: true, secure: true, stream: true } }
 ]);
-const pendingFileEditFlushes = new Map<string, () => void>();
-let fileEditFlushSequence = 0;
+const fileEditFlusher = createFileEditFlusher({
+  send: (requestId) => {
+    const window = mainWindow;
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return false;
+    window.webContents.send("files:flush", requestId);
+    return true;
+  },
+  log: (event, payload) => { void debugLogService.write(event, payload); }
+});
 /**
  * Asks the window to save every file open in its panel and waits for it, at
- * most `timeoutMs`. Unsaved text is also kept in userData, so a window that
- * does not answer loses nothing; it is offered again at the next start.
+ * most FILE_EDIT_FLUSH_TIMEOUT_MS. Unsaved text is also kept in userData, so a
+ * window that does not answer loses nothing; it is offered again at the next start.
  */
-function flushRendererFileEdits(timeoutMs: number): Promise<void> {
-  const window = mainWindow;
-  if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return Promise.resolve();
-  const requestId = `flush-${Date.now()}-${fileEditFlushSequence += 1}`;
-  return new Promise<void>((resolve) => {
-    const done = (): void => {
-      clearTimeout(timer);
-      pendingFileEditFlushes.delete(requestId);
-      resolve();
-    };
-    const timer = setTimeout(() => {
-      void debugLogService.write("files.flush-timeout", { timeoutMs });
-      done();
-    }, timeoutMs);
-    pendingFileEditFlushes.set(requestId, done);
-    try {
-      window.webContents.send("files:flush", requestId);
-    } catch {
-      done();
-    }
-  });
+function flushRendererFileEdits(): Promise<void> {
+  return fileEditFlusher.flush(FILE_EDIT_FLUSH_TIMEOUT_MS);
 }
+const allowFilePreviewOutsideOpen = createExternalOpenLimiter();
 const providerRunner = new ProviderRunner();
 setCommandDebugLogger(debugLogService);
 void debugLogService.write("crash-reports.start", { ...crashReportingStart });
@@ -1276,22 +1272,21 @@ async function openExternalUrl(url: unknown): Promise<void> {
  * nothing it does can navigate the app's own window.
  */
 function guardFilePreviewNavigation(contents: WebContents): void {
-  const openOutside = (url: string): void => {
-    if (/^https?:\/\//i.test(url) || /^mailto:/i.test(url)) {
-      void shell.openExternal(url).catch(() => undefined);
-    }
-  };
   contents.on("will-frame-navigate", (event) => {
-    if (event.isMainFrame) {
-      if (event.url.startsWith(`${FILE_PREVIEW_PROTOCOL}:`)) event.preventDefault();
-      return;
-    }
-    if (filePreviewService.isGrantedUrl(event.url) || event.url === "about:blank") return;
+    const decision = filePreviewNavigationDecision({
+      url: event.url,
+      isMainFrame: event.isMainFrame,
+      // Compared by id: frame objects are not guaranteed to be the same instance.
+      isPanelFrame: event.frame?.parent?.frameTreeNodeId === contents.mainFrame.frameTreeNodeId,
+      granted: filePreviewService.isGrantedUrl(event.url)
+    }, allowFilePreviewOutsideOpen);
+    if (decision === "allow") return;
     event.preventDefault();
-    openOutside(event.url);
+    if (decision === "open-outside") void openExternalUrl(event.url).catch(() => undefined);
   });
+  // window.open from a page in the panel; the app itself opens outside links through IPC.
   contents.setWindowOpenHandler(({ url }) => {
-    openOutside(url);
+    if (/^https?:\/\//i.test(url) && allowFilePreviewOutsideOpen()) void openExternalUrl(url).catch(() => undefined);
     return { action: "deny" };
   });
   contents.on("did-start-navigation", (details) => {
@@ -1357,10 +1352,15 @@ function createWindow(): void {
     // file first. Never while quitting or restarting for an update: a prevented
     // close then cancels the quit (2026-10-20), and both of those save through
     // their own step.
-    if (!fileEditsFlushedForClose && !quittingForUpdate && !quitCleanupStarted && mainWindow === window) {
+    if (shouldFlushBeforeClose({
+      alreadyFlushed: fileEditsFlushedForClose,
+      quittingForUpdate,
+      quitCleanupStarted,
+      isMainWindow: mainWindow === window
+    })) {
       event.preventDefault();
       fileEditsFlushedForClose = true;
-      void flushRendererFileEdits(2_000).finally(() => {
+      void flushRendererFileEdits().finally(() => {
         if (!window.isDestroyed()) window.close();
       });
       return;
@@ -1624,9 +1624,7 @@ function registerIpc(): void {
   ipcMain.handle("files:unsaved-save", (_event, edit: UnsavedFileEdit) => filePreviewService.saveUnsaved(edit));
   ipcMain.handle("files:unsaved-clear", (_event, realPath: unknown) => filePreviewService.clearUnsaved(realPath));
   ipcMain.handle("files:unsaved-list", () => filePreviewService.listUnsaved());
-  ipcMain.on("files:flush-done", (_event, requestId: unknown) => {
-    if (typeof requestId === "string") pendingFileEditFlushes.get(requestId)?.();
-  });
+  ipcMain.on("files:flush-done", (_event, requestId: unknown) => fileEditFlusher.acknowledge(requestId));
   ipcMain.handle("settings:set-beta-updates", (_event, enabled: boolean) => {
     return settingsService.setBetaUpdates(enabled);
   });
@@ -2633,7 +2631,7 @@ void app.whenReady().then(async () => {
       });
       // A restart for an update skips the normal quit cleanup, so the file
       // panel saves here, before the windows close.
-      return () => { void flushRendererFileEdits(2_000).finally(restart); };
+      return () => { void flushRendererFileEdits().finally(restart); };
     })(),
     log: (event, payload) => { void debugLogService.write(event, payload); }
   });
@@ -3054,7 +3052,7 @@ app.on("before-quit", (event) => {
   let cleanupDone = false;
   const cleanup = Promise.allSettled([
     // The file panel saves first; its unsaved text is also in userData if it cannot.
-    flushRendererFileEdits(2_000),
+    flushRendererFileEdits(),
     serverChatLink.stop(),
     cliAgentRunner.shutdownWarmAgents(),
     scriptService.stop().then(() => appMcpService.stop())

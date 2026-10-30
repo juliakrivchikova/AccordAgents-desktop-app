@@ -1,7 +1,7 @@
-import { useEffect, type CSSProperties } from "react";
+import type { CSSProperties } from "react";
 import { ArrowLeft, Code2, ExternalLink, FolderOpen, X } from "lucide-react";
-import { toast } from "sonner";
 
+import { fileBasename } from "../../../shared/filePreview";
 import type { LocalFileOpenAction, RepoFileExternalOpenAction } from "../../../shared/types";
 import type { PanelAttachmentTarget, PanelFileTarget } from "../artifacts/use-artifacts";
 import { useArtifactsPanelResize } from "../artifacts/use-artifacts-panel-resize";
@@ -9,10 +9,6 @@ import { CopyButton, IconButton } from "../primitives";
 import { FilePanelBody } from "./file-panel-body";
 import { ImageViewer } from "./image-viewer";
 import { useFileDocument, type FileDocument } from "./use-file-document";
-
-function basename(filePath: string): string {
-  return filePath.split(/[\\/]/).pop() || filePath;
-}
 
 function PanelFrame(props: {
   title: string;
@@ -57,12 +53,13 @@ function PanelFrame(props: {
           </h3>
           {props.subtitle && (
             <div className="file-panel-subtitle">
-              <span title={props.subtitle}>{props.subtitle}</span>
+              {/* The end of a long path stays visible; bdi keeps its slashes in order. */}
+              <span title={props.subtitle}><bdi>{props.subtitle}</bdi></span>
               {props.copyText && <CopyButton text={props.copyText} label="Copy path" />}
             </div>
           )}
         </div>
-        {props.status && <span className="file-panel-status" aria-live="polite">{props.status}</span>}
+        {props.status && <span className="file-panel-status">{props.status}</span>}
         {props.actions}
         <IconButton label="Close file" icon={X} onClick={props.onClose} />
       </div>
@@ -121,42 +118,29 @@ function FileNotices(props: { document: FileDocument }): JSX.Element | null {
   return notices.length ? <div className="file-panel-notices">{notices}</div> : null;
 }
 
+export function externalOpenLabel(action: RepoFileExternalOpenAction | undefined): string {
+  return action === "intellij-idea" ? "Open in IntelliJ IDEA" : "Open with default app";
+}
+
 /** A local file in the side panel. */
 export function FilePanel(props: {
   conversationId: string;
   target: PanelFileTarget;
-  externalAction: RepoFileExternalOpenAction;
+  /** What the Open button does; unset until the User chose, then the default app. */
+  externalAction: RepoFileExternalOpenAction | undefined;
   onClose: () => void;
   onBackToThread?: () => void;
-  /** The file turned out to be a kind the panel does not show: open it the OS way instead. */
-  onUnsupported: (target: PanelFileTarget) => void;
+  /** Opens the file the OS way (the same as a link click with an OS choice). */
+  openOutside: (target: { path: string; line?: number; column?: number }, action: LocalFileOpenAction) => void;
 }): JSX.Element {
   const document = useFileDocument(props.conversationId, props.target.path);
   const preview = document.preview;
-
-  useEffect(() => {
-    if (document.status === "ready" && preview?.kind === "unsupported") props.onUnsupported(props.target);
-    // Only when the file's kind becomes known.
-  }, [document.status, preview?.kind]);
-
-  const openOutside = (action: LocalFileOpenAction): void => {
-    void window.consensus.openLocalFile({
-      conversationId: props.conversationId,
-      path: preview?.absolutePath ?? props.target.path,
-      line: props.target.line,
-      column: props.target.column,
-      action
-    }).then((result) => {
-      if (result.fallbackMessage) toast.info(result.fallbackMessage);
-    }).catch((error: unknown) => {
-      toast.error(error instanceof Error ? error.message : "Could not open the file.");
-    });
-  };
-
-  const externalLabel = props.externalAction === "intellij-idea" ? "Open in IntelliJ IDEA" : "Open with default app";
+  const outsideTarget = { path: preview?.absolutePath ?? props.target.path, line: props.target.line, column: props.target.column };
+  const externalAction = props.externalAction ?? "open";
+  const externalLabel = externalOpenLabel(props.externalAction);
   return (
     <PanelFrame
-      title={basename(preview?.realPath ?? props.target.path)}
+      title={fileBasename(preview?.realPath ?? props.target.path)}
       subtitle={preview?.absolutePath ?? props.target.path}
       copyText={preview?.absolutePath ?? props.target.path}
       status={saveStatus(document)}
@@ -167,16 +151,21 @@ export function FilePanel(props: {
           <IconButton
             label={externalLabel}
             tooltip={externalLabel}
-            icon={props.externalAction === "intellij-idea" ? Code2 : ExternalLink}
-            onClick={() => openOutside(props.externalAction)}
+            icon={externalAction === "intellij-idea" ? Code2 : ExternalLink}
+            onClick={() => props.openOutside(outsideTarget, externalAction)}
           />
-          <IconButton label="Reveal in Finder" tooltip="Reveal in Finder" icon={FolderOpen} onClick={() => openOutside("reveal")} />
+          <IconButton
+            label="Reveal in file manager"
+            tooltip="Reveal in file manager"
+            icon={FolderOpen}
+            onClick={() => props.openOutside(outsideTarget, "reveal")}
+          />
         </>
       )}
     >
       <div className="file-panel-content">
         <FileNotices document={document} />
-        <FilePanelBody document={document} line={props.target.line} column={props.target.column} />
+        <FilePanelBody document={document} line={props.target.line} column={props.target.column} externalLabel={externalLabel} />
       </div>
     </PanelFrame>
   );

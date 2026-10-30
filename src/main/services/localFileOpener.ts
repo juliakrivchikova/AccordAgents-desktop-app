@@ -9,7 +9,7 @@ import type {
 } from "../../shared/types";
 import type { FilePreviewChatLookup } from "./filePreview";
 import { IntellijLauncherService, type IntellijLauncher } from "./intellijLauncher";
-import type { LocalFileResolution, LocalFileResolutionFailureReason } from "./repoFile";
+import { localFileFailureMessage, type LocalFileResolution } from "./repoFile";
 import { SettingsService } from "./settings";
 import { WorkspaceFileResolver } from "./workspaceFiles";
 
@@ -51,7 +51,7 @@ export class LocalFileOpenerService {
     }
     const resolution = await this.resolver.resolve(chat.repoPath, rawPath);
     if (!resolution.ok) {
-      throw new Error(this.failureMessage(resolution.reason));
+      throw new Error(localFileFailureMessage(resolution.reason));
     }
     return resolution;
   }
@@ -142,7 +142,7 @@ export class LocalFileOpenerService {
     // (an unsupported file type, the panel's own button) uses the panel's
     // "Open in…" choice.
     if (preference === "panel" || !preference) {
-      return (await this.settings.getRepoFileExternalOpenAction?.()) ?? "open";
+      return (await this.settings.getRepoFileExternalOpenAction()) ?? "open";
     }
     return preference;
   }
@@ -152,21 +152,6 @@ export class LocalFileOpenerService {
     if (error) {
       const prefix = fallbackCause ? `${fallbackCause} Also could not open with the default app` : "Could not open the file with the default app";
       throw new Error(`${prefix}: ${error}`);
-    }
-  }
-
-  private failureMessage(reason: LocalFileResolutionFailureReason): string {
-    switch (reason) {
-      case "base-missing":
-        return "This chat has no selected workspace, so relative file links cannot be opened.";
-      case "directory":
-        return "That path is a directory, not a file.";
-      case "not-regular-file":
-        return "That path is not a regular file.";
-      case "not-found":
-        return "That file no longer exists.";
-      default:
-        return "That file path is invalid.";
     }
   }
 }

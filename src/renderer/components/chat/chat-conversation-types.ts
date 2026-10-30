@@ -7,6 +7,7 @@ import type {
   ChatSkillMention,
   Conversation,
   RepoFileMention,
+  RepoFileExternalOpenAction,
   RepoFileOpenAction,
   ReviewProgress
 } from "../../../shared/types";
@@ -69,6 +70,7 @@ export interface ChatConversationViewProps {
     codexDecisionId?: string
   ) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
+  setRepoFileExternalOpenPreference: (action: RepoFileExternalOpenAction | null) => Promise<void>;
   onCompactParticipant: ParticipantCompactHandler;
   onStopRun?: (runId: string) => void;
   onJumpToParticipantLastMessage: (participantId: string) => void;

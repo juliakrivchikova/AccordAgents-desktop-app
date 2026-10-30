@@ -1,4 +1,5 @@
 import type { UnsavedFileEdit, WriteFilePreviewResult } from "../../../shared/types";
+import { cleanIpcError } from "../../lib/ipc-error";
 
 export type FileEditConflict = "changed" | "replaced" | "deleted";
 
@@ -73,8 +74,9 @@ export class FileEditBufferStore {
   open(seed: Omit<FileEditBuffer, "dirty" | "text"> & { text: string }): FileEditBuffer {
     const existing = this.buffers.get(seed.realPath);
     if (existing?.dirty) {
-      // Unsaved text wins over the disk; a different disk content is a conflict to settle.
-      if (existing.baseHash !== seed.baseHash && !existing.conflict) {
+      // Unsaved text wins over the disk; a different disk content is a conflict
+      // to settle, unless it is this panel's own save still in flight.
+      if (existing.baseHash !== seed.baseHash && !existing.conflict && !this.saving.has(seed.realPath)) {
         existing.conflict = "changed";
       }
       existing.conversationId = seed.conversationId;
@@ -85,6 +87,24 @@ export class FileEditBufferStore {
     const buffer: FileEditBuffer = { ...seed, dirty: false, conflict: undefined, error: undefined };
     this.buffers.set(seed.realPath, buffer);
     return buffer;
+  }
+
+  /** Drops a file nobody shows and nothing unsaved holds. */
+  forget(realPath: string): void {
+    const buffer = this.buffers.get(realPath);
+    if (!buffer || buffer.dirty || this.shown.has(realPath) || this.saving.has(realPath)) return;
+    this.buffers.delete(realPath);
+  }
+
+  isSaving(realPath: string): boolean {
+    return this.saving.has(realPath);
+  }
+
+  setError(realPath: string, error: string | undefined): void {
+    const buffer = this.buffers.get(realPath);
+    if (!buffer) return;
+    buffer.error = error;
+    this.emit(realPath);
   }
 
   /** The User typed. */
@@ -164,16 +184,17 @@ export class FileEditBufferStore {
     return next;
   }
 
-  /** Saves everything that can be saved and keeps a copy of the rest. For quit, close and update. */
+  /**
+   * For quit, close and update: first a copy of every unsaved text, then a save
+   * of each that can be saved. Never a conflicted one, and never edits restored
+   * from an earlier session that the User has not said to save.
+   */
   async flushAll(): Promise<void> {
     const pending = this.list().filter((buffer) => buffer.dirty);
+    await Promise.all(pending.map((buffer) => this.persist(buffer.realPath)));
     await Promise.all(pending.map(async (buffer) => {
-      if (buffer.conflict) {
-        await this.persist(buffer.realPath);
-        return;
-      }
-      const outcome = await this.save(buffer.realPath).catch(() => ({ status: "error", error: "" }) as FileEditSaveOutcome);
-      if (outcome.status !== "saved" && outcome.status !== "clean") await this.persist(buffer.realPath);
+      if (buffer.conflict || buffer.restored) return;
+      await this.save(buffer.realPath).catch(() => undefined);
     }));
   }
 
@@ -192,7 +213,7 @@ export class FileEditBufferStore {
         bom: buffer.bom
       });
     } catch (error) {
-      result = { ok: false, conflict: false, error: error instanceof Error ? error.message : String(error) };
+      result = { ok: false, conflict: false, error: cleanIpcError(error) };
     }
     const current = this.buffers.get(realPath);
     if (!current) return { status: "clean" };

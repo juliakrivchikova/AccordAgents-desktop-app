@@ -1,12 +1,9 @@
 import { useEffect, useRef } from "react";
 import { toast } from "sonner";
 
+import { fileBasename as basename } from "../../shared/filePreview";
 import type { ArtifactsState } from "../components/artifacts/use-artifacts";
 import { fileEditBuffers, type FileEditBuffer } from "../components/files/file-edit-buffers";
-
-function basename(filePath: string): string {
-  return filePath.split(/[\\/]/).pop() || filePath;
-}
 
 /**
  * The file panel's edits across the app's life:

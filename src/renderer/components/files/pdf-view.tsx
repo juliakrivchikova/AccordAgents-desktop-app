@@ -1,21 +1,40 @@
 import { useEffect, useRef, useState } from "react";
-import { Minus, Plus, Search } from "lucide-react";
+import { ChevronDown, ChevronUp, Minus, Plus, Search } from "lucide-react";
 
 import { IconButton } from "../primitives";
+import { ZOOM_MAX, ZOOM_MIN, ZOOM_STEP } from "./zoom";
 
 type PdfViewer = import("pdfjs-dist/web/pdf_viewer.mjs").PDFViewer;
 type EventBus = import("pdfjs-dist/web/pdf_viewer.mjs").EventBus;
 
+let workerReady: Promise<void> | undefined;
+
+/**
+ * pdf.js parses in its own worker, bundled into the app (no separate URL to
+ * load in the packaged app): a big or scanned PDF does not stall the chat, and
+ * the parser runs outside the page that holds the app's bridge.
+ */
+function ensurePdfWorker(): Promise<void> {
+  workerReady ??= (async () => {
+    const [pdfjs, { default: PdfWorker }] = await Promise.all([
+      import("pdfjs-dist"),
+      import("pdfjs-dist/build/pdf.worker.min.mjs?worker&inline")
+    ]);
+    pdfjs.GlobalWorkerOptions.workerPort = new PdfWorker();
+  })();
+  return workerReady;
+}
+
 /**
  * A PDF in the side panel, drawn by pdf.js inside the panel (the Chromium viewer
- * does not load from a custom scheme or inside a frame in Electron). The worker
- * code runs on the page itself, so nothing is loaded from a separate URL in the
- * packaged app. Zoom, fit to width and text search.
+ * does not load from a custom scheme or inside a frame in Electron). Zoom, fit
+ * to width and text search.
  */
 export function PdfView(props: { data: Uint8Array; revision: number }): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<PdfViewer | null>(null);
   const busRef = useRef<EventBus | null>(null);
+  const lastQuery = useRef("");
   const [state, setState] = useState<{ status: "loading" | "ready" | "error"; pages?: number; error?: string }>({ status: "loading" });
   const [scale, setScale] = useState<number | undefined>();
   const [query, setQuery] = useState("");
@@ -28,10 +47,10 @@ export function PdfView(props: { data: Uint8Array; revision: number }): JSX.Elem
     let destroyDocument: (() => void) | undefined;
     setState({ status: "loading" });
     setMatches(undefined);
+    lastQuery.current = "";
     void (async () => {
+      await ensurePdfWorker();
       const pdfjs = await import("pdfjs-dist");
-      const worker = await import("pdfjs-dist/build/pdf.worker.min.mjs");
-      (globalThis as { pdfjsWorker?: unknown }).pdfjsWorker = worker;
       const viewerModule = await import("pdfjs-dist/web/pdf_viewer.mjs");
       await import("pdfjs-dist/web/pdf_viewer.css");
       if (cancelled) return;
@@ -46,7 +65,7 @@ export function PdfView(props: { data: Uint8Array; revision: number }): JSX.Elem
       eventBus.on("scalechanging", (event: { scale: number }) => setScale(event.scale));
       eventBus.on("updatefindmatchescount", (event: { matchesCount: { current: number; total: number } }) => setMatches(event.matchesCount));
       eventBus.on("updatefindcontrolstate", (event: { matchesCount: { current: number; total: number } }) => setMatches(event.matchesCount));
-      // pdf.js may take the buffer over: hand it a copy.
+      // The worker takes the buffer over: hand it a copy, the panel keeps its own.
       const task = pdfjs.getDocument({ data: props.data.slice(), isEvalSupported: false });
       destroyDocument = () => { void task.destroy(); };
       const document = await task.promise;
@@ -67,10 +86,14 @@ export function PdfView(props: { data: Uint8Array; revision: number }): JSX.Elem
     };
   }, [props.data, props.revision]);
 
+  /** The same query again goes to the next (or previous) match; a new one starts over. */
   const find = (findPrevious = false): void => {
+    if (!query) return;
+    const again = query === lastQuery.current;
+    lastQuery.current = query;
     busRef.current?.dispatch("find", {
       source: null,
-      type: findPrevious ? "again" : "",
+      type: again ? "again" : "",
       query,
       caseSensitive: false,
       entireWord: false,
@@ -83,15 +106,15 @@ export function PdfView(props: { data: Uint8Array; revision: number }): JSX.Elem
   const zoom = (factor: number): void => {
     const viewer = viewerRef.current;
     if (!viewer) return;
-    viewer.currentScale = Math.min(8, Math.max(0.1, viewer.currentScale * factor));
+    viewer.currentScale = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, viewer.currentScale * factor));
   };
 
   return (
     <div className="file-pdf-view">
       <div className="file-viewer-toolbar" role="toolbar" aria-label="PDF">
-        <IconButton label="Zoom out" icon={Minus} onClick={() => zoom(1 / 1.2)} />
+        <IconButton label="Zoom out" icon={Minus} onClick={() => zoom(1 / ZOOM_STEP)} />
         <span className="file-viewer-zoom-value">{scale ? `${Math.round(scale * 100)}%` : "…"}</span>
-        <IconButton label="Zoom in" icon={Plus} onClick={() => zoom(1.2)} />
+        <IconButton label="Zoom in" icon={Plus} onClick={() => zoom(ZOOM_STEP)} />
         <button
           type="button"
           className="file-viewer-text-button"
@@ -99,10 +122,7 @@ export function PdfView(props: { data: Uint8Array; revision: number }): JSX.Elem
         >
           Fit width
         </button>
-        <form
-          className="file-viewer-search"
-          onSubmit={(event) => { event.preventDefault(); find(); }}
-        >
+        <form className="file-viewer-search" role="search" onSubmit={(event) => { event.preventDefault(); find(); }}>
           <Search size={13} aria-hidden />
           <input
             value={query}
@@ -118,6 +138,8 @@ export function PdfView(props: { data: Uint8Array; revision: number }): JSX.Elem
           />
           {matches && query && <span className="file-viewer-meta">{matches.total ? `${matches.current}/${matches.total}` : "0"}</span>}
         </form>
+        <IconButton label="Previous match" icon={ChevronUp} disabled={!query} onClick={() => find(true)} />
+        <IconButton label="Next match" icon={ChevronDown} disabled={!query} onClick={() => find(false)} />
         {state.pages ? <span className="file-viewer-meta">{state.pages} pages</span> : null}
       </div>
       <div className="file-pdf-stage">

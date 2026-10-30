@@ -8,6 +8,12 @@ export const FILE_PREVIEW_TEXT_READ_LIMIT = 20 * 1024 * 1024;
 export const FILE_PREVIEW_PDF_LIMIT = 50 * 1024 * 1024;
 /** The table view parses at most this many rows; the text view still shows the whole (truncated) text. */
 export const FILE_PREVIEW_CSV_ROW_LIMIT = 100_000;
+/** The table view shows at most this many columns. */
+export const FILE_PREVIEW_CSV_COLUMN_LIMIT = 500;
+/** A Markdown file larger than this opens as text: rendering it whole would stall the window. */
+export const FILE_PREVIEW_MARKDOWN_RENDER_LIMIT = 256 * 1024;
+/** Unsaved panel text kept in userData, at most (a paste may go past what the panel saves). */
+export const FILE_PREVIEW_UNSAVED_COPY_LIMIT = 8 * 1024 * 1024;
 /** The app's own scheme for images and HTML pages shown in the panel. */
 export const FILE_PREVIEW_PROTOCOL = "accord-file";
 
@@ -25,8 +31,12 @@ const UNSUPPORTED_EXTENSIONS = new Set([
   "sqlite", "sqlite3", "db"
 ]);
 
+export function fileBasename(filePath: string): string {
+  return filePath.split(/[\\/]/).pop() || filePath;
+}
+
 export function fileExtension(filePath: string): string {
-  const base = filePath.split(/[\\/]/).pop() ?? "";
+  const base = fileBasename(filePath);
   const dot = base.lastIndexOf(".");
   return dot > 0 ? base.slice(dot + 1).toLowerCase() : "";
 }
@@ -48,6 +58,11 @@ export function filePreviewKindForPath(filePath: string): FilePreviewKind {
 
 export function isTextPreviewKind(kind: FilePreviewKind): boolean {
   return kind === "text" || kind === "markdown" || kind === "csv";
+}
+
+/** Kinds whose text the panel edits (an HTML page's source is text too). */
+export function isEditablePreviewKind(kind: FilePreviewKind): boolean {
+  return isTextPreviewKind(kind) || kind === "html";
 }
 
 /** Length of the longest prefix of `bytes` (at most `limit`) that does not split a UTF-8 sequence. */

@@ -24,6 +24,22 @@ export type LocalFileResolutionFailureReason =
   | "directory"
   | "not-regular-file";
 
+/** The words the User sees when a file link cannot be resolved. */
+export function localFileFailureMessage(reason: LocalFileResolutionFailureReason): string {
+  switch (reason) {
+    case "base-missing":
+      return "This chat has no selected workspace, so relative file links cannot be opened.";
+    case "directory":
+      return "That path is a directory, not a file.";
+    case "not-regular-file":
+      return "That path is not a regular file.";
+    case "not-found":
+      return "That file no longer exists.";
+    default:
+      return "That file path is invalid.";
+  }
+}
+
 export type LocalFileResolution =
   | { ok: true; absolutePath: string; realPath: string; insideWorkspace: boolean }
   | { ok: false; reason: LocalFileResolutionFailureReason };

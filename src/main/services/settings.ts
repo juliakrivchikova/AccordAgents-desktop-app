@@ -1985,7 +1985,7 @@ export class SettingsService {
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
       lastRepoPath: stored.lastRepoPath,
       repoFileOpenAction: stored.repoFileOpenAction,
-      repoFileExternalOpenAction: stored.repoFileExternalOpenAction ?? "open",
+      repoFileExternalOpenAction: stored.repoFileExternalOpenAction,
       chatRoleConfigs: stored.chatRoleConfigs ?? DEFAULT_CHAT_ROLES,
       chatBehaviorRules: stored.chatBehaviorRules ?? [],
       chatSavedPrompts: stored.chatSavedPrompts ?? [],
@@ -2722,14 +2722,15 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
-  async getRepoFileExternalOpenAction(): Promise<RepoFileExternalOpenAction> {
+  /** Undefined until the User chose (or had chosen before the panel): files the panel does not show then ask. */
+  async getRepoFileExternalOpenAction(): Promise<RepoFileExternalOpenAction | undefined> {
     const stored = await this.readStored();
-    return stored.repoFileExternalOpenAction ?? "open";
+    return stored.repoFileExternalOpenAction;
   }
 
   async setRepoFileExternalOpenAction(action: unknown): Promise<AppSettings> {
     const normalized = this.normalizeRepoFileExternalOpenAction(action);
-    if (!normalized) throw new Error("Choose IntelliJ IDEA or the default app.");
+    if (!normalized && action !== null) throw new Error("Choose IntelliJ IDEA, the default app, or to be asked.");
     const stored = await this.readStored();
     stored.repoFileExternalOpenAction = normalized;
     stored.repoFileOpenPanelMigrated = true;
@@ -3263,10 +3264,12 @@ export class SettingsService {
     const action = this.normalizeRepoFileOpenAction(settings.repoFileOpenAction);
     const external = this.normalizeRepoFileExternalOpenAction(settings.repoFileExternalOpenAction);
     if (settings.repoFileOpenPanelMigrated === true) {
-      return { repoFileOpenAction: action, repoFileExternalOpenAction: external ?? "open", repoFileOpenPanelMigrated: true };
+      return { repoFileOpenAction: action, repoFileExternalOpenAction: external, repoFileOpenPanelMigrated: true };
     }
+    // Only an explicit earlier choice is carried over. Without one, a file the
+    // panel does not show (an installer, an archive) still asks, as before.
     const carried = action === "intellij-idea" || action === "open" ? action : undefined;
-    return { repoFileOpenAction: "panel", repoFileExternalOpenAction: carried ?? external ?? "open", repoFileOpenPanelMigrated: true };
+    return { repoFileOpenAction: "panel", repoFileExternalOpenAction: carried ?? external, repoFileOpenPanelMigrated: true };
   }
 
   private normalizeBetaUpdates(value: unknown): boolean {

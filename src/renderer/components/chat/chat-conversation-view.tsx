@@ -122,13 +122,16 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     onStopRun: props.onStopRun,
     runChoiceWithSubmittingId: choiceSubmission.runWithSubmittingId
   });
-  const chatRoot = useCallback(() => document.querySelector<HTMLElement>("[data-testid=\"chat-view\"]"), []);
+  // Read when used, after the viewport below exists.
+  const viewportRootRef = useRef<React.RefObject<HTMLDivElement> | undefined>(undefined);
+  const chatRoot = useCallback((): HTMLElement | null => viewportRootRef.current?.current ?? null, []);
   const sidePanel = useChatSidePanel({ artifacts, root: chatRoot, selectThread: setSelectedThreadRootId });
   const localFileOpen = useChatLocalFileOpen({
     conversationId: props.conversation.id,
     repoFileOpenAction: props.settings.repoFileOpenAction,
     repoFileExternalOpenAction: props.settings.repoFileExternalOpenAction,
     setRepoFileOpenPreference: props.setRepoFileOpenPreference,
+    setRepoFileExternalOpenPreference: props.setRepoFileExternalOpenPreference,
     openInPanel: sidePanel.openInPanel
   });
   const latestProgress = props.progress[props.progress.length - 1];
@@ -186,6 +189,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     onLoadOlderMessages: props.onLoadOlderMessages,
     onLoadMessagePageForMessage: props.onLoadMessagePageForMessage
   });
+  viewportRootRef.current = viewport.viewRef;
 
   async function sendDraft(
     repoFileMentions: RepoFileMention[] = [],
@@ -465,7 +469,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               settings={props.settings}
               artifacts={artifacts}
               backToThread={sidePanel.backToThread}
-              openFileOutside={(ref) => void localFileOpen.openFileOutside(ref)}
+              openFileOutside={(ref, action) => void localFileOpen.openFileOutside(ref, action)}
             />
           )}
           <LocalFileOpenChooser
