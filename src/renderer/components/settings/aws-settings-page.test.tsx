@@ -5,11 +5,11 @@ import { act } from "react";
 import type { AwsSetupStep, AwsWorkerOperationSnapshot, AwsWorkerStartRequest, AwsWorkerStatus, CloudRunWorkerSetupProgress } from "../../../shared/types";
 import { RUNNING, SETTINGS, mount, unmount } from "./aws-settings-page-harness.test";
 
-test("the page is sections: status, program, instance, disk and setup", async () => {
+test("the page is sections: status, program, instance, projects, disk and setup", async () => {
   const ui = await mount();
   assert.equal(ui.find("aws-worker-state")?.textContent, "Running · billable");
   const titles = [...document.querySelectorAll(".gen-section-title")].map((title) => title.textContent);
-  assert.deepEqual(titles, ["Cloud program", "Instance", "Disk", "Setup"]);
+  assert.deepEqual(titles, ["Cloud program", "Instance", "Projects on the instance", "Disk", "Setup"]);
   assert.equal(document.querySelectorAll(".gen-aws-problem, .gen-aws-feedback").length, 0, "problems are red lines, not boxes");
   await unmount();
 });
@@ -165,40 +165,6 @@ test("the disk shows what fills it, warns when it is low, and cleans up only aft
   assert.deepEqual(ui.bridge.calls.cleanAwsInstanceDisk, [["program-logs"]]);
   assert.equal(ui.find("aws-disk-clean-dialog"), null);
   assert.deepEqual(ui.bridge.calls.getAwsInstanceDisk?.at(-1), [{ refresh: true }], "measured again after the change");
-  await unmount();
-});
-
-test("the file browser marks a member's work, lets it be chosen, and deletes only what was chosen", async () => {
-  const ui = await mount();
-  await ui.click(ui.find("aws-disk-browse-project-copies"));
-  assert.deepEqual(ui.bridge.calls.listAwsInstanceFiles?.[0], ["@mirrors"]);
-  const tree = ui.find("aws-disk-tree");
-  assert.equal(tree?.querySelector("svg.lucide-lock"), null, "no lock anywhere");
-  const shared = tree?.querySelector('[data-path$="AccordAgents-0a6205133d"]');
-  assert.equal(shared?.querySelector(".gen-aws-tree-work")?.textContent, "member's worktree · uncommitted changes");
-  assert.equal(shared?.classList.contains("is-locked"), false);
-  const busy = tree?.querySelector<HTMLInputElement>('input[aria-label="busy-project-0987654321 cannot be deleted: in use right now"]');
-  assert.ok(busy?.disabled, "in use: a checkbox that cannot be ticked");
-  assert.match(tree?.querySelector('[data-path$="busy-project-0987654321"]')?.textContent ?? "", /in use right now/);
-  assert.match(document.body.textContent ?? "", /Marked project copies hold members' work, which is deleted with them\./);
-  await ui.click(tree?.querySelector('input[aria-label="Select old-project-1234567890"]') ?? null);
-  assert.match(ui.find("aws-disk-delete")?.textContent ?? "", /Delete 300 MB/);
-  await ui.click(ui.find("aws-disk-delete"));
-  await ui.click(ui.find("aws-disk-delete-dialog-confirm"));
-  assert.equal(ui.find("aws-disk-delete-dialog"), null);
-  assert.deepEqual(ui.bridge.calls.deleteAwsInstanceFiles, [[["/home/ubuntu/own/workspace/mirrors/old-project-1234567890"]]], "no work chosen, none sent");
-  const after = ui.find("aws-disk-tree");
-  await ui.click(after?.querySelector('input[aria-label="Select AccordAgents-0a6205133d"]') ?? null);
-  await ui.click(after?.querySelector('input[aria-label="Select old-project-1234567890"]') ?? null);
-  assert.match(ui.find("aws-disk-delete")?.textContent ?? "", /Delete 1\.8 GB/);
-  assert.match(document.body.textContent ?? "", /2 selected · 1\.8 GB · 1 holds members' work/);
-  await ui.click(ui.find("aws-disk-delete"));
-  assert.match(ui.find("aws-disk-delete-dialog")?.textContent ?? "", /1 of them holds members' work, which goes with them: member's worktree, uncommitted changes\./);
-  await ui.click(ui.find("aws-disk-delete-dialog-confirm"));
-  assert.deepEqual(ui.bridge.calls.deleteAwsInstanceFiles?.[1], [
-    ["/home/ubuntu/own/workspace/mirrors/AccordAgents-0a6205133d", "/home/ubuntu/own/workspace/mirrors/old-project-1234567890"],
-    { withWork: { "/home/ubuntu/own/workspace/mirrors/AccordAgents-0a6205133d": ["worktree", "changes"] } }
-  ], "the work goes only with the folder chosen while it was marked");
   await unmount();
 });
 

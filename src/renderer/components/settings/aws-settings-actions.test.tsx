@@ -244,7 +244,7 @@ test("choosing a folder replaces what was chosen inside it, and what stayed is s
 
 test("the file browser deletes only after the question is confirmed, once", async () => {
   const ui = await mount();
-  await ui.click(ui.find("aws-disk-browse-project-copies"));
+  await ui.click(ui.find("aws-disk-browse-all"));
   const choose = (): Promise<void> => ui.click(ui.find("aws-disk-tree")?.querySelector('input[aria-label="Select old-project-1234567890"]') ?? null);
   await choose();
   await ui.click(ui.find("aws-disk-delete"));

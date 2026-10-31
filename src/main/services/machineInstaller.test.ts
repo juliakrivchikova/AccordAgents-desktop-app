@@ -1036,7 +1036,11 @@ test("a failed first copy never publishes a partial project and retry stages a f
   h.records.set("m1", { machineId: "m1", target: TARGET, ...LAYOUT });
   await assert.rejects(h.service.bootstrapProjectMirror({ machineId: "m1", localPath: process.cwd() }), /connection lost/);
   assert.ok(!h.calls.some(call => call.script.includes("mv -Tn --")));
-  assert.ok(h.calls.some(call => call.script === `rm -rf -- '${h.syncedUp[0]}'`));
+  const cleanup = h.calls.find(call => call.script.startsWith(`rm -rf -- '${h.syncedUp[0]}';`));
+  assert.ok(cleanup);
+  // The project's folder goes too when the failed copy left it empty.
+  const container = h.syncedUp[0].replace(/\/repo\.bootstrap-[^/]*$/, "");
+  assert.ok(cleanup.script.endsWith(`rmdir -- '${container}' 2>/dev/null || true`), cleanup.script);
   options.mirrorCopyError = undefined;
   await h.service.bootstrapProjectMirror({ machineId: "m1", localPath: process.cwd() });
   assert.notEqual(h.syncedUp[0], h.syncedUp[1]);
@@ -1066,7 +1070,7 @@ test("Stop during project copy reaches the transfer and never publishes its stag
     message => messages.push(message)), /cancelled/);
   assert.ok(messages.some(message => message.includes("42%")));
   assert.ok(!h.calls.some(call => call.script.includes("mv -Tn --")));
-  const cleanup = h.calls.find(call => call.script === `rm -rf -- '${h.syncedUp[0]}'`);
+  const cleanup = h.calls.find(call => call.script.startsWith(`rm -rf -- '${h.syncedUp[0]}';`));
   assert.ok(cleanup);
   assert.equal(cleanup.signal, undefined, "cleanup must run even with an aborted request");
   assert.ok(h.calls.filter(call => call !== cleanup).every(call => call.signal === controller.signal));

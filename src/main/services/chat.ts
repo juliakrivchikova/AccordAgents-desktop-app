@@ -522,6 +522,17 @@ interface ChatAppMcpGateway {
 
 type ChatAppMcpTokenGrant = Parameters<ChatAppMcpGateway["issueToken"]>[0];
 
+/** What a member says when its project folder is gone. */
+function missingRunFolderText(handle: string, missing: { reason: string; machineCopy: boolean }): string {
+  return `@${handle} could not start: ${missing.reason}.${missing.machineCopy ? " Send the message again from your computer to copy the project there again." : ""}`;
+}
+
+/** A process that could not start in its folder (Node names the missing
+ *  folder as a missing executable). */
+function startFailedOnMissingPath(result: { error?: string; content?: string }): boolean {
+  return /\bENOENT\b|no such file or directory|not a directory/i.test(`${result.error ?? ""}\n${result.content ?? ""}`);
+}
+
 /** The line a compaction that did not happen leaves, local or on a machine,
  *  whatever punctuation the reason ends with. */
 function compactionFailureLine(handle: string, error: string | undefined): string {
@@ -847,6 +858,8 @@ export class ChatService {
   private machineRuntime = false;
   private prepareCloudSelection?: (selection: CloudRunSelection, provider: ChatProviderKind, progress: (snapshot: CloudRunPreparationProgress) => void) => Promise<string>;
   private prepareMachineProject?: (machineId: string, localPath: string, signal?: AbortSignal, progress?: (message: string) => void) => Promise<void>;
+  /** Desktop: a machine said its copy of a project is missing. */
+  private machineProjectMissing?: (machineId: string, localPath: string) => Promise<void>;
   private readonly participantRunSettledListeners = new Set<(run: ChatParticipantRun) => Promise<void> | void>();
   private readonly participantRunCompletionWaiters = new Map<string, Set<() => void>>();
 
@@ -1172,6 +1185,10 @@ export class ChatService {
 
   setMachineProjectPreparation(prepare: NonNullable<ChatService["prepareMachineProject"]>): void {
     this.prepareMachineProject = prepare;
+  }
+
+  setMachineProjectMissingHandler(handler: NonNullable<ChatService["machineProjectMissing"]>): void {
+    this.machineProjectMissing = handler;
   }
 
   private async prepareParticipantProjects(repoPath: string | undefined, participants: Array<{ homeMachineId?: string }>, signal?: AbortSignal, progress?: (message: string) => void): Promise<void> {
@@ -2367,10 +2384,13 @@ export class ChatService {
         session.runtimeConfigVersion = undefined;
       }
       this.upsertSession(conversation, session);
+      // A start that failed because the project folder is gone says so.
+      const missingFolder = !result.ok && !signal?.aborted && !agentEnvironment.problem && runPath !== workspacePath && startFailedOnMissingPath(result)
+        ? (await this.missingRunFolder(conversation, runPath))?.reason : undefined;
       await this.withChatMutation(conversation, async () => {
         const content = result.ok
           ? this.compactSuccessMessage(participant.handle, compactInstructions)
-          : compactionFailureLine(participant.handle, result.error);
+          : compactionFailureLine(participant.handle, missingFolder ?? result.error);
         conversation.messages.push(this.message(
           "system",
           content,
@@ -8192,6 +8212,21 @@ export class ChatService {
       if (!this.machineRuntime) {
         this.promptSuggestions.replyEnded(conversation.id, participant.id, runId);
       }
+      // A start that failed because the project folder is gone says so,
+      // instead of the process error that reads as a missing CLI. Only the
+      // project folder can go away under the member: the chat's own workspace
+      // is created for every run.
+      if (!result.ok && !signal?.aborted && runPath !== workspacePath && startFailedOnMissingPath(result)) {
+        const missing = await this.missingRunFolder(conversation, runPath);
+        if (missing) {
+          result = { ...result, content: missingRunFolderText(participant.handle, missing), error: missing.reason };
+          // The computer that made the copy forgets it when it reads this,
+          // so the next message copies the project again.
+          if (missing.copyOf && this.hostMachineId) {
+            pendingMessage.metadata = { ...pendingMessage.metadata, missingProjectCopy: { machineId: this.hostMachineId, sourcePath: missing.copyOf } };
+          }
+        }
+      }
       this.applyCliRunMetadata(session, result, participant, options.warnings);
       if (!signal?.aborted) {
         this.consumeOneTimePermissionApprovals(conversation, participant, appliedOneTimePermissionApprovalIds);
@@ -9600,6 +9635,25 @@ export class ChatService {
     return codexConfigOverrides && codexConfigOverrides.length > 0
       ? { ...cliParticipant, codexConfigOverrides }
       : cliParticipant;
+  }
+
+  /** Why the member cannot start in a folder that is gone, instead of the
+   *  process error that reads as a missing CLI. On a cloud machine that is
+   *  the machine's copy of the project, deleted on the instance. */
+  private async missingRunFolder(conversation: Conversation, runPath: string): Promise<{ reason: string; machineCopy: boolean; copyOf?: string } | undefined> {
+    let notFolder = false;
+    try {
+      if ((await stat(runPath)).isDirectory()) return undefined;
+      notFolder = true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return undefined;
+    }
+    const sourcePath = (conversation.metadata.machineRepository as { sourcePath?: unknown } | undefined)?.sourcePath;
+    if (this.hostMachineId && typeof sourcePath === "string" && sourcePath.trim()) {
+      return { reason: `the copy of ${path.basename(sourcePath)} on this cloud machine is missing`, machineCopy: true, copyOf: sourcePath };
+    }
+    return { reason: notFolder ? `${runPath} is not a folder` : `the folder ${runPath} does not exist`, machineCopy: false };
   }
 
   private runPathForParticipant(
@@ -20884,6 +20938,12 @@ export class ChatService {
         }
         if (incoming.role === "participant") this.recordLastMessageByParticipant(conversation, next);
         if (incoming.createdAt > conversation.updatedAt) conversation.updatedAt = incoming.createdAt;
+        const missingCopy = incoming.metadata?.missingProjectCopy;
+        if (!fromHere && !this.machineRuntime && incoming.role === "participant" && missingCopy
+          && typeof missingCopy.machineId === "string" && typeof missingCopy.sourcePath === "string") {
+          // Outside the chat's mutation: forgetting saves Settings.
+          void this.machineProjectMissing?.(missingCopy.machineId, missingCopy.sourcePath).catch(() => undefined);
+        }
         return;
       }
       case "message.react": {

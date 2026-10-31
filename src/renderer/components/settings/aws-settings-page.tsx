@@ -5,11 +5,13 @@ import { AwsWaiting } from "./aws-dialog";
 import { AwsDiskSection } from "./aws-disk-section";
 import { AwsInstanceSection } from "./aws-instance-section";
 import { AwsProgramSection } from "./aws-program-section";
+import { AwsProjectsSection } from "./aws-projects-section";
 import { Row } from "./aws-row";
 import { AwsSetupSection } from "./aws-setup-section";
 import { AwsSetupProgressDialog, useAwsSetupView } from "./aws-setup-progress";
 import { AwsStatusSection } from "./aws-status-section";
 import { clearAwsAttention, publishAwsAttention } from "./use-aws-attention";
+import { useAwsDisk } from "./use-aws-disk";
 import { useAwsMachineRuntime } from "./use-aws-machine-runtime";
 import { useAwsWorkerControl } from "./use-aws-worker-control";
 
@@ -21,6 +23,8 @@ import { useAwsWorkerControl } from "./use-aws-worker-control";
 export function AwsSettingsPage(props: { settings: CloudRunsSettings; onDeleted: () => Promise<void> }): JSX.Element {
   const control = useAwsWorkerControl(props.settings, props.onDeleted);
   const runtime = useAwsMachineRuntime(control.status);
+  // One disk for the page: deleting or adding a project changes it too.
+  const disk = useAwsDisk(control.status?.state === "running");
   // One setup window for the whole page: it stays when the instance appears
   // and the page turns from connecting to the instance's own sections.
   const setupView = useAwsSetupView(control);
@@ -45,7 +49,8 @@ export function AwsSettingsPage(props: { settings: CloudRunsSettings; onDeleted:
       <AwsStatusSection control={control} setupView={setupView} />
       <AwsProgramSection status={status} runtime={runtime} onStatus={control.monitor.accept} locked={control.locked} />
       <AwsInstanceSection control={control} />
-      <AwsDiskSection control={control} />
+      <AwsProjectsSection running={status.state === "running"} locked={control.locked} disk={disk} />
+      <AwsDiskSection control={control} disk={disk} />
       <AwsSetupSection running={status.state === "running"} instanceId={control.actual?.instanceId ?? status.handle?.instanceId}
         finishedSetup={setupView.operation?.phase === "ready" ? setupView.operation.operationId : undefined} settingUp={setupView.live} />
     </div>

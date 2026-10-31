@@ -28,6 +28,7 @@ import type {
 } from "../shared/machineInstall";
 import type {
   AwsDiskChosenWork,
+  AwsInstanceProjectProgress,
   AppBridge,
   AddChatParticipantRequest,
   AgentDetectionRequest,
@@ -197,6 +198,14 @@ const bridge: AppBridge = {
   cleanAwsInstanceDisk: (category: AwsDiskCleanCategory) => ipcRenderer.invoke("cloud-runs:aws-disk-clean", category),
   listAwsInstanceFiles: (path?: string) => ipcRenderer.invoke("cloud-runs:aws-disk-list", path),
   deleteAwsInstanceFiles: (paths: string[], options?: { withWork?: AwsDiskChosenWork }) => ipcRenderer.invoke("cloud-runs:aws-disk-delete", paths, options),
+  listAwsInstanceProjects: () => ipcRenderer.invoke("cloud-runs:aws-projects"),
+  addAwsInstanceProject: (localPath: string) => ipcRenderer.invoke("cloud-runs:aws-project-add", localPath),
+  cancelAwsInstanceProjectAdd: (localPath: string) => ipcRenderer.invoke("cloud-runs:aws-project-add-cancel", localPath),
+  onAwsInstanceProjectProgress: (callback) => {
+    const listener = (_event: unknown, progress: AwsInstanceProjectProgress): void => callback(progress);
+    ipcRenderer.on("cloud-runs:aws-project-progress", listener);
+    return () => ipcRenderer.off("cloud-runs:aws-project-progress", listener);
+  },
   stopAwsWorker: () => ipcRenderer.invoke("cloud-runs:aws-stop"),
   deleteAwsWorker: () => ipcRenderer.invoke("cloud-runs:aws-delete"),
   getAgentEnvironment: () => ipcRenderer.invoke("settings:get-agent-environment"),

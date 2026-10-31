@@ -46,7 +46,8 @@ function trace(device: string, event: string, payload: Record<string, unknown>):
 
 interface Turn { device: "desktop" | "machine"; participantId: string; triggerId: string; runId: string; signal?: AbortSignal; settingsAtStart?: number }
 
-function chatService(storage: StorageService, turns: Turn[], device: Turn["device"], control: { hold: boolean; releases: Array<() => void>; settingsApplied?: () => number; closed?: string[] }): ChatService {
+function chatService(storage: StorageService, turns: Turn[], device: Turn["device"], control: { hold: boolean; releases: Array<() => void>; settingsApplied?: () => number; closed?: string[];
+  reply?: (pending: ChatMessage) => void }): ChatService {
   const settings = {
     async getPublicSettings() {
       return { chatRoleConfigs: [], chatParticipantConfigs: [], providers: [{ kind: "claude-code", enabled: true }, { kind: "codex-cli", enabled: true }] };
@@ -70,6 +71,7 @@ function chatService(storage: StorageService, turns: Turn[], device: Turn["devic
     const pending = (options as { existingPendingMessage?: ChatMessage }).existingPendingMessage as ChatMessage;
     pending.content = `${device} reply to ${(trigger as ChatMessage).content}`;
     pending.status = "done";
+    control.reply?.(pending);
     return [pending];
   };
   return chat;
@@ -99,7 +101,8 @@ async function setup(t: test.TestContext) {
   const turns: Turn[] = [];
   const desktopControl = { hold: false, releases: [] as Array<() => void> };
   const applied: MachineSettingsDocument[] = [];
-  const machineControl = { hold: false, releases: [] as Array<() => void>, settingsApplied: () => applied.length, takes: true, closed: [] as string[] };
+  const machineControl = { hold: false, releases: [] as Array<() => void>, settingsApplied: () => applied.length, takes: true, closed: [] as string[],
+    reply: undefined as ((pending: ChatMessage) => void) | undefined };
   const desktopChat = chatService(desktopStorage, turns, "desktop", desktopControl);
   const machineChat = chatService(machineStorage, turns, "machine", machineControl);
 
@@ -387,4 +390,22 @@ test("a chat deleted on the computer is deleted on the machine too, through the 
   await h.machineChat.resumeServerTurns();
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal(await h.machineStorage.getConversation("chat-g"), undefined);
+});
+
+test("a machine member whose copy of the project is missing makes the computer forget that copy, so the next message copies it again", async (t) => {
+  const h = await linked(t, localChat("chat-gone", { repoPath: "/Users/me/project" }));
+  const forgotten: Array<[string, string]> = [];
+  h.desktopChat.setMachineProjectMissingHandler(async (machineId, localPath) => { forgotten.push([machineId, localPath]); });
+  // What the machine writes when its copy is gone (chat.ts sets this mark).
+  h.machineControl.reply = (pending) => {
+    pending.status = "error";
+    pending.content = "@drew could not start: the copy of project on this cloud machine is missing.";
+    pending.metadata = { ...pending.metadata, missingProjectCopy: { machineId: "box", sourcePath: "/Users/me/project" } };
+  };
+  await h.desktopChat.sendMessage({ conversationId: "chat-gone", content: "@drew hello" } as never);
+  await until(async () => forgotten, (calls) => calls.length > 0);
+  assert.deepEqual(forgotten[0], ["box", "/Users/me/project"]);
+  // The machine keeps the mark it wrote; only the computer acts on it.
+  const machineChat = await h.machineStorage.getConversation("chat-gone");
+  assert.ok(machineChat?.messages.some((message) => message.metadata?.missingProjectCopy), "the mark travels with the reply");
 });
