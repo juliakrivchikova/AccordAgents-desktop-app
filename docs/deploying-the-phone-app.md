@@ -24,6 +24,13 @@ the phone can see, because that lands as a *preview* deployment.
 
 ## Deploying
 
+Normally nobody runs this by hand: every beta released through the GitHub
+Actions `Release` workflow also builds the phone app from the released commit,
+deploys it to the `staging` branch, and checks that `mobile.accordagents.com`
+serves exactly that build (job `Phone app`; secret `CLOUDFLARE_API_TOKEN`).
+Stable releases do not deploy it, because `main` is older than `beta`. To
+deploy by hand, for example a phone-only fix between betas:
+
 ```bash
 npm run build:mobile                     # writes dist/mobile
 npm run deploy:mobile                    # publishes it to the production branch

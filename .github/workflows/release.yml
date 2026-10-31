@@ -15,6 +15,12 @@ name: Release
 #   APPLE_CODESIGN_IDENTITY, APPLE_TEAM_ID, MACOS_BUNDLE_ID,
 #   APPLE_NOTARIZE_APPLE_ID, APPLE_NOTARIZE_PASSWORD          same values as the local .env.local
 #   RELEASE_REPOS_TOKEN  fine-grained token with Contents read/write on the two release repos
+#   CLOUDFLARE_API_TOKEN Cloudflare token that can deploy the phone app's Pages project
+#
+# A beta release also deploys the phone app (PWA) built from the released
+# commit to mobile.accordagents.com; a trial build deploys it to a preview
+# branch only. Stable releases leave the phone app alone: main is older than
+# beta and would roll the phone back.
 
 on:
   workflow_dispatch:
@@ -46,6 +52,8 @@ jobs:
     timeout-minutes: 240
     env:
       TARGET: ${{ inputs.target }}
+    outputs:
+      version: ${{ steps.published.outputs.version }}
     steps:
       - name: Check the branch matches the release target
         run: |
@@ -111,6 +119,22 @@ jobs:
             gh api --method DELETE "repos/$repo/git/$probe"
             echo "The token can write to $repo."
           done
+
+      # The phone app is deployed after the beta is published; a token that
+      # cannot see the Pages project should stop the run before that.
+      - name: Check the Cloudflare token can deploy the phone app
+        if: inputs.target == 'beta' || inputs.target == 'build-only'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 72a0b869752e9838a0b5b21b2e4558b0
+        run: |
+          set -euo pipefail
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN must be set."
+            exit 1
+          fi
+          npx wrangler pages deployment list --project-name accordagents-mobile-control-staging > /dev/null
+          echo "The Cloudflare token can reach the phone app's Pages project."
 
       # A release bumps and tags before it notarizes, so an expired Apple
       # agreement would burn a version. Uploading a tiny file fails fast then.
@@ -233,6 +257,7 @@ jobs:
           fi
 
       - name: Check the published download
+        id: published
         if: inputs.target != 'build-only'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_REPOS_TOKEN }}
@@ -242,6 +267,7 @@ jobs:
           product="$(node -p 'const p = require("./package.json"); p.productName || p.name')"
           version="$(node -p 'require("./package.json").version')"
           echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           dir="$RUNNER_TEMP/published"
           mkdir -p "$dir"
           gh release download "v$version" --repo "$RELEASE_REPO" --dir "$dir"
@@ -292,4 +318,65 @@ jobs:
             sleep 30
           done
           echo "::warning::The update feed does not offer $VERSION to $previous yet ($url). The release is published; check the feed again instead of re-running."
+          exit 1
+
+  phone-app:
+    name: Phone app
+    needs: release
+    if: inputs.target == 'beta' || inputs.target == 'build-only'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_ACCOUNT_ID: 72a0b869752e9838a0b5b21b2e4558b0
+      PAGES_PROJECT: accordagents-mobile-control-staging
+      # The custom domain serves the Pages production branch, which is
+      # called staging. Trial builds go to a preview branch the phone never sees.
+      PAGES_BRANCH: ${{ inputs.target == 'beta' && 'staging' || 'release-trial' }}
+      SITE: ${{ inputs.target == 'beta' && 'https://mobile.accordagents.com' || 'https://release-trial.accordagents-mobile-control-staging.pages.dev' }}
+    steps:
+      # A beta deploys the phone app from the exact commit it released.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.target == 'beta' && format('refs/tags/v{0}', needs.release.outputs.version) || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # The phone app needs only esbuild and wrangler, both shipped as
+      # prebuilt binaries; no install script has to run.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Build the phone app
+        run: npm run build:mobile
+
+      - name: Deploy the phone app
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          npx wrangler pages deploy dist/mobile --project-name "$PAGES_PROJECT" --branch "$PAGES_BRANCH" \
+            --commit-hash "$sha" --commit-message "Release workflow ${GITHUB_RUN_ID} at ${sha}"
+
+      # Ask the address the phone uses, not the deploy output.
+      - name: Check the site serves this build
+        run: |
+          set -euo pipefail
+          expected_worker="$(shasum -a 256 dist/mobile/service-worker.js | cut -d' ' -f1)"
+          expected_app="$(shasum -a 256 dist/mobile/mobile-app.js | cut -d' ' -f1)"
+          for attempt in $(seq 1 20); do
+            worker="$(curl -fsS -H 'Cache-Control: no-cache' "$SITE/service-worker.js?check=$GITHUB_RUN_ID-$attempt" | shasum -a 256 | cut -d' ' -f1 || true)"
+            app="$(curl -fsS -H 'Cache-Control: no-cache' "$SITE/mobile-app.js?check=$GITHUB_RUN_ID-$attempt" | shasum -a 256 | cut -d' ' -f1 || true)"
+            if [ "$worker" = "$expected_worker" ] && [ "$app" = "$expected_app" ]; then
+              echo "$SITE serves this build ($(grep -o 'ASSET_VERSION = "[^"]*"' dist/mobile/service-worker.js))."
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::$SITE does not serve the build this run deployed."
           exit 1
