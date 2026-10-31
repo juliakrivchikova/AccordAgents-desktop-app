@@ -568,7 +568,8 @@ export class HubServer {
         if (request.method === "PUT") {
           // A body is put up before what names it reaches the server: a
           // phone's picture (it may be offline in between) is kept a month
-          // for it, anyone else's (a catalog's avatar) a day.
+          // for it, anyone else's (a computer's or a machine's picture, sent
+          // right before its message; a catalog's avatar) a day.
           await this.options.storage.deviceEventBlobs().pin([reference.blobHash], device.role === "phone" ? "phone-upload" : "upload",
             this.now() + (device.role === "phone" ? PHONE_UPLOAD_PIN_MS : UPLOAD_PIN_MS));
           await this.putBlobFragment(reference, index, body).catch((error: unknown) => {

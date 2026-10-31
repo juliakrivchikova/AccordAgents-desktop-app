@@ -140,3 +140,70 @@ test("an operation taken back while a request carried it is answered when that r
   assert.deepEqual(await answer, { status: "rejected", reason: HUB_OP_TAKEN_BACK });
   assert.equal(await store.get("op-claim"), undefined, "never sent again");
 });
+
+test("pictures go up before a batch is claimed: an operation taken back meanwhile is never sent, and a failed put counts no attempt", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-ops-client-pictures-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const storage = new StorageService({ dbPath: path.join(dir, "device.sqlite3") });
+  const store = storage.hubClientOps();
+  const written: string[] = [];
+  const fakeClient = {
+    writeOps: async (ops: HubOp[]) => {
+      written.push(...ops.map((op) => op.opId));
+      return { results: ops.map((op, index) => ({ opId: op.opId, status: "accepted", seq: index + 1 })) };
+    },
+    // The feed's long wait, as the server holds it (an answer at once would
+    // spin the reader).
+    feed: async (_after: number, waitMs: number, signal?: AbortSignal) => {
+      await new Promise<void>((resolve) => { const timer = setTimeout(resolve, waitMs); signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }); });
+      return { entries: [], head: 0, more: false };
+    }
+  };
+  let release!: () => void;
+  let puts = 0;
+  let fail = true;
+  const client = new HubOpsClient({
+    store,
+    cursor: { get: async () => "0", set: async () => undefined },
+    client: () => fakeClient as never,
+    apply: async () => undefined,
+    resync: async () => 0,
+    beforeSend: async (ops) => {
+      if (!ops.some((op) => op.kind === "message.create") || puts > 0) return false;
+      if (fail) {
+        fail = false;
+        throw new Error("A picture could not be put on your server: the connection was lost.");
+      }
+      // A slow put: the writer of the other operation takes it back meanwhile.
+      await new Promise<void>((resolve) => { release = resolve; });
+      puts += 1;
+      return true;
+    },
+    log: () => undefined
+  });
+  const at = new Date().toISOString();
+  await store.enqueue([
+    { opId: "op-picture", kind: "message.create", conversationId: "chat-1", message: { id: "m1", role: "user", content: "", createdAt: at } },
+    { opId: "op-doc", kind: "artifact.create", conversationId: "chat-1" } as unknown as HubOp
+  ], at);
+  client.start();
+  t.after(() => client.stop());
+  await until(async () => (await store.get("op-picture"))?.lastError !== undefined);
+  assert.equal((await store.get("op-picture"))?.attempts, 0, "nothing carried it: no attempt");
+  assert.deepEqual(written, []);
+  client.nudge();
+  await until(async () => typeof release === "function");
+  const taken = await client.withdraw("op-doc");
+  assert.deepEqual(taken, { status: "withdrawn", attempted: false }, "not claimed while its batch's pictures go up");
+  release();
+  await until(async () => written.length > 0);
+  assert.deepEqual(written, ["op-picture"], "the operation taken back is never sent");
+});
+
+async function until(check: () => Promise<boolean>, ms = 10_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!await check()) {
+    if (Date.now() > deadline) throw new Error("timed out");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
