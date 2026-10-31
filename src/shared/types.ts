@@ -1,6 +1,7 @@
 import type { CreateTerminalRequest, TerminalHostStateEvent, TerminalListResult, TerminalSummary } from "./terminal";
 import type { ChatScriptChangeRequest } from "./scripts";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
+import type { DeviceEventBlobReference } from "./deviceEventBlobs";
 import type {
   CreateMachineRequest,
   CreateMachineResult,
@@ -1941,6 +1942,11 @@ export interface ChatImageAttachment {
   height: number;
   storageKey: string;
   createdAt: string;
+  /** The picture's bytes on the User's server, put there by the device that
+   *  made it (the phone, the computer or a machine) before its message, so
+   *  every other device reads it from there. Absent on pictures made before
+   *  devices put their pictures on the server. */
+  hubBlob?: DeviceEventBlobReference;
 }
 
 export interface ReadChatAttachmentRequest {

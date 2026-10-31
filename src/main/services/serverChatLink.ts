@@ -19,6 +19,10 @@ const ARTIFACT_IN_FLIGHT_WAIT_MS = 10_000;
 /** A machine looks this often whether it has read the server yet, before it
  *  drops what it kept for the old order. */
 const LEGACY_DROP_CHECK_MS = 30_000;
+/** How long a picture put on the server is taken to be there without
+ *  putting it again: well under the day the server keeps a body nothing
+ *  names yet (a message deleted since may have let it go). */
+const PICTURE_PUT_REMEMBERED_MS = 10 * 60_000;
 
 /**
  * The computer's (or a machine's) link to the User's server, which owns every
@@ -49,6 +53,9 @@ export class ServerChatLink {
   private artifactMovesUnknown = false;
   /** Documents moved or read again later, after a first try failed. */
   private documentsRetry?: Promise<void>;
+  /** Pictures this link put on its server lately, by content, with when: a
+   *  batch read again or tried again does not send them again. */
+  private readonly picturesPut = new Map<string, number>();
   /** The one-time drop of what this device kept for the old order of signed
    *  events, under way (stopped by stop()). */
   private legacyDrop?: { abort: AbortController; done: Promise<void> };
@@ -128,6 +135,34 @@ export class ServerChatLink {
     return `Your server could not be reached${why}, so nothing was changed. Try again when it is back.`;
   }
 
+  /**
+   * The pictures a batch's messages name go up to the server before the
+   * batch, so no device reads a message whose picture is not there yet; true
+   * when one went up. Any failure holds the batch to be tried again: the
+   * server answers a failure to keep a picture (its disk, its database) with
+   * 400 too, so no answer is taken to mean the picture can never go. The
+   * server inside the app is read by nobody but this computer, which reads
+   * its own pictures from its disk: nothing goes up to it.
+   */
+  private async putPictures(ops: HubOp[], client: HubClient): Promise<boolean> {
+    if (this.embedded) return false;
+    let put = false;
+    const now = Date.now();
+    for (const [blobHash, at] of this.picturesPut) {
+      if (now - at > PICTURE_PUT_REMEMBERED_MS) this.picturesPut.delete(blobHash);
+    }
+    await this.options.chat.putServerPictures(ops, async (reference, bytes) => {
+      try {
+        await client.uploadBytes(bytes, reference);
+      } catch (error) {
+        throw new Error(`A picture could not be put on your server: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      this.picturesPut.set(reference.blobHash, Date.now());
+      put = true;
+    }, (blobHash) => this.picturesPut.has(blobHash));
+    return put;
+  }
+
   /** The link as ChatService uses it. */
   private chatLink(): ChatServerLink {
     return {
@@ -192,6 +227,7 @@ export class ServerChatLink {
     }
     const client = new HubClient({ url, identity: this.options.identity });
     this.client = client;
+    this.picturesPut.clear();
     const hub = this.options.storage.hub();
     this.ops = new HubOpsClient({
       store: this.options.storage.hubClientOps(),
@@ -199,6 +235,7 @@ export class ServerChatLink {
       client: () => this.ready ? this.client : undefined,
       apply: (entries: HubFeedEntry[]) => this.applyEntries(entries),
       resync: () => this.resync(),
+      beforeSend: (ops, sendingTo) => this.putPictures(ops, sendingTo),
       onAnswered: (row, outcome: HubOpOutcome) => {
         if (outcome.status === "rejected") this.options.log("chat.server.op-rejected", { opId: row.opId, kind: row.kind, conversationId: row.conversationId, reason: outcome.reason });
         // A User's message the server refused says so, with its reason (Д3).
@@ -624,6 +661,10 @@ export class ServerChatLink {
         // The order goes alone when it would make the last page too large.
         ...(last && Buffer.byteLength(JSON.stringify(order)) + bytesOf(pages[index]) < IMPORT_PAGE_BYTES ? { order } : {})
       };
+      // Its pictures go first, as with every message written to a server:
+      // made while this computer had only the server inside the app, or
+      // before the User set up this one, they are not there yet.
+      await this.putPictures([op], client);
       await this.writeOne(client, op);
       if (last && !("order" in op)) await this.writeOne(client, { opId: newOpId(), kind: "chat.import", conversationId: conversation.id, messages: [], order });
     }
