@@ -1,12 +1,13 @@
 ---
 name: release-beta
-description: Safely issue and verify AccordAgents macOS beta releases. Use when asked to prepare, run, resume, troubleshoot, or document a beta release — the GitHub Actions `Release` workflow or `npm run release:beta` — publish a beta tag, or validate beta DMG, ZIP, signing, notarization, and update-feed artifacts.
+description: Safely issue and verify AccordAgents beta releases for macOS and Windows. Use when asked to prepare, run, resume, troubleshoot, or document a beta release (the GitHub Actions `Release` workflow or `npm run release:beta`), publish a beta tag, or validate beta DMG, ZIP, Windows installer, signing, notarization, and update-feed artifacts.
 ---
 
 # Release Beta
 
-Releases are built, signed, notarized and published by the GitHub Actions `Release` workflow
-(`.github/workflows/release.yml`) on a GitHub-hosted macOS machine. Nothing releases on a merge: a
+Releases are built and published by the GitHub Actions `Release` workflow
+(`.github/workflows/release.yml`): macOS is built, signed and notarized on a GitHub-hosted macOS
+machine, then Windows is built, unsigned, on a GitHub-hosted Windows machine. Nothing releases on a merge: a
 release starts only when the User asks for one and you start the workflow. A release is complete only
 after the workflow's checks of the exact published download pass.
 
@@ -43,7 +44,8 @@ Stable releases use `--ref main -f target=patch` (or `minor`/`major`) once this 
 until then `main` has the old placeholder workflow and stable releases use the local fallback.
 `-f target=build-only` builds,
 signs, notarizes and launch-checks any branch without bumping or publishing; it keeps only checksums
-and the launch screenshot and log, never the signed app. Use it to try the pipeline itself.
+and the launch screenshot and log, never the signed app, plus the unsigned Windows installer for a
+week (`windows-trial-installer`) so it can be installed by hand. Use it to try the pipeline itself.
 
 The run, in order: checks the branch matches the target, `npm ci` with native arm64 Node, the
 dependency preflight, finds the release repo, proves the release-repo token can write there, uploads
@@ -58,6 +60,15 @@ built, their ASAR contents, signature and team, notarization and stapling, and l
 again. The update feed check runs last and only warns. Checksums, screenshots and launch logs are
 kept as the `release-evidence` artifact.
 
+Once macOS is published, the `Windows x64` job builds the same tag on a GitHub-hosted Windows
+machine with `npm run release:windows-x64 -- --skip-update-check`: it builds, checks the ASAR,
+launches the app with a throwaway profile, then adds `AccordAgents-<version>-win32-x64-Setup.exe`, the
+full NuGet package, `RELEASES` and checksums to the same GitHub Release, with a Windows section in its
+notes. It then downloads them with a read-only token, checks they are byte-identical, installs the
+published Setup.exe silently and launches the installed app (`Install and launch the installer`; a
+trial build installs the installer it built). Its feed check (`win32-x64/<previous>/RELEASES`) only
+warns. Windows builds are not code-signed. Evidence is kept as `windows-release-evidence`.
+
 A beta run then deploys the phone app (PWA) from the released tag in the `Phone app` job and checks
 that `mobile.accordagents.com` serves exactly that build; a trial build deploys it only to the
 `release-trial` preview branch. A failed or defective beta deploys no phone app. Stable releases never
@@ -70,6 +81,8 @@ Read the run (`gh run view <run-id> --log` for details) and report:
 - Released version and tag, and the GitHub Release URL
 - Run URL and the final `origin/beta` commit (the bump commit)
 - Result of the published-download step, and the screenshots in the `release-evidence` artifact
+- Windows: the result of the `Windows x64` job's `Install and launch the installer` step and its
+  screenshots in `windows-release-evidence`
 - Phone app: the `ASSET_VERSION` the `Phone app` job reports `mobile.accordagents.com` now serves
 - Update feed: offered, or the warning if it still lags (the release is published; re-probe the feed,
   never re-run the release)
@@ -86,6 +99,13 @@ Read the run (`gh run view <run-id> --log` for details) and report:
 - If only `Phone app` fails, the desktop beta is out but the phone is not updated: report that, and
   deploy by hand per `docs/deploying-the-phone-app.md` or re-run just that job (`gh run rerun <run-id>
   --job <job-id>`); re-running it never bumps a version.
+- If only `Windows x64` fails, macOS (and for a beta the phone app) is out, and Windows users keep
+  their version until a release carries Windows files. Report that, fix the cause if it is in the
+  build, and re-run just that job: it builds again and uploads to the existing release, replacing
+  its own files and its notes section. If its `Install and launch the installer` step fails after
+  publishing, report the Windows build as defective and ask before removing its files from the
+  release. If the macOS script updates the release after Windows was added (a recovery run), it
+  rewrites the whole notes: re-run the Windows job to put its section back.
 - If the published-download step fails, report the beta as defective immediately. Do not tell users to
   update to it and do not claim release completion. Ask before deleting or replacing a published
   release.

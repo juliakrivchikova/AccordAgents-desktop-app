@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -9,6 +10,10 @@ import { createReleaseAtFreshCommit, preflightReleaseRepo, verifyReleaseListing 
 
 const rootDir = process.cwd();
 const packageJsonPath = path.join(rootDir, "package.json");
+const outDir = path.join(rootDir, "out");
+// The built files under the names they are published with, and their checksums.
+const releaseDir = path.join(outDir, "windows-release");
+const windowsNotesHeading = "Windows x64:";
 
 function fail(message) {
   console.error(`\n${message}`);
@@ -18,18 +23,21 @@ function fail(message) {
 function printHelp() {
   console.log(`Usage: npm run release:windows-x64 -- [options]
 
-Builds and publishes Squirrel.Windows x64 update assets for the current package version.
-Run this after the corresponding source tag exists. It uses the same stable/beta
-release repositories as the in-app updater and uploads the Setup executable,
-full NuGet package, and RELEASES manifest required by update.electronjs.org.
-When it has to create the GitHub Release, the tag goes on a new empty commit
-on the release repo's default branch so the update feed lists it first.
+Builds, launch-checks and publishes the unsigned Squirrel.Windows x64 assets for the
+current package version. Run this after the corresponding source tag exists. It uses
+the same stable/beta release repositories as the in-app updater and uploads the Setup
+executable, the full NuGet package and the RELEASES manifest required by
+update.electronjs.org, with checksums for the first two. A release that already
+exists (the macOS build published it) only gets these files added. When it has to
+create the GitHub Release, the tag goes on a new empty commit on the release repo's
+default branch so the update feed lists it first.
 
 Options:
   --repo owner/repo              Public GitHub release repo. Defaults to package.json config for this channel.
   --from-version version         Installed version used to verify the update endpoint.
   --skip-update-check            Do not query update.electronjs.org after upload.
   --allow-private-release-repo   Allow publishing to a private release repo. Auto-updates will not work there.
+  --build-only                   Build, check and prepare the files in out/windows-release without publishing.
   --dry-run                      Print the planned release without changing files or GitHub state.
   -h, --help                     Show this help.
 `);
@@ -44,12 +52,18 @@ function run(command, args, options = {}) {
   });
 }
 
-function runInherited(command, args) {
+function runInherited(command, args, env = process.env) {
   execFileSync(command, args, {
     cwd: rootDir,
-    env: process.env,
+    env,
     stdio: "inherit"
   });
+}
+
+// The build runs every dependency's code; it needs no GitHub credentials.
+function envWithoutGitHubTokens() {
+  const { GH_TOKEN, GITHUB_TOKEN, SOURCE_PUSH_TOKEN, ...env } = process.env;
+  return env;
 }
 
 function runNpmInherited(args) {
@@ -57,7 +71,7 @@ function runNpmInherited(args) {
   if (!npmExecPath || !existsSync(npmExecPath)) {
     fail("Run the Windows release through npm so its CLI entry point can be launched safely.");
   }
-  runInherited(process.execPath, [npmExecPath, ...args]);
+  runInherited(process.execPath, [npmExecPath, ...args], envWithoutGitHubTokens());
 }
 
 function commandSucceeds(command, args) {
@@ -111,6 +125,7 @@ function parseArgs(version) {
     fromVersion: process.env.UPDATE_FROM_VERSION?.trim() || "",
     skipUpdateCheck: false,
     allowPrivateReleaseRepo: false,
+    buildOnly: false,
     dryRun: false
   };
 
@@ -147,6 +162,10 @@ function parseArgs(version) {
       options.allowPrivateReleaseRepo = true;
       continue;
     }
+    if (arg === "--build-only") {
+      options.buildOnly = true;
+      continue;
+    }
     if (arg === "--dry-run") {
       options.dryRun = true;
       continue;
@@ -160,7 +179,7 @@ function parseArgs(version) {
   if (!options.releaseRepo) {
     fail("Could not determine the release repository. Set package.json config, RELEASE_REPO, or pass --repo owner/repo.");
   }
-  if (!options.skipUpdateCheck && !options.fromVersion) {
+  if (!options.buildOnly && !options.skipUpdateCheck && !options.fromVersion) {
     fail("Pass --from-version <installed-version> or --skip-update-check.");
   }
 
@@ -233,19 +252,85 @@ function requireFile(filePath) {
   return filePath;
 }
 
-function releaseAssets() {
-  const assetDir = path.join(rootDir, "out", "make", "squirrel.windows", "x64");
-  const names = readdirSync(assetDir);
+function productName() {
+  const currentPackageJson = packageJson();
+  return currentPackageJson.productName || currentPackageJson.name;
+}
+
+// The packaged app is checked before anything is published: its archive holds
+// the runtime files and nothing else, and it starts with a throwaway profile.
+function checkPackagedApp() {
+  const appDir = path.join(outDir, `${productName()}-win32-x64`);
+  console.log("\n==> Checking the packaged app");
+  const env = envWithoutGitHubTokens();
+  runInherited(process.execPath, [path.join(rootDir, ".agents", "skills", "release-beta", "scripts", "verify-release.mjs"), "packaged", appDir], env);
+  runInherited(process.execPath, [
+    path.join(rootDir, "scripts", "smoke-launch-packaged-app.mjs"),
+    appDir,
+    "--screenshot",
+    path.join(outDir, "launch", "windows.png"),
+    "--log",
+    path.join(outDir, "launch", "windows.log")
+  ], env);
+}
+
+function sha256(filePath) {
+  return createHash("sha256").update(readFileSync(filePath)).digest("hex");
+}
+
+// GitHub turns the space in Squirrel's "<name>-<version> Setup.exe" into a dot,
+// so the installer is published under a name without one. The NuGet package and
+// RELEASES keep their names: RELEASES refers to the package by name.
+function prepareReleaseFiles(version) {
+  const makeDir = path.join(outDir, "make", "squirrel.windows", "x64");
+  const names = readdirSync(makeDir);
   const setupName = names.find((name) => name.endsWith(" Setup.exe"));
   const packageName = names.find((name) => name.endsWith("-full.nupkg"));
   if (!setupName || !packageName) {
     fail("Squirrel.Windows output must include a Setup executable and full NuGet package.");
   }
-  return [
-    requireFile(path.join(assetDir, setupName)),
-    requireFile(path.join(assetDir, packageName)),
-    requireFile(path.join(assetDir, "RELEASES"))
-  ];
+
+  rmSync(releaseDir, { recursive: true, force: true });
+  mkdirSync(releaseDir, { recursive: true });
+  const copy = (name, publishedName) => {
+    const target = path.join(releaseDir, publishedName);
+    copyFileSync(requireFile(path.join(makeDir, name)), target);
+    return target;
+  };
+  const writeChecksum = (filePath) => {
+    const checksumPath = `${filePath}.sha256`;
+    writeFileSync(checksumPath, `${sha256(filePath)}  ${path.basename(filePath)}\n`);
+    return checksumPath;
+  };
+
+  const setupPath = copy(setupName, `${productName()}-${version}-win32-x64-Setup.exe`);
+  const packagePath = copy(packageName, packageName);
+  const releasesPath = copy("RELEASES", "RELEASES");
+  // Kept for the check of the published download only: RELEASES is a manifest,
+  // not a download.
+  writeChecksum(releasesPath);
+  return [setupPath, writeChecksum(setupPath), packagePath, writeChecksum(packagePath), releasesPath];
+}
+
+function buildAndPrepare(version) {
+  console.log("\n==> Building Windows x64 update artifacts");
+  runNpmInherited(["run", "make:win-x64"]);
+  checkPackagedApp();
+  return prepareReleaseFiles(version);
+}
+
+function windowsNotes(assets) {
+  const checksumLines = assets
+    .filter((assetPath) => assetPath.endsWith(".sha256"))
+    .map((checksumPath) => `- \`${readFileSync(checksumPath, "utf8").trim()}\``)
+    .join("\n");
+  return `${windowsNotesHeading}
+- Setup.exe: Windows x64 installer for direct download. It is not code-signed yet, so Windows may ask to confirm it before the first run.
+- NuGet package and RELEASES: Squirrel update files for update.electronjs.org.
+
+Checksums:
+${checksumLines}
+`;
 }
 
 function releaseExists(tagName, releaseRepo) {
@@ -256,9 +341,23 @@ function releaseRepoInfo(releaseRepo) {
   return JSON.parse(run("gh", ["repo", "view", releaseRepo, "--json", "defaultBranchRef,isPrivate,url"]));
 }
 
-function createOrUpdateRelease(options, tagName, defaultBranch, assets) {
+// The macOS build wrote the notes; Windows adds its own section after them, and
+// a re-run replaces that section instead of adding another.
+export function mergeWindowsNotes(body, notes) {
+  const existing = body.indexOf(windowsNotesHeading);
+  const kept = (existing === -1 ? body : body.slice(0, existing)).trimEnd();
+  return kept ? `${kept}\n\n${notes}` : notes;
+}
+
+function addWindowsNotes(tagName, releaseRepo, notes) {
+  const body = run("gh", ["release", "view", tagName, "--repo", releaseRepo, "--json", "body", "--jq", ".body"]);
+  runInherited("gh", ["release", "edit", tagName, "--repo", releaseRepo, "--notes", mergeWindowsNotes(body, notes)]);
+}
+
+function createOrUpdateRelease(options, tagName, defaultBranch, assets, notes) {
   if (releaseExists(tagName, options.releaseRepo)) {
     runInherited("gh", ["release", "upload", tagName, ...assets, "--repo", options.releaseRepo, "--clobber"]);
+    addWindowsNotes(tagName, options.releaseRepo, notes);
     return;
   }
 
@@ -273,9 +372,9 @@ function createOrUpdateRelease(options, tagName, defaultBranch, assets) {
           "--repo",
           options.releaseRepo,
           "--title",
-          `AccordAgents ${tagName}`,
+          `${productName()} ${tagName}`,
           "--notes",
-          "Windows x64 Squirrel update artifacts."
+          notes
         ]
       },
       { gh: (args) => runInherited("gh", args) }
@@ -305,8 +404,14 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Squirrel asks the feed for RELEASES; the feed URL alone answers with a JSON
+// link to the installer, which never names the NuGet package.
+export function windowsUpdateFeedUrl(releaseRepo, fromVersion) {
+  return `https://update.electronjs.org/${releaseRepo}/win32-x64/${fromVersion}/RELEASES`;
+}
+
 async function queryUpdateEndpoint(options, version) {
-  const endpoint = `https://update.electronjs.org/${options.releaseRepo}/win32-x64/${options.fromVersion}`;
+  const endpoint = windowsUpdateFeedUrl(options.releaseRepo, options.fromVersion);
   const response = await fetch(endpoint, {
     headers: { "User-Agent": `${packageJson().name || "accordagents"}-release-check` }
   });
@@ -355,12 +460,19 @@ async function main() {
     console.log(`Release repo: ${options.releaseRepo}`);
     console.log(`Version: ${version}`);
     console.log("Build: npm run make:win-x64");
-    console.log(`Update check: ${options.skipUpdateCheck ? "skipped" : `enabled from ${options.fromVersion}`}`);
+    console.log(`Publish: ${options.buildOnly ? "no (build only)" : `${tagName} in ${options.releaseRepo}`}`);
+    console.log(`Update check: ${options.buildOnly || options.skipUpdateCheck ? "skipped" : `enabled from ${options.fromVersion} (${windowsUpdateFeedUrl(options.releaseRepo, options.fromVersion)})`}`);
     return;
   }
 
   if (process.platform !== "win32") {
     fail("Windows x64 release artifacts must be built on Windows.");
+  }
+
+  if (options.buildOnly) {
+    buildAndPrepare(version);
+    console.log(`\nWindows x64 files for ${version} are ready in ${path.relative(rootDir, releaseDir)}; nothing was published.`);
+    return;
   }
 
   requireCommand("git");
@@ -384,10 +496,8 @@ async function main() {
     }
   }
 
-  console.log("\n==> Building Windows x64 update artifacts");
-  runNpmInherited(["run", "make:win-x64"]);
-  const assets = releaseAssets();
-  const targetCommit = createOrUpdateRelease(options, tagName, defaultBranch, assets);
+  const assets = buildAndPrepare(version);
+  const targetCommit = createOrUpdateRelease(options, tagName, defaultBranch, assets, windowsNotes(assets));
   const listingProblem = targetCommit
     ? await verifyReleaseListing({ releaseRepo: options.releaseRepo, tagName, targetCommit, checkOrder: true })
     : "";

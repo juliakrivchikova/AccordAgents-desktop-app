@@ -158,7 +158,8 @@ gh workflow run release.yml --repo juliakrivchikova/AccordAgents-desktop-app --r
 ```
 
 `-f target=build-only` signs, notarizes and launch-checks any branch without
-bumping or publishing. Stable targets work once this workflow is on `main`. The workflow needs the repository secrets listed at the
+bumping or publishing, and builds, installs and launches the unsigned Windows
+installer, which it keeps as an artifact for a week. Stable targets work once this workflow is on `main`. The workflow needs the repository secrets listed at the
 top of `release.yml`. It runs the same `release-mac-arm64.mjs` as below, pinned
 to the commit the run was started for, then downloads the published assets and
 checks and launches them.
@@ -206,9 +207,41 @@ restart the app so the stable feed is checked on next launch.
 
 ## Verify Auto-Updates
 
-Each `release:*` command checks that `update.electronjs.org` can find the
+Each macOS `release:*` command checks that `update.electronjs.org` can find the
 published ZIP asset before it finishes. The check uses the public release repo,
-platform `darwin-arm64`, and the version created by that release run.
+platform `darwin-arm64`, and the version created by that release run. The
+Windows check asks `win32-x64/<installed version>/RELEASES` for the new NuGet
+package (see Windows below).
+
+## Windows
+
+Windows x64 builds are not code-signed. The `Release` workflow builds them on a
+GitHub-hosted Windows machine after macOS is published, from the same tag, and
+adds these files to the same GitHub Release:
+
+```text
+AccordAgents-<version>-win32-x64-Setup.exe
+AccordAgents-<version>-win32-x64-Setup.exe.sha256
+accordagents-<squirrel version>-full.nupkg
+accordagents-<squirrel version>-full.nupkg.sha256
+RELEASES
+```
+
+The Setup executable is for direct download. The NuGet package and `RELEASES`
+are what Squirrel asks `update.electronjs.org` for
+(`win32-x64/<installed version>/RELEASES`); Squirrel writes a beta version
+without the last dot (`1.11.4-beta.3` becomes `1.11.4-beta3`).
+
+To build and check without publishing, on Windows: `npm run release:windows-x64
+-- --build-only` (files land in `out/windows-release/`). To publish by hand
+after the source tag exists on the current commit: `npm run release:windows-x64
+-- --from-version <installed version>`.
+
+If Windows signing is added later, leave `resources/sqlite/win32-x64/sqlite3.exe`
+unsigned: the app checks that file byte for byte before it opens storage, and a
+signature changes its bytes, so a signed copy refuses to start. Files that
+arrive signed by their own publisher (Microsoft's ConPTY and `d3dcompiler_47.dll`)
+should keep that signature.
 
 ## If macOS Asks for Keychain Access
 

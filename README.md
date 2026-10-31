@@ -11,8 +11,9 @@ approval, and keep decisions, artifacts, and implementation history in one
 place.
 
 > Releases ship on a stable channel and a beta channel (Settings → General →
-> **Beta updates**) for macOS on Apple Silicon. Interfaces and on-disk formats
-> may still change between versions.
+> **Beta updates**) for macOS on Apple Silicon and, in releases built by GitHub
+> Actions, Windows x64. Interfaces and on-disk formats may still change between
+> versions.
 
 ## Why
 
@@ -91,6 +92,12 @@ Download the latest DMG from the
 The app checks for updates through `update.electronjs.org` and asks before
 restarting once no member is running; turn on Settings → General → **Beta updates** to follow the beta
 channel instead.
+
+On Windows, download `AccordAgents-<version>-win32-x64-Setup.exe` from the same
+release and run it; it installs for the current user and updates the same way.
+Windows builds are not code-signed yet, so SmartScreen asks first: choose
+**More info**, then **Run anyway**. A Windows copy installed before Windows
+releases existed cannot update itself; install the current version over it once.
 
 ## Run from source
 
@@ -176,8 +183,9 @@ release repositories:
 [`AccordAgents-Releases`](https://github.com/juliakrivchikova/AccordAgents-Releases)
 for the stable channel and
 [`AccordAgents-Beta-Releases`](https://github.com/juliakrivchikova/AccordAgents-Beta-Releases)
-for betas. The source repository never hosts release artifacts. Windows x64
-packaging and publishing scripts exist, but no Windows build is published yet.
+for betas. The source repository never hosts release artifacts. Each release
+made by the GitHub Actions `Release` workflow also adds an unsigned Windows x64
+installer and its Squirrel update files to the same release.
 See `SIGN.md` for signing, notarization, and the release process, and
 `docs/deploying-the-phone-app.md` for the phone app, which is deployed
 separately from the desktop app.
