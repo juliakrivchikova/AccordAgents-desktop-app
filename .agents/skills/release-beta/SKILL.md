@@ -61,13 +61,19 @@ again. The update feed check runs last and only warns. Checksums, screenshots an
 kept as the `release-evidence` artifact.
 
 Once macOS is published, the `Windows x64` job builds the same tag on a GitHub-hosted Windows
-machine with `npm run release:windows-x64 -- --skip-update-check`: it builds, checks the ASAR,
-launches the app with a throwaway profile, then adds `AccordAgents-<version>-win32-x64-Setup.exe`, the
-full NuGet package, `RELEASES` and checksums to the same GitHub Release, with a Windows section in its
-notes. It then downloads them with a read-only token, checks they are byte-identical, installs the
-published Setup.exe silently and launches the installed app (`Install and launch the installer`; a
-trial build installs the installer it built). Its feed check (`win32-x64/<previous>/RELEASES`) only
-warns. Windows builds are not code-signed. Evidence is kept as `windows-release-evidence`.
+machine, checked out with LF line endings like the macOS one. `Build and check` (`npm run
+release:windows-x64 -- --build-only`) builds, checks the ASAR and launches the packaged app with a
+throwaway profile; `Install and launch the installer` installs the built Setup.exe silently and
+launches the installed app. Only then `Publish` (`node scripts/release-windows-x64.mjs --publish-only`,
+no build and no npm, the only step with the release token) adds the full NuGet package and
+`RELEASES`, then `AccordAgents-<version>-win32-x64-Setup.exe` and checksums, to the same GitHub
+Release, with a Windows section in its notes. The installer goes last because update.electronjs.org
+offers a release to Windows from its first `.exe` on. `Check the published download` downloads them
+with a read-only token and checks they are byte-identical. The feed check
+(`win32-x64/<previous>/RELEASES`, this build's SHA1 and size) only warns. Windows builds are not
+code-signed. Squirrel gets the beta number padded (`1.11.4-beta.3` is `1.11.4-beta003` in the NuGet
+package and the install folder) so beta.10 sorts above beta.9; see `scripts/squirrel-version.cjs`.
+Evidence, including Squirrel's install logs, is kept as `windows-release-evidence`.
 
 A beta run then deploys the phone app (PWA) from the released tag in the `Phone app` job and checks
 that `mobile.accordagents.com` serves exactly that build; a trial build deploys it only to the
@@ -81,8 +87,8 @@ Read the run (`gh run view <run-id> --log` for details) and report:
 - Released version and tag, and the GitHub Release URL
 - Run URL and the final `origin/beta` commit (the bump commit)
 - Result of the published-download step, and the screenshots in the `release-evidence` artifact
-- Windows: the result of the `Windows x64` job's `Install and launch the installer` step and its
-  screenshots in `windows-release-evidence`
+- Windows: the results of the `Windows x64` job's `Install and launch the installer` and `Check the
+  published download` steps, and its screenshots in `windows-release-evidence`
 - Phone app: the `ASSET_VERSION` the `Phone app` job reports `mobile.accordagents.com` now serves
 - Update feed: offered, or the warning if it still lags (the release is published; re-probe the feed,
   never re-run the release)
@@ -100,12 +106,17 @@ Read the run (`gh run view <run-id> --log` for details) and report:
   deploy by hand per `docs/deploying-the-phone-app.md` or re-run just that job (`gh run rerun <run-id>
   --job <job-id>`); re-running it never bumps a version.
 - If only `Windows x64` fails, macOS (and for a beta the phone app) is out, and Windows users keep
-  their version until a release carries Windows files. Report that, fix the cause if it is in the
-  build, and re-run just that job: it builds again and uploads to the existing release, replacing
-  its own files and its notes section. If its `Install and launch the installer` step fails after
-  publishing, report the Windows build as defective and ask before removing its files from the
-  release. If the macOS script updates the release after Windows was added (a recovery run), it
-  rewrites the whole notes: re-run the Windows job to put its section back.
+  the last release that has Windows files. Report that, fix the cause if it is in the build, and
+  re-run just that job: it builds again and uploads to the existing release. Before its installer is
+  up it replaces its own files; once the installer is published, `Publish` refuses to replace
+  anything (users may already be updating to those files) and the published files need checking by
+  hand: download them and compare with the checksums in the release. Ask before removing Windows
+  files from a release. If the macOS script updates the release after Windows was added (a recovery
+  run), it rewrites the whole notes: add the Windows section back by hand from the checksums.
+- If `Release` fails after publishing, `Windows x64` and `Phone app` are skipped and cannot be re-run
+  on their own. To add Windows to that version, run on a Windows machine checked out at the tag, with
+  `git config core.autocrlf false` before the checkout and a GitHub account that can write to the
+  release repo: `npm run release:windows-x64 -- --skip-update-check`.
 - If the published-download step fails, report the beta as defective immediately. Do not tell users to
   update to it and do not claim release completion. Ask before deleting or replacing a published
   release.

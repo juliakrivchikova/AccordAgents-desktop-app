@@ -7,13 +7,17 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { createReleaseAtFreshCommit, preflightReleaseRepo, verifyReleaseListing } from "./release-repo-target.mjs";
+import squirrel from "./squirrel-version.cjs";
 
 const rootDir = process.cwd();
 const packageJsonPath = path.join(rootDir, "package.json");
 const outDir = path.join(rootDir, "out");
 // The built files under the names they are published with, and their checksums.
 const releaseDir = path.join(outDir, "windows-release");
-const windowsNotesHeading = "Windows x64:";
+// The Windows section of the release notes sits between these markers, so a
+// re-run replaces exactly that section.
+const windowsNotesStart = "<!-- windows-x64 -->";
+const windowsNotesEnd = "<!-- /windows-x64 -->";
 
 function fail(message) {
   console.error(`\n${message}`);
@@ -28,9 +32,10 @@ current package version. Run this after the corresponding source tag exists. It 
 the same stable/beta release repositories as the in-app updater and uploads the Setup
 executable, the full NuGet package and the RELEASES manifest required by
 update.electronjs.org, with checksums for the first two. A release that already
-exists (the macOS build published it) only gets these files added. When it has to
-create the GitHub Release, the tag goes on a new empty commit on the release repo's
-default branch so the update feed lists it first.
+exists (the macOS build published it) only gets these files added, the installer
+last, and never has a published installer replaced. When it has to create the
+GitHub Release, the tag goes on a new empty commit on the release repo's default
+branch so the update feed lists it first.
 
 Options:
   --repo owner/repo              Public GitHub release repo. Defaults to package.json config for this channel.
@@ -38,6 +43,7 @@ Options:
   --skip-update-check            Do not query update.electronjs.org after upload.
   --allow-private-release-repo   Allow publishing to a private release repo. Auto-updates will not work there.
   --build-only                   Build, check and prepare the files in out/windows-release without publishing.
+  --publish-only                 Publish the files a --build-only run prepared, without building.
   --dry-run                      Print the planned release without changing files or GitHub state.
   -h, --help                     Show this help.
 `);
@@ -126,6 +132,7 @@ function parseArgs(version) {
     skipUpdateCheck: false,
     allowPrivateReleaseRepo: false,
     buildOnly: false,
+    publishOnly: false,
     dryRun: false
   };
 
@@ -166,11 +173,19 @@ function parseArgs(version) {
       options.buildOnly = true;
       continue;
     }
+    if (arg === "--publish-only") {
+      options.publishOnly = true;
+      continue;
+    }
     if (arg === "--dry-run") {
       options.dryRun = true;
       continue;
     }
     fail(`Unknown option: ${arg}`);
+  }
+
+  if (options.buildOnly && options.publishOnly) {
+    fail("Pass --build-only or --publish-only, not both.");
   }
 
   if (!options.releaseRepo) {
@@ -303,13 +318,33 @@ function prepareReleaseFiles(version) {
     return checksumPath;
   };
 
-  const setupPath = copy(setupName, `${productName()}-${version}-win32-x64-Setup.exe`);
-  const packagePath = copy(packageName, packageName);
-  const releasesPath = copy("RELEASES", "RELEASES");
-  // Kept for the check of the published download only: RELEASES is a manifest,
-  // not a download.
-  writeChecksum(releasesPath);
-  return [setupPath, writeChecksum(setupPath), packagePath, writeChecksum(packagePath), releasesPath];
+  for (const filePath of [copy(setupName, installerName(version)), copy(packageName, packageName), copy("RELEASES", "RELEASES")]) {
+    // RELEASES gets one too, for the check of the published download only.
+    writeChecksum(filePath);
+  }
+  return releaseFiles(version);
+}
+
+function installerName(version) {
+  return `${productName()}-${version}-win32-x64-Setup.exe`;
+}
+
+// The prepared files in the two groups they are published in: update.electronjs.org
+// serves a release to Windows once it carries an .exe or a *-win32-x64* file and
+// then reads RELEASES from it, so the installer goes up after the update files.
+function releaseFiles(version) {
+  const packageName = existsSync(releaseDir)
+    ? readdirSync(releaseDir).find((name) => name.endsWith(`-${squirrel.squirrelPackageVersion(version)}-full.nupkg`))
+    : undefined;
+  if (!packageName) {
+    fail(`${path.relative(rootDir, releaseDir)} has no NuGet package for ${version}; run with --build-only first.`);
+  }
+  const packagePath = path.join(releaseDir, packageName);
+  const setupPath = path.join(releaseDir, installerName(version));
+  return {
+    update: [packagePath, `${packagePath}.sha256`, path.join(releaseDir, "RELEASES")].map(requireFile),
+    installer: [setupPath, `${setupPath}.sha256`].map(requireFile)
+  };
 }
 
 function buildAndPrepare(version) {
@@ -319,18 +354,19 @@ function buildAndPrepare(version) {
   return prepareReleaseFiles(version);
 }
 
-function windowsNotes(assets) {
-  const checksumLines = assets
-    .filter((assetPath) => assetPath.endsWith(".sha256"))
+function windowsNotes(files) {
+  const checksumLines = [...files.installer, ...files.update]
+    .filter((filePath) => filePath.endsWith(".sha256"))
     .map((checksumPath) => `- \`${readFileSync(checksumPath, "utf8").trim()}\``)
     .join("\n");
-  return `${windowsNotesHeading}
+  return `${windowsNotesStart}
+Windows x64:
 - Setup.exe: Windows x64 installer for direct download. It is not code-signed yet, so Windows may ask to confirm it before the first run.
 - NuGet package and RELEASES: Squirrel update files for update.electronjs.org.
 
 Checksums:
 ${checksumLines}
-`;
+${windowsNotesEnd}`;
 }
 
 function releaseExists(tagName, releaseRepo) {
@@ -342,11 +378,17 @@ function releaseRepoInfo(releaseRepo) {
 }
 
 // The macOS build wrote the notes; Windows adds its own section after them, and
-// a re-run replaces that section instead of adding another.
+// a re-run replaces that section, between its markers, instead of adding another.
 export function mergeWindowsNotes(body, notes) {
-  const existing = body.indexOf(windowsNotesHeading);
-  const kept = (existing === -1 ? body : body.slice(0, existing)).trimEnd();
-  return kept ? `${kept}\n\n${notes}` : notes;
+  const start = body.indexOf(windowsNotesStart);
+  const end = start === -1 ? -1 : body.indexOf(windowsNotesEnd, start);
+  if (end === -1) {
+    const kept = body.trimEnd();
+    return kept ? `${kept}\n\n${notes}` : notes;
+  }
+  const before = body.slice(0, start).trimEnd();
+  const after = body.slice(end + windowsNotesEnd.length).trim();
+  return [before, notes, after].filter(Boolean).join("\n\n");
 }
 
 function addWindowsNotes(tagName, releaseRepo, notes) {
@@ -354,9 +396,23 @@ function addWindowsNotes(tagName, releaseRepo, notes) {
   runInherited("gh", ["release", "edit", tagName, "--repo", releaseRepo, "--notes", mergeWindowsNotes(body, notes)]);
 }
 
-function createOrUpdateRelease(options, tagName, defaultBranch, assets, notes) {
+function publishedAssetNames(tagName, releaseRepo) {
+  return run("gh", ["release", "view", tagName, "--repo", releaseRepo, "--json", "assets", "--jq", ".assets[].name"])
+    .split(/\r?\n/)
+    .filter(Boolean);
+}
+
+function createOrUpdateRelease(options, tagName, defaultBranch, files, notes) {
   if (releaseExists(tagName, options.releaseRepo)) {
-    runInherited("gh", ["release", "upload", tagName, ...assets, "--repo", options.releaseRepo, "--clobber"]);
+    const installer = path.basename(files.installer[0]);
+    // Once the installer is up, Windows users may be updating to these files;
+    // a rebuild is never byte-identical, so it must not replace them.
+    if (publishedAssetNames(tagName, options.releaseRepo).includes(installer)) {
+      fail(`${tagName} in ${options.releaseRepo} already has ${installer}, so its Windows files are not replaced.
+If they must be rebuilt, remove the Windows files from the release by hand first.`);
+    }
+    runInherited("gh", ["release", "upload", tagName, ...files.update, "--repo", options.releaseRepo, "--clobber"]);
+    runInherited("gh", ["release", "upload", tagName, ...files.installer, "--repo", options.releaseRepo, "--clobber"]);
     addWindowsNotes(tagName, options.releaseRepo, notes);
     return;
   }
@@ -367,8 +423,10 @@ function createOrUpdateRelease(options, tagName, defaultBranch, assets, notes) {
         releaseRepo: options.releaseRepo,
         branch: defaultBranch,
         tagName,
+        // gh uploads to a draft and publishes it after the last file.
         releaseArgs: [
-          ...assets,
+          ...files.update,
+          ...files.installer,
           "--repo",
           options.releaseRepo,
           "--title",
@@ -390,10 +448,9 @@ export function validateWindowsUpdateResponse({ endpoint, status, statusText, ur
     throw new Error(`Windows update check failed for ${endpoint}: HTTP ${status} ${body.trim() || statusText}`);
   }
   const updateEvidence = `${url} ${body}`;
-  // Squirrel's NuGet package version removes the dot before a numeric beta
-  // suffix (for example 1.10.1-beta.3 becomes 1.10.1-beta3).
-  const squirrelVersion = version.replace(/-beta\.(\d+)$/i, "-beta$1");
-  const escapedVersion = squirrelVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // The NuGet package carries Squirrel's form of the version (1.10.1-beta.3
+  // becomes 1.10.1-beta003, see squirrel-version.cjs).
+  const escapedVersion = squirrel.squirrelPackageVersion(version).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const expectedPackage = new RegExp(`(?:^|[/\\s])[^/\\s]*-${escapedVersion}-full\\.nupkg(?:$|[?#\\s])`, "i");
   if (!expectedPackage.test(updateEvidence)) {
     throw new Error(`Windows update response did not mention expected version ${version}: ${updateEvidence.trim()}`);
@@ -459,13 +516,14 @@ async function main() {
     console.log(`Release channel: ${isBetaVersion(version) ? "beta" : "stable"}`);
     console.log(`Release repo: ${options.releaseRepo}`);
     console.log(`Version: ${version}`);
-    console.log("Build: npm run make:win-x64");
+    console.log(`Squirrel package version: ${squirrel.squirrelPackageVersion(version)}`);
+    console.log(`Build: ${options.publishOnly ? `no (publishes ${path.relative(rootDir, releaseDir)})` : "npm run make:win-x64"}`);
     console.log(`Publish: ${options.buildOnly ? "no (build only)" : `${tagName} in ${options.releaseRepo}`}`);
     console.log(`Update check: ${options.buildOnly || options.skipUpdateCheck ? "skipped" : `enabled from ${options.fromVersion} (${windowsUpdateFeedUrl(options.releaseRepo, options.fromVersion)})`}`);
     return;
   }
 
-  if (process.platform !== "win32") {
+  if (!options.publishOnly && process.platform !== "win32") {
     fail("Windows x64 release artifacts must be built on Windows.");
   }
 
@@ -496,8 +554,8 @@ async function main() {
     }
   }
 
-  const assets = buildAndPrepare(version);
-  const targetCommit = createOrUpdateRelease(options, tagName, defaultBranch, assets, windowsNotes(assets));
+  const files = options.publishOnly ? releaseFiles(version) : buildAndPrepare(version);
+  const targetCommit = createOrUpdateRelease(options, tagName, defaultBranch, files, windowsNotes(files));
   const listingProblem = targetCommit
     ? await verifyReleaseListing({ releaseRepo: options.releaseRepo, tagName, targetCommit, checkOrder: true })
     : "";

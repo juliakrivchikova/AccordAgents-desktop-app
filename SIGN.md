@@ -229,13 +229,28 @@ RELEASES
 
 The Setup executable is for direct download. The NuGet package and `RELEASES`
 are what Squirrel asks `update.electronjs.org` for
-(`win32-x64/<installed version>/RELEASES`); Squirrel writes a beta version
-without the last dot (`1.11.4-beta.3` becomes `1.11.4-beta3`).
+(`win32-x64/<installed version>/RELEASES`). The workflow installs and launches
+the installer before it publishes anything, then uploads the NuGet package and
+`RELEASES` first and the installer last: the update service offers a release to
+Windows as soon as it carries an `.exe`, and reads `RELEASES` from it. Once an
+installer is published it is never replaced by a rebuild.
+
+The Squirrel version pads the beta number to three digits (`1.11.4-beta.3` is
+`1.11.4-beta003` in the NuGet package and the install folder
+`%LOCALAPPDATA%\accordagents\app-1.11.4-beta003`). Squirrel compares that text,
+so without padding beta.10 would sort below beta.9 and installed apps would
+keep starting the older version. Keep the padding: an unpadded version would
+sort above every padded one (`scripts/squirrel-version.cjs`).
+
+Build on a checkout with LF line endings (`git config core.autocrlf false`
+before cloning): the app ships skills, prompts and the cloud machine runtime
+byte for byte, and CRLF copies differ from the macOS build.
 
 To build and check without publishing, on Windows: `npm run release:windows-x64
--- --build-only` (files land in `out/windows-release/`). To publish by hand
-after the source tag exists on the current commit: `npm run release:windows-x64
--- --from-version <installed version>`.
+-- --build-only` (files land in `out/windows-release/`); `--publish-only` then
+publishes those files without building. To build and publish by hand after the
+source tag exists on the current commit: `npm run release:windows-x64 --
+--from-version <installed version>`.
 
 If Windows signing is added later, leave `resources/sqlite/win32-x64/sqlite3.exe`
 unsigned: the app checks that file byte for byte before it opens storage, and a
