@@ -147,7 +147,7 @@ async function backgroundServerSync() {
   } finally {
     if (db) db.close();
   }
-  if (!pairing || !pairing.hubUrl || !identity || !identity.privateKeyDerBase64 || !self.AccordHubClient) {
+  if (!pairing || !pairing.hubUrl || !identity || !(identity.privateKey || identity.privateKeyDerBase64) || !self.AccordHubClient) {
     return { synced: false, reason: "not paired with a server" };
   }
   try {

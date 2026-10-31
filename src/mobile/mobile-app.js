@@ -936,6 +936,26 @@
     });
   }
 
+  /**
+   * Replaces a record as a whole, in one transaction, while `still` holds for
+   * what is there now. writeMetaRecord merges into the stored record, which
+   * keeps every field the new value leaves out: a key written over a key kept
+   * as text would keep the text beside it.
+   */
+  function replaceMetaRecordIf(key, value, still) {
+    return withNamedStore(META_STORE, "readwrite", function (store) {
+      const read = store.get(key);
+      read.onsuccess = function () {
+        if (still(read.result)) store.put({ ...value, key });
+      };
+    });
+  }
+
+  function replaceMetaRecord(key, value) {
+    return replaceMetaRecordIf(key, value, function () { return true; });
+  }
+
+
   // Once a run has produced its final (done or error) event, replayed copies
   // of its older "running" placeholders must not resurrect. A retry of the
   // same run stays visible because its placeholder is newer than the recorded
@@ -2161,14 +2181,51 @@
     hubIdentityCache = undefined;
   }
 
+  function hasSigningKey(identity) {
+    return Boolean(identity && (identity.privateKey || identity.privateKeyDerBase64));
+  }
+
   function hubIdentity() {
     if (hubIdentityCache) return Promise.resolve(hubIdentityCache);
     const generation = hubIdentityGeneration;
     return readMetaRecord(HUB_IDENTITY_META_KEY).then(function (identity) {
-      if (!identity || !identity.deviceId || !identity.privateKeyDerBase64) throw new Error("This phone has lost its pairing key. Pair it again.");
+      if (!identity || !identity.deviceId || !hasSigningKey(identity)) throw new Error("This phone has lost its pairing key. Pair it again.");
+      return identity.privateKeyDerBase64 ? sealStoredIdentity(identity) : identity;
+    }).then(function (identity) {
       if (generation === hubIdentityGeneration) hubIdentityCache = identity;
       return identity;
     });
+  }
+
+  /**
+   * A key this phone kept as text (it paired before keys were kept
+   * unreadable) becomes a non-extractable key, once and in place: the same
+   * key, so the server, the Mac and the pairing stay as they are and nothing
+   * is paired again; the text is gone from the database. The key on record
+   * is replaced only while it is still this one (another tab may have paired
+   * meanwhile). A failed write signs from memory and is tried again on the
+   * next launch.
+   */
+  async function sealStoredIdentity(identity) {
+    const api = globalThis.AccordHubClient;
+    if (!api || typeof api.sealHubDeviceIdentity !== "function") return identity;
+    const sealed = await api.sealHubDeviceIdentity(identity);
+    try {
+      await replaceMetaRecordIf(HUB_IDENTITY_META_KEY, sealed, function (current) {
+        return Boolean(current && current.deviceId === identity.deviceId && current.privateKeyDerBase64);
+      });
+      const pending = await readMetaRecord(HUB_PENDING_IDENTITY_META_KEY);
+      if (pending && pending.identity && pending.identity.privateKeyDerBase64) {
+        const pendingSealed = { ...pending, identity: await api.sealHubDeviceIdentity(pending.identity) };
+        await replaceMetaRecordIf(HUB_PENDING_IDENTITY_META_KEY, pendingSealed, function (current) {
+          return Boolean(current && current.tokenHash === pending.tokenHash && current.identity && current.identity.privateKeyDerBase64);
+        });
+      }
+      recordRelayDebug({ event: "hub-key-sealed", deviceId: identity.deviceId });
+    } catch (error) {
+      recordRelayDebug({ event: "hub-key-seal-failed", message: String(error && error.message || error) });
+    }
+    return sealed;
   }
 
   function hubClient() {
@@ -2256,18 +2313,20 @@
       const previous = await readMetaRecord(HUB_IDENTITY_META_KEY);
       const previousPairing = await readMetaRecord(HUB_PAIRING_META_KEY);
       const revoked = await readMetaRecord(HUB_REVOKED_IDENTITY_META_KEY);
-      const sameServer = Boolean(previous && previous.deviceId && previous.privateKeyDerBase64 && previousPairing &&
+      const sameServer = Boolean(previous && previous.deviceId && hasSigningKey(previous) && previousPairing &&
         previousPairing.hubId === invite.hubId && previousPairing.deviceId === previous.deviceId &&
         !(revoked && revoked.deviceId && revoked.deviceId === previous.deviceId));
-      const identity = pending && pending.tokenHash === tokenHash && pending.identity ? pending.identity
+      const chosen = pending && pending.tokenHash === tokenHash && pending.identity ? pending.identity
         : sameServer ? previous : await api.createHubDeviceIdentity();
-      await writeMetaRecord(HUB_PENDING_IDENTITY_META_KEY, { tokenHash: tokenHash, identity: identity });
+      // A key kept as text (paired before) goes on as a non-extractable one.
+      const identity = chosen.privateKeyDerBase64 ? await api.sealHubDeviceIdentity(chosen) : chosen;
+      await replaceMetaRecord(HUB_PENDING_IDENTITY_META_KEY, { tokenHash: tokenHash, identity: identity });
       const answer = await api.enrollHubPhone({ hubUrl: invite.hubUrl, hubId: invite.hubId, token: invite.token, identity: identity, name: phoneName() });
       // The key the server now knows this phone by, before the pairing that
       // names it: a pairing without its key could never sign again. What the
       // queue still holds goes out under it: a request is signed when it is
       // sent, the operations in it are not.
-      await writeMetaRecord(HUB_IDENTITY_META_KEY, identity);
+      await replaceMetaRecord(HUB_IDENTITY_META_KEY, identity);
       forgetHubIdentity();
       const pairing = { hubUrl: invite.hubUrl, hubId: invite.hubId, deviceId: identity.deviceId, scope: answer.scope, pairedAt: nowIso(), protocol: answer.protocol };
       setStoredValue(HUB_PAIRING_KEY, JSON.stringify(pairing));
