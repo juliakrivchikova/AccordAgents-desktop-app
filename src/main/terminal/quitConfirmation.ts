@@ -31,6 +31,8 @@ export interface QuitConfirmation {
   /** Lets the next quit through unasked: one a program asked for with a
    *  signal, not the User (Terminal.app does not ask then either). */
   allow: () => void;
+  /** Takes allow() back: the quit it let through did not happen. */
+  revoke: () => void;
 }
 
 const CONFIRMED_FOR_MS = 30_000;
@@ -38,9 +40,16 @@ const CONFIRMED_FOR_MS = 30_000;
 export function createQuitConfirmation(options: QuitConfirmationOptions): QuitConfirmation {
   let confirmed = false;
   let pending: Promise<void> | undefined;
+  let expiry: ReturnType<typeof setTimeout> | undefined;
+  const revoke = (): void => {
+    confirmed = false;
+    if (expiry) clearTimeout(expiry);
+    expiry = undefined;
+  };
   const confirm = (): void => {
+    revoke();
     confirmed = true;
-    const expiry = setTimeout(() => { confirmed = false; }, options.confirmedForMs ?? CONFIRMED_FOR_MS);
+    expiry = setTimeout(revoke, options.confirmedForMs ?? CONFIRMED_FOR_MS);
     expiry.unref?.();
   };
 
@@ -75,7 +84,37 @@ export function createQuitConfirmation(options: QuitConfirmationOptions): QuitCo
       return true;
     },
     holding: () => Boolean(pending) && !confirmed,
-    allow: confirm
+    allow: confirm,
+    revoke
+  };
+}
+
+/** The question about the terminal's commands, open or answered. */
+export interface QuitQuestion {
+  /** True: Quit; false: Cancel; undefined: it went away unanswered. */
+  answer: Promise<boolean | undefined>;
+  /** The User's own quit waits for this answer too, not only an update's
+   *  Restart. */
+  quitAsked: boolean;
+}
+
+/** One question at a time: a quit while an update's Restart is asking (or
+ *  the other way round) waits for the same answer instead of stacking a
+ *  second identical sheet. */
+export function createQuitQuestion(
+  show: (commands: Array<string | null> | undefined) => Promise<boolean | undefined>
+): (commands: Array<string | null> | undefined, by: "quit" | "restart") => QuitQuestion {
+  let open: QuitQuestion | undefined;
+  return (commands, by) => {
+    if (!open) {
+      const question: QuitQuestion = {
+        answer: show(commands).finally(() => { if (open === question) open = undefined; }),
+        quitAsked: false
+      };
+      open = question;
+    }
+    if (by === "quit") open.quitAsked = true;
+    return open;
   };
 }
 

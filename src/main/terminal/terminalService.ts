@@ -44,7 +44,6 @@ export interface TerminalServiceOptions {
   log?: (event: string, payload: Record<string, unknown>) => void;
   createTimeoutMs?: number;
   runningQueryTimeoutMs?: number;
-  settledPollMs?: number;
 }
 
 interface TerminalRecord extends TerminalSummary {
@@ -79,9 +78,6 @@ export class TerminalService {
   private readonly endedWhileStarting = new Set<string>();
   private readonly pendingQueries = new Map<string, (commands: Array<string | null> | undefined) => void>();
   private readonly windows = new Map<number, TerminalWindow>();
-  private readonly settledListeners = new Set<() => void>();
-  private settledTimer?: ReturnType<typeof setInterval>;
-  private lastRunning = false;
   private restarting?: Promise<TerminalListResult>;
   private readonly homeDir: string;
   private readonly platform: NodeJS.Platform;
@@ -183,14 +179,6 @@ export class TerminalService {
     return Boolean(this.host) && this.hostState === "running" && this.terminals.size > this.lost.size;
   }
 
-  /** Whether some terminal has a command running in it (not its shell
-   *  waiting at a prompt). An update restart waits for that, and, like the
-   *  restart gate's other checks, takes an answer it cannot get as busy. */
-  async hasRunningCommand(): Promise<boolean> {
-    const commands = await this.runningCommands();
-    return commands === undefined || commands.length > 0;
-  }
-
   /** The commands running in the terminals; undefined when the host does not
    *  answer in time (then nobody can say nothing runs). */
   runningCommands(): Promise<Array<string | null> | undefined> {
@@ -210,42 +198,14 @@ export class TerminalService {
     });
   }
 
-  /** Calls the listener when the last running command in a terminal ends. */
-  onCommandsSettled(listener: () => void): () => void {
-    this.settledListeners.add(listener);
-    if (!this.settledTimer) {
-      // The caller waits because something was running: a command that ends
-      // before the first look still counts as settling.
-      this.lastRunning = true;
-      this.settledTimer = setInterval(() => { void this.pollRunning(); }, this.options.settledPollMs ?? 2_000);
-      this.settledTimer.unref?.();
-    }
-    return () => {
-      this.settledListeners.delete(listener);
-      if (!this.settledListeners.size && this.settledTimer) {
-        clearInterval(this.settledTimer);
-        this.settledTimer = undefined;
-      }
-    };
-  }
-
   /** On quit: every shell gets its hangup and the host leaves. */
   shutdown(): void {
-    if (this.settledTimer) clearInterval(this.settledTimer);
-    this.settledTimer = undefined;
     const host = this.host;
     if (!host) return;
     this.stopping = true;
     try { host.postMessage({ type: "shutdown" }); } catch { /* already gone */ }
     const timer = setTimeout(() => { try { host.kill(); } catch { /* already gone */ } }, TERMINAL_HOST_KILL_AFTER_MS);
     timer.unref?.();
-  }
-
-  private async pollRunning(): Promise<void> {
-    const running = await this.hasRunningCommand();
-    const settled = this.lastRunning && !running;
-    this.lastRunning = running;
-    if (settled) for (const listener of [...this.settledListeners]) listener();
   }
 
   private async startShell(
@@ -338,7 +298,6 @@ export class TerminalService {
     this.pendingCreates.clear();
     for (const answer of this.pendingQueries.values()) answer([]);
     this.pendingQueries.clear();
-    this.lastRunning = false;
     if (expected || this.terminals.size === 0) {
       this.hostState = "stopped";
       this.terminals.clear();

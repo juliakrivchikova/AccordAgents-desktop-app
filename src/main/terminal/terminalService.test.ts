@@ -71,8 +71,7 @@ function service(environment: NodeJS.ProcessEnv = { SHELL: "/bin/sh", PATH: "/us
     environment: async () => environment,
     homeDir,
     platform: "darwin",
-    runningQueryTimeoutMs: 50,
-    settledPollMs: 20
+    runningQueryTimeoutMs: 50
   });
   const created = () => hosts.flatMap((host) => host.received).filter((message): message is Extract<MainToTerminalHostMessage, { type: "create" }> => message.type === "create");
   return { terminalService, hosts, created };
@@ -158,7 +157,7 @@ test("a host that dies keeps the tabs as lost; Restart brings them back in their
   assert.deepEqual(crashed.terminals.map((terminal) => terminal.lost), [true]);
   assert.equal(window.sent.at(-1)?.channel, TERMINAL_HOST_STATE_CHANNEL);
   assert.equal(terminalService.connect(window), false);
-  assert.equal(await terminalService.hasRunningCommand(), false);
+  assert.deepEqual(await terminalService.runningCommands(), []);
 
   const restarted = await terminalService.restartLost();
   assert.equal(hosts.length, 2);
@@ -285,25 +284,6 @@ test("a quit stops the host as expected: no lost tabs, no alarm", async () => {
   assert.equal(window.sent.length, told, "no alarm for a quit");
 });
 
-test("the update restart waits for a running command and hears when it ends", async () => {
-  const { terminalService, hosts } = service();
-  assert.equal(await terminalService.hasRunningCommand(), false);
-  await terminalService.create({});
-  assert.equal(await terminalService.hasRunningCommand(), false);
-  hosts[0]!.running = true;
-  assert.equal(await terminalService.hasRunningCommand(), true);
-  let settled = 0;
-  const off = terminalService.onCommandsSettled(() => { settled += 1; });
-  await wait(60);
-  hosts[0]!.running = false;
-  await wait(80);
-  off();
-  assert.equal(settled, 1);
-  // Like the update gate's other checks, an answer it cannot get is "busy".
-  hosts[0]!.answerQueries = false;
-  assert.equal(await terminalService.hasRunningCommand(), true);
-});
-
 test("a shell that ends is forgotten; a window that closes is told to the host", async () => {
   const { terminalService, hosts } = service();
   const window = new FakeWindow(3);
@@ -410,16 +390,6 @@ test("a shell that ends is told to every window, also one without a port", async
   const terminal = await terminalService.create({});
   hosts[0]!.send({ type: "exit", terminalId: terminal.terminalId, exitCode: 0 });
   assert.deepEqual(window.sent.at(-1), { channel: TERMINAL_HOST_STATE_CHANNEL, payload: { hostState: "running", terminals: [] } });
-});
-
-test("a command that ends before the first look still settles the update wait", async () => {
-  const { terminalService } = service();
-  await terminalService.create({});
-  let settled = 0;
-  const off = terminalService.onCommandsSettled(() => { settled += 1; });
-  for (let attempt = 0; attempt < 100 && settled === 0; attempt += 1) await wait(10);
-  off();
-  assert.equal(settled, 1);
 });
 
 test("the quit check hears which commands run, nothing without terminals, and 'unknown' when the host is silent", async () => {

@@ -7,7 +7,7 @@ import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { app, autoUpdater, BrowserWindow, dialog, ipcMain, MessageChannelMain, powerMonitor, protocol, shell, utilityProcess, type WebContents } from "electron";
 import { TerminalService } from "./terminal/terminalService";
-import { createQuitConfirmation, installQuitConfirmation, quitConfirmationDetail, quitStep } from "./terminal/quitConfirmation";
+import { createQuitConfirmation, createQuitQuestion, installQuitConfirmation, quitConfirmationDetail, quitStep } from "./terminal/quitConfirmation";
 import type { CreateTerminalRequest } from "../shared/terminal";
 import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
 import type {
@@ -282,14 +282,15 @@ const terminalService = new TerminalService({
 
 /** A quit while a command runs in the terminal panel asks first, as
  *  Terminal.app does. Registered ahead of every other quit step: while the
- *  User is asked, none of them starts. An update's restart was already held
- *  until no command ran, and does not ask. */
+ *  User is asked, none of them starts. An update's Restart asks the same
+ *  question itself (confirmRestart) and lets its quit through. */
 const quitConfirmation = createQuitConfirmation({
-  // Not for an update's restart (held until no command ran) nor for the
-  // re-quit after the quit steps already ran: those are past asking.
+  // Not for an update's restart (asked already) nor for the re-quit after the
+  // quit steps already ran: those are past asking.
   hasTerminals: () => !quittingForUpdate && !quitCleanupStarted && terminalService.hasLiveTerminals(),
   runningCommands: () => terminalService.runningCommands(),
-  ask: (commands) => askToQuitOverRunningCommands(commands),
+  // A window that went away under the question is no Quit.
+  ask: async (commands) => (await askToQuitOverRunningCommands(commands, "quit").answer) === true,
   quit: () => app.quit(),
   log: (event, payload) => { debugLogService.writeNow(event, payload); }
 });
@@ -1410,11 +1411,14 @@ function assertAppPage(event: Electron.IpcMainInvokeEvent): void {
 /** How long the quit question waits for a window that is still loading. */
 const QUIT_PROMPT_WINDOW_LOAD_TIMEOUT_MS = 10_000;
 
+/** One question for whoever asks while it is open (see createQuitQuestion). */
+const askToQuitOverRunningCommands = createQuitQuestion((commands) => showTerminalQuitQuestion(commands));
+
 /** The question on the app's window, as a sheet: a message box with no
  *  shown parent window runs modally on macOS and stops the whole main process
  *  until it is answered (see showUpdateRestartPrompt). With the window closed
  *  or minimized, it is brought back first. */
-async function askToQuitOverRunningCommands(commands: Array<string | null> | undefined): Promise<boolean> {
+async function showTerminalQuitQuestion(commands: Array<string | null> | undefined): Promise<boolean | undefined> {
   // The app's own window if one is open (also one whose page crashed), else
   // a new one.
   if (!updatePromptWindow()) createWindow();
@@ -1436,11 +1440,11 @@ async function askToQuitOverRunningCommands(commands: Array<string | null> | und
     });
   }
   if (window.isDestroyed()) return true;
-  // A sheet whose window goes away never answers: count that as Cancel, or
-  // every later quit would wait for it forever.
+  // A sheet whose window goes away never answers: settle it as unanswered,
+  // or every later quit would wait for it forever.
   let onClosed: (() => void) | undefined;
-  const closed = new Promise<boolean>((resolve) => {
-    onClosed = () => resolve(false);
+  const closed = new Promise<undefined>((resolve) => {
+    onClosed = () => resolve(undefined);
     window.once("closed", onClosed);
   });
   const answered = dialog.showMessageBox(window, {
@@ -2771,17 +2775,13 @@ void app.whenReady().then(async () => {
   // restarting kills the local members' CLI processes, and the new desktop
   // then upgrades every machine's runtime, which kills the members there.
   const updateRestartGate = createUpdateRestartGate({
-    // A command running in the terminal panel (not a shell at its prompt)
-    // holds the restart too, the way a working member does.
     isBusy: async () => chatService.liveRunIds().length > 0
       || machineInstallerService.hasActiveOperations()
-      || (await machineLinkService?.anyMachineBusy().catch(() => true)) === true
-      || await terminalService.hasRunningCommand(),
+      || (await machineLinkService?.anyMachineBusy().catch(() => true)) === true,
     onActivitySettled: (listener) => {
       const offRun = chatService.onParticipantRunSettled(() => listener());
       const offHello = machineLinkService?.onHello(() => listener());
-      const offTerminal = terminalService.onCommandsSettled(() => listener());
-      return () => { offRun(); offHello?.(); offTerminal(); };
+      return () => { offRun(); offHello?.(); };
     },
     // The question is asked on a window; one waiting for a window is asked as
     // soon as the User brings one up.
@@ -2792,10 +2792,33 @@ void app.whenReady().then(async () => {
     },
     canPrompt: () => updatePromptWindowShown(updatePromptWindow()),
     prompt: (info) => showUpdateRestartPrompt(info, updatePromptWindow(), () => quitConfirmation.holding()),
+    // A command running in the terminal does not hold the update back; the
+    // User's Restart asks about it the way her own quit does.
+    confirmRestart: async () => {
+      const commands = await terminalService.runningCommands();
+      if (commands !== undefined && commands.length === 0) return true;
+      debugLogService.writeNow("app-update-confirm-asked", { commands: commands ?? null });
+      const question = askToQuitOverRunningCommands(commands, "restart");
+      const restart = await question.answer.catch((error: unknown) => {
+        // A question that cannot be asked does not hold the User's Restart.
+        debugLogService.writeNow("app-update-confirm-error", { error: error instanceof Error ? error.message : String(error) });
+        return true;
+      });
+      debugLogService.writeNow("app-update-confirm-answered", { restart: restart ?? null, quitAsked: question.quitAsked });
+      // She also quit while asked: her Quit goes on as a quit, the way a quit
+      // while the update prompt is open does, and the update installs as the
+      // app quits. Restarting as well would race that quit.
+      if (restart && question.quitAsked) return false;
+      return restart;
+    },
     quitAndInstall: (() => {
       const restart = createUpdateRestart({
         quitAndInstall: () => {
           updateRestartRequested = true;
+          // Asked already (Restart asks about the terminal's commands): the
+          // update's own quit, which on Windows does not mark itself as one,
+          // must not ask again.
+          quitConfirmation.allow();
           quitAndInstallUpdate();
         },
         windows: currentUpdateWindows,
@@ -3183,6 +3206,8 @@ autoUpdater.on("error", (error: Error) => {
   if (!updateRestartRequested) return;
   updateRestartRequested = false;
   quittingForUpdate = false;
+  // No quit happened: the next one asks about the terminal's commands again.
+  quitConfirmation.revoke();
   debugLogService.writeNow("app-update-restart-failed", { message: error instanceof Error ? error.message : String(error) });
   setImmediate(() => {
     if (!mainWindow || mainWindow.isDestroyed()) createWindow();
