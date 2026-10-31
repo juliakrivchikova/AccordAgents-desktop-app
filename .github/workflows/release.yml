@@ -90,11 +90,10 @@ jobs:
           fi
           echo "RELEASE_REPO=$repo" >> "$GITHUB_ENV"
 
-      # Publishing happens after the bump and the build, so a missing or
-      # read-only token would burn a version. Creating and deleting a branch in
-      # the release repo proves the token can write there.
+      # Publishing happens after the build, so a missing or read-only token
+      # would waste the run. Creating and deleting a branch in each release
+      # repo proves the token can write there; trial builds check it too.
       - name: Check the release-repo token can publish
-        if: inputs.target != 'build-only'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_REPOS_TOKEN }}
         run: |
@@ -103,12 +102,15 @@ jobs:
             echo "::error::RELEASE_REPOS_TOKEN must be set."
             exit 1
           fi
-          branch="$(gh api "repos/$RELEASE_REPO" --jq .default_branch)"
-          sha="$(gh api "repos/$RELEASE_REPO/git/ref/heads/$branch" --jq .object.sha)"
-          probe="refs/heads/release-token-probe-$GITHUB_RUN_ID"
-          gh api --method POST "repos/$RELEASE_REPO/git/refs" -f ref="$probe" -f sha="$sha" > /dev/null
-          gh api --method DELETE "repos/$RELEASE_REPO/git/$probe"
-          echo "The token can write to $RELEASE_REPO."
+          for target in beta patch; do
+            repo="$(node scripts/release-mac-arm64.mjs "$target" --dry-run | sed -n 's/^Release repo: //p')"
+            branch="$(gh api "repos/$repo" --jq .default_branch)"
+            sha="$(gh api "repos/$repo/git/ref/heads/$branch" --jq .object.sha)"
+            probe="refs/heads/release-token-probe-$GITHUB_RUN_ID"
+            gh api --method POST "repos/$repo/git/refs" -f ref="$probe" -f sha="$sha" > /dev/null
+            gh api --method DELETE "repos/$repo/git/$probe"
+            echo "The token can write to $repo."
+          done
 
       # A release bumps and tags before it notarizes, so an expired Apple
       # agreement would burn a version. Uploading a tiny file fails fast then.
