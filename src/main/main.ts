@@ -7,6 +7,7 @@ import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { app, autoUpdater, BrowserWindow, dialog, ipcMain, MessageChannelMain, powerMonitor, protocol, shell, utilityProcess, type WebContents } from "electron";
 import { TerminalService } from "./terminal/terminalService";
+import { createQuitConfirmation, installQuitConfirmation, quitConfirmationDetail, quitStep } from "./terminal/quitConfirmation";
 import type { CreateTerminalRequest } from "../shared/terminal";
 import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
 import type {
@@ -278,6 +279,39 @@ const terminalService = new TerminalService({
   },
   log: (event, payload) => { void debugLogService.write(event, payload); }
 });
+
+/** A quit while a command runs in the terminal panel asks first, as
+ *  Terminal.app does. Registered ahead of every other quit step: while the
+ *  User is asked, none of them starts. An update's restart was already held
+ *  until no command ran, and does not ask. */
+const quitConfirmation = createQuitConfirmation({
+  // Not for an update's restart (held until no command ran) nor for the
+  // re-quit after the quit steps already ran: those are past asking.
+  hasTerminals: () => !quittingForUpdate && !quitCleanupStarted && terminalService.hasLiveTerminals(),
+  runningCommands: () => terminalService.runningCommands(),
+  ask: (commands) => askToQuitOverRunningCommands(commands),
+  quit: () => app.quit(),
+  log: (event, payload) => { debugLogService.writeNow(event, payload); }
+});
+installQuitConfirmation(app, quitConfirmation);
+
+// A quit asked for with a signal (a launcher, kill, Ctrl+C in a terminal) is
+// a program's, not the User's: it quits with the usual steps and asks nothing,
+// as Terminal.app does. Chromium installs its own handlers while the app
+// starts, after this file runs; ours go in once the app is ready, so they are
+// the ones in place. Like Chromium's, they take one signal: then they step
+// aside and the next signal ends the app at once, even with this process busy.
+const QUIT_SIGNALS = ["SIGTERM", "SIGINT", "SIGHUP"] as const;
+function onQuitSignal(signal: NodeJS.Signals): void {
+  for (const each of QUIT_SIGNALS) process.removeListener(each, onQuitSignal);
+  debugLogService.writeNow("app-quit.signal", { signal });
+  quitConfirmation.allow();
+  app.quit();
+}
+function installQuitSignalHandlers(): void {
+  for (const signal of QUIT_SIGNALS) process.on(signal, onQuitSignal);
+}
+void app.whenReady().then(() => setImmediate(installQuitSignalHandlers));
 const workspaceFileResolver = new WorkspaceFileResolver();
 const localFileOpenerService = new LocalFileOpenerService(storageService, settingsService, { resolver: workspaceFileResolver });
 const filePreviewService = new FilePreviewService(storageService, workspaceFileResolver, app.getPath("userData"), (event) => {
@@ -1204,9 +1238,9 @@ const avatarStudioService = new AvatarStudioService({
 // Scratch pictures never outlive the app: sweep whatever an earlier session left
 // behind, and cancel live draws on quit.
 void avatarStudioService.shutdown();
-app.on("before-quit", () => {
+app.on("before-quit", quitStep(quitConfirmation, () => {
   void avatarStudioService.shutdown();
-});
+}));
 
 const dispatchArtifactTool = createArtifactToolDispatcher(artifactService);
 wireArtifactToolHandler(appMcpService, chatService, dispatchArtifactTool);
@@ -1254,9 +1288,9 @@ chatService.setCardAppliers(() => localCardAppliers());
 
 const activeReviews = new Map<string, AbortController>();
 const activeChatCreations = new Set<AbortController>();
-app.on("before-quit", () => {
+app.on("before-quit", quitStep(quitConfirmation, () => {
   for (const controller of activeChatCreations) controller.abort();
-});
+}));
 
 function appSkillsSourceRoot(): string {
   return app.isPackaged
@@ -1369,6 +1403,59 @@ function assertAppPage(event: Electron.IpcMainInvokeEvent): void {
   if (!fromAppPage) {
     void debugLogService.write("terminal.refused-sender", { url: frame?.url ?? null });
     throw new Error("The terminal is only available to the app's own window.");
+  }
+}
+
+
+/** How long the quit question waits for a window that is still loading. */
+const QUIT_PROMPT_WINDOW_LOAD_TIMEOUT_MS = 10_000;
+
+/** The question on the app's window, as a sheet: a message box with no
+ *  shown parent window runs modally on macOS and stops the whole main process
+ *  until it is answered (see showUpdateRestartPrompt). With the window closed
+ *  or minimized, it is brought back first. */
+async function askToQuitOverRunningCommands(commands: Array<string | null> | undefined): Promise<boolean> {
+  // The app's own window if one is open (also one whose page crashed), else
+  // a new one.
+  if (!updatePromptWindow()) createWindow();
+  const window = updatePromptWindow();
+  // With no window to ask on, the question cannot be asked: quit.
+  if (!window || window.isDestroyed()) return true;
+  if (window.isMinimized()) window.restore();
+  window.show();
+  if (process.platform === "darwin") app.focus({ steal: true });
+  window.focus();
+  if (window.webContents.isLoading()) {
+    await new Promise<void>((resolve) => {
+      const loaded = (): void => { clearTimeout(timer); resolve(); };
+      const timer = setTimeout(() => {
+        if (!window.isDestroyed()) window.webContents.removeListener("did-finish-load", loaded);
+        resolve();
+      }, QUIT_PROMPT_WINDOW_LOAD_TIMEOUT_MS);
+      window.webContents.once("did-finish-load", loaded);
+    });
+  }
+  if (window.isDestroyed()) return true;
+  // A sheet whose window goes away never answers: count that as Cancel, or
+  // every later quit would wait for it forever.
+  let onClosed: (() => void) | undefined;
+  const closed = new Promise<boolean>((resolve) => {
+    onClosed = () => resolve(false);
+    window.once("closed", onClosed);
+  });
+  const answered = dialog.showMessageBox(window, {
+    type: "warning",
+    buttons: ["Quit", "Cancel"],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+    message: "Quit AccordAgents?",
+    detail: quitConfirmationDetail(commands)
+  }).then(({ response }) => response === 0);
+  try {
+    return await Promise.race([answered, closed]);
+  } finally {
+    if (onClosed && !window.isDestroyed()) window.removeListener("closed", onClosed);
   }
 }
 
@@ -2704,7 +2791,7 @@ void app.whenReady().then(async () => {
       return () => { app.removeListener("browser-window-focus", onFocus); };
     },
     canPrompt: () => updatePromptWindowShown(updatePromptWindow()),
-    prompt: (info) => showUpdateRestartPrompt(info, updatePromptWindow()),
+    prompt: (info) => showUpdateRestartPrompt(info, updatePromptWindow(), () => quitConfirmation.holding()),
     quitAndInstall: (() => {
       const restart = createUpdateRestart({
         quitAndInstall: () => {
@@ -3121,9 +3208,16 @@ app.on("before-quit", (event) => {
     forUpdate: quittingForUpdate,
     cleanupStarted: quitCleanupStarted,
     cleanupFinished: quitCleanupFinished,
+    heldForConfirmation: quitConfirmation.holding(),
     windows: BrowserWindow.getAllWindows().length
   });
   if (quittingForUpdate) {
+    return;
+  }
+  // The User is being asked whether to stop the terminal's commands; the
+  // quit goes on (or not) from her answer.
+  if (quitConfirmation.holding()) {
+    event.preventDefault();
     return;
   }
   if (quitCleanupFinished) {

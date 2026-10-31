@@ -69,7 +69,9 @@ export type TerminalHostToMainMessage =
   | { type: "created"; terminalId: string }
   | { type: "create-failed"; terminalId: string; error: string }
   | { type: "exit"; terminalId: string; exitCode: number; signal?: number }
-  | { type: "running"; requestId: string; running: boolean };
+  /** One entry per terminal running a command: its name, or null when the
+   *  name cannot be read. Empty: nothing runs. */
+  | { type: "running"; requestId: string; commands: Array<string | null> };
 
 /** What the host uses of @xterm/addon-serialize. Its own typings pull the
  *  browser's DOM types into the main process's program, so it is loaded
@@ -145,8 +147,8 @@ export class TerminalHostCore {
         this.disconnect(message.windowKey, true);
         return;
       case "running-query":
-        void this.anyCommandRunning().then((running) => {
-          this.toMain({ type: "running", requestId: message.requestId, running });
+        void this.runningCommands().then((commands) => {
+          this.toMain({ type: "running", requestId: message.requestId, commands });
         });
         return;
       case "shutdown":
@@ -193,9 +195,12 @@ export class TerminalHostCore {
 
   /** Whether some shell has a command in its terminal's foreground (not the
    *  shell itself waiting at its prompt). */
-  async anyCommandRunning(): Promise<boolean> {
-    const checks = [...this.sessions.values()].map((session) => this.commandRunning(session));
-    return (await Promise.all(checks)).some(Boolean);
+  /** The commands running in the terminals, one per terminal that has one:
+   *  its name ("npm", "vim") for the User to see what a quit stops, or null. */
+  async runningCommands(): Promise<Array<string | null>> {
+    const sessions = [...this.sessions.values()];
+    const running = await Promise.all(sessions.map((session) => this.commandRunning(session)));
+    return sessions.filter((_session, index) => running[index]).map((session) => foregroundName(session));
   }
 
   sessionCount(): number {
@@ -403,15 +408,24 @@ export class TerminalHostCore {
       // terminal is a command it started.
       if (group !== undefined) return group !== session.pty.pid;
     }
-    let foreground: string;
-    try {
-      foreground = session.pty.process;
-    } catch {
-      return false;
-    }
-    if (!foreground) return false;
-    return path.basename(foreground).replace(/^-/, "") !== session.shellName;
+    const foreground = foregroundProcessName(session);
+    return foreground !== undefined && foreground !== session.shellName;
   }
+}
+
+/** The name of the process in front of a terminal, as a login shell shows
+ *  it without its leading dash; undefined when it cannot be read. */
+function foregroundProcessName(session: Session): string | undefined {
+  try {
+    return path.basename(session.pty.process ?? "").replace(/^-/, "") || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function foregroundName(session: Session): string | null {
+  const name = foregroundProcessName(session);
+  return name && name !== session.shellName ? name : null;
 }
 
 function clampDimension(value: number, fallback: number): number {

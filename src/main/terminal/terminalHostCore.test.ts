@@ -211,12 +211,16 @@ test("a command is running when something other than the shell leads its termina
   const shell = h.ptys[0]!;
   group = shell.pid;
   shell.process = "bash"; // macOS /bin/sh names itself bash at its prompt
-  assert.equal(await h.core.anyCommandRunning(), false);
+  assert.equal((await h.core.runningCommands()).length > 0, false);
   group = shell.pid + 7;
-  assert.equal(await h.core.anyCommandRunning(), true);
+  assert.equal((await h.core.runningCommands()).length > 0, true);
   h.core.handleMain({ type: "running-query", requestId: "q1" });
   await waitFor(() => h.toMain.at(-1)?.type === "running", "answer");
-  assert.deepEqual(h.toMain.at(-1), { type: "running", requestId: "q1", running: true });
+  assert.deepEqual(h.toMain.at(-1), { type: "running", requestId: "q1", commands: ["bash"] });
+  shell.process = "npm";
+  assert.deepEqual(await h.core.runningCommands(), ["npm"]);
+  shell.process = "zsh";
+  assert.deepEqual(await h.core.runningCommands(), [null], "running, but under the shell's own name");
 });
 
 test("without a process group the foreground name decides", async () => {
@@ -225,10 +229,10 @@ test("without a process group the foreground name decides", async () => {
   const shell = h.ptys[0]!;
   for (const [name, running] of [["zsh", false], ["-zsh", false], ["", false], ["vim", true]] as const) {
     shell.process = name;
-    assert.equal(await h.core.anyCommandRunning(), running, name);
+    assert.equal((await h.core.runningCommands()).length > 0, running, name);
   }
   Object.defineProperty(shell, "process", { get: () => { throw new Error("gone"); } });
-  assert.equal(await h.core.anyCommandRunning(), false);
+  assert.equal((await h.core.runningCommands()).length > 0, false);
 });
 
 test("the notice is the first line on the screen", async () => {
@@ -301,12 +305,12 @@ for (const [shell, args] of [["/bin/sh", []], ["/bin/zsh", ["-l"]]] as const) {
     core.handleWindow("w", { type: "input", terminalId: "real", data: "stty size; echo marker-$((40+2))\r" });
     await waitFor(() => /marker-42/.test(text()), "marker", 10_000);
     await waitFor(() => /20 90/.test(text()), "size", 10_000);
-    assert.equal(await core.anyCommandRunning(), false, "a shell at its prompt is not running a command");
+    assert.equal((await core.runningCommands()).length > 0, false, "a shell at its prompt is not running a command");
     core.handleWindow("w", { type: "input", terminalId: "real", data: "sleep 5\r" });
     let running = false;
     for (let attempt = 0; attempt < 60 && !running; attempt += 1) {
       await wait(50);
-      running = await core.anyCommandRunning();
+      running = (await core.runningCommands()).length > 0;
     }
     assert.equal(running, true);
     core.handleMain({ type: "kill", terminalId: "real" });

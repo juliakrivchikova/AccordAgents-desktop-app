@@ -77,7 +77,7 @@ export class TerminalService {
   private readonly pendingCreates = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   /** Shells that ended before their start was confirmed. */
   private readonly endedWhileStarting = new Set<string>();
-  private readonly pendingQueries = new Map<string, (running: boolean) => void>();
+  private readonly pendingQueries = new Map<string, (commands: Array<string | null> | undefined) => void>();
   private readonly windows = new Map<number, TerminalWindow>();
   private readonly settledListeners = new Set<() => void>();
   private settledTimer?: ReturnType<typeof setInterval>;
@@ -178,21 +178,33 @@ export class TerminalService {
     return (await this.resolveFolder(repoPath)).workspaceRoot;
   }
 
+  /** Whether there are shells running now (tabs not lost with the host). */
+  hasLiveTerminals(): boolean {
+    return Boolean(this.host) && this.hostState === "running" && this.terminals.size > this.lost.size;
+  }
+
   /** Whether some terminal has a command running in it (not its shell
    *  waiting at a prompt). An update restart waits for that, and, like the
    *  restart gate's other checks, takes an answer it cannot get as busy. */
   async hasRunningCommand(): Promise<boolean> {
+    const commands = await this.runningCommands();
+    return commands === undefined || commands.length > 0;
+  }
+
+  /** The commands running in the terminals; undefined when the host does not
+   *  answer in time (then nobody can say nothing runs). */
+  runningCommands(): Promise<Array<string | null> | undefined> {
     const host = this.host;
-    if (!host || this.hostState !== "running" || this.terminals.size === this.lost.size) return false;
+    if (!host || !this.hasLiveTerminals()) return Promise.resolve([]);
     const requestId = randomUUID();
-    return new Promise<boolean>((resolve) => {
+    return new Promise<Array<string | null> | undefined>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingQueries.delete(requestId);
-        resolve(true);
+        resolve(undefined);
       }, this.options.runningQueryTimeoutMs ?? 1_500);
-      this.pendingQueries.set(requestId, (running) => {
+      this.pendingQueries.set(requestId, (commands) => {
         clearTimeout(timer);
-        resolve(running);
+        resolve(commands);
       });
       host.postMessage({ type: "running-query", requestId });
     });
@@ -313,7 +325,7 @@ export class TerminalService {
         }
         return;
       case "running":
-        this.pendingQueries.get(message.requestId)?.(message.running);
+        this.pendingQueries.get(message.requestId)?.(message.commands);
         this.pendingQueries.delete(message.requestId);
         return;
     }
@@ -324,7 +336,7 @@ export class TerminalService {
     this.host = undefined;
     for (const pending of this.pendingCreates.values()) pending.reject(new Error("The terminal stopped before it started."));
     this.pendingCreates.clear();
-    for (const answer of this.pendingQueries.values()) answer(false);
+    for (const answer of this.pendingQueries.values()) answer([]);
     this.pendingQueries.clear();
     this.lastRunning = false;
     if (expected || this.terminals.size === 0) {

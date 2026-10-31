@@ -33,7 +33,7 @@ class FakeHost implements TerminalHostProcess {
     this.received.push(message);
     queueMicrotask(() => {
       if (message.type === "create") this.send({ type: "created", terminalId: message.terminalId });
-      if (message.type === "running-query" && this.answerQueries) this.send({ type: "running", requestId: message.requestId, running: this.running });
+      if (message.type === "running-query" && this.answerQueries) this.send({ type: "running", requestId: message.requestId, commands: this.running ? ["npm"] : [] });
       if (message.type === "kill") this.send({ type: "exit", terminalId: message.terminalId, exitCode: 0 });
     });
   }
@@ -420,4 +420,19 @@ test("a command that ends before the first look still settles the update wait", 
   for (let attempt = 0; attempt < 100 && settled === 0; attempt += 1) await wait(10);
   off();
   assert.equal(settled, 1);
+});
+
+test("the quit check hears which commands run, nothing without terminals, and 'unknown' when the host is silent", async () => {
+  const { terminalService, hosts } = service();
+  assert.equal(terminalService.hasLiveTerminals(), false);
+  assert.deepEqual(await terminalService.runningCommands(), []);
+  await terminalService.create({});
+  assert.equal(terminalService.hasLiveTerminals(), true);
+  assert.deepEqual(await terminalService.runningCommands(), []);
+  hosts[0]!.running = true;
+  assert.deepEqual(await terminalService.runningCommands(), ["npm"]);
+  hosts[0]!.answerQueries = false;
+  assert.equal(await terminalService.runningCommands(), undefined);
+  hosts[0]!.crash(9);
+  assert.equal(terminalService.hasLiveTerminals(), false, "lost tabs have nothing left to stop");
 });
