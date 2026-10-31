@@ -36,6 +36,7 @@ Options:
   --prerelease                   Mark the GitHub Release as a prerelease. Auto-update check is skipped.
   --skip-update-check            Do not query update.electronjs.org after upload.
   --allow-private-release-repo   Allow publishing to a private release repo. Auto-updates will not work there.
+  --expect-head <sha>            Stop before bumping unless the source branch, after pulling, is at <sha>.
   --dry-run                      Print the planned release without changing files or GitHub state.
   -h, --help                     Show this help.
 
@@ -56,12 +57,18 @@ function run(command, args, options = {}) {
   });
 }
 
-function runInherited(command, args) {
+function runInherited(command, args, env = process.env) {
   execFileSync(command, args, {
     cwd: rootDir,
-    env: process.env,
+    env,
     stdio: "inherit"
   });
+}
+
+// The build runs every dependency's code; it needs no GitHub credentials.
+function envWithoutGitHubTokens() {
+  const { GH_TOKEN, GITHUB_TOKEN, ...env } = process.env;
+  return env;
 }
 
 function commandSucceeds(command, args) {
@@ -147,6 +154,7 @@ function parseArgs() {
     prerelease: false,
     skipUpdateCheck: false,
     allowPrivateReleaseRepo: false,
+    expectHead: "",
     dryRun: false
   };
 
@@ -185,6 +193,11 @@ function parseArgs() {
     }
     if (arg === "--dry-run") {
       options.dryRun = true;
+      continue;
+    }
+    if (arg === "--expect-head") {
+      options.expectHead = readOptionValue(args, index, arg);
+      index += 1;
       continue;
     }
     if (arg.startsWith("-")) {
@@ -513,6 +526,7 @@ if (options.dryRun) {
   console.log(`GitHub Release state: ${options.draft ? "draft" : options.prerelease ? "prerelease" : "published"}`);
   console.log("Release tag target: new empty commit on the release repo's default branch");
   console.log(`Update check: ${options.skipUpdateCheck || options.draft || options.prerelease ? "skipped" : "enabled against release repo"}`);
+  console.log(`Expected source commit: ${options.expectHead || "any"}`);
   process.exit(0);
 }
 
@@ -536,6 +550,12 @@ ensureSourceBranch(sourceBranch);
 ensureCleanWorktree();
 runInherited("git", ["pull", "--ff-only", "origin", sourceBranch]);
 ensureCleanWorktree();
+if (options.expectHead) {
+  const headCommit = run("git", ["rev-parse", "HEAD"]).trim();
+  if (headCommit !== options.expectHead) {
+    fail(`${sourceBranch} moved to ${headCommit} after this release was started for ${options.expectHead}. Nothing was bumped; start a new release for the commit you want.`);
+  }
+}
 
 const releaseRepoBranch = repoInfo.defaultBranchRef?.name || "main";
 const plannedTagName = `v${nextVersionForTarget(options.target, currentVersion())}`;
@@ -559,7 +579,7 @@ if (tagName !== plannedTagName) {
 ensureSourceTag(tagName);
 
 console.log("\n==> Building signed macOS arm64 artifacts");
-runInherited("npm", ["run", "signed:mac-arm64"]);
+runInherited("npm", ["run", "signed:mac-arm64"], envWithoutGitHubTokens());
 
 const assets = releaseAssets(version);
 const targetCommit = createOrUpdateGitHubRelease(options, tagName, releaseRepoBranch, assets);

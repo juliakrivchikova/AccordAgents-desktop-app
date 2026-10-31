@@ -4,8 +4,11 @@ name: Release
 # GitHub, or `gh workflow run release.yml --ref beta -f target=beta`.
 #   beta              bumps beta to the next -beta.N and publishes it (run on beta)
 #   patch|minor|major bumps main and publishes a stable release (run on main)
-#   build-only        builds, signs and notarizes the selected branch without
-#                     bumping or publishing; the result is a workflow artifact
+#   build-only        builds, signs, notarizes and launch-checks the selected
+#                     branch without bumping or publishing; keeps only checksums
+#                     and the launch screenshot and log
+# A release ships exactly the commit the run was started for: if the branch
+# moved meanwhile, the run stops before it uses a version.
 #
 # Secrets (repository → Settings → Secrets and variables → Actions):
 #   MACOS_CERTIFICATE_P12_BASE64, MACOS_CERTIFICATE_PASSWORD  Developer ID Application identity
@@ -38,7 +41,7 @@ jobs:
   release:
     name: ${{ inputs.target }} from ${{ github.ref_name }}
     runs-on: macos-26
-    timeout-minutes: 120
+    timeout-minutes: 240
     env:
       TARGET: ${{ inputs.target }}
     steps:
@@ -54,9 +57,12 @@ jobs:
             exit 1
           fi
 
+      # No stored credentials: dependency install scripts and the build never
+      # see a token that can push. The Release step adds one just for itself.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -71,30 +77,16 @@ jobs:
       - name: Check the dependency tree
         run: node .agents/skills/release-beta/scripts/verify-release.mjs preflight
 
-      - name: Import the Developer ID certificate
-        env:
-          CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      - name: Find the release repo
+        if: inputs.target != 'build-only'
         run: |
           set -euo pipefail
-          if [ -z "$CERTIFICATE_P12_BASE64" ] || [ -z "$CERTIFICATE_PASSWORD" ]; then
-            echo "::error::MACOS_CERTIFICATE_P12_BASE64 and MACOS_CERTIFICATE_PASSWORD must be set."
+          repo="$(node scripts/release-mac-arm64.mjs "$TARGET" --dry-run | sed -n 's/^Release repo: //p')"
+          if [ -z "$repo" ]; then
+            echo "::error::Could not determine the release repo for $TARGET."
             exit 1
           fi
-          keychain="$RUNNER_TEMP/release-signing.keychain-db"
-          keychain_password="$(openssl rand -hex 24)"
-          echo "::add-mask::$keychain_password"
-          printf '%s' "$CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
-          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
-          security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$keychain"
-          security import "$RUNNER_TEMP/developer-id.p12" -k "$keychain" -f pkcs12 -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          rm -f "$RUNNER_TEMP/developer-id.p12"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" > /dev/null
-          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
-          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          echo "RELEASE_REPO=$repo" >> "$GITHUB_ENV"
 
       # Publishing happens after the bump and the build, so a missing or
       # read-only token would burn a version. Creating and deleting a branch in
@@ -109,13 +101,12 @@ jobs:
             echo "::error::RELEASE_REPOS_TOKEN must be set."
             exit 1
           fi
-          repo="$(node -p 'const c = require("./package.json").config; process.env.TARGET === "beta" ? c.betaReleaseRepo : c.releaseRepo')"
-          branch="$(gh api "repos/$repo" --jq .default_branch)"
-          sha="$(gh api "repos/$repo/git/ref/heads/$branch" --jq .object.sha)"
+          branch="$(gh api "repos/$RELEASE_REPO" --jq .default_branch)"
+          sha="$(gh api "repos/$RELEASE_REPO/git/ref/heads/$branch" --jq .object.sha)"
           probe="refs/heads/release-token-probe-$GITHUB_RUN_ID"
-          gh api --method POST "repos/$repo/git/refs" -f ref="$probe" -f sha="$sha" > /dev/null
-          gh api --method DELETE "repos/$repo/git/$probe"
-          echo "The token can write to $repo."
+          gh api --method POST "repos/$RELEASE_REPO/git/refs" -f ref="$probe" -f sha="$sha" > /dev/null
+          gh api --method DELETE "repos/$RELEASE_REPO/git/$probe"
+          echo "The token can write to $RELEASE_REPO."
 
       # A release bumps and tags before it notarizes, so an expired Apple
       # agreement would burn a version. Uploading a tiny file fails fast then.
@@ -134,6 +125,33 @@ jobs:
           xcrun notarytool submit "$RUNNER_TEMP/notarization-probe.zip" \
             --apple-id "$APPLE_NOTARIZE_APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_NOTARIZE_PASSWORD"
 
+      - name: Import the Developer ID certificate
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CERTIFICATE_P12_BASE64" ] || [ -z "$CERTIFICATE_PASSWORD" ]; then
+            echo "::error::MACOS_CERTIFICATE_P12_BASE64 and MACOS_CERTIFICATE_PASSWORD must be set."
+            exit 1
+          fi
+          p12="$RUNNER_TEMP/developer-id.p12"
+          trap 'rm -f "$p12"' EXIT
+          keychain="$RUNNER_TEMP/release-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$keychain_password"
+          printf '%s' "$CERTIFICATE_P12_BASE64" | base64 --decode > "$p12"
+          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$keychain"
+          # -x: the private key cannot be exported again from this keychain.
+          security import "$p12" -k "$keychain" -f pkcs12 -x -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
       - name: Build, sign and notarize without publishing
         if: inputs.target == 'build-only'
         env:
@@ -144,15 +162,6 @@ jobs:
           MACOS_BUNDLE_ID: ${{ secrets.MACOS_BUNDLE_ID }}
         run: npm run signed:mac-arm64
 
-      - name: Keep the build
-        if: inputs.target == 'build-only'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: AccordAgents-${{ github.sha }}-darwin-arm64
-          path: signed/
-          retention-days: 7
-          if-no-files-found: error
-
       - name: Release
         if: inputs.target != 'build-only'
         env:
@@ -162,32 +171,50 @@ jobs:
           APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
           MACOS_BUNDLE_ID: ${{ secrets.MACOS_BUNDLE_ID }}
           GH_TOKEN: ${{ secrets.RELEASE_REPOS_TOKEN }}
+          PUSH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$auth"
+          git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
           # The update feed is checked below, without failing a published release.
-          node scripts/release-mac-arm64.mjs "$TARGET" --skip-update-check
+          node scripts/release-mac-arm64.mjs "$TARGET" --skip-update-check --expect-head "$GITHUB_SHA"
+
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then
+            security delete-keychain "$SIGNING_KEYCHAIN" || true
+          fi
 
       - name: Check the published download
         if: inputs.target != 'build-only'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_REPOS_TOKEN }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
+          product="$(node -p 'const p = require("./package.json"); p.productName || p.name')"
           version="$(node -p 'require("./package.json").version')"
-          repo="$(node -p 'const c = require("./package.json").config; process.env.TARGET === "beta" ? c.betaReleaseRepo : c.releaseRepo')"
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          echo "RELEASE_REPO=$repo" >> "$GITHUB_ENV"
           dir="$RUNNER_TEMP/published"
           mkdir -p "$dir"
-          gh release download "v$version" --repo "$repo" --dir "$dir"
-          (cd "$dir" && shasum -a 256 -c ./*.sha256)
-          ditto -x -k "$dir/AccordAgents-$version-darwin-arm64.zip" "$dir/unpacked"
-          app="$dir/unpacked/AccordAgents.app"
-          dmg="$dir/AccordAgents-$version-arm64.dmg"
+          gh release download "v$version" --repo "$RELEASE_REPO" --dir "$dir"
+          # The published bytes must be the ones this run built and checked.
+          (cd "$dir" && shasum -a 256 -c "$GITHUB_WORKSPACE"/signed/*.sha256)
+          ditto -x -k "$dir/$product-$version-darwin-arm64.zip" "$dir/unpacked"
+          app="$dir/unpacked/$product.app"
+          dmg="$dir/$product-$version-arm64.dmg"
           node .agents/skills/release-beta/scripts/verify-release.mjs packaged "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
+          team="$(codesign -dv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+          if [ "$team" != "$APPLE_TEAM_ID" ]; then
+            echo "::error::The published app is signed by team $team, not by ours."
+            exit 1
+          fi
           spctl -a -vv --type exec "$app"
           xcrun stapler validate "$app"
           xcrun stapler validate "$dmg"
@@ -195,12 +222,15 @@ jobs:
           node scripts/smoke-launch-packaged-app.mjs "$app" \
             --screenshot "$RUNNER_TEMP/launch/published.png" --log "$RUNNER_TEMP/launch/published.log"
 
-      - name: Keep the launch screenshot and log
-        if: always() && inputs.target != 'build-only'
+      - name: Keep checksums and launch evidence
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: published-launch
-          path: ${{ runner.temp }}/launch/
+          name: release-evidence
+          path: |
+            signed/*.sha256
+            out/launch/
+            ${{ runner.temp }}/launch/
           retention-days: 30
           if-no-files-found: ignore
 
@@ -221,10 +251,3 @@ jobs:
           done
           echo "::warning::The update feed does not offer $VERSION to $previous yet ($url). The release is published; check the feed again instead of re-running."
           exit 1
-
-      - name: Remove the signing keychain
-        if: always()
-        run: |
-          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then
-            security delete-keychain "$SIGNING_KEYCHAIN" || true
-          fi

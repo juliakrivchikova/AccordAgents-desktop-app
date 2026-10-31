@@ -28,7 +28,8 @@ after the workflow's checks of the exact published download pass.
 ## 1. Put the approved commit on `beta`
 
 Merge the approved feature branches into `beta` (`--no-ff`, from a clean checkout or clone) and push
-`beta` to origin. The workflow releases whatever `origin/beta` holds when it starts.
+`beta` to origin. The run releases exactly the commit `beta` pointed to when it was started; if `beta`
+moves before the bump, the run stops without using a version and you start a new one.
 
 ## 2. Start the release
 
@@ -39,16 +40,19 @@ gh run watch <run-id> --repo juliakrivchikova/AccordAgents-desktop-app --exit-st
 ```
 
 Stable releases use `--ref main -f target=patch` (or `minor`/`major`). `-f target=build-only` builds,
-signs and notarizes any branch without bumping or publishing and keeps the result as a workflow
-artifact for 7 days; use it to try the pipeline itself.
+signs, notarizes and launch-checks any branch without bumping or publishing; it keeps only checksums
+and the launch screenshot and log, never the signed app. Use it to try the pipeline itself.
 
 The run, in order: checks the branch matches the target, `npm ci` with native arm64 Node, the
-dependency preflight, imports the Developer ID certificate into a throwaway keychain, uploads a tiny
-file to Apple notarization (an expired Apple agreement fails here, before any version is used), then
-`node scripts/release-mac-arm64.mjs beta`: bump, push, tag, build, sign, notarize, launch the signed
-app with a throwaway profile (`scripts/smoke-launch-packaged-app.mjs`), publish. After publishing it
-downloads the published assets and checks checksums, ASAR contents, signature, notarization, stapling,
-and launches the downloaded app again. The update feed check runs last and only warns.
+dependency preflight, finds the release repo, proves the release-repo token can write there, uploads
+a tiny file to Apple notarization (an expired Apple agreement fails here), imports the Developer ID
+certificate into a throwaway keychain, then `node scripts/release-mac-arm64.mjs beta --expect-head
+<commit>`: bump, push, tag, build, sign, notarize, launch the signed app with a throwaway profile
+(`scripts/smoke-launch-packaged-app.mjs`), publish. Everything before the bump uses no version. It
+then removes the keychain, downloads the published assets, checks they are byte-identical to what it
+built, their ASAR contents, signature and team, notarization and stapling, and launches the download
+again. The update feed check runs last and only warns. Checksums, screenshots and launch logs are
+kept as the `release-evidence` artifact.
 
 ## 3. Report evidence
 
@@ -56,7 +60,7 @@ Read the run (`gh run view <run-id> --log` for details) and report:
 
 - Released version and tag, and the GitHub Release URL
 - Run URL and the final `origin/beta` commit (the bump commit)
-- Result of the published-download step, and the `published-launch` screenshot artifact
+- Result of the published-download step, and the screenshots in the `release-evidence` artifact
 - Update feed: offered, or the warning if it still lags (the release is published; re-probe the feed,
   never re-run the release)
 
@@ -69,9 +73,10 @@ Read the run (`gh run view <run-id> --log` for details) and report:
 - If the published-download step fails, report the beta as defective immediately. Do not tell users to
   update to it and do not claim release completion. Ask before deleting or replacing a published
   release.
-- Missing or expired secrets fail the certificate import or the notarization check. The secrets and
-  where they come from are listed at the top of `.github/workflows/release.yml`; only the User can
-  renew the Apple agreement or the release-repo token.
+- Missing or expired secrets fail before the bump: the release-repo token in `Check the release-repo
+  token can publish`, the Apple agreement or password in `Check Apple accepts notarization uploads`,
+  the certificate in `Import the Developer ID certificate`. The secrets and where they come from are
+  listed at the top of `.github/workflows/release.yml`; only the User can renew them.
 
 ## Local fallback
 

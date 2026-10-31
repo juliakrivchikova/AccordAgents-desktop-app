@@ -29,8 +29,11 @@ Use this when `.env.local` is already provided.
    ```
 
    The script cleans `out/` and `signed/`, runs typecheck, packages the app,
-   signs the app bundle, notarizes and staples the app, signs/notarizes/staples
-   the DMG, then writes the finished DMG and updater ZIP into `signed/`.
+   signs the app bundle, notarizes and staples the app, writes the updater ZIP,
+   launches the signed app once with a throwaway profile
+   (`scripts/smoke-launch-packaged-app.mjs`; a window opens briefly, screenshot
+   and log land in `out/launch/`), signs/notarizes/staples the DMG, then writes
+   the finished DMG and updater ZIP into `signed/`.
 
 5. Report only the artifact path, checksum, and validation result:
    ```bash
@@ -145,9 +148,25 @@ Both release repositories must be public before `update.electronjs.org` can
 discover new releases. The source repository and release repositories are
 separate; release artifacts are never published to the source repository.
 
-Run stable releases from `main` and beta releases from `beta`, with a clean
-worktree. Each release command enforces its source branch automatically. The
-active GitHub CLI account must have write access to the target release repository:
+Releases are normally built and published by the GitHub Actions `Release`
+workflow (`.github/workflows/release.yml`), started by hand — a merge never
+releases:
+
+```bash
+gh workflow run release.yml --repo juliakrivchikova/AccordAgents-desktop-app --ref beta -f target=beta
+gh workflow run release.yml --repo juliakrivchikova/AccordAgents-desktop-app --ref main -f target=patch
+```
+
+`-f target=build-only` signs, notarizes and launch-checks any branch without
+bumping or publishing. The workflow needs the repository secrets listed at the
+top of `release.yml`. It runs the same `release-mac-arm64.mjs` as below, pinned
+to the commit the run was started for, then downloads the published assets and
+checks and launches them.
+
+To release from a Mac instead, run stable releases from `main` and beta releases
+from `beta`, with a clean worktree. Each release command enforces its source
+branch automatically. The active GitHub CLI account must have write access to the
+target release repository:
 
 ```bash
 gh auth switch --user <your-github-username>

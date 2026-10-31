@@ -60,3 +60,14 @@ test("release branch cannot be overridden from the command line", () => {
   assert.match(failedDryRun("beta", {}, ["--branch", "main"]), /Unknown option: --branch/);
   assert.match(failedDryRun("beta", {}, ["--branch=main"]), /Unknown option: --branch=main/);
 });
+
+test("dry-run reports the source commit the release is pinned to", () => {
+  assert.match(dryRun("beta"), /Expected source commit: any/);
+  assert.match(dryRun("beta", {}, ["--expect-head", "0123abc"]), /Expected source commit: 0123abc/);
+});
+
+test("--expect-head requires a commit", () => {
+  const output = failedDryRun("beta", {}, ["--expect-head"]);
+
+  assert.match(output, /Missing value for --expect-head/);
+});
