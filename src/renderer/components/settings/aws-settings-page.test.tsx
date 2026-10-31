@@ -168,17 +168,33 @@ test("the disk shows what fills it, warns when it is low, and cleans up only aft
   await unmount();
 });
 
-test("the file browser locks a member's work and deletes only what was chosen", async () => {
+test("the file browser marks a member's work, lets it be chosen, and deletes only what was chosen", async () => {
   const ui = await mount();
   await ui.click(ui.find("aws-disk-browse-project-copies"));
   assert.deepEqual(ui.bridge.calls.listAwsInstanceFiles?.[0], ["@mirrors"]);
   const tree = ui.find("aws-disk-tree");
-  assert.match(tree?.textContent ?? "", /has a member's worktree/);
-  assert.equal(tree?.querySelector('input[aria-label="Select AccordAgents-0a6205133d"]'), null, "locked: no checkbox");
+  assert.equal(tree?.querySelector("svg.lucide-lock"), null, "no lock anywhere");
+  const shared = tree?.querySelector('[data-path$="AccordAgents-0a6205133d"]');
+  assert.equal(shared?.querySelector(".gen-aws-tree-work")?.textContent, "member's worktree · uncommitted changes");
+  assert.equal(shared?.classList.contains("is-locked"), false);
+  const busy = tree?.querySelector<HTMLInputElement>('input[aria-label="busy-project-0987654321 cannot be deleted: in use right now"]');
+  assert.ok(busy?.disabled, "in use: a checkbox that cannot be ticked");
+  assert.match(tree?.querySelector('[data-path$="busy-project-0987654321"]')?.textContent ?? "", /in use right now/);
+  assert.match(document.body.textContent ?? "", /Marked project copies hold members' work, which is deleted with them\./);
   await ui.click(tree?.querySelector('input[aria-label="Select old-project-1234567890"]') ?? null);
   assert.match(ui.find("aws-disk-delete")?.textContent ?? "", /Delete 300 MB/);
   await ui.click(ui.find("aws-disk-delete"));
-  assert.deepEqual(ui.bridge.calls.deleteAwsInstanceFiles, [[["/home/ubuntu/own/workspace/mirrors/old-project-1234567890"]]]);
+  assert.deepEqual(ui.bridge.calls.deleteAwsInstanceFiles, [[["/home/ubuntu/own/workspace/mirrors/old-project-1234567890"]]], "no work chosen, none sent");
+  const after = ui.find("aws-disk-tree");
+  await ui.click(after?.querySelector('input[aria-label="Select AccordAgents-0a6205133d"]') ?? null);
+  await ui.click(after?.querySelector('input[aria-label="Select old-project-1234567890"]') ?? null);
+  assert.match(ui.find("aws-disk-delete")?.textContent ?? "", /Delete 1\.8 GB/);
+  assert.match(document.body.textContent ?? "", /2 selected · 1\.8 GB · 1 holds members' work/);
+  await ui.click(ui.find("aws-disk-delete"));
+  assert.deepEqual(ui.bridge.calls.deleteAwsInstanceFiles?.[1], [
+    ["/home/ubuntu/own/workspace/mirrors/AccordAgents-0a6205133d", "/home/ubuntu/own/workspace/mirrors/old-project-1234567890"],
+    { withWork: { "/home/ubuntu/own/workspace/mirrors/AccordAgents-0a6205133d": ["worktree", "changes"] } }
+  ], "the work goes only with the folder chosen while it was marked");
   await unmount();
 });
 

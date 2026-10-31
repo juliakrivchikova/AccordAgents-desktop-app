@@ -27,6 +27,7 @@ import type {
   MachineUpgradeRequest
 } from "../shared/machineInstall";
 import type {
+  AwsDiskChosenWork,
   AppBridge,
   AddChatParticipantRequest,
   AgentDetectionRequest,
@@ -195,7 +196,7 @@ const bridge: AppBridge = {
   getAwsInstanceDisk: (options?: { refresh?: boolean }) => ipcRenderer.invoke("cloud-runs:aws-disk", options),
   cleanAwsInstanceDisk: (category: AwsDiskCleanCategory) => ipcRenderer.invoke("cloud-runs:aws-disk-clean", category),
   listAwsInstanceFiles: (path?: string) => ipcRenderer.invoke("cloud-runs:aws-disk-list", path),
-  deleteAwsInstanceFiles: (paths: string[]) => ipcRenderer.invoke("cloud-runs:aws-disk-delete", paths),
+  deleteAwsInstanceFiles: (paths: string[], options?: { withWork?: AwsDiskChosenWork }) => ipcRenderer.invoke("cloud-runs:aws-disk-delete", paths, options),
   stopAwsWorker: () => ipcRenderer.invoke("cloud-runs:aws-stop"),
   deleteAwsWorker: () => ipcRenderer.invoke("cloud-runs:aws-delete"),
   getAgentEnvironment: () => ipcRenderer.invoke("settings:get-agent-environment"),

@@ -114,12 +114,14 @@ export async function mount(options: {
       record("listAwsInstanceFiles", path);
       if (options.list) return options.list(path);
       return { path: "/home/ubuntu/own/workspace/mirrors", home: "/home/ubuntu", own: "/home/ubuntu/own", truncated: 0, entries: [
-        { name: "AccordAgents-0a6205133d", path: "/home/ubuntu/own/workspace/mirrors/AccordAgents-0a6205133d", bytes: 1_460_000_000, dir: true, lock: "worktree" },
-        { name: "old-project-1234567890", path: "/home/ubuntu/own/workspace/mirrors/old-project-1234567890", bytes: 300_000_000, dir: true, lock: null }
+        { name: "AccordAgents-0a6205133d", path: "/home/ubuntu/own/workspace/mirrors/AccordAgents-0a6205133d", bytes: 1_460_000_000, dir: true, lock: null, work: ["worktree", "changes"] },
+        { name: "old-project-1234567890", path: "/home/ubuntu/own/workspace/mirrors/old-project-1234567890", bytes: 300_000_000, dir: true, lock: null },
+        { name: "busy-project-0987654321", path: "/home/ubuntu/own/workspace/mirrors/busy-project-0987654321", bytes: 200_000_000, dir: true, lock: "in-use" }
       ] };
     },
-    deleteAwsInstanceFiles: async (paths: string[]) => {
-      record("deleteAwsInstanceFiles", paths);
+    deleteAwsInstanceFiles: async (paths: string[], deleteOptions?: { withWork?: Record<string, string[]> }) => {
+      if (deleteOptions) record("deleteAwsInstanceFiles", paths, deleteOptions);
+      else record("deleteAwsInstanceFiles", paths);
       if (options.del) return options.del(paths);
       return { freedBytes: 300_000_000, removed: 1, failed: [], space: { totalBytes: DISK.totalBytes, usedBytes: 36_500_000_000, availableBytes: 4_000_000_000 } };
     },

@@ -11,6 +11,7 @@ import type { CreateTerminalRequest } from "../shared/terminal";
 import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
 import type {
   AddChatParticipantRequest,
+  AwsDiskChosenWork,
   AgentDetectionRequest,
   CliProviderHostUpdate,
   DeleteAgentEnvironmentVariableRequest,
@@ -1860,7 +1861,7 @@ function registerIpc(): void {
   ipcMain.handle("cloud-runs:aws-disk", (_event, options?: { refresh?: boolean }) => awsInstanceDisk.report(options));
   ipcMain.handle("cloud-runs:aws-disk-clean", (_event, category: AwsDiskCleanCategory) => awsInstanceDisk.clean(category));
   ipcMain.handle("cloud-runs:aws-disk-list", (_event, path?: string) => awsInstanceDisk.list(path));
-  ipcMain.handle("cloud-runs:aws-disk-delete", (_event, paths: string[]) => awsInstanceDisk.remove(paths));
+  ipcMain.handle("cloud-runs:aws-disk-delete", (_event, paths: string[], options?: { withWork?: AwsDiskChosenWork }) => awsInstanceDisk.remove(paths, options?.withWork));
   ipcMain.handle("cloud-runs:aws-stop", () => cloudRunAwsService.stopWorker());
   ipcMain.handle("cloud-runs:aws-delete", () => cloudRunAwsService.deleteWorker());
   ipcMain.handle("settings:get-agent-environment", () => agentEnvironmentService.snapshot());

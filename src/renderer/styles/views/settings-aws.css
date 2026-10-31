@@ -226,6 +226,22 @@
   accent-color: var(--app-accent);
 }
 
+.gen-aws-dialog .gen-aws-tree-check input:disabled {
+  cursor: default;
+}
+
+.gen-aws-dialog .gen-aws-tree-work {
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid var(--app-warning-border);
+  border-radius: 999px;
+  background: var(--app-warning-soft);
+  color: var(--app-text-strong);
+  font-size: 11.5px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
 .gen-aws-dialog .gen-aws-tree-icon {
   flex: none;
   color: var(--app-muted);

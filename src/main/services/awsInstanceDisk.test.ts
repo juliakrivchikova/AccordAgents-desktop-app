@@ -96,9 +96,9 @@ function fixtureHome(t: TestContext): string {
   return home;
 }
 
-function runScript(home: string, mode: AwsInstanceDiskRequest["mode"], arg: unknown = "", env: Record<string, string> = {}): any {
+function runScript(home: string, mode: AwsInstanceDiskRequest["mode"], arg: unknown = "", env: Record<string, string> = {}, withWork?: Record<string, string[]>): any {
   const result = spawnSync("python3", ["-"], {
-    input: awsInstanceDiskScript({ mode, arg, root: `~/${OWN}`, data: `~/.accordagents/${OWN}` }),
+    input: awsInstanceDiskScript({ mode, arg, root: `~/${OWN}`, data: `~/.accordagents/${OWN}`, withWork }),
     env: { ...process.env, HOME: home, ...env },
     encoding: "utf8"
   });
@@ -110,6 +110,12 @@ function locks(home: string, folder: string, env: Record<string, string> = {}): 
   const listing = runScript(home, "list", folder, env) as AwsDiskListing & { ok: boolean };
   assert.equal(listing.ok, true, JSON.stringify(listing));
   return Object.fromEntries(listing.entries.map((entry) => [entry.name, entry.lock]));
+}
+
+function works(home: string, folder: string, env: Record<string, string> = {}): Record<string, string[]> {
+  const listing = runScript(home, "list", folder, env) as AwsDiskListing & { ok: boolean };
+  assert.equal(listing.ok, true, JSON.stringify(listing));
+  return Object.fromEntries(listing.entries.map((entry) => [entry.name, entry.work ?? []]));
 }
 
 /** A process table with one process working in a folder, as /proc shows it. */
@@ -170,15 +176,22 @@ test("listing marks what cannot be removed and why, and what each folder is", ne
   assert.equal(runScript(home, "list", "/etc").ok, false);
 });
 
-test("a project copy goes only as a whole, and only when nothing in it is unpushed", needsTools, (t) => {
+test("a project copy goes only as a whole, and is marked with the work a member would lose", needsTools, (t) => {
   const home = fixtureHome(t);
   const mirrors = path.join(home, OWN, "workspace", "mirrors");
   const copies = locks(home, mirrors);
-  assert.equal(copies.clean, null);
-  assert.equal(copies.shared, "worktree");
-  assert.equal(copies.dirty, "changes");
-  assert.equal(copies.ahead, "unpushed");
-  assert.equal(copies.stashed, "changes");
+  for (const name of ["clean", "shared", "dirty", "ahead", "stashed"]) assert.equal(copies[name], null, `${name} is not locked`);
+  const work = works(home, mirrors);
+  assert.deepEqual(work.clean, []);
+  assert.deepEqual(work.shared, ["worktree"]);
+  assert.deepEqual(work.dirty, ["changes"]);
+  assert.deepEqual(work.ahead, ["unpushed"]);
+  assert.deepEqual(work.stashed, ["changes"]);
+  // Only a whole copy is offered with its work: its parts stay locked.
+  const parts = locks(home, path.join(mirrors, "shared"));
+  assert.equal(parts["wt-member"], "worktree");
+  assert.equal(parts.repo, "worktree");
+  assert.deepEqual(works(home, path.join(mirrors, "shared"))["wt-member"], []);
   // Inside a project nothing is offered on its own: not a folder, a file,
   // its .git folder, or a member's worktree's .git file.
   const inside = locks(home, path.join(mirrors, "clean", "repo"));
@@ -228,6 +241,142 @@ test("deleting re-checks every path on the instance and never removes a member's
   assert.equal(reasons[path.join(OWN, "workspace", "mirrors", "dirty")], "changes");
   assert.equal(reasons[path.join(OWN, "releases", "1.2.0-ccc")], "running-version");
   assert.ok(result.space.availableBytes > 0);
+});
+
+test("a project copy with a member's work goes only when the User chose it with that work", needsTools, (t) => {
+  const home = fixtureHome(t);
+  const mirrors = path.join(home, OWN, "workspace", "mirrors");
+  const chosen = ["shared", "dirty", "ahead", "stashed"].map((name) => path.join(mirrors, name));
+  // A path the User chose without seeing work in it stays when work appeared
+  // meanwhile; a chosen path elsewhere in the same request still goes.
+  const partial = runScript(home, "delete", chosen, {}, { [chosen[0]]: ["worktree"], [chosen[2]]: ["unpushed"] }) as AwsDiskChangeResult;
+  assert.equal(partial.removed, 2);
+  assert.equal(fs.existsSync(chosen[0]), false);
+  assert.equal(fs.existsSync(chosen[2]), false);
+  assert.deepEqual(partial.failed.map((failure) => [path.basename(failure.path), failure.reason]), [["dirty", "changes"], ["stashed", "changes"]]);
+  const rest = runScript(home, "delete", [chosen[1], chosen[3]], {}, { [chosen[1]]: ["changes"], [chosen[3]]: ["changes"] }) as AwsDiskChangeResult;
+  assert.equal(rest.removed, 2);
+  assert.deepEqual(rest.failed, []);
+  assert.deepEqual(fs.readdirSync(mirrors), ["clean"]);
+});
+
+test("choosing a member's work never overrides a lock: in use, inside a project, the program's, not a whole copy", needsTools, (t) => {
+  const home = fixtureHome(t);
+  const mirrors = path.join(home, OWN, "workspace", "mirrors");
+  const worktree = path.join(mirrors, "shared", "wt-member");
+  const busy = procWith(t, worktree);
+  assert.equal(locks(home, mirrors, busy).shared, "in-use");
+  const targets = [path.join(mirrors, "shared"), path.join(mirrors, "dirty", "repo", "README.md"), path.join(home, OWN, "home"), worktree];
+  const all = Object.fromEntries(targets.map((target) => [target, ["worktree", "changes", "unpushed"]]));
+  const result = runScript(home, "delete", targets, busy, all) as AwsDiskChangeResult;
+  assert.equal(result.removed, 0);
+  assert.deepEqual(result.failed.map((failure) => failure.reason), ["in-use", "repository", "sign-ins", "in-use"]);
+  // A member's worktree is never deleted on its own, only with its whole copy.
+  const alone = runScript(home, "delete", [worktree], {}, { [worktree]: ["worktree", "changes", "unpushed"] }) as AwsDiskChangeResult;
+  assert.deepEqual(alone.failed.map((failure) => failure.reason), ["worktree"]);
+  assert.ok(fs.existsSync(path.join(worktree, "README.md")));
+  // An idle other computer's program holding a project with changes stays locked, chosen or not.
+  repo(path.join(home, OTHER, "workspace", "mirrors", "p", "repo"));
+  fs.writeFileSync(path.join(home, OTHER, "workspace", "mirrors", "p", "repo", "README.md"), "changed");
+  assert.equal(locks(home, "")[OTHER], "changes");
+  const other = path.join(home, OTHER);
+  assert.deepEqual((runScript(home, "delete", [other], {}, { [other]: ["changes"] }) as AwsDiskChangeResult).failed.map((failure) => failure.reason), ["changes"]);
+  // Clean-ups never carry a choice: a cache holding a project with changes stays.
+  repo(path.join(home, ".cache", "tool", "checkout"));
+  fs.writeFileSync(path.join(home, ".cache", "tool", "checkout", "README.md"), "changed");
+  const tool = path.join(home, ".cache", "tool");
+  const caches = runScript(home, "clean", "caches", {}, { [tool]: ["changes"] }) as AwsDiskChangeResult;
+  assert.deepEqual(caches.failed.map((failure) => [path.basename(failure.path), failure.reason]), [["tool", "changes"]]);
+  assert.ok(fs.existsSync(path.join(home, ".cache", "tool", "checkout", "README.md")));
+});
+
+test("a copy whose project has a worktree outside it stays, so nobody's worktree breaks unseen", needsTools, (t) => {
+  const home = fixtureHome(t);
+  const mirrors = path.join(home, OWN, "workspace", "mirrors");
+  const main = path.join(mirrors, "proj");
+  const feature = path.join(mirrors, "proj-feature");
+  pushedRepo(path.join(main, "repo"), path.join(home, ".remotes", "proj.git"));
+  git(path.join(main, "repo"), "worktree", "add", "-q", "-b", "feature", path.join(feature, "wt"));
+  fs.writeFileSync(path.join(feature, "wt", "work.md"), "in progress");
+  assert.equal(locks(home, mirrors).proj, "worktree-elsewhere");
+  assert.deepEqual(works(home, mirrors)["proj-feature"], ["worktree", "changes"]);
+  const result = runScript(home, "delete", [main], {}, { [main]: ["worktree", "changes", "unpushed"] }) as AwsDiskChangeResult;
+  assert.deepEqual(result.failed.map((failure) => failure.reason), ["worktree-elsewhere"]);
+  execFileSync("git", ["-C", path.join(feature, "wt"), "status"], { stdio: "ignore" });
+  // While a member works in that worktree, it stays too.
+  assert.equal(locks(home, mirrors, procWith(t, path.join(feature, "wt"))).proj, "worktree-elsewhere");
+  assert.equal(locks(home, mirrors, procWith(t, path.join(feature, "wt")))["proj-feature"], "in-use");
+  // The copy holding the worktree goes when chosen with what it holds;
+  // then the project no longer has a worktree anywhere and goes on its own.
+  const wt = runScript(home, "delete", [feature], {}, { [feature]: ["worktree", "changes"] }) as AwsDiskChangeResult;
+  assert.equal(wt.removed, 1);
+  assert.equal(locks(home, mirrors).proj, null);
+  assert.deepEqual(works(home, mirrors).proj, [], "a worktree whose folder is gone holds nothing");
+  assert.equal((runScript(home, "delete", [main]) as AwsDiskChangeResult).removed, 1);
+});
+
+test("a copy goes only with every kind of work the User saw on it, and stays when git cannot read it", needsTools, (t) => {
+  const home = fixtureHome(t);
+  const mirrors = path.join(home, OWN, "workspace", "mirrors");
+  const shared = path.join(mirrors, "shared");
+  fs.writeFileSync(path.join(shared, "repo", "README.md"), "changed too");
+  assert.deepEqual(works(home, mirrors).shared, ["worktree", "changes"], "every kind, not only the first");
+  const ahead = path.join(mirrors, "ahead");
+  // Work of a new kind appeared after the User looked: the copy stays.
+  fs.writeFileSync(path.join(ahead, "repo", "README.md"), "changed after the listing");
+  const result = runScript(home, "delete", [shared, ahead], {}, { [shared]: ["worktree", "changes"], [ahead]: ["unpushed"] }) as AwsDiskChangeResult;
+  assert.equal(result.removed, 1);
+  assert.equal(fs.existsSync(shared), false);
+  assert.deepEqual(result.failed.map((failure) => [path.basename(failure.path), failure.reason]), [["ahead", "changes"]]);
+  // A project git cannot read is never offered.
+  fs.writeFileSync(path.join(mirrors, "dirty", "repo", ".git", "HEAD"), "garbage");
+  assert.equal(locks(home, mirrors).dirty, "unreadable");
+  const dirty = path.join(mirrors, "dirty");
+  assert.deepEqual((runScript(home, "delete", [dirty], {}, { [dirty]: ["changes"] }) as AwsDiskChangeResult).failed.map((failure) => failure.reason), ["unreadable"]);
+});
+
+test("commits on no branch and bare projects are shown; a worktree is not charged with its main project's stash", needsTools, (t) => {
+  const home = fixtureHome(t);
+  const mirrors = path.join(home, OWN, "workspace", "mirrors");
+  // A detached HEAD with a commit no branch or remote has.
+  const det = path.join(mirrors, "det");
+  pushedRepo(path.join(det, "repo"), path.join(home, ".remotes", "det.git"));
+  git(path.join(det, "repo"), "checkout", "-q", "--detach");
+  fs.writeFileSync(path.join(det, "repo", "loose.md"), "y");
+  git(path.join(det, "repo"), "add", ".");
+  git(path.join(det, "repo"), "commit", "-qm", "on no branch");
+  // A bare project is read, not refused.
+  execFileSync("git", ["clone", "-q", "--bare", path.join(home, ".remotes", "det.git"), path.join(mirrors, "bare", "mirror.git")], { stdio: "ignore" });
+  // A worktree in its own copy, whose main project then gets a stash.
+  const main = path.join(mirrors, "main");
+  pushedRepo(path.join(main, "repo"), path.join(home, ".remotes", "main.git"));
+  git(path.join(main, "repo"), "worktree", "add", "-q", "-b", "topic", path.join(mirrors, "topic", "wt"));
+  fs.writeFileSync(path.join(main, "repo", "README.md"), "set aside");
+  git(path.join(main, "repo"), "stash", "-q");
+  const listed = locks(home, mirrors);
+  assert.equal(listed.det, null);
+  assert.equal(listed.bare, null);
+  assert.equal(listed.main, "worktree-elsewhere");
+  const work = works(home, mirrors);
+  assert.deepEqual(work.det, ["unpushed"]);
+  assert.deepEqual(work.bare, ["unpushed"], "a bare clone has no remote branches to compare with");
+  assert.deepEqual(work.topic, ["worktree"], "the stash and branches stay with the main project");
+  assert.deepEqual((runScript(home, "delete", [det]) as AwsDiskChangeResult).failed.map((failure) => failure.reason), ["unpushed"]);
+  const topic = path.join(mirrors, "topic");
+  const result = runScript(home, "delete", [topic, path.join(mirrors, "bare")], {}, { [topic]: ["worktree"], [path.join(mirrors, "bare")]: ["unpushed"] }) as AwsDiskChangeResult;
+  assert.equal(result.removed, 2);
+  assert.equal(execFileSync("git", ["-C", path.join(main, "repo"), "stash", "list"], { encoding: "utf8" }).trim().length > 0, true);
+});
+
+test("a linked worktree is told from a submodule by where its .git file points", needsTools, (t) => {
+  const home = fixtureHome(t);
+  const mirrors = path.join(home, OWN, "workspace", "mirrors");
+  // A project copy named "modules": its worktree's .git file mentions /modules/.
+  pushedRepo(path.join(mirrors, "modules", "repo"), path.join(home, ".remotes", "modules.git"));
+  git(path.join(mirrors, "modules", "repo"), "worktree", "add", "-q", "-b", "side", path.join(mirrors, "side", "wt"));
+  fs.writeFileSync(path.join(mirrors, "side", "wt", "README.md"), "edited");
+  assert.deepEqual(works(home, mirrors).side, ["worktree", "changes"]);
+  assert.deepEqual((runScript(home, "delete", [path.join(mirrors, "side")]) as AwsDiskChangeResult).failed.map((failure) => failure.reason), ["worktree"]);
 });
 
 test("a link is judged and removed where it is, never where it points", needsTools, (t) => {
@@ -414,9 +563,10 @@ test("the request travels in the script, never on the command line, and the inst
   const paths = Array.from({ length: 500 }, (_, index) => `/home/ubuntu/.cache/${"deep/".repeat(50)}item-${index}`);
   let seen: { command: string; script: string; timeoutMs: number } | undefined;
   const disk = service(async (_worker, command, script, timeoutMs) => { seen = { command, script, timeoutMs }; return CHANGED; });
-  await disk.remove(paths);
+  await disk.remove(paths, { [paths[7]]: ["worktree"] });
   assert.ok(seen);
   assert.ok(seen.command.length < 200);
+  assert.match(seen.script, /\\"withWork\\":\{\\"[^}]*item-7\\":\[\\"worktree\\"\]\}/, "the chosen work travels with the paths");
   assert.doesNotMatch(seen.command, /\.cache/);
   assert.match(seen.command, /timeout -k 10 285 python3 -/);
   assert.ok(seen.script.includes("item-499"));
@@ -429,6 +579,9 @@ test("the service refuses malformed requests before reaching the instance", asyn
   const disk = service(async () => { calls += 1; return CHANGED; });
   assert.throws(() => disk.remove([]), /Choose the files/);
   assert.throws(() => disk.remove(["relative/path"]), /Choose the files/);
+  assert.throws(() => disk.remove(["/home/ubuntu/a"], { "/home/ubuntu/b": ["worktree"] }), /Choose the files/, "work is chosen only with its path");
+  assert.throws(() => disk.remove(["/home/ubuntu/a"], { "/home/ubuntu/a": ["everything" as never] }), /Choose the files/, "only known kinds of work");
+  assert.throws(() => disk.remove(["/home/ubuntu/a"], { "/home/ubuntu/a": [] }), /Choose the files/, "a choice names the work it accepts");
   assert.throws(() => disk.clean("everything" as never), /Nothing to clean/);
   await disk.clean("caches");
   await disk.remove(["/home/ubuntu/.cache/electron"]);

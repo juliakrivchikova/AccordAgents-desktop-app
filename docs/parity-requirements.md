@@ -54,8 +54,10 @@ app feature.
 Consequences that follow from this and are not negotiable:
 
 - No hidden per-run or per-participant copy of the project is created by the app.
-- Whatever the app does to files on a worker must never destroy a
-  participant-created worktree or its uncommitted changes.
+- Whatever the app does to files on a worker on its own (syncing, cleaning
+  up) must never destroy a participant-created worktree or its uncommitted
+  changes. The User may still delete such a project copy herself in Settings,
+  where it is marked as holding a member's work (the User, 2026-10-30).
 - A proposal to "give each participant its own worktree" implemented *by the app*
   is a violation of this decision, however convenient it looks.
 
