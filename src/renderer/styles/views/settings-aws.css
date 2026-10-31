@@ -183,6 +183,10 @@
   border-top: 0;
 }
 
+.gen-aws-dialog label.gen-aws-tree-row.is-choice {
+  cursor: pointer;
+}
+
 .gen-aws-dialog .gen-aws-tree-row.is-locked,
 .gen-aws-dialog .gen-aws-tree-row.is-note {
   color: var(--app-muted);

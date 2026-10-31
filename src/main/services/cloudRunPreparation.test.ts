@@ -215,6 +215,71 @@ test("a non-git project folder uses the machine's copy and persists its path", a
   assert.deepEqual(await h.service.repositoryPaths("/Users/user/notes"), { "machine-1": "/home/ubuntu/notes" });
 });
 
+test("a project copy deleted on the instance is forgotten, so the next turn copies it again", async () => {
+  const h = harness(); await h.service.prepare(request, () => {});
+  const copies: Record<string, string> = {
+    "/Users/user/app": "/home/ubuntu/accordagents-x/workspace/mirrors/app-0a62/repo",
+    "/Users/user/notes": "/home/ubuntu/accordagents-x/workspace/mirrors/notes-f5ba/repo",
+    "/Users/user/kept": "/home/ubuntu/accordagents-x/workspace/mirrors/kept-1234/repo"
+  };
+  h.options.bootstrapProject = async (_machineId, localPath) => {
+    h.calls.push(`project:${localPath}`);
+    return { inspection: { path: copies[localPath], state: "clean", dirtyPaths: [], worktrees: [] }, action: "created", message: "Copied" };
+  };
+  for (const localPath of Object.keys(copies)) await h.service.prepareProject("machine-1", localPath);
+  assert.equal(h.calls.filter(call => call.startsWith("project:")).length, 3);
+
+  const forgotten = await h.service.forgetRemovedCopies([
+    "/home/ubuntu/accordagents-x/workspace/mirrors/app-0a62",
+    "/home/ubuntu/accordagents-x/workspace/mirrors/notes-f5ba/",
+    "/home/ubuntu/accordagents-x/workspace/mirrors/kept-12"
+  ]);
+  assert.deepEqual(forgotten.map(item => item.localPath).sort(), ["/Users/user/app", "/Users/user/notes"]);
+  assert.deepEqual(Object.keys(h.installs[0].projects ?? {}), ["/Users/user/kept"], "only the deleted copies are forgotten");
+  // The same service, and one started after a restart, copy the deleted projects again and only them.
+  await h.service.prepareProject("machine-1", "/Users/user/app");
+  await new CloudRunPreparationService(h.options).prepareProject("machine-1", "/Users/user/notes");
+  await h.service.prepareProject("machine-1", "/Users/user/kept");
+  assert.deepEqual(h.calls.filter(call => call.startsWith("project:")).slice(3), ["project:/Users/user/app", "project:/Users/user/notes"]);
+  assert.deepEqual(await h.service.forgetRemovedCopies(["/home/ubuntu/elsewhere"]), []);
+});
+
+test("adding a project in Settings asks the machine even when the copy is recorded, so a copy that went is made again", async () => {
+  const h = harness(); await h.service.prepare(request, () => {});
+  h.options.bootstrapProject = async (_machineId, localPath) => {
+    h.calls.push(`project:${localPath}`);
+    return { inspection: { path: "/home/ubuntu/mirrors/app/repo", state: "clean", dirtyPaths: [], worktrees: [] }, action: "created", message: "Copied" };
+  };
+  await h.service.prepareProject("machine-1", "/Users/user/app");
+  await h.service.prepareProject("machine-1", "/Users/user/app");
+  assert.equal(h.calls.filter(call => call.startsWith("project:")).length, 1, "a turn trusts the record");
+  await h.service.prepareProject("machine-1", "/Users/user/app", undefined, undefined, { checkCopy: true });
+  assert.equal(h.calls.filter(call => call.startsWith("project:")).length, 2, "Add asks the machine");
+  await assert.rejects(h.service.prepareProject("machine-unknown", "/Users/user/app", undefined, undefined, { checkCopy: true }), /not set up from this computer/);
+});
+
+test("forgetting a deleted copy does not wait for another project's copy, and that copy's save keeps the forget", async () => {
+  const h = harness(); await h.service.prepare(request, () => {});
+  let release!: () => void;
+  let reached!: () => void;
+  const copying = new Promise<void>(resolve => { reached = resolve; });
+  h.options.bootstrapProject = async (_machineId, localPath) => {
+    if (localPath === "/Users/user/slow") { reached(); await new Promise<void>(resolve => { release = resolve; }); }
+    return { inspection: { path: `/home/ubuntu/mirrors${localPath}/repo`, state: "clean", dirtyPaths: [], worktrees: [] }, action: "created", message: "Copied" };
+  };
+  await h.service.prepareProject("machine-1", "/Users/user/app");
+  const slow = h.service.prepareProject("machine-1", "/Users/user/slow");
+  await copying;
+  const forgotten = await h.service.forgetRemovedCopies(["/home/ubuntu/mirrors/Users/user/app"]);
+  assert.deepEqual(forgotten, [{ machineId: "machine-1", localPath: "/Users/user/app" }], "done while the other copy still runs");
+  release();
+  await slow;
+  assert.deepEqual(Object.keys(h.installs[0].projects ?? {}), ["/Users/user/slow"], "the running copy's save does not bring the forgotten one back");
+  assert.equal(await h.service.forgetProject("machine-1", "/Users/user/slow"), true);
+  assert.equal(await h.service.forgetProject("machine-1", "/Users/user/slow"), false, "forgetting twice changes nothing");
+  assert.deepEqual(h.installs[0].projects, {});
+});
+
 test("replication selects each machine's native project path without changing the desktop", () => {
   const desktop = { repoPath: "/Users/user/project", metadata: { machineRepository: {
     sourcePath: "/Users/user/project", paths: { one: "/home/one/project", two: "/home/two/project" }

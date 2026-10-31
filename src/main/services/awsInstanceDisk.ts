@@ -35,6 +35,9 @@ export interface AwsInstanceDiskOptions {
   program: () => Promise<AwsInstanceProgramFolders>;
   exec?: AwsInstanceDiskExec;
   log?: (event: string, data: Record<string, unknown>) => void;
+  /** Told what a change removed, before the change is reported done, so a
+   *  project copy that went is forgotten before the User sends anything. */
+  removed?: (paths: string[]) => Promise<void>;
 }
 
 /** Measures, cleans and browses the AWS instance's disk for Settings. Every
@@ -105,14 +108,23 @@ export class AwsInstanceDiskService {
     }));
   }
 
-  private change(request: Omit<AwsInstanceDiskRequest, "root" | "data" | "withWork"> & { withWork?: AwsDiskChosenWork }, logged: (result: AwsDiskChangeResult) => void): Promise<AwsDiskChangeResult> {
+  private async change(request: Omit<AwsInstanceDiskRequest, "root" | "data" | "withWork"> & { withWork?: AwsDiskChosenWork }, logged: (result: AwsDiskChangeResult) => void): Promise<AwsDiskChangeResult> {
     this.changes += 1;
     this.last = undefined;
-    return this.serial(async () => {
-      const result = await this.run<AwsDiskChangeResult>(await this.options.worker(), request, CHANGE_TIMEOUT_MS, false);
-      logged(result);
-      return result;
+    const result = await this.serial(async () => {
+      const outcome = await this.run<AwsDiskChangeResult>(await this.options.worker(), request, CHANGE_TIMEOUT_MS, false);
+      logged(outcome);
+      return outcome;
     });
+    const removed = Array.isArray(result.removedPaths) ? result.removedPaths.filter((path) => typeof path === "string" && path.startsWith("/")) : [];
+    if (removed.length && this.options.removed) {
+      // Outside the instance queue, before the change is reported done. The
+      // files are gone either way; a failure here is logged, not reported
+      // as a failed delete.
+      await this.options.removed(removed)
+        .catch((error) => this.options.log?.("aws.disk.forget-failed", { message: error instanceof Error ? error.message : String(error) }));
+    }
+    return result;
   }
 
   private serial<T>(work: () => Promise<T>): Promise<T> {

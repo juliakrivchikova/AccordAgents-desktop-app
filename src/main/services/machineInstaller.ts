@@ -450,7 +450,10 @@ export class MachineInstallerService {
         ...(warnings.length ? { warnings: [...warnings] } : {}),
         ...extra
       };
-      record = { ...record, lastOperation: snapshot };
+      // The projects on the machine are recorded by their copies, not by
+      // this setup: what was read when it began may be out of date by now.
+      const stored = await this.options.store.getMachineInstall(record.machineId);
+      record = { ...record, projects: stored?.projects ?? record.projects, lastOperation: snapshot };
       await this.options.store.saveMachineInstall(record);
       onProgress?.(snapshot);
       this.options.logger?.("machines.install.progress", {
@@ -1160,7 +1163,8 @@ export class MachineInstallerService {
     } finally {
       // This random staging directory belongs only to this copy. A failed
       // transfer/restart must not expose a half-copied project as runnable.
-      await this.sshExec({ target: record.target, script: `rm -rf -- ${shellQuotePosix(stagedPath)}`,
+      // The project's folder goes too when a first copy left nothing in it.
+      await this.sshExec({ target: record.target, script: `rm -rf -- ${shellQuotePosix(stagedPath)}; rmdir -- ${shellQuotePosix(repoPath.replace(/\/repo$/, ""))} 2>/dev/null || true`,
         timeoutMs: SHORT_TIMEOUT_MS, maintenance }).catch(() => undefined);
     }
     return {

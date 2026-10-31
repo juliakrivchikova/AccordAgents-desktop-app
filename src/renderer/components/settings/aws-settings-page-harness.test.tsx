@@ -6,7 +6,7 @@ import { createRoot } from "react-dom/client";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 import type {
-  AwsDiskReport, AwsWorkerOperationSnapshot, AwsWorkerStartRequest, AwsWorkerStatus, CloudRunWorkerDoctorReport,
+  AwsDiskReport, AwsInstanceProjectProgress, AwsInstanceProjects, AwsWorkerOperationSnapshot, AwsWorkerStartRequest, AwsWorkerStatus, CloudRunWorkerDoctorReport,
   CloudRunWorkerSetupProgress, CloudRunsSettings
 } from "../../../shared/types";
 import { AwsSettingsPage } from "./aws-settings-page";
@@ -39,11 +39,22 @@ export const CHECKS: CloudRunWorkerDoctorReport = { ok: false, message: "1 probl
   { id: "gh", label: "GitHub CLI", status: "pass", fixable: true }
 ] };
 
+export const PROJECTS: AwsInstanceProjects = {
+  copies: [
+    { path: "/home/ubuntu/own/workspace/mirrors/AccordAgents-0a6205133d", name: "AccordAgents", localPath: "/Users/me/IdeaProjects/AccordAgents",
+      bytes: 1_460_000_000, lock: null, work: ["worktree", "changes"] },
+    { path: "/home/ubuntu/own/workspace/mirrors/busy-0987654321", name: "busy", localPath: "/Users/me/busy", bytes: 200_000_000, lock: "in-use" }
+  ],
+  available: [{ path: "/Users/me/IdeaProjects/landing", label: "landing" }, { path: "/Users/me/notes", label: "notes" }],
+  freeBytes: 3_700_000_000
+};
+
 let mounted: ReturnType<typeof createRoot> | undefined;
 
 interface Bridge {
   calls: Record<string, unknown[][]>;
   progress: Array<(progress: CloudRunWorkerSetupProgress) => void>;
+  projectProgress: Array<(progress: AwsInstanceProjectProgress) => void>;
   operations: Array<(operation: AwsWorkerOperationSnapshot) => void>;
 }
 
@@ -67,6 +78,9 @@ export async function mount(options: {
   clean?: (category: string) => Promise<unknown>;
   list?: (path?: string) => Promise<unknown>;
   del?: (paths: string[]) => Promise<unknown>;
+  /** Settings → AWS → Projects. */
+  projects?: () => AwsInstanceProjects;
+  add?: (localPath: string) => Promise<void>;
   keepSetupChecks?: boolean;
   /** The User's server; set up unless a test says otherwise. */
   hubUrl?: string | null;
@@ -76,7 +90,7 @@ export async function mount(options: {
   if (!options.keepSetupChecks) forgetAwsSetupChecks();
   clearAwsAttention();
   let status = options.status ?? RUNNING;
-  const bridge: Bridge = { calls: {}, progress: [], operations: [] };
+  const bridge: Bridge = { calls: {}, progress: [], projectProgress: [], operations: [] };
   const record = (name: string, ...args: unknown[]): void => { (bridge.calls[name] ??= []).push(args); };
   (window as unknown as { consensus: unknown }).consensus = {
     getAwsWorkerStatus: options.getStatus ?? (async () => status),
@@ -124,6 +138,13 @@ export async function mount(options: {
       else record("deleteAwsInstanceFiles", paths);
       if (options.del) return options.del(paths);
       return { freedBytes: 300_000_000, removed: 1, failed: [], space: { totalBytes: DISK.totalBytes, usedBytes: 36_500_000_000, availableBytes: 4_000_000_000 } };
+    },
+    listAwsInstanceProjects: async () => { record("listAwsInstanceProjects"); return options.projects ? options.projects() : PROJECTS; },
+    addAwsInstanceProject: async (localPath: string) => { record("addAwsInstanceProject", localPath); if (options.add) await options.add(localPath); },
+    cancelAwsInstanceProjectAdd: async (localPath: string) => { record("cancelAwsInstanceProjectAdd", localPath); },
+    onAwsInstanceProjectProgress: (listener: (progress: AwsInstanceProjectProgress) => void) => {
+      bridge.projectProgress.push(listener);
+      return () => { bridge.projectProgress.splice(bridge.projectProgress.indexOf(listener), 1); };
     },
     diagnoseCloudRunWorker: async () => { record("diagnoseCloudRunWorker"); return options.checks ?? CHECKS; },
     setupCloudRunWorker: async (request?: unknown, setupOptions?: unknown) => { record("setupCloudRunWorker", request, setupOptions); return new Promise(() => undefined); },

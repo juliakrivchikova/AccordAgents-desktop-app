@@ -1128,10 +1128,18 @@ export class CloudRunAwsService {
   /** Where this desktop's program and its data live on the instance, as
    *  its setup recorded them; undefined before the first setup. */
   async programFoldersOnInstance(): Promise<{ installRoot: string; userDataDir?: string } | undefined> {
+    const record = await this.programRecordOnInstance();
+    return record ? { installRoot: record.installRoot, userDataDir: record.userDataDir || undefined } : undefined;
+  }
+
+  /** This desktop's cloud program on the instance, as its setup recorded
+   *  it: the machine whose project copies Settings manages. */
+  async programRecordOnInstance(): Promise<MachineInstallRecord | undefined> {
     const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
     if (!handle) return undefined;
-    const record = (await this.installsOnInstance(handle)).records.find((item) => item.installRoot && item.installedVersion);
-    return record ? { installRoot: record.installRoot, userDataDir: record.userDataDir || undefined } : undefined;
+    // The newest install, the same one whichever record was saved last.
+    return (await this.installsOnInstance(handle)).records.filter((item) => item.installRoot && item.installedVersion)
+      .sort((left, right) => (right.installedAt ?? "").localeCompare(left.installedAt ?? ""))[0];
   }
 
   /** The install record of one machine on this instance. */

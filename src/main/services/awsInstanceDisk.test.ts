@@ -230,6 +230,8 @@ test("deleting re-checks every path on the instance and never removes a member's
   const result = runScript(home, "delete", targets) as AwsDiskChangeResult & { ok: boolean };
   assert.equal(result.ok, true);
   assert.equal(result.removed, 2);
+  // The desktop forgets the removed project copies by these paths.
+  assert.deepEqual([...(result.removedPaths ?? [])].sort(), [path.join(mirrors, "clean"), path.join(home, OWN, "releases", "1.0.0-aaa")].sort());
   assert.equal(fs.existsSync(path.join(mirrors, "clean")), false);
   assert.equal(fs.existsSync(path.join(home, OWN, "releases", "1.0.0-aaa")), false);
   for (const kept of [path.join(mirrors, "shared", "wt-member", "README.md"), path.join(mirrors, "dirty", "repo", "README.md"),
@@ -591,4 +593,48 @@ test("the service refuses malformed requests before reaching the instance", asyn
 test("an instance that refuses says so in words", async () => {
   const disk = service(async () => JSON.stringify({ ok: false, error: "not a folder in the home folder" }));
   await assert.rejects(disk.list("/etc"), /The instance refused: not a folder in the home folder\./);
+});
+
+test("a delete reports what it removed to the desktop before it is done, outside the instance queue, and a failure there is only logged", async () => {
+  const told: string[][] = [];
+  const logged: string[] = [];
+  let fail = false;
+  let release!: () => void;
+  let hold = false;
+  const disk = new AwsInstanceDiskService({
+    worker: async () => worker,
+    program: async () => PROGRAM,
+    exec: async (_worker, _command, script) => modeOf(script) === "list"
+      ? JSON.stringify({ ok: true, path: "/home/ubuntu", home: "/home/ubuntu", own: "/home/ubuntu/own", entries: [], truncated: 0 })
+      : JSON.stringify({ ok: true, freedBytes: 9, removed: 1, removedPaths: ["/home/ubuntu/own/workspace/mirrors/app-0a62", 7, "relative"],
+        failed: [], space: { totalBytes: 1, usedBytes: 1, availableBytes: 0 } }),
+    log: (event) => { logged.push(event); },
+    removed: async (paths) => {
+      told.push(paths);
+      if (hold) await new Promise<void>((resolve) => { release = resolve; });
+      if (fail) throw new Error("settings unavailable");
+    }
+  });
+  hold = true;
+  let done = false;
+  const removing = disk.remove(["/home/ubuntu/own/workspace/mirrors/app-0a62"]).then((result) => { done = true; return result; });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(told, [["/home/ubuntu/own/workspace/mirrors/app-0a62"]]);
+  assert.equal(done, false, "not reported done before the desktop has forgotten the copy");
+  await disk.list("@mirrors");
+  release();
+  assert.equal((await removing).removed, 1);
+  hold = false;
+  fail = true;
+  await disk.remove(["/home/ubuntu/own/workspace/mirrors/app-0a62"]);
+  assert.ok(logged.includes("aws.disk.forget-failed"));
+});
+
+test("listing a named folder that was never made answers with no entries and the free space", needsTools, (t) => {
+  const home = fixtureHome(t);
+  fs.rmSync(path.join(home, OWN, "workspace"), { recursive: true, force: true });
+  const listing = runScript(home, "list", "@mirrors") as AwsDiskListing & { ok: boolean };
+  assert.equal(listing.ok, true);
+  assert.deepEqual(listing.entries, []);
+  assert.ok((listing.space?.availableBytes ?? 0) > 0);
 });

@@ -1780,6 +1780,47 @@ test("reported provider session id is persisted even if the first turn fails", a
   assert.equal(runs[1].options.sessionId, earlySessionId);
 });
 
+test("a member whose project folder or cloud project copy is gone is told so, not that its CLI is missing", async () => {
+  const participant = chatParticipant("claude-code");
+  const repo = await mkdtemp(path.join(tmpdir(), "gone-project-"));
+  const conversation = { ...chatConversation([participant]), repoPath: repo };
+  // What the CLI runner reports when the process cannot start in its folder.
+  let failure = { content: `@${participant.handle} could not start because the CLI executable is unavailable.`, error: "spawn /bin/sh ENOENT" };
+  const { service, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => ({ participant: runParticipant, ok: false, durationMs: 1, ...failure })
+  });
+  await mkdir(tempRoot, { recursive: true });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const turn = async (runId: string) => {
+    await (service as any).runParticipantTurnSerialized(conversation, participant, conversation.messages[0], runId, undefined, undefined, { warnings: [] });
+    return conversation.messages.find((message: ChatMessage) => message.metadata?.runId === runId)!;
+  };
+
+  const present = await turn("folder-present");
+  assert.equal(present.status, "error");
+  assert.match(present.content, /CLI executable is unavailable/, "a failure in a folder that is there keeps the CLI's own text");
+
+  await rm(repo, { recursive: true, force: true });
+  const gone = await turn("folder-gone");
+  assert.equal(gone.status, "error");
+  assert.equal(gone.content, `@${participant.handle} could not start: the folder ${repo} does not exist.`);
+
+  // On a cloud machine the folder is the machine's copy of the User's project.
+  (service as any).hostMachineId = "box";
+  conversation.metadata.machineRepository = { sourcePath: "/Users/me/IdeaProjects/AccordAgents", paths: { box: repo } };
+  const copy = await turn("copy-gone");
+  assert.equal(copy.content, `@${participant.handle} could not start: the copy of AccordAgents on this cloud machine is missing. Send the message again from your computer to copy the project there again.`);
+  assert.deepEqual(copy.metadata?.missingProjectCopy, { machineId: "box", sourcePath: "/Users/me/IdeaProjects/AccordAgents" },
+    "the computer that made the copy is told, so it copies it again");
+
+  // A run that started and failed for another reason keeps its own words.
+  failure = { content: `@${participant.handle} could not finish because the CLI account hit a usage limit.`, error: "usage limit reached" };
+  const limited = await turn("usage-limit");
+  assert.match(limited.content, /usage limit/);
+  assert.equal(limited.metadata?.missingProjectCopy, undefined);
+});
+
 test("local provider preference records only the first nonempty successful Assistant response", async () => {
   const participant = { ...chatParticipant("claude-code"), roleConfigId: ADMIN_ROLE.id, handle: "assistant" };
   const conversation = chatConversation([participant]);

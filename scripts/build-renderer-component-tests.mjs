@@ -39,6 +39,7 @@ await build({
     "renderer/components/settings/hub-server-section.test.tsx",
     "renderer/components/settings/aws-settings-page.test.tsx",
     "renderer/components/settings/aws-settings-actions.test.tsx",
+    "renderer/components/settings/aws-projects-section.test.tsx",
     "renderer/components/settings/aws-settings-text.test.ts",
     "renderer/components/settings/aws-worker-auto-stop.test.tsx",
     "renderer/components/search/chat-search-escape.test.tsx",

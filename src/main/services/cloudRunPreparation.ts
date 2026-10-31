@@ -50,6 +50,10 @@ function preparationIdentity(machine: MachineRecord, record: MachineInstallRecor
     record.target.host, record.target.port, record.target.user, record.target.identityFile, record.target.hostKeyAlias]);
 }
 
+function withoutTrailingSlash(path: string): string {
+  return path.length > 1 ? path.replace(/\/+$/, "") : path;
+}
+
 export function cloudEnvironmentDirectory(environmentId: string): string {
   if (!environmentId.trim()) throw new Error("This desktop has no environment identity.");
   return `accordagents-${createHash("sha256").update(environmentId).digest("hex").slice(0, 24)}`;
@@ -65,6 +69,7 @@ export class CloudRunPreparationService {
   private latest?: Omit<CloudRunPreparationProgress, "operationId">;
   private projects?: Promise<Map<string, Record<string, string>>>;
   private projectTasks = new Map<string, Promise<void>>();
+  private recordWrites: Promise<unknown> = Promise.resolve();
   private states = new Map<string, CloudRunPreparationState>();
   private prepared?: PreparedMachine;
 
@@ -101,20 +106,25 @@ export class CloudRunPreparationService {
 
   /** Bootstrap once, outside the chat mutation lock. Existing projects and
    * participant-created worktrees are reused without another copy. */
-  async prepareProject(machineId: string, localPath: string, signal?: AbortSignal, progress?: (message: string) => void): Promise<void> {
+  async prepareProject(machineId: string, localPath: string, signal?: AbortSignal, progress?: (message: string) => void,
+    options: { checkCopy?: boolean } = {}): Promise<void> {
     signal?.throwIfAborted();
     progress?.("Preparing the project on your cloud machine…");
-    const previous = this.projectTasks.get(machineId) ?? Promise.resolve();
     let started = false;
-    const task = previous.catch(() => undefined).then(async () => {
+    const task = this.inProjectQueue(machineId, async () => {
       started = true;
       signal?.throwIfAborted();
       const index = await this.projectIndex();
       signal?.throwIfAborted();
-      if (index.get(machineId)?.[localPath]) return;
+      // `checkCopy` (adding a project in Settings) asks the machine itself
+      // whether the copy is there, so a recorded copy that went is made again.
+      if (!options.checkCopy && index.get(machineId)?.[localPath]) return;
       const records = await this.options.listInstalls();
       const record = records.find(item => item.machineId === machineId);
-      if (!record) return; // Manually enrolled machines keep their own path.
+      if (!record) {
+        if (options.checkCopy) throw new Error("This machine was not set up from this computer.");
+        return; // Manually enrolled machines keep their own path.
+      }
       signal?.throwIfAborted();
       const result = await this.options.bootstrapProject(machineId, localPath, signal, progress);
       signal?.throwIfAborted();
@@ -123,16 +133,15 @@ export class CloudRunPreparationService {
       if (!["clean", "dirty", "directory"].includes(result.inspection.state) || !result.inspection.path.startsWith("/")) {
         throw new Error(result.message || "The cloud project could not be prepared.");
       }
-      const current = (await this.options.listInstalls()).find(item => item.machineId === machineId);
-      if (!current) throw new Error("The machine was removed during project setup.");
-      const projects = { ...current.projects, [localPath]: result.inspection.path };
-      signal?.throwIfAborted();
-      await this.options.saveInstall({ ...current, projects });
-      index.set(machineId, projects);
+      await this.withRecordLock(async () => {
+        const current = (await this.options.listInstalls()).find(item => item.machineId === machineId);
+        if (!current) throw new Error("The machine was removed during project setup.");
+        const projects = { ...current.projects, [localPath]: result.inspection.path };
+        signal?.throwIfAborted();
+        await this.options.saveInstall({ ...current, projects });
+        index.set(machineId, projects);
+      });
     });
-    this.projectTasks.set(machineId, task);
-    const forget = (): void => { if (this.projectTasks.get(machineId) === task) this.projectTasks.delete(machineId); };
-    void task.then(forget, forget);
     // Cancelling a queued caller must not abort another chat's copy, release
     // its queue reservation early, or make the caller wait for that copy.
     let abortQueued: (() => void) | undefined;
@@ -142,6 +151,68 @@ export class CloudRunPreparationService {
     });
     try { await Promise.race([task, cancelled]); }
     finally { if (abortQueued) signal?.removeEventListener("abort", abortQueued); }
+  }
+
+  /**
+   * Forgets the project copies the User deleted on the instance (Settings →
+   * AWS), so the next turn in such a project copies it again, as the first
+   * time, instead of starting in a folder that is gone. Returns what was
+   * forgotten.
+   */
+  forgetRemovedCopies(removedPaths: string[]): Promise<Array<{ machineId: string; localPath: string }>> {
+    const roots = removedPaths.map(withoutTrailingSlash).filter((root) => root.startsWith("/") && root !== "/");
+    if (!roots.length) return Promise.resolve([]);
+    // Every record on this computer is checked: a copy recorded for another
+    // machine at the same path is only looked at again on its next turn.
+    return this.forgetCopies((_machineId, _localPath, remotePath) => {
+      const path = withoutTrailingSlash(remotePath);
+      return roots.some((root) => path === root || path.startsWith(`${root}/`));
+    });
+  }
+
+  /** Forgets one machine's copy of a project that turned out to be missing
+   *  there, so the next turn in it copies it again. */
+  async forgetProject(machineId: string, localPath: string): Promise<boolean> {
+    return (await this.forgetCopies((id, path) => id === machineId && path === localPath)).length > 0;
+  }
+
+  /** Drops the recorded copies `gone` names. Only the record's read and
+   *  write are serialized (with a copy's save): a copy still running for
+   *  another project does not hold it up. */
+  forgetCopies(gone: (machineId: string, localPath: string, remotePath: string) => boolean): Promise<Array<{ machineId: string; localPath: string }>> {
+    return this.withRecordLock(async () => {
+      const forgotten: Array<{ machineId: string; localPath: string }> = [];
+      for (const record of await this.options.listInstalls()) {
+        const kept: Record<string, string> = {};
+        const dropped: string[] = [];
+        for (const [localPath, remotePath] of Object.entries(record.projects ?? {})) {
+          if (typeof remotePath === "string" && gone(record.machineId, localPath, remotePath)) dropped.push(localPath);
+          else kept[localPath] = remotePath;
+        }
+        if (!dropped.length) continue;
+        await this.options.saveInstall({ ...record, projects: kept });
+        (await this.projectIndex()).set(record.machineId, kept);
+        forgotten.push(...dropped.map((localPath) => ({ machineId: record.machineId, localPath })));
+      }
+      return forgotten;
+    });
+  }
+
+  /** Install records' projects are read, changed and saved one at a time. */
+  private withRecordLock<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.recordWrites.then(work, work);
+    this.recordWrites = next.catch(() => undefined);
+    return next;
+  }
+
+  /** Runs after every project task already queued for the machine. */
+  private inProjectQueue(machineId: string, work: () => Promise<void>): Promise<void> {
+    const previous = this.projectTasks.get(machineId) ?? Promise.resolve();
+    const task = previous.catch(() => undefined).then(work);
+    this.projectTasks.set(machineId, task);
+    const forget = (): void => { if (this.projectTasks.get(machineId) === task) this.projectTasks.delete(machineId); };
+    void task.then(forget, forget);
+    return task;
   }
 
   async prepare(request: PrepareCloudRunRequest, progress: (snapshot: CloudRunPreparationProgress) => void): Promise<PrepareCloudRunResult> {

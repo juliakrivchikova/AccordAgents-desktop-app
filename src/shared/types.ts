@@ -323,6 +323,37 @@ export interface AwsDiskListing {
   entries: AwsDiskEntry[];
   /** Entries left out after the largest ones. */
   truncated: number;
+  /** The disk as the listing was read. */
+  space?: AwsDiskSpace;
+}
+
+/** One project copy on the AWS instance, as Settings → AWS → Projects shows it. */
+export interface AwsInstanceProject {
+  /** The copy's folder on the instance. */
+  path: string;
+  name: string;
+  /** The project on this computer the copy was made from, when known. */
+  localPath?: string;
+  bytes: number;
+  /** Why it cannot be deleted now. */
+  lock: AwsDiskLockReason | null;
+  /** Members' work that goes with it when it is deleted. */
+  work?: AwsDiskWorkReason[];
+}
+
+export interface AwsInstanceProjects {
+  copies: AwsInstanceProject[];
+  /** This computer's projects without a copy on the instance, newest first. */
+  available: Array<{ path: string; label: string }>;
+  /** Why no project can be added yet, when one cannot. */
+  addUnavailable?: string;
+  freeBytes?: number;
+}
+
+/** A project being copied to the instance from Settings → AWS → Projects. */
+export interface AwsInstanceProjectProgress {
+  localPath: string;
+  message: string;
 }
 
 export interface AwsDiskSpace {
@@ -334,6 +365,8 @@ export interface AwsDiskSpace {
 export interface AwsDiskChangeResult {
   freedBytes: number;
   removed?: number;
+  /** What went, as the instance names it (its home folder resolved). */
+  removedPaths?: string[];
   failed: Array<{ path: string; reason: AwsDiskLockReason | "error"; message?: string }>;
   /** The disk right after the change; categories are measured again later. */
   space: AwsDiskSpace;
@@ -1510,6 +1543,10 @@ export interface ChatServerCardMark {
 }
 
 export interface ChatMessageMetadata {
+  /** A machine member could not start because the machine's copy of the
+   *  project is gone: the computer that made the copy forgets it, so the
+   *  next message copies it again. */
+  missingProjectCopy?: { machineId: string; sourcePath: string };
   /** The message's place in the User's server's order (agreement Д1): set
    *  by the server when it accepted the message, the same on every device. */
   serverSeq?: number;
@@ -3115,6 +3152,15 @@ export interface AppBridge {
    *  members' work, with the kinds of work she saw on each; a copy that
    *  holds any other kind by then stays. */
   deleteAwsInstanceFiles(paths: string[], options?: { withWork?: AwsDiskChosenWork }): Promise<AwsDiskChangeResult>;
+  /** Settings → AWS → Projects: the project copies on the instance and this
+   *  computer's projects that could be added. */
+  listAwsInstanceProjects(): Promise<AwsInstanceProjects>;
+  /** Copies one of this computer's projects to the instance; resolves when
+   *  the copy is there. A copy already there is kept as it is. */
+  addAwsInstanceProject(localPath: string): Promise<void>;
+  /** Stops a copy `addAwsInstanceProject` is making; nothing half-copied stays. */
+  cancelAwsInstanceProjectAdd(localPath: string): Promise<void>;
+  onAwsInstanceProjectProgress(callback: (progress: AwsInstanceProjectProgress) => void): () => void;
   stopAwsWorker(): Promise<AwsWorkerStatus>;
   deleteAwsWorker(): Promise<AwsWorkerStatus>;
   getAgentEnvironment(): Promise<AgentEnvironmentSnapshot>;

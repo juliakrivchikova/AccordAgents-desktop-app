@@ -6,9 +6,11 @@ import { AwsDialog, AwsWaiting } from "./aws-dialog";
 import { cleanError } from "./aws-shared";
 import { formatBytes, keptText, LOCK_TEXT, WORK_TEXT, type AwsDiskControl } from "./use-aws-disk";
 
-export type AwsDiskBrowseStart = "" | "@runs" | "@mirrors";
+export type AwsDiskBrowseStart = "" | "@runs";
 
-const TITLE: Record<AwsDiskBrowseStart, string> = { "": "Files on the instance", "@runs": "Cloud run working files", "@mirrors": "Project copies" };
+const TITLE: Record<AwsDiskBrowseStart, string> = { "": "Files on the instance", "@runs": "Cloud run working files" };
+/** Project copies are added and deleted in Projects, nowhere else. */
+const MANAGED_IN_PROJECTS = "added and deleted in Projects above";
 
 /** What a folder is to the User, when its name alone does not say. */
 const ROLE_TEXT: Record<AwsDiskEntryRole, string> = {
@@ -36,10 +38,10 @@ const indent = (depth: number): { paddingLeft: number } => ({ paddingLeft: 12 + 
 
 /**
  * The instance's files, largest first, with a checkbox on what may go and a
- * disabled one with the reason on what may not. A folder holding a member's
- * work is marked and may go with it. The instance checks every path again
- * when asked to delete, so a folder that became busy, or gained work nobody
- * chose to delete, stays.
+ * disabled one with the reason on what may not. Project copies, and what is
+ * in them, are added and deleted in Projects only. The instance checks every
+ * path again when asked to delete, so a folder that became busy, or gained
+ * work nobody chose to delete, stays.
  */
 export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart; disk: AwsDiskControl; onClose: () => void }): JSX.Element {
   const [folders, setFolders] = useState<Record<string, FolderState>>({});
@@ -82,6 +84,10 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
     }
   };
   const covered = (path: string): boolean => [...selected.keys()].some((chosen) => path !== chosen && path.startsWith(`${chosen}/`));
+  // The folders that hold the project copies, as the listings named them.
+  const copyFolders = useMemo(() => Object.values(folders).flatMap((folder) => folder.entries ?? [])
+    .filter((entry) => entry.role === "project-copies").map((entry) => entry.path), [folders]);
+  const inProjects = (path: string): boolean => copyFolders.some((folder) => path.startsWith(`${folder}/`));
   // Choosing a folder replaces whatever was chosen inside it.
   const toggleSelect = (entry: AwsDiskEntry): void => {
     const next = new Map(selected);
@@ -124,20 +130,23 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
       const Icon = entry.dir ? (open ? FolderOpen : Folder) : File;
       const inherited = covered(entry.path);
       const role = entry.role ? ROLE_TEXT[entry.role] : undefined;
+      const managed = inProjects(entry.path);
+      const locked = Boolean(entry.lock) || managed;
       // A folder's role already says why it is locked when it is the program's.
-      const reason = entry.lock && !(role && (entry.lock === "program" || entry.lock === "other-program" || entry.lock === "sign-ins"))
-        ? LOCK_TEXT[entry.lock] : undefined;
-      const work = !entry.lock && entry.work?.length ? entry.work.map((kind) => WORK_TEXT[kind]).join(" · ") : undefined;
+      const reason = managed ? MANAGED_IN_PROJECTS
+        : entry.lock && !(role && (entry.lock === "program" || entry.lock === "other-program" || entry.lock === "sign-ins"))
+          ? LOCK_TEXT[entry.lock] : undefined;
+      const work = !locked && entry.work?.length ? entry.work.map((kind) => WORK_TEXT[kind]).join(" · ") : undefined;
       return (
         <Fragment key={entry.path}>
-          <div className={`gen-aws-tree-row${entry.lock ? " is-locked" : ""}`} style={indent(depth)} data-path={entry.path}>
+          <div className={`gen-aws-tree-row${locked ? " is-locked" : ""}`} style={indent(depth)} data-path={entry.path}>
             {entry.dir ? (
               <button type="button" className="gen-aws-tree-chev" aria-label={open ? `Collapse ${entry.name}` : `Expand ${entry.name}`} aria-expanded={open} onClick={() => void toggleFolder(entry)}>
                 {Chevron ? <Chevron size={14} /> : null}
               </button>
             ) : <span className="gen-aws-tree-chev" />}
             <span className="gen-aws-tree-check">
-              {entry.lock ? <input type="checkbox" aria-label={`${entry.name} cannot be deleted${reason ? `: ${reason}` : ""}`} checked={inherited} disabled readOnly />
+              {locked ? <input type="checkbox" aria-label={`${entry.name} cannot be deleted here${reason ? `: ${reason}` : ""}`} checked={inherited} disabled readOnly />
                 : <input type="checkbox" aria-label={`Select ${entry.name}`} checked={inherited || selected.has(entry.path)} disabled={inherited || deleting}
                   onChange={() => toggleSelect(entry)} />}
             </span>
@@ -168,7 +177,7 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
       testId="aws-disk-browser"
       busy={deleting}
       onClose={props.onClose}
-      description={`${root ?? "Reading the folder…"}, largest first. Marked project copies hold members' work, which is deleted with them. Items in use or the program's own cannot be selected. Deleted files cannot be restored.`}
+      description={`${root ?? "Reading the folder…"}, largest first. Project copies are added and deleted in Projects above. Items in use or the program's own cannot be selected. Deleted files cannot be restored.`}
       note={selected.size ? `${selected.size} selected · ${formatBytes(total)}${workCount ? ` · ${workCount === 1 ? "1 holds" : `${workCount} hold`} members' work` : ""}` : undefined}
       actions={<>
         <Button type="button" variant="outline" size="sm" disabled={deleting} onClick={props.onClose}>{selected.size ? "Cancel" : "Close"}</Button>
