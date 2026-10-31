@@ -199,12 +199,14 @@ export class HubClientOpsStore {
   }
 
   /** A whole request failed (no answer, or the server refused the request):
-   *  every operation in it is tried again, and each attempt is recorded. */
-  async failed(rows: HubClientOpRow[], reason: string, at: string): Promise<void> {
+   *  every operation in it is tried again, and each attempt is recorded.
+   *  `attempted: false`: it failed before any request carried them (their
+   *  pictures could not be put on the server), so it counts as no attempt. */
+  async failed(rows: HubClientOpRow[], reason: string, at: string, options: { attempted: boolean } = { attempted: true }): Promise<void> {
     if (rows.length === 0) return;
     await this.init();
     await this.database.execute(`begin immediate;
-      update hub_client_ops set attempts = attempts + 1, last_error = ${quote(reason)}, updated_at = ${quote(at)}
+      update hub_client_ops set attempts = attempts + ${options.attempted ? 1 : 0}, last_error = ${quote(reason)}, updated_at = ${quote(at)}
         where op_id in (${rows.map((row) => quote(row.opId)).join(", ")});
       ${rows.map((row) => this.failureSql(row, reason, at)).join("\n")}
       commit;`);
@@ -330,6 +332,11 @@ export class HubOpsClient {
     /** Reads the chats again (the feed forgot this device's place); returns
      *  the place to continue from. */
     resync(): Promise<number>;
+    /** Done before a batch is claimed (the pictures its messages name go up
+     *  first); resolves true when it put something, and the batch is read
+     *  again before it goes. A failure holds the batch: it waits and is
+     *  tried again, like a request that did not get through. */
+    beforeSend?(ops: HubOp[], client: HubClient): Promise<boolean>;
     onAnswered?(row: HubClientOpRow, outcome: HubOpOutcome): void;
     log(event: string, payload: Record<string, unknown>): void;
     now?: () => number;
@@ -565,6 +572,26 @@ export class HubOpsClient {
       if (!client) {
         // No link yet: kept, tried when the link comes (nudge).
         return;
+      }
+      if (this.options.beforeSend) {
+        // The pictures the batch's messages name go up before it is
+        // claimed, so a writer can still take an operation back meanwhile;
+        // the batch is then read again. Nothing was sent yet, so a failure
+        // here is not an attempt of any of them.
+        let putSomething: boolean;
+        try {
+          putSomething = await this.options.beforeSend(batch.map((row) => row.op), client);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          await this.options.store.failed(batch, reason, at, { attempted: false }).catch(() => undefined);
+          this.options.log("hub.ops.prepare-failed", { ops: batch.length, reason, retryMs: this.retryMs });
+          this.setReachable(false, reason);
+          this.scheduleRetry();
+          return;
+        }
+        if (putSomething) continue;
+        // Taken back while the pictures were looked at: read again.
+        if (batch.some((row) => this.withdrawn.has(row.opId))) continue;
       }
       for (const row of batch) this.inFlight.add(row.opId);
       let response;
