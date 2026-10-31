@@ -1,6 +1,6 @@
 import type { ChatParticipantCompactionState } from "./types";
 
-const PARTICIPANT_COMPACTIONS_KEY = "participantCompactionsByParticipantId";
+export const PARTICIPANT_COMPACTIONS_KEY = "participantCompactionsByParticipantId";
 const ACTIVE_RUN_OWNERS_KEY = "activeRunOwnersByRunId";
 const ACTIVE_RUN_PARTICIPANTS_KEY = "activeRunParticipantIdsByRunId";
 

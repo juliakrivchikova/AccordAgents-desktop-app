@@ -3,7 +3,8 @@ import test from "node:test";
 import {
   activeRunIdsForConversation,
   activeRunSummaryForConversation,
-  buildChatParticipantStatusMap
+  buildChatParticipantStatusMap,
+  chatMemberIdsWithLiveWork
 } from "../../shared/chatRosterStatus";
 import type { ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
 
@@ -412,4 +413,42 @@ test("a member with live background work shows as working in the background, bel
   assert.equal(stopped.get(participant.id), "background", "a Stop does not end background work, so the status says so");
   assert.equal(buildChatParticipantStatusMap(conversation({}, []), new Map([[participant.id, []]])).get(participant.id), undefined);
   assert.equal(buildChatParticipantStatusMap(conversation({}, []), new Map([["not-a-member", ["x"]]])).size, 0);
+});
+
+test("only the members whose own work is live are busy; a waiting card, background work or a finished reply are not", () => {
+  const third: ChatParticipant = { id: "participant-3", handle: "sam", roleConfigId: "engineer", kind: "codex-cli" };
+  const members = [participant, remoteParticipant, third];
+  const owner = { processId: 1, instanceId: "instance", startedAt: NOW, updatedAt: NOW };
+
+  assert.deepEqual([...chatMemberIdsWithLiveWork(conversation({}, [], members))], []);
+  assert.deepEqual([...chatMemberIdsWithLiveWork(conversation({}, [
+    participantMessage("reply", { status: "pending", metadata: { runId: "run-1" } })
+  ], members))], [participant.id], "a pending reply, also one queued or written on another device");
+  assert.deepEqual([...chatMemberIdsWithLiveWork(conversation({
+    running: true,
+    activeRunIds: ["compact-run"],
+    activeRunOwnersByRunId: { "compact-run": owner },
+    participantCompactionsByParticipantId: { [remoteParticipant.id]: { runId: "compact-run", startedAt: NOW } }
+  }, [], members))], [remoteParticipant.id], "a live compaction");
+  assert.deepEqual([...chatMemberIdsWithLiveWork(conversation({
+    participantCompactionsByParticipantId: { [remoteParticipant.id]: { runId: "ended-run", startedAt: NOW } }
+  }, [], members))], [], "a compaction whose run ended");
+
+  const request = (status: string): ChatMessage => participantMessage("request", {
+    metadata: {
+      participantRequest: {
+        id: "batch", requesterParticipantId: participant.id, requesterHandle: participant.handle, source: "tool",
+        resumeRequester: true, status, depth: 1, createdAt: NOW, updatedAt: NOW,
+        items: [{ targetParticipantId: remoteParticipant.id, targetHandle: remoteParticipant.handle, prompt: "Check.", status, createdAt: NOW, updatedAt: NOW }]
+      }
+    } as any
+  });
+  assert.deepEqual([...chatMemberIdsWithLiveWork(conversation({}, [request("running")], members))].sort(), [participant.id, remoteParticipant.id].sort());
+  assert.deepEqual([...chatMemberIdsWithLiveWork(conversation({}, [request("resuming_requester")], members))], [participant.id]);
+  assert.deepEqual([...chatMemberIdsWithLiveWork(conversation({}, [request("pending_approval")], members))], [], "a request still waiting for the User");
+  assert.deepEqual([...chatMemberIdsWithLiveWork(conversation({}, [request("completed")], members))], []);
+  assert.deepEqual([...chatMemberIdsWithLiveWork(conversation({}, [
+    participantMessage("choice", { metadata: { pendingChoice: { id: "c", status: "pending" } } as any }),
+    participantMessage("stopped", { status: "error", metadata: { terminalReason: "user-stopped" } }, third)
+  ], members))], [], "a card waiting for the User and a stopped reply");
 });

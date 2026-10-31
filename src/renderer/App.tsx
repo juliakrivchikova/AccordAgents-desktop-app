@@ -313,7 +313,7 @@ function App(): JSX.Element {
             agents={state.agents}
             draft={state.chatMessageDraft}
             addParticipantDraft={state.chatAddParticipantDraft ?? defaultChatParticipantDraft(state.settings)}
-            isRunning={view.conversationRunning}
+            busyParticipantIds={view.busyParticipantIds}
             participantStatusById={view.participantStatusById}
             participantWatchers={view.activeChatConversation.metadata.participantWatchers}
             onDraftChange={state.setChatMessageDraft}

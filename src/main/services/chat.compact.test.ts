@@ -1341,3 +1341,43 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
   }
   assert.fail("Timed out waiting for condition.");
 }
+
+test("a member compacting while another member's compaction finishes stays compacting and cannot be removed", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-"));
+  try {
+    const first = chatParticipant({ id: "first", handle: "first" });
+    const second = chatParticipant({ id: "second", handle: "second" });
+    const third = chatParticipant({ id: "third", handle: "third" });
+    const conversation = chatConversation([first, second, third], [chatSession(first, "first-session"), chatSession(second, "second-session")]);
+    let finishSecond!: () => void;
+    const { service, storage } = testService({
+      conversation,
+      compactSession: async (runParticipant) => {
+        if (runParticipant.id === "second") {
+          await new Promise<void>((resolve) => { finishSecond = resolve; });
+        }
+        return { participant: runParticipant, ok: true, sessionId: `${runParticipant.id}-session` };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+
+    const firstCompaction = service.compactParticipant({ conversationId: conversation.id, participantId: first.id, runId: "first-compaction" });
+    const secondCompaction = service.compactParticipant({ conversationId: conversation.id, participantId: second.id, runId: "second-compaction" });
+    await firstCompaction;
+    await waitFor(() => typeof finishSecond === "function");
+    await (service as any).waitForQueuedSave(conversation.id);
+
+    assert.ok(storage.current.metadata.participantCompactionsByParticipantId?.second, "the second member still shows as compacting");
+    await assert.rejects(
+      () => service.removeParticipant({ conversationId: conversation.id, participantId: second.id }),
+      /@second is busy/
+    );
+
+    finishSecond();
+    await secondCompaction;
+    assert.equal(storage.current.metadata.participantCompactionsByParticipantId, undefined);
+    await service.removeParticipant({ conversationId: conversation.id, participantId: second.id });
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});

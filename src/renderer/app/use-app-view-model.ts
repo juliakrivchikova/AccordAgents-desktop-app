@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { Conversation } from "../../shared/types";
-import { buildChatParticipantStatusMap } from "../../shared/chatRosterStatus";
+import { buildChatParticipantStatusMap, chatMemberIdsWithLiveWork } from "../../shared/chatRosterStatus";
 import { useChatBackgroundTasks } from "../components/chat/use-chat-background-tasks";
 import { chatParticipants } from "../components/chat/chat-conversation-data";
 import {
@@ -64,6 +64,11 @@ export function useAppViewModel(state: AppState) {
     [activeChatConversation, participantBackgroundTasksById]
   );
   const participantHasRunById = useMemo(() => buildParticipantHasRunMap(activeChatConversation), [activeChatConversation]);
+  // Only a busy member's removal waits; the others can be removed meanwhile.
+  const busyParticipantIds = useMemo<ReadonlySet<string>>(
+    () => activeChatConversation ? chatMemberIdsWithLiveWork(activeChatConversation) : new Set(),
+    [activeChatConversation]
+  );
 
   return {
     openingConversation,
@@ -87,7 +92,8 @@ export function useAppViewModel(state: AppState) {
     activeChatParticipants,
     participantStatusById,
     participantBackgroundTasksById,
-    participantHasRunById
+    participantHasRunById,
+    busyParticipantIds
   };
 }
 
