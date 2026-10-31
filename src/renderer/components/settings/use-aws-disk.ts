@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AwsDiskChangeResult, AwsDiskCleanCategory, AwsDiskLockReason, AwsDiskReport } from "../../../shared/types";
+import type { AwsDiskChangeResult, AwsDiskChosenWork, AwsDiskCleanCategory, AwsDiskLockReason, AwsDiskReport, AwsDiskWorkReason } from "../../../shared/types";
 import { cleanError } from "./aws-shared";
 
 /** Below this, the disk section says so in red: updates and agents fail
@@ -27,10 +27,19 @@ export const LOCK_TEXT: Record<AwsDiskLockReason, string | undefined> = {
   "qa-browser": "the browser for QA",
   "other-program": "another computer's program",
   "in-use": "in use right now",
+  "worktree-elsewhere": "a member's worktree outside it belongs to it",
+  "unreadable": "git could not read it",
   "worktree": "has a member's worktree",
   "changes": "has uncommitted changes",
   "unpushed": "has commits not pushed anywhere",
   "repository": "part of a git project; only the whole project can go"
+};
+
+/** The work a folder holds that goes with it, as its mark says it. */
+export const WORK_TEXT: Record<AwsDiskWorkReason, string> = {
+  "worktree": "member's worktree",
+  "changes": "uncommitted changes",
+  "unpushed": "unpushed commits"
 };
 
 /** What a change left in place and why, in one sentence each. */
@@ -93,8 +102,8 @@ export function useAwsDisk(running: boolean) {
     if (mounted.current) applyChange(result, category);
     return result;
   };
-  const remove = async (paths: string[]): Promise<AwsDiskChangeResult> => {
-    const result = await window.consensus.deleteAwsInstanceFiles(paths);
+  const remove = async (paths: string[], withWork: AwsDiskChosenWork = {}): Promise<AwsDiskChangeResult> => {
+    const result = await window.consensus.deleteAwsInstanceFiles(paths, Object.keys(withWork).length ? { withWork } : undefined);
     if (mounted.current) applyChange(result);
     return result;
   };

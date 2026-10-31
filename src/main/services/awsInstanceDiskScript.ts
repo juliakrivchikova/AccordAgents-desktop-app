@@ -7,8 +7,12 @@
 // from a listing the desktop read earlier: a path is only removed when it is
 // inside one of the places the app owns and may rebuild, nothing running
 // uses it or works around it, it is not the program version in use or one
-// being installed, and it holds or sits in no git project a member could lose
-// work in (a linked worktree, uncommitted or unpushed changes, a stash).
+// being installed, and it sits in no git project (a project goes only as a
+// whole) and holds none a member could lose work in (a linked worktree,
+// uncommitted or unpushed changes, a stash). The one exception is a whole
+// project copy: it goes with its members' work when the User chose it
+// seeing every kind of work it holds ("withWork"), and only when no worktree
+// outside it belongs to it. The app never removes such work on its own.
 
 import { AWS_DISK_JOURNAL_KEEP_BYTES } from "../../shared/cloudRuns";
 
@@ -18,6 +22,8 @@ export interface AwsInstanceDiskRequest {
   root: string;
   data: string;
   arg?: unknown;
+  /** Delete only: the work the User saw on each chosen project copy. */
+  withWork?: Record<string, string[]>;
 }
 
 /** Most entries a listing returns, largest first. */
@@ -287,34 +293,89 @@ def git(top, *args):
     except OSError:
         return None
 
-def repo_hazard(top, linked, bare):
-    """Why a git project may hold work a member would lose; None if none."""
-    if linked:
-        return "worktree"
+def worktrees_of(top):
+    """The folders of a project's worktrees, its own included, as git knows
+    them; None when git cannot say. A worktree whose folder is gone
+    ("prunable") holds nothing and is left out."""
     listing = git(top, "worktree", "list", "--porcelain")
     if listing is None or listing.returncode != 0:
-        return "changes"
-    if listing.stdout.count("worktree ") > 1:
-        return "worktree"
+        return None
+    folders = []
+    for record in listing.stdout.split("\n\n"):
+        lines = record.strip().splitlines()
+        if lines and lines[0].startswith("worktree ") and not any(line.startswith("prunable") for line in lines):
+            folders.append(real(lines[0][len("worktree "):]))
+    return folders
+
+def repo_work(top, linked, bare, first):
+    """The work a member would lose in a git project, in a fixed order: the
+    first kind found when first is set, else every kind. "unreadable" when
+    git cannot tell."""
+    found = []
+    def add(kind):
+        if kind not in found:
+            found.append(kind)
+        return first
+    if linked and add("worktree"):
+        return found
+    trees = worktrees_of(top)
+    if trees is None:
+        return ["unreadable"]
+    if len(trees) > 1 and add("worktree"):
+        return found
     if not bare:
-        status = git(top, "status", "--porcelain", "--untracked-files=normal")
-        if status is None or status.returncode != 0 or status.stdout.strip():
-            return "changes"
-    stash = git(top, "stash", "list")
-    if stash is None or stash.returncode != 0 or stash.stdout.strip():
-        return "changes"
+        # A copied index never matches this disk's inode and ctime; compare
+        # what a copy keeps (size, mtime) so git does not re-read every file.
+        status = git(top, "-c", "core.checkStat=minimal", "-c", "core.trustctime=false",
+                     "status", "--porcelain", "--untracked-files=normal")
+        if status is None or status.returncode != 0:
+            return found + ["unreadable"]
+        if status.stdout.strip() and add("changes"):
+            return found
+    if not linked:
+        # Stashes and branches live in the main project: a linked worktree's
+        # folder holds neither, so they are the main project's to report.
+        stash = git(top, "for-each-ref", "--count=1", "--format=%(refname)", "refs/stash")
+        if stash is None or stash.returncode != 0:
+            return found + ["unreadable"]
+        if stash.stdout.strip() and add("changes"):
+            return found
+    if not bare:
+        # A commit on no branch (a detached HEAD, a rebase stopped midway)
+        # is kept only by this folder.
+        head = git(top, "rev-list", "-1", "HEAD", "--not", "--branches", "--remotes")
+        if head is None:
+            return found + ["unreadable"]
+        if head.returncode != 0:
+            born = git(top, "rev-parse", "-q", "--verify", "HEAD")
+            if born is None or born.returncode == 0:
+                return found + ["unreadable"]
+        elif head.stdout.strip() and add("unpushed"):
+            return found
+    if linked:
+        return found
     ahead = git(top, "log", "--branches", "--not", "--remotes", "--format=%H", "-1")
-    if ahead is None or ahead.returncode != 0 or ahead.stdout.strip():
-        return "unpushed"
-    return None
+    if ahead is None or ahead.returncode != 0:
+        return found + ["unreadable"]
+    if ahead.stdout.strip():
+        add("unpushed")
+    return found
+
+def repo_hazard(top, linked, bare):
+    """Why a git project may hold work a member would lose; None if none.
+    A project git cannot read is kept as if it had changes."""
+    work = repo_work(top, linked, bare, True)
+    return None if not work else "changes" if work[0] == "unreadable" else work[0]
 
 def submodule(dot_git):
-    """A submodule's .git file: its changes show in the project around it."""
+    """A submodule's .git file: its changes show in the project around it.
+    A linked worktree's .git file points into .git/worktrees instead."""
     try:
         with open(dot_git, errors="replace") as handle:
-            return "/modules/" in handle.read(4096)
+            text = handle.read(4096)
     except OSError:
         return False
+    return "/.git/modules/" in text and "/worktrees/" not in text
 
 def is_bare(folder, dirs, files):
     return "HEAD" in files and "objects" in dirs and "refs" in dirs
@@ -337,26 +398,60 @@ def repository_around(p):
         current = os.path.dirname(current)
     return None
 
-def repositories_below(path):
-    """Every git project in a folder, at any depth."""
+def repositories_in(path):
+    """Every git project in a folder, at any depth: (top, linked, bare)."""
     if not os.path.isdir(path) or os.path.islink(path):
-        return None
+        return
     for top, dirs, files in os.walk(path):
         if ".git" in dirs or ".git" in files and not submodule(os.path.join(top, ".git")):
-            hazard = repo_hazard(top, ".git" in files, False)
-            if hazard:
-                return hazard
+            yield top, ".git" in files, False
         elif is_bare(top, dirs, files):
-            hazard = repo_hazard(top, False, True)
-            if hazard:
-                return hazard
+            yield top, False, True
             dirs[:] = []
             continue
         dirs[:] = [d for d in dirs if d not in (".git", "node_modules")]
+
+def repositories_below(path):
+    """The first work a member would lose in any git project in a folder."""
+    for top, linked, bare in repositories_in(path):
+        hazard = repo_hazard(top, linked, bare)
+        if hazard:
+            return hazard
     return None
 
+WORK_ORDER = ("worktree", "changes", "unpushed")
+COPIES = {}
+def copy_state(p):
+    """A whole project copy, the one place the User may delete a member's
+    work: (lock, work). Locked when a worktree outside it belongs to a
+    project in it (deleting it would break that worktree, which nobody
+    chose) or git cannot read a project in it; otherwise every kind of work
+    deleting it loses. Read once per request."""
+    if p not in COPIES:
+        lock, work = None, set()
+        for top, linked, bare in repositories_in(p):
+            if not linked:
+                trees = worktrees_of(top)
+                if trees is None:
+                    lock = "unreadable"
+                    break
+                if any(not inside(tree, p) for tree in trees):
+                    lock = "worktree-elsewhere"
+                    break
+            kinds = repo_work(top, linked, bare, False)
+            if "unreadable" in kinds:
+                lock = "unreadable"
+                break
+            work.update(kinds)
+        COPIES[p] = (lock, [] if lock else [k for k in WORK_ORDER if k in work])
+    return COPIES[p]
+
+def is_copy(p):
+    return os.path.dirname(p) == MIRRORS
+
 def lock_reason(path):
-    """None when the path may be removed; otherwise why it may not."""
+    """None when the path may be removed, or may go with the work in it;
+    otherwise why it never may."""
     p = location(path)
     if not inside(p, HOME) or p == HOME:
         return "system"
@@ -383,7 +478,17 @@ def lock_reason(path):
             return "other-program"
     if in_use(p) or os.path.dirname(p) == RELEASES and recent(p):
         return "in-use"
-    return repository_around(p) or repositories_below(p)
+    around = repository_around(p)
+    if around or not is_copy(p):
+        return around or repositories_below(p)
+    return copy_state(p)[0]
+
+def work_reason(path):
+    """Every kind of work a member would lose with a project copy, which the
+    User may delete knowing it; empty for anything else. Asked only of a
+    path nothing locks."""
+    p = location(path)
+    return copy_state(p)[1] if is_copy(p) else []
 
 def role_of(p):
     if p == OWN:
@@ -500,13 +605,28 @@ def report():
     save_sizes(at)
     return dict(disk, ok=True, categories=categories, measuredAt=int(at * 1000))
 
+def chosen_work():
+    """The work the User saw on each project copy she chose to delete with
+    it; only a delete carries any."""
+    raw = PAYLOAD.get("withWork") if MODE == "delete" else None
+    if not isinstance(raw, dict):
+        return {}
+    return {location(k): set(v) for k, v in raw.items()
+            if isinstance(k, str) and k.startswith("/") and isinstance(v, list)}
+WITH_WORK = chosen_work()
+
 def remove(paths):
     """Removes what may go, checking each path again right before it goes;
-    the kept sizes forget what was removed."""
+    a project copy holding a member's work goes only when the User chose it
+    seeing every kind of work it holds now. The kept sizes forget what was
+    removed."""
     removed, failed, freed = [], [], 0
     for raw in paths:
         p = location(raw)
         reason = lock_reason(p)
+        if not reason:
+            unseen = [k for k in work_reason(p) if k not in WITH_WORK.get(p, ())]
+            reason = unseen[0] if unseen else None
         if reason:
             failed.append({"path": raw, "reason": reason}); continue
         before = size(p)
@@ -581,6 +701,9 @@ def listing(path):
     shown = entries[:LIST_LIMIT]
     for entry in shown:
         entry["lock"] = lock_reason(entry["path"])
+        work = [] if entry["lock"] else work_reason(entry["path"])
+        if work:
+            entry["work"] = work
         role = role_of(entry["path"])
         if role:
             entry["role"] = role

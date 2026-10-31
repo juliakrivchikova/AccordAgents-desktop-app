@@ -283,10 +283,18 @@ export interface AwsDiskReport extends AwsDiskSpace {
 
 export type AwsDiskCleanCategory = "program-logs" | "caches" | "program-versions" | "system-logs";
 
-/** Why a file on the instance cannot be removed from Settings. */
+/** A member's work in a git project, lost when the folder holding it goes. */
+export type AwsDiskWorkReason = "worktree" | "changes" | "unpushed";
+
+/** Chosen project copies, each with the kinds of work the User saw on it. */
+export type AwsDiskChosenWork = Record<string, AwsDiskWorkReason[]>;
+
+/** Why a file on the instance cannot be removed from Settings. A work
+ *  reason locks anything but a whole project copy, and a project copy
+ *  whose work changed after the User chose it. */
 export type AwsDiskLockReason =
   | "system" | "sign-ins" | "agent-tools" | "program" | "running-version" | "qa-browser"
-  | "other-program" | "in-use" | "worktree" | "changes" | "unpushed" | "repository";
+  | "other-program" | "in-use" | "repository" | "worktree-elsewhere" | "unreadable" | AwsDiskWorkReason;
 
 /** What a folder on the instance is to the User, when its name alone does
  *  not say; decided on the instance, which knows its layout. */
@@ -299,7 +307,11 @@ export interface AwsDiskEntry {
   path: string;
   bytes: number;
   dir: boolean;
+  /** Why it cannot be removed from Settings. */
   lock: AwsDiskLockReason | null;
+  /** A whole project copy only: every kind of work a member would lose
+   *  with it, in a fixed order; set only when nothing locks it. */
+  work?: AwsDiskWorkReason[];
   role?: AwsDiskEntryRole;
 }
 
@@ -3098,8 +3110,11 @@ export interface AppBridge {
   /** A folder on the instance, largest first. "@runs" and "@mirrors" name the
    *  cloud run files and the project copies; nothing means the home folder. */
   listAwsInstanceFiles(path?: string): Promise<AwsDiskListing>;
-  /** Removes only what the instance itself confirms is safe at that moment. */
-  deleteAwsInstanceFiles(paths: string[]): Promise<AwsDiskChangeResult>;
+  /** Removes only what the instance itself confirms is safe at that moment.
+   *  `withWork` names the chosen project copies the User deletes with their
+   *  members' work, with the kinds of work she saw on each; a copy that
+   *  holds any other kind by then stays. */
+  deleteAwsInstanceFiles(paths: string[], options?: { withWork?: AwsDiskChosenWork }): Promise<AwsDiskChangeResult>;
   stopAwsWorker(): Promise<AwsWorkerStatus>;
   deleteAwsWorker(): Promise<AwsWorkerStatus>;
   getAgentEnvironment(): Promise<AgentEnvironmentSnapshot>;

@@ -1,10 +1,10 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, File, Folder, FolderOpen, Loader2, Lock } from "lucide-react";
+import { ChevronDown, ChevronRight, File, Folder, FolderOpen, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { AwsDiskEntry, AwsDiskEntryRole } from "../../../shared/types";
+import type { AwsDiskEntry, AwsDiskEntryRole, AwsDiskWorkReason } from "../../../shared/types";
 import { AwsDialog, AwsWaiting } from "./aws-dialog";
 import { cleanError } from "./aws-shared";
-import { formatBytes, keptText, LOCK_TEXT, type AwsDiskControl } from "./use-aws-disk";
+import { formatBytes, keptText, LOCK_TEXT, WORK_TEXT, type AwsDiskControl } from "./use-aws-disk";
 
 export type AwsDiskBrowseStart = "" | "@runs" | "@mirrors";
 
@@ -29,20 +29,24 @@ const ROLE_TEXT: Record<AwsDiskEntryRole, string> = {
 const MAX_SELECTED = 500;
 
 interface FolderState { entries?: AwsDiskEntry[]; loading: boolean; error?: string; truncated?: number }
+/** A chosen path: its size, and the members' work seen going with it. */
+interface Chosen { bytes: number; work: AwsDiskWorkReason[] }
 
 const indent = (depth: number): { paddingLeft: number } => ({ paddingLeft: 12 + depth * 22 });
 
 /**
  * The instance's files, largest first, with a checkbox on what may go and a
- * lock with the reason on what may not. The instance checks every path again
- * when asked to delete, so a folder that became busy meanwhile stays.
+ * disabled one with the reason on what may not. A folder holding a member's
+ * work is marked and may go with it. The instance checks every path again
+ * when asked to delete, so a folder that became busy, or gained work nobody
+ * chose to delete, stays.
  */
 export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart; disk: AwsDiskControl; onClose: () => void }): JSX.Element {
   const [folders, setFolders] = useState<Record<string, FolderState>>({});
   const [root, setRoot] = useState<string>();
   const [rootError, setRootError] = useState<string>();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [selected, setSelected] = useState<Map<string, number>>(new Map());
+  const [selected, setSelected] = useState<Map<string, Chosen>>(new Map());
   const [deleting, setDeleting] = useState(false);
   const [outcome, setOutcome] = useState<{ error?: string; kept?: string }>();
 
@@ -84,18 +88,20 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
     if (next.has(entry.path)) next.delete(entry.path);
     else {
       for (const chosen of [...next.keys()]) if (chosen.startsWith(`${entry.path}/`)) next.delete(chosen);
-      next.set(entry.path, entry.bytes);
+      next.set(entry.path, { bytes: entry.bytes, work: entry.work ?? [] });
     }
     setSelected(next);
   };
-  const total = useMemo(() => [...selected.values()].reduce((sum, bytes) => sum + bytes, 0), [selected]);
+  const total = useMemo(() => [...selected.values()].reduce((sum, chosen) => sum + chosen.bytes, 0), [selected]);
+  const withWork = useMemo(() => Object.fromEntries([...selected].flatMap(([path, chosen]) => chosen.work.length ? [[path, chosen.work]] : [])), [selected]);
+  const workCount = Object.keys(withWork).length;
   const tooMany = selected.size > MAX_SELECTED;
   const remove = async (): Promise<void> => {
     if (tooMany) return;
     setDeleting(true);
     setOutcome(undefined);
     try {
-      const result = await props.disk.remove([...selected.keys()]);
+      const result = await props.disk.remove([...selected.keys()], withWork);
       setSelected(new Map());
       setExpanded(new Set());
       setOutcome({ kept: keptText(result.failed) });
@@ -121,6 +127,7 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
       // A folder's role already says why it is locked when it is the program's.
       const reason = entry.lock && !(role && (entry.lock === "program" || entry.lock === "other-program" || entry.lock === "sign-ins"))
         ? LOCK_TEXT[entry.lock] : undefined;
+      const work = !entry.lock && entry.work?.length ? entry.work.map((kind) => WORK_TEXT[kind]).join(" · ") : undefined;
       return (
         <Fragment key={entry.path}>
           <div className={`gen-aws-tree-row${entry.lock ? " is-locked" : ""}`} style={indent(depth)} data-path={entry.path}>
@@ -130,7 +137,7 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
               </button>
             ) : <span className="gen-aws-tree-chev" />}
             <span className="gen-aws-tree-check">
-              {entry.lock ? <Lock size={13} role="img" aria-label={`Locked${reason ? `: ${reason}` : ""}`} />
+              {entry.lock ? <input type="checkbox" aria-label={`${entry.name} cannot be deleted${reason ? `: ${reason}` : ""}`} checked={inherited} disabled readOnly />
                 : <input type="checkbox" aria-label={`Select ${entry.name}`} checked={inherited || selected.has(entry.path)} disabled={inherited || deleting}
                   onChange={() => toggleSelect(entry)} />}
             </span>
@@ -140,6 +147,7 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
               {role ? <span> · {role}</span> : null}
               {reason ? <em> · {reason}</em> : null}
             </span>
+            {work ? <span className="gen-aws-tree-work" title="Deleted together with this project copy">{work}</span> : null}
             <span className="gen-aws-tree-size">{formatBytes(entry.bytes)}</span>
           </div>
           {open ? rows(entry.path, depth + 1) : null}
@@ -160,8 +168,8 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
       testId="aws-disk-browser"
       busy={deleting}
       onClose={props.onClose}
-      description={`${root ?? "Reading the folder…"}, largest first. Locked items are in use or belong to someone's work and cannot be selected. Deleted files cannot be restored.`}
-      note={selected.size ? `${selected.size} selected · ${formatBytes(total)}` : undefined}
+      description={`${root ?? "Reading the folder…"}, largest first. Marked project copies hold members' work, which is deleted with them. Items in use or the program's own cannot be selected. Deleted files cannot be restored.`}
+      note={selected.size ? `${selected.size} selected · ${formatBytes(total)}${workCount ? ` · ${workCount === 1 ? "1 holds" : `${workCount} hold`} members' work` : ""}` : undefined}
       actions={<>
         <Button type="button" variant="outline" size="sm" disabled={deleting} onClick={props.onClose}>{selected.size ? "Cancel" : "Close"}</Button>
         <Button type="button" size="sm" data-testid="aws-disk-delete" disabled={!selected.size || deleting || tooMany} onClick={() => void remove()}>

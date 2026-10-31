@@ -1,5 +1,6 @@
 import type {
   AwsDiskChangeResult,
+  AwsDiskChosenWork,
   AwsDiskCleanCategory,
   AwsDiskListing,
   AwsDiskReport,
@@ -18,6 +19,7 @@ const CHANGE_TIMEOUT_MS = 5 * 60_000;
 const REMOTE_MARGIN_MS = 15_000;
 const MAX_DELETE_PATHS = 500;
 const CLEAN_CATEGORIES: readonly AwsDiskCleanCategory[] = ["program-logs", "caches", "program-versions", "system-logs"];
+const WORK_REASONS: readonly string[] = ["worktree", "changes", "unpushed"];
 
 export type AwsInstanceDiskExec = (worker: CloudRunWorkerSettings, remoteCommand: string, script: string, timeoutMs: number) => Promise<string>;
 
@@ -89,17 +91,21 @@ export class AwsInstanceDiskService {
     }));
   }
 
-  remove(paths: string[]): Promise<AwsDiskChangeResult> {
+  /** `withWork` names the chosen project copies the User deletes with
+   *  their members' work and the kinds of work she saw on each; the
+   *  instance keeps any copy holding another kind by then. */
+  remove(paths: string[], withWork: AwsDiskChosenWork = {}): Promise<AwsDiskChangeResult> {
     if (!Array.isArray(paths) || paths.length === 0 || paths.length > MAX_DELETE_PATHS
-      || paths.some((path) => typeof path !== "string" || !path.startsWith("/") || path.includes("\0"))) {
+      || paths.some((path) => typeof path !== "string" || !path.startsWith("/") || path.includes("\0"))
+      || !validChosenWork(withWork, paths)) {
       throw new Error("Choose the files to delete again.");
     }
-    return this.change({ mode: "delete", arg: paths }, (result) => this.options.log?.("aws.disk.delete", {
-      requested: paths.length, removed: result.removed ?? 0, freedBytes: result.freedBytes, failed: result.failed.length
+    return this.change({ mode: "delete", arg: paths, withWork }, (result) => this.options.log?.("aws.disk.delete", {
+      requested: paths.length, withWork: Object.keys(withWork).length, removed: result.removed ?? 0, freedBytes: result.freedBytes, failed: result.failed.length
     }));
   }
 
-  private change(request: Omit<AwsInstanceDiskRequest, "root" | "data">, logged: (result: AwsDiskChangeResult) => void): Promise<AwsDiskChangeResult> {
+  private change(request: Omit<AwsInstanceDiskRequest, "root" | "data" | "withWork"> & { withWork?: AwsDiskChosenWork }, logged: (result: AwsDiskChangeResult) => void): Promise<AwsDiskChangeResult> {
     this.changes += 1;
     this.last = undefined;
     return this.serial(async () => {
@@ -135,6 +141,12 @@ export class AwsInstanceDiskService {
     if (parsed.ok === false) throw new Error(parsed.error ? `The instance refused: ${parsed.error}.` : "The instance refused the request.");
     return parsed;
   }
+}
+
+function validChosenWork(withWork: unknown, paths: string[]): withWork is AwsDiskChosenWork {
+  if (!withWork || typeof withWork !== "object" || Array.isArray(withWork)) return false;
+  return Object.entries(withWork).every(([path, kinds]) => paths.includes(path)
+    && Array.isArray(kinds) && kinds.length > 0 && kinds.every((kind) => WORK_REASONS.includes(kind)));
 }
 
 function connectionFailure(error: unknown): boolean {
