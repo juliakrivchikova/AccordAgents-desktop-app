@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -41,6 +42,30 @@ export async function generateWorkerHostKey(run: typeof runCommand = runCommand)
   }
 }
 
+/**
+ * The host key for one launch: made once per launch token and kept until the
+ * machine is known, so a launch tried again with the same token (AWS answers
+ * the first one's machine) gives the same key, not a new one that would not
+ * match the token's first request or the machine it made.
+ */
+export async function hostKeyForLaunch(keyDir: string, launchToken: string | undefined, make: () => Promise<WorkerHostKey> = generateWorkerHostKey): Promise<WorkerHostKey> {
+  if (!launchToken) return make();
+  const dir = path.join(keyDir, "launch-host-keys");
+  const file = path.join(dir, `${createHash("sha256").update(launchToken).digest("hex").slice(0, 32)}.json`);
+  const kept = await readFile(file, "utf8").then((text) => JSON.parse(text) as Partial<WorkerHostKey>).catch(() => undefined);
+  if (kept && typeof kept.privateKey === "string" && typeof kept.publicKey === "string") return { privateKey: kept.privateKey, publicKey: kept.publicKey };
+  const made = await make();
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await writeFile(file, JSON.stringify(made), { mode: 0o600 });
+  return made;
+}
+
+/** The launch's key is known under the machine's name now: its copy goes. */
+export async function forgetLaunchHostKey(keyDir: string, launchToken: string | undefined): Promise<void> {
+  if (!launchToken) return;
+  await rm(path.join(keyDir, "launch-host-keys", `${createHash("sha256").update(launchToken).digest("hex").slice(0, 32)}.json`), { force: true });
+}
+
 const ALIAS = /^accordagents-i-[0-9a-f]{8,32}$/;
 
 /** Whether a connection name is one this app gives the AWS machines it makes. */
@@ -62,8 +87,8 @@ export async function pinWorkerHostKey(keyDir: string, alias: string, publicKey:
   await writeFile(file, `${[...kept, `${alias} ${type} ${key}`].join("\n")}\n`, { mode: 0o600 });
 }
 
-/** cloud-init lines that give the machine this host key (other key types
- *  are still made by the image, as before). */
+/** cloud-init lines that give the machine this host key. With `ssh_keys`
+ *  set, cloud-init makes no other host keys: this is the machine's only one. */
 export function workerHostKeyCloudInit(hostKey: WorkerHostKey): string[] {
   return [
     "ssh_deletekeys: true",

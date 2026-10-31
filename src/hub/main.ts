@@ -249,12 +249,12 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
     // With the server's own key: the owner learns it here, over the SSH
     // channel it set the server up through, and from then on accepts only a
     // server that proves it holds it.
-    return finish({ ok: true, hubId: hubId(), hubKey: loadOrCreateHubKey(userDataPath()).publicKeyDerBase64, alreadyOwner: Boolean(before) });
+    return finish({ ok: true, hubId: hubId(), hubKey: loadOrCreateHubKey(userDataPath(), { replaceUnreadable: true }).publicKeyDerBase64, alreadyOwner: Boolean(before) });
   }
 
   const keys = loadOrCreateVapidKeys(path.join(userDataPath(), "vapid.json"));
   const hub = composeHub({
-    storage, hubId: hubId(), version: HUB_VERSION, keys, hubKey: loadOrCreateHubKey(userDataPath()), log, acmeWebroot: args.acmeWebroot,
+    storage, hubId: hubId(), version: HUB_VERSION, keys, hubKey: startupHubKey(log), log, acmeWebroot: args.acmeWebroot,
     // QA only: a stand-in for AWS on this computer. A signed start request
     // never goes to any other address than AWS's own.
     ec2Endpoint: loopbackEndpoint(process.env.ACCORDAGENTS_HUB_EC2_ENDPOINT)
@@ -350,6 +350,18 @@ function loopbackEndpoint(value: string | undefined): string | undefined {
     const url = new URL(text);
     return url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost") ? url.href : undefined;
   } catch {
+    return undefined;
+  }
+}
+
+/** The server's key at start. An unreadable one keeps the server up without
+ *  proving itself (its devices say so, and setting it up again replaces it),
+ *  rather than failing every start. */
+function startupHubKey(log: (event: string, payload: Record<string, unknown>) => void): HubKey | undefined {
+  try {
+    return loadOrCreateHubKey(userDataPath());
+  } catch (error) {
+    log("hub.key.unreadable", { message: error instanceof Error ? error.message : String(error) });
     return undefined;
   }
 }

@@ -129,13 +129,23 @@ export class HubClient {
   /** The server at the address is the User's: its id, and its proof that it
    *  holds the key learned at setup. Checked once in a while, and again after
    *  a check that did not get an answer. */
+  /** A fresh check already under way: writes sent together share it (each
+   *  was asked after it began, so it is fresh for every one of them). */
+  private freshCheck?: Promise<void>;
+
   private verified(fresh = false): Promise<void> {
     if (!this.options.expect) return Promise.resolve();
     if (!fresh && this.proven && Date.now() - this.proven.at < IDENTITY_TTL_MS) return this.proven.check;
+    if (fresh && this.freshCheck) return this.freshCheck;
     const check = this.verifyNow();
     const entry = { at: Date.now(), check };
     this.proven = entry;
     check.catch(() => { if (this.proven === entry) this.proven = undefined; });
+    if (fresh) {
+      this.freshCheck = check;
+      const done = () => { if (this.freshCheck === check) this.freshCheck = undefined; };
+      check.then(done, done);
+    }
     return check;
   }
 

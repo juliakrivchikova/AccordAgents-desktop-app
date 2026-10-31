@@ -85,8 +85,9 @@ export interface AwsWorkerLifecycleOptions {
   /** A new machine's SSH host key: made before the machine exists, given to
    *  it at first boot, and known here under its connection name. */
   hostKey?: {
-    generate: () => Promise<WorkerHostKey>;
-    pin: (alias: string, publicKey: string) => Promise<void>;
+    /** The same key for the same launch token (a launch tried again). */
+    generate: (launchToken?: string) => Promise<WorkerHostKey>;
+    pin: (alias: string, publicKey: string, launchToken?: string) => Promise<void>;
   };
   waitForState?: (
     poll: () => Promise<AwsWorkerInstanceInfo | undefined>,
@@ -173,7 +174,7 @@ export class AwsWorkerLifecycle {
     } else {
       await client.authorizeSshIngress(securityGroupId, cidr);
     }
-    const hostKey = await this.options.hostKey?.generate();
+    const hostKey = await this.options.hostKey?.generate(options.clientToken);
     const spec = buildWorkerInstanceSpec({
       imageId: image.imageId,
       rootDeviceName: image.rootDeviceName,
@@ -189,7 +190,7 @@ export class AwsWorkerLifecycle {
     if (hostKey) {
       // Before anything connects to it. A failure here only leaves the first
       // connection checked as before (trust on first use); it is logged.
-      await this.options.hostKey!.pin(`accordagents-${instanceId}`, hostKey.publicKey).then(
+      await this.options.hostKey!.pin(`accordagents-${instanceId}`, hostKey.publicKey, options.clientToken).then(
         () => this.log("aws-worker.host-key-pinned", { instanceId }),
         (error: unknown) => this.log("aws-worker.host-key-pin-failed", { instanceId, message: error instanceof Error ? error.message : String(error) })
       );

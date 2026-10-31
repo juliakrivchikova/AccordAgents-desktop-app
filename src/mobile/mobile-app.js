@@ -2213,6 +2213,19 @@
       await replaceMetaRecordIf(HUB_IDENTITY_META_KEY, sealed, function (current) {
         return Boolean(current && current.deviceId === identity.deviceId && current.privateKeyDerBase64);
       });
+      // The key as stored must sign before its text is given up: a browser
+      // that could not keep it gets the text back, and signs from it.
+      const stored = await readMetaRecord(HUB_IDENTITY_META_KEY);
+      if (stored && stored.deviceId === identity.deviceId && !stored.privateKeyDerBase64) {
+        const works = await api.signHubRequestWeb(stored, { method: "GET", pathWithQuery: "/v1/key-check" }).then(function () { return true; }, function () { return false; });
+        if (!works) {
+          await replaceMetaRecordIf(HUB_IDENTITY_META_KEY, identity, function (current) {
+            return Boolean(current && current.deviceId === identity.deviceId && !current.privateKeyDerBase64);
+          });
+          recordRelayDebug({ event: "hub-key-seal-reverted", deviceId: identity.deviceId });
+          return identity;
+        }
+      }
       const pending = await readMetaRecord(HUB_PENDING_IDENTITY_META_KEY);
       if (pending && pending.identity && pending.identity.privateKeyDerBase64) {
         const pendingSealed = { ...pending, identity: await api.sealHubDeviceIdentity(pending.identity) };
@@ -2287,6 +2300,17 @@
   function askToPair(invite) {
     hubPairingState = { status: "confirm", invite: invite, replacing: Boolean(loadHubPairing()) };
     void render();
+  }
+
+  /** The server this phone is paired with now: its id at its address. */
+  function currentHubServer() {
+    const pairing = loadHubPairing();
+    if (!pairing) return undefined;
+    try {
+      return pairing.hubId + "@" + new URL(pairing.hubUrl).origin;
+    } catch {
+      return pairing.hubId + "@" + pairing.hubUrl;
+    }
   }
 
   function serverHost(hubUrl) {
@@ -2488,6 +2512,8 @@
       attempts: 0,
       updatedAt: createdAt,
       hub: true,
+      // The server it was written for: it goes to no other.
+      hubServer: currentHubServer(),
       ops: 3,
       ...(input.dependsOn ? { dependsOn: input.dependsOn } : {}),
       // Who the message is for, decided now, from what this phone showed the
@@ -2678,7 +2704,13 @@
    */
   async function flushOutboxToServer(entries) {
     const client = hubClient();
-    let owed = entries.filter(function (entry) { return entry.hub && serverOwesEntry(entry); })
+    // Written for another server (the phone was paired again meanwhile):
+    // it never goes to this one.
+    const server = currentHubServer();
+    for (const stray of entries.filter(function (entry) { return entry.hub && serverOwesEntry(entry) && entry.hubServer && entry.hubServer !== server; })) {
+      await settleOutboxEntry(stray, { status: OUTBOX_REFUSED, lastError: "Written for another server, so it was not sent to this one." });
+    }
+    let owed = entries.filter(function (entry) { return entry.hub && serverOwesEntry(entry) && (!entry.hubServer || entry.hubServer === server); })
       .sort(function (left, right) { return outboxOrderOf(left) - outboxOrderOf(right) || String(left.eventId).localeCompare(String(right.eventId)); });
     if (!client) return { status: "unreachable", sent: 0, pending: owed.length };
     let sent = 0;
@@ -5761,6 +5793,9 @@
     const invite = pairingState.invite;
     const current = loadHubPairing();
     const confirm = function () {
+      // One tap pairs once: a second would spend the same code again.
+      if (hubPairingState && hubPairingState.status !== "confirm") return;
+      for (const item of actions.querySelectorAll("button")) item.disabled = true;
       hubPairingState = { status: "pairing", replacing: Boolean(current) };
       void pairWithServer(invite);
     };

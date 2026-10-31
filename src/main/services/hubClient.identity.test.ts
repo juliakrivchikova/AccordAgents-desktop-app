@@ -136,3 +136,14 @@ test("a write always waits for a fresh proof: a server swapped without a single 
   await assert.rejects(() => client.writeOps([]), HubIdentityError);
   assert.deepEqual(seen.filter((request) => request.to === impostor.base && request.signed), [], "the write never left");
 });
+
+test("setting the server up again replaces an unreadable key, and keeps the old file aside", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-key-rotate-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { writeFileSync, readdirSync } = await import("node:fs");
+  writeFileSync(path.join(dir, "hub-key.json"), "{\"publicKeyDer");
+  const made = loadOrCreateHubKey(dir, { replaceUnreadable: true });
+  assert.deepEqual(loadOrCreateHubKey(dir), made, "the new key is kept");
+  assert.ok(readdirSync(dir).some((name) => name.startsWith("hub-key.json.unreadable-")), "the unreadable one is kept aside");
+  assert.ok(!readdirSync(dir).some((name) => name.endsWith(".tmp")), "no half-written file is left");
+});

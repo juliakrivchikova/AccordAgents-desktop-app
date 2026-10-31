@@ -83,8 +83,16 @@ test("a pairing code asks first, names the server, and another server gets nothi
     assert.equal(await pairingOf(app), null, "Cancel pairs nothing");
     assert.equal((await hubA.phones()).length, 0, "Cancel enrolls nothing");
 
-    // Paired with A, with the yes (the fixture taps Pair).
-    await pairPage(app, { hub: hubA, siteOrigin: site.origin });
+    // Paired with A, with the yes: tapped twice in a row, it pairs once.
+    const second = await hubA.invite();
+    await app.send("Page.navigate", { url: second.url(site.origin) });
+    await app.waitFor(`Boolean(document.querySelector("#chat-list .pairing-submit"))`, "the phone asks before it pairs", 20_000);
+    await app.evaluate(`(() => { const button = document.querySelector("#chat-list .pairing-submit"); button.click(); button.click(); })()`);
+    await app.waitFor(`Boolean(localStorage.getItem(${JSON.stringify(HUB_PAIRING_KEY)}))`, "paired with A", 20_000);
+    await app.waitFor(`Boolean(globalThis.AccordAgentsMobile) && JSON.parse(localStorage.getItem("accordagents.mobile.chatList.v1") || "[]").length > 0`, "A's chats are read", 20_000);
+    await sleep(800);
+    assert.equal(hubA.requests.filter((request) => request.method === "POST" && request.path === "/v1/phone/enroll").length, 1, "one tap's worth of pairing");
+    assert.equal(await app.evaluate(`Boolean(document.querySelector(".pairing-confirm"))`), false, "no failure replaced the chats");
     assert.equal((await pairingOf(app)).hubUrl, hubA.base);
     // (d) The key is a non-extractable key, not text.
     const sealed = await identityRecord(app);
