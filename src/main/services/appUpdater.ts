@@ -307,7 +307,13 @@ export function bootstrapAppUpdater(debugLogs: DebugLogService, betaUpdates: boo
  *  and then 8 hours, until the User came back and pressed Restart. A sheet on
  *  the window waits without stopping anything; with no window open, the
  *  question waits for one. */
-export function showUpdateRestartPrompt(info: UpdateRestartInfo, window: BrowserWindow | undefined): Promise<"restart" | "later" | "unanswered"> {
+export function showUpdateRestartPrompt(
+  info: UpdateRestartInfo,
+  window: BrowserWindow | undefined,
+  /** A quit held for the User's answer to another question (the terminal's
+   *  running commands) is not a quit yet, and does not end this one. */
+  quitHeld: () => boolean = () => false
+): Promise<"restart" | "later" | "unanswered"> {
   // A hidden or minimized window waits too: newer Electron versions run the
   // box modally for a parent that is not shown, which is the freeze again.
   if (!updatePromptWindowShown(window)) return Promise.resolve("unanswered");
@@ -315,9 +321,12 @@ export function showUpdateRestartPrompt(info: UpdateRestartInfo, window: Browser
   // closes, and an ended sheet reports its cancel button, which is Restart
   // here: that is no answer, and the update still installs as the app quits.
   let quitting = false;
-  const onQuit = (): void => { quitting = true; };
+  const onQuit = (): void => { if (!quitHeld()) quitting = true; };
+  // A window that closes ends this sheet whether or not a quit is held, so
+  // its close always counts as no answer.
+  const onClose = (): void => { quitting = true; };
   app.on("before-quit", onQuit);
-  window.once("close", onQuit);
+  window.once("close", onClose);
   return dialog.showMessageBox(window, {
     type: "info",
     buttons: ["Restart", "Later"],
@@ -327,7 +336,7 @@ export function showUpdateRestartPrompt(info: UpdateRestartInfo, window: Browser
   }).then(({ response }) => (quitting ? "unanswered" : response === 0 ? "restart" : "later"))
     .finally(() => {
       app.removeListener("before-quit", onQuit);
-      if (!window.isDestroyed()) window.removeListener("close", onQuit);
+      if (!window.isDestroyed()) window.removeListener("close", onClose);
     });
 }
 
