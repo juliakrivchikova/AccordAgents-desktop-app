@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
+import { ChatMessageWhen } from "./chat-streaming";
 import {
   ActivityDisclosureHarness,
   activityEvent,
@@ -165,5 +166,49 @@ test("notices about the run stay visible as their own rows", async () => {
   });
   assert.deepEqual(groupLines(renderer!), ["1 command", "Using Bash again~live"]);
   assert.deepEqual(activityRowLabels(renderer!), ["No provider output for 5 minutes"]);
+  await act(async () => renderer!.unmount());
+});
+
+test("the status line shows until the member's first text, then goes", async () => {
+  const statusLine = (renderer: ReactTestRenderer) => renderer.root
+    .findAll((node) => typeof node.type === "string" && /streaming-message-thinking/.test(String(node.props.className ?? "")))
+    .map((node) => textContent(node));
+  let renderer: ReactTestRenderer | undefined;
+  await act(async () => {
+    renderer = create(<ActivityDisclosureHarness activityEvents={[]} mode="stream-empty" />);
+  });
+  assert.deepEqual(statusLine(renderer!), ["Thinking"], "the running time lives in the message header, not here");
+
+  await act(async () => {
+    renderer!.update(<ActivityDisclosureHarness activityEvents={[]} mode="stream-tail" />);
+  });
+  assert.deepEqual(statusLine(renderer!), [], "no Responding line once text appears");
+  assert.doesNotMatch(textContent(renderer!.root), /Responding/);
+
+  await act(async () => {
+    renderer!.update(<ActivityDisclosureHarness activityEvents={[]} mode="stream-empty" statusLabel="" />);
+  });
+  assert.deepEqual(statusLine(renderer!), ["Thinking"], "an empty stored label never leaves a blank line");
+  await act(async () => renderer!.unmount());
+});
+
+test("a running reply's header shows its running time, and a finished one when it was sent", async () => {
+  const createdAt = new Date(Date.now() - 65_000).toISOString();
+  let renderer: ReactTestRenderer | undefined;
+  await act(async () => {
+    renderer = create(<ChatMessageWhen createdAt={createdAt} runningSince={createdAt} />);
+  });
+  const running = renderer!.root.findByType("span");
+  assert.equal(textContent(running), "1m 5s", "a duration, never a clock-like 1:05");
+  assert.equal(running.props.className, "message-when is-elapsed");
+  const sentAt = running.props.title;
+  assert.ok(sentAt, "the sent time stays reachable as the tooltip");
+
+  await act(async () => {
+    renderer!.update(<ChatMessageWhen createdAt={createdAt} />);
+  });
+  const finished = renderer!.root.findByType("span");
+  assert.equal(finished.props.className, "message-when");
+  assert.equal(textContent(finished), sentAt, "the finished header shows the sent time again");
   await act(async () => renderer!.unmount());
 });

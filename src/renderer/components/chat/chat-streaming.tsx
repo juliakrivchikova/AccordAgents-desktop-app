@@ -1,6 +1,8 @@
 import { memo, useEffect, useMemo, useState } from "react";
 
 import { MarkdownText } from "../content/markdown-text";
+import { formatChatTime } from "./chat-format";
+import { formatWorkedDuration } from "./chat-worked-row";
 import type { ChatAgentActivityEvent } from "../../../shared/types";
 import {
   chatActivityEventsForSegment,
@@ -31,18 +33,20 @@ export const StreamingMessageContent = memo(function StreamingMessageContent(pro
   activity?: string;
   activityEvents?: ChatAgentActivityEvent[];
   statusLabel?: string;
-  startedAt: string;
 }): JSX.Element {
-  const elapsedSeconds = useStreamingElapsedSeconds(props.startedAt);
   const hasContent = Boolean(props.content?.trim());
-  const statusLabel = props.statusLabel ?? (hasContent ? "Responding" : "Thinking");
+  const statusLabel = props.statusLabel || "Thinking";
   const activity = props.activity && props.activity !== statusLabel ? props.activity : undefined;
+  // Once the member is writing, its text and live command line show the work, so the status line
+  // goes. The reply's running time is in the message header, next to the member's status.
+  const showStatus = !hasContent;
   return (
     <div className="streaming-message-content" aria-live="polite">
-      <div className={`streaming-message-thinking ${hasContent ? "is-compact" : ""}`}>
-        <span className="streaming-status-label">{statusLabel}</span>
-        <span className="streaming-message-elapsed">{formatElapsed(elapsedSeconds)}</span>
-      </div>
+      {showStatus && (
+        <div className={`streaming-message-thinking ${hasContent ? "is-compact" : ""}`}>
+          <span className="streaming-status-label">{statusLabel}</span>
+        </div>
+      )}
       {hasContent && (
         <StreamingMarkdownText
           activityDisclosure={props.activityDisclosure}
@@ -224,10 +228,22 @@ function splitStreamingMarkdown(content: string): { completed: string; tail: str
   };
 }
 
-function formatElapsed(totalSeconds: number): string {
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+/** The message header's time: a running reply shows how long it has been running, ticking every
+ * second in the same "1m 5s" form as "Worked for" so it never reads as a clock time, with the sent
+ * time as the tooltip; any other message shows when it was sent. */
+export const ChatMessageWhen = memo(function ChatMessageWhen(props: {
+  createdAt: string;
+  runningSince?: string;
+}): JSX.Element {
+  if (props.runningSince) {
+    return <ChatMessageElapsed startedAt={props.runningSince} sentAt={formatChatTime(props.createdAt)} />;
+  }
+  return <span className="message-when">{formatChatTime(props.createdAt)}</span>;
+});
+
+function ChatMessageElapsed(props: { startedAt: string; sentAt: string }): JSX.Element {
+  const elapsedSeconds = useStreamingElapsedSeconds(props.startedAt);
+  return <span className="message-when is-elapsed" title={props.sentAt}>{formatWorkedDuration(elapsedSeconds * 1000)}</span>;
 }
 
 function useStreamingElapsedSeconds(startedAt: string): number {

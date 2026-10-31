@@ -38,11 +38,10 @@ import {
   participantRequestStatusLabel,
   providerLabel
 } from "./chat-conversation-data";
-import { formatChatTime } from "./chat-format";
 import { ChatChoiceCard } from "./chat-choice-card";
 import { chatMessageCards } from "./chat-server-card";
 import { ChatImageAttachmentStrip } from "./chat-image-attachments";
-import { ChatExpandedProcessingTranscript, StreamingMessageContent } from "./chat-streaming";
+import { ChatExpandedProcessingTranscript, ChatMessageWhen, StreamingMessageContent } from "./chat-streaming";
 import { ChatMessageReactionList } from "./chat-message-reactions";
 import { chatReplyPreviewAvatars } from "./chat-reply-preview";
 import { Avatar, avatarForMessage } from "../avatar/avatar";
@@ -345,7 +344,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 />
               )
             )}
-            <span className="message-when">{formatChatTime(message.createdAt)}</span>
+            <ChatMessageWhen createdAt={message.createdAt} runningSince={isStreaming ? streamingStartedAt : undefined} />
             {!props.inThread && message.metadata?.parentMessageId && message.role === "user" && (
               <StatusBadge tone="neutral">reply</StatusBadge>
             )}
@@ -361,7 +360,6 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 activity={streamedActivity}
                 activityEvents={streamedActivityEvents}
                 statusLabel={streamedRemoteRunStatus?.label}
-                startedAt={streamingStartedAt}
               />
             ) : (
               <>

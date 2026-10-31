@@ -27,6 +27,8 @@ export function ActivityDisclosureHarness(props: {
   mode?: ActivityHarnessMode;
   /** Streamed content for the stream modes; overrides the mode's preset text. */
   content?: string;
+  /** A cloud run's own status for the stream modes. */
+  statusLabel?: string;
 }): JSX.Element | null {
   const activityDisclosure = useChatActivityDisclosure(props.conversationId ?? "conversation-1");
   const mode = props.mode ?? "stream-empty";
@@ -68,7 +70,7 @@ export function ActivityDisclosureHarness(props: {
   return (
     <StreamingMessageContent
       activityDisclosure={activityDisclosure}
-      startedAt={NOW}
+      statusLabel={props.statusLabel}
       content={content}
       activityEvents={props.activityEvents}
     />
