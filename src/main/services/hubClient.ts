@@ -220,14 +220,9 @@ export class HubClient {
 
   /** Puts bytes on the hub as a body (a picture, an avatar) that a message
    *  or the catalog names by its reference; fragments already there are sent
-   *  again harmlessly. */
-  async uploadBytes(bytes: Buffer): Promise<DeviceEventBlobReference> {
-    const reference: DeviceEventBlobReference = {
-      type: "device.event.blob",
-      blobHash: `sha256:${sha256Hex(bytes)}`,
-      byteLength: bytes.length,
-      fragments: Math.max(1, Math.ceil(bytes.length / BLOB_FRAGMENT_MAX_BYTES))
-    };
+   *  again harmlessly. `reference`: the bytes' name, when the caller has
+   *  it already (it is not worked out again). */
+  async uploadBytes(bytes: Buffer, reference: DeviceEventBlobReference = blobReferenceOf(bytes)): Promise<DeviceEventBlobReference> {
     for (let index = 0; index < reference.fragments; index += 1) {
       const part = bytes.subarray(index * BLOB_FRAGMENT_MAX_BYTES, Math.min(bytes.length, (index + 1) * BLOB_FRAGMENT_MAX_BYTES));
       await this.request("PUT", hubBlobFragmentPath(reference, index), part, "application/octet-stream");
@@ -327,4 +322,16 @@ export class HubClient {
       socket?.close();
     };
   }
+}
+
+/** The name bytes are kept under on the User's server: their content, so a
+ *  device names a picture in its message before (and whether or not) the
+ *  bytes were put there, and every device names the same bytes alike. */
+export function blobReferenceOf(bytes: Buffer): DeviceEventBlobReference {
+  return {
+    type: "device.event.blob",
+    blobHash: `sha256:${sha256Hex(bytes)}`,
+    byteLength: bytes.length,
+    fragments: Math.max(1, Math.ceil(bytes.length / BLOB_FRAGMENT_MAX_BYTES))
+  };
 }

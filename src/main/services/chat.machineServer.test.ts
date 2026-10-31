@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,13 +9,14 @@ import { hubTurnRunId, type HubChatPage, type HubMachineSettings } from "../../s
 import { deriveMachineChannelKey } from "../../shared/machineChannelKey";
 import { isMachineSettingsDocument, type MachineSettingsDocument, type MachineSettingsSnapshot } from "../../shared/machineLink";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
-import type { ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
+import type { ChatImageAttachment, ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
+import { isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import { HubOps } from "../../hub/hubOps";
 import { HubServer } from "../../hub/hubServer";
 import { ChatService } from "./chat";
 import { DeviceIdentityService } from "./deviceIdentity";
 import { ChatSearchService } from "./chatSearch";
-import { HubClient } from "./hubClient";
+import { HubClient, HubHttpError } from "./hubClient";
 import { signHubRequest, type HubSigningIdentity } from "./hubAuth";
 import { openChannelPayload } from "./machineChannelSealing";
 import { MachineLinkService } from "./machineLink";
@@ -408,4 +410,143 @@ test("a machine member whose copy of the project is missing makes the computer f
   // The machine keeps the mark it wrote; only the computer acts on it.
   const machineChat = await h.machineStorage.getConversation("chat-gone");
   assert.ok(machineChat?.messages.some((message) => message.metadata?.missingProjectCopy), "the mark travels with the reply");
+});
+
+/** A PNG of `size` bytes: a real header (the app reads its dimensions), then
+ *  filler, so a picture spans several fragments on the server. */
+function pictureBytes(size: number): Buffer {
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=", "base64");
+  return Buffer.concat([png, randomBytes(Math.max(0, size - png.length))]);
+}
+
+/** Each device keeps its pictures on its own disk, as the computer and a
+ *  cloud machine do (one test process would otherwise share one folder). */
+async function ownPictureFolders(t: test.TestContext, h: Awaited<ReturnType<typeof setup>>): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "accord-pictures-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const [chat, device] of [[h.desktopChat, "desktop"], [h.machineChat, "machine"]] as const) {
+    (chat as unknown as { attachmentPath(conversationId: string, storageKey: string): string }).attachmentPath =
+      (conversationId, storageKey) => path.join(root, device, conversationId, storageKey);
+  }
+  return root;
+}
+
+/** Every message written to the server is checked, as it is written, for
+ *  whether the server already holds each picture it names. */
+function watchPictureOrder(t: test.TestContext, h: Awaited<ReturnType<typeof setup>>): Array<{ messageId: string; held: boolean }> {
+  const seen: Array<{ messageId: string; held: boolean }> = [];
+  const original = HubClient.prototype.writeOps;
+  HubClient.prototype.writeOps = async function (this: HubClient, ops: Parameters<HubClient["writeOps"]>[0]) {
+    for (const op of ops) {
+      const messages = op.kind === "message.create" ? [op.message] : op.kind === "chat.import" ? op.messages : [];
+      for (const message of messages) {
+        for (const attachment of message.metadata?.imageAttachments ?? []) {
+          if (!attachment.hubBlob) continue;
+          seen.push({ messageId: message.id, held: await h.hubStorage.deviceEventBlobs().verify(attachment.hubBlob).catch(() => false) });
+        }
+      }
+    }
+    return original.call(this, ops);
+  };
+  t.after(() => { HubClient.prototype.writeOps = original; });
+  return seen;
+}
+
+const persistPicture = (chat: ChatService, conversationId: string, bytes: Buffer) =>
+  (chat as unknown as { persistChatImageAttachment(id: string, input: { bytes: Buffer; filename?: string }, index: number): Promise<{ attachment: ChatImageAttachment }> })
+    .persistChatImageAttachment(conversationId, { bytes, filename: "mockup.png" }, 0);
+
+test("a picture a machine member sends goes up to the User's server before its message, and the computer opens it from there", async (t) => {
+  // The defect: a cloud member's picture stayed on the machine's disk. The
+  // computer found it neither on its own disk nor on the server and showed
+  // "Unavailable" (chat.attachments.missing in the User's log, 2026-10-31).
+  const project = await mkdtemp(path.join(tmpdir(), "accord-picture-project-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  const bytes = pictureBytes(900_000);
+  await writeFile(path.join(project, "mockup.png"), bytes);
+  const h = await linked(t, localChat("chat-pic", { repoPath: project }));
+  await ownPictureFolders(t, h);
+  const order = watchPictureOrder(t, h);
+  h.desktopChat.setHubBlobReader((reference) => h.desktopHub.downloadBytes(reference));
+  await until(() => h.machineStorage.getConversation("chat-pic"), (chat) => chat?.repoPath === project);
+  // The member, on the machine, sends it with app_chat_send_message.
+  const sent = await h.machineChat.sendChatMessageFromTool({
+    conversationId: "chat-pic", participantId: remote.id, roleConfigId: remote.roleConfigId, roleConfigVersion: 1, capabilities: [], snapshotMaxSequence: 0,
+    runPermissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), repoRead: true })
+  } as never, { content: "Three options.", attachments: [{ kind: "image", sourcePath: "mockup.png" }] });
+  const page = await until(() => h.page("chat-pic"), (current) => current.messages.some((message) => message.id === sent.messageId));
+  const named = page.messages.find((message) => message.id === sent.messageId)!.metadata?.imageAttachments?.[0];
+  assert.ok(named && isDeviceEventBlobReference(named.hubBlob), "the server's copy names the picture's bytes");
+  assert.deepEqual(order, [{ messageId: sent.messageId, held: true }], "the server held the picture when its message was written");
+  assert.ok((await h.desktopHub.downloadBytes(named.hubBlob)).equals(bytes));
+  await until(() => h.desktopStorage.getConversation("chat-pic"), (chat) => Boolean(chat?.messages.some((message) => message.id === sent.messageId)));
+  const read = await h.desktopChat.readChatAttachment({ conversationId: "chat-pic", attachmentId: named.id });
+  assert.ok(Buffer.from(read.dataBase64, "base64").equals(bytes), "the computer opens the machine's picture");
+});
+
+test("a picture the User attaches on the computer goes up to her server before its message, and another device reads it there", async (t) => {
+  // The phone reads a picture only from the server; one attached on the
+  // computer used to stay on the computer's disk, so the phone could not
+  // open it. A machine stands in for the phone here: no way to the computer
+  // but the server.
+  const h = await linked(t, localChat("chat-up"));
+  await ownPictureFolders(t, h);
+  const order = watchPictureOrder(t, h);
+  h.machineChat.setHubBlobReader((reference) => h.machineHub.downloadBytes(reference));
+  const bytes = pictureBytes(120_000);
+  await h.desktopChat.sendMessage({ conversationId: "chat-up", content: "look",
+    imageAttachments: [{ dataBase64: bytes.toString("base64"), mimeType: "image/png", filename: "shot.png" }] } as never);
+  const page = await until(() => h.page("chat-up"), (current) => current.messages.some((message) => message.role === "user" && message.metadata?.imageAttachments?.length));
+  const user = page.messages.find((message) => message.role === "user")!;
+  const named = user.metadata!.imageAttachments![0];
+  assert.ok(isDeviceEventBlobReference(named.hubBlob), "the server's copy names the picture's bytes");
+  assert.deepEqual(order, [{ messageId: user.id, held: true }], "the server held the picture when its message was written");
+  await until(() => h.machineStorage.getConversation("chat-up"), (chat) => Boolean(chat?.messages.some((message) => message.metadata?.imageAttachments?.length)));
+  const read = await h.machineChat.readChatAttachment({ conversationId: "chat-up", attachmentId: named.id });
+  assert.ok(Buffer.from(read.dataBase64, "base64").equals(bytes), "read from the server, not from the computer");
+});
+
+test("a chat moving to a server takes its pictures there with it", async (t) => {
+  // Pictures made while the computer had only the server inside the app (or
+  // before the User set up a new one) move with their chat.
+  const h = await setup(t);
+  await ownPictureFolders(t, h);
+  const order = watchPictureOrder(t, h);
+  const bytes = pictureBytes(400_000);
+  const made = await persistPicture(h.desktopChat, "chat-move", bytes);
+  const chat = localChat("chat-move");
+  chat.messages.push({ id: "chat-move-picture", role: "user", content: "before the move", createdAt: "2026-10-28T08:01:00.000Z", status: "done",
+    metadata: { imageAttachments: [made.attachment] } } as ChatMessage);
+  await save(h.desktopChat, chat);
+  await h.desktopLink.start();
+  await until(() => h.page("chat-move"), (page) => Boolean((page as { messages?: ChatMessage[] }).messages?.some((message) => message.id === "chat-move-picture")));
+  assert.deepEqual(order, [{ messageId: "chat-move-picture", held: true }], "the picture was on the server before the page that names it");
+  assert.ok((await h.desktopHub.downloadBytes(made.attachment.hubBlob!)).equals(bytes));
+});
+
+test("a message whose picture cannot be put on the server yet waits for it, and goes with it once it is there", async (t) => {
+  const h = await linked(t, localChat("chat-wait"));
+  await ownPictureFolders(t, h);
+  const order = watchPictureOrder(t, h);
+  const original = HubClient.prototype.uploadBytes;
+  let failures = 2;
+  HubClient.prototype.uploadBytes = async function (this: HubClient, bytes: Buffer, reference?: Parameters<HubClient["uploadBytes"]>[1]) {
+    if (failures > 0) {
+      failures -= 1;
+      // As the server answers when it cannot keep a body (its disk, its database).
+      throw new HubHttpError(400, "Device event blob storage failed.");
+    }
+    return original.call(this, bytes, reference);
+  };
+  t.after(() => { HubClient.prototype.uploadBytes = original; });
+  const bytes = pictureBytes(50_000);
+  await h.desktopChat.sendMessage({ conversationId: "chat-wait", content: "with a picture",
+    imageAttachments: [{ dataBase64: bytes.toString("base64"), mimeType: "image/png", filename: "shot.png" }] } as never);
+  const page = await until(() => h.page("chat-wait"), (current) => current.messages.some((message) => message.role === "user"));
+  const user = page.messages.find((message) => message.role === "user")!;
+  assert.equal(failures, 0, "both failures were met before it went");
+  assert.deepEqual(order, [{ messageId: user.id, held: true }], "never written ahead of its picture");
+  assert.ok((await h.desktopHub.downloadBytes(user.metadata!.imageAttachments![0].hubBlob!)).equals(bytes));
+  const row = await h.desktopStorage.hubClientOps().forMessage("chat-wait", user.id);
+  assert.equal(row?.attempts ?? 0, 0, "a batch held for its picture was never sent, so it counts no attempt");
 });

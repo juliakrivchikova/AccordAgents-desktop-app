@@ -15041,6 +15041,31 @@ test("a picture a machine does not hold is fetched from the desktop that owns th
   assert.deepEqual(asked, [{ conversationId: conversation.id, attachmentId: attachment.id }]);
 });
 
+test("a picture on the User's server that the server cannot give now is reported as unavailable, not as one to resend", async () => {
+  // The computer reads a picture a cloud member made from the User's server;
+  // when the server cannot answer, the picture is not lost.
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  const attachment = {
+    id: "attachment-3", filename: "shot.png", mimeType: "image/png",
+    sizeBytes: 3, width: 1, height: 1,
+    storageKey: `attachments/${randomUUID()}.png`, createdAt: NOW,
+    hubBlob: { type: "device.event.blob", blobHash: `sha256:${"a".repeat(64)}`, byteLength: 3, fragments: 1 }
+  };
+  conversation.messages.push({
+    id: "machine-picture", role: "participant", content: "Mockup.", status: "done", createdAt: NOW,
+    metadata: { imageAttachments: [attachment] }
+  } as any);
+  const { service } = testService({ conversation });
+  service.setHubBlobReader(async () => { throw new Error("socket hang up"); });
+  await assert.rejects(
+    service.readChatAttachment({ conversationId: conversation.id, attachmentId: attachment.id }),
+    (error: Error) => /AttachmentUnavailable/.test(error.message)
+      && error.message.includes("socket hang up")
+      && error.message.includes("do not ask for a resend")
+  );
+});
+
 test("a picture the owner cannot supply is reported as unavailable with the reason, not as empty bytes", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);

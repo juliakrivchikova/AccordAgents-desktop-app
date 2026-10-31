@@ -27,6 +27,7 @@ import {
 } from "../../shared/hubCards";
 import { ServerCardBook, type CardApplyResult, type ChatCardAppliers } from "./chatCards";
 import { HUB_OP_TAKEN_BACK, type HubOpOutcome } from "./hubOpsClient";
+import { blobReferenceOf } from "./hubClient";
 import type {
   AgentContextUsage,
   AgentHealth,
@@ -17358,8 +17359,8 @@ export class ChatService {
     return attachments;
   }
 
-  private chatImageAttachmentForTool(attachment: ChatImageAttachment): Omit<ChatImageAttachment, "storageKey"> {
-    const { storageKey: _storageKey, hubBlob: _hubBlob, ...safeAttachment } = attachment as ChatImageAttachment & { hubBlob?: unknown };
+  private chatImageAttachmentForTool(attachment: ChatImageAttachment): Omit<ChatImageAttachment, "storageKey" | "hubBlob"> {
+    const { storageKey: _storageKey, hubBlob: _hubBlob, ...safeAttachment } = attachment;
     return safeAttachment;
   }
 
@@ -17882,9 +17883,10 @@ export class ChatService {
     try {
       bytes = await readFile(filePath);
     } catch (error) {
-      // A machine holds the chat's text but not its pictures: replication
-      // carries attachment metadata without the file. Ask the desktop that
-      // owns the chat, and keep what it sends, so the next read is local.
+      // A picture made on another device (the phone, the computer, a cloud
+      // machine) is not on this one's disk: its device put it on the User's
+      // server, and a machine may also ask the desktop for an older one.
+      // What comes back is kept, so the next read is local.
       let ownerRefusal: string | undefined;
       const fetched = await this.fetchAttachmentFromOwner(conversationId, attachment).catch((fetchError) => {
         ownerRefusal = fetchError instanceof Error ? fetchError.message : String(fetchError);
@@ -17899,10 +17901,10 @@ export class ChatService {
         return fetched;
       }
       if (ownerRefusal) {
-        // The desktop was asked and said no (or never answered): the picture
-        // is not lost, so a resend would not help. Say what happened instead.
+        // The server or the desktop was asked and could not give it: the
+        // picture is not lost, so a resend would not help. Say what happened.
         throw new Error(
-          `AttachmentUnavailable. Problem: the image exists on the desktop that owns this chat, but it could not be fetched from there. Cause: ${ownerRefusal} Fix: tell User the picture could not be fetched from the desktop; do not ask for a resend.`
+          `AttachmentUnavailable. Problem: the image was made on another device, and it could not be fetched from the User's server or the desktop that owns this chat. Cause: ${ownerRefusal} Fix: tell User the picture could not be fetched right now; do not ask for a resend.`
         );
       }
       void this.debugLogs.write("chat.attachments.missing", {
@@ -17917,22 +17919,28 @@ export class ChatService {
     return bytes.toString("base64");
   }
 
-  /** The picture's bytes from the desktop that owns the chat, written to this
-   *  machine's own store so one fetch serves every later read. A copy that is
-   *  not a machine has no owner to ask and simply reports it missing. */
+  /** The picture's bytes from the User's server (or, on a machine, from the
+   *  desktop that owns the chat), written to this device's own store so one
+   *  fetch serves every later read. A picture named nowhere it can be read
+   *  from is reported missing. */
   private async fetchAttachmentFromOwner(conversationId: string, attachment: ChatImageAttachment): Promise<string | undefined> {
-    // A picture the User sent from her phone is on her server, named by its
-    // body: every device reads it from there, the desktop too.
-    const hubBlob = (attachment as ChatImageAttachment & { hubBlob?: unknown }).hubBlob;
+    // A picture is on the User's server, named by its body, when the device
+    // that made it put it there (the phone always; the computer and the
+    // machines since they do): every device reads it from there.
+    const hubBlob = attachment.hubBlob;
     // A server that cannot answer now leaves the machine link to try.
+    let hubError: string | undefined;
     const fromHub = this.hubBlobReader && isDeviceEventBlobReference(hubBlob)
       ? await this.hubBlobReader(hubBlob).then((bytes) => bytes.toString("base64"), (error: unknown) => {
-        void this.debugLogs.write("chat.attachment.hub-read-error", { conversationId, attachmentId: attachment.id, message: error instanceof Error ? error.message : String(error) });
+        hubError = error instanceof Error ? error.message : String(error);
+        void this.debugLogs.write("chat.attachment.hub-read-error", { conversationId, attachmentId: attachment.id, message: hubError });
         return undefined;
       })
       : undefined;
     const fetch = this.machineLink?.fetchAttachment;
     if (!fromHub && !fetch) {
+      // The server holds it and could not give it now: unavailable, not lost.
+      if (hubError) throw new Error(`Your server could not give the picture: ${hubError}`);
       return undefined;
     }
     const result = fromHub ? { dataBase64: fromHub } : await fetch!.call(this.machineLink, conversationId, attachment.id);
@@ -18112,9 +18120,63 @@ export class ChatService {
         width: dimensions.width,
         height: dimensions.height,
         storageKey,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        // Named by its content now; the bytes go up to the User's server
+        // right before the message that names them (putServerPictures).
+        hubBlob: blobReferenceOf(bytes)
       }
     };
+  }
+
+  /**
+   * Puts on the User's server the pictures these operations name that this
+   * device holds, before the operations go: the phone does the same, and
+   * every other device (the computer, a machine, the phone) reads a picture
+   * from there. A picture is in a message from the message's creation (a
+   * later update names the same one), and a chat moving to a server carries
+   * its messages whole. A failed put throws, so the operations wait and are
+   * tried again with it: a message never reaches the server ahead of its
+   * picture.
+   */
+  async putServerPictures(
+    ops: readonly HubOp[],
+    put: (reference: DeviceEventBlobReference, bytes: Buffer) => Promise<void>,
+    alreadyPut: (blobHash: string) => boolean
+  ): Promise<void> {
+    for (const op of ops) {
+      const messages = op.kind === "message.create" ? [op.message] : op.kind === "chat.import" ? op.messages : [];
+      for (const message of messages) {
+        const attachments = message.metadata?.imageAttachments;
+        if (!Array.isArray(attachments)) continue;
+        for (const attachment of attachments) {
+          const reference = attachment?.hubBlob;
+          if (!isDeviceEventBlobReference(reference) || alreadyPut(reference.blobHash) || typeof attachment.storageKey !== "string") continue;
+          let bytes: Buffer;
+          try {
+            bytes = await readFile(this.attachmentPath(op.conversationId, attachment.storageKey));
+          } catch (error) {
+            // Not on this device (a picture the phone or a machine made, in
+            // a chat moving to a server): its own device put it there. Kept
+            // in the log, as a picture this device made and lost would be.
+            void this.debugLogs.write("chat.attachments.server-put-missing", {
+              conversationId: op.conversationId, attachmentId: attachment.id,
+              message: error instanceof Error ? error.message : String(error)
+            });
+            continue;
+          }
+          const held = blobReferenceOf(bytes);
+          if (held.blobHash !== reference.blobHash || held.byteLength !== reference.byteLength) {
+            // This device's file is not the picture the message names (a
+            // copy cached from elsewhere and changed since): nothing to put.
+            void this.debugLogs.write("chat.attachments.server-put-mismatch", {
+              conversationId: op.conversationId, attachmentId: attachment.id
+            });
+            continue;
+          }
+          await put(reference, bytes);
+        }
+      }
+    }
   }
 
   private async resolveChatAttachmentImportSource(
