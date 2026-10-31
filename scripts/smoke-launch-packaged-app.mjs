@@ -63,6 +63,10 @@ function freePort() {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function pickEnv(names) {
+  return Object.fromEntries(names.filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
+}
+
 async function waitForPage(port, child, output) {
   const deadline = Date.now() + launchTimeoutMs;
   while (Date.now() < deadline) {
@@ -106,6 +110,10 @@ async function stop(child) {
     }
     await exited;
   }
+  // A helper that outlived the app could still hold the pipes open and keep
+  // this script from exiting.
+  child.stdout.destroy();
+  child.stderr.destroy();
 }
 
 async function main() {
@@ -141,8 +149,10 @@ async function main() {
   const child = spawn(executable, [`--remote-debugging-port=${port}`, "--use-mock-keychain"], {
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
+    // Only what a login session provides: release credentials in this
+    // process's environment must not reach the app.
     env: {
-      ...process.env,
+      ...pickEnv(["PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "SHELL", "LANG"]),
       ACCORDAGENTS_USER_DATA_DIR: path.join(profileDir, "profile"),
       ACCORDAGENTS_CRASH_REPORTS: "0"
     }

@@ -96,6 +96,27 @@ jobs:
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
 
+      # Publishing happens after the bump and the build, so a missing or
+      # read-only token would burn a version. Creating and deleting a branch in
+      # the release repo proves the token can write there.
+      - name: Check the release-repo token can publish
+        if: inputs.target != 'build-only'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_REPOS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::RELEASE_REPOS_TOKEN must be set."
+            exit 1
+          fi
+          repo="$(node -p 'const c = require("./package.json").config; process.env.TARGET === "beta" ? c.betaReleaseRepo : c.releaseRepo')"
+          branch="$(gh api "repos/$repo" --jq .default_branch)"
+          sha="$(gh api "repos/$repo/git/ref/heads/$branch" --jq .object.sha)"
+          probe="refs/heads/release-token-probe-$GITHUB_RUN_ID"
+          gh api --method POST "repos/$repo/git/refs" -f ref="$probe" -f sha="$sha" > /dev/null
+          gh api --method DELETE "repos/$repo/git/$probe"
+          echo "The token can write to $repo."
+
       # A release bumps and tags before it notarizes, so an expired Apple
       # agreement would burn a version. Uploading a tiny file fails fast then.
       - name: Check Apple accepts notarization uploads
@@ -192,7 +213,7 @@ jobs:
           previous="$(git show HEAD~1:package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')"
           url="https://update.electronjs.org/$RELEASE_REPO/darwin-arm64/$previous"
           for attempt in $(seq 1 10); do
-            if curl -fsS "$url" | grep -q "$VERSION"; then
+            if curl -fsS "$url" | grep -qF "$VERSION"; then
               echo "The update feed offers $VERSION to $previous: $url"
               exit 0
             fi
