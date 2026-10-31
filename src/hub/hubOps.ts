@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "../main/services/chatChanges";
 import { claimOutcomeFor } from "../main/services/hubOpsStore";
 import { HubArtifacts } from "./hubArtifacts";
+import { runsOnMachine, scopeMachineConversationUpdate } from "./hubMachineScope";
 import type { SavedMessageRow, StorageService } from "../main/services/storage";
 import type { HubDevice } from "../shared/hubProtocol";
 import {
@@ -170,6 +171,9 @@ export class HubOps {
     });
 
     if (op.kind === "conversation.create") {
+      // A machine never starts a chat through the app: one it wrote around
+      // the app could name any project folder for the members it then asks.
+      if (device.role === "machine") return reject(opId, "A cloud machine does not start chats.");
       // A phone paired for one chat starts no other.
       if (device.role === "phone" && device.scope?.scope !== "device") return reject(opId, "This phone was paired for one chat, so it does not start new ones.");
       if (await this.load(op.conversationId)) return reject(opId, "This chat already exists.");
@@ -210,18 +214,26 @@ export class HubOps {
 
     switch (op.kind) {
       case "conversation.update": {
-        const metadata = sharedMetadata(op.metadata ?? {});
-        const removed = (op.removedMetadataKeys ?? []).filter((key) => (SHARED_CONVERSATION_METADATA_KEYS as readonly string[]).includes(key));
-        if (op.title !== undefined) conversation.title = op.title;
-        if (op.repoPath === null) delete conversation.repoPath;
-        else if (op.repoPath !== undefined) conversation.repoPath = op.repoPath;
+        // A machine changes what concerns its own members, and nothing that
+        // reaches the members that run elsewhere (hubMachineScope.ts).
+        let asked: { title?: string; repoPath?: string | null; metadata?: Record<string, unknown>; removedMetadataKeys?: string[] } = op;
+        if (device.role === "machine") {
+          const scoped = scopeMachineConversationUpdate(loaded, op, device.machineId);
+          if (scoped.refused.length) this.log("hub.op.machine-scoped", { opId, conversationId: op.conversationId, deviceId: device.deviceId, refused: scoped.refused.slice(0, 20) });
+          asked = scoped.update;
+        }
+        const metadata = sharedMetadata(asked.metadata ?? {});
+        const removed = (asked.removedMetadataKeys ?? []).filter((key) => (SHARED_CONVERSATION_METADATA_KEYS as readonly string[]).includes(key));
+        if (asked.title !== undefined) conversation.title = asked.title;
+        if (asked.repoPath === null) delete conversation.repoPath;
+        else if (asked.repoPath !== undefined) conversation.repoPath = asked.repoPath;
         for (const [key, value] of Object.entries(metadata)) (conversation.metadata as Record<string, unknown>)[key] = value;
         for (const key of removed) delete (conversation.metadata as Record<string, unknown>)[key];
         conversation.updatedAt = acceptedAt;
         const done = accepted({
           kind: "conversation.update",
-          ...(op.title !== undefined ? { title: op.title } : {}),
-          ...(op.repoPath !== undefined ? { repoPath: op.repoPath } : {}),
+          ...(asked.title !== undefined ? { title: asked.title } : {}),
+          ...(asked.repoPath !== undefined ? { repoPath: asked.repoPath } : {}),
           ...(Object.keys(metadata).length ? { metadata } : {}),
           ...(removed.length ? { removedMetadataKeys: removed } : {}),
           updatedAt: acceptedAt
@@ -250,8 +262,10 @@ export class HubOps {
         conversation.messages.push(message);
         conversation.updatedAt = acceptedAt;
         // A User's message asks a turn of every member it names: waiting on
-        // the server for the device each member runs on (Д4).
-        const turns = requestedTurnsFor(conversation, message, devices, { by: device.deviceId, at: acceptedAt });
+        // the server for the device each member runs on (Д4). Only one the
+        // User wrote: a machine writes the User's words only for its own
+        // members (a choice she answered), and never asks anyone by them.
+        const turns = device.role === "machine" ? [] : requestedTurnsFor(conversation, message, devices, { by: device.deviceId, at: acceptedAt });
         const done = accepted({ kind: "message.create", message, ...(turns.length ? { turns } : {}) });
         await this.save(conversation, done, (condition) => turns.map((turn) => store.turnSql(turn, condition)).join("\n"));
         return { result: done.result, applied: { deviceId: device.deviceId, entry: done.entry, conversation } };
@@ -353,6 +367,20 @@ export class HubOps {
     if (op.kind === "turn.request") {
       // Any device asks; the member's own device takes it (Д2, Д4).
       if (current) return unchanged(claimOutcomeFor(current, device.deviceId));
+      // A machine asks a member that runs elsewhere as a member asks another
+      // through the app: to answer one of its own members' messages, never
+      // the User's words and never to compact it.
+      if (device.role === "machine") {
+        const members = Array.isArray(conversation.metadata?.participants) ? conversation.metadata.participants as Array<{ id?: unknown; homeMachineId?: string }> : [];
+        const member = (id: unknown) => members.find((item) => item?.id === id);
+        if (!runsOnMachine(member(op.participantId), device.machineId)) {
+          const message = conversation.messages.find((item) => item.id === op.messageId);
+          const ownMembers = message?.role === "participant" && runsOnMachine(member(message.participantId), device.machineId);
+          if (!ownMembers || op.request?.kind === "compaction") {
+            return reject(opId, "A cloud machine asks a member that runs elsewhere only to answer a message of one of its own members.");
+          }
+        }
+      }
       return place_({ runId: op.runId, conversationId: op.conversationId, messageId: op.messageId, participantId: op.participantId,
         state: "requested", requestedAt: acceptedAt, requestedBy: device.deviceId,
         ...(op.pendingMessageId ? { pendingMessageId: op.pendingMessageId } : {}),
