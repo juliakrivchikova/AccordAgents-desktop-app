@@ -35,14 +35,20 @@ export const StreamingMessageContent = memo(function StreamingMessageContent(pro
 }): JSX.Element {
   const elapsedSeconds = useStreamingElapsedSeconds(props.startedAt);
   const hasContent = Boolean(props.content?.trim());
-  const statusLabel = props.statusLabel ?? (hasContent ? "Responding" : "Thinking");
+  const statusLabel = props.statusLabel ?? "Thinking";
   const activity = props.activity && props.activity !== statusLabel ? props.activity : undefined;
+  // Once the member is writing, its text and live command line show the work, so the status line
+  // goes. A cloud run's own status (a machine being prepared, say) is not shown anywhere else
+  // and stays.
+  const showStatus = !hasContent || Boolean(props.statusLabel);
   return (
     <div className="streaming-message-content" aria-live="polite">
-      <div className={`streaming-message-thinking ${hasContent ? "is-compact" : ""}`}>
-        <span className="streaming-status-label">{statusLabel}</span>
-        <span className="streaming-message-elapsed">{formatElapsed(elapsedSeconds)}</span>
-      </div>
+      {showStatus && (
+        <div className={`streaming-message-thinking ${hasContent ? "is-compact" : ""}`}>
+          <span className="streaming-status-label">{statusLabel}</span>
+          <span className="streaming-message-elapsed">{formatElapsed(elapsedSeconds)}</span>
+        </div>
+      )}
       {hasContent && (
         <StreamingMarkdownText
           activityDisclosure={props.activityDisclosure}

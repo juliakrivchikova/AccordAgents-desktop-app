@@ -167,3 +167,26 @@ test("notices about the run stay visible as their own rows", async () => {
   assert.deepEqual(activityRowLabels(renderer!), ["No provider output for 5 minutes"]);
   await act(async () => renderer!.unmount());
 });
+
+test("the status line shows until the member's first text, and a cloud run's own status stays", async () => {
+  const statusLine = (renderer: ReactTestRenderer) => renderer.root
+    .findAll((node) => typeof node.type === "string" && /streaming-message-thinking/.test(String(node.props.className ?? "")))
+    .map((node) => textContent(node));
+  let renderer: ReactTestRenderer | undefined;
+  await act(async () => {
+    renderer = create(<ActivityDisclosureHarness activityEvents={[]} mode="stream-empty" />);
+  });
+  assert.deepEqual(statusLine(renderer!).map((text) => text.replace(/\d+:\d+/, "")), ["Thinking"]);
+
+  await act(async () => {
+    renderer!.update(<ActivityDisclosureHarness activityEvents={[]} mode="stream-tail" />);
+  });
+  assert.deepEqual(statusLine(renderer!), [], "no Responding line once text appears");
+  assert.doesNotMatch(textContent(renderer!.root), /Responding/);
+
+  await act(async () => {
+    renderer!.update(<ActivityDisclosureHarness activityEvents={[]} mode="stream-tail" statusLabel="Preparing machine" />);
+  });
+  assert.deepEqual(statusLine(renderer!).map((text) => text.replace(/\d+:\d+/, "")), ["Preparing machine"]);
+  await act(async () => renderer!.unmount());
+});
