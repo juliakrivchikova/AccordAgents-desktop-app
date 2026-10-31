@@ -43,6 +43,11 @@ export interface UpdateRestartGateOptions {
   /** Shows the update prompt; resolves with what the User chose, or
    *  "unanswered" when it cannot be shown now (no window to show it in). */
   prompt: (info: UpdateRestartInfo) => Promise<"restart" | "later" | "unanswered">;
+  /** Asked after the User chose Restart: false (she declined, e.g. to keep a
+   *  terminal command running) counts as Later, and the update installs when
+   *  the app next quits; undefined (the question went away unanswered, its
+   *  window closed) keeps the update pending, to be asked again. */
+  confirmRestart?: () => Promise<boolean | undefined>;
   quitAndInstall: () => void;
   log: (event: string, payload: Record<string, unknown>) => void;
   /** Safety net while an update waits: a machine turn started from the phone
@@ -156,8 +161,29 @@ export function createUpdateRestartGate(options: UpdateRestartGateOptions): Upda
       pending = undefined;
       return;
     }
-    // A member may have started while the prompt was open; an answer that
-    // cannot be had counts as busy, never as idle.
+    if (options.confirmRestart) {
+      let confirmed: boolean | undefined = true;
+      prompting = true;
+      try {
+        confirmed = await options.confirmRestart();
+      } catch (error) {
+        // A question that cannot be asked does not hold the User's Restart.
+        options.log("app-update-confirm-error", { error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        prompting = false;
+      }
+      if (confirmed === undefined) {
+        waitForWindow(info);
+        return;
+      }
+      if (!confirmed) {
+        options.log("app-update-postponed", { releaseName: info.releaseName ?? "", reason: "declined-at-restart" });
+        pending = undefined;
+        return;
+      }
+    }
+    // A member may have started while the questions were open; an answer
+    // that cannot be had counts as busy, never as idle.
     let busyAgain = true;
     try { busyAgain = await options.isBusy(); } catch (error) {
       options.log("app-update-busy-check-error", { error: error instanceof Error ? error.message : String(error) });

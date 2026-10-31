@@ -376,3 +376,85 @@ test("the feed is the one update-electron-app asked", () => {
   assert.equal(updateFeedUrl(STABLE_UPDATE_REPO, "1.11.1", "win32", "x64", true),
     "https://update.electronjs.org/juliakrivchikova/AccordAgents-Releases/win32-x64/msix/1.11.1");
 });
+
+function makeConfirmGate(confirm: () => Promise<boolean | undefined>, busy: () => boolean = () => false) {
+  const log: string[] = [];
+  let quits = 0;
+  let prompts = 0;
+  const asked: number[] = [];
+  const gate = createUpdateRestartGate({
+    isBusy: async () => busy(),
+    onActivitySettled: () => () => undefined,
+    prompt: async () => { prompts += 1; return "restart"; },
+    confirmRestart: async () => { asked.push(prompts); return confirm(); },
+    quitAndInstall: () => { quits += 1; },
+    log: (event) => { log.push(event); },
+    recheckIntervalMs: 20
+  });
+  return { gate, log, asked, quits: () => quits, prompts: () => prompts };
+}
+
+test("Restart asks about the terminal's commands after the update prompt, and restarts on Quit", async () => {
+  const harness = makeConfirmGate(async () => true);
+  harness.gate.onDownloaded({ releaseName: "v1" });
+  await tick();
+  assert.deepEqual(harness.asked, [1], "asked once, after the User chose Restart");
+  assert.equal(harness.quits(), 1);
+  assert.equal(harness.gate.pending(), undefined);
+});
+
+test("Cancel at that question works as Later: no restart, no further prompt for this download", async () => {
+  const harness = makeConfirmGate(async () => false);
+  harness.gate.onDownloaded({ releaseName: "v1" });
+  await tick();
+  assert.equal(harness.quits(), 0);
+  assert.equal(harness.gate.pending(), undefined);
+  assert.ok(harness.log.includes("app-update-postponed"));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(harness.prompts(), 1, "not asked again until the next download");
+});
+
+test("a question that cannot be asked does not hold the User's Restart", async () => {
+  const harness = makeConfirmGate(async () => { throw new Error("no window"); });
+  harness.gate.onDownloaded({ releaseName: "v1" });
+  await tick();
+  assert.equal(harness.quits(), 1);
+  assert.ok(harness.log.includes("app-update-confirm-error"));
+});
+
+test("a member who starts while the terminal question is open holds the restart back", async () => {
+  let memberWorking = false;
+  const harness = makeConfirmGate(async () => { memberWorking = true; return true; }, () => memberWorking);
+  harness.gate.onDownloaded({ releaseName: "v1" });
+  await tick();
+  assert.equal(harness.quits(), 0, "never restarted underneath the member");
+  assert.ok(harness.log.includes("app-update-restart-deferred"));
+  assert.ok(harness.gate.pending(), "still waiting for a quiet moment");
+  harness.gate.dispose();
+});
+
+test("a terminal question whose window went away keeps the update pending", async () => {
+  const harness = makeConfirmGate(async () => undefined);
+  harness.gate.onDownloaded({ releaseName: "v1" });
+  await tick();
+  assert.equal(harness.quits(), 0);
+  assert.ok(harness.gate.pending());
+  assert.ok(!harness.log.includes("app-update-postponed"));
+  harness.gate.dispose();
+});
+
+test("an update downloaded again while the terminal question is open asks nothing more", async () => {
+  let answer!: (restart: boolean) => void;
+  let questions = 0;
+  const harness = makeConfirmGate(() => { questions += 1; return new Promise<boolean>((resolve) => { answer = resolve; }); });
+  harness.gate.onDownloaded({ releaseName: "v1" });
+  await tick();
+  assert.equal(questions, 1);
+  harness.gate.onDownloaded({ releaseName: "v2" });
+  await tick();
+  assert.equal(harness.prompts(), 1, "no second update prompt under the open question");
+  assert.equal(questions, 1, "no second terminal question");
+  answer(true);
+  await tick();
+  assert.equal(harness.quits(), 1, "restarted once");
+});

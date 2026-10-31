@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
-import { createQuitConfirmation, installQuitConfirmation, quitConfirmationDetail, quitStep } from "./quitConfirmation";
+import { createQuitConfirmation, createQuitQuestion, installQuitConfirmation, quitConfirmationDetail, quitStep } from "./quitConfirmation";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -100,6 +100,35 @@ test("a Quit answer stands only for a while: a quit stopped by something else as
   await wait(60);
   assert.equal(h.confirmation.hold(), true);
   await waitFor(() => h.asked.length === 2, "asked again");
+});
+
+test("a quit let through that did not happen is taken back: the next quit asks again", async () => {
+  const h = harness({ answer: false });
+  h.confirmation.allow();
+  assert.equal(h.confirmation.hold(), false);
+  h.confirmation.revoke();
+  assert.equal(h.confirmation.hold(), true);
+  await waitFor(() => h.asked.length === 1, "asked");
+});
+
+test("the question is shown once for whoever asks while it is open, and marks a quit among them", async () => {
+  const answers: Array<(answer: boolean | undefined) => void> = [];
+  const ask = createQuitQuestion(() => new Promise((resolve) => { answers.push(resolve); }));
+  const restart = ask(["sleep"], "restart");
+  assert.equal(restart.quitAsked, false);
+  const quit = ask(["sleep"], "quit");
+  assert.equal(quit, restart, "the quit waits for the same answer");
+  assert.equal(answers.length, 1, "one sheet, not two");
+  assert.equal(restart.quitAsked, true);
+  answers[0](true);
+  assert.equal(await restart.answer, true);
+  assert.equal(await quit.answer, true);
+  const next = ask(["sleep"], "restart");
+  assert.notEqual(next, restart, "answered: the next ask is a new question");
+  assert.equal(next.quitAsked, false);
+  assert.equal(answers.length, 2);
+  answers[1](undefined);
+  assert.equal(await next.answer, undefined);
 });
 
 test("when the host cannot say, it asks; when checking or asking fails, the quit is not trapped", async () => {
