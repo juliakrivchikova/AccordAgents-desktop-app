@@ -184,6 +184,8 @@ test("the file browser marks a member's work, lets it be chosen, and deletes onl
   await ui.click(tree?.querySelector('input[aria-label="Select old-project-1234567890"]') ?? null);
   assert.match(ui.find("aws-disk-delete")?.textContent ?? "", /Delete 300 MB/);
   await ui.click(ui.find("aws-disk-delete"));
+  await ui.click(ui.find("aws-disk-delete-dialog-confirm"));
+  assert.equal(ui.find("aws-disk-delete-dialog"), null);
   assert.deepEqual(ui.bridge.calls.deleteAwsInstanceFiles, [[["/home/ubuntu/own/workspace/mirrors/old-project-1234567890"]]], "no work chosen, none sent");
   const after = ui.find("aws-disk-tree");
   await ui.click(after?.querySelector('input[aria-label="Select AccordAgents-0a6205133d"]') ?? null);
@@ -191,6 +193,8 @@ test("the file browser marks a member's work, lets it be chosen, and deletes onl
   assert.match(ui.find("aws-disk-delete")?.textContent ?? "", /Delete 1\.8 GB/);
   assert.match(document.body.textContent ?? "", /2 selected · 1\.8 GB · 1 holds members' work/);
   await ui.click(ui.find("aws-disk-delete"));
+  assert.match(ui.find("aws-disk-delete-dialog")?.textContent ?? "", /1 of them holds members' work, which goes with them: member's worktree, uncommitted changes\./);
+  await ui.click(ui.find("aws-disk-delete-dialog-confirm"));
   assert.deepEqual(ui.bridge.calls.deleteAwsInstanceFiles?.[1], [
     ["/home/ubuntu/own/workspace/mirrors/AccordAgents-0a6205133d", "/home/ubuntu/own/workspace/mirrors/old-project-1234567890"],
     { withWork: { "/home/ubuntu/own/workspace/mirrors/AccordAgents-0a6205133d": ["worktree", "changes"] } }

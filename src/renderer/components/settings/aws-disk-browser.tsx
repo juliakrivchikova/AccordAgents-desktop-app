@@ -1,8 +1,8 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, File, Folder, FolderOpen, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { AwsDiskEntry, AwsDiskEntryRole, AwsDiskWorkReason } from "../../../shared/types";
-import { AwsDialog, AwsWaiting } from "./aws-dialog";
+import { AwsConfirmDialog, AwsDialog, AwsWaiting } from "./aws-dialog";
 import { cleanError } from "./aws-shared";
 import { formatBytes, keptText, LOCK_TEXT, WORK_TEXT, type AwsDiskControl } from "./use-aws-disk";
 
@@ -29,8 +29,27 @@ const ROLE_TEXT: Record<AwsDiskEntryRole, string> = {
 const MAX_SELECTED = 500;
 
 interface FolderState { entries?: AwsDiskEntry[]; loading: boolean; error?: string; truncated?: number }
-/** A chosen path: its size, and the members' work seen going with it. */
-interface Chosen { bytes: number; work: AwsDiskWorkReason[] }
+/** A chosen path: its name, size, and the members' work seen going with it. */
+interface Chosen { name: string; bytes: number; work: AwsDiskWorkReason[] }
+/** Names shown in the delete question before "and N more". */
+const NAMED_IN_QUESTION = 3;
+
+/** The delete question: what goes, how much, and whose work goes with it. */
+export function deleteQuestion(chosen: Chosen[], total: number): { title: string; description: string } {
+  const names = chosen.map((item) => item.name);
+  const listed = names.length > NAMED_IN_QUESTION
+    ? `${names.slice(0, NAMED_IN_QUESTION).join(", ")} and ${names.length - NAMED_IN_QUESTION} more`
+    : names.join(", ");
+  const withWork = chosen.filter((item) => item.work.length);
+  const kinds = [...new Set(withWork.flatMap((item) => item.work))].map((kind) => WORK_TEXT[kind]).join(", ");
+  const work = !withWork.length ? ""
+    : chosen.length === 1 ? ` Its members' work goes with it: ${kinds}.`
+    : ` ${withWork.length === 1 ? "1 of them holds" : `${withWork.length} of them hold`} members' work, which goes with them: ${kinds}.`;
+  return {
+    title: chosen.length === 1 ? `Delete ${names[0]}?` : `Delete ${chosen.length} items?`,
+    description: `${listed} (${formatBytes(total)}) will be deleted from the instance.${work} The instance has no trash, so this cannot be undone.`
+  };
+}
 
 const indent = (depth: number): { paddingLeft: number } => ({ paddingLeft: 12 + depth * 22 });
 
@@ -48,6 +67,10 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Map<string, Chosen>>(new Map());
   const [deleting, setDeleting] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  /** A second click lands before the re-render that disables the button. */
+  const removing = useRef(false);
+  const deleteButton = useRef<HTMLButtonElement>(null);
   const [outcome, setOutcome] = useState<{ error?: string; kept?: string }>();
 
   const loadRoot = async (): Promise<void> => {
@@ -62,7 +85,7 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
   };
   useEffect(() => {
     if (!props.open) return;
-    setRoot(undefined); setFolders({}); setExpanded(new Set()); setSelected(new Map()); setOutcome(undefined);
+    setRoot(undefined); setFolders({}); setExpanded(new Set()); setSelected(new Map()); setOutcome(undefined); setConfirming(false);
     void loadRoot();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.open, props.start]);
@@ -88,7 +111,7 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
     if (next.has(entry.path)) next.delete(entry.path);
     else {
       for (const chosen of [...next.keys()]) if (chosen.startsWith(`${entry.path}/`)) next.delete(chosen);
-      next.set(entry.path, { bytes: entry.bytes, work: entry.work ?? [] });
+      next.set(entry.path, { name: entry.name, bytes: entry.bytes, work: entry.work ?? [] });
     }
     setSelected(next);
   };
@@ -96,8 +119,10 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
   const withWork = useMemo(() => Object.fromEntries([...selected].flatMap(([path, chosen]) => chosen.work.length ? [[path, chosen.work]] : [])), [selected]);
   const workCount = Object.keys(withWork).length;
   const tooMany = selected.size > MAX_SELECTED;
+  const question = useMemo(() => deleteQuestion([...selected.values()], total), [selected, total]);
   const remove = async (): Promise<void> => {
-    if (tooMany) return;
+    if (tooMany || removing.current) return;
+    removing.current = true;
     setDeleting(true);
     setOutcome(undefined);
     try {
@@ -109,6 +134,7 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
     } catch (cause) {
       setOutcome({ error: cleanError(cause) });
     } finally {
+      removing.current = false;
       setDeleting(false);
     }
   };
@@ -172,7 +198,7 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
       note={selected.size ? `${selected.size} selected · ${formatBytes(total)}${workCount ? ` · ${workCount === 1 ? "1 holds" : `${workCount} hold`} members' work` : ""}` : undefined}
       actions={<>
         <Button type="button" variant="outline" size="sm" disabled={deleting} onClick={props.onClose}>{selected.size ? "Cancel" : "Close"}</Button>
-        <Button type="button" size="sm" data-testid="aws-disk-delete" disabled={!selected.size || deleting || tooMany} onClick={() => void remove()}>
+        <Button ref={deleteButton} type="button" size="sm" data-testid="aws-disk-delete" disabled={!selected.size || deleting || tooMany} onClick={() => setConfirming(true)}>
           {deleting ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
           {deleting ? "Deleting…" : selected.size ? `Delete ${formatBytes(total)}` : "Delete"}
         </Button>
@@ -185,6 +211,17 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
       {tooMany ? <div className="gen-row-error" role="alert">Choose at most {MAX_SELECTED} items at once, or the folder that holds them.</div> : null}
       {outcome?.kept ? <div className="gen-row-error" role="alert" data-testid="aws-disk-kept">{outcome.kept}</div> : null}
       {outcome?.error ? <div className="gen-row-error" role="alert">{outcome.error}</div> : null}
+      <AwsConfirmDialog
+        open={confirming && selected.size > 0}
+        title={question.title}
+        description={question.description}
+        confirmLabel={`Delete ${formatBytes(total)}`}
+        testId="aws-disk-delete-dialog"
+        // Delete opened the question without being its trigger, so focus is
+        // handed back by hand once the question has gone.
+        onClose={() => { setConfirming(false); requestAnimationFrame(() => deleteButton.current?.focus()); }}
+        onConfirm={() => { setConfirming(false); void remove(); }}
+      />
     </AwsDialog>
   );
 }

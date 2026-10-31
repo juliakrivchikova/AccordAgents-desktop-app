@@ -236,8 +236,32 @@ test("choosing a folder replaces what was chosen inside it, and what stayed is s
   assert.equal(tree().querySelector<HTMLInputElement>('input[aria-label="Select wheels"]')?.disabled, true, "inside a chosen folder");
   assert.match(ui.find("aws-disk-delete")?.textContent ?? "", /Delete 400 MB/, "counted once");
   await ui.click(ui.find("aws-disk-delete"));
+  await ui.click(ui.find("aws-disk-delete-dialog-confirm"));
   assert.deepEqual(ui.bridge.calls.deleteAwsInstanceFiles, [[["/home/ubuntu/.cache/pip"]]]);
   assert.equal(ui.find("aws-disk-kept")?.textContent, "1 item could not be removed: Permission denied.");
+  await unmount();
+});
+
+test("the file browser deletes only after the question is confirmed, once", async () => {
+  const ui = await mount();
+  await ui.click(ui.find("aws-disk-browse-project-copies"));
+  const choose = (): Promise<void> => ui.click(ui.find("aws-disk-tree")?.querySelector('input[aria-label="Select old-project-1234567890"]') ?? null);
+  await choose();
+  await ui.click(ui.find("aws-disk-delete"));
+  assert.equal(ui.bridge.calls.deleteAwsInstanceFiles?.length ?? 0, 0, "nothing goes before the User confirms");
+  const question = ui.find("aws-disk-delete-dialog");
+  assert.match(question?.textContent ?? "", /Delete old-project-1234567890\?/);
+  assert.match(question?.textContent ?? "", /old-project-1234567890 \(300 MB\) will be deleted from the instance\. The instance has no trash, so this cannot be undone\./);
+  await ui.click([...question!.querySelectorAll("button")].find((button) => button.textContent === "Cancel") ?? null);
+  assert.equal(ui.find("aws-disk-delete-dialog"), null, "Cancel closes the question");
+  assert.equal(ui.bridge.calls.deleteAwsInstanceFiles?.length ?? 0, 0, "Cancel deletes nothing");
+  assert.ok(ui.find("aws-disk-tree")?.querySelector<HTMLInputElement>('input[aria-label="Select old-project-1234567890"]')?.checked, "the choice stays");
+  await ui.click(ui.find("aws-disk-delete"));
+  const confirm = ui.find("aws-disk-delete-dialog-confirm");
+  assert.equal(confirm?.textContent, "Delete 300 MB");
+  await act(async () => { confirm?.click(); confirm?.click(); });
+  await ui.settle();
+  assert.deepEqual(ui.bridge.calls.deleteAwsInstanceFiles, [[["/home/ubuntu/own/workspace/mirrors/old-project-1234567890"]]], "a second click sends nothing more");
   await unmount();
 });
 

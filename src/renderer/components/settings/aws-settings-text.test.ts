@@ -4,6 +4,7 @@ import test from "node:test";
 import { updateFailureText } from "./aws-program-section";
 import { setupItems } from "./aws-setup-section";
 import { formatBytes, keptText } from "./use-aws-disk";
+import { deleteQuestion } from "./aws-disk-browser";
 import { awsStatusNeedsAttention } from "./use-aws-attention";
 import type { AwsWorkerStatus } from "../../../shared/types";
 
@@ -73,4 +74,18 @@ test("what a running setup has not reached yet does not mark AWS in Settings", (
   assert.equal(awsStatusNeedsAttention(notInstalled), true);
   assert.equal(awsStatusNeedsAttention({ ...notInstalled, operation: { operationId: "op", phase: "setting-up", message: "", updatedAt: "" } }), false);
   assert.equal(awsStatusNeedsAttention({ ...notInstalled, operation: { operationId: "op", phase: "error", message: "", updatedAt: "" } }), true);
+});
+
+test("the delete question names what goes, how much, and whose work goes with it", () => {
+  const one = deleteQuestion([{ name: "AccordAgents-0a6205133d", bytes: 2_971_062_272, work: ["changes", "unpushed"] }], 2_971_062_272);
+  assert.equal(one.title, "Delete AccordAgents-0a6205133d?");
+  assert.equal(one.description, "AccordAgents-0a6205133d (3.0 GB) will be deleted from the instance. Its members' work goes with it: uncommitted changes, unpushed commits. The instance has no trash, so this cannot be undone.");
+  const many = deleteQuestion([
+    { name: "a", bytes: 1000, work: ["worktree"] }, { name: "b", bytes: 1000, work: ["unpushed"] },
+    { name: "c", bytes: 1000, work: [] }, { name: "d", bytes: 1000, work: [] }, { name: "e", bytes: 1000, work: [] }
+  ], 5000);
+  assert.equal(many.title, "Delete 5 items?");
+  assert.equal(many.description, "a, b, c and 2 more (5 KB) will be deleted from the instance. 2 of them hold members' work, which goes with them: member's worktree, unpushed commits. The instance has no trash, so this cannot be undone.");
+  assert.equal(deleteQuestion([{ name: "logs", bytes: 2_000_000, work: [] }], 2_000_000).description,
+    "logs (2 MB) will be deleted from the instance. The instance has no trash, so this cannot be undone.");
 });
