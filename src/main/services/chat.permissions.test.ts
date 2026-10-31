@@ -6339,12 +6339,13 @@ test("removeParticipant rejects unsafe removal requests", async () => {
   };
 
   {
-    const conversation = chatConversation([assistant, target], { running: true });
+    const conversation = chatConversation([assistant, target], { running: true, runId: "target-run", activeRunIds: ["target-run"] });
+    conversation.messages.push(pendingReply(target, "target-run"));
     const { service } = testService({ conversation });
 
     await assert.rejects(
       () => service.removeParticipant({ conversationId: conversation.id, participantId: target.id }),
-      /turn is running/
+      /@target is busy/
     );
   }
 
@@ -6371,6 +6372,447 @@ test("removeParticipant rejects unsafe removal requests", async () => {
       /last chat member/
     );
   }
+});
+
+function pendingReply(member: ChatParticipant, runId: string): ChatMessage {
+  return {
+    id: `${member.id}-reply`,
+    role: "participant",
+    participantId: member.id,
+    participantLabel: `@${member.handle}`,
+    content: "",
+    createdAt: NOW,
+    status: "pending",
+    metadata: { runId }
+  };
+}
+
+function removalTrio(metadata: Record<string, any> = {}) {
+  const assistant = { ...chatParticipant("codex-cli"), id: "assistant-participant", handle: "assistant", roleConfigId: ADMIN_ROLE.id };
+  const worker = { ...chatParticipant("claude-code"), id: "worker-participant", handle: "worker" };
+  const target = { ...chatParticipant("codex-cli"), id: "target-participant", handle: "target" };
+  const conversation = chatConversation([assistant, worker, target], metadata);
+  return { assistant, worker, target, conversation };
+}
+
+/** Registers a member's turn the way runParticipantBatch does. */
+async function startMemberTurn(service: ChatService, storage: any, member: ChatParticipant, runId: string): Promise<Conversation> {
+  const live = await storage.getConversation("conversation-1") as Conversation;
+  (service as any).registerTargetRun(runId, new AbortController(), { conversationId: live.id, participantId: member.id, participantHandle: member.handle });
+  await (service as any).beginChatRun(live, runId);
+  await (service as any).waitForQueuedSave(live.id);
+  return live;
+}
+
+test("removeParticipant removes an idle member while another member's turn runs", async () => {
+  const { assistant, worker, target, conversation } = removalTrio();
+  const { service, storage } = testService({ conversation });
+  const live = await startMemberTurn(service, storage, worker, "worker-run");
+
+  await service.removeParticipant({ conversationId: conversation.id, participantId: target.id });
+
+  assert.deepEqual(memberIds(storage.current), [assistant.id, worker.id]);
+  assert.equal(storage.current.metadata.running, true, "the other member's turn keeps running");
+  await assert.rejects(
+    () => service.removeParticipant({ conversationId: conversation.id, participantId: worker.id }),
+    /@worker is busy and cannot be removed until its work ends/
+  );
+
+  (service as any).unregisterTargetRun("worker-run");
+  await (service as any).endChatRun(live, "worker-run");
+  await service.removeParticipant({ conversationId: conversation.id, participantId: worker.id });
+  assert.deepEqual(memberIds(storage.current), [assistant.id]);
+});
+
+test("removeParticipant refuses a member whose own work is live and only that member", async () => {
+  const freshOwner = () => ({ processId: process.ppid, instanceId: "other-instance", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  const cases: Array<{ name: string; setup: (fixture: ReturnType<typeof removalTrio>) => void; start?: (service: ChatService, storage: any, fixture: ReturnType<typeof removalTrio>) => Promise<void> }> = [
+    {
+      name: "a reply another device writes",
+      setup: ({ conversation, target }) => {
+        conversation.metadata = { ...conversation.metadata, running: true, runId: "elsewhere-run", activeRunIds: ["elsewhere-run"], activeRunOwnersByRunId: { "elsewhere-run": freshOwner() } };
+        conversation.messages.push(pendingReply(target, "elsewhere-run"));
+      }
+    },
+    {
+      name: "its turn registered here",
+      setup: () => undefined,
+      start: async (service, storage, { target }) => { await startMemberTurn(service, storage, target, "target-run"); }
+    },
+    {
+      name: "a flow here that resumes it later",
+      setup: () => undefined,
+      start: async (service, storage) => {
+        const live = await storage.getConversation("conversation-1") as Conversation;
+        await (service as any).beginChatRun(live, "mention-run", ["target-participant"]);
+      }
+    },
+    {
+      name: "its compaction",
+      setup: () => undefined,
+      start: async (service, storage, { target }) => {
+        const live = await storage.getConversation("conversation-1") as Conversation;
+        await (service as any).beginChatParticipantCompactionRun(live, "compact-run", target.id);
+        await (service as any).waitForQueuedSave(live.id);
+      }
+    },
+    {
+      name: "a member request it asked that still runs",
+      setup: ({ conversation, target, worker }) => {
+        conversation.messages.push({
+          id: "request-message",
+          role: "participant",
+          participantId: target.id,
+          participantLabel: "@target",
+          content: "Asking @worker.",
+          createdAt: NOW,
+          status: "done",
+          metadata: {
+            participantRequest: {
+              id: "request-batch",
+              requesterParticipantId: target.id,
+              requesterHandle: target.handle,
+              source: "tool",
+              resumeRequester: true,
+              status: "running",
+              depth: 1,
+              createdAt: NOW,
+              updatedAt: NOW,
+              items: [{ targetParticipantId: worker.id, targetHandle: worker.handle, prompt: "Check it.", status: "running", createdAt: NOW, updatedAt: NOW }]
+            }
+          } as any
+        });
+      }
+    }
+  ];
+  for (const item of cases) {
+    const fixture = removalTrio();
+    item.setup(fixture);
+    const { service, storage } = testService({ conversation: fixture.conversation });
+    await item.start?.(service, storage, fixture);
+
+    await assert.rejects(
+      () => service.removeParticipant({ conversationId: "conversation-1", participantId: fixture.target.id }),
+      /@target is busy/,
+      item.name
+    );
+    assert.ok(memberIds(storage.current).includes(fixture.target.id), item.name);
+    if (item.name !== "a member request it asked that still runs") {
+      // Nobody else is busy: another member goes at once.
+      await service.removeParticipant({ conversationId: "conversation-1", participantId: fixture.worker.id });
+      assert.deepEqual(memberIds(storage.current), [fixture.assistant.id, fixture.target.id], item.name);
+    }
+  }
+});
+
+test("a run another app instance owns that names no member keeps every member", async () => {
+  const freshOwner = { processId: process.ppid, instanceId: "other-instance", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  const { target, conversation } = removalTrio({ running: true, runId: "elsewhere-run", activeRunIds: ["elsewhere-run"], activeRunOwnersByRunId: { "elsewhere-run": freshOwner } });
+  const { service, storage } = testService({ conversation });
+
+  await assert.rejects(
+    () => service.removeParticipant({ conversationId: conversation.id, participantId: target.id }),
+    /@target is busy/
+  );
+  assert.ok(memberIds(storage.current).includes(target.id));
+});
+
+test("a running member's older copy of the chat does not undo the User's changes to other members", async () => {
+  const { worker, target, conversation } = removalTrio();
+  conversation.metadata = {
+    ...conversation.metadata,
+    participants: (conversation.metadata.participants as ChatParticipant[]).map((participant) => participant.id === target.id
+      ? { ...participant, autoWatch: true, permissions: { ...normalizeChatAgentPermissions(participant.permissions), requestParticipants: "allow" } }
+      : participant),
+    participantWatchers: { [target.id]: { wakeChainDepth: 3, pausedReason: "wake-limit", updatedAt: "2026-01-01T00:00:00.000Z" } }
+  };
+  const { service, storage } = testService({ conversation });
+  // The worker's turn holds a copy read before the User's changes.
+  const workerCopy = await startMemberTurn(service, storage, worker, "worker-run");
+
+  await service.updateParticipantRuntime({
+    conversationId: conversation.id,
+    participantId: target.id,
+    permissions: { ...normalizeChatAgentPermissions(target.permissions), requestParticipants: "ask" },
+    autoWatch: false
+  });
+  await (service as any).withChatMutation(workerCopy, async () => {
+    workerCopy.messages.push({ id: "worker-note", role: "system", content: "Worker progress.", createdAt: NOW, status: "done" });
+    await (service as any).saveConversation(workerCopy);
+  });
+
+  const saved = (storage.current.metadata.participants as ChatParticipant[]).find((participant) => participant.id === target.id)!;
+  assert.equal(normalizeChatAgentPermissions(saved.permissions).requestParticipants, "ask", "the revoked permission stays revoked");
+  assert.equal(saved.autoWatch, false);
+  assert.equal(storage.current.metadata.participantWatchers?.[target.id], undefined, "the watcher the User turned off does not come back");
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.id === "worker-note"), "the worker's own change is saved");
+
+  // A grant the flow itself makes on its copy still reaches the chat.
+  await (service as any).withChatMutation(workerCopy, async () => {
+    (service as any).setParticipantRequestPermission(workerCopy, target.id, "allow");
+  });
+  const regranted = await storage.getConversation(conversation.id) as Conversation;
+  (service as any).setParticipantRequestPermission(regranted, worker.id, "allow");
+  await (service as any).withChatMutation(regranted, async () => {
+    await (service as any).saveConversation(regranted);
+  });
+  const workerSaved = (storage.current.metadata.participants as ChatParticipant[]).find((participant) => participant.id === worker.id)!;
+  assert.equal(normalizeChatAgentPermissions(workerSaved.permissions).requestParticipants, "allow");
+});
+
+test("a watcher the User turns back on is not paused again by a running member's older copy", async () => {
+  const { worker, target, conversation } = removalTrio();
+  conversation.metadata = {
+    ...conversation.metadata,
+    participants: (conversation.metadata.participants as ChatParticipant[]).map((participant) => participant.id === target.id ? { ...participant, autoWatch: true } : participant),
+    participantWatchers: { [target.id]: { wakeChainDepth: 3, pausedReason: "wake-limit", updatedAt: "2026-01-01T00:00:00.000Z" } }
+  };
+  const { service, storage } = testService({ conversation });
+  const workerCopy = await startMemberTurn(service, storage, worker, "worker-run");
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: target.id, autoWatch: false });
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: target.id, autoWatch: true });
+
+  await (service as any).withChatMutation(workerCopy, async () => {
+    await (service as any).saveConversation(workerCopy);
+  });
+  const watcher = storage.current.metadata.participantWatchers?.[target.id];
+  assert.ok(watcher, "the target still watches");
+  assert.equal(watcher.pausedReason, undefined);
+  assert.equal(watcher.wakeChainDepth, 0);
+});
+
+test("a member change waiting in the chat's queue is made on the chat as saved then, not on its earlier read", async () => {
+  const { assistant, worker, target, conversation } = removalTrio({ queuedWriteMarker: "before" });
+  const { service, storage } = testService({ conversation });
+  const holder = await storage.getConversation(conversation.id) as Conversation;
+  let release!: () => void;
+  const held = (service as any).withChatMutation(holder, async () => {
+    await new Promise<void>((resolve) => { release = resolve; });
+    holder.metadata = { ...holder.metadata, queuedWriteMarker: "written-while-queued" };
+    await (service as any).saveConversation(holder);
+  });
+  const removal = service.removeParticipant({ conversationId: conversation.id, participantId: target.id });
+  const update = service.updateParticipantRuntime({ conversationId: conversation.id, participantId: worker.id, model: "newer-model" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  release();
+  await held;
+  await removal;
+  await update;
+
+  assert.deepEqual(memberIds(storage.current), [assistant.id, worker.id]);
+  assert.equal(storage.current.metadata.queuedWriteMarker, "written-while-queued", "what was saved while they waited is kept");
+  assert.equal((storage.current.metadata.participants as ChatParticipant[]).find((participant) => participant.id === worker.id)!.model, "newer-model");
+});
+
+test("a member's tool call that read the chat before the User removed someone does not bring them back", async () => {
+  const { assistant, worker, target, conversation } = removalTrio();
+  const requester = { ...worker, permissions: { ...normalizeChatAgentPermissions(worker.permissions), requestParticipants: "allow" as const } };
+  conversation.metadata = {
+    ...conversation.metadata,
+    participants: [assistant, requester, target],
+    participantSessions: [{ participantId: target.id, sessionId: "target-session", roleConfigId: target.roleConfigId, roleConfigVersion: 1, roleLabel: ROLE.label, roleInstructions: ROLE.instructions, updatedAt: NOW }]
+  };
+  const { service, storage } = testService({ conversation });
+  const requireChat = (service as any).requireChat.bind(service);
+  let removedDuringCall = false;
+  (service as any).requireChat = async (id: string) => {
+    const copy = await requireChat(id);
+    if (!removedDuringCall) {
+      removedDuringCall = true;
+      await service.removeParticipant({ conversationId: id, participantId: target.id });
+    }
+    return copy;
+  };
+
+  const result = await service.requestParticipantsFromTool(
+    { conversationId: conversation.id, participantId: requester.id, roleConfigId: requester.roleConfigId, roleConfigVersion: 1, capabilities: ["participants.request"] } as any,
+    { requests: [{ target: "assistant", prompt: "Check it." }], resumeRequester: true }
+  );
+
+  assert.equal(removedDuringCall, true);
+  assert.notEqual(result.ok, false, JSON.stringify(result));
+  assert.deepEqual(memberIds(storage.current), [assistant.id, requester.id], "the removed member stays removed");
+  assert.equal((storage.current.metadata.participantSessions as ChatParticipantSession[]).some((session) => session.participantId === target.id), false);
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.metadata?.participantRequest?.requesterParticipantId === requester.id), "the request is recorded");
+});
+
+test("a turn uses the member's settings as they are when it starts", async () => {
+  const participant = { ...chatParticipant("claude-code"), id: "member", handle: "member", model: "old-model" };
+  const conversation = chatConversation([participant]);
+  const models: Array<string | undefined> = [];
+  const { service, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant: ParticipantConfig) => {
+      models.push(runParticipant.model);
+      return { participant: runParticipant, ok: true, content: "Done.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const live = { ...conversation, metadata: { ...conversation.metadata, participants: [{ ...participant, model: "newer-model" }] } };
+
+  await (service as any).runParticipantTurnSerialized(live, participant, live.messages[0], "continuation-run", undefined, undefined, { warnings: [], continuation: true });
+
+  assert.deepEqual(models, ["newer-model"]);
+});
+
+test("a member removed while its turn waited does not run", async () => {
+  const participant = { ...chatParticipant("claude-code"), id: "member", handle: "member" };
+  const other = { ...chatParticipant("codex-cli"), id: "other", handle: "other" };
+  const conversation = chatConversation([other]);
+  let runs = 0;
+  const { service, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant: ParticipantConfig) => {
+      runs += 1;
+      return { participant: runParticipant, ok: true, content: "Done.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await assert.rejects(
+    () => (service as any).runParticipantTurnSerialized(conversation, participant, conversation.messages[0], "late-run", undefined, undefined, { warnings: [], continuation: true }),
+    /@member was removed from this chat/
+  );
+  assert.equal(runs, 0);
+});
+
+test("a member addition prepared before the User added the same name is refused when applied", async () => {
+  const { conversation, worker } = removalTrio();
+  const { service, storage } = testService({ conversation });
+  const live = await storage.getConversation(conversation.id) as Conversation;
+  const duplicate = { ...worker, id: "late-duplicate" };
+  assert.throws(
+    () => (service as any).applyPreparedRosterChange(live, { request: { operations: [] }, participants: [duplicate], summary: "" }),
+    /Duplicate member name: @worker/
+  );
+  const watcherA = { ...chatParticipant("codex-cli"), id: "watcher-a", handle: "watcher-a", autoWatch: true };
+  const watcherB = { ...chatParticipant("codex-cli"), id: "watcher-b", handle: "watcher-b", autoWatch: true };
+  live.metadata = { ...live.metadata, participants: [...(live.metadata.participants as ChatParticipant[]), watcherA] };
+  // A second watcher joins without watching, as validateParticipants adds one.
+  const added = (service as any).applyPreparedRosterChange(live, { request: { operations: [] }, participants: [watcherB], summary: "" }) as ChatParticipant[];
+  assert.equal(added[0].autoWatch, false);
+  assert.equal((live.metadata.participants as ChatParticipant[]).filter((participant) => participant.autoWatch === true).length, 1);
+});
+
+test("a compaction another flow's older copy did not see still keeps its member busy", async () => {
+  const { assistant, worker, target, conversation } = removalTrio();
+  const { service, storage } = testService({ conversation });
+  // @worker's compaction holds a copy from before @target's started.
+  const workerCompaction = await storage.getConversation(conversation.id) as Conversation;
+  await (service as any).beginChatParticipantCompactionRun(workerCompaction, "worker-compaction", worker.id);
+  await (service as any).waitForQueuedSave(conversation.id);
+  const targetCompaction = await storage.getConversation(conversation.id) as Conversation;
+  await (service as any).beginChatParticipantCompactionRun(targetCompaction, "target-compaction", target.id);
+  await (service as any).waitForQueuedSave(conversation.id);
+
+  // @worker's compaction ends and saves its copy.
+  await (service as any).endChatRun(workerCompaction, "worker-compaction");
+  await (service as any).waitForQueuedSave(conversation.id);
+
+  assert.ok(storage.current.metadata.participantCompactionsByParticipantId?.[target.id], "the compaction is still recorded");
+  await assert.rejects(
+    () => service.removeParticipant({ conversationId: conversation.id, participantId: target.id }),
+    /@target is busy/
+  );
+  await service.removeParticipant({ conversationId: conversation.id, participantId: worker.id });
+  assert.deepEqual(memberIds(storage.current), [assistant.id, target.id]);
+});
+
+test("an older copy's finished compaction does not hide the member's new one", async () => {
+  const { conversation } = removalTrio();
+  const { service } = testService({ conversation });
+  const merged = (service as any).mergeParticipantCompactions(
+    { activeRunIds: ["second-run"], participantCompactionsByParticipantId: { "target-participant": { runId: "second-run", startedAt: NOW } } },
+    { activeRunIds: ["first-run"], participantCompactionsByParticipantId: { "target-participant": { runId: "first-run", startedAt: NOW } } },
+    new Set<string>()
+  );
+  assert.deepEqual(merged, { "target-participant": { runId: "second-run", startedAt: NOW } });
+});
+
+test("a message that starts no one keeps the run state of members that are working", async () => {
+  const { worker, conversation } = removalTrio();
+  const { service, storage } = testService({ conversation });
+  await startMemberTurn(service, storage, worker, "worker-run");
+
+  await service.sendMessage({ conversationId: conversation.id, content: "@nobody are you there?" } as any);
+
+  assert.equal(storage.current.metadata.running, true);
+  assert.deepEqual(storage.current.metadata.activeRunIds, ["worker-run"]);
+});
+
+test("a message sent to a member removed a moment before is told it is not here", async () => {
+  const { worker, target, conversation } = removalTrio();
+  const { service, storage } = testService({ conversation });
+  // The removal is queued and not yet saved when the message reads the chat.
+  const holder = await storage.getConversation(conversation.id) as Conversation;
+  let release!: () => void;
+  const removal = (service as any).withChatMutation(holder, async () => {
+    await new Promise<void>((resolve) => { release = resolve; });
+    (service as any).removeParticipantsInMutation(holder, [target.id], NOW);
+    await (service as any).saveConversation(holder);
+  });
+  let runs = 0;
+  (service as any).runParticipantBatch = async () => { runs += 1; };
+
+  const sending = service.sendMessage({ conversationId: conversation.id, content: "@target please check." } as any);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  release();
+  await removal;
+  const result = await sending;
+
+  assert.equal(runs, 0, "no turn is started for the removed member");
+  assert.ok(result.warnings.includes("No member named @target."), JSON.stringify(result.warnings));
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.content === "No member named @target."));
+  assert.ok(memberIds(storage.current).includes(worker.id));
+});
+
+test("answering a card that read the chat before the User removed someone does not bring them back", async () => {
+  const { assistant, worker, target, conversation } = removalTrio();
+  const { service, storage } = testService({ conversation });
+  const requested = await service.requestParticipantsFromTool(
+    { conversationId: conversation.id, participantId: worker.id, roleConfigId: worker.roleConfigId, roleConfigVersion: 1, capabilities: ["participants.request"] } as any,
+    { requests: [{ target: "assistant", prompt: "Check it." }], resumeRequester: true }
+  );
+  const approvalId = (storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).find((approval) => approval.status === "pending")?.id;
+  assert.ok(approvalId, JSON.stringify(requested));
+  const getConversation = storage.getConversation.bind(storage);
+  let removedDuringAnswer = false;
+  storage.getConversation = async (id: string) => {
+    const copy = await getConversation(id);
+    if (!removedDuringAnswer && copy) {
+      removedDuringAnswer = true;
+      await service.removeParticipant({ conversationId: id, participantId: target.id });
+    }
+    return copy;
+  };
+
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId, approve: false });
+
+  assert.equal(removedDuringAnswer, true);
+  assert.deepEqual(memberIds(storage.current), [assistant.id, worker.id], "the removed member stays removed");
+  assert.equal((storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).find((approval) => approval.id === approvalId)?.status, "denied");
+});
+
+test("a member being dispatched cannot be removed before its turn registers", async () => {
+  const { assistant, worker, target, conversation } = removalTrio();
+  const { service, storage } = testService({ conversation });
+  let failHistory!: (error: Error) => void;
+  (service as any).ensureHistoryFiles = () => new Promise<string>((_resolve, reject) => { failHistory = reject; });
+  const live = await storage.getConversation(conversation.id) as Conversation;
+  const trigger = live.messages[0]!;
+  const batch = (service as any).runParticipantBatch(live, [target], trigger, "batch-run", undefined, undefined, []) as Promise<void>;
+
+  await assert.rejects(
+    () => service.removeParticipant({ conversationId: conversation.id, participantId: target.id }),
+    /@target is busy/
+  );
+  await service.removeParticipant({ conversationId: conversation.id, participantId: worker.id });
+  assert.deepEqual(memberIds(storage.current), [assistant.id, target.id]);
+
+  failHistory(new Error("history unavailable"));
+  await assert.rejects(batch, /history unavailable/);
+  await service.removeParticipant({ conversationId: conversation.id, participantId: target.id });
+  assert.deepEqual(memberIds(storage.current), [assistant.id]);
 });
 
 function memberRemovalFixture(options: { metadata?: Record<string, any>; messages?: ChatMessage[]; manage?: "ask" | "allow" } = {}) {
@@ -6522,11 +6964,6 @@ test("an approved member removal waits for the asking member's turn, then applie
   assert.equal(approval.status, "approved");
   assert.equal(typeof approval.memberRemovalQueuedAt, "string");
   assert.ok(memberIds(storage.current).includes(target.id), "the target stays while the turn runs");
-  // The member list refuses the same removal while the turn runs, for the same reason.
-  await assert.rejects(
-    () => service.removeParticipant({ conversationId: live.id, participantId: target.id }),
-    /turn is running/
-  );
 
   await (service as any).endChatRun(live, "manager-run");
   await waitFor(() => !memberIds(storage.current).includes(target.id));

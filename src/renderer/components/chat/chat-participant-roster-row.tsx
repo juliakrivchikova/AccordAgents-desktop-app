@@ -22,7 +22,8 @@ type ParticipantRuntimePatch = Pick<ChatParticipant, "model" | "reasoningEffort"
 export function ChatParticipantRosterRow(props: {
   participant: ChatParticipant;
   removeDisabledReason: string | undefined;
-  isRunning: boolean;
+  /** Its own turn or compaction runs: its settings wait for it to end. */
+  busy: boolean;
   status: ChatParticipantRosterStatus;
   autoWatchDisabledReason?: string;
   autoWatchPausedReason?: ChatParticipantWatcherPausedReason;
@@ -113,7 +114,7 @@ export function ChatParticipantRosterRow(props: {
         {expanded && (
           <ParticipantRuntimeControls
             participant={props.participant}
-            disabled={props.isRunning}
+            disabled={props.busy}
             autoWatchDisabledReason={props.autoWatchDisabledReason}
             autoWatchPausedReason={props.autoWatchPausedReason}
             roleParticipantDefaults={props.roleParticipantDefaults}

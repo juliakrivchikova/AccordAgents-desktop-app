@@ -74,6 +74,7 @@ import type {
   ChatParticipantRequestInput,
   ChatParticipantRequestItem,
   ChatParticipantRequestStatus,
+  ChatParticipantCompactionState,
   ChatParticipantSession,
   ChatPromptContextParticipantPointers,
   ChatPromptContextPointerAdvance,
@@ -243,6 +244,7 @@ import { sanitizeChatSkillMention, UserSkillsService } from "./userSkills";
 import type { UserSkillRunContext } from "./userSkills";
 import {
   clearChatRunMetadata,
+  PARTICIPANT_COMPACTIONS_KEY,
   readActiveRunIds,
   readActiveRunParticipants,
   readParticipantCompactions,
@@ -250,6 +252,7 @@ import {
   withParticipantCompactionStarted,
   withParticipantCompactionsForRunRemoved
 } from "../../shared/chatRunState";
+import { activeRunSummaryForConversation, chatMemberIdsWithLiveWork } from "../../shared/chatRosterStatus";
 import { INTERRUPTED_RUN_WARNING, sanitizeWarningList, sanitizeWarningText } from "../../shared/warnings";
 import { markStopUnconfirmed, markStoppedByUser } from "./machineTurnOutcome";
 import { NativeProcessUnavailableError } from "./nativeProcess";
@@ -981,6 +984,18 @@ export class ChatService {
   private readonly participantExclusiveTurnQueues = new Map<string, Promise<void>>();
   private readonly chatRunControllers = new Map<string, Set<AbortController>>();
   private readonly chatRunMeta = new Map<string, { conversationId: string; participantId: string; participantHandle: string; pendingMessageId?: string }>();
+  /** Members a flow here is about to run, or will resume, before their own
+   *  turn is registered in chatRunMeta or shows a reply: removing one
+   *  meanwhile would start a turn for a member that is gone. Keyed by the
+   *  flow's run id (dropped with the run, forgetActiveChatRun) or by a token
+   *  the claiming code releases itself. */
+  private readonly memberWorkClaims = new Map<string, { conversationId: string; participantIds: Set<string> }>();
+  /** Members a flow gave "Request other members: allow" on its own copy of
+   *  the chat (an accord start, an approval "for this chat") that has not been
+   *  saved yet: only that grant survives the refresh from storage. Any other
+   *  value the copy holds is older than the saved one, which the User may
+   *  have changed meanwhile. Settled once a save of the copy is written. */
+  private readonly requestPermissionGrants = new WeakMap<Conversation, Set<string>>();
   private readonly chatMutationQueues = new Map<string, Promise<void>>();
   private readonly appSendMessageCountsByRun = new Map<string, number>();
   private readonly appSendMessageImageBytesByRun = new Map<string, number>();
@@ -1911,16 +1926,19 @@ export class ChatService {
   }
 
   async addParticipant(request: AddChatParticipantRequest): Promise<Conversation | undefined> {
-    const conversation = await this.storage.getConversation(request.conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      return conversation;
+    const read = (await this.readStoredChatStateForRefresh(request.conversationId)).stored;
+    if (!read || read.kind !== "chat") {
+      return read;
     }
-    return this.withChatMutation(conversation, async () => {
+    const conversation: Conversation = { ...read, messages: [], metadata: {} };
+    // Checked before the chat's queue: probing the CLIs takes seconds, and
+    // members that are running meanwhile save through the same queue.
+    const settings = await this.settings.getPublicSettings();
+    const agents = await this.detectAgentsForReadiness();
+    this.assertParticipantProvidersReady([request.participant], agents, settings.providers ?? [], settings.cliProviderHosts ?? []);
+    return this.withSavedChat(conversation, async () => {
       const participants = this.chatParticipants(conversation);
       const nextParticipant = (await this.validateParticipants([request.participant], participants))[0];
-      const settings = await this.settings.getPublicSettings();
-      const agents = await this.detectAgentsForReadiness();
-      this.assertParticipantProvidersReady([request.participant], agents, settings.providers ?? [], settings.cliProviderHosts ?? []);
       conversation.metadata = {
         ...conversation.metadata,
         participants: [...participants, nextParticipant]
@@ -1940,11 +1958,12 @@ export class ChatService {
   }
 
   async updateParticipantRuntime(request: UpdateChatParticipantRuntimeRequest): Promise<Conversation | undefined> {
-    const conversation = await this.storage.getConversation(request.conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      return conversation;
+    const read = (await this.readStoredChatStateForRefresh(request.conversationId)).stored;
+    if (!read || read.kind !== "chat") {
+      return read;
     }
-    return this.withChatMutation(conversation, async () => {
+    const conversation: Conversation = { ...read, messages: [], metadata: {} };
+    return this.withSavedChat(conversation, async () => {
       const participants = this.chatParticipants(conversation);
       const target = participants.find((participant) => participant.id === request.participantId);
       if (!target) {
@@ -2024,18 +2043,71 @@ export class ChatService {
   }
 
   async removeParticipant(request: RemoveChatParticipantRequest): Promise<Conversation | undefined> {
-    const conversation = await this.storage.getConversation(request.conversationId);
-    if (!conversation || conversation.kind !== "chat") {
-      return conversation;
+    const read = (await this.readStoredChatStateForRefresh(request.conversationId)).stored;
+    if (!read || read.kind !== "chat") {
+      return read;
     }
+    const conversation: Conversation = { ...read, messages: [], metadata: {} };
     const retired: ChatParticipant[] = [];
-    const saved = await this.withChatMutation(conversation, async () => {
-      retired.push(...this.removeParticipantsInMutation(conversation, [request.participantId], new Date().toISOString()));
-      await this.saveConversation(conversation);
-      return conversation;
-    });
+    // Queued under the run lock, which every flow that starts a member's turn
+    // holds while it picks its members: either this removal is queued first,
+    // and the flow's next mutation (and the check where its turn starts,
+    // runParticipantTurnSerialized) sees the member gone; or the flow has
+    // claimed the member by the time this removal checks it (synchronously
+    // once the lock is released, while this removal still reads the chat).
+    // Only the queuing holds the lock, not the save.
+    const queued = await this.withChatRunLock(conversation.id, async () => ({
+      done: this.withSavedChat(conversation, async () => {
+        retired.push(...this.removeParticipantsInMutation(conversation, [request.participantId], new Date().toISOString()));
+        await this.saveConversation(conversation);
+        return conversation;
+      })
+    }));
+    const saved = await queued.done;
     this.retireRemovedMembers(conversation.id, retired);
     return saved;
+  }
+
+
+  /** Saves what a member's tool call recorded on its copy of the chat
+   *  through the chat's mutation queue. `apply` runs once the copy has been
+   *  refreshed from storage, so a member list or settings the User changed
+   *  since the call read the chat are not written back. A change to the
+   *  member list itself belongs in `apply`: a member added to the copy before
+   *  the refresh would be dropped by it. */
+  private async saveChatChange<T>(conversation: Conversation, apply: () => Promise<T> | T): Promise<T> {
+    return this.withChatMutation(conversation, async () => {
+      const result = await apply();
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      return result;
+    });
+  }
+
+  /** For a change the User makes to the members or a member's settings
+   *  (withSavedChat): fills `conversation`, inside its mutation, with the chat exactly as saved
+   *  at that moment (the refresh a copy read earlier gets would let the copy's
+   *  older run state, watchers and the rest win). The messages are the saved
+   *  ones, not copies: these changes replace a message they alter, never edit
+   *  it in place. */
+  private withSavedChat<T>(conversation: Conversation, fn: () => Promise<T>): Promise<T> {
+    return this.withChatMutation(conversation, async () => {
+      await this.loadSavedChat(conversation);
+      return fn();
+    }, { skipRefresh: true });
+  }
+
+  private async loadSavedChat(conversation: Conversation): Promise<void> {
+    await this.waitForQueuedSave(conversation.id);
+    const stored = (await this.readStoredChatStateForRefresh(conversation.id)).stored;
+    if (!stored || stored.kind !== "chat" || !Array.isArray(stored.metadata.participants)) {
+      throw new Error("Chat was not found.");
+    }
+    Object.assign(conversation, stored, {
+      metadata: cloneJsonValue(stored.metadata),
+      messages: [...stored.messages]
+    });
+    this.applyRemovedChatMessageTombstones(conversation);
   }
 
   /**
@@ -2045,14 +2117,13 @@ export class ChatService {
    * returned members to retireRemovedMembers. Every target is checked before
    * anything is changed, so a refused removal leaves the chat untouched.
    *
-   * The chat must be idle: a removed member's own turn would keep writing its
+   * Each removed member must be idle: its own turn would keep writing its
    * reply, approvals and session after this cleanup ran, and an open member
-   * request involving it would resume a member that is gone.
+   * request involving it would resume a member that is gone. Another member's
+   * work does not stop it. (An approved member request waits for the whole
+   * chat to be idle before it gets here, memberRemovalMustWait.)
    */
   private removeParticipantsInMutation(conversation: Conversation, participantIds: string[], now: string): ChatParticipant[] {
-    if (this.memberRemovalBlockedByLiveWork(conversation)) {
-      throw new Error("Members cannot be removed while a turn is running.");
-    }
     const participants = this.chatParticipants(conversation);
     const targets: ChatParticipant[] = [];
     for (const participantId of new Set(participantIds)) {
@@ -2061,6 +2132,10 @@ export class ChatService {
         throw new Error("Chat member was not found.");
       }
       targets.push(target);
+    }
+    const busy = targets.find((target) => this.memberHasLiveWork(conversation, target.id));
+    if (busy) {
+      throw new Error(`@${busy.handle} is busy and cannot be removed until its work ends.`);
     }
     const assistantId = participants.find((item) => item.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID)?.id;
     if (targets.some((target) => target.id === assistantId)) {
@@ -2091,6 +2166,64 @@ export class ChatService {
 
   private memberRemovalBlockedByLiveWork(conversation: Conversation): boolean {
     return conversation.metadata.running === true || this.chatHasLiveWork(conversation.id);
+  }
+
+  /** Whether this member's own work in the chat is live: what the saved chat
+   *  shows (chatMemberIdsWithLiveWork), its turn registered here, a flow here
+   *  that is about to run or resume it, or a member request it asked or
+   *  answers that a runner here still works on. A run another app instance
+   *  owns that names no member could be anyone's, so it counts for all. */
+  private memberHasLiveWork(conversation: Conversation, participantId: string): boolean {
+    if (chatMemberIdsWithLiveWork(conversation).has(participantId)) {
+      return true;
+    }
+    for (const meta of this.chatRunMeta.values()) {
+      if (meta.conversationId === conversation.id && meta.participantId === participantId) {
+        return true;
+      }
+    }
+    for (const claim of this.memberWorkClaims.values()) {
+      if (claim.conversationId === conversation.id && claim.participantIds.has(participantId)) {
+        return true;
+      }
+    }
+    for (const requestMessageId of this.participantRequestRunners.keys()) {
+      const batch = conversation.messages.find((message) => message.id === requestMessageId)?.metadata?.participantRequest;
+      if (batch && (
+        batch.requesterParticipantId === participantId ||
+        batch.items.some((item) => item.targetParticipantId === participantId && this.isOpenParticipantRequestStatus(item.status))
+      )) {
+        return true;
+      }
+    }
+    const attributed = activeRunSummaryForConversation(conversation).participantIdsByRunId;
+    const compactionRunIds = new Set(Object.values(readParticipantCompactions(conversation.metadata)).map((state) => state.runId));
+    return readActiveRunIds(conversation.metadata).some((runId) =>
+      !attributed.has(runId) && !compactionRunIds.has(runId) && this.localRunOwnerState(conversation.metadata, runId) === "external-live"
+    );
+  }
+
+  /** Claims these members for a flow until `release` (idempotent) is called. */
+  private claimMemberWork(conversationId: string, participantIds: readonly string[]): () => void {
+    if (participantIds.length === 0) {
+      return () => undefined;
+    }
+    const token = `claim:${randomUUID()}`;
+    this.memberWorkClaims.set(token, { conversationId, participantIds: new Set(participantIds) });
+    return () => { this.memberWorkClaims.delete(token); };
+  }
+
+  /** Claims members for a run until the run ends here (forgetActiveChatRun). */
+  private claimMembersForRun(conversationId: string, runId: string, participantIds: readonly string[] | undefined): void {
+    if (!participantIds?.length) {
+      return;
+    }
+    const existing = this.memberWorkClaims.get(runId);
+    if (existing && existing.conversationId === conversationId) {
+      for (const participantId of participantIds) existing.participantIds.add(participantId);
+      return;
+    }
+    this.memberWorkClaims.set(runId, { conversationId, participantIds: new Set(participantIds) });
   }
 
   async compactParticipant(
@@ -2145,6 +2278,12 @@ export class ChatService {
           return { conversation, participant, session, runStarted: false };
         }
         await this.beginChatParticipantCompactionRun(conversation, runId, participant.id);
+        // The run's mutation refreshed the chat: a member removed since the
+        // read above is not compacted.
+        if (!this.chatParticipants(conversation).some((item) => item.id === participant.id)) {
+          await this.endChatRun(conversation, runId);
+          throw new Error("Chat member was not found.");
+        }
         await this.waitForQueuedSave(conversation.id);
         return { conversation, participant, session, runStarted: true };
       });
@@ -2770,15 +2909,16 @@ export class ChatService {
         prepared.summary,
         "auto-applied"
       );
-      const applied = this.applyPreparedRosterChange(conversation, prepared);
-      approval.appliedParticipantIds = applied.map((participant) => participant.id);
-      approval.updatedAt = new Date().toISOString();
-      this.upsertAppToolApproval(conversation, approval);
-      conversation.messages.push(this.message("system", `Auto-applied app tool request from @${requester.handle}: ${prepared.summary}.`, undefined, {
-        threadId: "system"
-      }));
-      conversation.updatedAt = new Date().toISOString();
-      await this.saveConversation(conversation);
+      const applied = await this.saveChatChange(conversation, () => {
+        const added = this.applyPreparedRosterChange(conversation, prepared);
+        approval.appliedParticipantIds = added.map((participant) => participant.id);
+        approval.updatedAt = new Date().toISOString();
+        this.upsertAppToolApproval(conversation, approval);
+        conversation.messages.push(this.message("system", `Auto-applied app tool request from @${requester.handle}: ${prepared.summary}.`, undefined, {
+          threadId: "system"
+        }));
+        return added;
+      });
       return {
         ok: true,
         status: "auto_applied",
@@ -2797,12 +2937,12 @@ export class ChatService {
       prepared.summary,
       "pending"
     );
-    this.upsertAppToolApproval(conversation, approval);
-    conversation.messages.push(this.message("system", `App tool approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
-      threadId: "system"
-    }));
-    conversation.updatedAt = new Date().toISOString();
-    await this.saveConversation(conversation);
+    await this.saveChatChange(conversation, () => {
+      this.upsertAppToolApproval(conversation, approval);
+      conversation.messages.push(this.message("system", `App tool approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
+        threadId: "system"
+      }));
+    });
     return {
       ok: true,
       status: "pending_user_approval",
@@ -2823,10 +2963,19 @@ export class ChatService {
       throw new Error("The issued app-tool token does not grant permission requests.");
     }
 
-    const applied = await this.applyPermissionChangeRequestFromTool(conversation, requester, actor, rawRequest);
-    if (applied.mutated) {
-      await this.saveConversation(conversation);
-    }
+    // Decided and recorded on the chat as saved now, through the queue: the
+    // read above can be older than a member change the User saved meanwhile.
+    const applied = await this.withChatMutation(conversation, async () => {
+      const requesterNow = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+      if (!requesterNow) {
+        throw new Error("The requesting member is no longer in this chat.");
+      }
+      const outcome = await this.applyPermissionChangeRequestFromTool(conversation, requesterNow, actor, rawRequest);
+      if (outcome.mutated) {
+        await this.saveConversation(conversation);
+      }
+      return outcome;
+    });
     return applied.result;
   }
 
@@ -3121,6 +3270,48 @@ export class ChatService {
     };
   }
 
+  /** Records a prepared member request on the chat: its message, and a card
+   *  for the targets that need the User's approval. */
+  private recordPreparedParticipantRequest(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    prepared: PreparedParticipantRequest,
+    actor: ChatAppMcpActor
+  ): void {
+    conversation.messages.push(prepared.requestMessage);
+    this.recordLastMessageByParticipant(conversation, prepared.requestMessage);
+    const pendingTargets = prepared.batch.items.filter((item) => item.status === "pending_approval");
+    if (pendingTargets.length === 0) {
+      return;
+    }
+    const participants = this.chatParticipants(conversation);
+    const approval = this.newAppToolApproval(
+      conversation,
+      requester,
+      APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
+      "participants.request",
+      {
+        ...prepared.request,
+        requests: prepared.request.requests.filter((request) => {
+          const target = this.participantForMentionHandle(participants, request.target);
+          return target ? pendingTargets.some((item) => item.targetParticipantId === target.id) : false;
+        }),
+        requestMessageId: prepared.requestMessage.id,
+        batchId: prepared.batch.id
+      },
+      this.participantRequestSummary(requester.handle, pendingTargets.map((item) => item.targetHandle)),
+      "pending"
+    );
+    if (actor.runId && actor.triggerMessageId) {
+      approval.resumeContext = {
+        runId: actor.runId,
+        triggerMessageId: actor.triggerMessageId,
+        participantRequestBatchId: prepared.batch.id
+      };
+    }
+    this.upsertAppToolApproval(conversation, approval);
+  }
+
   async requestParticipantsFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
     await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
@@ -3133,45 +3324,30 @@ export class ChatService {
       return this.participantRequestFailedToolResult("This member is not allowed to request other members.");
     }
 
-    let prepared: PreparedParticipantRequest;
-    try {
-      prepared = await this.prepareParticipantRequest(conversation, requester, this.normalizeParticipantRequest(rawRequest), actor, "mcp");
-    } catch (error) {
-      return this.participantRequestFailedToolResult(error instanceof Error ? error.message : String(error));
-    }
-    conversation.messages.push(prepared.requestMessage);
-    this.recordLastMessageByParticipant(conversation, prepared.requestMessage);
-    const pendingTargets = prepared.batch.items.filter((item) => item.status === "pending_approval");
-    if (pendingTargets.length > 0) {
-      const participants = this.chatParticipants(conversation);
-      const approval = this.newAppToolApproval(
-        conversation,
-        requester,
-        APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
-        "participants.request",
-        {
-          ...prepared.request,
-          requests: prepared.request.requests.filter((request) => {
-            const target = this.participantForMentionHandle(participants, request.target);
-            return target ? pendingTargets.some((item) => item.targetParticipantId === target.id) : false;
-          }),
-          requestMessageId: prepared.requestMessage.id,
-          batchId: prepared.batch.id
-        },
-        this.participantRequestSummary(requester.handle, pendingTargets.map((item) => item.targetHandle)),
-        "pending"
-      );
-      if (actor.runId && actor.triggerMessageId) {
-        approval.resumeContext = {
-          runId: actor.runId,
-          triggerMessageId: actor.triggerMessageId,
-          participantRequestBatchId: prepared.batch.id
-        };
+    // Prepared and recorded on the chat as saved now (refreshed by the
+    // mutation), not on the copy read above: a member the User removed or
+    // added meanwhile is neither asked nor written back.
+    let prepared!: PreparedParticipantRequest;
+    let pendingTargets: ChatParticipantRequestItem[] = [];
+    const failure = await this.withChatMutation(conversation, async () => {
+      const requesterNow = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+      if (!requesterNow) {
+        throw new Error("The requesting member is no longer in this chat.");
       }
-      this.upsertAppToolApproval(conversation, approval);
+      try {
+        prepared = await this.prepareParticipantRequest(conversation, requesterNow, this.normalizeParticipantRequest(rawRequest), actor, "mcp");
+      } catch (error) {
+        return this.participantRequestFailedToolResult(error instanceof Error ? error.message : String(error));
+      }
+      this.recordPreparedParticipantRequest(conversation, requesterNow, prepared, actor);
+      pendingTargets = prepared.batch.items.filter((item) => item.status === "pending_approval");
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      return undefined;
+    });
+    if (failure) {
+      return failure;
     }
-    conversation.updatedAt = new Date().toISOString();
-    await this.saveConversation(conversation);
 
     const hasRunningTargets = prepared.batch.items.some((item) => item.status === "running");
     if (!hasRunningTargets) {
@@ -3212,28 +3388,31 @@ export class ChatService {
     }
 
     const latest = await this.requireChat(conversation.id);
-    const latestBatch = latest.messages.find((message) => message.id === prepared.requestMessage.id)?.metadata?.participantRequest;
-    const hasUnfinishedItems = latestBatch?.items.some((item) => this.isOpenParticipantRequestStatus(item.status));
-    const approvalRequired = latestBatch?.items.some((item) => item.status === "pending_approval") ?? false;
-    let status = latestBatch?.status ?? result.result.batch.status;
-    // Only an inline request (resumeRequester false) waits, so finished
-    // replies here are returned in this same call.
-    if (!hasUnfinishedItems) {
-      const completedBatch = this.updateParticipantRequestBatch(latest, prepared.requestMessage.id, (batch) => ({
-        ...batch,
-        completedInToolCall: true,
-        status: "completed",
-        updatedAt: new Date().toISOString()
-      }));
-      status = completedBatch?.status ?? "completed";
-      void this.debugLogs.write("chat.participant-request.completed-in-tool-call", {
-        conversationId: conversation.id,
-        requestMessageId: prepared.requestMessage.id,
-        batchId: completedBatch?.id ?? latestBatch?.id
-      });
-    }
-    await this.saveConversation(latest);
-    return this.participantRequestToolResult(latest, prepared.requestMessage.id, { status, approvalRequired });
+    const finished = await this.withChatMutation(latest, async () => {
+      const latestBatch = latest.messages.find((message) => message.id === prepared.requestMessage.id)?.metadata?.participantRequest;
+      const hasUnfinishedItems = latestBatch?.items.some((item) => this.isOpenParticipantRequestStatus(item.status));
+      const approvalRequired = latestBatch?.items.some((item) => item.status === "pending_approval") ?? false;
+      let status = latestBatch?.status ?? result.result.batch.status;
+      // Only an inline request (resumeRequester false) waits, so finished
+      // replies here are returned in this same call.
+      if (!hasUnfinishedItems) {
+        const completedBatch = this.updateParticipantRequestBatch(latest, prepared.requestMessage.id, (batch) => ({
+          ...batch,
+          completedInToolCall: true,
+          status: "completed",
+          updatedAt: new Date().toISOString()
+        }));
+        status = completedBatch?.status ?? "completed";
+        void this.debugLogs.write("chat.participant-request.completed-in-tool-call", {
+          conversationId: conversation.id,
+          requestMessageId: prepared.requestMessage.id,
+          batchId: completedBatch?.id ?? latestBatch?.id
+        });
+      }
+      await this.saveConversation(latest);
+      return { status, approvalRequired };
+    });
+    return this.participantRequestToolResult(latest, prepared.requestMessage.id, finished);
   }
 
   async requestSelfCompactionFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
@@ -3253,38 +3432,56 @@ export class ChatService {
       return { ok: false, status: "rejected", error: `Context compaction requests are disabled for @${requester.handle}.` };
     }
     const request = this.normalizeSelfCompactionRequest(rawRequest);
-    const guard = this.selfCompactionRequestGuard(conversation, requester);
-    if (guard) {
-      return { ok: false, ...guard };
-    }
-
     const summary = `Compact @${requester.handle} context`;
-    if (permission === "ask") {
-      const approval = this.newAppToolApproval(
-        conversation,
-        requester,
-        APP_CHAT_REQUEST_COMPACTION_TOOL,
-        "compaction.request",
-        request,
-        summary,
-        "pending"
+    // Checked and recorded on the chat as saved now, through the queue.
+    let compactingRequester = requester;
+    const decided = await this.withChatMutation(conversation, async (): Promise<Record<string, unknown> | undefined> => {
+      const requesterNow = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+      if (!requesterNow) {
+        return { ok: false, status: "rejected", error: "The requesting member is no longer in this chat." };
+      }
+      compactingRequester = requesterNow;
+      const permissionNow = normalizeChatParticipantRequestPermission(
+        normalizeChatAgentPermissions(requesterNow.permissions).requestCompaction
       );
-      this.upsertAppToolApproval(conversation, approval);
+      if (permissionNow === "deny") {
+        return { ok: false, status: "rejected", error: `Context compaction requests are disabled for @${requesterNow.handle}.` };
+      }
+      const guard = this.selfCompactionRequestGuard(conversation, requesterNow);
+      if (guard) {
+        return { ok: false, ...guard };
+      }
+      if (permissionNow === "ask") {
+        const approval = this.newAppToolApproval(
+          conversation,
+          requesterNow,
+          APP_CHAT_REQUEST_COMPACTION_TOOL,
+          "compaction.request",
+          request,
+          summary,
+          "pending"
+        );
+        this.upsertAppToolApproval(conversation, approval);
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        return {
+          ok: true,
+          status: "pending_user_approval",
+          approvalId: approval.id,
+          summary
+        };
+      }
+      this.recordSelfCompactionRequested(conversation, requesterNow.id, new Date().toISOString());
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
-      return {
-        ok: true,
-        status: "pending_user_approval",
-        approvalId: approval.id,
-        summary
-      };
+      return undefined;
+    });
+    if (decided) {
+      return decided;
     }
 
     const runId = randomUUID();
-    this.recordSelfCompactionRequested(conversation, requester.id, new Date().toISOString());
-    conversation.updatedAt = new Date().toISOString();
-    await this.saveConversation(conversation);
-    this.startQueuedSelfCompaction(conversation.id, requester, request, runId);
+    this.startQueuedSelfCompaction(conversation.id, compactingRequester, request, runId);
     return {
       ok: true,
       status: "queued",
@@ -3304,20 +3501,22 @@ export class ChatService {
       ? rawRequest as { requestId?: unknown }
       : {};
     const requestId = typeof record.requestId === "string" ? record.requestId.trim() : "";
-    let changed = false;
-    for (const message of conversation.messages) {
-      const batch = message.metadata?.participantRequest;
-      if (!batch || (requestId && batch.id !== requestId)) {
-        continue;
+    await this.withChatMutation(conversation, async () => {
+      let changed = false;
+      for (const message of conversation.messages) {
+        const batch = message.metadata?.participantRequest;
+        if (!batch || (requestId && batch.id !== requestId)) {
+          continue;
+        }
+        if (this.markOrphanedParticipantRequestInterrupted(conversation, message)) {
+          changed = true;
+        }
       }
-      if (this.markOrphanedParticipantRequestInterrupted(conversation, message)) {
-        changed = true;
+      if (changed) {
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
       }
-    }
-    if (changed) {
-      conversation.updatedAt = new Date().toISOString();
-      await this.saveConversation(conversation);
-    }
+    });
     const batches = conversation.messages
       .map((message) => message.metadata?.participantRequest)
       .filter((batch): batch is ChatParticipantRequestBatch => Boolean(batch))
@@ -3666,18 +3865,18 @@ export class ChatService {
         "auto-applied"
       );
       const appliedRoles = await this.applyPreparedRoleChange(prepared);
-      this.upsertAppToolApproval(conversation, {
-        ...approval,
-        updatedAt: new Date().toISOString()
+      await this.saveChatChange(conversation, () => {
+        this.upsertAppToolApproval(conversation, {
+          ...approval,
+          updatedAt: new Date().toISOString()
+        });
+        conversation.messages.push(this.message(
+          "system",
+          `Auto-applied role request from @${requester.handle}: ${prepared.summary}.`,
+          undefined,
+          { threadId: "system" }
+        ));
       });
-      conversation.messages.push(this.message(
-        "system",
-        `Auto-applied role request from @${requester.handle}: ${prepared.summary}.`,
-        undefined,
-        { threadId: "system" }
-      ));
-      conversation.updatedAt = new Date().toISOString();
-      await this.saveConversation(conversation);
       return {
         ok: true,
         status: "auto_applied",
@@ -3704,12 +3903,12 @@ export class ChatService {
       prepared.summary,
       "pending"
     );
-    this.upsertAppToolApproval(conversation, approval);
-    conversation.messages.push(this.message("system", `Role approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
-      threadId: "system"
-    }));
-    conversation.updatedAt = new Date().toISOString();
-    await this.saveConversation(conversation);
+    await this.saveChatChange(conversation, () => {
+      this.upsertAppToolApproval(conversation, approval);
+      conversation.messages.push(this.message("system", `Role approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
+        threadId: "system"
+      }));
+    });
     return {
       ok: true,
       status: "pending_user_approval",
@@ -3787,26 +3986,27 @@ export class ChatService {
         participantRequest: request
       });
       if (manageRolesParticipants === "allow" && !prepared.managementEscalation) {
-        const applied = await this.applyPreparedRoleParticipantChange(conversation, prepared);
-        const approval: ChatAppToolApproval = {
-          ...pendingRoleApproval.approval,
-          toolName: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
-          request: applied.request,
-          summary: applied.summary,
-          status: "auto-applied",
-          approvalScope: "chat",
-          appliedParticipantIds: applied.participants.map((participant) => participant.id),
-          updatedAt: new Date().toISOString()
-        };
-        this.upsertAppToolApproval(conversation, approval);
-        conversation.messages.push(this.message(
-          "system",
-          `Auto-applied role and member request from @${requester.handle}: ${applied.summary}.`,
-          undefined,
-          { threadId: "system" }
-        ));
-        conversation.updatedAt = new Date().toISOString();
-        await this.saveConversation(conversation);
+        const { applied, approval } = await this.saveChatChange(conversation, async () => {
+          const applied = await this.applyPreparedRoleParticipantChange(conversation, prepared);
+          const approval: ChatAppToolApproval = {
+            ...pendingRoleApproval.approval,
+            toolName: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
+            request: applied.request,
+            summary: applied.summary,
+            status: "auto-applied",
+            approvalScope: "chat",
+            appliedParticipantIds: applied.participants.map((participant) => participant.id),
+            updatedAt: new Date().toISOString()
+          };
+          this.upsertAppToolApproval(conversation, approval);
+          conversation.messages.push(this.message(
+            "system",
+            `Auto-applied role and member request from @${requester.handle}: ${applied.summary}.`,
+            undefined,
+            { threadId: "system" }
+          ));
+          return { applied, approval };
+        });
         return {
           ok: true,
           status: "auto_applied",
@@ -3822,12 +4022,12 @@ export class ChatService {
         summary: prepared.summary,
         updatedAt: new Date().toISOString()
       };
-      this.upsertAppToolApproval(conversation, approval);
-      conversation.messages.push(this.message("system", `Role and member approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
-        threadId: "system"
-      }));
-      conversation.updatedAt = new Date().toISOString();
-      await this.saveConversation(conversation);
+      await this.saveChatChange(conversation, () => {
+        this.upsertAppToolApproval(conversation, approval);
+        conversation.messages.push(this.message("system", `Role and member approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
+          threadId: "system"
+        }));
+      });
       return {
         ok: true,
         status: "pending_user_approval",
@@ -3847,18 +4047,19 @@ export class ChatService {
         prepared.summary,
         "auto-applied"
       );
-      const applied = await this.applyPreparedParticipantChange(conversation, prepared);
-      approval.appliedParticipantIds = applied.map((participant) => participant.id);
-      approval.updatedAt = new Date().toISOString();
-      this.upsertAppToolApproval(conversation, approval);
-      conversation.messages.push(this.message(
-        "system",
+      const applied = await this.saveChatChange(conversation, async () => {
+        const added = await this.applyPreparedParticipantChange(conversation, prepared);
+        approval.appliedParticipantIds = added.map((participant) => participant.id);
+        approval.updatedAt = new Date().toISOString();
+        this.upsertAppToolApproval(conversation, approval);
+        conversation.messages.push(this.message(
+          "system",
           `Auto-applied member request from @${requester.handle}: ${prepared.summary}.`,
-        undefined,
-        { threadId: "system" }
-      ));
-      conversation.updatedAt = new Date().toISOString();
-      await this.saveConversation(conversation);
+          undefined,
+          { threadId: "system" }
+        ));
+        return added;
+      });
       return {
         ok: true,
         status: "auto_applied",
@@ -3876,12 +4077,12 @@ export class ChatService {
       prepared.summary,
       "pending"
     );
-    this.upsertAppToolApproval(conversation, approval);
-    conversation.messages.push(this.message("system", `Member approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
-      threadId: "system"
-    }));
-    conversation.updatedAt = new Date().toISOString();
-    await this.saveConversation(conversation);
+    await this.saveChatChange(conversation, () => {
+      this.upsertAppToolApproval(conversation, approval);
+      conversation.messages.push(this.message("system", `Member approval needed from @${requester.handle}: ${prepared.summary}.`, undefined, {
+        threadId: "system"
+      }));
+    });
     return {
       ok: true,
       status: "pending_user_approval",
@@ -5484,27 +5685,27 @@ export class ChatService {
       if (approval.toolName === APP_SCRIPTS_REQUEST_CHANGE_TOOL && this.isScriptChangeRequest(approval.request)) {
         await this.scriptHost?.rejectPending(approval.request);
       }
-      if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && this.isParticipantRequestApprovalRequest(approval.request)) {
-        this.applyParticipantRequestApprovalDecision(conversation, approval, "denied", request.scope);
-      }
       const deniedApproval: ChatAppToolApproval = {
         ...approval,
         status: "denied",
         updatedAt: now
       };
-      this.upsertAppToolApproval(conversation, deniedApproval);
-      if (approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL && this.isParticipantRemovalRequest(approval.request)) {
-        // The asking member reads this in the chat: nothing was removed.
-        const handles = this.memberRemovalHandles(approval.request);
-        conversation.messages.push(this.message(
-          "system",
-          `User declined @${approval.requesterHandle}'s request to remove ${handles}. ${handles} ${approval.request.operations.length === 1 ? "stays" : "stay"} in this chat.`,
-          undefined,
-          { threadId: "system" }
-        ));
-      }
-      conversation.updatedAt = now;
-      await this.saveConversation(conversation);
+      await this.saveChatChange(conversation, () => {
+        if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && this.isParticipantRequestApprovalRequest(approval.request)) {
+          this.applyParticipantRequestApprovalDecision(conversation, approval, "denied", request.scope);
+        }
+        this.upsertAppToolApproval(conversation, deniedApproval);
+        if (approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL && this.isParticipantRemovalRequest(approval.request)) {
+          // The asking member reads this in the chat: nothing was removed.
+          const handles = this.memberRemovalHandles(approval.request);
+          conversation.messages.push(this.message(
+            "system",
+            `User declined @${approval.requesterHandle}'s request to remove ${handles}. ${handles} ${approval.request.operations.length === 1 ? "stays" : "stay"} in this chat.`,
+            undefined,
+            { threadId: "system" }
+          ));
+        }
+      });
       await this.emitAppToolApprovalDecision({
         conversationId: conversation.id,
         approval: deniedApproval,
@@ -5558,22 +5759,23 @@ export class ChatService {
     if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL && this.isParticipantRequestApprovalRequest(approval.request)) {
       await execution?.beforeApply(approval);
       const participantScope = approval.request.source === "inferred" ? "once" : scope;
-      this.upsertAppToolApproval(conversation, {
-        ...approval,
-        status: "approved",
-        approvalScope: participantScope,
-        appliedParticipantIds: this.participantRequestApprovalTargetIds(conversation, approval.request),
-        updatedAt: now
+      const participantRequest = approval.request;
+      const requestMessageId = participantRequest.requestMessageId;
+      await this.saveChatChange(conversation, () => {
+        this.upsertAppToolApproval(conversation, {
+          ...approval,
+          status: "approved",
+          approvalScope: participantScope,
+          appliedParticipantIds: this.participantRequestApprovalTargetIds(conversation, participantRequest),
+          updatedAt: now
+        });
+        if (participantScope === "chat") {
+          this.setParticipantRequestPermission(conversation, approval.requesterParticipantId, "allow");
+        }
+        if (requestMessageId) {
+          this.applyParticipantRequestApprovalDecision(conversation, approval, "approved", participantScope);
+        }
       });
-      if (participantScope === "chat") {
-        this.setParticipantRequestPermission(conversation, approval.requesterParticipantId, "allow");
-      }
-      const requestMessageId = approval.request.requestMessageId;
-      if (requestMessageId) {
-        this.applyParticipantRequestApprovalDecision(conversation, approval, "approved", participantScope);
-      }
-      conversation.updatedAt = now;
-      await this.saveConversation(conversation);
       if (requestMessageId) {
         const batch = conversation.messages.find((message) => message.id === requestMessageId)?.metadata?.participantRequest;
         const runner = this.startParticipantRequestRunner(conversation.id, requestMessageId, batch?.depth ?? 1, progress);
@@ -5588,31 +5790,31 @@ export class ChatService {
         ? this.selfCompactionRequestGuard(conversation, requester, approval.id)
         : { status: "rejected", error: "The requesting member is no longer in this chat." };
       if (!requester || guard) {
-        this.upsertAppToolApproval(conversation, {
-          ...approval,
-          status: "denied",
-          updatedAt: now,
-          error: guard?.error ?? "The requesting member is no longer in this chat."
+        await this.saveChatChange(conversation, () => {
+          this.upsertAppToolApproval(conversation, {
+            ...approval,
+            status: "denied",
+            updatedAt: now,
+            error: guard?.error ?? "The requesting member is no longer in this chat."
+          });
         });
-        conversation.updatedAt = now;
-        await this.saveConversation(conversation);
         return conversation;
       }
       await execution?.beforeApply(approval);
-      if (scope === "chat") {
-        this.setParticipantCompactionPermission(conversation, requester.id, "allow");
-      }
       const runId = randomUUID();
-      this.recordSelfCompactionRequested(conversation, requester.id, now);
-      this.upsertAppToolApproval(conversation, {
-        ...approval,
-        status: "approved",
-        approvalScope: scope,
-        appliedParticipantIds: [requester.id],
-        updatedAt: now
+      await this.saveChatChange(conversation, () => {
+        if (scope === "chat") {
+          this.setParticipantCompactionPermission(conversation, requester.id, "allow");
+        }
+        this.recordSelfCompactionRequested(conversation, requester.id, now);
+        this.upsertAppToolApproval(conversation, {
+          ...approval,
+          status: "approved",
+          approvalScope: scope,
+          appliedParticipantIds: [requester.id],
+          updatedAt: now
+        });
       });
-      conversation.updatedAt = now;
-      await this.saveConversation(conversation);
       this.startQueuedSelfCompaction(conversation.id, requester, approval.request, runId);
       return conversation;
     }
@@ -5629,37 +5831,37 @@ export class ChatService {
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        this.upsertAppToolApproval(conversation, {
-          ...approval,
-          status: "denied",
-          updatedAt: now,
-          error: message
+        await this.saveChatChange(conversation, () => {
+          this.upsertAppToolApproval(conversation, {
+            ...approval,
+            status: "denied",
+            updatedAt: now,
+            error: message
+          });
+          conversation.messages.push(this.message("system", `Could not approve role and member request from @${approval.requesterHandle}: ${message}`, undefined, {
+            threadId: "system"
+          }));
         });
-        conversation.messages.push(this.message("system", `Could not approve role and member request from @${approval.requesterHandle}: ${message}`, undefined, {
-          threadId: "system"
-        }));
-        conversation.updatedAt = now;
-        await this.saveConversation(conversation);
         return conversation;
       }
       await execution?.beforeApply(approval);
-      const applied = await this.applyPreparedRoleParticipantChange(conversation, prepared);
-      this.upsertAppToolApproval(conversation, {
-        ...approval,
-        status: "approved",
-        request: applied.request,
-        approvalScope: "chat",
-        appliedParticipantIds: applied.participants.map((participant) => participant.id),
-        updatedAt: now
+      await this.saveChatChange(conversation, async () => {
+        const applied = await this.applyPreparedRoleParticipantChange(conversation, prepared);
+        this.upsertAppToolApproval(conversation, {
+          ...approval,
+          status: "approved",
+          request: applied.request,
+          approvalScope: "chat",
+          appliedParticipantIds: applied.participants.map((participant) => participant.id),
+          updatedAt: now
+        });
+        conversation.messages.push(this.message(
+          "system",
+          `Applied role and member request from @${approval.requesterHandle}: ${applied.summary}.`,
+          undefined,
+          { threadId: "system" }
+        ));
       });
-      conversation.messages.push(this.message(
-        "system",
-        `Applied role and member request from @${approval.requesterHandle}: ${applied.summary}.`,
-        undefined,
-        { threadId: "system" }
-      ));
-      conversation.updatedAt = now;
-      await this.saveConversation(conversation);
       return conversation;
     }
 
@@ -5669,36 +5871,36 @@ export class ChatService {
         prepared = await this.prepareRoleChange(this.normalizeRoleChangeRequest(request.draftOverride ?? approval.request));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        this.upsertAppToolApproval(conversation, {
-          ...approval,
-          status: "denied",
-          updatedAt: now,
-          error: message
+        await this.saveChatChange(conversation, () => {
+          this.upsertAppToolApproval(conversation, {
+            ...approval,
+            status: "denied",
+            updatedAt: now,
+            error: message
+          });
+          conversation.messages.push(this.message("system", `Could not approve role request from @${approval.requesterHandle}: ${message}`, undefined, {
+            threadId: "system"
+          }));
         });
-        conversation.messages.push(this.message("system", `Could not approve role request from @${approval.requesterHandle}: ${message}`, undefined, {
-          threadId: "system"
-        }));
-        conversation.updatedAt = now;
-        await this.saveConversation(conversation);
         return conversation;
       }
       await execution?.beforeApply(approval);
       const appliedRoles = await this.applyPreparedRoleChange(prepared);
-      this.upsertAppToolApproval(conversation, {
-        ...approval,
-        status: "approved",
-        request: prepared.request,
-        approvalScope: "chat",
-        updatedAt: now
+      await this.saveChatChange(conversation, () => {
+        this.upsertAppToolApproval(conversation, {
+          ...approval,
+          status: "approved",
+          request: prepared.request,
+          approvalScope: "chat",
+          updatedAt: now
+        });
+        conversation.messages.push(this.message(
+          "system",
+          `Applied role request from @${approval.requesterHandle}: ${this.formatHandleList(appliedRoles.map((role) => `"${role.label}"`))}.`,
+          undefined,
+          { threadId: "system" }
+        ));
       });
-      conversation.messages.push(this.message(
-        "system",
-        `Applied role request from @${approval.requesterHandle}: ${this.formatHandleList(appliedRoles.map((role) => `"${role.label}"`))}.`,
-        undefined,
-        { threadId: "system" }
-      ));
-      conversation.updatedAt = now;
-      await this.saveConversation(conversation);
       return conversation;
     }
 
@@ -5708,37 +5910,37 @@ export class ChatService {
         prepared = await this.prepareParticipantChange(conversation, this.normalizeParticipantChangeRequest(request.draftOverride ?? approval.request));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        this.upsertAppToolApproval(conversation, {
-          ...approval,
-          status: "denied",
-          updatedAt: now,
-          error: message
+        await this.saveChatChange(conversation, () => {
+          this.upsertAppToolApproval(conversation, {
+            ...approval,
+            status: "denied",
+            updatedAt: now,
+            error: message
+          });
+          conversation.messages.push(this.message("system", `Could not approve member request from @${approval.requesterHandle}: ${message}`, undefined, {
+            threadId: "system"
+          }));
         });
-        conversation.messages.push(this.message("system", `Could not approve member request from @${approval.requesterHandle}: ${message}`, undefined, {
-          threadId: "system"
-        }));
-        conversation.updatedAt = now;
-        await this.saveConversation(conversation);
         return conversation;
       }
       await execution?.beforeApply(approval);
-      const applied = await this.applyPreparedParticipantChange(conversation, prepared);
-      this.upsertAppToolApproval(conversation, {
-        ...approval,
-        status: "approved",
-        request: prepared.request,
-        approvalScope: "chat",
-        appliedParticipantIds: applied.map((participant) => participant.id),
-        updatedAt: now
+      await this.saveChatChange(conversation, async () => {
+        const applied = await this.applyPreparedParticipantChange(conversation, prepared);
+        this.upsertAppToolApproval(conversation, {
+          ...approval,
+          status: "approved",
+          request: prepared.request,
+          approvalScope: "chat",
+          appliedParticipantIds: applied.map((participant) => participant.id),
+          updatedAt: now
+        });
+        conversation.messages.push(this.message(
+          "system",
+          `Applied member request from @${approval.requesterHandle}: ${prepared.summary}.`,
+          undefined,
+          { threadId: "system" }
+        ));
       });
-      conversation.messages.push(this.message(
-        "system",
-        `Applied member request from @${approval.requesterHandle}: ${prepared.summary}.`,
-        undefined,
-        { threadId: "system" }
-      ));
-      conversation.updatedAt = now;
-      await this.saveConversation(conversation);
       return conversation;
     }
 
@@ -5751,60 +5953,61 @@ export class ChatService {
         : await this.prepareRosterChange(conversation, approval.request as ChatRosterChangeRequest);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.upsertAppToolApproval(conversation, {
-        ...approval,
-        status: "denied",
-        updatedAt: now
+      await this.saveChatChange(conversation, () => {
+        this.upsertAppToolApproval(conversation, {
+          ...approval,
+          status: "denied",
+          updatedAt: now
+        });
+        conversation.messages.push(this.message(
+          "system",
+          `Could not approve app tool request from @${approval.requesterHandle}: ${message}`,
+          undefined,
+          { threadId: "system" }
+        ));
       });
-      conversation.messages.push(this.message(
-        "system",
-        `Could not approve app tool request from @${approval.requesterHandle}: ${message}`,
-        undefined,
-        { threadId: "system" }
-      ));
-      conversation.updatedAt = now;
-      await this.saveConversation(conversation);
       return conversation;
     }
     if (!prepared) {
       return conversation;
     }
     await execution?.beforeApply(approval);
-    const applied = isPermissionApproval
-      ? scope === "once"
-        ? [requester].filter((participant): participant is ChatParticipant => Boolean(participant))
-        : [this.applyPreparedPermissionChange(conversation, approval.requesterParticipantId, prepared as PreparedPermissionChange)]
-      : this.applyPreparedRosterChange(conversation, prepared as PreparedRosterChange);
-    const updatedApproval: ChatAppToolApproval = {
-      ...approval,
-      status: "approved",
-      request: isPermissionApproval ? (prepared as PreparedPermissionChange).request : approval.request,
-      approvalScope: scope,
-      appliedParticipantIds: applied.map((participant) => participant.id),
-      updatedAt: now
-    };
-    this.upsertAppToolApproval(conversation, updatedApproval);
-    if (scope === "chat" && approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL) {
-      this.upsertRosterChatPolicy(conversation, approval, now);
-    }
-    const permissionGrantList = isPermissionApproval
-      ? this.formatPermissionChangeGrantList((prepared as PreparedPermissionChange).request)
-      : undefined;
-    const approvalMessage = isPermissionApproval
-      ? scope === "chat"
-        ? `Granted @${approval.requesterHandle} ${permissionGrantList} for this chat.`
-        : `Granted @${approval.requesterHandle} ${permissionGrantList} once.`
-      : scope === "chat"
-        ? `Allowed for this chat and applied app tool request from @${approval.requesterHandle}: ${approval.summary}.`
-        : `Allowed once and applied app tool request from @${approval.requesterHandle}: ${approval.summary}.`;
-    conversation.messages.push(this.message(
-      "system",
-      approvalMessage,
-      undefined,
-      { threadId: "system" }
-    ));
-    conversation.updatedAt = now;
-    await this.saveConversation(conversation);
+    const updatedApproval = await this.saveChatChange(conversation, () => {
+      const applied = isPermissionApproval
+        ? scope === "once"
+          ? [requester].filter((participant): participant is ChatParticipant => Boolean(participant))
+          : [this.applyPreparedPermissionChange(conversation, approval.requesterParticipantId, prepared as PreparedPermissionChange)]
+        : this.applyPreparedRosterChange(conversation, prepared as PreparedRosterChange);
+      const updatedApproval: ChatAppToolApproval = {
+        ...approval,
+        status: "approved",
+        request: isPermissionApproval ? (prepared as PreparedPermissionChange).request : approval.request,
+        approvalScope: scope,
+        appliedParticipantIds: applied.map((participant) => participant.id),
+        updatedAt: now
+      };
+      this.upsertAppToolApproval(conversation, updatedApproval);
+      if (scope === "chat" && approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL) {
+        this.upsertRosterChatPolicy(conversation, approval, now);
+      }
+      const permissionGrantList = isPermissionApproval
+        ? this.formatPermissionChangeGrantList((prepared as PreparedPermissionChange).request)
+        : undefined;
+      const approvalMessage = isPermissionApproval
+        ? scope === "chat"
+          ? `Granted @${approval.requesterHandle} ${permissionGrantList} for this chat.`
+          : `Granted @${approval.requesterHandle} ${permissionGrantList} once.`
+        : scope === "chat"
+          ? `Allowed for this chat and applied app tool request from @${approval.requesterHandle}: ${approval.summary}.`
+          : `Allowed once and applied app tool request from @${approval.requesterHandle}: ${approval.summary}.`;
+      conversation.messages.push(this.message(
+        "system",
+        approvalMessage,
+        undefined,
+        { threadId: "system" }
+      ));
+      return updatedApproval;
+    });
     if (isPermissionApproval) {
       await this.emitAppToolApprovalDecision({
         conversationId: conversation.id,
@@ -6255,10 +6458,12 @@ export class ChatService {
           turnReservation
         }
       );
-      await this.refreshStoredChatState(conversation);
-      const participantRequestsToRun = await this.appendParticipantTurnMessages(conversation, participant, messages);
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
+      const participantRequestsToRun = await this.withChatMutation(conversation, async () => {
+        const toRun = await this.appendParticipantTurnMessages(conversation, participant, messages);
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+        return toRun;
+      });
       this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
       await this.ensureHistoryFiles(conversation);
       this.emitProgress(resumeRunId, progress, "done", "Codex approval continuation finished.");
@@ -6585,7 +6790,6 @@ export class ChatService {
       }
       conversation.messages.push(userMessage);
       this.promptSuggestions.userMessageSent(conversation.id);
-      this.resetAutoWatchDepthForUserMessage(conversation);
       for (const unknown of dispatch.unknownHandles) {
         const warning = `No member named @${unknown}.`;
         warnings.push(warning);
@@ -6604,10 +6808,27 @@ export class ChatService {
       }
       try {
         await this.withChatMutation(conversation, async () => {
+          // On the watchers as saved now: each watcher's newest state wins
+          // the refresh, which an earlier reset would lose to.
+          this.resetAutoWatchDepthForUserMessage(conversation);
+          // Targets were resolved on the copy read before this mutation: a
+          // member removed meanwhile is told apart, as an unknown name is.
+          // An accord's facilitator is decided on the members the User named.
           dispatch = {
             ...dispatch,
             targets: this.allowParticipantRequestsForManualAccordIfSelected(conversation, skillValidation.skillMentions, dispatch.targets)
           };
+          const present = new Set(this.chatParticipants(conversation).map((participant) => participant.id));
+          for (const gone of dispatch.targets.filter((target) => !present.has(target.id))) {
+            const warning = `No member named @${gone.handle}.`;
+            warnings.push(warning);
+            conversation.messages.push(this.message("system", warning, undefined, {
+              threadId: userMessage.metadata?.threadId ?? threadId,
+              parentMessageId: userMessage.id,
+              chatThreadRootId
+            }));
+          }
+          dispatch = { ...dispatch, targets: dispatch.targets.filter((target) => present.has(target.id)) };
           if (this.serverLink && dispatch.targets.length > 0) {
             // The members this message names, as this device resolved them:
             // the server asks each one's device for its turn (Д4), and this
@@ -6637,7 +6858,9 @@ export class ChatService {
           }
           this.advanceAutoWatchCursorForDirectTargets(conversation, dispatch.targets, userMessage);
           if (dispatch.targets.length === 0) {
-            conversation.metadata = this.clearedChatRunMetadata(conversation.metadata);
+            // Nothing starts for this message; other members' runs, here or
+            // in another app instance, keep their run state.
+            conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata);
           }
           conversation.updatedAt = new Date().toISOString();
           await this.saveConversation(conversation);
@@ -6748,9 +6971,10 @@ export class ChatService {
       }
 
       if (!request.approve) {
-        this.updatePendingMentionStatus(sourceMessage, new Set(pendingMentions.map((mention) => mention.targetParticipantId)), "rejected");
-        conversation.updatedAt = new Date().toISOString();
-        await this.saveConversation(conversation);
+        await this.saveChatChange(conversation, () => {
+          const latest = conversation.messages.find((message) => message.id === sourceMessage.id) ?? sourceMessage;
+          this.updatePendingMentionStatus(latest, new Set(pendingMentions.map((mention) => mention.targetParticipantId)), "rejected");
+        });
         return { conversation, sourceMessage, targets: [], requester: undefined, runStarted: false };
       }
 
@@ -6764,7 +6988,9 @@ export class ChatService {
       const requester = request.continueRequester && sourceMessage.participantId
         ? participants.find((participant) => participant.id === sourceMessage.participantId)
         : undefined;
-      await this.beginChatRun(conversation, runId);
+      // The requester waits for the targets' turns before its own resumes;
+      // the targets are claimed by runParticipantBatch once they start.
+      await this.beginChatRun(conversation, runId, requester ? [requester.id] : undefined);
       await this.waitForQueuedSave(conversation.id);
       return { conversation, sourceMessage, targets, requester, runStarted: true };
     });
@@ -6882,6 +7108,7 @@ export class ChatService {
         }
         if (!request.cancel) {
           this.rememberActiveChatRun(conversation.id, runId);
+          this.claimMembersForRun(conversation.id, runId, [requester.id]);
           conversation.metadata = this.metadataWithLiveRunState(conversation.id, { ...conversation.metadata, runId }, undefined, runId);
         }
         conversation.updatedAt = new Date().toISOString();
@@ -6942,10 +7169,12 @@ export class ChatService {
           continuation: true,
           warnings
         });
-        await this.refreshStoredChatState(conversation);
-        const participantRequestsToRun = await this.appendParticipantTurnMessages(conversation, requester, messages);
-        conversation.updatedAt = new Date().toISOString();
-        this.queueSnapshot(conversation);
+        const participantRequestsToRun = await this.withChatMutation(conversation, async () => {
+          const toRun = await this.appendParticipantTurnMessages(conversation, requester, messages);
+          conversation.updatedAt = new Date().toISOString();
+          this.queueSnapshot(conversation);
+          return toRun;
+        });
         this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
         await this.ensureHistoryFiles(conversation);
       }
@@ -6976,10 +7205,12 @@ export class ChatService {
         continuation: true,
         warnings
       });
-      await this.refreshStoredChatState(conversation);
-      const participantRequestsToRun = await this.appendParticipantTurnMessages(conversation, requester, messages);
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
+      const participantRequestsToRun = await this.withChatMutation(conversation, async () => {
+        const toRun = await this.appendParticipantTurnMessages(conversation, requester, messages);
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+        return toRun;
+      });
       this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
       await this.ensureHistoryFiles(conversation);
       this.emitProgress(runId, progress, "done", "Choice response finished.");
@@ -7227,9 +7458,21 @@ export class ChatService {
     const writeGates = new Map(participants
       .filter((participant) => this.participantTurnMode(participant, triggerMessage) === "shared")
       .map((participant) => [participant.id, this.openClaudeWriteGate(conversation.id, participant.id)] as const));
+    // Each member cannot be removed from here until its turn is registered
+    // below (chatRunMeta), before that turn's first await.
+    const memberClaims = new Map<string, () => void>();
+    for (const participant of participants) {
+      if (!memberClaims.has(participant.id)) memberClaims.set(participant.id, this.claimMemberWork(conversation.id, [participant.id]));
+    }
     let completed = 0;
+    let workspacePath: string;
     const turnSnapshot = this.clone(conversation);
-    const workspacePath = await this.ensureHistoryFiles(turnSnapshot);
+    try {
+      workspacePath = await this.ensureHistoryFiles(turnSnapshot);
+    } catch (error) {
+      for (const release of memberClaims.values()) release();
+      throw error;
+    }
     const labels = participants.map((participant) => `@${participant.handle}`);
     this.emitProgress(runId, progress, "debate", `${this.formatHandleList(labels)} ${participants.length === 1 ? "is" : "are"} responding in parallel.`, {
       completed,
@@ -7264,6 +7507,7 @@ export class ChatService {
           participantId: participant.id,
           participantHandle: participant.handle
         });
+        memberClaims.get(participant.id)?.();
         const skillBlock = await this.skillRunBlockForParticipant(conversation, participant, triggerMessage);
         if (skillBlock) {
           await this.withChatMutation(conversation, async () => {
@@ -8504,9 +8748,13 @@ export class ChatService {
 
   private async appendParticipantTurnMessages(
     conversation: Conversation,
-    participant: ChatParticipant,
+    turnParticipant: ChatParticipant,
     messages: ChatMessage[]
   ): Promise<Array<{ requestMessageId: string; depth: number; source: ChatParticipantRequestBatch["source"] }>> {
+    // Its settings as saved now (callers refresh first): a "Request other
+    // members" the User changed while the turn ran decides what its reply may
+    // ask of others.
+    const participant = this.chatParticipants(conversation).find((item) => item.id === turnParticipant.id) ?? turnParticipant;
     const accepted: ChatMessage[] = [];
     for (const message of messages) {
       if (this.upsertCompletedMessage(conversation, message)) {
@@ -9905,7 +10153,12 @@ export class ChatService {
     // message ids. The merge is O(n) and id-keyed, so a no-op when storage matches.
     const title = this.mergeStoredChatTitle(stored, conversation);
     conversation.messages = this.mergeStoredChatMessages(stored.messages, conversation.messages, read.shared);
-    conversation.metadata = this.mergeStoredChatMetadata(stored.metadata, conversation.metadata);
+    conversation.metadata = this.mergeStoredChatMetadata(
+      stored.metadata,
+      conversation.metadata,
+      this.requestPermissionGrants.get(conversation),
+      this.activeConversationRunIds.get(conversation.id)
+    );
     conversation.title = title;
     this.applyRemovedChatMessageTombstones(conversation);
     this.withoutGoneServerPlaceholders(conversation);
@@ -10238,7 +10491,9 @@ export class ChatService {
 
   private mergeStoredChatMetadata(
     storedMetadata: Record<string, unknown>,
-    currentMetadata: Record<string, unknown>
+    currentMetadata: Record<string, unknown>,
+    requestPermissionGrants?: ReadonlySet<string>,
+    liveRunIdsHere?: ReadonlySet<string>
   ): Record<string, unknown> {
     const merged: Record<string, unknown> = {
       ...storedMetadata,
@@ -10256,11 +10511,23 @@ export class ChatService {
       storedMetadata.participants,
       currentMetadata.participants,
       "id",
-      (stored, current) => this.mergeStoredChatParticipantMetadata(stored, current),
+      (stored, current) => this.mergeStoredChatParticipantMetadata(stored, current, requestPermissionGrants),
       { appendCurrentMissing: false }
     );
     if (participants) {
       merged.participants = participants;
+    }
+    const compactions = this.mergeParticipantCompactions(storedMetadata, currentMetadata, liveRunIdsHere);
+    if (compactions) {
+      merged[PARTICIPANT_COMPACTIONS_KEY] = compactions;
+    } else {
+      delete merged[PARTICIPANT_COMPACTIONS_KEY];
+    }
+    const watchers = this.mergeParticipantWatchers(storedMetadata.participantWatchers, currentMetadata.participantWatchers, participants);
+    if (watchers) {
+      merged.participantWatchers = watchers;
+    } else {
+      delete merged.participantWatchers;
     }
     const storedParticipantIds = new Set(participants?.map((participant) => this.metadataStringKey(participant, "id")).filter(Boolean));
     const sessions = this.mergeMetadataItemsByKey(
@@ -10329,9 +10596,74 @@ export class ChatService {
     return merged;
   }
 
+  /** Each member's compaction, from either copy: one flow's copy does not
+   *  erase another member's compaction it never saw. A compaction is kept
+   *  while its run is live here, or while the saved chat still has it among
+   *  its active runs (another app instance's); one only an older copy still
+   *  holds has ended. */
+  private mergeParticipantCompactions(
+    storedMetadata: Record<string, unknown>,
+    currentMetadata: Record<string, unknown>,
+    liveRunIdsHere?: ReadonlySet<string>
+  ): Record<string, ChatParticipantCompactionState> | undefined {
+    const stored = readParticipantCompactions(storedMetadata);
+    const current = readParticipantCompactions(currentMetadata);
+    const storedActive = new Set(readActiveRunIds(storedMetadata));
+    const merged: Record<string, ChatParticipantCompactionState> = {};
+    for (const participantId of new Set([...Object.keys(stored), ...Object.keys(current)])) {
+      // The copy's entry first, then the saved one: an older copy can still
+      // hold a finished compaction of a member that is compacting again.
+      const live = [current[participantId], stored[participantId]].find((state) =>
+        state !== undefined && (
+          liveRunIdsHere?.has(state.runId) === true ||
+          (stored[participantId]?.runId === state.runId && storedActive.has(state.runId))
+        )
+      );
+      if (live) {
+        merged[participantId] = live;
+      }
+    }
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  /** Each watcher's newest state wins (every write stamps `updatedAt`), and
+   *  only members that still watch keep one: a flow's older copy neither
+   *  undoes the User turning a watcher off or on, nor brings back a removed
+   *  member's. */
+  private mergeParticipantWatchers(
+    storedValue: unknown,
+    currentValue: unknown,
+    mergedParticipants: Record<string, unknown>[] | undefined
+  ): Record<string, ChatParticipantWatcherState> | undefined {
+    const stored = this.isMetadataRecord(storedValue) ? storedValue : {};
+    const current = this.isMetadataRecord(currentValue) ? currentValue : {};
+    const watching = new Set((mergedParticipants ?? [])
+      .filter((participant) => participant.autoWatch === true)
+      .map((participant) => this.metadataStringKey(participant, "id"))
+      .filter(Boolean));
+    const merged: Record<string, ChatParticipantWatcherState> = {};
+    for (const participantId of new Set([...Object.keys(stored), ...Object.keys(current)])) {
+      if (!watching.has(participantId)) {
+        continue;
+      }
+      const storedState = this.isMetadataRecord(stored[participantId]) ? stored[participantId] as unknown as ChatParticipantWatcherState : undefined;
+      const currentState = this.isMetadataRecord(current[participantId]) ? current[participantId] as unknown as ChatParticipantWatcherState : undefined;
+      const newer = !storedState
+        ? currentState
+        : !currentState
+          ? storedState
+          : String(currentState.updatedAt ?? "") >= String(storedState.updatedAt ?? "") ? currentState : storedState;
+      if (newer) {
+        merged[participantId] = newer;
+      }
+    }
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
   private mergeStoredChatParticipantMetadata(
     stored: Record<string, unknown>,
-    current: Record<string, unknown>
+    current: Record<string, unknown>,
+    requestPermissionGrants?: ReadonlySet<string>
   ): Record<string, unknown> {
     const merged: Record<string, unknown> = {
       ...stored,
@@ -10345,7 +10677,8 @@ export class ChatService {
     );
     if (
       currentPermissions.requestParticipants === "allow" &&
-      storedPermissions.requestParticipants !== currentPermissions.requestParticipants
+      storedPermissions.requestParticipants !== currentPermissions.requestParticipants &&
+      requestPermissionGrants?.has(this.metadataStringKey(current, "id") ?? "") === true
     ) {
       merged.permissions = {
         ...storedPermissions,
@@ -11591,14 +11924,43 @@ export class ChatService {
 
   private applyPreparedRosterChange(conversation: Conversation, prepared: PreparedRosterChange): ChatParticipant[] {
     const participants = this.chatParticipants(conversation);
+    const added = this.fitRosterAdditions(conversation, prepared.participants);
     conversation.metadata = {
       ...conversation.metadata,
-      participants: [...participants, ...prepared.participants]
+      participants: [...participants, ...added]
     };
-    if (prepared.participants.some((participant) => participant.autoWatch === true)) {
+    if (added.some((participant) => participant.autoWatch === true)) {
       this.scheduleAutoWatchEvaluation(conversation.id, "participant-added");
     }
-    return prepared.participants;
+    return added;
+  }
+
+  /** Members prepared against an earlier read, checked against the chat as
+   *  it is now (the User or another member may have added some since), as
+   *  validateParticipants checks them: a name already taken is refused; a
+   *  second watcher joins without watching. Callers check before writing
+   *  anything else, such as saved member presets. */
+  private fitRosterAdditions(conversation: Conversation, additions: ChatParticipant[]): ChatParticipant[] {
+    const participants = this.chatParticipants(conversation);
+    const handles = new Set(participants.map((participant) => participant.handle.toLowerCase()));
+    const ids = new Set(participants.map((participant) => participant.id));
+    let watcherAssigned = participants.some((participant) => participant.autoWatch === true);
+    return additions.map((participant) => {
+      const handle = participant.handle.toLowerCase();
+      if (handles.has(handle) || ids.has(participant.id)) {
+        throw new Error(`Duplicate member name: @${participant.handle}.`);
+      }
+      handles.add(handle);
+      ids.add(participant.id);
+      if (participant.autoWatch !== true) {
+        return participant;
+      }
+      if (watcherAssigned) {
+        return { ...participant, autoWatch: false };
+      }
+      watcherAssigned = true;
+      return participant;
+    });
   }
 
   private normalizeRoleChangeRequest(raw: unknown): ChatRoleChangeRequest {
@@ -12193,6 +12555,7 @@ export class ChatService {
   }
 
   private async applyPreparedParticipantChange(conversation: Conversation, prepared: PreparedParticipantChange): Promise<ChatParticipant[]> {
+    this.fitRosterAdditions(conversation, prepared.participants);
     for (const preset of prepared.presetParticipantConfigs) {
       await this.settings.saveChatParticipantConfig({
         id: preset.id,
@@ -12244,6 +12607,7 @@ export class ChatService {
     conversation: Conversation,
     prepared: PreparedRoleParticipantChange
   ): Promise<{ request: ChatRoleParticipantChangeRequest; participants: ChatParticipant[]; summary: string }> {
+    this.fitRosterAdditions(conversation, prepared.participant.participants);
     const participantUpdates: ChatParticipantConfigUpdate[] = prepared.participant.presetParticipantConfigs.map((preset) => ({
       id: preset.id,
       handle: preset.handle,
@@ -13818,41 +14182,43 @@ export class ChatService {
           participantRequestBatchId: batch.id,
           chainRootId: batch.chainRootId
         });
-        await this.refreshStoredChatState(conversation);
-        participantRequestsToRun = await this.appendParticipantTurnMessages(conversation, target, messages);
         const reply = messages[0];
-        const waitingOnPermissionApproval = this.hasPendingPermissionApprovalForParticipantTurn(
-          conversation,
-          target,
-          requestMessage.id,
-          batch.id
-        );
-        const now = new Date().toISOString();
-        const remoteReplyStillRunning = false;
-        const stoppedByUser = reply?.metadata?.terminalReason === "user-stopped";
-        this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
-          ...current,
-          items: current.items.map((candidate) => candidate.targetParticipantId === item.targetParticipantId
-            ? {
-                ...candidate,
-                status: waitingOnPermissionApproval || remoteReplyStillRunning
-                  ? "running"
-                  : stoppedByUser
-                    ? "interrupted"
-                    : reply?.status === "error"
-                      ? "failed"
-                      : "answered",
-                replyMessageId: reply?.id,
-                error: waitingOnPermissionApproval || remoteReplyStillRunning
-                  ? undefined
-                  : stoppedByUser
-                    ? PARTICIPANT_REQUEST_STOPPED_BY_USER
-                    : reply?.status === "error" ? reply.content : undefined,
-                updatedAt: now
-              }
-            : candidate),
-          updatedAt: now
-        }));
+        await this.withChatMutation(conversation, async () => {
+          participantRequestsToRun = await this.appendParticipantTurnMessages(conversation, target, messages);
+          const waitingOnPermissionApproval = this.hasPendingPermissionApprovalForParticipantTurn(
+            conversation,
+            target,
+            requestMessage.id,
+            batch.id
+          );
+          const now = new Date().toISOString();
+          const remoteReplyStillRunning = false;
+          const stoppedByUser = reply?.metadata?.terminalReason === "user-stopped";
+          this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
+            ...current,
+            items: current.items.map((candidate) => candidate.targetParticipantId === item.targetParticipantId
+              ? {
+                  ...candidate,
+                  status: waitingOnPermissionApproval || remoteReplyStillRunning
+                    ? "running"
+                    : stoppedByUser
+                      ? "interrupted"
+                      : reply?.status === "error"
+                        ? "failed"
+                        : "answered",
+                  replyMessageId: reply?.id,
+                  error: waitingOnPermissionApproval || remoteReplyStillRunning
+                    ? undefined
+                    : stoppedByUser
+                      ? PARTICIPANT_REQUEST_STOPPED_BY_USER
+                      : reply?.status === "error" ? reply.content : undefined,
+                  updatedAt: now
+                }
+              : candidate),
+            updatedAt: now
+          }));
+          this.queueSnapshot(conversation);
+        });
         replies.push({
           targetHandle: target.handle,
           messageId: reply?.id,
@@ -13888,17 +14254,17 @@ export class ChatService {
       this.queueSnapshot(conversation);
       this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
     }));
-    const updatedBatch = this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => {
+    await this.ensureHistoryFiles(conversation);
+    // The runner's copy is as old as its last turn: the batch's final status
+    // is recorded on the chat as saved now.
+    const updatedBatch = await this.saveChatChange(conversation, () => this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => {
       const status = this.rollupParticipantRequestStatus(current.items);
       return {
         ...current,
         status: status === "answered" ? "answered" : status,
         updatedAt: new Date().toISOString()
       };
-    }) ?? batch;
-    conversation.updatedAt = new Date().toISOString();
-    await this.ensureHistoryFiles(conversation);
-    await this.saveConversation(conversation);
+    })) ?? batch;
     return { batch: updatedBatch, replies };
   }
 
@@ -14037,7 +14403,7 @@ export class ChatService {
             sourceMessageId: trigger.id
           }
         ));
-        await this.beginChatRun(conversation, resumeRunId);
+        await this.beginChatRun(conversation, resumeRunId, [requester.id]);
         return {
           conversation,
           approval,
@@ -14103,13 +14469,15 @@ export class ChatService {
         participantRequestBatchId: participantRequestBatch?.id,
         chainRootId: participantRequestBatch?.chainRootId
       });
-      await this.refreshStoredChatState(conversation);
-      const participantRequestsToRun = await this.appendParticipantTurnMessages(conversation, requester, messages);
-      const participantRequestResumeMessageId = participantRequestMessage && participantRequestBatch
-        ? this.applyPermissionResumeToParticipantRequest(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, messages)
-        : undefined;
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
+      const { participantRequestsToRun, participantRequestResumeMessageId } = await this.withChatMutation(conversation, async () => {
+        const toRun = await this.appendParticipantTurnMessages(conversation, requester, messages);
+        const resumeMessageId = participantRequestMessage && participantRequestBatch
+          ? this.applyPermissionResumeToParticipantRequest(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, messages)
+          : undefined;
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+        return { participantRequestsToRun: toRun, participantRequestResumeMessageId: resumeMessageId };
+      });
       this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
       await this.ensureHistoryFiles(conversation);
       this.emitProgress(resumeRunId, progress, "done", "Permission approval resume finished.");
@@ -14277,7 +14645,7 @@ export class ChatService {
         );
         conversation.messages.push(trigger);
         const resumeRunId = randomUUID();
-        await this.beginChatRun(conversation, resumeRunId);
+        await this.beginChatRun(conversation, resumeRunId, [requester.id]);
         return { conversation, requestMessageId, batch, requester, trigger, resumeRunId };
       });
 
@@ -14342,16 +14710,18 @@ export class ChatService {
         participantRequestBatchId: batch.id,
         chainRootId: batch.chainRootId
       });
-      await this.refreshStoredChatState(conversation);
-      const participantRequestsToRun = await this.appendParticipantTurnMessages(conversation, requester, messages);
-      this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
-        ...current,
-        status: "completed",
-        autoResumeMessageId: messages[0]?.id,
-        updatedAt: new Date().toISOString()
-      }));
-      conversation.updatedAt = new Date().toISOString();
-      this.queueSnapshot(conversation);
+      const participantRequestsToRun = await this.withChatMutation(conversation, async () => {
+        const toRun = await this.appendParticipantTurnMessages(conversation, requester, messages);
+        this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
+          ...current,
+          status: "completed",
+          autoResumeMessageId: messages[0]?.id,
+          updatedAt: new Date().toISOString()
+        }));
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+        return toRun;
+      });
       this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
       await this.ensureHistoryFiles(conversation);
     } catch (error) {
@@ -14396,6 +14766,16 @@ export class ChatService {
       if (turnController.signal.aborted) {
         throw new Error("Chat run cancelled.");
       }
+      // The member's settings as they are when its turn starts, not when the
+      // turn was asked for: a continuation waits for other members' turns,
+      // and the User may change the member's model or permissions meanwhile,
+      // which the dedicated CLI applies to its next turn.
+      // A member removed while its turn waited does not run at all.
+      const current = this.chatParticipants(conversation).find((item) => item.id === participant.id);
+      if (!current) {
+        throw new Error(`@${participant.handle} was removed from this chat.`);
+      }
+      participant = current;
       if (!this.machineRuntime) {
         this.promptSuggestions.replyStarted(conversation.id, participant.id, runId);
       }
@@ -18321,6 +18701,11 @@ export class ChatService {
         updated = participant;
         return participant;
       }
+      if (requestParticipants === "allow") {
+        const grants = this.requestPermissionGrants.get(conversation) ?? new Set<string>();
+        grants.add(participant.id);
+        this.requestPermissionGrants.set(conversation, grants);
+      }
       updated = {
         ...participant,
         permissions: {
@@ -19276,12 +19661,16 @@ export class ChatService {
       return;
     }
     this.withoutGoneServerPlaceholders(conversation);
+    const grants = this.pendingRequestPermissionGrants(conversation);
     const { snapshot, rows } = this.buildAndEmitSnapshot(conversation);
     const previous = this.saveQueues.get(conversation.id) ?? Promise.resolve();
     const outcome = previous
       .catch(() => undefined)
       .then(() => this.persistConversationSnapshot(snapshot, rows))
-      .then(() => true, (error: unknown) => {
+      .then(() => {
+        this.settleRequestPermissionGrants(conversation, grants);
+        return true;
+      }, (error: unknown) => {
         void this.debugLogs.write("chat.persistence.error", {
           conversationId: conversation.id,
           message: error instanceof Error ? error.message : String(error),
@@ -19309,6 +19698,22 @@ export class ChatService {
 
   private buildSnapshot(conversation: Conversation): ReturnType<typeof buildConversationSnapshot> {
     return buildConversationSnapshot(conversation, this.snapshotRowStates.get(conversation.id));
+  }
+
+  /** The grants a copy had when a save of it was built; once that save is
+   *  written they are in the saved chat (settleRequestPermissionGrants). */
+  private pendingRequestPermissionGrants(conversation: Conversation): ReadonlySet<string> | undefined {
+    const grants = this.requestPermissionGrants.get(conversation);
+    return grants && grants.size > 0 ? new Set(grants) : undefined;
+  }
+
+  private settleRequestPermissionGrants(conversation: Conversation, saved: ReadonlySet<string> | undefined): void {
+    const grants = this.requestPermissionGrants.get(conversation);
+    if (!grants || !saved) {
+      return;
+    }
+    for (const participantId of saved) grants.delete(participantId);
+    if (grants.size === 0) this.requestPermissionGrants.delete(conversation);
   }
 
   private buildAndEmitSnapshot(conversation: Conversation): { snapshot: Conversation; rows: SnapshotMessageRow[] } {
@@ -19739,8 +20144,11 @@ export class ChatService {
     }
   }
 
-  private async beginChatRun(conversation: Conversation, runId: string): Promise<void> {
+  /** `memberIds`: members this run will start or resume later than its own
+   *  start (claimMembersForRun), so they cannot be removed meanwhile. */
+  private async beginChatRun(conversation: Conversation, runId: string, memberIds?: readonly string[]): Promise<void> {
     this.rememberActiveChatRun(conversation.id, runId);
+    this.claimMembersForRun(conversation.id, runId, memberIds);
     try {
       await this.withChatMutation(conversation, async () => {
         if (conversation.metadata.archived === true) throw new Error("Unarchive the chat before starting a member.");
@@ -19759,6 +20167,9 @@ export class ChatService {
 
   private async beginChatParticipantCompactionRun(conversation: Conversation, runId: string, participantId: string): Promise<void> {
     this.rememberActiveChatRun(conversation.id, runId);
+    // Busy until the run ends here, whatever another flow's copy of the
+    // compaction map says meanwhile.
+    this.claimMembersForRun(conversation.id, runId, [participantId]);
     try {
       await this.withChatMutation(conversation, async () => {
         const now = new Date().toISOString();
@@ -20001,6 +20412,9 @@ export class ChatService {
     if (runCounts && runCounts.size === 0) {
       this.activeConversationRunRefCounts.delete(conversationId);
     }
+    if (this.memberWorkClaims.get(runId)?.conversationId === conversationId) {
+      this.memberWorkClaims.delete(runId);
+    }
     const runIds = this.activeConversationRunIds.get(conversationId);
     if (!runIds) {
       if (this.activeRunIds.size === 0) {
@@ -20056,17 +20470,23 @@ export class ChatService {
         return;
       }
       await this.waitForQueuedSave(conversationId);
-      const conversation = await this.storage.getConversation(conversationId);
-      if (!conversation || conversation.kind !== "chat" || conversation.metadata.running !== true) {
+      const read = (await this.readStoredChatStateForRefresh(conversationId)).stored;
+      if (!read || read.kind !== "chat" || read.metadata.running !== true) {
         return;
       }
-      if (this.chatHasLiveWork(conversationId)) {
-        return;
-      }
-      conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata);
-      conversation.updatedAt = new Date().toISOString();
-      await this.saveConversation(conversation);
-      if (!this.chatHasLiveWork(conversationId) && !this.storedMetadataHasProtectedLiveRuns(conversation.metadata)) {
+      // On the chat as saved when its turn in the queue comes: a member the
+      // User changed since the read above is not written back.
+      const conversation: Conversation = { ...read, messages: [], metadata: {} };
+      const cleared = await this.withSavedChat(conversation, async () => {
+        if (this.chatHasLiveWork(conversationId) || conversation.metadata.running !== true) {
+          return false;
+        }
+        conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata);
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        return true;
+      });
+      if (cleared && !this.chatHasLiveWork(conversationId) && !this.storedMetadataHasProtectedLiveRuns(conversation.metadata)) {
         this.scheduleAutoWatchEvaluation(conversationId, "background-runner-idle");
       }
     });
@@ -20097,12 +20517,14 @@ export class ChatService {
       await pending.catch(() => undefined);
     }
     this.withoutGoneServerPlaceholders(conversation);
+    const grants = this.pendingRequestPermissionGrants(conversation);
     const built = this.buildSnapshot(conversation);
     // Rows are remembered before the save so a snapshot queued while this one
     // is in flight diffs against them, and so the saved snapshot is kept for
     // refreshStoredChatState (only tracked chats keep it).
     this.rememberSnapshotRows(conversation.id, built.rows);
     await this.persistConversationSnapshot(built.snapshot, built.rows, options);
+    this.settleRequestPermissionGrants(conversation, grants);
     this.onConversationSnapshot?.(built.snapshot, built.update);
   }
 
@@ -20572,10 +20994,15 @@ export class ChatService {
     const controller = new AbortController();
     this.pendingServerTurns.set(runId, controller);
     const release = (): void => { if (this.pendingServerTurns.get(runId) === controller) this.pendingServerTurns.delete(runId); };
+    // The member it asks for cannot be removed from here until this turn
+    // ends; a removal that passed its check just before is caught where the
+    // turn starts (startServerTurnNow).
+    const releaseMemberClaim = this.claimMemberWork(turn.conversationId, [turn.participantId]);
     let started = false;
     try {
       started = await this.startServerTurnNow(turn, controller);
     } finally {
+      releaseMemberClaim();
       if (!started) release();
     }
   }
@@ -20647,9 +21074,14 @@ export class ChatService {
         }
         return true;
       }
-      await this.withChatMutation(chat, async () => {
+      const stillMember = await this.withChatMutation(chat, async () => {
+        // A removal saved before this turn was claimed here (startServerTurn)
+        // is in the chat this mutation refreshed: its member does not run.
+        if (!this.chatParticipants(chat).some((item) => item.id === participant.id)) return false;
         if (this.armServerChatTitle(chat, message)) this.queueSnapshot(chat);
+        return true;
       });
+      if (!stillMember) return false;
       await this.runParticipantBatch(chat, [participant], message, runId, controller.signal, this.onReviewProgress, warnings, {
         targetRunIds: new Map([[participant.id, runId]]),
         ...(turn.pendingMessageId ? { pendingMessageIds: new Map([[participant.id, turn.pendingMessageId]]) } : {})

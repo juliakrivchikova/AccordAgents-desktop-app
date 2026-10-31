@@ -22,7 +22,9 @@ export interface ChatParticipantMenuViewProps {
   participantHasRunById: ReadonlyMap<string, boolean>;
   draft: string;
   addValidation?: string;
-  isRunning: boolean;
+  /** Members whose own work is live (chatMemberIdsWithLiveWork): they cannot
+   *  be removed until it ends. */
+  busyParticipantIds: ReadonlySet<string>;
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
   participantWatchers?: Record<string, ChatParticipantWatcherState>;
   addParticipantEditor: React.ReactNode;
@@ -74,9 +76,18 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
     setOpen(false);
   }
 
+  /** Its own turn or compaction runs: its settings wait for it to end, as a
+   *  dedicated CLI's settings apply to its next turn. */
+  function memberWorking(participant: ChatParticipant): boolean {
+    const status = props.participantStatusById.get(participant.id);
+    return status === "running" || status === "compacting";
+  }
+
   function participantRemoveDisabledReason(participant: ChatParticipant): string | undefined {
-    if (props.isRunning) {
-      return "Members cannot be removed while a turn is running";
+    if (props.busyParticipantIds.has(participant.id)) {
+      return memberWorking(participant)
+        ? "This member is busy."
+        : "This member is waiting for answers from other members.";
     }
     if (participant.id === props.participants.find((item) => item.roleConfigId === CHAT_ASSISTANT_ROLE_ID)?.id) {
       return "Chat Assistant cannot be removed";
@@ -117,7 +128,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
               </Button>
               <Button
                 size="sm"
-                disabled={Boolean(props.addValidation) || props.isRunning}
+                disabled={Boolean(props.addValidation)}
                 onClick={() => {
                   props.onAddParticipant();
                   setView("roster");
@@ -136,7 +147,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                   key={participant.id}
                   participant={participant}
                   removeDisabledReason={participantRemoveDisabledReason(participant)}
-                  isRunning={props.isRunning}
+                  busy={memberWorking(participant)}
                   status={props.participantStatusById.get(participant.id) ?? "idle"}
                   autoWatchDisabledReason={
                     activeWatcher && activeWatcher.id !== participant.id
@@ -185,7 +196,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                       <Button
                         variant="outline"
                         size="sm"
-                        disabled={Boolean(invalidReason) || props.isRunning}
+                        disabled={Boolean(invalidReason)}
                         onClick={() => props.onAddSavedParticipant(config)}
                       >
                         <Plus size={16} />

@@ -38,7 +38,7 @@ export function ChatParticipantMenu(props: {
   agents: AgentHealth[];
   draft: string;
   addParticipantDraft: ChatParticipantDraft;
-  isRunning: boolean;
+  busyParticipantIds: ReadonlySet<string>;
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
   participantWatchers?: Record<string, ChatParticipantWatcherState>;
   onDraftChange: (value: string) => void;
@@ -74,7 +74,7 @@ export function ChatParticipantMenu(props: {
       participantHasRunById={props.participantHasRunById}
       draft={props.draft}
       addValidation={addValidation}
-      isRunning={props.isRunning}
+      busyParticipantIds={props.busyParticipantIds}
       participantStatusById={props.participantStatusById}
       participantWatchers={props.participantWatchers}
       savedParticipants={savedParticipants}

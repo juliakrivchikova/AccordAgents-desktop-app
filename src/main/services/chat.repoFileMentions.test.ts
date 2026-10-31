@@ -2123,6 +2123,23 @@ test("inferred participant request carrier is hidden and rooted to the source vi
   assert.equal(requestMessage.metadata?.chatThreadRootId, "outer-root");
 });
 
+test("inferred member requests follow the requester's permission as saved, not the turn's older copy", async () => {
+  const savedRequester = chatParticipant({ requestParticipants: "ask" }, { id: "manager", handle: "nikita" });
+  const target = chatParticipant({ repoRead: true }, { id: "codex", handle: "codex" });
+  const conversation = chatConversation([savedRequester, target], "/repo");
+  const { service } = testService({ conversations: [conversation] });
+  // The turn started while it was still allowed; the User switched it to Ask meanwhile.
+  const turnCopy = { ...savedRequester, permissions: { ...normalizeChatAgentPermissions(savedRequester.permissions), requestParticipants: "allow" as const } };
+
+  await (service as any).appendParticipantTurnMessages(conversation, turnCopy, [
+    participantMessage(savedRequester, "source-message", "@codex please verify this.")
+  ]);
+
+  const batch = conversation.messages.find((message) => message.metadata?.participantRequest)?.metadata?.participantRequest;
+  assert.ok(batch);
+  assert.deepEqual(batch.items.map((item) => item.status), ["pending_approval"]);
+});
+
 test("inferred participant requests trigger mentioned participants and rely on addressee guidance", async () => {
   const manager = chatParticipant({}, { id: "manager", handle: "nikita" });
   const codex = chatParticipant({ repoRead: true }, { id: "codex", handle: "codex" });
@@ -2235,15 +2252,25 @@ test("stored refresh preserves inferred accord participant-request auto-allow", 
   const taylor = chatParticipant({ repoRead: true }, { id: "taylor", handle: "taylor-claude-engineer", kind: "claude-code" });
   const stored = chatConversation([manager, drew, taylor], "/repo");
   const current = cloneConversation(stored);
+  const { service } = testService({ conversations: [stored] });
+  // The inferred accord grants it on the flow's copy (allowParticipantRequestsForInferredAccordIfSelected).
+  (service as any).setParticipantRequestPermission(current, drew.id, "allow");
+
+  await (service as any).refreshStoredChatState(current);
+
+  const refreshedDrew = (current.metadata.participants as ChatParticipant[]).find((participant) => participant.id === drew.id);
+  assert.equal(normalizeChatAgentPermissions(refreshedDrew?.permissions).requestParticipants, "allow");
+});
+
+test("stored refresh keeps a request-members permission the User revoked over an older copy's allow", async () => {
+  const manager = chatParticipant({ requestParticipants: "allow" }, { id: "manager", handle: "nikita" });
+  const drew = chatParticipant({ repoRead: true, requestParticipants: "ask" }, { id: "drew", handle: "drew-codex-engineer" });
+  const stored = chatConversation([manager, drew], "/repo");
+  // A flow's copy from before the User changed Drew from Allow to Ask.
+  const current = cloneConversation(stored);
   current.metadata.participants = (current.metadata.participants as ChatParticipant[]).map((participant) =>
     participant.id === drew.id
-      ? {
-          ...participant,
-          permissions: {
-            ...normalizeChatAgentPermissions(participant.permissions),
-            requestParticipants: "allow"
-          }
-        }
+      ? { ...participant, permissions: { ...normalizeChatAgentPermissions(participant.permissions), requestParticipants: "allow" } }
       : participant
   );
   const { service } = testService({ conversations: [stored] });
@@ -2251,7 +2278,7 @@ test("stored refresh preserves inferred accord participant-request auto-allow", 
   await (service as any).refreshStoredChatState(current);
 
   const refreshedDrew = (current.metadata.participants as ChatParticipant[]).find((participant) => participant.id === drew.id);
-  assert.equal(normalizeChatAgentPermissions(refreshedDrew?.permissions).requestParticipants, "allow");
+  assert.equal(normalizeChatAgentPermissions(refreshedDrew?.permissions).requestParticipants, "ask");
 });
 
 test("legacy accord launch metadata does not suppress inferred participant requests", async () => {
