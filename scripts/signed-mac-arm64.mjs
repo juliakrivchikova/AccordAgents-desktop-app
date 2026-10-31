@@ -373,6 +373,9 @@ verifyRuntimeArchive(path.join(appPath, "Contents", "Resources", "app.asar"));
 verifySignedApp();
 await verifyPackagedNativeProcess(appPath);
 
+log("Launching the signed app with a throwaway profile");
+run(process.execPath, [path.join(rootDir, "scripts", "smoke-launch-packaged-app.mjs"), appPath]);
+
 log("Creating signed ZIP for macOS auto-updates");
 const { signedZipPath, checksumPath: zipChecksumPath } = createSignedZip();
 
