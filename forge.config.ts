@@ -1,11 +1,14 @@
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { MakerDMG } from "@electron-forge/maker-dmg";
 import { MakerSquirrel } from "@electron-forge/maker-squirrel";
 import { MakerZIP } from "@electron-forge/maker-zip";
 import { FusesPlugin } from "@electron-forge/plugin-fuses";
 import { FuseV1Options, FuseVersion } from "@electron/fuses";
+import { squirrelVersion } from "./scripts/squirrel-version.cjs";
 
 const productName = "AccordAgents";
+const appVersion: string = JSON.parse(readFileSync(path.resolve(__dirname, "package.json"), "utf8")).version;
 const assetsDir = path.resolve(__dirname, "assets");
 const iconBasePath = path.join(assetsDir, "icon");
 const iconPath = `${iconBasePath}.icns`;
@@ -160,7 +163,8 @@ const config = {
       ]
     }, ["darwin"]),
     new MakerSquirrel({
-      setupIcon: windowsIconPath
+      setupIcon: windowsIconPath,
+      version: squirrelVersion(appVersion)
     }, ["win32"])
   ],
   plugins: [

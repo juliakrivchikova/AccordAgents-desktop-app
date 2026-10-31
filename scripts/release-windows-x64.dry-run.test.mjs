@@ -41,12 +41,22 @@ test("Windows release dry-run accepts an explicit update verification version", 
   assert.match(output, /update\.electronjs\.org\/juliakrivchikova\/AccordAgents-Beta-Releases\/win32-x64\/1\.10\.0\/RELEASES\)/);
 });
 
+test("Windows publish-only dry-run publishes the prepared files without building", () => {
+  const output = dryRun(["--publish-only", "--skip-update-check"]);
+
+  assert.match(output, /Build: no \(publishes out[\\/]windows-release\)/);
+  assert.match(output, /Publish: v\S+ in juliakrivchikova\/AccordAgents-Beta-Releases/);
+});
+
 const macNotes = "AccordAgents v1.2.3\n\nArtifacts:\n- DMG\n\nChecksums:\n- `abc  AccordAgents-1.2.3-arm64.dmg`\n";
-const windowsSection = "Windows x64:\n- Setup.exe\n\nChecksums:\n- `def  AccordAgents-1.2.3-win32-x64-Setup.exe`\n";
+const section = (line) => `<!-- windows-x64 -->\nWindows x64:\n- ${line}\n<!-- /windows-x64 -->`;
+const windowsSection = section("`def  AccordAgents-1.2.3-win32-x64-Setup.exe`");
+const handNote = "Known issue: added by hand.";
 
 for (const [name, body, expected] of [
   ["appends the Windows section after the macOS notes", macNotes, `${macNotes.trimEnd()}\n\n${windowsSection}`],
-  ["replaces the Windows section of an earlier run", `${macNotes}\nWindows x64:\n- stale\n`, `${macNotes.trimEnd()}\n\n${windowsSection}`],
+  ["replaces the Windows section of an earlier run", `${macNotes}\n${section("stale")}\n`, `${macNotes.trimEnd()}\n\n${windowsSection}`],
+  ["keeps what was added by hand below the Windows section", `${macNotes}\n${section("stale")}\n\n${handNote}\n`, `${macNotes.trimEnd()}\n\n${windowsSection}\n\n${handNote}`],
   ["writes only the Windows section into empty notes", "", windowsSection]
 ]) {
   test(`Windows release notes ${name}`, () => {
@@ -156,8 +166,18 @@ test("Windows update verification accepts Squirrel's normalized beta version", (
     status: 200,
     statusText: "OK",
     url: "https://update.electronjs.org/example/accordagents/win32-x64/1.10.1-beta.2/RELEASES",
-    body: "ABC accordagents-1.10.1-beta3-full.nupkg 123"
+    body: "ABC accordagents-1.10.1-beta003-full.nupkg 123"
   }, "1.10.1-beta.3"));
+});
+
+test("Windows update verification rejects the unpadded Squirrel beta version", () => {
+  assert.throws(() => validateWindowsUpdateResponse({
+    endpoint: "https://update.electronjs.org/example/accordagents/win32-x64/1.10.1-beta.2/RELEASES",
+    status: 200,
+    statusText: "OK",
+    url: "https://update.electronjs.org/example/accordagents/win32-x64/1.10.1-beta.2/RELEASES",
+    body: "ABC accordagents-1.10.1-beta3-full.nupkg 123"
+  }, "1.10.1-beta.3"), /did not mention expected version 1\.10\.1-beta\.3/);
 });
 
 test("Windows update verification rejects a near-prefix normalized beta version", () => {
@@ -166,7 +186,7 @@ test("Windows update verification rejects a near-prefix normalized beta version"
     status: 200,
     statusText: "OK",
     url: "https://update.electronjs.org/example/accordagents/win32-x64/1.10.1-beta.2/RELEASES",
-    body: "ABC accordagents-1.10.1-beta30-full.nupkg 123"
+    body: "ABC accordagents-1.10.1-beta0030-full.nupkg 123"
   }, "1.10.1-beta.3"), /did not mention expected version 1\.10\.1-beta\.3/);
 });
 

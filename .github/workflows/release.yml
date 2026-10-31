@@ -11,12 +11,12 @@ name: Release
 # A release ships exactly the commit the run was started for: if the branch
 # moved meanwhile, the run stops before it uses a version.
 #
-# Once macOS is published, the Windows x64 job builds the same tag, launch-checks
-# it, adds its installer and update files and a Windows section of the notes to
-# the same GitHub Release, then installs the published installer and launches
-# it. Windows builds are not code-signed yet. A failed Windows job uses no
-# version; a re-run of just that job builds again and replaces its own files
-# and notes section, never the macOS ones.
+# Once macOS is published, the Windows x64 job builds the same tag, launches
+# the packaged app, installs its installer and launches the installed app, and
+# only then adds the update files, then the installer, and a Windows section of
+# the notes to the same GitHub Release. Windows builds are not code-signed yet.
+# A failed Windows job uses no version. A re-run of just that job builds again;
+# it never replaces an installer that is already published, nor the macOS files.
 #
 # Secrets (repository → Settings → Secrets and variables → Actions):
 #   MACOS_CERTIFICATE_P12_BASE64, MACOS_CERTIFICATE_PASSWORD  Developer ID Application identity
@@ -342,6 +342,13 @@ jobs:
       TARGET: ${{ inputs.target }}
       VERSION: ${{ needs.release.outputs.version }}
     steps:
+      # The macOS build checks out with LF line endings; text files the app
+      # ships byte for byte (skills and prompts, the cloud machine runtime) must
+      # be the same here, or a machine used from both desktops is reinstalled
+      # by each.
+      - name: Check out with LF line endings
+        run: git config --global core.autocrlf false
+
       # A release builds the exact tag the macOS job pushed; the parent commit
       # gives the version the update feed is checked from.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -363,9 +370,49 @@ jobs:
       - name: Check the dependency tree
         run: node .agents/skills/release-beta/scripts/verify-release.mjs preflight
 
-      - name: Build and check without publishing
-        if: inputs.target == 'build-only'
+      # Builds, checks the archive and launches the packaged app, then puts the
+      # files to publish in out/windows-release.
+      - name: Build and check
         run: npm run release:windows-x64 -- --build-only
+
+      # Installs the built installer the way a user does and launches the
+      # installed app with a throwaway profile, before anything is published.
+      - name: Install and launch the installer
+        run: |
+          set -euo pipefail
+          dir="$PWD/out/windows-release"
+          local_app_data="$(cygpath -u "$LOCALAPPDATA")"
+          # Squirrel installs <id>-<version>-full.nupkg into <id>/app-<version>.
+          id="$(node -p 'require("./package.json").name.replace(/-/g, "_")')"
+          exe="$(node -p 'const p = require("./package.json"); p.productName || p.name').exe"
+          package="$(basename "$(ls "$dir"/*-full.nupkg)" -full.nupkg)"
+          root="$local_app_data/$id"
+          app="$root/app-${package#"$id"-}"
+          logs="$(cygpath -u "$RUNNER_TEMP")/launch/squirrel"
+          # Squirrel's own logs explain a failed install.
+          trap 'mkdir -p "$logs"; cp "$local_app_data"/SquirrelTemp/*.log "$root"/*.log "$logs"/ 2>/dev/null || true' EXIT
+          # S-1-16-12288 is an elevated process, which Squirrel's installer
+          # restarts unelevated and returns from at once.
+          echo "Integrity level: $("$(cygpath -u "$SYSTEMROOT")/System32/whoami.exe" //groups | grep -oE 'S-1-16-[0-9]+' || echo unknown)"
+          # A failed install shows a dialog nobody can close: give up instead of
+          # waiting for the job timeout.
+          timeout 600 "$dir"/*-win32-x64-Setup.exe --silent
+          for attempt in $(seq 1 120); do
+            if [ -f "$app/$exe" ] && [ -f "$root/packages/RELEASES" ] \
+              && ! tasklist //FI "IMAGENAME eq Update.exe" //NH | grep -qi 'Update\.exe'; then
+              break
+            fi
+            sleep 2
+          done
+          if [ ! -f "$app/$exe" ] || [ ! -f "$root/packages/RELEASES" ]; then
+            echo "::error::The installer did not finish installing $package at $app."
+            exit 1
+          fi
+          # Squirrel may start the app after installing; the check starts its own.
+          taskkill //IM "$exe" //T //F > /dev/null 2>&1 || true
+          node .agents/skills/release-beta/scripts/verify-release.mjs packaged "$app"
+          node scripts/smoke-launch-packaged-app.mjs "$app" \
+            --screenshot "$RUNNER_TEMP/launch/installed.png" --log "$RUNNER_TEMP/launch/installed.log"
 
       - name: Find the release repo
         if: inputs.target != 'build-only'
@@ -378,60 +425,28 @@ jobs:
           fi
           echo "RELEASE_REPO=$repo" >> "$GITHUB_ENV"
 
-      # Builds, launch-checks, then adds the files to the release macOS published.
+      # Publishes the checked files without building or running npm: the token
+      # that can write to the release repo reaches nothing else.
       - name: Publish
         if: inputs.target != 'build-only'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_REPOS_TOKEN }}
-        run: npm run release:windows-x64 -- --repo "$RELEASE_REPO" --skip-update-check
+        run: node scripts/release-windows-x64.mjs --publish-only --repo "$RELEASE_REPO" --skip-update-check
 
-      # The release repos are public: reading needs no token that can write
-      # there, and none reaches the installer or the app below.
-      - name: Download the published files
+      # The release repos are public: reading needs no token that can write there.
+      - name: Check the published download
         if: inputs.target != 'build-only'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          workspace="$PWD"
           dir="$(cygpath -u "$RUNNER_TEMP")/published"
           mkdir -p "$dir"
           gh release download "v$VERSION" --repo "$RELEASE_REPO" --dir "$dir" \
             --pattern '*-win32-x64-Setup.exe' --pattern '*-full.nupkg' --pattern RELEASES
-
-      # Installs the installer the way a user does and launches the installed
-      # app with a throwaway profile: the published installer for a release,
-      # the built one for a trial build.
-      - name: Install and launch the installer
-        run: |
-          set -euo pipefail
-          # Windows paths in the runner's variables do not glob in bash.
-          workspace="$PWD"
-          if [ "$TARGET" = "build-only" ]; then
-            dir="$workspace/out/windows-release"
-          else
-            dir="$(cygpath -u "$RUNNER_TEMP")/published"
-            # The published bytes must be the ones this job built and checked.
-            (cd "$dir" && sha256sum -c "$workspace"/out/windows-release/*.sha256)
-          fi
-          "$dir"/*-win32-x64-Setup.exe --silent
-          # Squirrel installs <id>-<version>-full.nupkg into <id>/app-<version>.
-          id="$(node -p 'require("./package.json").name.replace(/-/g, "_")')"
-          exe="$(node -p 'const p = require("./package.json"); p.productName || p.name').exe"
-          package="$(basename "$(ls out/windows-release/*-full.nupkg)" -full.nupkg)"
-          app="$(cygpath -u "$LOCALAPPDATA")/$id/app-${package#"$id"-}"
-          for attempt in $(seq 1 60); do
-            [ -f "$app/$exe" ] && break
-            sleep 2
-          done
-          if [ ! -f "$app/$exe" ]; then
-            echo "::error::The installer did not install $package at $app."
-            exit 1
-          fi
-          # Squirrel may start the app after installing; the check starts its own.
-          taskkill //IM "$exe" //T //F > /dev/null 2>&1 || true
-          node .agents/skills/release-beta/scripts/verify-release.mjs packaged "$app"
-          node scripts/smoke-launch-packaged-app.mjs "$app" \
-            --screenshot "$RUNNER_TEMP/launch/installed.png" --log "$RUNNER_TEMP/launch/installed.log"
+          # The published bytes must be the ones this job installed and launched.
+          (cd "$dir" && sha256sum -c "$workspace"/out/windows-release/*.sha256)
 
       - name: Keep checksums and launch evidence
         if: always()
@@ -446,32 +461,37 @@ jobs:
           if-no-files-found: ignore
 
       # A trial build is not published anywhere, so its installer is kept for a
-      # week to be installed and tried by hand.
+      # week to be tried by hand. It carries the version of the last release,
+      # so the commit in the artifact name tells it apart from that release.
       - name: Keep the trial installer
         if: inputs.target == 'build-only'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: windows-trial-installer
+          name: windows-trial-installer-${{ github.sha }}
           path: out/windows-release/*-win32-x64-Setup.exe
           retention-days: 7
           if-no-files-found: error
 
-      # Like the macOS check: a lagging feed is reported, not a failed release.
+      # Like the macOS check, a lagging feed is reported, not a failed release.
+      # The feed caches a repo for 15 minutes, and the macOS check may have just
+      # filled that cache, so it is given a little longer.
       - name: Check the update feed
         if: inputs.target != 'build-only'
         continue-on-error: true
         run: |
           previous="$(git show HEAD~1:package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')"
-          package="$(basename "$(ls out/windows-release/*-full.nupkg)")"
           url="https://update.electronjs.org/$RELEASE_REPO/win32-x64/$previous/RELEASES"
-          for attempt in $(seq 1 10); do
-            if curl -fsS "$url" | grep -qF "/$package "; then
-              echo "The update feed offers $package to $previous: $url"
+          # The served entry must be this build's package: same SHA1 and size.
+          entry() { sed 's/^\xEF\xBB\xBF//' | tr -d '\r' | awk '{ print $1, $3 }'; }
+          expected="$(entry < out/windows-release/RELEASES)"
+          for attempt in $(seq 1 18); do
+            if [ "$(curl -fsS "$url" | entry)" = "$expected" ]; then
+              echo "The update feed offers this build to $previous: $url"
               exit 0
             fi
-            sleep 30
+            sleep 60
           done
-          echo "::warning::The update feed does not offer $package to $previous yet ($url). The release is published; check the feed again instead of re-running."
+          echo "::warning::The update feed does not offer this build to $previous yet ($url). The release is published; check the feed again instead of re-running."
           exit 1
 
   phone-app:
