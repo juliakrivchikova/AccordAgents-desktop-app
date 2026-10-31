@@ -7,7 +7,7 @@ import { AwsDialog, AwsWaiting } from "./aws-dialog";
 import { AwsDiskBrowser, type AwsDiskBrowseStart } from "./aws-disk-browser";
 import { Row } from "./aws-row";
 import { publishAwsAttention } from "./use-aws-attention";
-import { AWS_DISK_LOW_BYTES, formatBytes, keptText, plural, useAwsDisk, type AwsDiskControl } from "./use-aws-disk";
+import { AWS_DISK_LOW_BYTES, formatBytes, keptText, plural, type AwsDiskControl } from "./use-aws-disk";
 import { cleanError } from "./aws-shared";
 import type { AwsWorkerControl } from "./use-aws-worker-control";
 
@@ -33,8 +33,8 @@ const CATEGORY: Record<AwsDiskCategoryId, CategoryText> = {
   "program-logs": { label: "Program logs", tone: "is-c5", clean: "program-logs",
     describe: (c) => c.cleanableBytes ? `${plural(c.files ?? 0, "day")} of logs. Clean up removes logs older than a day: ${formatBytes(c.cleanableBytes)}.` : `${plural(c.files ?? 0, "day")} of logs; nothing older than a day.`,
     cleans: (c) => `Removes the program's logs older than a day and frees ${formatBytes(c.cleanableBytes ?? 0)}. Today's log stays.` },
-  "project-copies": { label: "Project copies", tone: "is-c6", browse: "@mirrors",
-    describe: (c) => c.projects?.length ? `Copies of your projects: ${c.projects.map((name) => name.replace(/-[0-9a-f]{10}$/, "")).join(", ")}` : "Copies of your projects" },
+  "project-copies": { label: "Project copies", tone: "is-c6",
+    describe: (c) => `${c.projects?.length ? `Copies of your projects: ${c.projects.map((name) => name.replace(/-[0-9a-f]{10}$/, "")).join(", ")}` : "Copies of your projects"}. Added and deleted in Projects above.` },
   "program-data": { label: "Program data and sign-ins", tone: "is-c10", describe: () => "Chats, settings and the agents' sign-ins on the instance" },
   "caches": { label: "Caches", tone: "is-c9", clean: "caches",
     describe: (c) => c.cleanableBytes ? `npm, Electron and build caches. Clean up removes them: ${formatBytes(c.cleanableBytes)}.` : "npm, Electron and build caches",
@@ -53,10 +53,10 @@ const CATEGORY: Record<AwsDiskCategoryId, CategoryText> = {
  * per kind of thing with its own action (clean up or look inside), all the
  * files, and growing the disk.
  */
-export function AwsDiskSection(props: { control: AwsWorkerControl }): JSX.Element {
+export function AwsDiskSection(props: { control: AwsWorkerControl; disk: AwsDiskControl }): JSX.Element {
   const c = props.control;
   const running = c.status?.state === "running";
-  const disk = useAwsDisk(running);
+  const disk = props.disk;
   const [browse, setBrowse] = useState<AwsDiskBrowseStart>();
   const [cleaning, setCleaning] = useState<AwsDiskCategory>();
   const [growing, setGrowing] = useState(false);

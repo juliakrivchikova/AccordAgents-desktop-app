@@ -662,7 +662,9 @@ def change(targets):
     removed, failed, freed = remove(targets)
     if keep:
         save_sizes(time.time() - SIZE_CACHE_SECONDS / 2)
-    return {"ok": True, "freedBytes": freed, "removed": len(removed), "failed": failed}
+    # The desktop forgets the project copies that went, so the next turn in
+    # such a project copies it again instead of starting in a missing folder.
+    return {"ok": True, "freedBytes": freed, "removed": len(removed), "removedPaths": removed, "failed": failed}
 
 def clean(category):
     if category == "program-logs":
@@ -685,6 +687,9 @@ NAMED_FOLDERS = {"@runs": RUNS, "@mirrors": MIRRORS}
 
 def listing(path):
     p = real(NAMED_FOLDERS.get(path, path) or HOME)
+    if path in NAMED_FOLDERS and inside(p, HOME) and not os.path.lexists(p):
+        # Nothing was ever put there: no project copies yet.
+        return {"ok": True, "path": p, "home": HOME, "own": OWN, "entries": [], "truncated": 0, "space": space()}
     if not inside(p, HOME) or not os.path.isdir(p):
         return {"ok": False, "error": "not a folder in the home folder"}
     try:
@@ -708,7 +713,7 @@ def listing(path):
         if role:
             entry["role"] = role
     return {"ok": True, "path": p, "home": HOME, "own": OWN, "entries": shown,
-            "truncated": max(0, len(entries) - LIST_LIMIT)}
+            "truncated": max(0, len(entries) - LIST_LIMIT), "space": space()}
 
 if MODE == "report":
     print(json.dumps(report()))

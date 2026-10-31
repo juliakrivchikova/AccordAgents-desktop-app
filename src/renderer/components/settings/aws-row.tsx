@@ -6,7 +6,7 @@ export function Row(props: {
   title: ReactNode;
   desc?: ReactNode;
   error?: ReactNode;
-  action?: { label: string; onClick: () => void; disabled?: boolean; testId?: string };
+  action?: { label: string; onClick: () => void; disabled?: boolean; testId?: string; ariaLabel?: string };
   testId?: string;
 }): JSX.Element {
   return (
@@ -18,7 +18,7 @@ export function Row(props: {
       </div>
       {props.action ? (
         <div className="gen-actions">
-          <button type="button" className="gen-pill" data-testid={props.action.testId} disabled={props.action.disabled} onClick={props.action.onClick}>
+          <button type="button" className="gen-pill" data-testid={props.action.testId} disabled={props.action.disabled} aria-label={props.action.ariaLabel} onClick={props.action.onClick}>
             <span className="gen-pill-label">{props.action.label}</span>
           </button>
         </div>

@@ -3,6 +3,8 @@ import { fileURLToPath } from "node:url";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { HubInstaller, removeStaleHubTemp } from "./services/hubInstaller";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
+import { AwsInstanceProjectsService, AwsProjectAddCancelled } from "./services/awsInstanceProjects";
+import { newChatProjects } from "../shared/newChat";
 import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { app, autoUpdater, BrowserWindow, dialog, ipcMain, MessageChannelMain, powerMonitor, protocol, shell, utilityProcess, type WebContents } from "electron";
@@ -1177,6 +1179,10 @@ chatService.setCloudRunAwsService(cloudRunAwsService);
 chatService.setPromptSuggestionsListener((update) => sendToMainWindow("chat:prompt-suggestions", update));
 chatService.onBackgroundTasksChanged((event) => sendToMainWindow("chat:background-tasks", event));
 chatService.setMachineProjectPreparation((machineId, localPath, signal, progress) => cloudRunPreparation.prepareProject(machineId, localPath, signal, progress));
+// A machine found its copy of a project missing: the next turn copies it again.
+chatService.setMachineProjectMissingHandler(async (machineId, localPath) => {
+  if (await cloudRunPreparation.forgetProject(machineId, localPath)) void debugLogService.write("machines.project.missing-forgotten", { machineId });
+});
 chatService.setCloudRunDoctorService(cloudRunDoctorService);
 wireChatAppToolHandlers(appMcpService, chatService);
 // Scheduled scripts hosted by this desktop. Files, history and run state live
@@ -1947,12 +1953,40 @@ function registerIpc(): void {
       const name = root.replace(/\/+$/, "").split("/").pop() ?? folder;
       return { root, data: recorded?.userDataDir ?? `~/.accordagents/${name === "accordagents-machine" ? "machine" : name}` };
     },
-    log: (event, data) => { void debugLogService.write(event, data); }
+    log: (event, data) => { void debugLogService.write(event, data); },
+    // A deleted project copy is copied again by the next turn in its project.
+    removed: async (paths) => {
+      const forgotten = await cloudRunPreparation.forgetRemovedCopies(paths);
+      if (forgotten.length) void debugLogService.write("aws.disk.copies-forgotten", { machines: new Set(forgotten.map((item) => item.machineId)).size, projects: forgotten.length });
+    }
   });
   ipcMain.handle("cloud-runs:aws-disk", (_event, options?: { refresh?: boolean }) => awsInstanceDisk.report(options));
   ipcMain.handle("cloud-runs:aws-disk-clean", (_event, category: AwsDiskCleanCategory) => awsInstanceDisk.clean(category));
   ipcMain.handle("cloud-runs:aws-disk-list", (_event, path?: string) => awsInstanceDisk.list(path));
   ipcMain.handle("cloud-runs:aws-disk-delete", (_event, paths: string[], options?: { withWork?: AwsDiskChosenWork }) => awsInstanceDisk.remove(paths, options?.withWork));
+  const awsInstanceProjects = new AwsInstanceProjectsService({
+    record: () => cloudRunAwsService.programRecordOnInstance(),
+    listCopies: () => awsInstanceDisk.list("@mirrors"),
+    knownProjects: async () => newChatProjects(await storageService.listConversations(), undefined).projects,
+    copy: (machineId, localPath, signal, progress) => cloudRunPreparation.prepareProject(machineId, localPath, signal, progress, { checkCopy: true }),
+    forget: async (machineId, localPaths) => {
+      for (const localPath of localPaths) await cloudRunPreparation.forgetProject(machineId, localPath);
+      void debugLogService.write("aws.projects.missing-forgotten", { projects: localPaths.length });
+    },
+    progress: (progress) => sendToMainWindow("cloud-runs:aws-project-progress", progress)
+  });
+  ipcMain.handle("cloud-runs:aws-projects", () => awsInstanceProjects.list());
+  ipcMain.handle("cloud-runs:aws-project-add", async (_event, localPath: string) => {
+    try {
+      await awsInstanceProjects.add(localPath);
+      void debugLogService.write("aws.projects.add", { outcome: "added" });
+    } catch (error) {
+      void debugLogService.write("aws.projects.add", { outcome: error instanceof AwsProjectAddCancelled ? "cancelled" : "failed",
+        message: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
+  });
+  ipcMain.handle("cloud-runs:aws-project-add-cancel", (_event, localPath: string) => { awsInstanceProjects.cancel(localPath); });
   ipcMain.handle("cloud-runs:aws-stop", () => cloudRunAwsService.stopWorker());
   ipcMain.handle("cloud-runs:aws-delete", () => cloudRunAwsService.deleteWorker());
   ipcMain.handle("settings:get-agent-environment", () => agentEnvironmentService.snapshot());
