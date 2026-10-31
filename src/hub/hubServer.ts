@@ -10,12 +10,14 @@ import {
   HUB_MAX_BODY_BYTES,
   HUB_MAX_SMALL_BODY_BYTES,
   HUB_PROGRESS_PATH,
+  HUB_PROOF_CHALLENGE,
   HUB_PROTOCOL_VERSION,
   HUB_ROOM_MAX_MESSAGE_BYTES,
   HUB_ROOM_REPLACED_CLOSE_CODE,
   HUB_ROSTER_ROLES,
   hubPhoneEnrollmentSigningText,
   hubPhoneInviteSigningText,
+  hubProofSigningText,
   HUB_PHONE_INVITE_MAX_LIFETIME_MS,
   hubRoomRole,
   isHubPhoneInviteId,
@@ -33,7 +35,8 @@ import {
   type HubRosterResponse
 } from "../shared/hubProtocol";
 import type { MachineProgressFrame } from "../shared/machineProgress";
-import { HubNonceCache, deviceIdForPublicKey, parseHubAuthorization, sha256Hex, verifyHubRequest, verifyHubText, type ParsedHubAuthorization } from "../main/services/hubAuth";
+import { HubNonceCache, deviceIdForPublicKey, parseHubAuthorization, sha256Hex, signHubText, verifyHubRequest, verifyHubText, type ParsedHubAuthorization } from "../main/services/hubAuth";
+import type { HubKey } from "./hubKey";
 import type { ChatSearchService } from "../main/services/chatSearch";
 import type { StorageService } from "../main/services/storage";
 import { isAllowedPushEndpoint } from "./hubPush";
@@ -50,6 +53,8 @@ export interface HubServerOptions {
   storage: StorageService;
   search: ChatSearchService;
   vapidPublicKey: string;
+  /** The server's own key, with which it proves itself (`/v1/health?proof=`). */
+  hubKey?: HubKey;
   /** Files Let's Encrypt validation reads over plain HTTP. */
   acmeWebroot?: string;
   /** The phone's reads: chat list, pages and changes from the server's copy. */
@@ -513,8 +518,14 @@ export class HubServer {
         return this.serveChallenge(url.pathname, response);
       }
       if (request.method === "GET" && url.pathname === "/v1/health") {
+        const challenge = url.searchParams.get("proof");
+        const key = this.options.hubKey;
+        const proof = key && challenge && HUB_PROOF_CHALLENGE.test(challenge)
+          ? { hubKey: key.publicKeyDerBase64, signature: signHubText(key, hubProofSigningText(this.options.hubId, challenge)) }
+          : undefined;
         return json(response, 200, {
-          ok: true, protocol: HUB_PROTOCOL_VERSION, hubId: this.options.hubId, version: this.options.version, head: await this.options.ops?.head() ?? 0
+          ok: true, protocol: HUB_PROTOCOL_VERSION, hubId: this.options.hubId, version: this.options.version, head: await this.options.ops?.head() ?? 0,
+          ...(proof ? { proof } : {})
         } satisfies HubHealth);
       }
       if (request.method === "GET" && url.pathname === "/v1/push/vapid") {

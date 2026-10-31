@@ -29,7 +29,8 @@ import {
   type HubOpsResponse,
   type HubTurnsResponse
 } from "../../shared/hubOps";
-import { sha256Hex, signHubRequest, type HubSigningIdentity } from "./hubAuth";
+import { randomBytes } from "node:crypto";
+import { hubProofVerifies, sha256Hex, signHubRequest, type HubSigningIdentity } from "./hubAuth";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 /** Writing a large page (a chat moving to the server) takes longer. */
@@ -68,6 +69,23 @@ export class HubTransientError extends Error {
   }
 }
 
+/**
+ * The server at the address did not prove it is the User's (another id, or
+ * not holding the key this computer learned when it set the server up): it
+ * may have been replaced, say after its address was released and given to
+ * someone else. Nothing is sent to it. Transient for the queues (what waits
+ * keeps waiting, nothing is dropped), and said in Settings.
+ */
+export class HubIdentityError extends HubTransientError {
+  constructor(message: string) {
+    super(message);
+    this.name = "HubIdentityError";
+  }
+}
+
+/** How long a server that proved itself is taken at its word. */
+const IDENTITY_TTL_MS = 10 * 60_000;
+
 /** A fetch that did not get an answer becomes a HubTransientError; an answer,
  *  whatever it says, is returned. */
 async function reach(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<Response> {
@@ -92,13 +110,52 @@ export class HubClient {
   constructor(private readonly options: {
     url: string;
     identity: () => Promise<HubSigningIdentity>;
+    /** The server this computer set up: its id and its own key. Every
+     *  request waits for the server at the address to prove it is that one. */
+    expect?: () => Promise<{ hubId?: string; hubKey?: string } | undefined>;
     fetchImpl?: typeof fetch;
     createSocket?: (url: string) => LiveSocket;
   }) {
     this.base = options.url.replace(/\/+$/, "");
   }
 
+  private proven?: { at: number; check: Promise<void> };
+
+  /** The server at the address is the User's: its id, and its proof that it
+   *  holds the key learned at setup. Checked once in a while, and again after
+   *  a check that did not get an answer. */
+  private verified(): Promise<void> {
+    if (!this.options.expect) return Promise.resolve();
+    if (this.proven && Date.now() - this.proven.at < IDENTITY_TTL_MS) return this.proven.check;
+    const check = this.verifyNow();
+    const entry = { at: Date.now(), check };
+    this.proven = entry;
+    check.catch(() => { if (this.proven === entry) this.proven = undefined; });
+    return check;
+  }
+
+  private async verifyNow(): Promise<void> {
+    const expected = await this.options.expect?.();
+    if (!expected?.hubId && !expected?.hubKey) return;
+    const challenge = randomBytes(24).toString("base64url");
+    const health = await this.rawHealth(expected.hubKey ? challenge : undefined);
+    const host = (() => { try { return new URL(this.base).host; } catch { return this.base; } })();
+    if (expected.hubId && health.hubId !== expected.hubId) {
+      throw new HubIdentityError(`The server at ${host} is not your server any more (it answers as another one). Nothing was sent to it. Set your server up again in Settings → Your server.`);
+    }
+    if (expected.hubKey && !hubProofVerifies(health, expected.hubId ?? health.hubId, expected.hubKey, challenge)) {
+      throw new HubIdentityError(`The server at ${host} could not prove it is your server. Nothing was sent to it. If you set it up again on purpose, set it up from this computer in Settings → Your server.`);
+    }
+  }
+
+  private async rawHealth(challenge?: string): Promise<HubHealth> {
+    const response = await reach(this.options.fetchImpl ?? fetch, `${this.base}/v1/health${challenge ? `?proof=${challenge}` : ""}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    if (!response.ok) throw new HubHttpError(response.status, `The hub answered ${response.status}.`);
+    return await response.json() as HubHealth;
+  }
+
   private async request<T>(method: string, pathWithQuery: string, body?: Buffer | string, contentType?: string, timeoutMs = REQUEST_TIMEOUT_MS, cancel?: AbortSignal): Promise<T> {
+    await this.verified();
     const identity = await this.options.identity();
     const response = await reach(this.options.fetchImpl ?? fetch, `${this.base}${pathWithQuery}`, {
       method,
@@ -117,10 +174,10 @@ export class HubClient {
     return await response.json() as T;
   }
 
+  /** What the server says of itself, once it proved it is the User's. */
   async health(): Promise<HubHealth> {
-    const response = await reach(this.options.fetchImpl ?? fetch, `${this.base}/v1/health`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-    if (!response.ok) throw new HubHttpError(response.status, `The hub answered ${response.status}.`);
-    return await response.json() as HubHealth;
+    await this.verified();
+    return this.rawHealth();
   }
 
   // --- the chats as the server owns them (protocol v3) ---------------------
@@ -238,6 +295,7 @@ export class HubClient {
   /** Reads a blob's bytes from the hub (a picture a phone posted). */
   async downloadBytes(reference: DeviceEventBlobReference): Promise<Buffer> {
     if (!isDeviceEventBlobReference(reference)) throw new Error("Not a blob reference.");
+    await this.verified();
     const identity = await this.options.identity();
     const parts: Buffer[] = [];
     for (let index = 0; index < reference.fragments; index += 1) {
@@ -268,6 +326,7 @@ export class HubClient {
     const connect = async (): Promise<void> => {
       if (closed) return;
       try {
+        await this.verified();
         const identity = await this.options.identity();
         const auth = signHubRequest(identity, { method: "GET", pathWithQuery: "/v1/live" });
         const url = hubWebSocketUrl(this.base, `/v1/live?auth=${encodeURIComponent(auth)}`);

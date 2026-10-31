@@ -1,4 +1,4 @@
-import { HubClient, HubHttpError } from "./hubClient";
+import { HubClient, HubIdentityError, HubHttpError } from "./hubClient";
 import { HubOpsClient, HUB_FEED_CURSOR_KEY, type HubOpOutcome } from "./hubOpsClient";
 import { conversationFieldsOf, newOpId, type ChatServerLink } from "./chatServerOps";
 import { LOCAL_MESSAGE_METADATA_KEYS } from "./chatChanges";
@@ -58,7 +58,7 @@ export class ServerChatLink {
     chat: ChatService;
     identity: () => Promise<HubSigningIdentity & { publicKeyDerBase64: string }>;
     /** The User's own server, when she set one up. */
-    hubConfig: () => Promise<{ url: string } | undefined>;
+    hubConfig: () => Promise<{ url: string; hubId?: string; hubKey?: string } | undefined>;
     /** The server inside the app, started when she has no server of her own
      *  (the computer only; a machine always has hers). */
     startEmbedded?: (owner: { deviceId: string; publicKeyDerBase64: string }) => Promise<{ url: string; close(): Promise<void> }>;
@@ -190,7 +190,15 @@ export class ServerChatLink {
       this.embedded ??= await this.options.startEmbedded({ deviceId: this.deviceIdValue, publicKeyDerBase64: identity.publicKeyDerBase64 });
       url = this.embedded.url;
     }
-    const client = new HubClient({ url, identity: this.options.identity });
+    // The server this computer set up proves it is that one before anything
+    // goes to it (the one inside the app answers only here).
+    const client = new HubClient({
+      url, identity: this.options.identity,
+      ...(own?.url ? { expect: async () => {
+        const current = await this.options.hubConfig();
+        return current ? { hubId: current.hubId, hubKey: current.hubKey } : undefined;
+      } } : {})
+    });
     this.client = client;
     const hub = this.options.storage.hub();
     this.ops = new HubOpsClient({
@@ -248,8 +256,11 @@ export class ServerChatLink {
     for (let attempt = 1; ; attempt += 1) {
       try {
         if (this.options.movesChats) await this.moveChats(client);
+        this.identityProblem = undefined;
         break;
       } catch (error) {
+        // A server that is not the User's is said in Settings, not only logged.
+        this.identityProblem = error instanceof HubIdentityError ? error.message : undefined;
         this.options.log("chat.server.move-failed", { attempt, message: error instanceof Error ? error.message : String(error) });
         await new Promise((resolve) => setTimeout(resolve, Math.min(60_000, 2_000 * 2 ** Math.min(5, attempt))));
       }
@@ -331,9 +342,15 @@ export class ServerChatLink {
     return this.unreachable === undefined;
   }
 
+  /** Why the chats could not move: the server at the address is not the
+   *  User's (HubIdentityError). */
+  private identityProblem?: string;
+
   async status(): Promise<{ queued: number; unreachableSince?: number; lastError?: string; ready: boolean } | undefined> {
     if (!this.ops) return undefined;
-    return { ...await this.ops.status(), ready: this.ready };
+    const status = await this.ops.status();
+    if (this.identityProblem) return { ...status, unreachableSince: status.unreachableSince ?? Date.now(), lastError: this.identityProblem, ready: this.ready };
+    return { ...status, ready: this.ready };
   }
 
   async failures(): Promise<ReturnType<ReturnType<StorageService["hubClientOps"]>["failures"]>> {

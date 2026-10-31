@@ -25,6 +25,7 @@ import {
 import type { HubHealth } from "../../shared/hubProtocol";
 import { shellQuotePosix } from "./cloudRunWorkers";
 import { CommandError, runCommand, type CommandOptions, type CommandResult } from "./command";
+import { hubProofVerifies } from "./hubAuth";
 import { buildHubSetupCommand } from "./hubProvisioning";
 
 const HUB_SERVICE_NAME = "accordagents-hub";
@@ -90,6 +91,8 @@ export async function removeStaleHubTemp(dir = tmpdir(), now = Date.now()): Prom
 export interface HubLinkRequest {
   url: string;
   hubId: string;
+  /** The server's own key, learned over SSH as it was set up or updated. */
+  hubKey?: string;
   server: HubServerRecord;
 }
 
@@ -357,22 +360,24 @@ export class HubInstaller {
       }
       if (!owner.ok || typeof owner.hubId !== "string") throw new Error("The hub did not accept this computer as its owner.");
       const hubId = owner.hubId;
+      const hubKey = typeof owner.hubKey === "string" && owner.hubKey ? owner.hubKey : undefined;
 
       this.progress("starting", "Starting the hub…");
       await this.remote(server, hubServiceScript(), SHORT_TIMEOUT_MS);
       serviceMayBeStopped = false;
-      await this.waitForHealth(`http://${server.ip}`, hubId, "the hub over HTTP");
+      await this.waitForHealth(`http://${server.ip}`, hubId, "the hub over HTTP", hubKey);
 
       this.progress("certificate", "Getting a certificate for the server's address…");
       await this.remote(server, hubCertificateScript(server.ip));
 
       this.progress("checking", "Checking the hub over HTTPS…");
       const url = `https://${server.ip}`;
-      await this.waitForHealth(url, hubId, "the hub over HTTPS");
+      // The server that answers at the address is the one set up over SSH.
+      await this.waitForHealth(url, hubId, "the hub over HTTPS", hubKey);
 
       const { nonce: _nonce, hostKeys: _hostKeys, ...where } = server;
       const record: HubServerRecord = { ...where, installedAt: this.now().toISOString(), installedVersion: version };
-      await this.options.link({ url, hubId, server: record });
+      await this.options.link({ url, hubId, ...(hubKey ? { hubKey } : {}), server: record });
       this.progress("ready", "Your hub is ready.", { url, server: record });
       return this.withVersion(this.snapshot);
     } catch (error) {
@@ -403,15 +408,17 @@ export class HubInstaller {
     throw new Error(`This computer could not log in to the server at ${server.ip}: ${setupFailure(last)}`);
   }
 
-  private async waitForHealth(url: string, hubId: string, what: string): Promise<void> {
+  private async waitForHealth(url: string, hubId: string, what: string, hubKey?: string): Promise<void> {
     const deadline = this.now().getTime() + HEALTH_TIMEOUT_MS;
     let last = "";
     while (this.now().getTime() < deadline) {
       try {
-        const response = await (this.options.fetchImpl ?? fetch)(`${url}/v1/health`, { signal: AbortSignal.timeout(10_000) });
+        const challenge = randomBytes(24).toString("base64url");
+        const response = await (this.options.fetchImpl ?? fetch)(`${url}/v1/health${hubKey ? `?proof=${challenge}` : ""}`, { signal: AbortSignal.timeout(10_000) });
         const health = await response.json() as HubHealth;
-        if (response.ok && health.ok && health.hubId === hubId) return;
-        last = `it answered ${response.status}${health.hubId && health.hubId !== hubId ? " as another hub" : ""}`;
+        const proven = !hubKey || hubProofVerifies(health, hubId, hubKey, challenge);
+        if (response.ok && health.ok && health.hubId === hubId && proven) return;
+        last = `it answered ${response.status}${health.hubId && health.hubId !== hubId ? " as another hub" : !proven ? " without proving it is the server set up over SSH" : ""}`;
       } catch (error) {
         last = error instanceof Error ? (error.cause instanceof Error ? error.cause.message : error.message) : String(error);
       }
@@ -425,6 +432,8 @@ interface HubOwnerAnswer {
   ok?: boolean;
   reason?: string;
   hubId?: string;
+  /** The server's own key (a server program from before it had one says none). */
+  hubKey?: string;
   alreadyOwner?: boolean;
 }
 

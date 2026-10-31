@@ -34,6 +34,9 @@ export interface HubServerRecord extends Omit<HubServerBlob, "nonce" | "hostKeys
 export interface HubLinkConfig {
   url: string;
   hubId?: string;
+  /** The server's own key, learned over SSH when this computer set it up or
+   *  updated it: every link checks the server proves it holds it. */
+  hubKey?: string;
   server?: HubServerRecord;
 }
 

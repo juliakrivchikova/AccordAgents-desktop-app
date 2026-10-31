@@ -747,7 +747,15 @@ async function startHubLink(): Promise<void> {
   if (!config) return;
   hubOwnerConfirmed = false;
   const identity = () => deviceIdentityService.getOrCreateDeviceIdentity();
-  hubClient = new HubClient({ url: config.url, identity });
+  hubClient = new HubClient({
+    url: config.url, identity,
+    // The server this computer set up proves it is that one before the
+    // roster, invites or start keys go to it.
+    expect: async () => {
+      const current = await settingsService.getHubConfig().catch(() => undefined);
+      return current ? { hubId: current.hubId, hubKey: current.hubKey } : undefined;
+    }
+  });
   // Another server (or the first): every machine's settings are put there.
   machineLinkService?.resetPublishedSettings();
   const blobClient = hubClient;
@@ -877,8 +885,12 @@ const hubInstaller = new HubInstaller({
     const identity = await deviceIdentityService.getOrCreateDeviceIdentity();
     return { originId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64 };
   },
-  link: async ({ url, hubId, server }) => {
-    await settingsService.saveHubConfig({ url, hubId, server });
+  link: async ({ url, hubId, hubKey, server }) => {
+    // A server program from before servers had a key says none: the key
+    // learned before (if any) stays.
+    const before = await settingsService.getHubConfig().catch(() => undefined);
+    const keptKey = hubKey ?? (before?.hubId === hubId ? before?.hubKey : undefined);
+    await settingsService.saveHubConfig({ url, hubId, ...(keptKey ? { hubKey: keptKey } : {}), server });
     await startHubLink();
     // The chats move to the new server (once per server) and go through it
     // from now on.

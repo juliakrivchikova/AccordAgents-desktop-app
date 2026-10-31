@@ -12,6 +12,7 @@ import { HubChangeFeed, HubPhoneApi } from "./hubPhone";
 import { HubProgress, HubWaker, cardNotice, phoneMessageHomes, replyNotice } from "./hubPhoneState";
 import { isDeviceEventBlobReference } from "../shared/deviceEventBlobs";
 import { HubServer } from "./hubServer";
+import { loadOrCreateHubKey, type HubKey } from "./hubKey";
 
 declare const __HUB_VERSION__: string | undefined;
 const HUB_VERSION = typeof __HUB_VERSION__ === "string" ? __HUB_VERSION__ : "dev";
@@ -97,6 +98,8 @@ export function composeHub(options: {
   hubId: string;
   version: string;
   keys: { publicKey: string; privateJwk: import("node:crypto").JsonWebKey };
+  /** The server's own key, which proves it to its devices. */
+  hubKey?: HubKey;
   log: (event: string, payload: Record<string, unknown>) => void;
   acmeWebroot?: string;
   /** Local QA and tests: where the EC2 API is reached instead of AWS. */
@@ -198,6 +201,7 @@ export function composeHub(options: {
   const phoneApi = phone;
   const server = new HubServer({
     hubId: options.hubId, version: options.version, storage, search, vapidPublicKey: options.keys.publicKey,
+    ...(options.hubKey ? { hubKey: options.hubKey } : {}),
     ...(options.acmeWebroot ? { acmeWebroot: options.acmeWebroot } : {}), debugLog: log,
     phone: phoneApi,
     onCatalogChanged: () => phoneApi.catalogChanged(),
@@ -242,12 +246,15 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
       return finish({ ok: false, reason: "another-owner", hubId: hubId() });
     }
     await storage.hub().setOwner({ deviceId: owner.deviceId, publicKeyDerBase64: owner.publicKeyDerBase64, name: owner.name || "Desktop", addedAt: new Date().toISOString() });
-    return finish({ ok: true, hubId: hubId(), alreadyOwner: Boolean(before) });
+    // With the server's own key: the owner learns it here, over the SSH
+    // channel it set the server up through, and from then on accepts only a
+    // server that proves it holds it.
+    return finish({ ok: true, hubId: hubId(), hubKey: loadOrCreateHubKey(userDataPath()).publicKeyDerBase64, alreadyOwner: Boolean(before) });
   }
 
   const keys = loadOrCreateVapidKeys(path.join(userDataPath(), "vapid.json"));
   const hub = composeHub({
-    storage, hubId: hubId(), version: HUB_VERSION, keys, log, acmeWebroot: args.acmeWebroot,
+    storage, hubId: hubId(), version: HUB_VERSION, keys, hubKey: loadOrCreateHubKey(userDataPath()), log, acmeWebroot: args.acmeWebroot,
     // QA only: a stand-in for AWS on this computer. A signed start request
     // never goes to any other address than AWS's own.
     ec2Endpoint: loopbackEndpoint(process.env.ACCORDAGENTS_HUB_EC2_ENDPOINT)

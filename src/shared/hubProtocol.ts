@@ -85,6 +85,23 @@ export interface HubHealth {
   version: string;
   /** The newest place in the server's feed of operations. */
   head: number;
+  /** Asked with `?proof=<challenge>`: the server's own key and its signature
+   *  over hubProofSigningText, so a device that knows the key knows it is
+   *  talking to this server and not to whoever answers at its address now. */
+  proof?: HubProof;
+}
+
+export interface HubProof {
+  hubKey: string;
+  signature: string;
+}
+
+/** A challenge a device sends to have the server prove it is itself. */
+export const HUB_PROOF_CHALLENGE = /^[A-Za-z0-9_-]{16,128}$/;
+
+/** The exact text a server signs to prove itself to a device's challenge. */
+export function hubProofSigningText(hubId: string, challenge: string): string {
+  return ["accord-hub-proof-v1", hubId, challenge].join("\n");
 }
 
 /** PUT /v1/roster (owner only): the whole roster, owner included. */
