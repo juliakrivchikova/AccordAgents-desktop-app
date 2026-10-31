@@ -106,6 +106,7 @@ import { HubClient } from "./services/hubClient";
 import { ServerChatLink } from "./services/serverChatLink";
 import { deviceIdForPublicKey, hubCertificateCrypto, signHubText } from "./services/hubAuth";
 import { HubPhonePublisher } from "./services/hubPhonePublisher";
+import { HubMemberRulesPublisher, memberRulesFrom } from "./services/hubMemberRules";
 import {
   HUB_PHONE_PROTOCOL_VERSION,
   hubPhoneInviteSigningText,
@@ -531,6 +532,14 @@ async function startServerChatLinkOnce(): Promise<void> {
 }
 
 let lastNewChatOptions: import("../shared/hubProtocol").HubNewChatOptions | undefined;
+// The User's rules for members (roles, saved members) on her server, which
+// holds the cloud machines' changes to a chat's members to them.
+const hubMemberRulesPublisher = new HubMemberRulesPublisher({
+  client: () => (hubOwnerConfirmed ? hubClient : undefined),
+  rules: async () => memberRulesFrom(await settingsService.getPublicSettings()),
+  log: (event, payload) => { void debugLogService.write(event, payload); }
+});
+
 const hubPhonePublisher: HubPhonePublisher = new HubPhonePublisher({
   client: () => hubOwnerConfirmed ? hubClient : undefined,
   hasPhones: async () => (await hubPhones()).length > 0,
@@ -698,6 +707,7 @@ function publishHubRoster(): void {
     });
     hubPhonePublisher.scheduleCatalog();
     hubPhonePublisher.publishWakeKeys();
+    hubMemberRulesPublisher.publish();
   })().catch((error: unknown) => {
     // A machine set up while the hub was away would be refused by it: the
     // list goes up again until the hub has it.
@@ -764,6 +774,7 @@ async function startHubLink(): Promise<void> {
   // A picture the User sent from the phone is read from the server.
   chatService.setHubBlobReader((reference) => blobClient.downloadBytes(reference));
   hubPhonePublisher.reset();
+  hubMemberRulesPublisher.reset();
   publishHubRoster();
   // Phones that paired while this desktop was away are on the server's
   // roster: learned now, and the roster is read again from then on.
@@ -2979,6 +2990,7 @@ void app.whenReady().then(async () => {
     let machineSettingsSync: ReturnType<typeof setTimeout> | undefined;
     settingsService.onStoredChange(() => {
       hubPhonePublisher.scheduleCatalog();
+      hubMemberRulesPublisher.publish(2_000);
       if (machineSettingsSync) clearTimeout(machineSettingsSync);
       machineSettingsSync = setTimeout(() => {
         machineSettingsSync = undefined;

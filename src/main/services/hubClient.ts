@@ -1,7 +1,7 @@
 import { BLOB_FRAGMENT_MAX_BYTES, isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import {
-  HUB_PROGRESS_PATH, hubBlobFragmentPath, hubWebSocketUrl,
-  type HubComposerCatalog, type HubDevice, type HubHealth, type HubMachineWakeRequest, type HubPhoneInvite, type HubProgressPost, type HubRosterResponse
+  HUB_MEMBER_RULES_PATH, HUB_PROGRESS_PATH, hubBlobFragmentPath, hubWebSocketUrl,
+  type HubComposerCatalog, type HubDevice, type HubHealth, type HubMachineWakeRequest, type HubMemberRules, type HubPhoneInvite, type HubProgressPost, type HubRosterResponse
 } from "../../shared/hubProtocol";
 import type { MachineProgressFrame } from "../../shared/machineProgress";
 import {
@@ -302,6 +302,12 @@ export class HubClient {
   /** The composer's catalog the phone reads (owner only). */
   setCatalog(catalog: HubComposerCatalog): Promise<{ ok: boolean }> {
     return this.request("PUT", "/v1/catalog", JSON.stringify({ catalog }), "application/json");
+  }
+
+  /** The User's rules for members, which the server holds machines to
+   *  (owner only). */
+  setMemberRules(rules: HubMemberRules): Promise<{ ok: boolean }> {
+    return this.request("PUT", HUB_MEMBER_RULES_PATH, JSON.stringify(rules), "application/json");
   }
 
   /** This desktop's members' live progress, for the phone to show while

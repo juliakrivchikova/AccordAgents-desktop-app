@@ -9,6 +9,7 @@ import {
   HUB_AUTH_MAX_SKEW_MS,
   HUB_MAX_BODY_BYTES,
   HUB_MAX_SMALL_BODY_BYTES,
+  HUB_MEMBER_RULES_PATH,
   HUB_PROGRESS_PATH,
   HUB_PROOF_CHALLENGE,
   HUB_PROTOCOL_VERSION,
@@ -25,6 +26,7 @@ import {
   type HubDevice,
   type HubHealth,
   type HubLiveOps,
+  type HubMemberRules,
   type HubPhoneCertificate,
   type HubPhoneEnrollRequest,
   type HubPhoneEnrollResponse,
@@ -41,7 +43,7 @@ import type { ChatSearchService } from "../main/services/chatSearch";
 import type { StorageService } from "../main/services/storage";
 import { isAllowedPushEndpoint } from "./hubPush";
 import { HUB_PHONE_PATHS, type HubPhoneApi } from "./hubPhone";
-import { HubOpsRequestError, type HubOps } from "./hubOps";
+import { HUB_MEMBER_RULES_DOCUMENT, HubOpsRequestError, type HubOps } from "./hubOps";
 import {
   HUB_ARTIFACT_PATH, HUB_ARTIFACTS_PATH, HUB_CARDS_PATH, HUB_CHAT_PATH, HUB_CHATS_PATH, HUB_FEED_PATH, HUB_MACHINE_SETTINGS_PATH, HUB_ME_PATH, HUB_OPS_PATH, HUB_TURNS_PATH,
   type HubCardsResponse, type HubFeedGone, type HubLiveSettings, type HubMachineSettings, type HubMachineSettingsPut, type HubMe, type HubTurnsResponse
@@ -548,6 +550,7 @@ export class HubServer {
       const checked = await this.preauthenticate(request.headers.authorization);
       const large = (request.method === "POST" && url.pathname === HUB_OPS_PATH) || (request.method === "PUT" && BLOB_PATH.test(url.pathname)) ||
         (request.method === "PUT" && url.pathname === "/v1/catalog") || (request.method === "POST" && url.pathname === HUB_PROGRESS_PATH) ||
+        (request.method === "PUT" && url.pathname === HUB_MEMBER_RULES_PATH) ||
         // A machine's settings carry the User's skills and environment.
         (request.method === "PUT" && url.pathname === HUB_MACHINE_SETTINGS_PATH);
       const body = await readBody(request, large ? HUB_MAX_BODY_BYTES : HUB_MAX_SMALL_BODY_BYTES);
@@ -660,6 +663,13 @@ export class HubServer {
           .map((entry) => entry?.blob).filter(isDeviceEventBlobReference).map((blob) => blob.blobHash);
         await this.options.storage.deviceEventBlobs().pinOnly(avatars, "catalog");
         this.options.onCatalogChanged?.();
+        return json(response, 200, { ok: true });
+      }
+      if (url.pathname === HUB_MEMBER_RULES_PATH && request.method === "PUT") {
+        if (device.role !== "owner") throw new HubRequestError(403, "Only the desktop that set up this hub publishes the User's rules for members.");
+        const rules = validMemberRules(parseJson(body));
+        await this.options.storage.hub().setDocument(HUB_MEMBER_RULES_DOCUMENT, rules, new Date(this.now()).toISOString());
+        this.options.ops?.memberRulesChanged();
         return json(response, 200, { ok: true });
       }
       if (url.pathname === "/v1/machine-wake" && request.method === "PUT") {
@@ -923,6 +933,45 @@ function validInviteIds(value: unknown): string[] {
     throw new HubRequestError(400, "Invalid settled invites.");
   }
   return value as string[];
+}
+
+/** The User's rules for members, as her computer sends them: only what the
+ *  server holds a machine to is kept. */
+function validMemberRules(value: unknown): HubMemberRules {
+  const record = value as { version?: unknown; roles?: unknown; presets?: unknown } | undefined;
+  const isRecord = (item: unknown): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item);
+  const id = (item: unknown) => typeof item === "string" && item.length > 0 && item.length <= 256;
+  const right = (item: unknown) => item === "allow" || item === "ask" || item === "deny" ? item : undefined;
+  if (record?.version !== 1 || !isRecord(record.roles) || !isRecord(record.presets) ||
+      Object.keys(record.roles).length > 2_000 || Object.keys(record.presets).length > 2_000) {
+    throw new HubRequestError(400, "Invalid rules for members.");
+  }
+  const roles: HubMemberRules["roles"] = {};
+  for (const [roleId, entry] of Object.entries(record.roles)) {
+    if (!id(roleId) || !isRecord(entry)) throw new HubRequestError(400, "Invalid role rule.");
+    const requestParticipants = right(entry.requestParticipants);
+    const requestCompaction = right(entry.requestCompaction);
+    roles[roleId] = {
+      manageRolesParticipants: right(entry.manageRolesParticipants) ?? "deny",
+      ...(requestParticipants ? { requestParticipants } : {}),
+      ...(requestCompaction ? { requestCompaction } : {})
+    };
+  }
+  const presets: HubMemberRules["presets"] = {};
+  for (const [presetId, entry] of Object.entries(record.presets)) {
+    if (!id(presetId) || !isRecord(entry) || !id(entry.handle) || !id(entry.roleConfigId) ||
+        (entry.homeMachineId !== undefined && !id(entry.homeMachineId)) || (entry.permissions !== undefined && !isRecord(entry.permissions))) {
+      throw new HubRequestError(400, "Invalid saved member.");
+    }
+    presets[presetId] = {
+      handle: entry.handle as string,
+      roleConfigId: entry.roleConfigId as string,
+      ...(entry.homeMachineId !== undefined ? { homeMachineId: entry.homeMachineId as string } : {}),
+      ...(entry.agentMode === "auto" || entry.agentMode === "plan" || entry.agentMode === "default" ? { agentMode: entry.agentMode } : {}),
+      ...(entry.permissions !== undefined ? { permissions: entry.permissions as unknown as NonNullable<HubMemberRules["presets"][string]["permissions"]> } : {})
+    };
+  }
+  return { version: 1, roles, presets };
 }
 
 function validMachineWake(value: unknown): import("../shared/hubProtocol").HubMachineWakeRequest["machines"] {

@@ -8,7 +8,7 @@
  * only devices on its roster, which the desktop that set it up keeps.
  */
 
-import type { ChatParticipant, ChatProviderKind, ChatSkillMention } from "./types";
+import type { ChatAgentMode, ChatAgentPermissions, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind, ChatSkillMention } from "./types";
 import type { NewChatMemberOption } from "./newChat";
 import type { MachineProgressFrame } from "./machineProgress";
 import { stableJson } from "./stableJson";
@@ -305,6 +305,32 @@ export interface HubNewChatOptions {
   /** Why no chat can be started now, in the computer's words. */
   unavailable?: string;
 }
+
+/** PUT /v1/member-rules (owner only): the User's rules for what a member may
+ *  do without asking her, as her computer's settings hold them. The server
+ *  holds a cloud machine's changes to a chat's members to the same rules the
+ *  app applies (src/hub/hubMachineScope.ts): it does not know her settings
+ *  otherwise, and a machine's own word about them does not count. */
+export interface HubMemberRules {
+  version: 1;
+  /** By role: whether its members manage members and roles, and the rights
+   *  a member added with it starts with. */
+  roles: Record<string, {
+    manageRolesParticipants: ChatParticipantRequestPermission;
+    requestParticipants?: ChatParticipantRequestPermission;
+    requestCompaction?: ChatParticipantRequestPermission;
+  }>;
+  /** Saved members, as one is added to a chat. */
+  presets: Record<string, {
+    handle: string;
+    roleConfigId: string;
+    homeMachineId?: string;
+    agentMode?: ChatAgentMode;
+    permissions?: ChatAgentPermissions;
+  }>;
+}
+
+export const HUB_MEMBER_RULES_PATH = "/v1/member-rules";
 
 /** PUT /v1/machine-wake (owner only): the key the hub may use to start a
  *  stopped machine, scoped in AWS to starting the User's tagged instances.
