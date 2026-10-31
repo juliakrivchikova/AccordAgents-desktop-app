@@ -14,7 +14,7 @@ import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
-import { attachApp, launchChrome, member, pairPage, serveMobileShell, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
+import { attachApp, launchChrome, member, pairPage, serveMobileShell, sleep, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
 
 // A 1x1 PNG: what a photo from the phone's library stands for here.
 const PICTURE = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
@@ -267,4 +267,96 @@ test("the phone starts a chat the way the computer would: in the project chosen,
   // The server asks the machine for the turn: no computer in between.
   const turns = await hub.storage.hubOps().turnsFor(cloudChat.id, [cloudAsk.id]);
   assert.deepEqual(turns.map((turn) => ({ participantId: turn.participantId, state: turn.state })), [{ participantId: cloudMember.id, state: "requested" }]);
+});
+
+test("the @ list in New chat offers every member, the rest reached by scrolling, as on the computer", { timeout: 120_000 }, async (t) => {
+  // The User's phone, 2026-10-31: her cloud member @victor, saved last and in
+  // no chat yet, was not among the first six the list showed, and could not
+  // be scrolled to.
+  const { createDeviceIdentity } = require("../dist/main/main/services/deviceIdentity.js");
+  const cloudMachine = createDeviceIdentity(new Date().toISOString());
+  const hub = await startMobileHub({ rosterDevices: [
+    { deviceId: cloudMachine.originId, publicKeyDerBase64: cloudMachine.publicKeyDerBase64, role: "machine", name: "Cloud run", machineId: "m-cloud" }
+  ] });
+  const site = await serveMobileShell({ port: 8343, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-new-chat-mentions-");
+  const chrome = launchChrome({ port: 9483, profile, url: `${site.origin}/`, width: 402, height: 874 });
+  let app;
+  t.after(async () => {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  await hub.createChat("conv-old", { title: "Old", participants: [member("drew")] });
+  const assistant = { id: "t-assistant", handle: "assistant", roleConfigId: "administrator", kind: "codex-cli" };
+  const handles = ["drew", "taylor", "alex-manager", "gera", "alex-codex-qa-lead", "maya-design", "sam-product", "stephan", "remote-claude", "victor"];
+  const members = handles.map((handle, index) => ({ configId: `c-${handle}`, uses: handles.length - index - 1,
+    participant: member(handle, { id: `t-${handle}`, participantConfigId: `c-${handle}` }) }));
+  // Victor as hers is: a Cloud run member whose machine has this project.
+  members[members.length - 1] = { configId: "c-victor", uses: 0, machineId: "m-cloud", projects: ["/Users/u/site"],
+    participant: member("victor", { id: "t-victor", participantConfigId: "c-victor", cloudRun: {} }) };
+  // Not addable now: still left out of the @ list, as before.
+  members.push({ configId: "c-cass", uses: 0, participant: member("cass", { id: "t-cass", participantConfigId: "c-cass" }), unavailable: "QA: Claude Code is not signed in." });
+  const newChat = { projects: [{ path: "/Users/u/site", label: "site" }], defaultProject: "/Users/u/site", assistant, members };
+  const published = await hub.call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(), roles: { "software-engineer": "Engineer", administrator: "Chat Assistant" }, prompts: [], skills: [], avatars: {}, newChat } });
+  assert.equal(published.ok, true);
+  app = await attachApp({ port: 9483 });
+  await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+  await app.waitFor(`!document.getElementById("new-chat-button").hidden`, "the New chat button");
+  await app.evaluate(`document.getElementById("new-chat-button").click()`);
+  await app.waitFor(`document.querySelectorAll("#new-chat-members .new-chat-member").length >= ${handles.length}`, "the New chat screen with the offer");
+
+  const menu = `document.getElementById("new-chat-mention-menu")`;
+  const offered = `[...document.querySelectorAll("#new-chat-mention-menu .mobile-mention-option")].map((row) => row.dataset.handle)`;
+  const type = (text) => app.evaluate(`(() => { const input = document.getElementById("new-chat-input"); input.focus(); input.value = ${JSON.stringify(text)};
+    input.setSelectionRange(input.value.length, input.value.length); input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  // Where a row is on the screen, and whether a finger there lands on it.
+  const rowAt = (handle) => app.evaluate(`(() => { const row = document.querySelector('#new-chat-mention-menu [data-handle=${JSON.stringify(handle)}]'); const box = row.getBoundingClientRect();
+    const x = box.left + box.width / 2; const y = box.top + box.height / 2; const hit = document.elementFromPoint(x, y);
+    return { x, y, onScreen: y > 0 && y < innerHeight, hit: Boolean(hit && hit.closest('[data-handle=${JSON.stringify(handle)}]')) }; })()`);
+  await type("@");
+  await app.waitFor(`!${menu}.hidden`, "the @ list opens");
+  assert.deepEqual(await app.evaluate(offered), ["assistant", ...handles], "the Assistant and every member that can be added, the most used first");
+  assert.equal(await app.evaluate(`${menu}.scrollHeight > ${menu}.clientHeight + 40`), true, "longer than the list's box: it scrolls");
+  assert.equal((await rowAt("victor")).hit, false, "the last member starts below what the list shows");
+
+  // A finger drags the list up, as on the phone: the last member comes into
+  // view, the field keeps its keyboard and the list stays open.
+  await app.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+  const from = await rowAt("alex-codex-qa-lead");
+  await app.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: from.x, y: from.y, radiusX: 1, radiusY: 1, force: 1 }] });
+  for (let step = 1; step <= 12; step += 1) {
+    await app.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: from.x, y: from.y - step * 25, radiusX: 1, radiusY: 1, force: 1 }] });
+    await sleep(16);
+  }
+  await app.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await sleep(400);
+  assert.equal(await app.evaluate(`${menu}.scrollTop > 0`), true, "the drag scrolled the list");
+  assert.equal(await app.evaluate(`!${menu}.hidden && document.activeElement === document.getElementById("new-chat-input")`), true, "a drag picks nobody and keeps the field");
+  assert.equal(await app.evaluate(`document.getElementById("new-chat-members-button").getAttribute("aria-label")`), "Members: Chat Assistant", "nobody added by the drag");
+  const victor = await rowAt("victor");
+  assert.deepEqual({ onScreen: victor.onScreen, hit: victor.hit }, { onScreen: true, hit: true }, "scrolled to, the last member is on the screen under the finger");
+  // A key that changes nothing before the caret redraws the list where it was.
+  const scrolled = await app.evaluate(`${menu}.scrollTop`);
+  await app.evaluate(`document.getElementById("new-chat-input").dispatchEvent(new KeyboardEvent("keyup", { key: "Shift", bubbles: true }))`);
+  assert.equal(await app.evaluate(`${menu}.scrollTop`), scrolled, "kept where it was scrolled to");
+  // A tap picks it.
+  await app.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: victor.x, y: victor.y, radiusX: 1, radiusY: 1, force: 1 }] });
+  await sleep(40);
+  await app.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await app.send("Emulation.setTouchEmulationEnabled", { enabled: false, maxTouchPoints: 1 });
+  await app.waitFor(`document.getElementById("new-chat-input").value === "@victor "`, "the handle is written");
+  await app.waitFor(`document.getElementById("new-chat-members-button").getAttribute("aria-label").indexOf("@victor") >= 0 && ${menu}.hidden`, "and the member is in the chat");
+
+  // Opened again, the list starts at its top, not where it was scrolled to.
+  await type("@victor and @");
+  await app.waitFor(`!${menu}.hidden`, "the @ list opens again");
+  assert.equal(await app.evaluate(`${menu}.scrollTop`), 0, "from the first match");
+  assert.equal((await rowAt("assistant")).hit, true, "the Chat Assistant in view");
+  // Narrowed by typing after a scroll, it starts at its first match too.
+  await app.evaluate(`${menu}.scrollTop = ${menu}.scrollHeight`);
+  await type("@victor and @a");
+  await app.waitFor(`${offered}[0] === "assistant" && ${menu}.scrollTop === 0`, "narrowed, from the first match");
 });

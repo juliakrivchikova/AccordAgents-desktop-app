@@ -3027,6 +3027,10 @@
   let newChatAttachments = [];
   // Pictures still being prepared: Start waits for them.
   let newChatPreparing = 0;
+  // What was typed before the caret when the @ list was last drawn: the list
+  // starts again at its top when that changes, and keeps where it was scrolled
+  // to while it does not.
+  let newChatMentionText;
   const NEW_CHAT_REJECTED_PREFIX = "Not attached: ";
   let newChatToken = 0;
   let newChatStarting = false;
@@ -3460,6 +3464,7 @@
       menu.hidden = true;
       menu.replaceChildren();
     }
+    newChatMentionText = undefined;
     if (input) input.setAttribute("aria-expanded", "false");
   }
 
@@ -3470,11 +3475,18 @@
     const input = document.getElementById("new-chat-input");
     if (!menu || !input) return;
     const caret = typeof input.selectionStart === "number" ? input.selectionStart : input.value.length;
-    const options = document.activeElement === input ? mentionOptions(input.value.slice(0, caret), newChatMentionMembers()).slice(0, 6) : [];
+    const typed = input.value.slice(0, caret);
+    // Every member that matches, as the computer's list and the chat's own @
+    // list offer them: the list scrolls past what fits (the User, 2026-10-31).
+    const options = document.activeElement === input ? mentionOptions(typed, newChatMentionMembers()) : [];
     if (options.length === 0) {
       closeNewChatMentions();
       return;
     }
+    // Opened, or narrowed by what was typed: from the first match, not from
+    // where an earlier list was scrolled to.
+    const fromTop = menu.hidden || typed !== newChatMentionText;
+    newChatMentionText = typed;
     menu.replaceChildren();
     const title = document.createElement("div");
     title.className = "mobile-mention-title";
@@ -3509,6 +3521,7 @@
       menu.append(row);
     }
     menu.hidden = false;
+    if (fromTop) menu.scrollTop = 0;
     input.setAttribute("aria-expanded", "true");
   }
 
