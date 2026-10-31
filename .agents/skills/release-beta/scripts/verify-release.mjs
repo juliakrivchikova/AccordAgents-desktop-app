@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
 const rootDir = process.cwd();
 const packageJsonPath = path.join(rootDir, "package.json");
@@ -46,12 +47,19 @@ function packagedRuntimeDependencies(packageJson) {
     : dependencies.filter((dependency) => dependency !== "node-pty");
 }
 
+// Each release platform is built on its own native machine and architecture.
+const releasePlatforms = {
+  darwin: { arch: "arm64", rollupPackage: "rollup-darwin-arm64" },
+  win32: { arch: "x64", rollupPackage: "rollup-win32-x64-msvc" }
+};
+
 function verifyEnvironment() {
-  if (process.platform !== "darwin") {
-    fail(`Beta releases require macOS; current platform is ${process.platform}`);
+  const expected = releasePlatforms[process.platform];
+  if (!expected) {
+    fail(`Releases are built on macOS or Windows; current platform is ${process.platform}`);
   }
-  if (process.arch !== "arm64") {
-    fail(`Beta releases require native arm64 Node; current architecture is ${process.arch}`);
+  if (process.arch !== expected.arch) {
+    fail(`${process.platform} releases require native ${expected.arch} Node; current architecture is ${process.arch}`);
   }
   pass(`native ${process.platform} ${process.arch} Node ${process.version}`);
 }
@@ -105,14 +113,9 @@ function verifyPreflight() {
     }
   }
 
-  const arm64RollupPackage = path.join(
-    nodeModulesPath,
-    "@rollup",
-    "rollup-darwin-arm64",
-    "package.json"
-  );
-  if (!existsSync(arm64RollupPackage)) {
-    fail("arm64 Rollup native package is missing; rerun npm ci under native arm64 Node");
+  const rollupNativePackage = releasePlatforms[process.platform].rollupPackage;
+  if (!existsSync(path.join(nodeModulesPath, "@rollup", rollupNativePackage, "package.json"))) {
+    fail(`${rollupNativePackage} is missing; rerun npm ci under native ${process.arch} Node`);
   }
 
   pass(
@@ -122,18 +125,28 @@ function verifyPreflight() {
 
 async function verifyPackagedApp(appArgument) {
   if (!appArgument) {
-    fail("Usage: verify-release.mjs packaged /path/to/AccordAgents.app");
+    fail("Usage: verify-release.mjs packaged <path/to/AccordAgents.app | packaged Windows folder>");
   }
 
   const packageJson = readRootPackageJson();
   const appPath = path.resolve(rootDir, appArgument);
-  const asarPath = path.join(appPath, "Contents", "Resources", "app.asar");
+  const asarPath = process.platform === "win32"
+    ? path.join(appPath, "resources", "app.asar")
+    : path.join(appPath, "Contents", "Resources", "app.asar");
   if (!existsSync(asarPath)) {
     fail(`Packaged app.asar not found: ${asarPath}`);
   }
 
-  const { extractFile, listPackage } = await import("@electron/asar");
-  const packagedFiles = new Set(listPackage(asarPath, {}));
+  const { verifyRuntimeArchive } = await import(pathToFileURL(path.join(rootDir, "scripts", "packaging-boundary.mjs")).href);
+  let packagedFiles;
+  try {
+    packagedFiles = new Set(verifyRuntimeArchive(asarPath));
+  } catch (error) {
+    fail(error.message);
+  }
+  pass("app.asar holds only runtime files");
+
+  const { extractFile } = await import("@electron/asar");
   const requiredFiles = [
     "/package.json",
     "/dist/main/main/main.js",
@@ -165,5 +178,5 @@ if (command === "environment") {
 } else if (command === "packaged") {
   await verifyPackagedApp(argument);
 } else {
-  fail("Usage: verify-release.mjs <environment|preflight|packaged> [AccordAgents.app path]");
+  fail("Usage: verify-release.mjs <environment|preflight|packaged> [AccordAgents.app path | packaged Windows folder]");
 }
