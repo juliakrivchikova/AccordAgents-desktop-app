@@ -925,3 +925,45 @@ test("stopWorker is a no-op for an already stopped instance", async () => {
   assert.equal(client.stopCount, 0);
   assert.equal(client.state.state, "stopped");
 });
+
+test("a new machine gets a host key made here, known here under its name before anything connects", async () => {
+  const { generateWorkerHostKey, pinWorkerHostKey, workerKnownHostsPath } = await import("./awsWorkerHostKeys");
+  const { mkdtemp, readFile, rm, stat } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const keyDir = await mkdtemp(path.join(tmpdir(), "aa-host-keys-"));
+  try {
+    const made = await generateWorkerHostKey();
+    assert.match(made.publicKey, /^ssh-ed25519 /);
+    assert.match(made.privateKey, /BEGIN OPENSSH PRIVATE KEY/);
+    const client = new FakeEc2Client();
+    // A real instance id (what the names are checked against).
+    client.runInstance = async (spec) => { client.lastRunSpec = spec; return "i-0123456789abcdef0"; };
+    const pinned: Array<[string, string]> = [];
+    const handle = await lifecycleWith(client, {
+      hostKey: { generate: async () => made, pin: async (alias: string, key: string) => { pinned.push([alias, key]); await pinWorkerHostKey(keyDir, alias, key); } }
+    }).createWorker(CREDS);
+    const cloudInit = Buffer.from(client.lastRunSpec!.userData, "base64").toString("utf8");
+    assert.ok(cloudInit.includes("ssh_keys:") && cloudInit.includes(`  ed25519_public: ${made.publicKey}`), "the machine is given the key at first boot");
+    assert.ok(cloudInit.includes("    -----BEGIN OPENSSH PRIVATE KEY-----"));
+    assert.deepEqual(pinned, [[`accordagents-${handle.instanceId}`, made.publicKey]], "known under the name every connection uses");
+    const line = (await readFile(workerKnownHostsPath(keyDir), "utf8")).trim();
+    assert.equal(line, `accordagents-${handle.instanceId} ${made.publicKey.split(" ").slice(0, 2).join(" ")}`);
+    assert.equal((await stat(workerKnownHostsPath(keyDir))).mode & 0o777, 0o600);
+    // A machine made again under the same name replaces its line; others stay.
+    await pinWorkerHostKey(keyDir, "accordagents-i-0fedcba987654321", made.publicKey);
+    await pinWorkerHostKey(keyDir, `accordagents-${handle.instanceId}`, "ssh-ed25519 AAAAnew");
+    assert.deepEqual((await readFile(workerKnownHostsPath(keyDir), "utf8")).trim().split("\n").map((item) => item.split(" ")[0]).sort(),
+      [`accordagents-${handle.instanceId}`, "accordagents-i-0fedcba987654321"].sort());
+    await assert.rejects(() => pinWorkerHostKey(keyDir, "../../etc", made.publicKey));
+    await assert.rejects(() => pinWorkerHostKey(keyDir, "accordagents-i-0fedcba987654321", "ssh-ed25519 AAAA\nevil"));
+  } finally {
+    await rm(keyDir, { recursive: true, force: true });
+  }
+});
+
+test("a machine made without a host key (a test, or before) launches as before", async () => {
+  const client = new FakeEc2Client();
+  await lifecycleWith(client).createWorker(CREDS);
+  assert.ok(!Buffer.from(client.lastRunSpec!.userData, "base64").toString("utf8").includes("ssh_keys:"));
+});

@@ -22,6 +22,9 @@ import type { MachineRecord } from "../../shared/machineLink";
 import { buildBootstrapCommand, parseWorkerBlob } from "./awsWorkerProvisioning";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
 import { AwsWorkerLifecycle } from "./awsWorkerLifecycle";
+import { generateWorkerHostKey, pinWorkerHostKey, type WorkerHostKey } from "./awsWorkerHostKeys";
+import { awsWorkerKeyDir } from "./awsWorkerKeyMaterial";
+import { userDataPath } from "../platform";
 
 type StoredAwsWorkerOperation = Awaited<ReturnType<SettingsService["getAwsWorkerOperation"]>>;
 import type {
@@ -95,6 +98,8 @@ export interface CloudRunAwsServiceOptions {
   deleteKeyMaterial?: typeof deleteGeneratedAwsWorkerKeyMaterial;
   privateKeyPathForKeyName?: (keyName: string) => string;
   currentPublicIp?: () => Promise<string>;
+  /** Tests: a new machine's host key is made and pinned by these instead. */
+  workerHostKey?: { generate: () => Promise<WorkerHostKey>; pin: (alias: string, publicKey: string) => Promise<void> };
   workerAccess?: AwsWorkerAccess;
   logger?: (event: string, payload: Record<string, unknown>) => void;
   /** Removes a machine from this desktop the way Settings → Remove does. An
@@ -187,6 +192,10 @@ export class CloudRunAwsService {
       generateKeyMaterial: this.generateKeyMaterial,
       deleteKeyMaterial: async (keyName) => (options.deleteKeyMaterial ?? deleteGeneratedAwsWorkerKeyMaterial)(keyName),
       currentPublicIp: options.currentPublicIp ?? resolveCurrentPublicIp,
+      hostKey: options.workerHostKey ?? {
+        generate: () => generateWorkerHostKey(),
+        pin: (alias, publicKey) => pinWorkerHostKey(awsWorkerKeyDir(userDataPath()), alias, publicKey)
+      },
       // The User's switch governs this desktop's own idle stop too.
       automaticStopEnabled: () => this.autoStopSwitchedOn(),
       authorizeAutomaticStop: async (info) => {

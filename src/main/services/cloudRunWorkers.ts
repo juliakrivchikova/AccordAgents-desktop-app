@@ -4,6 +4,9 @@ import { homedir } from "node:os";
 import path from "node:path";
 import type { CloudRunWorkerSettings } from "../../shared/types";
 import type { RemoteRunWorkerTarget } from "./remoteWorkerTarget";
+import { userDataPath } from "../platform";
+import { awsWorkerKeyDir } from "./awsWorkerKeyMaterial";
+import { workerKnownHostsPath } from "./awsWorkerHostKeys";
 
 export function normalizeCloudRunWorkerSettings(value: unknown): CloudRunWorkerSettings {
   const record = value && typeof value === "object" && !Array.isArray(value)
@@ -108,7 +111,14 @@ export function cloudRunSshOptionArgs(
     args.push("-i", worker.identityFile.trim());
   }
   if (worker.hostKeyAlias?.trim()) {
-    args.push("-o", `HostKeyAlias=${normalizeHostKeyAlias(worker.hostKeyAlias)}`);
+    const alias = normalizeHostKeyAlias(worker.hostKeyAlias);
+    args.push("-o", `HostKeyAlias=${alias}`);
+    // A machine this app made on AWS: the host key it was given at first
+    // boot is in this app's own known-hosts file, read first, so a machine
+    // that answers with another key is refused even on the first connection
+    // (accept-new adds only hosts no file knows).
+    const pinned = alias && AWS_MACHINE_ALIAS.test(alias) ? appKnownHostsFile() : undefined;
+    if (pinned) args.push("-o", `UserKnownHostsFile="${pinned}" ~/.ssh/known_hosts`);
   }
   if (typeof worker.port === "number" && Number.isFinite(worker.port) && worker.port > 0) {
     args.push("-p", String(Math.floor(worker.port)));
@@ -213,5 +223,17 @@ function normalizeHostKeyAlias(value: unknown): string | undefined {
 function rejectLeadingDash(label: string, value: string): void {
   if (value.startsWith("-")) {
     throw new Error(`${label} must not start with '-'.`);
+  }
+}
+
+const AWS_MACHINE_ALIAS = /^accordagents-i-[0-9a-f]{8,32}$/;
+
+/** This app's known-hosts file, when there is an app around to have one. */
+function appKnownHostsFile(): string | undefined {
+  try {
+    const file = workerKnownHostsPath(awsWorkerKeyDir(userDataPath()));
+    return file.includes("\"") ? undefined : file;
+  } catch {
+    return undefined;
   }
 }
