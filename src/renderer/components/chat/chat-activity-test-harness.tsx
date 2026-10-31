@@ -70,7 +70,6 @@ export function ActivityDisclosureHarness(props: {
   return (
     <StreamingMessageContent
       activityDisclosure={activityDisclosure}
-      startedAt={NOW}
       statusLabel={props.statusLabel}
       content={content}
       activityEvents={props.activityEvents}

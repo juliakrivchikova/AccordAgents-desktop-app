@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useState } from "react";
 
 import { MarkdownText } from "../content/markdown-text";
+import { formatChatTime } from "./chat-format";
 import type { ChatAgentActivityEvent } from "../../../shared/types";
 import {
   chatActivityEventsForSegment,
@@ -31,22 +32,19 @@ export const StreamingMessageContent = memo(function StreamingMessageContent(pro
   activity?: string;
   activityEvents?: ChatAgentActivityEvent[];
   statusLabel?: string;
-  startedAt: string;
 }): JSX.Element {
-  const elapsedSeconds = useStreamingElapsedSeconds(props.startedAt);
   const hasContent = Boolean(props.content?.trim());
   const statusLabel = props.statusLabel ?? "Thinking";
   const activity = props.activity && props.activity !== statusLabel ? props.activity : undefined;
   // Once the member is writing, its text and live command line show the work, so the status line
   // goes. A cloud run's own status (a machine being prepared, say) is not shown anywhere else
-  // and stays.
+  // and stays. The reply's running time is in the message header, next to the member's status.
   const showStatus = !hasContent || Boolean(props.statusLabel);
   return (
     <div className="streaming-message-content" aria-live="polite">
       {showStatus && (
         <div className={`streaming-message-thinking ${hasContent ? "is-compact" : ""}`}>
           <span className="streaming-status-label">{statusLabel}</span>
-          <span className="streaming-message-elapsed">{formatElapsed(elapsedSeconds)}</span>
         </div>
       )}
       {hasContent && (
@@ -228,6 +226,23 @@ function splitStreamingMarkdown(content: string): { completed: string; tail: str
     tail: normalized.slice(tailOffset),
     tailOffset
   };
+}
+
+/** The message header's time: a running reply shows how long it has been running, ticking every
+ * second, with the time it started as the tooltip; any other message shows when it was sent. */
+export const ChatMessageWhen = memo(function ChatMessageWhen(props: {
+  createdAt: string;
+  runningSince?: string;
+}): JSX.Element {
+  if (props.runningSince) {
+    return <ChatMessageElapsed startedAt={props.runningSince} sentAt={formatChatTime(props.createdAt)} />;
+  }
+  return <span className="message-when">{formatChatTime(props.createdAt)}</span>;
+});
+
+function ChatMessageElapsed(props: { startedAt: string; sentAt: string }): JSX.Element {
+  const elapsedSeconds = useStreamingElapsedSeconds(props.startedAt);
+  return <span className="message-when is-elapsed" title={props.sentAt}>{formatElapsed(elapsedSeconds)}</span>;
 }
 
 function formatElapsed(totalSeconds: number): string {

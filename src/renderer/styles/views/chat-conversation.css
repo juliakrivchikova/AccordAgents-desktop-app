@@ -2959,13 +2959,6 @@
   font-size: 12.5px;
 }
 
-.streaming-message-elapsed {
-  color: var(--app-muted-subtle);
-  font-family: var(--font-code);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
 .streaming-message-activity {
   color: var(--app-muted-subtle);
   font-family: var(--font-code);
