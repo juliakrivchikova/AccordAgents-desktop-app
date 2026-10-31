@@ -260,7 +260,7 @@ export class ServerChatLink {
         break;
       } catch (error) {
         // A server that is not the User's is said in Settings, not only logged.
-        this.identityProblem = error instanceof HubIdentityError ? error.message : undefined;
+        this.identityProblem = error instanceof HubIdentityError ? { message: error.message, since: this.identityProblem?.since ?? Date.now() } : undefined;
         this.options.log("chat.server.move-failed", { attempt, message: error instanceof Error ? error.message : String(error) });
         await new Promise((resolve) => setTimeout(resolve, Math.min(60_000, 2_000 * 2 ** Math.min(5, attempt))));
       }
@@ -344,12 +344,12 @@ export class ServerChatLink {
 
   /** Why the chats could not move: the server at the address is not the
    *  User's (HubIdentityError). */
-  private identityProblem?: string;
+  private identityProblem?: { message: string; since: number };
 
   async status(): Promise<{ queued: number; unreachableSince?: number; lastError?: string; ready: boolean } | undefined> {
     if (!this.ops) return undefined;
     const status = await this.ops.status();
-    if (this.identityProblem) return { ...status, unreachableSince: status.unreachableSince ?? Date.now(), lastError: this.identityProblem, ready: this.ready };
+    if (this.identityProblem) return { ...status, unreachableSince: status.unreachableSince ?? this.identityProblem.since, lastError: this.identityProblem.message, ready: this.ready };
     return { ...status, ready: this.ready };
   }
 

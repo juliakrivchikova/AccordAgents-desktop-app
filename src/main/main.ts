@@ -493,7 +493,8 @@ const serverChatLink = new ServerChatLink({
   identity: () => deviceIdentityService.getOrCreateDeviceIdentity(),
   hubConfig: async () => {
     const config = await settingsService.getHubConfig();
-    return config ? { url: config.url } : undefined;
+    // With what the server must prove: the chats go to it only then.
+    return config ? { url: config.url, hubId: config.hubId, hubKey: config.hubKey } : undefined;
   },
   startEmbedded: async (owner) => {
     const { startEmbeddedHub } = await import("../hub/embeddedHub");
@@ -751,8 +752,9 @@ async function startHubLink(): Promise<void> {
     url: config.url, identity,
     // The server this computer set up proves it is that one before the
     // roster, invites or start keys go to it.
+    // Settings that cannot be read fail the check (nothing is sent), never pass it.
     expect: async () => {
-      const current = await settingsService.getHubConfig().catch(() => undefined);
+      const current = await settingsService.getHubConfig();
       return current ? { hubId: current.hubId, hubKey: current.hubKey } : undefined;
     }
   });
@@ -2917,7 +2919,13 @@ void app.whenReady().then(async () => {
       onDevicesChanged: () => publishHubRoster(),
       createClient: (pairing: MobilePairingPackage) => pairing.hubUrl ? new HubTunnelClient({
         hubUrl: pairing.hubUrl, rendezvousId: pairing.rendezvousId, role: "desktop",
-        identity: () => deviceIdentityService.getOrCreateDeviceIdentity()
+        identity: () => deviceIdentityService.getOrCreateDeviceIdentity(),
+        // The same server the link proved; a room elsewhere is not opened.
+        verify: async () => {
+          const client = hubClient;
+          if (!client || client.hubUrl !== (pairing.hubUrl ?? "").replace(/\/+$/, "")) throw new Error("This room is not on the server this computer is linked to.");
+          await client.health();
+        }
       }) : undefined,
       appVersion: app.getVersion(),
       desktopDeviceId: desktopIdentity.originId,

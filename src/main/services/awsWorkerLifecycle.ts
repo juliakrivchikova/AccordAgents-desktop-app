@@ -185,13 +185,14 @@ export class AwsWorkerLifecycle {
       ...(hostKey ? { hostKey } : {})
     });
     const instanceId = await client.runInstance(spec);
-    this.log("aws-worker.created", { instanceId, securityGroupId, hostKeyPinned: Boolean(hostKey) });
+    this.log("aws-worker.created", { instanceId, securityGroupId, hostKeyMade: Boolean(hostKey) });
     if (hostKey) {
       // Before anything connects to it. A failure here only leaves the first
       // connection checked as before (trust on first use); it is logged.
-      await this.options.hostKey!.pin(`accordagents-${instanceId}`, hostKey.publicKey).catch((error: unknown) => {
-        this.log("aws-worker.host-key-pin-failed", { instanceId, message: error instanceof Error ? error.message : String(error) });
-      });
+      await this.options.hostKey!.pin(`accordagents-${instanceId}`, hostKey.publicKey).then(
+        () => this.log("aws-worker.host-key-pinned", { instanceId }),
+        (error: unknown) => this.log("aws-worker.host-key-pin-failed", { instanceId, message: error instanceof Error ? error.message : String(error) })
+      );
     }
     return {
       instanceId,

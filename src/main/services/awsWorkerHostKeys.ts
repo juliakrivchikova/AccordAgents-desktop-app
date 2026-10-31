@@ -42,6 +42,12 @@ export async function generateWorkerHostKey(run: typeof runCommand = runCommand)
 }
 
 const ALIAS = /^accordagents-i-[0-9a-f]{8,32}$/;
+
+/** Whether a connection name is one this app gives the AWS machines it makes. */
+export function isAwsMachineAlias(alias: string): boolean {
+  return ALIAS.test(alias);
+}
+
 const PUBLIC_KEY = /^ssh-ed25519 [A-Za-z0-9+/=]+( .*)?$/;
 
 /** Records the key a machine will answer with, under its connection name. */

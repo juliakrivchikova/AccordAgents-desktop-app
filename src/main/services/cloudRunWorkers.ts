@@ -6,7 +6,7 @@ import type { CloudRunWorkerSettings } from "../../shared/types";
 import type { RemoteRunWorkerTarget } from "./remoteWorkerTarget";
 import { userDataPath } from "../platform";
 import { awsWorkerKeyDir } from "./awsWorkerKeyMaterial";
-import { workerKnownHostsPath } from "./awsWorkerHostKeys";
+import { isAwsMachineAlias, workerKnownHostsPath } from "./awsWorkerHostKeys";
 
 export function normalizeCloudRunWorkerSettings(value: unknown): CloudRunWorkerSettings {
   const record = value && typeof value === "object" && !Array.isArray(value)
@@ -117,7 +117,7 @@ export function cloudRunSshOptionArgs(
     // boot is in this app's own known-hosts file, read first, so a machine
     // that answers with another key is refused even on the first connection
     // (accept-new adds only hosts no file knows).
-    const pinned = alias && AWS_MACHINE_ALIAS.test(alias) ? appKnownHostsFile() : undefined;
+    const pinned = alias && isAwsMachineAlias(alias) ? appKnownHostsFile() : undefined;
     if (pinned) args.push("-o", `UserKnownHostsFile="${pinned}" ~/.ssh/known_hosts`);
   }
   if (typeof worker.port === "number" && Number.isFinite(worker.port) && worker.port > 0) {
@@ -225,8 +225,6 @@ function rejectLeadingDash(label: string, value: string): void {
     throw new Error(`${label} must not start with '-'.`);
   }
 }
-
-const AWS_MACHINE_ALIAS = /^accordagents-i-[0-9a-f]{8,32}$/;
 
 /** This app's known-hosts file, when there is an app around to have one. */
 function appKnownHostsFile(): string | undefined {

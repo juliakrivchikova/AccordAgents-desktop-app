@@ -15,11 +15,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createRequire } from "node:module";
 import { rm } from "node:fs/promises";
-import { HUB_PAIRING_KEY, attachApp, pairPage, launchChrome, member, serveMobileShell, sleep, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
+import { HUB_PAIRING_KEY, attachApp, pairPage, launchChrome, member, serveMobileShell, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
 
 const require = createRequire(import.meta.url);
-const SITE_PORT = 8321;
-const CDP_PORT = 9471;
+const SITE_PORT = 8352;
+const CDP_PORT = 9502;
 
 const pairingOf = (app) => app.evaluate(`JSON.parse(localStorage.getItem(${JSON.stringify(HUB_PAIRING_KEY)}) || "null")`);
 const identityRecord = (app) => app.evaluate(`(async () => {
@@ -122,10 +122,13 @@ test("a phone paired before keeps its pairing; its key kept as text becomes a no
     // Still the same phone to the server: nothing was paired again.
     assert.deepEqual((await hub.phones()).map((device) => device.deviceId), [legacy.deviceId]);
     // And it still signs: a fresh read after another launch works with the sealed key.
+    const reloadAt = Date.now();
+    await app.evaluate(`localStorage.removeItem("accordagents.mobile.chatList.v1")`);
     await app.send("Page.reload", {});
     await app.waitFor(`Boolean(globalThis.AccordAgentsMobile) && document.querySelectorAll(".mobile-chat-row").length > 0`, "the chats show after the next launch", 20_000);
-    const reads = hub.requests.filter((request) => request.path.startsWith("/v1/phone/") && request.at > Date.now() - 20_000);
+    const reads = hub.requests.filter((request) => request.path.startsWith("/v1/phone/") && request.at > reloadAt);
     assert.ok(reads.length > 0, "the phone kept reading the server with the sealed key");
+    assert.equal(hub.requests.filter((request) => request.at > reloadAt && request.status >= 400).length, 0, "and the server took every request");
   } finally {
     app?.close?.();
     chrome.kill("SIGKILL");

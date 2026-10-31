@@ -17,11 +17,12 @@ export function loadOrCreateHubKey(dir: string): HubKey {
     if (typeof stored.publicKeyDerBase64 === "string" && typeof stored.privateKeyDerBase64 === "string") {
       return { publicKeyDerBase64: stored.publicKeyDerBase64, privateKeyDerBase64: stored.privateKeyDerBase64 };
     }
+    // Never replaced silently: the devices that know the key would refuse
+    // the server from then on, with nothing to say why.
+    throw new Error(`${file} does not hold the server's key; it is left as it is.`);
   }
   const made = createDeviceIdentity(new Date().toISOString());
   const key = { publicKeyDerBase64: made.publicKeyDerBase64, privateKeyDerBase64: made.privateKeyDerBase64 };
-  // Not over an existing file: a key that could not be read is not replaced
-  // silently (the devices that know it would refuse the new one).
-  writeFileSync(file, JSON.stringify(key), { mode: 0o600, flag: existsSync(file) ? "w" : "wx" });
+  writeFileSync(file, JSON.stringify(key), { mode: 0o600, flag: "wx" });
   return key;
 }

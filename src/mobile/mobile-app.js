@@ -1641,12 +1641,12 @@
     }
   }
 
-  /** Starts pairing with the User's server when the address carries the code
-   *  the desktop shows; true when it did. */
+  /** Asks whether to pair with the server a pairing code names, when the
+   *  address carries one; true when it did. */
   function readBootstrapFromLocation(locationValue) {
     const url = new URL(locationValue.href);
-    // The code for the User's server: paired with it now, in the background
-    // of the first screen; the address bar keeps none of it.
+    // A code for a server: the phone asks before it pairs (askToPair); the
+    // address bar keeps none of it.
     const invite = readHubInvite(url);
     if (invite) {
       scrubCredentialsFromLocation();
@@ -2341,8 +2341,9 @@
    * same phone again rather than refusing it.
    */
   async function pairWithServer(invite) {
-    // Pairing over a pairing this phone has: its chats stay on screen until
-    // it is done, and a failure says so above them, with a way back.
+    // Pairing over a pairing this phone has: the screen says how it goes in
+    // place of the chats, and after a failure the chats come back as they
+    // were (Back to chats); they are cleared only once the new pairing holds.
     const replacing = Boolean(loadHubPairing());
     const api = globalThis.AccordHubClient;
     if (!api) {
@@ -5713,10 +5714,6 @@
     });
   }
 
-  // An installed home-screen app gets its own storage on iOS, so it starts with
-  // no pairing even though Safari has one. Say that plainly instead of showing
-  // an empty list with dead buttons. The same screen serves re-pairing after a
-  // revoke: the QR scan and paste box are the no-hand-copy path to a new link.
   /**
    * The question a pairing code asks before it is used, with the server's
    * address; and, while a pairing would replace this phone's, how it goes
@@ -5781,6 +5778,10 @@
     container.append(notice, actions);
   }
 
+  // An installed home-screen app gets its own storage on iOS, so it starts with
+  // no pairing even though Safari has one. Say that plainly instead of showing
+  // an empty list with dead buttons. The same screen serves re-pairing after a
+  // revoke: the QR scan and paste box are the no-hand-copy path to a new link.
   function renderUnpairedNotice(noticeText, stateTag) {
     const state = stateTag || "unpaired";
     const container = document.getElementById("chat-list");

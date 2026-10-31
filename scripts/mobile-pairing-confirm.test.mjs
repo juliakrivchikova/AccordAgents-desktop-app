@@ -20,8 +20,8 @@ import test from "node:test";
 import { rm } from "node:fs/promises";
 import { HUB_PAIRING_KEY, attachApp, launchChrome, member, pairPage, serveMobileShell, sleep, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
 
-const SITE_PORT = 8311;
-const CDP_PORT = 9461;
+const SITE_PORT = 8362;
+const CDP_PORT = 9512;
 
 const pairingOf = (app) => app.evaluate(`JSON.parse(localStorage.getItem(${JSON.stringify(HUB_PAIRING_KEY)}) || "null")`);
 const identityRecord = (app) => app.evaluate(`(async () => {

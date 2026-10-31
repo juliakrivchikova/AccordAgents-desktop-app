@@ -967,3 +967,23 @@ test("a machine made without a host key (a test, or before) launches as before",
   await lifecycleWith(client).createWorker(CREDS);
   assert.ok(!Buffer.from(client.lastRunSpec!.userData, "base64").toString("utf8").includes("ssh_keys:"));
 });
+
+test("connections to a machine this app made read the app's known hosts first; others are as before", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const path = await import("node:path");
+  const { createHeadlessPlatform, setHostPlatform } = await import("../platform");
+  const { cloudRunSshOptionArgs } = await import("./cloudRunWorkers");
+  const userData = await mkdtemp(path.join(tmpdir(), "aa user data "));
+  try {
+    setHostPlatform(createHeadlessPlatform({ userDataDir: userData, appVersion: "test" }));
+    const made = cloudRunSshOptionArgs({ host: "1.2.3.4", hostKeyAlias: "accordagents-i-0123456789abcdef0" });
+    const known = made[made.indexOf("HostKeyAlias=accordagents-i-0123456789abcdef0") + 2];
+    assert.equal(known, `UserKnownHostsFile="${path.join(userData, "cloud-runs-keys", "known_hosts")}" ~/.ssh/known_hosts`);
+    assert.ok(made.includes("StrictHostKeyChecking=accept-new"), "a machine made before still connects as it did");
+    const other = cloudRunSshOptionArgs({ host: "1.2.3.4", hostKeyAlias: "my-own-box" });
+    assert.ok(!other.some((arg) => arg.startsWith("UserKnownHostsFile=")), "a machine the User set up herself is as before");
+  } finally {
+    await rm(userData, { recursive: true, force: true });
+  }
+});

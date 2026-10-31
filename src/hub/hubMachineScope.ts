@@ -127,6 +127,11 @@ export function scopeMachineConversationUpdate(conversation: Conversation, updat
         if (!own(policy) && !beforePolicies.some((item) => item.id === policy.id && JSON.stringify(item) === JSON.stringify(policy))) refused.push(`appToolApprovalPolicies.${policy.id}`);
       }
       next.appToolApprovalPolicies = kept;
+    } else {
+      // Members removed without the rules in the same write: their rules go
+      // anyway, so a member added again later does not find them waiting.
+      const pruned = beforePolicies.filter(stays);
+      if (pruned.length !== beforePolicies.length) next.appToolApprovalPolicies = pruned;
     }
   }
 

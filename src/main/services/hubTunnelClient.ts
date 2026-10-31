@@ -85,6 +85,9 @@ export class HubTunnelClient implements TunnelClient {
     rendezvousId: string;
     role: TunnelRole;
     identity: () => Promise<HubSigningIdentity>;
+    /** The server at the address proves it is the User's before a signed
+     *  room request goes to it (HubClient's check). */
+    verify?: () => Promise<void>;
     reconnectDelayMs?: number;
   }) {}
 
@@ -128,6 +131,13 @@ export class HubTunnelClient implements TunnelClient {
   private async open(): Promise<void> {
     if (this.closed) return;
     this.setState(this.attempt === 0 ? "connecting" : "tunnel-reconnecting");
+    // Not proven (or not reached): nothing signed goes out; tried again later.
+    try {
+      await this.options.verify?.();
+    } catch {
+      this.scheduleReconnect();
+      return;
+    }
     const identity = await this.options.identity();
     this.ownId = identity.originId;
     const pathWithQuery = `/v1/room?rid=${encodeURIComponent(this.options.rendezvousId)}&role=${this.options.role}`;

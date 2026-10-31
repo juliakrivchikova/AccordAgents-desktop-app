@@ -149,6 +149,7 @@ export async function startMobileHub(options = {}) {
       return;
     }
     const upstream = httpRequest({ host: "127.0.0.1", port: innerPort, method: req.method, path: req.url, headers: req.headers }, (answer) => {
+      seen.status = answer.statusCode;
       res.writeHead(answer.statusCode || 502, answer.headers);
       if (opsRequest) {
         const answered = [];

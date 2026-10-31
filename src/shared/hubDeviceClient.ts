@@ -42,10 +42,6 @@ export interface HubDeviceIdentity {
 /** What signing needs of an identity: its key, in either form. */
 export type HubSigningKey = Pick<HubDeviceIdentity, "privateKey" | "privateKeyDerBase64">;
 
-/** Whether an identity can sign at all (a key in either form). */
-export function hasHubSigningKey(identity: Partial<HubSigningKey> | undefined | null): boolean {
-  return Boolean(identity && (identity.privateKey || identity.privateKeyDerBase64));
-}
 
 export interface HubBlobReference {
   type: "device.event.blob";
