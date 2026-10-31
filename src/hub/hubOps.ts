@@ -282,6 +282,9 @@ export class HubOps {
         if (op.message.role !== current.role || (op.message.participantId ?? "") !== (current.participantId ?? "")) {
           return reject(opId, "A message keeps its author.");
         }
+        if (device.role === "machine" && op.message.role === "user" && op.message.metadata?.hiddenFromTimeline !== true) {
+          return reject(opId, "A cloud machine writes the User's words only as a hidden answer for its own member.");
+        }
         const message = storedMessage(op.message, {
           serverSeq: typeof current.metadata?.serverSeq === "number" ? current.metadata.serverSeq : seq,
           serverWriter: writer ?? device.deviceId,
@@ -558,6 +561,12 @@ export class HubOps {
   /** Who may add a message: anyone, except a member's message, which only
    *  the device that member runs on writes (Д4). */
   private mayWriteMessage(device: HubDevice, conversation: Conversation, message: ChatMessage, devices: HubDevice[]): Rejection | undefined {
+    // The User's words from a machine are only the hidden ones the app
+    // writes for its own member (her answer to its choice, an approval's
+    // control word): never one the chat shows, or a member reads, as hers.
+    if (device.role === "machine" && message.role === "user" && message.metadata?.hiddenFromTimeline !== true) {
+      return { rejected: "A cloud machine writes the User's words only as a hidden answer for its own member." };
+    }
     if (message.role !== "participant") return undefined;
     if (!message.participantId) return { rejected: "A member's message names its member." };
     const home = homeDeviceId(conversation, message.participantId, devices);

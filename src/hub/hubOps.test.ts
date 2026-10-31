@@ -800,10 +800,16 @@ test("a machine changes what concerns its own members; members elsewhere, the fo
   held = await page();
   assert.deepEqual(byId(held).get("p-desk")?.permissions, { shell: { enabled: false }, requestParticipants: "allow" });
 
-  // The User's words from a machine ask nobody.
-  const words = await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message: userMessage("u-machine", "run this", ["p-desk"]) });
-  assert.equal(words.body.results[0].status, "accepted");
+  // The User's words from a machine: never shown (or read by a watching
+  // member) as hers, and they ask nobody.
+  const shown = await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message: userMessage("u-shown", "run this", ["p-desk"]) });
+  assert.equal(shown.body.results[0].status, "rejected", "a machine writes no visible message as the User");
+  const hiddenWords = { ...userMessage("u-machine", "run this", ["p-desk"]), metadata: { deliveryTargets: ["p-desk"], hiddenFromTimeline: true } } as ChatMessage;
+  const words = await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message: hiddenWords });
+  assert.equal(words.body.results[0].status, "accepted", "the hidden answer the app writes for its own member");
   assert.equal((await h.storage.hubOps().turn(hubTurnRunId("u-machine", "p-desk"))), undefined, "no turn is asked by them");
+  const unhidden = await h.write(h.machine, { opId: id("op"), kind: "message.update", conversationId: chat, message: { ...hiddenWords, metadata: { deliveryTargets: ["p-desk"] } } as ChatMessage });
+  assert.equal(unhidden.body.results[0].status, "rejected", "nor shown later");
   await h.write(h.owner, { opId: id("op"), kind: "message.create", conversationId: chat, message: userMessage("u-user", "earlier words") });
   await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message: reply("r-box", "p-box", "done", "@desk please look") });
   const ask = (messageId: string, request?: Record<string, unknown>) => h.write(h.machine, { opId: id("op"), kind: "turn.request", conversationId: chat,
