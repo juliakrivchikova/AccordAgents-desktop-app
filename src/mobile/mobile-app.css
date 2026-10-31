@@ -1280,6 +1280,21 @@ button.mobile-chat-group-title:active {
   font: 600 15px var(--sans);
 }
 
+.pairing-cancel {
+  padding: 13px 16px;
+  border: 1px solid var(--bd);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--fg1);
+  font: 600 15px var(--sans);
+}
+
+.pairing-host {
+  color: var(--fg1);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
 .pairing-error {
   margin: 10px 20px 0;
   color: var(--danger);

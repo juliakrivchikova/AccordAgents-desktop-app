@@ -474,12 +474,24 @@ export async function pairPage(app, { hub, siteOrigin, scope, query, expectChats
   // scrubbed the code from it.
   const url = code.url(siteOrigin);
   await app.send("Page.navigate", { url: query ? url.replace("/?pair=server", `/?${query}&pair=server`) : url });
+  // A code is never used at once: the phone asks, naming the server.
+  await confirmPairing(app);
   await app.waitFor(`Boolean(localStorage.getItem(${JSON.stringify(HUB_PAIRING_KEY)}))`, "the phone stored its pairing with the server", 20_000);
   if (expectChats) {
     await app.waitFor(`Boolean(globalThis.AccordAgentsMobile) && JSON.parse(localStorage.getItem("accordagents.mobile.chatList.v1") || "[]").length > 0`,
       "the phone read the chat list from the server", 20_000);
   }
   return code;
+}
+
+/** Answers the phone's question before it pairs, as a tap on its button
+ *  does; returns what the question said. */
+export async function confirmPairing(app) {
+  await app.waitFor(`Boolean(document.querySelector(".pairing-confirm")) && Boolean(document.querySelector("#chat-list .pairing-submit"))`,
+    "the phone asks before it pairs", 20_000);
+  const said = await app.evaluate(`document.querySelector(".pairing-confirm").textContent`);
+  await app.evaluate(`document.querySelector("#chat-list .pairing-submit").click()`);
+  return said;
 }
 
 /** Opens a chat from the list, as a tap on its row does. */
