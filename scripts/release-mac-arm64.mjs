@@ -21,10 +21,10 @@ function printHelp() {
   console.log(`Usage: npm run release:<patch|minor|major|beta> [-- options]
 
 Creates a macOS arm64 release:
-  1. bumps package.json/package-lock.json,
-  2. commits and pushes the version bump to the source repo,
-  3. tags the source repo at v<version>,
-  4. builds signed/notarized DMG and signed ZIP artifacts,
+  1. bumps package.json/package-lock.json and commits the bump locally,
+  2. tags it locally at v<version>,
+  3. builds signed/notarized DMG and signed ZIP artifacts and launch-checks the app,
+  4. pushes the bump and the tag to the source repo (a failed build pushes nothing and uses no version),
   5. creates or updates a GitHub Release in the public release repo; a new release is tagged at a new
      empty commit on the release repo's default branch so the update feed lists it first,
   6. checks update.electronjs.org for the ZIP asset.
@@ -67,8 +67,24 @@ function runInherited(command, args, env = process.env) {
 
 // The build runs every dependency's code; it needs no GitHub credentials.
 function envWithoutGitHubTokens() {
-  const { GH_TOKEN, GITHUB_TOKEN, ...env } = process.env;
+  const { GH_TOKEN, GITHUB_TOKEN, SOURCE_PUSH_TOKEN, ...env } = process.env;
   return env;
+}
+
+// In CI the source repo is checked out without stored credentials; the token
+// for pushing the bump and the tag is handed to those two git calls only.
+function sourcePushEnv() {
+  const token = process.env.SOURCE_PUSH_TOKEN;
+  if (!token) {
+    return process.env;
+  }
+  const auth = Buffer.from(`x-access-token:${token}`).toString("base64");
+  return {
+    ...process.env,
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.https://github.com/.extraheader",
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${auth}`
+  };
 }
 
 function commandSucceeds(command, args) {
@@ -327,7 +343,6 @@ function bumpVersion(target, sourceBranch) {
   const afterVersion = currentVersion();
   runInherited("git", ["add", "package.json", "package-lock.json"]);
   runInherited("git", ["commit", "-m", `Bump version to ${afterVersion}`]);
-  runInherited("git", ["push", "origin", `HEAD:${sourceBranch}`]);
 
   return afterVersion;
 }
@@ -344,6 +359,8 @@ function remoteTagExists(tagName) {
   return run("git", ["ls-remote", "--tags", "origin", `refs/tags/${tagName}`]).trim().length > 0;
 }
 
+// The bump commit and tag stay local until the signed build succeeded, so a
+// failed build uses no version.
 function ensureSourceTag(tagName) {
   const headCommit = run("git", ["rev-parse", "HEAD"]).trim();
   const localCommit = localTagCommit(tagName);
@@ -369,9 +386,26 @@ function ensureSourceTag(tagName) {
     console.log(`\n==> Creating source tag ${tagName}`);
     runInherited("git", ["tag", "-a", tagName, "-m", `Release ${tagName}`]);
   }
+}
 
-  console.log(`\n==> Pushing source tag ${tagName}`);
-  runInherited("git", ["push", "origin", tagName]);
+function pushSource(sourceBranch, tagName) {
+  console.log(`\n==> Pushing the version bump and source tag ${tagName}`);
+  try {
+    runInherited("git", ["push", "--atomic", "origin", `HEAD:refs/heads/${sourceBranch}`, `refs/tags/${tagName}`], sourcePushEnv());
+  } catch {
+    rollBackLocalBump(tagName);
+    fail(`Pushing ${tagName} to ${sourceBranch} failed, so nothing was published and no version was used. If ${sourceBranch} moved meanwhile, start a new release for the commit you want.`);
+  }
+}
+
+function rollBackLocalBump(tagName) {
+  console.log(`\n==> Dropping the unpushed version bump and tag ${tagName}`);
+  try {
+    runInherited("git", ["tag", "-d", tagName]);
+  } catch {
+    // The tag was never created.
+  }
+  runInherited("git", ["reset", "--hard", "HEAD~1"]);
 }
 
 function requireFile(filePath) {
@@ -553,7 +587,7 @@ ensureCleanWorktree();
 if (options.expectHead) {
   const headCommit = run("git", ["rev-parse", "HEAD"]).trim();
   if (headCommit !== options.expectHead) {
-    fail(`${sourceBranch} moved to ${headCommit} after this release was started for ${options.expectHead}. Nothing was bumped; start a new release for the commit you want.`);
+    fail(`${sourceBranch} moved to ${headCommit} after this release was started for ${options.expectHead}. Nothing was bumped. Start a new release for the commit you want, after reconciling any earlier attempt that failed after its bump.`);
   }
 }
 
@@ -573,13 +607,20 @@ if (tagName !== plannedTagName) {
   try {
     preflightReleaseRepo(options.releaseRepo, releaseRepoBranch, tagName);
   } catch (error) {
+    rollBackLocalBump(tagName);
     fail(error.message);
   }
 }
 ensureSourceTag(tagName);
 
 console.log("\n==> Building signed macOS arm64 artifacts");
-runInherited("npm", ["run", "signed:mac-arm64"], envWithoutGitHubTokens());
+try {
+  runInherited("npm", ["run", "signed:mac-arm64"], envWithoutGitHubTokens());
+} catch {
+  rollBackLocalBump(tagName);
+  fail(`The signed build failed before anything was pushed, so ${tagName} was not used. Fix the cause and release again.`);
+}
+pushSource(sourceBranch, tagName);
 
 const assets = releaseAssets(version);
 const targetCommit = createOrUpdateGitHubRelease(options, tagName, releaseRepoBranch, assets);
