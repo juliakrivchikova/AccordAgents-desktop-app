@@ -158,7 +158,7 @@ gh workflow run release.yml --repo juliakrivchikova/AccordAgents-desktop-app --r
 ```
 
 `-f target=build-only` signs, notarizes and launch-checks any branch without
-bumping or publishing. The workflow needs the repository secrets listed at the
+bumping or publishing. Stable targets work once this workflow is on `main`. The workflow needs the repository secrets listed at the
 top of `release.yml`. It runs the same `release-mac-arm64.mjs` as below, pinned
 to the commit the run was started for, then downloads the published assets and
 checks and launches them.
@@ -176,10 +176,11 @@ npm run release:minor
 npm run release:major
 ```
 
-The release script bumps the version, commits and pushes the bump to the source
-repo, creates and pushes source tag `v<version>`, runs `npm run
-signed:mac-arm64`, then creates or updates the GitHub Release in
-the selected release repository with:
+The release script bumps the version, commits the bump and creates source tag
+`v<version>` locally, runs `npm run signed:mac-arm64`, pushes the bump and the
+tag together only after that build succeeded (a failed build is rolled back and
+uses no version), then creates or updates the GitHub Release in the selected
+release repository with:
 
 ```text
 AccordAgents-<version>-arm64.dmg

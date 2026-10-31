@@ -33,8 +33,10 @@ on:
 permissions:
   contents: write
 
+# One release at a time. GitHub keeps only the newest waiting run per group,
+# so trial builds get their own group and never cancel a waiting release.
 concurrency:
-  group: release
+  group: ${{ inputs.target == 'build-only' && 'release-build-only' || 'release' }}
   cancel-in-progress: false
 
 jobs:
@@ -58,7 +60,7 @@ jobs:
           fi
 
       # No stored credentials: dependency install scripts and the build never
-      # see a token that can push. The Release step adds one just for itself.
+      # see a token that can push. The release script hands one to its push.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -152,6 +154,48 @@ jobs:
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
 
+      # Everything the build needs, checked before a version is used. The
+      # bundle id must stay the one users already have: their updates are
+      # refused if it changes.
+      - name: Check the signing settings
+        env:
+          APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARIZE_APPLE_ID: ${{ secrets.APPLE_NOTARIZE_APPLE_ID }}
+          APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
+          MACOS_BUNDLE_ID: ${{ secrets.MACOS_BUNDLE_ID }}
+          GH_TOKEN: ${{ secrets.RELEASE_REPOS_TOKEN }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CODESIGN_IDENTITY APPLE_TEAM_ID APPLE_NOTARIZE_APPLE_ID APPLE_NOTARIZE_PASSWORD MACOS_BUNDLE_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name must be set."
+              exit 1
+            fi
+          done
+          case "$APPLE_CODESIGN_IDENTITY" in
+            "Developer ID Application: "*"($APPLE_TEAM_ID)") ;;
+            *) echo "::error::APPLE_CODESIGN_IDENTITY must be a Developer ID Application identity of team APPLE_TEAM_ID."; exit 1 ;;
+          esac
+          identities="$(security find-identity -v -p codesigning "$SIGNING_KEYCHAIN")"
+          if ! grep -qF "\"$APPLE_CODESIGN_IDENTITY\"" <<< "$identities"; then
+            echo "::error::The imported certificate is not APPLE_CODESIGN_IDENTITY."
+            exit 1
+          fi
+          if [ "$TARGET" != "build-only" ]; then
+            product="$(node -p 'const p = require("./package.json"); p.productName || p.name')"
+            previous="$RUNNER_TEMP/previous"
+            gh release download --repo "$RELEASE_REPO" --pattern '*-darwin-arm64.zip' --dir "$previous"
+            unzip -q "$previous"/*-darwin-arm64.zip "$product.app/Contents/Info.plist" -d "$previous"
+            bundle_id="$(plutil -extract CFBundleIdentifier raw -o - "$previous/$product.app/Contents/Info.plist")"
+            rm -rf "$previous"
+            if [ "$bundle_id" != "$MACOS_BUNDLE_ID" ]; then
+              echo "::error::MACOS_BUNDLE_ID differs from the bundle id of the latest release in $RELEASE_REPO; installed apps would refuse the update."
+              exit 1
+            fi
+          fi
+          echo "Signing settings are complete and match the published app."
+
       - name: Build, sign and notarize without publishing
         if: inputs.target == 'build-only'
         env:
@@ -171,21 +215,17 @@ jobs:
           APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_NOTARIZE_PASSWORD }}
           MACOS_BUNDLE_ID: ${{ secrets.MACOS_BUNDLE_ID }}
           GH_TOKEN: ${{ secrets.RELEASE_REPOS_TOKEN }}
-          PUSH_TOKEN: ${{ github.token }}
+          SOURCE_PUSH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          auth="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 | tr -d '\n')"
-          echo "::add-mask::$auth"
-          git config --local http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
           # The update feed is checked below, without failing a published release.
           node scripts/release-mac-arm64.mjs "$TARGET" --skip-update-check --expect-head "$GITHUB_SHA"
 
       - name: Remove the signing keychain
         if: always()
         run: |
-          git config --local --unset-all http.https://github.com/.extraheader || true
           if [ -n "${SIGNING_KEYCHAIN:-}" ]; then
             security delete-keychain "$SIGNING_KEYCHAIN" || true
           fi

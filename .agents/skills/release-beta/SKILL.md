@@ -19,7 +19,7 @@ after the workflow's checks of the exact published download pass.
   `git merge-base --is-ancestor origin/main origin/beta` succeeds.
 - The approved commit has already passed the targeted tests its changes require; the workflow runs
   typecheck and the packaging checks, not the test suites.
-- Start one run per release and never re-run a run that reached its `Release` step (see Recovery).
+- Start one run per release and never re-run a run that pushed its version bump (see Recovery).
 - Do not report success from typecheck, signing, notarization, or update-feed checks alone. They do not
   prove the packaged app can resolve runtime modules.
 - Keep the dedicated CLI parity invariant intact: release only reviewed application behavior; do not
@@ -35,20 +35,24 @@ moves before the bump, the run stops without using a version and you start a new
 
 ```bash
 gh workflow run release.yml --repo juliakrivchikova/AccordAgents-desktop-app --ref beta -f target=beta
-gh run list --repo juliakrivchikova/AccordAgents-desktop-app --workflow release.yml --limit 1 --json databaseId,url,status
+# prints the URL of the run it created; take the run id from that URL, not from `gh run list`
 gh run watch <run-id> --repo juliakrivchikova/AccordAgents-desktop-app --exit-status   # run in the background
 ```
 
-Stable releases use `--ref main -f target=patch` (or `minor`/`major`). `-f target=build-only` builds,
+Stable releases use `--ref main -f target=patch` (or `minor`/`major`) once this workflow is on `main`;
+until then `main` has the old placeholder workflow and stable releases use the local fallback.
+`-f target=build-only` builds,
 signs, notarizes and launch-checks any branch without bumping or publishing; it keeps only checksums
 and the launch screenshot and log, never the signed app. Use it to try the pipeline itself.
 
 The run, in order: checks the branch matches the target, `npm ci` with native arm64 Node, the
 dependency preflight, finds the release repo, proves the release-repo token can write there, uploads
 a tiny file to Apple notarization (an expired Apple agreement fails here), imports the Developer ID
-certificate into a throwaway keychain, then `node scripts/release-mac-arm64.mjs beta --expect-head
-<commit>`: bump, push, tag, build, sign, notarize, launch the signed app with a throwaway profile
-(`scripts/smoke-launch-packaged-app.mjs`), publish. Everything before the bump uses no version. It
+certificate into a throwaway keychain, checks the signing settings and that the bundle id equals the
+latest published app's (installed apps refuse an update with another id), then
+`node scripts/release-mac-arm64.mjs beta --expect-head <commit>`: bump and tag locally, build, sign,
+notarize, launch the signed app with a throwaway profile (`scripts/smoke-launch-packaged-app.mjs`),
+push the bump and tag together, publish. Anything that fails before that push uses no version. It
 then removes the keychain, downloads the published assets, checks they are byte-identical to what it
 built, their ASAR contents, signature and team, notarization and stapling, and launches the download
 again. The update feed check runs last and only warns. Checksums, screenshots and launch logs are
@@ -66,16 +70,20 @@ Read the run (`gh run view <run-id> --log` for details) and report:
 
 ## Recovery
 
-- A run that failed before the `Release` step changed nothing: fix the cause and start a new run.
-- A run that failed inside `Release` may already have pushed the bump commit and tag. Record the
-  source commit, tag, release state and the failed stage first. Do not start another run blindly: it
-  bumps again and burns another version. Reconcile the existing tag and release before any recovery.
+- A run that failed before its log shows `Pushing the version bump and source tag` changed nothing
+  (the release script drops its local bump): fix the cause and start a new run.
+- A run that failed after that push has used the version. Record the source commit, tag, release
+  state and the failed stage first. Do not start another run blindly: it bumps again and burns another
+  version. Reconcile the existing tag and release before any recovery.
+- If `Release` fails after publishing (for example the release-list order check), the published-download
+  step does not run: run its commands by hand on the published assets before reporting anything.
 - If the published-download step fails, report the beta as defective immediately. Do not tell users to
   update to it and do not claim release completion. Ask before deleting or replacing a published
   release.
 - Missing or expired secrets fail before the bump: the release-repo token in `Check the release-repo
   token can publish`, the Apple agreement or password in `Check Apple accepts notarization uploads`,
-  the certificate in `Import the Developer ID certificate`. The secrets and where they come from are
+  the certificate in `Import the Developer ID certificate`, the identity, team and bundle id in `Check
+  the signing settings`. The secrets and where they come from are
   listed at the top of `.github/workflows/release.yml`; only the User can renew them.
 
 ## Local fallback
@@ -86,8 +94,8 @@ Only when GitHub Actions is unavailable and the User agrees, release from a Mac:
    `node .agents/skills/release-beta/scripts/verify-release.mjs environment`, `npm ci`, and
    `node .agents/skills/release-beta/scripts/verify-release.mjs preflight`.
 2. Provide signing credentials through the environment or an ignored `.env.local`. Never commit them.
-3. Run `npm run release:beta` as one uninterrupted workflow. It bumps and pushes before building; if it
-   fails, follow Recovery above.
+3. Run `npm run release:beta` as one uninterrupted workflow. It pushes the bump only after the signed
+   build succeeded; if it fails, follow Recovery above.
 4. Download the published ZIP and DMG into a new temporary directory, expand the ZIP with `ditto`, run
    `node .agents/skills/release-beta/scripts/verify-release.mjs packaged <app>`, the signing,
    notarization and stapling checks, and `node scripts/smoke-launch-packaged-app.mjs <app>`.

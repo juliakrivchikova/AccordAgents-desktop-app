@@ -224,7 +224,11 @@ async function main() {
     app?.close();
     await stop(child);
     logStream?.end();
-    rmSync(profileDir, { recursive: true, force: true });
+    try {
+      rmSync(profileDir, { recursive: true, force: true, maxRetries: 3 });
+    } catch (error) {
+      console.warn(`Could not remove the throwaway profile ${profileDir}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }
 
