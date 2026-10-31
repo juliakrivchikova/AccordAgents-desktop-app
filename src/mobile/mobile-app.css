@@ -2111,10 +2111,12 @@ button.mobile-chat-group-title:active {
   background: var(--s2);
 }
 
-/* The @ list rises above the card, across its width. */
+/* The @ list rises above the card, across its width. A drag that reaches
+   either end of it stays in the list instead of moving the screen. */
 .new-chat-mention-menu {
   left: 0;
   right: 0;
+  overscroll-behavior: contain;
 }
 
 .new-chat-card .mobile-mention-option {
