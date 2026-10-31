@@ -146,8 +146,10 @@ been caught by either:
 
 The PWA the phone runs is not served by the desktop app. It is a Cloudflare
 Pages site at `mobile.accordagents.com`, and a change reaches the phone only
-after `npm run build:mobile && npm run deploy:mobile`. Merging and restarting the
-desktop does nothing for the phone. The project's production branch is called
+after `npm run build:mobile && npm run deploy:mobile`. Every beta released through
+the GitHub Actions `Release` workflow runs that deploy from the released commit
+(see the `release-beta` skill); between betas it is done by hand. Merging and
+restarting the desktop does nothing for the phone. The project's production branch is called
 `staging`, so deploying to `main` publishes a preview that the phone never sees.
 See `docs/deploying-the-phone-app.md`, including the `ASSET_VERSION` bump that
 busts the phone's cache.

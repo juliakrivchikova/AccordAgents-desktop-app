@@ -376,6 +376,18 @@ await verifyPackagedNativeProcess(appPath);
 log("Creating signed ZIP for macOS auto-updates");
 const { signedZipPath, checksumPath: zipChecksumPath } = createSignedZip();
 
+// After the ZIP and DMG exist, so nothing the running app does can reach the
+// shipped bundles.
+log("Launching the signed app with a throwaway profile");
+run(process.execPath, [
+  path.join(rootDir, "scripts", "smoke-launch-packaged-app.mjs"),
+  appPath,
+  "--screenshot",
+  path.join(outDir, "launch", "signed.png"),
+  "--log",
+  path.join(outDir, "launch", "signed.log")
+]);
+
 const dmgPath = findDmg();
 
 log("Notarizing and stapling DMG");
