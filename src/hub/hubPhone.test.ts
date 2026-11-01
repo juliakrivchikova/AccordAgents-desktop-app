@@ -680,7 +680,7 @@ test("only turns taken by a device that still exists count as running for the ph
       turn("waiting", "chat-c", "requested", null),
       turn("ended", "chat-d", "finished", owner.originId),
       // Left open more than the longest run the app allows.
-      turn("forgotten", "chat-e", "claimed", owner.originId, new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString())
+      turn("forgotten", "chat-e", "claimed", owner.originId, new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString())
     ].join("\n"));
     const running = await storage.hubOps().runningTurnsByConversation();
     assert.deepEqual([...running.entries()], [["chat-a", [{ messageId: "ask-live", participantId: "taylor" }]]]);
