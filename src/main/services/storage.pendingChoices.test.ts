@@ -56,6 +56,9 @@ test("listPendingChoiceMessages returns the listed chats' waiting choices, whole
     );
     const afterBroken = await storage.listPendingChoiceMessages(["listed"]);
     assert.deepEqual(afterBroken.rows.map((row) => row.message.id), ["open"], "the broken row is left out, the others are found");
+    // The chats a start looks through for choices that expired meanwhile.
+    assert.deepEqual((await storage.conversationIdsWithPendingChoices()).sort(), ["elsewhere", "listed"],
+      "every chat with a waiting choice, once; the broken row takes nothing down");
 
     // Past the cap the set is incomplete and says so, rather than being
     // offered as the whole of what waits.

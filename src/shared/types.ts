@@ -1027,6 +1027,12 @@ export interface ChatPendingChoice {
   note?: string;
   selectedAt?: string;
   cancelledAt?: string;
+  /** When the member asked it (the end of the reply that carries it). */
+  askedAt?: string;
+  /** Closed by the app, not by the User: an hour after it was asked, once
+   *  the User had gone on with its member. Its status is `cancelled`, so it
+   *  is closed everywhere a cancelled choice is; it is shown as expired. */
+  expiredAt?: string;
   /** The durable answer which saved this selection, before native admission. */
   decisionEventId?: string;
   responseMessageId?: string;

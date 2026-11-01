@@ -18,6 +18,8 @@ export function ChatChoiceCard(props: {
   const [note, setNote] = useState(choice.note ?? "");
   const isAnswered = choice.status === "selected";
   const isCancelled = choice.status === "cancelled";
+  // Closed by the app an hour after the User went on with its member.
+  const isExpired = isCancelled && Boolean(choice.expiredAt);
   const isResolved = isAnswered || isCancelled;
   const selectedOptionId = isCancelled ? "" : choice.selectedOptionId ?? draftSelection;
   const isCustomSelected = selectedOptionId === CHAT_CUSTOM_CHOICE_OPTION_ID;
@@ -68,7 +70,7 @@ export function ChatChoiceCard(props: {
       <div className="chat-choice-head">
         <div className="chat-choice-title-block">
           {isAnswered && <span className="chat-choice-eyebrow">Answered</span>}
-          {isCancelled && <span className="chat-choice-eyebrow">Cancelled</span>}
+          {isCancelled && <span className="chat-choice-eyebrow">{isExpired ? "Expired" : "Cancelled"}</span>}
           <h3>{choice.title}</h3>
           {!isResolved && <p className="chat-choice-question">{choice.question}</p>}
         </div>
@@ -176,7 +178,7 @@ export function ChatChoiceCard(props: {
       {isCancelled && (
         <div className="chat-choice-text-panel locked">
           <span>
-            <strong>Cancelled</strong>
+            <strong>{isExpired ? "Expired" : "Cancelled"}</strong>
             <small>No answer was sent to {requesterMention}</small>
           </span>
         </div>

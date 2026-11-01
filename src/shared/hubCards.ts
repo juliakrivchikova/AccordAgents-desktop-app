@@ -101,7 +101,14 @@ export interface HubCardOutcome {
   approval?: ChatAppToolApproval;
   choice?: ChatPendingChoice;
   mentions?: ChatPendingMention[];
+  /** Closed with no answer (a choice that expired): only while nobody
+   *  answered it. The server refuses it for an answered card, so an answer
+   *  that crossed the closing is applied instead (HUB_CARD_ANSWERED_FIRST). */
+  unanswered?: boolean;
 }
+
+/** The server's refusal of an `unanswered` settle: the User answered first. */
+export const HUB_CARD_ANSWERED_FIRST = "The User answered this card before it closed.";
 
 /** A card a device holds for one of its own members, as it raises it. */
 export interface WantedHubCard {
@@ -237,7 +244,8 @@ export function hubCardOutcomeFrom(conversation: Conversation | undefined, cardI
       const choice = message.metadata?.pendingChoice;
       if (!choice) return { result: "closed" };
       const { refusals: _refusals, ...shown } = choice;
-      return { result, choice: shown };
+      const expired = result === "closed" && choice.status === "cancelled" && Boolean(choice.expiredAt);
+      return { result, choice: shown, ...(expired ? { unanswered: true } : {}) };
     }
     return { result, mentions: Array.isArray(message.metadata?.pendingMentions) ? message.metadata!.pendingMentions! : [] };
   }

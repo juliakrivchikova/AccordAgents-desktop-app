@@ -12,7 +12,7 @@ import { normalizedChatAvatarId } from "../../shared/chatAvatarCatalog";
 import type { HubNewChatOptions } from "../../shared/hubProtocol";
 import { chatChangesToOps, furthestTurnMarks, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
-import { hubTurnRunId, isHubTurnRunId, type HubCard, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
+import { hubTurnRunId, isHubTurnRunId, type HubCard, type HubCardState, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
 import {
   choiceCardId,
   hubCardDigest,
@@ -22,10 +22,12 @@ import {
   wantedHubCards,
   type HubApprovalCardAnswer,
   type HubApprovalCardPayload,
+  type HubChoiceCardPayload,
   type HubCardOutcome,
   type WantedHubCard
 } from "../../shared/hubCards";
 import { ServerCardBook, type CardApplyResult, type ChatCardAppliers } from "./chatCards";
+import { CHAT_CHOICE_EXPIRY_MS, choiceExpiryPlan, type ChoiceExpiryPlan } from "./chatChoiceExpiry";
 import { HUB_OP_TAKEN_BACK, type HubOpOutcome } from "./hubOpsClient";
 import { blobReferenceOf } from "./hubClient";
 import type {
@@ -418,6 +420,12 @@ const CHAT_EXECUTOR_LEASE_TTL_MS = 15 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
 /** How many refused answers a waiting choice keeps for the devices that sent them. */
 const CHAT_CHOICE_REFUSALS_KEPT = 5;
+/** A choice's expiry timer fires this long after it is due, never before. */
+const CHOICE_EXPIRY_TIMER_SLACK_MS = 1_000;
+/** A due choice that could not be closed (the server could not be asked,
+ *  its save failed, an answer to it was being applied) is looked at again
+ *  after this. */
+const CHOICE_EXPIRY_RETRY_MS = 5 * 60_000;
 const CHAT_ADMINISTRATOR_ROLE_ID = "administrator";
 const CHAT_ADMINISTRATOR_HANDLE = "assistant";
 // Built-in role used as a safety fallback when a participant's role is missing
@@ -944,6 +952,13 @@ export class ChatService {
   /** The User's server, owner of every chat (agreements Д1–Д13): saves go
    *  there as operations, and members' turns wait for it. */
   private serverLink?: ChatServerLink;
+  /** A link to the server was installed in this run: without one now, it is
+   *  between two (never "no server", which answers could not wait on). */
+  private serverLinkInstalled = false;
+  /** Each chat's timer for its next waiting choice to expire. */
+  private readonly choiceExpiryTimers = new Map<string, { atMs: number; timer: NodeJS.Timeout }>();
+  /** The clock choices expire by (tests move it). */
+  private choiceExpiryNow: () => number = () => Date.now();
   private readonly chatSavesInFlight = new Set<Promise<void>>();
   // Tracked chats are bounded by count and by retained serialized bytes; chats
   // with a run in flight are evicted last, so a settings sweep over many chats
@@ -7062,7 +7077,11 @@ export class ChatService {
         // Saving the answer precedes native admission. After a crash in between,
         // only this exact signed decision may resume that saved continuation.
         const resume = Boolean(execution && choice.decisionEventId === execution.decisionEventId);
-        if (choice.status !== "pending" && !resume) throw new Error("Choice request has already been answered.");
+        // Expired by the app, never by the User: an answer she gave while it
+        // still waited on her screen (one that crossed the expiry on its way)
+        // is taken as if it had not expired.
+        const expired = choice.status === "cancelled" && Boolean(choice.expiredAt);
+        if (choice.status !== "pending" && !expired && !resume) throw new Error("Choice request has already been answered.");
         const selectedOptionId = request.selectedOptionId?.trim();
         const customAnswer = request.customAnswer?.trim();
         const note = request.note?.trim();
@@ -8011,6 +8030,7 @@ export class ChatService {
       await this.withChatMutation(conversation, async () => {
         this.resolveSupersededParticipantInteractions(conversation, participant.id, pendingMessage.id);
         conversation.messages.push(pendingMessage);
+        this.noteChoiceExpiry(conversation);
         this.recordLastMessageByParticipant(conversation, pendingMessage);
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
@@ -8702,6 +8722,7 @@ export class ChatService {
       } else {
         conversation.messages.push(pendingMessage);
       }
+      this.noteChoiceExpiry(conversation);
       this.recordLastMessageByParticipant(conversation, pendingMessage);
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
@@ -16657,7 +16678,8 @@ export class ChatService {
       options: draft.options,
       recommendedOptionId: draft.recommendedOptionId,
       status: "pending",
-      selectedAt: undefined
+      selectedAt: undefined,
+      askedAt: new Date().toISOString()
     };
   }
 
@@ -17166,10 +17188,12 @@ export class ChatService {
     if (!choice || choice.id !== choiceId) {
       return;
     }
+    // Answered after it expired (the answer crossed the expiry): answered.
+    const { expiredAt: _expiredAt, cancelledAt: _cancelledAt, ...waiting } = choice;
     sourceMessage.metadata = {
       ...sourceMessage.metadata,
       pendingChoice: {
-        ...choice,
+        ...waiting,
         status: "selected",
         selectedOptionId,
         customAnswer: customAnswer || undefined,
@@ -17187,14 +17211,189 @@ export class ChatService {
     if (!choice || choice.id !== choiceId) {
       return;
     }
+    // Cancelled by the User (after it expired, too): her cancel is what it shows.
+    const { expiredAt: _expiredAt, ...rest } = choice;
     sourceMessage.metadata = {
       ...sourceMessage.metadata,
       pendingChoice: {
-        ...choice,
+        ...rest,
         status: "cancelled",
         cancelledAt: new Date().toISOString()
       }
     };
+  }
+
+  // --- choices that expire once the User went on with their member ---------
+
+  /** The waiting choices of this device's members that the User went on
+   *  past (choiceExpiryPlan): those due now, and when the next one is. */
+  private choiceExpiryPlanFor(conversation: Conversation): ChoiceExpiryPlan {
+    const participants = this.chatParticipants(conversation);
+    const me = this.serverLink?.deviceId();
+    return choiceExpiryPlan(conversation.messages, this.choiceExpiryNow(), (message) => {
+      const participant = participants.find((item) => item.id === message.participantId);
+      if (!participant || !this.runsHere(participant)) return false;
+      const writer = message.metadata?.serverWriter;
+      return !(typeof writer === "string" && me && writer !== me);
+    });
+  }
+
+  /** A member's turn starts (inside its chat mutation): the chat's expiry
+   *  timer is set for what the User's going on made due. Closing happens in
+   *  sweepChoiceExpiry, which asks the server first. */
+  private noteChoiceExpiry(conversation: Conversation): void {
+    const nowMs = this.choiceExpiryNow();
+    const plan = this.choiceExpiryPlanFor(conversation);
+    // A due card whose answer is being applied here waits for it: looked at
+    // again later, not at every turn meanwhile.
+    const free = plan.due.some((messageId) => !this.choiceAnsweredHere(messageId));
+    const atMs = free ? nowMs : plan.due.length > 0 ? Math.min(plan.nextAtMs ?? Infinity, nowMs + CHOICE_EXPIRY_RETRY_MS) : plan.nextAtMs;
+    this.scheduleChoiceExpiry(conversation.id, atMs, { replace: true });
+  }
+
+  /** This device heard of an answer to this card (or applies one now). */
+  private choiceAnsweredHere(messageId: string): boolean {
+    const cardId = choiceCardId(messageId);
+    return this.serverCards.applying.has(cardId) || this.serverCards.known(cardId)?.state === "answered";
+  }
+
+  /** One timer per chat, for its earliest choice to expire. `replace` sets
+   *  it to `atMs` (none when undefined); otherwise an earlier one is kept. */
+  private scheduleChoiceExpiry(conversationId: string, atMs: number | undefined, options: { replace?: boolean } = {}): void {
+    const current = this.choiceExpiryTimers.get(conversationId);
+    if (current && !options.replace && atMs !== undefined && current.atMs <= atMs) return;
+    if (current && current.atMs === atMs) return;
+    if (current) {
+      clearTimeout(current.timer);
+      this.choiceExpiryTimers.delete(conversationId);
+    }
+    if (atMs === undefined) return;
+    // Never longer than the expiry itself: a time far ahead (a wrong clock)
+    // is looked at again within it, never overflowing the timer.
+    const delayMs = Math.min(Math.max(0, atMs - this.choiceExpiryNow()), CHAT_CHOICE_EXPIRY_MS) + CHOICE_EXPIRY_TIMER_SLACK_MS;
+    const timer = setTimeout(() => {
+      if (this.choiceExpiryTimers.get(conversationId)?.timer === timer) this.choiceExpiryTimers.delete(conversationId);
+      void this.sweepChoiceExpiry(conversationId);
+    }, delayMs);
+    timer.unref?.();
+    this.choiceExpiryTimers.set(conversationId, { atMs, timer });
+  }
+
+  /**
+   * Closes a chat's choices that are due. An answer the User gave closes its
+   * card, never the expiry: a card answered on the User's server (as the
+   * server says now, or as this device heard) is left to its answer, and
+   * while the server cannot be asked nothing is closed. An answer that still
+   * crosses the expiry is applied all the same (respondToChoice).
+   */
+  private async sweepChoiceExpiry(conversationId: string): Promise<void> {
+    try {
+      if (this.deletedConversationIds.has(conversationId) || await this.storage.conversationTombstones?.().isDeleted(conversationId)) return;
+      const conversation = await this.storage.getConversation(conversationId);
+      if (!conversation || conversation.kind !== "chat") return;
+      const plan = this.choiceExpiryPlanFor(conversation);
+      if (plan.due.length === 0) {
+        this.scheduleChoiceExpiry(conversationId, plan.nextAtMs, { replace: true });
+        return;
+      }
+      let serverStates: Map<string, HubCardState> | undefined;
+      const link = this.serverLink;
+      if (link) {
+        // Not known which cards were answered there until they are read
+        // since this start: resumeChoiceExpiry runs then.
+        if (!this.serverCards.reconciled) return;
+        const read = await link.openCards?.(conversationId);
+        if (!read) throw new Error("The server's open cards could not be read.");
+        serverStates = new Map(read.cards.map((card) => [card.cardId, card.state]));
+      } else if (this.serverLinkInstalled) {
+        // Between two links to the server (it is being restarted).
+        throw new Error("Not linked to the server.");
+      }
+      await this.withChatMutation(conversation, async () => {
+        if (!this.expireDueChoices(conversation, serverStates)) return;
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+      });
+    } catch (error) {
+      // Not closed: looked at again later, on the copy storage holds then.
+      this.scheduleChoiceExpiry(conversationId, this.choiceExpiryNow() + CHOICE_EXPIRY_RETRY_MS);
+      void this.debugLogs.write("chat.choice.expiry-error", { conversationId, message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  /** Closes, in place, the due choices nobody answered (inside the chat's
+   *  mutation; the caller saves), and sets the chat's timer for the next. */
+  private expireDueChoices(conversation: Conversation, serverStates: Map<string, HubCardState> | undefined): boolean {
+    const nowMs = this.choiceExpiryNow();
+    const plan = this.choiceExpiryPlanFor(conversation);
+    let nextAtMs = plan.nextAtMs;
+    const due = new Set<string>();
+    for (const messageId of plan.due) {
+      const message = conversation.messages.find((item) => item.id === messageId);
+      if (!message) continue;
+      const answered = message.metadata?.serverCard?.state === "answered" || serverStates?.get(choiceCardId(message.id)) === "answered" ||
+        this.choiceAnsweredHere(message.id);
+      // Its answer is applied (or refused, and it is asked again): looked at
+      // again later.
+      if (answered) nextAtMs = Math.min(nextAtMs ?? Infinity, nowMs + CHOICE_EXPIRY_RETRY_MS);
+      else due.add(messageId);
+    }
+    this.scheduleChoiceExpiry(conversation.id, nextAtMs, { replace: true });
+    if (due.size === 0) return false;
+    const now = new Date(nowMs).toISOString();
+    for (const message of conversation.messages) {
+      const choice = message.metadata?.pendingChoice;
+      if (!due.has(message.id) || choice?.status !== "pending") continue;
+      message.metadata = { ...message.metadata, pendingChoice: { ...choice, status: "cancelled", cancelledAt: now, expiredAt: now } };
+    }
+    void this.debugLogs.write("chat.choice.expired", { conversationId: conversation.id, messageIds: [...due].slice(0, 20), count: due.size });
+    return true;
+  }
+
+  /** The server refused to close an expired choice: the User answered it
+   *  first. It waits again (as raised), and the server's open cards are read,
+   *  which applies her answer. */
+  private async reopenChoiceAnsweredFirst(conversationId: string, cardId: string): Promise<void> {
+    const messageId = cardId.startsWith("choice:") ? cardId.slice("choice:".length) : "";
+    const conversation = messageId ? await this.storage.getConversation(conversationId) : undefined;
+    if (!conversation || conversation.kind !== "chat") return;
+    await this.withChatMutation(conversation, async () => {
+      const message = conversation.messages.find((item) => item.id === messageId);
+      const choice = message?.metadata?.pendingChoice;
+      if (!message || choice?.status !== "cancelled" || !choice.expiredAt) return;
+      const { expiredAt: _expiredAt, cancelledAt: _cancelledAt, ...waiting } = choice;
+      message.metadata = { ...message.metadata, pendingChoice: { ...waiting, status: "pending" } };
+      // Raised as it was; the server holds her answer to it.
+      this.serverCards.noteState(cardId, conversationId, "pending", undefined, { reopen: true });
+      conversation.updatedAt = new Date().toISOString();
+      await this.saveConversation(conversation);
+      void this.debugLogs.write("chat.choice.reopened", { conversationId, messageId });
+    });
+    await this.resumeServerCards({ messages: false });
+  }
+
+  /**
+   * After the server's open cards were first read (resumeServerCards): the
+   * choices that expired while this device was off are closed, and timers
+   * kept for the ones still to come. `conversationIds` are the chats that
+   * read named; only those holding a waiting choice are opened.
+   */
+  async resumeChoiceExpiry(conversationIds: string[]): Promise<void> {
+    if (this.serverLink && !this.serverCards.reconciled) return;
+    let ids = conversationIds;
+    const storage = this.storage as Partial<Pick<StorageService, "listPendingChoiceMessages">>;
+    if (ids.length > 0 && typeof storage.listPendingChoiceMessages === "function") {
+      const found = await storage.listPendingChoiceMessages.call(this.storage, ids);
+      if (!found.truncated) ids = [...new Set(found.rows.map((row) => row.conversationId))];
+    }
+    for (const conversationId of ids) await this.sweepChoiceExpiry(conversationId);
+  }
+
+  /** A pass over every message row: on the User's data, seconds of the one
+   *  storage session, so only where nothing has just read them. */
+  private async chatIdsWithPendingChoices(): Promise<string[]> {
+    const storage = this.storage as Partial<Pick<StorageService, "conversationIdsWithPendingChoices">>;
+    return typeof storage.conversationIdsWithPendingChoices === "function" ? storage.conversationIdsWithPendingChoices.call(this.storage) : [];
   }
 
   private formatChoiceSelectionForChat(
@@ -21699,6 +21898,7 @@ export class ChatService {
   /** Installs (or removes) the link to the User's server (Д1). */
   setServerLink(link: ChatServerLink | undefined): void {
     this.serverLink = link;
+    if (link) this.serverLinkInstalled = true;
     this.chatChangeBaselines.clear();
     // The cards of another server (or none) are read again from it.
     this.serverCards.reset();
@@ -21750,18 +21950,32 @@ export class ChatService {
       const participant = participants.find((item) => item.id === participantId);
       return Boolean(participant) && this.runsHere(participant!);
     };
-    return wantedHubCards(conversation, {
+    const ownsMessage = (message: ChatMessage): boolean => {
+      const writer = message.metadata?.serverWriter;
+      if (typeof writer === "string" && (!me || writer !== me)) return false;
+      return memberHere(message.participantId);
+    };
+    const wanted = wantedHubCards(conversation, {
       approval: (approval) => this.isChatAppToolApproval(approval) && (!approval.homeMachineId || approval.homeMachineId === this.hostMachineId) &&
         memberHere(approval.requesterParticipantId),
       // Only for a member that runs here, as the server allows: a member of
       // a machine no longer on the server's devices (its messages moved as
       // this computer's) has nobody to answer it.
-      message: (message) => {
-        const writer = message.metadata?.serverWriter;
-        if (typeof writer === "string" && (!me || writer !== me)) return false;
-        return memberHere(message.participantId);
-      }
+      message: ownsMessage
     });
+    // A choice that expired here after the User had answered it on the
+    // server: kept open for her answer, which is applied here (respondToChoice
+    // takes it), never settled as if it had been.
+    for (const message of conversation.messages) {
+      const choice = message.metadata?.pendingChoice;
+      if (choice?.status !== "cancelled" || !choice.expiredAt || !message.participantId || !ownsMessage(message) ||
+        !this.choiceAnsweredHere(message.id)) continue;
+      const payload: HubChoiceCardPayload = { choice, sourceMessageId: message.id };
+      wanted.push({ cardId: choiceCardId(message.id), conversationId: conversation.id, cardKind: "choice", participantId: message.participantId,
+        messageId: message.id, card: payload as unknown as Record<string, unknown>, digest: hubCardDigest("choice", payload as unknown as Record<string, unknown>),
+        keepOnly: true });
+    }
+    return wanted;
   }
 
   /** The server answered one of this device's operations: for a card, how
@@ -21773,6 +21987,15 @@ export class ChatService {
       return;
     }
     void this.debugLogs.write("chat.card.op-refused", { kind: op.kind, cardId: op.cardId, conversationId: op.conversationId, reason: outcome.reason });
+    // An expired choice the User had answered just before it closed: open
+    // again, and her answer is applied.
+    if (op.kind === "card.settle" && (op.outcome as { unanswered?: unknown }).unanswered === true) {
+      void this.reopenChoiceAnsweredFirst(op.conversationId, op.cardId).catch((error) => {
+        void this.debugLogs.write("chat.choice.reopen-error", { conversationId: op.conversationId, cardId: op.cardId,
+          message: error instanceof Error ? error.message : String(error) });
+      });
+      return;
+    }
     if (op.kind === "card.raise") {
       this.serverCards.noteRaiseRefused(op.cardId, hubCardDigest(op.cardKind, op.card));
       // Refused for now (the server does not know this device for the
@@ -22065,7 +22288,16 @@ export class ChatService {
       });
     }
     for (const card of mine) if (card.state === "answered") this.scheduleCardApply(card);
+    const firstRead = !this.serverCards.reconciled;
     this.serverCards.reconciled = true;
+    // Choices that expired while it was not known which were answered on the
+    // server are closed now that it is. When message rows were read, the
+    // chats just read name every chat with a waiting choice: no second pass.
+    if (firstRead) {
+      void (async () => this.resumeChoiceExpiry(options.messages ? local : await this.chatIdsWithPendingChoices()))().catch((error) => {
+        void this.debugLogs.write("chat.choice.expiry-resume-error", { message: error instanceof Error ? error.message : String(error) });
+      });
+    }
     if (!this.machineRuntime) await this.reconcileCardMirrors(read.cards.filter((card) => card.raisedBy !== me), local, read.head);
   }
 

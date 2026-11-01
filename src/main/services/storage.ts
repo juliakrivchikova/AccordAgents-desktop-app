@@ -2129,6 +2129,18 @@ export class StorageService {
     return rows.flatMap((row) => typeof row.id === "string" && row.id.trim() ? [row.id] : []);
   }
 
+  /** The chats holding a member's choice that still waits for the User
+   *  (ChatService.resumeChoiceExpiry). */
+  async conversationIdsWithPendingChoices(): Promise<string[]> {
+    await this.init();
+    const rows = await this.queryJson<{ id: string }>(`
+      select distinct m.conversation_id as id from conversation_messages m
+        where m.payload_json like '%"pendingChoice":%'
+          and json_valid(m.payload_json)
+          and json_extract(m.payload_json, '$.metadata.pendingChoice.status') = 'pending';`);
+    return rows.flatMap((row) => typeof row.id === "string" && row.id.trim() ? [row.id] : []);
+  }
+
   private async queryConversationIds(whereSql: string): Promise<string[]> {
     const rows = await this.queryJson<{ id: string }>(`select id from conversations where ${whereSql};`);
     return rows.flatMap((row) => typeof row.id === "string" && row.id.trim() ? [row.id] : []);

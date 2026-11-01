@@ -8,7 +8,8 @@ import test from "node:test";
 import { APP_SCRIPTS_REQUEST_CHANGE_TOOL, APP_TOOL_PERMISSION_TOOL } from "../../shared/appMcpToolContracts";
 import { choiceCardId, mentionCardId, type HubMentionCardPayload } from "../../shared/hubCards";
 import type { HubCard, HubFeedResponse, HubOp } from "../../shared/hubOps";
-import { controlCardFromHubCard } from "../../shared/mobileControlCards";
+import { buildChatActivityItems } from "../../shared/chatActivity";
+import { controlCardFromChoiceMessage, controlCardFromHubCard } from "../../shared/mobileControlCards";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
 import { HubOps } from "../../hub/hubOps";
@@ -661,4 +662,159 @@ test("a machine makes the removal its member asked for itself once the User appr
   const page = await h.call<{ messages: ChatMessage[] }>(h.desktopIdentity, "GET", "/v3/chat?conversationId=cards-k");
   assert.equal(page.messages.filter((message) => message.content === "Removed @taylor from this chat at @drew's request.").length, 1, "made once");
   assert.equal(page.messages.filter((message) => message.content.startsWith("Could not remove")).length, 0, "nothing says it failed");
+});
+
+// The User, 2026-11-01: a member's choice expires an hour after it was asked
+// once she went on with that member; it leaves Pending on every device.
+test("a machine member's choice expires on its machine once the User went on with it: settled on the server, gone from the phone and the desktop, shown as expired", async (t) => {
+  const askedAt = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+  const wentOnAt = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+  const h = await linkedDesktop(t, chat("cards-expiry"));
+  await h.startMachine();
+  await until(() => h.machineStorage.getConversation("cards-expiry"), (item) => Boolean(item));
+  // On the machine: its member asked a choice, then the User wrote to it again
+  // and it answered her.
+  const machineCopy = (await h.machineStorage.getConversation("cards-expiry"))!;
+  machineCopy.messages.push(
+    { id: "expiring-choice", role: "participant", participantId: remote.id, participantLabel: "@drew", content: "Which store?", createdAt: askedAt, status: "done",
+      metadata: { pendingChoice: { id: "choice-x", title: "Store", question: "Which store?", status: "pending", askedAt,
+        options: [{ id: "sqlite", label: "SQLite" }, { id: "files", label: "Files" }] } } } as ChatMessage,
+    { id: "went-on", role: "user", content: "@drew never mind, look at the tests first", createdAt: wentOnAt, status: "done" } as ChatMessage,
+    { id: "went-on-reply", role: "participant", participantId: remote.id, participantLabel: "@drew", content: "Looking.", createdAt: wentOnAt, status: "done",
+      metadata: { sourceMessageId: "went-on", parentMessageId: "went-on" } } as ChatMessage
+  );
+  await save(h.machineChat, machineCopy);
+  const cardId = choiceCardId("expiring-choice");
+  await until(() => h.card(cardId), (item) => item?.state === "pending" && item.raisedBy === h.machineIdentity.originId);
+  // The machine starts again (a new process, the same storage): at its start,
+  // once the server's open cards are read, it closes what expired meanwhile.
+  await h.machineLink.stop();
+  const restarted = chatService(h.machineStorage, [], "machine");
+  restarted.setHostMachineId("box");
+  const restartedAppliers = appliers(h.machineStorage, restarted, h.desktopIdentity.originId, "machine-expiry");
+  restarted.setCardAppliers(async () => restartedAppliers);
+  const link = h.link(h.machineStorage, restarted, h.machineEvents, "machine-expiry", false);
+  h.links.push(link);
+  await link.start();
+  const settled = await until(() => h.card(cardId), (item) => item?.state === "settled");
+  const outcome = settled!.outcome as { result?: string; choice?: { status?: string; expiredAt?: string } };
+  assert.equal(outcome.result, "closed", "closed without an answer");
+  assert.equal(outcome.choice?.status, "cancelled");
+  assert.ok(outcome.choice?.expiredAt);
+  assert.equal(controlCardFromHubCard(settled!), undefined, "the phone asks nothing");
+  assert.deepEqual((await h.call<{ cards: HubCard[] }>(h.desktopIdentity, "GET", "/v3/cards?conversationId=cards-expiry")).cards, [], "nothing open on the server");
+  // The phone's chat shows the card under its message as expired.
+  const page = await until(() => h.call<{ messages: ChatMessage[] }>(h.desktopIdentity, "GET", "/v3/chat?conversationId=cards-expiry"),
+    (read) => Boolean(read.messages?.find((message) => message.id === "expiring-choice")?.metadata?.pendingChoice?.expiredAt));
+  const shown = controlCardFromChoiceMessage("cards-expiry", page.messages.find((message) => message.id === "expiring-choice")!);
+  assert.deepEqual([shown?.status, shown?.outcome], ["answered", "Expired"]);
+  // The desktop: the card is expired and Pending lists nothing.
+  const desktopCopy = await until(() => h.desktopStorage.getConversation("cards-expiry"),
+    (item) => Boolean(item?.messages.find((message) => message.id === "expiring-choice")?.metadata?.pendingChoice?.expiredAt));
+  assert.deepEqual(buildChatActivityItems(desktopCopy).filter((item) => item.kind === "choice" && item.status === "pending"), []);
+  // An answer from the phone that crossed the expiry is refused by the server.
+  const late = await h.phoneAnswers("cards-expiry", cardId, { selectedOptionId: "files" });
+  assert.equal(late.result.status, "rejected");
+  assert.equal(h.turns.length, 0, "the member was not started");
+});
+
+test("an answer the User gave on the phone while the machine was stopped wins over the choice's expiry when the machine starts again", async (t) => {
+  const askedAt = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+  const wentOnAt = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+  const h = await linkedDesktop(t, chat("cards-expiry-answered"));
+  await h.startMachine();
+  await until(() => h.machineStorage.getConversation("cards-expiry-answered"), (item) => Boolean(item));
+  const machineCopy = (await h.machineStorage.getConversation("cards-expiry-answered"))!;
+  machineCopy.messages.push(
+    { id: "due-choice", role: "participant", participantId: remote.id, participantLabel: "@drew", content: "Ship now?", createdAt: askedAt, status: "done",
+      metadata: { pendingChoice: { id: "choice-due", title: "Ship", question: "Ship now?", status: "pending", askedAt,
+        options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] } } } as ChatMessage,
+    { id: "went-on-2", role: "user", content: "@drew first the tests", createdAt: wentOnAt, status: "done" } as ChatMessage,
+    { id: "went-on-2-reply", role: "participant", participantId: remote.id, participantLabel: "@drew", content: "On it.", createdAt: wentOnAt, status: "done",
+      metadata: { sourceMessageId: "went-on-2", parentMessageId: "went-on-2" } } as ChatMessage
+  );
+  await save(h.machineChat, machineCopy);
+  const cardId = choiceCardId("due-choice");
+  await until(() => h.card(cardId), (item) => item?.state === "pending");
+  // The machine stops before it looked; the User answers on the phone meanwhile.
+  await h.machineLink.stop();
+  assert.equal((await h.phoneAnswers("cards-expiry-answered", cardId, { selectedOptionId: "yes" })).result.status, "accepted");
+  // It starts again: the choice is due to expire, and an answer waits for it.
+  const restartedTurns: Turn[] = [];
+  const restarted = chatService(h.machineStorage, restartedTurns, "machine");
+  restarted.setHostMachineId("box");
+  const restartedAppliers = appliers(h.machineStorage, restarted, h.desktopIdentity.originId, "machine-3");
+  // Her answer is held at the point it is being applied, while the machine
+  // looks for choices to expire.
+  let entered!: () => void;
+  const applying = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const apply = restartedAppliers.choice.apply.bind(restartedAppliers.choice);
+  restartedAppliers.choice.apply = async (card, answerOpId) => { entered(); await released; return apply(card, answerOpId); };
+  restarted.setCardAppliers(async () => restartedAppliers);
+  const link = h.link(h.machineStorage, restarted, h.machineEvents, "machine-3", false);
+  h.links.push(link);
+  await link.start();
+  await applying;
+  await restarted.resumeChoiceExpiry(["cards-expiry-answered"]);
+  await (restarted as unknown as { sweepChoiceExpiry(id: string): Promise<void> }).sweepChoiceExpiry("cards-expiry-answered");
+  const meanwhile = (await h.machineStorage.getConversation("cards-expiry-answered"))?.messages.find((message) => message.id === "due-choice")?.metadata?.pendingChoice;
+  assert.deepEqual([meanwhile?.status, meanwhile?.expiredAt], ["pending", undefined], "left to her answer");
+  release();
+  const settled = await until(() => h.card(cardId), (item) => item?.state === "settled");
+  assert.equal((settled!.outcome as { result?: string }).result, "applied", "her answer is applied");
+  const choice = (await h.machineStorage.getConversation("cards-expiry-answered"))?.messages.find((message) => message.id === "due-choice")?.metadata?.pendingChoice;
+  assert.deepEqual([choice?.status, choice?.selectedOptionId, choice?.expiredAt], ["selected", "yes", undefined], "not expired over her answer");
+  await until(async () => restartedTurns, (turns) => turns.length === 1);
+  await until(async () => restarted.liveRunIds().length, (count) => count === 0);
+});
+
+test("an answer from the phone that crosses the expiry is applied: the server refuses to close the answered card, and its machine opens it again and applies the answer", async (t) => {
+  const askedAt = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+  const wentOnAt = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+  const h = await linkedDesktop(t, chat("cards-crossed"));
+  await h.startMachine();
+  await until(() => h.machineStorage.getConversation("cards-crossed"), (item) => Boolean(item));
+  const machineCopy = (await h.machineStorage.getConversation("cards-crossed"))!;
+  machineCopy.messages.push(
+    { id: "crossed-choice", role: "participant", participantId: remote.id, participantLabel: "@drew", content: "Ship now?", createdAt: askedAt, status: "done",
+      metadata: { pendingChoice: { id: "choice-crossed", title: "Ship", question: "Ship now?", status: "pending", askedAt,
+        options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] } } } as ChatMessage,
+    { id: "went-on-3", role: "user", content: "@drew first the tests", createdAt: wentOnAt, status: "done" } as ChatMessage,
+    { id: "went-on-3-reply", role: "participant", participantId: remote.id, participantLabel: "@drew", content: "On it.", createdAt: wentOnAt, status: "done",
+      metadata: { sourceMessageId: "went-on-3", parentMessageId: "went-on-3" } } as ChatMessage
+  );
+  await save(h.machineChat, machineCopy);
+  const cardId = choiceCardId("crossed-choice");
+  await until(() => h.card(cardId), (item) => item?.state === "pending");
+  const machine = h.machineChat as unknown as {
+    serverCards: { reconciled: boolean };
+    serverLink: { openCards(conversationId?: string): Promise<unknown> };
+    noteServerCardEntries(entries: unknown[]): void;
+    sweepChoiceExpiry(id: string): Promise<void>;
+  };
+  await until(async () => machine.serverCards.reconciled, (done) => done);
+  // The machine read the open cards just before her answer reached the server,
+  // and the feed has not brought it here yet.
+  const stale = await machine.serverLink.openCards("cards-crossed");
+  const openCards = machine.serverLink.openCards;
+  const noteEntries = machine.noteServerCardEntries;
+  machine.serverLink.openCards = async () => stale;
+  machine.noteServerCardEntries = () => undefined;
+  assert.equal((await h.phoneAnswers("cards-crossed", cardId, { selectedOptionId: "yes" })).result.status, "accepted");
+  await machine.sweepChoiceExpiry("cards-crossed");
+  machine.serverLink.openCards = openCards;
+  machine.noteServerCardEntries = noteEntries;
+  // Closed here for a moment; the server keeps her answer and refuses the close.
+  const settled = await until(() => h.card(cardId), (item) => item?.state === "settled");
+  assert.equal((settled!.outcome as { result?: string }).result, "applied", "her answer is applied");
+  assert.equal((settled!.outcome as { choice?: { status?: string } }).choice?.status, "selected", "and said so, as the choice it answered");
+  const choice = (await until(() => h.machineStorage.getConversation("cards-crossed"), (item) =>
+    item?.messages.find((message) => message.id === "crossed-choice")?.metadata?.pendingChoice?.status !== "pending", 5_000))
+    ?.messages.find((message) => message.id === "crossed-choice")?.metadata?.pendingChoice;
+  assert.deepEqual([choice?.status, choice?.selectedOptionId, choice?.expiredAt], ["selected", "yes", undefined]);
+  await until(async () => h.turns, (turns) => turns.length === 1);
+  assert.deepEqual(h.turns.map((turn) => [turn.device, turn.participantId]), [["machine", remote.id]], "the member went on with her answer, once");
+  await until(async () => h.machineChat.liveRunIds().length, (count) => count === 0);
 });

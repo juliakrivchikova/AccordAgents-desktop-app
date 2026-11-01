@@ -204,7 +204,7 @@ export function controlCardFromChoiceMessage(conversationId: string, message: Ch
     outcome: choice.status === "pending"
       ? undefined
       : choice.status === "cancelled"
-        ? "Cancelled"
+        ? choice.expiredAt ? "Expired" : "Cancelled"
         : choice.options?.find((option) => option.id === choice.selectedOptionId)?.label
           ?? choice.customAnswer
           ?? "Answered",

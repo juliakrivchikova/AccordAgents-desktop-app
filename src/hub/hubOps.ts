@@ -5,6 +5,7 @@ import { claimOutcomeFor } from "../main/services/hubOpsStore";
 import { HubArtifacts } from "./hubArtifacts";
 import type { SavedMessageRow, StorageService } from "../main/services/storage";
 import type { HubDevice } from "../shared/hubProtocol";
+import { HUB_CARD_ANSWERED_FIRST } from "../shared/hubCards";
 import {
   HUB_CHAT_PAGE_MESSAGES,
   HUB_FEED_PAGE_BYTES,
@@ -421,6 +422,11 @@ export class HubOps {
     }
     if (current.raisedBy !== device.deviceId) return reject(opId, "Only the device that raised this card settles it.");
     if (current.state === "settled") return { result: { opId, status: "accepted", seq: seq - 1, card: current } };
+    // Closed with no answer (a choice that expired) only while nobody answered
+    // it: an answer that got here first is applied by that device instead.
+    if ((op.outcome as { unanswered?: unknown }).unanswered === true && current.state === "answered") {
+      return reject(opId, HUB_CARD_ANSWERED_FIRST);
+    }
     // A settle that says which answer it is about settles only that answer:
     // one sent for an earlier answer never closes the card asked again since.
     const forAnswer = (op.outcome as { answerOpId?: unknown }).answerOpId;

@@ -192,9 +192,9 @@ export class ServerChatLink {
       },
       machineName: (machineId) => this.machineNames.get(machineId),
       settleMoved: (conversationId) => this.requireOps().settleMoved(conversationId),
-      openCards: async () => {
+      openCards: async (conversationId) => {
         if (!this.ready || !this.client) return undefined;
-        return this.client.openCards();
+        return this.client.openCards(conversationId);
       },
       readThrough: async (seq, timeoutMs) => this.ops ? this.ops.waitApplied(seq, timeoutMs) : false,
       cardSettleQueued: async (conversationId, cardId) => (await this.options.storage.hubClientOps().forConversation(conversationId))
