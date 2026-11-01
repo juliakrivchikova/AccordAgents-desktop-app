@@ -1,15 +1,17 @@
 ---
 name: release-beta
-description: Safely issue and verify AccordAgents beta releases for macOS and Windows. Use when asked to prepare, run, resume, troubleshoot, or document a beta release (the GitHub Actions `Release` workflow or `npm run release:beta`), publish a beta tag, or validate beta DMG, ZIP, Windows installer, signing, notarization, and update-feed artifacts.
+description: Safely issue and verify AccordAgents macOS beta releases. Use when asked to prepare, run, resume, troubleshoot, or document a beta release — the GitHub Actions `Release` workflow or `npm run release:beta` — publish a beta tag, or validate beta DMG, ZIP, signing, notarization, and update-feed artifacts.
 ---
 
 # Release Beta
 
-Releases are built and published by the GitHub Actions `Release` workflow
-(`.github/workflows/release.yml`): macOS is built, signed and notarized on a GitHub-hosted macOS
-machine, then Windows is built, unsigned, on a GitHub-hosted Windows machine. Nothing releases on a merge: a
+Releases are built, signed, notarized and published by the GitHub Actions `Release` workflow
+(`.github/workflows/release.yml`) on a GitHub-hosted macOS machine. Nothing releases on a merge: a
 release starts only when the User asks for one and you start the workflow. A release is complete only
 after the workflow's checks of the exact published download pass.
+
+Betas have no Windows build: Windows ships only with stable releases, signed on the User's Windows PC
+(`SIGN.md`, Windows).
 
 ## Non-negotiable gates
 
@@ -44,8 +46,7 @@ Stable releases use `--ref main -f target=patch` (or `minor`/`major`) once this 
 until then `main` has the old placeholder workflow and stable releases use the local fallback.
 `-f target=build-only` builds,
 signs, notarizes and launch-checks any branch without bumping or publishing; it keeps only checksums
-and the launch screenshot and log, never the signed app, plus the unsigned Windows installer for a
-week (`windows-trial-installer`) so it can be installed by hand. Use it to try the pipeline itself.
+and the launch screenshot and log, never the signed app. Use it to try the pipeline itself.
 
 The run, in order: checks the branch matches the target, `npm ci` with native arm64 Node, the
 dependency preflight, finds the release repo, proves the release-repo token can write there, uploads
@@ -60,21 +61,6 @@ built, their ASAR contents, signature and team, notarization and stapling, and l
 again. The update feed check runs last and only warns. Checksums, screenshots and launch logs are
 kept as the `release-evidence` artifact.
 
-Once macOS is published, the `Windows x64` job builds the same tag on a GitHub-hosted Windows
-machine, checked out with LF line endings like the macOS one. `Build and check` (`npm run
-release:windows-x64 -- --build-only`) builds, checks the ASAR and launches the packaged app with a
-throwaway profile; `Install and launch the installer` installs the built Setup.exe silently and
-launches the installed app. Only then `Publish` (`node scripts/release-windows-x64.mjs --publish-only`,
-no build and no npm, the only step with the release token) adds the full NuGet package and
-`RELEASES`, then `AccordAgents-<version>-win32-x64-Setup.exe` and checksums, to the same GitHub
-Release, with a Windows section in its notes. The installer goes last because update.electronjs.org
-offers a release to Windows from its first `.exe` on. `Check the published download` downloads them
-with a read-only token and checks they are byte-identical. The feed check
-(`win32-x64/<previous>/RELEASES`, this build's SHA1 and size) only warns. Windows builds are not
-code-signed. Squirrel gets the beta number padded (`1.11.4-beta.3` is `1.11.4-beta003` in the NuGet
-package and the install folder) so beta.10 sorts above beta.9; see `scripts/squirrel-version.cjs`.
-Evidence, including Squirrel's install logs, is kept as `windows-release-evidence`.
-
 A beta run then deploys the phone app (PWA) from the released tag in the `Phone app` job and checks
 that `mobile.accordagents.com` serves exactly that build; a trial build deploys it only to the
 `release-trial` preview branch. A failed or defective beta deploys no phone app. Stable releases never
@@ -87,8 +73,6 @@ Read the run (`gh run view <run-id> --log` for details) and report:
 - Released version and tag, and the GitHub Release URL
 - Run URL and the final `origin/beta` commit (the bump commit)
 - Result of the published-download step, and the screenshots in the `release-evidence` artifact
-- Windows: the results of the `Windows x64` job's `Install and launch the installer` and `Check the
-  published download` steps, and its screenshots in `windows-release-evidence`
 - Phone app: the `ASSET_VERSION` the `Phone app` job reports `mobile.accordagents.com` now serves
 - Update feed: offered, or the warning if it still lags (the release is published; re-probe the feed,
   never re-run the release)
@@ -105,18 +89,6 @@ Read the run (`gh run view <run-id> --log` for details) and report:
 - If only `Phone app` fails, the desktop beta is out but the phone is not updated: report that, and
   deploy by hand per `docs/deploying-the-phone-app.md` or re-run just that job (`gh run rerun <run-id>
   --job <job-id>`); re-running it never bumps a version.
-- If only `Windows x64` fails, macOS (and for a beta the phone app) is out, and Windows users keep
-  the last release that has Windows files. Report that, fix the cause if it is in the build, and
-  re-run just that job: it builds again and uploads to the existing release. Before its installer is
-  up it replaces its own files; once the installer is published, `Publish` refuses to replace
-  anything (users may already be updating to those files) and the published files need checking by
-  hand: download them and compare with the checksums in the release. Ask before removing Windows
-  files from a release. If the macOS script updates the release after Windows was added (a recovery
-  run), it rewrites the whole notes: add the Windows section back by hand from the checksums.
-- If `Release` fails after publishing, `Windows x64` and `Phone app` are skipped and cannot be re-run
-  on their own. To add Windows to that version, run on a Windows machine checked out at the tag, with
-  `git config core.autocrlf false` before the checkout and a GitHub account that can write to the
-  release repo: `npm run release:windows-x64 -- --skip-update-check`.
 - If the published-download step fails, report the beta as defective immediately. Do not tell users to
   update to it and do not claim release completion. Ask before deleting or replacing a published
   release.

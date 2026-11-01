@@ -26,6 +26,7 @@ import {
   CHAT_AUTO_WATCH_WAKE_LIMIT_MIN
 } from "../../../shared/chatAutoWatch";
 import { CLI_AGENT_RUN_TIMEOUT_MAX_MS, CLI_AGENT_RUN_TIMEOUT_MIN_MS, cliAgentRunTimeoutHours } from "../../../shared/cliAgentRunSettings";
+import { BetaUpdatesRow } from "./beta-updates-row";
 import {
   CHAT_PROMPT_CONTEXT_LIMIT_MAX,
   normalizeChatPromptContextSettings
@@ -205,22 +206,7 @@ export function GeneralSettingsSection(props: {
               }}
             />
           </div>
-          <div className="gen-card-divider" />
-          <div className="gen-row">
-            <div className="gen-row-text">
-              <div className="gen-row-title">Beta updates</div>
-              <div className="gen-row-desc">Receive beta releases. Applies on next restart.</div>
-            </div>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                data-testid="beta-updates-toggle"
-                checked={props.betaUpdates}
-                onChange={(event) => void props.setBetaUpdates(event.target.checked)}
-              />
-              <span />
-            </label>
-          </div>
+          <BetaUpdatesRow enabled={props.betaUpdates} onChange={props.setBetaUpdates} />
           <div className="gen-card-divider" />
           <div className="gen-row">
             <div className="gen-row-text">
