@@ -936,6 +936,25 @@
     });
   }
 
+  /**
+   * Replaces a record as a whole, in one transaction, while `still` holds for
+   * what is there now. writeMetaRecord merges into the stored record, which
+   * keeps every field the new value leaves out: a key written over a key kept
+   * as text would keep the text beside it.
+   */
+  function replaceMetaRecordIf(key, value, still) {
+    return withNamedStore(META_STORE, "readwrite", function (store) {
+      const read = store.get(key);
+      read.onsuccess = function () {
+        if (still(read.result)) store.put({ ...value, key });
+      };
+    });
+  }
+
+  function replaceMetaRecord(key, value) {
+    return replaceMetaRecordIf(key, value, function () { return true; });
+  }
+
   // Once a run has produced its final (done or error) event, replayed copies
   // of its older "running" placeholders must not resurrect. A retry of the
   // same run stays visible because its placeholder is newer than the recorded
@@ -1622,16 +1641,16 @@
     }
   }
 
-  /** Starts pairing with the User's server when the address carries the code
-   *  the desktop shows; true when it did. */
+  /** Asks whether to pair with the server a pairing code names, when the
+   *  address carries one; true when it did. */
   function readBootstrapFromLocation(locationValue) {
     const url = new URL(locationValue.href);
-    // The code for the User's server: paired with it now, in the background
-    // of the first screen; the address bar keeps none of it.
+    // A code for a server: the phone asks before it pairs (askToPair); the
+    // address bar keeps none of it.
     const invite = readHubInvite(url);
     if (invite) {
       scrubCredentialsFromLocation();
-      void pairWithServer(invite);
+      askToPair(invite);
       return true;
     }
     if (url.hash || CREDENTIAL_URL_PARAMS.some(function (param) { return url.searchParams.has(param); })) {
@@ -2161,14 +2180,64 @@
     hubIdentityCache = undefined;
   }
 
+  function hasSigningKey(identity) {
+    return Boolean(identity && (identity.privateKey || identity.privateKeyDerBase64));
+  }
+
   function hubIdentity() {
     if (hubIdentityCache) return Promise.resolve(hubIdentityCache);
     const generation = hubIdentityGeneration;
     return readMetaRecord(HUB_IDENTITY_META_KEY).then(function (identity) {
-      if (!identity || !identity.deviceId || !identity.privateKeyDerBase64) throw new Error("This phone has lost its pairing key. Pair it again.");
+      if (!identity || !identity.deviceId || !hasSigningKey(identity)) throw new Error("This phone has lost its pairing key. Pair it again.");
+      return identity.privateKeyDerBase64 ? sealStoredIdentity(identity) : identity;
+    }).then(function (identity) {
       if (generation === hubIdentityGeneration) hubIdentityCache = identity;
       return identity;
     });
+  }
+
+  /**
+   * A key this phone kept as text (it paired before keys were kept
+   * unreadable) becomes a non-extractable key, once and in place: the same
+   * key, so the server, the Mac and the pairing stay as they are and nothing
+   * is paired again; the text is gone from the database. The key on record
+   * is replaced only while it is still this one (another tab may have paired
+   * meanwhile). A failed write signs from memory and is tried again on the
+   * next launch.
+   */
+  async function sealStoredIdentity(identity) {
+    const api = globalThis.AccordHubClient;
+    if (!api || typeof api.sealHubDeviceIdentity !== "function") return identity;
+    const sealed = await api.sealHubDeviceIdentity(identity);
+    try {
+      await replaceMetaRecordIf(HUB_IDENTITY_META_KEY, sealed, function (current) {
+        return Boolean(current && current.deviceId === identity.deviceId && current.privateKeyDerBase64);
+      });
+      // The key as stored must sign before its text is given up: a browser
+      // that could not keep it gets the text back, and signs from it.
+      const stored = await readMetaRecord(HUB_IDENTITY_META_KEY);
+      if (stored && stored.deviceId === identity.deviceId && !stored.privateKeyDerBase64) {
+        const works = await api.signHubRequestWeb(stored, { method: "GET", pathWithQuery: "/v1/key-check" }).then(function () { return true; }, function () { return false; });
+        if (!works) {
+          await replaceMetaRecordIf(HUB_IDENTITY_META_KEY, identity, function (current) {
+            return Boolean(current && current.deviceId === identity.deviceId && !current.privateKeyDerBase64);
+          });
+          recordRelayDebug({ event: "hub-key-seal-reverted", deviceId: identity.deviceId });
+          return identity;
+        }
+      }
+      const pending = await readMetaRecord(HUB_PENDING_IDENTITY_META_KEY);
+      if (pending && pending.identity && pending.identity.privateKeyDerBase64) {
+        const pendingSealed = { ...pending, identity: await api.sealHubDeviceIdentity(pending.identity) };
+        await replaceMetaRecordIf(HUB_PENDING_IDENTITY_META_KEY, pendingSealed, function (current) {
+          return Boolean(current && current.tokenHash === pending.tokenHash && current.identity && current.identity.privateKeyDerBase64);
+        });
+      }
+      recordRelayDebug({ event: "hub-key-sealed", deviceId: identity.deviceId });
+    } catch (error) {
+      recordRelayDebug({ event: "hub-key-seal-failed", message: String(error && error.message || error) });
+    }
+    return sealed;
   }
 
   function hubClient() {
@@ -2221,30 +2290,103 @@
   }
 
   /**
+   * A pairing code — from a link that opened the app, a pasted link or a
+   * scanned code — is never used at once. The phone first says which server
+   * it would pair with, and that this replaces the pairing it has, and pairs
+   * only when the User says so: a link in a chat or on a page can carry a
+   * code for anyone's server, and pairing with it would send what she writes
+   * there.
+   */
+  function askToPair(invite) {
+    hubPairingState = { status: "confirm", invite: invite, replacing: Boolean(loadHubPairing()) };
+    void render();
+  }
+
+  /** The server this phone is paired with now: its id at its address. */
+  function currentHubServer() {
+    const pairing = loadHubPairing();
+    if (!pairing) return undefined;
+    try {
+      return pairing.hubId + "@" + new URL(pairing.hubUrl).origin;
+    } catch {
+      return pairing.hubId + "@" + pairing.hubUrl;
+    }
+  }
+
+  function serverHost(hubUrl) {
+    try {
+      return new URL(hubUrl).host;
+    } catch {
+      return String(hubUrl || "");
+    }
+  }
+
+  /** The same server at the same address: the id alone is not enough, since
+   *  any server can answer with the id the User's own server publishes. */
+  function isSameServer(pairing, invite) {
+    if (!pairing || !invite || pairing.hubId !== invite.hubId) return false;
+    try {
+      return new URL(pairing.hubUrl).origin === new URL(invite.hubUrl).origin;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * What this phone kept of the chats of the server it was paired with: its
+   * chats, cards, timelines, the send log and what it has not sent yet.
+   * Pairing with another server clears it, so nothing kept for one server is
+   * shown as the other's, and nothing written for one goes to the other.
+   */
+  async function forgetServerData() {
+    await eventLogPort().runAtomic([TIMELINE_STORE, OUTBOX_STORE, SEND_FAILURES_STORE, META_STORE], function (tx) {
+      return Promise.all([
+        tx.clear(TIMELINE_STORE), tx.clear(OUTBOX_STORE), tx.clear(SEND_FAILURES_STORE),
+        tx.remove(META_STORE, UNREAD_META_KEY), tx.remove(META_STORE, CHAT_TITLES_META_KEY)
+      ]);
+    });
+    const keys = [CHAT_LIST_KEY, CHAT_LIST_AT_KEY, CONTROL_CARDS_KEY, CONTROL_CARD_SENT_KEY, UNREAD_KEY, TIMELINE_PAGES_KEY,
+      ACTIVE_CONVERSATION_KEY, OPEN_THREAD_KEY, OPEN_STREAM_KEY, STARTED_CHATS_KEY, VIEWED_AT_KEY, LIST_ACTIVITY_SEEN_KEY,
+      ACTIVITY_CLEARED_KEY, TERMINAL_RUNS_KEY, SYNC_WAIT_KEY, SEND_LOG_SEEN_KEY];
+    for (const key of keys) {
+      try {
+        localStorage.removeItem(key);
+        sessionStorage.removeItem(key);
+      } catch {
+        // A key that cannot be removed holds only what the next read replaces.
+      }
+    }
+  }
+
+  /**
    * Pairs this phone with the User's server from the code the desktop shows.
    * The key is made (and kept) before it is offered, so a lost answer is
    * asked again with the same key and the same code; the server answers the
    * same phone again rather than refusing it.
    */
   async function pairWithServer(invite) {
+    // Pairing over a pairing this phone has: the screen says how it goes in
+    // place of the chats, and after a failure the chats come back as they
+    // were (Back to chats); they are cleared only once the new pairing holds.
+    const replacing = Boolean(loadHubPairing());
     const api = globalThis.AccordHubClient;
     if (!api) {
-      hubPairingState = { status: "failed", message: "This copy of the app cannot pair yet. Reload it and scan the code again." };
+      hubPairingState = { status: "failed", message: "This copy of the app cannot pair yet. Reload it and scan the code again.", replacing: replacing };
       await render();
       return false;
     }
-    hubPairingState = { status: "pairing" };
+    hubPairingState = { status: "pairing", replacing: replacing };
     await render();
     try {
       const probe = api.createHubDeviceClient({ hubUrl: invite.hubUrl, identity: function () { return Promise.reject(new Error("not paired")); } });
       const health = await probe.health();
       if (!health || !(Number(health.protocol) >= HUB_PHONE_PROTOCOL)) {
-        hubPairingState = { status: "outdated", message: "Update AccordAgents on your Mac, then pair this phone again." };
+        hubPairingState = { status: "outdated", message: "Update AccordAgents on your Mac, then pair this phone again.", replacing: replacing };
         await render();
         return false;
       }
       if (health.hubId !== invite.hubId) {
-        hubPairingState = { status: "failed", message: "This code is for another server. Make a new one on your Mac." };
+        hubPairingState = { status: "failed", message: "This code is for another server. Make a new one on your Mac.", replacing: replacing };
         await render();
         return false;
       }
@@ -2256,18 +2398,25 @@
       const previous = await readMetaRecord(HUB_IDENTITY_META_KEY);
       const previousPairing = await readMetaRecord(HUB_PAIRING_META_KEY);
       const revoked = await readMetaRecord(HUB_REVOKED_IDENTITY_META_KEY);
-      const sameServer = Boolean(previous && previous.deviceId && previous.privateKeyDerBase64 && previousPairing &&
-        previousPairing.hubId === invite.hubId && previousPairing.deviceId === previous.deviceId &&
+      const sameServer = Boolean(previous && previous.deviceId && hasSigningKey(previous) && previousPairing &&
+        isSameServer(previousPairing, invite) && previousPairing.deviceId === previous.deviceId &&
         !(revoked && revoked.deviceId && revoked.deviceId === previous.deviceId));
-      const identity = pending && pending.tokenHash === tokenHash && pending.identity ? pending.identity
+      const chosen = pending && pending.tokenHash === tokenHash && pending.identity ? pending.identity
         : sameServer ? previous : await api.createHubDeviceIdentity();
-      await writeMetaRecord(HUB_PENDING_IDENTITY_META_KEY, { tokenHash: tokenHash, identity: identity });
+      // A key kept as text (paired before) goes on as a non-extractable one.
+      const identity = chosen.privateKeyDerBase64 ? await api.sealHubDeviceIdentity(chosen) : chosen;
+      await replaceMetaRecord(HUB_PENDING_IDENTITY_META_KEY, { tokenHash: tokenHash, identity: identity });
       const answer = await api.enrollHubPhone({ hubUrl: invite.hubUrl, hubId: invite.hubId, token: invite.token, identity: identity, name: phoneName() });
+      // Another server than the one this phone is paired with: what it kept
+      // for that one goes first, and the app starts again on the new one.
+      const current = loadHubPairing();
+      const switching = Boolean(current) && !isSameServer(current, invite);
+      if (switching) await forgetServerData();
       // The key the server now knows this phone by, before the pairing that
       // names it: a pairing without its key could never sign again. What the
       // queue still holds goes out under it: a request is signed when it is
       // sent, the operations in it are not.
-      await writeMetaRecord(HUB_IDENTITY_META_KEY, identity);
+      await replaceMetaRecord(HUB_IDENTITY_META_KEY, identity);
       forgetHubIdentity();
       const pairing = { hubUrl: invite.hubUrl, hubId: invite.hubId, deviceId: identity.deviceId, scope: answer.scope, pairedAt: nowIso(), protocol: answer.protocol };
       setStoredValue(HUB_PAIRING_KEY, JSON.stringify(pairing));
@@ -2283,14 +2432,19 @@
       // Nothing more to write: the server put this phone on its roster as it
       // enrolled, and the desktop learns it from that roster.
       hubPairingState = undefined;
-      recordRelayDebug({ event: "hub-paired", deviceId: identity.deviceId });
+      recordRelayDebug({ event: "hub-paired", deviceId: identity.deviceId, switched: switching });
+      if (switching) {
+        // Nothing this page holds in memory belongs to the new server.
+        globalThis.location.reload();
+        return true;
+      }
       await render();
       // From here on the phone works as it does after a launch: what it owes
       // goes out, the chats come in, live progress and alerts start.
       await initHubSession(loadPairing());
       return true;
     } catch (error) {
-      hubPairingState = hubPairingFailure(error);
+      hubPairingState = { ...hubPairingFailure(error), replacing: replacing };
       recordRelayDebug({ event: "hub-pairing-failed", message: String(error && error.message || error) });
       await render();
       return false;
@@ -2358,6 +2512,8 @@
       attempts: 0,
       updatedAt: createdAt,
       hub: true,
+      // The server it was written for: it goes to no other.
+      hubServer: currentHubServer(),
       ops: 3,
       ...(input.dependsOn ? { dependsOn: input.dependsOn } : {}),
       // Who the message is for, decided now, from what this phone showed the
@@ -2548,7 +2704,13 @@
    */
   async function flushOutboxToServer(entries) {
     const client = hubClient();
-    let owed = entries.filter(function (entry) { return entry.hub && serverOwesEntry(entry); })
+    // Written for another server (the phone was paired again meanwhile):
+    // it never goes to this one.
+    const server = currentHubServer();
+    for (const stray of entries.filter(function (entry) { return entry.hub && serverOwesEntry(entry) && entry.hubServer && entry.hubServer !== server; })) {
+      await settleOutboxEntry(stray, { status: OUTBOX_REFUSED, lastError: "Written for another server, so it was not sent to this one." });
+    }
+    let owed = entries.filter(function (entry) { return entry.hub && serverOwesEntry(entry) && (!entry.hubServer || entry.hubServer === server); })
       .sort(function (left, right) { return outboxOrderOf(left) - outboxOrderOf(right) || String(left.eventId).localeCompare(String(right.eventId)); });
     if (!client) return { status: "unreachable", sent: 0, pending: owed.length };
     let sent = 0;
@@ -5597,6 +5759,73 @@
     });
   }
 
+  /**
+   * The question a pairing code asks before it is used, with the server's
+   * address; and, while a pairing would replace this phone's, how it goes
+   * (the chats stay until it is done, and stay as they are when it fails).
+   */
+  function renderPairingPrompt(pairingState) {
+    const container = document.getElementById("chat-list");
+    if (!container) return;
+    const tag = "hub-prompt:" + pairingState.status + ":" + (pairingState.invite ? pairingState.invite.hubUrl : "") + ":" + (pairingState.message || "");
+    if (container.dataset.state === tag) return;
+    container.dataset.state = tag;
+    container.textContent = "";
+    const notice = document.createElement("div");
+    notice.className = "mobile-empty pairing-confirm";
+    const actions = document.createElement("div");
+    actions.className = "pairing-form";
+    const button = function (className, label, onClick) {
+      const element = document.createElement("button");
+      element.type = "button";
+      element.className = className;
+      element.textContent = label;
+      element.addEventListener("click", onClick);
+      return element;
+    };
+    const host = function (value) {
+      const strong = document.createElement("strong");
+      strong.className = "pairing-host";
+      strong.textContent = serverHost(value);
+      return strong;
+    };
+    const dismiss = function () {
+      hubPairingState = undefined;
+      delete container.dataset.state;
+      void render();
+    };
+    if (pairingState.status !== "confirm") {
+      notice.textContent = pairingState.status === "pairing" ? "Pairing with your server…" : (pairingState.message || "This phone could not pair.");
+      container.append(notice);
+      if (pairingState.status !== "pairing") {
+        actions.append(button("pairing-cancel", "Back to chats", dismiss));
+        container.append(actions);
+      }
+      return;
+    }
+    const invite = pairingState.invite;
+    const current = loadHubPairing();
+    const confirm = function () {
+      // One tap pairs once: a second would spend the same code again.
+      if (hubPairingState && hubPairingState.status !== "confirm") return;
+      for (const item of actions.querySelectorAll("button")) item.disabled = true;
+      hubPairingState = { status: "pairing", replacing: Boolean(current) };
+      void pairWithServer(invite);
+    };
+    if (!current) {
+      notice.append("Pair this phone with the server at ", host(invite.hubUrl), "? Continue only if you made this code on your Mac just now.");
+      actions.append(button("pairing-submit", "Pair", confirm), button("pairing-cancel", "Cancel", dismiss));
+    } else if (isSameServer(current, invite)) {
+      notice.append("Pair this phone again with your server at ", host(invite.hubUrl), "? Its chats stay as they are.");
+      actions.append(button("pairing-submit", "Pair again", confirm), button("pairing-cancel", "Cancel", dismiss));
+    } else {
+      notice.append("This phone is paired with your server at ", host(current.hubUrl), ". Pair it with the server at ", host(invite.hubUrl),
+        " instead? The chats on this phone and anything not sent yet are cleared, and it uses only the new server from then on.");
+      actions.append(button("pairing-submit", "Replace pairing", confirm), button("pairing-cancel", "Keep current pairing", dismiss));
+    }
+    container.append(notice, actions);
+  }
+
   // An installed home-screen app gets its own storage on iOS, so it starts with
   // no pairing even though Safari has one. Say that plainly instead of showing
   // an empty list with dead buttons. The same screen serves re-pairing after a
@@ -7672,6 +7901,13 @@
       state.textContent = "";
       lastRowsFingerprint = undefined;
       lastScrolledConversationId = undefined;
+    }
+    if (hubPairingState && (hubPairingState.status === "confirm" || hubPairingState.replacing)) {
+      // A code waiting for the User's yes, or a pairing that would replace
+      // the one this phone has: in place of the chats.
+      renderPairingPrompt(hubPairingState);
+      showScreen("chats");
+      return;
     }
     if (hubPairingState && (!loadHubPairing() || hubPairingState.status === "revoked")) {
       // Pairing with the server, or why it did not work: in place of the

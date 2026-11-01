@@ -176,11 +176,33 @@ How far it is built, so the two are not confused:
   way; nothing here is a difference between a local and a cloud member.
 - The server's chats are trusted as they are: it is the User's own, in her
   own AWS account (or inside her app), and only the desktop that set it up
-  changes who may use it. The server takes a chat's own fields (title,
-  members and their permissions, the project) from any device on its roster.
-  The app still has a member on a machine hand the member-list changes it
-  asks for to the desktop, which makes them (see the open divergence about
-  additions below).
+  changes who may use it. The computer checks, before anything goes to it,
+  that the server at the address proves it holds the key learned when the
+  computer set it up over SSH (taylor/security-hardening, 2026-10-31).
+- A cloud machine changes a chat through the server exactly as its members
+  change it through the app, and no further, because an agent there that was
+  tricked can write to the server around the app (taylor/security-hardening,
+  2026-11-01). The server knows which device wrote what and holds every
+  machine to the User's own rules and answers (`src/hub/hubMachineScope.ts`):
+  members that run elsewhere stay as they are, except the leave to ask other
+  members `/accord` gives the member it names; a machine's own members stay
+  on it with the role and the right to manage members the User gave them,
+  and get leave to ask other members only from her "Allow for this chat" or
+  `/accord`; a rule to act without a card is added only where she answered
+  so; a member is added only by a member there that may manage members
+  without a card under her rules (her computer publishes her roles and saved
+  members to the server, `PUT /v1/member-rules`) or as she approved it on a
+  card — the member she saw, with no right beyond it — and taken out the same
+  way (never the Chat Assistant or the last member); what she approved gives
+  its lasting change once, and a later answer to the same card replaces it; a
+  machine asks a member elsewhere only with its member's leave to ask or her
+  approval of that very request, once, as the request read when she approved
+  it; it names a new chat once, as the app does from the member that
+  answers first; it takes no project folder or other shared field, starts no
+  chat, and writes the User's words only as hidden answers for its own
+  member. Everything the app does on a machine passes these rules as it does
+  on the computer; nothing here is a difference between a local and a cloud
+  member.
 
 ## Exceptions
 

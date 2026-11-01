@@ -1937,7 +1937,7 @@ function hubSettingField(value: unknown): { hub?: HubLinkConfig } {
 /** The hub this desktop syncs with, as read back from disk. */
 function normalizeHubSetting(value: unknown): HubLinkConfig | undefined {
   if (!value || typeof value !== "object") return undefined;
-  const hub = value as { url?: unknown; hubId?: unknown; server?: unknown };
+  const hub = value as { url?: unknown; hubId?: unknown; hubKey?: unknown; server?: unknown };
   if (typeof hub.url !== "string" || !isAcceptableHubUrl(hub.url)) return undefined;
   let server: import("../../shared/hubSetup").HubServerRecord | undefined;
   if (hub.server && typeof hub.server === "object") {
@@ -1951,7 +1951,8 @@ function normalizeHubSetting(value: unknown): HubLinkConfig | undefined {
       };
     }
   }
-  return { url: hub.url, ...(typeof hub.hubId === "string" && hub.hubId ? { hubId: hub.hubId } : {}), ...(server ? { server } : {}) };
+  return { url: hub.url, ...(typeof hub.hubId === "string" && hub.hubId ? { hubId: hub.hubId } : {}),
+    ...(typeof hub.hubKey === "string" && hub.hubKey ? { hubKey: hub.hubKey } : {}), ...(server ? { server } : {}) };
 }
 
 export class SettingsService {
@@ -3831,7 +3832,7 @@ export class SettingsService {
     if (config && !isAcceptableHubUrl(config.url)) throw new Error("A hub is reached over HTTPS.");
     const stored = await this.readStored();
     if (this.storedReadError) throw new Error("Settings could not be read; nothing was changed.");
-    if (config) stored.hub = { url: config.url, ...(config.hubId ? { hubId: config.hubId } : {}), ...(config.server ? { server: config.server } : {}) };
+    if (config) stored.hub = { url: config.url, ...(config.hubId ? { hubId: config.hubId } : {}), ...(config.hubKey ? { hubKey: config.hubKey } : {}), ...(config.server ? { server: config.server } : {}) };
     else delete stored.hub;
     await this.writeStored(stored, true);
   }

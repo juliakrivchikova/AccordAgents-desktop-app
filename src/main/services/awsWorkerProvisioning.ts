@@ -2,6 +2,7 @@
 // command the user runs with their own AWS auth, the paste-blob it produces,
 // and the instance-launch spec. No AWS SDK and no side effects live here so
 // this is fully unit-testable; awsWorkerLifecycle.ts drives the real EC2 calls.
+import { workerHostKeyCloudInit, type WorkerHostKey } from "./awsWorkerHostKeys";
 import { normalizeAwsRootVolumeSizeGb } from "../../shared/cloudRuns";
 import { machinePowerPolicy, machineWakePolicy } from "../../shared/machinePower";
 
@@ -415,9 +416,11 @@ function parsePowerKey(value: unknown, label: string): AwsMachinePowerKey | unde
 
 // cloud-init that installs the worker toolchain at first boot, so a freshly
 // launched instance converges to a working state before the doctor even runs.
-export function buildWorkerCloudInit(): string {
+export function buildWorkerCloudInit(hostKey?: WorkerHostKey): string {
   return [
     "#cloud-config",
+    // The SSH host key this computer made for the machine and already knows.
+    ...(hostKey ? workerHostKeyCloudInit(hostKey) : []),
     "package_update: true",
     "packages:",
     "  - git",
@@ -465,6 +468,7 @@ export function buildWorkerInstanceSpec(options: {
   instanceType?: string;
   rootVolumeSizeGb?: number;
   clientToken?: string;
+  hostKey?: WorkerHostKey;
 }): WorkerInstanceSpec {
   return {
     imageId: options.imageId,
@@ -472,7 +476,7 @@ export function buildWorkerInstanceSpec(options: {
     instanceType: options.instanceType?.trim() || DEFAULT_AWS_WORKER_INSTANCE_TYPE,
     keyName: options.keyName,
     securityGroupId: options.securityGroupId,
-    userData: Buffer.from(buildWorkerCloudInit(), "utf8").toString("base64"),
+    userData: Buffer.from(buildWorkerCloudInit(options.hostKey), "utf8").toString("base64"),
     tagKey: AWS_WORKER_TAG_KEY,
     tagValue: AWS_WORKER_TAG_VALUE,
     rootVolumeSizeGb: normalizeAwsRootVolumeSizeGb(options.rootVolumeSizeGb),

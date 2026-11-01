@@ -3,8 +3,9 @@ import { createHash } from "node:crypto";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "../main/services/chatChanges";
 import { claimOutcomeFor } from "../main/services/hubOpsStore";
 import { HubArtifacts } from "./hubArtifacts";
+import { approvedMessageId, askNeedsApproval, changesMembers, keptApproval, machineMayAsk, runsOnMachine, scopeMachineConversationUpdate } from "./hubMachineScope";
 import type { SavedMessageRow, StorageService } from "../main/services/storage";
-import type { HubDevice } from "../shared/hubProtocol";
+import type { HubDevice, HubMemberRules } from "../shared/hubProtocol";
 import {
   HUB_CHAT_PAGE_MESSAGES,
   HUB_FEED_PAGE_BYTES,
@@ -40,6 +41,14 @@ import type { ChatMessage, ChatMessageReactions, Conversation } from "../shared/
  *  place in the server's order, and the device that wrote it (the only one
  *  that may change it). Whatever a device sends for these is replaced. */
 export const SERVER_MESSAGE_KEYS = ["serverSeq", "serverWriter"] as const;
+
+/** What a message says, to tell whether it changed. */
+function contentHash(content: string | undefined): string {
+  return createHash("sha256").update(content ?? "").digest("hex");
+}
+
+/** Where the server keeps the User's rules for members (HubMemberRules). */
+export const HUB_MEMBER_RULES_DOCUMENT = "member-rules";
 
 /** One accepted operation, as the server's other parts hear of it. */
 export interface HubOpApplied {
@@ -88,6 +97,25 @@ export class HubOps {
     private readonly now: () => Date = () => new Date()
   ) {
     this.artifacts = new HubArtifacts(storage, log, now);
+  }
+
+  /** The User's rules for members, as her computer last published them
+   *  (PUT /v1/member-rules); read again when published. */
+  private memberRulesCache?: Promise<HubMemberRules | undefined>;
+
+  memberRulesChanged(): void {
+    this.memberRulesCache = undefined;
+  }
+
+  private memberRules(): Promise<HubMemberRules | undefined> {
+    this.memberRulesCache ??= this.storage.hub().document(HUB_MEMBER_RULES_DOCUMENT).then((stored) => {
+      const value = stored?.value as HubMemberRules | undefined;
+      return value && value.version === 1 && value.roles && value.presets ? value : undefined;
+    }, () => {
+      this.memberRulesCache = undefined;
+      return undefined;
+    });
+    return this.memberRulesCache;
   }
 
   onApplied(listener: (applied: HubOpApplied) => void): void {
@@ -170,6 +198,9 @@ export class HubOps {
     });
 
     if (op.kind === "conversation.create") {
+      // A machine never starts a chat through the app: one it wrote around
+      // the app could name any project folder for the members it then asks.
+      if (device.role === "machine") return reject(opId, "A cloud machine does not start chats.");
       // A phone paired for one chat starts no other.
       if (device.role === "phone" && device.scope?.scope !== "device") return reject(opId, "This phone was paired for one chat, so it does not start new ones.");
       if (await this.load(op.conversationId)) return reject(opId, "This chat already exists.");
@@ -210,23 +241,41 @@ export class HubOps {
 
     switch (op.kind) {
       case "conversation.update": {
-        const metadata = sharedMetadata(op.metadata ?? {});
-        const removed = (op.removedMetadataKeys ?? []).filter((key) => (SHARED_CONVERSATION_METADATA_KEYS as readonly string[]).includes(key));
-        if (op.title !== undefined) conversation.title = op.title;
-        if (op.repoPath === null) delete conversation.repoPath;
-        else if (op.repoPath !== undefined) conversation.repoPath = op.repoPath;
+        // A machine changes what concerns its own members, and nothing that
+        // reaches the members that run elsewhere (hubMachineScope.ts).
+        let asked: { title?: string; repoPath?: string | null; metadata?: Record<string, unknown>; removedMetadataKeys?: string[] } = op;
+        let usedGrants: string[] = [];
+        if (device.role === "machine") {
+          // The User's approvals and rules matter only to a change of the
+          // members or their rules.
+          const scoped = scopeMachineConversationUpdate(loaded, op, device.machineId, changesMembers(op) ? {
+            approvals: await store.userApprovals(op.conversationId, device.deviceId),
+            used: await store.usedGrants(op.conversationId),
+            rules: await this.memberRules()
+          } : {});
+          if (scoped.refused.length) this.log("hub.op.machine-scoped", { opId, conversationId: op.conversationId, deviceId: device.deviceId, refused: scoped.refused.slice(0, 20) });
+          asked = scoped.update;
+          usedGrants = scoped.used;
+        }
+        const metadata = sharedMetadata(asked.metadata ?? {});
+        const removed = (asked.removedMetadataKeys ?? []).filter((key) => (SHARED_CONVERSATION_METADATA_KEYS as readonly string[]).includes(key));
+        if (asked.title !== undefined) conversation.title = asked.title;
+        if (asked.repoPath === null) delete conversation.repoPath;
+        else if (asked.repoPath !== undefined) conversation.repoPath = asked.repoPath;
         for (const [key, value] of Object.entries(metadata)) (conversation.metadata as Record<string, unknown>)[key] = value;
         for (const key of removed) delete (conversation.metadata as Record<string, unknown>)[key];
         conversation.updatedAt = acceptedAt;
         const done = accepted({
           kind: "conversation.update",
-          ...(op.title !== undefined ? { title: op.title } : {}),
-          ...(op.repoPath !== undefined ? { repoPath: op.repoPath } : {}),
+          ...(asked.title !== undefined ? { title: asked.title } : {}),
+          ...(asked.repoPath !== undefined ? { repoPath: asked.repoPath } : {}),
           ...(Object.keys(metadata).length ? { metadata } : {}),
           ...(removed.length ? { removedMetadataKeys: removed } : {}),
           updatedAt: acceptedAt
         });
-        await this.save(conversation, done);
+        // What gave a lasting change gives it once, noted in the same commit
+        // as the change it allowed.
+        await this.save(conversation, done, usedGrants.length ? (condition) => store.useGrantsSql(op.conversationId, usedGrants, acceptedAt, condition) : undefined);
         return { result: done.result, applied: { deviceId: device.deviceId, entry: done.entry, conversation } };
       }
       case "conversation.delete": {
@@ -250,8 +299,10 @@ export class HubOps {
         conversation.messages.push(message);
         conversation.updatedAt = acceptedAt;
         // A User's message asks a turn of every member it names: waiting on
-        // the server for the device each member runs on (Д4).
-        const turns = requestedTurnsFor(conversation, message, devices, { by: device.deviceId, at: acceptedAt });
+        // the server for the device each member runs on (Д4). Only one the
+        // User wrote: a machine writes the User's words only for its own
+        // members (a choice she answered), and never asks anyone by them.
+        const turns = device.role === "machine" ? [] : requestedTurnsFor(conversation, message, devices, { by: device.deviceId, at: acceptedAt });
         const done = accepted({ kind: "message.create", message, ...(turns.length ? { turns } : {}) });
         await this.save(conversation, done, (condition) => turns.map((turn) => store.turnSql(turn, condition)).join("\n"));
         return { result: done.result, applied: { deviceId: device.deviceId, entry: done.entry, conversation } };
@@ -267,6 +318,9 @@ export class HubOps {
         if ((writer ?? owner) !== device.deviceId) return reject(opId, "Only the device that wrote this message may change it.");
         if (op.message.role !== current.role || (op.message.participantId ?? "") !== (current.participantId ?? "")) {
           return reject(opId, "A message keeps its author.");
+        }
+        if (device.role === "machine" && op.message.role === "user" && op.message.metadata?.hiddenFromTimeline !== true) {
+          return reject(opId, "A cloud machine writes the User's words only as a hidden answer for its own member.");
         }
         const message = storedMessage(op.message, {
           serverSeq: typeof current.metadata?.serverSeq === "number" ? current.metadata.serverSeq : seq,
@@ -315,11 +369,11 @@ export class HubOps {
     const unchanged = (claim?: ReturnType<typeof claimOutcomeFor>) => ({
       result: { opId, status: "accepted" as const, seq: head, ...(claim ? { claim } : {}), ...(current ? { turn: current } : {}) }
     });
-    const place_ = async (turn: HubTurn, claim?: ReturnType<typeof claimOutcomeFor>): Promise<Outcome> => {
+    const place_ = async (turn: HubTurn, claim?: ReturnType<typeof claimOutcomeFor>, alsoSql = ""): Promise<Outcome> => {
       const effect: HubOpEffect = { kind: op.kind, turn } as HubOpEffect;
       const result: HubOpResult = { opId, status: "accepted", seq, ...(claim ? { claim } : {}), turn };
       const entry: HubFeedEntry = { seq, opId, deviceId: device.deviceId, conversationId: op.conversationId, acceptedAt, effect };
-      await store.execute(`${store.turnSql(turn)} ${store.insertSql({ ...entry, kind: op.kind, result })}`);
+      await store.execute(`${store.turnSql(turn)} ${alsoSql} ${store.insertSql({ ...entry, kind: op.kind, result })}`);
       return { result, applied: { deviceId: device.deviceId, entry } };
     };
 
@@ -353,10 +407,34 @@ export class HubOps {
     if (op.kind === "turn.request") {
       // Any device asks; the member's own device takes it (Д2, Д4).
       if (current) return unchanged(claimOutcomeFor(current, device.deviceId));
+      // A machine asks a member that runs elsewhere as a member asks another
+      // through the app: to answer one of its own members' messages, never
+      // the User's words and never to compact it.
+      let askGrant = "";
+      if (device.role === "machine") {
+        const members = Array.isArray(conversation.metadata?.participants) ? conversation.metadata.participants as Array<{ id?: unknown; homeMachineId?: string }> : [];
+        const member = (id: unknown) => members.find((item) => item?.id === id);
+        if (!runsOnMachine(member(op.participantId), device.machineId)) {
+          const message = conversation.messages.find((item) => item.id === op.messageId);
+          const ownMembers = message?.role === "participant" && runsOnMachine(member(message.participantId), device.machineId);
+          if (!ownMembers || op.request?.kind === "compaction") {
+            return reject(opId, "A cloud machine asks a member that runs elsewhere only to answer a message of one of its own members.");
+          }
+          // Only as the app lets that member ask: with its leave to ask
+          // other members, or with the User's approval of this request.
+          const needs = askNeedsApproval(conversation, message!);
+          const asked = machineMayAsk(conversation, device.machineId, message!, op.participantId,
+            needs ? await store.userApprovals(op.conversationId, device.deviceId) : [], contentHash(message!.content),
+            needs ? await store.usedGrants(op.conversationId) : new Set());
+          if (!asked) return reject(opId, "This member may ask a member that runs elsewhere only with leave to ask other members or with your approval.");
+          // Her approval runs the member once: noted with the turn.
+          if (typeof asked === "object") askGrant = store.useGrantsSql(op.conversationId, [asked.grant], acceptedAt);
+        }
+      }
       return place_({ runId: op.runId, conversationId: op.conversationId, messageId: op.messageId, participantId: op.participantId,
         state: "requested", requestedAt: acceptedAt, requestedBy: device.deviceId,
         ...(op.pendingMessageId ? { pendingMessageId: op.pendingMessageId } : {}),
-        ...(op.request ? { request: op.request } : {}) });
+        ...(op.request ? { request: op.request } : {}) }, undefined, askGrant);
     }
 
     // turn.claim: only where the member runs (Д4), once (Д5).
@@ -381,11 +459,11 @@ export class HubOps {
     if (!conversation) return reject(opId, "There is no such chat.");
     const current = await store.card(op.cardId);
     if (current && current.conversationId !== op.conversationId) return reject(opId, "This card belongs to another chat.");
-    const placeCard = async (card: HubCard): Promise<Outcome> => {
+    const placeCard = async (card: HubCard, alsoSql = ""): Promise<Outcome> => {
       const effect: HubOpEffect = { kind: op.kind, card } as HubOpEffect;
       const result: HubOpResult = { opId, status: "accepted", seq, card };
       const entry: HubFeedEntry = { seq, opId, deviceId: device.deviceId, conversationId: op.conversationId, acceptedAt, effect };
-      await store.execute(`${store.cardSql(card)} ${store.insertSql({ ...entry, kind: op.kind, result })}`);
+      await store.execute(`${store.cardSql(card)} ${alsoSql} ${store.insertSql({ ...entry, kind: op.kind, result })}`);
       return { result, applied: { deviceId: device.deviceId, entry, conversation } };
     };
     if (op.kind === "card.raise") {
@@ -417,7 +495,22 @@ export class HubOps {
       if (device.role === "machine" && (current.raisedBy !== device.deviceId || (op.answer as { auto?: unknown }).auto !== true)) {
         return reject(opId, "A machine does not answer for the User.");
       }
-      return placeCard({ ...current, state: "answered", answer: op.answer, answeredBy: device.deviceId, answeredAt: acceptedAt, answerOpId: opId });
+      const answered: HubCard = { ...current, state: "answered", answer: op.answer, answeredBy: device.deviceId, answeredAt: acceptedAt, answerOpId: opId };
+      // What she approves on a machine's card is kept as she saw it, with the
+      // request it approved as it read then: the machine is held to it after
+      // the card is settled or asked again (hubMachineScope.ts). Her new
+      // answer to a card replaces what she approved on it before.
+      let kept = "";
+      if (device.role !== "machine" && devices.some((item) => item.role === "machine" && item.deviceId === current.raisedBy)) {
+        kept = store.supersedeApprovalsSql(op.conversationId, current.cardId, acceptedAt);
+        if ((op.answer as { approve?: unknown }).approve === true && (op.answer as { auto?: unknown }).auto !== true) {
+          const messageId = approvedMessageId(answered);
+          const message = messageId ? conversation.messages.find((item) => item.id === messageId) : undefined;
+          const slim = keptApproval(answered);
+          if (slim) kept += store.userApprovalSql(slim, message ? contentHash(message.content) : undefined);
+        }
+      }
+      return placeCard(answered, kept);
     }
     if (current.raisedBy !== device.deviceId) return reject(opId, "Only the device that raised this card settles it.");
     if (current.state === "settled") return { result: { opId, status: "accepted", seq: seq - 1, card: current } };
@@ -530,6 +623,12 @@ export class HubOps {
   /** Who may add a message: anyone, except a member's message, which only
    *  the device that member runs on writes (Д4). */
   private mayWriteMessage(device: HubDevice, conversation: Conversation, message: ChatMessage, devices: HubDevice[]): Rejection | undefined {
+    // The User's words from a machine are only the hidden ones the app
+    // writes for its own member (her answer to its choice, an approval's
+    // control word): never one the chat shows, or a member reads, as hers.
+    if (device.role === "machine" && message.role === "user" && message.metadata?.hiddenFromTimeline !== true) {
+      return { rejected: "A cloud machine writes the User's words only as a hidden answer for its own member." };
+    }
     if (message.role !== "participant") return undefined;
     if (!message.participantId) return { rejected: "A member's message names its member." };
     const home = homeDeviceId(conversation, message.participantId, devices);

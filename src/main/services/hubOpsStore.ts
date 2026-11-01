@@ -1,10 +1,14 @@
-import type { HubCard, HubCardKind, HubClaimOutcome, HubFeedEntry, HubOpEffect, HubOpResult, HubTurn, HubTurnOutcome, HubTurnState } from "../../shared/hubOps";
+import type { HubCard, HubCardKind, HubUserApproval, HubClaimOutcome, HubFeedEntry, HubOpEffect, HubOpResult, HubTurn, HubTurnOutcome, HubTurnState } from "../../shared/hubOps";
 
 /**
  * The server's own record of what it accepted (agreements Д1, Д3): every
  * accepted operation in the server's order, and every turn and where it
  * stands. Server-side only; a device keeps none of this.
  */
+/** How many of the User's approvals in one chat a machine's change is held
+ *  to, newest first: far more than one chat's cards waiting at once. */
+const USER_APPROVALS_READ = 500;
+
 export const HUB_OPS_SCHEMA_SQL = `
   create table if not exists hub_ops (
     seq integer primary key autoincrement,
@@ -71,6 +75,30 @@ export const HUB_OPS_SCHEMA_SQL = `
     answer_op_id text
   );
   create index if not exists hub_cards_open on hub_cards(conversation_id, state);
+  -- What the User approved on a card a cloud machine raised (from her
+  -- computer or a phone), as the card was when she answered it: kept after
+  -- the card is settled or asked again, since what a machine does to members
+  -- elsewhere is held to it. Superseded when she answers the card again.
+  create table if not exists hub_user_approvals (
+    answer_op_id text primary key,
+    conversation_id text not null,
+    card_id text not null,
+    raised_by text not null,
+    participant_id text,
+    card_json text not null,
+    message_hash text,
+    answered_at text not null,
+    superseded_at text
+  );
+  create index if not exists hub_user_approvals_chat on hub_user_approvals(conversation_id, raised_by);
+  -- What already gave a machine a lasting change (an approval, an /accord):
+  -- each gives it once.
+  create table if not exists hub_machine_grants_used (
+    conversation_id text not null,
+    grant_key text not null,
+    used_at text not null,
+    primary key(conversation_id, grant_key)
+  );
   -- How far the feed was forgotten (retention): a device that read less
   -- reads its chats again.
   create table if not exists hub_ops_state (
@@ -308,9 +336,61 @@ export class HubOpsStore {
     return rows.map(cardFromRow);
   }
 
-  /** Removes a deleted chat's cards (committed with the deletion). */
+  /** Removes a deleted chat's cards (committed with the deletion), and what
+   *  the User approved on them. */
   deleteCardsSql(conversationId: string): string {
-    return `delete from hub_cards where conversation_id = ${quote(conversationId)};`;
+    return `delete from hub_cards where conversation_id = ${quote(conversationId)};
+      delete from hub_user_approvals where conversation_id = ${quote(conversationId)};
+      delete from hub_machine_grants_used where conversation_id = ${quote(conversationId)};`;
+  }
+
+  /** The User answered a card again: what she approved on it before no
+   *  longer counts. */
+  supersedeApprovalsSql(conversationId: string, cardId: string, at: string): string {
+    return `update hub_user_approvals set superseded_at = ${quote(at)}
+      where conversation_id = ${quote(conversationId)} and card_id = ${quote(cardId)} and superseded_at is null;`;
+  }
+
+  /** Keeps what the User approved on a card a machine raised, as the card is
+   *  now (answered), with the content of the message it approved. */
+  userApprovalSql(card: HubCard, messageHash?: string): string {
+    return `insert into hub_user_approvals(answer_op_id, conversation_id, card_id, raised_by, participant_id, card_json, message_hash, answered_at)
+      values (${quote(card.answerOpId ?? "")}, ${quote(card.conversationId)}, ${quote(card.cardId)}, ${quote(card.raisedBy)},
+        ${card.participantId ? quote(card.participantId) : "null"}, ${quote(JSON.stringify(card))}, ${messageHash ? quote(messageHash) : "null"},
+        ${quote(card.answeredAt ?? "")})
+      on conflict(answer_op_id) do nothing;`;
+  }
+
+  /** What the User approved on the cards one device raised in a chat, newest
+   *  first (the newest USER_APPROVALS_READ of them). */
+  async userApprovals(conversationId: string, raisedBy: string, limit = USER_APPROVALS_READ): Promise<HubUserApproval[]> {
+    await this.init();
+    const rows = await this.database.query<{ cardJson: string; messageHash: string | null; supersededAt: string | null }>(`select card_json as cardJson,
+      message_hash as messageHash, superseded_at as supersededAt from hub_user_approvals
+      where conversation_id = ${quote(conversationId)} and raised_by = ${quote(raisedBy)}
+      order by answered_at desc limit ${Math.max(1, Math.floor(limit))};`);
+    return rows.flatMap((row) => {
+      try {
+        return [{ ...(JSON.parse(row.cardJson) as HubCard), ...(row.messageHash ? { messageHash: row.messageHash } : {}), ...(row.supersededAt ? { superseded: true } : {}) }];
+      } catch {
+        return [];
+      }
+    });
+  }
+
+  /** What already gave a machine its lasting change in a chat. */
+  async usedGrants(conversationId: string): Promise<Set<string>> {
+    await this.init();
+    const rows = await this.database.query<{ grantKey: string }>(`select grant_key as grantKey from hub_machine_grants_used
+      where conversation_id = ${quote(conversationId)};`);
+    return new Set(rows.map((row) => row.grantKey));
+  }
+
+  /** Notes what gave its lasting change, gated like the change itself. */
+  useGrantsSql(conversationId: string, grantKeys: string[], usedAt: string, condition?: string): string {
+    return grantKeys.map((key) => `insert into hub_machine_grants_used(conversation_id, grant_key, used_at)
+      select ${quote(conversationId)}, ${quote(key)}, ${quote(usedAt)} ${condition ? `where ${condition}` : ""}
+      on conflict do nothing;`).join("\n");
   }
 
   cardSql(card: HubCard): string {

@@ -3,6 +3,7 @@
 // injectable Ec2Client so the state machine is unit-testable with a fake and
 // the real client (awsEc2Client.ts) can lazy-load the AWS SDK.
 
+import type { WorkerHostKey } from "./awsWorkerHostKeys";
 import {
   AWS_WORKER_TAG_KEY,
   AWS_WORKER_TAG_VALUE,
@@ -81,6 +82,13 @@ export interface AwsWorkerLifecycleOptions {
   generateKeyMaterial: (options?: { rotate?: boolean }) => Promise<AwsWorkerKeyMaterial>;
   deleteKeyMaterial?: (keyName: string, privateKeyPath: string) => Promise<void>;
   currentPublicIp: () => Promise<string>;
+  /** A new machine's SSH host key: made before the machine exists, given to
+   *  it at first boot, and known here under its connection name. */
+  hostKey?: {
+    /** The same key for the same launch token (a launch tried again). */
+    generate: (launchToken?: string) => Promise<WorkerHostKey>;
+    pin: (alias: string, publicKey: string, launchToken?: string) => Promise<void>;
+  };
   waitForState?: (
     poll: () => Promise<AwsWorkerInstanceInfo | undefined>,
     predicate: (info: AwsWorkerInstanceInfo | undefined) => boolean,
@@ -124,7 +132,7 @@ const DEFAULT_IDLE_STOP_MS = 3 * 60 * 60_000;
 export class AwsWorkerLifecycle {
   private readonly options: Required<Pick<AwsWorkerLifecycleOptions,
     "createEc2Client" | "generateKeyMaterial" | "deleteKeyMaterial" | "currentPublicIp" | "waitForState" | "idleStopMs" | "idleStopRetryMs" | "authorizeAutomaticStop" | "now">>
-    & Pick<AwsWorkerLifecycleOptions, "logger" | "automaticStopEnabled">;
+    & Pick<AwsWorkerLifecycleOptions, "logger" | "automaticStopEnabled" | "hostKey">;
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
   private activeRuns = 0;
 
@@ -140,7 +148,8 @@ export class AwsWorkerLifecycle {
       authorizeAutomaticStop: options.authorizeAutomaticStop ?? (async () => undefined),
       now: options.now ?? (() => Date.now()),
       logger: options.logger,
-      automaticStopEnabled: options.automaticStopEnabled
+      automaticStopEnabled: options.automaticStopEnabled,
+      hostKey: options.hostKey
     };
   }
 
@@ -165,6 +174,7 @@ export class AwsWorkerLifecycle {
     } else {
       await client.authorizeSshIngress(securityGroupId, cidr);
     }
+    const hostKey = await this.options.hostKey?.generate(options.clientToken);
     const spec = buildWorkerInstanceSpec({
       imageId: image.imageId,
       rootDeviceName: image.rootDeviceName,
@@ -172,10 +182,19 @@ export class AwsWorkerLifecycle {
       securityGroupId,
       instanceType: options.instanceType,
       rootVolumeSizeGb: options.rootVolumeSizeGb,
-      clientToken: options.clientToken
+      clientToken: options.clientToken,
+      ...(hostKey ? { hostKey } : {})
     });
     const instanceId = await client.runInstance(spec);
-    this.log("aws-worker.created", { instanceId, securityGroupId });
+    this.log("aws-worker.created", { instanceId, securityGroupId, hostKeyMade: Boolean(hostKey) });
+    if (hostKey) {
+      // Before anything connects to it. A failure here only leaves the first
+      // connection checked as before (trust on first use); it is logged.
+      await this.options.hostKey!.pin(`accordagents-${instanceId}`, hostKey.publicKey, options.clientToken).then(
+        () => this.log("aws-worker.host-key-pinned", { instanceId }),
+        (error: unknown) => this.log("aws-worker.host-key-pin-failed", { instanceId, message: error instanceof Error ? error.message : String(error) })
+      );
+    }
     return {
       instanceId,
       securityGroupId,

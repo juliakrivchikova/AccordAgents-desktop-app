@@ -22,6 +22,7 @@ import {
 } from "./machineInstaller";
 import {
   machineDrainScript,
+  machineInstallDependenciesScript,
   machineInstallLayout,
   machineMirrorProbeScript,
   machineProbeScript,
@@ -1464,4 +1465,10 @@ test("a failed identity read replaces nothing and starts the old runtime again",
   assert.ok(h.calls.slice(identityIndex + 1).some((call) => call.script.includes(" start 'accordagents-machine.service'")),
     "the old runtime is started again");
   assert.deepEqual(identity.adopted, []);
+});
+
+test("a machine installs exactly the packages its release names, checked by their integrity hashes", () => {
+  const script = machineInstallDependenciesScript(LAYOUT, "1.4.0-abc");
+  assert.match(script, /if \[ -f npm-shrinkwrap\.json \]; then npm ci --omit=dev/, "a release with a lockfile is installed with npm ci");
+  assert.match(script, /else npm install --omit=dev/, "a release from before still installs");
 });

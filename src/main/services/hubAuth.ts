@@ -1,5 +1,5 @@
 import { createHash, createPrivateKey, createPublicKey, randomBytes, sign, verify } from "node:crypto";
-import { HUB_AUTH_MAX_SKEW_MS, HUB_AUTH_SCHEME, hubRequestSigningText } from "../../shared/hubProtocol";
+import { HUB_AUTH_MAX_SKEW_MS, HUB_AUTH_SCHEME, hubProofSigningText, hubRequestSigningText, type HubHealth } from "../../shared/hubProtocol";
 
 /** A device identity as the chat event log keeps it. */
 export interface HubSigningIdentity {
@@ -130,3 +130,11 @@ export const hubCertificateCrypto = {
   sha256Hex: (text: string) => sha256Hex(text),
   deviceIdForPublicKey
 };
+
+/** Whether a server's answer to a challenge proves it holds the key a device
+ *  knows it by (and is the server it knows by that id). */
+export function hubProofVerifies(health: Pick<HubHealth, "hubId" | "proof">, hubId: string, hubKey: string, challenge: string): boolean {
+  const proof = health.proof;
+  return Boolean(proof && health.hubId === hubId && proof.hubKey === hubKey &&
+    typeof proof.signature === "string" && verifyHubText(hubKey, hubProofSigningText(hubId, challenge), proof.signature));
+}

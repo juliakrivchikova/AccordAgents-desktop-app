@@ -436,7 +436,9 @@ export function machineInstallDependenciesScript(layout: MachineInstallLayout, r
   return [
     PREAMBLE,
     `cd ${dir}`,
-    "npm install --omit=dev --no-audit --no-fund"
+    // Exactly the packages the release names, each checked against its
+    // integrity hash (a release from before it named them resolves them).
+    "if [ -f npm-shrinkwrap.json ]; then npm ci --omit=dev --no-audit --no-fund; else npm install --omit=dev --no-audit --no-fund; fi"
   ].join("\n");
 }
 

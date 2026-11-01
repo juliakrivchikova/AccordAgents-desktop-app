@@ -41,7 +41,7 @@ section can show verbatim:
 | `preflight` | `CloudRunDoctorService` checks and, if needed, repairs the machine: Node, git, `sqlite3`, the Codex sandbox kernel setting, and **the provider sign-in, performed on the machine**. `authUrl`/`authCode` on the snapshot are the device-auth handoff. |
 | `bundle` | The local `dist/machine` bundle is read and fingerprinted. |
 | `transfer` | The bundle is copied into `releases/<version>-<digest>` beside whatever is already there. |
-| `dependencies` | `npm install --omit=dev` inside that release. |
+| `dependencies` | `npm ci --omit=dev` inside that release. |
 | `enroll` | The enrollment package is written to `enrollment.json` (mode 600). |
 | `drain` | The running runtime, its native supervisor and any provider process it owns are stopped, and their absence is **proven**. This step always runs, including on a first install. |
 | `identity` | At setup, and at an upgrade of a machine whose identity this desktop does not know: the staged runtime prints the identity it signs its requests with (`--device-identity`, made once and kept in the machine's own database; the private key never leaves), and this desktop records it, so the User's server's roster names the machine and its settings can be sealed for it before it first connects. Runs while nothing runs there. A failure here replaces nothing and starts the old runtime again (`old-runtime-still-installed`). |
