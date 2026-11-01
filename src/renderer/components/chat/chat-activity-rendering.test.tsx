@@ -13,7 +13,7 @@ import {
   openGroups,
   svgClassNames,
   textContent
-} from "./chat-activity-test-harness";
+} from "./chat-activity-harness.test";
 
 test("activity detail masks secrets and independently preserves reveal and length state", async () => {
   const detail = [
