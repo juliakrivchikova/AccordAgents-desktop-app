@@ -228,11 +228,15 @@ its phone app. Everything else runs in the `Windows release` workflow
    machine, checked out with LF line endings like the macOS build (the app
    ships skills, prompts and the cloud machine runtime byte for byte), checks
    its archive, launches it and keeps it as an artifact. `Publish` then waits.
-2. On the Windows PC, within a week (the unsigned app is kept for 7 days),
-   with SimplySign Desktop signed in and the GitHub CLI signed in as the User,
-   the reviewer of `windows-signing`: in a clean clone checked out at the tag,
-   `npm ci`, then `npm run sign:windows-x64 -- --run <run id>`. It checks that
-   the run is one of this workflow and built the commit the tag names here,
+2. On the Windows PC, within 30 days (the run keeps the unsigned app that
+   long), with the GitHub CLI signed in as the User, the reviewer of
+   `windows-signing`: in a clean clone checked out at the tag, `npm ci
+   --ignore-scripts` (no dependency's install script runs on the PC that holds
+   the certificate session), then sign in to SimplySign Desktop and run `npm
+   run sign:windows-x64 -- --run <run id>` (the Release run's notice prints the
+   id). Before it signs anything it checks that the run is one of this
+   workflow, started from `main` for a release, built the commit the tag names
+   here, and that the account can write here and approve the run. It then
    downloads the unsigned app, signs its files, packs and signs the installer,
    checks every signature, puts the files in the draft release
    `windows-signed-<run id>` of this repository and approves `Publish`. The
@@ -244,8 +248,8 @@ its phone app. Everything else runs in the `Windows release` workflow
    checks the signatures of everything installed as Windows sees them, checks
    that the NuGet package and `RELEASES` are the ones inside the signed
    installer (anyone who can write to this repository can write to the draft),
-   launches the installed app, and only then adds to the GitHub Release of the
-   tag:
+   launches the installed app, and only then adds to the GitHub Release macOS
+   published for the tag (it never creates a Windows-only release):
 
    ```text
    AccordAgents-<version>-win32-x64-Setup.exe

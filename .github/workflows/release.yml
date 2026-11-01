@@ -340,7 +340,10 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: v${{ needs.release.outputs.version }}
     steps:
-      - run: gh workflow run windows-release.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f tag="$TAG"
+      - run: |
+          set -euo pipefail
+          url="$(gh workflow run windows-release.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f tag="$TAG" | grep -o 'https://[^ ]*/actions/runs/[0-9]*' || true)"
+          echo "::notice::Windows release for $TAG: ${url:-see the Actions tab}. Once its Build is done, sign it on the Windows PC: npm run sign:windows-x64 -- --run ${url##*/}"
 
   phone-app:
     name: Phone app

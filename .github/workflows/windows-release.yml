@@ -105,8 +105,11 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-unsigned-app
+          # The artifact holds the app's folder itself, named after the product.
           path: out/*-win32-x64/
-          retention-days: 7
+          include-hidden-files: true
+          # As long as the Publish job may wait for its approval.
+          retention-days: 30
           if-no-files-found: error
 
       - name: Keep what was built
@@ -114,7 +117,7 @@ jobs:
         with:
           name: windows-build-info
           path: ${{ runner.temp }}/build-info/build.json
-          retention-days: 7
+          retention-days: 30
           if-no-files-found: error
 
       - name: Keep the launch evidence
@@ -233,8 +236,10 @@ jobs:
           fi
           # Squirrel may start the app after installing; the check starts its own.
           taskkill //IM "$exe" //T //F > /dev/null 2>&1 || true
-          # The installer and every binary it installed, as Windows sees them.
-          node scripts/sign-windows-x64.mjs --check "$(cygpath -w "$setup")" "$(cygpath -w "$app")"
+          # The installer and every binary it installed, as Windows sees them,
+          # with Squirrel's Update.exe and the launcher every shortcut starts.
+          node scripts/sign-windows-x64.mjs --check "$(cygpath -w "$setup")" "$(cygpath -w "$app")" \
+            "$(cygpath -w "$root/Update.exe")" "$(cygpath -w "$root/$exe")"
           # The update files existing installs download must be the ones inside
           # the signed installer, which Squirrel just unpacked into packages/.
           entry() { sed 's/^\xEF\xBB\xBF//' | tr -d '\r' | awk '{ print $1, $2, $3 }'; }
@@ -258,8 +263,8 @@ jobs:
           fi
           echo "RELEASE_REPO=$repo" >> "$GITHUB_ENV"
 
-      # Publishes the checked files without building: the token that can
-      # write to the release repo reaches nothing else.
+      # Adds the checked files to the release macOS published, without
+      # building; only this step holds the token that can write there.
       - name: Publish
         if: inputs.tag != ''
         env:
@@ -281,7 +286,9 @@ jobs:
           # The published bytes must be the ones this job installed and launched.
           (cd "$dir" && sha256sum -c "$workspace"/out/windows-release/*.sha256)
 
+      # A draft left behind does no harm; the release is already done.
       - name: Remove the draft with the signed files
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release delete "$DRAFT" --repo "$GITHUB_REPOSITORY" --yes

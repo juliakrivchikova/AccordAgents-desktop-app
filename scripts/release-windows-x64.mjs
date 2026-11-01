@@ -6,7 +6,6 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync,
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { createReleaseAtFreshCommit, preflightReleaseRepo, verifyReleaseListing } from "./release-repo-target.mjs";
 
 const rootDir = process.cwd();
 const packageJsonPath = path.join(rootDir, "package.json");
@@ -33,13 +32,12 @@ only with stable releases.
 
   --package-only   Builds the unsigned app into out/<product>-win32-x64, checks its
                    archive and launches it with a throwaway profile.
-  --publish-only   Publishes the signed files in out/windows-release to the GitHub
-                   Release of the current version: the full NuGet package and
-                   RELEASES first, then the Setup executable, with checksums and a
-                   Windows section in the notes. A published installer is never
-                   replaced. When the release does not exist yet, its tag goes on a
-                   new empty commit on the release repo's default branch so the
-                   update feed lists it first.
+  --publish-only   Adds the signed files in out/windows-release to the GitHub
+                   Release the macOS build published for the current version:
+                   the full NuGet package and RELEASES first, then the Setup
+                   executable, with checksums and a Windows section in the
+                   notes. A published installer is never replaced, and a
+                   missing release is never created.
 
 Options:
   --repo owner/repo              Public GitHub release repo. Defaults to package.json config.releaseRepo.
@@ -407,45 +405,17 @@ function publishedAssetNames(tagName, releaseRepo) {
     .filter(Boolean);
 }
 
-function createOrUpdateRelease(options, tagName, defaultBranch, files, notes) {
-  if (releaseExists(tagName, options.releaseRepo)) {
-    const installer = path.basename(files.installer[0]);
-    // Once the installer is up, Windows users may be updating to these files;
-    // a rebuild is never byte-identical, so it must not replace them.
-    if (publishedAssetNames(tagName, options.releaseRepo).includes(installer)) {
-      fail(`${tagName} in ${options.releaseRepo} already has ${installer}, so its Windows files are not replaced.
+function addToRelease(options, tagName, files, notes) {
+  const installer = path.basename(files.installer[0]);
+  // Once the installer is up, Windows users may be updating to these files;
+  // a rebuild is never byte-identical, so it must not replace them.
+  if (publishedAssetNames(tagName, options.releaseRepo).includes(installer)) {
+    fail(`${tagName} in ${options.releaseRepo} already has ${installer}, so its Windows files are not replaced.
 If they must be rebuilt, remove the Windows files from the release by hand first.`);
-    }
-    runInherited("gh", ["release", "upload", tagName, ...files.update, "--repo", options.releaseRepo, "--clobber"]);
-    runInherited("gh", ["release", "upload", tagName, ...files.installer, "--repo", options.releaseRepo, "--clobber"]);
-    addWindowsNotes(tagName, options.releaseRepo, notes);
-    return;
   }
-
-  try {
-    return createReleaseAtFreshCommit(
-      {
-        releaseRepo: options.releaseRepo,
-        branch: defaultBranch,
-        tagName,
-        // gh uploads to a draft and publishes it after the last file.
-        releaseArgs: [
-          ...files.update,
-          ...files.installer,
-          "--repo",
-          options.releaseRepo,
-          "--title",
-          `${productName()} ${tagName}`,
-          "--notes",
-          notes
-        ]
-      },
-      { gh: (args) => runInherited("gh", args) }
-    );
-  } catch (error) {
-    fail(`Publishing ${tagName} to ${options.releaseRepo} failed: ${error.message}
-Fix the cause and rerun; when the release exists the script only uploads to it.`);
-  }
+  runInherited("gh", ["release", "upload", tagName, ...files.update, "--repo", options.releaseRepo, "--clobber"]);
+  runInherited("gh", ["release", "upload", tagName, ...files.installer, "--repo", options.releaseRepo, "--clobber"]);
+  addWindowsNotes(tagName, options.releaseRepo, notes);
 }
 
 export function validateWindowsUpdateResponse({ endpoint, status, statusText, url, body }, version) {
@@ -523,36 +493,15 @@ async function publish(options, version) {
   if (repoInfo.isPrivate && !options.allowPrivateReleaseRepo) {
     fail(`${options.releaseRepo} is private. update.electronjs.org requires a public GitHub release repo.`);
   }
-
-  const defaultBranch = repoInfo.defaultBranchRef?.name || "main";
+  // A release with only Windows files would become the newest one the
+  // update feed offers; Windows always follows a published macOS release.
   if (!releaseExists(tagName, options.releaseRepo)) {
-    try {
-      preflightReleaseRepo(options.releaseRepo, defaultBranch, tagName);
-    } catch (error) {
-      fail(error.message);
-    }
+    fail(`${options.releaseRepo} has no release ${tagName}. Windows files are added to the release the macOS build published.`);
   }
 
   const files = releaseFiles(version);
-  const targetCommit = createOrUpdateRelease(options, tagName, defaultBranch, files, windowsNotes(files));
-  const listingProblem = targetCommit
-    ? await verifyReleaseListing({ releaseRepo: options.releaseRepo, tagName, targetCommit, checkOrder: true })
-    : "";
-  if (listingProblem) {
-    console.warn(`\n${tagName} is published in ${options.releaseRepo}, but ${listingProblem}.`);
-  }
-  let updateCheckError = null;
-  try {
-    await checkUpdateEndpoint(options, version, repoInfo.isPrivate);
-  } catch (error) {
-    updateCheckError = error;
-  }
-  if (listingProblem) {
-    fail(`${tagName} is published, but ${listingProblem}.${updateCheckError ? `\nUpdate check: ${updateCheckError.message}` : ""}`);
-  }
-  if (updateCheckError) {
-    throw updateCheckError;
-  }
+  addToRelease(options, tagName, files, windowsNotes(files));
+  await checkUpdateEndpoint(options, version, repoInfo.isPrivate);
 
   console.log(`\nWindows update artifacts for ${tagName} are ready in ${options.releaseRepo}.`);
 }
