@@ -47,8 +47,9 @@ const SQLITE_MIGRATION_TIMEOUT_MS = 120_000;
  *  a nested status matches too — that the exact check then narrows. It never
  *  parses the row, so it cannot fail on one, and it is the condition of the
  *  partial index `idx_conversation_messages_pending_reply`: a query uses that
- *  index only while it states this very expression. */
-const PENDING_REPLY_ROW_HINT_SQL = (column: string): string => `instr(${column}, '"status":"pending"') > 0`;
+ *  index only while it states this very expression. The index is made once
+ *  by name, so a change here needs a new index name as well. */
+const pendingReplyRowHintSql = (column: string): string => `instr(${column}, '"status":"pending"') > 0`;
 const SCHEMA_META_COMPLETE = "complete";
 export const SUPPORTED_STORAGE_SCHEMA_VERSION = 2;
 /** What `prepareStorageForOlderVersion` puts the database back to. */
@@ -490,7 +491,7 @@ export class StorageService {
     // Built once over the existing rows; sqlite keeps it on every write after.
     await this.runSql(
       `create index if not exists idx_conversation_messages_pending_reply on conversation_messages(conversation_id)
-         where ${PENDING_REPLY_ROW_HINT_SQL("payload_json")};`,
+         where ${pendingReplyRowHintSql("payload_json")};`,
       SQLITE_MIGRATION_TIMEOUT_MS
     );
     await this.backfillConversationBodiesAndMessages();
@@ -555,9 +556,9 @@ export class StorageService {
       replyPending?: number | string | null;
       chatParticipantsJson?: string | null;
     }>(
-      // A chat has work while a run of this device is in it, and also while a
-      // member's reply has not ended (`isPendingReply`): a machine member's
-      // turn asked from the phone runs with no run here at all.
+      // Besides this device's runs, whether a member's reply has not ended
+      // (`isPendingReply`): a machine member's turn asked from the phone runs
+      // with no run here at all, and the reply is the only sign of it.
       `select
          id,
          title,
@@ -571,7 +572,7 @@ export class StorageService {
          exists (
            select 1 from conversation_messages m
            where m.conversation_id = conversations.id
-             and ${PENDING_REPLY_ROW_HINT_SQL("m.payload_json")}
+             and ${pendingReplyRowHintSql("m.payload_json")}
              and json_valid(m.payload_json)
              and json_extract(m.payload_json, '$.status') = 'pending'
              and json_extract(m.payload_json, '$.role') = 'participant'
@@ -586,7 +587,7 @@ export class StorageService {
         : (row.activeRunIdsCount ?? 0);
       const runningFlag = row.running === 1 || row.running === "1" || row.running === true || row.running === "true";
       const replyPending = row.replyPending === 1 || row.replyPending === "1";
-      const isRunning = activeCount > 0 || runningFlag || replyPending;
+      const isRunning = activeCount > 0 || runningFlag;
       const isArchived = row.archived === 1 || row.archived === "1" || row.archived === true || row.archived === "true";
       const chatParticipants = row.kind === "chat"
         ? normalizeConversationSummaryChatParticipants(row.chatParticipantsJson)
@@ -599,6 +600,7 @@ export class StorageService {
         updatedAt: row.updatedAt,
         repoPath: row.repoPath ?? undefined,
         running: isRunning,
+        ...(replyPending ? { replyPending: true } : {}),
         archived: isArchived,
         ...(chatParticipants ? { chatParticipants } : {})
       };

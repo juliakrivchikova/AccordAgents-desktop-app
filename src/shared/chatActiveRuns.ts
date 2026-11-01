@@ -13,8 +13,9 @@ type ConversationRunState = Pick<Conversation, "metadata" | "messages">;
 
 /** A member's reply that has not ended yet, wherever its turn runs: here, or
  *  on a machine for a turn asked from the phone, where this device holds no
- *  run of its own and the reply is the only sign of the work. Storage's chat
- *  list (`StorageService.listConversations`) states the same rule in SQL. */
+ *  run of its own and the reply is the only sign of the work. The chat list
+ *  (`ConversationSummary.replyPending`, `StorageService.listConversations`)
+ *  states the same rule in SQL. */
 export function isPendingReply(message: Pick<ChatMessage, "role" | "status">): boolean {
   return message.role === "participant" && message.status === "pending";
 }

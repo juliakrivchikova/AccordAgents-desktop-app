@@ -205,7 +205,8 @@ export const Sidebar = ({
                         const pending = summary.id === pendingId;
                         const selected = summary.id === activeId || pending;
                         const running = summary.running === true;
-                        const unread = !selected && !running && unreadIds?.has(summary.id) === true;
+                        const working = running || summary.replyPending === true;
+                        const unread = !selected && !working && unreadIds?.has(summary.id) === true;
                         return (
                           <SidebarSessionRow
                             key={summary.id}
@@ -213,6 +214,7 @@ export const Sidebar = ({
                             selected={selected}
                             pending={pending}
                             running={running}
+                            working={working}
                             unread={unread}
                             onSelect={onSelect}
                             onArchive={onArchive}
@@ -273,6 +275,7 @@ export const Sidebar = ({
                         selected={selected}
                         pending={pending}
                         running={summary.running === true}
+                        working={summary.running === true || summary.replyPending === true}
                         unread={false}
                         onSelect={onSelect}
                         onArchive={onArchive}

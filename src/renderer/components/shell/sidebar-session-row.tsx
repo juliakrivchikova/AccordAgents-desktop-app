@@ -13,7 +13,10 @@ interface SidebarSessionRowProps {
   summary: ConversationSummary;
   selected: boolean;
   pending: boolean;
+  /** A run of this device is in the chat: it cannot be archived or deleted. */
   running: boolean;
+  /** Work is shown: a run here, or a member's reply not ended anywhere. */
+  working: boolean;
   unread: boolean;
   onSelect: (id: string) => void;
   onArchive?: (id: string) => void;
@@ -25,6 +28,7 @@ export const SidebarSessionRow = ({
   selected,
   pending,
   running,
+  working,
   unread,
   onSelect,
   onArchive,
@@ -40,11 +44,11 @@ export const SidebarSessionRow = ({
           type="button"
           onClick={() => onSelect(summary.id)}
           data-selected={selected ? "true" : undefined}
-          data-running={running ? "true" : undefined}
+          data-running={working ? "true" : undefined}
           data-unread={unread ? "true" : undefined}
           data-archived={archived ? "true" : undefined}
           data-testid="project-session"
-          aria-busy={pending || running ? "true" : undefined}
+          aria-busy={pending || working ? "true" : undefined}
           className={cn(
             "sidebar-history-item group flex w-full min-w-0 max-w-full flex-col gap-0.5 overflow-hidden rounded-md px-2 py-1.5 text-left text-sm",
             "border border-transparent transition-colors hover:bg-[var(--app-surface-hover)]",
@@ -54,7 +58,7 @@ export const SidebarSessionRow = ({
           )}
         >
           <span className="flex w-full min-w-0 items-center gap-1.5 text-[13px] leading-tight">
-            {(pending || running) && <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />}
+            {(pending || working) && <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />}
             <span className="min-w-0 flex-1 truncate">{summary.title}</span>
             {unread && <span className="size-2 shrink-0 rounded-full bg-[var(--app-accent)]" aria-label="New activity" title="New activity" />}
             {relativeTime && <span className="shrink-0 text-[11px] text-muted-foreground">{relativeTime}</span>}
