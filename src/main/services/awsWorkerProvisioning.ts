@@ -2,6 +2,7 @@
 // command the user runs with their own AWS auth, the paste-blob it produces,
 // and the instance-launch spec. No AWS SDK and no side effects live here so
 // this is fully unit-testable; awsWorkerLifecycle.ts drives the real EC2 calls.
+import { powerShellBootstrapCommand } from "./awsSetupPowerShell";
 import { workerHostKeyCloudInit, type WorkerHostKey } from "./awsWorkerHostKeys";
 import { normalizeAwsRootVolumeSizeGb } from "../../shared/cloudRuns";
 import { machinePowerPolicy, machineWakePolicy } from "../../shared/machinePower";
@@ -181,6 +182,40 @@ export function buildScopedWorkerPolicy(region: string): unknown {
   };
 }
 
+export interface BootstrapCommandOptions {
+  targetUserName?: string;
+  keepWorkerKeyId?: string;
+  keepPowerKeyIds?: readonly string[];
+  keepWakeKeyId?: string;
+  /** False: make only the app's key, and leave the stop and start keys of an
+   *  instance in another region alone. */
+  machineKeys?: boolean;
+}
+
+/** Everything the setup command does, checked once; each shell only spells
+ *  it (the PowerShell one is `powerShellBootstrapCommand`). */
+export type BootstrapPlan =
+  /** An in-place permission update of this existing user: no key is made. */
+  | { kind: "permissions"; region: string; userName: string; policy: string }
+  | {
+    kind: "keys";
+    region: string;
+    userName: string;
+    policy: string;
+    keepWorkerKeyId: string;
+    powerUserName: string;
+    powerPolicy?: string;
+    keepPowerKeyIds: string[];
+    wakeUserName: string;
+    wakePolicy?: string;
+    keepWakeKeyId: string;
+    tagKey: string;
+    tagValue: string;
+    blobPrefix: string;
+    powerPolicyName: string;
+    wakePolicyName: string;
+  };
+
 // The copy-paste snippet shown in the app. The user runs it in a terminal that
 // already has AWS auth. It creates three dedicated IAM users, printed together
 // as one paste blob: the app's worker user with the scoped policy above, the
@@ -189,19 +224,19 @@ export function buildScopedWorkerPolicy(region: string): unknown {
 // `machineWakePolicy` (read and start them), whose key is made only once. It
 // never touches anything outside those users and their policies, and the app
 // never sees the user's own credentials, only the scoped keys pasted back.
+// Spelled for the Terminal this computer has: bash or zsh on macOS and Linux,
+// PowerShell on Windows, with the same AWS calls and the same printed result.
 export function buildBootstrapCommand(
   region: string,
   userSuffix: string,
-  options: {
-    targetUserName?: string;
-    keepWorkerKeyId?: string;
-    keepPowerKeyIds?: readonly string[];
-    keepWakeKeyId?: string;
-    /** False: make only the app's key, and leave the stop and start keys of an
-     *  instance in another region alone. */
-    machineKeys?: boolean;
-  } = {}
+  options: BootstrapCommandOptions = {},
+  platform: NodeJS.Platform = process.platform
 ): string {
+  const plan = bootstrapPlan(region, userSuffix, options);
+  return platform === "win32" ? powerShellBootstrapCommand(plan) : posixBootstrapCommand(plan);
+}
+
+function bootstrapPlan(region: string, userSuffix: string, options: BootstrapCommandOptions): BootstrapPlan {
   const safeRegion = assertToken("region", region);
   const targetUserName = options.targetUserName ? assertWorkerUserName(options.targetUserName) : undefined;
   const userName = targetUserName ?? `accordagents-worker-${assertToken("suffix", userSuffix)}`;
@@ -209,14 +244,44 @@ export function buildBootstrapCommand(
   if (policy.length > 6_144) {
     throw new Error("AWS worker policy exceeds the IAM customer-managed policy size limit.");
   }
-  // Single-quote the policy for the shell; escape embedded quotes.
-  const policyLiteral = shellSingleQuote(policy);
   if (targetUserName) {
     // An in-place permission update mints no key, so it never touches the stop key.
+    return { kind: "permissions", region: safeRegion, userName, policy };
+  }
+  const powerUserName = `accordagents-power-${assertToken("suffix", userSuffix)}`;
+  const wakeUserName = `accordagents-wake-${assertToken("suffix", userSuffix)}`;
+  if ([userName, powerUserName, wakeUserName].some((name) => name.length > 64)) throw new Error("An AWS IAM user name would exceed the IAM limit of 64 characters.");
+  // A region the stop- and start-key policies cannot name still gets the app's key.
+  const machineKeys = options.machineKeys !== false;
+  return {
+    kind: "keys",
+    region: safeRegion,
+    userName,
+    policy,
+    tagKey: AWS_WORKER_TAG_KEY,
+    tagValue: AWS_WORKER_TAG_VALUE,
+    blobPrefix: AWS_WORKER_BLOB_PREFIX,
+    powerPolicyName: AWS_MACHINE_POWER_POLICY_NAME,
+    wakePolicyName: AWS_MACHINE_WAKE_POLICY_NAME,
+    // Only well-formed key ids reach the script; anything else keeps nothing.
+    keepWorkerKeyId: options.keepWorkerKeyId && isAwsAccessKeyId(options.keepWorkerKeyId) ? options.keepWorkerKeyId : "",
+    powerUserName,
+    powerPolicy: machineKeys ? policyOrUndefined(() => machinePowerPolicy(safeRegion)) : undefined,
+    keepPowerKeyIds: [...new Set((options.keepPowerKeyIds ?? []).filter(isAwsAccessKeyId))],
+    wakeUserName,
+    wakePolicy: machineKeys ? policyOrUndefined(() => machineWakePolicy(safeRegion)) : undefined,
+    keepWakeKeyId: options.keepWakeKeyId && isAwsAccessKeyId(options.keepWakeKeyId) ? options.keepWakeKeyId : ""
+  };
+}
+
+function posixBootstrapCommand(plan: BootstrapPlan): string {
+  // Single-quote the policy for the shell; escape embedded quotes.
+  const policyLiteral = shellSingleQuote(plan.policy);
+  if (plan.kind === "permissions") {
     return [
       "set -e",
-      `REGION=${safeRegion}`,
-      `USER=${userName}`,
+      `REGION=${plan.region}`,
+      `USER=${plan.userName}`,
       `POLICY=${policyLiteral}`,
       'if ! aws iam get-user --user-name "$USER" >/dev/null 2>&1; then printf "%s\\n" "Expected existing AccordAgents worker IAM user $USER was not found." >&2; exit 1; fi',
       'POLICY_ARN=$(aws iam list-policies --scope Local --query "Policies[?PolicyName==\x27$USER\x27].Arn | [0]" --output text)',
@@ -226,17 +291,8 @@ export function buildBootstrapCommand(
       'printf "\\nUpdated AccordAgents worker permissions for %s. Return to AccordAgents and select Try again.\\n" "$USER"'
     ].join("\n");
   }
-  const powerUserName = `accordagents-power-${assertToken("suffix", userSuffix)}`;
-  const wakeUserName = `accordagents-wake-${assertToken("suffix", userSuffix)}`;
-  if ([userName, powerUserName, wakeUserName].some((name) => name.length > 64)) throw new Error("An AWS IAM user name would exceed the IAM limit of 64 characters.");
-  // Only well-formed key ids reach the script; anything else keeps nothing.
-  const keepWorkerKeyId = options.keepWorkerKeyId && isAwsAccessKeyId(options.keepWorkerKeyId) ? options.keepWorkerKeyId : "";
-  const keepPowerKeyIds = [...new Set((options.keepPowerKeyIds ?? []).filter(isAwsAccessKeyId))].join(" ");
-  const keepWakeKeyId = options.keepWakeKeyId && isAwsAccessKeyId(options.keepWakeKeyId) ? options.keepWakeKeyId : "";
-  // A region the stop- and start-key policies cannot name still gets the app's key.
-  const machineKeys = options.machineKeys !== false;
-  const powerPolicy = machineKeys ? policyOrUndefined(() => machinePowerPolicy(safeRegion)) : undefined;
-  const wakePolicy = machineKeys ? policyOrUndefined(() => machineWakePolicy(safeRegion)) : undefined;
+  const { region: safeRegion, userName, powerUserName, wakeUserName, powerPolicy, wakePolicy, keepWorkerKeyId, keepWakeKeyId } = plan;
+  const keepPowerKeyIds = plan.keepPowerKeyIds.join(" ");
   return [
     "set -e",
     `REGION=${safeRegion}`,

@@ -327,11 +327,11 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", { time
           text: (row.querySelector(".message-content")?.textContent || "").trim()
         } : null);
       })()`));
-      return read && read.text.startsWith("Waiting for your Mac") ? JSON.stringify(read) : false;
+      return read && read.text.startsWith("Waiting for your computer") ? JSON.stringify(read) : false;
     }, { detail: rowDump }));
     assert.match(placeholder.handle, /^@(taylor|drew|admin)$|^Chat Assistant$/, `S7: it names the member it was sent to: ${JSON.stringify(placeholder)}`);
     assert.notEqual(placeholder.handle, "Agent", `S7: it names nobody it does not know: ${JSON.stringify(placeholder)}`);
-    assert.match(placeholder.text, /^Waiting for your Mac to start it/, `S7: and says it is waiting for the member's home, not that the member is writing: ${JSON.stringify(placeholder)}`);
+    assert.match(placeholder.text, /^Waiting for your computer to start it/, `S7: and says it is waiting for the member's home, not that the member is writing: ${JSON.stringify(placeholder)}`);
     if (process.env.ACCORD_E2E_SHOT) {
       const shot = await app.send("Page.captureScreenshot", { format: "png" });
       await writeFile(process.env.ACCORD_E2E_SHOT, Buffer.from(shot.data, "base64"));
@@ -340,7 +340,7 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", { time
     // Started, and still nothing written: the member's own row, under its name.
     await until("the member's own row replaces the waiting one", async () => await evaluate(`(() => {
       const rows = [...document.querySelectorAll('#message-list .message-row[data-status="Running"]')];
-      return rows.length === 1 && !(rows[0].querySelector(".message-content")?.textContent || "").includes("Waiting for your Mac") &&
+      return rows.length === 1 && !(rows[0].querySelector(".message-content")?.textContent || "").includes("Waiting for your computer") &&
         (rows[0].querySelector(".message-handle")?.textContent || "") === ${JSON.stringify(placeholder.handle)};
     })()`), { detail: rowDump });
     releaseSilent();

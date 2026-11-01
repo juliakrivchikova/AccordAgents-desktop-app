@@ -404,7 +404,7 @@ test("mobile shell builds static installable PWA assets", async () => {
   }
   assert.match(app, /OLD_PAIRING_KEY = "accordagents\.mobile\.pairing\.v1"/);
   assert.match(app, /localStorage\.removeItem\(OLD_PAIRING_KEY\)/);
-  assert.match(app, /"This phone was paired the old way\. Pair it again from Settings on your Mac\."/);
+  assert.match(app, /"This phone was paired the old way\. Pair it again from Settings on your computer\."/);
   // W-N: only a participant's finished message may end a run. The behavioral
   // proof is scripts/mobile-inprogress-row.test.mjs; this pin fails fast if the
   // role guard is dropped, since without it the user's own message comes back

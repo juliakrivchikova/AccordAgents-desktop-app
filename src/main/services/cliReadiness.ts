@@ -402,7 +402,8 @@ function startCodexAccountProbe(
   const child = spawnCommand(command, ["app-server", "--listen", "stdio://"], {
     detached: useProcessGroup,
     env: commandEnvironment(env),
-    stdio: ["pipe", "pipe", "pipe"]
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true
   });
   const context: CodexAccountProbeContext = {
     child,

@@ -132,6 +132,8 @@ export function ChatParticipantSelectableRosterRow(props: {
   selected: boolean;
   locked?: boolean;
   disabledReason?: string;
+  /** The runtime controls; by default disabled with the member. */
+  controlsDisabled?: boolean;
   roleLabel: string;
   remoteExecution?: ChatParticipant["remoteExecution"];
   runtimeOverride?: ChatParticipantRuntimeOverride;
@@ -142,7 +144,8 @@ export function ChatParticipantSelectableRosterRow(props: {
 }): JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const displayName = chatParticipantDisplayName(props.participant);
-  const checkboxDisabled = Boolean(props.locked) || Boolean(props.disabledReason);
+  // A member that cannot run where it is set to can always be taken out again.
+  const checkboxDisabled = Boolean(props.locked) || (Boolean(props.disabledReason) && !props.selected);
   const runtimeOverride = props.runtimeOverride ?? {};
   const host = cliProviderHostForParticipant(props.participant.kind, props.participant.hostId, props.cliProviderHosts ?? []);
   const participant: ChatParticipant = {
@@ -164,7 +167,6 @@ export function ChatParticipantSelectableRosterRow(props: {
   return (
     <div
       className={`chat-participant-row chat-participant-select-row ${props.selected ? "is-selected" : ""} ${expanded ? "is-expanded" : "is-collapsed"} ${props.disabledReason ? "is-disabled" : ""}`}
-      title={props.disabledReason}
     >
       <span className="chat-participant-avatar-slot" aria-hidden>
         {props.renderParticipantAvatar(props.participant)}
@@ -174,6 +176,7 @@ export function ChatParticipantSelectableRosterRow(props: {
           <button
             type="button"
             className="chat-participant-identity"
+            title={props.disabledReason}
             aria-expanded={expanded}
             onClick={() => setExpanded((value) => !value)}
           >
@@ -215,7 +218,7 @@ export function ChatParticipantSelectableRosterRow(props: {
         {expanded && (
           <ParticipantRuntimeControls
             participant={participant}
-            disabled={Boolean(props.disabledReason)}
+            disabled={props.controlsDisabled ?? Boolean(props.disabledReason)}
             runLocationLocked={false}
             onUpdate={(_participantId, patch) => props.onRuntimeChange(props.participant, patch)}
           />

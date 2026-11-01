@@ -9,6 +9,16 @@ import { CHAT_PROVIDER_PREFERENCE } from "./chatProviders";
 
 export const CLI_READINESS_STALE_MS = 30_000;
 
+/** The platforms whose terminal Open Terminal opens: macOS's Terminal, and
+ *  PowerShell on Windows. */
+const CLI_TERMINAL_PLATFORMS = ["darwin", "win32"] as const;
+
+export type CliTerminalPlatform = typeof CLI_TERMINAL_PLATFORMS[number];
+
+export function isCliTerminalPlatform(platform: string | undefined): platform is CliTerminalPlatform {
+  return CLI_TERMINAL_PLATFORMS.some((supported) => supported === platform);
+}
+
 export interface CliProviderSetupMetadata {
   kind: ChatProviderKind;
   label: string;
@@ -16,7 +26,7 @@ export interface CliProviderSetupMetadata {
   versionArgs: string[];
   loginCommand: string;
   guideUrl: string;
-  installCommandByPlatform: Partial<Record<"darwin", string>>;
+  installCommandByPlatform: Partial<Record<CliTerminalPlatform, string>>;
   probeStrategy: "codex-login-status" | "claude-auth-status" | "antigravity-models";
 }
 
@@ -47,7 +57,8 @@ export const CLI_PROVIDER_SETUP: Record<ChatProviderKind, CliProviderSetupMetada
     loginCommand: "claude auth login",
     guideUrl: "https://docs.anthropic.com/en/docs/claude-code/getting-started",
     installCommandByPlatform: {
-      darwin: "npm install -g @anthropic-ai/claude-code"
+      darwin: "npm install -g @anthropic-ai/claude-code",
+      win32: "npm install -g @anthropic-ai/claude-code"
     },
     probeStrategy: "claude-auth-status"
   },
@@ -59,7 +70,8 @@ export const CLI_PROVIDER_SETUP: Record<ChatProviderKind, CliProviderSetupMetada
     loginCommand: "codex login",
     guideUrl: "https://github.com/openai/codex/blob/main/README.md",
     installCommandByPlatform: {
-      darwin: "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
+      darwin: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+      win32: "npm install -g @openai/codex"
     },
     probeStrategy: "codex-login-status"
   }

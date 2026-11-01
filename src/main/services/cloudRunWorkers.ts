@@ -88,7 +88,8 @@ export function buildCloudRunSshTarget(worker: Pick<RemoteRunWorkerTarget, "host
 }
 
 export function cloudRunSshOptionArgs(
-  worker: Pick<RemoteRunWorkerTarget, "host" | "user" | "identityFile" | "hostKeyAlias" | "port">
+  worker: Pick<RemoteRunWorkerTarget, "host" | "user" | "identityFile" | "hostKeyAlias" | "port">,
+  platform: NodeJS.Platform = process.platform
 ): string[] {
   validateCloudRunSshWorkerFields(worker);
   const args = [
@@ -105,7 +106,7 @@ export function cloudRunSshOptionArgs(
     "ServerAliveInterval=8",
     "-o",
     "ServerAliveCountMax=3",
-    ...sshMultiplexArgs(worker)
+    ...sshMultiplexArgs(worker, platform)
   ];
   if (worker.identityFile?.trim()) {
     args.push("-i", worker.identityFile.trim());
@@ -118,7 +119,8 @@ export function cloudRunSshOptionArgs(
     // that answers with another key is refused even on the first connection
     // (accept-new adds only hosts no file knows).
     const pinned = alias && isAwsMachineAlias(alias) ? appKnownHostsFile() : undefined;
-    if (pinned) args.push("-o", `UserKnownHostsFile="${pinned}" ~/.ssh/known_hosts`);
+    // ssh unescapes a backslash before \ or ": a Windows path, UNC included, is doubled.
+    if (pinned) args.push("-o", `UserKnownHostsFile="${pinned.replace(/["\\]/g, "\\$&")}" ~/.ssh/known_hosts`);
   }
   if (typeof worker.port === "number" && Number.isFinite(worker.port) && worker.port > 0) {
     args.push("-p", String(Math.floor(worker.port)));
@@ -137,9 +139,16 @@ export function cloudRunSshOptionArgs(
 // opens a fresh connection whenever the shared one is missing or stale, so the
 // worst case is exactly today's behaviour rather than a failure. `ControlPersist`
 // keeps it only while a run is live; it expires between turns.
+//
+// Windows OpenSSH has no multiplexing: given ControlMaster it exits at once
+// with "getsockname failed: Not a socket", before it even connects.
 function sshMultiplexArgs(
-  worker: Pick<RemoteRunWorkerTarget, "host" | "user" | "port">
+  worker: Pick<RemoteRunWorkerTarget, "host" | "user" | "port">,
+  platform: NodeJS.Platform
 ): string[] {
+  if (platform === "win32") {
+    return [];
+  }
   const controlDir = sshControlDirectory();
   if (!controlDir) {
     return [];

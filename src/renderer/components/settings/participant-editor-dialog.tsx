@@ -20,7 +20,7 @@ import {
 import type { ChatParticipantDraft } from "../chat/chat-participant-drafts";
 import { ParticipantRunLocation } from "../chat/participant-run-location";
 import { chatParticipantHomeIsUnassigned } from "../../../shared/chatParticipantHome";
-import { CHAT_AGENT_MODE_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatCliProviderLabel, chatConfigProviderLabel, chatParticipantHost, chatProviderOptionId, chatProviderOptionPatch, chatProviderOptions, chatProviderSupportsCloudRun, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
+import { CHAT_AGENT_MODE_OPTIONS, WORKFLOW_MANAGER_ROLE_ID, chatAgentModeLabel, chatConfigProviderLabel, chatParticipantHost, chatProviderOptionId, chatProviderOptionPatch, chatProviderOptions, chatProviderSupportsCloudRun, normalizedChatDrafts, sameParticipantDraft, updateChatParticipantDraft, validateChatCliAgents, validateChatParticipantDrafts } from "../chat/chat-participant-drafts";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
 import {
   ParticipantEditorHandleField,

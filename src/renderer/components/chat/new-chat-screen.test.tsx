@@ -6,11 +6,14 @@ import { act, create, type ReactTestInstance } from "react-test-renderer";
 import type {
   AgentHealth,
   AppSettings,
+  ChatParticipantConfig,
   ChatImageInput,
   ChatSkillMention,
   RepoFileMention
 } from "../../../shared/types";
 import { NewChatScreen } from "./new-chat-screen";
+import { ChatParticipantSelectableRosterRow } from "./chat-participant-roster-row";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import type { DraftPluginMention } from "./chat-composer-draft-utils";
 import type { PendingChatImage } from "./use-chat-composer-images";
 import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../../shared/mobilePairing";
@@ -240,6 +243,27 @@ test("New Chat suggests /goal for one clear target and selection inserts /goal s
   });
   assert.equal(renderer.root.findByProps({ "data-testid": "new-chat-prompt" }).props.value, "/goal ");
   renderer.unmount();
+});
+
+test("a member that cannot run where it is set to cannot be added, and once added can still be taken out", async () => {
+  const member = { id: "member-claude", handle: "claude", roleConfigId: "engineer", kind: "claude-code" } as ChatParticipantConfig;
+  const toggled: string[] = [];
+  const check = (selected: boolean) => create(<TooltipProvider><ChatParticipantSelectableRosterRow
+    participant={member}
+    selected={selected}
+    disabledReason="Claude Code requires sign-in."
+    controlsDisabled={false}
+    roleLabel="Engineer"
+    renderParticipantAvatar={() => null}
+    onToggleSelected={(id) => toggled.push(id)}
+    onRuntimeChange={() => undefined}
+  /></TooltipProvider>).root.findByProps({ role: "checkbox" });
+
+  assert.equal(check(false).props.disabled, true);
+  const selected = check(true);
+  assert.equal(selected.props.disabled, false, "a member set back to run here after it was added would be stuck in the chat");
+  await click(selected);
+  assert.deepEqual(toggled, [member.id]);
 });
 
 function GoalCommandHarness(): JSX.Element {

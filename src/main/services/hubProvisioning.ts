@@ -5,6 +5,7 @@
 // and lets this computer in), and prints one line for the app. Pure: no side
 // effects here, so it is fully unit-testable.
 import { HUB_SETUP_BLOB_PREFIX, isHubNonce, isHubRegion } from "../../shared/hubSetup";
+import { powerShellHubSetupCommand } from "./awsSetupPowerShell";
 
 export const HUB_INSTANCE_NAME = "accordagents-hub";
 export const HUB_STATIC_IP_NAME = "accordagents-hub-ip";
@@ -34,17 +35,23 @@ export function hubLaunchScript(publicKey: string): string {
 }
 
 /**
- * The command shown in Settings, to paste into Terminal (zsh or bash).
- * `nonce` names this command, so the app takes back only the line it
- * printed. The server's host keys come from AWS's own answer (signed in as
- * the User), so neither this command nor the app has to trust the first key
- * a server presents.
+ * The command shown in Settings, to paste into Terminal: zsh or bash, and
+ * PowerShell on Windows. `nonce` names this command, so the app takes back
+ * only the line it printed. The server's host keys come from AWS's own answer
+ * (signed in as the User), so neither this command nor the app has to trust
+ * the first key a server presents.
  */
-export function buildHubSetupCommand(region: string, publicKey: string, nonce: string): string {
+export function buildHubSetupCommand(region: string, publicKey: string, nonce: string, platform: NodeJS.Platform = process.platform): string {
   if (!isHubRegion(region)) throw new Error("Choose an AWS region such as us-east-1.");
   if (!isHubNonce(nonce)) throw new Error("Invalid setup label.");
   const key = assertPublicKey(publicKey);
   const user = HUB_SSH_USER;
+  if (platform === "win32") {
+    return powerShellHubSetupCommand({
+      region, instanceName: HUB_INSTANCE_NAME, staticIpName: HUB_STATIC_IP_NAME, blueprintId: HUB_BLUEPRINT_ID,
+      bundleId: HUB_BUNDLE_ID, tag: HUB_TAG, user, nonce, publicKey: key, launchScript: hubLaunchScript(key).trimEnd().split("\n")
+    });
+  }
   const script = [
     "set -euo pipefail",
     `REGION=${region}`,

@@ -35,7 +35,7 @@ import {
 import {
   readyProviderKinds
 } from "../../../shared/cliReadiness";
-import { validateChatCliAgents } from "./chat-cli-readiness";
+import { participantOptionInvalidReason, validateChatCliAgents } from "./chat-cli-readiness";
 export { validateChatCliAgents } from "./chat-cli-readiness";
 import {
   defaultChatAvatarId,
@@ -123,6 +123,10 @@ export function newChatAssistantParticipantDraft(
 export interface AddableSavedParticipantConfig {
   config: ChatParticipantConfig;
   invalidReason?: string;
+  /** What keeps the member from being added wherever it runs (its role, rules or handle). */
+  configReason?: string;
+  /** What keeps it from running on this computer: its CLI here is not ready. */
+  localCliReason?: string;
 }
 
 export function chatAgentModeLabel(mode: ChatAgentMode | undefined): string {
@@ -346,9 +350,17 @@ export function addableSavedParticipantConfigs(
     .filter((participant) => !normalizedExistingHandles.has(participant.handle.toLowerCase()))
     .map((config) => {
       const draft = chatParticipantConfigToDraft(config);
+      const cliReason = validateChatCliAgents([{ kind: draft.kind, hostId: draft.hostId }], agents, settings.providers, settings.cliProviderHosts);
+      // A member on an added provider runs on this computer only, so its
+      // provider's problems hold wherever it is set to run.
+      const configReason = validateChatParticipantDrafts([draft], settings.chatRoleConfigs, new Set(), settings.chatBehaviorRules)
+        ?? (draft.hostId ? cliReason : undefined);
+      const localCliReason = draft.hostId ? undefined : cliReason;
       return {
         config,
-        invalidReason: validateChatParticipantDrafts([draft], settings.chatRoleConfigs, new Set(), settings.chatBehaviorRules) ?? validateChatCliAgents([draft], agents, settings.providers, settings.cliProviderHosts)
+        invalidReason: participantOptionInvalidReason({ config, configReason, localCliReason }),
+        configReason,
+        localCliReason
       };
     });
 }

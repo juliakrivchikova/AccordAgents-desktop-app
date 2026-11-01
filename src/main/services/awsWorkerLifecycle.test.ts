@@ -91,7 +91,7 @@ test("scoped policy limits state changes to tagged instances in-region", () => {
 });
 
 test("bootstrap command creates a scoped user and prints a paste blob", () => {
-  const command = buildBootstrapCommand("us-east-1", "abc123");
+  const command = buildBootstrapCommand("us-east-1", "abc123", {}, "darwin");
   assert.match(command, /aws iam get-user --user-name "\$USER"/);
   assert.match(command, /aws iam create-user --user-name "\$USER"/);
   assert.match(command, /aws iam create-policy --policy-name "\$USER"/);
@@ -109,7 +109,7 @@ test("bootstrap command creates a scoped user and prints a paste blob", () => {
   assert.match(command, new RegExp(AWS_WORKER_BLOB_PREFIX));
   const syntax = spawnSync("bash", ["-n"], { input: command, encoding: "utf8" });
   assert.equal(syntax.status, 0, syntax.stderr);
-  assert.throws(() => buildBootstrapCommand("us-east-1", "bad;rm -rf"), /Invalid suffix/);
+  assert.throws(() => buildBootstrapCommand("us-east-1", "bad;rm -rf", {}, "darwin"), /Invalid suffix/);
 });
 
 test("bootstrap command reuses IAM resources and rotates policy versions and keys at their quotas", () => {
@@ -259,7 +259,7 @@ process.exit(2);
   try {
     writeFileSync(awsPath, mockAws, { mode: 0o755 });
     chmodSync(awsPath, 0o755);
-    let command = buildBootstrapCommand("us-east-1", "rerun");
+    let command = buildBootstrapCommand("us-east-1", "rerun", {}, "darwin");
     const run = () => spawnSync("bash", ["-c", command], {
       encoding: "utf8",
       env: {
@@ -311,7 +311,7 @@ process.exit(2);
       nextPolicyVersion: 6
     }));
     // The app still runs with the first key: it stays valid, the other goes.
-    command = buildBootstrapCommand("us-east-1", "rerun", { keepWorkerKeyId: firstState.keys[0] });
+    command = buildBootstrapCommand("us-east-1", "rerun", { keepWorkerKeyId: firstState.keys[0] }, "darwin");
     const second = run();
     assert.equal(second.status, 0, second.stderr);
     assert.match(second.stdout, new RegExp(AWS_WORKER_BLOB_PREFIX));
@@ -330,7 +330,7 @@ process.exit(2);
     ]);
     assert.deepEqual(secondState.keys, [firstState.keys[0], "AKIA0000000000000003"],
       "the key the app uses stays valid until the new one is pasted");
-    command = buildBootstrapCommand("us-east-1", "rerun");
+    command = buildBootstrapCommand("us-east-1", "rerun", {}, "darwin");
     const third = run();
     assert.equal(third.status, 0, third.stderr);
     const thirdPower = (JSON.parse(readFileSync(statePath, "utf8")) as { power: { keys: string[] } }).power;
@@ -382,7 +382,7 @@ process.exit(0);
     const run = (refuse: string, keys: { worker: string[]; power: string[]; wake?: string[] }, options: { keepWorkerKeyId?: string; keepPowerKeyIds?: string[]; keepWakeKeyId?: string } = {}) => {
       writeFileSync(state, JSON.stringify(keys));
       writeFileSync(log, "");
-      const result = spawnSync(shell, ["-c", buildBootstrapCommand("us-east-1", "dev", options)], {
+      const result = spawnSync(shell, ["-c", buildBootstrapCommand("us-east-1", "dev", options, "darwin")], {
         encoding: "utf8", env: { ...process.env, PATH: `${directory}:${process.env.PATH ?? ""}`, AWS_LOG: log, AWS_KEYS: state, AWS_REFUSE_POWER: refuse }
       });
       const pasted = result.status === 0 ? parseWorkerBlob(result.stdout.trim().split("\n").pop() ?? "") : undefined;
@@ -444,14 +444,14 @@ test("the setup command only ever names well-formed keys and still connects wher
   const command = buildBootstrapCommand("us-east-1", "dev", {
     keepWorkerKeyId: "AKIA0000000000000001;touch /tmp/x",
     keepPowerKeyIds: ["$(id)", "AKIAPWRHELD000000001\nrm", "akiapwrlower00000001"]
-  });
+  }, "darwin");
   assert.match(command, /^KEEP_WORKER_KEY=$/m);
   assert.match(command, /^KEEP_POWER_KEYS=''$/m);
   assert.doesNotMatch(command, /touch \/tmp\/x|\$\(id\)|\nrm\n/);
-  const appOnly = buildBootstrapCommand("eu-west-1", "dev", { machineKeys: false });
+  const appOnly = buildBootstrapCommand("eu-west-1", "dev", { machineKeys: false }, "darwin");
   assert.doesNotMatch(appOnly, /POWER_USER=|WAKE_USER=/, "a command for another instance's region leaves its keys alone");
   assert.equal(spawnSync("bash", ["-n"], { input: appOnly, encoding: "utf8" }).status, 0);
-  const unscoped = buildBootstrapCommand("eusc-de-east-1", "dev");
+  const unscoped = buildBootstrapCommand("eusc-de-east-1", "dev", {}, "darwin");
   assert.doesNotMatch(unscoped, /POWER_USER=/, "a region the stop-key policy cannot name gets no stop key");
   assert.match(unscoped, /Paste this into AccordAgents/);
   assert.equal(spawnSync("bash", ["-n"], { input: unscoped, encoding: "utf8" }).status, 0);
@@ -979,11 +979,18 @@ test("connections to a machine this app made read the app's known hosts first; o
     setHostPlatform(createHeadlessPlatform({ userDataDir: userData, appVersion: "test" }));
     const made = cloudRunSshOptionArgs({ host: "1.2.3.4", hostKeyAlias: "accordagents-i-0123456789abcdef0" });
     const known = made[made.indexOf("HostKeyAlias=accordagents-i-0123456789abcdef0") + 2];
-    assert.equal(known, `UserKnownHostsFile="${path.join(userData, "cloud-runs-keys", "known_hosts")}" ~/.ssh/known_hosts`);
+    assert.equal(known, `UserKnownHostsFile="${path.join(userData, "cloud-runs-keys", "known_hosts").replace(/\\/g, "\\\\")}" ~/.ssh/known_hosts`);
     assert.ok(made.includes("StrictHostKeyChecking=accept-new"), "a machine made before still connects as it did");
     const other = cloudRunSshOptionArgs({ host: "1.2.3.4", hostKeyAlias: "my-own-box" });
     assert.ok(!other.some((arg) => arg.startsWith("UserKnownHostsFile=")), "a machine the User set up herself is as before");
   } finally {
     await rm(userData, { recursive: true, force: true });
   }
+});
+
+test("a Windows connection asks for no shared connection: Windows OpenSSH exits at once when it is asked for one", async () => {
+  const { cloudRunSshOptionArgs } = await import("./cloudRunWorkers");
+  const args = cloudRunSshOptionArgs({ host: "1.2.3.4", user: "ubuntu", identityFile: "C:\\Users\\a b\\key.pem" }, "win32");
+  assert.ok(!args.some((arg) => /^Control(Master|Path|Persist)=/.test(arg)), args.join(" "));
+  assert.deepEqual(args.slice(args.indexOf("-i"), args.indexOf("-i") + 2), ["-i", "C:\\Users\\a b\\key.pem"]);
 });

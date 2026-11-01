@@ -26,6 +26,7 @@ import {
 } from "./chat-participant-config-panel";
 import { participantProviderLabel } from "./chat-conversation-data";
 import { displayChatRoleLabel } from "./chat-role-labels";
+import { ChatAppToolHandleField } from "./chat-app-tool-handle-field";
 
 export function ChatAppToolParticipantChangeOperation(props: {
   request: ChatParticipantChangeRequest;
@@ -383,20 +384,5 @@ function ParticipantManagementReview(props: {
         </div>
       )}
     </>
-  );
-}
-
-export function ChatAppToolHandleField(props: { handle: string; onChange: (handle: string) => void }): JSX.Element {
-  return (
-    <span className="chat-app-tool-inline-handle">
-      <span aria-hidden>@</span>
-      <input
-        value={props.handle}
-        aria-label="Member handle"
-        spellCheck={false}
-        size={Math.max(props.handle.length + 1, 4)}
-        onChange={(event) => props.onChange(event.currentTarget.value.replace(/^@+/, ""))}
-      />
-    </span>
   );
 }

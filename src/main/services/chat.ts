@@ -1613,12 +1613,12 @@ export class ChatService {
           machineId = machines.find((item) => item.awsInstanceId === cloudInstanceId)?.id
             ?? installs.find((record) => record.target?.hostKeyAlias === `accordagents-${cloudInstanceId}`)?.machineId;
         }
-        if (!machineReason && !machineId) machineReason = "Its cloud machine is not set up yet. Set it up in Settings → AWS on your Mac.";
+        if (!machineReason && !machineId) machineReason = "Its cloud machine is not set up yet. Set it up in Settings → AWS on your computer.";
       }
       // The server asks a machine for its turns only once the machine is one
       // of its devices; until then nothing would answer from the phone.
       if (!machineReason && machineId && !machines.find((item) => item.id === machineId)?.deviceId) {
-        machineReason = "Its machine is not connected to your server yet. Open Settings → Machines on your Mac.";
+        machineReason = "Its machine is not connected to your server yet. Open Settings → Machines on your computer.";
       }
       const install = machineId ? installs.find((record) => record.machineId === machineId) : undefined;
       const projects = install ? Object.keys(install.projects ?? {}) : undefined;

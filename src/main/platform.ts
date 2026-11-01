@@ -71,6 +71,14 @@ export function userDataPath(): string {
   return hostPlatform().userDataPath();
 }
 
+/** The desktop app's profile folder when `ACCORDAGENTS_USER_DATA_DIR` names
+ *  one (QA and second profiles). The single-instance lock of launcher.ts and
+ *  the app itself must read the same one. */
+export function desktopUserDataDirOverride(): string | undefined {
+  const override = process.env.ACCORDAGENTS_USER_DATA_DIR?.trim();
+  return override ? path.resolve(override) : undefined;
+}
+
 export function isHeadlessHost(): boolean {
   return hostPlatform().kind === "headless";
 }

@@ -10,7 +10,7 @@ import {
   buttonWithLabel,
   groupLines,
   textContent
-} from "./chat-activity-test-harness";
+} from "./chat-activity-harness.test";
 
 test("a live run shows only its current activity on one shimmering line", async () => {
   const events = [

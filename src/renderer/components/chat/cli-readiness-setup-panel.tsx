@@ -22,6 +22,7 @@ import {
   CLI_PROVIDER_DISPLAY_ORDER,
   cliProviderMetadata,
   deriveAgentReadiness,
+  isCliTerminalPlatform,
   providerEnabled
 } from "../../../shared/cliReadiness";
 import { IconButton } from "../primitives";
@@ -177,8 +178,9 @@ function CliReadinessDetails(props: {
   onOpenSettings: () => void;
   onError: (message: string | undefined) => void;
 }): JSX.Element {
-  const supportedPlatform = props.health?.platform === "darwin";
-  const installCommand = supportedPlatform ? props.metadata.installCommandByPlatform.darwin : undefined;
+  const platform = props.health?.platform;
+  const supportedPlatform = isCliTerminalPlatform(platform);
+  const installCommand = supportedPlatform ? props.metadata.installCommandByPlatform[platform] : undefined;
 
   if (props.readiness === "disabled") {
     return (
@@ -199,7 +201,7 @@ function CliReadinessDetails(props: {
     );
   }
 
-  if (!supportedPlatform) {
+  if (!supportedPlatform || (props.readiness === "not-detected" && !installCommand)) {
     return (
       <div className="cli-readiness-steps">
         <p>Open the official guide for setup instructions on this platform.</p>

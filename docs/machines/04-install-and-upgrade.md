@@ -88,6 +88,15 @@ and `npm run build` produces it, so every packaging path — `npm run package`,
 `npm run make`, and the signed release through `signed:mac-arm64` — includes it
 by construction rather than by remembering.
 
+Windows has no `rsync`. From there the payload (and a project mirror, and the
+portable skills bundle) travels as one tar stream over `ssh`
+(`machineDirectoryUpload.ts`): into an empty folder it is unpacked directly,
+otherwise into a private folder that the machine's own `rsync` applies with
+the same options, so deletions and protected paths follow the same rules.
+Windows keeps no POSIX modes: a file is executable when git records it so or
+when it starts with `#!`. A mirror checked out with `core.autocrlf=true` gets
+LF line ends on the machine, as a Linux checkout of the same files has them.
+
 A payload may contain only regular files and directories. Anything else — a
 symbolic link, a pipe, a device — is **refused**, by the bundler when it builds
 the payload and by the desktop when it reads one. Skipping them, as both

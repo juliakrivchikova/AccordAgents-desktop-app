@@ -271,7 +271,7 @@ export class HubWaker {
   /** The phone's Wake button: asks AWS now, unless it was just asked. */
   async wakeNow(machineId: string): Promise<{ ok: boolean; message: string }> {
     const config = (await this.configs()).get(machineId);
-    if (!config) return { ok: false, message: "This server has no key to start that machine. Open Settings → Machines on your Mac." };
+    if (!config) return { ok: false, message: "This server has no key to start that machine. Open Settings → Machines on your computer." };
     const { ok, message } = await this.wake(config, true);
     return { ok, message };
   }

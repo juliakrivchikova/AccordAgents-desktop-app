@@ -4,6 +4,7 @@ import path from "node:path";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, shellQuotePosix } from "./cloudRunWorkers";
 import { CommandError, runCommand } from "./command";
 import type { RemoteRunWorkerTarget } from "./remoteWorkerTarget";
+import { copiesWithoutLocalRsync, uploadDirectoryThroughTar } from "./machineDirectoryUpload";
 import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
 import { withMachineRsyncPath } from "./machineMaintenanceRsync";
 
@@ -20,7 +21,7 @@ const ANY_DEPTH_MIRROR_EXCLUDES = [
 const TOP_LEVEL_MIRROR_EXCLUDES = [
   "out", "dist", "build", ".next", ".nuxt", ".svelte-kit", ".turbo",
   ".gradle", "target", ".pytest_cache", ".mypy_cache", "coverage", ".cache",
-  ".idea", ".wrangler", ".qa-user-data", ".playwright-mcp", ".worktrees",
+  ".idea", ".vs", ".wrangler", ".qa-user-data", ".playwright-mcp", ".worktrees",
   "screenshots", "signed"
 ] as const;
 export const DEFAULT_MIRROR_EXCLUDES = [
@@ -42,6 +43,8 @@ export const REMOTE_MIRROR_UP_SYNC_PROTECT_FILTERS = [
   "--filter=P .git/packed-refs"
 ];
 const MIRROR_SYNC_SPACE_BUFFER_BYTES = 512 * 1024 * 1024;
+// What `du` reports for a folder with nothing in it.
+const EMPTY_FOLDER_BYTES = 64 * 1024;
 // Mirror sync is ONE-WAY (local → worker). syncDown exists only for the
 // explicit user-initiated "pull changes" action; it is never run
 // automatically. .git is synced UP (the agent needs history and commits from
@@ -79,7 +82,8 @@ export interface LocalMirrorFingerprint {
 export function remoteMirrorSlug(localPath: string): string {
   const resolved = path.resolve(localPath);
   const base = path.basename(resolved).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 40) || "project";
-  const hash = createHash("sha256").update(resolved).digest("hex").slice(0, 10);
+  // Windows paths ignore case: C:\Proj and c:\proj are one project.
+  const hash = createHash("sha256").update(process.platform === "win32" ? resolved.toLowerCase() : resolved).digest("hex").slice(0, 10);
   return `${base}-${hash}`;
 }
 
@@ -196,23 +200,27 @@ export const defaultRemoteMirrorSync: RemoteMirrorSyncRunner = {
     const localDir = assertLocalDir(request.localPath);
     const target = buildCloudRunSshTarget(request.worker);
     const sshArgs = cloudRunSshOptionArgs(request.worker);
-    const progressArgs = await rsyncProgressArgs();
     const pendingProgress: Promise<unknown>[] = [];
-    let progressBuffer = "";
     let lastPercent = -1;
-    const emitProgress = (chunk: string): void => {
-      if (!request.onProgress) {
-        return;
-      }
-      progressBuffer = `${progressBuffer}${chunk}`.slice(-4096);
-      const percent = parseLastRsyncProgressPercent(progressBuffer);
-      if (percent === undefined || percent === lastPercent) {
+    const report = (percent: number): void => {
+      if (!request.onProgress || percent === lastPercent) {
         return;
       }
       lastPercent = percent;
       const progress = request.onProgress({ percent });
       if (progress) {
         pendingProgress.push(Promise.resolve(progress).catch(() => undefined));
+      }
+    };
+    let progressBuffer = "";
+    const emitProgress = (chunk: string): void => {
+      if (!request.onProgress) {
+        return;
+      }
+      progressBuffer = `${progressBuffer}${chunk}`.slice(-4096);
+      const percent = parseLastRsyncProgressPercent(progressBuffer);
+      if (percent !== undefined) {
+        report(percent);
       }
     };
     try {
@@ -225,24 +233,44 @@ export const defaultRemoteMirrorSync: RemoteMirrorSyncRunner = {
         signal: request.signal
       });
       await assertRemoteMirrorHasSpace(request, localDir, target, sshArgs);
-      // The setup call carries stdin; cleanup does not and must still run
-      // after cancellation to remove only this transfer's temporary script.
-      await withMachineRsyncPath(request.maintenance, (command, input) => runCommand("ssh", [
-        ...sshArgs, target, command
-      ], { input, timeoutMs: 30_000, signal: input === undefined ? undefined : request.signal }), (rsyncPath) => runCommand("rsync", buildMirrorUpSyncRsyncArgs({
-        progressArgs,
-        rshCommand: rsyncRshCommand(sshArgs),
-        source: `${localDir}/`,
-        destination: `${target}:${escapeRemoteRsyncPath(request.remotePath)}/`,
-        contentMode: request.contentMode,
-        rsyncPath
-      }), {
-        timeoutMs: request.timeoutMs ?? REMOTE_MIRROR_SYNC_TIMEOUT_MS,
-        signal: request.signal,
-        killProcessGroup: true,
-        onStdout: emitProgress,
-        onStderr: emitProgress
-      }));
+      if (copiesWithoutLocalRsync()) {
+        await uploadDirectoryThroughTar({
+          sshArgs,
+          target,
+          localDir,
+          remoteDir: request.remotePath,
+          rsyncOptions: mirrorUpSyncRsyncOptions(request.contentMode),
+          skip: request.contentMode === "exact" ? undefined : isMirrorEntrySkipped,
+          lineEndsFromGit: request.contentMode !== "exact",
+          maintenance: request.maintenance,
+          timeoutMs: request.timeoutMs ?? REMOTE_MIRROR_SYNC_TIMEOUT_MS,
+          signal: request.signal,
+          onProgress: report
+        });
+        if (request.contentMode !== "exact") {
+          await checkOutLinuxLineEndings(localDir, request, target, sshArgs);
+        }
+      } else {
+        const progressArgs = await rsyncProgressArgs();
+        // The setup call carries stdin; cleanup does not and must still run
+        // after cancellation to remove only this transfer's temporary script.
+        await withMachineRsyncPath(request.maintenance, (command, input) => runCommand("ssh", [
+          ...sshArgs, target, command
+        ], { input, timeoutMs: 30_000, signal: input === undefined ? undefined : request.signal }), (rsyncPath) => runCommand("rsync", buildMirrorUpSyncRsyncArgs({
+          progressArgs,
+          rshCommand: rsyncRshCommand(sshArgs),
+          source: `${localDir}/`,
+          destination: `${target}:${escapeRemoteRsyncPath(request.remotePath)}/`,
+          contentMode: request.contentMode,
+          rsyncPath
+        }), {
+          timeoutMs: request.timeoutMs ?? REMOTE_MIRROR_SYNC_TIMEOUT_MS,
+          signal: request.signal,
+          killProcessGroup: true,
+          onStdout: emitProgress,
+          onStderr: emitProgress
+        }));
+      }
       await Promise.allSettled(pendingProgress);
     } catch (error) {
       await Promise.allSettled(pendingProgress);
@@ -430,6 +458,13 @@ function decodeIndexV4RemoveCount(
   return { removeCount: value, nextOffset };
 }
 
+/** What the up-sync's rsync filters leave out, by entry type as rsync reads
+ *  them: a top-level `--exclude=/build/***` names the folder, never a file
+ *  called build. */
+function isMirrorEntrySkipped(relativeDir: string, name: string, isDirectory: boolean): boolean {
+  return isMirrorEntryExcluded(relativeDir, name) && (isDirectory || ANY_DEPTH_MIRROR_EXCLUDE_SET.has(name));
+}
+
 function isMirrorEntryExcluded(relativeDir: string, name: string): boolean {
   const candidate = relativeDir ? `${relativeDir}/${name}` : name;
   if (
@@ -476,7 +511,10 @@ async function assertRemoteMirrorHasSpace(
   if (!remote) {
     return;
   }
-  const requiredFreeBytes = Math.max(0, localBytes - remote.usedBytes) + MIRROR_SYNC_SPACE_BUFFER_BYTES;
+  // A copy from Windows into a folder that already holds files is staged
+  // whole on the machine before it is applied; an empty one takes it directly.
+  const stagedBytes = copiesWithoutLocalRsync() && remote.usedBytes > EMPTY_FOLDER_BYTES ? localBytes : 0;
+  const requiredFreeBytes = Math.max(0, localBytes - remote.usedBytes) + stagedBytes + MIRROR_SYNC_SPACE_BUFFER_BYTES;
   if (remote.availableBytes >= requiredFreeBytes) {
     return;
   }
@@ -545,6 +583,51 @@ async function queryRemoteMirrorUsage(
   } catch {
     return undefined;
   }
+}
+
+/** Git for Windows checks text files out with CRLF when its own config says
+ *  core.autocrlf=true; the repository stores them with LF. The machine's copy
+ *  gets the line endings a checkout on Linux gives the same files: otherwise
+ *  its git sees every text file as changed, and scripts there fail on "\r".
+ *  Only files git stores with LF and finds wholly CRLF are touched, never one
+ *  whose attributes ask for CRLF; their content is otherwise the User's own.
+ *  The index still records the Windows sizes, so a converted file the User
+ *  did not change is read into it again; one she changed stays unstaged and
+ *  changed, as it is on her computer. */
+async function checkOutLinuxLineEndings(
+  localDir: string,
+  request: RemoteMirrorSyncRequest,
+  target: string,
+  sshArgs: string[]
+): Promise<void> {
+  try {
+    const autocrlf = await runCommand("git", ["-C", localDir, "config", "--type=bool", "--get", "core.autocrlf"], { timeoutMs: 10_000, signal: request.signal });
+    if (autocrlf.stdout.trim() !== "true") return;
+  } catch {
+    return;
+  }
+  const script = [
+    "set -e",
+    "export LC_ALL=C",
+    `cd ${shellQuotePosix(request.remotePath)}`,
+    "[ -e .git ] || exit 0",
+    'work=$(mktemp -d); trap \'rm -rf "$work"\' EXIT',
+    // Read as her computer reads them: line endings aside, these differ.
+    'git -c core.autocrlf=true diff --name-only -z | sort -z > "$work/changed"',
+    'git ls-files --eol -z | while IFS= read -r -d "" line; do',
+    '  case "$line" in',
+    '    *"eol=crlf"*) ;;',
+    "    \"i/lf \"*\"w/crlf \"*) printf '%s\\0' \"${line#*$'\\t'}\" ;;",
+    "  esac",
+    'done | sort -z > "$work/crlf"',
+    "xargs -0 -r sed -i 's/\\r$//' -- < \"$work/crlf\"",
+    'comm -z -23 "$work/crlf" "$work/changed" > "$work/same"',
+    'if [ -s "$work/same" ]; then git --literal-pathspecs add --pathspec-from-file="$work/same" --pathspec-file-nul; fi'
+  ].join("\n");
+  await runCommand("ssh", [...sshArgs, target, machineMaintenanceCommand(request.maintenance, `bash -c ${shellQuotePosix(script)}`)], {
+    timeoutMs: 120_000,
+    signal: request.signal
+  });
 }
 
 async function rsyncProgressArgs(): Promise<string[]> {
@@ -674,31 +757,23 @@ export function buildMirrorUpSyncRsyncArgs(params: {
   contentMode?: "repository" | "exact";
   rsyncPath?: string;
 }): string[] {
-  if (params.contentMode === "exact") {
-    return [
-      "-az",
-      "--delete",
-      ...(params.rsyncPath ? ["--rsync-path", params.rsyncPath] : []),
-      ...params.progressArgs,
-      "-e",
-      params.rshCommand,
-      params.source,
-      params.destination
-    ];
-  }
   return [
-    "-az",
-    "--delete",
-    "--delete-excluded",
+    ...mirrorUpSyncRsyncOptions(params.contentMode),
     ...(params.rsyncPath ? ["--rsync-path", params.rsyncPath] : []),
     ...params.progressArgs,
-    ...REMOTE_MIRROR_UP_SYNC_PROTECT_FILTERS,
-    ...UP_SYNC_EXCLUDE_ARGS,
     "-e",
     params.rshCommand,
     params.source,
     params.destination
   ];
+}
+
+/** What arrives in the mirror and what is deleted there, whichever way the
+ *  files travel. */
+function mirrorUpSyncRsyncOptions(contentMode: "repository" | "exact" = "repository"): string[] {
+  return contentMode === "exact"
+    ? ["-az", "--delete"]
+    : ["-az", "--delete", "--delete-excluded", ...REMOTE_MIRROR_UP_SYNC_PROTECT_FILTERS, ...UP_SYNC_EXCLUDE_ARGS];
 }
 
 // rsync tokenizes the -e value with shell-like quoting; single-quote any token
