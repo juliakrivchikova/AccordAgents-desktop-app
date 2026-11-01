@@ -29,9 +29,19 @@ export interface HubDeviceIdentity {
   deviceId: string;
   keyId: string;
   publicKeyDerBase64: string;
-  privateKeyDerBase64: string;
+  /** The private key as the browser keeps it (a non-extractable CryptoKey):
+   *  it signs, and no script can read it out, so a script that ever ran on
+   *  the phone's site cannot carry the key away. */
+  privateKey?: unknown;
+  /** The same key as text, as phones paired before kept it. Read only to
+   *  turn it into `privateKey` (sealHubDeviceIdentity), then dropped. */
+  privateKeyDerBase64?: string;
   createdAt: string;
 }
+
+/** What signing needs of an identity: its key, in either form. */
+export type HubSigningKey = Pick<HubDeviceIdentity, "privateKey" | "privateKeyDerBase64">;
+
 
 export interface HubBlobReference {
   type: "device.event.blob";
@@ -105,43 +115,63 @@ export async function sha256Hex(data: Uint8Array | string): Promise<string> {
   return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** A new signing identity: an Ed25519 key, named as every device names one. */
+/** A new signing identity: an Ed25519 key, named as every device names one.
+ *  The private half is made non-extractable: it is kept as the key object
+ *  itself (IndexedDB stores it as it is) and never exists as text. */
 export async function createHubDeviceIdentity(): Promise<HubDeviceIdentity> {
   let pair: { publicKey: unknown; privateKey: unknown };
   try {
-    pair = await subtle().generateKey({ name: "Ed25519" }, true, ["sign", "verify"]) as { publicKey: unknown; privateKey: unknown };
+    pair = await subtle().generateKey({ name: "Ed25519" }, false, ["sign", "verify"]) as { publicKey: unknown; privateKey: unknown };
   } catch {
     throw new Error("This phone's browser cannot make the key it pairs with (Ed25519). Update iOS or the browser, then pair again.");
   }
+  // The public half of a pair is always extractable, whatever was asked.
   const spki = new Uint8Array(await subtle().exportKey("spki", pair.publicKey));
-  const pkcs8 = new Uint8Array(await subtle().exportKey("pkcs8", pair.privateKey));
   const hash = await sha256Hex(spki);
   return {
     deviceId: `device-${hash.slice(0, 32)}`,
     keyId: `ed25519-${hash.slice(0, 32)}`,
     publicKeyDerBase64: bytesToBase64(spki),
-    privateKeyDerBase64: bytesToBase64(pkcs8),
+    privateKey: pair.privateKey,
     createdAt: new Date().toISOString()
   };
 }
 
+/**
+ * The same identity with its key kept as phones keep keys now: a key held as
+ * text (a phone paired before) is imported once as a non-extractable key and
+ * the text is left out. The key itself is the same, so the server, the
+ * roster and the pairing stay as they are; nothing has to be paired again.
+ * An identity already in that form is returned as it is.
+ */
+export async function sealHubDeviceIdentity<T extends HubSigningKey>(identity: T): Promise<Omit<T, "privateKeyDerBase64"> & { privateKey: unknown }> {
+  const { privateKeyDerBase64, ...rest } = identity;
+  if (identity.privateKey) return { ...rest, privateKey: identity.privateKey };
+  if (!privateKeyDerBase64) throw new Error("This identity has no key.");
+  const privateKey = await subtle().importKey("pkcs8", base64ToBytes(privateKeyDerBase64), { name: "Ed25519" }, false, ["sign"]);
+  return { ...rest, privateKey };
+}
+
 const keyCache = new Map<string, Promise<unknown>>();
 
-function signingKey(identity: Pick<HubDeviceIdentity, "privateKeyDerBase64">): Promise<unknown> {
-  const cached = keyCache.get(identity.privateKeyDerBase64);
+function signingKey(identity: HubSigningKey): Promise<unknown> {
+  if (identity.privateKey) return Promise.resolve(identity.privateKey);
+  const text = identity.privateKeyDerBase64;
+  if (!text) return Promise.reject(new Error("This phone has lost its pairing key. Pair it again."));
+  const cached = keyCache.get(text);
   if (cached) return cached;
-  const key = subtle().importKey("pkcs8", base64ToBytes(identity.privateKeyDerBase64), { name: "Ed25519" }, false, ["sign"]);
-  keyCache.set(identity.privateKeyDerBase64, key);
+  const key = subtle().importKey("pkcs8", base64ToBytes(text), { name: "Ed25519" }, false, ["sign"]);
+  keyCache.set(text, key);
   if (keyCache.size > 4) keyCache.delete(keyCache.keys().next().value!);
   return key;
 }
 
-async function sign(identity: Pick<HubDeviceIdentity, "privateKeyDerBase64">, text: string): Promise<Uint8Array> {
+async function sign(identity: HubSigningKey, text: string): Promise<Uint8Array> {
   return new Uint8Array(await subtle().sign({ name: "Ed25519" }, await signingKey(identity), encoder.encode(text)));
 }
 
 /** The Authorization header of one request, as hubAuth.signHubRequest makes it. */
-export async function signHubRequestWeb(identity: Pick<HubDeviceIdentity, "deviceId" | "privateKeyDerBase64">, request: {
+export async function signHubRequestWeb(identity: Pick<HubDeviceIdentity, "deviceId"> & HubSigningKey, request: {
   method: string;
   pathWithQuery: string;
   body?: Uint8Array | string;
@@ -207,7 +237,7 @@ async function reach(fetchImpl: typeof fetch, url: string, init: RequestInit): P
 /** Signed requests of one device to the User's server. */
 export function createHubDeviceClient(options: {
   hubUrl: string;
-  identity: () => Promise<Pick<HubDeviceIdentity, "deviceId" | "privateKeyDerBase64">>;
+  identity: () => Promise<Pick<HubDeviceIdentity, "deviceId"> & HubSigningKey>;
   fetchImpl?: typeof fetch;
 }) {
   const base = trimmed(options.hubUrl);

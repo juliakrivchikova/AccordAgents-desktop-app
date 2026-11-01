@@ -106,6 +106,7 @@ import { HubClient } from "./services/hubClient";
 import { ServerChatLink } from "./services/serverChatLink";
 import { deviceIdForPublicKey, hubCertificateCrypto, signHubText } from "./services/hubAuth";
 import { HubPhonePublisher } from "./services/hubPhonePublisher";
+import { HubMemberRulesPublisher, memberRulesFrom } from "./services/hubMemberRules";
 import {
   HUB_PHONE_PROTOCOL_VERSION,
   hubPhoneInviteSigningText,
@@ -493,7 +494,8 @@ const serverChatLink = new ServerChatLink({
   identity: () => deviceIdentityService.getOrCreateDeviceIdentity(),
   hubConfig: async () => {
     const config = await settingsService.getHubConfig();
-    return config ? { url: config.url } : undefined;
+    // With what the server must prove: the chats go to it only then.
+    return config ? { url: config.url, hubId: config.hubId, hubKey: config.hubKey } : undefined;
   },
   startEmbedded: async (owner) => {
     const { startEmbeddedHub } = await import("../hub/embeddedHub");
@@ -530,6 +532,14 @@ async function startServerChatLinkOnce(): Promise<void> {
 }
 
 let lastNewChatOptions: import("../shared/hubProtocol").HubNewChatOptions | undefined;
+// The User's rules for members (roles, saved members) on her server, which
+// holds the cloud machines' changes to a chat's members to them.
+const hubMemberRulesPublisher = new HubMemberRulesPublisher({
+  client: () => (hubOwnerConfirmed ? hubClient : undefined),
+  rules: async () => memberRulesFrom(await settingsService.getPublicSettings()),
+  log: (event, payload) => { void debugLogService.write(event, payload); }
+});
+
 const hubPhonePublisher: HubPhonePublisher = new HubPhonePublisher({
   client: () => hubOwnerConfirmed ? hubClient : undefined,
   hasPhones: async () => (await hubPhones()).length > 0,
@@ -697,6 +707,7 @@ function publishHubRoster(): void {
     });
     hubPhonePublisher.scheduleCatalog();
     hubPhonePublisher.publishWakeKeys();
+    hubMemberRulesPublisher.publish();
   })().catch((error: unknown) => {
     // A machine set up while the hub was away would be refused by it: the
     // list goes up again until the hub has it.
@@ -747,13 +758,23 @@ async function startHubLink(): Promise<void> {
   if (!config) return;
   hubOwnerConfirmed = false;
   const identity = () => deviceIdentityService.getOrCreateDeviceIdentity();
-  hubClient = new HubClient({ url: config.url, identity });
+  hubClient = new HubClient({
+    url: config.url, identity,
+    // The server this computer set up proves it is that one before the
+    // roster, invites or start keys go to it.
+    // Settings that cannot be read fail the check (nothing is sent), never pass it.
+    expect: async () => {
+      const current = await settingsService.getHubConfig();
+      return current ? { hubId: current.hubId, hubKey: current.hubKey } : undefined;
+    }
+  });
   // Another server (or the first): every machine's settings are put there.
   machineLinkService?.resetPublishedSettings();
   const blobClient = hubClient;
   // A picture the User sent from the phone is read from the server.
   chatService.setHubBlobReader((reference) => blobClient.downloadBytes(reference));
   hubPhonePublisher.reset();
+  hubMemberRulesPublisher.reset();
   publishHubRoster();
   // Phones that paired while this desktop was away are on the server's
   // roster: learned now, and the roster is read again from then on.
@@ -877,8 +898,12 @@ const hubInstaller = new HubInstaller({
     const identity = await deviceIdentityService.getOrCreateDeviceIdentity();
     return { originId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64 };
   },
-  link: async ({ url, hubId, server }) => {
-    await settingsService.saveHubConfig({ url, hubId, server });
+  link: async ({ url, hubId, hubKey, server }) => {
+    // A server program from before servers had a key says none: the key
+    // learned before (if any) stays.
+    const before = await settingsService.getHubConfig().catch(() => undefined);
+    const keptKey = hubKey ?? (before?.hubId === hubId ? before?.hubKey : undefined);
+    await settingsService.saveHubConfig({ url, hubId, ...(keptKey ? { hubKey: keptKey } : {}), server });
     await startHubLink();
     // The chats move to the new server (once per server) and go through it
     // from now on.
@@ -2905,7 +2930,13 @@ void app.whenReady().then(async () => {
       onDevicesChanged: () => publishHubRoster(),
       createClient: (pairing: MobilePairingPackage) => pairing.hubUrl ? new HubTunnelClient({
         hubUrl: pairing.hubUrl, rendezvousId: pairing.rendezvousId, role: "desktop",
-        identity: () => deviceIdentityService.getOrCreateDeviceIdentity()
+        identity: () => deviceIdentityService.getOrCreateDeviceIdentity(),
+        // The same server the link proved; a room elsewhere is not opened.
+        verify: async () => {
+          const client = hubClient;
+          if (!client || client.hubUrl !== (pairing.hubUrl ?? "").replace(/\/+$/, "")) throw new Error("This room is not on the server this computer is linked to.");
+          await client.health();
+        }
       }) : undefined,
       appVersion: app.getVersion(),
       desktopDeviceId: desktopIdentity.originId,
@@ -2959,6 +2990,7 @@ void app.whenReady().then(async () => {
     let machineSettingsSync: ReturnType<typeof setTimeout> | undefined;
     settingsService.onStoredChange(() => {
       hubPhonePublisher.scheduleCatalog();
+      hubMemberRulesPublisher.publish(2_000);
       if (machineSettingsSync) clearTimeout(machineSettingsSync);
       machineSettingsSync = setTimeout(() => {
         machineSettingsSync = undefined;

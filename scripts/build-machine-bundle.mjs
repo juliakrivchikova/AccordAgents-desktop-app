@@ -3,8 +3,9 @@
 // this bundle, and its enrollment file. Electron never enters the bundle: the
 // runtime composes the same services through src/main/platform.ts.
 import { build } from "esbuild";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -72,6 +73,19 @@ await writeFile(path.join(outdir, "package.json"), `${JSON.stringify({
   engines: { node: ">=20" },
   dependencies
 }, null, 2)}\n`, "utf8");
+// The exact packages the machine installs, each with its integrity hash: the
+// versions this repository's lockfile has (the ones its tests ran with),
+// pruned to what the runtime needs, shipped as npm-shrinkwrap.json and
+// installed with `npm ci`. Without it a machine resolved caret ranges at
+// install time, so a malicious release of any package in the tree would run
+// on every machine installed or upgraded after it.
+await copyFile(path.join(repoRoot, "package-lock.json"), path.join(outdir, "package-lock.json"));
+execFileSync("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], { cwd: outdir, stdio: ["ignore", "ignore", "inherit"] });
+const lock = JSON.parse(await readFile(path.join(outdir, "package-lock.json"), "utf8"));
+for (const [where, entry] of Object.entries(lock.packages ?? {})) {
+  if (where && !entry.link && !entry.integrity) throw new Error(`The machine's lockfile has no integrity hash for ${where}.`);
+}
+await rename(path.join(outdir, "package-lock.json"), path.join(outdir, "npm-shrinkwrap.json"));
 await cp(path.join(repoRoot, "src/main/appSkills"), path.join(outdir, "appSkills"), { recursive: true });
 // A release that carries this file understands `--maintenance`. An older
 // release does not, and running `node <old runtime> --maintenance ...` would
@@ -84,7 +98,7 @@ await writeFile(path.join(outdir, "README.md"), `# AccordAgents machine runtime 
 Install on a Linux computer that will host chat members:
 
 1. Install Node 20+, the sqlite3 CLI, git, and the provider CLIs you use (codex, claude); log the CLIs in on this computer.
-2. Copy this directory somewhere stable (for example ~/accordagents-machine) and run \`npm install --omit=dev\` inside it.
+2. Copy this directory somewhere stable (for example ~/accordagents-machine) and run \`npm ci --omit=dev\` inside it (it installs exactly the versions in npm-shrinkwrap.json).
 3. In the desktop app, Settings > General > Machines > Add machine, copy the enrollment and save it as ~/accordagents-machine/enrollment.json (it carries the relay key; keep it private).
 4. Start the runtime: \`node accordagents-machine.cjs --enrollment enrollment.json --user-data ~/.accordagents/machine --name <machine name>\`.
    Keep it running with systemd (see docs/machines/03-machine-runtime.md in the repository).

@@ -478,10 +478,11 @@ test("the hub this desktop uses and a machine's key from setup survive a fresh S
   };
   try {
     const server = { version: 1 as const, region: "us-east-1", instanceName: "accordagents-hub", ip: "52.72.175.0", user: "ubuntu", installedAt: "2026-10-18T19:28:02.800Z", installedVersion: "1.11.2" };
-    await instance().saveHubConfig({ url: "https://52.72.175.0", hubId: "hub-1", server });
+    await instance().saveHubConfig({ url: "https://52.72.175.0", hubId: "hub-1", hubKey: "MCowBQYDK2VwAyEAhubkey", server });
     await instance().saveMachine({ id: "machine-1", name: "Box", deviceId: "device-machine", pairingKey: "pairing-1", createdAt: "2026-10-18T00:00:00.000Z", devicePublicKeyDerBase64: "MCowBQYDK2VwAyEAkey" });
     const restarted = instance();
-    assert.deepEqual(await restarted.getHubConfig(), { url: "https://52.72.175.0", hubId: "hub-1", server });
+    // The server's own key is kept with it: every link checks the server proves it.
+    assert.deepEqual(await restarted.getHubConfig(), { url: "https://52.72.175.0", hubId: "hub-1", hubKey: "MCowBQYDK2VwAyEAhubkey", server });
     assert.equal((await restarted.listMachines())[0].devicePublicKeyDerBase64, "MCowBQYDK2VwAyEAkey");
     // Another write keeps it too.
     await restarted.saveMachine({ id: "machine-2", name: "Box 2", deviceId: "", pairingKey: "pairing-2", createdAt: "2026-10-18T00:00:00.000Z" });

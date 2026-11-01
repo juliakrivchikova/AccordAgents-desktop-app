@@ -8,7 +8,7 @@
  * only devices on its roster, which the desktop that set it up keeps.
  */
 
-import type { ChatParticipant, ChatProviderKind, ChatSkillMention } from "./types";
+import type { ChatAgentMode, ChatAgentPermissions, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind, ChatSkillMention } from "./types";
 import type { NewChatMemberOption } from "./newChat";
 import type { MachineProgressFrame } from "./machineProgress";
 import { stableJson } from "./stableJson";
@@ -85,6 +85,23 @@ export interface HubHealth {
   version: string;
   /** The newest place in the server's feed of operations. */
   head: number;
+  /** Asked with `?proof=<challenge>`: the server's own key and its signature
+   *  over hubProofSigningText, so a device that knows the key knows it is
+   *  talking to this server and not to whoever answers at its address now. */
+  proof?: HubProof;
+}
+
+export interface HubProof {
+  hubKey: string;
+  signature: string;
+}
+
+/** A challenge a device sends to have the server prove it is itself. */
+export const HUB_PROOF_CHALLENGE = /^[A-Za-z0-9_-]{16,128}$/;
+
+/** The exact text a server signs to prove itself to a device's challenge. */
+export function hubProofSigningText(hubId: string, challenge: string): string {
+  return ["accord-hub-proof-v1", hubId, challenge].join("\n");
 }
 
 /** PUT /v1/roster (owner only): the whole roster, owner included. */
@@ -288,6 +305,32 @@ export interface HubNewChatOptions {
   /** Why no chat can be started now, in the computer's words. */
   unavailable?: string;
 }
+
+/** PUT /v1/member-rules (owner only): the User's rules for what a member may
+ *  do without asking her, as her computer's settings hold them. The server
+ *  holds a cloud machine's changes to a chat's members to the same rules the
+ *  app applies (src/hub/hubMachineScope.ts): it does not know her settings
+ *  otherwise, and a machine's own word about them does not count. */
+export interface HubMemberRules {
+  version: 1;
+  /** By role: whether its members manage members and roles, and the rights
+   *  a member added with it starts with. */
+  roles: Record<string, {
+    manageRolesParticipants: ChatParticipantRequestPermission;
+    requestParticipants?: ChatParticipantRequestPermission;
+    requestCompaction?: ChatParticipantRequestPermission;
+  }>;
+  /** Saved members, as one is added to a chat. */
+  presets: Record<string, {
+    handle: string;
+    roleConfigId: string;
+    homeMachineId?: string;
+    agentMode?: ChatAgentMode;
+    permissions?: ChatAgentPermissions;
+  }>;
+}
+
+export const HUB_MEMBER_RULES_PATH = "/v1/member-rules";
 
 /** PUT /v1/machine-wake (owner only): the key the hub may use to start a
  *  stopped machine, scoped in AWS to starting the User's tagged instances.
