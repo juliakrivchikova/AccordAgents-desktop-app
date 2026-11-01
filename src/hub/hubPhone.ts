@@ -165,6 +165,7 @@ export class HubPhoneApi {
    *  composer on every keystroke, and the hub's copy of a big chat is
    *  megabytes to read each time. */
   private readonly openedCache = new Map<string, { stamp: number; limit: number; opened: ConversationOpenResult }>();
+  private readonly farMessageCache = new Map<string, { stamp: number; messages: Map<string, ChatMessage | undefined> }>();
   private catalogCache?: { at: number; catalog: HubComposerCatalog | undefined };
 
   constructor(private readonly options: HubPhoneOptions) {}
@@ -307,15 +308,16 @@ export class HubPhoneApi {
       });
       const updatedAt = new Map(listed.map((summary) => [summary.id, summary.updatedAt]));
       for (const row of built) {
+        const served = catalog ? row : { ...row, members: row.members?.map((member) => ({ ...member, roleLabel: roleLabelFor(member.roleLabel) })) };
         if (turnsReadFailed || unsettled.has(row.id)) {
           this.rowCache.delete(row.id);
-          builtUncached.set(row.id, row);
+          builtUncached.set(row.id, served);
           continue;
         }
         this.rowCache.set(row.id, {
           seq,
           updatedAt: updatedAt.get(row.id) ?? row.updatedAt,
-          row: catalog ? row : { ...row, members: row.members?.map((member) => ({ ...member, roleLabel: roleLabelFor(member.roleLabel) })) }
+          row: served
         });
       }
     }
@@ -338,13 +340,12 @@ export class HubPhoneApi {
     if (messageId.length > 200 || /[\u0000-\u001f\u007f]/.test(messageId)) {
       return { status: 400, body: { ok: false, error: "messageId invalid" } };
     }
-    const opened = await this.options.store.openConversation(conversationId, 1);
+    const opened = await this.openedRecent(conversationId, 1);
     const conversation = opened?.conversation;
     if (!conversation || conversation.kind !== "chat" || (scope.scope === "device" && conversation.metadata.archived === true)) {
       return { status: 404, body: { ok: false, error: PHONE_ERROR_CHAT_NOT_FOUND } };
     }
-    const read = await this.options.store.listConversationMessages({ conversationId, aroundMessageId: messageId, limit: 1 });
-    const message = read.messages.find((item) => item.id === messageId);
+    const message = await this.options.store.conversationMessageById(conversationId, messageId);
     return {
       status: 200,
       body: {
@@ -439,6 +440,30 @@ export class HubPhoneApi {
       ? { ...event, turns: byMessage.get(event.messageId) ?? [] } : event);
   }
 
+  /** Messages of a chat by id for the live poll, read again only once the
+   *  chat changed: the poll runs every second or two for as long as a turn
+   *  goes, and these messages change only when the chat does. */
+  private async farMessages(conversationId: string, messageIds: string[]): Promise<ChatMessage[]> {
+    if (messageIds.length === 0) return [];
+    const stamp = this.options.feed.lastChange(conversationId);
+    let cached = this.farMessageCache.get(conversationId);
+    if (!cached || cached.stamp !== stamp) {
+      cached = { stamp, messages: new Map() };
+      this.farMessageCache.delete(conversationId);
+      this.farMessageCache.set(conversationId, cached);
+      while (this.farMessageCache.size > OPENED_CACHE_MAX) this.farMessageCache.delete(this.farMessageCache.keys().next().value!);
+    }
+    const found: ChatMessage[] = [];
+    for (const messageId of messageIds) {
+      if (!cached.messages.has(messageId)) {
+        cached.messages.set(messageId, await this.options.store.conversationMessageById(conversationId, messageId).catch(() => undefined));
+      }
+      const message = cached.messages.get(messageId);
+      if (message) found.push(message);
+    }
+    return found;
+  }
+
   /** A chat's newest `limit` messages, read again only once it changed. */
   private async openedRecent(conversationId: string, limit: number): Promise<ConversationOpenResult | undefined> {
     const stamp = this.options.feed.lastChange(conversationId);
@@ -466,14 +491,10 @@ export class HubPhoneApi {
     // text still has to reach the phone, so the message of each run with
     // live progress is read by id when the newest messages do not hold it.
     const held = new Set(opened.conversation.messages.map((message) => message.id));
-    const missing = [...new Set(runs.map((run) => run.agentProgress?.messageId)
+    // Newest runs first (the progress map keeps the last updated last).
+    const missing = [...new Set([...runs].reverse().map((run) => run.agentProgress?.messageId)
       .filter((id): id is string => typeof id === "string" && Boolean(id) && !held.has(id)))].slice(0, LIVE_PROGRESS_FAR_RUNS_MAX);
-    const far: ChatMessage[] = [];
-    for (const messageId of missing) {
-      const read = await this.options.store.listConversationMessages({ conversationId, aroundMessageId: messageId, limit: 1 }).catch(() => undefined);
-      const message = read?.messages.find((item) => item.id === messageId);
-      if (message) far.push(message);
-    }
+    const far = await this.farMessages(conversationId, missing);
     const conversation = far.length > 0 ? { ...opened.conversation, messages: [...far, ...opened.conversation.messages] } : opened.conversation;
     const events = liveTimelineEvents(conversation, runs);
     return { status: 200, body: { ok: true, type: "mobile.timeline.events", conversationId, events, live: true } };

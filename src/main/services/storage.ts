@@ -896,6 +896,17 @@ export class StorageService {
     };
   }
 
+  /** One message of a chat by its id: a single read through the chat's
+   *  message-id index, for readers that need nothing around it. */
+  async conversationMessageById(conversationId: string, messageId: string): Promise<ChatMessage | undefined> {
+    await this.init();
+    const rows = await this.queryJson<{ sequence: number; payloadHex: string }>(
+      `select sequence, hex(payload_json) as payloadHex from conversation_messages
+        where conversation_id = ${sqlString(conversationId)} and message_id = ${sqlString(messageId)} limit 1;`
+    );
+    return rows[0] ? parseHexJson<ChatMessage>(rows[0].payloadHex, `message ${conversationId}:${rows[0].sequence}`) : undefined;
+  }
+
   /** The member messages still in progress that answer these turns (the
    *  member and the message each turn answers), wherever they are in the
    *  chat. Read from the earliest of those messages on, not the whole chat;

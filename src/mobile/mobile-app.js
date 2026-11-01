@@ -844,7 +844,7 @@
    *  page just read carries those among its rows, and the turns that left the
    *  list are kept until the server says how they ended. A placeholder of one
    *  of them is a turn that is long, not dead: members' turns run for hours. */
-  function turnsStillGoing(conversationId, batchEvents) {
+  function turnsStillGoing(conversationId, batchEvents, includeSettling) {
     const going = new Set();
     const chat = loadChats().find(function (item) { return item.id === conversationId; });
     const events = (chat && Array.isArray(chat.activity) ? chat.activity : []).concat(Array.isArray(batchEvents) ? batchEvents : []);
@@ -856,8 +856,10 @@
     }
     // A turn this phone is still asking the server about is not a corpse
     // either: its end is on its way (see settleTurnsThatLeftTheList).
-    for (const entry of loadSettleTurns()) {
-      if (entry.conversationId === conversationId) going.add(entry.messageId);
+    if (includeSettling !== false) {
+      for (const entry of loadSettleTurns()) {
+        if (entry.conversationId === conversationId && !settleGivenUp(entry)) going.add(entry.messageId);
+      }
     }
     return going;
   }
@@ -2383,7 +2385,7 @@
     });
     const keys = [CHAT_LIST_KEY, CHAT_LIST_AT_KEY, CONTROL_CARDS_KEY, CONTROL_CARD_SENT_KEY, UNREAD_KEY, TIMELINE_PAGES_KEY,
       ACTIVE_CONVERSATION_KEY, OPEN_THREAD_KEY, OPEN_STREAM_KEY, STARTED_CHATS_KEY, VIEWED_AT_KEY, LIST_ACTIVITY_SEEN_KEY,
-      ACTIVITY_CLEARED_KEY, TERMINAL_RUNS_KEY, SYNC_WAIT_KEY, SEND_LOG_SEEN_KEY];
+      ACTIVITY_CLEARED_KEY, TERMINAL_RUNS_KEY, SYNC_WAIT_KEY, SEND_LOG_SEEN_KEY, SETTLE_TURNS_KEY];
     for (const key of keys) {
       try {
         localStorage.removeItem(key);
@@ -3919,29 +3921,46 @@
   let settlePassTimer;
   let settleUnsupportedUntil = 0;
 
+  // An entry given up (too many reads) is kept until it is old, so the same
+  // row is not taken up again from scratch, but it is not read, timed, or a
+  // reason to spare the row from the corpse rule.
+  function settleGivenUp(entry) {
+    return (entry.attempts || 0) >= SETTLE_ATTEMPTS_MAX;
+  }
+
   function loadSettleTurns() {
     const now = Date.now();
     try {
       const raw = JSON.parse(localStorage.getItem(SETTLE_TURNS_KEY) || "[]");
       return Array.isArray(raw) ? raw.filter(function (entry) {
         return entry && typeof entry.conversationId === "string" && typeof entry.messageId === "string" &&
-          (entry.attempts || 0) < SETTLE_ATTEMPTS_MAX && now - (entry.since || 0) < SETTLE_KEEP_MS;
+          now - (entry.since || 0) < SETTLE_KEEP_MS;
       }) : [];
     } catch {
       return [];
     }
   }
 
+  // A turn asked about again because something changed (its chat changed,
+  // or it left the list) is read soon, not at the end of its longest wait,
+  // but not more often than this, however busy the chat.
+  const SETTLE_NUDGE_FLOOR_MS = 10_000;
+
   function addSettleTurns(items) {
     if (items.length === 0) return;
     const list = loadSettleTurns();
-    const known = new Set(list.map(function (entry) { return entry.conversationId + "\u0000" + entry.messageId; }));
+    const byKey = new Map(list.map(function (entry) { return [entry.conversationId + "\u0000" + entry.messageId, entry]; }));
     const now = Date.now();
     for (const item of items) {
       const key = item.conversationId + "\u0000" + item.messageId;
-      if (known.has(key)) continue;
-      known.add(key);
-      list.push({ conversationId: item.conversationId, messageId: item.messageId, since: now, attempts: 0, missing: 0, nextAt: 0 });
+      const known = byKey.get(key);
+      if (known) {
+        if (!settleGivenUp(known)) known.nextAt = Math.min(known.nextAt || 0, Math.max(now, (known.lastAt || 0) + SETTLE_NUDGE_FLOOR_MS));
+        continue;
+      }
+      const entry = { conversationId: item.conversationId, messageId: item.messageId, since: now, attempts: 0, missing: 0, nextAt: 0 };
+      byKey.set(key, entry);
+      list.push(entry);
     }
     saveSettleTurns(list);
     void runSettlePass();
@@ -3957,7 +3976,7 @@
       .filter(function (at) { return typeof at === "string" && at; }).sort();
     if (times.length === 0) return;
     const oldestOnPage = times[0];
-    const going = turnsStillGoing(conversationId, events);
+    const going = turnsStillGoing(conversationId, events, false);
     const rows = await listTimelineEntries(conversationId).catch(function () { return []; });
     addSettleTurns(rows.filter(function (row) {
       const messageId = row && (row.messageId || row.sourceId);
@@ -4002,10 +4021,10 @@
     try {
       const now = Date.now();
       const due = loadSettleTurns().filter(function (entry) {
-        return (entry.nextAt || 0) <= now;
+        return !settleGivenUp(entry) && (entry.nextAt || 0) <= now;
       }).slice(0, SETTLE_PASS_MAX);
       for (const entry of due) {
-        const outcome = await settleTurnByMessage(entry.conversationId, entry.messageId);
+        const outcome = await settleTurnByMessage(entry);
         const list = loadSettleTurns();
         const index = list.findIndex(function (item) {
           return item.conversationId === entry.conversationId && item.messageId === entry.messageId;
@@ -4015,10 +4034,10 @@
           if (outcome === "settled" || missing >= SETTLE_MISSING_MAX) {
             list.splice(index, 1);
           } else if (outcome === "missing") {
-            list[index] = { ...list[index], missing: missing, nextAt: Date.now() + SETTLE_RETRY_FIRST_MS };
+            list[index] = { ...list[index], missing: missing, lastAt: Date.now(), nextAt: Date.now() + SETTLE_RETRY_FIRST_MS };
           } else {
             const attempts = (list[index].attempts || 0) + 1;
-            list[index] = { ...list[index], attempts: attempts,
+            list[index] = { ...list[index], attempts: attempts, lastAt: Date.now(),
               nextAt: Date.now() + Math.min(SETTLE_RETRY_MAX_MS, SETTLE_RETRY_FIRST_MS * Math.pow(2, attempts - 1)) };
           }
         }
@@ -4044,7 +4063,7 @@
   function scheduleSettlePass() {
     clearTimeout(settlePassTimer);
     settlePassTimer = undefined;
-    const pending = loadSettleTurns();
+    const pending = loadSettleTurns().filter(function (entry) { return !settleGivenUp(entry); });
     if (pending.length === 0 || document.hidden) return;
     const nextAt = Math.max(settleUnsupportedUntil, pending.reduce(function (earliest, entry) {
       return Math.min(earliest, entry.nextAt || 0);
@@ -4059,7 +4078,14 @@
    *  message gone) or this phone's row is already settled; "missing" when
    *  this phone holds no row for it (yet); "pending" when it still runs;
    *  "failed" or "unsupported" otherwise. */
-  async function settleTurnByMessage(conversationId, messageId) {
+  // An end found soon after the turn left the list is one this phone watched
+  // happen: Finished lists it by when it ended. A row settled long after
+  // (a phone away, an old stuck row) keeps its own time.
+  const SETTLE_LIVE_WINDOW_MS = 10 * 60_000;
+
+  async function settleTurnByMessage(entry) {
+    const conversationId = entry.conversationId;
+    const messageId = entry.messageId;
     const held = await getTimelineEntry(conversationId + ":" + messageId).catch(function () { return undefined; });
     // Already settled here: done. Not held: maybe a page that holds it is
     // still being stored, so asked again a few times; an answer this phone
@@ -4084,8 +4110,7 @@
     }
     const event = payload.events.find(function (item) { return item && (item.messageId === messageId || item.id === messageId); });
     try {
-      // Watched ending now, as far as this phone can tell: Finished lists it by then.
-      await handleRelayTimelinePayload(payload, conversationId, { live: true });
+      await handleRelayTimelinePayload(payload, conversationId, { live: Date.now() - (entry.since || 0) < SETTLE_LIVE_WINDOW_MS });
     } catch {
       return "failed";
     }
@@ -4109,7 +4134,10 @@
       opening: Boolean(options && options.opening),
       openedAt: options && options.openedAt
     });
-    if (!beforeMessageId && payload && Array.isArray(payload.events)) {
+    // Only a newest page with history before it can leave a held row behind:
+    // a page that is the whole chat and lacks a row says the row is not the
+    // server's at all, which the older rules (the corpse rule) handle.
+    if (!beforeMessageId && payload && Array.isArray(payload.events) && payload.page && payload.page.hasMoreBefore === true) {
       void settleHeldTurnsBeyondPage(conversationId, payload.events);
     }
     return stored;
