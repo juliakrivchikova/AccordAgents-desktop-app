@@ -172,7 +172,7 @@ import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
 import { MachineRecoveryService } from "./services/machineRecovery";
 import { MachineInactivityCheck } from "./services/machineInactivity";
 import { isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase, isMachineRecoveryOperation } from "../shared/machineInstall";
-import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, runCommand, setCommandDebugLogger } from "./services/command";
+import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, refreshLoginShellEnv, runCommand, setCommandDebugLogger, windowsPowerShellPath } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService, enabledCloudProviders } from "./services/cloudRunDoctor";
 import { CloudRunSetupSession } from "./services/cloudRunSetupSession";
@@ -1405,9 +1405,15 @@ async function openTerminal(): Promise<void> {
   if (process.platform === "win32") {
     // A new PowerShell window in the home folder, in Windows Terminal when
     // that is the default terminal: where the setup panel's commands run.
+    // Like a new macOS Terminal it gets the PATH installers set since the app
+    // started, and it runs the .ps1 shims npm installs, which Windows'
+    // default policy refuses.
+    await refreshLoginShellEnv();
+    const cmd = path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe");
+    const args = ["/d", "/c", "start", "\"\"", `"${windowsPowerShellPath()}"`, "-NoLogo", "-ExecutionPolicy", "RemoteSigned"];
     await new Promise<void>((resolve, reject) => {
-      const child = spawn("cmd.exe", ["/d", "/c", "start", "\"\"", "powershell.exe", "-NoLogo"], {
-        cwd: homedir(), detached: true, stdio: "ignore", windowsHide: true, windowsVerbatimArguments: true
+      const child = spawn(cmd, args, {
+        cwd: homedir(), env: commandEnvironment(), detached: true, stdio: "ignore", windowsHide: true, windowsVerbatimArguments: true
       });
       // `start` returns as soon as the window is up, or fails at once.
       child.once("error", reject);

@@ -90,6 +90,10 @@ export function refreshLoginShellEnv(): Promise<LoginShellEnvironmentRefresh> {
 }
 
 async function captureFreshLoginShellEnv(): Promise<LoginShellEnvironmentRefresh> {
+  if (process.platform === "win32") {
+    loginShellEnv = await captureWindowsPath();
+    return { ok: true, env: loginShellEnv };
+  }
   if (process.platform !== "darwin") {
     loginShellEnv = {};
     return { ok: true, env: {} };
@@ -164,9 +168,17 @@ export function resolveCommandTimeoutMs(requestedTimeoutMs: number | undefined, 
 }
 
 export async function runCommand(command: string, args: string[], options: CommandOptions = {}): Promise<CommandResult> {
+  // The input can fail while the environment is still being read: keep its
+  // error for the run instead of leaving it unhandled.
+  let earlyInputError: Error | undefined;
+  const holdEarlyInputError = (error: Error): void => {
+    earlyInputError ??= error;
+  };
+  options.inputStream?.once("error", holdEarlyInputError);
   if (options.primeLoginShellEnv !== false) {
     await ensureLoginShellEnvPrimed();
   }
+  options.inputStream?.off("error", holdEarlyInputError);
   const timeoutMs = resolveCommandTimeoutMs(options.timeoutMs, options.allowNoTimeout === true);
 
   return new Promise((resolve, reject) => {
@@ -336,7 +348,10 @@ export async function runCommand(command: string, args: string[], options: Comma
         }
       });
     }
-    if (options.inputStream) {
+    if (options.inputStream && earlyInputError) {
+      stdinError ??= earlyInputError;
+      child.stdin.end();
+    } else if (options.inputStream) {
       // pipe() leaves its destination open when the source fails: the child
       // would wait for more input until the timeout.
       options.inputStream.once("error", (error) => {
@@ -547,6 +562,29 @@ async function captureLoginShellEnv(): Promise<NodeJS.ProcessEnv> {
     timeoutMs: LOGIN_SHELL_ENV_TIMEOUT_MS
   });
   return parseLoginShellEnvOutput(result.stdout, startSentinel, endSentinel);
+}
+
+/** Windows has no login shell: a new terminal takes PATH from the registry,
+ *  where an installer adds its folder while the app runs. This process's own
+ *  entries stay after it. Without the registry, PATH stays as it was. */
+async function captureWindowsPath(): Promise<NodeJS.ProcessEnv> {
+  try {
+    const result = await runCommand(windowsPowerShellPath(), [
+      "-NoProfile", "-NonInteractive", "-Command",
+      "[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Environment]::GetEnvironmentVariable('Path', 'Machine'); [Environment]::GetEnvironmentVariable('Path', 'User')"
+    ], { env: process.env, primeLoginShellEnv: false, timeoutMs: LOGIN_SHELL_ENV_TIMEOUT_MS });
+    const segments = [...result.stdout.split(/\r?\n/), process.env.PATH ?? ""].flatMap((value) => value.split(path.delimiter));
+    return { PATH: uniquePathSegments(segments).join(path.delimiter) };
+  } catch (error) {
+    void writeCommandDebugLog("command.windows-path-refresh-failed", {
+      reason: error instanceof CommandError && error.result.timedOut ? "timeout" : "failed"
+    });
+    return {};
+  }
+}
+
+export function windowsPowerShellPath(): string {
+  return path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
 
 function shellQuote(value: string): string {
