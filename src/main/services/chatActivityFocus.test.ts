@@ -71,3 +71,47 @@ test("executeChatActivityFocus commits only after loading and the final frame", 
   assert.equal(result, "completed");
   assert.deepEqual(events, ["resolved", "loaded", "frame", "committed"]);
 });
+
+test("executeChatActivityFocus goes stale without clearing when another selection replaces it while the target is looked up", async () => {
+  let current = true;
+  const events: string[] = [];
+
+  const result = await executeChatActivityFocus({
+    isCurrent: () => current,
+    openConversation: async () => ({ id: "conversation-1" }),
+    resolveTarget: async () => {
+      current = false;
+      return { messageId: "message-1" };
+    },
+    onTargetResolved: () => events.push("resolved"),
+    ensureTargetLoaded: async () => true,
+    beforeCommit: async () => {},
+    commit: () => events.push("committed"),
+    clear: () => events.push("cleared"),
+    fail: () => events.push("failed")
+  });
+
+  assert.equal(result, "stale");
+  assert.deepEqual(events, []);
+});
+
+test("executeChatActivityFocus reports a failed target lookup and clears", async () => {
+  const events: string[] = [];
+
+  const result = await executeChatActivityFocus({
+    isCurrent: () => true,
+    openConversation: async () => ({ id: "conversation-1" }),
+    resolveTarget: async () => {
+      throw new Error("lookup failed");
+    },
+    onTargetResolved: () => events.push("resolved"),
+    ensureTargetLoaded: async () => true,
+    beforeCommit: async () => {},
+    commit: () => events.push("committed"),
+    clear: () => events.push("cleared"),
+    fail: (error) => events.push(`failed:${(error as Error).message}`)
+  });
+
+  assert.equal(result, "failed");
+  assert.deepEqual(events, ["failed:lookup failed", "cleared"]);
+});

@@ -273,3 +273,77 @@ test("a busy chat sends the phone its newest activity, never more than the cap",
   assert.equal(events[events.length - 1].id, "m11", "the newest is kept");
   assert.equal(events[0].id, `m${12 - PHONE_ACTIVITY_PER_CHAT}`);
 });
+
+test("a member's posts during its turn are marked, and a turn that ends empty still ends on the phone", () => {
+  const member = { participantId: "taylor", participantLabel: "@taylor" };
+  const conversation: Conversation = {
+    id: "posting-chat", kind: "chat", title: "Posting", createdAt: "2026-10-31T20:00:00Z",
+    updatedAt: "2026-10-31T20:05:00Z", findings: [], metadata: {},
+    messages: [
+      { id: "turn", role: "participant", ...member, content: "", status: "done", createdAt: "2026-10-31T20:00:00Z", metadata: { runId: "run-1" } },
+      { id: "post", role: "participant", ...member, content: "Halfway there.", status: "done", createdAt: "2026-10-31T20:01:00Z",
+        metadata: { runId: "run-1", appMessageSource: "app_chat_send_message" } },
+      { id: "next-turn", role: "participant", ...member, content: "", status: "pending", createdAt: "2026-10-31T20:02:00Z", metadata: { runId: "run-2" } },
+      { id: "answer", role: "participant", ...member, content: "Done.", status: "done", createdAt: "2026-10-31T20:03:00Z", metadata: { runId: "run-3" } }
+    ]
+  };
+  const events = Object.fromEntries(timelineEventsFromSnapshot(conversation).map((event) => [event.id, event]));
+  // The empty end of a turn travels hidden, so the phone settles the turn.
+  assert.equal(events.turn?.hidden, true);
+  assert.equal(events.turn?.status, "done");
+  assert.equal(events.turn?.midTurn, undefined);
+  // A post during the turn says so: it ends no run.
+  assert.equal(events.post?.midTurn, true);
+  assert.equal(events.post?.hidden, undefined);
+  // A turn still running and a real answer are as they were.
+  assert.equal(events["next-turn"]?.hidden, undefined);
+  assert.equal(events["next-turn"]?.status, "pending");
+  assert.equal(events.answer?.midTurn, undefined);
+  assert.equal(events.answer?.hidden, undefined);
+});
+
+test("a turn in progress travels to the phone's Activity however many newer replies there are", async () => {
+  const { phoneActivityEvents, PHONE_ACTIVITY_PER_CHAT } = await import("./mobileTimeline");
+  const now = Date.parse("2026-11-01T08:00:00.000Z");
+  const turn = { id: "long-turn", role: "participant", participantId: "taylor", participantLabel: "@taylor", content: "",
+    createdAt: new Date(now - 60 * 60_000).toISOString(), status: "pending", metadata: { runId: "run-long" } };
+  const replies = Array.from({ length: 12 }, (_, index) => ({
+    id: `r${index}`, role: "participant", participantId: `p${index}`, participantLabel: `@m${index}`, content: `reply ${index}`,
+    createdAt: new Date(now - (12 - index) * 60_000).toISOString(), status: "done"
+  }));
+  const events = phoneActivityEvents({ id: "busy", kind: "chat", title: "B", createdAt: "", updatedAt: "", findings: [], metadata: {},
+    messages: [turn, ...replies] } as unknown as Conversation, now);
+  assert.equal(events.length, PHONE_ACTIVITY_PER_CHAT);
+  assert.equal(events[0].id, "long-turn", "the turn in progress is kept, oldest first");
+  assert.equal(events[events.length - 1].id, "r11", "the newest reply is kept");
+});
+
+test("the phone's chat list counts a turn in progress that started before the chat's newest messages", async () => {
+  const { buildMobileChatList } = await import("./mobileChatCatalog");
+  const at = (minute: number) => new Date(Date.UTC(2026, 10, 1, 7, minute)).toISOString();
+  const turn = { id: "long-turn", role: "participant", participantId: "taylor", participantLabel: "@taylor", content: "",
+    createdAt: at(0), status: "pending", metadata: { runId: "run-long" } };
+  const newest = Array.from({ length: 10 }, (_, index) => ({
+    id: `post-${index}`, role: "participant", participantId: "taylor", participantLabel: "@taylor", content: `post ${index}`,
+    createdAt: at(index + 1), status: "done", metadata: { runId: "run-long", appMessageSource: "app_chat_send_message" }
+  }));
+  const conversation = {
+    id: "chat-long", kind: "chat", title: "Long", createdAt: at(0), updatedAt: at(11), findings: [],
+    metadata: { participants: [{ id: "taylor", handle: "taylor", kind: "claude-code", roleConfigId: "engineer" }] },
+    messages: newest
+  } as unknown as Conversation;
+  const store = {
+    listConversations: async () => [{ id: "chat-long", kind: "chat", title: "Long", createdAt: at(0), updatedAt: at(11) }],
+    openConversation: async () => ({ conversation, messagePage: { hasMoreBefore: true } })
+  } as unknown as Parameters<typeof buildMobileChatList>[0];
+  const options = { roleLabels: new Map<string, string>(), machineNames: new Map<string, string>(), runningFromMessages: true };
+
+  const blind = await buildMobileChatList(store, options);
+  assert.equal(blind[0].running, false, "the newest messages alone are all posts");
+
+  const seen = await buildMobileChatList(store, { ...options, pendingMessagesFor: async () => [turn as never] });
+  assert.equal(seen[0].running, true);
+  assert.equal(seen[0].activity?.[0]?.id, "long-turn");
+  assert.equal(seen[0].activity?.[0]?.status, "pending");
+  assert.equal(seen[0].snippet, "post 9", "the last line is still the newest message");
+});

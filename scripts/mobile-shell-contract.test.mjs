@@ -634,3 +634,16 @@ test("mobile shell gives scaffolding one row and every real message its own", as
     mobile.timelineRenderRowKey(pending)
   );
 });
+
+test("mobile shell opens a running member's row at its turn in progress", async () => {
+  const app = await readFile(path.join(repoRoot, "src/mobile/mobile-app.js"), "utf8");
+  // The Running row hands its member's turn to the chat it opens.
+  assert.match(app, /openConversation\(row\.conversationId, row\.openMessageId\s*\?\s*\{ threadRootId: row\.openThreadRootId, messageId: row\.openMessageId \}/);
+  // The chat lands on that row instead of its end, and gives up after a bounded read.
+  assert.match(app, /pendingMessageFocus = focusRequest;/);
+  assert.match(app, /const FOCUS_EARLIER_PAGE_LIMIT = \d+;/);
+  assert.match(app, /const target = messageRowFor\(list, pendingMessageFocus\.messageId\);\s*if \(target\) \{\s*pendingMessageFocus = undefined;\s*focusMessageRow\(activeId, target\);\s*return;/);
+  // "Show earlier messages" and the read towards the turn share one reader.
+  assert.match(app, /async function loadEarlierMessages\(\) \{[\s\S]*?await fetchEarlierPage\(conversationId\)/);
+  assert.match(app, /if \(await fetchEarlierPage\(conversationId\) !== "read"\) break;/);
+});

@@ -39,6 +39,11 @@ export interface MobileChatListOptions {
   include?: (summary: ConversationSummary) => boolean;
   /** The chat summaries when the caller already read them. */
   summaries?: ConversationSummary[];
+  /** A chat's member turns in progress anywhere in its history, for a chat
+   *  that has one (undefined otherwise). The newest messages the list reads
+   *  can be all posts and replies that came after a turn started: without
+   *  this the turn looked over to the phone while it was still going. */
+  pendingMessagesFor?: (conversationId: string) => Promise<ChatMessage[] | undefined>;
 }
 
 export async function buildMobileChatList(store: MobileCatalogStore, options: MobileChatListOptions): Promise<MobileChatListItem[]> {
@@ -55,6 +60,10 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
     // every return to the foreground and every pull to refresh.
     const opened = await store.openConversation(summary.id, MOBILE_CHAT_LIST_SNIPPET_WINDOW);
     const conversation = opened?.conversation;
+    // What is running is judged from the turns in progress as well as the
+    // newest messages; the last line and the members still come from the
+    // newest messages alone.
+    const runState = conversation ? await withPendingMessages(conversation, options.pendingMessagesFor) : undefined;
     // The last line the User can see, not the last line stored: an internal
     // system trigger is hidden on the desktop and must not become the
     // phone's preview of the chat. When the whole window is internal, a
@@ -65,7 +74,7 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
       newest.find((message) => message.role === "participant" && message.metadata?.hiddenFromTimeline !== true);
     const members = mobileChatMembers(conversation);
     const pendingCards = options.pendingCardsFor?.(summary.id, conversation);
-    const activity = conversation ? phoneActivityEvents(conversation) : [];
+    const activity = runState ? phoneActivityEvents(runState) : [];
     items.push({
       id: summary.id,
       title: summary.title || "Chat",
@@ -74,7 +83,7 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
       who: mobileWhoLabel(lastMessage),
       updatedAt: summary.updatedAt,
       running: summary.running === true ||
-        (options.runningFromMessages === true && (conversation?.messages ?? []).some((message) => message.role === "participant" && message.status === "pending")),
+        (options.runningFromMessages === true && (runState?.messages ?? []).some((message) => message.role === "participant" && message.status === "pending")),
       participants: (summary.chatParticipants ?? [])
         .map((participant) => participant.handle.startsWith("@") ? participant.handle : `@${participant.handle}`)
         .slice(0, 4),
@@ -108,6 +117,17 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
     });
   }
   return items;
+}
+
+async function withPendingMessages(
+  conversation: Conversation,
+  pendingMessagesFor: MobileChatListOptions["pendingMessagesFor"]
+): Promise<Conversation> {
+  const pending = pendingMessagesFor ? await pendingMessagesFor(conversation.id).catch(() => undefined) : undefined;
+  if (!pending || pending.length === 0) return conversation;
+  const held = new Set(conversation.messages.map((message) => message.id));
+  const earlier = pending.filter((message) => !held.has(message.id));
+  return earlier.length === 0 ? conversation : { ...conversation, messages: [...earlier, ...conversation.messages] };
 }
 
 /** The newest page of a chat, or the page before a message the phone

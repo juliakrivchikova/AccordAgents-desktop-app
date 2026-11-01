@@ -168,18 +168,53 @@
     // an early "Running..." row that names nobody and by a row that names the
     // member; the member's row wins.
     const runs = new Map();
+    // What a tap on a member's running row opens: the member's turn in
+    // progress, the same message the desktop opens (runningMessageForParticipant
+    // in src/shared/chatRunningMessage.ts). Posts the member made during the
+    // turn are newer than it; a later turn waits behind it, and nothing on the
+    // phone says which one waits, so the turn started first is the one in
+    // progress. A member's turns run one after another, so a turn this phone
+    // still holds as running is over once the member finished a later turn
+    // or posted from one: it is not taken, whatever this phone missed.
+    const pendingByMember = new Map();
+    const laterTurnTimesByMember = new Map();
     for (const entry of entries) {
+      const memberKey = entry.conversationId + "\u0000" + handleOf(entry).toLowerCase();
+      if (entry.status === "done" && entry.runId && handleOf(entry)) {
+        const times = laterTurnTimesByMember.get(memberKey) || [];
+        times.push({ runId: entry.runId, at: timeValue(entry.createdAt) });
+        laterTurnTimesByMember.set(memberKey, times);
+      }
       if (entry.status !== "pending") continue;
       if (entry.runId && isRunSettled(entry.runId)) continue;
       if (endedSinceStarted(entry)) continue;
+      if (handleOf(entry)) {
+        const pending = pendingByMember.get(memberKey) || [];
+        pending.push(entry);
+        pendingByMember.set(memberKey, pending);
+      }
       const runKey = entry.conversationId + "\u0000" + (entry.runId || entry.mobileEventId || entry.id);
       const group = runs.get(runKey) || new Map();
-      const memberKey = handleOf(entry).toLowerCase();
-      const existing = group.get(memberKey);
+      const groupMemberKey = handleOf(entry).toLowerCase();
+      const existing = group.get(groupMemberKey);
       if (!existing || timeValue(entry.createdAt) > timeValue(existing.createdAt)) {
-        group.set(memberKey, entry);
+        group.set(groupMemberKey, entry);
       }
       runs.set(runKey, group);
+    }
+    const inProgressByMember = new Map();
+    for (const [memberKey, pending] of pendingByMember) {
+      const laterTurns = laterTurnTimesByMember.get(memberKey) || [];
+      let inProgress;
+      for (const entry of pending) {
+        const at = timeValue(entry.createdAt);
+        if (laterTurns.some(function (turn) { return turn.runId !== entry.runId && at > 0 && turn.at > at; })) continue;
+        // An unknown start time cannot claim to be first.
+        if (!inProgress || (at > 0 && (timeValue(inProgress.createdAt) === 0 || at < timeValue(inProgress.createdAt)))) {
+          inProgress = entry;
+        }
+      }
+      if (inProgress) inProgressByMember.set(memberKey, inProgress);
     }
     const running = [];
     const runningRunIds = new Set();
@@ -187,6 +222,12 @@
       const named = Array.from(group.entries()).filter(function (pair) { return pair[0] !== ""; });
       const rows = named.length > 0 ? named.map(function (pair) { return pair[1]; }) : Array.from(group.values());
       for (const entry of rows) {
+        // A member's row opens its turn in progress, else its own message;
+        // a row that names nobody opens the chat as before.
+        const inProgress = handleOf(entry)
+          ? inProgressByMember.get(entry.conversationId + "\u0000" + handleOf(entry).toLowerCase()) || entry
+          : undefined;
+        const openMessageId = inProgress ? inProgress.messageId || inProgress.sourceId : undefined;
         if (entry.runId) runningRunIds.add(entry.runId);
         const placeholder = isPlaceholder(entry.content);
         running.push({
@@ -199,6 +240,7 @@
           at: entry.createdAt,
           runId: entry.runId,
           threadRootId: entry.threadRootId,
+          ...(openMessageId ? { openMessageId: openMessageId, openThreadRootId: inProgress.threadRootId || undefined } : {}),
           // A row that names nobody has no member to stop yet.
           cancellable: Boolean(entry.runId) && !placeholder,
           stopping: Boolean(entry.runId) && isStopRequested(entry.runId)
