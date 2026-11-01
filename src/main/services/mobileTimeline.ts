@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
+import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
 import {
   chatMessageHiddenFromTimeline,
   chatMessageVisualThreadRootId,
@@ -94,6 +95,10 @@ export interface MobileTimelineEvent {
    *  of a run: the phone settles the run's pending row on it and stores no
    *  bubble. Internal system and user rows are not sent at all. */
   hidden?: true;
+  /** A member's post during its turn (its reply tool). The turn goes on, so
+   *  the post ends no run on the phone: the turn's own message is still the
+   *  one in progress. */
+  midTurn?: true;
   /** The member that wrote it, so the phone resolves an unaddressed draft to
    *  the last member that spoke, as the desktop does. */
   participantId?: string;
@@ -150,9 +155,14 @@ export function phoneActivityEvents(conversation: Conversation, now = Date.now()
     else if (asking) askingByMember.set(member, short);
     else doneByMember.set(member, short);
   }
-  return [...pendingByRun.values(), ...askingByMember.values(), ...doneByMember.values()]
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-    .slice(-PHONE_ACTIVITY_PER_CHAT);
+  const byTime = (left: MobileTimelineEvent, right: MobileTimelineEvent) => left.createdAt.localeCompare(right.createdAt);
+  // A turn in progress always travels, however many newer replies there are:
+  // a long turn starts before the replies around it, and the newest few
+  // alone dropped it, so the phone took the turn for over while it went on.
+  const pending = [...pendingByRun.values()].sort(byTime).slice(-PHONE_ACTIVITY_PER_CHAT);
+  const others = [...askingByMember.values(), ...doneByMember.values()].sort(byTime);
+  const room = PHONE_ACTIVITY_PER_CHAT - pending.length;
+  return [...pending, ...(room > 0 ? others.slice(-room) : [])].sort(byTime);
 }
 
 export function timelineEventsFromSnapshot(conversation: Conversation, limit = 40): MobileTimelineEvent[] {
@@ -181,11 +191,22 @@ export function messageIsHiddenOnPhone(conversation: Pick<Conversation, "message
   // request carrier's hidden-ness depend on its trigger being in the message
   // list, and the phone's projections read pages, so at a page boundary the
   // same carrier would otherwise flip between hidden and shown.
-  return message.metadata?.hiddenFromTimeline === true || chatMessageHiddenFromTimeline(conversation, message);
+  return message.metadata?.hiddenFromTimeline === true || chatMessageHiddenFromTimeline(conversation, message) ||
+    isEmptyFinishedTurn(message);
+}
+
+/** A member's turn that ended with nothing to show (all it had to say went
+ *  out as posts during the turn). It has no bubble, but it is the end of the
+ *  turn: without it the phone's row for the turn would stay running. */
+function isEmptyFinishedTurn(message: ChatMessage): boolean {
+  return message.role === "participant" && message.status !== "pending" &&
+    typeof message.metadata?.runId === "string" && Boolean(message.metadata.runId) &&
+    message.metadata?.appMessageSource !== APP_CHAT_SEND_MESSAGE_TOOL &&
+    !message.content.trim() && timelineAttachmentsFromMessage(message).length === 0;
 }
 
 function messageTravelsToPhone(conversation: Pick<Conversation, "messages">, message: ChatMessage): boolean {
-  if (!messageIsVisibleOnPhone(message)) {
+  if (!messageIsVisibleOnPhone(message) && !isEmptyFinishedTurn(message)) {
     return false;
   }
   return message.role === "participant" || !messageIsHiddenOnPhone(conversation, message);
@@ -228,10 +249,13 @@ function timelineEventFromMessage(
     : undefined;
   const attachments = timelineAttachmentsFromMessage(message);
   const hidden = conversation && message.role === "participant" && messageIsHiddenOnPhone(conversation, message);
+  const midTurn = message.role === "participant" && message.status === "done" &&
+    message.metadata?.appMessageSource === APP_CHAT_SEND_MESSAGE_TOOL;
   return {
     id: message.id,
     ...(threadRootId && threadRootId !== message.id ? { threadRootId } : {}),
     ...(hidden ? { hidden: true as const } : {}),
+    ...(midTurn ? { midTurn: true as const } : {}),
     // A scheduled script's message is not the User's: the phone has no script
     // author, so it shows as an author named after the script.
     role: message.role === "participant" || message.role === "script" ? "participant" : message.role === "system" ? "system" : "you",

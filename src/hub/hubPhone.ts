@@ -9,7 +9,7 @@ import type { HubComposerCatalog, HubDevice, HubPhoneScope } from "../shared/hub
 import type { HubCard } from "../shared/hubOps";
 import { controlCardFromChoiceMessage, controlCardFromHubCard, type MobileControlCard } from "../shared/mobileControlCards";
 import { MOBILE_CHAT_LIST_LIMIT, buildMobileChatList, buildMobileTimelinePage, mobileChatMembers } from "../main/services/mobileChatCatalog";
-import type { MobileChatListItem, MobileTimelineEvent, MobileTimelineTurn } from "../main/services/mobileTimeline";
+import { timelineEventsFromSnapshot, type MobileChatListItem, type MobileTimelineEvent, type MobileTimelineTurn } from "../main/services/mobileTimeline";
 import type { StorageService } from "../main/services/storage";
 import { liveTimelineEvents, scopeCovers, type HubProgress, type HubWaker } from "./hubPhoneState";
 /**
@@ -269,12 +269,20 @@ export class HubPhoneApi {
         if (card.state !== "pending" || !stale.has(card.conversationId)) continue;
         byChat.set(card.conversationId, [...(byChat.get(card.conversationId) ?? []), card]);
       }
+      // Chats where a turn is asked for or under way: their turns in
+      // progress are read wherever they are in the chat, not only among its
+      // newest messages.
+      const openTurns = await this.options.store.hubOps().runningTurnsByConversation()
+        .catch(() => new Map<string, Array<{ messageId: string; participantId: string }>>());
       const built = await buildMobileChatList(this.options.store, {
         roleLabels: new Map(Object.entries(catalog?.roles ?? {})),
         machineNames,
         pendingCardsFor: (conversationId, conversation) => whole
           ? phoneCards(byChat.get(conversationId) ?? [], conversation, machineNames) : undefined,
         runningFromMessages: true,
+        pendingMessagesFor: async (conversationId) => openTurns.has(conversationId)
+          ? this.options.store.listPendingTurnMessages(conversationId, openTurns.get(conversationId) ?? [])
+          : undefined,
         summaries,
         include: (summary: ConversationSummary) => stale.has(summary.id) && include(summary)
       });
@@ -296,6 +304,33 @@ export class HubPhoneApi {
     return chats;
   }
 
+  /** One message of a chat as the phone stores it, wherever it is: how the
+   *  phone learns that a turn it showed running has ended (its answer is
+   *  written where the turn started, which can be far above the newest
+   *  page). Not a page: it moves no cursor and states no cards. */
+  private async timelineMessage(scope: HubPhoneScope, conversationId: string, messageId: string): Promise<Answer> {
+    if (messageId.length > 200 || /[\u0000-\u001f\u007f]/.test(messageId)) {
+      return { status: 400, body: { ok: false, error: "messageId invalid" } };
+    }
+    const opened = await this.options.store.openConversation(conversationId, 1);
+    const conversation = opened?.conversation;
+    if (!conversation || conversation.kind !== "chat" || (scope.scope === "device" && conversation.metadata.archived === true)) {
+      return { status: 404, body: { ok: false, error: PHONE_ERROR_CHAT_NOT_FOUND } };
+    }
+    const read = await this.options.store.listConversationMessages({ conversationId, aroundMessageId: messageId, limit: 1 });
+    const message = read.messages.find((item) => item.id === messageId);
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        type: "mobile.timeline.events",
+        conversationId,
+        message: messageId,
+        events: message ? timelineEventsFromSnapshot({ ...conversation, messages: [message] }, 1) : []
+      }
+    };
+  }
+
   private conversationParam(scope: HubPhoneScope, query: URLSearchParams): string | Answer {
     const conversationId = query.get("conversationId") ?? "";
     if (!conversationId || conversationId.length > 200 || /[\u0000-\u001f\u007f]/.test(conversationId)) {
@@ -308,6 +343,8 @@ export class HubPhoneApi {
   private async timeline(scope: HubPhoneScope, query: URLSearchParams): Promise<Answer> {
     const conversationId = this.conversationParam(scope, query);
     if (typeof conversationId !== "string") return conversationId;
+    const messageRaw = query.get("messageId")?.trim() ?? "";
+    if (messageRaw) return this.timelineMessage(scope, conversationId, messageRaw);
     const beforeRaw = query.get("beforeMessageId")?.trim() ?? "";
     const before = beforeRaw && beforeRaw.length <= 200 && !/[\u0000-\u001f\u007f]/.test(beforeRaw) ? beforeRaw : undefined;
     const presence = await this.options.store.conversationPresence(conversationId);

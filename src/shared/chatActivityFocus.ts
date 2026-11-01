@@ -3,7 +3,7 @@ export type ChatActivityFocusExecutionResult = "completed" | "stale" | "missing"
 export interface ExecuteChatActivityFocusOptions<TConversation, TTarget> {
   isCurrent: () => boolean;
   openConversation: () => Promise<TConversation | undefined>;
-  resolveTarget: (conversation: TConversation) => TTarget | undefined;
+  resolveTarget: (conversation: TConversation) => TTarget | undefined | Promise<TTarget | undefined>;
   onTargetResolved: (target: TTarget) => void;
   ensureTargetLoaded: (conversation: TConversation, target: TTarget) => Promise<boolean>;
   beforeCommit: () => Promise<void>;
@@ -25,7 +25,10 @@ export async function executeChatActivityFocus<TConversation, TTarget>(
       return "missing";
     }
 
-    const target = options.resolveTarget(conversation);
+    const target = await options.resolveTarget(conversation);
+    if (!options.isCurrent()) {
+      return "stale";
+    }
     if (!target) {
       options.clear();
       return "missing";

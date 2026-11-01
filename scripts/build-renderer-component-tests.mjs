@@ -46,6 +46,7 @@ await build({
     "renderer/components/shell/chat-search.test.tsx",
     "renderer/components/shell/sidebar-nav.test.tsx",
     "renderer/app/use-app-navigation.test.ts",
+    "renderer/app/running-participant-target.test.ts",
     "renderer/app/app-notices.test.tsx"
   ].map((entry) => path.join(sourceRoot, entry)),
   alias: { "@": sourceRoot },

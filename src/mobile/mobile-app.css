@@ -789,6 +789,17 @@ button.mobile-chat-group-title:active {
   justify-content: flex-end;
 }
 
+/* The message a chat was opened on (a running member's turn from Activity),
+   marked as the desktop marks a message it opened. */
+.message-row.message-focused {
+  margin: -8px -10px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  /* As the desktop marks it: half the accent wash. */
+  background: var(--accs);
+  background: color-mix(in srgb, var(--accs) 45%, transparent);
+}
+
 .message-bubble {
   max-width: 82%;
   background: var(--user-bub);
@@ -1976,6 +1987,30 @@ button.mobile-chat-group-title:active {
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+
+.members-sheet-row.is-openable {
+  cursor: pointer;
+}
+
+.members-sheet-row.is-openable:active {
+  background: var(--press);
+}
+
+.members-sheet-name-line {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.members-sheet-status {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  font: 500 12.5px var(--sans);
+  color: var(--fg);
 }
 
 .members-sheet-copy strong {

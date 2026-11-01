@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { ChatSearchService } from "../main/services/chatSearch";
+import { APP_CHAT_SEND_MESSAGE_TOOL } from "../shared/appMcpToolContracts";
 import { deviceIdForPublicKey } from "../main/services/hubAuth";
 import { StorageService } from "../main/services/storage";
 import { createHeadlessPlatform, setHostPlatform, userDataPath } from "../main/platform";
@@ -176,7 +177,11 @@ export function composeHub(options: {
       (effect.kind === "message.create" || previous?.status === "pending");
     if (settled) {
       const runId = typeof message.metadata?.runId === "string" ? message.metadata.runId : undefined;
-      if (runId) progress.settle(runId);
+      // A member's post during its turn (its reply tool) carries the turn's
+      // run id but ends nothing: the turn's progress goes on arriving, as
+      // changes to what the server already holds, so it must not be dropped.
+      const midTurnPost = message.metadata?.appMessageSource === APP_CHAT_SEND_MESSAGE_TOOL;
+      if (runId && !midTurnPost) progress.settle(runId);
       // A member's line that is not the User's to see rings nobody.
       if (message.metadata?.hiddenFromTimeline !== true) {
         void notify(replyNotice(conversation, message)).catch((error) => log("hub.notice.error", { message: error instanceof Error ? error.message : String(error) }));

@@ -2222,6 +2222,10 @@ function registerIpc(): void {
     };
   });
   ipcMain.handle("conversations:list-messages", (_event, request: ConversationMessagePageRequest) => storageService.listConversationMessages(request));
+  ipcMain.handle("conversations:find-running-participant-message", (_event, conversationId: string, participantId: string) =>
+    typeof conversationId === "string" && typeof participantId === "string"
+      ? storageService.findRunningParticipantMessage(conversationId, participantId)
+      : undefined);
   ipcMain.handle("conversations:save-decision-selections", async (_event, conversationId: string, selections: Record<string, string>) => {
     const conversation = await storageService.getConversation(conversationId);
     if (!conversation || conversation.kind !== "implementation-plan") {

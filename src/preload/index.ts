@@ -249,6 +249,8 @@ const bridge: AppBridge = {
   getConversation: (id: string) => ipcRenderer.invoke("conversations:get", id),
   openConversation: (id: string, limit?: number) => ipcRenderer.invoke("conversations:open", id, limit),
   listConversationMessages: (request: ConversationMessagePageRequest) => ipcRenderer.invoke("conversations:list-messages", request),
+  findRunningParticipantMessage: (conversationId: string, participantId: string) =>
+    ipcRenderer.invoke("conversations:find-running-participant-message", conversationId, participantId),
   saveDecisionSelections: (conversationId: string, selections: Record<string, string>) =>
     ipcRenderer.invoke("conversations:save-decision-selections", conversationId, selections),
   saveDecisionResolutions: (conversationId: string, resolutions: Record<string, boolean>) =>

@@ -6,6 +6,7 @@ import { SqliteSession } from "./sqliteSession";
 import type {
   ChatMessage,
   ChatParticipant,
+  ChatRunningMessageTarget,
   Conversation,
   ConversationMessagePage,
   ConversationMessagePageInfo,
@@ -16,6 +17,7 @@ import type {
   ListChatActivityResult
 } from "../../shared/types";
 import type { ChatSearchDocument } from "../../shared/chatSearchDocuments";
+import { runningMessageForParticipant, runningMessageTarget } from "../../shared/chatRunningMessage";
 import {
   DEFAULT_CHAT_ACTIVITY_LIMIT,
   DEFAULT_CHAT_ACTIVITY_RECENT_CONVERSATION_LIMIT,
@@ -104,6 +106,28 @@ function parseHexText(value: unknown, context: string): string {
     return UTF8_DECODER.decode(Buffer.from(value, "hex"));
   } catch {
     throw new Error(`Invalid UTF-8 text returned for ${context}.`);
+  }
+}
+
+/** The chat state the running-message rule reads (chatActiveRuns.ts):
+ *  the chat's members and its run bookkeeping, nothing else of its body. */
+const RUNNING_MESSAGE_RUN_STATE_KEYS = [
+  "participants",
+  "activeRunIds",
+  "runId",
+  "activeRunOwnersByRunId",
+  "activeRunParticipantIdsByRunId",
+  "remoteRunHandles"
+] as const;
+/** Long enough for every hidden "waiting for approval" status the rule
+ *  recognises (isParticipantRequestWaitingStatus), which are one sentence. */
+const RUNNING_MESSAGE_CONTENT_CHARS = 400;
+
+function decodedRunningMessageContent(value: unknown): string {
+  try {
+    return parseHexText(value, "a running message");
+  } catch {
+    return "";
   }
 }
 
@@ -870,6 +894,114 @@ export class StorageService {
       hasMoreBefore: rows.length > limit,
       totalMessages: countRows[0]?.totalMessages ?? selectedRows.length
     };
+  }
+
+  /** The member messages still in progress that answer these turns (the
+   *  member and the message each turn answers), wherever they are in the
+   *  chat. Read from the earliest of those messages on, not the whole chat;
+   *  few and small (a turn's message holds only its placeholder until it
+   *  ends). A dead message of another turn is never one of them. */
+  async listPendingTurnMessages(
+    conversationId: string,
+    turns: Array<{ messageId: string; participantId: string }>
+  ): Promise<ChatMessage[]> {
+    if (turns.length === 0) return [];
+    await this.init();
+    const asked = [...new Set(turns.map((turn) => turn.messageId))].slice(0, 200);
+    const [first] = await this.queryJson<{ sequence: number | null }>(
+      `select min(sequence) as sequence from conversation_messages
+        where conversation_id = ${sqlString(conversationId)} and message_id in (${asked.map(sqlString).join(", ")});`
+    );
+    if (typeof first?.sequence !== "number") return [];
+    const rows = await this.queryJson<{ sequence: number; payloadHex: string }>(
+      `
+        select sequence, hex(payload_json) as payloadHex
+        from conversation_messages
+        where conversation_id = ${sqlString(conversationId)}
+          and sequence >= ${Math.max(0, Math.floor(first.sequence))}
+          and payload_json like '%"status":"pending"%'
+          and json_valid(payload_json)
+          and json_extract(payload_json, '$.role') = 'participant'
+          and json_extract(payload_json, '$.status') = 'pending'
+        order by sequence;
+      `
+    );
+    const wanted = new Set(turns.map((turn) => `${turn.participantId}\u0000${turn.messageId}`));
+    return rows
+      .map((row) => parseHexJson<ChatMessage>(row.payloadHex, `pending message ${conversationId}:${row.sequence}`))
+      .filter((message) => {
+        const answers = message.metadata?.sourceMessageId || message.metadata?.parentMessageId;
+        return Boolean(message.participantId && answers) && wanted.has(`${message.participantId}\u0000${answers}`);
+      });
+  }
+
+  /** The member's turn in progress (see runningMessageForParticipant), found
+   *  in the whole chat: an open chat holds only its latest page, and a long
+   *  turn's message can be far above it. Reads only the chat's run state and,
+   *  of its pending member messages, the run fields plus the first characters
+   *  of their text (to recognise a hidden "waiting for approval" status), so
+   *  the answer stays a handful of short rows on any chat. */
+  async findRunningParticipantMessage(conversationId: string, participantId: string): Promise<ChatRunningMessageTarget | undefined> {
+    await this.init();
+    const body = `coalesce(nullif(body_json, ''), payload_json)`;
+    const runStateJson = await this.queryText(
+      `
+        select json_object(${RUNNING_MESSAGE_RUN_STATE_KEYS.map((key) =>
+          `${sqlString(key)}, json_extract(${body}, ${sqlString(`$.metadata.${key}`)})`).join(", ")})
+        from conversations
+        where id = ${sqlString(conversationId)} and json_valid(${body})
+        limit 1;
+      `
+    );
+    if (!runStateJson) {
+      return undefined;
+    }
+    const metadata = JSON.parse(runStateJson) as Conversation["metadata"];
+    const rows = await this.queryJson<{
+      id: string;
+      participantId: string | null;
+      createdAt: string | null;
+      runId: string | null;
+      queued: number;
+      chatThreadRootId: string | null;
+      hiddenFromTimeline: number | null;
+      contentHex: string | null;
+    }>(
+      `
+        select
+          message_id as id,
+          json_extract(payload_json, '$.participantId') as participantId,
+          json_extract(payload_json, '$.createdAt') as createdAt,
+          json_extract(payload_json, '$.metadata.runId') as runId,
+          json_extract(payload_json, '$.metadata.queuedBehind') is not null as queued,
+          json_extract(payload_json, '$.metadata.chatThreadRootId') as chatThreadRootId,
+          json_extract(payload_json, '$.metadata.hiddenFromTimeline') as hiddenFromTimeline,
+          hex(substr(json_extract(payload_json, '$.content'), 1, ${RUNNING_MESSAGE_CONTENT_CHARS})) as contentHex
+        from conversation_messages
+        where conversation_id = ${sqlString(conversationId)}
+          and payload_json like '%"status":"pending"%'
+          and json_valid(payload_json)
+          and json_extract(payload_json, '$.role') = 'participant'
+          and json_extract(payload_json, '$.status') = 'pending'
+        order by sequence;
+      `
+    );
+    const messages: ChatMessage[] = rows.flatMap((row) => typeof row.id === "string" && row.id ? [{
+      id: row.id,
+      role: "participant" as const,
+      status: "pending" as const,
+      ...(typeof row.participantId === "string" ? { participantId: row.participantId } : {}),
+      content: decodedRunningMessageContent(row.contentHex),
+      createdAt: typeof row.createdAt === "string" ? row.createdAt : "",
+      metadata: {
+        ...(typeof row.runId === "string" ? { runId: row.runId } : {}),
+        ...(row.queued ? { queuedBehind: { handle: "" } } : {}),
+        ...(typeof row.chatThreadRootId === "string" ? { chatThreadRootId: row.chatThreadRootId } : {}),
+        ...(row.hiddenFromTimeline ? { hiddenFromTimeline: true } : {})
+      }
+    }] : []);
+    const running = runningMessageForParticipant({ metadata, messages }, participantId);
+    return running ? runningMessageTarget(running) : undefined;
   }
 
   async listChatSearchConversationSnapshots(options: { includeParticipants?: boolean } = {}): Promise<ChatSearchConversationSnapshot[]> {

@@ -303,6 +303,26 @@ export class HubOpsStore {
         outcome = excluded.outcome;`;
   }
 
+  /** The turns under way, by chat: which member answers which message. Only
+   *  turns a device that still exists took: one asked for and not taken has
+   *  no running message yet, and one taken by a device removed since can
+   *  never end, and must not keep a message "running" for ever. Read through
+   *  the partial index on taken turns, so it stays cheap however many ended. */
+  async runningTurnsByConversation(): Promise<Map<string, Array<{ messageId: string; participantId: string }>>> {
+    await this.init();
+    const rows = await this.database.query<{ conversationId: string; messageId: string; participantId: string }>(`
+      select t.conversation_id as conversationId, t.message_id as messageId, t.participant_id as participantId
+        from hub_turns t
+        where t.state = 'claimed'
+          and exists (select 1 from hub_devices d where d.device_id = t.executor_device_id);`);
+    const byChat = new Map<string, Array<{ messageId: string; participantId: string }>>();
+    for (const row of rows) {
+      if (!row.conversationId || !row.messageId || !row.participantId) continue;
+      byChat.set(row.conversationId, [...(byChat.get(row.conversationId) ?? []), { messageId: row.messageId, participantId: row.participantId }]);
+    }
+    return byChat;
+  }
+
   /** Turns asked for that nobody has taken yet, oldest first. */
   async requested(limit = 500): Promise<HubTurn[]> {
     await this.init();

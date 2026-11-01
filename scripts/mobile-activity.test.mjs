@@ -171,6 +171,68 @@ test("a run in progress is listed once per run and member, with the member's row
   ]);
 });
 
+test("a member's running rows open its turn in progress, not its posts and not a turn waiting behind it", () => {
+  const activity = buildActivity({
+    now: NOW,
+    chats,
+    entries: [
+      running("turn", "c-polish", "@taylor", 30, { sourceId: "turn", messageId: "turn", threadRootId: "root" }),
+      done("post", "c-polish", "@taylor", 5, { runId: "run-turn" }),
+      running("waiting", "c-polish", "@taylor", 2, { sourceId: "waiting", messageId: "waiting" }),
+      running("drew", "c-polish", "@drew", 1, { sourceId: "drew-turn", messageId: "drew-turn" })
+    ]
+  });
+  assert.deepEqual(
+    activity.running.map((row) => [row.handle, row.runId, row.openMessageId, row.openThreadRootId]),
+    [
+      ["@drew", "run-drew", "drew-turn", undefined],
+      ["@taylor", "run-waiting", "turn", "root"],
+      ["@taylor", "run-turn", "turn", "root"]
+    ]
+  );
+});
+
+test("a turn this phone still holds as running after the member finished a later one is not the one opened", () => {
+  const activity = buildActivity({
+    now: NOW,
+    chats,
+    entries: [
+      // The phone never heard run "old" end; the member has since finished a later turn.
+      running("old", "c-polish", "@taylor", 300, { sourceId: "old", messageId: "old" }),
+      done("later-answer", "c-polish", "@taylor", 200, { runId: "run-later" }),
+      running("now", "c-polish", "@taylor", 20, { sourceId: "now", messageId: "now" }),
+      done("now-post", "c-polish", "@taylor", 5, { runId: "run-now" })
+    ],
+    // The chat is running again, so the old row stays listed.
+    isRunKnownLive: () => true
+  });
+  const opened = Object.fromEntries(activity.running.map((row) => [row.runId, row.openMessageId]));
+  assert.deepEqual(opened, { "run-old": "now", "run-now": "now" });
+});
+
+test("two pending rows of one run, and a row with no start time, follow the desktop's rule", () => {
+  const activity = buildActivity({
+    now: NOW,
+    chats,
+    entries: [
+      running("no-time", "c-polish", "@taylor", 0, { sourceId: "no-time", messageId: "no-time", runId: "r0", createdAt: "" }),
+      running("first", "c-polish", "@taylor", 10, { sourceId: "first", messageId: "first", runId: "r1" }),
+      running("second", "c-polish", "@taylor", 5, { sourceId: "second", messageId: "second", runId: "r1" })
+    ]
+  });
+  assert.ok(activity.running.length > 0);
+  for (const row of activity.running) assert.equal(row.openMessageId, "first");
+});
+
+test("a run that names nobody opens the chat as before", () => {
+  const activity = buildActivity({
+    now: NOW,
+    chats,
+    entries: [{ id: "c-polish:r", sourceId: "r", conversationId: "c-polish", role: "participant", content: "Running...", status: "pending", runId: "r", createdAt: at(1) }]
+  });
+  assert.equal(activity.running[0].openMessageId, undefined);
+});
+
 test("a run that names nobody yet is listed, and cannot be stopped", () => {
   const activity = buildActivity({
     now: NOW,

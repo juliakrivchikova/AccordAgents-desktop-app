@@ -77,6 +77,12 @@
   let openActivityCardId;
   // The thread to land in when the chat Activity is opening is first drawn.
   let pendingThreadOpen;
+  // The message a chat opened from Activity lands on instead of its end (a
+  // running member's turn in progress), until it is on screen or given up.
+  let pendingMessageFocus;
+  // The message landed on, marked until the reader touches the chat or
+  // leaves it, as the desktop marks a message it opened.
+  let focusedMessage;
   // Bumped by every write to the timeline store. The home screens redraw on
   // every batch and poll; rereading a week of messages each time for the
   // Activity badge would cost the phone far more than the list is worth.
@@ -820,10 +826,12 @@
   // it announces that an answer is being written. Its run can die without a
   // terminal that carries its keys — an interrupted app, or an answer written
   // before terminals inherited the source's mobile event id — and then nothing
-  // ever deletes it. No live run outlives the CLI's own 15-minute kill, so a
-  // placeholder half an hour older than an arriving terminal is a corpse, not
-  // a run. Only placeholder-sentence rows qualify; real pending text is never
-  // touched, which is what the reverted age guard got wrong.
+  // ever deletes it. A placeholder half an hour older than an arriving
+  // terminal is taken for a corpse, unless the server still lists its turn as
+  // going (turnsStillGoing): a member's turn can run for hours, and the old
+  // "no run outlives the CLI's 15-minute kill" no longer holds. Only
+  // placeholder-sentence rows qualify; real pending text is never touched,
+  // which is what the reverted age guard got wrong.
   const PLACEHOLDER_CORPSE_AGE_MS = 30 * 60 * 1000;
 
   function isPlaceholderTimelineContent(content) {
@@ -831,11 +839,35 @@
     return text === "Running..." || /\bis running\.\.\.$/.test(text);
   }
 
-  function deleteStalePlaceholderTimelineEntries(conversationId, terminalCreatedAt) {
+  /** The turns still going in a chat as far as this phone can tell: its chat
+   *  list carries every turn in progress (however far back it started), the
+   *  page just read carries those among its rows, and the turns that left the
+   *  list are kept until the server says how they ended. A placeholder of one
+   *  of them is a turn that is long, not dead: members' turns run for hours. */
+  function turnsStillGoing(conversationId, batchEvents) {
+    const going = new Set();
+    const chat = loadChats().find(function (item) { return item.id === conversationId; });
+    const events = (chat && Array.isArray(chat.activity) ? chat.activity : []).concat(Array.isArray(batchEvents) ? batchEvents : []);
+    for (const event of events) {
+      if (!event || event.status !== "pending") continue;
+      for (const key of [event.runId, event.messageId, event.id]) {
+        if (typeof key === "string" && key) going.add(key);
+      }
+    }
+    // A turn this phone is still asking the server about is not a corpse
+    // either: its end is on its way (see settleTurnsThatLeftTheList).
+    for (const entry of loadSettleTurns()) {
+      if (entry.conversationId === conversationId) going.add(entry.messageId);
+    }
+    return going;
+  }
+
+  function deleteStalePlaceholderTimelineEntries(conversationId, terminalCreatedAt, batchEvents) {
     const terminalTime = Date.parse(terminalCreatedAt || "");
     if (!Number.isFinite(terminalTime)) {
       return Promise.resolve(0);
     }
+    const going = turnsStillGoing(conversationId, batchEvents);
     return withTimeline("readwrite", function (store) {
       return timelineRowsForConversation(store, conversationId, { mayHold: true }).then(function (entries) {
         const deletes = entries.filter(function (entry) {
@@ -843,6 +875,9 @@
             return false;
           }
           if (entry.conversationId !== conversationId) {
+            return false;
+          }
+          if ((entry.runId && going.has(entry.runId)) || going.has(entry.messageId || entry.sourceId)) {
             return false;
           }
           const created = Date.parse(entry.createdAt || "");
@@ -1291,6 +1326,7 @@
       cachedChatList = kept;
     }
     noteListActivitySeen(kept);
+    settleTurnsThatLeftTheList(previousById, normalized);
     // A chat started here that the server now lists is the server's.
     const started = loadStartedChats();
     const stillStarted = started.filter(function (chat) {
@@ -3859,6 +3895,157 @@
     return hubPhoneGet(path, params, options);
   }
 
+  // Turns the list showed running and no longer does, kept until the server
+  // says how each ended: a long turn answers where it started, far above the
+  // newest page, so nothing else brings its end to this phone. Kept across
+  // launches and read again after a failed or not-yet-final answer, so a
+  // dropped read or an end saved late does not lose the answer.
+  const SETTLE_TURNS_KEY = "accordagents.mobile.settleTurns.v1";
+  const SETTLE_TURNS_MAX = 200;
+  const SETTLE_PASS_MAX = 12;
+  const SETTLE_GIVE_UP_MS = 24 * 60 * 60 * 1000;
+  const SETTLE_RETRY_FIRST_MS = 15_000;
+  const SETTLE_RETRY_MAX_MS = 5 * 60_000;
+  const SETTLE_UNSUPPORTED_WAIT_MS = 30 * 60_000;
+  let settlePassRunning = false;
+  let settlePassTimer;
+  let settleUnsupportedUntil = 0;
+
+  function loadSettleTurns() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(SETTLE_TURNS_KEY) || "[]");
+      return Array.isArray(raw) ? raw.filter(function (entry) {
+        return entry && typeof entry.conversationId === "string" && typeof entry.messageId === "string";
+      }) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveSettleTurns(list) {
+    try {
+      localStorage.setItem(SETTLE_TURNS_KEY, JSON.stringify(list.slice(-SETTLE_TURNS_MAX)));
+    } catch {
+      // Best effort: the corpse rule still clears a row that is never settled.
+    }
+  }
+
+  function settleTurnsThatLeftTheList(previousById, chats) {
+    // A server that cannot settle a turn is not asked to (see runSettlePass).
+    if (Date.now() < settleUnsupportedUntil) return;
+    const list = loadSettleTurns();
+    const known = new Set(list.map(function (entry) { return entry.conversationId + "\u0000" + entry.messageId; }));
+    const now = Date.now();
+    for (const chat of chats) {
+      const before = previousById.get(chat.id);
+      if (!before || !Array.isArray(before.activity)) continue;
+      const still = new Set((Array.isArray(chat.activity) ? chat.activity : [])
+        .filter(function (row) { return row && row.status === "pending"; })
+        .map(function (row) { return row.messageId; }));
+      for (const row of before.activity) {
+        if (!row || row.status !== "pending" || !row.messageId || still.has(row.messageId)) continue;
+        const key = chat.id + "\u0000" + row.messageId;
+        if (known.has(key)) continue;
+        known.add(key);
+        list.push({ conversationId: chat.id, messageId: row.messageId, since: now, attempts: 0, nextAt: 0 });
+      }
+    }
+    saveSettleTurns(list);
+    void runSettlePass();
+  }
+
+  async function runSettlePass() {
+    if (settlePassRunning || Date.now() < settleUnsupportedUntil) return;
+    settlePassRunning = true;
+    try {
+      const now = Date.now();
+      const due = loadSettleTurns().filter(function (entry) {
+        return now - (entry.since || 0) < SETTLE_GIVE_UP_MS && (entry.nextAt || 0) <= now;
+      }).slice(0, SETTLE_PASS_MAX);
+      for (const entry of due) {
+        const outcome = await settleTurnByMessage(entry.conversationId, entry.messageId);
+        const list = loadSettleTurns().filter(function (item) {
+          return Date.now() - (item.since || 0) < SETTLE_GIVE_UP_MS;
+        });
+        const index = list.findIndex(function (item) {
+          return item.conversationId === entry.conversationId && item.messageId === entry.messageId;
+        });
+        if (index >= 0) {
+          if (outcome === "settled") {
+            list.splice(index, 1);
+          } else {
+            const attempts = (list[index].attempts || 0) + 1;
+            list[index] = { ...list[index], attempts: attempts,
+              nextAt: Date.now() + Math.min(SETTLE_RETRY_MAX_MS, SETTLE_RETRY_FIRST_MS * Math.pow(2, attempts - 1)) };
+          }
+        }
+        saveSettleTurns(list);
+        if (outcome === "unsupported") {
+          // This server cannot read one message yet (it updates after the
+          // desktop does): nothing waiting here can be settled by it, so the
+          // rows go back to the old rules (their corpse cleanup included)
+          // instead of being held, and it is asked again later.
+          saveSettleTurns([]);
+          settleUnsupportedUntil = Date.now() + SETTLE_UNSUPPORTED_WAIT_MS;
+          break;
+        }
+      }
+    } finally {
+      settlePassRunning = false;
+      scheduleSettlePass();
+    }
+  }
+
+  /** The next pass when the earliest waiting turn is due, while the app is in
+   *  front; a list or a return to the app also starts one. */
+  function scheduleSettlePass() {
+    clearTimeout(settlePassTimer);
+    settlePassTimer = undefined;
+    const pending = loadSettleTurns();
+    if (pending.length === 0 || document.hidden) return;
+    const nextAt = Math.max(settleUnsupportedUntil, pending.reduce(function (earliest, entry) {
+      return Math.min(earliest, entry.nextAt || 0);
+    }, Infinity));
+    settlePassTimer = setTimeout(function () {
+      settlePassTimer = undefined;
+      void runSettlePass();
+    }, Math.max(1000, Math.min(SETTLE_RETRY_MAX_MS, nextAt - Date.now())));
+  }
+
+  /** "settled" when the server's answer is final (the turn's end, or the
+   *  message gone) or this phone holds no running row to settle; "pending"
+   *  when it still runs; "failed" or "unsupported" otherwise. */
+  async function settleTurnByMessage(conversationId, messageId) {
+    const held = await getTimelineEntry(conversationId + ":" + messageId).catch(function () { return undefined; });
+    // Nothing held, or already settled: nothing to bring here (an answer this
+    // phone never showed is not placed alone above its newest page).
+    if (!held || held.status !== "pending") return "settled";
+    const pairing = loadPairing();
+    if (!pairing || !canSync(pairing)) return "failed";
+    let payload;
+    try {
+      payload = await serverPhoneGet("/v1/phone/timeline", { conversationId: conversationId, messageId: messageId });
+    } catch {
+      return "failed";
+    }
+    // A server that cannot read one message answers with its newest page.
+    if (!payload || payload.message !== messageId || !Array.isArray(payload.events)) return "unsupported";
+    if (payload.events.length === 0) {
+      // Gone on the server (a stopped turn's message is removed): so is its row.
+      await deletePendingTimelineEntriesForRun(conversationId, undefined, undefined, messageId, "done").catch(function () { return 0; });
+      void render("synced");
+      return "settled";
+    }
+    const event = payload.events.find(function (item) { return item && (item.messageId === messageId || item.id === messageId); });
+    try {
+      // Watched ending now, as far as this phone can tell: Finished lists it by then.
+      await handleRelayTimelinePayload(payload, conversationId, { live: true });
+    } catch {
+      return "failed";
+    }
+    return event && event.status === "pending" ? "pending" : "settled";
+  }
+
   async function requestChatListFromServer() {
     const requestedAt = Date.now();
     const payload = await serverPhoneGet("/v1/phone/chats");
@@ -4606,7 +4793,12 @@
       const attachments = timelineAttachmentsFromEvent(event);
       // A picture with no caption is still a message. Requiring text dropped it.
       if (!content && attachments.length === 0) {
-        continue;
+        // A turn that ended with nothing to say travels hidden and empty: it
+        // still ends its run below, and no bubble is stored for it.
+        const endsRunUnseen = event.hidden === true && (event.status === "done" || event.status === "error");
+        if (!endsRunUnseen) {
+          continue;
+        }
       }
       const status = event.status === "error" ? "error" : event.status === "done" ? "done" : "pending";
       const runId = typeof event.runId === "string" ? event.runId : undefined;
@@ -4629,11 +4821,16 @@
       // update by when it finished. A backlog drained later carries no such
       // moment, so it keeps the desktop's stamp.
       let settledAt;
-      if (!historyPage && status !== "pending" && role === "participant" && (runId || mobileEventId || messageId)) {
+      // A member's post during its turn (its reply tool) is not the end of
+      // the turn: the turn's own row stays running, and nothing of the run is
+      // settled or barred from coming back. A server that does not mark posts
+      // yet leaves this as it was.
+      const midTurnPost = event.midTurn === true && status === "done";
+      if (!historyPage && !midTurnPost && status !== "pending" && role === "participant" && (runId || mobileEventId || messageId)) {
         const cleared = await deletePendingTimelineEntriesForRun(conversationId, runId, mobileEventId, messageId, status);
         if (cleared > 0 && status === "done" && options && options.live) settledAt = nowIso();
         rememberTerminalRun(runId, mobileEventId, createdAt);
-        await deleteStalePlaceholderTimelineEntries(conversationId, createdAt);
+        await deleteStalePlaceholderTimelineEntries(conversationId, createdAt, historyPage ? undefined : payload.events);
       }
       if (!historyPage && status === "pending" && isSupersededPendingEvent(runId, mobileEventId, createdAt)) {
         continue;
@@ -4644,6 +4841,12 @@
       // copy stored before the desktop hid it (an older shell, a page read
       // that could not see the row's trigger) goes with it.
       if (event.hidden === true) {
+        // A chat being opened on this message lands at its end instead: the
+        // message has nothing to show, and reading earlier pages for it would
+        // find nothing.
+        if (pendingMessageFocus && pendingMessageFocus.conversationId === conversationId && pendingMessageFocus.messageId === messageId) {
+          pendingMessageFocus = undefined;
+        }
         if (await deleteTimelineEntry(conversationId ? conversationId + ":" + id : id)) {
           changed += 1;
         }
@@ -5343,6 +5546,10 @@
   function openConversation(conversationId, options) {
     const rootId = options && options.threadRootId ? options.threadRootId : undefined;
     pendingThreadOpen = rootId ? { conversationId: conversationId, rootId: rootId } : undefined;
+    const focusMessageId = options && options.messageId ? options.messageId : undefined;
+    const focusRequest = focusMessageId ? { conversationId: conversationId, messageId: focusMessageId } : undefined;
+    pendingMessageFocus = focusRequest;
+    clearFocusMark();
     setOpenThreadRootId(rootId);
     localStorage.setItem(ACTIVE_CONVERSATION_KEY, conversationId);
     // When the User opened it, on this phone's clock: what the page it is
@@ -5362,8 +5569,122 @@
         return 0;
       }).then(function () {
         return render("synced");
+      }).then(function () {
+        return focusRequest ? revealEarlierFocusMessage(focusRequest) : undefined;
+      });
+    }).finally(function () {
+      // Not found on any page this phone could read: the chat stays as any
+      // other chat opens, at its end. A drawing already on its way with the
+      // row gets a moment first: the last one asked for can be overtaken by
+      // a newer one that is still reading the rows.
+      if (focusRequest && pendingMessageFocus === focusRequest) {
+        setTimeout(function () {
+          if (pendingMessageFocus === focusRequest) pendingMessageFocus = undefined;
+        }, FOCUS_SETTLE_MS);
+      }
+    });
+  }
+
+  const FOCUS_SETTLE_MS = 2000;
+
+  // A long turn's message can be pages above the latest one. The pages in
+  // between are read the way "Show earlier messages" reads them, so the chat
+  // has no hole between the message and its end. Bounded, so a message that
+  // is no longer there does not read a chat's whole history.
+  const FOCUS_EARLIER_PAGE_LIMIT = 20;
+
+  async function revealEarlierFocusMessage(focusRequest) {
+    const conversationId = focusRequest.conversationId;
+    const entryId = conversationId + ":" + focusRequest.messageId;
+    let read = false;
+    for (let pages = 0; pages < FOCUS_EARLIER_PAGE_LIMIT; pages += 1) {
+      if (pendingMessageFocus !== focusRequest || selectedConversationId() !== conversationId) {
+        return;
+      }
+      // Stored is enough: the drawing below (or a newer one) lands on it.
+      // Reading on after that would put rows above it while it is shown.
+      if (await getTimelineEntry(entryId).catch(function () { return undefined; })) break;
+      const page = timelinePageFor(conversationId);
+      if (!page || !page.hasMoreBefore) break;
+      if (await fetchEarlierPage(conversationId) !== "read") break;
+      read = true;
+    }
+    if (read && pendingMessageFocus === focusRequest && selectedConversationId() === conversationId) {
+      await render("synced");
+    }
+  }
+
+  function messageRowFor(list, messageId) {
+    for (const row of list.querySelectorAll(".message-row[data-thread-root]")) {
+      if (row.dataset.threadRoot === messageId) return row;
+    }
+    return undefined;
+  }
+
+  // The last landing: its re-placement (ended when the reader moves the
+  // chat, sends, or asks for the latest) and its mark (cleared when the
+  // reader touches the chat). Both go with the next landing and with leaving
+  // the chat, so nothing is left listening on the chat's scroll area.
+  let focusPlacement;
+  let focusMark;
+
+  function endFocusPlacement() {
+    if (focusPlacement) {
+      focusPlacement.abort();
+      focusPlacement = undefined;
+    }
+  }
+
+  function clearFocusMark() {
+    endFocusPlacement();
+    if (focusMark) {
+      focusMark.abort();
+      focusMark = undefined;
+    }
+    focusedMessage = undefined;
+    for (const focused of document.querySelectorAll("#message-list .message-row.message-focused")) {
+      focused.classList.remove("message-focused");
+    }
+  }
+
+  /** Puts the row at the top of the chat and marks it. Rows above it can
+   *  still grow as they settle (markdown, pictures), and a closing sheet or
+   *  the keyboard can move the chat to its end, so it is placed again over
+   *  the next moments, until the reader moves the chat themselves. */
+  function focusMessageRow(conversationId, row) {
+    clearFocusMark();
+    const marked = { conversationId: conversationId, messageId: row.dataset.threadRoot };
+    focusedMessage = marked;
+    row.classList.add("message-focused");
+    const surface = threadSurface();
+    if (!surface) return;
+    const placement = new AbortController();
+    const mark = new AbortController();
+    focusPlacement = placement;
+    focusMark = mark;
+    surface.addEventListener("wheel", endFocusPlacement, { passive: true, signal: placement.signal });
+    surface.addEventListener("pointerdown", function () {
+      if (focusMark === mark) clearFocusMark();
+    }, { signal: mark.signal });
+    const place = function () {
+      if (placement.signal.aborted || !row.isConnected) return;
+      const top = row.getBoundingClientRect().top - surface.getBoundingClientRect().top + surface.scrollTop - 12;
+      surface.scrollTop = Math.max(0, top);
+      setJumpToLatestVisible(!isNearBottom(surface));
+    };
+    place();
+    requestAnimationFrame(function () {
+      place();
+      requestAnimationFrame(function () {
+        place();
+        requestAnimationFrame(place);
       });
     });
+    setTimeout(place, 250);
+    setTimeout(function () {
+      place();
+      if (focusPlacement === placement) endFocusPlacement();
+    }, 700);
   }
 
   /** The chat list's subtitle is the desktop's 84-character cut of the last
@@ -6734,6 +7055,7 @@
    *  between cannot land on a thread of a chat that is no longer open. */
   function leaveOpenChat() {
     if (!selectedConversationId()) return;
+    clearFocusMark();
     closeMembersSheet();
     closeImageViewer();
     setOpenThreadRootId(undefined);
@@ -7480,7 +7802,11 @@
       element.append(stop);
     }
     makeRowOpen(element, function () {
-      void openConversation(row.conversationId, { threadRootId: row.threadRootId });
+      // The member's turn in progress, not the end of the chat: what it
+      // posted during the turn sits below it.
+      void openConversation(row.conversationId, row.openMessageId
+        ? { threadRootId: row.openThreadRootId, messageId: row.openMessageId }
+        : { threadRootId: row.threadRootId });
     });
     return element;
   }
@@ -7897,6 +8223,7 @@
       }
       list.dataset.conversationId = activeId || "";
       list.replaceChildren();
+      if (focusedMessage && focusedMessage.conversationId !== activeId) clearFocusMark();
       renderThreadHeader(undefined);
       state.textContent = "";
       lastRowsFingerprint = undefined;
@@ -8005,6 +8332,10 @@
     // A server update, navigation or another tab may have superseded this
     // read. Committing it would replace the current chat with the old snapshot.
     if (revision !== renderRevision || activeId !== selectedConversationId()) return;
+    if (membersSheetOpen) {
+      updateMembersSheetTargets(activeId, activeChat, timelineEntries);
+      renderMembersSheetIfOpen(activeChat);
+    }
     if (!document.hidden) {
       markConversationViewed(activeId, timelineEntries.reduce(function (newest, entry) {
         const at = entry && (entry.receivedAt || entry.createdAt);
@@ -8180,6 +8511,19 @@
     }
     renderCardIndex = null;
     lastScrolledConversationId = activeId;
+    if (focusedMessage && focusedMessage.conversationId === activeId) {
+      // A row redrawn for a change in it keeps the mark.
+      const marked = messageRowFor(list, focusedMessage.messageId);
+      if (marked) marked.classList.add("message-focused");
+    }
+    if (pendingMessageFocus && pendingMessageFocus.conversationId === activeId) {
+      const target = messageRowFor(list, pendingMessageFocus.messageId);
+      if (target) {
+        pendingMessageFocus = undefined;
+        focusMessageRow(activeId, target);
+        return;
+      }
+    }
     if (!rowsChanged && !openedConversation) {
       return;
     }
@@ -9019,6 +9363,69 @@
   // member's role and home machine. Nothing is asked of the desktop.
 
   let membersSheetOpen = false;
+  // Where a tap on a member in the open chat's members sheet lands: a
+  // running member's turn in progress (the rule Activity's Running rows use),
+  // any other member's last message. Worked out from the rows the chat's
+  // drawing already read, so the open sheet costs no reads of its own.
+  let membersSheetTargets = { conversationId: undefined, running: new Map(), lastById: new Map(), lastByHandle: new Map() };
+  let lastMembersSheetSignature = "";
+
+  function memberHandleKey(value) {
+    return String(value || "").trim().replace(/^@/, "").toLowerCase();
+  }
+
+  function updateMembersSheetTargets(conversationId, chat, entries) {
+    const activityApi = self.AccordMobileActivity;
+    if (!activityApi || !conversationId || !chat) return;
+    let running = new Map();
+    try {
+      const activity = activityApi.buildActivity({
+        entries: withListActivity(entries, [chat], loadListActivitySeen()),
+        chats: [chat],
+        isPlaceholder: isPlaceholderTimelineContent,
+        chatListAt: localStorage.getItem(CHAT_LIST_AT_KEY) || undefined,
+        now: Date.now()
+      });
+      for (const row of activity.running) {
+        if (row.handle && row.openMessageId && !running.has(memberHandleKey(row.handle))) {
+          running.set(memberHandleKey(row.handle), { messageId: row.openMessageId, threadRootId: row.openThreadRootId });
+        }
+      }
+    } catch {
+      running = new Map();
+    }
+    // Rows come oldest first: the last one seen per member is its newest.
+    const lastById = new Map();
+    const lastByHandle = new Map();
+    for (const entry of entries) {
+      if (!entry || entry.role !== "participant" || entry.status === "pending") continue;
+      if (!String(entry.content || "").trim() && !(Array.isArray(entry.attachments) && entry.attachments.length > 0)) continue;
+      const target = { messageId: entry.messageId || entry.sourceId, threadRootId: entry.threadRootId || undefined };
+      if (!target.messageId) continue;
+      if (entry.participantId) lastById.set(entry.participantId, target);
+      if (entry.participantLabel) lastByHandle.set(memberHandleKey(entry.participantLabel), target);
+    }
+    membersSheetTargets = { conversationId: conversationId, running: running, lastById: lastById, lastByHandle: lastByHandle };
+  }
+
+  function memberSheetTarget(member) {
+    if (membersSheetTargets.conversationId !== selectedConversationId()) return undefined;
+    const key = memberHandleKey(member.handle);
+    return membersSheetTargets.running.get(key) ||
+      (member.id && membersSheetTargets.lastById.get(member.id)) ||
+      membersSheetTargets.lastByHandle.get(key);
+  }
+
+  /** A tap on a member: the chat lands on its turn in progress, or on its
+   *  last message, as the desktop's members list does. */
+  function openMemberMessage(handle) {
+    const conversationId = selectedConversationId();
+    const member = selectedConversationMembers().find(function (item) { return item.handle === handle; });
+    const target = member ? memberSheetTarget(member) : undefined;
+    if (!conversationId || !target || !target.messageId) return;
+    closeMembersSheet();
+    void openConversation(conversationId, { threadRootId: target.threadRootId, messageId: target.messageId });
+  }
 
   function memberKindLabel(kind) {
     if (kind === "claude-code") {
@@ -9062,6 +9469,18 @@
       return;
     }
     const members = chat ? selectedConversationMembers() : [];
+    const conversationId = selectedConversationId();
+    const targets = membersSheetTargets.conversationId === conversationId ? membersSheetTargets : undefined;
+    // Redrawn only when what it shows changed: a member streaming redraws the
+    // chat every second or so, and a row replaced under the finger loses the tap.
+    const signature = JSON.stringify([conversationId, members.map(function (member) {
+      return [member.handle, member.displayName, member.roleLabel, member.kind, memberLocationLabel(member), member.avatarId || "",
+        Boolean(targets && targets.running.has(memberHandleKey(member.handle))), Boolean(memberSheetTarget(member))];
+    })]);
+    if (signature === lastMembersSheetSignature && list.childElementCount > 0) {
+      return;
+    }
+    lastMembersSheetSignature = signature;
     if (title) {
       title.textContent = members.length === 1 ? "1 member" : members.length + " members";
     }
@@ -9082,16 +9501,35 @@
       paintAvatar(avatar, avatarForMember(member), selectedConversationId());
       const copy = document.createElement("span");
       copy.className = "members-sheet-copy";
+      const nameLine = document.createElement("span");
+      nameLine.className = "members-sheet-name-line";
       const name = document.createElement("strong");
       name.textContent = member.displayName;
+      nameLine.append(name);
+      const key = memberHandleKey(member.handle);
+      if (targets && targets.running.has(key)) {
+        const status = document.createElement("span");
+        status.className = "members-sheet-status";
+        const dot = document.createElement("span");
+        dot.className = "mobile-live-dot";
+        dot.setAttribute("aria-hidden", "true");
+        status.append(dot, document.createTextNode("Running"));
+        nameLine.append(status);
+        row.dataset.running = "1";
+      }
       const role = document.createElement("span");
       role.className = "members-sheet-role";
       role.textContent = [member.roleLabel, memberKindLabel(member.kind)].filter(Boolean).join(" · ");
       const location = document.createElement("span");
       location.className = "members-sheet-location";
       location.textContent = memberLocationLabel(member);
-      copy.append(name, role, location);
+      copy.append(nameLine, role, location);
       row.append(avatar, copy);
+      if (memberSheetTarget(member)) {
+        row.classList.add("is-openable");
+        row.setAttribute("role", "button");
+        row.tabIndex = 0;
+      }
       list.append(row);
     });
   }
@@ -9112,10 +9550,19 @@
   function openMembersSheet() {
     membersSheetOpen = true;
     renderMembersSheet(activeChatRecord());
+    // Who is running and where each member lands, from the chat's rows; kept
+    // current by the chat's own drawing while the sheet stays open.
+    const conversationId = selectedConversationId();
+    void listTimelineEntries(conversationId).then(function (entries) {
+      if (!membersSheetOpen || selectedConversationId() !== conversationId) return;
+      updateMembersSheetTargets(conversationId, activeChatRecord(), entries);
+      renderMembersSheet(activeChatRecord());
+    }).catch(function () { return undefined; });
   }
 
   function closeMembersSheet() {
     membersSheetOpen = false;
+    lastMembersSheetSignature = "";
     renderMembersSheet(undefined);
   }
 
@@ -9137,6 +9584,11 @@
       }
     });
     close?.addEventListener("click", closeMembersSheet);
+    // One handler on the list: rows are redrawn as members start and stop.
+    document.getElementById("members-sheet-list")?.addEventListener("click", function (event) {
+      const row = event.target instanceof Element ? event.target.closest(".members-sheet-row.is-openable") : null;
+      if (row && row.dataset.handle) openMemberMessage(row.dataset.handle);
+    });
     sheet.addEventListener("click", function (event) {
       if (event.target instanceof Element && event.target.dataset.membersClose === "1") {
         closeMembersSheet();
@@ -9166,32 +9618,40 @@
     button.textContent = loadEarlierBusy ? "Loading…" : "Show earlier messages";
   }
 
-  async function loadEarlierMessages() {
-    const conversationId = selectedConversationId();
+  /** Reads the page before the earliest one this phone holds into storage:
+   *  "read", "failed", or "none" when there is no page to read or a read is
+   *  already going. Drawing it is the caller's. */
+  async function fetchEarlierPage(conversationId) {
     const pairing = loadPairing();
     const page = conversationId ? timelinePageFor(conversationId) : undefined;
     if (!conversationId || !pairing || !canSync(pairing) || !page || !page.beforeMessageId || loadEarlierBusy) {
-      return;
+      return "none";
     }
     loadEarlierBusy = true;
     renderLoadEarlier(conversationId, openThreadRootId());
-    const surface = threadSurface();
-    const heightBefore = surface ? surface.scrollHeight : 0;
-    const topBefore = surface ? surface.scrollTop : 0;
-    let failed = false;
     try {
       await requestTimelineViaRelay(pairing, conversationId, {
         beforeMessageId: page.beforeMessageId,
         deferRender: true
       });
+      return "read";
     } catch {
-      failed = true;
+      return "failed";
     } finally {
       loadEarlierBusy = false;
     }
-    if (selectedConversationId() !== conversationId) {
+  }
+
+  async function loadEarlierMessages() {
+    const conversationId = selectedConversationId();
+    const surface = threadSurface();
+    const heightBefore = surface ? surface.scrollHeight : 0;
+    const topBefore = surface ? surface.scrollTop : 0;
+    const result = await fetchEarlierPage(conversationId);
+    if (result === "none" || selectedConversationId() !== conversationId) {
       return;
     }
+    const failed = result === "failed";
     await render(failed ? "tunnel-reconnecting" : "synced");
     if (surface && !failed) {
       // Rows were added above the reader. Keep the message they were looking at
@@ -9349,6 +9809,7 @@
         return;
       }
       void resyncAfterForeground();
+      void runSettlePass();
     });
     window.addEventListener("pageshow", function (event) {
       if (event.persisted) {
@@ -9531,6 +9992,7 @@
     const jump = document.getElementById("jump-to-latest");
     if (jump) {
       jump.addEventListener("click", function () {
+        endFocusPlacement();
         scrollToLatest("smooth");
       });
     }
@@ -9984,6 +10446,7 @@
       // also dropped the next message typed while the first was still going
       // out over a slow connection, with nothing on screen to say so.
       const sendComposer = function () {
+        endFocusPlacement();
         return submitComposer();
       };
       input.addEventListener("focus", updateComposerShape);

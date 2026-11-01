@@ -2479,6 +2479,13 @@ export interface Conversation extends ConversationSummary {
   metadata: ConversationMetadata;
 }
 
+/** Where to open a member's turn that is in progress: the message itself,
+ *  and the thread it is in when it is a thread reply. */
+export interface ChatRunningMessageTarget {
+  messageId: string;
+  threadRootId?: string;
+}
+
 export interface ConversationMessagePageRequest {
   conversationId: string;
   beforeSequence?: number;
@@ -3226,6 +3233,9 @@ export interface AppBridge {
   getConversation(id: string): Promise<Conversation | undefined>;
   openConversation(id: string, limit?: number): Promise<ConversationOpenResult | undefined>;
   listConversationMessages(request: ConversationMessagePageRequest): Promise<ConversationMessagePage>;
+  /** The member's message that is in progress right now, searched in the
+   *  whole chat (an open chat holds only its latest page). */
+  findRunningParticipantMessage(conversationId: string, participantId: string): Promise<ChatRunningMessageTarget | undefined>;
   saveDecisionSelections(conversationId: string, selections: Record<string, string>): Promise<Conversation | undefined>;
   saveDecisionResolutions(conversationId: string, resolutions: Record<string, boolean>): Promise<Conversation | undefined>;
   savePlanItemReview(request: PlanItemReviewRequest): Promise<Conversation | undefined>;

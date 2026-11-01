@@ -1,7 +1,8 @@
-import type { AgentDetectionRequest, AgentHealth, ChatActivityItem, ChatMessage, ChatSearchMessageMatch, Conversation, ConversationSummary } from "../../shared/types";
+import type { AgentDetectionRequest, AgentHealth, ChatActivityItem, ChatMessage, ChatRunningMessageTarget, ChatSearchMessageMatch, Conversation, ConversationSummary } from "../../shared/types";
 import { reconcileConversationSummaryRefresh } from "../../shared/conversationSummary";
 import { buildChatActivityItems, reconcileChatActivityRefreshItems } from "../../shared/chatActivity";
 import { executeChatActivityFocus } from "../../shared/chatActivityFocus";
+import { runningParticipantTarget, withRunningActivityTarget } from "./running-participant-target";
 import {
   CONVERSATION_MESSAGE_PAGE_SIZE,
   mergeLoadedMessagePage,
@@ -237,6 +238,8 @@ export function useConversationActions(state: AppState): ConversationActions {
       pending: true
     });
     let conversationRequestId: number | undefined;
+    // The row of a running member resolved to its turn in progress.
+    let runningTurnItem: ChatActivityItem | undefined;
     const isCurrent = (): boolean =>
       state.chatMessageFocusNonceRef.current === pendingFocusNonce &&
       (conversationRequestId === undefined || state.openConversationRequestRef.current === conversationRequestId);
@@ -248,8 +251,10 @@ export function useConversationActions(state: AppState): ConversationActions {
         conversationRequestId = state.openConversationRequestRef.current;
         return conversation;
       },
-      resolveTarget: (conversation) => {
-        const resolvedItem = resolveLoadedActivityItemTarget(item, conversation);
+      resolveTarget: async (conversation) => {
+        const loadedItem = resolveLoadedActivityItemTarget(item, conversation);
+        const resolvedItem = await withRunningActivityTarget(loadedItem, conversation);
+        runningTurnItem = resolvedItem !== loadedItem ? resolvedItem : undefined;
         const target = activityFocusTarget(resolvedItem, options);
         return target.messageId ? resolvedItem : undefined;
       },
@@ -258,6 +263,13 @@ export function useConversationActions(state: AppState): ConversationActions {
       },
       ensureTargetLoaded: (conversation, resolvedItem) => {
         const target = activityFocusTarget(resolvedItem, options);
+        if (resolvedItem === runningTurnItem) {
+          // A turn in progress is usually far above the open page with the
+          // member's own posts in between. The chat view reads every page
+          // down to it, as for any member it opens; loading only the page
+          // around it here would leave those posts out.
+          return Promise.resolve(true);
+        }
         return ensureActivityTargetMessagesLoaded(conversation, target.messageId, target.threadRootId, isCurrent);
       },
       beforeCommit: waitForNextFrame,
@@ -498,17 +510,40 @@ export function useConversationActions(state: AppState): ConversationActions {
     }
   }
 
+  /** Opens a member from the chat (Running members, the members list): a
+   *  running member at its turn in progress, any other at its last message.
+   *  Whether it is running is the whole chat's answer, not the open page's. */
   function jumpToParticipantLastMessage(participantId: string): void {
-    const entry = state.conversation?.metadata.lastMessageByParticipant?.[participantId];
-    if (!entry || typeof entry.messageId !== "string" || !entry.messageId.trim()) {
+    const conversation = state.conversation;
+    if (!conversation) {
       return;
     }
-    state.chatMessageFocusNonceRef.current += 1;
-    state.setChatMessageFocusRequest({
-      conversationId: state.conversation?.id,
-      messageId: entry.messageId,
-      threadRootId: typeof entry.threadRootId === "string" && entry.threadRootId.trim() ? entry.threadRootId : undefined,
-      nonce: state.chatMessageFocusNonceRef.current
+    const nonceAtClick = state.chatMessageFocusNonceRef.current;
+    const openRequest = state.openConversationRequestRef.current;
+    const entry = conversation.metadata.lastMessageByParticipant?.[participantId];
+    const lastMessage: ChatRunningMessageTarget | undefined = entry && typeof entry.messageId === "string" && entry.messageId.trim()
+      ? {
+        messageId: entry.messageId,
+        threadRootId: typeof entry.threadRootId === "string" && entry.threadRootId.trim() ? entry.threadRootId : undefined
+      }
+      : undefined;
+    void runningParticipantTarget(conversation, participantId).then((running) => {
+      // Another chat opened or another message was asked for meanwhile.
+      if (state.chatMessageFocusNonceRef.current !== nonceAtClick || state.openConversationRequestRef.current !== openRequest) {
+        return;
+      }
+      const target = running ?? lastMessage;
+      if (!target) {
+        return;
+      }
+      const nonce = nonceAtClick + 1;
+      state.chatMessageFocusNonceRef.current = nonce;
+      state.setChatMessageFocusRequest({
+        conversationId: conversation.id,
+        messageId: target.messageId,
+        threadRootId: target.threadRootId,
+        nonce
+      });
     });
   }
 

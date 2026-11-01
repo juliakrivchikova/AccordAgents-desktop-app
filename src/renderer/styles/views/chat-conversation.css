@@ -3188,7 +3188,8 @@
   z-index: -1;
   inset: -16px;
   border-radius: 12px;
-  background: var(--app-accent-soft);
+  /* Half the accent wash: it marks where you landed without shouting (the User, 2026-11-01). */
+  background: color-mix(in srgb, var(--app-accent-soft) 45%, transparent);
   content: "";
 }
 
