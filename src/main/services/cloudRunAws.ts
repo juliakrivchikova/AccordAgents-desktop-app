@@ -119,6 +119,8 @@ export interface CloudRunAwsServiceOptions {
   };
   wait?: (delayMs: number) => Promise<void>;
   sshExec?: (worker: CloudRunWorkerSettings, command: string, timeoutMs: number) => Promise<void>;
+  /** Whose Terminal the setup command is spelled for. */
+  platform?: NodeJS.Platform;
 }
 
 export interface PreparedAwsWorker {
@@ -154,6 +156,7 @@ export class CloudRunAwsService {
   private readonly activeRunIds = new Set<string>();
   private readonly wait: (delayMs: number) => Promise<void>;
   private readonly sshExec: (worker: CloudRunWorkerSettings, command: string, timeoutMs: number) => Promise<void>;
+  private readonly platform: NodeJS.Platform;
   private prepareActive: Promise<PreparedAwsWorker> | undefined;
   private prepareRequest: PrepareAwsWorkerRequest | undefined;
   private readonly removeMachine?: (machineId: string) => Promise<void>;
@@ -240,6 +243,7 @@ export class CloudRunAwsService {
     this.privateKeyPathForKeyName = options.privateKeyPathForKeyName ?? resolveAwsWorkerPrivateKeyPath;
     this.wait = options.wait ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
     this.sshExec = options.sshExec ?? defaultSshExec;
+    this.platform = options.platform ?? process.platform;
   }
 
   async bootstrapCommand(region: string, recoveryOperationId?: string): Promise<string> {
@@ -252,12 +256,12 @@ export class CloudRunAwsService {
       }
       targetUserName = operation.awsPrincipalUserName;
     }
-    if (targetUserName) return buildBootstrapCommand(region, deviceId, { targetUserName });
+    if (targetUserName) return buildBootstrapCommand(region, deviceId, { targetUserName }, this.platform);
     // The stop and start keys belong to the instance's region: a command for
     // another region must not rewrite the policies of keys already in use.
     const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
     const otherRegion = Boolean(handle && handle.region !== region.trim());
-    return buildBootstrapCommand(region, deviceId, { ...await this.keysInUse(), ...(otherRegion ? { machineKeys: false } : {}) });
+    return buildBootstrapCommand(region, deviceId, { ...await this.keysInUse(), ...(otherRegion ? { machineKeys: false } : {}) }, this.platform);
   }
 
   /** The keys a rerun of the setup command must leave valid: the app's own,

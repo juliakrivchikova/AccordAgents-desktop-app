@@ -23,6 +23,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { recoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
 import { machineMaintenanceCommand, type MachineMaintenanceTarget } from "./machineMaintenanceCommand";
+import { copiesWithoutLocalRsync, uploadDirectoryThroughTar } from "./machineDirectoryUpload";
 import { withMachineRsyncPath } from "./machineMaintenanceRsync";
 import fs from "node:fs";
 import path from "node:path";
@@ -1493,6 +1494,14 @@ async function defaultMachineSshExec(request: MachineSshExecRequest): Promise<st
   return result.stdout;
 }
 
+const BUNDLE_RSYNC_OPTIONS = [
+  "-az",
+  "--delete",
+  // Dependencies are installed inside the release directory on the machine;
+  // deleting them on every re-upload would reinstall them for nothing.
+  "--exclude=node_modules"
+];
+
 async function defaultBundleUpload(request: {
   target: MachineSshTarget;
   localDir: string;
@@ -1507,14 +1516,23 @@ async function defaultBundleUpload(request: {
     `bash -c ${shellQuotePosix(`umask 077; mkdir -p ${shellQuotePosix(request.remoteDir)}`)}`)], {
     timeoutMs: 60_000
   });
+  if (copiesWithoutLocalRsync()) {
+    await uploadDirectoryThroughTar({
+      sshArgs,
+      target,
+      localDir: path.resolve(request.localDir),
+      remoteDir: request.remoteDir,
+      rsyncOptions: BUNDLE_RSYNC_OPTIONS,
+      skip: (_relativeDir, name) => name === "node_modules",
+      maintenance: request.maintenance,
+      timeoutMs: request.timeoutMs
+    });
+    return;
+  }
   await withMachineRsyncPath(request.maintenance, (command, input) => runCommand("ssh", [
     ...sshArgs, target, command
   ], { input, timeoutMs: 60_000 }), (rsyncPath) => runCommand("rsync", [
-    "-az",
-    "--delete",
-    // Dependencies are installed inside the release directory on the machine;
-    // deleting them on every re-upload would reinstall them for nothing.
-    "--exclude=node_modules",
+    ...BUNDLE_RSYNC_OPTIONS,
     ...(rsyncPath ? ["--rsync-path", rsyncPath] : []),
     "-e",
     rsyncRshCommand(sshArgs),

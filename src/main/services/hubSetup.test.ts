@@ -26,7 +26,7 @@ function blobFor(ip: string, extra: { nonce?: string; hostKeys?: string[] } = {}
 }
 
 test("the setup command is one bash script that names the region, this computer's key and its label", () => {
-  const command = buildHubSetupCommand("eu-central-1", KEY, NONCE);
+  const command = buildHubSetupCommand("eu-central-1", KEY, NONCE, "darwin");
   assert.ok(command.startsWith("bash <<'ACCORDAGENTS_HUB'\n") && command.endsWith("\nACCORDAGENTS_HUB"));
   const script = command.slice("bash <<'ACCORDAGENTS_HUB'\n".length, -"\nACCORDAGENTS_HUB".length);
   bashSyntax(script);
@@ -36,9 +36,9 @@ test("the setup command is one bash script that names the region, this computer'
   assert.ok(script.includes(KEY));
   assert.match(script, /--bundle-id nano_3_0/);
   assert.match(script, /get-instance-access-details/, "a server made before lets this computer in");
-  assert.throws(() => buildHubSetupCommand("eu-central-1; rm -rf /", KEY, NONCE));
-  assert.throws(() => buildHubSetupCommand("us-east-1", "ssh-rsa AAAA' ; echo", NONCE));
-  assert.throws(() => buildHubSetupCommand("us-east-1", KEY, "x; reboot"));
+  assert.throws(() => buildHubSetupCommand("eu-central-1; rm -rf /", KEY, NONCE, "darwin"));
+  assert.throws(() => buildHubSetupCommand("us-east-1", "ssh-rsa AAAA' ; echo", NONCE, "darwin"));
+  assert.throws(() => buildHubSetupCommand("us-east-1", KEY, "x; reboot", "darwin"));
 });
 
 test("the line the command prints is read back, with whatever was pasted around it", () => {
@@ -335,7 +335,7 @@ k=$(grep -o 'PAIR-[0-9]*' "$key"); c=$(grep -o 'PAIR-[0-9]*' "$cert")
 `, { mode: 0o755 });
   // Waiting for AWS is not waited out here.
   await writeFile(path.join(bin, "sleep"), "#!/bin/sh\n", { mode: 0o755 });
-  const command = buildHubSetupCommand("us-east-1", KEY, NONCE);
+  const command = buildHubSetupCommand("us-east-1", KEY, NONCE, "darwin");
   const runIt = () => execFileSync("zsh", ["-c", command], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, LANG: "C" }, encoding: "utf8" });
   const first = runIt();
   assert.deepEqual(parseHubServerBlob(first), { version: 1, region: "us-east-1", instanceName: "accordagents-hub", ip: "3.14.15.92", user: "ubuntu", nonce: NONCE, hostKeys: [HOST_KEY] });

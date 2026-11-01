@@ -45,7 +45,7 @@ import {
 import { CliReadinessService } from "./cliReadiness";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { spawnNativeProcess, confirmNativeProcessClosed, isSupervisedNativeProcess } from "./nativeProcess";
-import { NATIVE_PROCESS_REGISTRY_FILE } from "./nativeProcessRegistry";
+import { NATIVE_PROCESS_REGISTRY_FILE, usesNativeProcessRegistry } from "./nativeProcessRegistry";
 import {
   capturePosixDescendants,
   capturePosixDescendantsFromTable,
@@ -1562,7 +1562,8 @@ export class CliAgentRunner {
     const codexExecutable = await this.codexExecutableForRun();
     const child = spawnCommand(codexExecutable, ["app-server", "--listen", "stdio://"], {
       env: commandEnvironment(),
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true
     });
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -7046,7 +7047,9 @@ export class CliAgentRunner {
   private async spawnResidentProcess(scope: string, command: string, args: string[], options: {
     cwd?: string; env: NodeJS.ProcessEnv; detached: boolean; stdio: ["pipe", "pipe", "pipe"];
   }): Promise<ChildProcessWithoutNullStreams> {
-    if (!this.nativeProcessDbPath || process.platform === "win32") return spawnCommand(command, args, options);
+    // windowsHide: on Windows a console program started from the app gets a
+    // console window of its own, and closing it would kill the member.
+    if (!this.nativeProcessDbPath || !usesNativeProcessRegistry()) return spawnCommand(command, args, { ...options, windowsHide: true });
     return spawnNativeProcess({ scope, command, args, cwd: options.cwd, env: options.env, dbPath: this.nativeProcessDbPath });
   }
 

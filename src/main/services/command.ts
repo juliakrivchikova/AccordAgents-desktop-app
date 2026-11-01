@@ -176,7 +176,10 @@ export async function runCommand(command: string, args: string[], options: Comma
       cwd: options.cwd,
       env: options.exactEnv === true ? { ...(options.env ?? {}) } : commandEnvironment(options.env, options.envOptions),
       detached: useProcessGroup,
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"],
+      // On Windows a console program started from the app gets a console
+      // window of its own; closing it would kill the command.
+      windowsHide: true
     });
     if (child.pid !== undefined) {
       options.onSpawn?.(child.pid);

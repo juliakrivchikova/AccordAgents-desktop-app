@@ -346,6 +346,8 @@ function serviceWith(
   overrides: Partial<CloudRunAwsServiceOptions> = {}
 ): CloudRunAwsService {
   return new CloudRunAwsService(settings as unknown as SettingsService, {
+    // The command's text is read below as the bash one macOS gets.
+    platform: "darwin",
     createEc2Client: (credentials) => {
       const client = clients.get(`${credentials.accessKeyId}:${credentials.region}`) ?? clients.get(credentials.accessKeyId);
       if (!client) {

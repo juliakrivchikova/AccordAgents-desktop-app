@@ -7,6 +7,13 @@ const initializing = new Map<string, Promise<void>>();
 /** Each deployment keeps its registry under this name in its user-data
  *  directory; other deployments on the host find it there. */
 export const NATIVE_PROCESS_REGISTRY_FILE = "native-processes.sqlite3";
+
+/** Windows runs providers without the registry: its supervisor is a POSIX
+ *  shell, and there is no POSIX process table to check leases against. */
+export function usesNativeProcessRegistry(platform: NodeJS.Platform = process.platform): boolean {
+  return platform !== "win32";
+}
+
 class NativeRegistryError extends Error {
   constructor(message: string, readonly busy: boolean) { super(message); }
 }

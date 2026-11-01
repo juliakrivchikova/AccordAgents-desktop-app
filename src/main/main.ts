@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -5,9 +7,13 @@ import { HubInstaller, removeStaleHubTemp } from "./services/hubInstaller";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { AwsInstanceProjectsService, AwsProjectAddCancelled } from "./services/awsInstanceProjects";
 import { newChatProjects } from "../shared/newChat";
+import { isCliTerminalPlatform } from "../shared/cliReadiness";
 import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { app, autoUpdater, BrowserWindow, dialog, ipcMain, MessageChannelMain, powerMonitor, protocol, shell, utilityProcess, type WebContents } from "electron";
+import { app, autoUpdater, BrowserWindow, dialog, ipcMain, MessageChannelMain, powerMonitor, protocol, shell, utilityProcess, type Tray, type WebContents } from "electron";
+import { createBackgroundTray } from "./backgroundTray";
+import { desktopUserDataDirOverride } from "./platform";
+import { NATIVE_PROCESS_REGISTRY_FILE, usesNativeProcessRegistry } from "./services/nativeProcessRegistry";
 import { TerminalService } from "./terminal/terminalService";
 import { createQuitConfirmation, createQuitQuestion, installQuitConfirmation, quitConfirmationDetail, quitStep } from "./terminal/quitConfirmation";
 import type { CreateTerminalRequest } from "../shared/terminal";
@@ -211,6 +217,9 @@ let updateRestartRequested = false;
 // Only the loader is up while the User's server updates before the window
 // opens (serverUpdateLoader.ts): no window of the app's own yet.
 let serverUpdateLoaderOpen = false;
+// Windows: the icon the app keeps running under once its window is closed.
+let backgroundTray: Tray | undefined;
+let appWindowOpened = false;
 
 function sendToMainWindow(channel: string, ...args: unknown[]): boolean {
   const window = mainWindow;
@@ -225,9 +234,9 @@ function sendToMainWindow(channel: string, ...args: unknown[]): boolean {
   }
 }
 
-const userDataDirOverride = process.env.ACCORDAGENTS_USER_DATA_DIR?.trim();
+const userDataDirOverride = desktopUserDataDirOverride();
 if (userDataDirOverride) {
-  app.setPath("userData", path.resolve(userDataDirOverride));
+  app.setPath("userData", userDataDirOverride);
 }
 
 // Once the profile directory is final and before the app is ready: the SDK
@@ -1299,7 +1308,7 @@ let cardAppliers: Promise<ChatCardAppliers> | undefined;
 function localCardAppliers(): Promise<ChatCardAppliers> {
   const pending = cardAppliers ??= (async () => {
     const device = await deviceIdentityService.getOrCreateDeviceIdentity();
-    const nativeProcessDbPath = path.join(app.getPath("userData"), "native-processes.sqlite3");
+    const nativeProcessDbPath = usesNativeProcessRegistry() ? path.join(app.getPath("userData"), NATIVE_PROCESS_REGISTRY_FILE) : undefined;
     return {
       approval: new MachineApprovalExecutor({
         storage: storageService, chat: chatService,
@@ -1390,8 +1399,21 @@ function guardFilePreviewNavigation(contents: WebContents): void {
 }
 
 async function openTerminal(): Promise<void> {
-  if (process.platform !== "darwin") {
-    throw new Error("Open Terminal is available on macOS only.");
+  if (!isCliTerminalPlatform(process.platform)) {
+    throw new Error("Open Terminal is available on macOS and Windows only.");
+  }
+  if (process.platform === "win32") {
+    // A new PowerShell window in the home folder, in Windows Terminal when
+    // that is the default terminal: where the setup panel's commands run.
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn("cmd.exe", ["/d", "/c", "start", "\"\"", "powershell.exe", "-NoLogo"], {
+        cwd: homedir(), detached: true, stdio: "ignore", windowsHide: true, windowsVerbatimArguments: true
+      });
+      // `start` returns as soon as the window is up, or fails at once.
+      child.once("error", reject);
+      child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`Could not start PowerShell (exit code ${code}).`)));
+    });
+    return;
   }
   const candidates = [
     "/System/Applications/Utilities/Terminal.app",
@@ -3214,8 +3236,16 @@ void app.whenReady().then(async () => {
     });
   });
   createWindow();
+  appWindowOpened = true;
   serverUpdateLoaderOpen = false;
   serverUpdateLoader?.close();
+  if (process.platform === "win32") {
+    backgroundTray = await createBackgroundTray(showMainWindow).catch((error: unknown) => {
+      // Without the icon, closing the window quits, as it did before.
+      void debugLogService.write("app-tray.create-error", { message: error instanceof Error ? error.message : String(error) });
+      return undefined;
+    });
+  }
   void ensureLoginShellEnvPrimed();
   await detectAgentsWithAppSkills().catch((error) => {
     void debugLogService.write("app-skills-startup-sync-error", {
@@ -3241,11 +3271,31 @@ void app.whenReady().then(async () => {
 app.on("window-all-closed", () => {
   debugLogService.writeNow("app-window.all-closed", { forUpdate: quittingForUpdate, quitting: quitCleanupStarted });
   // The loader closed by hand while the server updates: the app's window
-  // still comes.
-  if (process.platform !== "darwin" && !serverUpdateLoaderOpen) {
+  // still comes. With its icon in the notification area the app goes on
+  // running, as it does in the Dock on macOS.
+  if (process.platform !== "darwin" && !serverUpdateLoaderOpen && !backgroundTray) {
     app.quit();
   }
 });
+
+/** A second launch on Windows (see launcher.ts) and the tray icon open the
+ *  window; before the first one has opened, it is on its way anyway. */
+function showMainWindow(): void {
+  if (!appWindowOpened) return;
+  // The app's own window, also one whose page crashed: that one is reloaded,
+  // not joined by a second window.
+  const window = updatePromptWindow();
+  if (!window) {
+    createWindow();
+    return;
+  }
+  if (window.webContents.isCrashed()) window.webContents.reload();
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+}
+
+app.on("second-instance", () => showMainWindow());
 
 autoUpdater.on("before-quit-for-update", () => {
   if (!updateRestartRequested) {

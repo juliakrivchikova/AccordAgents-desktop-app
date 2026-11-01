@@ -78,10 +78,7 @@ async function generateNewKey(options: AwsWorkerKeyMaterialOptions): Promise<Aws
     if (await exists(privateKeyPath) || await exists(`${privateKeyPath}.pub`)) {
       continue;
     }
-    await runCommand("bash", [
-      "-lc",
-      `ssh-keygen -t ed25519 -N '' -q -f ${shellQuote(privateKeyPath)} -C ${shellQuote(keyName)}`
-    ], { timeoutMs: 30_000 });
+    await runCommand("ssh-keygen", ["-t", "ed25519", "-N", "", "-q", "-f", privateKeyPath, "-C", keyName], { timeoutMs: 30_000 });
     await chmod(privateKeyPath, 0o600);
     const publicKeyOpenSsh = (await readFile(`${privateKeyPath}.pub`, "utf8")).trim();
     if (!isOpenSshPublicKey(publicKeyOpenSsh)) {
@@ -150,8 +147,4 @@ function assertKeyName(value: string): string {
     throw new Error(`Invalid AWS worker key name: ${value}`);
   }
   return trimmed;
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }

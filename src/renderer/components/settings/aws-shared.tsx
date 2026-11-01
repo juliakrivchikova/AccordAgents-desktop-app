@@ -1,4 +1,5 @@
 import { AWS_WORKER_INSTANCE_TYPE_SPECS } from "../../../shared/cloudRuns";
+import { isWindowsPlatform } from "../../lib/platform";
 import type { AwsWorkerActualSpec, AwsWorkerOperationSnapshot } from "../../../shared/types";
 
 /** The reason only: Electron prefixes errors thrown in the main process. */
@@ -12,8 +13,9 @@ export const CONFIRM_TEXT: Record<"stop" | "delete" | "recreate", string> = {
   recreate: "Recreating terminates the current instance and its disk, then creates a new one at the requested size. Cloud environments, sessions and sign-ins on it are lost."
 };
 
-/** How every AWS dialog that needs the setup command asks for it. */
-export const ADMIN_COMMAND_TEXT = "Run this command once in Terminal with an AWS administrator account";
+/** How every AWS dialog that needs the setup command asks for it. On Windows
+ *  the command is a PowerShell one, which Command Prompt cannot run. */
+export const ADMIN_COMMAND_TEXT = `Run this command once in ${isWindowsPlatform() ? "PowerShell" : "Terminal"} with an AWS administrator account`;
 
 /** An instance type's processors and memory, the way AWS lists them. */
 export function instanceTypeSpecs(instanceType: string, actual?: AwsWorkerActualSpec): string {

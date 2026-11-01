@@ -287,6 +287,25 @@ test("unsupported platforms show guide-only installation without a macOS copy ac
   renderer.unmount();
 });
 
+test("on Windows a missing CLI gets its PowerShell install command and Open Terminal; one with no Windows command gets the guide", async () => {
+  installWindowBridge();
+  const agents = MISSING.map((health) => ({ ...health, platform: "win32" as const }));
+  const renderer = create(
+    <Panel agents={agents} settings={SETTINGS} checking={false} onRefresh={async () => agents} onOpenSettings={() => undefined} />
+  );
+  await click(findButton(renderer.root.findByProps({ "data-provider-kind": "codex-cli" }), "Set up Codex"));
+  const codex = renderer.root.findByProps({ "data-provider-kind": "codex-cli" });
+  assert.equal(textOf(codex).includes(CLI_PROVIDER_SETUP["codex-cli"].installCommandByPlatform.win32 ?? "missing"), true);
+  assert.doesNotMatch(textOf(codex), /curl /);
+  assert.equal(Boolean(findButton(codex, "Open Terminal")), true);
+  await click(findButton(codex, "Hide Codex"));
+  await click(findButton(renderer.root.findByProps({ "data-provider-kind": "gemini-cli" }), "Set up Antigravity"));
+  const antigravity = renderer.root.findByProps({ "data-provider-kind": "gemini-cli" });
+  assert.match(textOf(antigravity), /Official guide/);
+  assert.doesNotMatch(textOf(antigravity), /curl |Open Terminal/);
+  renderer.unmount();
+});
+
 test("renderer readiness validation blocks an explicitly selected unready member with an actionable reason", () => {
   assert.match(
     validateChatCliAgents([{ kind: "claude-code" }], MISSING, SETTINGS.providers) ?? "",
