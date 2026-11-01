@@ -268,7 +268,7 @@ function requireFile(filePath) {
   return filePath;
 }
 
-function productName() {
+export function productName() {
   const currentPackageJson = packageJson();
   return currentPackageJson.productName || currentPackageJson.name;
 }
@@ -336,12 +336,12 @@ function installerName(version) {
 // The prepared files in the two groups they are published in: update.electronjs.org
 // serves a release to Windows once it carries an .exe or a *-win32-x64* file and
 // then reads RELEASES from it, so the installer goes up after the update files.
-export function releaseFiles(version) {
+function releaseFiles(version) {
   const packageNames = existsSync(releaseDir)
     ? readdirSync(releaseDir).filter((name) => name.endsWith("-full.nupkg"))
     : [];
   if (packageNames.length !== 1) {
-    fail(`${path.relative(rootDir, releaseDir)} must hold exactly one NuGet package; sign the build first (npm run sign:windows-x64).`);
+    fail(`${path.relative(rootDir, releaseDir)} must hold exactly one NuGet package.`);
   }
   const packagePath = path.join(releaseDir, packageNames[0]);
   const setupPath = path.join(releaseDir, installerName(version));

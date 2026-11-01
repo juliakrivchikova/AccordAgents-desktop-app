@@ -184,7 +184,7 @@ release repositories:
 [`AccordAgents-Releases`](https://github.com/juliakrivchikova/AccordAgents-Releases)
 for the stable channel and
 [`AccordAgents-Beta-Releases`](https://github.com/juliakrivchikova/AccordAgents-Beta-Releases)
-for betas. The source repository never hosts release artifacts. Each stable
+for betas. Releases are never published to the source repository. Each stable
 release also gets a code-signed Windows x64 installer and its Squirrel update
 files, built by GitHub Actions and signed on a Windows PC. See `SIGN.md` for signing, notarization, and the release process, and
 `docs/deploying-the-phone-app.md` for the phone app, which is deployed

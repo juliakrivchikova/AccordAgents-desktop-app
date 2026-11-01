@@ -146,7 +146,8 @@ juliakrivchikova/AccordAgents-Beta-Releases
 
 Both release repositories must be public before `update.electronjs.org` can
 discover new releases. The source repository and release repositories are
-separate; release artifacts are never published to the source repository.
+separate; release artifacts are never published to the source repository (the
+signed Windows files only pass through a draft there, see Windows below).
 
 Releases are normally built and published by the GitHub Actions `Release`
 workflow (`.github/workflows/release.yml`), started by hand — a merge never
@@ -227,17 +228,24 @@ its phone app. Everything else runs in the `Windows release` workflow
    machine, checked out with LF line endings like the macOS build (the app
    ships skills, prompts and the cloud machine runtime byte for byte), checks
    its archive, launches it and keeps it as an artifact. `Publish` then waits.
-2. On the Windows PC, with SimplySign Desktop signed in and the GitHub CLI
-   signed in to an account that can write to this repository: in a clean clone
-   checked out at the tag, `npm ci`, then `npm run sign:windows-x64 -- --run
-   <run id>`. It downloads the unsigned app, signs its files, packs and signs
-   the installer, checks every signature, puts the files in the draft release
+2. On the Windows PC, within a week (the unsigned app is kept for 7 days),
+   with SimplySign Desktop signed in and the GitHub CLI signed in as the User,
+   the reviewer of `windows-signing`: in a clean clone checked out at the tag,
+   `npm ci`, then `npm run sign:windows-x64 -- --run <run id>`. It checks that
+   the run is one of this workflow and built the commit the tag names here,
+   downloads the unsigned app, signs its files, packs and signs the installer,
+   checks every signature, puts the files in the draft release
    `windows-signed-<run id>` of this repository and approves `Publish`. The
    clone supplies only the installer's metadata, so its line endings do not
    matter.
-3. `Publish` installs the signed installer on a clean GitHub machine, checks
-   the signatures as Windows sees them, launches the installed app, and only
-   then adds to the GitHub Release of the tag:
+3. `Publish` checks that the tag still names the built commit and that the
+   installer from the draft carries the release certificate before running
+   anything from it. It installs the installer on a clean GitHub machine,
+   checks the signatures of everything installed as Windows sees them, checks
+   that the NuGet package and `RELEASES` are the ones inside the signed
+   installer (anyone who can write to this repository can write to the draft),
+   launches the installed app, and only then adds to the GitHub Release of the
+   tag:
 
    ```text
    AccordAgents-<version>-win32-x64-Setup.exe
@@ -254,7 +262,10 @@ its phone app. Everything else runs in the `Windows release` workflow
    download, removes the draft, and checks the update feed, which only warns.
 
 Without a tag the workflow is a trial of the selected branch: it builds, waits
-for the signature, installs and launches, and publishes nothing.
+for the signature, installs and launches, and publishes nothing. GitHub starts
+a workflow by hand only when its file is on the default branch, so
+`windows-release.yml` can run once it is on `main`, as it is after the first
+stable release that carries it.
 
 One-time setup: Settings → Environments → `windows-signing`, with the User as
 a required reviewer, so `Publish` waits for the signature. Without the
@@ -268,7 +279,7 @@ What gets our signature is decided by `scripts/windows-sign-file.cjs`:
 that file byte for byte before it opens storage and a signed copy refuses to
 start; files that arrive signed by their own publisher (Microsoft's ConPTY and
 `d3dcompiler_47.dll`) keep that signature; every other binary gets ours. `npm
-run sign:windows-x64 -- --check <app folder> <Setup.exe>` checks those rules.
+run sign:windows-x64 -- --check <Setup.exe> [<app folder>]` checks those rules.
 
 If Windows betas ever ship, pad the beta number for Squirrel first: it compares
 prerelease text character by character, so `beta10` would sort below `beta9`

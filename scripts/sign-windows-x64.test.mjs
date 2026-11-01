@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import path from "node:path";
 import test from "node:test";
-import { signatureProblems } from "./sign-windows-x64.mjs";
+import { fileURLToPath } from "node:url";
+import { readSignatures, signatureProblems } from "./sign-windows-x64.mjs";
 
+const require = createRequire(import.meta.url);
+const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const { keptUnsigned } = require("./windows-sign-file.cjs");
 const ours = "8D5B96BC995A35E672E78D459CCBBAB675AD442C";
 const microsoft = "F252E794FE438E35ACE6E53762C0A234A2C52135";
 const app = path.join("C:", "app-1.2.3");
@@ -10,11 +15,24 @@ const exe = path.join(app, "AccordAgents.exe");
 const setup = path.join("C:", "AccordAgents-1.2.3-win32-x64-Setup.exe");
 const sqlite = path.join(app, "resources", "sqlite", "win32-x64", "sqlite3.exe");
 const conpty = path.join(app, "resources", "app.asar.unpacked", "node_modules", "node-pty", "build", "Release", "conpty.dll");
-const options = {
-  thumbprint: ours,
-  ours: [exe, setup],
-  keptUnsigned: [path.join("resources", "sqlite", "win32-x64", "sqlite3.exe")]
-};
+const options = { thumbprint: ours, ours: [exe, setup], keptUnsigned };
+
+// A signed copy of the SQLite CLI the app checks byte for byte refuses to
+// start, so the file the hook keeps unsigned must be the one the app runs.
+test("Windows signing keeps unsigned the SQLite CLI the packaged app runs", () => {
+  const { resolveSqliteExecutable } = require(path.join(rootDir, "dist", "main", "main", "services", "sqliteCli.js"));
+  const resolved = resolveSqliteExecutable({ platform: "win32", arch: "x64", isPackaged: true, resourcesPath: path.join(app, "resources") });
+  assert.ok(keptUnsigned.some((suffix) => resolved.endsWith(suffix)), resolved);
+});
+
+// Windows PowerShell serializes a line it read from a file as an object, not
+// a string; the reader must hand back the paths it was given.
+test("Windows signature reader reports each file with the status Windows gives it", { skip: process.platform !== "win32" && "Authenticode is read on Windows only" }, () => {
+  const unsigned = path.join(rootDir, "assets", "sqlite", "win32-x64", "sqlite3.exe");
+  const entries = readSignatures([process.execPath, unsigned]);
+  assert.deepEqual(entries.map((entry) => [entry.path, entry.status]), [[process.execPath, "Valid"], [unsigned, "NotSigned"]]);
+  assert.match(entries[0].thumbprint, /^[0-9A-F]{40}$/);
+});
 const signed = [
   { path: exe, status: "Valid", thumbprint: ours },
   { path: setup, status: "Valid", thumbprint: ours },
