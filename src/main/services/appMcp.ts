@@ -607,7 +607,7 @@ export class AppMcpService {
     }
     if (typeof record.name === "string" && (APP_SCRIPT_TOOL_NAMES as readonly string[]).includes(record.name)) {
       if (!this.scriptToolHandler) {
-        throw new Error("Scheduled scripts are not available on this host yet.");
+        throw new Error("Scheduled tasks are not available on this host yet.");
       }
       return this.toolTextResult(await this.scriptToolHandler(actor, record.name, record.arguments));
     }

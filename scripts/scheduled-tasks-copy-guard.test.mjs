@@ -6,8 +6,10 @@ import { fileURLToPath } from "node:url";
 
 // The User calls the feature "Scheduled Tasks". What she sees must say so:
 // the settings page, its notices in chat, the approval card on the desktop
-// and on the phone, and errors her own actions can show. Code names, the app
-// tool, agent prompts and the script API keep the word "script".
+// and on the phone, and errors her own actions can show. Members must call
+// it a scheduled task too, so the skill, the tool descriptions and the notice
+// a woken member gets say so. Code names, tool names, the script API and the
+// word for the code inside a task keep "script".
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const userFacingFiles = [
@@ -68,13 +70,28 @@ test("what the User sees calls scheduled scripts Scheduled Tasks", async () => {
   assert.deepEqual(hits, []);
 });
 
-test("the automations skill the User sees, and members follow, says scheduled task", async () => {
-  const skill = await readFile(path.join(repoRoot, "src/main/appSkills/automations/SKILL.md"), "utf8");
-  const description = skill.split("\n---")[0];
-  assert.doesNotMatch(description, /scheduled script|Proposes the script/);
+const flat = (text) => text.replace(/\s+/g, " ");
+
+test("members are told to call it a scheduled task", async () => {
+  const read = async (file) => flat(await readFile(path.join(repoRoot, file), "utf8"));
+  const skill = await read("src/main/appSkills/automations/SKILL.md");
+  const description = skill.split(" --- ")[0];
+  assert.doesNotMatch(description, /scheduled scripts?|propos\w* (the|a) script/i);
   assert.match(description, /Set up a scheduled task in AccordAgents/);
-  assert.match(skill, /When you\s+talk to the User, say "scheduled task" or "task"/);
-  assert.doesNotMatch(skill, /tell the User in one or two sentences what the script does/);
+  assert.match(skill, /When you talk to the User, say "scheduled task"/);
+  assert.doesNotMatch(skill, /what the script does/i);
+
+  const tools = await read("src/shared/appMcpToolContracts.ts");
+  assert.doesNotMatch(tools, /Scheduled Scripts?\b|scheduled scripts?\b|why a script is failing/);
+  assert.match(tools, /"title": "Request Scheduled Task Change"/);
+
+  const chatLines = (await readFile(path.join(repoRoot, "src/main/services/chat.ts"), "utf8")).split("\n");
+  const stale = chatLines
+    .map((line, index) => ({ line: line.trim(), at: index + 1 }))
+    .filter(({ line }) => !/^(\/\/|\/\*|\*)/.test(line) && /\b[Ss]cheduled scripts?\b/.test(line))
+    .map(({ line, at }) => `chat.ts:${at}: ${line.slice(0, 120)}`);
+  assert.deepEqual(stale, []);
+  assert.match(flat(chatLines.join("\n")), /When you talk to the User, call it a scheduled task\./);
 });
 
 test("the settings menu and page title read Scheduled Tasks", async () => {

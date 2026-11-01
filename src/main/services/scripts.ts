@@ -1037,7 +1037,7 @@ export class ScriptService {
 
   private async requireChatScript(id: string, conversationId: string): Promise<ScriptRecord> {
     const record = await this.requireRecord(id);
-    if (!this.belongsToChat(record, conversationId)) throw new Error("That scheduled script does not belong to this chat.");
+    if (!this.belongsToChat(record, conversationId)) throw new Error("That scheduled task does not belong to this chat.");
     return record;
   }
 
@@ -1047,14 +1047,14 @@ export class ScriptService {
     const reason = trimmedString(request.reason, "reason", REASON_MAX_CHARS, false);
     if (op === "run_now") {
       const record = await this.requireChatScript(String(request.scriptId ?? ""), input.conversationId);
-      if (!record.enabled) throw new Error("The script is switched off; ask the User to switch it on first.");
+      if (!record.enabled) throw new Error("The task is switched off; ask the User to switch it on first.");
       await this.runNow(record.id);
       return { kind: "ran", scriptId: record.id, name: record.name };
     }
     if (op === "create" || op === "update") return this.proposeRevision(input, request, op, reason);
     if (op === "delete" || op === "enable" || op === "disable") {
       const record = await this.requireChatScript(String(request.scriptId ?? ""), input.conversationId);
-      if (!record.approvedHash && op !== "delete") throw new Error("The script has not been approved yet.");
+      if (!record.approvedHash && op !== "delete") throw new Error("The task has not been approved yet.");
       const changeRequest = this.changeRequestFromRecord(record, op, reason);
       const verb = op === "delete" ? "Delete" : op === "enable" ? "Switch on" : "Switch off";
       return { kind: "approval", request: changeRequest, summary: `${verb} the scheduled task "${record.name}"`, missingSecretNames: [] };

@@ -2365,8 +2365,8 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
     policyOrder: 38,
     effect: "app-managed",
     desktop: {
-      "title": "Request Scheduled Script Change",
-      "description": "Propose a scheduled script: a small node or bash program the app runs on a schedule (an interval, or a cron expression in the User's time zone) and that can wake chat members by posting into existing chats through the local script API. Follow the automations skill. Every create/update/delete/enable/disable shows the User an approval card (code, schedule, chats, members, keys); nothing runs until the User approves. Key values (API tokens) are entered by the User on the card and you never see them; name them in secretNames and read them from environment variables. run_now starts an approved, switched-on script once without a card. Returns status pending_user_approval with approvalId and scriptId, or started for run_now.",
+      "title": "Request Scheduled Task Change",
+      "description": "Propose a scheduled task (the User's name for it; say scheduled task to the User): a small node or bash script the app runs on a schedule (an interval, or a cron expression in the User's time zone) and that can wake chat members by posting into existing chats through the local script API. Follow the automations skill. Every create/update/delete/enable/disable shows the User an approval card (code, schedule, chats, members, keys); nothing runs until the User approves. Key values (API tokens) are entered by the User on the card and you never see them; name them in secretNames and read them from environment variables. run_now starts an approved, switched-on script once without a card. Returns status pending_user_approval with approvalId and scriptId, or started for run_now.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -2424,8 +2424,8 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
     policyOrder: 39,
     effect: "app-managed",
     desktop: {
-      "title": "List Scheduled Scripts",
-      "description": "List the scheduled scripts on this host with their schedule, status (ok, failing, blocked, off, needs-approval, waiting-for-keys, holding-messages), last and next run, chats, members and which keys are saved. Never returns key values or code.",
+      "title": "List Scheduled Tasks",
+      "description": "List the scheduled tasks on this host with their schedule, status (ok, failing, blocked, off, needs-approval, waiting-for-keys, holding-messages), last and next run, chats, members and which keys are saved. Never returns key values or code.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -2444,8 +2444,8 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
     policyOrder: 40,
     effect: "app-managed",
     desktop: {
-      "title": "Read Scheduled Script Runs",
-      "description": "Read a scheduled script's run history, newest first: status, how many consecutive runs a row covers, exit code, messages sent, and the last output (key values are replaced by •••). Use it to explain why a script is failing.",
+      "title": "Read Scheduled Task Runs",
+      "description": "Read a scheduled task's run history, newest first: status, how many consecutive runs a row covers, exit code, messages sent, and the last output (key values are replaced by •••). Use it to explain why a task is failing.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

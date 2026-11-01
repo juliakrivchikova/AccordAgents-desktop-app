@@ -15,11 +15,11 @@ description: >
 # Automations: scheduled tasks
 
 The User calls these **scheduled tasks** (Settings → Scheduled Tasks). When you
-talk to the User, say "scheduled task" or "task"; "script" is only the code
-inside it and the tool names.
+talk to the User, say "scheduled task"; "script" is only the code inside it
+and the tool names.
 
-A scheduled task is the cheap part of an automation. Its script runs on a schedule
-without any agent, checks whatever it needs (an API, a Slack channel, a file),
+A scheduled task is the cheap part of an automation. Its script runs on a
+schedule without any agent, checks whatever it needs (an API, a Slack channel, a file),
 and only when it finds something it posts a message into an existing chat that
 mentions the members who should act. That message starts those members exactly
 like a User message with the same mentions would. A check that finds nothing
