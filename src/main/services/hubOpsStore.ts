@@ -135,6 +135,8 @@ const TURN_COLUMNS = `run_id as runId, conversation_id as conversationId, messag
   executor_device_id as executorDeviceId, claimed_at as claimedAt, stop_requested_at as stopRequestedAt,
   finished_at as finishedAt, outcome`;
 
+const RUNNING_TURN_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
 export class HubOpsStore {
   private ready?: Promise<void>;
 
@@ -308,12 +310,15 @@ export class HubOpsStore {
    *  no running message yet, and one taken by a device removed since can
    *  never end, and must not keep a message "running" for ever. Read through
    *  the partial index on taken turns, so it stays cheap however many ended. */
+  // No turn runs longer than the longest run time the app allows (7 days): a
+  // turn claimed before that was left open and is not read again.
   async runningTurnsByConversation(): Promise<Map<string, Array<{ messageId: string; participantId: string }>>> {
     await this.init();
     const rows = await this.database.query<{ conversationId: string; messageId: string; participantId: string }>(`
       select t.conversation_id as conversationId, t.message_id as messageId, t.participant_id as participantId
         from hub_turns t
         where t.state = 'claimed'
+          and (t.claimed_at is null or t.claimed_at >= ${quote(new Date(Date.now() - RUNNING_TURN_MAX_AGE_MS).toISOString())})
           and exists (select 1 from hub_devices d where d.device_id = t.executor_device_id);`);
     const byChat = new Map<string, Array<{ messageId: string; participantId: string }>>();
     for (const row of rows) {

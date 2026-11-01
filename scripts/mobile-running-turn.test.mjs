@@ -208,6 +208,16 @@ test("a long turn buried under a busy chat stays running on the phone and opens 
     // The chat has no hole: the notes between the turn and the newest page are there.
     assert.equal(await evaluate(`document.getElementById("message-list").textContent.includes("Drew's note 0.")`), true);
 
+    // The turn's live text still reaches the phone, though its message is far
+    // above the newest messages the live poll reads.
+    await hub.progress(CHAT, runId, "Still working on the long task", { participantLabel: "@taylor", agentProgress: { messageId: "long-turn" } });
+    await app.waitFor(`(async () => {
+      const db = await new Promise((res, rej) => { const r = indexedDB.open("accordagents-mobile-control"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+      const row = await new Promise((res) => { const one = db.transaction("timeline", "readonly").objectStore("timeline").get(${JSON.stringify(`${CHAT}:long-turn`)}); one.onsuccess = () => res(one.result); one.onerror = () => res(undefined); });
+      db.close();
+      return Boolean(row) && row.content === "Still working on the long task";
+    })()`, "the buried turn's live text reaches the phone", 20_000);
+
     // Another reply arrives: the hour-old turn is not taken for a dead run.
     await hub.addMessages(CHAT, [{ id: "d-late", role: "participant", participantId: DREW.id, participantLabel: "@drew",
       content: "A late note.", status: "done", createdAt: minutesAgo(0) }]);
@@ -234,6 +244,68 @@ test("a long turn buried under a busy chat stays running on the phone and opens 
     await evaluate(`document.querySelector('[data-activity-tab="running"]')?.click()`);
     await app.waitFor(`![...document.querySelectorAll("#activity-list .act-row")].some((row) => row.innerText.includes("@taylor") && document.getElementById("activity-list").dataset.activityTab === "running")`,
       "the ended turn leaves Running");
+  } finally {
+    app?.close();
+    const exited = new Promise((resolve) => chrome.once("exit", resolve));
+    chrome.kill("SIGKILL");
+    await exited;
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// A member's own follow-up reply runs with no turn on the server (nothing
+// lists it once it is buried). The phone held its row from the open chat;
+// buried past the newest page, it is asked about by message until it ends,
+// and its answer shows where it started.
+test("a turn with no turn on the server, buried past the page, still ends on the phone", { timeout: 240_000 }, async () => {
+  const DREW = member("drew", { kind: "codex-cli" });
+  const CHAT = "conv-follow-up-qa";
+  const minutesAgo = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: SITE_PORT + 2, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-follow-up-");
+  const chrome = launchChrome({ port: CDP_PORT + 2, profile, url: `${site.origin}/`, width: 390, height: 640 });
+  let app;
+  try {
+    await hub.createChat(CHAT, { title: "Follow-up QA", participants: [TAYLOR, DREW], createdAt: minutesAgo(90),
+      messages: [{ id: "u0", role: "user", content: "hello", status: "done", createdAt: minutesAgo(90) }] });
+    app = await attachApp({ port: CDP_PORT + 2 });
+    await pairPage(app, { hub, siteOrigin: site.origin });
+    await openChat(app, CHAT);
+    const followUp = { id: "follow-up", role: "participant", participantId: TAYLOR.id, participantLabel: "@taylor", content: "",
+      status: "pending", createdAt: minutesAgo(60), metadata: { runId: "self-resumed-run" } };
+    const chatter = Array.from({ length: 95 }, (_, i) => ({
+      id: `n${String(i).padStart(3, "0")}`, role: "participant", participantId: DREW.id, participantLabel: "@drew",
+      content: `Note ${i}.`, status: "done", createdAt: minutesAgo(59 - i * 0.5)
+    }));
+    // Written together with more than the chat list reads, so the list never
+    // carries it: the phone holds it only from the open chat's page.
+    await hub.addMessages(CHAT, [followUp, ...chatter.slice(0, 15)]);
+    const row = `document.querySelector('#message-list .message-row[data-thread-root="follow-up"]')`;
+    await app.waitFor(`Boolean(${row}) && ${row}.dataset.status === "Running"`, "the follow-up's row appears");
+    assert.equal(await app.evaluate(`JSON.parse(localStorage.getItem("accordagents.mobile.chatList.v1") || "[]")
+      .some((chat) => (chat.activity || []).some((event) => event.messageId === "follow-up"))`), false, "the chat list never carried it");
+    for (let start = 15; start < chatter.length; start += 25) await hub.addMessages(CHAT, chatter.slice(start, start + 25));
+    await app.waitFor(`document.getElementById("message-list").textContent.includes("Note 94.")`, "the newest notes arrive");
+    await sleep(3000);
+    assert.equal(await app.evaluate(`Boolean(${row}) && ${row}.dataset.status`), "Running", "the buried follow-up is not taken for a dead run");
+    // The User leaves the chat; the follow-up ends while it is closed, so no
+    // change of the open chat brings the end: only asking about it does.
+    await app.evaluate(`document.getElementById("back-to-chats").click()`);
+    await app.waitFor(`document.getElementById("chats-screen").classList.contains("is-active")`, "back on the chat list");
+    await hub.updateMessages(CHAT, [{ ...followUp, status: "done", content: "Follow-up answer." }]);
+    const stored = `(async () => {
+      const db = await new Promise((res, rej) => { const r = indexedDB.open("accordagents-mobile-control"); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+      const one = await new Promise((res) => { const q = db.transaction("timeline", "readonly").objectStore("timeline").get(${JSON.stringify(`${CHAT}:follow-up`)}); q.onsuccess = () => res(q.result); q.onerror = () => res(undefined); });
+      db.close();
+      return Boolean(one) && one.status === "done" && one.content === "Follow-up answer.";
+    })()`;
+    await app.waitFor(stored, "the follow-up's answer reaches the phone while the chat is closed", 60_000);
+    await openChat(app, CHAT);
+    await app.waitFor(`Boolean(${row}) && ${row}.dataset.status === "Done" && ${row}.textContent.includes("Follow-up answer.")`,
+      "the answer shows where the follow-up started");
   } finally {
     app?.close();
     const exited = new Promise((resolve) => chrome.once("exit", resolve));

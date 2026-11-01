@@ -671,14 +671,16 @@ test("only turns taken by a device that still exists count as running for the ph
     const owner = createDeviceIdentity(new Date().toISOString());
     await storage.hub().setOwner({ deviceId: owner.originId, publicKeyDerBase64: owner.publicKeyDerBase64, name: "Mac", addedAt: new Date().toISOString() });
     assert.equal((await storage.hubOps().runningTurnsByConversation()).size, 0);
-    const turn = (runId: string, conversationId: string, state: string, executor: string | null) =>
-      `insert into hub_turns(run_id, conversation_id, message_id, participant_id, state, executor_device_id)
-        values ('${runId}', '${conversationId}', 'ask-${runId}', 'taylor', '${state}', ${executor ? `'${executor}'` : "null"});`;
+    const turn = (runId: string, conversationId: string, state: string, executor: string | null, claimedAt = new Date().toISOString()) =>
+      `insert into hub_turns(run_id, conversation_id, message_id, participant_id, state, executor_device_id, claimed_at)
+        values ('${runId}', '${conversationId}', 'ask-${runId}', 'taylor', '${state}', ${executor ? `'${executor}'` : "null"}, '${claimedAt}');`;
     await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql([
       turn("live", "chat-a", "claimed", owner.originId),
       turn("orphan", "chat-b", "claimed", "device-removed-long-ago"),
       turn("waiting", "chat-c", "requested", null),
-      turn("ended", "chat-d", "finished", owner.originId)
+      turn("ended", "chat-d", "finished", owner.originId),
+      // Left open more than the longest run the app allows.
+      turn("forgotten", "chat-e", "claimed", owner.originId, new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString())
     ].join("\n"));
     const running = await storage.hubOps().runningTurnsByConversation();
     assert.deepEqual([...running.entries()], [["chat-a", [{ messageId: "ask-live", participantId: "taylor" }]]]);

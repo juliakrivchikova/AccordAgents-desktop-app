@@ -39,6 +39,9 @@ const WAITERS_MAX = 256;
 const WAITERS_PER_DEVICE_MAX = 4;
 /** The newest messages read for a chat's live progress (its running rows). */
 const LIVE_PROGRESS_WINDOW = 40;
+/** At most this many live runs of a chat whose message is beyond the newest
+ *  ones are read by id for each live poll. */
+const LIVE_PROGRESS_FAR_RUNS_MAX = 8;
 /** Chats whose newest messages are held between phone requests. */
 const OPENED_CACHE_MAX = 4;
 /** A body this large or larger is compressed for a phone that accepts it. */
@@ -255,6 +258,8 @@ export class HubPhoneApi {
       const row = this.rowCache.get(summary.id);
       return !row || row.updatedAt !== summary.updatedAt || feed.lastChange(summary.id) > row.seq;
     }).map((summary) => summary.id));
+    // Rows served this once and not kept (see below).
+    const builtUncached = new Map<string, MobileChatListItem>();
     if (stale.size > 0) {
       const machineNames = await this.options.machineNames().catch(() => new Map<string, string>());
       const catalog = await this.catalog();
@@ -272,22 +277,41 @@ export class HubPhoneApi {
       // Chats where a turn is asked for or under way: their turns in
       // progress are read wherever they are in the chat, not only among its
       // newest messages.
+      // A row built on a failed read of the turns in progress is served once
+      // and not kept: kept, it said a running turn was over until the chat
+      // changed again.
+      let turnsReadFailed = false;
+      const unsettled = new Set<string>();
       const openTurns = await this.options.store.hubOps().runningTurnsByConversation()
-        .catch(() => new Map<string, Array<{ messageId: string; participantId: string }>>());
+        .catch(() => {
+          turnsReadFailed = true;
+          return new Map<string, Array<{ messageId: string; participantId: string }>>();
+        });
       const built = await buildMobileChatList(this.options.store, {
         roleLabels: new Map(Object.entries(catalog?.roles ?? {})),
         machineNames,
         pendingCardsFor: (conversationId, conversation) => whole
           ? phoneCards(byChat.get(conversationId) ?? [], conversation, machineNames) : undefined,
         runningFromMessages: true,
-        pendingMessagesFor: async (conversationId) => openTurns.has(conversationId)
-          ? this.options.store.listPendingTurnMessages(conversationId, openTurns.get(conversationId) ?? [])
-          : undefined,
+        pendingMessagesFor: async (conversationId) => {
+          if (!openTurns.has(conversationId)) return undefined;
+          try {
+            return await this.options.store.listPendingTurnMessages(conversationId, openTurns.get(conversationId) ?? []);
+          } catch {
+            unsettled.add(conversationId);
+            return undefined;
+          }
+        },
         summaries,
         include: (summary: ConversationSummary) => stale.has(summary.id) && include(summary)
       });
       const updatedAt = new Map(listed.map((summary) => [summary.id, summary.updatedAt]));
       for (const row of built) {
+        if (turnsReadFailed || unsettled.has(row.id)) {
+          this.rowCache.delete(row.id);
+          builtUncached.set(row.id, row);
+          continue;
+        }
         this.rowCache.set(row.id, {
           seq,
           updatedAt: updatedAt.get(row.id) ?? row.updatedAt,
@@ -296,9 +320,11 @@ export class HubPhoneApi {
       }
     }
     const chats = listed.flatMap((summary) => {
-      const row = this.rowCache.get(summary.id)?.row;
+      const row = builtUncached.get(summary.id) ?? this.rowCache.get(summary.id)?.row;
       return row ? [row] : [];
     });
+    // A list holding a row built on a failed read is not kept either.
+    if (builtUncached.size > 0) return chats;
     if (this.listCache.size > 16) this.listCache = new Map();
     this.listCache.set(key, { seq, chats });
     return chats;
@@ -435,7 +461,21 @@ export class HubPhoneApi {
     if (typeof conversationId !== "string") return conversationId;
     const opened = await this.openedRecent(conversationId, LIVE_PROGRESS_WINDOW);
     if (!opened || opened.conversation.kind !== "chat") return { status: 404, body: { ok: false, error: PHONE_ERROR_CHAT_NOT_FOUND } };
-    const events = liveTimelineEvents(opened.conversation, this.options.progress.forConversation(conversationId));
+    const runs = this.options.progress.forConversation(conversationId);
+    // A long turn's message can be far above the newest messages: its live
+    // text still has to reach the phone, so the message of each run with
+    // live progress is read by id when the newest messages do not hold it.
+    const held = new Set(opened.conversation.messages.map((message) => message.id));
+    const missing = [...new Set(runs.map((run) => run.agentProgress?.messageId)
+      .filter((id): id is string => typeof id === "string" && Boolean(id) && !held.has(id)))].slice(0, LIVE_PROGRESS_FAR_RUNS_MAX);
+    const far: ChatMessage[] = [];
+    for (const messageId of missing) {
+      const read = await this.options.store.listConversationMessages({ conversationId, aroundMessageId: messageId, limit: 1 }).catch(() => undefined);
+      const message = read?.messages.find((item) => item.id === messageId);
+      if (message) far.push(message);
+    }
+    const conversation = far.length > 0 ? { ...opened.conversation, messages: [...far, ...opened.conversation.messages] } : opened.conversation;
+    const events = liveTimelineEvents(conversation, runs);
     return { status: 200, body: { ok: true, type: "mobile.timeline.events", conversationId, events, live: true } };
   }
 
