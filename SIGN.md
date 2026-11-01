@@ -230,7 +230,9 @@ its phone app. Everything else runs in the `Windows release` workflow
    its archive, launches it and keeps it as an artifact. `Publish` then waits.
 2. On the Windows PC, within 30 days (the run keeps the unsigned app that
    long), with the GitHub CLI signed in as the User, the reviewer of
-   `windows-signing`: in a clean clone checked out at the tag, `npm ci
+   `windows-signing`: in a clean clone checked out at the tag, at a short path
+   such as `C:\src\AccordAgents-release` (signtool cannot open paths longer
+   than 260 characters, and the app's deepest file is about 120 below it), `npm ci
    --ignore-scripts` (no dependency's install script runs on the PC that holds
    the certificate session), then sign in to SimplySign Desktop and run `npm
    run sign:windows-x64 -- --run <run id>` (the Release run's notice prints the

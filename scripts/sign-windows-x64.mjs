@@ -308,6 +308,12 @@ async function signRun(runId, repo) {
   if (!existsSync(mainExe)) {
     fail(`The run's unsigned app has no ${path.relative(rootDir, mainExe)}.`);
   }
+  // signtool cannot open a file whose path is longer than Windows' 260
+  // characters, and the installer build nests the app a little deeper.
+  const longest = binaries(appDir).reduce((found, file) => (file.length > found.length ? file : found), "");
+  if (longest.length > 230) {
+    fail(`${longest} is ${longest.length} characters long, too long for signtool. Clone the repository into a shorter folder, such as C:\\src\\AccordAgents-release, and run this again.`);
+  }
 
   // windows-sign only logs a failed hook, and Squirrel then packs the file as
   // it is, so the hook also lists what it could not sign.
