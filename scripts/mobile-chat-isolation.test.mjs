@@ -54,6 +54,16 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
     };
     const shown = () => evaluate(`({ title: document.getElementById("chat-title").textContent,
       body: document.getElementById("message-list").textContent })`);
+    // A fresh start opens on New chat, not on the chat open last (the User,
+    // 2026-11-01): its menu button opens the chats, and the chat is opened
+    // from the list again.
+    const reopenAfterStart = async id => {
+      await until('Boolean(globalThis.AccordAgentsMobile) && !document.getElementById("new-chat-screen").hidden');
+      await app.click("#new-chat-close");
+      await until(`document.querySelector("#chats-screen").classList.contains("is-active") &&
+        Array.from(document.querySelectorAll(".mobile-chat-row")).some(row => row.textContent.includes(${JSON.stringify("Chat ")} + ${JSON.stringify(id)}))`);
+      await evaluate(`Array.from(document.querySelectorAll(".mobile-chat-row")).find(row => row.textContent.includes(${JSON.stringify("Chat " + id)})).click()`);
+    };
     await pairPage(app, { hub, siteOrigin: origin });
     await until("document.querySelectorAll('.mobile-chat-row').length === 2");
     await ingest(batch("A", [event("a", "ONLY_CHAT_A")]));
@@ -106,7 +116,8 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
       hub.setGate(() => held);
       try {
         await app.send("Page.reload", { ignoreCache: true });
-        await until('Boolean(globalThis.AccordAgentsMobile) && document.getElementById("message-list").textContent.includes("CACHED_STARTUP_PROGRESS")');
+        await reopenAfterStart("A");
+        await until('document.getElementById("message-list").textContent.includes("CACHED_STARTUP_PROGRESS")');
         await app.click('.message-row[data-streamable="1"]');
         await until('!document.getElementById("stream-view").hidden');
         assert.ok(await evaluate('document.getElementById("stream-body").textContent.includes("CACHED_STARTUP_PROGRESS")'));
@@ -116,7 +127,8 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
         hub.setGate(undefined);
         release();
         await app.send("Page.reload", { ignoreCache: true });
-        await until('Boolean(globalThis.AccordAgentsMobile) && document.getElementById("message-list").textContent.includes("CACHED_STARTUP_PROGRESS")');
+        await reopenAfterStart("A");
+        await until('document.getElementById("message-list").textContent.includes("CACHED_STARTUP_PROGRESS")');
         await ingest(batch("A", [{ ...pending, status: "done" }]));
       }
     });
@@ -220,7 +232,7 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
       assert.equal((await shown()).body, "", "late render restored a chat after Back");
     });
 
-    await t.test("reloading the same chat preserves its open stream, but navigation closes it", async () => {
+    await t.test("a fresh start leaves the chat and its open stream; the chat opened again shows its own rows", async () => {
       const live = { ...event("reload-a", "ONLY_CHAT_A reload stream"), status: "pending", runId: "reload-run-a" };
       await ingest(batch("A", [live]));
       await select("A");
@@ -228,9 +240,10 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
       await app.click('.message-row[data-streamable="1"]');
       await until('!document.getElementById("stream-view").hidden');
       await app.send("Page.reload", { ignoreCache: true });
-      await until('Boolean(globalThis.AccordAgentsMobile) && document.getElementById("message-list").textContent.includes("reload stream")');
-      assert.equal(await evaluate('document.getElementById("stream-view").hidden'), false);
-      assert.ok(await evaluate('document.getElementById("stream-body").textContent.includes("ONLY_CHAT_A reload stream")'));
+      await reopenAfterStart("A");
+      await until('document.getElementById("message-list").textContent.includes("reload stream")');
+      assert.equal(await evaluate('document.getElementById("stream-view").hidden'), true, "the stream is not reopened by itself");
+      assert.equal((await shown()).title, "Chat A");
       await select("B");
       await until('document.getElementById("message-list").textContent.includes("ONLY_CHAT_B")');
       assert.equal(await evaluate('document.getElementById("stream-view").hidden'), true);
@@ -303,7 +316,8 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
       // Old/unlabelled packets must not take ownership from the open chat.
       assert.equal(await ingest(batch(undefined, [event("unlabelled", "UNLABELLED_PACKET")])), 0);
       await app.send("Page.reload", { ignoreCache: true });
-      await until("Boolean(globalThis.AccordAgentsMobile) && document.querySelectorAll('.mobile-chat-row').length === 2");
+      await reopenAfterStart("A");
+      await until("document.querySelectorAll('.mobile-chat-row').length === 2");
       for (const id of ["A", "B"]) {
         await select(id);
         await until(`document.getElementById("message-list").textContent.includes(${JSON.stringify("ONLY_CHAT_" + id)})`);

@@ -29,6 +29,14 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.equal(manifest.theme_color, "#eceef2");
   assert.equal(manifest.icons[0].src, "assets/accordagents-mark.png");
   assert.ok(icon.size > 0);
+  // iOS takes the home screen icon from apple-touch-icon only: an opaque
+  // 180px PNG, or the installed app shows a grey letter.
+  const shellHtml = await readFile(path.join(repoRoot, "dist/mobile/index.html"), "utf8");
+  assert.match(shellHtml, /<link rel="apple-touch-icon" href="apple-touch-icon\.png" \/>/);
+  const touchIcon = await readFile(path.join(repoRoot, "dist/mobile/apple-touch-icon.png"));
+  assert.equal(touchIcon.subarray(1, 4).toString("latin1"), "PNG");
+  assert.deepEqual([touchIcon.readUInt32BE(16), touchIcon.readUInt32BE(20)], [180, 180], "180 by 180");
+  assert.equal(touchIcon[25], 2, "colour type 2: RGB without alpha, so iOS has nothing to fill black");
   for (const asset of ["./index.html", "./mobile-app.css?v=", "./mobile-app.js?v=", "./manifest.webmanifest"]) {
     assert.ok(worker.includes(asset), `service worker must precache ${asset}`);
   }

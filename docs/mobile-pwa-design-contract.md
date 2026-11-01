@@ -33,6 +33,49 @@ nothing is worse than none. The "Search chats" button stays and filters the list
 the phone already holds (title, last sender, last message) without asking the
 desktop. The header geometry is otherwise the handoff's.
 
+Since 2026-10-29 the phone does start chats (New chat, as the computer's), and
+since 2026-11-01 the header's button is search again: see "Start screen, New
+chat and search" below.
+
+## Start screen, New chat and search (2026-11-01)
+
+Decided by the User on 2026-11-01, after Claude's app:
+
+- A fresh start of the app opens on New chat, not on the chat or tab that was
+  open last. Coming back to the app while it is still running is not a start
+  and keeps its place. A launch that says where to go — a tapped notification,
+  a pairing code — goes there instead. A phone paired for one chat cannot start
+  chats and still opens on that chat.
+- New chat has no bar and no back or cancel control: the round menu button at
+  its top left opens the chats (the Chats tab, leaving any open chat), and the
+  bar is there.
+- The bar's round button beside Chats · Activity · Settings is New chat (it was
+  search). Inside a chat it is there too, under the composer.
+- Search is the icon in the Chats header, so it is reachable only where the
+  chats are listed; it filters what the phone holds, as before. Searching the
+  messages inside chats is a separate, later change.
+- The chat list's rows carry no avatars: the title, the last line and when.
+- Started without a connection (or on a server error), New chat says the
+  server could not be reached and reads the computer's offer again by itself,
+  with growing pauses up to a minute while it is on screen, in front and
+  online, and at once when the phone comes back online or in front. An older
+  server's refusal is not asked again. Left up untouched for more than five
+  minutes, New chat reads the offer again on coming back; once something on
+  it was touched, the offer on screen stays as it was. A phone taken off the
+  server is not held on New chat: the chats screen says it was removed and how
+  to pair again.
+- The installed app's home screen icon is the Mac app's icon (iOS reads
+  `apple-touch-icon`, not the manifest, and drew a grey letter without it). iOS
+  keeps the icon an app was added with: only an app added again shows it.
+
+## Members button in the chat header (2026-11-01)
+
+Decided by the User on 2026-11-01 (option B of the mockup): the chat's title
+opened the members sheet, but nothing on screen said so. The header now ends
+with a button showing people and how many members the chat has; it opens the
+same sheet, and the title still does too. It takes the header spacer's place;
+the send log's button, when there, sits before it.
+
 ## Dark appearance
 
 Decided by the User on 2026-09-15 (PWA polish round): the PWA follows the phone's
@@ -67,6 +110,9 @@ remembered across launches, and a folded header shows how many chats it holds
 and the unread dot when one of them has news. While a search is open the headers
 are plain labels and every match is shown.
 
+The chat list's rows have carried no avatars since 2026-11-01; members' avatars
+are on their messages and in the members sheet.
+
 ## Bottom bar, Activity and Settings (2026-09-19)
 
 Decided by the User on 2026-09-19: the phone gets a bottom bar, option B of the
@@ -76,6 +122,9 @@ screens of a paired phone, and it steps aside while a choice opened from
 Activity is on screen and while the chat search is open. The Chats header no
 longer carries the search button; the bar's button opens the chat search,
 switching to Chats first when another tab is open.
+
+Since 2026-11-01 the round button is New chat and search is back in the Chats
+header (see "Start screen, New chat and search").
 
 **Inside a chat (2026-09-20).** The 2026-09-19 decision had the bar gone inside
 a chat. The User changed it the next day, pointing at Slack: in a chat the bar
@@ -87,8 +136,8 @@ to the bar, and the bar is hidden exactly while the composer holds focus (the
 same test the height tracker uses for the keyboard, so the two cannot disagree).
 A reader who was at the latest message stays there when the bar comes and goes.
 A tab tapped inside a chat leaves the chat for that screen, the way the back
-button does, and leaves the chat's dialogs closed behind it; so does the bar's
-search button, because it searches the chat list. The chat's own dialogs — a
+button does, and leaves the chat's dialogs closed behind it. (Since 2026-11-01
+the bar's round button there is New chat, which leaves the chat too.) The chat's own dialogs — a
 picture at full size, the members sheet — take the bar with them while they are
 open, as the opened choice does on Activity; the live-reply view does not,
 because it is a screen of the chat rather than a dialog.
