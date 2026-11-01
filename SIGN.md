@@ -234,7 +234,8 @@ its phone app. Everything else runs in the `Windows release` workflow
    such as `C:\src\AccordAgents-release` (signtool cannot open paths longer
    than 260 characters, and the app's deepest file is about 120 below it), `npm ci
    --ignore-scripts` (no dependency's install script runs on the PC that holds
-   the certificate session), then sign in to SimplySign Desktop and run `npm
+   the certificate session; the signing script sets up only the 7-Zip the
+   installer is packed with), then sign in to SimplySign Desktop and run `npm
    run sign:windows-x64 -- --run <run id>` (the Release run's notice prints the
    id). Before it signs anything it checks that the run is one of this
    workflow, started from `main` for a release, built the commit the tag names

@@ -296,6 +296,13 @@ async function signRun(runId, repo) {
   if (run("git", ["status", "--porcelain"]).trim()) {
     fail("Sign from a clean checkout.");
   }
+  // `npm ci --ignore-scripts` skips electron-winstaller's install script,
+  // which sets up the 7-Zip Squirrel packs the installer with; that package's
+  // code runs while the installer is made anyway.
+  const winstallerDir = path.dirname(require.resolve("electron-winstaller/package.json"));
+  if (!existsSync(path.join(winstallerDir, "vendor", "7z.exe"))) {
+    execFileSync(process.execPath, ["script/select-7z-arch.js"], { cwd: winstallerDir, env: envWithoutGitHubTokens(), stdio: "inherit" });
+  }
 
   // Signing starts from an empty out/: forge packs whatever app it finds
   // there. The artifact holds the app's folder itself.
