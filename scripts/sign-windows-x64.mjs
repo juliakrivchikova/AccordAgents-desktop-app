@@ -9,7 +9,7 @@
 // clean GitHub machine before anything is published.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
@@ -33,7 +33,7 @@ function fail(message) {
 function printHelp() {
   console.log(`Usage:
   npm run sign:windows-x64 -- --run <run id> [--repo owner/repo]
-  npm run sign:windows-x64 -- --check <Setup.exe> [<app folder>]
+  npm run sign:windows-x64 -- --check <Setup.exe> [<app folder> [<file>...]]
 
 --run signs the app that run's Build job kept. Run it from a clean checkout of
 the commit the run built (the release tag), after npm ci, with SimplySign
@@ -43,7 +43,8 @@ windows-signed-<run id> of the source repository (default: package.json
 repository); then the run's Publish job is approved, or re-run when it already
 ran without them.
 
---check only checks the signatures of an installer and, if given, an app folder.
+--check only checks the signatures of an installer and, if given, an app folder
+and more files that must carry the release certificate.
 `);
 }
 
@@ -126,9 +127,11 @@ export function signatureProblems(entries, { thumbprint, ours, keptUnsigned }) {
   return problems;
 }
 
-function checkSignatures(setupPath, appDir) {
-  const ours = appDir ? [path.join(appDir, `${productName()}.exe`), setupPath] : [setupPath];
-  const problems = signatureProblems(readSignatures([...(appDir ? binaries(appDir) : []), setupPath]), {
+// `others` are more files that must carry our signature, such as the Update.exe
+// and the launcher Squirrel installs next to the app's folder.
+function checkSignatures(setupPath, appDir, others = []) {
+  const ours = [...(appDir ? [path.join(appDir, `${productName()}.exe`)] : []), setupPath, ...others];
+  const problems = signatureProblems(readSignatures([...(appDir ? binaries(appDir) : []), setupPath, ...others]), {
     thumbprint: certificateThumbprint(),
     ours,
     keptUnsigned: require(hookModulePath).keptUnsigned
@@ -143,20 +146,46 @@ function viewRun(repo, runId) {
   return JSON.parse(run("gh", ["run", "view", runId, "--repo", repo, "--json", "jobs,url"]));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function downloadArtifact(repo, runId, name, dir) {
+  try {
+    run("gh", ["run", "download", runId, "--repo", repo, "--name", name, "--dir", dir]);
+  } catch {
+    fail(`Could not download ${name} of run ${runId}. A run keeps its build for 30 days; after that, start a new Windows release run.`);
+  }
+}
+
 function downloadBuildInfo(repo, runId) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "accordagents-build-info-"));
   try {
-    run("gh", ["run", "download", runId, "--repo", repo, "--name", "windows-build-info", "--dir", dir]);
+    downloadArtifact(repo, runId, "windows-build-info", dir);
     return JSON.parse(readFileSync(path.join(dir, "build.json"), "utf8"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
+function pendingSignings(repo, runId) {
+  return JSON.parse(run("gh", ["api", `repos/${repo}/actions/runs/${runId}/pending_deployments`]))
+    .filter(({ environment }) => environment.name === signingEnvironment);
+}
+
+// GitHub lets several drafts share a tag name, and gh picks one of them.
+function draftIds(repo, draft) {
+  return JSON.parse(run("gh", ["api", `repos/${repo}/releases?per_page=100`, "--jq",
+    `[.[] | select(.draft and .tag_name == "${draft}") | .id]`]));
+}
+
 function uploadDraft(repo, runId, runUrl, files) {
   const draft = `windows-signed-${runId}`;
-  const exists = spawnSync("gh", ["release", "view", draft, "--repo", repo], { stdio: "ignore" }).status === 0;
-  if (exists) {
+  const ids = draftIds(repo, draft);
+  if (ids.length > 1) {
+    fail(`${repo} has ${ids.length} drafts named ${draft}; remove all but one and run this again.`);
+  }
+  if (ids.length === 1) {
     runInherited("gh", ["release", "upload", draft, ...files, "--repo", repo, "--clobber"]);
   } else {
     runInherited("gh", [
@@ -170,35 +199,50 @@ function uploadDraft(repo, runId, runUrl, files) {
   return draft;
 }
 
+function approve(repo, runId, runUrl, pending) {
+  const args = ["api", "--method", "POST", `repos/${repo}/actions/runs/${runId}/pending_deployments`,
+    "-f", "state=approved", "-f", "comment=Signed on the Windows PC."];
+  for (const { environment } of pending) {
+    args.push("-F", `environment_ids[]=${environment.id}`);
+  }
+  try {
+    run("gh", args);
+  } catch {
+    fail(`The signed files are uploaded, but approving the ${publishJobName} job failed.
+Approve it in GitHub (Review deployments) as a reviewer of ${signingEnvironment}: ${runUrl}`);
+  }
+  console.log(`Approved the ${publishJobName} job.`);
+}
+
 // The Publish job waits in the windows-signing environment until it is
-// approved, which only a required reviewer of that environment can do; where
-// the environment has no reviewers it has already failed for want of the
-// draft, and is re-run instead.
-function continueRun(repo, runId, runUrl) {
-  const pending = JSON.parse(run("gh", ["api", `repos/${repo}/actions/runs/${runId}/pending_deployments`]))
-    .filter(({ environment }) => environment.name === signingEnvironment);
+// approved. It has already failed for want of the draft where the environment
+// has no reviewers, or where it was approved before the files were signed; a
+// re-run then waits at the environment again.
+async function continueRun(repo, runId, runUrl) {
+  const pending = pendingSignings(repo, runId);
   if (pending.length > 0) {
-    const args = ["api", "--method", "POST", `repos/${repo}/actions/runs/${runId}/pending_deployments`,
-      "-f", "state=approved", "-f", "comment=Signed on the Windows PC."];
-    for (const { environment } of pending) {
-      args.push("-F", `environment_ids[]=${environment.id}`);
-    }
-    try {
-      run("gh", args);
-    } catch {
-      fail(`The signed files are uploaded, but this GitHub account cannot approve the ${publishJobName} job.
-Approve it in GitHub (Review deployments) as a reviewer of windows-signing: ${runUrl}`);
-    }
-    console.log(`Approved the ${publishJobName} job.`);
+    approve(repo, runId, runUrl, pending);
     return;
   }
   const publishJob = viewRun(repo, runId).jobs.find((job) => job.name === publishJobName);
-  if (publishJob?.status === "completed" && publishJob.conclusion !== "success") {
-    runInherited("gh", ["run", "rerun", runId, "--repo", repo, "--failed"]);
-    console.log(`Re-ran the ${publishJobName} job, which ran before the files were signed.`);
+  if (publishJob?.status !== "completed" || publishJob.conclusion === "success") {
+    console.log(`The ${publishJobName} job is ${publishJob?.status ?? "missing"}; if it fails without the signed files, run this again.`);
     return;
   }
-  console.log(`The ${publishJobName} job is ${publishJob?.status ?? "missing"}; if it fails without the signed files, run this again.`);
+  runInherited("gh", ["run", "rerun", runId, "--repo", repo, "--failed"]);
+  console.log(`Re-ran the ${publishJobName} job, which ran before the files were signed.`);
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    await sleep(10_000);
+    const waiting = pendingSignings(repo, runId);
+    if (waiting.length > 0) {
+      approve(repo, runId, runUrl, waiting);
+      return;
+    }
+    if (viewRun(repo, runId).jobs.find((job) => job.name === publishJobName)?.status === "in_progress") {
+      return;
+    }
+  }
+  console.log(`The re-run ${publishJobName} job has not started yet; approve it in GitHub if it waits for review: ${runUrl}`);
 }
 
 async function signRun(runId, repo) {
@@ -206,16 +250,28 @@ async function signRun(runId, repo) {
     fail("Windows files are signed on Windows.");
   }
   const thumbprint = certificateThumbprint();
-  // The certificate signs whatever the run built, so only a run of this
-  // repository's own workflow file qualifies, whatever it is named.
-  const runPath = run("gh", ["api", `repos/${repo}/actions/runs/${runId}`, "--jq", ".path"]).trim();
-  if (runPath !== workflowPath) {
-    fail(`Run ${runId} of ${repo} is a run of ${runPath || "an unknown workflow"}, not of ${workflowPath}.`);
+
+  // Everything that can refuse is asked before the certificate signs
+  // anything. It signs whatever the run built, so only a run of this
+  // repository's own workflow file started by hand qualifies, and a release
+  // only from main, where the Release workflow starts it.
+  const meta = JSON.parse(run("gh", ["api", `repos/${repo}/actions/runs/${runId}`, "--jq", "{path, event, head_branch}"]));
+  if (meta.path !== workflowPath || meta.event !== "workflow_dispatch") {
+    fail(`Run ${runId} of ${repo} is a ${meta.event} run of ${meta.path || "an unknown workflow"}, not a run of ${workflowPath} started by hand.`);
   }
   const runInfo = viewRun(repo, runId);
   const build = runInfo.jobs.find((job) => job.name === buildJobName);
   if (build?.conclusion !== "success") {
     fail(`The run's ${buildJobName} job has not succeeded (${build ? `${build.status} ${build.conclusion}` : "missing"}): ${runInfo.url}`);
+  }
+  if (runInfo.jobs.find((job) => job.name === publishJobName)?.conclusion === "success") {
+    fail(`The run's ${publishJobName} job has already succeeded; there is nothing to sign: ${runInfo.url}`);
+  }
+  if (run("gh", ["api", `repos/${repo}`, "--jq", ".permissions.push"]).trim() !== "true") {
+    fail(`This GitHub account cannot write to ${repo}, where the signed files go. Sign in as the User (gh auth login) and run this again.`);
+  }
+  if (pendingSignings(repo, runId).some((deployment) => !deployment.current_user_can_approve)) {
+    fail(`This GitHub account is not a reviewer of ${signingEnvironment}, so it could not let the run go on. Sign in as the User (gh auth login) and run this again.`);
   }
 
   // Squirrel takes the package's name, version and description from this
@@ -227,41 +283,61 @@ async function signRun(runId, repo) {
     fail(`Run ${runId} built ${info.commit}; check out that commit first (this checkout is at ${head}).`);
   }
   if (info.tag) {
+    if (meta.head_branch !== "main") {
+      fail(`Run ${runId} builds the release ${info.tag} but was started from ${meta.head_branch}, not main.`);
+    }
     const tagged = spawnSync("git", ["rev-parse", "--verify", "--quiet", `refs/tags/${info.tag}^{commit}`], { cwd: rootDir, encoding: "utf8" }).stdout.trim();
     if (tagged !== head) {
       fail(`Run ${runId} built ${info.tag}, but the tag ${info.tag} here ${tagged ? `names ${tagged}` : "is missing"}, not ${head}.`);
     }
   } else {
-    console.log(`Run ${runId} is a trial build of ${head}: its files are checked and installed, never published.`);
+    console.log(`Run ${runId} is a trial build of ${meta.head_branch} at ${head}: its files are checked and installed, never published.`);
   }
   if (run("git", ["status", "--porcelain"]).trim()) {
     fail("Sign from a clean checkout.");
   }
 
-  // Signing starts from an empty out/: forge packs whatever app it finds there.
+  // Signing starts from an empty out/: forge packs whatever app it finds
+  // there. The artifact holds the app's folder itself.
+  const outDir = path.join(rootDir, "out");
   const appDir = packagedAppDir();
-  rmSync(path.join(rootDir, "out"), { recursive: true, force: true });
-  console.log(`==> Downloading the unsigned app of ${runInfo.url}`);
-  run("gh", ["run", "download", runId, "--repo", repo, "--name", "windows-unsigned-app", "--dir", appDir]);
-
-  console.log("\n==> Signing the app");
-  process.env.WINDOWS_SIGN_CERT_SHA1 = thumbprint;
-  // windows-sign only logs a failed hook; signing the app's executable first
-  // turns a closed SimplySign session into a clear error.
   const mainExe = path.join(appDir, `${productName()}.exe`);
-  try {
-    require(hookModulePath)(mainExe);
-  } catch {
-    fail("Signing failed. Open SimplySign Desktop, sign in with the code from its phone app, and run this again.");
+  rmSync(outDir, { recursive: true, force: true });
+  console.log(`==> Downloading the unsigned app of ${runInfo.url}`);
+  downloadArtifact(repo, runId, "windows-unsigned-app", outDir);
+  if (!existsSync(mainExe)) {
+    fail(`The run's unsigned app has no ${path.relative(rootDir, mainExe)}.`);
   }
-  const { sign } = await import("@electron/windows-sign");
-  await sign({ appDirectory: appDir, hookModulePath });
 
-  console.log("\n==> Packing and signing the installer");
-  runInherited(process.execPath, [
-    require.resolve("@electron-forge/cli/dist/electron-forge.js"),
-    "make", "--skip-package", "--platform=win32", "--arch=x64"
-  ], { ...envWithoutGitHubTokens(), WINDOWS_SIGN_CERT_SHA1: thumbprint });
+  // windows-sign only logs a failed hook, and Squirrel then packs the file as
+  // it is, so the hook also lists what it could not sign.
+  const failureDir = mkdtempSync(path.join(os.tmpdir(), "accordagents-sign-failures-"));
+  const failureLog = path.join(failureDir, "failures.txt");
+  writeFileSync(failureLog, "");
+  Object.assign(process.env, { WINDOWS_SIGN_CERT_SHA1: thumbprint, WINDOWS_SIGN_FAILURES: failureLog });
+  try {
+    console.log("\n==> Signing the app");
+    // The app's own executable first: a closed SimplySign session stops here.
+    try {
+      require(hookModulePath)(mainExe);
+    } catch {
+      fail("Signing failed, with signtool's error above. If SimplySign Desktop is not signed in, sign in with the code from its phone app and run this again.");
+    }
+    const { sign } = await import("@electron/windows-sign");
+    await sign({ appDirectory: appDir, hookModulePath });
+
+    console.log("\n==> Packing and signing the installer");
+    runInherited(process.execPath, [
+      require.resolve("@electron-forge/cli/dist/electron-forge.js"),
+      "make", "--skip-package", "--platform=win32", "--arch=x64"
+    ], envWithoutGitHubTokens());
+    const unsigned = readFileSync(failureLog, "utf8").split("\n").filter(Boolean);
+    if (unsigned.length > 0) {
+      fail(`These files could not be signed (signtool's errors are above):\n${unsigned.map((file) => `- ${file}`).join("\n")}`);
+    }
+  } finally {
+    rmSync(failureDir, { recursive: true, force: true });
+  }
   const files = prepareReleaseFiles(info.version);
 
   console.log("\n==> Checking the signatures");
@@ -271,7 +347,7 @@ async function signRun(runId, repo) {
   // RELEASES.sha256 goes along for the Publish job's checks only; it is never published.
   const releasesChecksum = `${files.update.find((file) => path.basename(file) === "RELEASES")}.sha256`;
   const draft = uploadDraft(repo, runId, runInfo.url, [...files.update, ...files.installer, releasesChecksum]);
-  continueRun(repo, runId, runInfo.url);
+  await continueRun(repo, runId, runInfo.url);
   console.log(`\nThe signed files are in the draft ${draft} of ${repo}; the run goes on: ${runInfo.url}`);
 }
 
@@ -281,8 +357,9 @@ async function main() {
     printHelp();
     return;
   }
-  if (args[0] === "--check" && (args.length === 2 || args.length === 3)) {
-    checkSignatures(path.resolve(args[1]), args[2] && path.resolve(args[2]));
+  if (args[0] === "--check" && args.length >= 2) {
+    const [setup, appDir, ...others] = args.slice(1).map((arg) => path.resolve(arg));
+    checkSignatures(setup, appDir, others);
     return;
   }
   const runIndex = args.indexOf("--run");
