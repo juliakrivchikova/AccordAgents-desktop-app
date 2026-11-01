@@ -23,7 +23,7 @@ import { HUB_PAIRING_KEY, attachApp, launchChrome, member, pairPage, serveMobile
 const SITE_PORT = 8181;
 const CDP_PORT = 9349;
 const OLD_PAIRING_KEY = "accordagents.mobile.pairing.v1";
-const OLD_NOTICE = "This phone was paired the old way. Pair it again from Settings on your Mac.";
+const OLD_NOTICE = "This phone was paired the old way. Pair it again from Settings on your computer.";
 
 test("pairing credentials leave the URL; an old pairing is cleared and said once", { timeout: 180_000 }, async () => {
   const hub = await startMobileHub();
@@ -66,7 +66,7 @@ test("pairing credentials leave the URL; an old pairing is cleared and said once
       assert.ok(!now.href.includes(secret), `${secret} must leave the URL: ${now.href}`);
     }
     assert.ok(now.href.includes("qa=1"), "non-credential params survive the scrub: " + now.href);
-    assert.deepEqual(now.notices.map((text) => text.startsWith("Scan the code from your Mac")), [true], `the phone asks to be paired: ${JSON.stringify(now.notices)}`);
+    assert.deepEqual(now.notices.map((text) => text.startsWith("Scan the code from your computer")), [true], `the phone asks to be paired: ${JSON.stringify(now.notices)}`);
     assert.equal(now.dock, false, "and shows no bar before it is");
 
     // --- an old pairing held on the phone: one plain notice, data cleared ---

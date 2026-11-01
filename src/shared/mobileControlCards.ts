@@ -124,7 +124,7 @@ export function controlCardFromApproval(conversationId: string, approval: ChatAp
         options: [],
         status: "answered",
         waiting: true,
-        outcome: `Waiting for running turns to finish and for ${base.machineName ? base.machineName : "your Mac"} to apply it, then ${handles} ${one ? "leaves" : "leave"} this chat.`
+        outcome: `Waiting for running turns to finish and for ${base.machineName ? base.machineName : "your computer"} to apply it, then ${handles} ${one ? "leaves" : "leave"} this chat.`
       };
     }
     return {
@@ -152,7 +152,7 @@ export function controlCardFromApproval(conversationId: string, approval: ChatAp
       status: "answered",
       waiting: true,
       // The device the asking member runs on applies it (Д2).
-      outcome: `Waiting for ${(approval as { machineName?: string }).machineName || "your Mac"} to apply it.`,
+      outcome: `Waiting for ${(approval as { machineName?: string }).machineName || "your computer"} to apply it.`,
       createdAt: approval.createdAt
     };
   }

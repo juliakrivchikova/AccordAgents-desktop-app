@@ -126,7 +126,7 @@ test("a member removal reaches the phone in the desktop card's words, and stays 
   assert.equal(waiting.status, "answered");
   assert.equal(waiting.waiting, true);
   assert.equal(waiting.title, "Removal approved");
-  assert.equal(waiting.outcome, "Waiting for running turns to finish and for your Mac to apply it, then @gera and @taylor leave this chat.");
+  assert.equal(waiting.outcome, "Waiting for running turns to finish and for your computer to apply it, then @gera and @taylor leave this chat.");
   assert.deepEqual(waiting.options, []);
   assert.equal(waiting.draftOverride, undefined, "nothing to answer");
 
@@ -141,7 +141,7 @@ test("a member removal reaches the phone in the desktop card's words, and stays 
   assert.equal(approvalHasCard(removalApproval({ status: "denied" })), false);
 });
 
-test("a machine member's approved addition waits visibly until the Mac adds the member", () => {
+test("a machine member's approved addition waits visibly until the desktop adds the member", () => {
   const addition = { ...removalApproval(), id: "addition-1", status: "auto-applied" as const, summary: "Add @helper", memberAdditionQueuedAt: "2026-10-26T09:01:00.000Z",
     request: { operations: [{ type: "add_new_participant_to_chat" as const, participant: { handle: "helper", roleConfigId: "generic-participant", kind: "claude-code" as const } }] } };
   assert.equal(approvalHasCard(addition), true);
@@ -150,7 +150,7 @@ test("a machine member's approved addition waits visibly until the Mac adds the 
   assert.deepEqual(card.options, []);
   assert.equal(card.title, "Addition approved");
   assert.equal(card.summary, "Add @helper");
-  assert.equal(card.outcome, "Waiting for your Mac to apply it.");
+  assert.equal(card.outcome, "Waiting for your computer to apply it.");
 });
 
 function hubCard(patch: Partial<HubCard>): HubCard {
@@ -176,7 +176,7 @@ test("a card on the User's server is the phone's card: answerable while it waits
   const roster = controlCardFromHubCard(hubCard({ cardId: removal.id, cardKind: "roster", card: { approval: removal }, state: "answered", answer: { approve: true },
     answeredAt: "2026-10-28T09:01:00.000Z" }));
   assert.deepEqual([roster?.title, roster?.waiting, roster?.outcome], ["Removal approved", true,
-    "Waiting for running turns to finish and for your Mac to apply it, then @gera and @taylor leave this chat."], "an approved removal waits as the desktop's does");
+    "Waiting for running turns to finish and for your computer to apply it, then @gera and @taylor leave this chat."], "an approved removal waits as the desktop's does");
   // A member on a machine asked it: that machine makes it (Д2), and is named.
   const onMachine = controlCardFromHubCard(hubCard({ cardId: removal.id, cardKind: "roster", participantId: "drew-id", card: { approval: removal },
     state: "answered", answer: { approve: true } }), undefined, (participantId) => participantId === "drew-id" ? "Box" : undefined);

@@ -804,7 +804,7 @@ export class HubServer {
     if (!verifyHubText(accepted.publicKeyDerBase64, hubPhoneEnrollmentSigningText(accepted), request.signature)) throw refused("The pairing request's signature does not verify.");
     const hub = this.options.storage.hub();
     const stored = await hub.phoneInviteByTokenHash(tokenHash);
-    const gone = new HubRequestError(410, "This pairing code was already used or has expired. Make a new one on your Mac.");
+    const gone = new HubRequestError(410, "This pairing code was already used or has expired. Make a new one on your computer.");
     if (!stored || stored.cancelledAt) throw gone;
     const answer = (enrollmentJson: string, enrollmentSignature: string): HubPhoneEnrollResponse => {
       const kept = JSON.parse(enrollmentJson) as HubPhoneEnrollment;

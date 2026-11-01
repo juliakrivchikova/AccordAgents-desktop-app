@@ -2315,8 +2315,8 @@
 
   function hubPairingFailure(error) {
     const status = error && typeof error.status === "number" ? error.status : 0;
-    if (status === 410) return { status: "failed", message: "This pairing code was already used or has expired. Make a new one on your Mac (Settings → Device Pairing)." };
-    if (status === 404 || status === 405) return { status: "outdated", message: "Update AccordAgents on your Mac, then pair this phone again." };
+    if (status === 410) return { status: "failed", message: "This pairing code was already used or has expired. Make a new one on your computer (Settings → Device Pairing)." };
+    if (status === 404 || status === 405) return { status: "outdated", message: "Update AccordAgents on your computer, then pair this phone again." };
     if (error && error.unreachable) return { status: "failed", message: "Could not reach your server. Check the phone's connection and scan the code again." };
     if (status === 400 || status === 429) {
       // The server says what was wrong (a clock that is off, too many tries).
@@ -2419,12 +2419,12 @@
       const probe = api.createHubDeviceClient({ hubUrl: invite.hubUrl, identity: function () { return Promise.reject(new Error("not paired")); } });
       const health = await probe.health();
       if (!health || !(Number(health.protocol) >= HUB_PHONE_PROTOCOL)) {
-        hubPairingState = { status: "outdated", message: "Update AccordAgents on your Mac, then pair this phone again.", replacing: replacing };
+        hubPairingState = { status: "outdated", message: "Update AccordAgents on your computer, then pair this phone again.", replacing: replacing };
         await render();
         return false;
       }
       if (health.hubId !== invite.hubId) {
-        hubPairingState = { status: "failed", message: "This code is for another server. Make a new one on your Mac.", replacing: replacing };
+        hubPairingState = { status: "failed", message: "This code is for another server. Make a new one on your computer.", replacing: replacing };
         await render();
         return false;
       }
@@ -2722,10 +2722,10 @@
       let said = "";
       try { said = String(JSON.parse(error.body || "{}").error || ""); } catch { said = ""; }
       if (error.status === 401 && said.indexOf("not on the hub's roster") >= 0) {
-        // Taken off the server's devices (removed on the Mac): said as the
+        // Taken off the server's devices (removed on the desktop): said as the
         // reads say it, and nothing more is offered (see scheduleOutboxRetry).
-        hubPairingState = { status: "revoked", message: "This phone was removed from your server. Pair it again from your Mac." };
-        return { cause: "revoked", reason: "This phone was removed from your server, so it cannot send. Pair it again from your Mac." };
+        hubPairingState = { status: "revoked", message: "This phone was removed from your server. Pair it again from your computer." };
+        return { cause: "revoked", reason: "This phone was removed from your server, so it cannot send. Pair it again from your computer." };
       }
       return { cause: "http", reason: "Your server answered " + error.status + (said ? ": " + said : ".") };
     }
@@ -3248,7 +3248,7 @@
     newChatProject = "";
     newChatReading = true;
     closeNewChatPickers();
-    renderNewChat("Reading what your Mac offers…");
+    renderNewChat("Reading what your computer offers…");
     screen.hidden = false;
     applyDock();
     let answer;
@@ -3257,9 +3257,9 @@
     } catch (error) {
       if (token !== newChatToken) return;
       newChatReading = false;
-      // A server from before New chat on the phone: it updates once the Mac does.
+      // A server from before New chat on the phone: it updates once the desktop does.
       renderNewChat(error && error.serverStatus === 404
-        ? "Your server does not start chats from the phone yet. It will once AccordAgents on your Mac has updated."
+        ? "Your server does not start chats from the phone yet. It will once AccordAgents on your computer has updated."
         : "Could not reach your server: " + (error && error.message ? error.message : String(error)));
       return;
     }
@@ -3844,10 +3844,10 @@
     } catch (error) {
       const status = error && typeof error.status === "number" ? error.status : 0;
       if (status === 401 && String(error && error.body || "").indexOf("not on the hub's roster") >= 0) {
-        // Taken off the server's devices (removed on the Mac): this phone
+        // Taken off the server's devices (removed on the desktop): this phone
         // reads nothing more and says so. Any other refusal (a clock that is
         // off) is not a removal.
-        hubPairingState = { status: "revoked", message: "This phone was removed from your server. Pair it again from your Mac." };
+        hubPairingState = { status: "revoked", message: "This phone was removed from your server. Pair it again from your computer." };
         // Paired again after this, the phone gets a new key: the one the
         // User took off is not trusted again.
         void hubIdentity().then(function (identity) { return writeMetaRecord(HUB_REVOKED_IDENTITY_META_KEY, { deviceId: identity.deviceId }); }).catch(function () {});
@@ -5838,7 +5838,7 @@
       const empty = document.createElement("div");
       empty.className = "mobile-empty";
       if (!canSync(loadPairing())) {
-        empty.textContent = "Scan the code from your Mac (Settings → Device Pairing) to connect this phone.";
+        empty.textContent = "Scan the code from your computer (Settings → Device Pairing) to connect this phone.";
       } else {
         empty.textContent = "";
         const line = document.createElement("div");
@@ -6212,7 +6212,7 @@
       void pairWithServer(invite);
     };
     if (!current) {
-      notice.append("Pair this phone with the server at ", host(invite.hubUrl), "? Continue only if you made this code on your Mac just now.");
+      notice.append("Pair this phone with the server at ", host(invite.hubUrl), "? Continue only if you made this code on your computer just now.");
       actions.append(button("pairing-submit", "Pair", confirm), button("pairing-cancel", "Cancel", dismiss));
     } else if (isSameServer(current, invite)) {
       notice.append("Pair this phone again with your server at ", host(invite.hubUrl), "? Its chats stay as they are.");
@@ -8135,8 +8135,8 @@
         : "Nothing failed to send.";
     list.append(settingsGroup("This phone", [
       hubPaired
-        ? settingsRow("Paired with your server", "Chats, replies and alerts come from your own server, with or without your Mac.")
-        : settingsRow("Not paired", "Scan the code from your Mac (Settings → Device Pairing) to connect this phone."),
+        ? settingsRow("Paired with your server", "Chats, replies and alerts come from your own server, with or without your computer.")
+        : settingsRow("Not paired", "Scan the code from your computer (Settings → Device Pairing) to connect this phone."),
       ...(hubPaired ? [settingsRow("Send log", sendLogSub, settingsButton("View", function () { void openSendLog(); }))] : [])
     ]));
 
@@ -8326,9 +8326,9 @@
       // A phone that held a pairing made the old way is told why it has to
       // pair again, once and plainly; the old pairing itself is gone.
       if (oldPairingCleared()) {
-        renderUnpairedNotice("This phone was paired the old way. Pair it again from Settings on your Mac.", "old-pairing");
+        renderUnpairedNotice("This phone was paired the old way. Pair it again from Settings on your computer.", "old-pairing");
       } else {
-        renderUnpairedNotice("Scan the code from your Mac (Settings → Device Pairing) to connect this phone. " +
+        renderUnpairedNotice("Scan the code from your computer (Settings → Device Pairing) to connect this phone. " +
           "An installed app has its own storage, so it pairs separately from the browser.");
       }
       showScreen("chats");
@@ -9032,7 +9032,7 @@
         // Not on the server yet (offline): nobody can start it, so the row
         // says what the message itself says.
         const content = !ask.sent ? "Waiting to sync…"
-          : !member.homeMachineId ? "Waiting for your Mac to start it…"
+          : !member.homeMachineId ? "Waiting for your computer to start it…"
           : machine && machine.waking ? "Waking " + where + "…" : "Waiting for " + where + "…";
         rows.push({
           rowKey: "routed\0" + runId,
@@ -10625,7 +10625,7 @@
     if (client) {
       void client.health().then(function (health) {
         if (!(Number(health && health.protocol) >= HUB_PHONE_PROTOCOL)) {
-          hubPairingState = { status: "outdated", message: "Update AccordAgents on your Mac: its server runs an older program than this app." };
+          hubPairingState = { status: "outdated", message: "Update AccordAgents on your computer: its server runs an older program than this app." };
           return render();
         }
         return undefined;

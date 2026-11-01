@@ -4277,7 +4277,7 @@ test("a member whose machine is not one of the server's devices says so instead 
     machines: [{ id: "m-old", name: "Old box" }] });
   const offered = await service.newChatOptions([]);
   assert.equal(offered?.members.find((member) => member.configId === homed.id)?.machineUnavailable,
-    "Its machine is not connected to your server yet. Open Settings → Machines on your Mac.");
+    "Its machine is not connected to your server yet. Open Settings → Machines on your computer.");
 });
 
 test("with no cloud machine set up, a Cloud run member is offered and says why it cannot join from the phone", { timeout: 10_000 }, async () => {
@@ -4285,7 +4285,7 @@ test("with no cloud machine set up, a Cloud run member is offered and says why i
   const { service } = testService({ agents: installedChatAgents(), settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], chatParticipantConfigs: [cloud] } });
   const offered = await service.newChatOptions([]);
   const remote = offered?.members.find((member) => member.configId === cloud.id);
-  assert.equal(remote?.machineUnavailable, "Its cloud machine is not set up yet. Set it up in Settings → AWS on your Mac.");
+  assert.equal(remote?.machineUnavailable, "Its cloud machine is not set up yet. Set it up in Settings → AWS on your computer.");
   assert.equal(remote?.unavailable, undefined);
   assert.ok(remote?.participant.cloudRun, "shown as a Cloud run member");
 });

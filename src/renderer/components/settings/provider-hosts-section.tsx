@@ -264,7 +264,7 @@ export function ProviderHostEditorDialog(props: {
                 onChange={(event) => setDraft((current) => ({ ...current, baseUrl: event.target.value }))}
               />
             </FormRow>
-            <FormRow label="API key" hint={host?.hasApiKey && draft.apiKey === undefined ? "A key is stored. Paste a new one to replace it." : "Stored encrypted on this Mac; never shown again."}>
+            <FormRow label="API key" hint={host?.hasApiKey && draft.apiKey === undefined ? "A key is stored. Paste a new one to replace it." : "Stored encrypted on this computer; never shown again."}>
               <Input
                 type="password"
                 value={draft.apiKey ?? ""}

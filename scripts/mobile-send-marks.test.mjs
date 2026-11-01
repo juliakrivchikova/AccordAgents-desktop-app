@@ -197,8 +197,8 @@ test("a message is faded until the server takes it, then shown as any message, a
 test("a Stop on a member still waiting for its device stops the turn on the server; two messages with the same words stay two", { timeout: 120_000 }, async (t) => {
   const { hub, app, send, ownRows, entryOf } = await phone(t, { site: 8337, cdp: 9477 });
   await send("@drew do not start this");
-  // Nobody takes the turn: the member's row waits for the Mac, with Stop.
-  await app.waitFor(`(() => { const row = document.querySelector('#message-list .message-row[data-row-key^="routed"]'); return Boolean(row && /Waiting for your Mac to start it/.test(row.innerText) && row.querySelector(".message-stop")); })()`,
+  // Nobody takes the turn: the member's row waits for the desktop, with Stop.
+  await app.waitFor(`(() => { const row = document.querySelector('#message-list .message-row[data-row-key^="routed"]'); return Boolean(row && /Waiting for your computer to start it/.test(row.innerText) && row.querySelector(".message-stop")); })()`,
     "the member's waiting row, with Stop");
   const entry = await entryOf("@drew do not start this");
   await app.evaluate(`document.querySelector('#message-list .message-row[data-row-key^="routed"] .message-stop').click()`);
@@ -241,7 +241,7 @@ test("a phone taken off the server's devices says so and stops offering what it 
   await send("after removal");
   await app.waitFor(`AccordAgentsMobile.listSendFailures().then((rows) => rows.some((row) => row.cause === "revoked"))`, "the removal in the send log");
   const failure = (await app.evaluate(`AccordAgentsMobile.listSendFailures()`)).find((row) => row.cause === "revoked");
-  assert.equal(failure.reason, "This phone was removed from your server, so it cannot send. Pair it again from your Mac.");
+  assert.equal(failure.reason, "This phone was removed from your server, so it cannot send. Pair it again from your computer.");
   const entry = await entryOf("after removal");
   assert.equal(entry.status, "queued", "kept on the phone: it is the User's, and goes if the phone is paired again");
   const carrying = () => hub.requests.filter((request) => request.path === "/v3/ops" && (request.ops || []).some((op) => op.opId === entry.eventId)).length;

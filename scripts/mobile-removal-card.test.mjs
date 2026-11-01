@@ -79,7 +79,7 @@ test("a removal card asks in the desktop's words, and waits visibly once approve
     }
     assert.ok(waiting?.waiting, "the approved removal stays visible while it waits");
     assert.match(waiting.text, /Removal approved/);
-    assert.match(waiting.text, /Waiting for running turns to finish and for your Mac to apply it, then @gera leaves this chat\./);
+    assert.match(waiting.text, /Waiting for running turns to finish and for your computer to apply it, then @gera leaves this chat\./);
     assert.deepEqual(waiting.options, [], "nothing left to answer");
     const pendingCount = await app.evaluate(`document.querySelectorAll('#control-cards .control-card:not(.control-card-waiting)').length`);
     assert.equal(pendingCount, 0, "it is not offered as a question");
