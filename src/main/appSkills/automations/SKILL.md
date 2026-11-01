@@ -2,19 +2,23 @@
 name: automations
 visibility: public
 description: >
-  Set up a scheduled script in AccordAgents: a small node or bash program the
+  Set up a scheduled task in AccordAgents: a small node or bash script the
   app runs on a schedule (every N minutes, or a cron time in the User's time
   zone) that checks something cheaply and wakes chat members only when it
   finds work, by posting into an existing chat. Use when the User asks for
   something to happen automatically or repeatedly: "every weekday at 17:00",
   "check X every minute", "watch this channel and react", "remind me", "poll
-  this API". Proposes the script with app_scripts_request_change; the User
+  this API". Proposes the task with app_scripts_request_change; the User
   approves it on a card and enters any keys there.
 ---
 
-# Automations: scheduled scripts
+# Automations: scheduled tasks
 
-A scheduled script is the cheap part of an automation. It runs on a schedule
+The User calls these **scheduled tasks** (Settings → Scheduled Tasks). When you
+talk to the User, say "scheduled task" or "task"; "script" is only the code
+inside it and the tool names.
+
+A scheduled task is the cheap part of an automation. Its script runs on a schedule
 without any agent, checks whatever it needs (an API, a Slack channel, a file),
 and only when it finds something it posts a message into an existing chat that
 mentions the members who should act. That message starts those members exactly
@@ -34,7 +38,8 @@ to outside events. If the User wants something done once, now, just do it.
 - A script may mention only the members listed in `members`. Mentions wake
   them; a message without mentions wakes nobody (use that for plain notes).
 - At most `maxWakeupsPerHour` messages with mentions per rolling hour (default
-  6). Extra ones are held for the User to release or discard in Settings.
+  6). Extra ones are held for the User to release or discard in Settings →
+  Scheduled Tasks.
 - Key values (API tokens) are entered by the User on the card. You never see
   them. Name them in `secretNames`; the script reads them from its environment.
 - The script runs with the User's full permissions on that computer. Keep it
@@ -71,7 +76,7 @@ Call `app_scripts_request_change` with:
   code). `delete`, `enable`, `disable` take only `scriptId`. Every one of these
   needs the User's approval. `run_now` starts an approved, switched-on script
   once without a card, for testing.
-- After proposing, tell the User in one or two sentences what the script does
+- After proposing, tell the User in one or two sentences what the task does
   and that they approve it on the card (and enter the keys there, if any).
 
 Use `app_scripts_list` to see scripts and their status, and

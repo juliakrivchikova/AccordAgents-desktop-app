@@ -68,6 +68,15 @@ test("what the User sees calls scheduled scripts Scheduled Tasks", async () => {
   assert.deepEqual(hits, []);
 });
 
+test("the automations skill the User sees, and members follow, says scheduled task", async () => {
+  const skill = await readFile(path.join(repoRoot, "src/main/appSkills/automations/SKILL.md"), "utf8");
+  const description = skill.split("\n---")[0];
+  assert.doesNotMatch(description, /scheduled script|Proposes the script/);
+  assert.match(description, /Set up a scheduled task in AccordAgents/);
+  assert.match(skill, /When you\s+talk to the User, say "scheduled task" or "task"/);
+  assert.doesNotMatch(skill, /tell the User in one or two sentences what the script does/);
+});
+
 test("the settings menu and page title read Scheduled Tasks", async () => {
   const sidebar = await readFile(path.join(repoRoot, "src/renderer/components/settings/settings-sidebar.tsx"), "utf8");
   const view = await readFile(path.join(repoRoot, "src/renderer/components/settings/settings-view.tsx"), "utf8");
