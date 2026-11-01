@@ -19,9 +19,13 @@
   const ACTIVE_CONVERSATION_KEY = "accordagents.mobile.activeConversationId.v1";
   const OPEN_THREAD_KEY = "accordagents.mobile.openThreadRootId.v1";
   // W-M: which run's reply is being watched. Session-scoped like the open
-  // thread: reopening the app should land you back in the chat, not in a
-  // stream for a run that finished while you were away.
+  // thread: a phone that reopens on its chat (one paired for that chat only;
+  // the others start on New chat) lands in the chat, not in a stream for a
+  // run that finished while you were away.
   const OPEN_STREAM_KEY = "accordagents.mobile.openStreamRunId.v1";
+  // Set just before the reload that follows a pairing with another server,
+  // read once by the launch it starts (takePairedReload).
+  const PAIRED_RELOAD_KEY = "accordagents.mobile.pairedReload.v1";
   const SYNC_WAIT_KEY = "accordagents.mobile.syncWaitStartedAt.v1";
   const CHAT_LIST_KEY = "accordagents.mobile.chatList.v1";
   const TERMINAL_RUNS_KEY = "accordagents.mobile.terminalRuns.v1";
@@ -2193,6 +2197,12 @@
     return Boolean(pairing && pairing.hub === true && pairing.hubUrl);
   }
 
+  /** A phone paired for every chat starts new ones, as the computer does; one
+   *  paired for a single chat has only that chat. */
+  function canStartChats(pairing) {
+    return isHubPairing(pairing) && !pairing.conversationId;
+  }
+
   /** The hub pairing in the shape the rest of the app reads a pairing in. */
   function hubPairingAsPairing(hub) {
     return {
@@ -2472,7 +2482,10 @@
       hubPairingState = undefined;
       recordRelayDebug({ event: "hub-paired", deviceId: identity.deviceId, switched: switching });
       if (switching) {
-        // Nothing this page holds in memory belongs to the new server.
+        // Nothing this page holds in memory belongs to the new server. The
+        // launch after it is the pairing's, not a fresh start: it lands on
+        // the chats, as a pairing with the same server does.
+        try { sessionStorage.setItem(PAIRED_RELOAD_KEY, "1"); } catch { /* lands on New chat instead */ }
         globalThis.location.reload();
         return true;
       }
@@ -2709,13 +2722,20 @@
     throw new Error("This phone cannot send a " + String(entry.kind || "change") + ".");
   }
 
+  /** What a failed reach said, without the client's own "could not be
+   *  reached" opening: the phone says that part in its own words. */
+  function unreachableDetail(error) {
+    const message = error && typeof error === "object" ? String(error.message || "") : String(error || "");
+    return message.replace(/^The server could not be reached:\s*/, "");
+  }
+
   /** Why an attempt failed, in words, and of which kind: no connection, a
    *  timeout, an error answer of the server's, or this phone's own. */
   function sendFailureOf(error) {
     if (error && error.timedOut) return { cause: "timeout", reason: "Your server did not answer in time." };
     if (error && error.name === "TimeoutError") return { cause: "timeout", reason: "Your server did not answer in time." };
     if (error && error.unreachable) {
-      const detail = String(error.message || "").replace(/^The server could not be reached:\s*/, "");
+      const detail = unreachableDetail(error);
       return { cause: "network", reason: "Could not reach your server" + (detail ? " (" + detail + ")" : "") + "." };
     }
     if (error && typeof error.status === "number") {
@@ -3075,17 +3095,16 @@
 
   /** The way to the log from the chat's header, beside where it says whether
    *  the phone is connected: there while a send is failing, and after a
-   *  refusal the User has not looked at. Its place is the header's spacer
-   *  otherwise, so the title does not move. */
+   *  refusal the User has not looked at. It sits before the members button
+   *  at the header's end. */
   function renderSendLogButton() {
     const button = document.getElementById("send-log-button");
-    const spacer = document.getElementById("send-log-spacer");
     if (!button) return;
     const summary = owedSummary();
     const unseenRefusal = Boolean(sendLogNewestRefusalAt) && sendLogNewestRefusalAt > sendLogSeenAt();
     const shown = isHubPairing(loadPairing()) && (summary.failing > 0 || unseenRefusal);
     button.hidden = !shown;
-    if (spacer) spacer.hidden = shown;
+    syncHeaderSpacer();
     button.setAttribute("aria-label", summary.failing > 0
       ? "Send log: " + (summary.failing === 1 ? "something you sent has" : summary.failing + " things you sent have") + " not reached your server yet"
       : "Send log: your server did not take something you sent");
@@ -3234,21 +3253,45 @@
   const NEW_CHAT_REJECTED_PREFIX = "Not attached: ";
   let newChatToken = 0;
   let newChatStarting = false;
+  // The last read of the offer failed for want of a connection: read again
+  // once the phone is back (retryNewChatOffer). Not after a refusal or an
+  // older server, which reading again would not change.
+  let newChatUnreachable = false;
+  // While New chat is up and its read keeps failing that way, it is tried
+  // again by itself, each pause twice the last, up to a minute.
+  const NEW_CHAT_RETRY_FIRST_MS = 5_000;
+  const NEW_CHAT_RETRY_MAX_MS = 60_000;
+  let newChatRetryTimer;
+  let newChatRetryDelay = 0;
+  // A read again by itself is under way: the screen keeps saying what it said.
+  let newChatReadingAgain = false;
+  // When the offer on screen was read, to read it again once it is old.
+  let newChatOfferAt = 0;
+  const NEW_CHAT_OFFER_FRESH_MS = 5 * 60_000;
 
   const NEW_CHAT_FOLDER_ICON = ["m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"];
   const NEW_CHAT_NO_PROJECT_ICON = ["M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z", "m5.7 5.7 12.6 12.6"];
   const NEW_CHAT_CHECK_ICON = ["M20 6 9 17l-5-5"];
 
-  async function openNewChat() {
+  async function openNewChat(options) {
     const screen = document.getElementById("new-chat-screen");
     if (!screen) return;
+    // A read again by itself keeps what the screen says until the answer
+    // differs: the note does not flicker, nor is it spoken again, on each try.
+    const again = Boolean(options && options.again);
     const token = ++newChatToken;
     newChatOffer = undefined;
     newChatChosen = new Set();
     newChatProject = "";
     newChatReading = true;
+    newChatReadingAgain = again;
+    newChatUnreachable = false;
+    if (!again) {
+      clearTimeout(newChatRetryTimer);
+      newChatRetryDelay = 0;
+    }
     closeNewChatPickers();
-    renderNewChat("Reading what your Mac offers…");
+    if (!again) renderNewChat("Reading what your Mac offers…");
     screen.hidden = false;
     applyDock();
     let answer;
@@ -3257,22 +3300,110 @@
     } catch (error) {
       if (token !== newChatToken) return;
       newChatReading = false;
+      newChatReadingAgain = false;
+      // Taken off the server: the chats screen says so and how to pair again,
+      // which a line about not reaching the server would not.
+      if (hubPairingState && hubPairingState.status === "revoked") {
+        closeNewChat();
+        void render();
+        return;
+      }
+      newChatUnreachable = Boolean(error && (error.unavailable || error.serverStatus >= 500));
+      if (newChatUnreachable) scheduleNewChatRetry();
       // A server from before New chat on the phone: it updates once the Mac does.
       renderNewChat(error && error.serverStatus === 404
         ? "Your server does not start chats from the phone yet. It will once AccordAgents on your Mac has updated."
-        : "Could not reach your server: " + (error && error.message ? error.message : String(error)));
+        : "Could not reach your server: " + unreachableDetail(error));
       return;
     }
     if (token !== newChatToken) return;
     newChatReading = false;
+    newChatReadingAgain = false;
+    clearTimeout(newChatRetryTimer);
+    newChatRetryDelay = 0;
+    applyNewChatAnswer(answer);
+  }
+
+  /** What the computer offers, from the server's answer, on screen. */
+  function applyNewChatAnswer(answer) {
+    newChatOfferAt = performance.now();
     newChatOffer = answer && answer.options ? { options: answer.options, roles: answer.roles || {}, machines: answer.machines || {} } : undefined;
     // As on the computer: the project it last worked in, or none.
     newChatProject = newChatOffer && newChatOffer.options.defaultProject ? newChatOffer.options.defaultProject : "";
     renderNewChat(answer && answer.unavailable ? answer.unavailable : "");
   }
 
+  /** Nothing on New chat was touched yet: no member, no other project, no
+   *  words, no picture, no list open. */
+  function newChatUntouched() {
+    if (!newChatOffer) return false;
+    const input = document.getElementById("new-chat-input");
+    return newChatChosen.size === 0 && newChatProject === (newChatOffer.options.defaultProject || "") &&
+      newChatAttachments.length === 0 && newChatPreparing === 0 && !(input && input.value.trim()) &&
+      !document.querySelector(".new-chat-picker:not([hidden])");
+  }
+
+  /** New chat still up without what the computer offers because the phone
+   *  had no connection (the app started on it offline): read again once the
+   *  phone is back, in front or after a read of the chats got through. */
+  function retryNewChatOffer() {
+    const screen = document.getElementById("new-chat-screen");
+    if (!screen || screen.hidden || !newChatUnreachable || newChatOffer || newChatReading || newChatStarting) return;
+    // Not from the background or with no network: the next try waits, and
+    // coming back to the front or online reads it sooner (resyncAfterForeground).
+    if (document.hidden || navigator.onLine === false) {
+      scheduleNewChatRetry();
+      return;
+    }
+    void openNewChat({ again: true });
+  }
+
+  /** New chat resting as the first screen for long: its offer (members,
+   *  where they run, projects) is read again on coming back, but only while
+   *  nothing on it was touched, so no pick is lost; the offer on screen stays
+   *  usable while it is read, and stays as it was if the read fails. */
+  function refreshStaleNewChatOffer() {
+    const screen = document.getElementById("new-chat-screen");
+    if (!screen || screen.hidden || newChatReading || newChatStarting || !newChatUntouched()) return;
+    if (performance.now() - newChatOfferAt < NEW_CHAT_OFFER_FRESH_MS) return;
+    const token = newChatToken;
+    newChatOfferAt = performance.now();
+    serverPhoneGet("/v1/phone/new-chat", {}).then(function (answer) {
+      if (token !== newChatToken || newChatReading || newChatStarting || !newChatUntouched()) return;
+      applyNewChatAnswer(answer);
+    }, function () { return undefined; });
+  }
+
+  function newChatAfterServerAnswered() {
+    retryNewChatOffer();
+    refreshStaleNewChatOffer();
+  }
+
+  function scheduleNewChatRetry() {
+    clearTimeout(newChatRetryTimer);
+    newChatRetryDelay = Math.min(newChatRetryDelay ? newChatRetryDelay * 2 : NEW_CHAT_RETRY_FIRST_MS, NEW_CHAT_RETRY_MAX_MS);
+    newChatRetryTimer = setTimeout(retryNewChatOffer, newChatRetryDelay);
+  }
+
+  /** In place of the chats stands a pairing prompt, or the note that says how
+   *  to pair or that the phone was removed: nothing over it or beside it
+   *  offers what only a paired phone can do (New chat, search). */
+  function clearForPairingNote() {
+    const searchToggle = document.getElementById("chat-search-toggle");
+    if (searchToggle) searchToggle.hidden = true;
+    const newChatButton = document.getElementById("new-chat-button");
+    if (newChatButton) newChatButton.hidden = true;
+    closeChatSearch();
+    const screen = document.getElementById("new-chat-screen");
+    if (screen && !screen.hidden) closeNewChat();
+  }
+
   function closeNewChat() {
     newChatToken += 1;
+    // Left, New chat reads nothing more until it is opened again, and then
+    // from the first pause.
+    clearTimeout(newChatRetryTimer);
+    newChatRetryDelay = 0;
     closeNewChatMentions();
     closeNewChatPickers();
     const screen = document.getElementById("new-chat-screen");
@@ -3504,7 +3635,7 @@
     if (noteNode) {
       noteNode.textContent = shown || "";
       noteNode.hidden = !shown;
-      if (newChatReading && !offer) noteNode.dataset.tone = "info";
+      if (newChatReading && !newChatReadingAgain && !offer) noteNode.dataset.tone = "info";
       else delete noteNode.dataset.tone;
     }
     const hasMessage = Boolean(input && input.value.trim()) || newChatAttachments.length > 0;
@@ -3733,8 +3864,17 @@
     const start = document.getElementById("new-chat-start");
     const attach = document.getElementById("new-chat-attach");
     const imageInput = document.getElementById("new-chat-image-input");
-    button?.addEventListener("click", function () { void openNewChat(); });
-    close?.addEventListener("click", closeNewChat);
+    // The bar is under a chat's composer too: New chat from there leaves the
+    // chat, so what arrives in it while New chat is up is not taken as read.
+    button?.addEventListener("click", function () {
+      const leaving = Boolean(selectedConversationId());
+      leaveOpenChat();
+      void openNewChat();
+      if (leaving) void render();
+    });
+    // The menu button opens the chats, from wherever New chat was opened
+    // (the User, 2026-11-01): it is the way off this screen, not a cancel.
+    close?.addEventListener("click", function () { void switchHomeTab("chats"); });
     screen?.addEventListener("click", function (event) {
       if (event.target instanceof Element && event.target.closest("[data-new-chat-picker-close]")) closeNewChatPickers();
     });
@@ -4171,6 +4311,9 @@
             const status = error && typeof error === "object" ? error.serverStatus : undefined;
             if (status === 404 || status === 403 || status === 401) {
               serverReads = "no";
+              // Taken off the server: said in place of the chats at once, and
+              // New chat, the screen the app rests on, does not stay up.
+              if (hubPairingState && hubPairingState.status === "revoked") void render();
               return;
             }
             failures += 1;
@@ -5293,8 +5436,8 @@
     img.src = src;
     img.alt = "";
     img.decoding = "async";
-    // A hundred chat rows and eighty message rows are built at once; only
-    // the discs on screen need their picture now.
+    // Eighty message rows and a week of Activity rows are built at once;
+    // only the discs on screen need their picture now.
     img.loading = "lazy";
     return img;
   }
@@ -5812,13 +5955,7 @@
           snippet: chat.snippet,
           who: chat.who,
           running: chat.running,
-          updatedAt: chat.updatedAt,
-          participants: chat.participants,
-          // What each row's avatars are drawn from: a member's changed picture
-          // must repaint the row even when nothing else about the chat moved.
-          members: chatMembers(chat).map(function (member) {
-            return [member.handle, member.kind, member.avatarId || "", member.isAssistant === true];
-          })
+          updatedAt: chat.updatedAt
         };
       })
     });
@@ -5906,19 +6043,8 @@
         row.addEventListener("click", function () {
           openConversation(chat.id);
         });
-        const avatars = document.createElement("div");
-        avatars.className = "mobile-chat-avatars";
-        // A chat row that arrives without a participants array must not take
-        // the whole list down with it.
-        const chatParticipants = Array.isArray(chat.participants) ? chat.participants : [];
-        const participants = chatParticipants.length > 0 ? chatParticipants : [chat.title];
-        const rowMembers = chatMembers(chat);
-        participants.slice(0, 2).forEach(function (participant) {
-          const avatar = document.createElement("span");
-          avatar.className = "mobile-chat-avatar";
-          paintAvatar(avatar, avatarForLabel(rowMembers, participant), chat.id);
-          avatars.append(avatar);
-        });
+        // No avatars on a row (the User, 2026-11-01): the title, the last
+        // line and when.
         const copy = document.createElement("div");
         copy.className = "mobile-chat-copy";
         const titleLine = document.createElement("div");
@@ -5951,7 +6077,7 @@
         const when = document.createElement("div");
         when.className = "mobile-chat-time";
         when.textContent = relativeTime(chat.updatedAt);
-        row.append(avatars, copy, when);
+        row.append(copy, when);
         list.append(row);
       }
       container.append(title, list);
@@ -7141,11 +7267,14 @@
     dropCachedChatRows();
   }
 
-  /** One way to change home tab, from the bar and from search alike: an open
-   *  choice is left, the open chat is left (the bar is under the chat too, so
-   *  a tab can be tapped from inside one), the tab is remembered, and the
-   *  screen redrawn. */
+  /** One way to change home tab, from the bar and from New chat's menu button
+   *  alike: an open choice is left, the open chat is left (the bar is under
+   *  the chat too, so a tab can be tapped from inside one), the tab is
+   *  remembered, and the screen redrawn. */
   function switchHomeTab(tab) {
+    // Search belongs to the Chats header: left open on another tab it would
+    // keep the bar away with nothing on screen to close it.
+    if (tab !== "chats") closeChatSearch();
     closeNewChat();
     closeActivityItem();
     leaveOpenChat();
@@ -8310,6 +8439,7 @@
     if (hubPairingState && (hubPairingState.status === "confirm" || hubPairingState.replacing)) {
       // A code waiting for the User's yes, or a pairing that would replace
       // the one this phone has: in place of the chats.
+      clearForPairingNote();
       renderPairingPrompt(hubPairingState);
       showScreen("chats");
       return;
@@ -8317,12 +8447,14 @@
     if (hubPairingState && (!loadHubPairing() || hubPairingState.status === "revoked")) {
       // Pairing with the server, or why it did not work: in place of the
       // chats, with the code scanner to try again.
+      clearForPairingNote();
       renderUnpairedNotice(hubPairingState.status === "pairing" ? "Pairing with your server…" : hubPairingState.message,
         "hub-" + hubPairingState.status);
       showScreen("chats");
       return;
     }
     if (!loadPairing()) {
+      clearForPairingNote();
       // A phone that held a pairing made the old way is told why it has to
       // pair again, once and plainly; the old pairing itself is gone.
       if (oldPairingCleared()) {
@@ -8334,12 +8466,10 @@
       showScreen("chats");
       return;
     }
-    // A phone paired for every chat starts new ones, as the computer does.
+    const searchToggle = document.getElementById("chat-search-toggle");
+    if (searchToggle) searchToggle.hidden = false;
     const newChatButton = document.getElementById("new-chat-button");
-    if (newChatButton) {
-      const pairing = loadPairing();
-      newChatButton.hidden = !(isHubPairing(pairing) && !pairing.conversationId);
-    }
+    if (newChatButton) newChatButton.hidden = !canStartChats(loadPairing());
     // W5: offer the doorbell once paired. iOS only grants Notification
     // permission from a user gesture, so this is a visible button, shown only
     // while permission is still undecided.
@@ -8380,6 +8510,7 @@
     const openHomeTab = homeTab();
     showScreen(activeId ? "timeline" : openHomeTab);
     if (!activeId) {
+      renderMembersButton(undefined, undefined);
       // Reopening the same chat should land at the latest message again.
       lastScrolledConversationId = undefined;
       await renderHome(openHomeTab, revision);
@@ -8399,6 +8530,7 @@
     // The back arrows and the composer's placeholder go with the heading,
     // not after the reads.
     renderThreadHeader(openThreadRootId());
+    renderMembersButton(activeId, activeChat);
     // Looking at the chat is what reads it. A chat opened behind a locked
     // screen is not being looked at.
     if (!document.hidden) {
@@ -9530,18 +9662,45 @@
     return "Local · desktop";
   }
 
+  /** The header keeps the handoff's spacer (the shell contract checks it)
+   *  only while nothing sits at its end. With a chat open the members button
+   *  is always there, so in practice the spacer stays hidden. */
+  function syncHeaderSpacer() {
+    const spacer = document.getElementById("send-log-spacer");
+    if (!spacer) return;
+    const sendLog = document.getElementById("send-log-button");
+    const members = document.getElementById("chat-members-button");
+    spacer.hidden = Boolean(sendLog && !sendLog.hidden) || Boolean(members && !members.hidden);
+  }
+
+  /** The header's way to the members, with how many there are, whenever a
+   *  chat is open (the User, 2026-11-01): the title opens the same sheet, but
+   *  nothing on screen said so. The number is the sheet's own count. */
+  function renderMembersButton(conversationId, chat) {
+    const button = document.getElementById("chat-members-button");
+    if (!button) return;
+    const count = chat ? chatMembers(chat).length : 0;
+    const shown = Boolean(conversationId);
+    if (button.hidden === shown) button.hidden = !shown;
+    const number = document.getElementById("chat-members-count");
+    const text = count > 0 ? String(count) : "";
+    if (number && number.textContent !== text) number.textContent = text;
+    const label = count === 1 ? "Members: 1 member" : count > 0 ? "Members: " + count + " members" : "Members";
+    if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
+    syncHeaderSpacer();
+  }
+
   function renderMembersSheet(chat) {
     const sheet = document.getElementById("members-sheet");
     const list = document.getElementById("members-sheet-list");
     const title = document.getElementById("members-sheet-title");
-    const toggle = document.getElementById("chat-members-toggle");
     if (!sheet || !list) {
       return;
     }
     sheet.hidden = !membersSheetOpen;
     keepingReaderAtLatest(applyDock);
-    if (toggle) {
-      toggle.setAttribute("aria-expanded", membersSheetOpen ? "true" : "false");
+    for (const id of ["chat-members-toggle", "chat-members-button"]) {
+      document.getElementById(id)?.setAttribute("aria-expanded", membersSheetOpen ? "true" : "false");
     }
     if (!membersSheetOpen) {
       return;
@@ -9651,7 +9810,8 @@
     if (!toggle || !sheet) {
       return;
     }
-    toggle.addEventListener("click", function () {
+    // The title and the members button open the same sheet.
+    function toggleMembers() {
       if (!selectedConversationId()) {
         return;
       }
@@ -9660,7 +9820,9 @@
       } else {
         openMembersSheet();
       }
-    });
+    }
+    toggle.addEventListener("click", toggleMembers);
+    document.getElementById("chat-members-button")?.addEventListener("click", toggleMembers);
     close?.addEventListener("click", closeMembersSheet);
     // One handler on the list: rows are redrawn as members start and stop.
     document.getElementById("members-sheet-list")?.addEventListener("click", function (event) {
@@ -9866,8 +10028,10 @@
       }
       // Back in front: what was missed is read from the server, and what
       // this phone still owes it goes now, the pauses between tries over.
+      // Once the server answers again, New chat reads its offer if it has
+      // none or if it is old (newChatAfterServerAnswered).
       await retryOutboxNow().catch(function () { return undefined; });
-      await requestChatListViaRelay(pairing).catch(function () { return []; });
+      await requestChatListViaRelay(pairing).then(newChatAfterServerAnswered, function () { return []; });
       const openId = selectedConversationId();
       if (openId) await requestTimelineViaRelay(pairing, openId).catch(function () { return 0; });
       startServerChanges();
@@ -9903,6 +10067,7 @@
    *  happened across every chat. A chat can be one of many and a reply can be
    *  inside a thread, so the list is the one place that always holds it. */
   function openActivityFromNotification(list) {
+    closeChatSearch();
     closeNewChat();
     leaveOpenChat();
     setHomeTab("activity");
@@ -9990,15 +10155,28 @@
       const url = new URL(globalThis.location.href);
       const open = url.searchParams.get("open");
       if (!open || !open.trim()) {
-        return;
+        return false;
       }
       setOpenThreadRootId(undefined);
       localStorage.setItem(ACTIVE_CONVERSATION_KEY, open.trim());
       url.searchParams.delete("open");
       history.replaceState(null, "", url.pathname + (url.search || "") + (url.hash || ""));
+      return true;
     } catch {
-      return;
+      return false;
     }
+  }
+
+  /** The chat search closed and emptied; the list is redrawn by the caller. */
+  function closeChatSearch() {
+    const box = document.getElementById("chat-search");
+    const input = document.getElementById("chat-search-input");
+    if (box) box.hidden = true;
+    document.getElementById("chat-search-toggle")?.setAttribute("aria-expanded", "false");
+    const phone = document.querySelector(".mobile-phone");
+    if (phone) phone.dataset.searching = "0";
+    if (input) input.value = "";
+    chatSearchQuery = "";
   }
 
   function wireChatSearch() {
@@ -10010,31 +10188,22 @@
       return;
     }
     function setOpen(open) {
-      box.hidden = !open;
-      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      if (!open) {
+        closeChatSearch();
+        renderChatList();
+        return;
+      }
+      box.hidden = false;
+      toggle.setAttribute("aria-expanded", "true");
       // The bar steps aside while searching: with the keyboard up it would sit
       // on top of the results.
       const phone = document.querySelector(".mobile-phone");
-      if (phone) phone.dataset.searching = open ? "1" : "0";
-      if (open) {
-        input.focus();
-      } else {
-        input.value = "";
-        chatSearchQuery = "";
-        renderChatList();
-      }
+      if (phone) phone.dataset.searching = "1";
+      input.focus();
     }
-    // The search button lives in the bottom bar, so it can be tapped from
-    // Activity, Settings, or from inside a chat: it searches the chat list, so
-    // it goes there first. An open chat has to be part of that test — the
-    // remembered tab inside a chat is usually Chats already, and then the box
-    // would open on a screen the reader cannot see.
+    // The search button is in the Chats header (the User, 2026-11-01), so
+    // the list it searches is already on screen.
     toggle.addEventListener("click", function () {
-      if (selectedConversationId() || homeTab() !== "chats") {
-        void switchHomeTab("chats");
-        setOpen(true);
-        return;
-      }
       setOpen(box.hidden);
     });
     close?.addEventListener("click", function () {
@@ -10054,12 +10223,28 @@
     });
   }
 
+  /** Whether this launch is the reload a pairing with another server made;
+   *  the mark is used once. */
+  function takePairedReload() {
+    try {
+      const marked = sessionStorage.getItem(PAIRED_RELOAD_KEY) === "1";
+      sessionStorage.removeItem(PAIRED_RELOAD_KEY);
+      return marked;
+    } catch {
+      return false;
+    }
+  }
+
   async function init() {
     // Before anything is drawn: a pairing made the old way is cleared, so the
     // first screen already says why this phone has to pair again.
     await clearOldPairing().catch(function () { return false; });
-    readBootstrapFromLocation(globalThis.location);
-    adoptOpenConversationFromLocation();
+    // Read (and used up) whatever the launch is: a mark left behind must not
+    // make a later launch count as a pairing's.
+    const pairedReload = takePairedReload();
+    if (pairedReload) setHomeTab("chats");
+    const openedToPair = readBootstrapFromLocation(globalThis.location) || pairedReload;
+    const openedToChat = adoptOpenConversationFromLocation();
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("service-worker.js").catch(function () {
         return undefined;
@@ -10098,7 +10283,8 @@
     // cannot postMessage to a page that does not exist yet, so it says it in
     // the URL instead.
     const opening = new URLSearchParams(location.search);
-    if (opening.get("tab") === "activity") {
+    const openedToActivity = opening.get("tab") === "activity";
+    if (openedToActivity) {
       leaveOpenChat();
       setHomeTab("activity");
       const list = opening.get("list");
@@ -10106,6 +10292,16 @@
         setActivityTab(list);
       }
       history.replaceState(undefined, "", location.pathname);
+    }
+    // A fresh start opens on New chat (the User, 2026-11-01, after Claude's
+    // app), not on the chat or tab open last; its menu button opens the
+    // chats. A launch that says where to go (a tapped notification, a pairing
+    // code) goes there instead, and coming back to the app while it is still
+    // running is not a start: it keeps its place.
+    if (!openedToPair && !openedToChat && !openedToActivity && canStartChats(loadPairing())) {
+      leaveOpenChat();
+      setHomeTab("chats");
+      void openNewChat();
     }
     wireForegroundResync();
     document.getElementById("load-earlier")?.addEventListener("click", function () {
@@ -10639,6 +10835,9 @@
     try {
       await requestChatListViaRelay(pairing);
       await render("synced");
+      // The server answered: New chat, if it is still up without its offer
+      // because the first read found no connection, reads it now.
+      retryNewChatOffer();
       const conversationId = selectedConversationId();
       if (conversationId) {
         await requestTimelineViaRelay(pairing, conversationId);

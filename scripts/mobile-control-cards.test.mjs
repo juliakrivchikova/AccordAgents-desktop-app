@@ -228,9 +228,12 @@ test("a card published by the desktop is answered on the phone and survives a re
       "the card says it was allowed and waits to be applied", 20_000);
     t.diagnostic(`folded: ${folded.text.replace(/\n/g, " | ")}`);
 
-    // A reload must not lose it.
+    // A reload must not lose it. A fresh start opens on New chat (the User,
+    // 2026-11-01): the chat is opened again from the list, as she would.
     await app.send("Page.reload", {});
-    await sleep(2500);
+    await app.waitFor(`(() => { const screen = document.getElementById("new-chat-screen"); return Boolean(screen && !screen.hidden); })()`, "New chat after the reload", 20_000);
+    await app.evaluate(`document.getElementById("new-chat-close").click()`);
+    await openChat(app, CONVERSATION);
     let reloaded = null;
     for (let i = 0; i < 40 && !reloaded; i += 1) {
       reloaded = await cardText().catch(() => null);
