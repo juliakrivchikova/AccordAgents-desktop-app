@@ -166,4 +166,11 @@ test("a member whose CLI here is not signed in can be added to run on a machine 
     "a cloud member picked to run here needs this computer's CLI");
   const noRole = addableSavedParticipantConfigs({ ...settings, chatRoleConfigs: [] } as unknown as AppSettings, agents, new Set())[0];
   assert.ok(participantOptionInvalidReason(noRole, { cloudRun: { target: "aws" } }), "a broken member stays blocked wherever it runs");
+  // Moved off this computer, a member on a keyless or deleted provider would run as the built-in CLI.
+  for (const hostId of ["host-keyless", "host-deleted"]) {
+    const bound = { ...member, id: hostId, handle: hostId, hostId };
+    const hosts = [{ ...ZAI, id: "host-keyless", hasApiKey: false }];
+    const [option] = addableSavedParticipantConfigs({ ...settings, chatParticipantConfigs: [bound], cliProviderHosts: hosts } as unknown as AppSettings, agents, new Set());
+    assert.ok(participantOptionInvalidReason(option, { cloudRun: { target: "aws" } }), hostId);
+  }
 });

@@ -350,8 +350,12 @@ export function addableSavedParticipantConfigs(
     .filter((participant) => !normalizedExistingHandles.has(participant.handle.toLowerCase()))
     .map((config) => {
       const draft = chatParticipantConfigToDraft(config);
-      const configReason = validateChatParticipantDrafts([draft], settings.chatRoleConfigs, new Set(), settings.chatBehaviorRules);
-      const localCliReason = validateChatCliAgents([{ kind: draft.kind, hostId: draft.hostId }], agents, settings.providers, settings.cliProviderHosts);
+      const cliReason = validateChatCliAgents([{ kind: draft.kind, hostId: draft.hostId }], agents, settings.providers, settings.cliProviderHosts);
+      // A member on an added provider runs on this computer only, so its
+      // provider's problems hold wherever it is set to run.
+      const configReason = validateChatParticipantDrafts([draft], settings.chatRoleConfigs, new Set(), settings.chatBehaviorRules)
+        ?? (draft.hostId ? cliReason : undefined);
+      const localCliReason = draft.hostId ? undefined : cliReason;
       return {
         config,
         invalidReason: participantOptionInvalidReason({ config, configReason, localCliReason }),
