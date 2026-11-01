@@ -2522,6 +2522,10 @@ export interface ConversationMessageDelta {
   totalMessages: number;
   tailCount: number;
   removedIds: string[];
+  /** Whether any member's reply in the whole chat has not ended yet
+   *  (`isPendingReply`): the carried messages may not include it, and the
+   *  chat list shows the chat as working while one has not. */
+  replyPending?: boolean;
 }
 
 export interface ConversationUpdate extends Conversation {

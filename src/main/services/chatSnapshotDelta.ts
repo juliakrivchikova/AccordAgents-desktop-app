@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ChatMessage, Conversation, ConversationUpdate } from "../../shared/types";
+import { isPendingReply } from "../../shared/chatActiveRuns";
 import { CONVERSATION_UPDATE_TAIL_SIZE } from "../../shared/conversationUpdates";
 import type { SavedMessageRow } from "./storage";
 
@@ -83,7 +84,8 @@ export function buildConversationSnapshot(
     messageDelta: {
       totalMessages: rows.length,
       tailCount: tail.length,
-      removedIds: removedMessageIds
+      removedIds: removedMessageIds,
+      replyPending: rows.some((row) => isPendingReply(row.message))
     }
   };
   return { snapshot, rows, update, changedMessageIds, removedMessageIds };
