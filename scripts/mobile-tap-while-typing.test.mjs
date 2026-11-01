@@ -95,6 +95,13 @@ test("a tap above the composer while the keyboard is up lands the first time", {
     })()`);
     await app.send("Page.reload", {});
     await sleep(1500);
+    // A fresh start opens on New chat (the User, 2026-11-01): its menu
+    // button opens the chats, and the chat is opened from the list.
+    await waitFor(`Boolean(globalThis.AccordAgentsMobile) && !document.getElementById("new-chat-screen").hidden`, "New chat after the launch");
+    await evaluate(`document.getElementById("new-chat-close").click()`);
+    const row = `document.querySelector('.mobile-chat-row[data-conversation-id=${JSON.stringify(CHAT)}]')`;
+    await waitFor(`Boolean(${row})`, "the chat in the list");
+    await evaluate(`${row}.click()`);
     await waitFor(`Boolean(globalThis.AccordAgentsMobile && document.querySelector("#control-cards .control-card"))`, "the chat came up with its card");
   };
   // Which of a card's fields get focused from script, and how. A note opened

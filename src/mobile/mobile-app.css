@@ -309,12 +309,6 @@ button.mobile-chat-group-title:active {
   background: var(--s2);
 }
 
-.mobile-chat-avatars {
-  position: relative;
-  flex-shrink: 0;
-  display: flex;
-}
-
 .mobile-chat-avatar {
   width: 38px;
   height: 38px;
@@ -392,11 +386,6 @@ button.mobile-chat-group-title:active {
   background: var(--accs);
   background: color-mix(in srgb, var(--accs) 58%, var(--avatar-bg));
   color: var(--acc);
-}
-
-.mobile-chat-avatar + .mobile-chat-avatar {
-  margin-left: -13px;
-  box-shadow: 0 0 0 2.5px var(--surface);
 }
 
 .mobile-chat-copy {
@@ -513,10 +502,62 @@ button.mobile-chat-group-title:active {
   display: none;
 }
 
-/* The way to the send log: in the spacer's place, in the warning colour, only
-   while something sent has not reached the server or was refused. */
+/* The way to the send log: before the members button, in the warning colour,
+   only while something sent has not reached the server or was refused. */
 .send-log-button {
   color: var(--warn);
+}
+
+/* The way to the members, at the header's end: people and how many. The
+   button is the header's 44px tall, so the whole height takes the tap; the
+   pill inside is what is drawn. */
+.chat-members-button {
+  height: 44px;
+  min-width: 44px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--fg1);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.chat-members-button[hidden] {
+  display: none;
+}
+
+.chat-members-pill {
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 11px;
+  border: 1px solid var(--bd);
+  border-radius: 18px;
+  background: var(--s2);
+  font: 600 14px var(--sans);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-members-button:active .chat-members-pill {
+  background: var(--press);
+}
+
+.chat-members-button:focus-visible {
+  outline: none;
+}
+
+.chat-members-button:focus-visible .chat-members-pill {
+  outline: 2px solid var(--fg1);
+  outline-offset: 1px;
+}
+
+#chat-members-count:empty {
+  display: none;
 }
 
 .mobile-title {
@@ -2627,7 +2668,8 @@ button.mobile-chat-group-title:active {
 
 /* ---- Home: the floating bottom bar, Activity and Settings ----------------
    With no chat open, the phone shows Chats, Activity or Settings, switched by
-   a floating bar with search on its own round button beside it. The bar
+   a floating bar with New chat on its own round button beside it (a phone
+   paired for every chat; search is in the Chats header). The bar
    floats over the lists, so each list keeps room at its end to scroll clear
    of it. Inside a chat it is in the flow under the composer instead, and it
    leaves while the keyboard is up. */
@@ -2740,7 +2782,9 @@ button.mobile-chat-group-title:active {
   display: none;
 }
 
-.pb-search {
+/* New chat, round, beside the bar. A phone paired for one chat starts none,
+   and the bar then takes the whole width. */
+.pb-action {
   width: 64px;
   height: 64px;
   flex-shrink: 0;
@@ -2754,6 +2798,10 @@ button.mobile-chat-group-title:active {
   box-shadow: var(--menu-shadow);
   color: var(--fg1);
   cursor: pointer;
+}
+
+.pb-action[hidden] {
+  display: none;
 }
 
 /* Room at the end of every list to scroll clear of the bar: its offset, its
@@ -3293,7 +3341,7 @@ button.mobile-chat-group-title:active {
 
 /* ---- Pressed and focused, for every new control ---- */
 .pb-tab:active,
-.pb-search:active,
+.pb-action:active,
 .act-tab:active,
 .act-stop:active .act-stop-ring,
 .act-open-chat:active {
@@ -3319,7 +3367,7 @@ button.mobile-chat-group-title:active {
 }
 
 .pb-tab:focus-visible,
-.pb-search:focus-visible,
+.pb-action:focus-visible,
 .act-tab:focus-visible,
 .act-main:focus-visible,
 .act-pill:focus-visible,

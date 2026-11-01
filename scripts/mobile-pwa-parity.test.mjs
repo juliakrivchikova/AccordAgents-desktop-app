@@ -95,33 +95,21 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     // ships, not a copy.
     assert.equal(await evaluate(`typeof globalThis.AccordMobileShared.resolveChatParticipantAvatar`), "function");
 
-    // --- the chat list: every row's avatars come from the member record -----
+    // --- the chat list: no avatars on its rows (the User, 2026-11-01) -------
+    // Members' avatars are drawn where the members are: on their messages and
+    // in the members sheet, both checked below.
     const describeAvatar = `(node) => ({
       kind: [...node.classList].find((c) => /^avatar-(anthropic|codex|gemini|custom|generic)$/.test(c)) || null,
       media: node.querySelector(".avatar-media") ? [...node.querySelector(".avatar-media").classList].find((c) => /^avatar-media-(glyph|photo)$/.test(c)) : null,
       src: node.querySelector("img") ? node.querySelector("img").getAttribute("src") : null,
       text: node.querySelector("span.avatar-media") ? node.querySelector("span.avatar-media").textContent : null
     })`;
-    const listAvatars = async () => await evaluate(`(() => {
-      const describe = ${describeAvatar};
-      return [...document.querySelectorAll("#chat-list .mobile-chat-row")].map((row) => ({
-        id: row.dataset.conversationId,
-        avatars: [...row.querySelectorAll(".mobile-chat-avatar")].map(describe)
-      }));
-    })()`);
-    const list = await waitFor(listAvatars, (rows) => rows.length === 3 && rows.every((r) => r.avatars.length > 0), "the three chats are listed with avatars");
-    const byChat = new Map(list.map((entry) => [entry.id, entry.avatars]));
-    assert.deepEqual(byChat.get(CHAT_A), [
-      { kind: "avatar-custom", media: "avatar-media-photo", src: "assets/avatars/codex-cat.png", text: null },
-      { kind: "avatar-anthropic", media: "avatar-media-glyph", src: "assets/avatars/claude-logo.png", text: null }
-    ], "a chosen photo covers the disc; the Claude logo is a glyph on the terracotta disc");
-    assert.deepEqual(byChat.get(CHAT_B), [
-      { kind: "avatar-custom", media: "avatar-media-glyph", src: "assets/accordagents-mark.png", text: null },
-      { kind: "avatar-custom", media: "avatar-media-photo", src: `assets/avatars/${morganDefault}.png`, text: null }
-    ], "the assistant shows the app mark; a member with nothing chosen shows the desktop's hashed default");
-    assert.deepEqual(byChat.get(CHAT_C), [
-      { kind: "avatar-generic", media: "avatar-media-glyph", src: null, text: "K" }
-    ], "a member known only by handle shows initials, never a guessed animal");
+    const listRows = async () => await evaluate(`(() => [...document.querySelectorAll("#chat-list .mobile-chat-row")].map((row) => ({
+      id: row.dataset.conversationId,
+      avatars: row.querySelectorAll(".mobile-chat-avatar, .avatar-icon, img").length
+    })))()`);
+    const list = await waitFor(listRows, (rows) => rows.length === 3, "the three chats are listed");
+    assert.deepEqual(list.map((row) => row.avatars), [0, 0, 0], "no avatars on the chat list's rows");
     // The pictures themselves are served, not just named.
     for (const src of ["assets/avatars/codex-cat.png", "assets/avatars/claude-logo.png", `assets/avatars/${morganDefault}.png`]) {
       const response = await fetch(`${site.origin}/${src}`);
@@ -149,6 +137,9 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     ], "tapping a project folds it and shows how many chats it holds; the other project is now one tap away");
     await app.send("Page.reload", {});
     await settle();
+    // A fresh start opens on New chat (the User, 2026-11-01); its menu button
+    // opens the chats.
+    await evaluate(`(() => { document.getElementById("new-chat-close").click(); return true; })()`);
     await waitFor(headers, (list) => list.length === 2, "the list is back after the reload");
     assert.deepEqual((await plainHeaders())[0], { name: "AccordAgents", expanded: "false", count: "2", rows: 0 }, "the fold survives a reload");
     await evaluate(`(() => { document.getElementById("chat-search-toggle").click(); const i = document.getElementById("chat-search-input"); i.value = "alpha"; i.dispatchEvent(new Event("input", { bubbles: true })); return true; })()`);
@@ -236,6 +227,11 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     await evaluate(`(() => { localStorage.removeItem("accordagents.mobile.internalSystemRowsDropped.v1"); return true; })()`);
     await app.send("Page.reload", {});
     await settle();
+    // A fresh start opens on New chat (the User, 2026-11-01): the chat is
+    // opened again from the list, as she would.
+    await evaluate(`(() => { document.getElementById("new-chat-close").click(); return true; })()`);
+    await waitFor(() => evaluate(`Boolean(document.querySelector('#chat-list .mobile-chat-row[data-conversation-id="${CHAT_A}"]'))`), (listed) => listed === true, "the chat is listed again");
+    await evaluate(`(() => { document.querySelector('#chat-list .mobile-chat-row[data-conversation-id="${CHAT_A}"]').click(); return true; })()`);
     await waitFor(rowAvatars, (rows) => rows.length === 6, "the chat is back after the reload");
     assert.deepEqual(await systemRows(), ["The machine restarte"], "the desktop's internal trigger is gone; the phone's own machine note stays");
     assert.equal(await evaluate(`localStorage.getItem("accordagents.mobile.internalSystemRowsDropped.v1")`), "1", "the sweep runs once");

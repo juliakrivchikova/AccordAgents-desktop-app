@@ -412,34 +412,17 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
     await evaluate(`document.querySelector('#activity-list .act-row[data-activity-key="${drewRow.key}"] .act-avatar').click()`);
     await waitFor(`document.getElementById("timeline-screen").classList.contains("is-active") ? true : null`, "the chat again");
 
-    // The search button from a chat opened off the Chats list: the remembered
-    // tab is Chats already, so only the open chat can tell the app to leave it.
-    // Without that the box would open on a screen the reader cannot see.
+    // Search is in the Chats header (the User, 2026-11-01): inside a chat it
+    // is not on screen, and the bar's round button there starts a new chat.
+    assert.equal(await evaluate(`document.getElementById("chat-search-toggle").offsetParent === null`), true, "no search inside a chat");
+    assert.equal(await evaluate(`Boolean(document.querySelector("#home-dock #new-chat-button")) && document.getElementById("new-chat-button").offsetParent !== null`), true,
+      "the bar's round button inside a chat is New chat");
     await evaluate(`document.querySelector('[data-home-tab="chats"]').click()`);
     await waitFor(`document.getElementById("chats-screen").classList.contains("is-active") ? true : null`, "Chats");
     await sleep(TAP_SETTLE_MS);
-    await evaluate(`document.querySelector('#chat-list .mobile-chat-row').click()`);
-    await waitFor(`(() => document.getElementById("timeline-screen").classList.contains("is-active") &&
-      localStorage.getItem("accordagents.mobile.homeTab.v1") === "chats" ? true : null)()`, "a chat opened from the list");
     await evaluate(`document.getElementById("chat-search-toggle").click()`);
     await waitFor(`(() => document.getElementById("chats-screen").classList.contains("is-active") &&
-      !document.getElementById("chat-search").hidden &&
-      !localStorage.getItem("accordagents.mobile.activeConversationId.v1") ? true : null)()`,
-      "the chat search from a chat opened off the list");
-    await evaluate(`document.getElementById("chat-search-close").click()`);
-    await sleep(TAP_SETTLE_MS);
-    await evaluate(`document.querySelector('[data-home-tab="activity"]').click()`);
-    await waitFor(`document.getElementById("activity-screen").classList.contains("is-active") ? true : null`, "Activity before the second search pass");
-    await sleep(TAP_SETTLE_MS);
-    await evaluate(`document.querySelector('#activity-list .act-row[data-activity-key="${drewRow.key}"] .act-avatar').click()`);
-    await waitFor(`document.getElementById("timeline-screen").classList.contains("is-active") ? true : null`, "the chat from Activity again");
-
-    // And from a chat opened off Activity, where the remembered tab is not
-    // Chats: it leaves the chat and switches tab in one go.
-    await evaluate(`document.getElementById("chat-search-toggle").click()`);
-    await waitFor(`(() => document.getElementById("chats-screen").classList.contains("is-active") &&
-      !document.getElementById("chat-search").hidden &&
-      !localStorage.getItem("accordagents.mobile.activeConversationId.v1") ? true : null)()`, "the chat search from inside a chat");
+      !document.getElementById("chat-search").hidden ? true : null)()`, "the chat search from the Chats header");
     await evaluate(`document.getElementById("chat-search-close").click()`);
     await sleep(TAP_SETTLE_MS);
     await evaluate(`document.querySelector('[data-home-tab="activity"]').click()`);
@@ -621,7 +604,11 @@ test("Activity lists what the server delivered and acts on it from the bottom ba
     })()`, "Wake in Settings with the key for a machine");
     assert.match(withKey, /Cloud machine/);
 
-    // Search sits on the bar and searches the chats, from any tab.
+    // Search is not on the bar: on Settings it is not on screen; the Chats
+    // header has it, and the bar steps aside while it is open.
+    assert.equal(await evaluate(`document.getElementById("chat-search-toggle").offsetParent === null`), true, "no search on Settings");
+    await evaluate(`document.querySelector('[data-home-tab="chats"]').click()`);
+    await waitFor(`document.getElementById("chats-screen").classList.contains("is-active") ? true : null`, "Chats for the search");
     await evaluate(`document.getElementById("chat-search-toggle").click()`);
     await waitFor(`(() => document.getElementById("chats-screen").classList.contains("is-active") &&
       !document.getElementById("chat-search").hidden && document.getElementById("home-dock").offsetParent === null ? true : null)()`,

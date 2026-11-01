@@ -233,6 +233,11 @@ test("live end-to-end: a phone-sent turn clears its own in-progress row", { time
     await until("the third turn shows an in-progress row", async () => await runningRows() > 0);
     await app.send("Page.reload", {});
     await sleep(5000);
+    // A fresh start opens on New chat (the User, 2026-11-01): the chat is
+    // opened again from the list, as she would.
+    await app.waitFor(`(() => { const screen = document.getElementById("new-chat-screen"); return Boolean(screen && !screen.hidden); })()`, "New chat after the relaunch", 20_000);
+    await app.evaluate(`document.getElementById("new-chat-close").click()`);
+    await openChat(app, CONVERSATION);
     release();
     await until("the third answer arrives after relaunch", async () => await bodyHas("Answer number 3."), { timeoutMs: 30_000 });
     await until(
