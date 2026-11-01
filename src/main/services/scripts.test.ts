@@ -576,7 +576,7 @@ test("approving a proposal that was already applied succeeds, and declining it t
   const h = await harness(t);
   const request = await approvedScript(h, {}, {});
   await h.service.assertApprovable(request);
-  assert.match(await h.service.applyApproved(request), /Added the scheduled script/);
+  assert.match(await h.service.applyApproved(request), /Added the scheduled task/);
   await h.service.rejectPending(request);
   assert.deepEqual(await h.service.list(), []);
 });

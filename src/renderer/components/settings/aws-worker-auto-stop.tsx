@@ -61,7 +61,7 @@ export function AwsAutoStopRow(props: {
         <div className="gen-row-desc">Stops the instance after three hours without working agents.</div>
         {props.autoStop.enabled && props.autoStop.keptOnByScripts ? (
           <div className="gen-row-desc" data-testid="aws-auto-stop-kept-on">
-            Kept on by {props.autoStop.keptOnByScripts} scheduled {props.autoStop.keptOnByScripts === 1 ? "script" : "scripts"}: switch {props.autoStop.keptOnByScripts === 1 ? "it" : "them"} off in Settings → Scripts to let it stop.
+            Kept on by {props.autoStop.keptOnByScripts} scheduled {props.autoStop.keptOnByScripts === 1 ? "task" : "tasks"}: switch {props.autoStop.keptOnByScripts === 1 ? "it" : "them"} off in Settings → Scheduled Tasks to let it stop.
           </div>
         ) : null}
         {props.error ? <div className="gen-row-error" data-testid="aws-auto-stop-problem">{props.error}</div> : null}

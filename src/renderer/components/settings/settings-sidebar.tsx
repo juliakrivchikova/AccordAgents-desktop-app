@@ -13,7 +13,7 @@ const SETTINGS_NAV: Array<{ section: SettingsSection; label: string; icon: Lucid
   { section: "general", label: "General", icon: SlidersHorizontal },
   { section: "aws", label: "AWS", icon: Cloud },
   { section: "environment", label: "Environment", icon: KeyRound },
-  { section: "scripts", label: "Scripts", icon: CalendarClock },
+  { section: "scripts", label: "Scheduled Tasks", icon: CalendarClock },
   { section: "roles", label: "Roles", icon: Circle },
   { section: "behavior-rules", label: "Rules", icon: ListChecks },
   { section: "saved-prompts", label: "Prompts", icon: FileText },

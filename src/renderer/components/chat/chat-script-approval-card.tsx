@@ -12,11 +12,11 @@ import { ChatAppToolReviewFooter } from "./chat-app-tool-approval-review";
 function scriptApprovalTitle(handle: string, request: ChatScriptChangeRequest): string {
   const who = chatParticipantReference(handle);
   switch (request.op) {
-    case "create": return `${who} wants to add a scheduled script`;
-    case "update": return `${who} wants to change a scheduled script`;
-    case "delete": return `${who} wants to delete a scheduled script`;
-    case "enable": return `${who} wants to switch on a scheduled script`;
-    case "disable": return `${who} wants to switch off a scheduled script`;
+    case "create": return `${who} wants to add a scheduled task`;
+    case "update": return `${who} wants to change a scheduled task`;
+    case "delete": return `${who} wants to delete a scheduled task`;
+    case "enable": return `${who} wants to switch on a scheduled task`;
+    case "disable": return `${who} wants to switch off a scheduled task`;
   }
 }
 
@@ -24,7 +24,7 @@ function scriptApprovalPrimaryLabel(request: ChatScriptChangeRequest): string {
   switch (request.op) {
     case "create": return "Approve and run";
     case "update": return "Approve change";
-    case "delete": return "Delete script";
+    case "delete": return "Delete task";
     case "enable": return "Switch on";
     case "disable": return "Switch off";
   }
@@ -142,14 +142,14 @@ export function ChatScriptApprovalCard(props: {
       <div className="chat-app-tool-approval-body">
         <div className="chat-app-tool-approval-meta">
           <strong>{requesterLabel}</strong>
-          <span className="message-provider">{pending ? "Proposes a scheduled script" : "Scheduled script"}</span>
+          <span className="message-provider">{pending ? "Proposes a scheduled task" : "Scheduled task"}</span>
           <span className="message-when">{formatChatTime(approval.createdAt)}</span>
         </div>
         <div className="chat-app-tool-approval-panel is-review-change">
           <div className="chat-app-tool-review-header">
             <div className="chat-app-tool-review-chip">
               <CalendarClock size={13} aria-hidden />
-              Scheduled script
+              Scheduled task
             </div>
           </div>
           {pending ? (
@@ -183,7 +183,7 @@ export function ChatScriptApprovalCard(props: {
                     <KeyRound size={13} aria-hidden />
                     Keys
                   </div>
-                  <p className="chat-script-approval-hint">Saved only on {request.hostPhrase}. The script reads them from its environment; agents never see them.</p>
+                  <p className="chat-script-approval-hint">Saved only on {request.hostPhrase}. The task reads them from its environment; agents never see them.</p>
                   {request.secretNames.map((name) => {
                     const saved = savedNames.includes(name);
                     return (

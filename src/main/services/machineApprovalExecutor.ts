@@ -32,7 +32,7 @@ export type CardApplyResult =
 export class CardRetryError extends Error {}
 
 /** A script that installs code is approved only where its code is shown. */
-export const SCRIPT_CODE_APPROVED_ON_DESKTOP = "A script that runs code is approved on the desktop, where its code is shown.";
+export const SCRIPT_CODE_APPROVED_ON_DESKTOP = "A scheduled task that runs code is approved on the desktop, where its code is shown.";
 
 /**
  * Applies the User's answer to a permission or roster card, raised by this

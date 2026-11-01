@@ -171,7 +171,7 @@ export function ScriptSettingsItem(props: {
           </Button>
           {confirmDelete ? (
             <>
-              <span className="gen-row-desc">Delete the script, its keys and history?</span>
+              <span className="gen-row-desc">Delete the task, its keys and history?</span>
               <Button type="button" variant="destructive" size="sm" disabled={busy}
                 onClick={() => void act(() => window.consensus.deleteScript(target))}>Delete</Button>
               <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setConfirmDelete(false)}>Keep</Button>

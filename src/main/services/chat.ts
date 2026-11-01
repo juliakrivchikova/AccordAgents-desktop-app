@@ -3777,7 +3777,7 @@ export class ChatService {
             this.upsertAppToolApproval(conversation, { ...older, status: "cancelled", error: "Replaced by a newer proposal.", updatedAt: new Date().toISOString() });
           }
         }
-        conversation.messages.push(this.message("system", `Scheduled script approval needed from @${requester.handle}: ${proposal.summary}.`, undefined, {
+        conversation.messages.push(this.message("system", `Scheduled task approval needed from @${requester.handle}: ${proposal.summary}.`, undefined, {
           threadId: "system"
         }));
         conversation.updatedAt = new Date().toISOString();
@@ -5764,7 +5764,7 @@ export class ChatService {
     if (approval.toolName === APP_SCRIPTS_REQUEST_CHANGE_TOOL && this.isScriptChangeRequest(approval.request)) {
       const host = this.scriptHost;
       if (!host) {
-        throw new Error("Scheduled scripts are not available on this host.");
+        throw new Error("Scheduled tasks are not available on this host.");
       }
       // A script approval is always for this one proposal: never "for this
       // chat", never with an edited draft. Missing keys keep it pending.

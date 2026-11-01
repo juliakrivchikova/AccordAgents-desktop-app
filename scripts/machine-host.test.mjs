@@ -238,7 +238,7 @@ test("a runtime without scheduled scripts answers the desktop instead of leaving
   await settle();
   const result = (await controlBodies(client, host.options.pairing)).find((body) => body.type === "machine.scripts.result");
   assert.equal(result.ok, false);
-  assert.match(result.error, /does not host scheduled scripts/);
+  assert.match(result.error, /does not host scheduled tasks/);
   assert.equal((await controlBodies(client, host.options.pairing)).find((body) => body.type === "machine.hello").scriptsSupported, undefined);
   host.close();
 });
