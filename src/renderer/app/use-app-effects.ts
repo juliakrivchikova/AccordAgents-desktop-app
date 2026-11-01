@@ -163,7 +163,9 @@ export function useAppEffects(
         archivedConversationIds.delete(update.id);
       }
       state.archivedConversationIdsRef.current = archivedConversationIds;
-      state.setSummaries((current) => upsertConversationSummary(current, updatedConversation));
+      // The update itself: a delta says whether the whole chat has a reply
+      // not ended yet, which its few carried messages cannot.
+      state.setSummaries((current) => upsertConversationSummary(current, update));
       if (archived) {
         state.setSelectedActivityItem((current) => current?.conversationId === update.id ? undefined : current);
       }

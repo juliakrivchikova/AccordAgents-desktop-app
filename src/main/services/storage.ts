@@ -42,6 +42,14 @@ const MAX_MESSAGE_PAGE_LIMIT = 200;
 const SQLITE_BUSY_TIMEOUT_MS = 30_000;
 const SQLITE_COMMAND_TIMEOUT_MS = 45_000;
 const SQLITE_MIGRATION_TIMEOUT_MS = 120_000;
+/** A message row that may be a member's reply not ended yet: its JSON (as
+ *  JSON.stringify writes it) holds a pending status somewhere. A superset —
+ *  a nested status matches too — that the exact check then narrows. It never
+ *  parses the row, so it cannot fail on one, and it is the condition of the
+ *  partial index `idx_conversation_messages_pending_reply`: a query uses that
+ *  index only while it states this very expression. The index is made once
+ *  by name, so a change here needs a new index name as well. */
+const pendingReplyRowHintSql = (column: string): string => `instr(${column}, '"status":"pending"') > 0`;
 const SCHEMA_META_COMPLETE = "complete";
 export const SUPPORTED_STORAGE_SCHEMA_VERSION = 2;
 /** What `prepareStorageForOlderVersion` puts the database back to. */
@@ -478,6 +486,14 @@ export class StorageService {
     await this.pruneStaleRunCancelRequests();
     await this.ensureColumn("conversations", "body_json", "text");
     await this.ensureColumn("conversations", "save_token", "text");
+    // The few message rows that may be a member's reply not ended yet, so the
+    // chat list finds them without reading every message (listConversations).
+    // Built once over the existing rows; sqlite keeps it on every write after.
+    await this.runSql(
+      `create index if not exists idx_conversation_messages_pending_reply on conversation_messages(conversation_id)
+         where ${pendingReplyRowHintSql("payload_json")};`,
+      SQLITE_MIGRATION_TIMEOUT_MS
+    );
     await this.backfillConversationBodiesAndMessages();
     await this.backUpBeforeSchemaUpgrade();
     await this.setSchemaMeta(STORAGE_SCHEMA_VERSION_META_KEY, String(SUPPORTED_STORAGE_SCHEMA_VERSION));
@@ -537,8 +553,12 @@ export class StorageService {
       running?: number | string | boolean | null;
       archived?: number | string | boolean | null;
       activeRunIdsCount?: number | string | null;
+      replyPending?: number | string | null;
       chatParticipantsJson?: string | null;
     }>(
+      // Besides this device's runs, whether a member's reply has not ended
+      // (`isPendingReply`): a machine member's turn asked from the phone runs
+      // with no run here at all, and the reply is the only sign of it.
       `select
          id,
          title,
@@ -549,6 +569,14 @@ export class StorageService {
          json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.running') as running,
          json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.archived') as archived,
          coalesce(json_array_length(coalesce(nullif(body_json, ''), payload_json), '$.metadata.activeRunIds'), 0) as activeRunIdsCount,
+         exists (
+           select 1 from conversation_messages m
+           where m.conversation_id = conversations.id
+             and ${pendingReplyRowHintSql("m.payload_json")}
+             and json_valid(m.payload_json)
+             and json_extract(m.payload_json, '$.status') = 'pending'
+             and json_extract(m.payload_json, '$.role') = 'participant'
+         ) as replyPending,
          json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participants') as chatParticipantsJson
        from conversations
        order by updated_at desc;`
@@ -558,6 +586,7 @@ export class StorageService {
         ? Number.parseInt(row.activeRunIdsCount, 10) || 0
         : (row.activeRunIdsCount ?? 0);
       const runningFlag = row.running === 1 || row.running === "1" || row.running === true || row.running === "true";
+      const replyPending = row.replyPending === 1 || row.replyPending === "1";
       const isRunning = activeCount > 0 || runningFlag;
       const isArchived = row.archived === 1 || row.archived === "1" || row.archived === true || row.archived === "true";
       const chatParticipants = row.kind === "chat"
@@ -571,6 +600,7 @@ export class StorageService {
         updatedAt: row.updatedAt,
         repoPath: row.repoPath ?? undefined,
         running: isRunning,
+        ...(replyPending ? { replyPending: true } : {}),
         archived: isArchived,
         ...(chatParticipants ? { chatParticipants } : {})
       };

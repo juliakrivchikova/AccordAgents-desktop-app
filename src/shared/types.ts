@@ -2340,6 +2340,11 @@ export interface ConversationSummary {
   updatedAt: string;
   repoPath?: string;
   running?: boolean;
+  /** A member's reply in the chat has not ended (`isPendingReply`), though
+   *  this device may hold no run in it: a machine member's turn asked from
+   *  the phone. The chat list shows it as work; unlike `running` it blocks
+   *  nothing (a reply whose machine is gone may never end). */
+  replyPending?: boolean;
   archived?: boolean;
   chatParticipants?: ConversationSummaryChatParticipant[];
 }
@@ -2522,6 +2527,10 @@ export interface ConversationMessageDelta {
   totalMessages: number;
   tailCount: number;
   removedIds: string[];
+  /** Whether any member's reply in the whole chat has not ended yet
+   *  (`isPendingReply`): the carried messages may not include it
+   *  (`ConversationSummary.replyPending`). */
+  replyPending?: boolean;
 }
 
 export interface ConversationUpdate extends Conversation {

@@ -1,4 +1,5 @@
-import type { Conversation, ConversationSummary } from "../../shared/types";
+import type { ConversationSummary, ConversationUpdate } from "../../shared/types";
+import { isPendingReply } from "../../shared/chatActiveRuns";
 import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import type { ProjectSessionGroup } from "../components/shell";
 import { NO_PROJECT_GROUP_KEY } from "./constants";
@@ -47,7 +48,7 @@ export function buildProjectSessionGroups(summaries: ConversationSummary[]): Pro
     });
 }
 
-export function upsertConversationSummary(summaries: ConversationSummary[], conversation: Conversation): ConversationSummary[] {
+export function upsertConversationSummary(summaries: ConversationSummary[], conversation: ConversationUpdate): ConversationSummary[] {
   const nextSummary = summaryFromConversation(conversation);
   return [
     nextSummary,
@@ -65,10 +66,15 @@ export function conversationTimeValue(value: string): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function summaryFromConversation(conversation: Conversation): ConversationSummary {
+function summaryFromConversation(conversation: ConversationUpdate): ConversationSummary {
   const activeRunIds = conversation.metadata?.activeRunIds;
   const hasActiveRuns = Array.isArray(activeRunIds) && activeRunIds.length > 0;
   const running = Boolean(hasActiveRuns || conversation.metadata?.running);
+  // A member's reply not ended yet, even with no run of this device in the
+  // chat (a machine member's turn asked from the phone). A delta carries only
+  // some messages, so it says whether the whole chat has one; a full update
+  // or a loaded chat is read as it is.
+  const replyPending = conversation.messageDelta?.replyPending === true || conversation.messages.some(isPendingReply);
   const chatParticipants = conversation.kind === "chat"
     ? normalizeConversationSummaryChatParticipants(conversation.metadata?.participants)
     : undefined;
@@ -80,6 +86,7 @@ function summaryFromConversation(conversation: Conversation): ConversationSummar
     updatedAt: conversation.updatedAt,
     repoPath: conversation.repoPath,
     running,
+    ...(replyPending ? { replyPending: true } : {}),
     archived: conversation.metadata?.archived === true,
     ...(chatParticipants ? { chatParticipants } : {})
   };
