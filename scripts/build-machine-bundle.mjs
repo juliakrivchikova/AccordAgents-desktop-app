@@ -80,7 +80,10 @@ await writeFile(path.join(outdir, "package.json"), `${JSON.stringify({
 // install time, so a malicious release of any package in the tree would run
 // on every machine installed or upgraded after it.
 await copyFile(path.join(repoRoot, "package-lock.json"), path.join(outdir, "package-lock.json"));
-execFileSync("npm", ["install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], { cwd: outdir, stdio: ["ignore", "ignore", "inherit"] });
+// On Windows npm is usually a .cmd script, which execFile cannot start; under
+// `npm run` npm_execpath names npm's own entry point.
+const npm = /npm-cli\.js$/.test(process.env.npm_execpath ?? "") ? [process.execPath, process.env.npm_execpath] : ["npm"];
+execFileSync(npm[0], [...npm.slice(1), "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], { cwd: outdir, stdio: ["ignore", "ignore", "inherit"] });
 const lock = JSON.parse(await readFile(path.join(outdir, "package-lock.json"), "utf8"));
 for (const [where, entry] of Object.entries(lock.packages ?? {})) {
   if (where && !entry.link && !entry.integrity) throw new Error(`The machine's lockfile has no integrity hash for ${where}.`);

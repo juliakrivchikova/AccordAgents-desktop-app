@@ -2,7 +2,8 @@ import { statSync } from "node:fs";
 import { listPackage } from "@electron/asar";
 
 export function verifyRuntimeArchive(asarPath) {
-  const files = listPackage(asarPath, {});
+  // On Windows the asar lists its entries with backslashes.
+  const files = listPackage(asarPath, {}).map((file) => file.replaceAll("\\", "/"));
   const unexpected = files.filter((file) => !/^\/(?:package\.json$|(?:dist|node_modules)(?:\/|$))/.test(file));
   if (unexpected.length > 0) {
     throw new Error(`App archive contains non-runtime files: ${unexpected.slice(0, 10).join(", ")}`);
@@ -12,6 +13,7 @@ export function verifyRuntimeArchive(asarPath) {
       throw new Error(`App archive is missing ${required}`);
     }
   }
+  return files;
 }
 
 export function verifyUpdaterZip(zipPath) {

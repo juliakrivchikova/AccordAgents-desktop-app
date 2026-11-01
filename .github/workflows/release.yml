@@ -10,6 +10,10 @@ name: Release
 # A release ships exactly the commit the run was started for: if the branch
 # moved meanwhile, the run stops before it uses a version.
 #
+# Betas have no Windows build. Once a stable release is published, this run
+# starts "Windows release" (windows-release.yml) for its tag, which builds the
+# Windows app and waits for it to be signed on the User's Windows PC.
+#
 # Secrets (repository → Settings → Secrets and variables → Actions):
 #   MACOS_CERTIFICATE_P12_BASE64, MACOS_CERTIFICATE_PASSWORD  Developer ID Application identity
 #   APPLE_CODESIGN_IDENTITY, APPLE_TEAM_ID, MACOS_BUNDLE_ID,
@@ -319,6 +323,27 @@ jobs:
           done
           echo "::warning::The update feed does not offer $VERSION to $previous yet ($url). The release is published; check the feed again instead of re-running."
           exit 1
+
+  # Its Build job runs now; its Publish job waits for the signature from the
+  # Windows PC. A job of its own, so the token that can start workflows never
+  # meets the dependencies the release job installs. If it fails, macOS is
+  # still published: start the Windows release by hand.
+  windows:
+    name: Start the Windows release
+    needs: release
+    if: inputs.target == 'patch' || inputs.target == 'minor' || inputs.target == 'major'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v${{ needs.release.outputs.version }}
+    steps:
+      - run: |
+          set -euo pipefail
+          url="$(gh workflow run windows-release.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f tag="$TAG" | grep -o 'https://[^ ]*/actions/runs/[0-9]*' || true)"
+          echo "::notice::Windows release for $TAG: ${url:-see the Actions tab}. Once its Build is done, sign it on the Windows PC: npm run sign:windows-x64 -- --run ${url##*/}"
 
   phone-app:
     name: Phone app

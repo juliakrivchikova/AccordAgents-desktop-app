@@ -4,9 +4,9 @@
 // the app reports the version in this checkout's package.json. Used before a
 // release is published and again on the published download.
 //
-// Usage: node scripts/smoke-launch-packaged-app.mjs <path/to/App.app> [--screenshot file.png] [--log file.log]
+// Usage: node scripts/smoke-launch-packaged-app.mjs <path/to/App.app | packaged Windows folder> [--screenshot file.png] [--log file.log]
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -28,6 +28,20 @@ const settleMs = 5_000;
 const outputTailLines = 50;
 const mainProcessErrorPattern = /A JavaScript error occurred in the main process|Uncaught Exception/;
 const devToolsPattern = /DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//;
+const isWindows = process.platform === "win32";
+// Only what a login session provides: release credentials in this process's
+// environment must not reach the app.
+const sessionEnvNames = isWindows
+  ? ["PATH", "PATHEXT", "SystemRoot", "SystemDrive", "windir", "ComSpec", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+    "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "USERNAME", "USERDOMAIN", "ProgramData", "ProgramFiles",
+    "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles", "PUBLIC", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"]
+  : ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "SHELL", "LANG"];
+
+function appExecutable(appPath) {
+  return isWindows
+    ? path.join(appPath, `${productName}.exe`)
+    : path.join(appPath, "Contents", "MacOS", productName);
+}
 
 function parseArgs(argv) {
   const options = { appPath: "", screenshot: "", log: "" };
@@ -49,7 +63,7 @@ function parseArgs(argv) {
     }
   }
   if (!options.appPath) {
-    throw new Error("Usage: smoke-launch-packaged-app.mjs <path/to/App.app> [--screenshot file.png] [--log file.log]");
+    throw new Error("Usage: smoke-launch-packaged-app.mjs <path/to/App.app | packaged Windows folder> [--screenshot file.png] [--log file.log]");
   }
   return options;
 }
@@ -99,23 +113,29 @@ async function stop(child) {
   if (!child.pid) {
     return;
   }
-  if (!exited(child)) {
-    // The app may ignore SIGTERM while it shuts its services down, so give it
-    // a moment before killing the group.
-    const exit = once(child, "exit");
-    try {
-      process.kill(-child.pid, "SIGTERM");
-    } catch {
-      // Already gone.
+  if (isWindows) {
+    // Windows has no process groups to signal; end the app's whole process
+    // tree (renderer, GPU, terminal host) so nothing keeps the pipes open.
+    spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+  } else {
+    if (!exited(child)) {
+      // The app may ignore SIGTERM while it shuts its services down, so give it
+      // a moment before killing the group.
+      const exit = once(child, "exit");
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {
+        // Already gone.
+      }
+      await Promise.race([exit, delay(10_000)]);
     }
-    await Promise.race([exit, delay(10_000)]);
-  }
-  // Even after the app itself exited, helpers in its process group (renderer,
-  // GPU) may still be running and holding the pipes open.
-  try {
-    process.kill(-child.pid, "SIGKILL");
-  } catch {
-    // The whole group is gone.
+    // Even after the app itself exited, helpers in its process group (renderer,
+    // GPU) may still be running and holding the pipes open.
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      // The whole group is gone.
+    }
   }
   if (!exited(child)) {
     await once(child, "exit");
@@ -126,7 +146,7 @@ async function stop(child) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const executable = path.join(options.appPath, "Contents", "MacOS", productName);
+  const executable = appExecutable(options.appPath);
   if (!existsSync(executable)) {
     throw new Error(`No app executable at ${executable}`);
   }
@@ -161,10 +181,8 @@ async function main() {
   ], {
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
-    // Only what a login session provides: release credentials in this
-    // process's environment must not reach the app.
     env: {
-      ...pickEnv(["PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "SHELL", "LANG"]),
+      ...pickEnv(sessionEnvNames),
       ACCORDAGENTS_USER_DATA_DIR: path.join(profileDir, "profile"),
       ACCORDAGENTS_CRASH_REPORTS: "0"
     }

@@ -63,6 +63,14 @@ const osxNotarizeOptions = hasNotarizeCredentials
   }
   : undefined;
 
+// The Windows installer is signed with the certificate whose thumbprint is in
+// WINDOWS_SIGN_CERT_SHA1, which scripts/sign-windows-x64.mjs sets after it has
+// signed the packaged app; the hook decides which files get our signature.
+// Without a thumbprint the installer stays unsigned.
+const windowsSignOptions = process.env.WINDOWS_SIGN_CERT_SHA1
+  ? { hookModulePath: path.resolve(__dirname, "scripts", "windows-sign-file.cjs") }
+  : undefined;
+
 const config = {
   packagerConfig: {
     name: productName,
@@ -160,7 +168,8 @@ const config = {
       ]
     }, ["darwin"]),
     new MakerSquirrel({
-      setupIcon: windowsIconPath
+      setupIcon: windowsIconPath,
+      ...(windowsSignOptions ? { windowsSign: windowsSignOptions } : {})
     }, ["win32"])
   ],
   plugins: [

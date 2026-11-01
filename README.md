@@ -11,8 +11,8 @@ approval, and keep decisions, artifacts, and implementation history in one
 place.
 
 > Releases ship on a stable channel and a beta channel (Settings → General →
-> **Beta updates**) for macOS on Apple Silicon. Interfaces and on-disk formats
-> may still change between versions.
+> **Beta updates**) for macOS on Apple Silicon; stable releases also ship for
+> Windows x64. Interfaces and on-disk formats may still change between versions.
 
 ## Why
 
@@ -91,6 +91,14 @@ Download the latest DMG from the
 The app checks for updates through `update.electronjs.org` and asks before
 restarting once no member is running; turn on Settings → General → **Beta updates** to follow the beta
 channel instead.
+
+On Windows, download `AccordAgents-<version>-win32-x64-Setup.exe` from the same
+release and run it; it installs for the current user and updates the same way.
+Windows gets stable releases only, so its Settings have no **Beta updates**.
+The installer is code-signed; while the certificate is new, SmartScreen may
+still ask first: choose **More info**, then **Run anyway**. A Windows copy
+installed before Windows releases existed cannot update itself; install the
+current version over it once.
 
 ## Run from source
 
@@ -176,9 +184,9 @@ release repositories:
 [`AccordAgents-Releases`](https://github.com/juliakrivchikova/AccordAgents-Releases)
 for the stable channel and
 [`AccordAgents-Beta-Releases`](https://github.com/juliakrivchikova/AccordAgents-Beta-Releases)
-for betas. The source repository never hosts release artifacts. Windows x64
-packaging and publishing scripts exist, but no Windows build is published yet.
-See `SIGN.md` for signing, notarization, and the release process, and
+for betas. Releases are never published to the source repository. Each stable
+release also gets a code-signed Windows x64 installer and its Squirrel update
+files, built by GitHub Actions and signed on a Windows PC. See `SIGN.md` for signing, notarization, and the release process, and
 `docs/deploying-the-phone-app.md` for the phone app, which is deployed
 separately from the desktop app.
 

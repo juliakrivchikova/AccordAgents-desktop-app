@@ -146,7 +146,8 @@ juliakrivchikova/AccordAgents-Beta-Releases
 
 Both release repositories must be public before `update.electronjs.org` can
 discover new releases. The source repository and release repositories are
-separate; release artifacts are never published to the source repository.
+separate; release artifacts are never published to the source repository (the
+signed Windows files only pass through a draft there, see Windows below).
 
 Releases are normally built and published by the GitHub Actions `Release`
 workflow (`.github/workflows/release.yml`), started by hand — a merge never
@@ -209,6 +210,87 @@ restart the app so the stable feed is checked on next launch.
 Each `release:*` command checks that `update.electronjs.org` can find the
 published ZIP asset before it finishes. The check uses the public release repo,
 platform `darwin-arm64`, and the version created by that release run.
+
+## Windows
+
+Windows x64 ships only with stable releases. Betas have no Windows build, and
+the Windows app always follows the stable feed, so its Settings have no `Beta
+updates`. Windows builds are signed with the Certum code-signing certificate,
+whose key stays in Certum's cloud and is reached only through SimplySign
+Desktop on the User's Windows PC, after she signs in there with the code from
+its phone app. Everything else runs in the `Windows release` workflow
+(`.github/workflows/windows-release.yml`):
+
+1. A stable `Release` run starts it for its tag once macOS is published; by
+   hand: `gh workflow run windows-release.yml --repo
+   juliakrivchikova/AccordAgents-desktop-app --ref main -f tag=v<version>`.
+   `Build` builds the unsigned app from the tag on a GitHub-hosted Windows
+   machine, checked out with LF line endings like the macOS build (the app
+   ships skills, prompts and the cloud machine runtime byte for byte), checks
+   its archive, launches it and keeps it as an artifact. `Publish` then waits.
+2. On the Windows PC, within 30 days (the run keeps the unsigned app that
+   long), with the GitHub CLI signed in as the User, the reviewer of
+   `windows-signing`: in a clean clone checked out at the tag, at a short path
+   such as `C:\src\AccordAgents-release` (signtool cannot open paths longer
+   than 260 characters, and the app's deepest file is about 120 below it), `npm ci
+   --ignore-scripts` (no dependency's install script runs on the PC that holds
+   the certificate session; the signing script sets up only the 7-Zip the
+   installer is packed with), then sign in to SimplySign Desktop and run `npm
+   run sign:windows-x64 -- --run <run id>` (the Release run's notice prints the
+   id). Before it signs anything it checks that the run is one of this
+   workflow, started from `main` for a release, built the commit the tag names
+   here, and that the account can write here and approve the run. It then
+   downloads the unsigned app, signs its files, packs and signs the installer,
+   checks every signature, puts the files in the draft release
+   `windows-signed-<run id>` of this repository and approves `Publish`. The
+   clone supplies only the installer's metadata, so its line endings do not
+   matter.
+3. `Publish` checks that the tag still names the built commit and that the
+   installer from the draft carries the release certificate before running
+   anything from it. It installs the installer on a clean GitHub machine,
+   checks the signatures of everything installed as Windows sees them, checks
+   that the NuGet package and `RELEASES` are the ones inside the signed
+   installer (anyone who can write to this repository can write to the draft),
+   launches the installed app, and only then adds to the GitHub Release macOS
+   published for the tag (it never creates a Windows-only release):
+
+   ```text
+   AccordAgents-<version>-win32-x64-Setup.exe
+   AccordAgents-<version>-win32-x64-Setup.exe.sha256
+   accordagents-<version>-full.nupkg
+   accordagents-<version>-full.nupkg.sha256
+   RELEASES
+   ```
+
+   The NuGet package and `RELEASES` go up first and the installer last: the
+   update service offers a release to Windows as soon as it carries an `.exe`,
+   and Squirrel then reads `win32-x64/<installed version>/RELEASES`. A
+   published installer is never replaced. Then it checks the published
+   download, removes the draft, and checks the update feed, which only warns.
+
+Without a tag the workflow is a trial of the selected branch: it builds, waits
+for the signature, installs and launches, and publishes nothing. GitHub starts
+a workflow by hand only when its file is on the default branch, so
+`windows-release.yml` can run once it is on `main`, as it is after the first
+stable release that carries it.
+
+One-time setup: Settings → Environments → `windows-signing`, with the User as
+a required reviewer, so `Publish` waits for the signature. Without the
+environment `Publish` fails at once for want of the draft, and
+`sign:windows-x64` re-runs it. The certificate's SHA1 thumbprint is
+`config.windowsSignCertSha1` in `package.json`; change it when the certificate
+is renewed.
+
+What gets our signature is decided by `scripts/windows-sign-file.cjs`:
+`resources/sqlite/win32-x64/sqlite3.exe` stays unsigned, because the app checks
+that file byte for byte before it opens storage and a signed copy refuses to
+start; files that arrive signed by their own publisher (Microsoft's ConPTY and
+`d3dcompiler_47.dll`) keep that signature; every other binary gets ours. `npm
+run sign:windows-x64 -- --check <Setup.exe> [<app folder>]` checks those rules.
+
+If Windows betas ever ship, pad the beta number for Squirrel first: it compares
+prerelease text character by character, so `beta10` would sort below `beta9`
+and installed apps would keep starting the older version.
 
 ## If macOS Asks for Keychain Access
 

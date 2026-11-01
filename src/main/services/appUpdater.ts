@@ -4,8 +4,10 @@ import { DebugLogService } from "./debugLogs";
 export const STABLE_UPDATE_REPO = "juliakrivchikova/AccordAgents-Releases";
 export const BETA_UPDATE_REPO = "juliakrivchikova/AccordAgents-Beta-Releases";
 
-export function resolveUpdateRepo(betaUpdates: boolean): string {
-  return betaUpdates === true ? BETA_UPDATE_REPO : STABLE_UPDATE_REPO;
+/** Windows ships only with stable releases, so a Windows app always follows
+ *  the stable feed; Settings does not offer it beta updates. */
+export function resolveUpdateRepo(betaUpdates: boolean, platform: NodeJS.Platform): string {
+  return betaUpdates === true && platform !== "win32" ? BETA_UPDATE_REPO : STABLE_UPDATE_REPO;
 }
 
 export function supportsAutoUpdates(isPackaged: boolean, platform: NodeJS.Platform): boolean {
@@ -278,11 +280,11 @@ export function bootstrapAppUpdater(debugLogs: DebugLogService, betaUpdates: boo
     return;
   }
 
-  const repo = resolveUpdateRepo(betaUpdates);
+  const repo = resolveUpdateRepo(betaUpdates, process.platform);
 
   try {
     void debugLogs.write("app-updater-bootstrap", {
-      channel: betaUpdates ? "beta" : "stable",
+      channel: repo === BETA_UPDATE_REPO ? "beta" : "stable",
       repo
     });
     // The library reports these only to the console, which a packaged app

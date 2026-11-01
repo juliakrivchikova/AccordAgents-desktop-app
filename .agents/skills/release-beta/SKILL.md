@@ -10,6 +10,9 @@ Releases are built, signed, notarized and published by the GitHub Actions `Relea
 release starts only when the User asks for one and you start the workflow. A release is complete only
 after the workflow's checks of the exact published download pass.
 
+Betas have no Windows build: Windows ships only with stable releases, signed on the User's Windows PC
+(`SIGN.md`, Windows).
+
 ## Non-negotiable gates
 
 - Release betas from the short-lived `beta` branch, never from `main`. `beta` is cut from
@@ -40,7 +43,9 @@ gh run watch <run-id> --repo juliakrivchikova/AccordAgents-desktop-app --exit-st
 ```
 
 Stable releases use `--ref main -f target=patch` (or `minor`/`major`) once this workflow is on `main`;
-until then `main` has the old placeholder workflow and stable releases use the local fallback.
+until then `main` has the old placeholder workflow and stable releases use the local fallback. A
+stable run then starts the `Windows release` workflow, whose `Publish` job waits until the User's
+Windows PC signs the build (`SIGN.md`, Windows): report its run URL as waiting for the signature.
 `-f target=build-only` builds,
 signs, notarizes and launch-checks any branch without bumping or publishing; it keeps only checksums
 and the launch screenshot and log, never the signed app. Use it to try the pipeline itself.
