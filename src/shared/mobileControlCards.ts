@@ -165,7 +165,7 @@ export function controlCardFromApproval(conversationId: string, approval: ChatAp
     conversationId,
     title: desktopOnly ? `Approve on the desktop: ${approval.summary}` : approval.summary || "Permission request",
     summary: desktopOnly
-      ? `${approval.summary}. The phone cannot show the script's code yet, so it is approved on the desktop. You can decline it here.`
+      ? `${approval.summary}. The phone cannot show the task's code yet, so it is approved on the desktop. You can decline it here.`
       : approval.summary || "",
     requesterLabel: approval.requesterHandle ? `@${approval.requesterHandle}` : undefined,
     machineName: (approval as { machineName?: string }).machineName,

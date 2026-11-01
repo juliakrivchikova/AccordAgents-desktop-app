@@ -1279,7 +1279,7 @@ export class ScriptService {
     }
     const revision = await this.options.store.readRevision(record.id, request.revisionId);
     if (!revision || revision.contentHash !== request.contentHash) {
-      throw new Error("The proposed files are no longer what the card shows; ask for the task again.");
+      throw new Error("The proposed files are no longer what the card shows; ask the member to propose it again.");
     }
     const saved = await this.options.secrets.savedNames(record.id);
     const missing = revision.secretNames.filter((name) => !saved.includes(name));
@@ -1310,7 +1310,7 @@ export class ScriptService {
       // Re-checked under the lock: a newer proposal may have replaced this one.
       if (record.pendingRevisionId !== request.revisionId) throw new Error("This proposal was replaced by a newer one or already handled.");
       const revision = await this.options.store.readRevision(id, request.revisionId!);
-      if (!revision || revision.contentHash !== request.contentHash) throw new Error("The proposed files are no longer what the card shows; ask for the task again.");
+      if (!revision || revision.contentHash !== request.contentHash) throw new Error("The proposed files are no longer what the card shows; ask the member to propose it again.");
       const nowMs = this.now();
       // Computed before anything is written: a schedule that cannot fire
       // must not leave a half-approved script behind.
@@ -1604,7 +1604,7 @@ export async function handleScriptsOperation(service: ScriptService, operation: 
     case "discardHeld": await service.discardHeld(text(operation.scriptId, "script")); return undefined;
     default: {
       const unknown: never = operation;
-      throw new Error(`This machine does not know the scripts operation ${(unknown as { op?: unknown }).op}; upgrade its runtime.`);
+      throw new Error(`This machine does not know the scheduled tasks operation ${(unknown as { op?: unknown }).op}; upgrade its runtime.`);
     }
   }
 }

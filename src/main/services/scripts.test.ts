@@ -807,7 +807,7 @@ test("a desktop request on a machine's scripts is checked before it is used", as
   assert.equal((await h.service.summary(request.scriptId)).enabled, true);
   await assert.rejects(send({ op: "setSecret", scriptId: request.scriptId, name: "ALERT_KEY" }), /key value/);
   await assert.rejects(send({ op: "runs" }), /no script/);
-  await assert.rejects(send({ op: "rename", scriptId: request.scriptId }), /does not know the scripts operation rename/);
+  await assert.rejects(send({ op: "rename", scriptId: request.scriptId }), /does not know the scheduled tasks operation rename/);
   const summary = await send({ op: "setEnabled", scriptId: request.scriptId, enabled: false }) as { enabled: boolean };
   assert.equal(summary.enabled, false);
   assert.ok(Array.isArray(await send({ op: "list" })));
