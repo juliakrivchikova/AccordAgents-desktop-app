@@ -54,10 +54,6 @@ jobs:
     name: ${{ inputs.target }} from ${{ github.ref_name }}
     runs-on: macos-26
     timeout-minutes: 240
-    permissions:
-      contents: write
-      # Starts the Windows release of a stable version.
-      actions: write
     env:
       TARGET: ${{ inputs.target }}
     outputs:
@@ -298,15 +294,6 @@ jobs:
           node scripts/smoke-launch-packaged-app.mjs "$app" \
             --screenshot "$RUNNER_TEMP/launch/published.png" --log "$RUNNER_TEMP/launch/published.log"
 
-      # Its Build job runs now; its Publish job waits for the signature from
-      # the Windows PC. A failure here leaves macOS published: start it by hand.
-      - name: Start the Windows release
-        if: inputs.target == 'patch' || inputs.target == 'minor' || inputs.target == 'major'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run windows-release.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f tag="v$VERSION"
-
       - name: Keep checksums and launch evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -336,6 +323,24 @@ jobs:
           done
           echo "::warning::The update feed does not offer $VERSION to $previous yet ($url). The release is published; check the feed again instead of re-running."
           exit 1
+
+  # Its Build job runs now; its Publish job waits for the signature from the
+  # Windows PC. A job of its own, so the token that can start workflows never
+  # meets the dependencies the release job installs. If it fails, macOS is
+  # still published: start the Windows release by hand.
+  windows:
+    name: Start the Windows release
+    needs: release
+    if: inputs.target == 'patch' || inputs.target == 'minor' || inputs.target == 'major'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v${{ needs.release.outputs.version }}
+    steps:
+      - run: gh workflow run windows-release.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f tag="$TAG"
 
   phone-app:
     name: Phone app

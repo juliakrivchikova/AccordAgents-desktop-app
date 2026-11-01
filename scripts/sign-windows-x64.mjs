@@ -15,14 +15,15 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { envWithoutGitHubTokens, packagedAppDir, parseGitHubRepo, prepareReleaseFiles } from "./release-windows-x64.mjs";
+import { envWithoutGitHubTokens, packagedAppDir, parseGitHubRepo, prepareReleaseFiles, productName } from "./release-windows-x64.mjs";
 
 const rootDir = process.cwd();
 const require = createRequire(import.meta.url);
 const hookModulePath = path.join(rootDir, "scripts", "windows-sign-file.cjs");
-const workflowName = "Windows release";
+const workflowPath = ".github/workflows/windows-release.yml";
 const buildJobName = "Build";
 const publishJobName = "Publish";
+const signingEnvironment = "windows-signing";
 
 function fail(message) {
   console.error(`\n${message}`);
@@ -32,15 +33,17 @@ function fail(message) {
 function printHelp() {
   console.log(`Usage:
   npm run sign:windows-x64 -- --run <run id> [--repo owner/repo]
-  npm run sign:windows-x64 -- --check <app folder> <Setup.exe>
+  npm run sign:windows-x64 -- --check <Setup.exe> [<app folder>]
 
 --run signs the app that run's Build job kept. Run it from a clean checkout of
-the commit the run built, after npm ci, with SimplySign Desktop signed in. The
-signed files go to the draft release windows-signed-<run id> of the source
-repository (default: package.json repository); then the run's Publish job is
-approved, or re-run when it already ran without them.
+the commit the run built (the release tag), after npm ci, with SimplySign
+Desktop signed in and the GitHub CLI signed in as a reviewer of the
+windows-signing environment. The signed files go to the draft release
+windows-signed-<run id> of the source repository (default: package.json
+repository); then the run's Publish job is approved, or re-run when it already
+ran without them.
 
---check only checks the signatures of an app folder and its installer.
+--check only checks the signatures of an installer and, if given, an app folder.
 `);
 }
 
@@ -70,17 +73,26 @@ function binaries(dir) {
     .map((entry) => path.join(entry.parentPath, entry.name));
 }
 
-// One PowerShell call reads the status and signer of every file.
-function readSignatures(files) {
+// One PowerShell call reads the status and signer of every file. The list goes
+// through a file named in the environment, so no path is quoted into the script.
+// Windows PowerShell serializes a line Get-Content read as an object with its
+// source file, hence [string].
+export function readSignatures(files) {
   const listDir = mkdtempSync(path.join(os.tmpdir(), "accordagents-signatures-"));
   try {
     const listPath = path.join(listDir, "files.txt");
     writeFileSync(listPath, files.join("\n"));
-    const script = `$result = @(Get-Content -LiteralPath '${listPath}' -Encoding UTF8 | ForEach-Object {
+    const script = `[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$result = @(Get-Content -LiteralPath $env:ACCORDAGENTS_SIGNATURE_LIST -Encoding UTF8 | ForEach-Object {
   $signature = Get-AuthenticodeSignature -LiteralPath $_
-  [pscustomobject]@{ path = $_; status = [string]$signature.Status; thumbprint = $signature.SignerCertificate.Thumbprint }
+  [pscustomobject]@{ path = [string]$_; status = [string]$signature.Status; thumbprint = $signature.SignerCertificate.Thumbprint }
 }); ConvertTo-Json -InputObject $result -Compress`;
-    return JSON.parse(run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]));
+    return JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      cwd: rootDir,
+      env: { ...process.env, ACCORDAGENTS_SIGNATURE_LIST: listPath },
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "inherit"]
+    }));
   } finally {
     rmSync(listDir, { recursive: true, force: true });
   }
@@ -114,10 +126,9 @@ export function signatureProblems(entries, { thumbprint, ours, keptUnsigned }) {
   return problems;
 }
 
-function checkSignatures(appDir, setupPath) {
-  const name = packageJson().productName || packageJson().name;
-  const ours = [path.join(appDir, `${name}.exe`), setupPath];
-  const problems = signatureProblems(readSignatures([...binaries(appDir), setupPath]), {
+function checkSignatures(setupPath, appDir) {
+  const ours = appDir ? [path.join(appDir, `${productName()}.exe`), setupPath] : [setupPath];
+  const problems = signatureProblems(readSignatures([...(appDir ? binaries(appDir) : []), setupPath]), {
     thumbprint: certificateThumbprint(),
     ours,
     keptUnsigned: require(hookModulePath).keptUnsigned
@@ -129,7 +140,7 @@ function checkSignatures(appDir, setupPath) {
 }
 
 function viewRun(repo, runId) {
-  return JSON.parse(run("gh", ["run", "view", runId, "--repo", repo, "--json", "workflowName,jobs,url"]));
+  return JSON.parse(run("gh", ["run", "view", runId, "--repo", repo, "--json", "jobs,url"]));
 }
 
 function downloadBuildInfo(repo, runId) {
@@ -160,17 +171,24 @@ function uploadDraft(repo, runId, runUrl, files) {
 }
 
 // The Publish job waits in the windows-signing environment until it is
-// approved; where the environment has no reviewers it has already failed for
-// want of the draft, and is re-run instead.
-function continueRun(repo, runId) {
-  const pending = JSON.parse(run("gh", ["api", `repos/${repo}/actions/runs/${runId}/pending_deployments`]));
+// approved, which only a required reviewer of that environment can do; where
+// the environment has no reviewers it has already failed for want of the
+// draft, and is re-run instead.
+function continueRun(repo, runId, runUrl) {
+  const pending = JSON.parse(run("gh", ["api", `repos/${repo}/actions/runs/${runId}/pending_deployments`]))
+    .filter(({ environment }) => environment.name === signingEnvironment);
   if (pending.length > 0) {
     const args = ["api", "--method", "POST", `repos/${repo}/actions/runs/${runId}/pending_deployments`,
       "-f", "state=approved", "-f", "comment=Signed on the Windows PC."];
     for (const { environment } of pending) {
       args.push("-F", `environment_ids[]=${environment.id}`);
     }
-    run("gh", args);
+    try {
+      run("gh", args);
+    } catch {
+      fail(`The signed files are uploaded, but this GitHub account cannot approve the ${publishJobName} job.
+Approve it in GitHub (Review deployments) as a reviewer of windows-signing: ${runUrl}`);
+    }
     console.log(`Approved the ${publishJobName} job.`);
     return;
   }
@@ -178,7 +196,9 @@ function continueRun(repo, runId) {
   if (publishJob?.status === "completed" && publishJob.conclusion !== "success") {
     runInherited("gh", ["run", "rerun", runId, "--repo", repo, "--failed"]);
     console.log(`Re-ran the ${publishJobName} job, which ran before the files were signed.`);
+    return;
   }
+  console.log(`The ${publishJobName} job is ${publishJob?.status ?? "missing"}; if it fails without the signed files, run this again.`);
 }
 
 async function signRun(runId, repo) {
@@ -186,34 +206,49 @@ async function signRun(runId, repo) {
     fail("Windows files are signed on Windows.");
   }
   const thumbprint = certificateThumbprint();
-  const runInfo = viewRun(repo, runId);
-  if (runInfo.workflowName !== workflowName) {
-    fail(`Run ${runId} of ${repo} is a "${runInfo.workflowName}" run, not "${workflowName}".`);
+  // The certificate signs whatever the run built, so only a run of this
+  // repository's own workflow file qualifies, whatever it is named.
+  const runPath = run("gh", ["api", `repos/${repo}/actions/runs/${runId}`, "--jq", ".path"]).trim();
+  if (runPath !== workflowPath) {
+    fail(`Run ${runId} of ${repo} is a run of ${runPath || "an unknown workflow"}, not of ${workflowPath}.`);
   }
+  const runInfo = viewRun(repo, runId);
   const build = runInfo.jobs.find((job) => job.name === buildJobName);
   if (build?.conclusion !== "success") {
     fail(`The run's ${buildJobName} job has not succeeded (${build ? `${build.status} ${build.conclusion}` : "missing"}): ${runInfo.url}`);
   }
 
   // Squirrel takes the package's name, version and description from this
-  // checkout, so it must be the commit the run built.
+  // checkout, so it must be the commit the run built: for a release, the one
+  // its tag names here, not only the one the run says it built.
   const info = downloadBuildInfo(repo, runId);
   const head = run("git", ["rev-parse", "HEAD"]).trim();
   if (info.commit !== head) {
     fail(`Run ${runId} built ${info.commit}; check out that commit first (this checkout is at ${head}).`);
   }
+  if (info.tag) {
+    const tagged = spawnSync("git", ["rev-parse", "--verify", "--quiet", `refs/tags/${info.tag}^{commit}`], { cwd: rootDir, encoding: "utf8" }).stdout.trim();
+    if (tagged !== head) {
+      fail(`Run ${runId} built ${info.tag}, but the tag ${info.tag} here ${tagged ? `names ${tagged}` : "is missing"}, not ${head}.`);
+    }
+  } else {
+    console.log(`Run ${runId} is a trial build of ${head}: its files are checked and installed, never published.`);
+  }
   if (run("git", ["status", "--porcelain"]).trim()) {
     fail("Sign from a clean checkout.");
   }
 
+  // Signing starts from an empty out/: forge packs whatever app it finds there.
   const appDir = packagedAppDir();
-  rmSync(path.dirname(appDir), { recursive: true, force: true });
+  rmSync(path.join(rootDir, "out"), { recursive: true, force: true });
   console.log(`==> Downloading the unsigned app of ${runInfo.url}`);
   run("gh", ["run", "download", runId, "--repo", repo, "--name", "windows-unsigned-app", "--dir", appDir]);
 
   console.log("\n==> Signing the app");
   process.env.WINDOWS_SIGN_CERT_SHA1 = thumbprint;
-  const mainExe = path.join(appDir, `${packageJson().productName || packageJson().name}.exe`);
+  // windows-sign only logs a failed hook; signing the app's executable first
+  // turns a closed SimplySign session into a clear error.
+  const mainExe = path.join(appDir, `${productName()}.exe`);
   try {
     require(hookModulePath)(mainExe);
   } catch {
@@ -230,11 +265,13 @@ async function signRun(runId, repo) {
   const files = prepareReleaseFiles(info.version);
 
   console.log("\n==> Checking the signatures");
-  checkSignatures(appDir, files.installer[0]);
+  checkSignatures(files.installer[0], appDir);
 
   console.log("\n==> Handing the signed files to the run");
-  const draft = uploadDraft(repo, runId, runInfo.url, [...files.update, ...files.installer]);
-  continueRun(repo, runId);
+  // RELEASES.sha256 goes along for the Publish job's checks only; it is never published.
+  const releasesChecksum = `${files.update.find((file) => path.basename(file) === "RELEASES")}.sha256`;
+  const draft = uploadDraft(repo, runId, runInfo.url, [...files.update, ...files.installer, releasesChecksum]);
+  continueRun(repo, runId, runInfo.url);
   console.log(`\nThe signed files are in the draft ${draft} of ${repo}; the run goes on: ${runInfo.url}`);
 }
 
@@ -244,8 +281,8 @@ async function main() {
     printHelp();
     return;
   }
-  if (args[0] === "--check" && args.length === 3) {
-    checkSignatures(path.resolve(args[1]), path.resolve(args[2]));
+  if (args[0] === "--check" && (args.length === 2 || args.length === 3)) {
+    checkSignatures(path.resolve(args[1]), args[2] && path.resolve(args[2]));
     return;
   }
   const runIndex = args.indexOf("--run");
