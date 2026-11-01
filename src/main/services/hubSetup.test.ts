@@ -6,6 +6,9 @@ import path from "node:path";
 import test from "node:test";
 import { HUB_SETUP_BLOB_PREFIX, parseHubServerBlob, type HubLinkConfig, type HubSetupState } from "../../shared/hubSetup";
 import { CommandError, type CommandOptions, type CommandResult } from "./command";
+import { createDeviceIdentity } from "./deviceIdentity";
+import { signHubText } from "./hubAuth";
+import { hubProofSigningText } from "../../shared/hubProtocol";
 import { buildHubSetupCommand, hubLaunchScript } from "./hubProvisioning";
 import { HubInstaller, hubActivateScript, hubCertificateScript, hubPrepareScript, hubServiceScript, hubServiceUnit, hubSetOwnerScript, hubStartOverScript, removeStaleHubTemp, sshQuoted, type HubLinkRequest } from "./hubInstaller";
 
@@ -58,7 +61,9 @@ test("every script the installer runs on the server is valid bash", () => {
   assert.doesNotMatch(hubPrepareScript(), /setup_22\.x \| bash/, "no script piped to a root shell");
 });
 
-async function fixture(t: test.TestContext, behaviour: { owner: string[]; healthFailures?: number; failOn?: RegExp; linked?: HubLinkConfig; reachable?: boolean; defaultRegion?: string; keyDirName?: string }) {
+async function fixture(t: test.TestContext, behaviour: { owner: string[]; healthFailures?: number; failOn?: RegExp; linked?: HubLinkConfig; reachable?: boolean; defaultRegion?: string; keyDirName?: string;
+  /** The key the server at the address proves itself with. */
+  answersWith?: { publicKeyDerBase64: string; privateKeyDerBase64: string } }) {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-setup-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const payload = path.join(dir, "payload");
@@ -87,12 +92,17 @@ async function fixture(t: test.TestContext, behaviour: { owner: string[]; health
     return result("");
   };
   let healthFailures = behaviour.healthFailures ?? 0;
-  const fetchImpl = (async () => {
+  const fetchImpl = (async (input: string | URL) => {
     if (healthFailures > 0) { healthFailures -= 1; throw new TypeError("fetch failed"); }
-    return new Response(JSON.stringify({ ok: true, protocol: 1, hubId: "hub-1", version: "1.2.3", head: 0 }), { status: 200 });
+    const challenge = new URL(String(input)).searchParams.get("proof");
+    const proof = challenge && behaviour.answersWith
+      ? { hubKey: behaviour.answersWith.publicKeyDerBase64, signature: signHubText(behaviour.answersWith, hubProofSigningText("hub-1", challenge)) }
+      : undefined;
+    return new Response(JSON.stringify({ ok: true, protocol: 1, hubId: "hub-1", version: "1.2.3", head: 0, ...(proof ? { proof } : {}) }), { status: 200 });
   }) as unknown as typeof fetch;
   const links: HubLinkRequest[] = [];
   const states: HubSetupState[] = [];
+  let clock = Date.now();
   const keyDir = path.join(dir, behaviour.keyDirName ?? "keys");
   const installer = new HubInstaller({
     keyDir,
@@ -105,7 +115,9 @@ async function fixture(t: test.TestContext, behaviour: { owner: string[]; health
     defaultRegion: async () => behaviour.defaultRegion,
     run,
     fetchImpl,
-    sleep: async () => undefined
+    // Every wait passes its time at once, so a deadline comes without waiting for it.
+    now: () => new Date(clock),
+    sleep: async (ms: number) => { clock += ms; }
   });
   installer.onProgress((state) => states.push(state));
   // A line names the command this desktop issued.
@@ -348,4 +360,21 @@ k=$(grep -o 'PAIR-[0-9]*' "$key"); c=$(grep -o 'PAIR-[0-9]*' "$cert")
   assert.throws(() => execFileSync("zsh", ["-c", command], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, LANG: "C" }, encoding: "utf8", stdio: "pipe" }),
     (error: { stderr?: string; stdout?: string }) => /has not reported the keys/.test(error.stderr ?? "") && !(error.stdout ?? "").includes(HUB_SETUP_BLOB_PREFIX));
   assert.equal(execFileSync("cat", [path.join(dir, "ssh.log")], { encoding: "utf8" }).split("\n").length, sshCalls);
+});
+
+test("setup learns the server's own key over SSH and links only a server at the address that proves it", async (t) => {
+  const key = createDeviceIdentity(new Date().toISOString());
+  const owner = JSON.stringify({ ok: true, hubId: "hub-1", hubKey: key.publicKeyDerBase64, alreadyOwner: false });
+  const f = await fixture(t, { owner: [owner], answersWith: key });
+  const state = await f.installer.install({ blob: blobFor("3.14.15.92", { nonce: f.nonce, hostKeys: [HOST_KEY] }) });
+  assert.equal(state.status, "ready", state.message);
+  assert.equal(f.links[0].hubKey, key.publicKeyDerBase64, "the key goes with the link");
+
+  // Whoever answers at the address does not hold that key: nothing is linked.
+  const other = createDeviceIdentity(new Date().toISOString());
+  const g = await fixture(t, { owner: [owner], answersWith: other, keyDirName: "keys-2" });
+  const refused = await g.installer.install({ blob: blobFor("3.14.15.92", { nonce: g.nonce, hostKeys: [HOST_KEY] }) });
+  assert.equal(refused.status, "failed");
+  assert.match(refused.message ?? "", /without proving it is the server set up over SSH/);
+  assert.equal(g.links.length, 0, "nothing is linked");
 });

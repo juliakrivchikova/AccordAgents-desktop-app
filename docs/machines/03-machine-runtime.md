@@ -44,7 +44,7 @@ Dedicated provider/AWS credential records, cloud-run settings, and other machine
 
 1. Install Node 20+, the `sqlite3` CLI, `git`, and the provider CLIs you use (`codex`, `claude`); log the CLIs in on that computer (native auth is per machine and is never copied).
 2. Build the bundle on the desktop: `npm run build:machine` → `dist/machine/` (`accordagents-machine.cjs`, `package.json`, `appSkills/`, `README.md`).
-3. Copy `dist/machine/` to the computer (for example `~/accordagents-machine`) and run `npm install --omit=dev` inside it.
+3. Copy `dist/machine/` to the computer (for example `~/accordagents-machine`) and run `npm ci --omit=dev` inside it.
 4. In the desktop app: Settings → General → Machines → Add machine. Copy the enrollment and save it on the computer as `~/accordagents-machine/enrollment.json` (it carries the key the machine's first hello is sealed with and the address of the User's server; treat it like a password). Adding a machine needs a server of the User's (Settings → Your server).
 5. Start it:
 

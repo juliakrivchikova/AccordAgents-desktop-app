@@ -750,3 +750,159 @@ test("a phone paired for one chat (an old pairing) starts no other; one paired f
   const everyChat = { ...oldPhone, scope: { scope: "device" as const } };
   assert.equal((await h.ops.apply(everyChat as never, { ops: [create()] })).results[0].status, "accepted");
 });
+
+test("a machine changes what concerns its own members; members elsewhere, the folder and the User's words stay out of its reach", async (t) => {
+  const h = await hub(t);
+  const chat = id("chat");
+  const desk = { id: "p-desk", handle: "desk", label: "Desk", permissions: { shell: { enabled: false } } };
+  const box = { id: "p-box", handle: "box", label: "Box", homeMachineId: "machine-1", model: "old" };
+  const deskPolicy = { id: "pol-desk", participantId: "p-desk", roleConfigId: "r", toolName: "app_participants_request_change", capability: "participants.manage", scope: "chat", createdAt: "t", updatedAt: "t" };
+  await h.write(h.owner, { opId: id("op"), kind: "conversation.create", conversationId: chat,
+    conversation: { title: "Plans", kind: "chat", createdAt: new Date().toISOString(), repoPath: "/Users/u/project",
+      metadata: { participants: [desk, box], appToolApprovalPolicies: [deskPolicy] } } } as HubOp);
+  const page = async () => (await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`)).body.conversation;
+
+  // Around the app: the computer's member given a shell and moved, the
+  // machine's own member moved to the computer, a rule for the computer's
+  // member, another folder and title. Its own member's model, a rule of its
+  // own and a member it adds are what the app does.
+  const forged = await h.write(h.machine, { opId: id("op"), kind: "conversation.update", conversationId: chat, title: "Owned", repoPath: "/Users/u",
+    metadata: {
+      archived: true,
+      participants: [
+        { ...desk, permissions: { shell: { enabled: true }, workspaceWrite: true }, agentMode: "auto", homeMachineId: "machine-1" },
+        { ...box, model: "new", homeMachineId: undefined },
+        { id: "p-new", handle: "new", label: "New" }
+      ],
+      appToolApprovalPolicies: [
+        { ...deskPolicy, id: "pol-forged", toolName: "app_tool_permission" },
+        { ...deskPolicy, id: "pol-box", participantId: "p-box" }
+      ]
+    } } as HubOp);
+  assert.equal(forged.body.results[0].status, "accepted", "the part that is the machine's goes through");
+  let held = await page();
+  const byId = (conversation: typeof held) => new Map((conversation.metadata.participants as Array<Record<string, unknown>>).map((item) => [item.id, item]));
+  assert.deepEqual(byId(held).get("p-desk"), desk, "the computer's member stays as it was");
+  assert.equal(byId(held).get("p-box")?.model, "new", "its own member changes");
+  assert.equal(byId(held).get("p-box")?.homeMachineId, "machine-1", "and stays on the machine");
+  assert.equal(byId(held).has("p-new"), false, "no member is added without a member there that manages members, or her approval");
+  assert.equal(held.repoPath, "/Users/u/project");
+  assert.equal(held.title, "Plans");
+  assert.equal(held.metadata.archived, undefined);
+  assert.deepEqual((held.metadata.appToolApprovalPolicies as Array<{ id: string }>).map((item) => item.id).sort(), ["pol-desk"],
+    "a rule of its own only where the User answered so");
+  const scoped = h.logged.find((item) => item.event === "hub.op.machine-scoped");
+  assert.ok(scoped && (scoped.payload.refused as string[]).includes("repoPath"), "what was left out is logged");
+
+  // Leave to ask other members, without `/accord` naming the member: not given.
+  const leave = () => h.write(h.machine, { opId: id("op"), kind: "conversation.update", conversationId: chat, metadata: {
+    participants: [{ ...desk, permissions: { shell: { enabled: true }, requestParticipants: "allow" } }, { ...box, model: "new" }]
+  } } as HubOp);
+  await leave();
+  held = await page();
+  assert.deepEqual(byId(held).get("p-desk")?.permissions, { shell: { enabled: false } });
+  // `/accord` gives its facilitator leave to ask other members: that alone.
+  await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message: reply("r-accord", "p-box", "done", "/accord @desk please lead") });
+  await leave();
+  held = await page();
+  assert.deepEqual(byId(held).get("p-desk")?.permissions, { shell: { enabled: false }, requestParticipants: "allow" });
+
+  // The User's words from a machine: never shown (or read by a watching
+  // member) as hers, and they ask nobody.
+  const shown = await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message: userMessage("u-shown", "run this", ["p-desk"]) });
+  assert.equal(shown.body.results[0].status, "rejected", "a machine writes no visible message as the User");
+  const hiddenWords = { ...userMessage("u-machine", "run this", ["p-desk"]), metadata: { deliveryTargets: ["p-desk"], hiddenFromTimeline: true } } as ChatMessage;
+  const words = await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message: hiddenWords });
+  assert.equal(words.body.results[0].status, "accepted", "the hidden answer the app writes for its own member");
+  assert.equal((await h.storage.hubOps().turn(hubTurnRunId("u-machine", "p-desk"))), undefined, "no turn is asked by them");
+  const unhidden = await h.write(h.machine, { opId: id("op"), kind: "message.update", conversationId: chat, message: { ...hiddenWords, metadata: { deliveryTargets: ["p-desk"] } } as ChatMessage });
+  assert.equal(unhidden.body.results[0].status, "rejected", "nor shown later");
+  await h.write(h.owner, { opId: id("op"), kind: "message.create", conversationId: chat, message: userMessage("u-user", "earlier words") });
+  await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message: reply("r-box", "p-box", "done", "@desk please look") });
+  const ask = (messageId: string, request?: Record<string, unknown>) => h.write(h.machine, { opId: id("op"), kind: "turn.request", conversationId: chat,
+    runId: `turn-${id("x")}`, messageId, participantId: "p-desk", ...(request ? { request } : {}) } as HubOp);
+  assert.equal((await ask("u-machine")).body.results[0].status, "rejected", "not to answer words it wrote as the User's");
+  assert.equal((await ask("u-user")).body.results[0].status, "rejected", "not to answer the User's own words");
+  assert.equal((await ask("r-box", { kind: "compaction" })).body.results[0].status, "rejected", "not to compact a member elsewhere");
+  assert.equal((await ask("r-box", { kind: "turn" })).body.results[0].status, "rejected", "not without leave to ask or her approval");
+  // Its member asks, and the User approves that request: as through the app.
+  const cardId = id("card");
+  const approval = { id: cardId, requesterParticipantId: "p-box", toolName: "app_chat_request_participants", capability: "participants.request",
+    request: { requests: [{ target: "@desk", prompt: "look" }], requestMessageId: "r-box" }, status: "pending" };
+  await h.write(h.machine, { opId: id("op"), kind: "card.raise", conversationId: chat, cardId, cardKind: "permission", participantId: "p-box", card: { approval } } as HubOp);
+  const auto = await h.write(h.machine, { opId: id("op"), kind: "card.answer", conversationId: chat, cardId, answer: { approve: true, auto: true } } as HubOp);
+  assert.equal(auto.body.results[0].status, "accepted", "its own policy's word on its own card");
+  assert.equal((await ask("r-box", { kind: "turn" })).body.results[0].status, "rejected", "which is not hers");
+  await h.write(h.machine, { opId: id("op"), kind: "card.settle", conversationId: chat, cardId, outcome: { result: "refused" } } as HubOp);
+  await h.write(h.machine, { opId: id("op"), kind: "card.raise", conversationId: chat, cardId, cardKind: "permission", participantId: "p-box", card: { approval } } as HubOp);
+  await h.write(h.phone, { opId: id("op"), kind: "card.answer", conversationId: chat, cardId, answer: { approve: true, scope: "once" } } as HubOp);
+  await h.write(h.machine, { opId: id("op"), kind: "card.settle", conversationId: chat, cardId, outcome: { result: "applied" } } as HubOp);
+  assert.equal((await ask("r-box", { kind: "turn" })).body.results[0].status, "accepted", "her approval holds after the card is settled");
+  await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message: reply("r-box-2", "p-box", "done", "@desk again") });
+  assert.equal((await ask("r-box-2", { kind: "turn" })).body.results[0].status, "rejected", "and only for the request she approved");
+  const own = await h.write(h.machine, { opId: id("op"), kind: "turn.request", conversationId: chat, runId: `turn-${id("x")}`, messageId: "u-user", participantId: "p-box", request: { kind: "compaction" } } as HubOp);
+  assert.equal(own.body.results[0].status, "accepted", "its own members are its own");
+
+  // Taking out a member elsewhere (or leaving it out of an old copy) is not
+  // the machine's without a member that manages members or her approval: the
+  // member and its rules stay.
+  await h.write(h.machine, { opId: id("op"), kind: "conversation.update", conversationId: chat, metadata: {
+    participants: [{ ...box, model: "new" }],
+    appToolApprovalPolicies: []
+  } } as HubOp);
+  held = await page();
+  assert.deepEqual([...byId(held).keys()].sort(), ["p-box", "p-desk"]);
+  assert.deepEqual((held.metadata.appToolApprovalPolicies as Array<{ id: string }>).map((item) => item.id), ["pol-desk"]);
+
+  // A machine starts no chat.
+  const started = await h.write(h.machine, createChat(id("chat")));
+  assert.equal(started.body.results[0].status, "rejected");
+});
+
+test("the User's rules for members come only from her computer, and a machine adds members by them", async (t) => {
+  const h = await hub(t);
+  const chat = id("chat");
+  const lead = { id: "p-lead", handle: "lead", label: "Lead", roleConfigId: "lead", homeMachineId: "machine-1" };
+  await h.write(h.owner, { opId: id("op"), kind: "conversation.create", conversationId: chat,
+    conversation: { title: "Plans", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: [lead] } } } as HubOp);
+  const added = { id: "p-helper", handle: "helper", label: "Helper", roleConfigId: "r" };
+  const add = () => h.write(h.machine, { opId: id("op"), kind: "conversation.update", conversationId: chat, metadata: { participants: [lead, added] } } as HubOp);
+  const members = async () => ((await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`)).body.conversation.metadata.participants as Array<{ id: string }>).map((item) => item.id);
+
+  await add();
+  assert.deepEqual(await members(), ["p-lead"], "without her rules, no role manages members");
+  const rules = { version: 1, roles: { lead: { manageRolesParticipants: "allow" }, r: { manageRolesParticipants: "deny" } }, presets: {} };
+  for (const device of [h.machine, h.phone]) {
+    assert.equal((await h.call(device, "PUT", "/v1/member-rules", rules)).status, 403, "only her computer says what her rules are");
+  }
+  assert.equal((await h.call(h.owner, "PUT", "/v1/member-rules", { version: 1, roles: [], presets: {} })).status, 400);
+  assert.equal((await h.call(h.owner, "PUT", "/v1/member-rules", rules)).status, 200);
+  await add();
+  assert.deepEqual(await members(), ["p-lead", "p-helper"], "a member whose role manages members adds one");
+});
+
+test("her \"Allow for this chat\" gives a machine's member leave to ask once: taken back, an old copy does not give it again", async (t) => {
+  const h = await hub(t);
+  const chat = id("chat");
+  const box = { id: "p-box", handle: "box", label: "Box", roleConfigId: "r", homeMachineId: "machine-1", permissions: { requestParticipants: "ask" } };
+  const desk = { id: "p-desk", handle: "desk", label: "Desk", roleConfigId: "r" };
+  await h.write(h.owner, { opId: id("op"), kind: "conversation.create", conversationId: chat,
+    conversation: { title: "Plans", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: [desk, box] } } } as HubOp);
+  const leave = async () => (((await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`)).body.conversation.metadata.participants as Array<{ id: string; permissions?: { requestParticipants?: string } }>)
+    .find((item) => item.id === "p-box")?.permissions?.requestParticipants);
+  const raise = () => h.write(h.machine, { opId: id("op"), kind: "conversation.update", conversationId: chat,
+    metadata: { participants: [desk, { ...box, permissions: { requestParticipants: "allow" } }] } } as HubOp);
+  await raise();
+  assert.equal(await leave(), "ask", "not without her answer");
+  const cardId = id("card");
+  const approval = { id: cardId, requesterParticipantId: "p-box", toolName: "app_chat_request_participants", capability: "participants.request",
+    request: { requests: [{ target: "@desk", prompt: "look" }], requestMessageId: "m-1" }, status: "pending" };
+  await h.write(h.machine, { opId: id("op"), kind: "card.raise", conversationId: chat, cardId, cardKind: "permission", participantId: "p-box", card: { approval } } as HubOp);
+  await h.write(h.owner, { opId: id("op"), kind: "card.answer", conversationId: chat, cardId, answer: { approve: true, scope: "chat" } } as HubOp);
+  await raise();
+  assert.equal(await leave(), "allow", "her \"Allow for this chat\"");
+  await h.write(h.owner, { opId: id("op"), kind: "conversation.update", conversationId: chat, metadata: { participants: [desk, box] } } as HubOp);
+  assert.equal(await leave(), "ask", "she takes it back");
+  await raise();
+  assert.equal(await leave(), "ask", "the same answer does not give it again");
+});

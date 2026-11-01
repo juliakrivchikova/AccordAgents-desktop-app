@@ -178,6 +178,12 @@ export type HubOp = HubOpBody & {
 };
 
 export type HubCardKind = "permission" | "choice" | "mention" | "roster";
+
+/** A card as the User approved it (from her computer or a phone), kept by the
+ *  server for the cards a cloud machine raised: `superseded` once she
+ *  answered the same card again; `messageHash`, the content of the message
+ *  it approved (a member request's), as it was when she approved it. */
+export type HubUserApproval = HubCard & { superseded?: boolean; messageHash?: string };
 export type HubCardState = "pending" | "answered" | "settled";
 
 /** A card on the server: what it asks, the answer it got, and what came of it. */
