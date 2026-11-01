@@ -32,9 +32,9 @@ export interface ChatServerLink {
   machineName(machineId: string): string | undefined;
   /** The chat moved to the server whole: what was queued for it is in that move. */
   settleMoved?(conversationId: string): Promise<void>;
-  /** Cards not settled yet on the server, in every chat, and the place in
-   *  its order they were read at (undefined: not linked yet). */
-  openCards?(): Promise<{ cards: HubCard[]; head: number } | undefined>;
+  /** Cards not settled yet on the server, in every chat (or in one), and
+   *  the place in its order they were read at (undefined: not linked yet). */
+  openCards?(conversationId?: string): Promise<{ cards: HubCard[]; head: number } | undefined>;
   /** Resolves once this device has read the feed through `seq`, or after
    *  `timeoutMs` (false then). */
   readThrough?(seq: number, timeoutMs: number): Promise<boolean>;

@@ -8840,7 +8840,7 @@
     }
     const state = document.createElement("p");
     state.className = "control-card-state";
-    state.textContent = outcome === "Cancelled" ? "Cancelled" : outcome ? label + outcome : "";
+    state.textContent = outcome === "Cancelled" || outcome === "Expired" ? outcome : outcome ? label + outcome : "";
     state.hidden = !state.textContent;
     wrap.append(state);
     return wrap;
