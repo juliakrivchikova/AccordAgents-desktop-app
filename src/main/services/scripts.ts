@@ -499,9 +499,9 @@ export class ScriptService {
   /** Start one run now. Throws when it cannot start. */
   async runNow(id: string): Promise<void> {
     const record = await this.requireRecord(id);
-    if (this.stopped) throw new Error(`Scheduled scripts on ${this.hostPhrase} are stopping; try again in a moment.`);
-    if (!record.approvedHash) throw new Error("Approve the script before running it.");
-    if (this.running.has(id) || this.starting.has(id)) throw new Error("The script is already running.");
+    if (this.stopped) throw new Error(`Scheduled tasks on ${this.hostPhrase} are stopping; try again in a moment.`);
+    if (!record.approvedHash) throw new Error("Approve the task before running it.");
+    if (this.running.has(id) || this.starting.has(id)) throw new Error("The task is already running.");
     this.launch(id, "Started by hand.");
   }
 
@@ -562,7 +562,7 @@ export class ScriptService {
     if (this.options.admit) {
       // A host that cannot say whether it is staying awake does not start
       // work; the run is recorded either way, never dropped in silence.
-      const admission = await Promise.resolve(this.options.admit(`the scheduled script "${record.name}"`))
+      const admission = await Promise.resolve(this.options.admit(`the scheduled task "${record.name}"`))
         .catch((error): MachineHostAdmission => ({ admitted: false, reason: `This machine could not admit new work: ${errorMessage(error)}` }));
       if (!admission.admitted) {
         await this.recordRun(id, { status: "skipped", at: startedAt, messagesSent: 0, detail: admission.reason });
@@ -783,7 +783,7 @@ export class ScriptService {
       return announce ? "failing" as const : undefined;
     });
     if (transition === "failing") {
-      await this.notice(id, `Failing: ${failure ?? "its last run did not succeed"}. Its history is in Settings → Scripts.`);
+      await this.notice(id, `Failing: ${failure ?? "its last run did not succeed"}. Its history is in Settings → Scheduled Tasks.`);
     } else if (transition === "recovered") {
       await this.notice(id, "Working again.");
     }
@@ -907,8 +907,8 @@ export class ScriptService {
     if (reservation.kind === "held") {
       if (reservation.first) {
         void this.notice(context.scriptId, reservation.overWakeups
-          ? `Holding messages: it reached its limit of ${record.permissions.maxWakeupsPerHour} wake-ups per hour. Release or discard them in Settings → Scripts.`
-          : `Holding messages: it reached its limit of ${SCRIPT_MAX_MESSAGES_PER_HOUR} messages per hour. Release or discard them in Settings → Scripts.`);
+          ? `Holding messages: it reached its limit of ${record.permissions.maxWakeupsPerHour} wake-ups per hour. Release or discard them in Settings → Scheduled Tasks.`
+          : `Holding messages: it reached its limit of ${SCRIPT_MAX_MESSAGES_PER_HOUR} messages per hour. Release or discard them in Settings → Scheduled Tasks.`);
       }
       this.changed();
       return { ok: true, status: "held", heldCount: reservation.heldCount };
@@ -1037,7 +1037,7 @@ export class ScriptService {
 
   private async requireChatScript(id: string, conversationId: string): Promise<ScriptRecord> {
     const record = await this.requireRecord(id);
-    if (!this.belongsToChat(record, conversationId)) throw new Error("That scheduled script does not belong to this chat.");
+    if (!this.belongsToChat(record, conversationId)) throw new Error("That scheduled task does not belong to this chat.");
     return record;
   }
 
@@ -1047,17 +1047,17 @@ export class ScriptService {
     const reason = trimmedString(request.reason, "reason", REASON_MAX_CHARS, false);
     if (op === "run_now") {
       const record = await this.requireChatScript(String(request.scriptId ?? ""), input.conversationId);
-      if (!record.enabled) throw new Error("The script is switched off; ask the User to switch it on first.");
+      if (!record.enabled) throw new Error("The task is switched off; ask the User to switch it on first.");
       await this.runNow(record.id);
       return { kind: "ran", scriptId: record.id, name: record.name };
     }
     if (op === "create" || op === "update") return this.proposeRevision(input, request, op, reason);
     if (op === "delete" || op === "enable" || op === "disable") {
       const record = await this.requireChatScript(String(request.scriptId ?? ""), input.conversationId);
-      if (!record.approvedHash && op !== "delete") throw new Error("The script has not been approved yet.");
+      if (!record.approvedHash && op !== "delete") throw new Error("The task has not been approved yet.");
       const changeRequest = this.changeRequestFromRecord(record, op, reason);
       const verb = op === "delete" ? "Delete" : op === "enable" ? "Switch on" : "Switch off";
-      return { kind: "approval", request: changeRequest, summary: `${verb} the scheduled script "${record.name}"`, missingSecretNames: [] };
+      return { kind: "approval", request: changeRequest, summary: `${verb} the scheduled task "${record.name}"`, missingSecretNames: [] };
     }
     throw new Error("op must be create, update, delete, enable, disable or run_now.");
   }
@@ -1170,7 +1170,7 @@ export class ScriptService {
     this.changed();
     const verb = op === "create" ? "Add" : "Update";
     const members = permissions.permissions.participantIds.map((pid) => permissions.participantLabels[pid] ?? pid);
-    const summary = `${verb} the scheduled script "${name}": ${describeScriptSchedule(schedule).toLowerCase()} on ${this.hostPhrase}`
+    const summary = `${verb} the scheduled task "${name}": ${describeScriptSchedule(schedule).toLowerCase()} on ${this.hostPhrase}`
       + (members.length > 0 ? `, may wake ${members.join(", ")}` : "")
       + (secretNames.length > 0 ? `; needs keys ${secretNames.join(", ")}` : "")
       + ". Review the code and approve it on the desktop";
@@ -1279,7 +1279,7 @@ export class ScriptService {
     }
     const revision = await this.options.store.readRevision(record.id, request.revisionId);
     if (!revision || revision.contentHash !== request.contentHash) {
-      throw new Error("The proposed files are no longer what the card shows; ask for the script again.");
+      throw new Error("The proposed files are no longer what the card shows; ask the member to propose it again.");
     }
     const saved = await this.options.secrets.savedNames(record.id);
     const missing = revision.secretNames.filter((name) => !saved.includes(name));
@@ -1293,24 +1293,24 @@ export class ScriptService {
     const id = request.scriptId;
     if (request.op === "delete") {
       await this.deleteScript(id);
-      return `Deleted the scheduled script "${request.name}".`;
+      return `Deleted the scheduled task "${request.name}".`;
     }
     if (request.op === "disable") {
       await this.setEnabled(id, false);
-      return `Switched off the scheduled script "${request.name}".`;
+      return `Switched off the scheduled task "${request.name}".`;
     }
     if (request.op === "enable") {
       await this.setEnabled(id, true);
-      return `Switched on the scheduled script "${request.name}". ${request.scheduleText}.`;
+      return `Switched on the scheduled task "${request.name}". ${request.scheduleText}.`;
     }
     await this.options.store.withScript(id, async () => {
       const record = await this.options.store.readRecord(id);
-      if (!record) throw new Error("That scheduled script does not exist.");
+      if (!record) throw new Error("That scheduled task does not exist.");
       if (this.alreadyApplied(record, request)) return;
       // Re-checked under the lock: a newer proposal may have replaced this one.
       if (record.pendingRevisionId !== request.revisionId) throw new Error("This proposal was replaced by a newer one or already handled.");
       const revision = await this.options.store.readRevision(id, request.revisionId!);
-      if (!revision || revision.contentHash !== request.contentHash) throw new Error("The proposed files are no longer what the card shows; ask for the script again.");
+      if (!revision || revision.contentHash !== request.contentHash) throw new Error("The proposed files are no longer what the card shows; ask the member to propose it again.");
       const nowMs = this.now();
       // Computed before anything is written: a schedule that cannot fire
       // must not leave a half-approved script behind.
@@ -1354,7 +1354,7 @@ export class ScriptService {
     const runtime = await this.options.store.readRuntime(id);
     const nextRun = runtime.nextDueAt ? Date.parse(runtime.nextDueAt) : undefined;
     const when = nextRun === undefined ? "soon" : nextRun <= this.now() + 1000 ? "now" : humanTime(nextRun, record.schedule.kind === "cron" ? record.schedule.timeZone : undefined);
-    return `${request.op === "create" ? "Added" : "Updated"} the scheduled script "${record.name}": ${describeScriptSchedule(record.schedule).toLowerCase()}, first run ${when}.`;
+    return `${request.op === "create" ? "Added" : "Updated"} the scheduled task "${record.name}": ${describeScriptSchedule(record.schedule).toLowerCase()}, first run ${when}.`;
   }
 
   /** The User declined the card: drop the proposal; a script that was never
@@ -1387,7 +1387,7 @@ export class ScriptService {
 
   async setEnabled(id: string, enabled: boolean): Promise<void> {
     const record = await this.requireRecord(id);
-    if (!record.approvedHash) throw new Error("Approve the script first.");
+    if (!record.approvedHash) throw new Error("Approve the task first.");
     await this.options.store.withScript(id, async () => {
       const current = (await this.options.store.readRecord(id))!;
       const runtime = await this.options.store.readRuntime(id);
@@ -1428,7 +1428,7 @@ export class ScriptService {
       const revision = await this.options.store.readRevision(id, record.pendingRevisionId);
       revision?.secretNames.forEach((item) => names.add(item));
     }
-    if (!names.has(name)) throw new Error(`The script does not use a key named ${name}.`);
+    if (!names.has(name)) throw new Error(`The task does not use a key named ${name}.`);
     const trimmed = value.trim();
     if (!trimmed) throw new Error("A key value cannot be empty.");
     if (trimmed.length > SECRET_MAX_CHARS) throw new Error(`A key value is at most ${SECRET_MAX_CHARS} characters.`);
@@ -1451,7 +1451,7 @@ export class ScriptService {
     } catch {
       record = undefined;
     }
-    if (!record) throw new Error("That scheduled script does not exist.");
+    if (!record) throw new Error("That scheduled task does not exist.");
     return record;
   }
 
@@ -1536,7 +1536,7 @@ export class ScriptService {
       if (!revision) throw new Error("That proposal is no longer available.");
       return { scriptId: id, revisionId, runtime: revision.runtime, entry: revision.entry, files: revision.files, contentHash: revision.contentHash };
     }
-    if (!record.approvedHash) throw new Error("The script has not been approved yet.");
+    if (!record.approvedHash) throw new Error("The task has not been approved yet.");
     const files = await this.options.store.readInstalledFiles(id);
     return { scriptId: id, runtime: record.runtime, entry: record.entry, files, contentHash: scriptContentHash(record.runtime, record.entry, files) };
   }
@@ -1604,7 +1604,7 @@ export async function handleScriptsOperation(service: ScriptService, operation: 
     case "discardHeld": await service.discardHeld(text(operation.scriptId, "script")); return undefined;
     default: {
       const unknown: never = operation;
-      throw new Error(`This machine does not know the scripts operation ${(unknown as { op?: unknown }).op}; upgrade its runtime.`);
+      throw new Error(`This machine does not know the scheduled tasks operation ${(unknown as { op?: unknown }).op}; upgrade its runtime.`);
     }
   }
 }

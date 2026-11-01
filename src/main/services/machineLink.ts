@@ -125,7 +125,7 @@ const TURN_HOLD_RENEW_MS = 5 * 60_000;
 /** Runs whose live progress is followed per machine, at most. */
 const LIVE_PROGRESS_RUNS_MAX = 64;
 
-/** A machine as Settings → Scripts sees it. */
+/** A machine as Settings → Scheduled Tasks sees it. */
 export interface MachineScriptHost {
   machineId: string;
   name: string;
@@ -402,13 +402,13 @@ export class MachineLinkService {
     const connection = this.connections.get(machineId);
     if (!connection) throw new Error("That machine is not set up on this computer.");
     if (!this.managesScripts(connection)) {
-      throw new Error(`Scheduled scripts on ${connection.record.name} are managed from the desktop that set it up.`);
+      throw new Error(`Scheduled tasks on ${connection.record.name} are managed from the desktop that set it up.`);
     }
     if (!connection.machineDeviceId) throw new Error(`${connection.record.name} is not connected right now.`);
     const hello = connection.record.lastHello;
     if (!hello) throw new Error(`${connection.record.name} has not greeted this desktop yet; try again in a moment.`);
     if (hello.scriptsSupported !== true) {
-      throw new Error(`${connection.record.name} runs an older runtime without scheduled scripts; upgrade it in Settings → Machines.`);
+      throw new Error(`${connection.record.name} runs an older runtime without scheduled tasks; upgrade it in Settings → Machines.`);
     }
     const requestId = randomUUID();
     const answer = new Promise<unknown>((resolve, reject) => {

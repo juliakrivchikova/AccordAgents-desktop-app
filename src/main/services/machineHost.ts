@@ -675,7 +675,7 @@ export class MachineHostService {
       const expiresAt = typeof body.expiresAt === "string" ? Date.parse(body.expiresAt) : Number.NaN;
       let reply: MachineLinkMessage;
       if (!scripts) {
-        reply = fail("This machine runtime does not host scheduled scripts; upgrade it.");
+        reply = fail("This machine runtime does not host scheduled tasks; upgrade it.");
       } else if (body.instanceId !== this.instanceId) {
         reply = fail("The machine restarted since this was asked; try again.");
       } else if (!Number.isFinite(expiresAt) || this.now().getTime() > expiresAt + SCRIPTS_REQUEST_CLOCK_SKEW_MS) {

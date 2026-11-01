@@ -945,7 +945,7 @@ const cloudRunAwsService = new CloudRunAwsService(settingsService, {
     authorizeAutomaticWorkerStop: async (worker) => machineLinkService?.hasActiveMachineWork()
       ? { allowed: false, reason: "A machine is still working." }
       : machineLinkService?.machineKeepsAwake(awsInstanceOfWorker(worker))
-        ? { allowed: false, reason: "A machine runs switched-on scheduled scripts." }
+        ? { allowed: false, reason: "A machine runs switched-on scheduled tasks." }
         : { allowed: true, lease: { leaseId: "machine-idle", expiresAt: new Date(Date.now() + 30_000).toISOString() } },
     renewAutomaticWorkerStopLease: async (worker, lease) => machineLinkService?.hasActiveMachineWork() || machineLinkService?.machineKeepsAwake(awsInstanceOfWorker(worker))
       ? Promise.reject(new Error("A machine started working; the automatic stop is abandoned."))

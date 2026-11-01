@@ -74,7 +74,7 @@ test("a scheduled script that installs code reaches the phone as decline-only", 
     toolName: "app_scripts_request_change",
     capability: "scripts.request",
     status: "pending",
-    summary: "Add the scheduled script \"QA ping\"",
+    summary: "Add the scheduled task \"QA ping\"",
     createdAt: "2026-10-18T00:00:00.000Z",
     updatedAt: "2026-10-18T00:00:00.000Z",
     request: {
@@ -217,9 +217,9 @@ test("a permission card asked again after its device refused an answer tells the
     toolName: "Bash", capability: "shell", status: "pending", request: { command: "ls" }, summary: "Use Bash",
     createdAt: "2026-10-28T08:59:00.000Z", updatedAt: "2026-10-28T08:59:00.000Z" } as unknown as ChatAppToolApproval;
   const asked = controlCardFromHubCard(hubCard({ cardId: "approval-2", card: { approval,
-    refusals: [{ operationId: "op-phone-1", reason: "A script that runs code is approved on the desktop, where its code is shown.", at: "2026-10-28T09:00:00.000Z" }, { operationId: "", reason: "nameless" }] } }));
+    refusals: [{ operationId: "op-phone-1", reason: "A scheduled task with new code is approved on the desktop, where its code is shown.", at: "2026-10-28T09:00:00.000Z" }, { operationId: "", reason: "nameless" }] } }));
   assert.equal(asked?.status, "pending");
-  assert.deepEqual(asked?.refusedAnswers, [{ operationId: "op-phone-1", reason: "A script that runs code is approved on the desktop, where its code is shown." }]);
+  assert.deepEqual(asked?.refusedAnswers, [{ operationId: "op-phone-1", reason: "A scheduled task with new code is approved on the desktop, where its code is shown." }]);
   const plain = controlCardFromHubCard(hubCard({ cardId: "approval-2", card: { approval } }));
   assert.equal(plain?.refusedAnswers, undefined);
 });

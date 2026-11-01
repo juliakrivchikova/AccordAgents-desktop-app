@@ -1,4 +1,4 @@
-/* Scheduled-script approval card (chat) and the Settings → Scripts page. */
+/* Scheduled-task approval card (chat) and the Settings → Scheduled Tasks page. */
 
 .chat-script-approval-content {
   display: grid;
@@ -198,7 +198,7 @@
   font-size: 12px;
 }
 
-/* Settings → Scripts */
+/* Settings → Scheduled Tasks */
 
 .scripts-settings-list {
   display: grid;

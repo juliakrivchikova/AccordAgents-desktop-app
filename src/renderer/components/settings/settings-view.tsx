@@ -75,7 +75,7 @@ export function SettingsView(props: {
     : props.section === "environment"
       ? "Environment"
     : props.section === "scripts"
-      ? "Scripts"
+      ? "Scheduled Tasks"
       : props.section === "roles"
         ? "Roles"
         : props.section === "behavior-rules"

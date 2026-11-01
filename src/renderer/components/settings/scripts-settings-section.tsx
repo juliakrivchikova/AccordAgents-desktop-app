@@ -4,7 +4,7 @@ import type { ScheduledScriptSummary } from "../../../shared/scripts";
 import { errorText } from "../review/review-conversation-data";
 import { ScriptSettingsItem } from "./scripts-settings-item";
 
-/** Settings → Scripts: every scheduled script, on this computer and on its
+/** Settings → Scheduled Tasks: every scheduled script, on this computer and on its
  *  machines, its state, history and keys, with the direct controls (on/off,
  *  Run now, Delete). Each item names the host it runs on. */
 export function ScriptsSettingsSection(): JSX.Element {
@@ -32,9 +32,9 @@ export function ScriptsSettingsSection(): JSX.Element {
   return (
     <section className="gen-section" data-testid="scripts-settings">
       <div className="gen-section-head">
-        <h2 className="gen-section-title">Scheduled scripts</h2>
+        <h2 className="gen-section-title">Scheduled tasks</h2>
         <span className="gen-section-meta">
-          {scripts ? `${scripts.length} ${scripts.length === 1 ? "script" : "scripts"}` : "Loading"}
+          {scripts ? `${scripts.length} ${scripts.length === 1 ? "task" : "tasks"}` : "Loading"}
         </span>
       </div>
       <p className="scripts-settings-meta">
@@ -46,7 +46,7 @@ export function ScriptsSettingsSection(): JSX.Element {
         <div className="gen-card">
           <div className="gen-row">
             <div className="gen-row-text">
-              <div className="gen-row-desc">No scheduled scripts yet.</div>
+              <div className="gen-row-desc">No scheduled tasks yet.</div>
             </div>
           </div>
         </div>

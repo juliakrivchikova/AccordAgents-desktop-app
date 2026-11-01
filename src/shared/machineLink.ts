@@ -89,7 +89,7 @@ export interface MachineHelloBody {
   /** An enabled scheduled script keeps this machine from stopping when idle.
    *  Not a run: the desktop's update gate does not wait on it. */
   keepAwake?: boolean;
-  /** How many switched-on scripts keep it awake ("Kept on by 2 scheduled scripts"). */
+  /** How many switched-on scripts keep it awake ("Kept on by 2 scheduled tasks"). */
   keepAwakeScripts?: number;
 }
 
