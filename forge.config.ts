@@ -1,14 +1,11 @@
-import { readFileSync } from "node:fs";
 import path from "node:path";
 import { MakerDMG } from "@electron-forge/maker-dmg";
 import { MakerSquirrel } from "@electron-forge/maker-squirrel";
 import { MakerZIP } from "@electron-forge/maker-zip";
 import { FusesPlugin } from "@electron-forge/plugin-fuses";
 import { FuseV1Options, FuseVersion } from "@electron/fuses";
-import { squirrelVersion } from "./scripts/squirrel-version.cjs";
 
 const productName = "AccordAgents";
-const appVersion: string = JSON.parse(readFileSync(path.resolve(__dirname, "package.json"), "utf8")).version;
 const assetsDir = path.resolve(__dirname, "assets");
 const iconBasePath = path.join(assetsDir, "icon");
 const iconPath = `${iconBasePath}.icns`;
@@ -64,6 +61,14 @@ const osxNotarizeOptions = hasNotarizeCredentials
     appleIdPassword: process.env.APPLE_NOTARIZE_PASSWORD as string,
     teamId: process.env.APPLE_TEAM_ID as string
   }
+  : undefined;
+
+// The Windows installer is signed with the certificate whose thumbprint is in
+// WINDOWS_SIGN_CERT_SHA1, which scripts/sign-windows-x64.mjs sets after it has
+// signed the packaged app; the hook decides which files get our signature.
+// Without a thumbprint the installer stays unsigned.
+const windowsSignOptions = process.env.WINDOWS_SIGN_CERT_SHA1
+  ? { hookModulePath: path.resolve(__dirname, "scripts", "windows-sign-file.cjs") }
   : undefined;
 
 const config = {
@@ -164,7 +169,7 @@ const config = {
     }, ["darwin"]),
     new MakerSquirrel({
       setupIcon: windowsIconPath,
-      version: squirrelVersion(appVersion)
+      ...(windowsSignOptions ? { windowsSign: windowsSignOptions } : {})
     }, ["win32"])
   ],
   plugins: [

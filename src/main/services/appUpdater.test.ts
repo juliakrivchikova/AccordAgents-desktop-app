@@ -8,8 +8,14 @@ import {
 } from "./appUpdater";
 
 test("resolveUpdateRepo returns the stable repo unless beta updates are enabled", () => {
-  assert.equal(resolveUpdateRepo(false), STABLE_UPDATE_REPO);
-  assert.equal(resolveUpdateRepo(true), BETA_UPDATE_REPO);
+  assert.equal(resolveUpdateRepo(false, "darwin"), STABLE_UPDATE_REPO);
+  assert.equal(resolveUpdateRepo(true, "darwin"), BETA_UPDATE_REPO);
+});
+
+// Betas have no Windows build: a Windows app that kept the setting on from an
+// older version would otherwise never be offered another update.
+test("resolveUpdateRepo keeps Windows on the stable repo", () => {
+  assert.equal(resolveUpdateRepo(true, "win32"), STABLE_UPDATE_REPO);
 });
 
 test("supports the packaged macOS and Squirrel.Windows update paths only", () => {

@@ -158,8 +158,7 @@ gh workflow run release.yml --repo juliakrivchikova/AccordAgents-desktop-app --r
 ```
 
 `-f target=build-only` signs, notarizes and launch-checks any branch without
-bumping or publishing, and builds, installs and launches the unsigned Windows
-installer, which it keeps as an artifact for a week. Stable targets work once this workflow is on `main`. The workflow needs the repository secrets listed at the
+bumping or publishing. Stable targets work once this workflow is on `main`. The workflow needs the repository secrets listed at the
 top of `release.yml`. It runs the same `release-mac-arm64.mjs` as below, pinned
 to the commit the run was started for, then downloads the published assets and
 checks and launches them.
@@ -207,56 +206,73 @@ restart the app so the stable feed is checked on next launch.
 
 ## Verify Auto-Updates
 
-Each macOS `release:*` command checks that `update.electronjs.org` can find the
+Each `release:*` command checks that `update.electronjs.org` can find the
 published ZIP asset before it finishes. The check uses the public release repo,
-platform `darwin-arm64`, and the version created by that release run. The
-Windows check asks `win32-x64/<installed version>/RELEASES` for the new NuGet
-package (see Windows below).
+platform `darwin-arm64`, and the version created by that release run.
 
 ## Windows
 
-Windows x64 builds are not code-signed. The `Release` workflow builds them on a
-GitHub-hosted Windows machine after macOS is published, from the same tag, and
-adds these files to the same GitHub Release:
+Windows x64 ships only with stable releases. Betas have no Windows build, and
+the Windows app always follows the stable feed, so its Settings have no `Beta
+updates`. Windows builds are signed with the Certum code-signing certificate,
+whose key stays in Certum's cloud and is reached only through SimplySign
+Desktop on the User's Windows PC, after she signs in there with the code from
+its phone app. Everything else runs in the `Windows release` workflow
+(`.github/workflows/windows-release.yml`):
 
-```text
-AccordAgents-<version>-win32-x64-Setup.exe
-AccordAgents-<version>-win32-x64-Setup.exe.sha256
-accordagents-<squirrel version>-full.nupkg
-accordagents-<squirrel version>-full.nupkg.sha256
-RELEASES
-```
+1. A stable `Release` run starts it for its tag once macOS is published; by
+   hand: `gh workflow run windows-release.yml --repo
+   juliakrivchikova/AccordAgents-desktop-app --ref main -f tag=v<version>`.
+   `Build` builds the unsigned app from the tag on a GitHub-hosted Windows
+   machine, checked out with LF line endings like the macOS build (the app
+   ships skills, prompts and the cloud machine runtime byte for byte), checks
+   its archive, launches it and keeps it as an artifact. `Publish` then waits.
+2. On the Windows PC, with SimplySign Desktop signed in and the GitHub CLI
+   signed in to an account that can write to this repository: in a clean clone
+   checked out at the tag, `npm ci`, then `npm run sign:windows-x64 -- --run
+   <run id>`. It downloads the unsigned app, signs its files, packs and signs
+   the installer, checks every signature, puts the files in the draft release
+   `windows-signed-<run id>` of this repository and approves `Publish`. The
+   clone supplies only the installer's metadata, so its line endings do not
+   matter.
+3. `Publish` installs the signed installer on a clean GitHub machine, checks
+   the signatures as Windows sees them, launches the installed app, and only
+   then adds to the GitHub Release of the tag:
 
-The Setup executable is for direct download. The NuGet package and `RELEASES`
-are what Squirrel asks `update.electronjs.org` for
-(`win32-x64/<installed version>/RELEASES`). The workflow installs and launches
-the installer before it publishes anything, then uploads the NuGet package and
-`RELEASES` first and the installer last: the update service offers a release to
-Windows as soon as it carries an `.exe`, and reads `RELEASES` from it. Once an
-installer is published it is never replaced by a rebuild.
+   ```text
+   AccordAgents-<version>-win32-x64-Setup.exe
+   AccordAgents-<version>-win32-x64-Setup.exe.sha256
+   accordagents-<version>-full.nupkg
+   accordagents-<version>-full.nupkg.sha256
+   RELEASES
+   ```
 
-The Squirrel version pads the beta number to three digits (`1.11.4-beta.3` is
-`1.11.4-beta003` in the NuGet package and the install folder
-`%LOCALAPPDATA%\accordagents\app-1.11.4-beta003`). Squirrel compares that text,
-so without padding beta.10 would sort below beta.9 and installed apps would
-keep starting the older version. Keep the padding: an unpadded version would
-sort above every padded one (`scripts/squirrel-version.cjs`).
+   The NuGet package and `RELEASES` go up first and the installer last: the
+   update service offers a release to Windows as soon as it carries an `.exe`,
+   and Squirrel then reads `win32-x64/<installed version>/RELEASES`. A
+   published installer is never replaced. Then it checks the published
+   download, removes the draft, and checks the update feed, which only warns.
 
-Build on a checkout with LF line endings (`git config core.autocrlf false`
-before cloning): the app ships skills, prompts and the cloud machine runtime
-byte for byte, and CRLF copies differ from the macOS build.
+Without a tag the workflow is a trial of the selected branch: it builds, waits
+for the signature, installs and launches, and publishes nothing.
 
-To build and check without publishing, on Windows: `npm run release:windows-x64
--- --build-only` (files land in `out/windows-release/`); `--publish-only` then
-publishes those files without building. To build and publish by hand after the
-source tag exists on the current commit: `npm run release:windows-x64 --
---from-version <installed version>`.
+One-time setup: Settings → Environments → `windows-signing`, with the User as
+a required reviewer, so `Publish` waits for the signature. Without the
+environment `Publish` fails at once for want of the draft, and
+`sign:windows-x64` re-runs it. The certificate's SHA1 thumbprint is
+`config.windowsSignCertSha1` in `package.json`; change it when the certificate
+is renewed.
 
-If Windows signing is added later, leave `resources/sqlite/win32-x64/sqlite3.exe`
-unsigned: the app checks that file byte for byte before it opens storage, and a
-signature changes its bytes, so a signed copy refuses to start. Files that
-arrive signed by their own publisher (Microsoft's ConPTY and `d3dcompiler_47.dll`)
-should keep that signature.
+What gets our signature is decided by `scripts/windows-sign-file.cjs`:
+`resources/sqlite/win32-x64/sqlite3.exe` stays unsigned, because the app checks
+that file byte for byte before it opens storage and a signed copy refuses to
+start; files that arrive signed by their own publisher (Microsoft's ConPTY and
+`d3dcompiler_47.dll`) keep that signature; every other binary gets ours. `npm
+run sign:windows-x64 -- --check <app folder> <Setup.exe>` checks those rules.
+
+If Windows betas ever ship, pad the beta number for Squirrel first: it compares
+prerelease text character by character, so `beta10` would sort below `beta9`
+and installed apps would keep starting the older version.
 
 ## If macOS Asks for Keychain Access
 

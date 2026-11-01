@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,45 +7,56 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { mergeWindowsNotes, sourceTagFailure, validateWindowsUpdateResponse } from "./release-windows-x64.mjs";
 
-const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const scriptPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "release-windows-x64.mjs");
 
-function dryRun(args, env = {}) {
-  return execFileSync(process.execPath, ["scripts/release-windows-x64.mjs", ...args, "--dry-run"], {
-    cwd: rootDir,
-    env: { ...process.env, RELEASE_REPO: "", ...env },
+// The script works on the package.json of the directory it runs in.
+function dryRun(t, version, args) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "accordagents-windows-dry-run-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, "package.json"), JSON.stringify({
+    name: "accordagents",
+    productName: "AccordAgents",
+    version,
+    config: { releaseRepo: "example/stable", betaReleaseRepo: "example/beta" }
+  }));
+  return spawnSync(process.execPath, [scriptPath, ...args, "--dry-run"], {
+    cwd: dir,
+    env: { ...process.env, RELEASE_REPO: "", UPDATE_FROM_VERSION: "" },
     encoding: "utf8"
   });
 }
 
-test("Windows release dry-run uses the beta update repository and Squirrel maker", () => {
-  const output = dryRun(["--skip-update-check"]);
+test("Windows package-only dry-run builds the unsigned app and publishes nothing", (t) => {
+  const { status, stdout } = dryRun(t, "1.2.4-beta.1", ["--package-only"]);
 
-  assert.match(output, /Release channel: beta/);
-  assert.match(output, /Release repo: juliakrivchikova\/AccordAgents-Beta-Releases/);
-  assert.match(output, /Build: npm run make:win-x64/);
-  assert.match(output, /Update check: skipped/);
+  assert.equal(status, 0);
+  assert.match(stdout, /Build: npm run package -- --platform=win32 --arch=x64 \(unsigned\)/);
+  assert.match(stdout, /Publish: no/);
 });
 
-test("Windows build-only dry-run needs no update version and publishes nothing", () => {
-  const output = dryRun(["--build-only"]);
+test("Windows publish-only dry-run publishes a stable version to the stable repo without building", (t) => {
+  const { status, stdout } = dryRun(t, "1.2.3", ["--publish-only", "--skip-update-check"]);
 
-  assert.match(output, /Publish: no \(build only\)/);
-  assert.match(output, /Update check: skipped/);
+  assert.equal(status, 0);
+  assert.match(stdout, /Release repo: example\/stable/);
+  assert.match(stdout, /Build: no \(publishes out[\\/]windows-release\)/);
+  assert.match(stdout, /Publish: v1\.2\.3 in example\/stable/);
+  assert.match(stdout, /Update check: skipped/);
 });
 
-test("Windows release dry-run accepts an explicit update verification version", () => {
-  const output = dryRun(["--from-version", "1.10.0"]);
+// Windows apps follow only the stable feed, so a prerelease would reach nobody.
+test("Windows publish-only refuses a prerelease", (t) => {
+  const { status, stderr } = dryRun(t, "1.2.4-beta.1", ["--publish-only", "--skip-update-check"]);
 
-  assert.match(output, /Update check: enabled from 1\.10\.0/);
-  // Squirrel reads RELEASES; the bare feed URL answers with JSON that never names the package.
-  assert.match(output, /update\.electronjs\.org\/juliakrivchikova\/AccordAgents-Beta-Releases\/win32-x64\/1\.10\.0\/RELEASES\)/);
+  assert.equal(status, 1);
+  assert.match(stderr, /Windows ships only with stable releases; 1\.2\.4-beta\.1 is a prerelease/);
 });
 
-test("Windows publish-only dry-run publishes the prepared files without building", () => {
-  const output = dryRun(["--publish-only", "--skip-update-check"]);
+test("Windows publish-only dry-run checks the RELEASES Squirrel reads", (t) => {
+  const { stdout } = dryRun(t, "1.2.3", ["--publish-only", "--from-version", "1.2.2"]);
 
-  assert.match(output, /Build: no \(publishes out[\\/]windows-release\)/);
-  assert.match(output, /Publish: v\S+ in juliakrivchikova\/AccordAgents-Beta-Releases/);
+  // The bare feed URL answers with JSON that never names the package.
+  assert.match(stdout, /Update check: enabled from 1\.2\.2 \(https:\/\/update\.electronjs\.org\/example\/stable\/win32-x64\/1\.2\.2\/RELEASES\)/);
 });
 
 const macNotes = "AccordAgents v1.2.3\n\nArtifacts:\n- DMG\n\nChecksums:\n- `abc  AccordAgents-1.2.3-arm64.dmg`\n";
@@ -158,36 +169,6 @@ test("Windows update verification accepts the expected NuGet package version", (
     // The form update.electronjs.org serves (checked against a live feed on 2026-10-31).
     body: "﻿2A2B https://github.com/example/accordagents/releases/download/v1.2.3/accordagents-1.2.3-full.nupkg 123"
   }, "1.2.3"));
-});
-
-test("Windows update verification accepts Squirrel's normalized beta version", () => {
-  assert.doesNotThrow(() => validateWindowsUpdateResponse({
-    endpoint: "https://update.electronjs.org/example/accordagents/win32-x64/1.10.1-beta.2/RELEASES",
-    status: 200,
-    statusText: "OK",
-    url: "https://update.electronjs.org/example/accordagents/win32-x64/1.10.1-beta.2/RELEASES",
-    body: "ABC accordagents-1.10.1-beta003-full.nupkg 123"
-  }, "1.10.1-beta.3"));
-});
-
-test("Windows update verification rejects the unpadded Squirrel beta version", () => {
-  assert.throws(() => validateWindowsUpdateResponse({
-    endpoint: "https://update.electronjs.org/example/accordagents/win32-x64/1.10.1-beta.2/RELEASES",
-    status: 200,
-    statusText: "OK",
-    url: "https://update.electronjs.org/example/accordagents/win32-x64/1.10.1-beta.2/RELEASES",
-    body: "ABC accordagents-1.10.1-beta3-full.nupkg 123"
-  }, "1.10.1-beta.3"), /did not mention expected version 1\.10\.1-beta\.3/);
-});
-
-test("Windows update verification rejects a near-prefix normalized beta version", () => {
-  assert.throws(() => validateWindowsUpdateResponse({
-    endpoint: "https://update.electronjs.org/example/accordagents/win32-x64/1.10.1-beta.2/RELEASES",
-    status: 200,
-    statusText: "OK",
-    url: "https://update.electronjs.org/example/accordagents/win32-x64/1.10.1-beta.2/RELEASES",
-    body: "ABC accordagents-1.10.1-beta0030-full.nupkg 123"
-  }, "1.10.1-beta.3"), /did not mention expected version 1\.10\.1-beta\.3/);
 });
 
 test("Windows update verification rejects a near-prefix package version", () => {
