@@ -35,7 +35,7 @@ import {
 import {
   readyProviderKinds
 } from "../../../shared/cliReadiness";
-import { validateChatCliAgents } from "./chat-cli-readiness";
+import { participantOptionInvalidReason, validateChatCliAgents } from "./chat-cli-readiness";
 export { validateChatCliAgents } from "./chat-cli-readiness";
 import {
   defaultChatAvatarId,
@@ -123,6 +123,10 @@ export function newChatAssistantParticipantDraft(
 export interface AddableSavedParticipantConfig {
   config: ChatParticipantConfig;
   invalidReason?: string;
+  /** What keeps the member from being added wherever it runs (its role, rules or handle). */
+  configReason?: string;
+  /** What keeps it from running on this computer: its CLI here is not ready. */
+  localCliReason?: string;
 }
 
 export function chatAgentModeLabel(mode: ChatAgentMode | undefined): string {
@@ -346,9 +350,13 @@ export function addableSavedParticipantConfigs(
     .filter((participant) => !normalizedExistingHandles.has(participant.handle.toLowerCase()))
     .map((config) => {
       const draft = chatParticipantConfigToDraft(config);
+      const configReason = validateChatParticipantDrafts([draft], settings.chatRoleConfigs, new Set(), settings.chatBehaviorRules);
+      const localCliReason = validateChatCliAgents([{ kind: draft.kind, hostId: draft.hostId }], agents, settings.providers, settings.cliProviderHosts);
       return {
         config,
-        invalidReason: validateChatParticipantDrafts([draft], settings.chatRoleConfigs, new Set(), settings.chatBehaviorRules) ?? validateChatCliAgents([draft], agents, settings.providers, settings.cliProviderHosts)
+        invalidReason: participantOptionInvalidReason({ config, configReason, localCliReason }),
+        configReason,
+        localCliReason
       };
     });
 }

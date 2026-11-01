@@ -46,6 +46,7 @@ import {
   selectedOrMentionedChatParticipantDrafts,
   validateChatStartupDrafts
 } from "./chat-participant-drafts";
+import { participantOptionInvalidReason } from "./chat-cli-readiness";
 import {
   cliProviderMetadata,
   readyProviderKinds,
@@ -146,10 +147,10 @@ export function NewChatScreen(props: {
     () => [
       ...(assistantParticipant ? [assistantParticipant] : []),
       ...savedParticipantOptions
-        .filter(({ invalidReason }) => !invalidReason)
+        .filter((option) => !participantOptionInvalidReason(option, props.selectedParticipantRuntimeOverrides[option.config.id]))
         .map(({ config }) => config)
     ],
-    [assistantParticipant, savedParticipantOptions]
+    [assistantParticipant, savedParticipantOptions, props.selectedParticipantRuntimeOverrides]
   );
   const prospectiveParticipantDrafts = useMemo(() => {
     const drafts = selectedOrMentionedChatParticipantDrafts(
@@ -683,7 +684,9 @@ function ParticipantPicker(props: {
       ...current,
       [participant.id]: runtimeOverride
     }));
-    if (!isNewChatAssistantOption(participant)) {
+    // Changing a member's settings adds it, once it can run where they put it.
+    const option = participantOptions.find(({ config }) => config.id === participant.id);
+    if (option && !isNewChatAssistantOption(participant) && !participantOptionInvalidReason(option, runtimeOverride)) {
       props.onSelectedParticipantIdsChange((current) => new Set(current).add(participant.id));
     }
   }
@@ -715,8 +718,10 @@ function ParticipantPicker(props: {
         >
           {participantOptions.length === 0 ? (
             <div className="new-chat-menu-empty">No saved members configured.</div>
-          ) : participantOptions.map(({ config: participant, invalidReason, locked }) => {
+          ) : participantOptions.map((option) => {
+            const { config: participant, locked } = option;
             const selected = Boolean(locked) || props.selectedParticipantIds.has(participant.id);
+            const invalidReason = participantOptionInvalidReason(option, runtimeOverrideFor(participant));
             return (
               <ChatParticipantSelectableRosterRow
                 key={participant.id}
@@ -725,6 +730,8 @@ function ParticipantPicker(props: {
                 selected={selected}
                 locked={locked}
                 disabledReason={invalidReason}
+                // Where it runs stays choosable while only this computer's CLI is not ready.
+                controlsDisabled={Boolean(option.configReason)}
                 roleLabel={props.participantRoleLabel(participant)}
                 runtimeOverride={runtimeOverrideFor(participant)}
                 renderParticipantAvatar={props.renderParticipantAvatar}

@@ -3,8 +3,9 @@ import test from "node:test";
 
 import type { AgentHealth, AppSettings, ChatRoleConfig, CliProviderHost } from "../../../shared/types";
 import { defaultChatAgentPermissions } from "../../../shared/agentPermissions";
-import { validateChatCliAgents } from "./chat-cli-readiness";
+import { participantOptionInvalidReason, validateChatCliAgents } from "./chat-cli-readiness";
 import {
+  addableSavedParticipantConfigs,
   chatCliProviderLabel,
   chatConfigProviderLabel,
   chatModelDefaultLabel,
@@ -145,4 +146,24 @@ test("readiness: a bound member passes when its CLI is installed but not signed 
   assert.match(validateChatCliAgents([draft()], agents, providers, [ZAI]) ?? "", /sign/i);
   assert.match(validateChatCliAgents([draft({ hostId: ZAI.id })], agents, providers, [{ ...ZAI, hasApiKey: false }]) ?? "", /Z\.ai GLM has no API key/);
   assert.match(validateChatCliAgents([draft({ hostId: "gone" })], agents, providers, [ZAI]) ?? "", /no longer exists/);
+});
+
+test("a member whose CLI here is not signed in can be added to run on a machine or in the cloud, and not to run here", () => {
+  const agents: AgentHealth[] = [
+    { kind: "claude-code", label: "Claude Code", installed: true, detection: "detected", runnable: "ready", authentication: "required" }
+  ];
+  const member = { id: "member-1", handle: "claude", roleConfigId: ROLE.id, kind: "claude-code", model: "opus", remoteExecution: "local" };
+  const cloudMember = { ...member, id: "member-2", handle: "cloud-claude", cloudRun: { target: "aws" } };
+  const settings = { ...SETTINGS, chatParticipantConfigs: [member, cloudMember] } as unknown as AppSettings;
+  const [local, cloud] = addableSavedParticipantConfigs(settings, agents, new Set());
+  assert.ok(local.localCliReason && cloud.localCliReason);
+  assert.equal(participantOptionInvalidReason(local), local.localCliReason);
+  assert.equal(local.invalidReason, local.localCliReason, "the picker and the @mention list agree");
+  assert.equal(participantOptionInvalidReason(local, { cloudRun: { target: "aws" } }), undefined, "picked to run in the cloud");
+  assert.equal(participantOptionInvalidReason(local, { homeMachineId: "machine-1", cloudRun: undefined }), undefined, "picked to run on a machine");
+  assert.equal(participantOptionInvalidReason(cloud), undefined, "saved to run in the cloud");
+  assert.equal(participantOptionInvalidReason(cloud, { cloudRun: undefined, homeMachineId: undefined, remoteExecution: "local" }), cloud.localCliReason,
+    "a cloud member picked to run here needs this computer's CLI");
+  const noRole = addableSavedParticipantConfigs({ ...settings, chatRoleConfigs: [] } as unknown as AppSettings, agents, new Set())[0];
+  assert.ok(participantOptionInvalidReason(noRole, { cloudRun: { target: "aws" } }), "a broken member stays blocked wherever it runs");
 });

@@ -247,7 +247,9 @@
   background: var(--app-surface-subtle);
 }
 
-.chat-participant-popover .chat-participant-row.is-disabled {
+/* Only the member itself dims: its Run on can still move it where it runs. */
+.chat-participant-popover .chat-participant-row.is-disabled > .chat-participant-avatar-slot,
+.chat-participant-popover .chat-participant-row.is-disabled .chat-participant-row-head {
   opacity: 0.6;
 }
 
