@@ -246,8 +246,9 @@ for the stable channel and
 [`AccordAgents-Beta-Releases`](https://github.com/juliakrivchikova/AccordAgents-Beta-Releases)
 for betas. Releases are never published to the source repository. Each stable
 release also gets a code-signed Windows x64 installer and its Squirrel update
-files, built by GitHub Actions and signed on a Windows PC. Each beta release
-also deploys the phone app from the released commit; between betas it is
+files, built by GitHub Actions and signed on a Windows PC. Each beta and stable
+release also deploys the phone app from the released commit (a stable release
+skips it when beta has phone app changes it lacks); between releases it is
 deployed by hand. See `SIGN.md` for signing, notarization, and the release
 process, and `docs/deploying-the-phone-app.md` for the phone app.
 

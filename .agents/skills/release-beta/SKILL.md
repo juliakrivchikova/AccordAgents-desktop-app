@@ -63,10 +63,13 @@ built, their ASAR contents, signature and team, notarization and stapling, and l
 again. The update feed check runs last and only warns. Checksums, screenshots and launch logs are
 kept as the `release-evidence` artifact.
 
-A beta run then deploys the phone app (PWA) from the released tag in the `Phone app` job and checks
-that `mobile.accordagents.com` serves exactly that build; a trial build deploys it only to the
-`release-trial` preview branch. A failed or defective beta deploys no phone app. Stable releases never
-deploy it. The Cloudflare token is checked before the bump, together with the other secrets.
+A beta or stable run then deploys the phone app (PWA) from the released tag in the `Phone app` job
+and checks that `mobile.accordagents.com` serves exactly that build; a trial build deploys it only to
+the `release-trial` preview branch. A failed or defective release deploys no phone app. A stable run
+deploys it only when the release contains `beta` (or has the same phone app sources) and knows the
+version the phone runs; otherwise the phone keeps its app and the run shows a warning
+(`docs/deploying-the-phone-app.md`). The Cloudflare token is checked before the bump, together with
+the other secrets.
 
 ## 3. Report evidence
 
@@ -88,9 +91,11 @@ Read the run (`gh run view <run-id> --log` for details) and report:
   version. Reconcile the existing tag and release before any recovery.
 - If `Release` fails after publishing (for example the release-list order check), the published-download
   step does not run: run its commands by hand on the published assets before reporting anything.
-- If only `Phone app` fails, the desktop beta is out but the phone is not updated: report that, and
+- If only `Phone app` fails, the desktop release is out but the phone is not updated: report that, and
   deploy by hand per `docs/deploying-the-phone-app.md` or re-run just that job (`gh run rerun <run-id>
-  --job <job-id>`); re-running it never bumps a version.
+  --job <job-id>`); re-running it never bumps a version. When a stable run kept the phone's app (a
+  warning at `Check the phone does not run a newer phone app`), a hand deploy from `main` is exactly
+  the rollback it avoided: the changes reach the phone with the next beta.
 - If the published-download step fails, report the beta as defective immediately. Do not tell users to
   update to it and do not claim release completion. Ask before deleting or replacing a published
   release.
