@@ -21,10 +21,11 @@ name: Release
 #   RELEASE_REPOS_TOKEN  fine-grained token with Contents read/write on the two release repos
 #   CLOUDFLARE_API_TOKEN Cloudflare token that can deploy the phone app's Pages project
 #
-# A beta release also deploys the phone app (PWA) built from the released
+# Every release also deploys the phone app (PWA) built from the released
 # commit to mobile.accordagents.com; a trial build deploys it to a preview
-# branch only. Stable releases leave the phone app alone: main is older than
-# beta and would roll the phone back.
+# branch only. main can be behind beta, so a stable release deploys it only
+# when it has every phone app change beta has and knows the version the phone
+# runs (scripts/phone-app-stable-deploy.mjs); otherwise the phone keeps its app.
 
 on:
   workflow_dispatch:
@@ -58,6 +59,7 @@ jobs:
       TARGET: ${{ inputs.target }}
     outputs:
       version: ${{ steps.published.outputs.version }}
+      beta: ${{ steps.beta.outputs.commit }}
     steps:
       - name: Check the branch matches the release target
         run: |
@@ -77,6 +79,20 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # Every release deploys the phone app. A beta must contain main, or it
+      # would take main's phone app changes off the phone; a stable release
+      # compares itself with beta as it stood when this run started (betas and
+      # stable releases never run at once).
+      - name: Check where beta stands
+        id: beta
+        run: |
+          set -euo pipefail
+          if [ "$TARGET" = beta ] && ! git merge-base --is-ancestor refs/remotes/origin/main HEAD; then
+            echo "::error::beta does not contain main. Merge main into beta and start a new run."
+            exit 1
+          fi
+          echo "commit=$(git rev-parse refs/remotes/origin/beta)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -127,10 +143,9 @@ jobs:
             echo "The token can write to $repo."
           done
 
-      # The phone app is deployed after the beta is published; a token that
+      # The phone app is deployed after the release is published; a token that
       # cannot see the Pages project should stop the run before that.
       - name: Check the Cloudflare token can deploy the phone app
-        if: inputs.target == 'beta' || inputs.target == 'build-only'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 72a0b869752e9838a0b5b21b2e4558b0
@@ -351,7 +366,6 @@ jobs:
   phone-app:
     name: Phone app
     needs: release
-    if: inputs.target == 'beta' || inputs.target == 'build-only'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -361,13 +375,15 @@ jobs:
       PAGES_PROJECT: accordagents-mobile-control-staging
       # The custom domain serves the Pages production branch, which is
       # called staging. Trial builds go to a preview branch the phone never sees.
-      PAGES_BRANCH: ${{ inputs.target == 'beta' && 'staging' || 'release-trial' }}
-      SITE: ${{ inputs.target == 'beta' && 'https://mobile.accordagents.com' || 'https://release-trial.accordagents-mobile-control-staging.pages.dev' }}
+      PAGES_BRANCH: ${{ inputs.target == 'build-only' && 'release-trial' || 'staging' }}
+      SITE: ${{ inputs.target == 'build-only' && 'https://release-trial.accordagents-mobile-control-staging.pages.dev' || 'https://mobile.accordagents.com' }}
     steps:
-      # A beta deploys the phone app from the exact commit it released.
+      # A release deploys the phone app from the exact commit it released. The
+      # stable check below needs every branch's history.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.target == 'beta' && format('refs/tags/v{0}', needs.release.outputs.version) || github.sha }}
+          ref: ${{ inputs.target == 'build-only' && github.sha || format('refs/tags/v{0}', needs.release.outputs.version) }}
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -382,7 +398,18 @@ jobs:
       - name: Build the phone app
         run: npm run build:mobile
 
+      # Right before the deploy, so a hand deploy meanwhile is seen. Writes
+      # deploy=true only when deploying cannot take a newer phone app off the
+      # phone; for a stable release the steps below run only then.
+      - name: Check the phone does not run a newer phone app
+        id: stable
+        if: inputs.target != 'beta' && inputs.target != 'build-only'
+        env:
+          BETA: ${{ needs.release.outputs.beta }}
+        run: node scripts/phone-app-stable-deploy.mjs --site "$SITE" --beta "$BETA"
+
       - name: Deploy the phone app
+        if: steps.stable.outcome == 'skipped' || steps.stable.outputs.deploy == 'true'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
@@ -393,6 +420,7 @@ jobs:
 
       # Ask the address the phone uses, not the deploy output.
       - name: Check the site serves this build
+        if: steps.stable.outcome == 'skipped' || steps.stable.outputs.deploy == 'true'
         run: |
           set -euo pipefail
           expected_worker="$(shasum -a 256 dist/mobile/service-worker.js | cut -d' ' -f1)"

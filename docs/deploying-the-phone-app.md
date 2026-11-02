@@ -24,12 +24,24 @@ the phone can see, because that lands as a *preview* deployment.
 
 ## Deploying
 
-Normally nobody runs this by hand: every beta released through the GitHub
-Actions `Release` workflow also builds the phone app from the released commit,
-deploys it to the `staging` branch, and checks that `mobile.accordagents.com`
-serves exactly that build (job `Phone app`; secret `CLOUDFLARE_API_TOKEN`).
-Stable releases do not deploy it, because `main` is older than `beta`. To
-deploy by hand, for example a phone-only fix between betas:
+Normally nobody runs this by hand: every beta and stable release through the
+GitHub Actions `Release` workflow also builds the phone app from the released
+commit, deploys it to the `staging` branch, and checks that
+`mobile.accordagents.com` serves exactly that build (job `Phone app`; secret
+`CLOUDFLARE_API_TOKEN`).
+
+A stable release comes from `main`, which can be behind `beta`, so it deploys
+only when that cannot take a newer phone app off the phone
+(`scripts/phone-app-stable-deploy.mjs`): the release's history must have the
+`ASSET_VERSION` the site serves, and the release must contain `beta`, or build
+the phone app from the same sources as `beta` (`src/mobile`, `src/shared`,
+`src/renderer/assets`, `scripts/build-mobile-shell.mjs`). Otherwise the phone
+keeps its app and the run shows a warning; those changes reach the phone with
+the next beta. A version alone cannot decide this: a merge can join two phone
+changes under one `ASSET_VERSION`. If the site cannot be read, the job fails
+and deploys nothing; re-run it.
+
+To deploy by hand, for example a phone-only fix between releases:
 
 ```bash
 npm run build:mobile                     # writes dist/mobile
@@ -52,7 +64,9 @@ curl -s https://mobile.accordagents.com/mobile-app.js | grep -c "<a string your 
 cache. If a change ships without bumping it, the phone can keep serving its
 cached copy: the service worker only refetches assets whose version string
 changed. Bump it in the same commit as any change to `mobile-app.js`,
-`mobile-app.css` or `index.html`.
+`mobile-app.css` or `index.html`, using only letters, digits, dots, dashes and
+underscores (`scripts/mobile-shell-contract.test.mjs` checks it): a stable
+release reads it to tell which phone app the phone runs.
 
 ## Which deployment is live
 

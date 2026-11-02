@@ -5,6 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
+import { assetVersion as parseAssetVersion } from "./phone-app-stable-deploy.mjs";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(import.meta.dirname, "..");
@@ -152,8 +153,9 @@ test("mobile shell builds static installable PWA assets", async () => {
   // nothing but this pin catches their removal.
   assert.match(html, /<meta name="viewport"[^>]*maximum-scale=1[^>]*user-scalable=no/);
   assert.match(html, /<meta name="viewport"[^>]*viewport-fit=cover/);
-  const assetVersion = /const ASSET_VERSION = "([^"]+)"/.exec(worker)?.[1];
-  assert.ok(assetVersion, "service worker must declare an asset version");
+  // Parsed the way a stable release reads the version the phone runs.
+  const assetVersion = parseAssetVersion(worker);
+  assert.ok(assetVersion, "service worker must declare an asset version of letters, digits, dots, dashes and underscores");
   const htmlAssetVersions = [...html.matchAll(/(?:mobile-app\.css|mobile-db\.js|jsqr\.js|mobile-hub-client\.js|mobile-shared\.js|mobile-activity\.js|mobile-app\.js)\?v=([^"']+)/g)]
     .map((match) => match[1]);
   assert.deepEqual(htmlAssetVersions, [assetVersion, assetVersion, assetVersion, assetVersion, assetVersion, assetVersion, assetVersion]);
