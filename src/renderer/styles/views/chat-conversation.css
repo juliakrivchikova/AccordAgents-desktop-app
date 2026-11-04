@@ -4705,6 +4705,30 @@ button.composer-active-run-row-main:focus-visible {
   background: var(--app-surface-hover);
 }
 
+/* The member's name is part of the card, so it takes the card's cursor. */
+.chat-artifact-note-card .chat-mention {
+  cursor: inherit;
+}
+
+/* Where a search hit or a message link lands: the wash other messages get. */
+.chat-artifact-note.message-focused {
+  position: relative;
+  isolation: isolate;
+}
+
+.chat-artifact-note.message-focused::before {
+  position: absolute;
+  z-index: -1;
+  inset: -16px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--app-accent-soft) 45%, transparent);
+  content: "";
+}
+
+.chat-artifact-note .chat-message-reactions {
+  margin-top: 6px;
+}
+
 .chat-artifact-note-card:focus-visible {
   outline: 1px solid var(--app-focus-border);
   outline-offset: 0;

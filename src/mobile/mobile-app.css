@@ -896,7 +896,9 @@ button.mobile-chat-group-title:active {
 
 .artifact-note-meta {
   margin-top: 1px;
-  color: var(--mut);
+  /* Darker than --mut: the line says who did what, and --mut on the card
+     falls short of readable contrast. */
+  color: color-mix(in srgb, var(--fg) 70%, var(--mut));
   font-size: 13.5px;
   line-height: 1.4;
 }

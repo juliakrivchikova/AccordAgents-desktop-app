@@ -119,7 +119,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
   const artifactNote = artifactNoteCardForMessage(message);
   if (artifactNote) {
-    return <ChatArtifactNoteCard messageId={message.id} createdAt={message.createdAt} card={artifactNote} />;
+    return <ChatArtifactNoteCard message={message} card={artifactNote} onToggleReaction={props.onToggleReaction} />;
   }
   const processingTranscriptOpen = props.activityDisclosure.expandedProcessingTranscriptMessageIds.has(message.id);
   const author = authorForMessage(message, "chat");

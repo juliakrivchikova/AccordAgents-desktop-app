@@ -9240,8 +9240,10 @@
     "M11.7 14.2 7 17l-4.7-2.8"
   ];
 
-  /** An artifact note, read by the desktop's own rule (artifactNoteCard.ts);
-   *  any other system row, or a note it cannot read, stays a bubble. */
+  /** An artifact note, its sentence read by the desktop's own parser
+   *  (artifactNoteCard.ts). The server sends the phone no other system rows
+   *  but these (messageTravelsToPhone), and the phone's own machine notes
+   *  never read as one; a note it cannot read stays a bubble. */
   function artifactNoteCardForEntry(entry) {
     if (!entry || entry.author !== "system" || entry.scaffolding) return undefined;
     const shared = mobileSharedRules();

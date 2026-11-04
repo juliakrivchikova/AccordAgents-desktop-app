@@ -15,7 +15,6 @@ const note = (id, minute, content) => ({
   id, role: "system", content, status: "done", createdAt: at(minute),
   metadata: { appMessageSource: "app_artifact_note", artifactEventId: `event-${id}` }
 });
-const clock = (iso) => new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(iso));
 
 test("artifact notes show as cards on the phone", { timeout: 120_000 }, async (t) => {
   const hub = await startMobileHub();
@@ -42,7 +41,6 @@ test("artifact notes show as cards on the phone", { timeout: 120_000 }, async (t
   await openChat(app, "conv-notes");
 
   const rows = () => app.evaluate(`(() => [...document.querySelectorAll('#message-list .message-row[data-author="system"]')].map((row) => ({
-    key: row.dataset.rowKey,
     card: Boolean(row.querySelector(".artifact-note-card")),
     bubble: Boolean(row.querySelector(".message-bubble")),
     avatar: Boolean(row.querySelector(".message-avatar")),
@@ -53,6 +51,8 @@ test("artifact notes show as cards on the phone", { timeout: 120_000 }, async (t
     icon: Boolean(row.querySelector(".artifact-note-icon svg")),
     text: row.textContent
   })))()`);
+  // The time as the page writes it, in the browser's own locale.
+  const pageClock = (iso) => app.evaluate(`new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(${JSON.stringify(iso)}))`);
   await app.waitFor(`document.querySelectorAll('#message-list .message-row[data-author="system"]').length === 3`, "the three notes are on screen");
   const [revised, signed, unknown] = await rows();
 
@@ -62,13 +62,13 @@ test("artifact notes show as cards on the phone", { timeout: 120_000 }, async (t
     "a member's revision is a card with no avatar or bubble"
   );
   assert.equal(revised.title, "Память участников — план v1");
-  assert.equal(revised.meta, `@taylor revised · v4 · ${clock(at(32))}`);
+  assert.equal(revised.meta, `@taylor revised · v4 · ${await pageClock(at(32))}`);
   assert.equal(revised.body, "Правило выбора: знания проекта — в репозиторий");
   assert.ok(!revised.text.includes("#artifact:"), "the link's markup is not printed");
 
   assert.equal(signed.card, true);
   assert.equal(signed.actorIsMember, false, "the User is not coloured as a member");
-  assert.equal(signed.meta, `You signed · v4 · fully approved · ${clock(at(40))}`);
+  assert.equal(signed.meta, `You signed · v4 · fully approved · ${await pageClock(at(40))}`);
   assert.equal(signed.body, null, "no note line when there is no note");
 
   assert.equal(unknown.card, false, "a note the card cannot read stays a bubble");
@@ -76,12 +76,24 @@ test("artifact notes show as cards on the phone", { timeout: 120_000 }, async (t
 
   // In line with a member's text, inside the screen.
   const box = await app.evaluate(`(() => {
-    const card = document.querySelector('.message-row[data-row-key="n-revised"] .artifact-note-card') ||
-      document.querySelectorAll('#message-list .artifact-note-card')[0];
+    const card = document.querySelector('#message-list .artifact-note-card');
     const text = document.querySelector('#message-list .message-row[data-author="agent"] .message-copy');
     const c = card.getBoundingClientRect(); const m = text.getBoundingClientRect();
     return { left: Math.round(c.left), textLeft: Math.round(m.left), right: Math.round(c.right), width: window.innerWidth };
   })()`);
   assert.ok(Math.abs(box.left - box.textLeft) <= 1, `the card starts where a member's text does: ${JSON.stringify(box)}`);
   assert.ok(box.right <= box.width, `the card stays on screen: ${JSON.stringify(box)}`);
+
+  // Redrawn rows keep their shape: a later message leaves the cards cards,
+  // and a note the desktop rewrites into one it can read becomes a card.
+  await hub.addMessages("conv-notes", [
+    { id: "m-2", role: "participant", participantId: taylor.id, participantLabel: "@taylor", content: "One more thing.", status: "done", createdAt: at(42) }
+  ]);
+  await hub.updateMessages("conv-notes", [note("n-unknown", 41, "@taylor archived artifact [Plan](#artifact:art-1)")]);
+  await app.waitFor(`document.getElementById("message-list").textContent.includes("One more thing.") &&
+    document.querySelectorAll('#message-list .artifact-note-card').length === 3`, "the rewritten note is a card after the redraw");
+  const redrawn = await rows();
+  assert.equal(redrawn.length, 3, "still three note rows");
+  assert.ok(redrawn.every((row) => row.card && !row.bubble), `every note row is a card and nothing else: ${JSON.stringify(redrawn)}`);
+  assert.equal(redrawn[2].meta, `@taylor archived · ${await pageClock(at(41))}`);
 });

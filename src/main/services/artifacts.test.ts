@@ -747,7 +747,10 @@ test("a note the card does not know stays a plain message", () => {
     "@taylor revised [Plan](#artifact:ab-1) · v4 extra",
     "@taylor deleted [Plan](#artifact:ab-1)",
     "@taylor signed [Plan](https://example.com) v2",
-    "someone signed [Plan](#artifact:ab-1) v2"
+    "someone signed [Plan](#artifact:ab-1) v2",
+    // The service names the User "User"; a member cannot pass as her.
+    "@user signed [Plan](#artifact:ab-1) v2",
+    "@User revised [Plan](#artifact:ab-1) · v2"
   ]) {
     assert.equal(parseArtifactNoteCard(text), undefined, text);
   }

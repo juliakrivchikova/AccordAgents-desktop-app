@@ -32,15 +32,6 @@ export interface ArtifactNoteCard {
   note?: string;
 }
 
-const NOTE_PATTERN = new RegExp(
-  "^(User|@\\S+) " +
-  "(created draft collection|created artifact|revised|renamed artifact|signed|archived artifact|restored artifact|" +
-  "submitted a draft to|withdrew a draft from|published) " +
-  "\\[([^\\]]*)\\]\\(#artifact:([^)\\s]+)\\)" +
-  "(.*)$",
-  "s"
-);
-
 const ACTION_BY_PHRASE: Record<string, ArtifactNoteAction> = {
   "created draft collection": "created-collection",
   "created artifact": "created",
@@ -53,6 +44,15 @@ const ACTION_BY_PHRASE: Record<string, ArtifactNoteAction> = {
   "withdrew a draft from": "withdrew-draft",
   published: "published"
 };
+
+// Built from ACTION_BY_PHRASE, the one list of the sentences' verbs.
+const NOTE_PATTERN = new RegExp(
+  "^(User|@\\S+) " +
+  `(${Object.keys(ACTION_BY_PHRASE).join("|")}) ` +
+  "\\[([^\\]]*)\\]\\(#artifact:([^)\\s]+)\\)" +
+  "(.*)$",
+  "s"
+);
 
 const VERB_BY_ACTION: Record<ArtifactNoteAction, string> = {
   created: "created",
@@ -117,6 +117,11 @@ export function parseArtifactNoteCard(content: unknown): ArtifactNoteCard | unde
     return undefined;
   }
   const actor = match[1] === "User" ? ARTIFACT_USER_MEMBER : match[1]!.slice(1).toLowerCase();
+  // The service writes the User as "User", never "@user": a sentence naming
+  // "@user" is not one it wrote, and must not read as "You".
+  if (actor === ARTIFACT_USER_MEMBER && match[1] !== "User") {
+    return undefined;
+  }
   return { actor, action, artifactId, label: match[3]!.trim() || "artifact", ...tail };
 }
 
