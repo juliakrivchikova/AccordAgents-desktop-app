@@ -103,7 +103,9 @@ export function parseArtifactNoteCard(content: unknown): ArtifactNoteCard | unde
   if (typeof content !== "string") {
     return undefined;
   }
-  const match = NOTE_PATTERN.exec(content.trim());
+  // An earlier wording named the kind of draft ("submitted an <kind> draft
+  // to"); notes in the User's chats from July 2026 still say it.
+  const match = NOTE_PATTERN.exec(content.trim().replace(/^(\S+ submitted) an \S+ draft to /, "$1 a draft to "));
   if (!match) {
     return undefined;
   }

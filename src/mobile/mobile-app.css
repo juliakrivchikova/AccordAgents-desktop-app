@@ -858,7 +858,8 @@ button.mobile-chat-group-title:active {
 .artifact-note-card {
   flex: 1;
   display: flex;
-  align-items: center;
+  /* The icon stays beside the title, also on a long note. */
+  align-items: flex-start;
   gap: 12px;
   min-width: 0;
   margin-left: 43px;

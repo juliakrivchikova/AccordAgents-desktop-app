@@ -25,6 +25,10 @@ test("an artifact note's message reads as a card; any other message keeps its ro
   assert.equal(artifactNoteCardForMessage(noteMessage(revised, {})), undefined, "a system message that is not an artifact note");
   assert.equal(artifactNoteCardForMessage({ ...noteMessage(revised), role: "participant" }), undefined, "a member quoting a note");
   assert.equal(artifactNoteCardForMessage(noteMessage("@taylor did something new to [Plan](#artifact:art-1)")), undefined);
+  // An earlier wording, still in the User's chats from July 2026.
+  assert.deepEqual(artifactNoteCardForMessage(noteMessage("@drew submitted an independent draft to [Corrections](#artifact:art-2) · Submitted")), {
+    actor: "drew", action: "submitted-draft", artifactId: "art-2", label: "Corrections", details: []
+  });
 });
 
 test("the card names the artifact as it is now, says who did what, and opens it", () => {
