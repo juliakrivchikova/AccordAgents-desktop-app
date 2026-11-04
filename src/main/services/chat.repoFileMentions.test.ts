@@ -805,7 +805,8 @@ test("respondToChoice releases chat run queue while requester turn continues", a
   assert.equal(savedSelectionMessage.metadata?.hiddenFromTimeline, true);
   assert.equal(savedSelectionMessage.metadata?.threadId, sourceMessage.metadata?.threadId);
   assert.equal(savedSelectionMessage.metadata?.parentMessageId, sourceMessage.id);
-  assert.equal(savedSelectionMessage.metadata?.chatThreadRootId, sourceMessage.id);
+  // A card on the main timeline: the member answers there, not in a thread under the card.
+  assert.equal(savedSelectionMessage.metadata?.chatThreadRootId, undefined);
   assert.match(savedSelectionMessage.content, /^Choice selected for @drew\./);
   assert.match(savedSelectionMessage.content, /Choice: Decision/);
   assert.match(savedSelectionMessage.content, /Question: Proceed\?/);

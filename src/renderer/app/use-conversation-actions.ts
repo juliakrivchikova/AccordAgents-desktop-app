@@ -23,6 +23,9 @@ import { compareConversationSummaries, conversationTimeValue, normalizeProjectPa
 import { persistLastViewedAt } from "./storage";
 import { activityItemsWithStoredPreferences } from "./activity-item-state";
 import { focusConversationMessage } from "./focus-conversation-message";
+import { visibleTimelineAnchor } from "./activity-timeline-anchor";
+
+const ACTIVITY_MESSAGE_MISSING_ERROR = "The selected activity message is no longer available.";
 
 export interface ConversationActions {
   refreshAll: () => Promise<void>;
@@ -240,6 +243,8 @@ export function useConversationActions(state: AppState): ConversationActions {
     let conversationRequestId: number | undefined;
     // The row of a running member resolved to its turn in progress.
     let runningTurnItem: ChatActivityItem | undefined;
+    // "Open in chat": the shown message the target stands for (see visibleTimelineAnchor).
+    let timelineAnchorId: string | undefined;
     const isCurrent = (): boolean =>
       state.chatMessageFocusNonceRef.current === pendingFocusNonce &&
       (conversationRequestId === undefined || state.openConversationRequestRef.current === conversationRequestId);
@@ -270,14 +275,42 @@ export function useConversationActions(state: AppState): ConversationActions {
           // around it here would leave those posts out.
           return Promise.resolve(true);
         }
-        return ensureActivityTargetMessagesLoaded(conversation, target.messageId, target.threadRootId, isCurrent);
+        if (!options.timelineOnly) {
+          return ensureActivityTargetMessagesLoaded(conversation, target.messageId, target.threadRootId, isCurrent);
+        }
+        return (async () => {
+          // A message that cannot be read ends that walk, not the open; only
+          // a target that is gone with nothing to fall back to is an error.
+          const unreadable = new Map<string, unknown>();
+          timelineAnchorId = await visibleTimelineAnchor({
+            conversation,
+            messageId: target.messageId,
+            fallbackMessageId: resolvedItem.target.messageId,
+            load: async (messageId, messages) => {
+              try {
+                const loaded = await loadActivityTargetMessages({ ...conversation, messages }, [messageId], isCurrent);
+                if (!loaded) {
+                  unreadable.set(messageId, new Error(ACTIVITY_MESSAGE_MISSING_ERROR));
+                }
+                return loaded;
+              } catch (error) {
+                unreadable.set(messageId, error);
+                return undefined;
+              }
+            }
+          });
+          if (!timelineAnchorId && isCurrent() && unreadable.has(target.messageId)) {
+            throw unreadable.get(target.messageId);
+          }
+          return Boolean(timelineAnchorId);
+        })();
       },
       beforeCommit: waitForNextFrame,
       commit: (resolvedItem) => {
         const target = activityFocusTarget(resolvedItem, options);
         state.setChatMessageFocusRequest({
           conversationId: item.conversationId,
-          messageId: target.messageId,
+          messageId: timelineAnchorId ?? target.messageId,
           threadRootId: target.threadRootId,
           approvalId: target.approvalId,
           nonce: pendingFocusNonce
@@ -390,13 +423,24 @@ export function useConversationActions(state: AppState): ConversationActions {
     messageId: string,
     threadRootId: string | undefined,
     isCurrent: () => boolean,
-    missingMessageError = "The selected activity message is no longer available."
+    missingMessageError = ACTIVITY_MESSAGE_MISSING_ERROR
   ): Promise<boolean> {
+    return Boolean(await loadActivityTargetMessages(conversation, [messageId, threadRootId], isCurrent, missingMessageError));
+  }
+
+  /** Loads the page around each target not loaded yet; gives the loaded messages
+   *  once every target is among them, else undefined. */
+  async function loadActivityTargetMessages(
+    conversation: Conversation,
+    ids: Array<string | undefined>,
+    isCurrent: () => boolean,
+    missingMessageError = ACTIVITY_MESSAGE_MISSING_ERROR
+  ): Promise<ChatMessage[] | undefined> {
     let loadedMessages = conversation.messages;
-    const targetIds = [...new Set([messageId, threadRootId].filter((id): id is string => Boolean(id)))];
+    const targetIds = [...new Set(ids.filter((id): id is string => Boolean(id)))];
     for (const targetId of targetIds) {
       if (!isCurrent()) {
-        return false;
+        return undefined;
       }
       if (loadedMessages.some((message) => message.id === targetId)) {
         continue;
@@ -407,7 +451,7 @@ export function useConversationActions(state: AppState): ConversationActions {
         limit: CONVERSATION_MESSAGE_PAGE_SIZE
       });
       if (!isCurrent()) {
-        return false;
+        return undefined;
       }
       if (page.messages.length === 0) {
         throw new Error(missingMessageError);
@@ -418,7 +462,7 @@ export function useConversationActions(state: AppState): ConversationActions {
         : current);
       state.setMessagePage((current) => mergeLoadedMessagePage(current, page));
     }
-    return targetIds.every((targetId) => loadedMessages.some((message) => message.id === targetId));
+    return targetIds.every((targetId) => loadedMessages.some((message) => message.id === targetId)) ? loadedMessages : undefined;
   }
 
   function markConversationViewed(conversation: Conversation): void {
