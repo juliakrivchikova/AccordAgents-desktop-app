@@ -9231,6 +9231,59 @@
     button.setAttribute("aria-label", "Stop response from " + rowHandleText(entry));
   }
 
+  // The FileBox outline the desktop's artifact cards and links use.
+  const ARTIFACT_NOTE_ICON_PATHS = [
+    "M14.5 22H18a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4",
+    "M14 2v4a2 2 0 0 0 2 2h4",
+    "M3 13.1a2 2 0 0 0-1 1.76v3.24a2 2 0 0 0 .97 1.78L6 21.7a2 2 0 0 0 2.03.01L11 19.9a2 2 0 0 0 1-1.76V14.9a2 2 0 0 0-.97-1.78L8 11.3a2 2 0 0 0-2.03-.01Z",
+    "M7 17v5",
+    "M11.7 14.2 7 17l-4.7-2.8"
+  ];
+
+  /** An artifact note, read by the desktop's own rule (artifactNoteCard.ts);
+   *  any other system row, or a note it cannot read, stays a bubble. */
+  function artifactNoteCardForEntry(entry) {
+    if (!entry || entry.author !== "system" || entry.scaffolding) return undefined;
+    const shared = mobileSharedRules();
+    return shared && typeof shared.parseArtifactNoteCard === "function"
+      ? shared.parseArtifactNoteCard(entry.content)
+      : undefined;
+  }
+
+  /** The note as the desktop shows it: a card with no avatar or author line,
+   *  who did what inside it. The phone has no artifact viewer, so the card
+   *  names the artifact as the note did and opens nothing. */
+  function artifactNoteCardElement(entry, card) {
+    const shared = mobileSharedRules();
+    const wrap = document.createElement("div");
+    wrap.className = "artifact-note-card";
+    const icon = document.createElement("span");
+    icon.className = "artifact-note-icon";
+    icon.append(lineIcon(ARTIFACT_NOTE_ICON_PATHS, 20));
+    const text = document.createElement("div");
+    text.className = "artifact-note-text";
+    const title = document.createElement("div");
+    title.className = "artifact-note-title";
+    title.textContent = card.label;
+    const meta = document.createElement("div");
+    meta.className = "artifact-note-meta";
+    const actor = document.createElement("span");
+    actor.className = card.actor === "user" ? "artifact-note-actor" : "artifact-note-actor is-member";
+    actor.textContent = shared.artifactNoteActorLabel(card.actor);
+    const when = formatClockTime(entry.createdAt);
+    const facts = [shared.artifactNoteVerb(card.action)].concat(card.details, when ? [when] : []);
+    meta.append(actor, document.createTextNode(" " + facts.join(" · ")));
+    text.append(title, meta);
+    if (card.note) {
+      const body = document.createElement("div");
+      body.className = "artifact-note-body";
+      body.textContent = card.note;
+      text.append(body);
+    }
+    wrap.append(icon, text);
+    return wrap;
+  }
+
   function createMessageRow(entry) {
     const item = document.createElement("li");
     item.className = "message-row";
@@ -9252,6 +9305,12 @@
     if (entry.scaffolding) {
       item.dataset.scaffolding = "1";
       renderScaffoldingInto(item);
+      return item;
+    }
+    const artifactNote = artifactNoteCardForEntry(entry);
+    if (artifactNote) {
+      item.dataset.artifactNote = "1";
+      item.append(artifactNoteCardElement(entry, artifactNote));
       return item;
     }
     if (entry.author === "agent") {
@@ -9450,6 +9509,11 @@
 
   function updateMessageRow(item, entry) {
     if (item.dataset.author !== entry.author) {
+      return false;
+    }
+    // A note's card is drawn whole; a row turning into one, or out of one, is
+    // a different shape, so the reconciler draws it again.
+    if (item.dataset.artifactNote === "1" || artifactNoteCardForEntry(entry)) {
       return false;
     }
     // Scaffolding and a message are different shapes; the reconciler replaces

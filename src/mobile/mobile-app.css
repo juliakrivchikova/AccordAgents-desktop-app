@@ -14,6 +14,8 @@
   --surface: #ffffff;
   --surface-fg: #ffffff;
   --user-bub: #eceff3;
+  /* An artifact note's card, a shade paler than a bubble (as on the desktop). */
+  --note-card: #f8f9fb;
   --code-bg: rgba(15, 23, 42, 0.08);
   --pre-bg: #111827;
   --pre-fg: #f9fafb;
@@ -849,6 +851,66 @@ button.mobile-chat-group-title:active {
   font: 400 15.5px var(--sans);
   line-height: 1.45;
   color: var(--fg1);
+}
+
+/* An artifact note: a card with no avatar or author line, in line with a
+   member's text (32px avatar + 11px gap), as the desktop draws it. */
+.artifact-note-card {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  margin-left: 43px;
+  padding: 11px 14px 11px 11px;
+  border-radius: 14px;
+  background: var(--note-card);
+  color: var(--fg1);
+  font-family: var(--sans);
+}
+
+.artifact-note-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--accs);
+  color: var(--acc);
+}
+
+.artifact-note-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.artifact-note-title {
+  font-size: 15.5px;
+  font-weight: 500;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.artifact-note-meta {
+  margin-top: 1px;
+  color: var(--mut);
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+
+.artifact-note-actor.is-member {
+  color: var(--warn);
+}
+
+.artifact-note-body {
+  margin-top: 4px;
+  color: var(--fg);
+  font-size: 14px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .message-row[data-author="agent"] .message-bubble {
@@ -2614,6 +2676,7 @@ button.mobile-chat-group-title:active {
     --surface: #181b21;
     --surface-fg: #0d0f13;
     --user-bub: #232a35;
+    --note-card: #1f232a;
     --code-bg: rgba(255, 255, 255, 0.08);
     --pre-bg: #0d0f13;
     --pre-fg: #e5e9f0;

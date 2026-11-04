@@ -4679,3 +4679,74 @@ button.composer-active-run-row-main:focus-visible {
   height: auto;
   object-fit: contain;
 }
+
+/* Artifact note: a card on the timeline, no avatar or author line, aligned
+   with the message text column (38px avatar + 12px gap). */
+.chat-artifact-note {
+  margin: 0 0 18px 50px;
+}
+
+.chat-artifact-note-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: min(100%, 560px);
+  padding: 12px 16px 12px 12px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--chat-artifact-note-bg);
+  color: var(--app-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-artifact-note-card:hover {
+  background: var(--app-surface-hover);
+}
+
+.chat-artifact-note-card:focus-visible {
+  outline: 1px solid var(--app-focus-border);
+  outline-offset: 0;
+}
+
+.chat-artifact-note-icon {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+
+.chat-artifact-note-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.chat-artifact-note-title {
+  font-size: 15px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.chat-artifact-note-meta {
+  margin-top: 1px;
+  color: var(--app-text-secondary);
+  font-size: 13px;
+}
+
+.chat-artifact-note-meta .message-when {
+  color: inherit;
+  font-size: inherit;
+}
+
+.chat-artifact-note-body {
+  margin-top: 4px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}

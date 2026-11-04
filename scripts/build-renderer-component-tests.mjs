@@ -16,6 +16,7 @@ await build({
     "renderer/components/files/code-editor.test.tsx",
     "renderer/components/cloud-provider-auth.test.tsx",
     "renderer/components/avatar/avatar-studio-dialog.test.tsx",
+    "renderer/components/chat/chat-artifact-note-card.test.tsx",
     "renderer/components/chat/chat-composer-mention-token.test.ts",
     "renderer/components/chat/chat-composer-plugin-token.test.ts",
     "renderer/components/chat/chat-participant-drafts.test.ts",

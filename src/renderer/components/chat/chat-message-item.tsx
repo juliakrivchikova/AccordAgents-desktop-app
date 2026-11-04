@@ -38,6 +38,7 @@ import {
   participantRequestStatusLabel,
   providerLabel
 } from "./chat-conversation-data";
+import { ChatArtifactNoteCard, artifactNoteCardForMessage } from "./chat-artifact-note-card";
 import { ChatChoiceCard } from "./chat-choice-card";
 import { chatMessageCards } from "./chat-server-card";
 import { ChatImageAttachmentStrip } from "./chat-image-attachments";
@@ -116,6 +117,10 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   }
   const [copied, setCopied] = useState(false);
   const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
+  const artifactNote = artifactNoteCardForMessage(message);
+  if (artifactNote) {
+    return <ChatArtifactNoteCard messageId={message.id} createdAt={message.createdAt} card={artifactNote} />;
+  }
   const processingTranscriptOpen = props.activityDisclosure.expandedProcessingTranscriptMessageIds.has(message.id);
   const author = authorForMessage(message, "chat");
   const isStreaming = message.status === "pending" && message.role === "participant";

@@ -27,6 +27,8 @@
   --app-surface-muted: #f4f4f4;
   --app-surface-hover: #f1f3f6;
   --app-surface-active: #eceff3;
+  /* Artifact note cards on the timeline: a shade paler than surface-subtle. */
+  --chat-artifact-note-bg: #f8f9fb;
   --app-text: #1a1c1f;
   --app-text-strong: #1a1c1f;
   --app-muted: #8e8f90;
@@ -267,6 +269,7 @@
   --app-surface-muted: #232323;
   --app-surface-hover: #282828;
   --app-surface-active: #2f2f2f;
+  --chat-artifact-note-bg: #1e1e1e;
   --app-text: #dfdfdf;
   --app-text-strong: #dfdfdf;
   --app-muted: #8b8b8b;
