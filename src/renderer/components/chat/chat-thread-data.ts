@@ -8,12 +8,24 @@ import type { ChatParticipantRequestBatch, Conversation } from "../../../shared/
 
 const SHOW_CHAT_SYSTEM_MESSAGES = import.meta.env.VITE_ACCORD_AGENTS_SHOW_SYSTEM_MESSAGES === "1";
 
+/** A message the chat draws no row for, on the timeline or in a thread. */
+export function isChatMessageHiddenInChat(conversation: Pick<Conversation, "messages">, message: Conversation["messages"][number]): boolean {
+  return chatMessageHiddenFromTimeline(conversation, message, { showSystemMessages: SHOW_CHAT_SYSTEM_MESSAGES });
+}
+
+/** A message drawn as a row of the chat's main timeline: shown, and not a thread reply. */
+export function isChatTopLevelMessage(
+  conversation: Pick<Conversation, "messages">,
+  message: Conversation["messages"][number],
+  participantRequestReplyRoots = chatParticipantRequestReplyRootMap(conversation)
+): boolean {
+  return !isChatMessageHiddenInChat(conversation, message) &&
+    !chatMessageVisualThreadRootId(conversation, message, participantRequestReplyRoots);
+}
+
 export function chatTopLevelMessages(conversation: Conversation): Conversation["messages"] {
   const participantRequestReplyRoots = chatParticipantRequestReplyRootMap(conversation);
-  return conversation.messages.filter((message) =>
-    !chatMessageHiddenFromTimeline(conversation, message, { showSystemMessages: SHOW_CHAT_SYSTEM_MESSAGES }) &&
-    !chatMessageVisualThreadRootId(conversation, message, participantRequestReplyRoots)
-  );
+  return conversation.messages.filter((message) => isChatTopLevelMessage(conversation, message, participantRequestReplyRoots));
 }
 
 export function chatThreadSummaryMap(conversation: Conversation): Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }> {

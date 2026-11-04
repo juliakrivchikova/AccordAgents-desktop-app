@@ -146,7 +146,7 @@ import type {
 import { isAutoWatchStableMessage, isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
 import { isMachineCompactionLine } from "../../shared/machineLink";
 import { machineStopPendingText, machineWaitingText } from "../../shared/machineWaitingText";
-import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
+import { chatMessageVisualThreadRootId, participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES,
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
@@ -7131,10 +7131,15 @@ export class ChatService {
           this.updatePendingChoiceCancellation(sourceMessage, choice.id);
         } else {
           this.updatePendingChoiceSelection(sourceMessage, choice.id, selectedOption?.id ?? CHAT_CUSTOM_CHOICE_OPTION_ID, customAnswer, note);
-          const rootId = sourceMessage.metadata?.chatThreadRootId ?? sourceMessage.id;
+          // The member answers where its card stands (the User, 2026-11-04): in
+          // the card's thread when the card is in one, otherwise on the main
+          // timeline, never in a new thread under the card. Placed by the helper
+          // the desktop and the phone draw threads with.
+          const cardThreadRootId = chatMessageVisualThreadRootId(conversation, sourceMessage);
+          const rootId = cardThreadRootId && cardThreadRootId !== sourceMessage.id ? cardThreadRootId : undefined;
           userMessage = this.message("user", this.formatChoiceSelectionForChat(sourceMessage, choice, selectedOption, customAnswer, note), undefined, {
-            threadId: sourceMessage.metadata?.threadId ?? rootId,
-            parentMessageId: sourceMessage.id, chatThreadRootId: rootId,
+            threadId: sourceMessage.metadata?.threadId ?? rootId ?? sourceMessage.id,
+            parentMessageId: sourceMessage.id, ...(rootId ? { chatThreadRootId: rootId } : {}),
             sourceMessageId: sourceMessage.id, hiddenFromTimeline: true
           });
           conversation.messages.push(userMessage);

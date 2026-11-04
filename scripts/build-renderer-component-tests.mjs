@@ -47,6 +47,7 @@ await build({
     "renderer/components/shell/sidebar-nav.test.tsx",
     "renderer/app/use-app-navigation.test.ts",
     "renderer/app/running-participant-target.test.ts",
+    "renderer/app/activity-timeline-anchor.test.ts",
     "renderer/app/conversation-summaries.test.ts",
     "renderer/app/app-notices.test.tsx"
   ].map((entry) => path.join(sourceRoot, entry)),
