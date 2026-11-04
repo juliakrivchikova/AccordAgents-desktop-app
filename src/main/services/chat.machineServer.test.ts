@@ -11,6 +11,7 @@ import { isMachineSettingsDocument, type MachineSettingsDocument, type MachineSe
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import type { ChatImageAttachment, ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
 import { isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
+import { TURN_FINISHED_NOTE_SOURCE } from "../../shared/turnFinishedNoteSource";
 import { HubOps } from "../../hub/hubOps";
 import { HubServer } from "../../hub/hubServer";
 import { ChatService } from "./chat";
@@ -550,3 +551,80 @@ test("a message whose picture cannot be put on the server yet waits for it, and 
   const row = await h.desktopStorage.hubClientOps().forMessage("chat-wait", user.id);
   assert.equal(row?.attempts ?? 0, 0, "a batch held for its picture was never sent, so it counts no attempt");
 });
+
+/** A member's post during its turn (app_chat_send_message), from the device
+ *  the member runs on. */
+async function postDuringTurn(chat: ChatService, conversationId: string, member: ChatParticipant, content: string): Promise<string> {
+  const sent = await chat.sendChatMessageFromTool({
+    conversationId, participantId: member.id, roleConfigId: member.roleConfigId, roleConfigVersion: 1, capabilities: [],
+    runPermissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
+  } as never, { content });
+  return sent.messageId as string;
+}
+
+const isFinishedNote = (message: ChatMessage) => message.metadata?.appMessageSource === TURN_FINISHED_NOTE_SOURCE;
+
+for (const where of ["machine", "desktop"] as const) {
+  test(`a ${where} member whose posts came below its reply during the turn leaves a note at the end of the chat that leads back to the reply`, async (t) => {
+    // The User, 2026-11-04: the member's posts during its turn stood below its
+    // reply, and the reply, written last, was lost above them.
+    const h = await linked(t, localChat(`chat-note-${where}`));
+    const id = `chat-note-${where}`;
+    const member = where === "machine" ? remote : desk;
+    const control = where === "machine" ? h.machineControl : h.desktopControl;
+    const chat = where === "machine" ? h.machineChat : h.desktopChat;
+    const writer = where === "machine" ? h.machineIdentity.originId : undefined;
+    control.hold = true;
+    await h.desktopChat.sendMessage({ conversationId: id, content: `@${member.handle} fix the button` } as never);
+    await until(async () => control.releases.length, (count) => count === 1);
+    const postId = await postDuringTurn(chat, id, member, "Found the cause.");
+    await until(() => h.page(id), (page) => page.messages.some((message) => message.id === postId));
+    control.releases.splice(0).forEach((release) => release());
+    const page = await until(() => h.page(id), (current) => current.messages.some(isFinishedNote));
+    const reply = page.messages.find((message) => message.role === "participant" && message.status === "done" && message.id !== postId)!;
+    const note = page.messages.find(isFinishedNote)!;
+    assert.deepEqual(note.metadata?.turnFinishedNote, { messageId: reply.id, participantId: member.id, participantLabel: `@${member.handle}` });
+    assert.equal(note.id, `turn-finished-${reply.id}`, "one id per reply");
+    assert.equal(note.content, `${where} reply to @${member.handle} fix the button`);
+    assert.equal(page.messages.at(-1)?.id, note.id, "the note is the last message");
+    assert.ok(page.messages.findIndex((message) => message.id === reply.id) < page.messages.findIndex((message) => message.id === postId), "the reply keeps its place");
+    if (writer) assert.equal(note.metadata?.serverWriter, writer, "written by the device the member runs on");
+    assert.equal(page.messages.filter(isFinishedNote).length, 1);
+    // The computer holds it as the server does.
+    await until(() => h.desktopStorage.getConversation(id), (current) => current?.messages.at(-1)?.id === note.id);
+    // Members do not read it: it only points back at a reply they read in full.
+    await until(() => chat.readChatMessagesForTool({ conversationId: id, participantId: member.id } as never, { limit: 50 }),
+      (read) => (read.messages as Array<{ id: string }>).some((message) => message.id === reply.id));
+    const read = await chat.readChatMessagesForTool({ conversationId: id, participantId: member.id } as never, { limit: 50 });
+    assert.ok(!(read.messages as Array<{ id: string }>).some((message) => message.id === note.id), "members' read tool leaves the note out");
+    // The cross takes away only a note: a reply's id or an unknown one does nothing.
+    await h.desktopChat.dismissTurnFinishedNote({ conversationId: id, messageId: reply.id });
+    await h.desktopChat.dismissTurnFinishedNote({ conversationId: id, messageId: "no-such-message" });
+    assert.ok((await h.desktopStorage.getConversation(id))!.messages.some((message) => message.id === reply.id), "the reply stays here");
+    // The User's cross takes it away on the server, and so on every device.
+    await h.desktopChat.dismissTurnFinishedNote({ conversationId: id, messageId: note.id });
+    await until(() => h.page(id), (current) => !current.messages.some(isFinishedNote));
+    await until(() => (where === "machine" ? h.machineStorage : h.desktopStorage).getConversation(id),
+      (current) => Boolean(current) && !current!.messages.some(isFinishedNote));
+    const after = await h.page(id);
+    assert.ok(after.messages.some((message) => message.id === reply.id), "the reply is still on the server");
+  });
+}
+
+for (const where of ["machine", "desktop"] as const) {
+  test(`a ${where} member's reply that is last when its turn ends leaves no note`, async (t) => {
+    const id = `chat-no-note-${where}`;
+    const member = where === "machine" ? remote : desk;
+    const h = await linked(t, localChat(id));
+    await h.desktopChat.sendMessage({ conversationId: id, content: `@${member.handle} hello` } as never);
+    const page = await until(() => h.page(id), (current) =>
+      current.messages.some((message) => message.role === "participant" && message.status === "done") &&
+      current.turns.some((turn) => turn.state === "finished"));
+    assert.equal(page.messages.filter(isFinishedNote).length, 0);
+    // Where the note would be written first, in the same save as the reply.
+    const device = where === "machine" ? h.machineStorage : h.desktopStorage;
+    const held = await until(() => device.getConversation(id), (chat) =>
+      Boolean(chat?.messages.some((message) => message.role === "participant" && message.status === "done")));
+    assert.equal(held!.messages.filter(isFinishedNote).length, 0);
+  });
+}

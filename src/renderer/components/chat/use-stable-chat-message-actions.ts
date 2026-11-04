@@ -22,11 +22,13 @@ export type StableChatMessageActions = {
   onToggleReaction: (messageId: string, emoji: string) => void;
   onCompactParticipant: (participantId: string, context?: StableParticipantCompactContext) => void | Promise<boolean>;
   onStopRun: (runId: string) => void;
+  onDismissTurnFinishedNote: (messageId: string) => void;
 };
 
-export type StableChatMessageActionHandlers = Omit<StableChatMessageActions, "onStopRun"> & {
+export type StableChatMessageActionHandlers = Omit<StableChatMessageActions, "onStopRun" | "onDismissTurnFinishedNote"> & {
   runChoiceWithSubmittingId: ChoiceSubmittingRunner;
   onStopRun?: (runId: string) => void;
+  onDismissTurnFinishedNote?: (messageId: string) => void;
 };
 
 export function useStableChatMessageActions(
@@ -77,16 +79,25 @@ export function useStableChatMessageActions(
     []
   );
 
+  const onDismissTurnFinishedNote = useCallback<StableChatMessageActions["onDismissTurnFinishedNote"]>(
+    (messageId) => {
+      handlersRef.current.onDismissTurnFinishedNote?.(messageId);
+    },
+    []
+  );
+
   return useMemo(() => ({
     onApproveMentions,
     onRejectMentions,
     onRespondToChoice,
     onToggleReaction,
     onCompactParticipant,
-    onStopRun
+    onStopRun,
+    onDismissTurnFinishedNote
   }), [
     onApproveMentions,
     onCompactParticipant,
+    onDismissTurnFinishedNote,
     onRejectMentions,
     onRespondToChoice,
     onStopRun,

@@ -906,3 +906,25 @@ test("her \"Allow for this chat\" gives a machine's member leave to ask once: ta
   await raise();
   assert.equal(await leave(), "ask", "the same answer does not give it again");
 });
+
+test("a note that a member finished answering is written only by the device the member runs on", async (t) => {
+  // It speaks for the member, as the member's reply does: another device
+  // cannot post "@box finished answering · <anything>".
+  const h = await hub(t);
+  const chat = id("chat");
+  await h.write(h.owner, createChat(chat));
+  const note = (messageId: string, participantId: string, extra: Record<string, unknown> = {}): ChatMessage => ({
+    id: messageId, role: "system", content: "Done.", status: "done", createdAt: new Date().toISOString(),
+    metadata: { appMessageSource: "app_turn_finished_note", turnFinishedNote: { messageId: "r1", participantId, participantLabel: `@${participantId}` }, ...extra }
+  } as ChatMessage);
+  const write = (device: typeof h.owner, message: ChatMessage) =>
+    h.write(device, { opId: id("op"), kind: "message.create", conversationId: chat, message });
+  assert.equal((await write(h.owner, note("n-desk", "p-desk"))).body.results[0].status, "accepted", "the computer, for its own member");
+  assert.equal((await write(h.machine, note("n-box", "p-box"))).body.results[0].status, "accepted", "the machine, for its member");
+  assert.equal((await write(h.machine, note("n-forged", "p-desk"))).body.results[0].status, "rejected", "the machine, for the computer's member");
+  assert.equal((await write(h.phone, note("n-phone", "p-box"))).body.results[0].status, "rejected", "a phone runs no member");
+  const malformed = { ...note("n-bad", "p-desk"), metadata: { appMessageSource: "app_turn_finished_note" } } as ChatMessage;
+  assert.equal((await write(h.owner, malformed)).body.results[0].status, "rejected", "a note that names no member and reply");
+  const page = await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`);
+  assert.deepEqual(page.body.messages.map((message) => message.id), ["n-desk", "n-box"]);
+});

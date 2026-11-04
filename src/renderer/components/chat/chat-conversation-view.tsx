@@ -120,6 +120,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     onToggleReaction: props.onToggleReaction,
     onCompactParticipant: props.onCompactParticipant,
     onStopRun: props.onStopRun,
+    onDismissTurnFinishedNote: props.onDismissTurnFinishedNote,
     runChoiceWithSubmittingId: choiceSubmission.runWithSubmittingId
   });
   // Read when used, after the viewport below exists.
@@ -378,6 +379,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               onScrollIntent={viewport.markUserScrollIntent}
               onStopRun={props.onStopRun ? chatMessageActions.onStopRun : undefined}
               onToggleReaction={chatMessageActions.onToggleReaction}
+              onDismissTurnFinishedNote={props.onDismissTurnFinishedNote ? chatMessageActions.onDismissTurnFinishedNote : undefined}
               participantStatusById={props.participantStatusById}
               participants={participants}
               approvalsByMessageId={approvalPlacement.byMessageId}
@@ -435,6 +437,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               activityDisclosure={activityDisclosure}
               rootMessage={selectedThreadRoot}
               replies={selectedThreadSummary?.replies ?? []}
+              replyCount={selectedThreadSummary?.countedReplies.length ?? 0}
               participants={participants}
               participantStatusById={props.participantStatusById}
               conversationId={props.conversation.id}
@@ -454,6 +457,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               onRejectMentions={chatMessageActions.onRejectMentions}
               onRespondToChoice={chatMessageActions.onRespondToChoice}
               onToggleReaction={chatMessageActions.onToggleReaction}
+              onDismissTurnFinishedNote={props.onDismissTurnFinishedNote ? chatMessageActions.onDismissTurnFinishedNote : undefined}
               onCompactParticipant={chatMessageActions.onCompactParticipant}
               onStopRun={props.onStopRun ? chatMessageActions.onStopRun : undefined}
               continuedMentionRequestIds={continuedMentionRequestIds}

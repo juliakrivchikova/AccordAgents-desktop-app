@@ -1,5 +1,6 @@
 import type { ChatMessage, ChatParticipant, Conversation, ConversationSummary } from "../../shared/types";
 import { chatMessageHiddenFromTimeline } from "../../shared/chatParticipantRequestThreads";
+import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
 import { mobileChatGroupLabel, mobileSnippet } from "../../shared/mobileChatRow";
 import type { MobileControlCard } from "../../shared/mobileControlCards";
 import { phoneActivityEvents, timelineEventsFromSnapshot, type MobileChatListItem, type MobileTimelinePage } from "./mobileTimeline";
@@ -200,6 +201,12 @@ export function mobileWhoLabel(message: ChatMessage | undefined): string | undef
   }
   if (message.role === "user") {
     return "you:";
+  }
+  // A turn-finished note carries the member's reply's first line: the chat
+  // list says it as the member's, as it says the reply.
+  const finished = turnFinishedNoteOf(message);
+  if (finished?.participantLabel) {
+    return `${finished.participantLabel.replace(/^@/, "")}:`;
   }
   if (message.participantLabel) {
     return `${message.participantLabel.replace(/^@/, "")}:`;

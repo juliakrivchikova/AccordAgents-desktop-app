@@ -39,6 +39,8 @@ import {
   providerLabel
 } from "./chat-conversation-data";
 import { ChatArtifactNoteCard, artifactNoteCardForMessage } from "./chat-artifact-note-card";
+import { ChatTurnFinishedNote } from "./chat-turn-finished-note";
+import { turnFinishedNoteOf } from "../../../shared/turnFinishedNoteSource";
 import { ChatChoiceCard } from "./chat-choice-card";
 import { chatMessageCards } from "./chat-server-card";
 import { ChatImageAttachmentStrip } from "./chat-image-attachments";
@@ -101,6 +103,8 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void | Promise<void>;
   onToggleReaction: (messageId: string, emoji: string) => void;
+  /** Takes a turn-finished note away (its cross). */
+  onDismissTurnFinishedNote?: (messageId: string) => void;
   onCompactParticipant?: ParticipantCompactHandler;
   onStopRun?: (runId: string) => void;
   onRespondToAppToolApproval?: (
@@ -120,6 +124,17 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   const artifactNote = artifactNoteCardForMessage(message);
   if (artifactNote) {
     return <ChatArtifactNoteCard message={message} card={artifactNote} onToggleReaction={props.onToggleReaction} />;
+  }
+  const turnFinishedNote = turnFinishedNoteOf(message);
+  if (turnFinishedNote) {
+    return (
+      <ChatTurnFinishedNote
+        message={message}
+        note={turnFinishedNote}
+        participant={props.participants?.find((item) => item.id === turnFinishedNote.participantId)}
+        onDismiss={props.onDismissTurnFinishedNote}
+      />
+    );
   }
   const processingTranscriptOpen = props.activityDisclosure.expandedProcessingTranscriptMessageIds.has(message.id);
   const author = authorForMessage(message, "chat");
