@@ -32,3 +32,6 @@ export { nativeGoalObjective, parseNativeGoalCommand } from "./nativeGoalCommand
 export { newChatIntro, newChatMemberFitsProject, newChatParticipants, newChatPickedMembers, newChatTitle } from "./newChat";
 // The list row of a chat the phone started, as the server will list it.
 export { mobileChatGroupLabel, mobileSnippet } from "./mobileChatRow";
+// An artifact note becomes a card on the timeline: the same reading of the
+// note's sentence and the same words on the desktop and the phone.
+export { artifactNoteActorLabel, artifactNoteVerb, parseArtifactNoteCard } from "./artifactNoteCard";

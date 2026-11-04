@@ -11,6 +11,7 @@ import { CommandError, runCommand } from "./command";
 import { resolveSqliteExecutable } from "./sqliteCli";
 import { parseMarkdownInline } from "../../shared/markdownInline";
 import { unifiedLineDiff } from "../../shared/artifactDiff";
+import { artifactNoteActorLabel, artifactNoteVerb, parseArtifactNoteCard } from "../../shared/artifactNoteCard";
 import type { ArtifactError, ArtifactReadResult, ArtifactResult, PublishedArtifactReadResult } from "../../shared/types";
 
 const CONVERSATION_ID = "chat-1";
@@ -694,6 +695,68 @@ test("chat notes carry a stable-id link and never the artifact body", async () =
   }
 });
 
+test("every chat note the service writes reads as a timeline card", async () => {
+  const h = await harness();
+  try {
+    const created = expectPublished(expectOk(await h.service.create("gera", {
+      conversationId: CONVERSATION_ID,
+      name: "Memory plan",
+      content: "v1",
+      requiredSigners: ["user", "drew"]
+    })));
+    const id = created.summary.id;
+    expectOk(await h.service.revise("gera", { conversationId: CONVERSATION_ID, artifactId: id, baseVersion: 1, content: "v2",
+      note: "Choice rule: project knowledge — repo, private — memory" }));
+    expectOk(await h.service.revise("user", { conversationId: CONVERSATION_ID, artifactId: id, baseVersion: 2, content: "v3" }));
+    expectOk(await h.service.sign("user", { conversationId: CONVERSATION_ID, artifactId: id }));
+    expectOk(await h.service.sign("drew", { conversationId: CONVERSATION_ID, artifactId: id, version: 1 }));
+    expectOk(await h.service.rename("gera", { conversationId: CONVERSATION_ID, artifactId: id, newName: "Memory plan v2" }));
+    expectOk(await h.service.setArchived("user", { conversationId: CONVERSATION_ID, artifactId: id, archived: true }));
+    expectOk(await h.service.setArchived("gera", { conversationId: CONVERSATION_ID, artifactId: id, archived: false }));
+
+    assert.deepEqual(h.notes.map(parseArtifactNoteCard), [
+      { actor: "gera", action: "created", artifactId: id, label: "Memory plan", details: ["v1"] },
+      { actor: "gera", action: "revised", artifactId: id, label: "Memory plan", details: ["v2"],
+        note: "Choice rule: project knowledge — repo, private — memory" },
+      { actor: "user", action: "revised", artifactId: id, label: "Memory plan", details: ["v3"] },
+      { actor: "user", action: "signed", artifactId: id, label: "Memory plan", details: ["v3", "1/2 signed"] },
+      { actor: "drew", action: "signed", artifactId: id, label: "Memory plan", details: ["v1"] },
+      { actor: "gera", action: "renamed", artifactId: id, label: "Memory plan v2", details: ['was "Memory plan"'] },
+      { actor: "user", action: "archived", artifactId: id, label: "Memory plan v2", details: [] },
+      { actor: "gera", action: "restored", artifactId: id, label: "Memory plan v2", details: [] }
+    ]);
+    assert.equal(artifactNoteActorLabel("user"), "You");
+    assert.equal(artifactNoteActorLabel("assistant"), "Chat Assistant");
+    assert.equal(artifactNoteActorLabel("gera"), "@gera");
+    assert.equal(artifactNoteVerb("withdrew-draft"), "withdrew a draft");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a note the card does not know stays a plain message", () => {
+  // Notes already in the User's chats use these exact sentences.
+  assert.deepEqual(parseArtifactNoteCard("@taylor revised [Память участников — план v1](#artifact:ab-1) · v4 — Правило выбора"), {
+    actor: "taylor", action: "revised", artifactId: "ab-1", label: "Память участников — план v1", details: ["v4"], note: "Правило выбора"
+  });
+  for (const text of [
+    "",
+    "Chat started.",
+    "@taylor revised the plan",
+    "@taylor revised [Plan](#artifact:ab-1)",
+    "@taylor revised [Plan](#artifact:ab-1) · v4 extra",
+    "@taylor deleted [Plan](#artifact:ab-1)",
+    "@taylor signed [Plan](https://example.com) v2",
+    "someone signed [Plan](#artifact:ab-1) v2",
+    // The service names the User "User"; a member cannot pass as her.
+    "@user signed [Plan](#artifact:ab-1) v2",
+    "@User revised [Plan](#artifact:ab-1) · v2"
+  ]) {
+    assert.equal(parseArtifactNoteCard(text), undefined, text);
+  }
+  assert.equal(parseArtifactNoteCard(undefined), undefined);
+});
+
 test("artifact reference tokens parse into artifact links (rename-safe by id)", () => {
   const labeled = parseMarkdownInline("See [Release Plan](#artifact:0b9f3d3a-1) for details.");
   const link = labeled.find((node) => node.type === "artifactLink");
@@ -886,6 +949,10 @@ test("collecting lifecycle enforces draft ACLs, blocks early publication, and pu
 
     const publicNotes = h.notes.join("\n");
     assert.ok(publicNotes.includes("submitted a draft"));
+    assert.deepEqual(
+      [...new Set(h.notes.map((note) => parseArtifactNoteCard(note)?.action ?? `unread: ${note}`))],
+      ["created-collection", "submitted-draft", "published"]
+    );
     for (const secret of ["OWNER-PRIVATE", "CODEX-PRIVATE", "DREW-PRIVATE"]) {
       assert.ok(!publicNotes.includes(secret), `public notes must not leak ${secret}`);
     }
@@ -1092,6 +1159,8 @@ test("replacement and withdrawal preserve frozen provenance and readiness", asyn
       assert.equal(afterWithdraw.readyToPublish, false);
       assert.deepEqual(afterWithdraw.missingRequiredAuthors, ["gera"]);
     }
+    assert.ok(h.notes.some((note) => parseArtifactNoteCard(note)?.action === "withdrew-draft"));
+    assert.ok(h.notes.every((note) => parseArtifactNoteCard(note)), "every note reads as a card");
   } finally {
     await h.cleanup();
   }
