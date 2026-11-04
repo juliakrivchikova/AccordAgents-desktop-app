@@ -3274,6 +3274,19 @@ export interface AppBridge {
   getHubSetupCommand(request: import("./hubSetup").HubSetupCommandRequest): Promise<import("./hubSetup").HubSetupCommandResult>;
   installHub(request: import("./hubSetup").HubInstallRequest): Promise<import("./hubSetup").HubSetupState>;
   onHubSetupProgress(callback: (state: import("./hubSetup").HubSetupState) => void): () => void;
+  /** Speech to text: dictation recognized on this computer by a downloaded
+   *  Whisper model. Off until the User turns it on in General settings. */
+  getSpeechToTextState(): Promise<SpeechToTextState>;
+  /** Turns it on and downloads the model, or resumes an interrupted download. */
+  enableSpeechToText(): Promise<SpeechToTextState>;
+  /** Stops a download in progress, removes what was downloaded, turns it off. */
+  cancelSpeechToTextDownload(): Promise<SpeechToTextState>;
+  disableSpeechToText(request: DisableSpeechToTextRequest): Promise<SpeechToTextState>;
+  /** Recognizes one recording: a 16 kHz mono 16-bit WAV. */
+  transcribeSpeech(request: TranscribeSpeechRequest): Promise<TranscribeSpeechResult>;
+  /** Asks the system for the microphone; false when it is refused or off. */
+  requestMicrophoneAccess(): Promise<boolean>;
+  onSpeechToTextState(callback: (state: SpeechToTextState) => void): () => void;
   startReview(request: ReviewRequest): Promise<StartReviewResult>;
   continueReview(request: ContinueReviewRequest): Promise<StartReviewResult>;
   askPlanDecisionClarification(request: PlanDecisionClarificationRequest): Promise<StartReviewResult>;
@@ -3373,4 +3386,38 @@ export interface RevokePhoneInviteResult {
   revoked: boolean;
   inviteId: string;
   deviceId?: string;
+}
+
+/**
+ * Speech to text on this computer.
+ * - unavailable: this build or this computer cannot run it.
+ * - off: the User has not turned it on (the model may still be on disk).
+ * - downloading / verifying: the model is being fetched or checked.
+ * - interrupted: turned on, but the model is incomplete and nothing is
+ *   downloading (a failed download, or the app quit during one).
+ * - ready: the microphone can be used.
+ */
+export type SpeechToTextStatus = "unavailable" | "off" | "downloading" | "verifying" | "interrupted" | "ready";
+
+export interface SpeechToTextState {
+  status: SpeechToTextStatus;
+  /** The model is fully downloaded and checked, whether or not it is on. */
+  modelInstalled: boolean;
+  downloadedBytes: number;
+  totalBytes: number;
+  /** What went wrong, in a sentence for the User. */
+  error?: string;
+}
+
+export interface DisableSpeechToTextRequest {
+  deleteModel: boolean;
+}
+
+export interface TranscribeSpeechRequest {
+  /** A 16 kHz mono 16-bit PCM WAV file. */
+  audio: Uint8Array;
+}
+
+export interface TranscribeSpeechResult {
+  text: string;
 }

@@ -168,6 +168,16 @@ async function verifyPackagedApp(appArgument) {
 
   pass(`app.asar contains all ${requiredFiles.length} required runtime entries`);
   pass(`packaged version matches ${packageJson.version}`);
+
+  // Speech to text runs this program from the app's resources; a Mac app
+  // built without it would offer the feature and fail when it is turned on.
+  if (process.platform === "darwin") {
+    const whisperCli = path.join(appPath, "Contents", "Resources", "whisper", "whisper-cli");
+    if (!existsSync(whisperCli)) {
+      fail(`Packaged app is missing the speech-to-text engine: ${whisperCli}`);
+    }
+    pass("speech-to-text engine is packaged");
+  }
 }
 
 const [command, argument] = process.argv.slice(2);

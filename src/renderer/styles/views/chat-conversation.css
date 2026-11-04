@@ -749,12 +749,14 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat-rt-status-dot {
+  .chat-rt-status-dot,
+  .composer-dictation-dot {
     animation: none !important;
   }
 }
 
 .app-inactive .chat-rt-status-dot,
+.app-inactive .composer-dictation-dot,
 .app-inactive .streaming-status-label,
 .app-inactive .streaming-caret,
 .app-inactive .animate-pulse {
@@ -4157,6 +4159,71 @@ button.composer-active-run-row-main:focus-visible {
   padding: 8px 6px 6px;
   color: var(--app-muted);
   font-size: 12px;
+}
+
+/* Dictation: a recording shows its time and stops on click; notices are one
+   quiet line beside the microphone. */
+.composer-dictation-recording {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.composer-dictation-recording:hover {
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+.composer-dictation-recording:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.composer-dictation-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--app-danger);
+  animation: composer-dictation-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes composer-dictation-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.composer-dictation-notice {
+  display: -webkit-box;
+  min-width: 0;
+  max-width: 320px;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--app-text-secondary);
+  font-size: 11px;
+  line-height: 14px;
+  text-align: right;
+  cursor: pointer;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.composer-dictation-notice.is-error {
+  color: var(--app-danger);
+}
+
+.chat-composer-actions {
+  min-width: 0;
 }
 
 .chat-composer-hint {

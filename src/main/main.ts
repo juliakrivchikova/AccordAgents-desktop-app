@@ -4,13 +4,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { HubInstaller, removeStaleHubTemp } from "./services/hubInstaller";
+import { SpeechToTextService, resolveSpeechEngine } from "./services/speechToText";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { AwsInstanceProjectsService, AwsProjectAddCancelled } from "./services/awsInstanceProjects";
 import { newChatProjects } from "../shared/newChat";
 import { isCliTerminalPlatform } from "../shared/cliReadiness";
 import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { app, autoUpdater, BrowserWindow, dialog, ipcMain, MessageChannelMain, powerMonitor, protocol, shell, utilityProcess, type Tray, type WebContents } from "electron";
+import { app, autoUpdater, BrowserWindow, dialog, ipcMain, MessageChannelMain, net, powerMonitor, protocol, session, shell, systemPreferences, utilityProcess, type Tray, type WebContents } from "electron";
 import { createBackgroundTray } from "./backgroundTray";
 import { desktopUserDataDirOverride } from "./platform";
 import { NATIVE_PROCESS_REGISTRY_FILE, usesNativeProcessRegistry } from "./services/nativeProcessRegistry";
@@ -934,6 +935,51 @@ const hubInstaller = new HubInstaller({
 hubInstaller.onProgress((state) => {
   sendToMainWindow("hub:setup-progress", state);
 });
+
+const speechToTextService = new SpeechToTextService({
+  dir: path.join(app.getPath("userData"), "speech-to-text"),
+  engine: () => resolveSpeechEngine({
+    platform: process.platform,
+    arch: process.arch,
+    packaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    appPath: app.getAppPath(),
+    override: process.env.ACCORDAGENTS_WHISPER_CLI
+  }),
+  // Chromium's network stack: the system proxy and certificates apply.
+  fetch: (url, init) => net.fetch(url, init),
+  log: (event, payload) => { void debugLogService.write(event, payload); }
+});
+speechToTextService.onState((state) => {
+  sendToMainWindow("speech:state", state);
+});
+
+/**
+ * Web content may open the microphone only to dictate: audio alone, from the
+ * app's own pages, while speech to text is on and ready. The camera is never
+ * opened. Every other permission keeps Electron's default.
+ */
+function installMediaPermissionGate(): void {
+  const devServerUrl = process.env.VITE_DEV_SERVER_URL;
+  const isAppPage = (url: string): boolean => url.startsWith("file://") || Boolean(devServerUrl && url.startsWith(devServerUrl));
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    if (permission !== "media") {
+      callback(true);
+      return;
+    }
+    const types = "mediaTypes" in details ? details.mediaTypes ?? [] : [];
+    callback(
+      types.length > 0
+      && types.every((type) => type === "audio")
+      && isAppPage(details.requestingUrl)
+      && speechToTextService.isReadyNow()
+    );
+  });
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission, _origin, details) => {
+    if (permission !== "media") return true;
+    return details.mediaType === "audio" && speechToTextService.isReadyNow();
+  });
+}
 void removeStaleHubTemp().then((removed) => {
   if (removed) void debugLogService.write("hub.setup.temp-removed", { removed });
 });
@@ -2600,6 +2646,28 @@ function registerIpc(): void {
     ...(typeof request?.blob === "string" ? { blob: request.blob } : {}),
     ...(request?.startOver === true ? { startOver: true } : {})
   }));
+  ipcMain.handle("speech:state", () => speechToTextService.getState());
+  ipcMain.handle("speech:enable", () => speechToTextService.enable());
+  ipcMain.handle("speech:cancel-download", () => speechToTextService.cancelDownload());
+  ipcMain.handle("speech:disable", (_event, request: { deleteModel?: unknown } | undefined) =>
+    speechToTextService.disable({ deleteModel: request?.deleteModel === true }));
+  ipcMain.handle("speech:transcribe", (_event, request: { audio?: unknown } | undefined) => {
+    const audio = request?.audio;
+    if (!(audio instanceof Uint8Array)) {
+      throw new Error("The recording did not arrive.");
+    }
+    return speechToTextService.transcribe(audio);
+  });
+  ipcMain.handle("speech:request-microphone", async () => {
+    // Chromium's stand-in microphone (a test run fed from an audio file)
+    // never opens the real one, so there is nothing to ask macOS for.
+    if (!(await speechToTextService.getState().then((state) => state.status === "ready", () => false))) return false;
+    if (process.platform !== "darwin" || app.commandLine.hasSwitch("use-fake-device-for-media-stream")) return true;
+    const status = systemPreferences.getMediaAccessStatus("microphone");
+    if (status === "granted") return true;
+    if (status === "not-determined") return systemPreferences.askForMediaAccess("microphone");
+    return false;
+  });
   ipcMain.handle("mobile:create-phone-invite", async (_event, request: import("../shared/types").CreatePhoneInviteRequest | undefined) => createPhoneInvite(request ?? {}));
   ipcMain.handle("mobile:revoke-phone-invite", async (_event, request: { inviteId?: string } | undefined) => {
     const inviteId = typeof request?.inviteId === "string" ? request.inviteId.trim() : "";
@@ -2897,6 +2965,9 @@ void app.whenReady().then(async () => {
   await validateSqliteExecutable({ executable: sqliteExecutable });
   protocol.handle(FILE_PREVIEW_PROTOCOL, (request) => filePreviewService.handleProtocolRequest(request));
   registerIpc();
+  installMediaPermissionGate();
+  // Loaded now, so the microphone check above answers from the saved choice.
+  void speechToTextService.getState().catch(() => undefined);
   let betaUpdates = false;
   try {
     betaUpdates = await settingsService.getBetaUpdatesEnabled();

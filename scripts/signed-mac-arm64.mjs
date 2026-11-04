@@ -366,6 +366,9 @@ log("Running TypeScript checks");
 run("npm", ["run", "typecheck"]);
 
 log("Building macOS arm64 distributables with Electron Forge");
+// A release never ships without the speech-to-text engine: its build fails
+// instead of skipping when cmake is missing or the source cannot be fetched.
+process.env.ACCORDAGENTS_REQUIRE_WHISPER = "1";
 run("npm", ["run", "make", "--", "--platform=darwin", "--arch=arm64"]);
 
 log("Verifying signed and notarized app bundle");
