@@ -4682,10 +4682,15 @@ button.composer-active-run-row-main:focus-visible {
 
 /* Artifact note: a card on the timeline, no avatar or author line, aligned
    with the message text column (38px avatar + 12px gap). */
-/* Notes in a row sit close together, as one group under the message. */
+/* A note keeps a message's distance from what follows it; notes in a row
+   sit close together, as one group under the message they follow. */
 .chat-artifact-note {
   max-width: 560px;
-  margin: 0 0 4px 50px;
+  margin: 0 0 18px 50px;
+}
+
+.virtual-timeline-item:has(> .chat-artifact-note):has(+ .virtual-timeline-item > .chat-artifact-note) > .chat-artifact-note {
+  margin-bottom: -4px;
 }
 
 /* The icon stays beside the title: centred on a long note it would drift to
