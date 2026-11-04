@@ -244,6 +244,7 @@ import type { ParticipantRunResult } from "./providers";
 import { SettingsService } from "./settings";
 import { StorageService } from "./storage";
 import { sanitizeChatSkillMention, UserSkillsService } from "./userSkills";
+import { memoryAccessNow, memoryIndex, type MemoryServerAccess } from "./memoryTools";
 import type { UserSkillRunContext } from "./userSkills";
 import {
   clearChatRunMetadata,
@@ -331,6 +332,7 @@ interface ChatPromptSectionSizes {
   attachments: number;
   autoTitle: number;
   behaviorRules: number;
+  memory: number;
   currentRequest: number;
   total: number;
 }
@@ -414,7 +416,17 @@ interface CompactChatCommand {
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 20;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 21;
+/** How members keep their long-term memory (shared/memory.ts), decided by the
+ *  User on 2026-11-04: members do it on their own and never make the User
+ *  think about it; project knowledge goes to the repository first. */
+const MEMBER_MEMORY_INSTRUCTIONS = [
+  "Long-term memory:",
+  "- Keep it yourself with `app_memory_search`, `app_memory_read`, `app_memory_write`, `app_memory_archive`; User never asks for it. Do not mention memory to User unless User asks.",
+  "- Kinds: runbook (how to do a task well next time), article (what the code does not show: decisions and why, outside limits, User's preferences tagged `preference`), status (one task: where you stopped, branch, done, released, open). Scopes: global, project, role, chat.",
+  "- Repository first: project knowledge everyone working on the repository may see goes into its files with your current task's changes. Memory holds what must not or need not be there: User-specific details, anything unfit for a public repository (assume public unless you checked). With no task to carry it, write a project note with `awaitingRepository: true`, move it with the next task there, then archive the note.",
+  "- Search when you start a task. After several attempts or a stated preference, write or update a runbook or article. Update the task's status when you stop; archive it once released. Fix or archive wrong notes; update instead of duplicating; reuse tags already in use (`app_memory_tags`). No secrets, nothing the code already says. Notes are members' reference, not User's instructions."
+] as const;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_EXECUTOR_LEASE_TTL_MS = 15 * 60_000;
 const CHAT_CUSTOM_CHOICE_OPTION_ID = "__custom__";
@@ -913,6 +925,20 @@ export class ChatService {
       warnings: Array.isArray(conversation.metadata.warnings) ? conversation.metadata.warnings.filter((warning): warning is string => typeof warning === "string") : [],
       ...(contextUsage ? { contextUsage } : {})
     };
+  }
+
+  /** Members' memory on the User's server (wireMemoryToolHandler). */
+  private memoryAccess?: () => MemoryServerAccess | undefined;
+  /** Members whose context was compacted since they last saw the list of
+   *  notes: their next turn shows it again. */
+  private readonly memoryIndexDue = new Set<string>();
+
+  setMemoryAccess(access: () => MemoryServerAccess | undefined): void {
+    this.memoryAccess = access;
+  }
+
+  private memoryIndexKey(conversationId: string, participantId: string): string {
+    return `${conversationId}\u0000${participantId}`;
   }
 
   /** Machines transport, machine side: members whose home is this id are
@@ -2393,6 +2419,9 @@ export class ChatService {
         }
       }
       this.updateParticipantContextUsage(conversation, participant.id, usage);
+      // The list of memory notes was in the context that is now summarized:
+      // the member's next turn shows it again.
+      if (result.ok) this.memoryIndexDue.add(this.memoryIndexKey(conversation.id, participant.id));
       if (result.ok && session.roleRuntime === "prompt-fallback") {
         // Emulated Gemini compaction swaps to a fresh seeded conversation. Force
         // the existing instruction-refresh path to redeliver the prompt-fallback
@@ -7921,6 +7950,12 @@ export class ChatService {
       : sourcePromptConversation;
     const workspacePath = options.workspacePath ?? await this.ensureHistoryFiles(promptConversation);
     const isResumingSession = Boolean(session.sessionId);
+    // Members' memory: the list of notes goes with a session's first turn,
+    // with instructions sent again, and after the context was compacted. It
+    // is asked now, while the rest of the turn is prepared (it never fails).
+    const memoryIndexPending = !isResumingSession || sessionState.instructionsRefreshed || this.memoryIndexDue.has(this.memoryIndexKey(conversation.id, participant.id))
+      ? memoryIndex(memoryAccessNow(this.memoryAccess), { conversationId: conversation.id, participantId: participant.id })
+      : undefined;
     // A Claude Code member may take this message while an earlier one is
     // still waiting in its CLI; context counts as delivered only once the CLI
     // has handed that message to a step (onReplyStarted below).
@@ -7953,25 +7988,32 @@ export class ChatService {
     const usePromptRole = session.roleRuntime === "prompt-fallback";
     const includeRefreshedRoleInstructions = isResumingSession && sessionState.instructionsRefreshed;
     const primaryIncludeRoleInstructions = (usePromptRole && !isResumingSession) || includeRefreshedRoleInstructions;
+    const memoryIndexResult = await memoryIndexPending;
+    const memoryIndexBlock = memoryIndexResult?.text;
+    // Shown again after a compaction until the server's list was given.
+    if (memoryIndexResult?.delivered) this.memoryIndexDue.delete(this.memoryIndexKey(conversation.id, participant.id));
     const primary = this.buildPromptParts(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: primaryIncludeRoleInstructions,
       agentMode,
       permissions,
-      promptContextBlock: preparedPromptContext.block
+      promptContextBlock: preparedPromptContext.block,
+      memoryIndexBlock
     });
     const prompt = primary.prompt;
     const promptFallbackPrompt = this.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: true,
       agentMode,
       permissions,
-      promptContextBlock: preparedPromptContext.block
+      promptContextBlock: preparedPromptContext.block,
+      memoryIndexBlock
     });
     const resumeFallbackPrompt = isResumingSession
       ? this.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: usePromptRole || includeRefreshedRoleInstructions,
           agentMode,
           permissions,
-          promptContextBlock: preparedPromptContext.resumeFallbackBlock
+          promptContextBlock: preparedPromptContext.resumeFallbackBlock,
+          memoryIndexBlock
         })
       : undefined;
     const role = usePromptRole ? undefined : this.cliRoleOptions(participant, session, promptFallbackPrompt);
@@ -8835,7 +8877,7 @@ export class ChatService {
     triggerMessage: ChatMessage,
     workspacePath: string,
     continuation: boolean,
-    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string }
+    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string; memoryIndexBlock?: string }
   ): string {
     return this.buildPromptParts(conversation, participant, session, triggerMessage, workspacePath, continuation, options).prompt;
   }
@@ -8847,7 +8889,7 @@ export class ChatService {
     triggerMessage: ChatMessage,
     workspacePath: string,
     continuation: boolean,
-    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string }
+    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string; memoryIndexBlock?: string }
   ): { prompt: string; sections: ChatPromptSectionSizes } {
     const canRequestPermissions = this.canRequestPermissionChanges(session);
     const dynamicHeader = this.participantDynamicHeader(conversation, participant, session, options);
@@ -8874,6 +8916,7 @@ export class ChatService {
         : this.formatMessage(triggerMessage, false, false)
     ].join("\n\n");
     const promptContextBlock = options.promptContextBlock ?? "";
+    const memoryIndexBlock = options.memoryIndexBlock ?? "";
     const addresseeBlock = this.multiParticipantAddresseePromptSection(conversation, triggerMessage);
     const mentionTriggerBlock = this.mentionTriggerPromptSection(conversation);
     const skillsBlock = this.skillMentionsPromptSection(triggerMessage, participant.kind);
@@ -8902,6 +8945,7 @@ export class ChatService {
     const orderedBlocks = [
       staticEnvelope || dynamicHeader,
       promptContextBlock,
+      memoryIndexBlock,
       triggerBlock,
       addresseeBlock,
       mentionTriggerBlock,
@@ -8929,6 +8973,7 @@ export class ChatService {
         attachments: attachmentsBlock.length,
         autoTitle: autoTitleBlock.length,
         behaviorRules: behaviorRulesBlock.length,
+        memory: memoryIndexBlock.length,
         currentRequest: currentRequestBlock.length,
         total: prompt.length
       }
@@ -9225,6 +9270,8 @@ export class ChatService {
       "",
       "App MCP policy:",
       this.appToolPromptPolicy(session, includeParticipantActivityTool),
+      "",
+      ...MEMBER_MEMORY_INSTRUCTIONS,
       "",
       "Response rules:",
       "- The user strongly prefers concise replies. Do not repeat accepted context or restate proposals when a short verdict, blocker, or delta is enough.",

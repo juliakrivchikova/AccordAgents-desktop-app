@@ -189,9 +189,10 @@ test("buildPromptParts section sizes stay under baseline caps across envelope br
   ] as const) {
     assert.equal(parts.sections.dynamicHeader, 0, `${label}: dynamicHeader is folded into staticEnvelope when role instructions are included`);
     // Bumped from 7450 when app_chat_send_message was added, then when its guidance
-    // was expanded, then when app_chat_set_title joined the always-on app MCP surface.
+    // was expanded, then when app_chat_set_title joined the always-on app MCP surface,
+    // then from 7950 for the members' long-term memory instructions (~1.2 KB).
     // Intentional growth; keep tightening any further bloat.
-    assert.ok(parts.sections.staticEnvelope < 7950, `${label}: staticEnvelope too large: ${parts.sections.staticEnvelope}`);
+    assert.ok(parts.sections.staticEnvelope < 9200, `${label}: staticEnvelope too large: ${parts.sections.staticEnvelope}`);
     assert.equal(parts.sections.promptContext, 0, `${label}: promptContext should be empty without automatic context`);
     assert.ok(parts.sections.trigger < 350, `${label}: trigger too large: ${parts.sections.trigger}`);
     assert.ok(parts.sections.currentRequest < 130, `${label}: currentRequest too large: ${parts.sections.currentRequest}`);
@@ -201,8 +202,9 @@ test("buildPromptParts section sizes stay under baseline caps across envelope br
   assert.ok(slimRepoRead.sections.total < 1100, `slim repo+repoRead total too large: ${slimRepoRead.sections.total}`);
   assert.ok(slimNoRepoRead.sections.total < 1500, `slim repo+no-repoRead total too large: ${slimNoRepoRead.sections.total}`);
   assert.ok(slimNoRepo.sections.total < 1500, `slim no-repo total too large: ${slimNoRepo.sections.total}`);
-  assert.ok(fullRepoRead.sections.total < 8100, `full repo+repoRead total too large: ${fullRepoRead.sections.total}`);
-  assert.ok(fullNoRepoRead.sections.total < 8200, `full repo+no-repoRead total too large: ${fullNoRepoRead.sections.total}`);
+  // Full totals grew with the staticEnvelope (members' memory instructions).
+  assert.ok(fullRepoRead.sections.total < 9350, `full repo+repoRead total too large: ${fullRepoRead.sections.total}`);
+  assert.ok(fullNoRepoRead.sections.total < 9450, `full repo+no-repoRead total too large: ${fullNoRepoRead.sections.total}`);
   assert.ok(slimRepoRead.sections.total * 4 < fullRepoRead.sections.total, "slim envelope should be at least 4x smaller than full");
 
   // Repo-read state appears once: on the Repository line (and the escalation line when blocked).

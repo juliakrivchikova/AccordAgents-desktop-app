@@ -1,4 +1,5 @@
 import { BLOB_FRAGMENT_MAX_BYTES, isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
+import { HUB_MEMORY_PATH, isMemoryChangeAction, type HubMemoryRequest, type MemoryResult } from "../../shared/memory";
 import {
   HUB_MEMBER_RULES_PATH, HUB_PROGRESS_PATH, hubBlobFragmentPath, hubWebSocketUrl,
   type HubComposerCatalog, type HubDevice, type HubHealth, type HubMachineWakeRequest, type HubMemberRules, type HubPhoneInvite, type HubProgressPost, type HubRosterResponse
@@ -31,6 +32,7 @@ import {
 } from "../../shared/hubOps";
 import { randomBytes } from "node:crypto";
 import { hubProofVerifies, sha256Hex, signHubRequest, type HubSigningIdentity } from "./hubAuth";
+
 
 const REQUEST_TIMEOUT_MS = 30_000;
 /** Writing a large page (a chat moving to the server) takes longer. */
@@ -257,6 +259,15 @@ export class HubClient {
   artifactRevision(artifactId: string, versionEventId: string): Promise<HubArtifactRevisionResponse> {
     return this.request<HubArtifactRevisionResponse>("GET", `${HUB_ARTIFACT_PATH}?${new URLSearchParams({ artifactId, revision: versionEventId }).toString()}`,
       undefined, undefined, OPS_TIMEOUT_MS);
+  }
+
+  /** Members' memory: a read goes as GET, a change as POST (HubMemory). */
+  memory<T>(request: HubMemoryRequest, cancel?: AbortSignal): Promise<MemoryResult<T>> {
+    if (isMemoryChangeAction(request.action)) {
+      return this.request<MemoryResult<T>>("POST", HUB_MEMORY_PATH, JSON.stringify(request), "application/json", REQUEST_TIMEOUT_MS, cancel);
+    }
+    return this.request<MemoryResult<T>>("GET", `${HUB_MEMORY_PATH}?${new URLSearchParams({ request: JSON.stringify(request) }).toString()}`,
+      undefined, undefined, REQUEST_TIMEOUT_MS, cancel);
   }
 
   waitingTurns(): Promise<HubTurnsResponse> {

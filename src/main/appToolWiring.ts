@@ -13,6 +13,7 @@ import type {
 import type { ArtifactOperations } from "./services/artifactClient";
 import { validateArtifactCreateToolRequest } from "./services/artifactToolRequest";
 import type { ChatService } from "./services/chat";
+import { callMemoryTool, memoryAccessNow, type MemoryServerAccess } from "./services/memoryTools";
 import {
   APP_ARTIFACT_CREATE_TOOL,
   APP_ARTIFACT_DRAFT_LIST_TOOL,
@@ -65,6 +66,19 @@ export function wireChatAppToolHandlers(appMcpService: AppMcpService, chatServic
   appMcpService.setChatSendMessageHandler((actor, request) => chatService.sendChatMessageFromTool(actor, request));
   appMcpService.setChatSetTitleHandler((actor, request) => chatService.setChatTitleFromTool(actor, request));
   appMcpService.setScriptToolHandler((actor, toolName, request) => chatService.scriptToolFromApp(actor, toolName, request));
+}
+
+/** Registers members' memory tools (shared/memory.ts) and gives the chat
+ *  service the same way to the server for the list shown at a session's
+ *  start. `access` is read at each call: the link to the server may start
+ *  after the tools are wired. */
+export function wireMemoryToolHandler(
+  appMcpService: AppMcpService,
+  chatService: ChatService,
+  access: () => MemoryServerAccess | undefined
+): void {
+  appMcpService.setMemoryToolHandler((actor, toolName, request) => callMemoryTool(memoryAccessNow(access), actor, toolName, request));
+  chatService.setMemoryAccess(access);
 }
 
 /** Registers the artifact tool handler: resolves the acting member through the

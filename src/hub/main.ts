@@ -7,6 +7,7 @@ import { deviceIdForPublicKey } from "../main/services/hubAuth";
 import { StorageService } from "../main/services/storage";
 import { createHeadlessPlatform, setHostPlatform, userDataPath } from "../main/platform";
 import { HubOps } from "./hubOps";
+import { HubMemory } from "./hubMemory";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
 import { HubRetention, hubRetentionConfig } from "./hubRetention";
 import { HubChangeFeed, HubPhoneApi } from "./hubPhone";
@@ -204,6 +205,8 @@ export function composeHub(options: {
     log
   });
   const phoneApi = phone;
+  // Members' long-term memory, beside the chats (shared/memory.ts).
+  const memory = new HubMemory(storage, log);
   const server = new HubServer({
     hubId: options.hubId, version: options.version, storage, search, vapidPublicKey: options.keys.publicKey,
     ...(options.hubKey ? { hubKey: options.hubKey } : {}),
@@ -211,7 +214,8 @@ export function composeHub(options: {
     phone: phoneApi,
     onCatalogChanged: () => phoneApi.catalogChanged(),
     onProgress: (frames) => { for (const frame of frames) progress.noteFrame(frame); },
-    ops
+    ops,
+    memory
   });
   waker.start();
   // What the server kept for the order of signed events it had before it
@@ -221,7 +225,7 @@ export function composeHub(options: {
   const dropped = storage.dropLegacyEventTables({ keepBodies: true, signal: dropping.signal, log })
     .catch((error: unknown) => log("hub.legacy-tables.error", { message: error instanceof Error ? error.message : String(error) }));
   return {
-    server, push, waker, feed, progress, phone: phoneApi, ops,
+    server, push, waker, feed, progress, phone: phoneApi, ops, memory,
     close: async () => {
       push.close();
       waker.close();

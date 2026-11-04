@@ -359,6 +359,9 @@ const bridge: AppBridge = {
     ipcRenderer.on("scripts:updated", listener);
     return () => ipcRenderer.removeListener("scripts:updated", listener);
   },
+  listMemoryNotes: (request) => ipcRenderer.invoke("memory:list", request),
+  readMemoryNote: (request) => ipcRenderer.invoke("memory:read", request),
+  deleteMemoryNote: (request) => ipcRenderer.invoke("memory:delete", request),
   listMachineInactivityQuestions: (): Promise<MachineInactivityQuestion[]> => ipcRenderer.invoke("machines:inactivity-questions"),
   answerMachineInactivity: (request: AnswerMachineInactivityRequest): Promise<MachineInactivityQuestion[]> =>
     ipcRenderer.invoke("machines:inactivity-answer", request),

@@ -206,6 +206,8 @@ test("compactParticipant refreshes stored context usage from the session after c
     assert.equal(storage.current.metadata.agentContextUsageByParticipant?.[participant.id]?.usedTokens, 120);
     assert.equal(storage.current.metadata.agentContextUsageByParticipant?.[participant.id]?.percentage, 12);
     assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
+    // The list of memory notes was in the compacted context: the next turn shows it again.
+    assert.ok((service as any).memoryIndexDue.has((service as any).memoryIndexKey(conversation.id, participant.id)));
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -436,6 +438,8 @@ test("compactParticipant clears running state when compact fails", async () => {
     assert.equal(storage.current.messages.at(-1)?.content, "Could not compact @admin context: codex app-server compact timed out after 300000ms.");
     assert.equal(storage.current.messages.at(-1)?.metadata?.compaction?.outcome, "failed");
     assert.equal(debugEvents.filter(({ event }) => event === "chat.compaction.finished").at(-1)?.payload.outcome, "failed");
+    // Nothing was compacted: the member still has its list of memory notes.
+    assert.equal((service as any).memoryIndexDue.size, 0);
     assert.equal(storage.current.metadata.running, false);
     assert.equal(storage.current.metadata.runId, undefined);
     assert.equal(storage.current.metadata.activeRunIds, undefined);

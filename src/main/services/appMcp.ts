@@ -46,6 +46,7 @@ import {
   APP_ARTIFACT_PUBLISH_TOOL,
   APP_ARTIFACT_TOOL_NAMES,
   APP_SCRIPT_TOOL_NAMES,
+  APP_MEMORY_TOOL_NAMES,
   APP_MCP_TOOL_POLICIES,
   appMcpToolDefinitionsForCapabilities
 } from "../../shared/appMcpToolContracts";
@@ -126,6 +127,7 @@ type AppChatSendMessageHandler = (actor: AppMcpActor, request: unknown) => Promi
 type AppChatSetTitleHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppArtifactToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
 type AppScriptToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
+type AppMemoryToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
 /** A scheduled script's run, identified by its per-run script token. */
 export interface ScriptApiContext {
   scriptId: string;
@@ -183,6 +185,7 @@ export class AppMcpService {
   private chatSetTitleHandler?: AppChatSetTitleHandler;
   private artifactToolHandler?: AppArtifactToolHandler;
   private scriptToolHandler?: AppScriptToolHandler;
+  private memoryToolHandler?: AppMemoryToolHandler;
   private scriptApiHandler?: ScriptApiHandler;
   /** Script tokens live apart from agent tokens: a script token opens only
    *  the script API, and an agent token never opens it. */
@@ -277,6 +280,10 @@ export class AppMcpService {
   setArtifactToolHandler(handler: AppArtifactToolHandler): void {
     this.artifactToolHandler = handler;
   }
+  setMemoryToolHandler(handler: AppMemoryToolHandler | undefined): void {
+    this.memoryToolHandler = handler;
+  }
+
   setScriptToolHandler(handler: AppScriptToolHandler | undefined): void {
     this.scriptToolHandler = handler;
   }
@@ -604,6 +611,12 @@ export class AppMcpService {
         throw new Error("Artifact tools are not available.");
       }
       return this.toolTextResult(await this.artifactToolHandler(actor, record.name, record.arguments));
+    }
+    if (typeof record.name === "string" && (APP_MEMORY_TOOL_NAMES as readonly string[]).includes(record.name)) {
+      if (!this.memoryToolHandler) {
+        throw new Error("Memory is not available on this host yet.");
+      }
+      return this.toolTextResult(await this.memoryToolHandler(actor, record.name, record.arguments));
     }
     if (typeof record.name === "string" && (APP_SCRIPT_TOOL_NAMES as readonly string[]).includes(record.name)) {
       if (!this.scriptToolHandler) {

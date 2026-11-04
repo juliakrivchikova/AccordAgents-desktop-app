@@ -8,6 +8,9 @@ import type { ChatService } from "./chat";
 import type { ArtifactClient, ArtifactServerLink, ArtifactWriteOutcome } from "./artifactClient";
 import { HUB_OP_MAX_BYTES, type HubArtifactImportRows, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
 import type { ChatMessage, Conversation } from "../../shared/types";
+import { isMemoryChangeAction, type HubMemoryRequest, type MemoryResult } from "../../shared/memory";
+import type { MemoryMirror } from "./memoryMirror";
+import type { MemoryServerAccess } from "./memoryTools";
 
 /** Messages in one page of a chat moving to the server (well under the
  *  server's limit for one operation). */
@@ -23,6 +26,12 @@ const LEGACY_DROP_CHECK_MS = 30_000;
  *  putting it again: well under the day the server keeps a body nothing
  *  names yet (a message deleted since may have let it go). */
 const PICTURE_PUT_REMEMBERED_MS = 10 * 60_000;
+/** How often the computer reads members' notes into its copy. */
+const MEMORY_COPY_INTERVAL_MS = 60_000;
+/** How long a link that ends waits for a last read of the notes. */
+const LAST_MEMORY_READ_MS = 5_000;
+/** What members ask of memory (the rest is the owner's, for the copy and Settings). */
+const MEMBER_MEMORY_ACTIONS = new Set<string>(["index", "tags", "search", "read", "write", "archive"]);
 
 /**
  * The computer's (or a machine's) link to the User's server, which owns every
@@ -75,8 +84,18 @@ export class ServerChatLink {
     /** This device's documents: written through the server, its copy kept
      *  from the server's feed (and moved there with the chats, one time). */
     artifacts?: ArtifactClient;
+    /** The computer's copy of members' notes, moved with the chats to a
+     *  server this computer links to for the first time. */
+    memoryMirror?: MemoryMirror;
     log: (event: string, payload: Record<string, unknown>) => void;
   }) {}
+
+  /** Reads the server's notes into the computer's copy about every minute. */
+  private memoryTimer?: NodeJS.Timeout;
+  /** The server the copy follows now (its id), once known. */
+  private memoryHubId?: string;
+  /** The copy is still to be put on this server: members' memory waits. */
+  private memoryMoving = false;
 
   /** The link as documents use it. */
   private artifactLink(): ArtifactServerLink {
@@ -91,6 +110,53 @@ export class ServerChatLink {
       artifact: async (artifactId) => (await this.requireClient().artifact(artifactId)).artifact,
       revision: async (artifactId, versionEventId) => (await this.requireClient().artifactRevision(artifactId, versionEventId)).revision
     };
+  }
+
+  /**
+   * One request to members' memory, which only the server keeps (no copy on
+   * this device). A request that did not get an answer says so: it never
+   * reads as "there is no memory".
+   */
+  async memory<T>(request: HubMemoryRequest, cancel?: AbortSignal): Promise<MemoryResult<T>> {
+    const client = this.client;
+    if (!client) {
+      return { ok: false, error: { code: "server_unavailable", message: "This device is not linked to your server yet, so memory was not read or changed. It does not mean there is no memory." } };
+    }
+    // While the computer's copy is still being put on a server it links to
+    // for the first time, members wait: a note they wrote meanwhile would
+    // stand beside the one about to arrive.
+    if (this.options.memoryMirror && this.options.movesChats && MEMBER_MEMORY_ACTIONS.has(request.action) && (!this.ready || this.memoryMoving)) {
+      return { ok: false, error: { code: "server_unavailable", message: "Memory is moving to your server (or this link is still starting); try again in a minute. It does not mean there is no memory." } };
+    }
+    return this.memoryVia<T>(client, request, cancel);
+  }
+
+  /** The computer's copy reads and writes through the link it started on,
+   *  never through one started after it. */
+  private memoryAccessFor(client: HubClient): MemoryServerAccess {
+    return {
+      memory: <T>(request: HubMemoryRequest, cancel?: AbortSignal) => this.client === client
+        ? this.memoryVia<T>(client, request, cancel)
+        : Promise.resolve({ ok: false, error: { code: "server_unavailable", message: "The link to that server ended." } } as MemoryResult<T>)
+    };
+  }
+
+  private async memoryVia<T>(client: HubClient, request: HubMemoryRequest, cancel?: AbortSignal): Promise<MemoryResult<T>> {
+    try {
+      return await client.memory<T>(request, cancel);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.options.log("server.memory.failed", { action: request.action, status: error instanceof HubHttpError ? error.status : undefined, message: message.slice(0, 300) });
+      if (error instanceof HubHttpError && error.status === 404) {
+        return { ok: false, error: { code: "server_unavailable", message: "Your server is older than this app and keeps no members' memory yet; it will once it updates." } };
+      }
+      const why = message.slice(0, 200);
+      return { ok: false, error: { code: "server_unavailable", message: request.action === "delete"
+        ? `Your server did not confirm the deletion (${why}). Open the list again to see whether the note is still there.`
+        : isMemoryChangeAction(request.action)
+          ? `Your server did not confirm this change (${why}). It may still have reached it: read the note again before trying again.`
+          : `Your server could not be reached (${why}), so memory was not read. It does not mean there is no memory.` } };
+    }
   }
 
   private requireClient(): HubClient {
@@ -312,10 +378,12 @@ export class ServerChatLink {
       return false;
     });
     if (!prepared) this.retryDocuments(client);
+    await this.noteMemoryMove(client);
     this.ready = true;
     this.ops?.nudge();
     this.ops?.wakeReader();
     this.dropLegacyTables();
+    this.keepMemoryCopy(client);
     await this.options.chat.resumeServerTurns().catch((error) => {
       this.options.log("chat.server.resume-error", { message: error instanceof Error ? error.message : String(error) });
     });
@@ -324,7 +392,81 @@ export class ServerChatLink {
     });
   }
 
+  /** Before members use memory on this server: whether the computer's copy
+   *  is still to be put there (members wait until it is). */
+  private async noteMemoryMove(client: HubClient): Promise<void> {
+    const mirror = this.options.memoryMirror;
+    if (!mirror || !this.options.movesChats) return;
+    try {
+      this.memoryHubId = (await client.health()).hubId;
+      this.memoryMoving = await mirror.needsMove(this.memoryHubId);
+    } catch (error) {
+      // Not known yet: members wait until the copy's first step says.
+      this.memoryMoving = true;
+      this.options.log("memory.mirror.move-check-failed", { message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  /**
+   * Members' notes move with the chats (the computer only): its copy goes to
+   * a server it links to for the first time, then follows that server. A
+   * failure leaves the copy as it is and is tried again.
+   */
+  private keepMemoryCopy(client: HubClient): void {
+    const mirror = this.options.memoryMirror;
+    if (!mirror || !this.options.movesChats || this.client !== client) return;
+    const access = this.memoryAccessFor(client);
+    const stopFollowing = () => {
+      if (this.memoryTimer) clearInterval(this.memoryTimer);
+      this.memoryTimer = undefined;
+    };
+    const run = async (): Promise<void> => {
+      if (this.client !== client) return;
+      const hubId = this.memoryHubId ?? (await client.health()).hubId;
+      this.memoryHubId = hubId;
+      const moved = await mirror.moveTo(access, hubId);
+      if (this.client !== client) return;
+      if (moved === "denied") {
+        // Not this server's owner: it keeps no copy, members use the server as it is.
+        this.memoryMoving = false;
+        stopFollowing();
+        return;
+      }
+      if (moved !== "ok") return;
+      this.memoryMoving = false;
+      if (await mirror.sync(access, hubId) === "denied") stopFollowing();
+    };
+    const tick = () => {
+      void run().catch((error: unknown) => {
+        this.options.log("memory.mirror.error", { message: error instanceof Error ? error.message : String(error) });
+      });
+    };
+    stopFollowing();
+    tick();
+    this.memoryTimer = setInterval(tick, MEMORY_COPY_INTERVAL_MS);
+    this.memoryTimer.unref?.();
+  }
+
+  /** A last read of the server's notes before the link ends (a move to
+   *  another server starts with the copy as fresh as it can be). */
+  private async lastMemoryRead(): Promise<void> {
+    const mirror = this.options.memoryMirror;
+    const client = this.client;
+    const hubId = this.memoryHubId;
+    if (!mirror || !this.options.movesChats || !client || !hubId || this.memoryMoving) return;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      mirror.sync(this.memoryAccessFor(client), hubId).catch(() => "failed"),
+      new Promise((resolve) => { timer = setTimeout(resolve, LAST_MEMORY_READ_MS); })
+    ]).finally(() => { if (timer) clearTimeout(timer); });
+  }
+
   async stop(): Promise<void> {
+    if (this.memoryTimer) clearInterval(this.memoryTimer);
+    this.memoryTimer = undefined;
+    await this.lastMemoryRead();
+    this.memoryHubId = undefined;
+    this.memoryMoving = false;
     this.ready = false;
     const legacy = this.legacyDrop;
     legacy?.abort.abort();

@@ -1,0 +1,60 @@
+/* Settings → Memory: laid out with the Roles screen's toolbar, tabs, cards
+   and dialog (settings-roles.css); only what notes add is here. */
+
+.memory-settings-filters {
+  margin-top: -8px;
+}
+
+.memory-settings-error {
+  margin-bottom: 14px;
+}
+
+.memory-card-tags {
+  color: var(--app-muted);
+}
+
+.memory-card-footer-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-note-meta {
+  margin-bottom: 8px;
+  color: var(--app-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.roles-preview-box.memory-note-body {
+  min-height: 120px;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
+.memory-note-source {
+  margin-top: 12px;
+  margin-bottom: 0;
+}
+
+/* A note's title is what tells it apart: two lines before it is cut. */
+.memory-card .roles-card-head {
+  align-items: flex-start;
+}
+
+.memory-card .roles-card-title-row {
+  align-items: flex-start;
+}
+
+.memory-card .roles-card-title-row strong {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.memory-card .roles-kind-badge {
+  margin-top: 2px;
+}
