@@ -44,6 +44,8 @@ import type { StorageService } from "../main/services/storage";
 import { isAllowedPushEndpoint } from "./hubPush";
 import { HUB_PHONE_PATHS, type HubPhoneApi } from "./hubPhone";
 import { HUB_MEMBER_RULES_DOCUMENT, HubOpsRequestError, type HubOps } from "./hubOps";
+import type { HubMemory } from "./hubMemory";
+import { HUB_MEMORY_PATH, isMemoryChangeAction } from "../shared/memory";
 import {
   HUB_ARTIFACT_PATH, HUB_ARTIFACTS_PATH, HUB_CARDS_PATH, HUB_CHAT_PATH, HUB_CHATS_PATH, HUB_FEED_PATH, HUB_MACHINE_SETTINGS_PATH, HUB_ME_PATH, HUB_OPS_PATH, HUB_TURNS_PATH,
   type HubCardsResponse, type HubFeedGone, type HubLiveSettings, type HubMachineSettings, type HubMachineSettingsPut, type HubMe, type HubTurnsResponse
@@ -67,6 +69,8 @@ export interface HubServerOptions {
   onProgress?: (frames: MachineProgressFrame[]) => void;
   /** The chats as the server owns them: operations, the feed, chat pages. */
   ops?: HubOps;
+  /** Members' long-term memory (shared/memory.ts). */
+  memory?: HubMemory;
   now?: () => number;
   debugLog?: (event: string, payload: Record<string, unknown>) => void;
 }
@@ -331,6 +335,25 @@ export class HubServer {
     throw new HubRequestError(404, "Not found.");
   }
 
+  /** Members' memory: a read as GET (`?request=` the request as JSON), a
+   *  change as POST; the answer says what the rules decided. */
+  private async handleMemory(request: IncomingMessage, response: ServerResponse, url: URL, device: HubDevice, body: Buffer): Promise<number> {
+    const memory = this.options.memory as HubMemory;
+    let parsed: unknown;
+    if (request.method === "GET") {
+      const text = url.searchParams.get("request") ?? "";
+      try { parsed = JSON.parse(text) as unknown; } catch { throw new HubRequestError(400, "Invalid memory request."); }
+      const action = (parsed as { action?: unknown } | undefined)?.action;
+      if (typeof action !== "string" || isMemoryChangeAction(action)) throw new HubRequestError(400, "A change to memory is a POST.");
+    } else if (request.method === "POST") {
+      parsed = parseJson(body);
+    } else {
+      throw new HubRequestError(404, "Not found.");
+    }
+    json(response, 200, await memory.handle(device, parsed));
+    return 200;
+  }
+
   /**
    * A machine's settings, sealed for it by the computer that set it up: the
    * owner puts them, the machine reads its own (by the machine id the roster
@@ -568,6 +591,10 @@ export class HubServer {
       }
       if (url.pathname === HUB_MACHINE_SETTINGS_PATH) {
         status = await this.handleMachineSettings(request, response, url, device, body);
+        return;
+      }
+      if (this.options.memory && url.pathname === HUB_MEMORY_PATH) {
+        status = await this.handleMemory(request, response, url, device, body);
         return;
       }
       if (this.options.ops && url.pathname.startsWith("/v3/")) {

@@ -3312,6 +3312,10 @@ export interface AppBridge {
   releaseHeldScriptMessages(request: import("./scripts").ScriptIdRequest): Promise<void>;
   discardHeldScriptMessages(request: import("./scripts").ScriptIdRequest): Promise<void>;
   onScriptsUpdated(callback: (event: import("./scripts").ScriptsUpdatedEvent) => void): () => void;
+  // Members' long-term memory on the User's server (Settings → Memory: look and delete only).
+  listMemoryNotes(request: import("./memory").MemorySettingsListRequest): Promise<import("./memory").MemorySettingsListResult>;
+  readMemoryNote(request: import("./memory").MemoryNoteIdRequest): Promise<import("./memory").MemoryResult<import("./memory").MemoryNote>>;
+  deleteMemoryNote(request: import("./memory").MemoryNoteIdRequest): Promise<import("./memory").MemoryResult<{ deleted: boolean }>>;
   // Machines transport: machines that host participants.
   listMachines(): Promise<MachineListResult>;
   getCloudRunPreparation(request: Pick<import("./cloudRunPreparation").PrepareCloudRunRequest, "provider" | "instanceId">): Promise<import("./cloudRunPreparation").CloudRunPreparationState | undefined>;

@@ -30,8 +30,9 @@ import { PluginsSettingsSection } from "./plugins/plugins-settings-section";
 import { X } from "lucide-react";
 import { AwsSettingsPage } from "./aws-settings-page";
 import { ScriptsSettingsSection } from "./scripts-settings-section";
+import { MemorySettingsSection } from "./memory-settings-section";
 
-export type SettingsSection = "general" | "aws" | "environment" | "scripts" | "roles" | "behavior-rules" | "saved-prompts" | "participants" | "plugins";
+export type SettingsSection = "general" | "aws" | "environment" | "scripts" | "roles" | "behavior-rules" | "saved-prompts" | "participants" | "plugins" | "memory";
 
 export function SettingsView(props: {
   section: SettingsSection;
@@ -82,10 +83,10 @@ export function SettingsView(props: {
           ? "Rules"
           : props.section === "saved-prompts"
             ? "Prompts"
-            : props.section === "plugins" ? "Plugins & Skills" : "Members";
+            : props.section === "plugins" ? "Plugins & Skills" : props.section === "memory" ? "Memory" : "Members";
   const sectionClass = props.section === "participants"
     ? "settings-view-participants"
-    : props.section === "roles"
+    : props.section === "roles" || props.section === "memory"
       ? "settings-view-roles"
       : "";
   return (
@@ -144,6 +145,7 @@ export function SettingsView(props: {
           />
         )}
         {props.section === "scripts" && <ScriptsSettingsSection />}
+        {props.section === "memory" && <MemorySettingsSection />}
         {props.section === "plugins" && (
           <PluginsSettingsSection
             repoPath={props.settings.lastRepoPath}

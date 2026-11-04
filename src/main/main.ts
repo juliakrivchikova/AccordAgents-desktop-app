@@ -105,11 +105,13 @@ import { artifactMembersForConversation } from "../shared/artifacts";
 import { normalizeExternalUrlForOpen } from "../shared/externalLinks";
 import { ArtifactClient } from "./services/artifactClient";
 import { ArtifactStore } from "./services/artifactStore";
-import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "./appToolWiring";
+import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers, wireMemoryToolHandler } from "./appToolWiring";
 import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
 import { HubClient } from "./services/hubClient";
 import { ServerChatLink } from "./services/serverChatLink";
+import { MemoryMirror } from "./services/memoryMirror";
+import type { MemoryNote, MemoryNoteIdRequest, MemoryOwnerListValue, MemorySettingsListRequest, MemorySettingsListResult } from "../shared/memory";
 import { deviceIdForPublicKey, hubCertificateCrypto, signHubText } from "./services/hubAuth";
 import { HubPhonePublisher } from "./services/hubPhonePublisher";
 import { HubMemberRulesPublisher, memberRulesFrom } from "./services/hubMemberRules";
@@ -495,9 +497,14 @@ const artifactService = new ArtifactClient({
 });
 chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
 
+/** The computer's copy of members' notes, moved with the chats to a new server. */
+const memoryMirror = new MemoryMirror(() => storageService.sqlExecutor(), () => storageService.hub(),
+  (event, payload) => { void debugLogService.write(event, payload); });
+
 /** The User's server owns every chat (agreements Д1–Д13): her own server, or
  *  the same server inside this app when she has none (Д6). */
 const serverChatLink = new ServerChatLink({
+  memoryMirror,
   storage: storageService,
   chat: chatService,
   identity: () => deviceIdentityService.getOrCreateDeviceIdentity(),
@@ -1285,6 +1292,31 @@ app.on("before-quit", quitStep(quitConfirmation, () => {
 
 const dispatchArtifactTool = createArtifactToolDispatcher(artifactService);
 wireArtifactToolHandler(appMcpService, chatService, dispatchArtifactTool);
+// Members' memory lives on the User's server only (shared/memory.ts).
+wireMemoryToolHandler(appMcpService, chatService, () => serverChatLink);
+
+/** Settings → Memory: every note on the User's server, with the names of
+ *  the roles and chats they are kept for. */
+async function listMemoryNotesForSettings(request: MemorySettingsListRequest | undefined): Promise<MemorySettingsListResult> {
+  const query: MemorySettingsListRequest = {
+    ...(typeof request?.query === "string" && request.query.trim() ? { query: request.query.trim() } : {}),
+    ...(typeof request?.tag === "string" && request.tag.trim() ? { tag: request.tag.trim() } : {}),
+    ...(request?.kind ? { kind: request.kind } : {}),
+    ...(request?.scope ? { scope: request.scope } : {}),
+    ...(request?.archived ? { archived: true } : {})
+  };
+  const result = await serverChatLink.memory<MemoryOwnerListValue>({ action: "list", ...query });
+  if (!result.ok) {
+    if (result.error.code === "server_unavailable") return { status: "unavailable", notes: [], truncated: false, message: result.error.message, roleLabels: {}, chatTitles: {} };
+    throw new Error(result.error.message);
+  }
+  const settings = await settingsService.getPublicSettings();
+  const roleLabels = Object.fromEntries(settings.chatRoleConfigs.map((role) => [role.id, role.label]));
+  // One read for the titles of the notes' chats; a chat missing here was deleted.
+  const chatIds = [...new Set(result.value.notes.flatMap((note) => note.conversationId ? [note.conversationId] : []))];
+  const chatTitles = await storageService.conversationTitles(chatIds);
+  return { status: "ok", notes: result.value.notes, truncated: result.value.truncated, roleLabels, chatTitles };
+}
 
 let runtimeIdentity: Promise<{ runtimeId: string; pid: number; startedAt: string }> | undefined;
 
@@ -2409,6 +2441,17 @@ function registerIpc(): void {
     } finally {
       activeReviews.delete(runId);
     }
+  });
+  ipcMain.handle("memory:list", (_event, request: MemorySettingsListRequest) => listMemoryNotesForSettings(request));
+  ipcMain.handle("memory:read", (_event, request: MemoryNoteIdRequest) =>
+    serverChatLink.memory<MemoryNote>({ action: "owner-read", noteId: String(request?.noteId ?? "") }));
+  ipcMain.handle("memory:delete", async (_event, request: MemoryNoteIdRequest) => {
+    const noteId = String(request?.noteId ?? "");
+    // Deleted by the User: it leaves the computer's copy first, so it never
+    // comes back with a move to another server, even if the server's answer
+    // is lost.
+    await memoryMirror.forget(noteId);
+    return serverChatLink.memory<{ deleted: boolean }>({ action: "delete", noteId });
   });
   ipcMain.handle("scripts:list", () => scriptHub.list());
   ipcMain.handle("scripts:get-revision", (_event, request: GetScriptRevisionRequest) =>

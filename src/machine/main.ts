@@ -21,7 +21,7 @@ import { artifactMembersForConversation } from "../shared/artifacts";
 import { assertMobilePairingPackage, type MobilePairingPackage } from "../shared/mobilePairing";
 import { deriveMachineChannelKey } from "../shared/machineChannelKey";
 import { isMachineSettingsDocument } from "../shared/machineLink";
-import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers } from "../main/appToolWiring";
+import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers, wireMemoryToolHandler } from "../main/appToolWiring";
 import { createHeadlessPlatform, setHostPlatform, userDataPath } from "../main/platform";
 import { AgentEnvironmentService } from "../main/services/agentEnvironment";
 import { AppMcpService } from "../main/services/appMcp";
@@ -330,6 +330,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   });
   chatService.setArtifactCleanup((conversationId) => artifactService.deleteConversationArtifacts(conversationId));
   wireArtifactToolHandler(appMcpService, chatService, createArtifactToolDispatcher(artifactService));
+  // Members' memory: straight to the User's server, like documents.
+  wireMemoryToolHandler(appMcpService, chatService, () => serverChatLink);
 
   await appMcpService.start();
   await storageService.init();

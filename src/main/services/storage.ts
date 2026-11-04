@@ -541,6 +541,35 @@ export class StorageService {
     await this.runSql(`delete from run_cancel_requests where requested_at < ${sqlString(cutoff)};`);
   }
 
+  /** A chat's kind, project folder and members, without its messages or
+   *  the rest of its body (members' memory asks this on every request). */
+  async conversationAccess(id: string): Promise<{ kind: string; repoPath?: string; participants: unknown[] } | undefined> {
+    await this.init();
+    const rows = await this.queryJson<{ kind: string; repoPath: string | null; participantsJson: string | null }>(
+      `select kind, repo_path as repoPath,
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participants') as participantsJson
+       from conversations where id = ${sqlString(id)};`
+    );
+    const row = rows[0];
+    if (!row) return undefined;
+    let participants: unknown[] = [];
+    try {
+      const parsed = row.participantsJson ? JSON.parse(row.participantsJson) as unknown : [];
+      if (Array.isArray(parsed)) participants = parsed;
+    } catch {
+      participants = [];
+    }
+    return { kind: row.kind, ...(row.repoPath ? { repoPath: row.repoPath } : {}), participants };
+  }
+
+  /** The titles of the chats named (those this device still has). */
+  async conversationTitles(ids: readonly string[]): Promise<Record<string, string>> {
+    if (!ids.length) return {};
+    await this.init();
+    const rows = await this.queryJson<{ id: string; title: string }>(`select id, title from conversations where id in (${sqlStringList(ids)});`);
+    return Object.fromEntries(rows.map((row) => [row.id, row.title]));
+  }
+
   async listConversations(): Promise<ConversationSummary[]> {
     await this.init();
     const rows = await this.queryJson<{

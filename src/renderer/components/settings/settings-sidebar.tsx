@@ -1,4 +1,4 @@
-import { ArrowLeft, CalendarClock, Circle, Cloud, FileText, KeyRound, ListChecks, Plug, SlidersHorizontal, Users } from "lucide-react";
+import { ArrowLeft, Brain, CalendarClock, Circle, Cloud, FileText, KeyRound, ListChecks, Plug, SlidersHorizontal, Users } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -18,6 +18,7 @@ const SETTINGS_NAV: Array<{ section: SettingsSection; label: string; icon: Lucid
   { section: "behavior-rules", label: "Rules", icon: ListChecks },
   { section: "saved-prompts", label: "Prompts", icon: FileText },
   { section: "plugins", label: "Plugins & Skills", icon: Plug },
+  { section: "memory", label: "Memory", icon: Brain },
   { section: "participants", label: "Members", icon: Users }
 ];
 
