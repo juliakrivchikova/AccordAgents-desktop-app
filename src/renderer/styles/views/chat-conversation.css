@@ -749,12 +749,14 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat-rt-status-dot {
+  .chat-rt-status-dot,
+  .composer-dictation-dot {
     animation: none !important;
   }
 }
 
 .app-inactive .chat-rt-status-dot,
+.app-inactive .composer-dictation-dot,
 .app-inactive .streaming-status-label,
 .app-inactive .streaming-caret,
 .app-inactive .animate-pulse {
@@ -4181,6 +4183,11 @@ button.composer-active-run-row-main:focus-visible {
   color: var(--app-text-strong);
 }
 
+.composer-dictation-recording:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 .composer-dictation-dot {
   width: 7px;
   height: 7px;
@@ -4195,12 +4202,28 @@ button.composer-active-run-row-main:focus-visible {
 }
 
 .composer-dictation-notice {
+  display: -webkit-box;
+  min-width: 0;
   max-width: 320px;
   overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--app-text-secondary);
   font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 14px;
+  text-align: right;
+  cursor: pointer;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.composer-dictation-notice.is-error {
+  color: var(--app-danger);
+}
+
+.chat-composer-actions {
+  min-width: 0;
 }
 
 .chat-composer-hint {

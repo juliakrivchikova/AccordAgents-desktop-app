@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { SPEECH_SAMPLE_RATE, encodeWavPcm16 } from "../../../shared/speechToText";
+import { SPEECH_MAX_SECONDS, SPEECH_SAMPLE_RATE, encodeWavPcm16 } from "../../../shared/speechToText";
+import { cleanIpcError } from "../../lib/ipc-error";
 
 export type DictationPhase = "idle" | "starting" | "recording" | "recognizing";
 
+/** An error stays until she dismisses it or dictates again; a hint fades. */
+export interface DictationNotice {
+  text: string;
+  kind: "error" | "hint";
+}
+
 const MICROPHONE_OFF =
   "Microphone access is off for AccordAgents. Turn it on in System Settings › Privacy & Security › Microphone.";
+const NOTHING_HEARD = "No speech was recognized.";
+const HINT_MS = 6_000;
 
 interface Recording {
   stream: MediaStream;
@@ -14,26 +23,36 @@ interface Recording {
   stopped: Promise<void>;
 }
 
+/** One microphone, one dictation: the main field and a thread field never
+ *  record the same speech twice. */
+let dictationOwner: symbol | undefined;
+
 /**
  * One dictation at a time in one message field: start records from the
  * microphone, stop recognizes what was said and hands the text over. A new
- * session (another chat, the field going away) drops what is in flight, so
- * text never lands in a message it was not spoken for.
+ * session (another chat or thread, the field going away) drops what is in
+ * flight, so text never lands in a message it was not spoken for.
  */
 export function useDictation(options: { session?: string; onText: (text: string) => void }): {
   phase: DictationPhase;
   seconds: number;
-  notice?: string;
+  notice?: DictationNotice;
+  dismissNotice: () => void;
   start: () => Promise<void>;
   stop: () => Promise<void>;
 } {
   const [phase, setPhase] = useState<DictationPhase>("idle");
   const [seconds, setSeconds] = useState(0);
-  const [notice, setNotice] = useState<string>();
+  const [notice, setNotice] = useState<DictationNotice>();
   const recordingRef = useRef<Recording>();
   const generationRef = useRef(0);
+  const ownerRef = useRef(Symbol("dictation"));
   const onTextRef = useRef(options.onText);
   onTextRef.current = options.onText;
+
+  const release = useCallback(() => {
+    if (dictationOwner === ownerRef.current) dictationOwner = undefined;
+  }, []);
 
   const discard = useCallback(() => {
     generationRef.current += 1;
@@ -41,71 +60,20 @@ export function useDictation(options: { session?: string; onText: (text: string)
     recordingRef.current = undefined;
     if (recording) {
       if (recording.recorder.state !== "inactive") recording.recorder.stop();
-      for (const track of recording.stream.getTracks()) track.stop();
+      stopTracks(recording.stream);
     }
+    release();
     setPhase("idle");
     setSeconds(0);
-  }, []);
+  }, [release]);
 
   useEffect(() => discard, [discard, options.session]);
 
   useEffect(() => {
-    if (phase !== "recording") return undefined;
-    const startedAt = Date.now();
-    const timer = window.setInterval(() => setSeconds(Math.floor((Date.now() - startedAt) / 1000)), 250);
-    return () => window.clearInterval(timer);
-  }, [phase]);
-
-  useEffect(() => {
-    if (!notice) return undefined;
-    const timer = window.setTimeout(() => setNotice(undefined), 8_000);
+    if (notice?.kind !== "hint") return undefined;
+    const timer = window.setTimeout(() => setNotice(undefined), HINT_MS);
     return () => window.clearTimeout(timer);
   }, [notice]);
-
-  const start = useCallback(async () => {
-    if (recordingRef.current || phase !== "idle") return;
-    const generation = ++generationRef.current;
-    setNotice(undefined);
-    setSeconds(0);
-    setPhase("starting");
-    try {
-      const allowed = await window.consensus.requestMicrophoneAccess();
-      if (generation !== generationRef.current) return;
-      if (!allowed) {
-        setNotice(MICROPHONE_OFF);
-        setPhase("idle");
-        return;
-      }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-      });
-      if (generation !== generationRef.current) {
-        for (const track of stream.getTracks()) track.stop();
-        return;
-      }
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : undefined;
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-      const chunks: Blob[] = [];
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunks.push(event.data);
-      };
-      const stopped = new Promise<void>((resolve) => {
-        recorder.onstop = () => resolve();
-      });
-      recorder.start(1_000);
-      recordingRef.current = { stream, recorder, chunks, stopped };
-      setPhase("recording");
-    } catch (error) {
-      if (generation !== generationRef.current) return;
-      const name = error instanceof DOMException ? error.name : "";
-      setNotice(name === "NotAllowedError" || name === "SecurityError"
-        ? MICROPHONE_OFF
-        : name === "NotFoundError"
-          ? "No microphone was found."
-          : "The microphone could not be started.");
-      discard();
-    }
-  }, [discard, phase]);
 
   const stop = useCallback(async () => {
     const recording = recordingRef.current;
@@ -116,51 +84,131 @@ export function useDictation(options: { session?: string; onText: (text: string)
     try {
       if (recording.recorder.state !== "inactive") recording.recorder.stop();
       await recording.stopped;
-      for (const track of recording.stream.getTracks()) track.stop();
+      stopTracks(recording.stream);
       const blob = new Blob(recording.chunks, { type: recording.recorder.mimeType || "audio/webm" });
-      const samples = await decodeToSpeechSamples(blob);
+      recording.chunks.length = 0;
+      const samples = await decodeToSpeechSamples(blob).catch(() => undefined);
       if (generation !== generationRef.current) return;
+      if (!samples || samples.length === 0) {
+        setNotice({ text: NOTHING_HEARD, kind: "hint" });
+        return;
+      }
       const result = await window.consensus.transcribeSpeech({ audio: encodeWavPcm16(samples) });
       if (generation !== generationRef.current) return;
       if (result.text) onTextRef.current(result.text);
-      else setNotice("No speech was recognized.");
+      else setNotice({ text: NOTHING_HEARD, kind: "hint" });
     } catch (error) {
       if (generation !== generationRef.current) return;
-      setNotice(cleanIpcError(error));
+      setNotice({ text: cleanIpcError(error) || "Speech could not be recognized.", kind: "error" });
     } finally {
       if (generation === generationRef.current) {
+        release();
         setPhase("idle");
         setSeconds(0);
       }
     }
-  }, []);
+  }, [release]);
 
-  return { phase, seconds, notice, start, stop };
+  // The time shown while recording; at the limit the recording stops and is
+  // recognized, so nothing past it is lost.
+  useEffect(() => {
+    if (phase !== "recording") return undefined;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      setSeconds(elapsed);
+      if (elapsed >= SPEECH_MAX_SECONDS) void stop();
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [phase, stop]);
+
+  const start = useCallback(async () => {
+    if (recordingRef.current || phase !== "idle") return;
+    if (dictationOwner && dictationOwner !== ownerRef.current) {
+      setNotice({ text: "Another message field is already dictating.", kind: "hint" });
+      return;
+    }
+    dictationOwner = ownerRef.current;
+    const generation = ++generationRef.current;
+    setNotice(undefined);
+    setSeconds(0);
+    setPhase("starting");
+    let stream: MediaStream | undefined;
+    try {
+      const allowed = await window.consensus.requestMicrophoneAccess();
+      if (generation !== generationRef.current) return;
+      if (!allowed) {
+        setNotice({ text: MICROPHONE_OFF, kind: "error" });
+        release();
+        setPhase("idle");
+        return;
+      }
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
+      if (generation !== generationRef.current) {
+        stopTracks(stream);
+        return;
+      }
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : undefined;
+      const recorder = new MediaRecorder(stream, { ...(mimeType ? { mimeType } : {}), audioBitsPerSecond: 32_000 });
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
+      };
+      const stopped = new Promise<void>((resolve) => {
+        recorder.onstop = () => resolve();
+      });
+      // A microphone that goes away (unplugged, headset off) ends the
+      // recording with what was said so far.
+      for (const track of stream.getAudioTracks()) {
+        track.onended = () => {
+          if (recordingRef.current?.recorder === recorder) void stop();
+        };
+      }
+      recorder.start(1_000);
+      recordingRef.current = { stream, recorder, chunks, stopped };
+      setPhase("recording");
+    } catch (error) {
+      if (stream) stopTracks(stream);
+      if (generation !== generationRef.current) return;
+      const name = error instanceof DOMException ? error.name : "";
+      setNotice({
+        text: name === "NotAllowedError" || name === "SecurityError"
+          ? MICROPHONE_OFF
+          : name === "NotFoundError"
+            ? "No microphone was found."
+            : "The microphone could not be started.",
+        kind: "error"
+      });
+      discard();
+    }
+  }, [discard, phase, release, stop]);
+
+  return { phase, seconds, notice, dismissNotice: () => setNotice(undefined), start, stop };
 }
 
-/** The recording as 16 kHz mono samples, the way the engine reads them. */
+function stopTracks(stream: MediaStream): void {
+  for (const track of stream.getTracks()) {
+    track.onended = null;
+    track.stop();
+  }
+}
+
+/**
+ * The recording as 16 kHz mono samples, the way the engine reads them. An
+ * offline context at that rate resamples while decoding, so the recording is
+ * never held at the microphone's own rate and no audio output is opened.
+ */
 async function decodeToSpeechSamples(blob: Blob): Promise<Float32Array> {
   const data = await blob.arrayBuffer();
   if (data.byteLength === 0) return new Float32Array(0);
-  const context = new AudioContext();
-  let decoded: AudioBuffer;
-  try {
-    decoded = await context.decodeAudioData(data);
-  } finally {
-    void context.close();
+  const decoded = await new OfflineAudioContext(1, 1, SPEECH_SAMPLE_RATE).decodeAudioData(data);
+  if (decoded.numberOfChannels === 1) return decoded.getChannelData(0);
+  const mono = new Float32Array(decoded.length);
+  for (let channel = 0; channel < decoded.numberOfChannels; channel += 1) {
+    const samples = decoded.getChannelData(channel);
+    for (let index = 0; index < mono.length; index += 1) mono[index] += (samples[index] ?? 0) / decoded.numberOfChannels;
   }
-  const length = Math.max(1, Math.ceil(decoded.duration * SPEECH_SAMPLE_RATE));
-  const offline = new OfflineAudioContext(1, length, SPEECH_SAMPLE_RATE);
-  const source = offline.createBufferSource();
-  source.buffer = decoded;
-  source.connect(offline.destination);
-  source.start();
-  const rendered = await offline.startRendering();
-  return rendered.getChannelData(0);
-}
-
-/** Electron prefixes errors from the main process with where they came from. */
-function cleanIpcError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "") || "Speech could not be recognized.";
+  return mono;
 }

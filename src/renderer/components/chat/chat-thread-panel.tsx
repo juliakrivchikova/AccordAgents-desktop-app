@@ -158,6 +158,7 @@ export function ChatThreadPanel(props: {
         participants={props.participants}
         savedPrompts={props.settings.chatSavedPrompts}
         conversationId={props.conversationId}
+        dictationSession={`${props.conversationId}:${props.rootMessage.id}`}
         repoPath={props.repoPath}
         draft={props.draft}
         onDraftChange={props.onDraftChange}

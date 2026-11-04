@@ -98,7 +98,7 @@ const config = {
       CFBundleDisplayName: productName,
       CFBundleName: productName,
       LSMinimumSystemVersion: "13.0",
-      NSMicrophoneUsageDescription: "AccordAgents uses the microphone only while you dictate a message. Speech is recognized on this Mac."
+      NSMicrophoneUsageDescription: "AccordAgents uses the microphone to dictate messages. Speech is recognized on this Mac."
     },
     ignore: [
       // Only runtime roots belong in the app; local worktrees and data must never ship.

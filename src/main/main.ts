@@ -11,7 +11,7 @@ import { newChatProjects } from "../shared/newChat";
 import { isCliTerminalPlatform } from "../shared/cliReadiness";
 import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { app, autoUpdater, BrowserWindow, dialog, ipcMain, MessageChannelMain, net, powerMonitor, protocol, shell, systemPreferences, utilityProcess, type Tray, type WebContents } from "electron";
+import { app, autoUpdater, BrowserWindow, dialog, ipcMain, MessageChannelMain, net, powerMonitor, protocol, session, shell, systemPreferences, utilityProcess, type Tray, type WebContents } from "electron";
 import { createBackgroundTray } from "./backgroundTray";
 import { desktopUserDataDirOverride } from "./platform";
 import { NATIVE_PROCESS_REGISTRY_FILE, usesNativeProcessRegistry } from "./services/nativeProcessRegistry";
@@ -946,6 +946,33 @@ const speechToTextService = new SpeechToTextService({
 speechToTextService.onState((state) => {
   sendToMainWindow("speech:state", state);
 });
+
+/**
+ * Web content may open the microphone only to dictate: audio alone, from the
+ * app's own pages, while speech to text is on and ready. The camera is never
+ * opened. Every other permission keeps Electron's default.
+ */
+function installMediaPermissionGate(): void {
+  const devServerUrl = process.env.VITE_DEV_SERVER_URL;
+  const isAppPage = (url: string): boolean => url.startsWith("file://") || Boolean(devServerUrl && url.startsWith(devServerUrl));
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    if (permission !== "media") {
+      callback(true);
+      return;
+    }
+    const types = "mediaTypes" in details ? details.mediaTypes ?? [] : [];
+    callback(
+      types.length > 0
+      && types.every((type) => type === "audio")
+      && isAppPage(details.requestingUrl)
+      && speechToTextService.isReadyNow()
+    );
+  });
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission, _origin, details) => {
+    if (permission !== "media") return true;
+    return details.mediaType === "audio" && speechToTextService.isReadyNow();
+  });
+}
 void removeStaleHubTemp().then((removed) => {
   if (removed) void debugLogService.write("hub.setup.temp-removed", { removed });
 });
@@ -2591,6 +2618,7 @@ function registerIpc(): void {
   ipcMain.handle("speech:request-microphone", async () => {
     // Chromium's stand-in microphone (a test run fed from an audio file)
     // never opens the real one, so there is nothing to ask macOS for.
+    if (!(await speechToTextService.getState().then((state) => state.status === "ready", () => false))) return false;
     if (process.platform !== "darwin" || app.commandLine.hasSwitch("use-fake-device-for-media-stream")) return true;
     const status = systemPreferences.getMediaAccessStatus("microphone");
     if (status === "granted") return true;
@@ -2894,6 +2922,9 @@ void app.whenReady().then(async () => {
   await validateSqliteExecutable({ executable: sqliteExecutable });
   protocol.handle(FILE_PREVIEW_PROTOCOL, (request) => filePreviewService.handleProtocolRequest(request));
   registerIpc();
+  installMediaPermissionGate();
+  // Loaded now, so the microphone check above answers from the saved choice.
+  void speechToTextService.getState().catch(() => undefined);
   let betaUpdates = false;
   try {
     betaUpdates = await settingsService.getBetaUpdatesEnabled();

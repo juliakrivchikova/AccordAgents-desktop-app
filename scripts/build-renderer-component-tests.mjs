@@ -38,6 +38,7 @@ await build({
     "renderer/components/settings/device-pairing-revoke.test.tsx",
     "renderer/components/settings/hub-server-section.test.tsx",
     "renderer/components/settings/speech-to-text-row.test.tsx",
+    "renderer/components/chat/speech-to-text-button.test.tsx",
     "renderer/components/settings/aws-settings-page.test.tsx",
     "renderer/components/settings/aws-settings-actions.test.tsx",
     "renderer/components/settings/aws-projects-section.test.tsx",

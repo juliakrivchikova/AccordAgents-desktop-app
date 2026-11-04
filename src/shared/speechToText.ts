@@ -20,8 +20,9 @@ const WAV_HEADER_BYTES = 44;
 
 /** "1.6 GB" for a byte count, in the units macOS shows. */
 export function formatSpeechBytes(bytes: number): string {
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
-  if (bytes >= 1e6) return `${Math.round(bytes / 1e6)} MB`;
+  // Rounded the way it is shown, so 999.6 MB reads "1.0 GB", not "1000 MB".
+  if (bytes >= 999_500_000) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 999_500) return `${Math.round(bytes / 1e6)} MB`;
   return `${Math.max(0, Math.round(bytes / 1e3))} KB`;
 }
 
@@ -46,9 +47,12 @@ export function encodeWavPcm16(samples: Float32Array, sampleRate: number = SPEEC
   view.setUint16(34, 16, true);
   ascii(36, "data");
   view.setUint32(40, dataBytes, true);
+  // WAV is little-endian, like every computer the desktop runs on; a typed
+  // view writes a half-hour recording far faster than one call per sample.
+  const pcm = new Int16Array(bytes.buffer, WAV_HEADER_BYTES, samples.length);
   for (let index = 0; index < samples.length; index += 1) {
     const sample = Math.max(-1, Math.min(1, samples[index] ?? 0));
-    view.setInt16(WAV_HEADER_BYTES + index * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    pcm[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
   }
   return bytes;
 }

@@ -21,6 +21,7 @@ type ServeMode =
   | { kind: "drop-after"; bytes: number }
   | { kind: "stall-after"; bytes: number }
   | { kind: "corrupt" }
+  | { kind: "shifted-range" }
   | { kind: "status"; status: number };
 
 interface ModelServer {
@@ -46,9 +47,11 @@ async function startModelServer(): Promise<ModelServer> {
     let start = 0;
     if (match && mode.kind !== "ignore-range") {
       start = Number(match[1]);
+      // A server that answers from somewhere other than where it was asked.
+      const shown = mode.kind === "shifted-range" ? start + 1 : start;
       response.writeHead(206, {
         "content-length": String(body.length - start),
-        "content-range": `bytes ${start}-${body.length - 1}/${body.length}`
+        "content-range": `bytes ${shown}-${body.length - 1}/${body.length}`
       });
     } else {
       response.writeHead(200, { "content-length": String(body.length) });
@@ -175,12 +178,12 @@ test("a dropped connection leaves what arrived, and resuming continues from ther
     const failed = await settle(h.service, notBusy);
     assert.equal(failed.status, "interrupted");
     assert.match(failed.error ?? "", /download stopped/i);
-    assert.equal(failed.downloadedBytes, 100_000);
+    assert.ok(failed.downloadedBytes > 0 && failed.downloadedBytes <= 100_000);
     h.server.mode = { kind: "normal" };
     await h.service.enable();
     const done = await settle(h.service, notBusy);
     assert.equal(done.status, "ready");
-    assert.equal(h.server.requests.at(-1)?.range, "bytes=100000-");
+    assert.equal(h.server.requests.at(-1)?.range, `bytes=${failed.downloadedBytes}-`);
     assert.deepEqual(await readFile(path.join(h.dir, "speech-to-text", SPEECH_MODEL_FILE)), MODEL);
   } finally {
     await h.cleanup();
@@ -238,7 +241,7 @@ test("a download that stops sending is stopped, and can be resumed", async () =>
     await h.service.enable();
     const failed = await settle(h.service, notBusy);
     assert.equal(failed.status, "interrupted");
-    assert.match(failed.error ?? "", /no data arrived/);
+    assert.match(failed.error ?? "", /no data was arriving/);
     h.server.mode = { kind: "normal" };
     await h.service.enable();
     assert.equal((await settle(h.service, notBusy)).status, "ready");
@@ -374,6 +377,7 @@ test("an engine failure becomes a plain message, and the next recording still wo
     await h.service.enable();
     await settle(h.service, notBusy);
     await assert.rejects(h.service.transcribe(recording(1)), /could not be recognized/);
+    assert.deepEqual((await readdir(tmpdir())).filter((name) => name.startsWith("accordagents-speech-")), []);
     fail = false;
     assert.equal((await h.service.transcribe(recording(1))).text, "ok");
   } finally {
@@ -415,6 +419,85 @@ test("the engine is looked up beside the app, and only Apple silicon Macs have o
     assert.deepEqual(resolveSpeechEngine(base), { path: path.join(dir, "whisper", "whisper-cli") });
     assert.ok("unavailable" in resolveSpeechEngine({ ...base, platform: "win32" }));
     assert.ok("unavailable" in resolveSpeechEngine({ ...base, arch: "x64" }));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a resume the server answers from elsewhere starts over instead of corrupting the file", async () => {
+  const h = await harness();
+  try {
+    h.server.mode = { kind: "drop-after", bytes: 40_000 };
+    await h.service.enable();
+    await settle(h.service, notBusy);
+    h.server.mode = { kind: "shifted-range" };
+    await h.service.enable();
+    const failed = await settle(h.service, notBusy);
+    assert.equal(failed.status, "interrupted");
+    assert.match(failed.error ?? "", /206/);
+    assert.equal(failed.downloadedBytes, 0);
+    h.server.mode = { kind: "normal" };
+    await h.service.enable();
+    assert.equal((await settle(h.service, notBusy)).status, "ready");
+    assert.equal(h.server.requests.at(-1)?.range, undefined);
+    assert.deepEqual(await readFile(path.join(h.dir, "speech-to-text", SPEECH_MODEL_FILE)), MODEL);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a download that was complete when the app quit is checked without downloading again", async () => {
+  const h = await harness();
+  try {
+    await mkdir(path.join(h.dir, "speech-to-text"), { recursive: true });
+    await writeFile(path.join(h.dir, "speech-to-text", "settings.json"), JSON.stringify({ enabled: true }));
+    await writeFile(path.join(h.dir, "speech-to-text", `${SPEECH_MODEL_FILE}.partial`), MODEL);
+    assert.equal((await h.service.getState()).status, "interrupted");
+    await h.service.enable();
+    assert.equal((await settle(h.service, notBusy)).status, "ready");
+    assert.equal(h.server.requests.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a quick on, off, on runs in order and ends downloading", async () => {
+  const h = await harness({ stallMs: 60_000 });
+  try {
+    h.server.mode = { kind: "stall-after", bytes: 32_000 };
+    const results = await Promise.all([h.service.enable(), h.service.cancelDownload(), h.service.enable()]);
+    assert.deepEqual(results.map((state) => state.status), ["downloading", "off", "downloading"]);
+    assert.equal((await h.service.getState()).status, "downloading");
+    await h.service.cancelDownload();
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a model removed behind the app's back is reported instead of failing every dictation", async () => {
+  const h = await harness();
+  try {
+    await h.service.enable();
+    await settle(h.service, notBusy);
+    await rm(path.join(h.dir, "speech-to-text", SPEECH_MODEL_FILE));
+    await assert.rejects(h.service.transcribe(recording(1)), /model is missing/);
+    const state = await h.service.getState();
+    assert.equal(state.status, "interrupted");
+    assert.equal(state.modelInstalled, false);
+    assert.equal(h.engineRuns.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a signed app ignores an engine picked by its environment", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "speech-engine-"));
+  try {
+    const elsewhere = path.join(dir, "other-program");
+    await writeFile(elsewhere, "");
+    const base = { platform: "darwin" as NodeJS.Platform, arch: "arm64", resourcesPath: dir, appPath: dir, override: elsewhere };
+    assert.ok("unavailable" in resolveSpeechEngine({ ...base, packaged: true }));
+    assert.deepEqual(resolveSpeechEngine({ ...base, packaged: false }), { path: elsewhere });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

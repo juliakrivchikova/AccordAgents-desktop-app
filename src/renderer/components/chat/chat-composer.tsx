@@ -76,6 +76,9 @@ export interface ChatComposerProps {
   ) => boolean | void | Promise<boolean | void>;
   accordDisabledReason?: string;
   onOpenAccord?: () => void;
+  /** What a dictation belongs to (a chat, or a thread in it); changing it
+   *  drops a dictation in progress. Defaults to the chat. */
+  dictationSession?: string;
 }
 
 export function ChatComposer(props: ChatComposerProps): JSX.Element {
@@ -368,7 +371,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
               </Tooltip>
             )}
             <SpeechToTextButton
-              session={props.conversationId}
+              session={props.dictationSession ?? props.conversationId}
               getTextarea={() => rootRef.current?.querySelector("textarea") ?? null}
               draft={props.draft}
               onDraftChange={props.onDraftChange}

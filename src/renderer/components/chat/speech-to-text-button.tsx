@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { Loader2, Mic, Square } from "lucide-react";
 
 import { IconButton } from "@/renderer/components/primitives";
@@ -20,6 +21,8 @@ export function SpeechToTextButton(props: {
   onDraftChange: (value: string) => void;
 }): JSX.Element | null {
   const state = useSpeechToTextState();
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const keepFocusRef = useRef(false);
   const dictation = useDictation({
     session: props.session,
     onText: (text) => {
@@ -33,6 +36,7 @@ export function SpeechToTextButton(props: {
         textarea?.selectionEnd ?? draft.length,
         text
       );
+      keepFocusRef.current = false;
       props.onDraftChange(next.value);
       requestAnimationFrame(() => {
         const field = props.getTextarea();
@@ -43,25 +47,46 @@ export function SpeechToTextButton(props: {
       });
     }
   });
+
+  // The microphone and the stop button take turns in one place: keyboard
+  // focus follows from one to the other.
+  useEffect(() => {
+    if (keepFocusRef.current) buttonRef.current?.focus();
+  }, [dictation.phase]);
+
   if (state?.status !== "ready" && dictation.phase === "idle") {
     return null;
   }
+  const remember = (): void => {
+    keepFocusRef.current = document.activeElement === buttonRef.current;
+  };
   const notice = dictation.notice ? (
-    <span className="composer-dictation-notice" role="status" title={dictation.notice} data-testid="composer-dictation-notice">
-      {dictation.notice}
-    </span>
+    <button
+      type="button"
+      className={`composer-dictation-notice${dictation.notice.kind === "error" ? " is-error" : ""}`}
+      role="status"
+      title="Dismiss"
+      data-testid="composer-dictation-notice"
+      onClick={dictation.dismissNotice}
+    >
+      {dictation.notice.text}
+    </button>
   ) : null;
   if (dictation.phase === "recording") {
     return (
       <>
         {notice}
         <button
+          ref={buttonRef}
           type="button"
           className="composer-dictation-recording"
           aria-label="Stop dictation and insert text"
           title="Stop dictation and insert text"
           data-testid="composer-dictation-stop"
-          onClick={() => void dictation.stop()}
+          onClick={() => {
+            remember();
+            void dictation.stop();
+          }}
         >
           <span className="composer-dictation-dot" aria-hidden />
           <span className="composer-dictation-time">{formatElapsed(dictation.seconds)}</span>
@@ -75,12 +100,18 @@ export function SpeechToTextButton(props: {
     <>
       {notice}
       <IconButton
+        ref={buttonRef}
         label={dictation.phase === "recognizing" ? "Recognizing speech…" : "Dictate"}
         icon={busy ? Loader2 : Mic}
         iconClassName={busy ? "spin" : undefined}
-        disabled={busy}
+        aria-disabled={busy || undefined}
         data-testid="composer-dictation-start"
-        onClick={() => void dictation.start()}
+        data-busy={busy || undefined}
+        onClick={() => {
+          if (busy) return;
+          remember();
+          void dictation.start();
+        }}
       />
     </>
   );

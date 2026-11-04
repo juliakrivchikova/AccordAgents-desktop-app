@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, open, readFile, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -45,7 +45,11 @@ interface StoredChoice {
 class SpeechError extends Error {}
 
 const DISK_MARGIN_BYTES = 200 * 1024 * 1024;
-const ENGINE_TIMEOUT_MS = 20 * 60 * 1000;
+const DEFAULT_STALL_MS = 60_000;
+const DEFAULT_PROGRESS_INTERVAL_MS = 250;
+/** Recordings waiting in the temporary folder after a crash are this old. */
+const STALE_RECORDING_MS = 60 * 60 * 1000;
+const TEMP_PREFIX = "accordagents-speech-";
 
 /**
  * Speech to text on this computer: the User's on/off choice, the Whisper
@@ -66,6 +70,9 @@ export class SpeechToTextService {
   private error?: string;
   private download?: { controller: AbortController; done: Promise<void> };
   private transcriptions: Promise<unknown> = Promise.resolve();
+  /** Turning on and off run one at a time, so a quick on-off-on never
+   *  removes a download another action has just started. */
+  private actions: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: SpeechToTextServiceOptions) {
     this.model = options.model ?? { url: SPEECH_MODEL_URL, bytes: SPEECH_MODEL_BYTES, sha256: SPEECH_MODEL_SHA256 };
@@ -84,48 +91,57 @@ export class SpeechToTextService {
     return this.snapshot();
   }
 
-  async enable(): Promise<SpeechToTextState> {
-    await this.load();
-    const engine = this.options.engine();
-    if ("unavailable" in engine) return this.snapshot();
-    if (!this.enabled) {
-      this.enabled = true;
-      await this.saveChoice();
-    }
-    if (!this.modelInstalled && !this.download) {
-      this.startDownload();
-    }
-    this.emit();
-    return this.snapshot();
+  /** Whether the microphone may be used now. Answers from what is loaded,
+   *  for checks that cannot wait. */
+  isReadyNow(): boolean {
+    return this.snapshot().status === "ready";
   }
 
-  async cancelDownload(): Promise<SpeechToTextState> {
-    await this.load();
+  enable(): Promise<SpeechToTextState> {
+    return this.serialize(async () => {
+      const engine = this.options.engine();
+      if ("unavailable" in engine) return this.snapshot();
+      if (!this.enabled) await this.saveChoice(true);
+      if (!this.modelInstalled && !this.download) {
+        this.startDownload();
+      }
+      this.emit();
+      return this.snapshot();
+    });
+  }
+
+  /** Stops a download and removes what arrived. A model that finished in
+   *  the meantime is kept: nothing she downloaded is thrown away by a race. */
+  cancelDownload(): Promise<SpeechToTextState> {
+    return this.serialize(() => this.turnOff(false));
+  }
+
+  disable(request: { deleteModel: boolean }): Promise<SpeechToTextState> {
+    return this.serialize(() => this.turnOff(request.deleteModel));
+  }
+
+  private async turnOff(deleteModel: boolean): Promise<SpeechToTextState> {
     await this.stopDownload();
     await rm(this.partialPath, { force: true });
     this.downloadedBytes = 0;
-    this.error = undefined;
-    this.enabled = false;
-    await this.saveChoice();
-    this.emit();
-    return this.snapshot();
-  }
-
-  async disable(request: { deleteModel: boolean }): Promise<SpeechToTextState> {
-    await this.load();
-    await this.stopDownload();
-    await rm(this.partialPath, { force: true });
-    this.downloadedBytes = 0;
-    if (request.deleteModel === true) {
+    if (deleteModel) {
       await rm(this.modelPath, { force: true });
       this.modelInstalled = false;
     }
     this.error = undefined;
-    this.enabled = false;
-    await this.saveChoice();
-    this.options.log?.("speech.disabled", { deleteModel: request.deleteModel === true });
+    await this.saveChoice(false);
+    this.options.log?.("speech.disabled", { deleteModel });
     this.emit();
     return this.snapshot();
+  }
+
+  private serialize<T>(action: () => Promise<T>): Promise<T> {
+    const run = this.actions.then(async () => {
+      await this.load();
+      return action();
+    });
+    this.actions = run.catch(() => undefined);
+    return run;
   }
 
   /** Recognizes one recording. Recordings wait for each other: one engine
@@ -143,21 +159,29 @@ export class SpeechToTextService {
     if (!this.enabled || !this.modelInstalled) {
       throw new Error("Speech to text is not ready. Turn it on in Settings › General.");
     }
-    const bytes = audio instanceof Uint8Array ? audio : new Uint8Array(audio as ArrayBuffer);
-    const length = speechWavSeconds(bytes);
+    const length = speechWavSeconds(audio);
     if ("error" in length) throw new Error(length.error);
-    if (length.seconds < SPEECH_MIN_SECONDS || speechWavIsSilent(bytes)) return { text: "" };
-    if (length.seconds > SPEECH_MAX_SECONDS) {
+    if (length.seconds < SPEECH_MIN_SECONDS || speechWavIsSilent(audio)) return { text: "" };
+    if (length.seconds > SPEECH_MAX_SECONDS + 5) {
       throw new Error(`The recording is longer than ${SPEECH_MAX_SECONDS / 60} minutes. Record it in parts.`);
     }
-    const base = path.join(os.tmpdir(), `accordagents-speech-${randomUUID()}`);
+    if (await this.fileSize(this.modelPath) !== this.model.bytes) {
+      // Removed outside the app: say so instead of failing every dictation.
+      this.modelInstalled = false;
+      this.emit();
+      throw new Error("The speech model is missing. Turn speech to text off and on in Settings › General to download it again.");
+    }
+    const base = path.join(os.tmpdir(), `${TEMP_PREFIX}${randomUUID()}`);
     const wavPath = `${base}.wav`;
     const textPath = `${base}.txt`;
     const startedAt = Date.now();
     try {
-      await writeFile(wavPath, bytes, { mode: 0o600 });
+      await writeFile(wavPath, audio, { mode: 0o600 });
       const threads = String(Math.max(2, Math.min(8, os.cpus().length)));
-      await this.runEngine(engine.path, [
+      // Several times slower than real time is already broken; a hung engine
+      // must not hold every later recording in the queue for long.
+      const timeoutMs = 2 * 60 * 1000 + Math.ceil(length.seconds) * 1000;
+      await this.runEngine(engine.path, timeoutMs, [
         "-m", this.modelPath,
         "-f", wavPath,
         "-l", "auto",
@@ -184,14 +208,14 @@ export class SpeechToTextService {
     }
   }
 
-  private async runEngine(enginePath: string, args: string[]): Promise<void> {
+  private async runEngine(enginePath: string, timeoutMs: number, args: string[]): Promise<void> {
     if (this.options.runEngine) {
       await this.options.runEngine(enginePath, args);
       return;
     }
     try {
       await runCommand(enginePath, args, {
-        timeoutMs: ENGINE_TIMEOUT_MS,
+        timeoutMs,
         primeLoginShellEnv: false,
         maxOutputChars: 8_000
       });
@@ -240,14 +264,17 @@ export class SpeechToTextService {
       }
       this.modelInstalled = await this.fileSize(this.modelPath) === this.model.bytes;
       this.downloadedBytes = this.modelInstalled ? this.model.bytes : await this.fileSize(this.partialPath) ?? 0;
+      await removeStaleRecordings();
     })();
     return this.loaded;
   }
 
-  private async saveChoice(): Promise<void> {
+  /** Saved first, then applied: a failed save leaves the app as it was. */
+  private async saveChoice(enabled: boolean): Promise<void> {
     await mkdir(this.options.dir, { recursive: true });
-    const stored: StoredChoice = { enabled: this.enabled };
+    const stored: StoredChoice = { enabled };
     await writeFile(this.choicePath, `${JSON.stringify(stored)}\n`);
+    this.enabled = enabled;
   }
 
   private async fileSize(file: string): Promise<number | undefined> {
@@ -287,7 +314,7 @@ export class SpeechToTextService {
       stallTimer = setTimeout(() => {
         stalled = true;
         controller.abort(new Error("stalled"));
-      }, this.options.stallMs ?? 60_000);
+      }, this.options.stallMs ?? DEFAULT_STALL_MS);
     };
     try {
       await mkdir(this.options.dir, { recursive: true });
@@ -317,7 +344,12 @@ export class SpeechToTextService {
           have = 0;
         } else {
           await response.body?.cancel().catch(() => undefined);
-          throw new SpeechError(`The download failed: the server answered ${response.status}.`);
+          if (response.status === 206 || response.status === 416) {
+            // It did not continue where this download stopped: start over next time.
+            await rm(this.partialPath, { force: true });
+            this.downloadedBytes = 0;
+          }
+          throw new SpeechError(`The download failed: the server answered ${response.status}. Try again.`);
         }
         if (!response.body) throw new SpeechError("The download failed: the server sent nothing.");
         const file = await open(this.partialPath, append ? "a" : "w");
@@ -334,7 +366,7 @@ export class SpeechToTextService {
             await file.write(value);
             this.downloadedBytes = have;
             const now = Date.now();
-            if (now - lastProgressAt >= (this.options.progressIntervalMs ?? 250)) {
+            if (now - lastProgressAt >= (this.options.progressIntervalMs ?? DEFAULT_PROGRESS_INTERVAL_MS)) {
               lastProgressAt = now;
               this.emit();
             }
@@ -365,11 +397,17 @@ export class SpeechToTextService {
         return;
       }
       this.error = stalled
-        ? "The download stopped: no data arrived for a minute. Check the connection and resume."
+        ? "The download stopped: no data was arriving. Check the connection and resume."
         : error instanceof SpeechError
           ? error.message
-          : `The download stopped: ${error instanceof Error ? error.message : String(error)}. Resume continues from where it stopped.`;
-      this.options.log?.("speech.download-failed", { message: this.error, downloadedBytes: this.downloadedBytes });
+          : (error as NodeJS.ErrnoException)?.code === "ENOSPC"
+            ? "The disk is full. Free some space and resume the download."
+            : "The download stopped. Resume continues from where it stopped.";
+      this.options.log?.("speech.download-failed", {
+        message: this.error,
+        cause: error instanceof Error ? error.message : String(error),
+        downloadedBytes: this.downloadedBytes
+      });
     } finally {
       if (stallTimer) clearTimeout(stallTimer);
     }
@@ -389,7 +427,8 @@ export function resolveSpeechEngine(input: {
   if (input.platform !== "darwin" || input.arch !== "arm64") {
     return { unavailable: "Speech to text works on Macs with Apple silicon." };
   }
-  const candidate = input.override?.trim()
+  // A signed app never runs another program picked by its environment.
+  const candidate = (input.packaged ? undefined : input.override?.trim())
     || (input.packaged
       ? path.join(input.resourcesPath, "whisper", "whisper-cli")
       : path.join(input.appPath, "dist", "whisper", "whisper-cli"));
@@ -397,6 +436,19 @@ export function resolveSpeechEngine(input: {
     return { unavailable: "Speech to text is not included in this build of the app." };
   }
   return { path: candidate };
+}
+
+/** Recordings left in the temporary folder by a crash mid-recognition. */
+async function removeStaleRecordings(): Promise<void> {
+  const dir = os.tmpdir();
+  const names = await readdir(dir).catch(() => [] as string[]);
+  const now = Date.now();
+  for (const name of names) {
+    if (!name.startsWith(TEMP_PREFIX)) continue;
+    const file = path.join(dir, name);
+    const info = await stat(file).catch(() => undefined);
+    if (info && now - info.mtimeMs > STALE_RECORDING_MS) await rm(file, { force: true }).catch(() => undefined);
+  }
 }
 
 function contentRangeStart(header: string | null): number | undefined {

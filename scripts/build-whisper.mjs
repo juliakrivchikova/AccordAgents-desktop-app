@@ -3,10 +3,11 @@
 // app ships it as a loose resource and runs it on the User's own Mac; the
 // speech model itself is downloaded later, when she turns the feature on.
 //
-// Only macOS builds it. A checkout without cmake skips it with a warning, so
-// everyday builds keep working and the app shows speech to text as missing
-// from that build; a release build (CI, or ACCORDAGENTS_REQUIRE_WHISPER=1)
-// fails instead, so a release never ships without it.
+// Only macOS builds it. A checkout that cannot build it (no cmake, offline)
+// skips it with a warning, so everyday builds keep working and the app shows
+// speech to text as missing from that build; a release build (CI, or
+// ACCORDAGENTS_REQUIRE_WHISPER=1) fails instead, so a release never ships
+// without it.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -129,6 +130,13 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(`[build-whisper] ${error instanceof Error ? error.message : String(error)}`);
+  const message = error instanceof Error ? error.message : String(error);
+  if (!required) {
+    // Offline, GitHub down, a compiler update: everyday builds go on without
+    // speech to text rather than failing.
+    console.warn(`[build-whisper] WARNING: speech to text is left out of this build: ${message}`);
+    return;
+  }
+  console.error(`[build-whisper] ${message}`);
   process.exit(1);
 });

@@ -59,6 +59,7 @@ test("sizes read the way macOS shows them", () => {
   assert.equal(formatSpeechBytes(1_624_555_275), "1.6 GB");
   assert.equal(formatSpeechBytes(512_000_000), "512 MB");
   assert.equal(formatSpeechBytes(1_500), "2 KB");
+  assert.equal(formatSpeechBytes(999_600_000), "1.0 GB");
 });
 
 test("a recording with no sound at all is told apart from a quiet one", () => {

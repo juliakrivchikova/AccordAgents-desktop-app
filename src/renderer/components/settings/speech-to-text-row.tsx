@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { formatSpeechBytes } from "../../../shared/speechToText";
 import type { SpeechToTextState } from "../../../shared/types";
 import { useSpeechToTextState } from "../../app/use-speech-to-text";
+import { cleanIpcError } from "../../lib/ipc-error";
 import { isWindowsPlatform } from "../../lib/platform";
 import { AwsDialog } from "./aws-dialog";
 
@@ -31,7 +32,7 @@ export function SpeechToTextRow(): JSX.Element | null {
       await action();
       setDialog(undefined);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      setError(cleanIpcError(caught));
     } finally {
       setPending(false);
     }
