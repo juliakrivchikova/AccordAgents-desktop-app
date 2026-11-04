@@ -3,6 +3,7 @@ import type { ScriptsUpdatedEvent } from "../shared/scripts";
 import type { CreateTerminalRequest, TerminalHostStateEvent } from "../shared/terminal";
 import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
 import type { HubInstallRequest, HubSetupCommandRequest, HubSetupState } from "../shared/hubSetup";
+import type { DisableSpeechToTextRequest, SpeechToTextState, TranscribeSpeechRequest } from "../shared/types";
 import type {
   CreateMachineRequest,
   CreateMachineResult,
@@ -281,6 +282,17 @@ const bridge: AppBridge = {
     const listener = (_event: Electron.IpcRendererEvent, state: HubSetupState) => callback(state);
     ipcRenderer.on("hub:setup-progress", listener);
     return () => ipcRenderer.removeListener("hub:setup-progress", listener);
+  },
+  getSpeechToTextState: () => ipcRenderer.invoke("speech:state"),
+  enableSpeechToText: () => ipcRenderer.invoke("speech:enable"),
+  cancelSpeechToTextDownload: () => ipcRenderer.invoke("speech:cancel-download"),
+  disableSpeechToText: (request: DisableSpeechToTextRequest) => ipcRenderer.invoke("speech:disable", request),
+  transcribeSpeech: (request: TranscribeSpeechRequest) => ipcRenderer.invoke("speech:transcribe", request),
+  requestMicrophoneAccess: () => ipcRenderer.invoke("speech:request-microphone"),
+  onSpeechToTextState: (callback: (state: SpeechToTextState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: SpeechToTextState) => callback(state);
+    ipcRenderer.on("speech:state", listener);
+    return () => ipcRenderer.removeListener("speech:state", listener);
   },
   startReview: (request: ReviewRequest) => ipcRenderer.invoke("conversations:start-review", request),
   continueReview: (request: ContinueReviewRequest) => ipcRenderer.invoke("conversations:continue-review", request),

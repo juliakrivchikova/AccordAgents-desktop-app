@@ -4159,6 +4159,50 @@ button.composer-active-run-row-main:focus-visible {
   font-size: 12px;
 }
 
+/* Dictation: a recording shows its time and stops on click; notices are one
+   quiet line beside the microphone. */
+.composer-dictation-recording {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.composer-dictation-recording:hover {
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+.composer-dictation-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--app-danger);
+  animation: composer-dictation-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes composer-dictation-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.composer-dictation-notice {
+  max-width: 320px;
+  overflow: hidden;
+  color: var(--app-text-secondary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-composer-hint {
   display: inline-flex;
   align-items: center;

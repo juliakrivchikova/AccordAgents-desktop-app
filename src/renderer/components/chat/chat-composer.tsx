@@ -28,6 +28,7 @@ import {
 import { useChatComposerMentions } from "./use-chat-composer-mentions";
 import { useChatComposerSuggestions, type ChatComposerSuggestion } from "./use-chat-composer-suggestions";
 import { useComposerNoticeClearance } from "./use-composer-notice-clearance";
+import { SpeechToTextButton } from "./speech-to-text-button";
 
 /**
  * Skills, plugins and files picked for the draft's tokens. When the owner
@@ -366,6 +367,12 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
                 <TooltipContent side="top">{accordTooltip}</TooltipContent>
               </Tooltip>
             )}
+            <SpeechToTextButton
+              session={props.conversationId}
+              getTextarea={() => rootRef.current?.querySelector("textarea") ?? null}
+              draft={props.draft}
+              onDraftChange={props.onDraftChange}
+            />
             <button
               type="button"
               className="composer-send-button"

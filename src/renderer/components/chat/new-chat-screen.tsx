@@ -61,6 +61,7 @@ import {
   draftStartsWithPluginMention
 } from "./chat-composer-draft-utils";
 import { renderSlashHighlightedDraft } from "./chat-composer-draft-highlights";
+import { SpeechToTextButton } from "./speech-to-text-button";
 import { useChatComposerImages } from "./use-chat-composer-images";
 import { useChatComposerMentions } from "./use-chat-composer-mentions";
 import { sortSavedParticipantOptionsByUsage } from "./new-chat-participant-usage";
@@ -501,6 +502,11 @@ export function NewChatScreen(props: {
             onSelectedParticipantIdsChange={props.onSelectedParticipantIdsChange}
             onSelectedParticipantRuntimeOverridesChange={props.onSelectedParticipantRuntimeOverridesChange}
             onOpenParticipantsSettings={props.onOpenParticipantsSettings}
+          />
+          <SpeechToTextButton
+            getTextarea={() => promptRef.current}
+            draft={props.prompt}
+            onDraftChange={props.onPromptChange}
           />
           <button
             type="button"

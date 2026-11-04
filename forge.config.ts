@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { MakerDMG } from "@electron-forge/maker-dmg";
 import { MakerSquirrel } from "@electron-forge/maker-squirrel";
@@ -17,6 +18,9 @@ const sqliteResourcePath = path.join(assetsDir, "sqlite");
 const machinePayloadPath = path.resolve(__dirname, "dist", "machine");
 // The User's own server program, installed on it over SSH the same way.
 const hubPayloadPath = path.resolve(__dirname, "dist", "hub");
+// The speech-to-text engine (scripts/build-whisper.mjs): a program the app
+// runs, so it ships as a real file beside the asar. macOS only.
+const whisperPayloadPath = path.resolve(__dirname, "dist", "whisper");
 const dmgBackgroundPath = path.join(assetsDir, "dmg-background.png");
 const entitlementsPath = path.resolve(__dirname, "entitlements.mac.plist");
 const entitlementsInheritPath = path.resolve(__dirname, "entitlements.mac.inherit.plist");
@@ -85,12 +89,16 @@ const config = {
     extraResource: [
       ...(process.platform === "win32" ? [sqliteResourcePath] : []),
       machinePayloadPath,
-      hubPayloadPath
+      hubPayloadPath,
+      // A checkout without cmake builds no engine (and the release check
+      // refuses such an app); packaging it anyway must not fail here.
+      ...(process.platform === "darwin" && existsSync(whisperPayloadPath) ? [whisperPayloadPath] : [])
     ],
     extendInfo: {
       CFBundleDisplayName: productName,
       CFBundleName: productName,
-      LSMinimumSystemVersion: "13.0"
+      LSMinimumSystemVersion: "13.0",
+      NSMicrophoneUsageDescription: "AccordAgents uses the microphone only while you dictate a message. Speech is recognized on this Mac."
     },
     ignore: [
       // Only runtime roots belong in the app; local worktrees and data must never ship.
@@ -106,6 +114,7 @@ const config = {
       // the asar as well would ship the same 6 MB twice and still be unusable.
       /^\/dist\/machine(?:\/|$)/,
       /^\/dist\/hub(?:\/|$)/,
+      /^\/dist\/whisper(?:\/|$)/,
       /^\/dist\/renderer-tests(?:-|\/|$)/,
       /^\/dist\/codex-approval-renderer-test(?:\/|$)/,
       /^\/dist\/.*\.d\.ts$/,

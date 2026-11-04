@@ -882,6 +882,30 @@
   max-width: 520px;
 }
 
+/* Speech to text: the model download's progress and its buttons. */
+.settings-view .gen-speech-progress {
+  max-width: 430px;
+  height: 4px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--app-surface-active);
+}
+
+.settings-view .gen-speech-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--app-accent);
+  transition: width 200ms ease-out;
+}
+
+.settings-view .gen-speech-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 @media (max-width: 620px) {
   .device-pairing-grid {
     grid-template-columns: minmax(0, 1fr);
