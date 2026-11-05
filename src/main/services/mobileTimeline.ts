@@ -1,5 +1,6 @@
-import type { ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
+import type { ChatMessage, ChatParticipant, ChatTurnFinishedNoteMetadata, Conversation } from "../../shared/types";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
+import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
 import {
   chatMessageHiddenFromTimeline,
   chatMessageVisualThreadRootId,
@@ -111,6 +112,9 @@ export interface MobileTimelineEvent {
    *  stands on the server (the phone shows a member's waiting row until the
    *  member's own device took it). */
   turns?: MobileTimelineTurn[];
+  /** A turn-finished note (system): the member's reply it leads back to.
+   *  Its content is the reply's first line. */
+  finishedNote?: ChatTurnFinishedNoteMetadata;
 }
 
 export interface MobileTimelineTurn {
@@ -183,7 +187,8 @@ function messageIsVisibleOnPhone(message: ChatMessage): boolean {
 /** What the desktop keeps off its timeline — internal system triggers such as
  *  "Auto-resumed @x after member request", control text, waiting statuses,
  *  inferred request carriers — is off the phone's too, by the same rule; only
- *  artifact notes among system messages are the User's to see. A hidden
+ *  artifact notes and turn-finished notes among system messages are the
+ *  User's to see. A hidden
  *  member message still travels, flagged: it can be the message that ends a
  *  run, and without it the phone's pending row for that run never settles. */
 export function messageIsHiddenOnPhone(conversation: Pick<Conversation, "messages">, message: ChatMessage): boolean {
@@ -251,11 +256,13 @@ function timelineEventFromMessage(
   const hidden = conversation && message.role === "participant" && messageIsHiddenOnPhone(conversation, message);
   const midTurn = message.role === "participant" && message.status === "done" &&
     message.metadata?.appMessageSource === APP_CHAT_SEND_MESSAGE_TOOL;
+  const finishedNote = turnFinishedNoteOf(message);
   return {
     id: message.id,
     ...(threadRootId && threadRootId !== message.id ? { threadRootId } : {}),
     ...(hidden ? { hidden: true as const } : {}),
     ...(midTurn ? { midTurn: true as const } : {}),
+    ...(finishedNote ? { finishedNote } : {}),
     // A scheduled script's message is not the User's: the phone has no script
     // author, so it shows as an author named after the script.
     role: message.role === "participant" || message.role === "script" ? "participant" : message.role === "system" ? "system" : "you",

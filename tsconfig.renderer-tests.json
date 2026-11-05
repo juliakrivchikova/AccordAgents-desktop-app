@@ -13,6 +13,7 @@
     "src/renderer/components/chat/chat-active-run-popover.test.tsx",
     "src/renderer/components/chat/chat-activity-groups.test.tsx",
     "src/renderer/components/chat/chat-artifact-note-card.test.tsx",
+    "src/renderer/components/chat/chat-turn-finished-note.test.tsx",
     "src/renderer/components/chat/chat-activity-harness.test.tsx",
     "src/renderer/components/chat/chat-activity-rendering.test.tsx",
     "src/renderer/components/chat/chat-composer-mention-token.test.ts",

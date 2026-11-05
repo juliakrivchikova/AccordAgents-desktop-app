@@ -440,6 +440,17 @@ export class HubOpsStore {
     return new Set(rows.map((row) => row.messageId));
   }
 
+  /** The newest removals in this chat of ids that start with `prefix`
+   *  (turn-finished notes the User took away), newest first: what a phone
+   *  drops from the copy it keeps. */
+  async recentRemovedIds(conversationId: string, prefix: string, limit: number): Promise<string[]> {
+    await this.init();
+    const rows = await this.database.query<{ messageId: string }>(`select message_id as messageId from hub_removed_messages
+      where conversation_id = ${quote(conversationId)} and substr(message_id, 1, ${prefix.length}) = ${quote(prefix)}
+      order by removed_at desc limit ${Math.max(1, Math.floor(limit))};`);
+    return rows.map((row) => row.messageId);
+  }
+
   async isRemoved(conversationId: string, messageId: string): Promise<boolean> {
     await this.init();
     const rows = await this.database.query<{ one: number }>(`select 1 as one from hub_removed_messages

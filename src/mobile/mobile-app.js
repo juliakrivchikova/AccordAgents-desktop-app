@@ -543,7 +543,9 @@
       (left.runId || "") === (right.runId || "") &&
       (left.sourceMessageId || "") === (right.sourceMessageId || "") &&
       attachmentIds(left) === attachmentIds(right) &&
-      turns(left) === turns(right);
+      turns(left) === turns(right) &&
+      // A note an older shell stored as a plain row becomes the card.
+      ((left.finishedNote && left.finishedNote.messageId) || "") === ((right.finishedNote && right.finishedNote.messageId) || "");
   }
 
   function sameMobileEvent(left, right) {
@@ -2719,6 +2721,7 @@
       return { ...base, kind: "turn.stop", runId: payload.runId, messageId: payload.messageId, participantId: payload.participantId };
     }
     if (entry.kind === "card.answer") return { ...base, kind: "card.answer", cardId: payload.cardId, answer: payload.answer || {} };
+    if (entry.kind === "message.remove") return { ...base, kind: "message.remove", messageId: payload.messageId };
     throw new Error("This phone cannot send a " + String(entry.kind || "change") + ".");
   }
 
@@ -3015,6 +3018,8 @@
       text = String(payload.label || "Your answer");
     } else if (entry.kind === "conversation.create") {
       text = String(payload.conversation && payload.conversation.title || "");
+    } else if (entry.kind === "message.remove") {
+      text = "Dismiss a finished-answering note";
     }
     return {
       entryId: entry.eventId,
@@ -4465,6 +4470,88 @@
     }
   }
 
+  /** A turn-finished note's target, as the server sent it: the member's reply
+   *  the note leads back to. Nothing for any other system row. */
+  function finishedNoteOfEvent(event) {
+    const note = event && event.finishedNote;
+    if (!note || typeof note !== "object" || typeof note.messageId !== "string" || !note.messageId.trim()) return {};
+    return {
+      finishedNote: {
+        messageId: note.messageId.trim(),
+        participantId: typeof note.participantId === "string" ? note.participantId : "",
+        participantLabel: typeof note.participantLabel === "string" ? note.participantLabel : ""
+      }
+    };
+  }
+
+  // Notes the User took away on this phone, by entry id, kept until the
+  // server names them among the notes taken away (bounded: a removal the
+  // server never took is not remembered forever).
+  const DISMISSED_FINISHED_NOTES_KEY = "accordagents.mobile.dismissedFinishedNotes.v1";
+  const DISMISSED_FINISHED_NOTES_MAX = 200;
+  const dismissedFinishedNotes = new Set(loadStoredStringArray(DISMISSED_FINISHED_NOTES_KEY));
+
+  /** The notes the server says the User took away (on any device): the
+   *  copies kept here go, and those this phone took away are settled. */
+  async function dropRemovedFinishedNotes(conversationId, removedIds) {
+    let dropped = 0;
+    let settled = false;
+    for (const id of removedIds) {
+      if (typeof id !== "string" || !id) continue;
+      const entryId = conversationId + ":" + id;
+      if (dismissedFinishedNotes.delete(entryId)) settled = true;
+      if (await deleteTimelineEntry(entryId)) dropped += 1;
+    }
+    if (settled) saveDismissedFinishedNotes();
+    return dropped;
+  }
+
+  function saveDismissedFinishedNotes() {
+    const kept = [...dismissedFinishedNotes].slice(-DISMISSED_FINISHED_NOTES_MAX);
+    if (kept.length < dismissedFinishedNotes.size) {
+      dismissedFinishedNotes.clear();
+      for (const id of kept) dismissedFinishedNotes.add(id);
+    }
+    saveStoredStringArray(DISMISSED_FINISHED_NOTES_KEY, kept);
+  }
+
+  /** The note's tap: the reply it leads back to, scrolled to and marked in
+   *  the open chat, reading earlier pages when it is far above. */
+  function openFinishedNoteTarget(messageId) {
+    const conversationId = selectedConversationId();
+    if (!conversationId || !messageId) return;
+    const list = document.getElementById("message-list");
+    const row = list ? messageRowFor(list, messageId) : undefined;
+    if (row) {
+      focusMessageRow(conversationId, row);
+      return;
+    }
+    const focusRequest = { conversationId: conversationId, messageId: messageId };
+    pendingMessageFocus = focusRequest;
+    void revealEarlierFocusMessage(focusRequest).finally(function () {
+      setTimeout(function () {
+        if (pendingMessageFocus === focusRequest) pendingMessageFocus = undefined;
+      }, FOCUS_SETTLE_MS);
+    });
+  }
+
+  /** The note's cross: gone from this phone now, and from every device once
+   *  the server takes its removal. */
+  async function dismissFinishedNote(messageId) {
+    const conversationId = selectedConversationId();
+    if (!conversationId || !messageId) return;
+    const entryId = conversationId + ":" + messageId;
+    // The removal is queued first: a note hidden here and never removed on
+    // the server would stay on every other device.
+    await createOutboxEvent({ conversationId: conversationId, kind: "message.remove", payload: { messageId: messageId } }).then(persistOutboundEvent);
+    dismissedFinishedNotes.add(entryId);
+    saveDismissedFinishedNotes();
+    await deleteTimelineEntry(entryId);
+    await render("synced");
+    // Where every other write goes, at once.
+    await sendNow();
+  }
+
   /** The members' messages the server's list carries for a chat (its running
    *  members and newest finished replies), kept in the shape Activity reads
    *  timeline rows in. A chat the phone never opened has no other rows, and
@@ -5074,6 +5161,11 @@
         stored += 1;
         continue;
       }
+      // A note the User took away here stays away while the server has not
+      // taken the removal yet.
+      if (role === "system" && event.finishedNote && dismissedFinishedNotes.has(conversationId + ":" + id)) {
+        continue;
+      }
       const written = await putTimelineEntryDeduped({
         id: conversationId ? conversationId + ":" + id : id,
         sourceId: id,
@@ -5097,6 +5189,8 @@
         // The message a member's turn answers: with its run and member, what
         // a Stop names the turn on the server by.
         ...(typeof event.sourceMessageId === "string" && event.sourceMessageId ? { sourceMessageId: event.sourceMessageId } : {}),
+        // A turn-finished note: the reply it leads back to.
+        ...(role === "system" ? finishedNoteOfEvent(event) : {}),
         // The User's message: where each turn it asked for stands.
         ...(role === "you" && Array.isArray(event.turns) ? { turns: event.turns.filter(function (turn) {
           return turn && typeof turn.participantId === "string" && typeof turn.runId === "string" && typeof turn.state === "string";
@@ -5107,6 +5201,11 @@
         changed += 1;
       }
       stored += 1;
+    }
+    // Turn-finished notes taken away on any device, as the newest page names
+    // them: the copies kept here go too. Not news.
+    if (Array.isArray(payload.removedNoteIds)) {
+      stored += await dropRemovedFinishedNotes(conversationId, payload.removedNoteIds);
     }
     // News for a chat that is not on screen — or is, behind a locked screen —
     // is unread, the way the desktop marks a chat it is not showing. The
@@ -6143,7 +6242,9 @@
     const replyCountByRoot = new Map();
     const latestReplyAtByRoot = new Map();
     for (const row of rows) {
-      if (!row.threadRootId) {
+      // A turn-finished note in a thread points back at a reply there; it is
+      // no reply itself, as on the desktop.
+      if (!row.threadRootId || row.finishedNote) {
         continue;
       }
       replyCountByRoot.set(row.threadRootId, (replyCountByRoot.get(row.threadRootId) || 0) + 1);
@@ -8620,6 +8721,7 @@
         // then dropped here, so a message with an image rendered as text.
         attachments: entry.attachments,
         author: entry.role === "you" ? "you" : entry.role === "system" ? "system" : "agent",
+        ...(entry.finishedNote ? { finishedNote: entry.finishedNote } : {}),
         // The desktop publishes the in-progress row the moment it accepts the
         // message, before routing has picked anyone, and can only guess a
         // handle from an explicit @mention in the text. With no mention there
@@ -8865,6 +8967,20 @@
     list.addEventListener("click", function (event) {
       const row = event.target && event.target.closest ? event.target.closest(".message-row") : undefined;
       if (!row) {
+        return;
+      }
+      // A turn-finished note: its cross takes it away, the rest of it leads
+      // back to the reply.
+      const noteDismiss = event.target.closest("[data-finished-note-dismiss]");
+      if (noteDismiss) {
+        void dismissFinishedNote(noteDismiss.dataset.finishedNoteDismiss).catch(function (error) {
+          flashRowNotice(row, "Could not dismiss: " + (error && error.message ? error.message : "try again"));
+        });
+        return;
+      }
+      const noteTarget = event.target.closest("[data-finished-note-target]");
+      if (noteTarget) {
+        openFinishedNoteTarget(noteTarget.dataset.finishedNoteTarget);
         return;
       }
       // A card under a message is answered where it stands: a tap on it is
@@ -9286,6 +9402,59 @@
     return wrap;
   }
 
+  /** The reply a turn-finished note leads back to; none for any other row. */
+  function finishedNoteOfEntry(entry) {
+    return entry && entry.author === "system" && !entry.scaffolding && entry.finishedNote && entry.finishedNote.messageId
+      ? entry.finishedNote
+      : undefined;
+  }
+
+  // The desktop's X outline, for the note's close button.
+  const FINISHED_NOTE_CLOSE_PATHS = ["M18 6 6 18", "m6 6 12 12"];
+
+  /** A member finished answering while its reply had other messages below
+   *  it: the desktop's card, with the member, the reply's first line and a
+   *  cross. A tap leads to the reply; the cross takes the note away
+   *  (the User, 2026-11-04). */
+  function finishedNoteCardElement(entry) {
+    const note = finishedNoteOfEntry(entry);
+    const wrap = document.createElement("div");
+    wrap.className = "finished-note-card";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "finished-note-open";
+    const label = note.participantLabel || "A member";
+    // Its name is what it says (who, the time, the reply's first words).
+    open.title = "Go to " + label + "'s reply";
+    open.dataset.finishedNoteTarget = note.messageId;
+    const avatar = document.createElement("div");
+    avatar.className = "message-avatar";
+    avatar.setAttribute("aria-hidden", "true");
+    applyRowIdentity(avatar, { ...entry, participantLabel: label, identified: Boolean(note.participantLabel) });
+    const text = document.createElement("div");
+    text.className = "finished-note-text";
+    const title = document.createElement("div");
+    title.className = "finished-note-title";
+    const who = document.createElement("span");
+    who.className = "finished-note-actor";
+    who.textContent = label;
+    const when = formatClockTime(entry.createdAt);
+    title.append(who, document.createTextNode(" finished answering" + (when ? " · " + when : "")));
+    const preview = document.createElement("div");
+    preview.className = "finished-note-preview";
+    preview.textContent = entry.content || "";
+    text.append(title, preview);
+    open.append(avatar, text);
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "finished-note-close";
+    close.setAttribute("aria-label", "Dismiss note");
+    close.dataset.finishedNoteDismiss = entry.sourceId || entry.id;
+    close.append(lineIcon(FINISHED_NOTE_CLOSE_PATHS, 16));
+    wrap.append(open, close);
+    return wrap;
+  }
+
   function createMessageRow(entry) {
     const item = document.createElement("li");
     item.className = "message-row";
@@ -9313,6 +9482,11 @@
     if (artifactNote) {
       item.dataset.artifactNote = "1";
       item.append(artifactNoteCardElement(entry, artifactNote));
+      return item;
+    }
+    if (finishedNoteOfEntry(entry)) {
+      item.dataset.finishedNote = "1";
+      item.append(finishedNoteCardElement(entry));
       return item;
     }
     if (entry.author === "agent") {
@@ -9516,6 +9690,9 @@
     // A note's card is drawn whole; a row turning into one, or out of one, is
     // a different shape, so the reconciler draws it again.
     if (item.dataset.artifactNote === "1" || artifactNoteCardForEntry(entry)) {
+      return false;
+    }
+    if (item.dataset.finishedNote === "1" || finishedNoteOfEntry(entry)) {
       return false;
     }
     // Scaffolding and a message are different shapes; the reconciler replaces

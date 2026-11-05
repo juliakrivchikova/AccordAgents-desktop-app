@@ -10,8 +10,7 @@ import type {
   ChatAppToolApprovalScope,
   ChatParticipant,
   ChatParticipantRequestBatch,
-  ChatParticipantSession,
-  Conversation
+  ChatParticipantSession
 } from "../../../shared/types";
 import { TimelineLoadMoreRow } from "../conversation/timeline-primitives";
 import type { ParticipantCompactHandler } from "../content/participant-hover-card";
@@ -22,12 +21,13 @@ import {
   sessionIdForMessage
 } from "./chat-conversation-data";
 import { ChatMessageItem, type ChatChoiceResponse } from "./chat-message-item";
+import type { ChatThreadSummary } from "./chat-thread-data";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 import { ChatThinkingRowItem } from "./chat-streaming";
 import { unmeasuredRowClip } from "./chat-timeline-row-clip";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
-type ThreadSummaryMap = Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>;
+type ThreadSummaryMap = Map<string, ChatThreadSummary>;
 
 export function ChatConversationTimeline(props: {
   activityDisclosure: ChatActivityDisclosureState;
@@ -56,6 +56,7 @@ export function ChatConversationTimeline(props: {
   onScrollIntent: () => void;
   onStopRun?: (runId: string) => void;
   onToggleReaction: (messageId: string, emoji: string) => void;
+  onDismissTurnFinishedNote?: (messageId: string) => void;
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
   participants: ChatParticipant[];
   approvalsByMessageId: ReadonlyMap<string, ChatAppToolApproval[]>;
@@ -133,8 +134,8 @@ export function ChatConversationTimeline(props: {
                   busy={props.isRunning}
                   submittingChoiceIds={props.submittingChoiceIds}
                   selected={row.message.id === props.selectedThreadRootId}
-                  replyCount={props.threadSummaries.get(row.message.id)?.replies.length ?? 0}
-                  replyPreviewMessages={props.threadSummaries.get(row.message.id)?.replies}
+                  replyCount={props.threadSummaries.get(row.message.id)?.countedReplies.length ?? 0}
+                  replyPreviewMessages={props.threadSummaries.get(row.message.id)?.countedReplies}
                   latestReplyAt={props.threadSummaries.get(row.message.id)?.latestReplyAt}
                   hasContinuationReply={props.continuedMentionRequestIds.has(row.message.id)}
                   inferredParticipantRequests={props.inferredParticipantRequestsByTrigger.get(row.message.id)}
@@ -149,6 +150,7 @@ export function ChatConversationTimeline(props: {
                   onRejectMentions={props.onRejectMentions}
                   onRespondToChoice={props.onRespondToChoice}
                   onToggleReaction={props.onToggleReaction}
+                  onDismissTurnFinishedNote={props.onDismissTurnFinishedNote}
                   onCompactParticipant={props.onCompactParticipant}
                   onStopRun={props.onStopRun}
                   onRespondToAppToolApproval={props.onRespondToAppToolApproval}

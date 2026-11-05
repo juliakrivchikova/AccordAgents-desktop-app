@@ -137,6 +137,7 @@ import type {
   StartChatAccordResult,
   StartReviewResult,
   ToggleChatReactionRequest,
+  DismissTurnFinishedNoteRequest,
   UpdateChatParticipantRuntimeRequest,
   RemoveChatParticipantRequest,
   RemoteRunHandle,
@@ -144,6 +145,8 @@ import type {
   RemoteRunSyncInfo
 } from "../../shared/types";
 import { isAutoWatchStableMessage, isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
+import { turnFinishedNoteFor } from "../../shared/turnFinishedNote";
+import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
 import { isMachineCompactionLine } from "../../shared/machineLink";
 import { machineStopPendingText, machineWaitingText } from "../../shared/machineWaitingText";
 import { chatMessageVisualThreadRootId, participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
@@ -5106,6 +5109,11 @@ export class ChatService {
       if (typeof actor.snapshotMaxSequence === "number" && sequence > actor.snapshotMaxSequence) {
         return false;
       }
+      // A turn-finished note is the User's pointer back to a reply members
+      // can read in full: not part of the chat they read.
+      if (turnFinishedNoteOf(message)) {
+        return false;
+      }
       // Read the exact canonical message by id. Snapshot visibility still applies, so a
       // message newer than this turn (or from another conversation) returns nothing. Other
       // filters are ignored when messageId is set.
@@ -5179,6 +5187,26 @@ export class ChatService {
       return result;
     });
     return conversation;
+  }
+
+  /** The User takes a turn-finished note away. Its removal goes to her
+   *  server like any message's, so the note leaves every device; nothing but
+   *  a note can be removed this way. */
+  async dismissTurnFinishedNote(request: DismissTurnFinishedNoteRequest): Promise<void> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return;
+    }
+    await this.withChatMutation(conversation, async () => {
+      const index = conversation.messages.findIndex((message) => message.id === request.messageId);
+      if (index < 0 || !turnFinishedNoteOf(conversation.messages[index])) {
+        return;
+      }
+      conversation.messages.splice(index, 1);
+      this.markChatMessageRemoved(conversation, request.messageId);
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
   }
 
   async reactToMessageFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
@@ -8844,6 +8872,7 @@ export class ChatService {
         : [];
       await this.recordSuccessfulAssistantProviderForMessages(conversation, participant, accepted);
       participantRequestsToRun = await this.createImplicitParticipantRequestApproval(conversation, participant, accepted);
+      this.appendTurnFinishedNote(conversation, accepted);
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
     });
@@ -8869,10 +8898,27 @@ export class ChatService {
     // A declined late message (e.g. a user-stopped run finishing) must not spawn
     // implicit request approvals from content the user never sees.
     const participantRequestsToRun = await this.createImplicitParticipantRequestApproval(conversation, participant, accepted);
+    this.appendTurnFinishedNote(conversation, accepted);
     if (accepted.length > 0 && !this.chatHasLiveWork(conversation.id)) {
       this.scheduleAutoWatchEvaluation(conversation.id, "participant-output");
     }
     return participantRequestsToRun;
+  }
+
+  /** A reply that ended with other messages below it gets a note at the end
+   *  of where it stands, leading back to it (turnFinishedNote.ts). Written by
+   *  the device the member runs on, in the same save as the reply. */
+  private appendTurnFinishedNote(conversation: Conversation, accepted: ChatMessage[]): void {
+    if (accepted.length === 0) {
+      return;
+    }
+    const note = turnFinishedNoteFor(conversation, accepted, {
+      createdAt: new Date().toISOString(),
+      removedIds: this.normalizedRemovedChatMessageIds(conversation.metadata.removedChatMessageIds)
+    });
+    if (note) {
+      conversation.messages.push(note);
+    }
   }
 
   private buildPrompt(
@@ -17476,9 +17522,17 @@ export class ChatService {
     const markdown = this.historyMarkdown(conversation);
     await Promise.all([
       writeFile(path.join(dir, "history.md"), markdown, "utf8"),
-      writeFile(path.join(dir, "history.json"), `${JSON.stringify(conversation, null, 2)}\n`, "utf8")
+      // The members' copy: a turn-finished note points back at a reply that
+      // is here in full, as in history.md and the read tool.
+      writeFile(path.join(dir, "history.json"), `${JSON.stringify(this.conversationForMembers(conversation), null, 2)}\n`, "utf8")
     ]);
     return dir;
+  }
+
+  private conversationForMembers(conversation: Conversation): Conversation {
+    return conversation.messages.some((message) => turnFinishedNoteOf(message))
+      ? { ...conversation, messages: conversation.messages.filter((message) => !turnFinishedNoteOf(message)) }
+      : conversation;
   }
 
   private historyFilePaths(
@@ -17505,7 +17559,8 @@ export class ChatService {
       ...participants.map((participant) => `- @${participant.handle}: ${this.roleLabelForParticipant(conversation, participant)} (${participant.kind})`),
       "",
       "## Messages",
-      ...conversation.messages.map((message) => [
+      // A turn-finished note only points back at a reply that is here in full.
+      ...conversation.messages.filter((message) => !turnFinishedNoteOf(message)).map((message) => [
         `### ${message.createdAt} ${this.messageAuthor(message)}`,
         `Message ID: ${message.id}`,
         message.metadata?.threadId ? `Thread ID: ${message.metadata.threadId}` : "",

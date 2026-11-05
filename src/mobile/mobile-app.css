@@ -916,6 +916,78 @@ button.mobile-chat-group-title:active {
   overflow-wrap: anywhere;
 }
 
+/* A turn-finished note: the artifact note's card, with the member, the
+   reply's first line and a cross. A tap leads back to the reply. */
+.finished-note-card {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  margin-left: 43px;
+  padding-right: 4px;
+  border-radius: 14px;
+  background: var(--note-card);
+  color: var(--fg1);
+  font-family: var(--sans);
+}
+
+.finished-note-open {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  padding: 8px 4px 8px 10px;
+  -webkit-tap-highlight-color: transparent;
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.finished-note-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.finished-note-title {
+  color: color-mix(in srgb, var(--fg) 70%, var(--mut));
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+
+.finished-note-actor {
+  color: var(--warn);
+}
+
+.finished-note-preview {
+  margin-top: 1px;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 14.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.finished-note-close {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--mut);
+  -webkit-tap-highlight-color: transparent;
+}
+
 .message-row[data-author="agent"] .message-bubble {
   max-width: none;
   background: transparent;
@@ -3418,7 +3490,9 @@ button.mobile-chat-group-title:active {
 .set-button:active,
 .act-swipe-action:active,
 .thread-reply-button:active,
-.act-detail .control-card-option:active {
+.act-detail .control-card-option:active,
+.finished-note-open:active,
+.finished-note-close:active {
   background: var(--press);
 }
 
@@ -3442,7 +3516,9 @@ button.mobile-chat-group-title:active {
 .act-open-chat:focus-visible,
 .act-swipe-action:focus-visible,
 .thread-reply-button:focus-visible,
-.act-detail .control-card-option:focus-visible {
+.act-detail .control-card-option:focus-visible,
+.finished-note-open:focus-visible,
+.finished-note-close:focus-visible {
   outline: 2px solid var(--fg1);
   outline-offset: 1px;
 }
