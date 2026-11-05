@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdtempSync } from "node:fs";
 import { access, chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -21,6 +22,10 @@ import type { CodexServerRequestDelivery } from "./codexApprovals";
 import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
 import type { ParticipantRunResult } from "./providers";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
+
+// Claude Code's own config on this computer (Claude in Chrome, for one) must
+// not decide these tests: an empty config folder is a fresh Claude Code.
+process.env.CLAUDE_CONFIG_DIR = mkdtempSync(path.join(tmpdir(), "aa-claude-config-"));
 
 function makeRunner(): CliAgentRunner {
   return new CliAgentRunner();

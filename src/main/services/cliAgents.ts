@@ -5419,7 +5419,6 @@ export class CliAgentRunner {
     if (this.nativeAdmissionsFenced || this.warmShutdown || (options.warm && this.conversationClosing(options.warm.conversationId))) {
       return this.failed(participant, new Error("Native sessions are shutting down; this command did not start."));
     }
-    options = await this.withClaudeChrome(options);
     const warm = options.warm;
     if (!warm) {
       return this.runClaudeOneShot(participant, prompt, repoPath, kind, signal, options);
