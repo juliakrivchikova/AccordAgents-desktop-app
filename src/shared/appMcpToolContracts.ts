@@ -69,6 +69,7 @@ export const APP_CHAT_REQUEST_COMPACTION_TOOL = "app_chat_request_compaction";
 export const APP_CHAT_REQUEST_PARTICIPANTS_TOOL = "app_chat_request_participants";
 export const APP_CHAT_SEND_MESSAGE_TOOL = "app_chat_send_message";
 export const APP_CHAT_SET_TITLE_TOOL = "app_chat_set_title";
+export const APP_CONNECTOR_SIGN_IN_TOOL = "app_connector_sign_in";
 export const APP_PARTICIPANTS_DESCRIBE_OPTIONS_TOOL = "app_participants_describe_options";
 export const APP_PARTICIPANTS_REQUEST_CHANGE_TOOL = "app_participants_request_change";
 export const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
@@ -1701,6 +1702,37 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
         "destructiveHint": false,
         "idempotentHint": false,
         "openWorldHint": false
+      }
+    },
+  },
+  {
+    name: APP_CONNECTOR_SIGN_IN_TOOL,
+    policyOrder: 46,
+    effect: "app-managed",
+    capability: "permissions.request",
+    desktop: {
+      "title": "Ask the User to Sign In to a Connector",
+      "description": "Ask the User to sign in to an MCP server or claude.ai connector your task needs that is not connected (it needs authentication, or it failed to connect). The User gets a sign-in card; the call waits until they finish, then reconnects the server, so once it returns connected the server's tools are available in this same reply (find them with ToolSearch). Pass the server's name as Claude Code lists it, for example \"claude.ai Sentry\". Returns connected, declined, not_found with similar names, or the CLI's own error. Works for Claude Code members.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["connector"],
+        "properties": {
+          "connector": {
+            "type": "string",
+            "description": "The MCP server's name as Claude Code lists it, for example \"claude.ai Sentry\"."
+          },
+          "reason": {
+            "type": "string",
+            "description": "One short sentence on what you need it for; the card shows it."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
       }
     },
   },

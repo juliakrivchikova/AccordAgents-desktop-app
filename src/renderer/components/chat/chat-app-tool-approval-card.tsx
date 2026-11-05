@@ -29,15 +29,20 @@ import { ChatAppToolRoleChangeOperation } from "./chat-app-tool-role-operation";
 import { ChatAppToolParticipantChangeOperation } from "./chat-app-tool-participant-operation";
 import { ChatCodexApprovalOperation } from "./chat-codex-approval-operation";
 import { ChatScriptApprovalCard } from "./chat-script-approval-card";
-import { chatParticipantRemovalRequest, chatScriptChangeRequest } from "./chat-app-tool-data";
+import { chatConnectorSignInRequest, chatParticipantRemovalRequest, chatScriptChangeRequest } from "./chat-app-tool-data";
+import { ChatConnectorSignInCard } from "./chat-connector-sign-in-card";
 import { ChatAppToolMemberRemovalOperation, ChatAppToolMemberRemovalResult, memberRemovalOptions, memberRemovalQuestion } from "./chat-app-tool-member-removal";
 
-/** Scheduled-script proposals have their own card; every other approval uses the generic one. */
+/** Scheduled-script proposals and connector sign-ins have their own cards;
+ *  every other approval uses the generic one. */
 export function ChatAppToolApprovalCard(props: Parameters<typeof GenericChatAppToolApprovalCard>[0]): JSX.Element {
   const request = chatScriptChangeRequest(props.approval);
+  const signIn = chatConnectorSignInRequest(props.approval);
   return request
     ? <ChatScriptApprovalCard {...props} request={request} />
-    : <GenericChatAppToolApprovalCard {...props} />;
+    : signIn
+      ? <ChatConnectorSignInCard {...props} request={signIn} />
+      : <GenericChatAppToolApprovalCard {...props} />;
 }
 
 function GenericChatAppToolApprovalCard(props: {

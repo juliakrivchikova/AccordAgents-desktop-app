@@ -107,6 +107,7 @@ import type {
   ChatShellPermissionRule,
   ChatSkillMention,
   ChatToolPermissionRequest,
+  ChatConnectorSignInRequest,
   CompactChatParticipantRequest,
   RestartChatParticipantRequest,
   Conversation,
@@ -226,6 +227,7 @@ import {
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_CHAT_REQUEST_COMPACTION_TOOL,
   APP_CHAT_READ_MESSAGES_TOOL,
+  APP_CONNECTOR_SIGN_IN_TOOL,
   APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
   APP_PARTICIPANTS_DESCRIBE_OPTIONS_TOOL,
   APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
@@ -243,6 +245,17 @@ import {
 import type { AppMcpClientStatus } from "./appMcp";
 import { isChatScriptChangeRequest, type ChatScriptChangeRequest, type ScriptRunRow } from "../../shared/scripts";
 import type { ProposeScriptChangeInput, ProposeScriptChangeResult, ScriptChatInfo } from "./scripts";
+import {
+  CONNECTOR_CONTROL_TIMEOUT_MS,
+  CONNECTOR_PENDING_WAIT_MS,
+  connectorSignInHost,
+  connectorSignInSummary,
+  isConnectorSignInRequest,
+  matchMcpServer,
+  parseConnectorSignInInput,
+  parseMcpServerStatuses,
+  type McpServerStatus
+} from "../../shared/connectorSignIn";
 import { DebugLogService } from "./debugLogs";
 import type { ParticipantRunResult } from "./providers";
 import { SettingsService } from "./settings";
@@ -478,6 +491,7 @@ const CHAT_PARTICIPANT_REQUEST_RATE_LIMIT = 8;
 const CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS = 120_000;
 const CHAT_PARTICIPANT_REQUEST_WAIT_MAX_MS = 300_000;
 const CHAT_TOOL_PERMISSION_WAIT_MS = 30 * 60_000;
+const CONNECTOR_SIGN_IN_ORPHANED = "No member is waiting for this sign-in any more; it ended before you answered.";
 // Mirrors the dedicated CLI's bounded human approval wait. The provider turn
 // timer is paused separately while a direct callback is outstanding.
 const CHAT_CODEX_APPROVAL_WAIT_MS = 30 * 60_000;
@@ -1046,6 +1060,12 @@ export class ChatService {
   private readonly permissionApprovalAutoResumes = new Set<string>();
   private readonly codexApprovalContinuations = new Set<string>();
   private readonly toolPermissionResolvers = new Map<string, Set<(decision: ToolPermissionDecision) => void>>();
+  /** Sign-in cards members' calls wait on in this process, by how many calls
+   *  wait. Any other pending one was left by a call that ended (the app
+   *  restarted), and is closed rather than answered into nothing. */
+  private readonly connectorSignInWaiters = new Map<string, number>();
+  /** Sign-in cards answered Done whose server is being reconnected. */
+  private readonly connectorSignInReconnects = new Map<string, Promise<Record<string, unknown>>>();
   private readonly codexApprovalResolvers = new Map<string, CodexApprovalResolver>();
   private readonly participantTurnQueues = new Map<string, Promise<void>>();
   /** Exclusive same-participant operations only (see reserveParticipantTurn). */
@@ -1435,6 +1455,7 @@ export class ChatService {
     await this.withChatMutation(conversation, async () => {
       const participantsSynced = await this.syncConversationParticipantsFromSettings(conversation);
       const orphanedCodexApprovalsExpired = this.expireOrphanedCodexApprovals(conversation);
+      const orphanedSignInsExpired = this.expireOrphanedConnectorSignIns(conversation);
       const recoveredRunState = this.recoverStaleChatRun(conversation);
       const interruptedRequests = this.markOrphanedParticipantRequestsInterrupted(conversation);
       const usageUpdates = nextUsage ? this.contextUsageUpdatesAfterRefresh(conversation, existingUsage, nextUsage) : undefined;
@@ -1442,7 +1463,7 @@ export class ChatService {
       // Heal pointer maps left stale by the pre-fix index-ordering so roster jump targets
       // the participant's true latest message even before they post again.
       const pointersHealed = this.rebuildLastMessagesByParticipantIfChanged(conversation);
-      if (!usageUpdates && !interruptedRequests && !recoveredRunState && !participantsSynced && !pointersHealed && !orphanedCodexApprovalsExpired) {
+      if (!usageUpdates && !interruptedRequests && !recoveredRunState && !participantsSynced && !pointersHealed && !orphanedCodexApprovalsExpired && !orphanedSignInsExpired) {
         hydrated = conversation;
         return;
       }
@@ -1455,7 +1476,7 @@ export class ChatService {
           }
         };
       }
-      if (interruptedRequests || recoveredRunState || orphanedCodexApprovalsExpired) {
+      if (interruptedRequests || recoveredRunState || orphanedCodexApprovalsExpired || orphanedSignInsExpired) {
         conversation.updatedAt = new Date().toISOString();
       }
       await this.saveConversation(conversation);
@@ -3581,6 +3602,309 @@ export class ChatService {
       behavior: "allow",
       updatedInput: outcome.prepared.toolInput
     };
+  }
+
+  /** A member asks the User to sign in to (or reconnect) an MCP server its
+   *  task needs (src/shared/connectorSignIn.ts). The call waits for the User
+   *  as a permission card does. The sign-in address comes from the member's
+   *  own CLI, and after "Done" the server is reconnected in the member's live
+   *  process, so its tools are there for the rest of the same reply. The card
+   *  stays open (its server card too) until what came of it is recorded. */
+  async requestConnectorSignInFromTool(actor: ChatAppMcpActor, rawRequest: unknown, abandoned?: AbortSignal): Promise<Record<string, unknown>> {
+    let input: { connector: string; reason?: string };
+    try {
+      input = parseConnectorSignInInput(rawRequest);
+    } catch (error) {
+      return { status: "error", message: (error instanceof Error ? error.message : String(error)) };
+    }
+    const conversation = await this.requireChat(actor.conversationId);
+    const requester = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+    if (!requester) {
+      return { status: "error", message: "The requesting member is no longer in this chat." };
+    }
+    if (requester.kind !== "claude-code") {
+      return {
+        status: "unsupported",
+        message: "Signing in from the chat works for Claude Code members only. Tell the User which server needs signing in; they sign in through your CLI's own MCP settings."
+      };
+    }
+    // The member's turn stopping, or its CLI giving up on this call.
+    const runSignal = actor.runId ? this.firstChatRunController(actor.runId)?.signal : undefined;
+    const signals = [runSignal, abandoned].filter((item): item is AbortSignal => Boolean(item));
+    const signal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+    const control = (request: Record<string, unknown>): Promise<Record<string, unknown> | undefined> =>
+      this.memberClaudeControl(actor.conversationId, actor.participantId, request, signal);
+    const serverNow = async (name: string): Promise<McpServerStatus | undefined> =>
+      parseMcpServerStatuses(await control({ subtype: "mcp_status" })).find((server) => server.name === name);
+    const waitedCard = (chat: Conversation, connector: string): ChatAppToolApproval | undefined =>
+      this.chatAppToolApprovals(chat).find((item) =>
+        item.status === "pending" && item.toolName === APP_CONNECTOR_SIGN_IN_TOOL && item.requesterParticipantId === requester.id &&
+        isConnectorSignInRequest(item.request) && item.request.connector === connector && (this.connectorSignInWaiters.get(item.id) ?? 0) > 0);
+
+    let server: McpServerStatus;
+    let auth: Record<string, unknown> = {};
+    let joined: ChatAppToolApproval | undefined;
+    try {
+      const status = await control({ subtype: "mcp_status" });
+      if (!status) {
+        return { status: "unavailable", message: "This member has no live Claude Code process on this device to sign in from." };
+      }
+      const match = matchMcpServer(parseMcpServerStatuses(status), input.connector);
+      if (match.kind === "ambiguous") {
+        return { status: "ambiguous", message: `Several MCP servers match "${input.connector}"; call again with one of these names.`, names: match.names };
+      }
+      if (match.kind === "none") {
+        return {
+          status: "not_found",
+          message: `Claude Code has no MCP server named "${input.connector}".`,
+          ...(match.suggestions.length > 0 ? { similar: match.suggestions } : {})
+        };
+      }
+      server = match.server;
+      // Still connecting: given a moment, as the CLI's own list would show it settle.
+      const pendingUntil = Date.now() + CONNECTOR_PENDING_WAIT_MS;
+      while (server.status === "pending" && Date.now() < pendingUntil && !signal?.aborted) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        server = await serverNow(server.name) ?? server;
+      }
+      if (server.status === "connected") {
+        return { status: "connected", connector: server.name, message: "Already connected; its tools are available (find them with ToolSearch)." };
+      }
+      if (server.status === "disabled") {
+        return { status: "disabled", connector: server.name, message: "The User turned this server off in Claude Code (/mcp). Ask them to turn it on if you need it." };
+      }
+      // Asked again while its card waits: the same card. Signing in again
+      // would start a new sign-in and spoil the one the User may be in.
+      joined = waitedCard((await this.storage.getConversation(conversation.id)) ?? conversation, server.name);
+      if (!joined && server.status === "needs-auth") {
+        auth = await control({ subtype: "mcp_authenticate", serverName: server.name }) ?? {};
+        const authUrl = typeof auth.authUrl === "string" ? auth.authUrl : undefined;
+        if (authUrl && !connectorSignInHost(authUrl)) {
+          return { status: "error", connector: server.name, message: "Claude Code returned a sign-in address the app does not open." };
+        }
+        if (!authUrl || auth.requiresUserAction === false) {
+          // Signed in without the User (a saved session was renewed).
+          return await this.reconnectConnectorForMember(control, serverNow, server.name);
+        }
+      }
+    } catch (error) {
+      return { status: "error", connector: input.connector, message: `Claude Code: ${(error instanceof Error ? error.message : String(error))}` };
+    }
+
+    const authUrl = typeof auth.authUrl === "string" ? auth.authUrl : undefined;
+    const request: ChatConnectorSignInRequest = {
+      kind: "connectorSignIn",
+      connector: server.name,
+      action: server.status === "needs-auth" ? "sign-in" : "reconnect",
+      ...(authUrl ? { authUrl } : {}),
+      // The CLI takes the browser's return itself, on its own computer.
+      ...(authUrl && auth.callbackExpected === true ? { callbackOnMemberComputer: true } : {}),
+      ...(input.reason ? { reason: input.reason } : {})
+    };
+    let approval: ChatAppToolApproval;
+    this.connectorSignInWaiterAdd(joined?.id ?? "");
+    let waitingOn = joined?.id ?? "";
+    try {
+      approval = joined ?? await this.withChatMutation(conversation, async () => {
+        const current = this.chatParticipants(conversation).find((participant) => participant.id === requester.id);
+        if (!current) {
+          throw new Error("The requesting member is no longer in this chat.");
+        }
+        const now = new Date().toISOString();
+        const raced = waitedCard(conversation, request.connector);
+        // Raised by another call meanwhile: that card, with this sign-in's
+        // address, since the CLI's newest sign-in is the one that works.
+        const next: ChatAppToolApproval = raced
+          ? { ...raced, ...(authUrl ? { request: { ...(raced.request as ChatConnectorSignInRequest), ...request } } : {}), updatedAt: now }
+          : this.newAppToolApproval(conversation, current, APP_CONNECTOR_SIGN_IN_TOOL, "permissions.request", request, connectorSignInSummary(current.handle, request), "pending");
+        if (!raced) {
+          // A card for this server no call here waits on is left from a call
+          // that ended: closed, so only this one is open.
+          for (const stale of this.chatAppToolApprovals(conversation)) {
+            if (stale.status === "pending" && stale.toolName === APP_CONNECTOR_SIGN_IN_TOOL && stale.requesterParticipantId === current.id &&
+              isConnectorSignInRequest(stale.request) && stale.request.connector === request.connector) {
+              this.upsertAppToolApproval(conversation, { ...stale, status: "expired", error: CONNECTOR_SIGN_IN_ORPHANED, updatedAt: now });
+            }
+          }
+          if (actor.runId && actor.triggerMessageId) {
+            next.resumeContext = {
+              runId: actor.runId,
+              triggerMessageId: actor.triggerMessageId,
+              participantRequestBatchId: actor.participantRequestBatchId
+            };
+          }
+        }
+        this.upsertAppToolApproval(conversation, next);
+        conversation.updatedAt = now;
+        // Waited on from before its save, so nothing takes it for a card left
+        // by a call that ended.
+        this.connectorSignInWaiterAdd(next.id);
+        waitingOn = next.id;
+        await this.saveConversation(conversation);
+        return next;
+      });
+    } catch (error) {
+      this.connectorSignInWaiterRelease(waitingOn);
+      return { status: "error", connector: request.connector, message: (error instanceof Error ? error.message : String(error)) };
+    }
+    void this.debugLogs.write("chat.connector-sign-in.asked", {
+      conversationId: actor.conversationId,
+      participantId: actor.participantId,
+      runId: actor.runId,
+      approvalId: approval.id,
+      action: request.action,
+      joined: Boolean(joined),
+      authHost: connectorSignInHost(authUrl)
+    });
+
+    let decision: ToolPermissionDecision;
+    try {
+      decision = await this.waitForToolPermissionDecision(actor.conversationId, approval.id, actor.runId, abandoned);
+    } finally {
+      this.connectorSignInWaiterRelease(approval.id);
+    }
+    if (!decision.approve) {
+      const latest = await this.storage.getConversation(actor.conversationId);
+      const stored = latest ? this.chatAppToolApprovals(latest).find((item) => item.id === approval.id) : undefined;
+      if (decision.source === "user" && stored?.status === "denied") {
+        return { status: "declined", connector: request.connector, message: "The User chose not to sign in now. Go on without it, or tell them what you need it for." };
+      }
+      // Another call still waits on the same card: it stays open for that one.
+      if ((this.connectorSignInWaiters.get(approval.id) ?? 0) === 0) {
+        await this.closePendingConnectorSignIn(actor.conversationId, approval.id, decision.reason ?? "The sign-in card was not answered.");
+      }
+      return { status: "expired", connector: request.connector, message: "The sign-in card closed without the User's answer." };
+    }
+    // Every call that waited on the card gets the same result: one reconnect.
+    let reconnect = this.connectorSignInReconnects.get(approval.id);
+    if (!reconnect) {
+      reconnect = (async () => {
+        const result = await this.reconnectConnectorForMember(control, serverNow, request.connector);
+        await this.recordConnectorSignInResult(actor.conversationId, approval.id, result);
+        return result;
+      })().finally(() => this.connectorSignInReconnects.delete(approval.id));
+      this.connectorSignInReconnects.set(approval.id, reconnect);
+    }
+    return reconnect;
+  }
+
+  private connectorSignInWaiterAdd(approvalId: string): void {
+    if (approvalId) this.connectorSignInWaiters.set(approvalId, (this.connectorSignInWaiters.get(approvalId) ?? 0) + 1);
+  }
+
+  private connectorSignInWaiterRelease(approvalId: string): void {
+    const count = (this.connectorSignInWaiters.get(approvalId) ?? 0) - 1;
+    if (count > 0) this.connectorSignInWaiters.set(approvalId, count);
+    else this.connectorSignInWaiters.delete(approvalId);
+  }
+
+  /** The member's live Claude Code process answers one of its control requests. */
+  private memberClaudeControl(conversationId: string, participantId: string, request: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown> | undefined> {
+    const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "memberClaudeControl">>;
+    return runner.memberClaudeControl
+      ? runner.memberClaudeControl.call(this.cliRunner, conversationId, participantId, request, CONNECTOR_CONTROL_TIMEOUT_MS, signal)
+      : Promise.resolve(undefined);
+  }
+
+  /** Reconnects the server in the member's process, as the CLI's /mcp does
+   *  after a sign-in, and says what the CLI reports then. */
+  private async reconnectConnectorForMember(
+    control: (request: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>,
+    serverNow: (name: string) => Promise<McpServerStatus | undefined>,
+    connector: string
+  ): Promise<Record<string, unknown>> {
+    try {
+      const reconnected = await control({ subtype: "mcp_reconnect", serverName: connector });
+      if (!reconnected) {
+        return { status: "unavailable", connector, message: "This member's Claude Code process ended before the server could be reconnected." };
+      }
+      const server = await serverNow(connector);
+      if (server?.status === "connected") {
+        return { status: "connected", connector, message: "Connected. Its tools are available now, in this same reply (find them with ToolSearch)." };
+      }
+      return {
+        status: server?.status ?? "not_found",
+        connector,
+        message: `The User finished, but Claude Code still reports ${server?.status ?? "no such server"} for ${connector}.`
+      };
+    } catch (error) {
+      return { status: "error", connector, message: `Claude Code could not reconnect ${connector}: ${(error instanceof Error ? error.message : String(error))}` };
+    }
+  }
+
+  /** What came of the User's "Done", on its card: the card (and its server
+   *  card, which waits for this) closes with it. */
+  private async recordConnectorSignInResult(conversationId: string, approvalId: string, result: Record<string, unknown>): Promise<void> {
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") return;
+    await this.saveChatChange(conversation, () => {
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
+      if (!approval) return;
+      const now = new Date().toISOString();
+      const { error: _previous, ...rest } = approval;
+      this.upsertAppToolApproval(conversation, {
+        ...rest,
+        consumedAt: now,
+        updatedAt: now,
+        ...(result.status === "connected" ? {} : { error: typeof result.message === "string" ? result.message : "It is still not connected." })
+      });
+    }).catch((error) => {
+      void this.debugLogs.write("chat.connector-sign-in.record-error", { conversationId, approvalId, message: (error instanceof Error ? error.message : String(error)) });
+    });
+  }
+
+  /** A sign-in card nobody answered (the member's turn stopped, or the wait ran out). */
+  private async closePendingConnectorSignIn(conversationId: string, approvalId: string, reason: string): Promise<void> {
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") return;
+    await this.saveChatChange(conversation, () => {
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
+      if (!approval || approval.status !== "pending") return;
+      this.upsertAppToolApproval(conversation, {
+        ...approval,
+        status: /stop|cancel/i.test(reason) ? "cancelled" : "expired",
+        error: reason,
+        updatedAt: new Date().toISOString()
+      });
+    }).catch(() => undefined);
+  }
+
+  /** The User's answer to a sign-in card: Done (approve) or Not now. The
+   *  member's waiting call does the rest. A card no call waits on any more
+   *  is closed instead, saying so. */
+  private async respondToConnectorSignInApproval(
+    request: RespondToChatAppToolApprovalRequest,
+    execution?: ChatApprovalExecutionGuard
+  ): Promise<Conversation | undefined> {
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      return conversation;
+    }
+    let decided: ChatAppToolApproval | undefined;
+    await this.withChatMutation(conversation, async () => {
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === request.approvalId);
+      if (!approval || approval.toolName !== APP_CONNECTOR_SIGN_IN_TOOL) {
+        throw new Error("App tool approval request was not found.");
+      }
+      if (approval.status !== "pending") {
+        throw new Error("App tool approval request has already been answered.");
+      }
+      await execution?.beforeApply(approval);
+      const now = new Date().toISOString();
+      decided = (this.connectorSignInWaiters.get(approval.id) ?? 0) > 0
+        ? { ...approval, status: request.approve ? "approved" : "denied", updatedAt: now }
+        : { ...approval, status: "expired", error: CONNECTOR_SIGN_IN_ORPHANED, updatedAt: now };
+      this.upsertAppToolApproval(conversation, decided);
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+    });
+    if (!decided) {
+      throw new Error("App tool approval request could not be resolved.");
+    }
+    this.resolveToolPermissionApproval(request.approvalId, request.approve
+      ? { approve: true, source: "user" }
+      : { approve: false, source: "user", reason: "The User chose not to sign in now." });
+    return conversation;
   }
 
   /** Records a prepared member request on the chat: its message, and a card
@@ -6010,6 +6334,9 @@ export class ChatService {
     if (approvalOwner) this.assertOwnsParticipant(approvalOwner);
     if (approval.toolName === APP_TOOL_PERMISSION_TOOL && this.isToolPermissionRequest(approval.request)) {
       return this.respondToToolPermissionApproval(request, execution);
+    }
+    if (approval.toolName === APP_CONNECTOR_SIGN_IN_TOOL && isConnectorSignInRequest(approval.request)) {
+      return this.respondToConnectorSignInApproval(request, execution);
     }
     if (approval.status !== "pending") {
       throw new Error("App tool approval request has already been answered.");
@@ -9633,6 +9960,9 @@ export class ChatService {
       "Participant request MCP tools: use `app_chat_request_participants` to ask participants; `app_chat_get_participant_request_status` recovers replies. JSON: `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }] }`.",
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
       "With the default `resumeRequester: true`, the call returns at once and replies arrive in a fresh auto-resumed requester turn, so end your turn as described above. Use `resumeRequester: false` (with an optional `timeoutMs` wait) only when you need completed replies inline in the same turn.",
+      ...(session.participantKind === "claude-code"
+        ? ["Connector sign-in MCP tool: when your task needs an MCP server or claude.ai connector that is not connected (it needs authentication, or failed to connect), call `app_connector_sign_in` with its name instead of telling User it is unavailable or to sign in elsewhere. User gets a sign-in card; once the call returns `connected`, the server's tools are available in this same reply (find them with ToolSearch)."]
+        : []),
       ...(canRequestCompaction
         ? ["Compaction MCP tool: `app_chat_request_compaction` requests compaction of this participant's own provider session after the current turn. Call it only when context pressure would materially benefit the ongoing workflow; stop after a queued or pending-approval result."]
         : []),
@@ -13895,12 +14225,14 @@ export class ChatService {
   private waitForToolPermissionDecision(
     conversationId: string,
     approvalId: string,
-    runId: string | undefined
+    runId: string | undefined,
+    /** Aborts when the member's CLI gave up on the call that waits. */
+    abandoned?: AbortSignal
   ): Promise<ToolPermissionDecision> {
     return new Promise<ToolPermissionDecision>((resolve) => {
       let settled = false;
       const controller = runId ? this.firstChatRunController(runId) : undefined;
-      const signal = controller?.signal;
+      const signal = controller?.signal && abandoned ? AbortSignal.any([controller.signal, abandoned]) : controller?.signal ?? abandoned;
       let timer: NodeJS.Timeout;
       const finish = (decision: ToolPermissionDecision): void => {
         if (settled) {
@@ -16020,6 +16352,16 @@ export class ChatService {
           reason
         });
       }
+      if (approval.toolName === APP_CONNECTOR_SIGN_IN_TOOL) {
+        // Closed with the member's turn, not declined by the User.
+        this.resolveToolPermissionApproval(approval.id, { approve: false, source: "abort", reason });
+        return {
+          ...approval,
+          status: /stop|cancel/i.test(reason) ? "cancelled" as const : "expired" as const,
+          error: reason,
+          updatedAt: now
+        };
+      }
       if (approval.toolName === CODEX_APPROVAL_TOOL_NAME && this.isCodexApprovalRequest(approval.request)) {
         const resolver = this.codexApprovalResolvers.get(approval.id);
         if (resolver) {
@@ -16048,6 +16390,35 @@ export class ChatService {
       pendingAppToolApprovals: nextApprovals
     };
     return true;
+  }
+
+  /** Sign-in cards of this device's members left by calls that ended: open
+   *  ones no call waits on, and Done ones whose reconnect never finished (the
+   *  app quit meanwhile). Both are closed, saying so, rather than shown as
+   *  waiting forever. */
+  private expireOrphanedConnectorSignIns(conversation: Conversation): boolean {
+    const owned = new Set(this.chatParticipants(conversation).filter((participant) => this.ownsParticipant(participant)).map((participant) => participant.id));
+    const now = new Date().toISOString();
+    let changed = false;
+    const nextApprovals = this.chatAppToolApprovals(conversation).map((approval) => {
+      if (approval.toolName !== APP_CONNECTOR_SIGN_IN_TOOL || !owned.has(approval.requesterParticipantId) ||
+        (approval.homeMachineId && approval.homeMachineId !== this.hostMachineId)) {
+        return approval;
+      }
+      if (approval.status === "pending" && !this.connectorSignInWaiters.has(approval.id)) {
+        changed = true;
+        return { ...approval, status: "expired" as const, error: CONNECTOR_SIGN_IN_ORPHANED, updatedAt: now };
+      }
+      if (approval.status === "approved" && !approval.consumedAt && !this.connectorSignInReconnects.has(approval.id)) {
+        changed = true;
+        return { ...approval, consumedAt: now, error: "The app closed before it could reconnect the server. Ask the member again if it is still needed.", updatedAt: now };
+      }
+      return approval;
+    });
+    if (changed) {
+      conversation.metadata = { ...conversation.metadata, pendingAppToolApprovals: nextApprovals };
+    }
+    return changed;
   }
 
   private expireOrphanedCodexApprovals(
@@ -16638,6 +17009,10 @@ export class ChatService {
     const approvals = this.chatAppToolApprovals(conversation).map((approval) => {
       if (approval.status !== "pending" || !this.appToolApprovalReferencesParticipant(conversation, approval, participant)) {
         return approval;
+      }
+      if (approval.toolName === APP_CONNECTOR_SIGN_IN_TOOL) {
+        this.resolveToolPermissionApproval(approval.id, { approve: false, source: "abort", reason: removalError });
+        return { ...approval, status: "expired" as const, updatedAt: now, error: removalError };
       }
       if (approval.toolName === CODEX_APPROVAL_TOOL_NAME && this.isCodexApprovalRequest(approval.request)) {
         const resolver = this.codexApprovalResolvers.get(approval.id);
@@ -19658,6 +20033,10 @@ export class ChatService {
       approval.toolName === CODEX_APPROVAL_TOOL_NAME &&
       approval.capability === "permissions.request" &&
       this.isCodexApprovalRequest(approval.request);
+    const isConnectorSignInApproval =
+      approval.toolName === APP_CONNECTOR_SIGN_IN_TOOL &&
+      approval.capability === "permissions.request" &&
+      isConnectorSignInRequest(approval.request);
     const isScriptApproval =
       approval.toolName === APP_SCRIPTS_REQUEST_CHANGE_TOOL &&
       approval.capability === "scripts.request" &&
@@ -19668,7 +20047,7 @@ export class ChatService {
       typeof approval.requesterParticipantId === "string" &&
       typeof approval.requesterHandle === "string" &&
       typeof approval.requesterRoleConfigId === "string" &&
-      (isRosterApproval || isRoleApproval || isParticipantChangeApproval || isPermissionApproval || isToolPermissionApproval || isParticipantRequestApproval || isSelfCompactionApproval || isCodexApproval || isScriptApproval) &&
+      (isRosterApproval || isRoleApproval || isParticipantChangeApproval || isPermissionApproval || isToolPermissionApproval || isParticipantRequestApproval || isSelfCompactionApproval || isCodexApproval || isScriptApproval || isConnectorSignInApproval) &&
       (approval.status === "pending" || approval.status === "approved" || approval.status === "denied" || approval.status === "cancelled" || approval.status === "expired" || approval.status === "auto-applied") &&
       typeof approval.summary === "string" &&
       typeof approval.createdAt === "string" &&
@@ -22640,6 +23019,12 @@ export class ChatService {
       // Decided on the chat's newest copy, between its saves: a card a save
       // raised meanwhile is never taken for one resolved here.
       await this.withChatMutation(conversation, async () => {
+        // Cards left by calls that ended (this device restarted) are closed
+        // before the server is told which are open.
+        if (this.expireOrphanedConnectorSignIns(conversation)) {
+          conversation.updatedAt = new Date().toISOString();
+          await this.saveConversation(conversation);
+        }
         const { ops, commit } = this.serverCards.opsFor(conversation, this.wantedServerCards(conversation), newOpId);
         if (ops.length === 0) return;
         await link.enqueue(ops);

@@ -15,7 +15,8 @@
  */
 
 import type { ChatAppToolApproval, ChatChoiceOption, ChatMessage, ChatParticipantRemovalRequest, ChatPendingChoice, Conversation } from "./types";
-import { APP_PARTICIPANTS_REQUEST_CHANGE_TOOL } from "./appMcpToolContracts";
+import { APP_CONNECTOR_SIGN_IN_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL } from "./appMcpToolContracts";
+import { connectorSignInHost, isConnectorSignInRequest } from "./connectorSignIn";
 import type { HubCard } from "./hubOps";
 import { approvalInstallsScriptCode } from "./scripts";
 
@@ -51,6 +52,9 @@ export interface MobileControlCard {
   draftOverride?: unknown;
   /** The message a choice belongs to; the answer names it. */
   sourceMessageId?: string;
+  /** A connector sign-in card: the address the member's CLI gave for it,
+   *  opened by the card's Sign in link. */
+  signInUrl?: string;
   /** Answers to a still pending choice that were refused, named by the
    *  operation id each was sent under, so the phone that sent one stops waiting. */
   refusedAnswers?: Array<{ operationId: string; reason: string }>;
@@ -89,7 +93,10 @@ function removalRequest(approval: ChatAppToolApproval): ChatParticipantRemovalRe
 export function approvalHasCard(approval: ChatAppToolApproval): boolean {
   return approval.status === "pending" ||
     ((approval.status === "approved" || approval.status === "auto-applied") &&
-      (typeof approval.memberRemovalQueuedAt === "string" || typeof approval.memberAdditionQueuedAt === "string"));
+      (typeof approval.memberRemovalQueuedAt === "string" || typeof approval.memberAdditionQueuedAt === "string")) ||
+    // A sign-in answered Done stays until its member's device has reconnected
+    // the server and recorded what came of it.
+    (approval.status === "approved" && approval.toolName === APP_CONNECTOR_SIGN_IN_TOOL && !approval.consumedAt);
 }
 
 /** The card for one app-tool approval, in exactly the shape the desktop card
@@ -154,6 +161,44 @@ export function controlCardFromApproval(conversationId: string, approval: ChatAp
       // The device the asking member runs on applies it (Д2).
       outcome: `Waiting for ${(approval as { machineName?: string }).machineName || "your computer"} to apply it.`,
       createdAt: approval.createdAt
+    };
+  }
+  if (approval.toolName === APP_CONNECTOR_SIGN_IN_TOOL && isConnectorSignInRequest(approval.request)) {
+    // The desktop's sign-in card: Sign in opens the address, Done has the
+    // member's device reconnect the server, Not now declines.
+    const request = approval.request;
+    const requester = handleList([approval.requesterHandle]);
+    const signIn = request.action === "sign-in" && Boolean(connectorSignInHost(request.authUrl));
+    // Its sign-in returns to the member's computer, which a phone is not.
+    const elsewhere = signIn && request.callbackOnMemberComputer === true;
+    const title = request.action === "sign-in" ? `${requester} needs you to sign in to ${request.connector}` : `${requester} can't reach ${request.connector}`;
+    const base = {
+      id: approval.id,
+      kind: "permission" as const,
+      conversationId,
+      title,
+      requesterLabel: requester,
+      machineName: (approval as { machineName?: string }).machineName,
+      allowsCustomAnswer: false,
+      allowsCancel: false,
+      createdAt: approval.createdAt
+    };
+    if (approval.status === "approved") {
+      return { ...base, summary: "", options: [], status: "answered", waiting: true, outcome: `Reconnecting ${request.connector}…` };
+    }
+    return {
+      ...base,
+      summary: [
+        request.reason,
+        elsewhere
+          ? `Signing in to ${request.connector} finishes in a browser on the computer ${requester} runs on, so it cannot be done from this phone.`
+          : signIn
+            ? `Sign in opens ${connectorSignInHost(request.authUrl)} in your browser. When you have finished, tap Done.`
+            : "It failed to connect. Fix it (start its program, or correct its settings), then tap Reconnect."
+      ].filter(Boolean).join(" "),
+      options: [{ id: "allow", label: signIn ? "Done" : "Reconnect" }, { id: "deny", label: "Not now" }],
+      status: "pending",
+      ...(signIn && !elsewhere ? { signInUrl: request.authUrl } : {})
     };
   }
   // A script that installs code is approved where its code can be read: the
