@@ -564,3 +564,16 @@ test("a member sees the tags in use on the notes it sees, most used first, and t
   const block = await memoryIndexBlock(desktopLink, { conversationId: CHAT_A, participantId: taylor.id });
   assert.match(block, /\nTags in use: release \(3\), beta \(1\), preference \(1\), secret-role-tag \(1\)\. Reuse one that fits; app_memory_tags lists all\.\n/);
 });
+
+test("Settings names the chats of notes kept in several chats (and none of a deleted chat)", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-memory-titles-"));
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const storage = new StorageService({ dbPath: path.join(dir, "desktop.sqlite3") });
+  const service = chatService(storage, "desktop");
+  await save(service, chat(CHAT_A, "/work/accord", [taylor], "Plans"));
+  await save(service, chat(CHAT_B, "/work/accord", [taylor], "Other chat"));
+  await service.settleChatSaves();
+  assert.deepEqual(await storage.conversationTitles([CHAT_A, CHAT_B, CHAT_C]), { [CHAT_A]: "Plans", [CHAT_B]: "Other chat" });
+  assert.deepEqual(await storage.conversationTitles([CHAT_A]), { [CHAT_A]: "Plans" });
+  assert.deepEqual(await storage.conversationTitles([]), {});
+});

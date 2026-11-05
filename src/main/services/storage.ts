@@ -566,7 +566,9 @@ export class StorageService {
   async conversationTitles(ids: readonly string[]): Promise<Record<string, string>> {
     if (!ids.length) return {};
     await this.init();
-    const rows = await this.queryJson<{ id: string; title: string }>(`select id, title from conversations where id in (${sqlStringList(ids)});`);
+    // sqlStringList is already parenthesized: one more pair makes a row value
+    // that sqlite refuses as soon as there are two ids.
+    const rows = await this.queryJson<{ id: string; title: string }>(`select id, title from conversations where id in ${sqlStringList(ids)};`);
     return Object.fromEntries(rows.map((row) => [row.id, row.title]));
   }
 
