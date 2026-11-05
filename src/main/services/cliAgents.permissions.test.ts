@@ -285,6 +285,43 @@ test("warmAgentKey changes when the manual agent environment version changes", (
   assert.equal(JSON.parse(secondKey).agentEnvKey, "agent-env-v2");
 });
 
+test("a Claude member started with Claude in Chrome gets --chrome and its own process key", () => {
+  const runner = makeRunner() as any;
+  const options = chatOptions({ agentMode: "default", workspaceWrite: false });
+  const config = runner.claudeToolConfig("chat", "/selected/repo", [], options);
+  const launch = (claudeChrome?: boolean) => runner.claudeLaunchArgs(
+    { id: "claude-1", kind: "claude-code", label: "@claude" }, "chat", { ...options, claudeChrome }, config, [], "warm", "session-1"
+  ) as string[];
+  assert.equal(launch(true).includes("--chrome"), true);
+  assert.equal(launch(false).includes("--chrome"), false);
+  assert.equal(launch(undefined).includes("--chrome"), false);
+  const participant = { id: "claude-1", kind: "claude-code" };
+  const warm = { conversationId: "c1", participantId: "claude-1", contextKey: "k" };
+  assert.notEqual(runner.warmAgentKey(participant, "/r", "chat", { warm, claudeChrome: true }), runner.warmAgentKey(participant, "/r", "chat", { warm }),
+    "switching it starts the next turn in a new process");
+  assert.equal(runner.warmAgentKey(participant, "/r", "chat", { warm, claudeChrome: false }), runner.warmAgentKey(participant, "/r", "chat", { warm }),
+    "off keeps the key processes already had");
+});
+
+test("a Chrome switch waits for a busy member process instead of the member waiting for it", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accordagents-chrome-defer-"));
+  try {
+    await writeFile(path.join(dir, ".claude.json"), JSON.stringify({ claudeInChromeDefaultEnabled: true }));
+    const runner = makeRunner() as any;
+    const warm = { conversationId: "c1", participantId: "p1", contextKey: "", idleTimeoutMs: 1 };
+    const options = { agentEnv: { CLAUDE_CONFIG_DIR: dir }, warm };
+    const runningKey = runner.warmAgentKey({ id: "p1", kind: "claude-code" }, "/r", "chat", { warm });
+    let idle = false;
+    runner.warmAgents.set(runningKey, { key: runningKey, scopeKey: "c1:p1", closed: false, isIdle: () => idle });
+    assert.equal((await runner.withClaudeChrome(options)).claudeChrome, false, "busy (a background task): it keeps what it started with");
+    idle = true;
+    assert.equal((await runner.withClaudeChrome(options)).claudeChrome, true, "idle: its next turn gets the new setting");
+    assert.equal((await runner.withClaudeChrome({ agentEnv: { CLAUDE_CONFIG_DIR: dir } })).claudeChrome, true, "a goal or one-shot run reads it too");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("parseClaudeModelPickerOutput extracts aliases and default model from picker text", () => {
   const output = [
     "\u001b[?25lSelect m\u001b[12Gdel",

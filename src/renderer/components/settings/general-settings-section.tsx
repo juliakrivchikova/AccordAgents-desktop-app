@@ -28,6 +28,7 @@ import {
 import { CLI_AGENT_RUN_TIMEOUT_MAX_MS, CLI_AGENT_RUN_TIMEOUT_MIN_MS, cliAgentRunTimeoutHours } from "../../../shared/cliAgentRunSettings";
 import { BetaUpdatesRow } from "./beta-updates-row";
 import { SpeechToTextRow } from "./speech-to-text-row";
+import { ClaudeChromeRow } from "./claude-chrome-row";
 import {
   CHAT_PROMPT_CONTEXT_LIMIT_MAX,
   normalizeChatPromptContextSettings
@@ -144,6 +145,7 @@ export function GeneralSettingsSection(props: {
             onAdd={() => setHostEditor({ type: "create" })}
             onEdit={(host) => setHostEditor({ type: "edit", host })}
           />
+          <ClaudeChromeRow />
         </div>
       </section>
 

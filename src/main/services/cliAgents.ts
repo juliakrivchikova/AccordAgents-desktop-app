@@ -19,6 +19,7 @@ import type {
   ChatProviderKind,
   ChatReasoningEffort,
   ChatShellPermissionRule,
+  ClaudeChromeSetting,
   ConversationKind,
   GitDiffMode,
   ParticipantConfig,
@@ -43,6 +44,13 @@ import {
   type CommandEnvironmentOptions
 } from "./command";
 import { CliReadinessService } from "./cliReadiness";
+import {
+  claudeChromeEditEnvironment,
+  claudeChromeEnvironmentDecides,
+  claudeChromeLaunchFlag,
+  claudeChromeSettingsEdit,
+  readClaudeChromeSetting
+} from "./claudeChrome";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { spawnNativeProcess, confirmNativeProcessClosed, isSupervisedNativeProcess } from "./nativeProcess";
 import { NATIVE_PROCESS_REGISTRY_FILE, usesNativeProcessRegistry } from "./nativeProcessRegistry";
@@ -143,6 +151,16 @@ const CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS = [
 ];
 const CLAUDE_CODE_SKIP_PROMPT_HISTORY_ENV = "CLAUDE_CODE_SKIP_PROMPT_HISTORY";
 const CLAUDE_CODE_FORCE_SESSION_PERSISTENCE_ENV = "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE";
+/** Whether a warm process key was started with Claude in Chrome. */
+function warmKeyClaudeChrome(key: string): boolean | undefined {
+  try {
+    const parsed = JSON.parse(key) as { claudeChrome?: unknown; providerKind?: unknown };
+    return parsed.providerKind === "claude-code" ? parsed.claudeChrome === true : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const CLAUDE_CODE_COMMAND_ENV_OPTIONS: CommandEnvironmentOptions = {
   dropProcessEnvKeysAbsentFromLoginShell: CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS
 };
@@ -240,6 +258,9 @@ export interface CliAgentRunOptions {
   resumeFallbackPrompt?: string;
   role?: CliAgentRoleOptions;
   appMcp?: CliAgentAppMcpOptions;
+  /** Claude: start the CLI with `--chrome` (decided once per run from the
+   *  CLI's own setting; part of the warm process key). */
+  claudeChrome?: boolean;
   agentEnv?: NodeJS.ProcessEnv;
   agentEnvKey?: string;
   warm?: CliAgentWarmOptions;
@@ -1229,7 +1250,7 @@ export class CliAgentRunner {
 
   constructor(
     private readonly debugLogs?: CliAgentDebugLogger,
-    manualReadinessEnvironment?: () => Promise<{ env: NodeJS.ProcessEnv }>,
+    private readonly manualReadinessEnvironment?: () => Promise<{ env: NodeJS.ProcessEnv }>,
     codexExecutableOrOptions: string | CliAgentRunnerOptions = "codex",
     private readonly claudeModelProbePtySpawn?: ClaudeModelProbePtySpawn,
     private readonly claudeModelProbeExpectSpawn: ClaudeModelProbeExpectSpawn = spawnCommand
@@ -5041,6 +5062,9 @@ export class CliAgentRunner {
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
+    // Every Claude turn (a goal, a warm or a one-shot one) starts its CLI
+    // with the same Claude in Chrome.
+    options = await this.withClaudeChrome(options);
     if (options.nativeGoal) {
       // The goal runs in its own process on the same session; the member's
       // warm process must not be writing to that session at the same time.
@@ -5081,6 +5105,9 @@ export class CliAgentRunner {
     signal: AbortSignal | undefined,
     options: CliAgentRunOptions
   ): Promise<CliAgentCompactResult> {
+    // The same key as its turns: a compaction must not replace the process
+    // the member's turns run in only because Chrome was not looked up here.
+    options = await this.withClaudeChrome(options);
     const warm = options.warm;
     if (!warm) {
       return { participant, ok: false, error: `${participant.label} has no chat session to compact.` };
@@ -5392,6 +5419,7 @@ export class CliAgentRunner {
     if (this.nativeAdmissionsFenced || this.warmShutdown || (options.warm && this.conversationClosing(options.warm.conversationId))) {
       return this.failed(participant, new Error("Native sessions are shutting down; this command did not start."));
     }
+    options = await this.withClaudeChrome(options);
     const warm = options.warm;
     if (!warm) {
       return this.runClaudeOneShot(participant, prompt, repoPath, kind, signal, options);
@@ -6062,6 +6090,9 @@ export class CliAgentRunner {
     }
     if (participant.model) {
       args.push("--model", participant.model);
+    }
+    if (options.claudeChrome) {
+      args.push("--chrome");
     }
     const reasoningEffort = this.claudeReasoningEffort(participant.reasoningEffort);
     if (reasoningEffort) {
@@ -7073,6 +7104,9 @@ export class CliAgentRunner {
       kind,
       extraReadableDirs: this.normalizedExtraReadableDirs(options.extraReadableDirs),
       agentEnvKey: options.agentEnvKey ?? "",
+      // Switching Claude in Chrome starts the member's next turn in a new
+      // process, as a changed model does.
+      ...(options.claudeChrome ? { claudeChrome: true } : {}),
       codexConfigOverrides: participant.codexConfigOverrides ?? [],
       contextKey: options.warm?.contextKey ?? ""
     });
@@ -7088,6 +7122,62 @@ export class CliAgentRunner {
   memberProcessAnswering(conversationId: string, participantId: string): boolean {
     const scopeKey = this.warmAgentScopeKey({ conversationId, participantId, contextKey: "", idleTimeoutMs: 0 });
     return Array.from(this.warmAgents.values()).some((entry) => entry.scopeKey === scopeKey && !entry.closed && entry.isReplyIdle?.() === false);
+  }
+
+  /** The environment members on this computer get (Settings → Environment
+   *  included), for the CLI's Chrome setting read and written from Settings. */
+  private async claudeSettingsEnvironment(): Promise<NodeJS.ProcessEnv> {
+    await ensureLoginShellEnvPrimed();
+    const manual = filterAllowedAgentEnvironment((await this.manualReadinessEnvironment?.().catch(() => undefined))?.env);
+    return commandEnvironment(Object.keys(manual).length > 0 ? manual : undefined, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
+  }
+
+  /** Claude in Chrome as this computer's Claude Code has it (`/chrome`). */
+  async claudeChromeSetting(): Promise<ClaudeChromeSetting> {
+    const env = await this.claudeSettingsEnvironment();
+    const setting = await readClaudeChromeSetting(env);
+    return claudeChromeEnvironmentDecides(env) ? { ...setting, environmentDecides: true } : setting;
+  }
+
+  /** Changes "Enabled by default" through the CLI's own command. Members
+   *  pick it up with their next turn once their process is idle. */
+  async setClaudeChromeEnabledByDefault(enabled: boolean): Promise<ClaudeChromeSetting> {
+    const env = claudeChromeEditEnvironment(await this.claudeSettingsEnvironment());
+    try {
+      const executable = await resolveCommandPath("claude", env);
+      // The whole environment, so the session markers removed above are not
+      // merged back from this process's own.
+      await runCommand(executable, ["edit-chrome-settings", "--json"], { env, exactEnv: true, input: claudeChromeSettingsEdit(enabled), timeoutMs: 30_000 });
+    } catch (error) {
+      const result = error instanceof CommandError ? error.result : undefined;
+      const said = (result?.stderr || result?.stdout || (error instanceof Error ? error.message : "")).trim().split("\n").pop();
+      throw new Error(`Claude Code did not change the setting${said ? `: ${said}` : "."}`);
+    }
+    void this.writeDebugLog("cli.claude.chrome-setting", { enabledByDefault: enabled });
+    return this.claudeChromeSetting();
+  }
+
+  /** The run's `--chrome`, decided from the CLI's setting in the environment
+   *  the member's CLI gets (a member on a machine: that machine's Claude
+   *  Code). While the member's process is busy (answering, or carrying
+   *  background tasks) a change waits for it: like the dedicated CLI, a
+   *  session already running keeps what it started with, and nothing waits. */
+  private async withClaudeChrome(options: CliAgentRunOptions): Promise<CliAgentRunOptions> {
+    if (options.claudeChrome !== undefined) return options;
+    await ensureLoginShellEnvPrimed();
+    const env = commandEnvironment(this.agentRunEnv(options), CLAUDE_CODE_COMMAND_ENV_OPTIONS);
+    const setting = await readClaudeChromeSetting(env).catch(() => ({ enabledByDefault: false }));
+    const wanted = claudeChromeLaunchFlag(setting, env);
+    if (options.warm) {
+      const scopeKey = this.warmAgentScopeKey(options.warm);
+      const busy = Array.from(this.warmAgents.values()).find((entry) => entry.scopeKey === scopeKey && !entry.closed && entry.isIdle?.() === false);
+      const running = busy ? warmKeyClaudeChrome(busy.key) : undefined;
+      if (running !== undefined && running !== wanted) {
+        void this.writeDebugLog("cli.claude.chrome-change-deferred", { participantId: options.warm.participantId, wanted });
+        return { ...options, claudeChrome: running };
+      }
+    }
+    return { ...options, claudeChrome: wanted };
   }
 
   /** Retire every warm process of one member, e.g. when the credential it was
