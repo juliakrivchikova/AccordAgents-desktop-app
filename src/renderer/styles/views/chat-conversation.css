@@ -4888,6 +4888,7 @@ button.composer-active-run-row-main:focus-visible {
 .chat-participant-restart-confirm-ok {
   border-color: var(--app-danger-border);
   color: var(--app-danger);
+}
 
 /* Turn-finished note: at the end of the chat when a member's reply had other
    messages below it once its turn ended. The artifact note's card and column;
