@@ -12,6 +12,7 @@
 @import "./views/chat-accord.css" layer(components);
 @import "./views/chat-conversation.css" layer(components);
 @import "./views/chat-scripts.css" layer(components);
+@import "./views/chat-connector-sign-in.css" layer(components);
 @import "./views/artifacts.css" layer(components);
 @import "./views/terminal.css" layer(components);
 @import "./views/file-panel.css" layer(components);

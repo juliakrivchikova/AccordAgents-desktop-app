@@ -58,7 +58,7 @@
     "benchmark:chat-search": "npm run build:main && node dist/main/main/services/chatSearch.benchmark.js",
     "test:sidebar-widths": "npm run build:main && node --test dist/main/main/services/sidebarWidths.test.js",
     "test:sidebar-nav": "npm run build:renderer-tests && node --test --test-force-exit --import ./scripts/renderer-jsdom-setup.mjs dist/renderer-tests/renderer/components/shell/sidebar-nav.test.mjs dist/renderer-tests/renderer/app/use-app-navigation.test.mjs dist/renderer-tests/renderer/app/app-notices.test.mjs dist/renderer-tests/renderer/components/search/chat-search-escape.test.mjs",
-    "test:chat-compact": "npm run build:main && node --test dist/main/main/services/chat.compact.test.js dist/main/main/services/chat.restart.test.js dist/main/main/services/chatParticipantStatus.test.js dist/main/main/services/chatRosterStatus.test.js",
+    "test:chat-compact": "npm run build:main && node --test dist/main/main/services/chat.compact.test.js dist/main/main/services/chat.restart.test.js dist/main/main/services/chat.connectorSignIn.test.js dist/main/main/services/appMcp.waitingTool.test.js dist/main/main/services/chatParticipantStatus.test.js dist/main/main/services/chatRosterStatus.test.js",
     "test:user-skills": "npm run build:main && node --test dist/main/main/services/userSkills.test.js dist/main/main/services/chat.userSkills.test.js dist/main/main/services/remoteAgentSetup.test.js",
     "test:plugins": "npm run build:main && node --test dist/main/main/services/plugins.test.js",
     "test:accord": "npm run build:main && node --test dist/main/main/services/accordLauncherPreferences.test.js",

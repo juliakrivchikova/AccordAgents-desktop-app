@@ -1215,6 +1215,21 @@ export interface ChatToolPermissionRequest {
   toolInput?: unknown;
 }
 
+/** A member asks the User to sign in to (or reconnect) an MCP server its task
+ *  needs (src/shared/connectorSignIn.ts). The sign-in address comes from the
+ *  member's CLI, never from the member. Answering it approves "Done" (the app
+ *  reconnects the server) or declines "Not now". */
+export interface ChatConnectorSignInRequest {
+  kind: "connectorSignIn";
+  /** The server's name as the CLI lists it, e.g. "claude.ai Sentry". */
+  connector: string;
+  /** sign-in: the CLI needs the User to authenticate; reconnect: the server
+   *  failed to connect, and the User fixes it, then reconnects. */
+  action: "sign-in" | "reconnect";
+  authUrl?: string;
+  reason?: string;
+}
+
 export interface ChatParticipantRequestInput {
   target: string;
   prompt: string;
@@ -1378,6 +1393,7 @@ export type ChatAppToolApprovalRequest =
   | ChatRoleParticipantChangeRequest
   | ChatPermissionChangeRequest
   | ChatToolPermissionRequest
+  | ChatConnectorSignInRequest
   | ChatParticipantRequestApprovalRequest
   | ChatSelfCompactionRequest
   | ChatCodexApprovalRequest;

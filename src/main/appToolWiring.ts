@@ -52,6 +52,7 @@ export function wireChatAppToolHandlers(appMcpService: AppMcpService, chatServic
   appMcpService.setParticipantOptionsHandler((actor) => chatService.describeParticipantOptionsForTool(actor));
   appMcpService.setPermissionChangeHandler((actor, request) => chatService.requestPermissionChangeFromTool(actor, request));
   appMcpService.setToolPermissionHandler((actor, request) => chatService.requestToolPermissionFromTool(actor, request));
+  appMcpService.setConnectorSignInHandler((actor, request, signal) => chatService.requestConnectorSignInFromTool(actor, request, signal));
   appMcpService.setChatContextHandler((actor) => chatService.describeChatContextForTool(actor));
   appMcpService.setChatParticipantsHandler((actor) => chatService.describeChatParticipantsForTool(actor));
   appMcpService.setChatParticipantActivityHandler((actor) => chatService.describeChatParticipantActivityForTool(actor));

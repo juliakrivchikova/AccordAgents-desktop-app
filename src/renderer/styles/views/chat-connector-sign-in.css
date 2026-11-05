@@ -1,0 +1,40 @@
+/* A member's connector sign-in card (chat-connector-sign-in-card.tsx), laid
+   out as the scheduled-task card is. */
+
+.chat-connector-sign-in-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  padding: 4px 15px 12px;
+  min-width: 0;
+}
+
+.chat-app-tool-approval-panel .chat-connector-sign-in-title,
+.chat-app-tool-approval-panel.is-review-change .chat-connector-sign-in-title {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--app-text-strong);
+  overflow-wrap: anywhere;
+}
+
+.chat-connector-sign-in-reason {
+  margin: 0;
+  color: var(--app-text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.chat-connector-sign-in-hint {
+  margin: 0;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.chat-connector-sign-in-error {
+  margin: 0;
+  color: var(--app-status-danger-text);
+  font-size: 12px;
+}

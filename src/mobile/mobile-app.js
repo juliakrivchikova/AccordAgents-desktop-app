@@ -6916,7 +6916,7 @@
     return JSON.stringify([card.id, card.kind, card.status, card.waiting === true, card.outcome || "", card.title, card.summary, card.requesterLabel,
       card.machineName, card.options, card.recommendedOptionId, card.allowsCustomAnswer, card.allowsCancel,
       isCardLocked(card.id) || controlCardAnswering.has(card.id), controlCardErrors.get(card.id) || "",
-      cardSentText(card.id), cardOutcome(card.id) || ""]);
+      cardSentText(card.id), cardOutcome(card.id) || "", card.signInUrl || ""]);
   }
 
   // What was picked on a choice and not sent yet, by card. Outside the card:
@@ -7214,6 +7214,17 @@
       summary.className = "control-card-summary";
       summary.textContent = card.summary;
       wrap.append(summary);
+    }
+
+    // A connector sign-in: the page the member's CLI gave, opened here.
+    if (typeof card.signInUrl === "string" && /^https?:\/\//i.test(card.signInUrl)) {
+      const signIn = document.createElement("a");
+      signIn.className = "control-card-option control-card-sign-in";
+      signIn.href = card.signInUrl;
+      signIn.target = "_blank";
+      signIn.rel = "noopener noreferrer";
+      signIn.textContent = "Sign in";
+      wrap.append(signIn);
     }
 
     const sent = isCardLocked(card.id) || controlCardAnswering.has(card.id);

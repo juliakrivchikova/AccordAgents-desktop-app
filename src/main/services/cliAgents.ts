@@ -428,6 +428,10 @@ interface WarmAgentEntry {
    *  `/context` counts it (`get_context_usage`); after a `/compact`, the
    *  compacted figure. Undefined when the CLI does not answer it. */
   contextUsage?: (signal?: AbortSignal) => Promise<AgentContextUsage | undefined>;
+  /** Claude only: one of the CLI's own control requests (`mcp_status`,
+   *  `mcp_authenticate`, `mcp_reconnect`), answered while a reply runs too.
+   *  Its response, or an error with the CLI's words. */
+  control?: (request: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal) => Promise<Record<string, unknown>>;
   /** Claude only: the CLI's figures for the last compaction it ran. */
   lastCompactBoundary?: () => ClaudeCompactBoundary | undefined;
   queue: Promise<void>;
@@ -5927,6 +5931,30 @@ export class CliAgentRunner {
           model: state.model ?? participant.model
         });
       },
+      control: async (request: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal) => {
+        if (closed || child.exitCode !== null || child.killed) throw new Error("The member's Claude Code process has ended.");
+        if (signal?.aborted) throw new Error(CLAUDE_WARM_CANCELLED_MESSAGE);
+        const response = await new Promise<Record<string, unknown> | undefined>((resolve) => {
+          const requestId = this.sendClaudeWarmControl(hooks, request);
+          const timer = setTimeout(() => finish(undefined), timeoutMs);
+          timer.unref();
+          const onAbort = (): void => finish(undefined);
+          const finish = (value: Record<string, unknown> | undefined): void => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", onAbort);
+            state.controlWaiters.delete(requestId);
+            resolve(value);
+          };
+          state.controlWaiters.set(requestId, finish);
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
+        if (signal?.aborted) throw new Error(CLAUDE_WARM_CANCELLED_MESSAGE);
+        if (!response) throw new Error(`Claude Code did not answer ${String(request.subtype)} in time.`);
+        if (this.stringField(response, "subtype") !== "success") {
+          throw new Error(this.stringField(response, "error") || `Claude Code refused ${String(request.subtype)}.`);
+        }
+        return this.asRecord(response.response) ?? {};
+      },
       lastCompactBoundary: () => state.lastCompactBoundary,
       run: (
         turnPrompt: string,
@@ -7088,6 +7116,23 @@ export class CliAgentRunner {
   memberProcessAnswering(conversationId: string, participantId: string): boolean {
     const scopeKey = this.warmAgentScopeKey({ conversationId, participantId, contextKey: "", idleTimeoutMs: 0 });
     return Array.from(this.warmAgents.values()).some((entry) => entry.scopeKey === scopeKey && !entry.closed && entry.isReplyIdle?.() === false);
+  }
+
+  /** One of the CLI's own control requests, sent to the member's live Claude
+   *  Code process: the one answering now, else any still open. Undefined when
+   *  the member has no live Claude Code process on this device. */
+  async memberClaudeControl(
+    conversationId: string,
+    participantId: string,
+    request: Record<string, unknown>,
+    timeoutMs: number,
+    signal?: AbortSignal
+  ): Promise<Record<string, unknown> | undefined> {
+    const scopeKey = this.warmAgentScopeKey({ conversationId, participantId, contextKey: "", idleTimeoutMs: 0 });
+    const live = Array.from(this.warmAgents.values())
+      .filter((entry) => entry.scopeKey === scopeKey && !entry.closed && entry.process.exitCode === null && entry.control);
+    const entry = live.find((item) => item.isReplyIdle?.() === false) ?? live[0];
+    return entry?.control ? entry.control(request, timeoutMs, signal) : undefined;
   }
 
   /** Retire every warm process of one member, e.g. when the credential it was

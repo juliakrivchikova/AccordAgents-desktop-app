@@ -15,7 +15,8 @@
  */
 
 import type { ChatAppToolApproval, ChatChoiceOption, ChatMessage, ChatParticipantRemovalRequest, ChatPendingChoice, Conversation } from "./types";
-import { APP_PARTICIPANTS_REQUEST_CHANGE_TOOL } from "./appMcpToolContracts";
+import { APP_CONNECTOR_SIGN_IN_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL } from "./appMcpToolContracts";
+import { connectorSignInHost, isConnectorSignInRequest } from "./connectorSignIn";
 import type { HubCard } from "./hubOps";
 import { approvalInstallsScriptCode } from "./scripts";
 
@@ -51,6 +52,9 @@ export interface MobileControlCard {
   draftOverride?: unknown;
   /** The message a choice belongs to; the answer names it. */
   sourceMessageId?: string;
+  /** A connector sign-in card: the address the member's CLI gave for it,
+   *  opened by the card's Sign in link. */
+  signInUrl?: string;
   /** Answers to a still pending choice that were refused, named by the
    *  operation id each was sent under, so the phone that sent one stops waiting. */
   refusedAnswers?: Array<{ operationId: string; reason: string }>;
@@ -154,6 +158,33 @@ export function controlCardFromApproval(conversationId: string, approval: ChatAp
       // The device the asking member runs on applies it (Д2).
       outcome: `Waiting for ${(approval as { machineName?: string }).machineName || "your computer"} to apply it.`,
       createdAt: approval.createdAt
+    };
+  }
+  if (approval.toolName === APP_CONNECTOR_SIGN_IN_TOOL && isConnectorSignInRequest(approval.request)) {
+    // The desktop's sign-in card: Sign in opens the address, Done has the
+    // member's device reconnect the server, Not now declines.
+    const request = approval.request;
+    const requester = handleList([approval.requesterHandle]);
+    const signIn = request.action === "sign-in" && Boolean(connectorSignInHost(request.authUrl));
+    return {
+      id: approval.id,
+      kind: "permission",
+      conversationId,
+      title: signIn ? `${requester} needs you to sign in to ${request.connector}` : `${requester} can't reach ${request.connector}`,
+      summary: [
+        request.reason,
+        signIn
+          ? `Sign in opens ${connectorSignInHost(request.authUrl)} in your browser. When you have finished, tap Done.`
+          : "It failed to connect. Fix it (start its program, or correct its settings), then tap Reconnect."
+      ].filter(Boolean).join(" "),
+      requesterLabel: requester,
+      machineName: (approval as { machineName?: string }).machineName,
+      options: [{ id: "allow", label: signIn ? "Done" : "Reconnect" }, { id: "deny", label: "Not now" }],
+      allowsCustomAnswer: false,
+      allowsCancel: false,
+      status: "pending",
+      createdAt: approval.createdAt,
+      ...(signIn ? { signInUrl: request.authUrl } : {})
     };
   }
   // A script that installs code is approved where its code can be read: the

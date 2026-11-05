@@ -16,6 +16,7 @@ import {
   APP_TOOL_PERMISSION_TOOL,
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_CHAT_REQUEST_COMPACTION_TOOL,
+  APP_CONNECTOR_SIGN_IN_TOOL,
   APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
   APP_CHAT_GET_CONTEXT_TOOL,
   APP_CHAT_GET_PARTICIPANTS_TOOL,
@@ -112,6 +113,15 @@ type AppParticipantChangeHandler = (actor: AppMcpActor, request: unknown) => Pro
 type AppParticipantOptionsHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppPermissionChangeHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppToolPermissionHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+/** A tool call that waits for the User: given a signal that aborts when the
+ *  member's CLI gives up on the call. */
+type AppWaitingToolHandler = (actor: AppMcpActor, request: unknown, signal?: AbortSignal) => Promise<unknown>;
+
+/** How often a waiting tool call tells the CLI it is still running. Claude
+ *  Code drops a plain JSON answer after 60 s and an idle stream after 5 min
+ *  (2.1.280), so a call that waits for the User answers as a stream and
+ *  reports progress well inside that. */
+const APP_MCP_WAITING_PROGRESS_MS = 20_000;
 type AppChatContextHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppChatParticipantsHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppChatParticipantActivityHandler = (actor: AppMcpActor) => Promise<unknown>;
@@ -170,6 +180,9 @@ export class AppMcpService {
   private participantOptionsHandler?: AppParticipantOptionsHandler;
   private permissionChangeHandler?: AppPermissionChangeHandler;
   private toolPermissionHandler?: AppToolPermissionHandler;
+  private connectorSignInHandler?: AppWaitingToolHandler;
+  /** How often a waiting tool call reports progress (tests shorten it). */
+  waitingProgressMs = APP_MCP_WAITING_PROGRESS_MS;
   private chatContextHandler?: AppChatContextHandler;
   private chatParticipantsHandler?: AppChatParticipantsHandler;
   private chatParticipantActivityHandler?: AppChatParticipantActivityHandler;
@@ -223,6 +236,11 @@ export class AppMcpService {
 
   setToolPermissionHandler(handler: AppToolPermissionHandler): void {
     this.toolPermissionHandler = handler;
+  }
+
+  /** The member asks the User to sign in to an MCP server its task needs. */
+  setConnectorSignInHandler(handler: AppWaitingToolHandler): void {
+    this.connectorSignInHandler = handler;
   }
 
   setChatContextHandler(handler: AppChatContextHandler): void {
@@ -420,6 +438,11 @@ export class AppMcpService {
       return;
     }
 
+    if (this.isWaitingToolCall(payload) && /text\/event-stream/i.test(String(request.headers.accept ?? ""))) {
+      await this.streamWaitingToolCall(actor, payload as JsonRpcRequest, response);
+      return;
+    }
+
     const requests = Array.isArray(payload) ? payload : [payload];
     const results: JsonRpcResponse[] = [];
     for (const item of requests) {
@@ -575,10 +598,10 @@ export class AppMcpService {
     return appMcpToolDefinitionsForCapabilities(actor.capabilities);
   }
 
-  private async callTool(actor: AppMcpActor, params: unknown): Promise<unknown> {
+  private async callTool(actor: AppMcpActor, params: unknown, signal?: AbortSignal): Promise<unknown> {
     const toolName = this.diagnosticToolName(params);
     try {
-      const result = await this.callToolUnchecked(actor, params);
+      const result = await this.callToolUnchecked(actor, params, signal);
       const denialCode = this.structuredToolDenialCode(result);
       if (denialCode) {
         this.logToolDenial(actor, toolName, "first-party-app-server-policy", denialCode);
@@ -601,7 +624,7 @@ export class AppMcpService {
     }
   }
 
-  private async callToolUnchecked(actor: AppMcpActor, params: unknown): Promise<unknown> {
+  private async callToolUnchecked(actor: AppMcpActor, params: unknown, signal?: AbortSignal): Promise<unknown> {
     if (!params || typeof params !== "object" || Array.isArray(params)) {
       throw new Error("Tool call params are required.");
     }
@@ -633,6 +656,7 @@ export class AppMcpService {
       record.name !== APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
       record.name !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
       record.name !== APP_TOOL_PERMISSION_TOOL &&
+      record.name !== APP_CONNECTOR_SIGN_IN_TOOL &&
       record.name !== APP_CHAT_REQUEST_PARTICIPANTS_TOOL &&
       record.name !== APP_CHAT_REQUEST_COMPACTION_TOOL &&
       record.name !== APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL &&
@@ -657,6 +681,15 @@ export class AppMcpService {
         throw new Error("Tool permission handling is not available.");
       }
       return this.toolTextResult(await this.toolPermissionHandler(actor, record.arguments));
+    }
+    if (record.name === APP_CONNECTOR_SIGN_IN_TOOL) {
+      if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
+        throw new Error("This member is not allowed to ask for sign-ins.");
+      }
+      if (!this.connectorSignInHandler) {
+        throw new Error("Connector sign-in is not available.");
+      }
+      return this.toolTextResult(await this.connectorSignInHandler(actor, record.arguments, signal));
     }
     if (record.name === APP_CHAT_GET_CONTEXT_TOOL) {
       if (!this.chatContextHandler) {
@@ -1009,6 +1042,54 @@ export class AppMcpService {
         message
       }
     };
+  }
+
+  /** A call of a tool that waits for the User (a sign-in card). */
+  private isWaitingToolCall(payload: unknown): boolean {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+    const request = payload as JsonRpcRequest;
+    const params = request.params && typeof request.params === "object" ? request.params as { name?: unknown } : undefined;
+    return request.method === "tools/call" && request.id !== undefined && params?.name === APP_CONNECTOR_SIGN_IN_TOOL;
+  }
+
+  /** Answers a waiting tool call as an event stream (MCP Streamable HTTP):
+   *  progress while the User decides, then the result. When the CLI gives up
+   *  on the call (the connection closes first) the wait is aborted, so its
+   *  card does not stay open for an answer nobody reads. */
+  private async streamWaitingToolCall(actor: AppMcpActor, request: JsonRpcRequest, response: http.ServerResponse): Promise<void> {
+    const abandoned = new AbortController();
+    let finished = false;
+    response.on("close", () => {
+      if (!finished) abandoned.abort();
+    });
+    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+    response.flushHeaders();
+    const send = (message: unknown): void => {
+      if (!response.writableEnded && !response.destroyed) response.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
+    };
+    const meta = request.params && typeof request.params === "object" ? (request.params as { _meta?: { progressToken?: unknown } })._meta : undefined;
+    const progressToken = typeof meta?.progressToken === "string" || typeof meta?.progressToken === "number" ? meta.progressToken : undefined;
+    let progress = 0;
+    const ticker = setInterval(() => {
+      progress++;
+      if (progressToken !== undefined) {
+        send({ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken, progress, message: "Waiting for the User." } });
+      } else if (!response.writableEnded && !response.destroyed) {
+        response.write(": waiting\n\n");
+      }
+    }, this.waitingProgressMs);
+    ticker.unref();
+    let answer: JsonRpcResponse;
+    try {
+      answer = this.rpcResult(request.id, await this.callTool(actor, request.params, abandoned.signal));
+    } catch (error) {
+      answer = this.rpcError(request.id, -32603, error instanceof Error ? error.message : String(error));
+    } finally {
+      clearInterval(ticker);
+    }
+    finished = true;
+    send(answer);
+    if (!response.writableEnded) response.end();
   }
 
   private writeJson(response: http.ServerResponse, payload: unknown): void {

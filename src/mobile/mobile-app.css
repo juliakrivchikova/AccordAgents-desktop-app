@@ -1681,6 +1681,14 @@ button.mobile-chat-group-title:active {
   opacity: 0.5;
 }
 
+/* A connector sign-in card's link to the sign-in page, above its answers. */
+.control-card-sign-in {
+  display: inline-block;
+  margin-top: 10px;
+  text-decoration: none;
+  font-weight: 600;
+}
+
 /* An answer on its way: the card or row fades a little, and says nothing more
    (the User, 2026-09-24). One fade for the whole of it: the lines already
    muted on their own, and an Activity row's dead pills, do not fade a second
