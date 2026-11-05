@@ -1921,6 +1921,15 @@ export interface RestartChatParticipantRequest {
   stopBackgroundTasks?: boolean;
 }
 
+/** Claude in Chrome as this computer's Claude Code has it ("Enabled by
+ *  default" in its `/chrome` dialog). */
+export interface ClaudeChromeSetting {
+  enabledByDefault: boolean;
+  /** CLAUDE_CODE_ENABLE_CFC in the environment decides it instead, as in the
+   *  CLI itself. */
+  environmentDecides?: boolean;
+}
+
 export interface RenameChatConversationRequest {
   conversationId: string;
   title: string;
@@ -3308,6 +3317,8 @@ export interface AppBridge {
   updateChatParticipantRuntime(request: UpdateChatParticipantRuntimeRequest): Promise<Conversation | undefined>;
   removeChatParticipant(request: RemoveChatParticipantRequest): Promise<Conversation | undefined>;
   compactChatParticipant(request: CompactChatParticipantRequest): Promise<StartReviewResult>;
+  getClaudeChromeSetting(): Promise<ClaudeChromeSetting>;
+  setClaudeChromeEnabledByDefault(enabled: boolean): Promise<ClaudeChromeSetting>;
   /** The chat itself arrives as a snapshot update; nothing is returned, so a
    *  large chat is not sent twice. */
   restartChatParticipant(request: RestartChatParticipantRequest): Promise<void>;

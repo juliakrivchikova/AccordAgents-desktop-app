@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdtempSync } from "node:fs";
 import { access, chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -21,6 +22,10 @@ import type { CodexServerRequestDelivery } from "./codexApprovals";
 import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
 import type { ParticipantRunResult } from "./providers";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
+
+// Claude Code's own config on this computer (Claude in Chrome, for one) must
+// not decide these tests: an empty config folder is a fresh Claude Code.
+process.env.CLAUDE_CONFIG_DIR = mkdtempSync(path.join(tmpdir(), "aa-claude-config-"));
 
 function makeRunner(): CliAgentRunner {
   return new CliAgentRunner();
@@ -283,6 +288,73 @@ test("warmAgentKey changes when the manual agent environment version changes", (
   assert.equal(firstKey, repeatedFirstKey);
   assert.equal(JSON.parse(firstKey).agentEnvKey, "agent-env-v1");
   assert.equal(JSON.parse(secondKey).agentEnvKey, "agent-env-v2");
+});
+
+test("a Claude member started with Claude in Chrome gets --chrome and its own process key", () => {
+  const runner = makeRunner() as any;
+  const options = chatOptions({ agentMode: "default", workspaceWrite: false });
+  const config = runner.claudeToolConfig("chat", "/selected/repo", [], options);
+  const launch = (claudeChrome?: boolean) => runner.claudeLaunchArgs(
+    { id: "claude-1", kind: "claude-code", label: "@claude" }, "chat", { ...options, claudeChrome }, config, [], "warm", "session-1"
+  ) as string[];
+  assert.equal(launch(true).includes("--chrome"), true);
+  assert.equal(launch(false).includes("--chrome"), false);
+  assert.equal(launch(undefined).includes("--chrome"), false);
+  const participant = { id: "claude-1", kind: "claude-code" };
+  const warm = { conversationId: "c1", participantId: "claude-1", contextKey: "k" };
+  assert.notEqual(runner.warmAgentKey(participant, "/r", "chat", { warm, claudeChrome: true }), runner.warmAgentKey(participant, "/r", "chat", { warm }),
+    "switching it starts the next turn in a new process");
+  assert.equal(runner.warmAgentKey(participant, "/r", "chat", { warm, claudeChrome: false }), runner.warmAgentKey(participant, "/r", "chat", { warm }),
+    "off keeps the key processes already had");
+});
+
+test("a Chrome switch waits for a busy member process instead of the member waiting for it", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accordagents-chrome-defer-"));
+  try {
+    await writeFile(path.join(dir, ".claude.json"), JSON.stringify({ claudeInChromeDefaultEnabled: true }));
+    const runner = makeRunner() as any;
+    const warm = { conversationId: "c1", participantId: "p1", contextKey: "", idleTimeoutMs: 1 };
+    const options = { agentEnv: { CLAUDE_CONFIG_DIR: dir }, warm };
+    const runningKey = runner.warmAgentKey({ id: "p1", kind: "claude-code" }, "/r", "chat", { warm });
+    let idle = false;
+    runner.warmAgents.set(runningKey, { key: runningKey, scopeKey: "c1:p1", closed: false, isIdle: () => idle });
+    const member = { id: "p1", kind: "claude-code" };
+    const chrome = async (runOptions: Record<string, unknown>, kind = "chat") => (await runner.withClaudeChrome(member, "/r", kind, runOptions)).claudeChrome;
+    assert.equal(await chrome(options), false, "busy (a background task): it keeps what it started with");
+    assert.equal(await chrome({ ...options, nativeGoal: { objective: "x" } }), true, "a goal runs in its own process: the setting as it is now");
+    assert.equal(await chrome({ ...options, warm: { ...warm, contextKey: "changed" } }), true, "other settings changed too: the process is replaced anyway");
+    idle = true;
+    assert.equal(await chrome(options), true, "idle: its next turn gets the new setting");
+    assert.equal(await chrome({ agentEnv: { CLAUDE_CONFIG_DIR: dir } }), true, "a one-shot run reads it too");
+    assert.equal(await chrome({ agentEnv: { CLAUDE_CONFIG_DIR: dir }, isolated: true }), undefined, "the app's own runs never get it");
+    assert.equal(await chrome({ agentEnv: { CLAUDE_CONFIG_DIR: dir } }, "general"), undefined, "nor runs that are not a chat member's");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a shutdown while a Claude turn reads its Chrome setting stops the turn", async () => {
+  for (const compact of [false, true]) {
+    const runner = makeRunner() as any;
+    let release!: () => void;
+    const reading = new Promise<void>((resolve) => { release = resolve; });
+    runner.withClaudeChrome = async (_participant: unknown, _repoPath: unknown, _kind: unknown, options: Record<string, unknown>) => {
+      await reading;
+      return { ...options, claudeChrome: false };
+    };
+    runner.runClaude = runner.compactClaudeSession = async () => { throw new Error("must not start"); };
+    const participant = { id: "p1", label: "Claude", kind: "claude-code" };
+    const warm = { conversationId: "c1", participantId: "p1", contextKey: "k", idleTimeoutMs: 1000 };
+    const pending = compact
+      ? runner.compactSession(participant, undefined, undefined, "chat", undefined, { warm, sessionId: "s1" })
+      : runner.run(participant, "hi", undefined, undefined, "chat", undefined, { warm });
+    const closing = runner.shutdownWarmAgents();
+    release();
+    const result = await pending;
+    await closing;
+    assert.equal(result.ok, false);
+    assert.match(result.error, /shut down while/);
+  }
 });
 
 test("parseClaudeModelPickerOutput extracts aliases and default model from picker text", () => {

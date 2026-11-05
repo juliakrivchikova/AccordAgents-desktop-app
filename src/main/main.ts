@@ -2455,6 +2455,11 @@ function registerIpc(): void {
       activeReviews.delete(runId);
     }
   });
+  ipcMain.handle("claude-chrome:get", async () => cliAgentRunner.claudeChromeSetting());
+  ipcMain.handle("claude-chrome:set", async (_event, enabled: unknown) => {
+    if (typeof enabled !== "boolean") throw new Error("Claude in Chrome takes on or off.");
+    return cliAgentRunner.setClaudeChromeEnabledByDefault(enabled);
+  });
   ipcMain.handle("chat:start-accord", async (_event, request: StartChatAccordRequest) => {
     const runId = randomUUID();
     const controller = new AbortController();
