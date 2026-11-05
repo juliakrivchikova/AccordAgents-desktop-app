@@ -1227,6 +1227,9 @@ export interface ChatConnectorSignInRequest {
    *  failed to connect, and the User fixes it, then reconnects. */
   action: "sign-in" | "reconnect";
   authUrl?: string;
+  /** The server's own sign-in, whose browser return the member's CLI takes on
+   *  the computer it runs on: it can finish only in a browser there. */
+  callbackOnMemberComputer?: boolean;
   reason?: string;
 }
 

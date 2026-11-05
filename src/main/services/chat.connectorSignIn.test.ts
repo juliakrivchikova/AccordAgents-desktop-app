@@ -5,7 +5,8 @@ import type { ChatAppToolApproval, ChatParticipant, ChatRoleConfig, Conversation
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { connectorSignInHost, matchMcpServer, parseConnectorSignInInput } from "../../shared/connectorSignIn";
-import { controlCardFromApproval } from "../../shared/mobileControlCards";
+import { approvalHasCard, controlCardFromApproval } from "../../shared/mobileControlCards";
+import { wantedHubCards } from "../../shared/hubCards";
 import { APP_CONNECTOR_SIGN_IN_TOOL } from "../../shared/appMcpToolContracts";
 import { ChatService } from "./chat";
 
@@ -88,17 +89,83 @@ test("a server that failed to connect asks for a reconnect, with no address", as
   assert.equal((await asking).status, "connected");
 });
 
-test("asked again while its card waits, the member gets the same card, with the fresh address", async () => {
+test("asked again while its card waits, the member joins that card and its sign-in is not started again", async () => {
   const { service, storage, cli } = testService({ "claude.ai Sentry": "needs-auth" });
-  const first = service.requestConnectorSignInFromTool(actor(), { connector: "claude.ai Sentry" });
+  const firstGivesUp = new AbortController();
+  const first = service.requestConnectorSignInFromTool(actor(), { connector: "claude.ai Sentry" }, firstGivesUp.signal);
   const card = await waitForCard(storage);
-  cli.authUrl = `${AUTH_URL}&again=1`;
   const second = service.requestConnectorSignInFromTool(actor(), { connector: "claude.ai Sentry" });
-  await waitFor(() => (approvals(storage)[0].request as { authUrl?: string }).authUrl === cli.authUrl);
+  await waitFor(() => cli.sent.filter((request) => request.subtype === "mcp_status").length >= 2);
+  await delay(20);
+  assert.equal(cli.sent.filter((request) => request.subtype === "mcp_authenticate").length, 1, "a second sign-in would spoil the one the User may be in");
   assert.equal(approvals(storage).length, 1);
+
+  firstGivesUp.abort();
+  assert.equal((await first).status, "expired");
+  assert.equal(approvals(storage)[0].status, "pending", "the other call still waits on it");
+
+  cli.onReconnect = (name) => { cli.servers[name] = "connected"; };
+  await service.respondToAppToolApproval({ conversationId: CHAT_ID, approvalId: card.id, approve: true });
+  assert.equal((await second).status, "connected");
+  assert.equal(cli.sent.filter((request) => request.subtype === "mcp_reconnect").length, 1);
+});
+
+test("Done keeps the card open, here and on the User's server, until what came of it is recorded", async () => {
+  const { service, storage, cli } = testService({ "claude.ai Sentry": "needs-auth" });
+  let finishReconnect!: () => void;
+  const reconnecting = new Promise<void>((resolve) => { finishReconnect = resolve; });
+  cli.reconnectGate = reconnecting;
+  cli.onReconnect = (name) => { cli.servers[name] = "connected"; };
+  const asking = service.requestConnectorSignInFromTool(actor(), { connector: "claude.ai Sentry" });
+  const card = await waitForCard(storage);
+  await service.respondToAppToolApproval({ conversationId: CHAT_ID, approvalId: card.id, approve: true });
+  await waitFor(() => cli.sent.some((request) => request.subtype === "mcp_reconnect"));
+  const answered = approvals(storage)[0];
+  assert.equal(answered.status, "approved");
+  assert.equal(approvalHasCard(answered), true, "its server card is kept, not settled before the result");
+  assert.equal(wantedHubCards(storage.current, { approval: () => true, message: () => true })[0]?.keepOnly, true);
+  const phone = controlCardFromApproval(CHAT_ID, answered);
+  assert.deepEqual([phone.status, phone.waiting, phone.outcome, phone.options.length], ["answered", true, "Reconnecting claude.ai Sentry…", 0]);
+  finishReconnect();
+  assert.equal((await asking).status, "connected");
+  assert.equal(approvalHasCard(approvals(storage)[0]), false, "settled once recorded, with the result");
+});
+
+test("a turn that ends closes its card as closed, never as the User's Not now", async () => {
+  const { service, storage } = testService({ "claude.ai Sentry": "needs-auth" });
+  const asking = service.requestConnectorSignInFromTool(actor({ runId: "run-2" }), { connector: "claude.ai Sentry" });
+  await waitForCard(storage);
+  const chat = clone(storage.current);
+  (service as any).markPendingAppToolApprovalsForRunTerminal(chat, "run-2", "Stopped by user.");
+  storage.current = chat;
+  const result = await asking;
+  assert.equal(result.status, "expired");
+  assert.equal(approvals(storage)[0].status, "cancelled");
+  assert.equal(approvals(storage)[0].error, "Stopped by user.");
+});
+
+test("a member removed while its card waits: the card closes and the call ends", async () => {
+  const { service, storage } = testService({ "claude.ai Sentry": "needs-auth" });
+  const asking = service.requestConnectorSignInFromTool(actor(), { connector: "claude.ai Sentry" });
+  await waitForCard(storage);
+  const chat = clone(storage.current);
+  (service as any).cleanupRemovedParticipantState(chat, (chat.metadata.participants as ChatParticipant[])[0], NOW);
+  storage.current = chat;
+  assert.equal((await asking).status, "expired");
+  assert.equal(approvals(storage)[0].status, "expired");
+});
+
+test("a server whose own sign-in returns to the member's computer says so where it cannot finish", async () => {
+  const { service, storage, cli } = testService({ "github": "needs-auth" });
+  cli.callbackExpected = true;
+  const asking = service.requestConnectorSignInFromTool(actor(), { connector: "github" });
+  const card = await waitForCard(storage);
+  assert.equal((card.request as { callbackOnMemberComputer?: boolean }).callbackOnMemberComputer, true);
+  const phone = controlCardFromApproval(CHAT_ID, card);
+  assert.equal(phone.signInUrl, undefined, "a phone's browser never reaches the member's computer");
+  assert.match(phone.summary, /cannot be done from this phone/);
   await service.respondToAppToolApproval({ conversationId: CHAT_ID, approvalId: card.id, approve: false });
-  assert.equal((await first).status, "declined");
-  assert.equal((await second).status, "declined");
+  await asking;
 });
 
 test("a member's turn stopping closes its card unanswered", async () => {
@@ -166,6 +233,14 @@ test("a card no call waits on any more (the app restarted) is closed, never answ
   await restarted.service.hydrateContextUsage(clone(restarted.storage.current));
   assert.equal(approvals(restarted.storage)[0].status, "expired");
   assert.match(String(approvals(restarted.storage)[0].error), /No member is waiting/);
+
+  const stuck = testService({ "claude.ai Sentry": "needs-auth" });
+  stuck.storage.current = clone(storage.current);
+  (stuck.storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[])[0].status = "approved";
+  await stuck.service.hydrateContextUsage(clone(stuck.storage.current));
+  const closedAfterQuit = approvals(stuck.storage)[0];
+  assert.equal(typeof closedAfterQuit.consumedAt, "string", "a Done whose reconnect the app quit before is closed");
+  assert.match(String(closedAfterQuit.error), /closed before it could reconnect/);
 
   const answered = testService({ "claude.ai Sentry": "needs-auth" });
   answered.storage.current = clone(storage.current);
@@ -243,13 +318,16 @@ function fakeCli(servers: Record<string, string>) {
     live: true,
     refuse: undefined as string | undefined,
     onReconnect: undefined as ((name: string) => void) | undefined,
+    reconnectGate: undefined as Promise<void> | undefined,
+    callbackExpected: false,
     async memberClaudeControl(_conversationId: string, _participantId: string, request: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {
       if (!cli.live) return undefined;
       cli.sent.push(request);
       if (cli.refuse && request.subtype === "mcp_authenticate") throw new Error(cli.refuse);
       if (request.subtype === "mcp_status") return { mcpServers: Object.entries(cli.servers).map(([name, status]) => ({ name, status })) };
-      if (request.subtype === "mcp_authenticate") return { authUrl: cli.authUrl, requiresUserAction: true, callbackExpected: false };
+      if (request.subtype === "mcp_authenticate") return { authUrl: cli.authUrl, requiresUserAction: true, callbackExpected: cli.callbackExpected };
       if (request.subtype === "mcp_reconnect") {
+        await cli.reconnectGate;
         cli.onReconnect?.(String(request.serverName));
         return {};
       }
