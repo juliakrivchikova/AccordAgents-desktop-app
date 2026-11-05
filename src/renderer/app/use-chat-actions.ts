@@ -37,6 +37,7 @@ import type { ConversationActions } from "./use-conversation-actions";
 import { upsertConversationSummary } from "./conversation-summaries";
 import { newChatTitle } from "../../shared/newChat";
 import { persistLastViewedAt } from "./storage";
+import { cleanIpcError } from "../lib/ipc-error";
 import { serializeComposerDraft } from "../components/chat/chat-composer-draft-utils";
 import { revokePendingImageUrls } from "../components/chat/use-chat-composer-images";
 import {
@@ -61,6 +62,7 @@ export interface ChatActions {
   updateChatParticipantRuntime: (participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">) => Promise<boolean>;
   removeChatParticipant: (participantId: string) => Promise<void>;
   compactChatParticipant: (participantId: string, options?: ChatRunScopeOptions) => Promise<boolean>;
+  restartChatParticipant: (participantId: string, stopBackgroundTasks?: boolean) => Promise<boolean>;
   startChatAccord: (options: StartChatAccordOptions) => Promise<boolean>;
   respondToChatAppToolApproval: (
     approvalId: string,
@@ -536,6 +538,21 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
   }
 
+  /** Restarts a member's CLI process. The line its restart wrote arrives as
+   *  a chat update; an error stays in the chat's error banner. */
+  async function restartChatParticipant(participantId: string, stopBackgroundTasks = false): Promise<boolean> {
+    if (!state.conversation || state.conversation.kind !== "chat") return false;
+    const conversationId = state.conversation.id;
+    state.setError(undefined);
+    try {
+      await window.consensus.restartChatParticipant({ conversationId, participantId, runId: crypto.randomUUID(), stopBackgroundTasks });
+      return true;
+    } catch (caught) {
+      state.setError(cleanIpcError(caught));
+      return false;
+    }
+  }
+
   async function startChatAccord(options: StartChatAccordOptions): Promise<boolean> {
     if (!state.conversation || state.conversation.kind !== "chat") return false;
     state.setError(undefined);
@@ -646,7 +663,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
   return {
     startChat, renameChatConversation, setChatArchived, deleteChatConversation, sendChatMessage, respondToChatMentions,
     toggleChatReaction, dismissTurnFinishedNote, respondToChatChoice, addChatParticipant, addSavedChatParticipant,
-    updateChatParticipantRuntime, removeChatParticipant, compactChatParticipant, startChatAccord, respondToChatAppToolApproval
+    updateChatParticipantRuntime, removeChatParticipant, compactChatParticipant, restartChatParticipant, startChatAccord, respondToChatAppToolApproval
   };
 }
 

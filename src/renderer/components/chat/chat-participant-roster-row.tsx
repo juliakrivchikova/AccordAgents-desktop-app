@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useContext, useState } from "react";
 import type React from "react";
-import { AtSign, Check, ChevronDown, Minimize2, Trash2 } from "lucide-react";
+import { AtSign, Check, ChevronDown, Minimize2, RotateCcw, Trash2 } from "lucide-react";
 
-import { canCompactParticipant } from "../../../shared/chatParticipantStatus";
+import { canCompactParticipant, canRestartParticipant, memberProcessRestartable } from "../../../shared/chatParticipantStatus";
 import type {
   ChatParticipant,
   ChatParticipantConfig,
@@ -10,12 +10,13 @@ import type {
   ChatRoleParticipantDefaults,
   ChatParticipantWatcherPausedReason
 } from "../../../shared/types";
+import type { MemberRestartInProgress } from "../../../shared/memberRestart";
 import { IconButton } from "../primitives";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { ParticipantRuntimeControls } from "./chat-participant-runtime-controls";
 import { chatCliProviderLabel, type ChatParticipantRuntimeOverride } from "./chat-participant-drafts";
 import { cliProviderHostForParticipant } from "../../../shared/cliProviderHosts";
-import { RosterStatusIndicator, type ChatParticipantRosterStatus } from "./chat-roster-status";
+import { backgroundTasksStatusLabel, ChatBackgroundTasksContext, RosterStatusIndicator, type ChatParticipantRosterStatus } from "./chat-roster-status";
 
 type ParticipantRuntimePatch = Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">;
 
@@ -39,6 +40,12 @@ export function ChatParticipantRosterRow(props: {
     patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">
   ) => void;
   onCompactParticipant: (participantId: string) => void;
+  /** Resolves once the restart ended (true when it worked). */
+  onRestartParticipant: (participantId: string, stopBackgroundTasks: boolean) => Promise<boolean>;
+  /** Stops waiting for a restart its machine has not taken. */
+  onStopRestart: (runId: string) => void;
+  /** Its restart has not ended (also after this row closed and opened again). */
+  restartStatus?: MemberRestartInProgress;
   onRemoveParticipant: (participantId: string) => void;
 }): JSX.Element {
   const displayName = chatParticipantDisplayName(props.participant);
@@ -46,6 +53,36 @@ export function ChatParticipantRosterRow(props: {
   const roleArchived = props.participantRoleArchived(props.participant);
   const [expanded, setExpanded] = useState(false);
   const compactDisabled = !canCompactParticipant(props.status);
+  const backgroundTasks = useContext(ChatBackgroundTasksContext).get(props.participant.id) ?? [];
+  const [confirmingRestart, setConfirmingRestart] = useState(false);
+  const [restartPending, setRestartPending] = useState(false);
+  // Also while the app waits for the member's machine, after this row closed.
+  const restarting = restartPending || props.restartStatus !== undefined;
+  // While its machine has not taken the restart, the spinning button stops it.
+  const restartWait = props.restartStatus?.waiting ? props.restartStatus : undefined;
+  const restartable = memberProcessRestartable(props.participant.kind);
+  const restartDisabled = restartWait ? false : restarting || !canRestartParticipant(props.status);
+  async function restart(stopBackgroundTasks: boolean): Promise<void> {
+    setConfirmingRestart(false);
+    setRestartPending(true);
+    try {
+      await props.onRestartParticipant(props.participant.id, stopBackgroundTasks);
+    } finally {
+      setRestartPending(false);
+    }
+  }
+  function onRestartButton(): void {
+    if (restartWait) {
+      props.onStopRestart(restartWait.runId);
+      return;
+    }
+    // Background work ends with the process: asked first, never silently.
+    if (backgroundTasks.length > 0) {
+      setConfirmingRestart(true);
+      return;
+    }
+    void restart(false);
+  }
   return (
     <div className={`chat-participant-row ${expanded ? "is-expanded" : "is-collapsed"}`}>
       <span className="chat-participant-avatar-slot" aria-hidden>
@@ -93,6 +130,24 @@ export function ChatParticipantRosterRow(props: {
               disabled={compactDisabled}
               onClick={() => props.onCompactParticipant(props.participant.id)}
             />
+            {restartable && (
+              <IconButton
+                size="xs"
+                icon={RotateCcw}
+                iconClassName={restarting ? "animate-spin" : undefined}
+                label={restartWait ? `Stop restarting ${displayName}` : `Restart ${displayName}`}
+                tooltip={restartWait
+                  ? "Stop waiting for the machine to restart this member."
+                  : restarting
+                    ? "Restarting…"
+                    : restartDisabled
+                      ? "This member is busy."
+                      : "Restart this member's process so its next reply picks up changed connectors and settings."}
+                disabled={restartDisabled}
+                aria-expanded={confirmingRestart || undefined}
+                onClick={onRestartButton}
+              />
+            )}
             <IconButton
               size="xs"
               icon={AtSign}
@@ -111,6 +166,23 @@ export function ChatParticipantRosterRow(props: {
             />
           </div>
         </div>
+        {restartWait && (
+          <div className="chat-participant-restart-note" role="status">{restartWait.message}</div>
+        )}
+        {/* Work that ended while asking needs no question any more. */}
+        {confirmingRestart && backgroundTasks.length > 0 && (
+          <div className="chat-participant-restart-confirm" role="group" aria-label={`Restart ${displayName}`}>
+            <span className="chat-participant-restart-confirm-text">
+              {`Restarting stops ${displayName}'s ${backgroundTasks.length === 1 ? "background task" : backgroundTasksStatusLabel(backgroundTasks.length)}.`}
+            </span>
+            <button type="button" className="chat-participant-restart-confirm-cancel" onClick={() => setConfirmingRestart(false)}>
+              Cancel
+            </button>
+            <button type="button" className="chat-participant-restart-confirm-ok" onClick={() => void restart(true)}>
+              Stop and restart
+            </button>
+          </div>
+        )}
         {expanded && (
           <ParticipantRuntimeControls
             participant={props.participant}

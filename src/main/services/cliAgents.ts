@@ -413,6 +413,9 @@ interface WarmAgentEntry {
   isIdle?: () => boolean;
   /** Claude only: settles once isIdle() holds (or the process is gone). */
   whenIdle?: (signal?: AbortSignal) => Promise<void>;
+  /** Claude only: no reply is waiting, running or about to start on its own;
+   *  background tasks may still be running. */
+  isReplyIdle?: () => boolean;
   /** Claude only: settles once no reply is waiting, running or about to
    *  start on its own (or the process is gone); background tasks may still
    *  be running. */
@@ -5897,6 +5900,7 @@ export class CliAgentRunner {
       isIdle,
       whenIdle: (signal?: AbortSignal) => waitUntil(isIdle, signal),
       whenReplyIdle: (signal?: AbortSignal) => waitUntil(isReplyIdle, signal),
+      isReplyIdle,
       capturedBackgroundProcesses: () => Array.from(capturedBackgroundProcesses.values()),
       refreshCapturedBackgroundProcesses: captureBackgroundProcesses,
       contextUsage: async (signal?: AbortSignal) => {
@@ -7076,6 +7080,14 @@ export class CliAgentRunner {
 
   private warmAgentScopeKey(warm: CliAgentWarmOptions): string {
     return `${warm.conversationId}:${warm.participantId}`;
+  }
+
+  /** Whether a live process of this member is answering, or about to start a
+   *  reply on its own (Claude: a background task finished and the CLI answers
+   *  it), before the chat has registered that reply as a run. */
+  memberProcessAnswering(conversationId: string, participantId: string): boolean {
+    const scopeKey = this.warmAgentScopeKey({ conversationId, participantId, contextKey: "", idleTimeoutMs: 0 });
+    return Array.from(this.warmAgents.values()).some((entry) => entry.scopeKey === scopeKey && !entry.closed && entry.isReplyIdle?.() === false);
   }
 
   /** Retire every warm process of one member, e.g. when the credential it was

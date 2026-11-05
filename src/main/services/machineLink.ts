@@ -13,6 +13,7 @@
  * settings on the server, sealed for that machine alone.
  */
 
+import type { MachineMemberRestartSupport } from "../../shared/memberRestart";
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
@@ -393,6 +394,18 @@ export class MachineLinkService {
   /** Why turns asked of this machine wait right now, when this desktop knows. */
   turnWaitReason(machineId: string): string | undefined {
     return this.turnHolds.get(machineId)?.[0]?.reason;
+  }
+
+  /** Whether this machine's runtime restarts its members' processes, by the
+   *  last hello it sent this desktop: "unknown" before any hello, and
+   *  "disconnected" while it is not connected (a stopped machine has no
+   *  member process to restart). */
+  memberRestartSupport(machineId: string): MachineMemberRestartSupport {
+    const connection = this.connections.get(machineId);
+    const hello = connection?.record.lastHello;
+    if (!connection || !hello) return "unknown";
+    if (hello.memberRestartSupported !== true) return "outdated";
+    return connection.machineDeviceId ? "supported" : "disconnected";
   }
 
   /** Ask a machine to do something with its scheduled scripts and wait for

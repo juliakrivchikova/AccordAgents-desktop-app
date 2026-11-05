@@ -39,6 +39,7 @@ import type {
   AwsDiskCleanCategory,
   SetAwsAutoStopRequest,
   CompactChatParticipantRequest,
+  RestartChatParticipantRequest,
   ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate,
   ComposeImplementationPlanRequest,
@@ -2436,6 +2437,24 @@ function registerIpc(): void {
       activeReviews.delete(runId);
     }
   });
+  ipcMain.handle("chat:restart-participant", async (_event, request: RestartChatParticipantRequest) => {
+    const runId = request.runId ?? randomUUID();
+    const controller = new AbortController();
+    activeReviews.set(runId, controller);
+    try {
+      await chatService.restartParticipant({ ...request, runId }, controller.signal, (progress) => emitReviewProgress(progress));
+    } catch (error) {
+      sendToMainWindow("conversations:review-progress", {
+        runId,
+        phase: controller.signal.aborted ? "cancelled" : "error",
+        message: error instanceof Error ? error.message : String(error),
+        createdAt: new Date().toISOString()
+      });
+      throw error;
+    } finally {
+      activeReviews.delete(runId);
+    }
+  });
   ipcMain.handle("chat:start-accord", async (_event, request: StartChatAccordRequest) => {
     const runId = randomUUID();
     const controller = new AbortController();
@@ -3115,6 +3134,7 @@ void app.whenReady().then(async () => {
       }
     });
     chatService.setMachineWaitReason((machineId) => machineLink.turnWaitReason(machineId));
+    chatService.setMachineMemberRestartSupport((machineId) => machineLink.memberRestartSupport(machineId));
     // The machines are read before the link to the server starts, so their
     // keys are on the server's roster before anything is written for them;
     // a passing failure to read is tried again first.
