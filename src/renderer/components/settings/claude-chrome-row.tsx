@@ -44,7 +44,7 @@ export function ClaudeChromeRow(): JSX.Element {
           <div className="gen-row-title">Claude in Chrome</div>
           <div className="gen-row-desc">
             Lets members on Claude on this computer use your Chrome, as “Enabled by default” in /chrome does in Claude Code (the same setting).
-            Members get it with their next message.
+            Members get it with their next message; a member still answering or running background tasks gets it once those finish.
             {setting?.environmentDecides ? " CLAUDE_CODE_ENABLE_CFC in your environment decides it instead." : ""}
           </div>
           {error ? <div className="gen-row-error" role="alert">{error}</div> : null}

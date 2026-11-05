@@ -318,12 +318,42 @@ test("a Chrome switch waits for a busy member process instead of the member wait
     const runningKey = runner.warmAgentKey({ id: "p1", kind: "claude-code" }, "/r", "chat", { warm });
     let idle = false;
     runner.warmAgents.set(runningKey, { key: runningKey, scopeKey: "c1:p1", closed: false, isIdle: () => idle });
-    assert.equal((await runner.withClaudeChrome(options)).claudeChrome, false, "busy (a background task): it keeps what it started with");
+    const member = { id: "p1", kind: "claude-code" };
+    const chrome = async (runOptions: Record<string, unknown>, kind = "chat") => (await runner.withClaudeChrome(member, "/r", kind, runOptions)).claudeChrome;
+    assert.equal(await chrome(options), false, "busy (a background task): it keeps what it started with");
+    assert.equal(await chrome({ ...options, nativeGoal: { objective: "x" } }), true, "a goal runs in its own process: the setting as it is now");
+    assert.equal(await chrome({ ...options, warm: { ...warm, contextKey: "changed" } }), true, "other settings changed too: the process is replaced anyway");
     idle = true;
-    assert.equal((await runner.withClaudeChrome(options)).claudeChrome, true, "idle: its next turn gets the new setting");
-    assert.equal((await runner.withClaudeChrome({ agentEnv: { CLAUDE_CONFIG_DIR: dir } })).claudeChrome, true, "a goal or one-shot run reads it too");
+    assert.equal(await chrome(options), true, "idle: its next turn gets the new setting");
+    assert.equal(await chrome({ agentEnv: { CLAUDE_CONFIG_DIR: dir } }), true, "a one-shot run reads it too");
+    assert.equal(await chrome({ agentEnv: { CLAUDE_CONFIG_DIR: dir }, isolated: true }), undefined, "the app's own runs never get it");
+    assert.equal(await chrome({ agentEnv: { CLAUDE_CONFIG_DIR: dir } }, "general"), undefined, "nor runs that are not a chat member's");
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a shutdown while a Claude turn reads its Chrome setting stops the turn", async () => {
+  for (const compact of [false, true]) {
+    const runner = makeRunner() as any;
+    let release!: () => void;
+    const reading = new Promise<void>((resolve) => { release = resolve; });
+    runner.withClaudeChrome = async (_participant: unknown, _repoPath: unknown, _kind: unknown, options: Record<string, unknown>) => {
+      await reading;
+      return { ...options, claudeChrome: false };
+    };
+    runner.runClaude = runner.compactClaudeSession = async () => { throw new Error("must not start"); };
+    const participant = { id: "p1", label: "Claude", kind: "claude-code" };
+    const warm = { conversationId: "c1", participantId: "p1", contextKey: "k", idleTimeoutMs: 1000 };
+    const pending = compact
+      ? runner.compactSession(participant, undefined, undefined, "chat", undefined, { warm, sessionId: "s1" })
+      : runner.run(participant, "hi", undefined, undefined, "chat", undefined, { warm });
+    const closing = runner.shutdownWarmAgents();
+    release();
+    const result = await pending;
+    await closing;
+    assert.equal(result.ok, false);
+    assert.match(result.error, /shut down while/);
   }
 });
 

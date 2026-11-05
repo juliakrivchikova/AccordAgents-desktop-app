@@ -1384,6 +1384,12 @@ export class CliAgentRunner {
     this.trackConversationOperation(options.warm?.conversationId, 1);
     const shutdownGeneration = this.nativeShutdownGeneration;
     try {
+      // Every Claude turn (a goal, a warm or a one-shot one) starts its CLI
+      // with the same Claude in Chrome. Read before the checks below, so a
+      // shutdown during the read stops the turn too.
+      const runOptions = participant.kind === "claude-code"
+        ? await this.withClaudeChrome(participant, effectiveRepoPath, kind, effectiveOptions)
+        : effectiveOptions;
       const refusal = await this.hostRefusal("this native command");
       if (shutdownGeneration !== this.nativeShutdownGeneration) return this.failed(participant, new Error("Native sessions shut down while this command waited; it did not start."));
       if (signal?.aborted) return this.failed(participant, new Error("The command was cancelled before native execution started."));
@@ -1393,7 +1399,7 @@ export class CliAgentRunner {
         return await this.runCodex(participant, prompt, effectiveRepoPath, diffMode, kind, signal, effectiveOptions);
       }
       if (participant.kind === "claude-code") {
-        return await this.runClaude(participant, prompt, effectiveRepoPath, kind, signal, effectiveOptions);
+        return await this.runClaude(participant, prompt, effectiveRepoPath, kind, signal, runOptions);
       }
       if (participant.kind === "gemini-cli") {
         return await this.runGemini(participant, prompt, effectiveRepoPath, kind, signal, effectiveOptions);
@@ -1426,6 +1432,11 @@ export class CliAgentRunner {
     this.trackConversationOperation(options.warm?.conversationId, 1);
     const shutdownGeneration = this.nativeShutdownGeneration;
     try {
+      // The same key as its turns: a compaction must not replace the process
+      // the member's turns run in only because Chrome was not looked up here.
+      const compactOptions = participant.kind === "claude-code"
+        ? await this.withClaudeChrome(participant, effectiveRepoPath, kind, options)
+        : options;
       const compactionRefusal = await this.hostRefusal("compaction");
       if (shutdownGeneration !== this.nativeShutdownGeneration) return this.failedCompact(participant, new Error("Native sessions shut down while compaction waited; it did not start."));
       if (signal?.aborted) return this.failedCompact(participant, new Error(COMPACTION_CANCELLED_BEFORE_START));
@@ -1435,7 +1446,7 @@ export class CliAgentRunner {
         return await this.compactCodexSession(participant, effectiveRepoPath, diffMode, kind, signal, options);
       }
       if (participant.kind === "claude-code") {
-        return await this.compactClaudeSession(participant, effectiveRepoPath, kind, signal, options);
+        return await this.compactClaudeSession(participant, effectiveRepoPath, kind, signal, compactOptions);
       }
       if (participant.kind === "gemini-cli") {
         return await this.compactGeminiSession(participant, effectiveRepoPath, kind, signal, options);
@@ -5062,9 +5073,6 @@ export class CliAgentRunner {
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
-    // Every Claude turn (a goal, a warm or a one-shot one) starts its CLI
-    // with the same Claude in Chrome.
-    options = await this.withClaudeChrome(options);
     if (options.nativeGoal) {
       // The goal runs in its own process on the same session; the member's
       // warm process must not be writing to that session at the same time.
@@ -5105,9 +5113,6 @@ export class CliAgentRunner {
     signal: AbortSignal | undefined,
     options: CliAgentRunOptions
   ): Promise<CliAgentCompactResult> {
-    // The same key as its turns: a compaction must not replace the process
-    // the member's turns run in only because Chrome was not looked up here.
-    options = await this.withClaudeChrome(options);
     const warm = options.warm;
     if (!warm) {
       return { participant, ok: false, error: `${participant.label} has no chat session to compact.` };
@@ -7158,20 +7163,29 @@ export class CliAgentRunner {
 
   /** The run's `--chrome`, decided from the CLI's setting in the environment
    *  the member's CLI gets (a member on a machine: that machine's Claude
-   *  Code). While the member's process is busy (answering, or carrying
-   *  background tasks) a change waits for it: like the dedicated CLI, a
-   *  session already running keeps what it started with, and nothing waits. */
-  private async withClaudeChrome(options: CliAgentRunOptions): Promise<CliAgentRunOptions> {
-    if (options.claudeChrome !== undefined) return options;
+   *  Code). Only chat members get it: the app's own runs (an avatar, say)
+   *  start without the User's connectors at all. While the member's process
+   *  is busy (answering, or carrying background tasks) a change waits for it:
+   *  like the dedicated CLI, a session already running keeps what it started
+   *  with, and nothing waits. A run that would not use that process anyway (a
+   *  goal, or other settings changed too) gets the setting as it is now. */
+  private async withClaudeChrome(
+    participant: ParticipantConfig,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    options: CliAgentRunOptions
+  ): Promise<CliAgentRunOptions> {
+    if (options.claudeChrome !== undefined || options.isolated || kind !== "chat") return options;
     await ensureLoginShellEnvPrimed();
     const env = commandEnvironment(this.agentRunEnv(options), CLAUDE_CODE_COMMAND_ENV_OPTIONS);
     const setting = await readClaudeChromeSetting(env).catch(() => ({ enabledByDefault: false }));
     const wanted = claudeChromeLaunchFlag(setting, env);
-    if (options.warm) {
+    if (options.warm && !options.nativeGoal) {
       const scopeKey = this.warmAgentScopeKey(options.warm);
       const busy = Array.from(this.warmAgents.values()).find((entry) => entry.scopeKey === scopeKey && !entry.closed && entry.isIdle?.() === false);
       const running = busy ? warmKeyClaudeChrome(busy.key) : undefined;
-      if (running !== undefined && running !== wanted) {
+      if (running !== undefined && running !== wanted &&
+        busy!.key === this.warmAgentKey(participant, repoPath, kind, { ...options, claudeChrome: running })) {
         void this.writeDebugLog("cli.claude.chrome-change-deferred", { participantId: options.warm.participantId, wanted });
         return { ...options, claudeChrome: running };
       }
