@@ -4850,3 +4850,42 @@ button.composer-active-run-row-main:focus-visible {
   font-size: 13px;
   overflow-wrap: anywhere;
 }
+
+/* Restarting a member with background work asks first, inside its row. */
+.chat-participant-restart-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 2px;
+  font-size: 12px;
+  color: var(--app-muted);
+}
+
+/* A machine has not taken a member's restart yet. */
+.chat-participant-restart-note {
+  margin: 6px 0 2px;
+  font-size: 12px;
+  color: var(--app-muted);
+}
+
+.chat-participant-restart-confirm-text {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.chat-participant-restart-confirm-cancel,
+.chat-participant-restart-confirm-ok {
+  border: 1px solid var(--app-border-strong);
+  border-radius: 6px;
+  padding: 2px 8px;
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-participant-restart-confirm-ok {
+  border-color: var(--app-danger-border);
+  color: var(--app-danger);
+}

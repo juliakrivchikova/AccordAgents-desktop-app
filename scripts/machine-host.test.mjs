@@ -211,6 +211,7 @@ test("the desktop's script requests are answered by the machine's scripts, off t
   assert.match(byId.late.error, /too old; nothing was changed/);
   assert.deepEqual(handled, ["releaseHeld", "list", "runNow"], "the stale and the late requests were never handled");
   assert.equal(bodies.filter((body) => body.type === "machine.hello").pop().scriptsSupported, true);
+  assert.equal(bodies.filter((body) => body.type === "machine.hello").pop().memberRestartSupported, true, "this runtime restarts its members");
 
   awake = true;
   assert.equal(await host.hasWorkForIdleStop(), true, "a switched-on script vetoes the idle stop");

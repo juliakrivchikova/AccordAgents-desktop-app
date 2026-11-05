@@ -837,6 +837,10 @@ test("a machine changes what concerns its own members; members elsewhere, the fo
   await h.write(h.machine, { opId: id("op"), kind: "card.raise", conversationId: chat, cardId, cardKind: "permission", participantId: "p-box", card: { approval } } as HubOp);
   await h.write(h.phone, { opId: id("op"), kind: "card.answer", conversationId: chat, cardId, answer: { approve: true, scope: "once" } } as HubOp);
   await h.write(h.machine, { opId: id("op"), kind: "card.settle", conversationId: chat, cardId, outcome: { result: "applied" } } as HubOp);
+  // Where an ordinary ask would go through: never to compact or restart a
+  // member elsewhere, and the refusal does not use her approval up.
+  assert.equal((await ask("r-box", { kind: "compaction" })).body.results[0].status, "rejected", "not to compact a member elsewhere, even with her approval");
+  assert.equal((await ask("r-box", { kind: "restart" })).body.results[0].status, "rejected", "not to restart a member elsewhere, even with her approval");
   assert.equal((await ask("r-box", { kind: "turn" })).body.results[0].status, "accepted", "her approval holds after the card is settled");
   await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message: reply("r-box-2", "p-box", "done", "@desk again") });
   assert.equal((await ask("r-box-2", { kind: "turn" })).body.results[0].status, "rejected", "and only for the request she approved");

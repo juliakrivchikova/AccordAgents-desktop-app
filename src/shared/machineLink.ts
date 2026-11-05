@@ -86,6 +86,10 @@ export interface MachineHelloBody {
   unsentWarning?: string;
   /** This runtime hosts scheduled scripts (absent before scripts existed). */
   scriptsSupported?: boolean;
+  /** This runtime restarts its members' CLI processes when the User asks
+   *  (a turn with request kind "restart"); absent before that existed, when
+   *  such a turn would be taken as an ordinary turn of the member. */
+  memberRestartSupported?: boolean;
   /** An enabled scheduled script keeps this machine from stopping when idle.
    *  Not a run: the desktop's update gate does not wait on it. */
   keepAwake?: boolean;

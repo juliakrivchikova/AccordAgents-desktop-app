@@ -1,3 +1,4 @@
+import type { MemberRestartInProgress } from "../../../shared/memberRestart";
 import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import type {
   AgentHealth,
@@ -50,6 +51,11 @@ export function ChatParticipantMenu(props: {
     patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">
   ) => void;
   onCompactParticipant: (participantId: string) => void;
+  onRestartParticipant: (participantId: string, stopBackgroundTasks: boolean) => Promise<boolean>;
+  /** Stops waiting for a restart (its run id). */
+  onStopRestart: (runId: string) => void;
+  /** Members whose restart has not ended. */
+  restartingById?: ReadonlyMap<string, MemberRestartInProgress>;
   onRemoveParticipant: (participantId: string) => void;
   onJumpToParticipantLastMessage: (participantId: string) => void;
   onManageInSettings: () => void;
@@ -105,6 +111,9 @@ export function ChatParticipantMenu(props: {
       onAddSavedParticipant={props.onAddSavedParticipant}
       onUpdateParticipantRuntime={props.onUpdateParticipantRuntime}
       onCompactParticipant={props.onCompactParticipant}
+      onRestartParticipant={props.onRestartParticipant}
+      onStopRestart={props.onStopRestart}
+      restartingById={props.restartingById}
       onRemoveParticipant={props.onRemoveParticipant}
       onJumpToParticipantLastMessage={props.onJumpToParticipantLastMessage}
       onManageInSettings={props.onManageInSettings}

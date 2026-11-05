@@ -411,6 +411,24 @@ test("script requests go to the one machine, resolve on its answer, and refuse a
   link.close();
 });
 
+test("a machine restarts its members only when its connected runtime says it can", () => {
+  const record = { id: "machine-r", name: "Box", deviceId: "dev-r", pairingKey: "rv-r", createdAt: new Date().toISOString() };
+  const link = new MachineLinkService(machineSettings([record], []), { write: async () => undefined }, {
+    appVersion: "test", desktopDeviceId: DESKTOP_ID, deviceIdentity: desktopEvents.deviceIdentity });
+  try {
+    assert.equal(link.memberRestartSupport("missing"), "unknown", "a machine this desktop does not know");
+    const connection = { record, machineDeviceId: undefined, pendingScripts: new Map(), client: { close() {} }, pairing: { issuer: { originId: DESKTOP_ID } } };
+    link.connections.set(record.id, connection);
+    assert.equal(link.memberRestartSupport("machine-r"), "unknown", "no hello yet");
+    record.lastHello = { protocol: MACHINE_LINK_PROTOCOL, deviceId: "dev-r", instanceId: "run-1" };
+    assert.equal(link.memberRestartSupport("machine-r"), "outdated", "an older runtime would take the turn as an ordinary one");
+    record.lastHello = { ...record.lastHello, memberRestartSupported: true };
+    assert.equal(link.memberRestartSupport("machine-r"), "disconnected", "a stopped machine has no process to restart");
+    connection.machineDeviceId = "dev-r";
+    assert.equal(link.memberRestartSupport("machine-r"), "supported");
+  } finally { link.close(); }
+});
+
 test("another machine meeting this one in its room does not make it look present or absent", async () => {
   const pairing = offlinePairing();
   const record = { id: "machine-presence", name: "Presence", deviceId: MACHINE_ID, pairingKey: pairing.rendezvousId, createdAt: new Date().toISOString() };

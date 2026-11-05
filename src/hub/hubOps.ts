@@ -1,3 +1,4 @@
+import { isMemberRestartTurnRequest } from "../shared/memberRestart";
 import { CommandError } from "../main/services/command";
 import { createHash } from "node:crypto";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "../main/services/chatChanges";
@@ -418,7 +419,7 @@ export class HubOps {
         if (!runsOnMachine(member(op.participantId), device.machineId)) {
           const message = conversation.messages.find((item) => item.id === op.messageId);
           const ownMembers = message?.role === "participant" && runsOnMachine(member(message.participantId), device.machineId);
-          if (!ownMembers || op.request?.kind === "compaction") {
+          if (!ownMembers || op.request?.kind === "compaction" || isMemberRestartTurnRequest(op.request)) {
             return reject(opId, "A cloud machine asks a member that runs elsewhere only to answer a message of one of its own members.");
           }
           // Only as the app lets that member ask: with its leave to ask

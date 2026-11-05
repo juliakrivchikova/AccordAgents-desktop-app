@@ -53,6 +53,7 @@ import { errorText } from "./components/review/review-conversation-data";
 import { isCodexActivityApprovalItem } from "../shared/chatActivity";
 import { CHAT_SPLIT_WORKSPACE_MIN_WIDTH } from "./lib/chat-split-sizing";
 import { ChatBackgroundTasksContext } from "./components/chat/chat-roster-status";
+import { restartingMembers } from "../shared/memberRestart";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
 import { useTerminalPanel } from "./components/terminal/use-terminal-panel";
 import "./styles/app.css";
@@ -322,6 +323,9 @@ function App(): JSX.Element {
             onAddSavedParticipant={(participant) => void chatActions.addSavedChatParticipant(participant)}
             onUpdateParticipantRuntime={(participantId, patch) => chatActions.updateChatParticipantRuntime(participantId, patch)}
             onCompactParticipant={(participantId) => void chatActions.compactChatParticipant(participantId)}
+            onRestartParticipant={(participantId, stopBackgroundTasks) => chatActions.restartChatParticipant(participantId, stopBackgroundTasks)}
+            onStopRestart={(runId) => void window.consensus.cancelReview(runId)}
+            restartingById={restartingMembers(state.progressLog)}
             onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
             onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
             onManageInSettings={() => openSettingsSection("participants")}

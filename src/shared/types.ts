@@ -1880,6 +1880,17 @@ export interface CompactChatParticipantRequest {
   chatThreadRootId?: string;
 }
 
+/** Restart a member's CLI process (the members list): its next turn starts a
+ *  new process that resumes the same session with the settings of then. */
+export interface RestartChatParticipantRequest {
+  conversationId: string;
+  participantId: string;
+  runId?: string;
+  /** The User agreed to stop the member's background tasks; without it a
+   *  member that has some is not restarted. */
+  stopBackgroundTasks?: boolean;
+}
+
 export interface RenameChatConversationRequest {
   conversationId: string;
   title: string;
@@ -2258,6 +2269,9 @@ export interface ReviewProgress {
   findingTitle?: string;
   completed?: number;
   total?: number;
+  /** A member's restart: the members list shows it (and a machine's wait)
+   *  on that member's row until it ends. */
+  memberRestart?: { participantId: string; waiting?: boolean };
   createdAt: string;
 }
 
@@ -3258,6 +3272,9 @@ export interface AppBridge {
   updateChatParticipantRuntime(request: UpdateChatParticipantRuntimeRequest): Promise<Conversation | undefined>;
   removeChatParticipant(request: RemoveChatParticipantRequest): Promise<Conversation | undefined>;
   compactChatParticipant(request: CompactChatParticipantRequest): Promise<StartReviewResult>;
+  /** The chat itself arrives as a snapshot update; nothing is returned, so a
+   *  large chat is not sent twice. */
+  restartChatParticipant(request: RestartChatParticipantRequest): Promise<void>;
   sendChatMessage(request: SendChatMessageRequest): Promise<StartReviewResult>;
   readChatAttachment(request: ReadChatAttachmentRequest): Promise<ReadChatAttachmentResult>;
   toggleChatReaction(request: ToggleChatReactionRequest): Promise<Conversation | undefined>;

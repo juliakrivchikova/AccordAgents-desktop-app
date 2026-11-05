@@ -1,3 +1,4 @@
+import type { MemberRestartInProgress } from "../../../shared/memberRestart";
 import React, { useState } from "react";
 import { ChevronLeft, ChevronRight, Plus, Users } from "lucide-react";
 
@@ -45,6 +46,11 @@ export interface ChatParticipantMenuViewProps {
     patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "skipToolchainPreflight" | "autoWatch">
   ) => void;
   onCompactParticipant: (participantId: string) => void;
+  onRestartParticipant: (participantId: string, stopBackgroundTasks: boolean) => Promise<boolean>;
+  /** Stops waiting for a restart (its run id). */
+  onStopRestart: (runId: string) => void;
+  /** Members whose restart has not ended. */
+  restartingById?: ReadonlyMap<string, MemberRestartInProgress>;
   onRemoveParticipant: (participantId: string) => void;
   onJumpToParticipantLastMessage: (participantId: string) => void;
   onManageInSettings: () => void;
@@ -164,6 +170,9 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                   onJumpToLastMessage={jumpToParticipantLastMessage}
                   onUpdateParticipantRuntime={props.onUpdateParticipantRuntime}
                   onCompactParticipant={props.onCompactParticipant}
+                  onRestartParticipant={props.onRestartParticipant}
+                  onStopRestart={props.onStopRestart}
+                  restartStatus={props.restartingById?.get(participant.id)}
                   onRemoveParticipant={props.onRemoveParticipant}
                 />
               ))}
