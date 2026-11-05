@@ -62,6 +62,8 @@ export interface ChatConversationViewProps {
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void | Promise<void>;
   onToggleReaction: (messageId: string, emoji: string) => void;
+  /** Takes a turn-finished note away. */
+  onDismissTurnFinishedNote?: (messageId: string) => void;
   onRespondToAppToolApproval: (
     approvalId: string,
     approve: boolean,

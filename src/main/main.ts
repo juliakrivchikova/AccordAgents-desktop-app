@@ -75,6 +75,7 @@ import type {
   SaveAgentEnvironmentVariableRequest,
   StartChatAccordRequest,
   ToggleChatReactionRequest,
+  DismissTurnFinishedNoteRequest,
   UpdateChatParticipantRuntimeRequest,
   RemoveChatParticipantRequest,
   UserSkillDiagnosticsRequest,
@@ -2537,6 +2538,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("chat:toggle-reaction", async (_event, request: ToggleChatReactionRequest) => {
     return chatService.toggleReaction(request);
+  });
+  ipcMain.handle("chat:dismiss-turn-finished-note", async (_event, request: DismissTurnFinishedNoteRequest) => {
+    await chatService.dismissTurnFinishedNote(request);
   });
   // Answers to cards a member waits on go to the User's server (agreement
   // Д9): the device the member runs on applies them, once, whichever device

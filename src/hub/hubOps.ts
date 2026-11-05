@@ -8,6 +8,7 @@ import { approvedMessageId, askNeedsApproval, changesMembers, keptApproval, mach
 import type { SavedMessageRow, StorageService } from "../main/services/storage";
 import type { HubDevice, HubMemberRules } from "../shared/hubProtocol";
 import { HUB_CARD_ANSWERED_FIRST } from "../shared/hubCards";
+import { TURN_FINISHED_NOTE_SOURCE, turnFinishedNoteOf } from "../shared/turnFinishedNoteSource";
 import {
   HUB_CHAT_PAGE_MESSAGES,
   HUB_FEED_PAGE_BYTES,
@@ -635,6 +636,16 @@ export class HubOps {
     // control word): never one the chat shows, or a member reads, as hers.
     if (device.role === "machine" && message.role === "user" && message.metadata?.hiddenFromTimeline !== true) {
       return { rejected: "A cloud machine writes the User's words only as a hidden answer for its own member." };
+    }
+    // A note that a member finished answering speaks for that member, so it
+    // comes from the device the member runs on, as the member's reply does.
+    if (message.role === "system" && message.metadata?.appMessageSource === TURN_FINISHED_NOTE_SOURCE) {
+      const note = turnFinishedNoteOf(message);
+      if (!note) return { rejected: "A turn-finished note names its member and the reply it leads to." };
+      if (homeDeviceId(conversation, note.participantId, devices) !== device.deviceId) {
+        return { rejected: "Only the device this member runs on writes that it finished answering." };
+      }
+      return undefined;
     }
     if (message.role !== "participant") return undefined;
     if (!message.participantId) return { rejected: "A member's message names its member." };

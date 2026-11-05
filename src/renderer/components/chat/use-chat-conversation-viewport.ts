@@ -8,8 +8,9 @@ import type { ChatMessageFocusRequest } from "./chat-conversation-types";
 import { measureRowAndRemember } from "./chat-timeline-row-clip";
 import { useAnchoredVirtualItems, useOlderMessagesTopUp } from "./chat-timeline-scroll";
 import { useChatFocusNavigation } from "./use-chat-focus-navigation";
+import type { ChatThreadSummary } from "./chat-thread-data";
 
-type ThreadSummaryMap = Map<string, { replies: Conversation["messages"]; latestReplyAt?: string }>;
+type ThreadSummaryMap = Map<string, Pick<ChatThreadSummary, "replies" | "latestReplyAt">>;
 
 // How long a roster-jump focus keeps retrying after its page load resolves. Bounds the
 // retry effect so an unreachable target (compacted/deleted message, or a thread reply whose

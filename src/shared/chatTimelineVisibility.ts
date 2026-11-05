@@ -1,4 +1,5 @@
 import { ARTIFACT_NOTE_MESSAGE_SOURCE } from "./artifacts";
+import { turnFinishedNoteOf } from "./turnFinishedNoteSource";
 import type { ChatMessage } from "./types";
 
 export function isParticipantRequestWaitingStatus(content: string): boolean {
@@ -24,6 +25,10 @@ export function isChatMessageHiddenFromTimeline(
   // Artifact notes are user-facing awareness messages ("@gera revised [Plan] · v3"),
   // not internal system context; keep them on the timeline.
   if (message.metadata?.appMessageSource === ARTIFACT_NOTE_MESSAGE_SOURCE) {
+    return false;
+  }
+  // So is the note that a member finished answering above the newest messages.
+  if (turnFinishedNoteOf(message)) {
     return false;
   }
   return options.showSystemMessages !== true;

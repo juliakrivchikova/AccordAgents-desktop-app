@@ -36,6 +36,8 @@ export function ChatThreadPanel(props: {
   activityDisclosure: ChatActivityDisclosureState;
   rootMessage: Conversation["messages"][number];
   replies: Conversation["messages"][number][];
+  /** The replies the thread's count names (not a turn-finished note). */
+  replyCount: number;
   participants: ChatParticipant[];
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
   conversationId?: string;
@@ -59,6 +61,7 @@ export function ChatThreadPanel(props: {
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void | Promise<void>;
   onToggleReaction: (messageId: string, emoji: string) => void;
+  onDismissTurnFinishedNote?: (messageId: string) => void;
   onCompactParticipant: ParticipantCompactHandler;
   onStopRun?: (runId: string) => void;
   continuedMentionRequestIds: Set<string>;
@@ -74,7 +77,7 @@ export function ChatThreadPanel(props: {
   ) => Promise<void>;
 }): JSX.Element {
   const mentionDirectory = chatMentionDirectory(props.participants, props.settings.chatRoleConfigs, props.sessionsByParticipant, props.contextUsageByParticipant);
-  const replyLabel = `${props.replies.length} ${props.replies.length === 1 ? "reply" : "replies"}`;
+  const replyLabel = `${props.replyCount} ${props.replyCount === 1 ? "reply" : "replies"}`;
   // Stable, so file links and images in the thread do not re-render on every chat update.
   const origin = useMemo(() => ({ threadRootId: props.rootMessage.id }), [props.rootMessage.id]);
   return (
@@ -112,6 +115,7 @@ export function ChatThreadPanel(props: {
           onRejectMentions={props.onRejectMentions}
           onRespondToChoice={props.onRespondToChoice}
           onToggleReaction={props.onToggleReaction}
+          onDismissTurnFinishedNote={props.onDismissTurnFinishedNote}
           onCompactParticipant={props.onCompactParticipant}
           onStopRun={props.onStopRun}
           onRespondToAppToolApproval={props.onRespondToAppToolApproval}
@@ -144,6 +148,7 @@ export function ChatThreadPanel(props: {
                 onRejectMentions={props.onRejectMentions}
                 onRespondToChoice={props.onRespondToChoice}
                 onToggleReaction={props.onToggleReaction}
+                onDismissTurnFinishedNote={props.onDismissTurnFinishedNote}
                 onCompactParticipant={props.onCompactParticipant}
                 onStopRun={props.onStopRun}
                 onRespondToAppToolApproval={props.onRespondToAppToolApproval}

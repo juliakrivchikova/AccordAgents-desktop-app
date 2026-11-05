@@ -4888,4 +4888,93 @@ button.composer-active-run-row-main:focus-visible {
 .chat-participant-restart-confirm-ok {
   border-color: var(--app-danger-border);
   color: var(--app-danger);
+
+/* Turn-finished note: at the end of the chat when a member's reply had other
+   messages below it once its turn ended. The artifact note's card and column;
+   the card leads back to the reply, the cross takes the note away. */
+.chat-turn-finished-note {
+  max-width: 560px;
+  margin: 0 0 18px 50px;
+}
+
+.chat-turn-finished-note-card {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 10px;
+  border-radius: 14px;
+  background: var(--chat-artifact-note-bg);
+}
+
+/* Lit when the part that leads to the reply is under the pointer, not when the
+   cross is: the cross has its own hover. */
+.chat-turn-finished-note-card:has(.chat-turn-finished-note-open:hover) {
+  background: var(--app-surface-hover);
+}
+
+.chat-turn-finished-note-open {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 4px 10px 10px;
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-turn-finished-note-open:focus-visible {
+  outline: 1px solid var(--app-focus-border);
+  outline-offset: 0;
+}
+
+.chat-turn-finished-note-avatar-slot {
+  display: flex;
+  flex: none;
+}
+
+.chat-turn-finished-note-avatar {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.chat-turn-finished-note-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.chat-turn-finished-note-title {
+  color: var(--app-text-secondary);
+  font-size: 13px;
+}
+
+/* The member's name is part of the card, so it takes the card's cursor. */
+.chat-turn-finished-note-title .chat-mention {
+  cursor: inherit;
+}
+
+.chat-turn-finished-note-title .message-when {
+  color: inherit;
+  font-size: inherit;
+}
+
+.chat-turn-finished-note-preview {
+  margin-top: 1px;
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-turn-finished-note-dismiss {
+  flex: none;
 }

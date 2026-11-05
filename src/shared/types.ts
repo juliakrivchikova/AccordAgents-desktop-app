@@ -1549,6 +1549,13 @@ export interface ChatServerCardMark {
   machineName: string;
 }
 
+/** The reply a turn-finished note points at, and the member who wrote it. */
+export interface ChatTurnFinishedNoteMetadata {
+  messageId: string;
+  participantId: string;
+  participantLabel: string;
+}
+
 export interface ChatMessageMetadata {
   /** A machine member could not start because the machine's copy of the
    *  project is gone: the computer that made the copy forgets it, so the
@@ -1636,6 +1643,10 @@ export interface ChatMessageMetadata {
   scriptId?: string;
   scriptName?: string;
   artifactEventId?: string;
+  /** On a turn-finished note (appMessageSource TURN_FINISHED_NOTE_SOURCE): the
+   *  member's reply it points at, which had other messages below it when the
+   *  turn ended. */
+  turnFinishedNote?: ChatTurnFinishedNoteMetadata;
   activityEvents?: ChatAgentActivityEvent[];
   processingTranscript?: ChatProcessingTranscript;
   remoteRunStatus?: ChatRemoteRunStatus;
@@ -1940,6 +1951,12 @@ export interface ToggleChatReactionRequest {
   conversationId: string;
   messageId: string;
   emoji: string;
+}
+
+/** Takes a turn-finished note away (its cross), on every device. */
+export interface DismissTurnFinishedNoteRequest {
+  conversationId: string;
+  messageId: string;
 }
 
 export type ChatImageMimeType = "image/png" | "image/jpeg" | "image/webp";
@@ -3278,6 +3295,7 @@ export interface AppBridge {
   sendChatMessage(request: SendChatMessageRequest): Promise<StartReviewResult>;
   readChatAttachment(request: ReadChatAttachmentRequest): Promise<ReadChatAttachmentResult>;
   toggleChatReaction(request: ToggleChatReactionRequest): Promise<Conversation | undefined>;
+  dismissTurnFinishedNote(request: DismissTurnFinishedNoteRequest): Promise<void>;
   respondToChatMentions(request: RespondToChatMentionsRequest): Promise<StartReviewResult>;
   respondToChatChoice(request: RespondToChatChoiceRequest): Promise<StartReviewResult>;
   respondToChatAppToolApproval(request: RespondToChatAppToolApprovalRequest): Promise<Conversation | undefined>;

@@ -87,9 +87,12 @@ export function focusRenderedMessage(
   return true;
 }
 
-function MessageLink({ messageId, label }: { messageId: string; label: string }): JSX.Element {
+/** How anything in the chat goes to a message: the chat scrolls to it and
+ *  marks it, loading older messages when it is far above; without a chat
+ *  view, the message on screen is scrolled to. */
+export function useFocusChatMessage(): (messageId: string) => void {
   const focusMessage = useContext(MessageLinkContext);
-  const activate = (): void => {
+  return (messageId) => {
     if (focusMessage?.(messageId) === true) {
       return;
     }
@@ -97,6 +100,11 @@ function MessageLink({ messageId, label }: { messageId: string; label: string })
       focusRenderedMessage(document, messageId);
     }
   };
+}
+
+function MessageLink({ messageId, label }: { messageId: string; label: string }): JSX.Element {
+  const focusMessage = useFocusChatMessage();
+  const activate = (): void => focusMessage(messageId);
 
   return (
     <a

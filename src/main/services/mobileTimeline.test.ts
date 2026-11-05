@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { timelineEventsFromSnapshot } from "./mobileTimeline";
+import { mobileWhoLabel } from "./mobileChatCatalog";
 import type { Conversation } from "../../shared/types";
 
 // What the User's server serves the phone as a chat's page (mobileChatCatalog
@@ -346,4 +347,25 @@ test("the phone's chat list counts a turn in progress that started before the ch
   assert.equal(seen[0].activity?.[0]?.id, "long-turn");
   assert.equal(seen[0].activity?.[0]?.status, "pending");
   assert.equal(seen[0].snippet, "post 9", "the last line is still the newest message");
+});
+
+test("a turn-finished note travels to the phone with the reply it leads to, and the chat list names its member", () => {
+  const note = {
+    id: "turn-finished-reply", role: "system" as const, content: "Done: the button fits.", status: "done" as const,
+    createdAt: "2026-11-04T20:44:00Z",
+    metadata: { appMessageSource: "app_turn_finished_note", turnFinishedNote: { messageId: "reply", participantId: "p-taylor", participantLabel: "@taylor" } }
+  };
+  const conversation: Conversation = {
+    id: "note-chat", kind: "chat", title: "Notes", createdAt: "2026-11-04T20:40:00Z", updatedAt: "2026-11-04T20:44:00Z", findings: [], metadata: {},
+    messages: [
+      { id: "reply", role: "participant", participantId: "p-taylor", participantLabel: "@taylor", content: "Done: the button fits.", status: "done", createdAt: "2026-11-04T20:40:00Z" },
+      { id: "hidden-system", role: "system", content: "Auto-resumed @taylor.", status: "done", createdAt: "2026-11-04T20:43:00Z" },
+      note
+    ]
+  };
+  const events = timelineEventsFromSnapshot(conversation);
+  assert.deepEqual(events.map((event) => event.id), ["reply", "turn-finished-reply"], "a note is the one system message besides artifact notes that travels");
+  assert.deepEqual(events[1].finishedNote, { messageId: "reply", participantId: "p-taylor", participantLabel: "@taylor" });
+  assert.equal(mobileWhoLabel(note), "taylor:");
+  assert.equal(mobileWhoLabel({ ...note, metadata: { ...note.metadata, turnFinishedNote: { ...note.metadata.turnFinishedNote, participantLabel: "" } } }), "system:");
 });

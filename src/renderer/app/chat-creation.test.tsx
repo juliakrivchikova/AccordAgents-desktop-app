@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import type { Conversation, ReviewProgress, StartReviewResult } from "../../shared/types";
+import type { ChatActivityItem, ChatMessage, Conversation, ReviewProgress, StartReviewResult } from "../../shared/types";
 import { useAppState, type AppState } from "./app-state";
 import { DEFAULT_SETTINGS } from "./constants";
 import { useAppEffects } from "./use-app-effects";
@@ -249,5 +249,60 @@ test("a chat opened from the sidebar while the new chat is being created stays o
   await act(async () => { h.creation.resolve({ conversation: conversation(), warnings: [] }); });
   await act(async () => { h.sent.resolve({ conversation: conversation(), warnings: [] }); assert.equal(await pending, true); });
   assert.equal(h.state().conversation?.id, "other");
+  await act(async () => { h.renderer.unmount(); });
+});
+
+/** A member's answer to a choice card on the main timeline follows the User's
+ *  hidden pick; Activity's "Open in chat" for it lands on the card. */
+function choiceAnswerChat(messages: ChatMessage[]): Conversation {
+  return { ...conversation(), id: "choice-chat", messages };
+}
+const choiceAt = "2026-11-04T19:00:00.000Z";
+const choiceAsk: ChatMessage = { id: "ask", role: "user", content: "@taylor which store?", createdAt: choiceAt, status: "done" };
+const choiceCard: ChatMessage = { id: "card", role: "participant", participantId: "taylor", content: "Pick one.", createdAt: choiceAt, status: "done",
+  metadata: { threadId: "ask", parentMessageId: "ask", sourceMessageId: "ask",
+    pendingChoice: { id: "c", title: "Store", question: "Which?", options: [{ id: "a", label: "A" }], status: "selected" } } };
+// As ChatService.respondToChoice writes it: the card's threadId (its chain), the card as parent.
+const choicePick: ChatMessage = { id: "pick", role: "user", content: "Choice selected.", createdAt: choiceAt, status: "done",
+  metadata: { threadId: "ask", parentMessageId: "card", sourceMessageId: "card", hiddenFromTimeline: true } };
+const choiceReply: ChatMessage = { id: "reply", role: "participant", participantId: "taylor", content: "Going with A.", createdAt: choiceAt, status: "done",
+  metadata: { parentMessageId: "pick", sourceMessageId: "pick", approvedContinuation: true } };
+const choiceReplyItem = {
+  id: "recent:choice-chat:reply", conversationId: "choice-chat", conversationTitle: "hello", status: "recent", kind: "message",
+  title: "@taylor recently finished", preview: "Going with A.", createdAt: choiceAt, updatedAt: choiceAt,
+  // As Activity names it: the reply, in the "thread" of its parent, the hidden pick.
+  target: { messageId: "reply", threadRootId: "pick" }
+} as ChatActivityItem;
+
+async function openChoiceReplyInChat(pages: Record<string, ChatMessage[]>) {
+  // The focus commits on the next frame; jsdom alone has no frames.
+  const frames = globalThis as unknown as { requestAnimationFrame?: (callback: FrameRequestCallback) => number };
+  frames.requestAnimationFrame ??= (callback) => setTimeout(() => callback(Date.now()), 0) as unknown as number;
+  const h = await harness();
+  const asked: string[] = [];
+  (window.consensus as unknown as { listConversationMessages: unknown }).listConversationMessages =
+    async (request: { aroundMessageId?: string }) => {
+      asked.push(request.aroundMessageId ?? "");
+      const messages = pages[request.aroundMessageId ?? ""] ?? [];
+      return { messages, hasMoreBefore: false, totalMessages: 3, oldestSequence: messages.length ? 0 : undefined, newestSequence: messages.length ? 0 : undefined };
+    };
+  await act(async () => { h.state().setConversation(choiceAnswerChat([choiceAsk, choicePick, choiceReply])); });
+  await act(async () => { await h.navigation().openConversationAndFocusActivityItem(choiceReplyItem, { timelineOnly: true }); });
+  return { h, asked };
+}
+
+test("Open in chat for a member's answer to a main-timeline card lands on the card, read when not loaded", async () => {
+  const { h, asked } = await openChoiceReplyInChat({ card: [choiceCard] });
+  assert.equal(h.state().chatMessageFocusRequest?.messageId, "card");
+  assert.equal(h.state().chatMessageFocusRequest?.pending, undefined, "the focus is committed, not left waiting");
+  assert.deepEqual(asked, ["card"], "only the card is read; the hidden pick was already loaded");
+  assert.equal(h.state().activityFocusError, undefined);
+  await act(async () => { h.renderer.unmount(); });
+});
+
+test("Open in chat whose card cannot be read lands on the answer itself, with no error", async () => {
+  const { h } = await openChoiceReplyInChat({});
+  assert.equal(h.state().chatMessageFocusRequest?.messageId, "reply");
+  assert.equal(h.state().activityFocusError, undefined);
   await act(async () => { h.renderer.unmount(); });
 });

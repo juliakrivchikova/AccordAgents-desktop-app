@@ -10,6 +10,7 @@ import type { HubCard } from "../shared/hubOps";
 import { controlCardFromChoiceMessage, controlCardFromHubCard, type MobileControlCard } from "../shared/mobileControlCards";
 import { MOBILE_CHAT_LIST_LIMIT, buildMobileChatList, buildMobileTimelinePage, mobileChatMembers } from "../main/services/mobileChatCatalog";
 import { timelineEventsFromSnapshot, type MobileChatListItem, type MobileTimelineEvent, type MobileTimelineTurn } from "../main/services/mobileTimeline";
+import { TURN_FINISHED_NOTE_ID_PREFIX, TURN_FINISHED_NOTE_REMOVALS_PER_PAGE } from "../shared/turnFinishedNote";
 import type { StorageService } from "../main/services/storage";
 import { liveTimelineEvents, scopeCovers, type HubProgress, type HubWaker } from "./hubPhoneState";
 /**
@@ -393,6 +394,10 @@ export class HubPhoneApi {
         events: await this.withTurns(conversationId, page.events, conversation.messages),
         // The newest page states the chat's cards, as the desktop's did.
         ...(before ? {} : { cards: await this.cards(conversationId, conversation) }),
+        // And the turn-finished notes the User took away on any device, so
+        // the copy the phone keeps of them goes too.
+        ...(before ? {} : { removedNoteIds: await this.options.store.hubOps().recentRemovedIds(
+          conversationId, TURN_FINISHED_NOTE_ID_PREFIX, TURN_FINISHED_NOTE_REMOVALS_PER_PAGE) }),
         page: {
           hasMoreBefore: page.hasMoreBefore,
           ...(page.beforeMessageId ? { beforeMessageId: page.beforeMessageId } : {}),

@@ -100,6 +100,7 @@ export function ConversationPanel({
           }
           onRespondToChoice={(sourceMessageId, choiceId, response) => chatActions.respondToChatChoice(sourceMessageId, choiceId, response)}
           onToggleReaction={(messageId, emoji) => void chatActions.toggleChatReaction(messageId, emoji)}
+          onDismissTurnFinishedNote={(messageId) => void chatActions.dismissTurnFinishedNote(messageId)}
           onRespondToAppToolApproval={chatActions.respondToChatAppToolApproval}
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
           setRepoFileExternalOpenPreference={settingsActions.setRepoFileExternalOpenPreference}

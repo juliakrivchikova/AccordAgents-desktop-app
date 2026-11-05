@@ -13,6 +13,7 @@
     "src/renderer/components/chat/chat-active-run-popover.test.tsx",
     "src/renderer/components/chat/chat-activity-groups.test.tsx",
     "src/renderer/components/chat/chat-artifact-note-card.test.tsx",
+    "src/renderer/components/chat/chat-turn-finished-note.test.tsx",
     "src/renderer/components/chat/chat-activity-harness.test.tsx",
     "src/renderer/components/chat/chat-activity-rendering.test.tsx",
     "src/renderer/components/chat/chat-composer-mention-token.test.ts",
@@ -38,6 +39,7 @@
     "src/renderer/components/shell/chat-search.test.tsx",
     "src/renderer/components/shell/sidebar-nav.test.tsx",
     "src/renderer/app/use-app-navigation.test.ts",
+    "src/renderer/app/activity-timeline-anchor.test.ts",
     "src/renderer/app/app-notices.test.tsx",
     "src/preload/global.d.ts"
   ],

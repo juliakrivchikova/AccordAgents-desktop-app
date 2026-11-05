@@ -55,6 +55,7 @@ export interface ChatActions {
   sendChatMessage: (options?: SendChatMessageOptions) => Promise<boolean>;
   respondToChatMentions: (sourceMessageId: string, targetParticipantIds: string[], approve: boolean, continueRequester?: boolean) => Promise<void>;
   toggleChatReaction: (messageId: string, emoji: string) => Promise<void>;
+  dismissTurnFinishedNote: (messageId: string) => Promise<void>;
   respondToChatChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => Promise<void>;
   addChatParticipant: () => Promise<void>;
   addSavedChatParticipant: (config: ChatParticipantConfig) => Promise<void>;
@@ -429,6 +430,18 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
   }
 
+  // The note goes from the chat on every device: the main process removes it
+  // and the chat's next update shows it gone.
+  async function dismissTurnFinishedNote(messageId: string): Promise<void> {
+    if (!state.conversation || state.conversation.kind !== "chat") return;
+    state.setError(undefined);
+    try {
+      await window.consensus.dismissTurnFinishedNote({ conversationId: state.conversation.id, messageId });
+    } catch (caught) {
+      state.setError(errorText(caught));
+    }
+  }
+
   async function respondToChatChoice(sourceMessageId: string, choiceId: string, response: ChatChoiceResponse): Promise<void> {
     await runBusyChatAction("Choice response cancelled.", async (runId) => {
       const openRequest = state.openConversationRequestRef.current;
@@ -649,7 +662,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
 
   return {
     startChat, renameChatConversation, setChatArchived, deleteChatConversation, sendChatMessage, respondToChatMentions,
-    toggleChatReaction, respondToChatChoice, addChatParticipant, addSavedChatParticipant,
+    toggleChatReaction, dismissTurnFinishedNote, respondToChatChoice, addChatParticipant, addSavedChatParticipant,
     updateChatParticipantRuntime, removeChatParticipant, compactChatParticipant, restartChatParticipant, startChatAccord, respondToChatAppToolApproval
   };
 }

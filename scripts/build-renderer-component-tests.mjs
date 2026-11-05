@@ -17,6 +17,7 @@ await build({
     "renderer/components/cloud-provider-auth.test.tsx",
     "renderer/components/avatar/avatar-studio-dialog.test.tsx",
     "renderer/components/chat/chat-artifact-note-card.test.tsx",
+    "renderer/components/chat/chat-turn-finished-note.test.tsx",
     "renderer/components/chat/chat-composer-mention-token.test.ts",
     "renderer/components/chat/chat-composer-plugin-token.test.ts",
     "renderer/components/chat/chat-participant-drafts.test.ts",
@@ -50,6 +51,7 @@ await build({
     "renderer/components/shell/sidebar-nav.test.tsx",
     "renderer/app/use-app-navigation.test.ts",
     "renderer/app/running-participant-target.test.ts",
+    "renderer/app/activity-timeline-anchor.test.ts",
     "renderer/app/conversation-summaries.test.ts",
     "renderer/app/app-notices.test.tsx"
   ].map((entry) => path.join(sourceRoot, entry)),
