@@ -400,3 +400,11 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void
   }
   throw new Error("Timed out waiting for the condition.");
 }
+
+test("a session goes to every folder its member may run in as one file, not copies", async () => {
+  const projects = await tempDir();
+  const placed = await placeClaudeTranscript(projects, ["/Users/me/proj", "/Users/me/Library/AccordAgents/chats/c1"], "sess-1", TRANSCRIPT);
+  const linked = path.join(projects, "-Users-me-Library-AccordAgents-chats-c1", "sess-1.jsonl");
+  const { stat } = await import("node:fs/promises");
+  assert.equal((await stat(placed)).ino, (await stat(linked)).ino, "a large session takes its space once, and the CLI appends to the one session");
+});

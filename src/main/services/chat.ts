@@ -3382,13 +3382,24 @@ export class ChatService {
       // (The chat's folder is named, not written: ensureHistoryFiles writes
       // its history for the turn.)
       const folders = [...new Set([conversation.repoPath, path.join(userDataPath(), "chats", conversation.id)].filter((item): item is string => Boolean(item)))];
-      for (const folder of folders) await placeClaudeTranscript(projectsDir, folder, handoff.sessionId, unpacked.transcript);
+      await placeClaudeTranscript(projectsDir, folders, handoff.sessionId, unpacked.transcript);
       // A process an older session of it left here would answer from that one.
       await runner.closeWarmAgents?.call(this.cliRunner, conversation.id, participant.id, "member-moved").catch(() => undefined);
+      // This device's own record of the member (its mode, permissions,
+      // provider, model), with only what belongs to the session from the
+      // one it left: which session, how far the chat reached it, and the
+      // role it was given, so a changed role is sent again.
+      const local = await this.newSessionForParticipant(participant);
+      const moved = unpacked.session;
       taken = {
-        ...unpacked.session,
-        participantId: participant.id,
-        executionSessionId: randomUUID(),
+        ...local,
+        sessionId: handoff.sessionId,
+        ...(typeof moved.lastSyncedMessageId === "string" ? { lastSyncedMessageId: moved.lastSyncedMessageId } : {}),
+        ...(typeof moved.roleConfigId === "string" && moved.roleConfigId === local.roleConfigId && typeof moved.roleConfigVersion === "number"
+          ? { roleConfigVersion: moved.roleConfigVersion } : {}),
+        ...(typeof moved.roleInstructions === "string" ? { roleInstructions: moved.roleInstructions } : {}),
+        ...(typeof moved.roleLabel === "string" ? { roleLabel: moved.roleLabel } : {}),
+        ...(Array.isArray(moved.participantBehaviorRules) ? { participantBehaviorRules: moved.participantBehaviorRules } : {}),
         importedHandoff: handoff.blob.blobHash,
         updatedAt: new Date().toISOString()
       };
@@ -3427,31 +3438,31 @@ export class ChatService {
     void this.debugLogs.write("chat.member-move.taken", { conversationId: conversation.id, participantId: participant.id, taken: Boolean(taken), bytes: handoff.blob.byteLength });
   }
 
-  /** Desktop: a session handed to a member's machine is let go once that
-   *  machine answered as the member after the handoff (it took it first). */
-  private async clearTakenSessionHandoffs(conversationId: string): Promise<void> {
-    if (this.machineRuntime) return;
-    const conversation = await this.storage.getConversation(conversationId);
-    if (!conversation || conversation.kind !== "chat") return;
-    const answered = (member: ChatParticipant): boolean => {
+  /** Desktop: the members whose session was handed to their machine and
+   *  that machine has since answered as them (it took the session first). */
+  private takenSessionHandoffs(conversation: Conversation): string[] {
+    if (this.machineRuntime) return [];
+    const waiting = this.chatParticipants(conversation).filter((member) => member.sessionHandoff && member.homeMachineId);
+    if (waiting.length === 0) return [];
+    return waiting.filter((member) => {
       const at = member.sessionHandoff?.at ?? "";
       return conversation.messages.some((message) => message.createdAt > at && (
         (message.role === "participant" && message.participantId === member.id && message.status === "done") ||
         (message.role === "system" && message.metadata?.compaction?.participantId === member.id && message.metadata.compaction.outcome === "completed")
       ));
-    };
-    const due = this.chatParticipants(conversation).filter((member) => member.sessionHandoff && member.homeMachineId && answered(member));
-    if (due.length === 0) return;
-    const ids = new Set(due.map((member) => member.id));
+    }).map((member) => member.id);
+  }
+
+  /** Desktop: lets go of those sessions on the User's server. */
+  private async clearTakenSessionHandoffs(conversation: Conversation): Promise<void> {
     await this.withChatMutation(conversation, async () => {
-      let changed = false;
+      const due = new Set(this.takenSessionHandoffs(conversation));
+      if (due.size === 0) return;
       conversation.metadata.participants = this.chatParticipants(conversation).map((item) => {
-        if (!ids.has(item.id) || !item.sessionHandoff || !item.homeMachineId || !answered(item)) return item;
-        changed = true;
+        if (!due.has(item.id)) return item;
         const { sessionHandoff: _taken, ...rest } = item;
         return rest;
       });
-      if (!changed) return;
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
     });
@@ -22337,7 +22348,7 @@ export class ChatService {
     // server, and are this device's now.
     if (this.membersArrivedHere(previousHomes, target)) void this.resumeServerTurns().catch(() => undefined);
     // A session handed to a machine that has since answered as the member.
-    if (!this.machineRuntime) void this.clearTakenSessionHandoffs(conversationId).catch(() => undefined);
+    if (!this.machineRuntime && this.takenSessionHandoffs(target).length > 0) void this.clearTakenSessionHandoffs(target).catch(() => undefined);
     // A member this device runs that the chat no longer has (removed on any
     // device) ends its process here, as a local member's does.
     this.retireRemovedMembers(conversationId, dropped);

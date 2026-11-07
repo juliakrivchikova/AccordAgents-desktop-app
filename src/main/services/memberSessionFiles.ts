@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, link, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -55,15 +55,16 @@ export async function findClaudeTranscript(projectsDir: string, sessionId: strin
 }
 
 /** Puts a session's transcript where the CLI looks for it when it runs in
- *  `cwd`, replacing an older copy there. Written whole or not at all. */
-export async function placeClaudeTranscript(projectsDir: string, cwd: string, sessionId: string, transcript: Buffer): Promise<string> {
+ *  `cwd` (the first folder), replacing an older copy there; written whole or
+ *  not at all. Further folders it may run in get the same file as a hard
+ *  link, so a large session takes its space once and stays one session. */
+export async function placeClaudeTranscript(projectsDir: string, cwd: string | readonly string[], sessionId: string, transcript: Buffer): Promise<string> {
   if (!isSafeSessionId(sessionId)) throw new Error("the session's id is not one Claude Code writes");
-  const folder = claudeProjectFolderName(cwd) ?? await existingLongFolder(projectsDir, cwd);
-  if (!folder) throw new Error("the folder it runs in has a path too long for Claude Code to find a moved session there");
-  const dir = path.join(projectsDir, folder);
-  await mkdir(dir, { recursive: true });
-  const file = path.join(dir, `${sessionId}.jsonl`);
-  const temporary = path.join(dir, `.${sessionId}.${randomUUID()}.moving`);
+  const [first, ...others] = typeof cwd === "string" ? [cwd] : [...new Set(cwd)];
+  if (!first) throw new Error("there is no folder it runs in");
+  const file = await transcriptPathFor(projectsDir, first, sessionId);
+  await mkdir(path.dirname(file), { recursive: true });
+  const temporary = path.join(path.dirname(file), `.${sessionId}.${randomUUID()}.moving`);
   try {
     await writeFile(temporary, transcript, { mode: 0o600 });
     await rename(temporary, file);
@@ -71,7 +72,20 @@ export async function placeClaudeTranscript(projectsDir: string, cwd: string, se
     await rm(temporary, { force: true }).catch(() => undefined);
     throw error;
   }
+  for (const other of others) {
+    const target = await transcriptPathFor(projectsDir, other, sessionId).catch(() => undefined);
+    if (!target || target === file) continue;
+    await mkdir(path.dirname(target), { recursive: true });
+    await rm(target, { force: true });
+    await link(file, target).catch(() => copyFile(file, target));
+  }
   return file;
+}
+
+async function transcriptPathFor(projectsDir: string, cwd: string, sessionId: string): Promise<string> {
+  const folder = claudeProjectFolderName(cwd) ?? await existingLongFolder(projectsDir, cwd);
+  if (!folder) throw new Error("the folder it runs in has a path too long for Claude Code to find a moved session there");
+  return path.join(projectsDir, folder, `${sessionId}.jsonl`);
 }
 
 /** A long folder the CLI already made for this directory (its hash is its
