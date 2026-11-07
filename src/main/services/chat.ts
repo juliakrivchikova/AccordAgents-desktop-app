@@ -289,6 +289,8 @@ import { NativeProcessUnavailableError } from "./nativeProcess";
 import { normalizeAutoChatTitle, normalizeManualChatTitle, sanitizeAutoChatTitleSuggestion } from "../../shared/chatTitles";
 import {
   agentReadinessReason,
+  assistantSubstituteNote,
+  NO_READY_CLI_MESSAGE,
   cliProviderMetadata,
   providerEnabled,
   readinessForParticipant,
@@ -1709,24 +1711,23 @@ export class ChatService {
         ...(machineReason ? { machineUnavailable: machineReason } : {}), ...(projects ? { projects } : {}) });
     }
     const { projects, defaultProject } = newChatProjects(summaries, settings.lastRepoPath);
+    const assistantNote = assistantSubstituteNote({ agents, providers: settings.providers, explicitKind: settings.assistantProviderKind });
     return {
       projects,
       ...(defaultProject ? { defaultProject } : {}),
       assistant: { ...assistant, id: CHAT_ADMINISTRATOR_ROLE_ID },
       members,
-      ...(unavailable ? { unavailable } : {})
+      ...(unavailable ? { unavailable } : {}),
+      ...(assistantNote ? { assistantNote } : {})
     };
   }
 
   /** Why this computer starts no chat now, in the words its New chat uses;
    *  undefined when it can. */
   private newChatBlockedReason(agents: AgentHealth[], settings: AppSettings, assistantKind: ChatProviderKind | undefined): string | undefined {
-    if (readyProviderKinds(agents, settings.providers).length === 0) return "Set up and sign in to at least one CLI provider before creating a chat.";
-    if (assistantKind) return undefined;
-    const savedKind = settings.assistantProviderKind;
-    if (!savedKind) return "Could not initialize an Assistant provider. Check General Settings and try again.";
-    const label = cliProviderMetadata(savedKind).label;
-    return `${agentReadinessReason(readinessForProvider(savedKind, agents, settings.providers), label) ?? `${label} is not ready.`} Change the Assistant provider in General Settings.`;
+    // A saved Assistant CLI that is not ready gives way to a ready one
+    // (resolveAssistantProviderKind): only no ready CLI at all stops a chat.
+    return readyProviderKinds(agents, settings.providers).length === 0 || !assistantKind ? NO_READY_CLI_MESSAGE : undefined;
   }
 
   private seededParticipantInputs(
@@ -12240,7 +12241,7 @@ export class ChatService {
       explicitKind: settings.assistantProviderKind
     });
     if (!kind) {
-      throw new Error("The saved Assistant provider is not ready. Change it in General Settings.");
+      throw new Error(NO_READY_CLI_MESSAGE);
     }
     return kind;
   }

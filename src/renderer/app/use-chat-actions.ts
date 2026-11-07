@@ -41,9 +41,8 @@ import { cleanIpcError } from "../lib/ipc-error";
 import { serializeComposerDraft } from "../components/chat/chat-composer-draft-utils";
 import { revokePendingImageUrls } from "../components/chat/use-chat-composer-images";
 import {
-  cliProviderMetadata,
   isAgentSnapshotStale,
-  readinessForProvider,
+  NO_READY_CLI_MESSAGE,
   resolveAssistantProviderKind
 } from "../../shared/cliReadiness";
 
@@ -118,6 +117,9 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       providers: state.settings.providers,
       explicitKind: state.settings.assistantProviderKind
     });
+    // The Assistant's CLI the screen showed: settings made for it in the
+    // member list do not carry over to another one.
+    const shownAssistantKind = resolveProvider(state.agents);
     let agents = state.agents;
     if (isAgentSnapshotStale(agents)) {
       try {
@@ -129,17 +131,13 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
     const assistantProviderKind = resolveProvider(agents);
     if (!assistantProviderKind) {
-      const savedKind = state.settings.assistantProviderKind;
-      if (savedKind) {
-        const label = cliProviderMetadata(savedKind).label;
-        const readiness = readinessForProvider(savedKind, agents, state.settings.providers);
-        state.setError(`${label} is ${readiness === "disabled" ? "disabled" : "not ready"}. Change the Assistant provider in General Settings.`);
-      } else {
-        state.setError("Could not initialize an Assistant provider. Check General Settings and try again.");
-      }
+      // The saved Assistant CLI gives way to any ready one: none is ready.
+      state.setError(NO_READY_CLI_MESSAGE);
       return false;
     }
-    const assistantRuntimeOverride = state.selectedChatParticipantRuntimeOverrides[NEW_CHAT_ASSISTANT_PARTICIPANT_ID];
+    const assistantRuntimeOverride = assistantProviderKind === shownAssistantKind
+      ? state.selectedChatParticipantRuntimeOverrides[NEW_CHAT_ASSISTANT_PARTICIPANT_ID]
+      : undefined;
     const participants = [
       ...(hasChatParticipantRuntimeOverride(assistantRuntimeOverride)
         ? [newChatAssistantParticipantDraft(assistantProviderKind, assistantRuntimeOverride)]

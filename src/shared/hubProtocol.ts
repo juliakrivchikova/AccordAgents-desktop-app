@@ -304,6 +304,9 @@ export interface HubNewChatOptions {
   members: NewChatMemberOption[];
   /** Why no chat can be started now, in the computer's words. */
   unavailable?: string;
+  /** When the Assistant runs on another CLI than the one saved in Settings
+   *  (that one is not ready), the line the computer's New chat shows. */
+  assistantNote?: string;
 }
 
 /** PUT /v1/member-rules (owner only): the User's rules for what a member may

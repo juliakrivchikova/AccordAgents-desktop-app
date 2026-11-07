@@ -3636,11 +3636,14 @@
       }
     }
     const blocked = !offer ? note : offer.unavailable;
-    const shown = note || blocked;
+    // The Assistant on another CLI than the one saved in Settings: said, as
+    // the computer's New chat says it, and nothing is blocked.
+    const assistantNote = !note && !blocked && offer && offer.assistantNote ? offer.assistantNote : "";
+    const shown = note || blocked || assistantNote;
     if (noteNode) {
       noteNode.textContent = shown || "";
       noteNode.hidden = !shown;
-      if (newChatReading && !newChatReadingAgain && !offer) noteNode.dataset.tone = "info";
+      if ((newChatReading && !newChatReadingAgain && !offer) || assistantNote) noteNode.dataset.tone = "info";
       else delete noteNode.dataset.tone;
     }
     const hasMessage = Boolean(input && input.value.trim()) || newChatAttachments.length > 0;

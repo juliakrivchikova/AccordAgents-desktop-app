@@ -2135,6 +2135,27 @@ export interface AgentHealth {
   appSkillSync?: AppSkillSyncHealth;
 }
 
+/** A CLI whose own sign-in the app can start on this computer. Antigravity
+ *  has no sign-in command; it is signed in from its own app. */
+export type CliSignInKind = Extract<ChatProviderKind, "claude-code" | "codex-cli">;
+export type CliSignInStatus = "starting" | "waiting" | "checking-code" | "succeeded" | "failed" | "cancelled";
+
+/** One sign-in the CLI runs on this computer. The CLI opens the browser and
+ *  keeps the credentials; the app only starts it and shows where it is. */
+export interface CliSignInState {
+  kind: CliSignInKind;
+  requestId: string;
+  status: CliSignInStatus;
+  /** Higher is newer; an update with a lower revision is stale. */
+  revision: number;
+  /** The page the CLI printed for when the browser did not open. */
+  pageUrl?: string;
+  /** That page ends with a code the CLI reads back (Claude's). */
+  pageGivesCode?: boolean;
+  /** Why it failed, in the CLI's words when it said. */
+  message?: string;
+}
+
 export type AgentDetectionState = "detected" | "not-detected" | "unknown";
 export type AgentPlatform = "darwin" | "linux" | "win32" | "other";
 export type AgentRunnableState = "ready" | "failed" | "unknown";
@@ -3274,6 +3295,13 @@ export interface AppBridge {
   updateLastRepoPath(repoPath: string): Promise<AppSettings>;
   listProviderModels(kind: ProviderKind): Promise<ProviderModelCatalog>;
   detectAgents(request?: AgentDetectionRequest): Promise<AgentHealth[]>;
+  /** Runs the CLI's own sign-in on this computer (`claude auth login`,
+   *  `codex login`); a second start while one runs returns that one. */
+  startCliSignIn(kind: CliSignInKind): Promise<CliSignInState>;
+  listCliSignIns(): Promise<CliSignInState[]>;
+  submitCliSignInCode(request: { requestId: string; code: string }): Promise<void>;
+  cancelCliSignIn(requestId: string): Promise<void>;
+  onCliSignInUpdated(callback: (state: CliSignInState) => void): () => void;
   openTerminal(): Promise<void>;
   /** The terminal panel. Output and input go over a MessagePort the window
    *  gets after connectTerminals(); these only manage the terminals. */

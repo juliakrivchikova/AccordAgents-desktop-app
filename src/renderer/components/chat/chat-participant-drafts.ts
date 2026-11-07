@@ -33,6 +33,7 @@ import {
   cliProviderHostForParticipant
 } from "../../../shared/cliProviderHosts";
 import {
+  NO_READY_CLI_MESSAGE,
   readyProviderKinds
 } from "../../../shared/cliReadiness";
 import { participantOptionInvalidReason, validateChatCliAgents } from "./chat-cli-readiness";
@@ -649,7 +650,7 @@ export function validateChatStartupDrafts(
       return "Chat Assistant role is required to start an empty chat.";
     }
     if (readyProviderKinds(agents, providers).length === 0) {
-      return "Set up and sign in to at least one CLI provider to start a chat.";
+      return NO_READY_CLI_MESSAGE;
     }
     return undefined;
   }

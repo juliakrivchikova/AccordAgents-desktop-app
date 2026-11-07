@@ -211,7 +211,7 @@ test("could-not-verify offers recovery without claiming sign-in is required", as
   assert.match(textOf(card), /Could not verify/);
   assert.equal(card.props.className.includes("is-expanded"), true);
   const expanded = textOf(renderer.root.findByProps({ "data-provider-kind": "codex-cli" }));
-  assert.match(expanded, /Try sign-in.*codex login/);
+  assert.match(expanded, /Try signing in.*Sign in.*codex login/);
   assert.doesNotMatch(expanded, /Sign-in required/);
   assert.equal(Boolean(findButton(renderer.root.findByProps({ "data-provider-kind": "codex-cli" }), "Open Terminal")), true);
   assert.equal(Boolean(findButton(renderer.root.findByProps({ "data-provider-kind": "codex-cli" }), "Official guide")), true);
@@ -332,7 +332,7 @@ test("renderer provider preview uses Codex priority when no default is stored", 
     agents,
     providers: disabledProviders,
     explicitKind: "claude-code"
-  }), undefined);
+  }), "codex-cli");
 });
 
 function missing(kind: AgentHealth["kind"], label: string): AgentHealth {

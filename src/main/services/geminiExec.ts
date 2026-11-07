@@ -21,7 +21,12 @@ export const GEMINI_MCP_TOKEN_ENV = "ACCORD_AGENTS_MCP_TOKEN";
 export interface GeminiExecAppMcpOptions {
   url: string;
   token: string;
+  /** The app tools this run exposes; agy is told to allow each. */
+  toolNames?: string[];
 }
+
+/** The MCP server name the app's tools are under in agy's config. */
+export const GEMINI_APP_MCP_SERVER = "accord_agents";
 
 export interface GeminiExecOptions {
   sessionId?: string;
@@ -33,11 +38,23 @@ export interface GeminiExecOptions {
   // App-MCP url/token) always take precedence over entries here.
   extraEnv?: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  /** The User's own agy settings, so the session settings that allow the
+   *  app's tools never drop her rules (geminiUserSettings). */
+  userSettings?: GeminiUserSettings;
+  /** Where the run's session settings file goes (in the run's own folder);
+   *  without one they travel inline. */
+  settingsPath?: string;
 }
+
+/** What the app could read of agy's settings.json: its `permissions`, or that
+ *  it could not be read, in which case the app adds no session settings. */
+export type GeminiUserSettings = { readable: true; permissions?: Record<string, unknown> } | { readable: false };
 
 export interface GeminiExecInvocation {
   args: string[];
   env?: NodeJS.ProcessEnv;
+  /** Session settings to write to options.settingsPath before the run. */
+  settings?: Record<string, unknown>;
 }
 
 export interface GeminiInteractiveGoalInvocation extends GeminiExecInvocation {
@@ -106,10 +123,15 @@ export function buildGeminiExecInvocation(request: BuildGeminiExecInvocationRequ
     // contract for file tools.
     args.push("--sandbox");
   }
+  const settings = mode === "auto" || permissions.workspaceWrite ? undefined : geminiAppToolSettings(options);
+  if (settings) {
+    args.push("--settings", options.settingsPath ?? JSON.stringify(settings));
+  }
 
   return {
     args,
-    env: geminiInvocationEnv(options)
+    env: geminiInvocationEnv(options),
+    ...(settings ? { settings } : {})
   };
 }
 
@@ -140,11 +162,87 @@ export function buildGeminiInteractiveGoalInvocation(
   } else {
     args.push("--sandbox");
   }
+  const settings = mode === "auto" || permissions.workspaceWrite ? undefined : geminiAppToolSettings(options);
+  if (settings) {
+    args.push("--settings", options.settingsPath ?? JSON.stringify(settings));
+  }
   return {
     args,
     env: geminiInvocationEnv(options),
+    ...(settings ? { settings } : {}),
     goalPrompt: `/goal ${geminiPrompt(request.prompt, request.repoPath, request.kind, mode, permissions)}`
   };
+}
+
+/**
+ * agy without --dangerously-skip-permissions cannot ask before a tool runs
+ * when the app runs it: a tool no rule allows is denied, and a turn that only
+ * wanted an app tool (naming the chat, say) ends with no answer (agy 1.5.x,
+ * 2026-11-07). The app's own tools are allowed as Claude Code's --allowedTools
+ * allows them; each asks the User itself where it must. The User's own
+ * permission rules go along with them, so a session setting that replaces
+ * hers instead of adding to them drops nothing; when her settings cannot be
+ * read, nothing is added and agy keeps to her file alone.
+ */
+export function geminiAppToolSettings(options: GeminiExecOptions): Record<string, unknown> | undefined {
+  const toolNames = (options.appMcp?.toolNames ?? []).filter((name) => /^[A-Za-z0-9_-]+$/.test(name));
+  const user = options.userSettings ?? { readable: true };
+  if (!options.appMcp || toolNames.length === 0 || !user.readable) {
+    return undefined;
+  }
+  const own = user.permissions ?? {};
+  const ownAllow = Array.isArray(own.allow) ? own.allow.filter((rule): rule is string => typeof rule === "string") : [];
+  if (own.allow !== undefined && (!Array.isArray(own.allow) || ownAllow.length !== own.allow.length)) {
+    // Rules the app would have to rewrite to add its own: leave them to agy.
+    return undefined;
+  }
+  const allow = Array.from(new Set([...ownAllow, ...toolNames.map((name) => `mcp(${GEMINI_APP_MCP_SERVER}/${name})`)]));
+  return { permissions: { ...own, allow } };
+}
+
+/** Reads agy's settings.json text: a missing file is no rules; a file that is
+ *  not plain JSON (comments, say) is one the app does not try to understand. */
+export function geminiUserSettings(settingsText: string | undefined): GeminiUserSettings {
+  if (settingsText === undefined) {
+    return { readable: true };
+  }
+  try {
+    const parsed = JSON.parse(settingsText.replace(/^\uFEFF/, "")) as { permissions?: unknown } | null;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { readable: false };
+    }
+    const permissions = parsed.permissions;
+    if (permissions === undefined) {
+      return { readable: true };
+    }
+    return permissions && typeof permissions === "object" && !Array.isArray(permissions)
+      ? { readable: true, permissions: permissions as Record<string, unknown> }
+      : { readable: false };
+  } catch {
+    return { readable: false };
+  }
+}
+
+/** agy's user settings, where its own permission rules live. */
+export function geminiUserSettingsPath(homeDir: string): string {
+  return path.join(homeDir, ".gemini", "antigravity-cli", "settings.json");
+}
+
+/** What agy says when headless mode denied a tool it could not ask about: its
+ *  own words, without the flag advice the User cannot follow from the app, so
+ *  she reads why instead of an empty reply. */
+export function geminiHeadlessDenial(stderr: string): string | undefined {
+  const line = stderr.split(/\r?\n/).map((text) => text.trim()).find((text) => /headless mode cannot prompt/i.test(text));
+  if (!line) {
+    return undefined;
+  }
+  return line
+    .replace(/^jetski:\s*/i, "")
+    .replace(/^no output produced\s*[—-]\s*/i, "")
+    .split(/(?<=\.)\s+(?=[A-Z])/)
+    .filter((sentence) => !/--dangerously-skip-permissions/.test(sentence))
+    .join(" ")
+    .replace(/^./, (first) => first.toUpperCase());
 }
 
 export function geminiAppMcpEnv(options: GeminiExecOptions = {}): NodeJS.ProcessEnv | undefined {
