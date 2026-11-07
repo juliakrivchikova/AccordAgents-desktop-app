@@ -222,6 +222,12 @@ function keepRequestRight(next: ChatParticipant, current: ChatParticipant, given
 
 // --- its own members ----------------------------------------------------------
 
+function withoutHandoff(member: ChatParticipant): ChatParticipant {
+  if (!("sessionHandoff" in member)) return member;
+  const { sessionHandoff: _handoff, ...rest } = member;
+  return rest;
+}
+
 function keepHome(next: ChatParticipant, current: ChatParticipant): ChatParticipant {
   const merged = { ...next } as Record<string, unknown>;
   for (const field of HOME_FIELDS) {
@@ -559,8 +565,12 @@ export function scopeMachineConversationUpdate(conversation: Conversation, updat
         // A name another member has would speak for that one.
         const clash = [...beforeById.values(), ...taken].some((other) => other.id !== participant.id && handleKey(other.handle) === handleKey(participant.handle));
         if (!clash && additionAllowed(participant, changes)) {
-          taken.push(participant);
-          return [participant];
+          // A member a machine adds brings no session with it: only the
+          // computer hands a member its session, when it moves it.
+          const added = withoutHandoff(participant);
+          if (added !== participant) refused.push(`participants.${participant.id}.sessionHandoff`);
+          taken.push(added);
+          return [added];
         }
         refused.push(`participants.${participant.id}.added`);
         return [];

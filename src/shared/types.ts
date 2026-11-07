@@ -1665,6 +1665,8 @@ export interface ChatMessageMetadata {
   /** A machine's hidden answer to a `session.export` turn: where it put the
    *  member's session on the User's server for its move. */
   memberSessionExport?: import("./memberSessionMove").MemberSessionExportReport;
+  /** A machine's hidden word that it took the session its member was handed. */
+  memberSessionTaken?: import("./memberSessionMove").MemberSessionTakenReport;
   workedMs?: number;
   queuedBehind?: { handle: string };
   appMessageSource?: string;

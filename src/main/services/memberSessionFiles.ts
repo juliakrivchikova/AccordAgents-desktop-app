@@ -2,6 +2,8 @@ import { copyFile, link, mkdir, readdir, readFile, rename, rm, stat, writeFile }
 import { homedir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { promisify } from "node:util";
+import { gunzip, gzip } from "node:zlib";
 import type { PortableMemberSession } from "../../shared/memberSessionMove";
 import type { ChatParticipantSession } from "../../shared/types";
 
@@ -21,6 +23,9 @@ const CLAUDE_PROJECT_FOLDER_MAX = 200;
 
 const PACK_FORMAT = "accordagents.member-session";
 const PACK_VERSION = 1;
+
+const gzipAsync = promisify(gzip);
+const gunzipAsync = promisify(gunzip);
 
 /** Where Claude keeps its sessions for an environment like a member's. */
 export function claudeProjectsDir(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): string {
@@ -117,13 +122,20 @@ interface PackHeader {
 }
 
 /** One body for the User's server: a line naming what it is and the app's
- *  record of the session, then the CLI's transcript as it is on disk. */
-export function packMemberSession(session: PortableMemberSession, transcript: Buffer): Buffer {
+ *  record of the session, then the CLI's transcript as it is on disk; all of
+ *  it gzipped off the main thread (a long session is tens of megabytes). */
+export async function packMemberSession(session: PortableMemberSession, transcript: Buffer): Promise<Buffer> {
   const header: PackHeader = { format: PACK_FORMAT, version: PACK_VERSION, provider: "claude-code", session, transcriptBytes: transcript.length };
-  return Buffer.concat([Buffer.from(`${JSON.stringify(header)}\n`, "utf8"), transcript]);
+  return gzipAsync(Buffer.concat([Buffer.from(`${JSON.stringify(header)}\n`, "utf8"), transcript]));
 }
 
-export function unpackMemberSession(bytes: Buffer): { provider: "claude-code"; session: PortableMemberSession; transcript: Buffer } {
+export async function unpackMemberSession(packed: Buffer): Promise<{ provider: "claude-code"; session: PortableMemberSession; transcript: Buffer }> {
+  let bytes: Buffer;
+  try {
+    bytes = await gunzipAsync(packed);
+  } catch {
+    throw new Error("the moved session is not one this app packed");
+  }
   const end = bytes.indexOf(0x0a);
   if (end < 0) throw new Error("the moved session is not one this app packed");
   let header: Partial<PackHeader>;

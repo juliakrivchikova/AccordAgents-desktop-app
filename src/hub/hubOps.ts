@@ -1,4 +1,5 @@
 import { isMemberRestartTurnRequest } from "../shared/memberRestart";
+import { isMemberSessionExportTurnRequest } from "../shared/memberSessionMove";
 import { CommandError } from "../main/services/command";
 import { createHash } from "node:crypto";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "../main/services/chatChanges";
@@ -410,6 +411,11 @@ export class HubOps {
     if (op.kind === "turn.request") {
       // Any device asks; the member's own device takes it (Д2, Д4).
       if (current) return unchanged(claimOutcomeFor(current, device.deviceId));
+      // A member's session leaves its device only when the computer moves
+      // the member: never at a machine's or a phone's word.
+      if (isMemberSessionExportTurnRequest(op.request) && device.role !== "owner" && device.role !== "desktop") {
+        return reject(opId, "Only the computer moves a member with its session.");
+      }
       // A machine asks a member that runs elsewhere as a member asks another
       // through the app: to answer one of its own members' messages, never
       // the User's words and never to compact it.

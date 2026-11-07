@@ -46,7 +46,7 @@ import {
   memberMovedLine,
   memberSessionMoves,
   type ChatSessionHandoff,
-  type MachineSessionMoveSupport,
+  type MachineSessionMoveTarget,
   type MemberSessionExportReport,
   type MemberSessionExportTurnRequest
 } from "../../shared/memberSessionMove";
@@ -354,7 +354,16 @@ interface ParticipantMoveApplied {
   handoff?: ChatSessionHandoff;
   /** Its session was here and left with it. */
   dropLocalSession: boolean;
+  /** Moving here with this session: this computer takes it. */
+  expectHere?: ChatSessionHandoff;
   line: string;
+}
+
+/** Device-local: the sessions this computer handed its own members when it
+ *  moved them here, by member (only those are taken here). */
+function readExpectedSessionHandoffs(metadata: Conversation["metadata"]): Record<string, string> {
+  const value = metadata.expectedSessionHandoffs;
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, string> : {};
 }
 
 interface ChatParticipantSessionState {
@@ -919,6 +928,17 @@ interface CloudRunDoctorProbe {
 /** Copy for values adopted out of a stored snapshot into the live
  *  conversation, so in-place edits of the live object never reach the snapshot
  *  (see readStoredChatStateForRefresh). */
+/** Waits for `done`, or rejects when `signal` aborts first. */
+function abortableWait(done: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+  if (!signal) return done;
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("Chat run cancelled."));
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new Error("Chat run cancelled."));
+    signal.addEventListener("abort", onAbort, { once: true });
+    done.then(() => { signal.removeEventListener("abort", onAbort); resolve(); }, (error: unknown) => { signal.removeEventListener("abort", onAbort); reject(error); });
+  });
+}
+
 function cloneJsonValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -1144,15 +1164,13 @@ export class ChatService {
   private machineMemberRestartSupport?: (machineId: string) => MachineMemberRestartSupport;
   /** Desktop side: whether a machine takes and hands over members' sessions
    *  (its last hello), and its name; by machine id or AWS instance id. */
-  private machineSessionMove?: (target: { machineId?: string; instanceId?: string }) => { support: MachineSessionMoveSupport; name?: string; machineId?: string };
-  /** Members whose session this machine handed over for a move, until when
-   *  their turns wait for the move (MEMBER_SESSION_EXPORT_HOLD_MS). */
-  private readonly memberSessionExportHolds = new Map<string, number>();
-  /** Handoffs being taken here, so one is taken once. */
+  private machineSessionMove?: (target: { machineId?: string; instanceId?: string }) => MachineSessionMoveTarget;
+  /** Members moving (on the computer) or whose session this machine just
+   *  handed over: their turns wait for it (memberMoveGate). */
+  private readonly memberMoveGates = new Map<string, { done: Promise<void>; release: () => void }>();
+  /** Handoffs being taken here, and those taken, so one is taken once. */
   private readonly sessionHandoffsTaking = new Map<string, Promise<void>>();
-  /** How many times each member moved while this process ran: a turn that
-   *  waited behind a move reads the chat again before it starts. */
-  private readonly memberMoves = new Map<string, number>();
+  private readonly sessionHandoffsTaken = new Set<string>();
   /** Restarts asked here that have not ended, by chat and member: one at a time. */
   private readonly memberRestartsInFlight = new Set<string>();
   /** Desktop side: runs before a turn of a machine member is asked (the
@@ -1383,7 +1401,7 @@ export class ChatService {
   }
 
   /** Desktop side: see machineSessionMove. */
-  setMachineSessionMove(lookup: ((target: { machineId?: string; instanceId?: string }) => { support: MachineSessionMoveSupport; name?: string; machineId?: string }) | undefined): void {
+  setMachineSessionMove(lookup: ((target: { machineId?: string; instanceId?: string }) => MachineSessionMoveTarget) | undefined): void {
     this.machineSessionMove = lookup;
   }
 
@@ -2199,9 +2217,13 @@ export class ChatService {
         if (moved.dropLocalSession) {
           conversation.metadata.participantSessions = this.chatSessions(conversation).filter((session) => session.participantId !== target.id);
         }
+        // Moving here: the session it carries is the one this computer made
+        // the handoff for, and only that one is taken (takeSessionHandoff).
+        const expected = { ...readExpectedSessionHandoffs(conversation.metadata) };
+        if (moved.expectHere) expected[target.id] = moved.expectHere.blob.blobHash;
+        else delete expected[target.id];
+        conversation.metadata.expectedSessionHandoffs = expected;
         conversation.messages.push(this.message("system", moved.line));
-        const key = `${conversation.id}:${target.id}`;
-        this.memberMoves.set(key, (this.memberMoves.get(key) ?? 0) + 1);
       }
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
@@ -3074,6 +3096,36 @@ export class ChatService {
     return (nextHomeMachineId ?? "") !== (current.homeMachineId ?? "") || JSON.stringify(nextCloudRun) !== JSON.stringify(current.cloudRun);
   }
 
+  /** While a member moves (or a machine has just handed its session over), its
+   *  turns wait: a turn routed by the old home would run on the old session. */
+  private memberMoveGate(conversationId: string, participantId: string): Promise<void> | undefined {
+    return this.memberMoveGates.get(`${conversationId}:${participantId}`)?.done;
+  }
+
+  private openMemberMoveGate(conversationId: string, participantId: string): () => void {
+    const key = `${conversationId}:${participantId}`;
+    let release!: () => void;
+    const done = new Promise<void>((resolve) => { release = resolve; });
+    const gate = { done, release: () => {
+      if (this.memberMoveGates.get(key) === gate) this.memberMoveGates.delete(key);
+      release();
+    } };
+    this.memberMoveGates.set(key, gate);
+    return gate.release;
+  }
+
+  /** The member as the saved chat has it now, when where it runs changed
+   *  since `participant` was read (it moved): the chat is read again. */
+  private async memberWhereItRunsNow(conversation: Conversation, participant: ChatParticipant): Promise<ChatParticipant> {
+    const stored = (await this.readStoredChatStateForRefresh(conversation.id)).stored;
+    const saved = stored && stored.kind === "chat" ? this.chatParticipants(stored).find((item) => item.id === participant.id) : undefined;
+    if (!saved || ((saved.homeMachineId ?? "") === (participant.homeMachineId ?? "") && JSON.stringify(saved.cloudRun) === JSON.stringify(participant.cloudRun))) {
+      return participant;
+    }
+    await this.refreshStoredChatState(conversation);
+    return this.chatParticipants(conversation).find((item) => item.id === participant.id) ?? saved;
+  }
+
   /**
    * Desktop: a Claude Code member that already ran moves to another device
    * with its session, through the User's server. Leaving this computer, its
@@ -3081,11 +3133,13 @@ export class ChatService {
    * asked for it by a turn of the member (a stopped one is started for it).
    * The member's `sessionHandoff` names it, and the device it arrives on
    * takes it before its next turn (takeSessionHandoff); arriving here, that
-   * happens at once. Refused while the member answers; exclusive in its turn
-   * queue, so no turn of it starts here meanwhile.
+   * happens at once. Refused while the member answers or has background
+   * tasks; one move of a member at a time, and its turns wait for it.
    */
   private async moveParticipant(request: UpdateChatParticipantRuntimeRequest, conversation: Conversation, member: ChatParticipant): Promise<Conversation | undefined> {
     const label = `@${member.handle}`;
+    if (this.memberMoveGate(conversation.id, member.id)) throw new Error(`${label} is already moving.`);
+    if (conversation.metadata.archived === true) throw new Error("This chat is archived. Unarchive it to move its members.");
     const nextHomeMachineId = Object.prototype.hasOwnProperty.call(request, "homeMachineId")
       ? (typeof request.homeMachineId === "string" && request.homeMachineId.trim() ? request.homeMachineId.trim() : undefined)
       : member.homeMachineId;
@@ -3094,65 +3148,81 @@ export class ChatService {
     const destination = toHere ? undefined : this.machineSessionMove?.(nextHomeMachineId ? { machineId: nextHomeMachineId } : { instanceId: nextCloudRun?.instanceId })
       ?? { support: "unknown" as const };
     const destinationName = toHere ? "this computer" : destination?.name ?? "its cloud machine";
-    const sourceMachineId = member.homeMachineId;
-    const sameMachine = Boolean(sourceMachineId && destination?.machineId && destination.machineId === sourceMachineId);
-    const fromHere = this.runsHere(member);
-    if ((fromHere && toHere) || sameMachine || (!sourceMachineId && !fromHere && !toHere && JSON.stringify(nextCloudRun) === JSON.stringify(member.cloudRun))) {
-      // Where it already runs: nothing moves.
-      return conversation;
+    if (!toHere && destination?.machineId && destination.support !== "supported") {
+      // A machine not set up yet runs this version; one that is set up says
+      // in its hello whether it takes a member's session.
+      throw new Error(destination.support === "outdated"
+        ? `Could not move ${label}: ${destinationName} still runs an older version of AccordAgents that cannot take a member's session. This computer updates it the next time it is connected and idle; move it again after that.`
+        : `Could not move ${label}: ${destinationName} has not connected to this computer yet. Move it again once it is connected.`);
     }
-    if (destination?.support === "outdated") {
-      throw new Error(`Could not move ${label}: ${destinationName} still runs an older version of AccordAgents that cannot take a member's session. This computer updates it the next time it is connected and idle; move it again after that.`);
+    if (this.memberAnswersNow(conversation, member.id)) throw new Error(`${label} is busy. Move it when it is done.`);
+    if ((this.memberBackgroundTasks.get(conversation.id)?.get(member.id)?.labels.length ?? 0) > 0) {
+      throw new Error(`${label} has background tasks running. Move it when they are done.`);
     }
-    if (this.memberAnswersNow(conversation, member.id)) {
-      throw new Error(`${label} is busy. Move it when it is done.`);
-    }
+    const releaseGate = this.openMemberMoveGate(conversation.id, member.id);
     const reservation = this.reserveParticipantTurn(conversation.id, member.id, "exclusive");
+    let moved: Conversation | undefined;
     try {
       await reservation.wait();
-      const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "memberProcessAnswering" | "closeWarmAgents" | "claudeProjectsDirectory">>;
+      // As it is now: a turn that ran just before may have changed it.
+      const latest = await this.requireChat(conversation.id);
+      const current = this.chatParticipants(latest).find((item) => item.id === member.id);
+      if (!current) throw new Error(`${label} was removed from this chat.`);
+      const fromHere = this.runsHere(current);
+      const sourceMachineId = current.homeMachineId;
+      if ((fromHere && toHere) || (sourceMachineId && destination?.machineId === sourceMachineId) ||
+        (!sourceMachineId && !fromHere && !toHere && JSON.stringify(nextCloudRun) === JSON.stringify(current.cloudRun))) {
+        // Where it already runs: nothing moves.
+        return conversation;
+      }
+      const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "memberProcessAnswering" | "closeWarmAgents">>;
       let handoff: ChatSessionHandoff | undefined;
       let sessionNote: string | undefined;
       let dropLocalSession = false;
       if (fromHere) {
         if (runner.memberProcessAnswering?.call(this.cliRunner, conversation.id, member.id)) throw new Error(`${label} is busy. Move it when it is done.`);
-        const latest = await this.requireChat(conversation.id);
         const session = this.chatSessions(latest).find((item) => item.participantId === member.id);
         dropLocalSession = Boolean(session);
         if (session?.sessionId) {
           await runner.closeWarmAgents?.call(this.cliRunner, conversation.id, member.id, "member-moved");
-          const exported = await this.packLocalSession(session, label);
-          if (exported) handoff = exported;
-          else sessionNote = "Its session was not found on this computer, so it starts a new one there.";
-        } else if (member.sessionHandoff) {
-          handoff = member.sessionHandoff;
+          handoff = await this.packLocalSession(session, label);
+          if (!handoff) sessionNote = "Its session was not found on this computer, so it starts a new one there.";
+        } else if (current.sessionHandoff) {
+          handoff = current.sessionHandoff;
         }
       } else if (sourceMachineId) {
-        const exported = await this.exportSessionFromMachine(conversation, member);
+        const exported = await this.exportSessionFromMachine(latest, current);
         handoff = exported.handoff;
-        if (exported.note) sessionNote = exported.note;
+        sessionNote = exported.note;
       } else {
         // A Cloud choice not prepared yet: what it was handed still waits.
-        handoff = member.sessionHandoff;
+        handoff = current.sessionHandoff;
       }
       const line = [memberMovedLine(member.handle, destinationName, Boolean(handoff)), sessionNote].filter(Boolean).join(" ");
-      await this.updateParticipantRuntime(request, { handoff, dropLocalSession, line });
+      // A known machine that takes sessions is its home at once, so its turns
+      // (the phone's too) go there without waiting for a Cloud preparation.
+      const applied: UpdateChatParticipantRuntimeRequest = !toHere && !nextHomeMachineId && destination?.machineId && destination.support === "supported"
+        ? { ...request, homeMachineId: destination.machineId }
+        : request;
+      await this.updateParticipantRuntime(applied, { handoff, dropLocalSession, expectHere: toHere ? handoff : undefined, line });
       void this.debugLogs.write("chat.member-move.done", {
         conversationId: conversation.id, participantId: member.id, from: fromHere ? "here" : sourceMachineId ?? "cloud-pending",
-        to: toHere ? "here" : destination?.machineId ?? nextCloudRun?.instanceId ?? "cloud-pending", withSession: Boolean(handoff), bytes: handoff?.blob.byteLength
-      });
-    } finally {
-      reservation.release();
-    }
-    let moved = await this.requireChat(conversation.id);
-    const arrived = this.chatParticipants(moved).find((item) => item.id === member.id);
-    if (toHere && arrived?.sessionHandoff) {
-      // Arriving here: taken now, so the server lets go of it; a failure is
-      // tried again before its next turn, which then says why.
-      await this.takeSessionHandoff(moved, arrived).catch((error) => {
-        void this.debugLogs.write("chat.member-move.take-deferred", { conversationId: moved.id, participantId: member.id, message: error instanceof Error ? error.message : String(error) });
+        to: toHere ? "here" : applied.homeMachineId ?? nextCloudRun?.instanceId ?? "cloud-pending", withSession: Boolean(handoff), bytes: handoff?.blob.byteLength
       });
       moved = await this.requireChat(conversation.id);
+      const arrived = this.chatParticipants(moved).find((item) => item.id === member.id);
+      if (toHere && arrived?.sessionHandoff) {
+        // Arriving here: taken now, before any turn of it starts, so the
+        // server lets go of it; a failure for now is tried again before its
+        // next turn, which then says why.
+        await this.takeSessionHandoff(moved, arrived).catch((error) => {
+          void this.debugLogs.write("chat.member-move.take-deferred", { conversationId: conversation.id, participantId: member.id, message: error instanceof Error ? error.message : String(error) });
+        });
+        moved = await this.requireChat(conversation.id);
+      }
+    } finally {
+      reservation.release();
+      releaseGate();
     }
     // Turns asked of the member while it moved wait on the server for its
     // new device; this one takes those now its own.
@@ -3169,8 +3239,8 @@ export class ChatService {
     const file = await findClaudeTranscript(await runner.claudeProjectsDirectory.call(this.cliRunner), session.sessionId);
     if (!file) return undefined;
     if (!this.hubBlobWriter) throw new Error(`Could not move ${label}: this device is not linked to your server, which carries the session.`);
-    const transcript = await readClaudeTranscript(file);
-    const blob = await this.hubBlobWriter(packMemberSession(portableMemberSession(session), transcript)).catch((error: unknown) => {
+    const packed = await packMemberSession(portableMemberSession(session), await readClaudeTranscript(file));
+    const blob = await this.hubBlobWriter(packed).catch((error: unknown) => {
       throw new Error(`Could not move ${label}: its session did not reach your server (${error instanceof Error ? error.message : String(error)}).`);
     });
     return { provider: "claude-code", sessionId: session.sessionId, blob, at: new Date().toISOString() };
@@ -3180,8 +3250,8 @@ export class ChatService {
    * Desktop: asks a member's machine for its session, as a turn of the member
    * on the User's server (request kind "session.export"), so a stopped
    * machine is started for it like for any turn. The machine answers on a
-   * hidden line naming where it put the session; nothing else changes there
-   * (it keeps the member's turns waiting for a few minutes for the move).
+   * hidden line naming where it put the session, and keeps the member's turns
+   * waiting until the move is made; nothing else changes there.
    */
   private async exportSessionFromMachine(conversation: Conversation, member: ChatParticipant): Promise<{ handoff?: ChatSessionHandoff; note?: string }> {
     const label = `@${member.handle}`;
@@ -3197,7 +3267,7 @@ export class ChatService {
       throw new Error(`Could not move ${label}: ${machineName} has not connected to this computer yet. Move it again once it is connected.`);
     }
     const anchor = this.compactionAnchor(conversation, {});
-    if (!anchor) return {};
+    if (!anchor) throw new Error(`Could not move ${label}: this chat has nothing on your server yet to ask ${machineName} by. Try again in a moment.`);
     const serverRunId = `turn-${randomUUID()}`;
     const turnRequest: MemberSessionExportTurnRequest = { kind: MEMBER_SESSION_EXPORT_TURN_KIND, askedAt: new Date().toISOString() };
     const placed = (item: HubTurn) => item.state !== "requested";
@@ -3217,6 +3287,8 @@ export class ChatService {
       if (!ended(turn)) turn = await this.waitForServerTurn(serverRunId, ended, signal);
     } catch (error) {
       if (signal.aborted) {
+        // Never taken: taken back. Taken: the Stop ends it there, and the
+        // machine lets the member's turns go.
         const withdrawn = await link.withdraw?.(opId).catch(() => undefined);
         if (withdrawn?.status !== "withdrawn") {
           await link.enqueue([{ opId: newOpId(), kind: "turn.stop", conversationId: conversation.id, runId: serverRunId, messageId: anchor.id, participantId: member.id }]).catch(() => undefined);
@@ -3227,28 +3299,42 @@ export class ChatService {
     }
     void this.debugLogs.write("chat.member-move.export-finished", { conversationId: conversation.id, participantId: member.id, machineName, state: turn.state, outcome: turn.outcome });
     // The machine's hidden line reached this device through the server
-    // before the turn's end did.
+    // before the turn's end did; only the machine that took the turn speaks.
     const refreshed = await this.requireChat(conversation.id);
     const line = refreshed.messages.filter((message) => message.role === "system" && message.metadata?.memberSessionExport?.runId === serverRunId
       && message.metadata.memberSessionExport.participantId === member.id
-      && (!turn?.executorDeviceId || !message.metadata.serverWriter || message.metadata.serverWriter === turn.executorDeviceId)).at(-1);
+      && Boolean(turn?.executorDeviceId) && message.metadata.serverWriter === turn?.executorDeviceId).at(-1);
     const report = line?.metadata?.memberSessionExport;
-    if (turn.state !== "finished" || turn.outcome !== "done" || !report) {
-      throw new Error(report?.error
-        ? `Could not move ${label}: ${report.error} It stays on ${machineName}.`
-        : `Could not move ${label}: ${machineName} did not hand over its session (it was busy, or stopped before it was done). It stays on ${machineName}.`);
+    const stays = `It stays on ${machineName}.`;
+    if (turn.state !== "finished" || !report) {
+      throw new Error(`Could not move ${label}: ${machineName} did not hand over its session (it stopped before it was done). ${stays}`);
     }
-    if (report.none || !report.blob || !report.sessionId) {
-      return report.error ? { note: report.error } : {};
+    // What the machine says is never the chat's words: only which case it is.
+    switch (report.reason) {
+      case "busy": throw new Error(`${label} is busy on ${machineName}. Move it when it is done.`);
+      case "background": throw new Error(`${label} has background tasks running on ${machineName}. Move it when they are done.`);
+      case "not-found": return { note: `Its session was not found on ${machineName}, so it starts a new one.` };
+      case "none": return {};
+      case undefined: break;
+      default: throw new Error(`Could not move ${label}: ${machineName} could not hand over its session. ${stays}`);
+    }
+    if (turn.outcome !== "done" || !report.blob || !report.sessionId) {
+      throw new Error(`Could not move ${label}: ${machineName} could not hand over its session. ${stays}`);
     }
     return { handoff: { provider: "claude-code", sessionId: report.sessionId, blob: report.blob, at: new Date().toISOString() } };
   }
 
   /** Machine side: the turn that asks this machine for a member's session.
-   *  Taken on the server first, like any turn; it answers on a hidden line. */
+   *  Taken on the server first, like any turn; answered on a hidden line.
+   *  From the moment it is taken the member's other turns wait, until its
+   *  home changes (the move was made) or the hold ends. A Stop ends it. */
   private async runServerSessionExportTurn(turn: HubTurn, chat: Conversation, participant: ChatParticipant, controller: AbortController): Promise<void> {
+    if (!this.machineRuntime) return;
     if (await this.claimServerTurnHere(turn, controller.signal) !== "claimed") return;
-    let outcome: "done" | "error" = "error";
+    const releaseGate = this.openMemberMoveGate(chat.id, participant.id);
+    this.registerRunController(turn.runId, controller);
+    let outcome: "done" | "error" | "stopped" = "error";
+    let handedOver = false;
     try {
       const request = (turn.request ?? {}) as Partial<MemberSessionExportTurnRequest>;
       const askedAt = typeof request.askedAt === "string" ? Date.parse(request.askedAt) : Number.NaN;
@@ -3257,9 +3343,14 @@ export class ChatService {
       }
       let report: MemberSessionExportReport;
       try {
-        report = { runId: turn.runId, participantId: participant.id, ...await this.exportSessionHere(chat, participant) };
+        report = { runId: turn.runId, participantId: participant.id, ...await this.exportSessionHere(chat, participant, controller.signal) };
       } catch (error) {
-        report = { runId: turn.runId, participantId: participant.id, error: error instanceof Error ? error.message : String(error) };
+        void this.debugLogs.write("chat.member-move.export-failed", { conversationId: chat.id, participantId: participant.id, runId: turn.runId, message: error instanceof Error ? error.message : String(error) });
+        report = { runId: turn.runId, participantId: participant.id, reason: "failed" };
+      }
+      if (controller.signal.aborted) {
+        outcome = "stopped";
+        return;
       }
       await this.withChatMutation(chat, async () => {
         chat.messages.push(this.message("system", `Handed @${participant.handle}'s session over for its move.`, undefined,
@@ -3267,35 +3358,39 @@ export class ChatService {
         chat.updatedAt = new Date().toISOString();
         await this.saveConversation(chat);
       });
-      if (!report.error) {
-        // Its turns wait for the move a little: a reply run here now would be
-        // missing from the session that moved.
-        const key = `${chat.id}:${participant.id}`;
-        this.memberSessionExportHolds.set(key, Date.now() + MEMBER_SESSION_EXPORT_HOLD_MS);
-        setTimeout(() => {
-          if ((this.memberSessionExportHolds.get(key) ?? 0) <= Date.now()) this.memberSessionExportHolds.delete(key);
-          void this.resumeServerTurns().catch(() => undefined);
-        }, MEMBER_SESSION_EXPORT_HOLD_MS + 1_000).unref?.();
-      }
-      outcome = report.error ? "error" : "done";
+      handedOver = !report.reason || report.reason === "none" || report.reason === "not-found";
+      outcome = report.reason && !handedOver ? "error" : "done";
     } catch (error) {
       void this.debugLogs.write("chat.member-move.export-failed", { conversationId: chat.id, participantId: participant.id, runId: turn.runId, message: error instanceof Error ? error.message : String(error) });
     } finally {
+      this.unregisterRunController(turn.runId, controller);
       this.finishServerTurn(turn.runId, outcome);
+      if (handedOver) {
+        // Held until the computer makes the move (its home leaves here), or
+        // for long enough that it plainly will not.
+        setTimeout(() => {
+          releaseGate();
+          void this.resumeServerTurns().catch(() => undefined);
+        }, MEMBER_SESSION_EXPORT_HOLD_MS).unref?.();
+      } else {
+        releaseGate();
+        void this.resumeServerTurns().catch(() => undefined);
+      }
     }
   }
 
   /** A member's session on this device, put on the User's server for its
-   *  move; refused while it answers. One handed here and not taken yet is
-   *  passed on as it is. */
-  private async exportSessionHere(chat: Conversation, participant: ChatParticipant): Promise<Omit<MemberSessionExportReport, "runId" | "participantId">> {
-    const label = `@${participant.handle}`;
-    if (this.memberAnswersNow(chat, participant.id)) throw new Error(`${label} is busy. Move it when it is done.`);
+   *  move; refused while it answers or has background tasks. One handed here
+   *  and not taken yet is passed on as it is. */
+  private async exportSessionHere(chat: Conversation, participant: ChatParticipant, signal: AbortSignal): Promise<Omit<MemberSessionExportReport, "runId" | "participantId">> {
+    if (this.memberAnswersNow(chat, participant.id)) return { reason: "busy" };
+    if ((this.memberBackgroundTasks.get(chat.id)?.get(participant.id)?.labels.length ?? 0) > 0) return { reason: "background" };
     const reservation = this.reserveParticipantTurn(chat.id, participant.id, "exclusive");
     try {
       await reservation.wait();
+      if (signal.aborted) return { reason: "failed" };
       const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "memberProcessAnswering" | "closeWarmAgents">>;
-      if (runner.memberProcessAnswering?.call(this.cliRunner, chat.id, participant.id)) throw new Error(`${label} is busy. Move it when it is done.`);
+      if (runner.memberProcessAnswering?.call(this.cliRunner, chat.id, participant.id)) return { reason: "busy" };
       const latest = await this.requireChat(chat.id);
       const current = this.chatParticipants(latest).find((item) => item.id === participant.id) ?? participant;
       const session = this.chatSessions(latest).find((item) => item.participantId === participant.id);
@@ -3303,14 +3398,35 @@ export class ChatService {
       if (handoff && session?.importedHandoff !== handoff.blob.blobHash) {
         return { sessionId: handoff.sessionId, blob: handoff.blob };
       }
-      if (!session?.sessionId) return { none: true };
+      if (!session?.sessionId) return { reason: "none" };
       await runner.closeWarmAgents?.call(this.cliRunner, chat.id, participant.id, "member-moved");
-      const packed = await this.packLocalSession(session, label);
-      if (!packed) return { none: true, error: "Its session was not found on its machine, so it starts a new one." };
+      const packed = await this.packLocalSession(session, `@${participant.handle}`);
+      if (!packed) return { reason: "not-found" };
       return { sessionId: packed.sessionId, blob: packed.blob };
     } finally {
       reservation.release();
     }
+  }
+
+  /** Machine: members that ran here and run elsewhere now (moved): their
+   *  turns wait no more here, their process closes, and the session this
+   *  device kept of them goes (a later move back hands them their session
+   *  again). */
+  private async retireMovedMembers(conversation: Conversation, before: ReadonlySet<string>): Promise<void> {
+    const left = this.chatParticipants(conversation).filter((member) => before.has(member.id) && !this.runsHere(member));
+    if (left.length === 0) return;
+    const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "closeWarmAgents">>;
+    for (const member of left) {
+      this.memberMoveGates.get(`${conversation.id}:${member.id}`)?.release();
+      await runner.closeWarmAgents?.call(this.cliRunner, conversation.id, member.id, "member-moved").catch(() => undefined);
+    }
+    const ids = new Set(left.map((member) => member.id));
+    await this.withChatMutation(conversation, async () => {
+      const sessions = this.chatSessions(conversation);
+      if (!sessions.some((session) => ids.has(session.participantId))) return;
+      conversation.metadata.participantSessions = sessions.filter((session) => !ids.has(session.participantId));
+      await this.saveConversation(conversation);
+    });
   }
 
   /** Whether a member runs here now that did not before. */
@@ -3318,42 +3434,51 @@ export class ChatService {
     return this.chatParticipants(conversation).some((member) => this.runsHere(member) && !before.has(member.id));
   }
 
-  /** A machine that handed a member's session over keeps that member's
-   *  turns waiting until the move is made (or the hold ends). */
-  private memberSessionExportHeld(conversationId: string, participantId: string): boolean {
-    const key = `${conversationId}:${participantId}`;
-    const until = this.memberSessionExportHolds.get(key);
-    if (until === undefined) return false;
-    if (until > Date.now()) return true;
-    this.memberSessionExportHolds.delete(key);
-    return false;
-  }
-
   /**
    * The device a member runs on takes the session it was handed
    * (`sessionHandoff`) before it first uses one: read from the User's
-   * server, its transcript put where Claude Code looks for it here, and the
-   * app's record of it kept as this device's. Once per handoff. A handoff
-   * that can never be taken (gone from the server, damaged) is let go with a
-   * line saying the member starts a new session; one that failed for now
-   * (the server out of reach) stops the turn, and the next tries again.
+   * server, its transcript put where Claude Code looks for it here, and kept
+   * as this device's session of the member. Once per handoff, whichever turn
+   * gets there first; the others wait for it and read the chat again. A
+   * handoff that can never be taken (gone from the server, damaged, a folder
+   * Claude cannot be given it in) is let go with a line saying the member
+   * starts a new session; one that failed for now (the server out of reach)
+   * stops the turn, and the next tries again. A machine then says on a
+   * hidden line that it took it, so the computer lets the server go of it.
    */
   private async takeSessionHandoff(conversation: Conversation, participant: ChatParticipant): Promise<void> {
     const current = this.chatParticipants(conversation).find((item) => item.id === participant.id) ?? participant;
     const handoff = current.sessionHandoff;
-    if (!handoff || !this.runsHere(current)) return;
+    if (!handoff || !this.runsHere(current) || !memberSessionMoves(current)) return;
+    const key = `${conversation.id}:${participant.id}:${handoff.blob.blobHash}`;
+    if (this.sessionHandoffsTaken.has(key)) {
+      if (!this.chatSessions(conversation).some((session) => session.participantId === participant.id && session.importedHandoff === handoff.blob.blobHash)) {
+        await this.refreshStoredChatState(conversation);
+      }
+      return;
+    }
     const existing = this.chatSessions(conversation).find((session) => session.participantId === participant.id);
     if (existing?.importedHandoff === handoff.blob.blobHash) return;
-    const key = `${conversation.id}:${participant.id}:${handoff.blob.blobHash}`;
+    // The computer takes only a handoff it made itself.
+    if (!this.machineRuntime && readExpectedSessionHandoffs(conversation.metadata)[participant.id] !== handoff.blob.blobHash) return;
     const running = this.sessionHandoffsTaking.get(key);
-    if (running) return running;
-    const taking = this.takeSessionHandoffNow(conversation, current, handoff).finally(() => this.sessionHandoffsTaking.delete(key));
+    if (running) {
+      await running;
+      await this.refreshStoredChatState(conversation);
+      return;
+    }
+    const taking = this.takeSessionHandoffNow(conversation, current, handoff)
+      .then(() => { this.sessionHandoffsTaken.add(key); })
+      .finally(() => this.sessionHandoffsTaking.delete(key));
     this.sessionHandoffsTaking.set(key, taking);
     return taking;
   }
 
   private async takeSessionHandoffNow(conversation: Conversation, participant: ChatParticipant, handoff: ChatSessionHandoff): Promise<void> {
     const label = `@${participant.handle}`;
+    // A copy of the chat read before another turn took it here.
+    await this.refreshStoredChatState(conversation);
+    if (this.chatSessions(conversation).some((session) => session.participantId === participant.id && session.importedHandoff === handoff.blob.blobHash)) return;
     let taken: ChatParticipantSession | undefined;
     let lostReason: string | undefined;
     try {
@@ -3366,23 +3491,28 @@ export class ChatService {
         }
         throw error;
       });
-      let unpacked: ReturnType<typeof unpackMemberSession>;
+      let unpacked: Awaited<ReturnType<typeof unpackMemberSession>>;
       try {
-        unpacked = unpackMemberSession(bytes);
+        unpacked = await unpackMemberSession(bytes);
         if (unpacked.session.sessionId !== handoff.sessionId) throw new Error("the moved session names another session");
       } catch (error) {
         lostReason = error instanceof Error ? error.message : String(error);
         throw error;
       }
       const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "closeWarmAgents" | "claudeProjectsDirectory">>;
-      if (!runner.claudeProjectsDirectory) throw new Error("this device cannot write Claude Code's sessions");
+      if (!runner.claudeProjectsDirectory) {
+        lostReason = "this device cannot write Claude Code's sessions";
+        throw new Error(lostReason);
+      }
       const projectsDir = await runner.claudeProjectsDirectory.call(this.cliRunner);
       // Where its CLI runs here: the project, or the chat's own folder when
-      // it may not read the project; both get it, so either finds it.
-      // (The chat's folder is named, not written: ensureHistoryFiles writes
-      // its history for the turn.)
-      const folders = [...new Set([conversation.repoPath, path.join(userDataPath(), "chats", conversation.id)].filter((item): item is string => Boolean(item)))];
-      await placeClaudeTranscript(projectsDir, folders, handoff.sessionId, unpacked.transcript);
+      // it may not read the project; both name it (the chat's folder is
+      // named, not written: a turn writes its history there).
+      const folders = [conversation.repoPath, path.join(userDataPath(), "chats", conversation.id)].filter((item): item is string => Boolean(item));
+      await placeClaudeTranscript(projectsDir, folders, handoff.sessionId, unpacked.transcript).catch((error: unknown) => {
+        if (error instanceof Error && /path too long|no folder/.test(error.message)) lostReason = error.message;
+        throw error;
+      });
       // A process an older session of it left here would answer from that one.
       await runner.closeWarmAgents?.call(this.cliRunner, conversation.id, participant.id, "member-moved").catch(() => undefined);
       // This device's own record of the member (its mode, permissions,
@@ -3424,13 +3554,20 @@ export class ChatService {
         conversation.messages.push(this.message("system", `${label}'s session could not be moved here (${lostReason}). It starts a new session.`));
       }
       conversation.metadata.participantSessions = sessions;
-      if (!this.machineRuntime) {
+      if (this.machineRuntime) {
+        // The computer lets the server go of it once it reads this.
+        conversation.messages.push(this.message("system", `Took @${member.handle}'s session over.`, undefined,
+          { hiddenFromTimeline: true, memberSessionTaken: { participantId: member.id, blobHash: handoff.blob.blobHash, taken: Boolean(taken) } }));
+      } else {
         // The computer writes members' homes: taken here, the server lets go.
         conversation.metadata.participants = this.chatParticipants(conversation).map((item) => {
           if (item.id !== participant.id) return item;
           const { sessionHandoff: _taken, ...rest } = item;
           return rest;
         });
+        const expected = { ...readExpectedSessionHandoffs(conversation.metadata) };
+        delete expected[participant.id];
+        conversation.metadata.expectedSessionHandoffs = expected;
       }
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
@@ -3438,18 +3575,18 @@ export class ChatService {
     void this.debugLogs.write("chat.member-move.taken", { conversationId: conversation.id, participantId: participant.id, taken: Boolean(taken), bytes: handoff.blob.byteLength });
   }
 
-  /** Desktop: the members whose session was handed to their machine and
-   *  that machine has since answered as them (it took the session first). */
+  /** Desktop: the members whose machine said it took the session they were
+   *  handed (on a hidden line written by that machine). */
   private takenSessionHandoffs(conversation: Conversation): string[] {
     if (this.machineRuntime) return [];
     const waiting = this.chatParticipants(conversation).filter((member) => member.sessionHandoff && member.homeMachineId);
     if (waiting.length === 0) return [];
     return waiting.filter((member) => {
-      const at = member.sessionHandoff?.at ?? "";
-      return conversation.messages.some((message) => message.createdAt > at && (
-        (message.role === "participant" && message.participantId === member.id && message.status === "done") ||
-        (message.role === "system" && message.metadata?.compaction?.participantId === member.id && message.metadata.compaction.outcome === "completed")
-      ));
+      const writer = this.machineSessionMove?.({ machineId: member.homeMachineId })?.deviceId;
+      return conversation.messages.some((message) => message.role === "system"
+        && message.metadata?.memberSessionTaken?.participantId === member.id
+        && message.metadata.memberSessionTaken.blobHash === member.sessionHandoff?.blob.blobHash
+        && Boolean(writer) && message.metadata.serverWriter === writer);
     }).map((member) => member.id);
   }
 
@@ -15990,15 +16127,10 @@ export class ChatService {
     let serverTurnEnded = false;
     try {
       turnController = this.ensureChatTurnController(conversation, participant, runId, signal);
-      const moveKey = `${conversation.id}:${participant.id}`;
-      const movesBefore = this.memberMoves.get(moveKey) ?? 0;
       await this.waitForParticipantTurnReservation(reservation, turnController.signal);
       if (turnController.signal.aborted) {
         throw new Error("Chat run cancelled.");
       }
-      // The member moved while this turn waited: where it runs now is in the
-      // chat as saved.
-      if ((this.memberMoves.get(moveKey) ?? 0) !== movesBefore) await this.refreshStoredChatState(conversation);
       // The member's settings as they are when its turn starts, not when the
       // turn was asked for: a continuation waits for other members' turns,
       // and the User may change the member's model or permissions meanwhile,
@@ -16018,6 +16150,9 @@ export class ChatService {
       const opened: ServerTurnOpen = this.serverLink
         ? await this.openServerTurn(conversation, participant, triggerMessage, runId, turnController.signal)
         : { kind: "none" };
+      // Where it runs was decided there (after any move of it): as the chat
+      // has it now.
+      participant = this.chatParticipants(conversation).find((item) => item.id === participant.id) ?? participant;
       if (opened.kind !== "local") serverTurnEnded = true;
       if (opened.kind === "stopped" || opened.kind === "skip") {
         this.serverTurnOpens.delete(runId);
@@ -22347,6 +22482,8 @@ export class ChatService {
     // A member that moved here: turns asked of it while it moved wait on the
     // server, and are this device's now.
     if (this.membersArrivedHere(previousHomes, target)) void this.resumeServerTurns().catch(() => undefined);
+    // A member that moved away from this machine: its session here goes.
+    if (this.machineRuntime) void this.retireMovedMembers(target, previousHomes).catch(() => undefined);
     // A session handed to a machine that has since answered as the member.
     if (!this.machineRuntime && this.takenSessionHandoffs(target).length > 0) void this.clearTakenSessionHandoffs(target).catch(() => undefined);
     // A member this device runs that the chat no longer has (removed on any
@@ -22564,9 +22701,16 @@ export class ChatService {
     if (!conversation || conversation.kind !== "chat" || conversation.metadata.archived === true) return false;
     const participant = this.chatParticipants(conversation).find((item) => item.id === turn.participantId);
     if (!participant || !this.runsHere(participant)) return false;
-    // Its session was just handed over for a move: its turns wait on the
-    // server for its new device (or for the hold to end).
-    if (!isMemberSessionExportTurnRequest(turn.request) && this.memberSessionExportHeld(conversation.id, participant.id)) return false;
+    // Moving: on a machine that handed its session over, its turns wait on
+    // the server for its new device (or for the hold to end); on the
+    // computer, they wait for the move and go where it runs then.
+    const moving = isMemberSessionExportTurnRequest(turn.request) ? undefined : this.memberMoveGate(conversation.id, participant.id);
+    if (moving && this.machineRuntime) return false;
+    if (moving) {
+      await abortableWait(moving, controller.signal);
+      return this.startServerTurnNow(turn, controller);
+    }
+    if (isMemberSessionExportTurnRequest(turn.request) && !this.machineRuntime) return false;
     const message = conversation.messages.find((item) => item.id === turn.messageId);
     if (!message) return false;
     // A machine makes its settings current first, and takes nothing while it
@@ -22797,6 +22941,10 @@ export class ChatService {
   private async openServerTurnNow(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage, localRunId: string, signal?: AbortSignal): Promise<ServerTurnOpen> {
     const link = this.serverLink;
     if (!link) return { kind: "none" };
+    // A member that is moving is routed once it moved: by its new home.
+    const moving = this.memberMoveGate(conversation.id, participant.id);
+    if (moving) await abortableWait(moving, signal);
+    participant = await this.memberWhereItRunsNow(conversation, participant);
     const targets = deliveryTargetsOf(triggerMessage);
     const canonical = triggerMessage.role === "user" && targets.includes(participant.id);
     const serverRunId = canonical ? hubTurnRunId(triggerMessage.id, participant.id) : localRunId.startsWith("turn-") ? localRunId : `turn-${localRunId}`;

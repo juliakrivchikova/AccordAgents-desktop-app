@@ -22,9 +22,10 @@ export const MEMBER_SESSION_EXPORT_TURN_KIND = "session.export";
 export const MEMBER_SESSION_EXPORT_TURN_TTL_MS = 10 * 60_000;
 
 /** After a machine hands a member's session over, it leaves the member's
- *  turns waiting this long for the computer to make the move: a reply it ran
+ *  turns waiting until the computer made the move (the member's home leaves
+ *  the machine), or this long when it plainly will not: a reply it ran
  *  meanwhile would be missing from the session that moved. */
-export const MEMBER_SESSION_EXPORT_HOLD_MS = 3 * 60_000;
+export const MEMBER_SESSION_EXPORT_HOLD_MS = 15 * 60_000;
 
 export interface MemberSessionExportTurnRequest {
   kind: typeof MEMBER_SESSION_EXPORT_TURN_KIND;
@@ -48,15 +49,25 @@ export interface ChatSessionHandoff {
   at: string;
 }
 
-/** What a machine's export turn reports, on a hidden line of the chat. */
+/** What a machine's export turn reports, on a hidden line of the chat. The
+ *  computer words what it shows itself: a machine says only which case. */
 export interface MemberSessionExportReport {
   runId: string;
   participantId: string;
-  /** No session there yet: the member just moves. */
-  none?: boolean;
   sessionId?: string;
   blob?: DeviceEventBlobReference;
-  error?: string;
+  /** Absent when the session was put on the server. "none": it has no
+   *  session yet; "not-found": the CLI removed it there; the member moves
+   *  without one. "busy", "background", "failed": it does not move. */
+  reason?: "none" | "not-found" | "busy" | "background" | "failed";
+}
+
+/** What a machine says, on a hidden line, once it took (or gave up on) the
+ *  session its member was handed: the computer then lets the server go of it. */
+export interface MemberSessionTakenReport {
+  participantId: string;
+  blobHash: string;
+  taken: boolean;
 }
 
 /** What the session a member's handoff carries holds besides the transcript:
@@ -71,6 +82,15 @@ export function memberSessionMoves(participant: Pick<ChatParticipant, "kind" | "
 
 /** What a machine's last hello says about moving members' sessions. */
 export type MachineSessionMoveSupport = "supported" | "outdated" | "unknown";
+
+/** A machine as the computer knows it for a move: whether it takes and
+ *  hands over sessions, its name, its id, and the device it writes as. */
+export interface MachineSessionMoveTarget {
+  support: MachineSessionMoveSupport;
+  name?: string;
+  machineId?: string;
+  deviceId?: string;
+}
 
 /** The line the chat shows once a member moved. */
 export function memberMovedLine(handle: string, destination: string, withSession: boolean): string {

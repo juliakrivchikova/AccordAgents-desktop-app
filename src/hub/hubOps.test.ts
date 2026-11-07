@@ -841,6 +841,11 @@ test("a machine changes what concerns its own members; members elsewhere, the fo
   // member elsewhere, and the refusal does not use her approval up.
   assert.equal((await ask("r-box", { kind: "compaction" })).body.results[0].status, "rejected", "not to compact a member elsewhere, even with her approval");
   assert.equal((await ask("r-box", { kind: "restart" })).body.results[0].status, "rejected", "not to restart a member elsewhere, even with her approval");
+  assert.equal((await ask("r-box", { kind: "session.export", askedAt: new Date().toISOString() })).body.results[0].status, "rejected",
+    "never to take a member's session elsewhere, even with her approval");
+  const ownExport = await h.write(h.machine, { opId: id("op"), kind: "turn.request", conversationId: chat, runId: `turn-${id("x")}`, messageId: "u-user", participantId: "p-box",
+    request: { kind: "session.export", askedAt: new Date().toISOString() } } as HubOp);
+  assert.equal(ownExport.body.results[0].status, "rejected", "nor its own member's: only the computer moves a member");
   assert.equal((await ask("r-box", { kind: "turn" })).body.results[0].status, "accepted", "her approval holds after the card is settled");
   await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message: reply("r-box-2", "p-box", "done", "@desk again") });
   assert.equal((await ask("r-box-2", { kind: "turn" })).body.results[0].status, "rejected", "and only for the request she approved");

@@ -289,7 +289,8 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
     storage, config: hubRetentionConfig(), log,
     bodiesReady: async () => Boolean(await storage.hub().document(BLOB_PINS_DONE_KEY)),
     renewPins: async () => {
-      await renewSessionPins(storage);
+      // Each on its own: a failure of one never skips the other's pins.
+      await renewSessionPins(storage).catch((error: unknown) => log("hub.session-pins.error", { message: error instanceof Error ? error.message : String(error) }));
       await renewPicturePins(storage);
     }
   });

@@ -14,7 +14,7 @@
  */
 
 import type { MachineMemberRestartSupport } from "../../shared/memberRestart";
-import type { MachineSessionMoveSupport } from "../../shared/memberSessionMove";
+import type { MachineSessionMoveSupport, MachineSessionMoveTarget } from "../../shared/memberSessionMove";
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
@@ -412,14 +412,14 @@ export class MachineLinkService {
   /** Whether a machine (by id, or by the AWS instance it runs on) takes and
    *  hands over members' sessions, by the last hello it sent this desktop,
    *  connected or not: its program changes only through this desktop. */
-  sessionMoveTarget(target: { machineId?: string; instanceId?: string }): { support: MachineSessionMoveSupport; name?: string; machineId?: string } {
+  sessionMoveTarget(target: { machineId?: string; instanceId?: string }): MachineSessionMoveTarget {
     const connection = target.machineId
       ? this.connections.get(target.machineId)
       : target.instanceId ? [...this.connections.values()].find((item) => item.record.awsInstanceId === target.instanceId) : undefined;
     if (!connection) return { support: "unknown" };
     const hello = connection.record.lastHello;
     const support: MachineSessionMoveSupport = !hello ? "unknown" : hello.sessionMoveSupported === true ? "supported" : "outdated";
-    return { support, name: connection.record.name, machineId: connection.record.id };
+    return { support, name: connection.record.name, machineId: connection.record.id, ...(connection.record.deviceId ? { deviceId: connection.record.deviceId } : {}) };
   }
 
   /** Ask a machine to do something with its scheduled scripts and wait for

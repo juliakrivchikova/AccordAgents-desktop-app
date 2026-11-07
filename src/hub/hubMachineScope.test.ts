@@ -378,3 +378,14 @@ test("a machine never writes the session a member is handed when it moves, for i
   const members = (written.update.metadata?.participants ?? [desk, box]) as Array<{ id: string; sessionHandoff?: unknown }>;
   assert.ok(members.every((member) => member.sessionHandoff === undefined), "nor one it makes up");
 });
+
+test("a member a machine adds comes without a session handed to it", () => {
+  const handoff = { provider: "claude-code", sessionId: "s-1", blob: { type: "device.event.blob", blobHash: `sha256:${"b".repeat(64)}`, byteLength: 10, fragments: 1 }, at: "t" };
+  const manager = { ...box, permissions: { manageRolesParticipants: "allow" } };
+  const managed = chat();
+  managed.metadata.participants = [desk, manager];
+  const added = { id: "p-new", handle: "new", label: "New", roleConfigId: "r", kind: "claude-code", sessionHandoff: handoff };
+  const scoped = scopeMachineConversationUpdate(managed, { metadata: { participants: [desk, manager, added] } }, "machine-1");
+  const member = (scoped.update.metadata?.participants as Array<{ id: string; sessionHandoff?: unknown }>)?.find((item) => item.id === "p-new");
+  if (member) assert.equal(member.sessionHandoff, undefined);
+});
