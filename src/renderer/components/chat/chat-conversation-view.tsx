@@ -109,14 +109,21 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   );
   const artifacts = props.artifacts;
   // Each artifact note's drafts and signatures as they stood when it was
-  // written, read from the notes loaded for this chat.
+  // written, read from the notes loaded for this chat. Worked out again only
+  // when the notes themselves change, not on every update of a running turn.
+  const artifactNotes = props.conversation.messages.filter(
+    (message) => message.role === "system" && message.metadata?.appMessageSource === ARTIFACT_NOTE_MESSAGE_SOURCE
+  );
+  const artifactNotesKey = artifactNotes.map((note) => `${note.id}:${note.content.length}`).join("\n");
+  const artifactNotesRef = useRef(artifactNotes);
+  artifactNotesRef.current = artifactNotes;
   const artifactNoteProgress = useMemo(() => {
     const byId = artifacts.context.byId;
-    return artifactNoteProgressById(
-      props.conversation.messages.filter((message) => message.role === "system" && message.metadata?.appMessageSource === ARTIFACT_NOTE_MESSAGE_SOURCE),
-      (artifactId) => byId.get(artifactId)?.approval.requiredSigners.length || undefined
-    );
-  }, [props.conversation.messages, artifacts.context.byId]);
+    return artifactNoteProgressById(artifactNotesRef.current, (artifactId) => {
+      const summary = byId.get(artifactId);
+      return summary ? { signers: summary.approval.requiredSigners.length, drafters: summary.requiredDraftCount || undefined } : undefined;
+    });
+  }, [artifactNotesKey, artifacts.context.byId]);
   const [selectedThreadRootId, setSelectedThreadRootId] = useState<string | undefined>();
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const [threadWidth, setThreadWidth] = useState(CHAT_THREAD_DEFAULT_WIDTH);

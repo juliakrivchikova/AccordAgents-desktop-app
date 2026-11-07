@@ -34,7 +34,7 @@ function ArtifactNoteMarks(props: { progress: ArtifactNoteProgress }): JSX.Eleme
     ? `Drafts ${progress.done.length} of ${progress.total}`
     : `Signed ${progress.done.length} of ${progress.total}`;
   return (
-    <span className="chat-artifact-note-marks" role="img" aria-label={summary}>
+    <span className={`chat-artifact-note-marks${progress.total > 4 ? " is-many" : ""}`} role="img" aria-label={summary}>
       {slots.map((actor, index) => {
         const given = actor !== undefined;
         const state = given ? (progress.complete ? "is-complete" : "is-given") : "";

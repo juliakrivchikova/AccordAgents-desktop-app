@@ -22,8 +22,9 @@ export interface ArtifactNoteProgressInput {
 }
 
 /** What the desktop knows of an artifact now, when its notes do not say:
- *  how many signers it has (a revision keeps the signer set). */
-export type ArtifactSignerCount = (artifactId: string) => number | undefined;
+ *  how many signers it has (a revision keeps the signer set) and how many
+ *  drafts it waits for. Unknown counts give no marks rather than a guess. */
+export type ArtifactCounts = (artifactId: string) => { signers?: number; drafters?: number } | undefined;
 
 const COUNT = /^(?:Drafts )?(\d+)\/(\d+)(?: signed)?$/;
 
@@ -37,17 +38,18 @@ function countOf(details: string[], suffix: "Drafts" | "signed"): { done: number
   return undefined;
 }
 
-/** `done`, with unnamed places added when a note counts more than the
- *  loaded notes name. */
-function padded(done: string[], count: number): string[] {
-  return done.length >= count ? done : [...done, ...Array.from({ length: count - done.length }, () => "")];
+/** `done` made exactly `count` long: unnamed places added when a note counts
+ *  more than the loaded notes name, the oldest dropped when it counts fewer. */
+function fit(done: string[], count: number): string[] {
+  if (done.length >= count) return done.slice(done.length - count);
+  return [...done, ...Array.from({ length: count - done.length }, () => "")];
 }
 
 /** The marks for every artifact note among `notes` (in timeline order),
  *  by note id; notes that are not about drafts or signatures get none. */
 export function artifactNoteProgressById(
   notes: ArtifactNoteProgressInput[],
-  signerCount?: ArtifactSignerCount
+  counts?: ArtifactCounts
 ): Map<string, ArtifactNoteProgress> {
   const parsed: Array<{ id: string; card: ArtifactNoteCard }> = [];
   for (const note of notes) {
@@ -65,18 +67,22 @@ export function artifactNoteProgressById(
     if (drafts) draftersByArtifact.set(card.artifactId, drafts.total);
   }
   const signers = (artifactId: string): number | undefined =>
-    signersByArtifact.get(artifactId) ?? signerCount?.(artifactId) ?? draftersByArtifact.get(artifactId);
+    signersByArtifact.get(artifactId) ?? counts?.(artifactId)?.signers;
+  const drafters = (artifactId: string): number | undefined =>
+    draftersByArtifact.get(artifactId) ?? counts?.(artifactId)?.drafters;
 
   const drafts = new Map<string, string[]>();
   const signatures = new Map<string, string[]>();
+  const headVersion = new Map<string, string>();
   const result = new Map<string, ArtifactNoteProgress>();
   for (const { id, card } of parsed) {
     const artifactId = card.artifactId;
+    const version = card.details.find((detail) => /^v\d+$/.test(detail));
     switch (card.action) {
       case "created-collection": {
-        const count = countOf(card.details, "Drafts");
         drafts.set(artifactId, []);
-        if (count && count.total > 0) result.set(id, { kind: "drafts", done: [], total: count.total, complete: false });
+        const total = drafters(artifactId);
+        if (total && total > 0) result.set(id, { kind: "drafts", done: [], total, complete: false });
         break;
       }
       case "submitted-draft":
@@ -84,28 +90,42 @@ export function artifactNoteProgressById(
         const current = (drafts.get(artifactId) ?? []).filter((actor) => actor !== card.actor);
         const next = card.action === "submitted-draft" ? [...current, card.actor] : current;
         drafts.set(artifactId, next);
-        const total = Math.max(draftersByArtifact.get(artifactId) ?? 0, next.length);
-        if (total > 0) result.set(id, { kind: "drafts", done: next, total, complete: false });
+        const total = drafters(artifactId);
+        // Drafts beyond the required ones (optional authors) do not add marks.
+        if (total && total > 0) result.set(id, { kind: "drafts", done: next.slice(0, total), total, complete: false });
         break;
       }
+      case "created":
       case "published":
       case "revised": {
         // A new version: the signatures given to the last one no longer count.
         signatures.set(artifactId, []);
+        if (version) headVersion.set(artifactId, version);
         const total = signers(artifactId);
         if (total && total > 0) result.set(id, { kind: "signatures", done: [], total, complete: false });
         break;
       }
       case "signed": {
-        const current = (signatures.get(artifactId) ?? []).filter((actor) => actor !== card.actor);
-        let done = [...current, card.actor];
+        // Only a signature on the version waiting for them counts; one on an
+        // older version (written without a count) changes nothing.
+        const head = headVersion.get(artifactId);
+        if (head && version && version !== head) break;
         const count = countOf(card.details, "signed");
         const fully = card.details.includes("fully approved");
-        const total = count?.total ?? signers(artifactId) ?? done.length;
-        if (count) done = padded(done, count.done);
-        if (fully) done = padded(done, total);
+        if (!count && !fully && head) break;
+        if (version && !head) headVersion.set(artifactId, version);
+        const current = (signatures.get(artifactId) ?? []).filter((actor) => actor !== card.actor);
+        let done = [...current, card.actor];
+        const total = count?.total ?? signers(artifactId) ?? (fully ? done.length : undefined);
+        if (!total || total <= 0) {
+          signatures.set(artifactId, done);
+          break;
+        }
+        // The note's own count is the truth; names come from the notes loaded.
+        if (count) done = fit(done, count.done);
+        if (fully) done = fit(done, total);
         signatures.set(artifactId, done);
-        if (total > 0) result.set(id, { kind: "signatures", done: done.slice(0, total), total, complete: fully || done.length >= total });
+        result.set(id, { kind: "signatures", done, total, complete: fully || done.length >= total });
         break;
       }
       default:

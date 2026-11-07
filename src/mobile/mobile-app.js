@@ -9452,7 +9452,7 @@
    *  signature is in, lilac once it is, green when every signature is. */
   function artifactNoteMarksElement(progress) {
     const marks = document.createElement("span");
-    marks.className = "artifact-note-marks";
+    marks.className = "artifact-note-marks" + (progress.total > 3 ? " is-many" : "");
     marks.setAttribute("role", "img");
     marks.setAttribute("aria-label", (progress.kind === "drafts" ? "Drafts " : "Signed ") + progress.done.length + " of " + progress.total);
     for (let index = 0; index < progress.total; index += 1) {

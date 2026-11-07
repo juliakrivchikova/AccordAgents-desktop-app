@@ -32,10 +32,10 @@
   --menu-shadow: 0 12px 30px rgba(22, 25, 31, 0.16);
   /* Something waiting for the User: the desktop's warning colour. */
   --warn: #c98a13;
-  /* The Start Accord glyph's branches, as the desktop's --app-accord-icon-*. */
   /* Every signature in: the desktop's --app-success pair. */
   --ok: #08794e;
   --ok-soft: #e8f8f1;
+  /* The Start Accord glyph's branches, as the desktop's --app-accord-icon-*. */
   --accord-icon-top: #a855f7;
   --accord-icon-left: #e73975;
   --accord-icon-right: #447bf3;
@@ -940,6 +940,22 @@ button.mobile-chat-group-title:active {
   border-radius: 7px;
   background: color-mix(in srgb, var(--mut) 12%, transparent);
   color: color-mix(in srgb, var(--mut) 75%, transparent);
+}
+
+/* Many members: smaller marks, so the text keeps its room on a phone. */
+.artifact-note-marks.is-many {
+  gap: 3px;
+}
+
+.artifact-note-marks.is-many .artifact-note-mark {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+}
+
+.artifact-note-marks.is-many svg {
+  width: 12px;
+  height: 12px;
 }
 
 .artifact-note-mark.is-given {

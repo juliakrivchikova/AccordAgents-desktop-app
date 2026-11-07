@@ -4870,6 +4870,22 @@ button.composer-active-run-row-main:focus-visible {
   color: color-mix(in srgb, var(--app-muted) 75%, transparent);
 }
 
+/* Many members: smaller marks, so the text keeps its room. */
+.chat-artifact-note-marks.is-many {
+  gap: 3px;
+}
+
+.chat-artifact-note-marks.is-many .chat-artifact-note-mark {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+
+.chat-artifact-note-marks.is-many svg {
+  width: 13px;
+  height: 13px;
+}
+
 .chat-artifact-note-mark.is-given {
   background: var(--app-accent-soft);
   color: var(--app-accent);
