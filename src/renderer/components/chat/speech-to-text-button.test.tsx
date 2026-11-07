@@ -166,3 +166,29 @@ test("only one message field dictates at a time", async () => {
     second.remove();
   }
 });
+
+test("opening another chat while a long recording is recognized stops sending the rest", async () => {
+  const fakes = installFakes(READY);
+  const textarea = field();
+  const drafts: string[] = [];
+  const view = await mount({ session: "chat-1", textarea, drafts });
+  try {
+    await click(view.host, "composer-dictation-start");
+    await settle();
+    await act(async () => { fakes.speak(30); });
+    await settle();
+    assert.equal(fakes.transcribe.length, 1, "the first piece is sent while she speaks");
+    await click(view.host, "composer-dictation-stop");
+    await settle();
+    // The rest waits behind the first piece; she opens another chat.
+    await view.rerender("chat-2");
+    fakes.transcribe[0]!.resolve({ text: "Для первого чата." });
+    await settle();
+    assert.equal(fakes.transcribe.length, 1, "the rest is not sent");
+    assert.deepEqual(drafts, []);
+  } finally {
+    await act(async () => { view.root.unmount(); });
+    view.host.remove();
+    textarea.remove();
+  }
+});

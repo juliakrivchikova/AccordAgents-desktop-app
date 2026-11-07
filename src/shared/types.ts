@@ -3351,7 +3351,8 @@ export interface AppBridge {
   setSpeechToTextHoldKey(holdKey: import("./speechToText").SpeechHoldKey): Promise<SpeechToTextState>;
   /** Starts loading the speech model as she begins to dictate; returns at once. */
   prepareSpeechToText(): Promise<void>;
-  /** Recognizes one recording: a 16 kHz mono 16-bit WAV. */
+  /** Recognizes one recording, or one piece of a long one (16 kHz mono
+   *  16-bit WAV), optionally given the text before it and its language. */
   transcribeSpeech(request: TranscribeSpeechRequest): Promise<TranscribeSpeechResult>;
   /** Asks the system for the microphone; false when it is refused or off. */
   requestMicrophoneAccess(): Promise<boolean>;

@@ -29,7 +29,7 @@ import { useChatComposerMentions } from "./use-chat-composer-mentions";
 import { useChatComposerSuggestions, type ChatComposerSuggestion } from "./use-chat-composer-suggestions";
 import { useComposerNoticeClearance } from "./use-composer-notice-clearance";
 import { SpeechToTextButton } from "./speech-to-text-button";
-import { DICTATION_SESSION_ATTRIBUTE } from "./dictation-hold-key";
+import { DICTATION_SESSION_ATTRIBUTE } from "./dictation-target";
 
 /**
  * Skills, plugins and files picked for the draft's tokens. When the owner

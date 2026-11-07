@@ -42,6 +42,7 @@ await build({
     "renderer/components/settings/speech-to-text-row.test.tsx",
     "renderer/components/chat/speech-to-text-button.test.tsx",
     "renderer/components/chat/dictation-hold-key.test.tsx",
+    "renderer/components/chat/dictation-pieces.test.tsx",
     "renderer/components/settings/aws-settings-page.test.tsx",
     "renderer/components/settings/aws-settings-actions.test.tsx",
     "renderer/components/settings/aws-projects-section.test.tsx",

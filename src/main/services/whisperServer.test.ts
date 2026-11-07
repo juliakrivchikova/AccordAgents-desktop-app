@@ -45,7 +45,8 @@ setTimeout(() => {
         const prompt = field("prompt");
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({
-          text: " heard " + body.length + (prompt ? " after " + prompt : "") + "\\n",
+          text: " heard " + body.length + (prompt ? " after " + prompt : "")
+            + " as " + field("response_format") + (field("no_language_probabilities") === "true" ? " without odds" : "") + "\\n",
           format: field("response_format"),
           language: field("language") || "russian"
         }));
@@ -147,11 +148,11 @@ test("ten idle minutes (here, a moment) free the memory, and the next phrase loa
   const t = await setup();
   const engine = new WhisperServerEngine({ serverPath: t.server, modelPath: "/m.bin", idleMs: 300 });
   try {
-    (await engine.transcribe(WAV, 5_000)).text;
+    await engine.transcribe(WAV, 5_000);
     const [first] = await t.started();
     await until(() => !alive(first!.pid));
     assert.equal(engine.isWarm(), false);
-    (await engine.transcribe(WAV, 5_000)).text;
+    await engine.transcribe(WAV, 5_000);
     const started = await t.started();
     assert.equal(started.length, 2);
     assert.ok(alive(started[1]!.pid));
@@ -321,7 +322,9 @@ test("a piece of a long recording is sent with the text and the language before 
   const t = await setup();
   const engine = new WhisperServerEngine({ serverPath: t.server, modelPath: "/m.bin", idleMs: 60_000 });
   try {
-    assert.doesNotMatch((await engine.transcribe(WAV, 5_000)).text, /after/);
+    const first = await engine.transcribe(WAV, 5_000);
+    assert.doesNotMatch(first.text, /after/);
+    assert.match(first.text, /as verbose_json without odds/, "the language comes back without the cost of every language's odds");
     const piece = await engine.transcribe(WAV, 5_000, { prompt: "Привет, мир.", language: "english" });
     assert.match(piece.text, /after Привет, мир\./);
     assert.equal(piece.language, "english", "the first piece's language is kept for the rest");

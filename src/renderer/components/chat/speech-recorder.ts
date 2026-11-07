@@ -38,6 +38,8 @@ registerProcessor("accordagents-speech-tap", AccordAgentsSpeechTap);
 let tapModuleUrl: string | undefined;
 /** A microphone that has not started by then is reported, not waited on. */
 const START_TIMEOUT_MS = 10_000;
+/** The last sound is waited for this long when recording stops. */
+const FLUSH_TIMEOUT_MS = 500;
 
 export interface SpeechRecorder {
   /** Ends recording; resolves once the last sound has been handed over. */
@@ -87,7 +89,7 @@ export async function startSpeechRecorder(options: {
             flushed = resolve;
             tap.port.postMessage("flush");
             // A context that stopped running never answers.
-            window.setTimeout(resolve, 500);
+            window.setTimeout(resolve, FLUSH_TIMEOUT_MS);
           });
           source.disconnect();
           tap.disconnect();

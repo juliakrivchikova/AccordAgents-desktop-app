@@ -4227,17 +4227,25 @@ button.composer-active-run-row-main:focus-visible {
 }
 
 /* Hold-to-dictate: a status pill while the key is held, and a small window
-   for text that had no field to go into. Both float at the top centre, clear
-   of the message field. */
-.dictation-hold-pill,
-.dictation-result {
+   for text that had no field to go into. They float at the top centre, clear
+   of the message field, the pill above the window. */
+.dictation-hold-layer {
   position: fixed;
   top: 56px;
   left: 50%;
   /* Above dialogs and their scrim, and usable while one is open. */
   z-index: var(--z-toast);
-  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
   transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.dictation-hold-pill,
+.dictation-result {
+  pointer-events: auto;
   border: 1px solid var(--app-border);
   background: var(--app-surface);
   box-shadow: var(--shadow-lg);
@@ -4317,7 +4325,7 @@ button.composer-active-run-row-main:focus-visible {
      component, so the ring empties exactly when the window closes. */
   stroke-dasharray: 66;
   stroke-dashoffset: 0;
-  animation: dictation-result-countdown 8s linear forwards;
+  animation: dictation-result-countdown linear forwards;
 }
 
 .dictation-result-close[data-paused] .dictation-result-ring circle {

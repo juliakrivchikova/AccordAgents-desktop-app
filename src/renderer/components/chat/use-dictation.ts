@@ -22,6 +22,13 @@ export interface DictationNotice {
 const MICROPHONE_OFF =
   "Microphone access is off for AccordAgents. Turn it on in System Settings › Privacy & Security › Microphone.";
 const NOTHING_HEARD = "No speech was recognized.";
+const NOT_RECOGNIZED = "Speech could not be recognized.";
+/** After this many failed pieces in a row the engine is not waited on for
+ *  the rest: each failure restarts it, and each wait can take minutes. */
+const FAILURES_IN_A_ROW_LIMIT = 2;
+/** A piece's language is kept for the rest only when it had this much text:
+ *  a cough or "hmm" says little about the language she speaks. */
+const LANGUAGE_MIN_LETTERS = 12;
 const HINT_MS = 6_000;
 
 interface Recording {
@@ -33,6 +40,7 @@ interface Recording {
   /** Pieces are recognized one after another, while she still speaks. */
   queue: Promise<void>;
   failure?: string;
+  failuresInARow: number;
   /** Found in the first piece; the rest are recognized in the same language. */
   language?: string;
   /** Dropped (another chat, or the key turned out to be a shortcut): nothing
@@ -57,13 +65,18 @@ export function useDictation(options: { session?: string; onText: (text: string)
   dismissNotice: () => void;
   start: () => Promise<void>;
   stop: () => Promise<void>;
-  /** Drops the recording without recognizing it. */
+  /** Drops the recording without recognizing it, and stops recognizing one
+   *  that has stopped. */
   cancel: () => void;
+  /** Shows a passing note under the field. */
+  hint: (text: string) => void;
 } {
   const [phase, setPhase] = useState<DictationPhase>("idle");
   const [seconds, setSeconds] = useState(0);
   const [notice, setNotice] = useState<DictationNotice>();
   const recordingRef = useRef<Recording>();
+  /** The recording being recognized after it stopped. */
+  const stoppingRef = useRef<Recording>();
   const generationRef = useRef(0);
   const ownerRef = useRef(Symbol("dictation"));
   const onTextRef = useRef(options.onText);
@@ -82,6 +95,9 @@ export function useDictation(options: { session?: string; onText: (text: string)
       void recording.recorder?.stop();
       stopTracks(recording.stream);
     }
+    // What is still waiting to be recognized is not sent.
+    if (stoppingRef.current) stoppingRef.current.cancelled = true;
+    stoppingRef.current = undefined;
     release();
     setPhase("idle");
     setSeconds(0);
@@ -100,6 +116,7 @@ export function useDictation(options: { session?: string; onText: (text: string)
     if (!recording) return;
     const generation = generationRef.current;
     recordingRef.current = undefined;
+    stoppingRef.current = recording;
     setPhase("recognizing");
     try {
       await recording.recorder?.stop();
@@ -118,8 +135,9 @@ export function useDictation(options: { session?: string; onText: (text: string)
       }
     } catch (error) {
       if (generation !== generationRef.current) return;
-      setNotice({ text: cleanIpcError(error) || "Speech could not be recognized.", kind: "error" });
+      setNotice({ text: cleanIpcError(error) || NOT_RECOGNIZED, kind: "error" });
     } finally {
+      if (stoppingRef.current === recording) stoppingRef.current = undefined;
       if (generation === generationRef.current) {
         release();
         setPhase("idle");
@@ -180,7 +198,7 @@ export function useDictation(options: { session?: string; onText: (text: string)
         stopTracks(stream);
         return;
       }
-      const recording: Recording = { stream, pieces: new SpeechPieces(), texts: [], queue: Promise.resolve() };
+      const recording: Recording = { stream, pieces: new SpeechPieces(), texts: [], queue: Promise.resolve(), failuresInARow: 0 };
       recording.recorder = await startSpeechRecorder({
         stream,
         onSamples: (samples) => {
@@ -221,7 +239,8 @@ export function useDictation(options: { session?: string; onText: (text: string)
     }
   }, [discard, phase, release, stop]);
 
-  return { phase, seconds, notice, dismissNotice: () => setNotice(undefined), start, stop, cancel: discard };
+  const hint = useCallback((text: string) => setNotice({ text, kind: "hint" }), []);
+  return { phase, seconds, notice, dismissNotice: () => setNotice(undefined), start, stop, cancel: discard, hint };
 }
 
 function stopTracks(stream: MediaStream): void {
@@ -233,13 +252,14 @@ function stopTracks(stream: MediaStream): void {
 
 /**
  * Queues one piece; each is given the end of the text before it and the
- * language of the first. A piece with no voice in it (a pause) is skipped.
+ * language of the first. A piece with no voice in it (a pause) is skipped,
+ * and so is the rest once the engine has failed twice in a row.
  */
 function recognizePiece(recording: Recording, samples: Float32Array): void {
   if (recording.cancelled || !speechHasVoice(samples)) return;
   const audio = encodeWavPcm16(samples);
   recording.queue = recording.queue.then(async () => {
-    if (recording.cancelled) return;
+    if (recording.cancelled || recording.failuresInARow >= FAILURES_IN_A_ROW_LIMIT) return;
     try {
       const prompt = speechPromptFrom(joinTranscripts(recording.texts));
       const result = await window.consensus.transcribeSpeech({
@@ -248,9 +268,11 @@ function recognizePiece(recording: Recording, samples: Float32Array): void {
         ...(recording.language ? { language: recording.language } : {})
       });
       recording.texts.push(result.text);
-      if (result.text.trim()) recording.language ??= result.language;
+      recording.failuresInARow = 0;
+      if ((result.text.match(/\p{L}/gu)?.length ?? 0) >= LANGUAGE_MIN_LETTERS) recording.language ??= result.language;
     } catch (error) {
-      recording.failure ??= cleanIpcError(error) || "Speech could not be recognized.";
+      recording.failuresInARow += 1;
+      recording.failure ??= cleanIpcError(error) || NOT_RECOGNIZED;
     }
   });
 }

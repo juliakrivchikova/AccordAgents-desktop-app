@@ -14,7 +14,8 @@ export const SPEECH_MODEL_SHA256 = "1fc70f774d38eb169993ac391eea357ef47c88757ef7
 export const SPEECH_SAMPLE_RATE = 16_000;
 /** Shorter than this is a click, not speech: nothing is sent. */
 export const SPEECH_MIN_SECONDS = 0.4;
-/** One recording's limit; longer ones are refused rather than cut. */
+/** One recording's limit: recording stops here, and the desktop refuses a
+ *  single recording longer than this. */
 export const SPEECH_MAX_SECONDS = 30 * 60;
 /**
  * A long recording is recognized in pieces while she speaks: once this much
@@ -33,7 +34,7 @@ export const SPEECH_PROMPT_MAX_CHARS = 1_000;
 export type SpeechHoldKey = "option" | "right-option" | "off";
 export const SPEECH_HOLD_KEYS: readonly SpeechHoldKey[] = ["option", "right-option", "off"];
 export const DEFAULT_SPEECH_HOLD_KEY: SpeechHoldKey = "option";
-/** How each choice reads in Settings and while recording. */
+/** How each choice reads in Settings and in the recording status. */
 export const SPEECH_HOLD_KEY_LABELS: Record<SpeechHoldKey, string> = {
   option: "Option",
   "right-option": "Right Option",
@@ -215,20 +216,14 @@ export class SpeechPieces {
 }
 
 /**
- * Whether a piece holds anything like a voice: some 50 ms of it is louder
- * than a quiet room (about -40 dBFS). A pause alone is not sent: given the
- * text before it, Whisper tends to invent words for it.
+ * Whether a piece has any sound in it: a piece that is all silence (a long
+ * pause) is not sent, since the engine tends to invent words for it. The
+ * line is the same one the desktop uses to call a whole recording silent.
  */
-export function speechHasVoice(samples: Float32Array, sampleRate: number = SPEECH_SAMPLE_RATE): boolean {
-  const window = Math.max(1, Math.round(sampleRate * 0.05));
-  for (let start = 0; start < samples.length; start += window) {
-    let energy = 0;
-    const end = Math.min(samples.length, start + window);
-    for (let index = start; index < end; index += 1) {
-      const sample = samples[index] ?? 0;
-      energy += sample * sample;
-    }
-    if (Math.sqrt(energy / Math.max(1, end - start)) > 0.01) return true;
+export function speechHasVoice(samples: Float32Array): boolean {
+  const peak = SILENCE_PEAK / 32_768;
+  for (const sample of samples) {
+    if (Math.abs(sample) > peak) return true;
   }
   return false;
 }

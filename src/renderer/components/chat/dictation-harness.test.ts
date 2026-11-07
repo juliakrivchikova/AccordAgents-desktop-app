@@ -6,6 +6,9 @@ export interface FakeTrack { stopped: boolean; stop: () => void; onended: (() =>
 export interface Fakes {
   prepared: number;
   allowMicrophone: boolean;
+  /** When set, the system's microphone answer waits for `answerMicrophone`. */
+  holdMicrophone: boolean;
+  answerMicrophone: () => void;
   failRecorder: boolean;
   tracks: FakeTrack[];
   transcribe: Array<{
@@ -23,9 +26,12 @@ const SECOND_OF_SOUND = new Float32Array(16_000).map((_, index) => 0.2 * Math.si
 
 export function installFakes(state: SpeechToTextState): Fakes {
   let tap: FakeTapNode | undefined;
+  const microphoneWaits: Array<() => void> = [];
   const fakes: Fakes = {
     prepared: 0,
     allowMicrophone: true,
+    holdMicrophone: false,
+    answerMicrophone: () => microphoneWaits.shift()?.(),
     failRecorder: false,
     tracks: [],
     transcribe: [],
@@ -38,7 +44,9 @@ export function installFakes(state: SpeechToTextState): Fakes {
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
     getSpeechToTextState: async () => state,
     onSpeechToTextState: () => () => undefined,
-    requestMicrophoneAccess: async () => fakes.allowMicrophone,
+    requestMicrophoneAccess: () => fakes.holdMicrophone
+      ? new Promise<boolean>((resolve) => microphoneWaits.push(() => resolve(fakes.allowMicrophone)))
+      : Promise.resolve(fakes.allowMicrophone),
     prepareSpeechToText: async () => { fakes.prepared += 1; },
     transcribeSpeech: (request: TranscribeSpeechRequest) =>
       new Promise<TranscribeSpeechResult>((resolve, reject) => fakes.transcribe.push({ request, resolve, reject }))

@@ -15,6 +15,8 @@ import {
   encodeWavPcm16,
   formatSpeechBytes,
   insertDictatedText,
+  isSpeechLanguage,
+  speechHasVoice,
   speechWavIsSilent,
   speechWavSeconds
 } from "./speechToText";
@@ -141,4 +143,23 @@ test("dictated text is spaced from the words around it", () => {
   assert.equal(spacedDictation("Hello ", ". Next", "world"), "world");
   assert.equal(spacedDictation("", "rest", "Start"), "Start ");
   assert.equal(spacedDictation("a", "b", "   "), "");
+});
+
+test("a piece is sent when it has any sound the desktop would not call silence", () => {
+  const quiet = (peak: number): Float32Array => new Float32Array(SPEECH_SAMPLE_RATE).map((_, index) => peak * Math.sin(index / 5));
+  assert.equal(speechHasVoice(new Float32Array(SPEECH_SAMPLE_RATE)), false, "a pause");
+  assert.equal(speechHasVoice(new Float32Array(0)), false);
+  assert.equal(speechHasVoice(quiet(0.002)), false, "below about -50 dBFS");
+  assert.equal(speechHasVoice(quiet(0.006)), true, "a quiet voice");
+  for (const peak of [0.002, 0.006, 0.2]) {
+    const samples = quiet(peak);
+    assert.equal(speechHasVoice(samples), !speechWavIsSilent(encodeWavPcm16(samples)), "the same line as a whole recording");
+  }
+});
+
+test("only a language name from the engine is passed back to it", () => {
+  for (const name of ["russian", "english", "haitian creole"]) assert.equal(isSpeechLanguage(name), true, name);
+  for (const value of ["", "a", "ru\r\nX", "x".repeat(30), "en-US", 42, undefined]) {
+    assert.equal(isSpeechLanguage(value), false, String(value));
+  }
 });
