@@ -552,3 +552,28 @@ test("a signed app ignores an engine picked by its environment", async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("a microphone press while it is being turned off does not load the model again", async () => {
+  const h = await harness();
+  try {
+    await h.service.enable();
+    await settle(h.service, notBusy);
+    await h.service.prepare();
+    const engine = h.engines[0]!;
+    assert.equal(engine.prepared, 1);
+    // A press and a dictation that arrive while the engine is being stopped.
+    let during: Promise<unknown> = Promise.resolve();
+    const stop = engine.stop.bind(engine);
+    engine.stop = async (reason: string) => {
+      during = Promise.all([h.service.prepare(), assert.rejects(h.service.transcribe(recording(1)), /not ready/)]);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return stop(reason);
+    };
+    await h.service.disable({ deleteModel: false });
+    await during;
+    assert.equal(engine.prepared, 1);
+    assert.deepEqual(engine.stops, ["turned-off"]);
+  } finally {
+    await h.cleanup();
+  }
+});

@@ -9,6 +9,7 @@
 // ACCORDAGENTS_REQUIRE_WHISPER=1) fails instead, so a release never ships
 // without it.
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -33,7 +34,19 @@ const CMAKE_FLAGS = [
   "-DCMAKE_OSX_ARCHITECTURES=arm64",
   "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
 ];
-const STAMP = `whisper-server ${WHISPER_TAG} ${WHISPER_COMMIT} ${CMAKE_FLAGS.join(" ")}`;
+// One change to the official server: it can listen on a Unix socket, so
+// only her user can reach it (a port on 127.0.0.1 is open to every account
+// on the Mac, and to web pages). It also refuses bodies over 64 MB.
+const SERVER_PATCH_FROM = `    if (!svr->bind_to_port(sparams.hostname, sparams.port))`;
+const SERVER_PATCH_TO = `    // AccordAgents: "--host unix:PATH" listens on a Unix socket at PATH.
+    svr->set_payload_max_length(64 * 1024 * 1024);
+    if (sparams.hostname.rfind("unix:", 0) == 0) {
+        svr->set_address_family(AF_UNIX);
+        sparams.hostname = sparams.hostname.substr(5);
+    }
+    if (!svr->bind_to_port(sparams.hostname, sparams.port))`;
+const PATCH_ID = createHash("sha256").update(SERVER_PATCH_TO).digest("hex").slice(0, 12);
+const STAMP = `whisper-server ${WHISPER_TAG} ${WHISPER_COMMIT} patch-${PATCH_ID} ${CMAKE_FLAGS.join(" ")}`;
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputDir = path.join(repoRoot, "dist", "whisper");
@@ -122,6 +135,12 @@ async function main() {
   if (commit !== WHISPER_COMMIT) {
     throw new Error(`whisper.cpp ${WHISPER_TAG} is commit ${commit}, expected ${WHISPER_COMMIT}; refusing to build it.`);
   }
+  const serverSource = path.join(sourceDir, "examples", "server", "server.cpp");
+  const original = await readFile(serverSource, "utf8");
+  if (original.split(SERVER_PATCH_FROM).length !== 2) {
+    throw new Error("whisper.cpp's server.cpp no longer matches the Unix socket patch; update it.");
+  }
+  await writeFile(serverSource, original.replace(SERVER_PATCH_FROM, SERVER_PATCH_TO));
   log(`building ${ENGINE} with ${cmake}`);
   run(cmake, ["-S", sourceDir, "-B", buildDir, ...CMAKE_FLAGS]);
   run(cmake, ["--build", buildDir, "--config", "Release", "--target", ENGINE, "-j", String(os.cpus().length)]);

@@ -16,6 +16,7 @@ const READY: SpeechToTextState = { status: "ready", modelInstalled: true, downlo
 interface FakeTrack { stopped: boolean; stop: () => void; onended: (() => void) | null }
 
 interface Fakes {
+  prepared: number;
   allowMicrophone: boolean;
   failRecorder: boolean;
   tracks: FakeTrack[];
@@ -23,11 +24,12 @@ interface Fakes {
 }
 
 function installFakes(): Fakes {
-  const fakes: Fakes = { allowMicrophone: true, failRecorder: false, tracks: [], transcribe: [] };
+  const fakes: Fakes = { prepared: 0, allowMicrophone: true, failRecorder: false, tracks: [], transcribe: [] };
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
     getSpeechToTextState: async () => READY,
     onSpeechToTextState: () => () => undefined,
     requestMicrophoneAccess: async () => fakes.allowMicrophone,
+    prepareSpeechToText: async () => { fakes.prepared += 1; },
     transcribeSpeech: () => new Promise<TranscribeSpeechResult>((resolve) => fakes.transcribe.push({ resolve }))
   };
   Object.defineProperty(navigator, "mediaDevices", {
@@ -120,6 +122,7 @@ test("recognized text goes in at the caret and nothing is sent", async () => {
   try {
     await click(view.host, "composer-dictation-start");
     await settle();
+    assert.equal(fakes.prepared, 1, "the model starts loading as she starts speaking");
     await click(view.host, "composer-dictation-stop");
     await settle();
     assert.equal(fakes.tracks[0]?.stopped, true, "the microphone is released when the recording stops");

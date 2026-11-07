@@ -114,10 +114,17 @@ export function useDictation(options: { session?: string; onText: (text: string)
   useEffect(() => {
     if (phase !== "recording") return undefined;
     const startedAt = Date.now();
+    let lastPrepare = Date.now();
     const timer = window.setInterval(() => {
       const elapsed = Math.floor((Date.now() - startedAt) / 1000);
       setSeconds(elapsed);
       if (elapsed >= SPEECH_MAX_SECONDS) void stop();
+      // A long recording keeps the model loaded: it leaves memory only
+      // ten minutes after the last dictation, not during one.
+      if (Date.now() - lastPrepare >= 60_000) {
+        lastPrepare = Date.now();
+        void window.consensus.prepareSpeechToText?.().catch(() => undefined);
+      }
     }, 250);
     return () => window.clearInterval(timer);
   }, [phase, stop]);

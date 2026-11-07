@@ -946,7 +946,7 @@ const speechToTextService = new SpeechToTextService({
     packaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     appPath: app.getAppPath(),
-    override: process.env.ACCORDAGENTS_WHISPER_CLI
+    override: process.env.ACCORDAGENTS_WHISPER_SERVER
   }),
   // Chromium's network stack: the system proxy and certificates apply.
   fetch: (url, init) => net.fetch(url, init),
