@@ -3489,8 +3489,12 @@ export interface TranscribeSpeechRequest {
   audio: Uint8Array;
   /** The end of the text recognized before this piece of a long recording. */
   prompt?: string;
+  /** The language found in the recording's first piece, kept for the rest. */
+  language?: string;
 }
 
 export interface TranscribeSpeechResult {
   text: string;
+  /** The language the engine heard, in its own naming ("russian"). */
+  language?: string;
 }

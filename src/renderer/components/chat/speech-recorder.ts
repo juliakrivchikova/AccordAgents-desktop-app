@@ -36,6 +36,8 @@ registerProcessor("accordagents-speech-tap", AccordAgentsSpeechTap);
 `;
 
 let tapModuleUrl: string | undefined;
+/** A microphone that has not started by then is reported, not waited on. */
+const START_TIMEOUT_MS = 10_000;
 
 export interface SpeechRecorder {
   /** Ends recording; resolves once the last sound has been handed over. */
@@ -54,9 +56,17 @@ export async function startSpeechRecorder(options: {
   const context = new AudioContext({ sampleRate: SPEECH_SAMPLE_RATE });
   try {
     tapModuleUrl ??= URL.createObjectURL(new Blob([TAP_SOURCE], { type: "text/javascript" }));
-    await context.audioWorklet.addModule(tapModuleUrl);
+    await withTimeout(context.audioWorklet.addModule(tapModuleUrl));
     const source = context.createMediaStreamSource(options.stream);
-    const tap = new AudioWorkletNode(context, "accordagents-speech-tap", { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 });
+    // Every input channel mixed into one: a microphone on input 2 of an
+    // interface is heard too.
+    const tap = new AudioWorkletNode(context, "accordagents-speech-tap", {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      channelCount: 1,
+      channelCountMode: "explicit",
+      channelInterpretation: "speakers"
+    });
     // A node is run only when it leads somewhere: a silent output does that.
     const mute = context.createGain();
     mute.gain.value = 0;
@@ -68,7 +78,7 @@ export async function startSpeechRecorder(options: {
       if (event.data.samples.length) options.onSamples(event.data.samples);
       if (event.data.last) flushed?.();
     };
-    if (context.state === "suspended") await context.resume();
+    if (context.state === "suspended") await withTimeout(context.resume());
     let stopping: Promise<void> | undefined;
     return {
       stop: () => {
@@ -91,4 +101,17 @@ export async function startSpeechRecorder(options: {
     await context.close().catch(() => undefined);
     throw error;
   }
+}
+
+function withTimeout<T>(work: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error("The microphone did not start.")), START_TIMEOUT_MS);
+    work.then((value) => {
+      window.clearTimeout(timer);
+      resolve(value);
+    }, (error: unknown) => {
+      window.clearTimeout(timer);
+      reject(error);
+    });
+  });
 }

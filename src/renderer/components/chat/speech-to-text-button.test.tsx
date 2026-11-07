@@ -150,7 +150,7 @@ test("only one message field dictates at a time", async () => {
     await click(b.host, "composer-dictation-start");
     await settle();
     assert.equal(fakes.tracks.length, 1);
-    assert.match(b.host.querySelector("[data-testid=composer-dictation-notice]")?.textContent ?? "", /already dictating/);
+    assert.match(b.host.querySelector("[data-testid=composer-dictation-notice]")?.textContent ?? "", /Another dictation is in progress/);
     await click(a.host, "composer-dictation-stop");
     await settle();
     fakes.transcribe[0]!.resolve({ text: "" });

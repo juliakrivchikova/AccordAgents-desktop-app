@@ -87,17 +87,19 @@ class FakeEngine {
   prepared = 0;
   transcribed: Uint8Array[] = [];
   prompts: Array<string | undefined> = [];
+  languages: Array<string | undefined> = [];
   stops: string[] = [];
   warm = false;
   respond: (wav: Uint8Array) => Promise<string> = async () => " [BLANK_AUDIO]\n Привет, мир.\n Hello world.\n";
   constructor(readonly input: { serverPath: string; modelPath: string; idleMs: number }) {}
   isWarm(): boolean { return this.warm; }
   async prepare(): Promise<void> { this.prepared += 1; this.warm = true; }
-  async transcribe(wav: Uint8Array, _timeoutMs: number, prompt?: string): Promise<string> {
+  async transcribe(wav: Uint8Array, _timeoutMs: number, context: { prompt?: string; language?: string } = {}): Promise<{ text: string; language?: string }> {
     this.transcribed.push(wav);
-    this.prompts.push(prompt);
+    this.prompts.push(context.prompt);
+    this.languages.push(context.language);
     this.warm = true;
-    return this.respond(wav);
+    return { text: await this.respond(wav), language: context.language ?? "russian" };
   }
   async stop(reason: string): Promise<void> { this.stops.push(reason); this.warm = false; }
 }
@@ -601,9 +603,11 @@ test("a piece of a long recording is recognized with the text before it", async 
   try {
     await h.service.enable();
     await settle(h.service, notBusy);
-    await h.service.transcribe(recording(2));
-    await h.service.transcribe(recording(2), "Привет, мир.");
+    const first = await h.service.transcribe(recording(2));
+    assert.equal(first.language, "russian", "the language heard comes back");
+    await h.service.transcribe(recording(2), { prompt: "Привет, мир.", language: first.language });
     assert.deepEqual(h.engines[0]!.prompts, [undefined, "Привет, мир."]);
+    assert.deepEqual(h.engines[0]!.languages, [undefined, "russian"]);
   } finally {
     await h.cleanup();
   }

@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { SPEECH_MAX_SECONDS, SpeechPieces, encodeWavPcm16, joinTranscripts, speechPromptFrom } from "../../../shared/speechToText";
+import {
+  SPEECH_MAX_SECONDS,
+  SpeechPieces,
+  encodeWavPcm16,
+  joinTranscripts,
+  speechHasVoice,
+  speechPromptFrom
+} from "../../../shared/speechToText";
 import { cleanIpcError } from "../../lib/ipc-error";
 import { startSpeechRecorder, type SpeechRecorder } from "./speech-recorder";
 
@@ -26,6 +33,11 @@ interface Recording {
   /** Pieces are recognized one after another, while she still speaks. */
   queue: Promise<void>;
   failure?: string;
+  /** Found in the first piece; the rest are recognized in the same language. */
+  language?: string;
+  /** Dropped (another chat, or the key turned out to be a shortcut): nothing
+   *  more of it is sent to be recognized. */
+  cancelled?: boolean;
 }
 
 /** One microphone, one dictation: the main field and a thread field never
@@ -45,6 +57,8 @@ export function useDictation(options: { session?: string; onText: (text: string)
   dismissNotice: () => void;
   start: () => Promise<void>;
   stop: () => Promise<void>;
+  /** Drops the recording without recognizing it. */
+  cancel: () => void;
 } {
   const [phase, setPhase] = useState<DictationPhase>("idle");
   const [seconds, setSeconds] = useState(0);
@@ -64,6 +78,7 @@ export function useDictation(options: { session?: string; onText: (text: string)
     const recording = recordingRef.current;
     recordingRef.current = undefined;
     if (recording) {
+      recording.cancelled = true;
       void recording.recorder?.stop();
       stopTracks(recording.stream);
     }
@@ -134,9 +149,13 @@ export function useDictation(options: { session?: string; onText: (text: string)
   }, [phase, stop]);
 
   const start = useCallback(async () => {
-    if (recordingRef.current || phase !== "idle") return;
+    if (recordingRef.current) return;
+    if (phase !== "idle") {
+      if (phase === "recognizing") setNotice({ text: "Still recognizing the last dictation.", kind: "hint" });
+      return;
+    }
     if (dictationOwner && dictationOwner !== ownerRef.current) {
-      setNotice({ text: "Another message field is already dictating.", kind: "hint" });
+      setNotice({ text: "Another dictation is in progress.", kind: "hint" });
       return;
     }
     dictationOwner = ownerRef.current;
@@ -202,7 +221,7 @@ export function useDictation(options: { session?: string; onText: (text: string)
     }
   }, [discard, phase, release, stop]);
 
-  return { phase, seconds, notice, dismissNotice: () => setNotice(undefined), start, stop };
+  return { phase, seconds, notice, dismissNotice: () => setNotice(undefined), start, stop, cancel: discard };
 }
 
 function stopTracks(stream: MediaStream): void {
@@ -212,14 +231,24 @@ function stopTracks(stream: MediaStream): void {
   }
 }
 
-/** Queues one piece; each is given the end of the text before it. */
+/**
+ * Queues one piece; each is given the end of the text before it and the
+ * language of the first. A piece with no voice in it (a pause) is skipped.
+ */
 function recognizePiece(recording: Recording, samples: Float32Array): void {
+  if (recording.cancelled || !speechHasVoice(samples)) return;
   const audio = encodeWavPcm16(samples);
   recording.queue = recording.queue.then(async () => {
+    if (recording.cancelled) return;
     try {
       const prompt = speechPromptFrom(joinTranscripts(recording.texts));
-      const result = await window.consensus.transcribeSpeech({ audio, ...(prompt ? { prompt } : {}) });
+      const result = await window.consensus.transcribeSpeech({
+        audio,
+        ...(prompt ? { prompt } : {}),
+        ...(recording.language ? { language: recording.language } : {})
+      });
       recording.texts.push(result.text);
+      if (result.text.trim()) recording.language ??= result.language;
     } catch (error) {
       recording.failure ??= cleanIpcError(error) || "Speech could not be recognized.";
     }

@@ -26,11 +26,19 @@ export const SPEECH_PIECE_MAX_SECONDS = 28;
 export const SPEECH_PIECE_MIN_SECONDS = 18;
 /** Previous text given to the engine with the next piece, for continuity. */
 const SPEECH_PROMPT_CHARS = 200;
+/** The most prompt text the desktop accepts with one piece. */
+export const SPEECH_PROMPT_MAX_CHARS = 1_000;
 
 /** The key held to dictate, in the app only. fn never reaches web content. */
 export type SpeechHoldKey = "option" | "right-option" | "off";
 export const SPEECH_HOLD_KEYS: readonly SpeechHoldKey[] = ["option", "right-option", "off"];
 export const DEFAULT_SPEECH_HOLD_KEY: SpeechHoldKey = "option";
+/** How each choice reads in Settings and while recording. */
+export const SPEECH_HOLD_KEY_LABELS: Record<SpeechHoldKey, string> = {
+  option: "Option",
+  "right-option": "Right Option",
+  off: "Off"
+};
 
 export function isSpeechHoldKey(value: unknown): value is SpeechHoldKey {
   return typeof value === "string" && (SPEECH_HOLD_KEYS as readonly string[]).includes(value);
@@ -204,6 +212,35 @@ export class SpeechPieces {
     }
     return all;
   }
+}
+
+/**
+ * Whether a piece holds anything like a voice: some 50 ms of it is louder
+ * than a quiet room (about -40 dBFS). A pause alone is not sent: given the
+ * text before it, Whisper tends to invent words for it.
+ */
+export function speechHasVoice(samples: Float32Array, sampleRate: number = SPEECH_SAMPLE_RATE): boolean {
+  const window = Math.max(1, Math.round(sampleRate * 0.05));
+  for (let start = 0; start < samples.length; start += window) {
+    let energy = 0;
+    const end = Math.min(samples.length, start + window);
+    for (let index = start; index < end; index += 1) {
+      const sample = samples[index] ?? 0;
+      energy += sample * sample;
+    }
+    if (Math.sqrt(energy / Math.max(1, end - start)) > 0.01) return true;
+  }
+  return false;
+}
+
+/** "1:05" for seconds of recording. */
+export function formatSpeechElapsed(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/** Whisper's names for languages ("russian"), as the engine reports them. */
+export function isSpeechLanguage(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z][a-z ]{1,24}$/i.test(value);
 }
 
 /** The pieces' text as one paragraph. */

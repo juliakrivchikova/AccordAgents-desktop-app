@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { formatSpeechBytes, isSpeechHoldKey } from "../../../shared/speechToText";
+import { SPEECH_HOLD_KEYS, SPEECH_HOLD_KEY_LABELS, formatSpeechBytes, isSpeechHoldKey } from "../../../shared/speechToText";
 import type { SpeechToTextState } from "../../../shared/types";
 import { useSpeechToTextState } from "../../app/use-speech-to-text";
 import { cleanIpcError } from "../../lib/ipc-error";
@@ -10,11 +10,7 @@ import { isWindowsPlatform } from "../../lib/platform";
 import { AppSelect } from "../primitives";
 import { AwsDialog } from "./aws-dialog";
 
-const HOLD_KEY_OPTIONS = [
-  { value: "option", label: "Option" },
-  { value: "right-option", label: "Right Option" },
-  { value: "off", label: "Off" }
-];
+const HOLD_KEY_OPTIONS = SPEECH_HOLD_KEYS.map((value) => ({ value, label: SPEECH_HOLD_KEY_LABELS[value] }));
 
 type Dialog = "download" | "turn-off" | undefined;
 

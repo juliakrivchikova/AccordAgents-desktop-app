@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { Loader2, Mic, Square } from "lucide-react";
 
 import { IconButton } from "@/renderer/components/primitives";
-import { insertDictatedText } from "../../../shared/speechToText";
+import { formatSpeechElapsed, insertDictatedText } from "../../../shared/speechToText";
 import { useSpeechToTextState } from "../../app/use-speech-to-text";
 import { useDictation } from "./use-dictation";
 
@@ -89,7 +89,7 @@ export function SpeechToTextButton(props: {
           }}
         >
           <span className="composer-dictation-dot" aria-hidden />
-          <span className="composer-dictation-time">{formatElapsed(dictation.seconds)}</span>
+          <span className="composer-dictation-time">{formatSpeechElapsed(dictation.seconds)}</span>
           <Square size={11} strokeWidth={2.4} aria-hidden />
         </button>
       </>
@@ -117,6 +117,3 @@ export function SpeechToTextButton(props: {
   );
 }
 
-function formatElapsed(seconds: number): string {
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-}

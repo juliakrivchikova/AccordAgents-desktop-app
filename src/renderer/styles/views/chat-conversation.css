@@ -4234,7 +4234,9 @@ button.composer-active-run-row-main:focus-visible {
   position: fixed;
   top: 56px;
   left: 50%;
-  z-index: 60;
+  /* Above dialogs and their scrim, and usable while one is open. */
+  z-index: var(--z-toast);
+  pointer-events: auto;
   transform: translateX(-50%);
   border: 1px solid var(--app-border);
   background: var(--app-surface);
@@ -4311,6 +4313,8 @@ button.composer-active-run-row-main:focus-visible {
   fill: none;
   stroke: var(--app-border-strong);
   stroke-width: 1.5;
+  /* 66 ≈ the circle's length (2π × 10.5); the duration comes from the
+     component, so the ring empties exactly when the window closes. */
   stroke-dasharray: 66;
   stroke-dashoffset: 0;
   animation: dictation-result-countdown 8s linear forwards;

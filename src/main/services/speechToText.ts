@@ -20,7 +20,7 @@ import {
 } from "../../shared/speechToText";
 import type { SpeechHoldKey } from "../../shared/speechToText";
 import type { SpeechToTextState, TranscribeSpeechResult } from "../../shared/types";
-import { ENGINE_DIR_PREFIX, WhisperServerEngine, type SpeechEngine, type SpeechEngineInput } from "./whisperServer";
+import { ENGINE_DIR_PREFIX, WhisperServerEngine, type SpeechEngine, type SpeechEngineInput, type SpeechPieceContext } from "./whisperServer";
 
 type SpeechFetch = (url: string, init: { headers: Record<string, string>; signal: AbortSignal }) => Promise<Response>;
 type CreateEngine = (input: SpeechEngineInput) => SpeechEngine;
@@ -200,8 +200,6 @@ export class SpeechToTextService {
     return run;
   }
 
-  /** Recognizes one recording. Recordings wait for each other: one engine
-   *  at a time holds the model in memory. */
   /** The key held to dictate; kept whether speech to text is on or off. */
   setHoldKey(holdKey: unknown): Promise<SpeechToTextState> {
     return this.serialize(async () => {
@@ -212,14 +210,16 @@ export class SpeechToTextService {
     });
   }
 
-  async transcribe(audio: Uint8Array, prompt?: string): Promise<TranscribeSpeechResult> {
+  /** Recognizes one recording, or one piece of a long one. Recordings wait
+   *  for each other: one engine at a time holds the model in memory. */
+  async transcribe(audio: Uint8Array, context: SpeechPieceContext = {}): Promise<TranscribeSpeechResult> {
     await this.load();
-    const run = this.transcriptions.then(() => this.transcribeNow(audio, prompt), () => this.transcribeNow(audio, prompt));
+    const run = this.transcriptions.then(() => this.transcribeNow(audio, context), () => this.transcribeNow(audio, context));
     this.transcriptions = run.catch(() => undefined);
     return run;
   }
 
-  private async transcribeNow(audio: Uint8Array, prompt?: string): Promise<TranscribeSpeechResult> {
+  private async transcribeNow(audio: Uint8Array, context: SpeechPieceContext): Promise<TranscribeSpeechResult> {
     const engine = this.options.engine();
     if ("unavailable" in engine) throw new Error(engine.unavailable);
     if (!this.enabled || !this.modelInstalled || this.turningOff) {
@@ -246,14 +246,15 @@ export class SpeechToTextService {
       // several times slower than real time is already broken, and a hung
       // engine must not hold every later recording in the queue for long.
       const timeoutMs = 2 * 60 * 1000 + Math.ceil(length.seconds) * 1000;
-      const text = cleanTranscript(await speechEngine.transcribe(audio, timeoutMs, prompt));
+      const heard = await speechEngine.transcribe(audio, timeoutMs, context);
+      const text = cleanTranscript(heard.text);
       this.options.log?.("speech.transcribed", {
         seconds: Math.round(length.seconds * 10) / 10,
         ms: Date.now() - startedAt,
         warm,
         characters: text.length
       });
-      return { text };
+      return { text, ...(heard.language ? { language: heard.language } : {}) };
     } catch (error) {
       this.options.log?.("speech.transcribe-failed", { message: error instanceof Error ? error.message : String(error) });
       throw new Error("Speech could not be recognized. Try again.");

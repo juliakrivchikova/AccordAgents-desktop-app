@@ -41,9 +41,14 @@ setTimeout(() => {
       req.on("end", () => setTimeout(() => {
         if (o.inferStatus) { res.statusCode = o.inferStatus; res.end('{"error":"no"}'); return; }
         const body = Buffer.concat(chunks).toString("latin1");
-        const prompt = /name="prompt"\\r\\n\\r\\n([^\\r]*)/.exec(body);
+        const field = (name) => { const m = new RegExp('name="' + name + '"\\r\\n\\r\\n([^\\r]*)').exec(body); return m ? Buffer.from(m[1], "latin1").toString("utf8") : undefined; };
+        const prompt = field("prompt");
         res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify({ text: " heard " + body.length + (prompt ? " after " + Buffer.from(prompt[1], "latin1").toString("utf8") : "") + "\\n" }));
+        res.end(JSON.stringify({
+          text: " heard " + body.length + (prompt ? " after " + prompt : "") + "\\n",
+          format: field("response_format"),
+          language: field("language") || "russian"
+        }));
       }, o.inferMs || 0));
       return;
     }
@@ -107,8 +112,8 @@ test("the model is loaded once while she speaks, and later phrases reuse it", as
     assert.equal(engine.isWarm(), false, "not warm while loading");
     await loading;
     assert.equal(engine.isWarm(), true);
-    assert.match(await engine.transcribe(WAV, 5_000), /heard \d+/);
-    assert.match(await engine.transcribe(WAV, 5_000), /heard \d+/);
+    assert.match((await engine.transcribe(WAV, 5_000)).text, /heard \d+/);
+    assert.match((await engine.transcribe(WAV, 5_000)).text, /heard \d+/);
     const started = await t.started();
     assert.equal(started.length, 1);
     assert.equal(started[0]!.model, "/models/m.bin");
@@ -142,11 +147,11 @@ test("ten idle minutes (here, a moment) free the memory, and the next phrase loa
   const t = await setup();
   const engine = new WhisperServerEngine({ serverPath: t.server, modelPath: "/m.bin", idleMs: 300 });
   try {
-    await engine.transcribe(WAV, 5_000);
+    (await engine.transcribe(WAV, 5_000)).text;
     const [first] = await t.started();
     await until(() => !alive(first!.pid));
     assert.equal(engine.isWarm(), false);
-    await engine.transcribe(WAV, 5_000);
+    (await engine.transcribe(WAV, 5_000)).text;
     const started = await t.started();
     assert.equal(started.length, 2);
     assert.ok(alive(started[1]!.pid));
@@ -162,9 +167,9 @@ test("the idle countdown never ends a load or a recognition in progress", async 
   const slowInfer = await setup({ inferMs: 700 });
   const recognizing = new WhisperServerEngine({ serverPath: slowInfer.server, modelPath: "/m.bin", idleMs: 200 });
   try {
-    assert.match(await loading.transcribe(WAV, 5_000), /heard/);
+    assert.match((await loading.transcribe(WAV, 5_000)).text, /heard/);
     assert.equal((await slowLoad.started()).length, 1);
-    assert.match(await recognizing.transcribe(WAV, 5_000), /heard/);
+    assert.match((await recognizing.transcribe(WAV, 5_000)).text, /heard/);
     assert.equal((await slowInfer.started()).length, 1);
   } finally {
     await loading.stop("test");
@@ -216,7 +221,7 @@ test("an engine that dies is started again for the next phrase", async () => {
     const [first] = await t.started();
     process.kill(first!.pid, "SIGKILL");
     await until(() => !engine.isWarm());
-    assert.match(await engine.transcribe(WAV, 5_000), /heard/);
+    assert.match((await engine.transcribe(WAV, 5_000)).text, /heard/);
     assert.equal((await t.started()).length, 2);
   } finally {
     await engine.stop("test");
@@ -312,12 +317,15 @@ test("when the app dies without stopping it, the engine does not stay in memory"
   }
 });
 
-test("a piece of a long recording is sent with the text before it", async () => {
+test("a piece of a long recording is sent with the text and the language before it", async () => {
   const t = await setup();
   const engine = new WhisperServerEngine({ serverPath: t.server, modelPath: "/m.bin", idleMs: 60_000 });
   try {
-    assert.doesNotMatch(await engine.transcribe(WAV, 5_000), /after/);
-    assert.match(await engine.transcribe(WAV, 5_000, "Привет, мир."), /after Привет, мир\./);
+    assert.doesNotMatch((await engine.transcribe(WAV, 5_000)).text, /after/);
+    const piece = await engine.transcribe(WAV, 5_000, { prompt: "Привет, мир.", language: "english" });
+    assert.match(piece.text, /after Привет, мир\./);
+    assert.equal(piece.language, "english", "the first piece's language is kept for the rest");
+    assert.equal((await engine.transcribe(WAV, 5_000)).language, "russian", "the language heard comes back");
   } finally {
     await engine.stop("test");
     await t.cleanup();
