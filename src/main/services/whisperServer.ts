@@ -10,14 +10,21 @@ import { performance } from "node:perf_hooks";
 export interface SpeechEngine {
   /** Loads the model unless it is loaded or loading; resolves when ready. */
   prepare(): Promise<void>;
-  /** The engine's text for one 16 kHz mono WAV. */
-  transcribe(wav: Uint8Array, timeoutMs: number): Promise<string>;
+  /** The engine's text for one 16 kHz mono WAV, and the language it heard.
+   *  A piece of a longer recording comes with the text before it and the
+   *  language found in its first piece. */
+  transcribe(wav: Uint8Array, timeoutMs: number, context?: SpeechPieceContext): Promise<{ text: string; language?: string }>;
   stop(reason: string): Promise<void>;
   /** Whether the model is loaded and answering now (for the log). */
   isWarm(): boolean;
 }
 
 export type SpeechEngineInput = Pick<WhisperServerEngineOptions, "serverPath" | "modelPath" | "idleMs">;
+
+export interface SpeechPieceContext {
+  prompt?: string;
+  language?: string;
+}
 
 export interface WhisperServerEngineOptions {
   serverPath: string;
@@ -86,23 +93,23 @@ export class WhisperServerEngine implements SpeechEngine {
     return this.running.ready;
   }
 
-  async transcribe(wav: Uint8Array, timeoutMs: number): Promise<string> {
+  async transcribe(wav: Uint8Array, timeoutMs: number, context: SpeechPieceContext = {}): Promise<{ text: string; language?: string }> {
     this.inFlight += 1;
     try {
-      return await this.transcribeNow(wav, timeoutMs);
+      return await this.transcribeNow(wav, timeoutMs, context);
     } finally {
       this.inFlight -= 1;
       this.touch();
     }
   }
 
-  private async transcribeNow(wav: Uint8Array, timeoutMs: number): Promise<string> {
+  private async transcribeNow(wav: Uint8Array, timeoutMs: number, context: SpeechPieceContext): Promise<{ text: string; language?: string }> {
     await this.prepare();
     const running = this.running;
     if (!running?.socket || running.exited) throw new Error("The speech engine stopped while loading.");
     let response: { status: number; body: string };
     try {
-      response = await unixRequest(running.socket, "POST", "/inference", multipart(wav), timeoutMs);
+      response = await unixRequest(running.socket, "POST", "/inference", multipart(wav, context), timeoutMs);
     } catch (error) {
       // No answer in time, or the connection broke: a hung or broken engine
       // is not reused for the next dictation.
@@ -113,11 +120,11 @@ export class WhisperServerEngine implements SpeechEngine {
     if (response.status !== 200) {
       throw new Error(`The speech engine answered ${response.status}: ${response.body.slice(0, ERROR_BODY_CHARS)}`);
     }
-    const parsed = JSON.parse(response.body) as { text?: unknown };
+    const parsed = JSON.parse(response.body) as { text?: unknown; language?: unknown };
     if (typeof parsed.text !== "string") {
       throw new Error(`The speech engine gave no text: ${response.body.slice(0, ERROR_BODY_CHARS)}`);
     }
-    return parsed.text;
+    return { text: parsed.text, ...(typeof parsed.language === "string" ? { language: parsed.language } : {}) };
   }
 
   async stop(reason: string): Promise<void> {
@@ -304,10 +311,21 @@ function unixRequest(
   });
 }
 
-function multipart(wav: Uint8Array): { type: string; data: Buffer } {
+function multipart(wav: Uint8Array, context: SpeechPieceContext): { type: string; data: Buffer } {
   const boundary = `accordagents-${randomBytes(12).toString("hex")}`;
+  const field = (name: string, value: string): string =>
+    `\r\n--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}`;
   const head = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="speech.wav"\r\nContent-Type: audio/wav\r\n\r\n`;
-  const tail = `\r\n--${boundary}\r\nContent-Disposition: form-data; name="response_format"\r\n\r\njson\r\n--${boundary}--\r\n`;
+  // The boundary is random per request, so text cannot end a field early.
+  // verbose_json reports the language heard; its probabilities cost a second
+  // pass and are not needed.
+  const fields = [
+    field("response_format", "verbose_json"),
+    field("no_language_probabilities", "true"),
+    context.prompt ? field("prompt", context.prompt) : "",
+    context.language ? field("language", context.language) : ""
+  ].join("");
+  const tail = `${fields}\r\n--${boundary}--\r\n`;
   return {
     type: `multipart/form-data; boundary=${boundary}`,
     data: Buffer.concat([Buffer.from(head), Buffer.from(wav.buffer, wav.byteOffset, wav.byteLength), Buffer.from(tail)])

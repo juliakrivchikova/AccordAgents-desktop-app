@@ -62,6 +62,7 @@ import {
 } from "./chat-composer-draft-utils";
 import { renderSlashHighlightedDraft } from "./chat-composer-draft-highlights";
 import { SpeechToTextButton } from "./speech-to-text-button";
+import { DICTATION_SESSION_ATTRIBUTE } from "./dictation-target";
 import { useChatComposerImages } from "./use-chat-composer-images";
 import { useChatComposerMentions } from "./use-chat-composer-mentions";
 import { sortSavedParticipantOptionsByUsage } from "./new-chat-participant-usage";
@@ -347,7 +348,7 @@ export function NewChatScreen(props: {
           selectedFileMentions={mentions.selectedFileMentions}
           selectedSkillMentions={mentions.selectedSkillMentions}
         />
-        <div className={["new-chat-input-wrap", mentions.showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")}>
+        <div className={["new-chat-input-wrap", mentions.showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")} {...{ [DICTATION_SESSION_ATTRIBUTE]: "new-chat" }}>
           <ChatComposerMenus
             fileIndex={mentions.fileIndex}
             insertCommand={mentions.insertCommand}

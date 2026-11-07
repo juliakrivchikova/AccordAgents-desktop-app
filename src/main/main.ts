@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { HubInstaller, removeStaleHubTemp } from "./services/hubInstaller";
 import { SpeechToTextService, resolveSpeechEngine } from "./services/speechToText";
+import { SPEECH_PROMPT_MAX_CHARS, isSpeechLanguage } from "../shared/speechToText";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { AwsInstanceProjectsService, AwsProjectAddCancelled } from "./services/awsInstanceProjects";
 import { newChatProjects } from "../shared/newChat";
@@ -2680,12 +2681,15 @@ function registerIpc(): void {
   ipcMain.handle("speech:disable", (_event, request: { deleteModel?: unknown } | undefined) =>
     speechToTextService.disable({ deleteModel: request?.deleteModel === true }));
   ipcMain.handle("speech:prepare", () => speechToTextService.prepare());
-  ipcMain.handle("speech:transcribe", (_event, request: { audio?: unknown } | undefined) => {
+  ipcMain.handle("speech:set-hold-key", (_event, holdKey: unknown) => speechToTextService.setHoldKey(holdKey));
+  ipcMain.handle("speech:transcribe", (_event, request: { audio?: unknown; prompt?: unknown; language?: unknown } | undefined) => {
     const audio = request?.audio;
     if (!(audio instanceof Uint8Array)) {
       throw new Error("The recording did not arrive.");
     }
-    return speechToTextService.transcribe(audio);
+    const prompt = typeof request?.prompt === "string" ? request.prompt.slice(-SPEECH_PROMPT_MAX_CHARS) : undefined;
+    const language = isSpeechLanguage(request?.language) ? request.language : undefined;
+    return speechToTextService.transcribe(audio, { prompt, language });
   });
   ipcMain.handle("speech:request-microphone", async () => {
     // Chromium's stand-in microphone (a test run fed from an audio file)

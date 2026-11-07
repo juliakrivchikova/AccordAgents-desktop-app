@@ -86,16 +86,20 @@ async function startModelServer(): Promise<ModelServer> {
 class FakeEngine {
   prepared = 0;
   transcribed: Uint8Array[] = [];
+  prompts: Array<string | undefined> = [];
+  languages: Array<string | undefined> = [];
   stops: string[] = [];
   warm = false;
   respond: (wav: Uint8Array) => Promise<string> = async () => " [BLANK_AUDIO]\n Привет, мир.\n Hello world.\n";
   constructor(readonly input: { serverPath: string; modelPath: string; idleMs: number }) {}
   isWarm(): boolean { return this.warm; }
   async prepare(): Promise<void> { this.prepared += 1; this.warm = true; }
-  async transcribe(wav: Uint8Array): Promise<string> {
+  async transcribe(wav: Uint8Array, _timeoutMs: number, context: { prompt?: string; language?: string } = {}): Promise<{ text: string; language?: string }> {
     this.transcribed.push(wav);
+    this.prompts.push(context.prompt);
+    this.languages.push(context.language);
     this.warm = true;
-    return this.respond(wav);
+    return { text: await this.respond(wav), language: context.language ?? "russian" };
   }
   async stop(reason: string): Promise<void> { this.stops.push(reason); this.warm = false; }
 }
@@ -573,6 +577,37 @@ test("a microphone press while it is being turned off does not load the model ag
     await during;
     assert.equal(engine.prepared, 1);
     assert.deepEqual(engine.stops, ["turned-off"]);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("the key held to dictate is Option until she picks another, and is remembered", async () => {
+  const h = await harness();
+  try {
+    assert.equal((await h.service.getState()).holdKey, "option");
+    assert.equal((await h.service.setHoldKey("right-option")).holdKey, "right-option");
+    await assert.rejects(h.service.setHoldKey("fn"), /cannot be used/);
+    await h.service.enable();
+    await settle(h.service, notBusy);
+    await h.service.disable({ deleteModel: false });
+    assert.equal((await h.create().getState()).holdKey, "right-option", "kept across turning off and a restart");
+    assert.equal((await h.service.setHoldKey("off")).holdKey, "off");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("a piece of a long recording is recognized with the text before it", async () => {
+  const h = await harness();
+  try {
+    await h.service.enable();
+    await settle(h.service, notBusy);
+    const first = await h.service.transcribe(recording(2));
+    assert.equal(first.language, "russian", "the language heard comes back");
+    await h.service.transcribe(recording(2), { prompt: "Привет, мир.", language: first.language });
+    assert.deepEqual(h.engines[0]!.prompts, [undefined, "Привет, мир."]);
+    assert.deepEqual(h.engines[0]!.languages, [undefined, "russian"]);
   } finally {
     await h.cleanup();
   }

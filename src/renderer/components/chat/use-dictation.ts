@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { SPEECH_MAX_SECONDS, SPEECH_SAMPLE_RATE, encodeWavPcm16 } from "../../../shared/speechToText";
+import {
+  SPEECH_MAX_SECONDS,
+  SpeechPieces,
+  encodeWavPcm16,
+  joinTranscripts,
+  speechHasVoice,
+  speechPromptFrom
+} from "../../../shared/speechToText";
 import { cleanIpcError } from "../../lib/ipc-error";
+import { startSpeechRecorder, type SpeechRecorder } from "./speech-recorder";
 
 export type DictationPhase = "idle" | "starting" | "recording" | "recognizing";
 
@@ -14,13 +22,30 @@ export interface DictationNotice {
 const MICROPHONE_OFF =
   "Microphone access is off for AccordAgents. Turn it on in System Settings › Privacy & Security › Microphone.";
 const NOTHING_HEARD = "No speech was recognized.";
+const NOT_RECOGNIZED = "Speech could not be recognized.";
+/** After this many failed pieces in a row the engine is not waited on for
+ *  the rest: each failure restarts it, and each wait can take minutes. */
+const FAILURES_IN_A_ROW_LIMIT = 2;
+/** A piece's language is kept for the rest only when it had this much text:
+ *  a cough or "hmm" says little about the language she speaks. */
+const LANGUAGE_MIN_LETTERS = 12;
 const HINT_MS = 6_000;
 
 interface Recording {
   stream: MediaStream;
-  recorder: MediaRecorder;
-  chunks: Blob[];
-  stopped: Promise<void>;
+  recorder?: SpeechRecorder;
+  pieces: SpeechPieces;
+  /** Recognized pieces, in order. */
+  texts: string[];
+  /** Pieces are recognized one after another, while she still speaks. */
+  queue: Promise<void>;
+  failure?: string;
+  failuresInARow: number;
+  /** Found in the first piece; the rest are recognized in the same language. */
+  language?: string;
+  /** Dropped (another chat, or the key turned out to be a shortcut): nothing
+   *  more of it is sent to be recognized. */
+  cancelled?: boolean;
 }
 
 /** One microphone, one dictation: the main field and a thread field never
@@ -40,11 +65,18 @@ export function useDictation(options: { session?: string; onText: (text: string)
   dismissNotice: () => void;
   start: () => Promise<void>;
   stop: () => Promise<void>;
+  /** Drops the recording without recognizing it, and stops recognizing one
+   *  that has stopped. */
+  cancel: () => void;
+  /** Shows a passing note under the field. */
+  hint: (text: string) => void;
 } {
   const [phase, setPhase] = useState<DictationPhase>("idle");
   const [seconds, setSeconds] = useState(0);
   const [notice, setNotice] = useState<DictationNotice>();
   const recordingRef = useRef<Recording>();
+  /** The recording being recognized after it stopped. */
+  const stoppingRef = useRef<Recording>();
   const generationRef = useRef(0);
   const ownerRef = useRef(Symbol("dictation"));
   const onTextRef = useRef(options.onText);
@@ -59,9 +91,13 @@ export function useDictation(options: { session?: string; onText: (text: string)
     const recording = recordingRef.current;
     recordingRef.current = undefined;
     if (recording) {
-      if (recording.recorder.state !== "inactive") recording.recorder.stop();
+      recording.cancelled = true;
+      void recording.recorder?.stop();
       stopTracks(recording.stream);
     }
+    // What is still waiting to be recognized is not sent.
+    if (stoppingRef.current) stoppingRef.current.cancelled = true;
+    stoppingRef.current = undefined;
     release();
     setPhase("idle");
     setSeconds(0);
@@ -80,27 +116,28 @@ export function useDictation(options: { session?: string; onText: (text: string)
     if (!recording) return;
     const generation = generationRef.current;
     recordingRef.current = undefined;
+    stoppingRef.current = recording;
     setPhase("recognizing");
     try {
-      if (recording.recorder.state !== "inactive") recording.recorder.stop();
-      await recording.stopped;
+      await recording.recorder?.stop();
       stopTracks(recording.stream);
-      const blob = new Blob(recording.chunks, { type: recording.recorder.mimeType || "audio/webm" });
-      recording.chunks.length = 0;
-      const samples = await decodeToSpeechSamples(blob).catch(() => undefined);
+      // Only what was said since the last piece is still to recognize.
+      const rest = recording.pieces.finish();
+      if (rest.length) recognizePiece(recording, rest);
+      await recording.queue;
       if (generation !== generationRef.current) return;
-      if (!samples || samples.length === 0) {
+      const text = joinTranscripts(recording.texts);
+      if (text) onTextRef.current(text);
+      if (recording.failure) {
+        setNotice({ text: text ? "Part of the recording could not be recognized." : recording.failure, kind: "error" });
+      } else if (!text) {
         setNotice({ text: NOTHING_HEARD, kind: "hint" });
-        return;
       }
-      const result = await window.consensus.transcribeSpeech({ audio: encodeWavPcm16(samples) });
-      if (generation !== generationRef.current) return;
-      if (result.text) onTextRef.current(result.text);
-      else setNotice({ text: NOTHING_HEARD, kind: "hint" });
     } catch (error) {
       if (generation !== generationRef.current) return;
-      setNotice({ text: cleanIpcError(error) || "Speech could not be recognized.", kind: "error" });
+      setNotice({ text: cleanIpcError(error) || NOT_RECOGNIZED, kind: "error" });
     } finally {
+      if (stoppingRef.current === recording) stoppingRef.current = undefined;
       if (generation === generationRef.current) {
         release();
         setPhase("idle");
@@ -130,9 +167,13 @@ export function useDictation(options: { session?: string; onText: (text: string)
   }, [phase, stop]);
 
   const start = useCallback(async () => {
-    if (recordingRef.current || phase !== "idle") return;
+    if (recordingRef.current) return;
+    if (phase !== "idle") {
+      if (phase === "recognizing") setNotice({ text: "Still recognizing the last dictation.", kind: "hint" });
+      return;
+    }
     if (dictationOwner && dictationOwner !== ownerRef.current) {
-      setNotice({ text: "Another message field is already dictating.", kind: "hint" });
+      setNotice({ text: "Another dictation is in progress.", kind: "hint" });
       return;
     }
     dictationOwner = ownerRef.current;
@@ -157,24 +198,28 @@ export function useDictation(options: { session?: string; onText: (text: string)
         stopTracks(stream);
         return;
       }
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : undefined;
-      const recorder = new MediaRecorder(stream, { ...(mimeType ? { mimeType } : {}), audioBitsPerSecond: 32_000 });
-      const chunks: Blob[] = [];
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunks.push(event.data);
-      };
-      const stopped = new Promise<void>((resolve) => {
-        recorder.onstop = () => resolve();
+      const recording: Recording = { stream, pieces: new SpeechPieces(), texts: [], queue: Promise.resolve(), failuresInARow: 0 };
+      recording.recorder = await startSpeechRecorder({
+        stream,
+        onSamples: (samples) => {
+          // A long recording is recognized piece by piece as she speaks.
+          const piece = recording.pieces.push(samples);
+          if (piece) recognizePiece(recording, piece);
+        }
       });
+      if (generation !== generationRef.current) {
+        void recording.recorder.stop();
+        stopTracks(stream);
+        return;
+      }
       // A microphone that goes away (unplugged, headset off) ends the
       // recording with what was said so far.
       for (const track of stream.getAudioTracks()) {
         track.onended = () => {
-          if (recordingRef.current?.recorder === recorder) void stop();
+          if (recordingRef.current === recording) void stop();
         };
       }
-      recorder.start(1_000);
-      recordingRef.current = { stream, recorder, chunks, stopped };
+      recordingRef.current = recording;
       setPhase("recording");
       // The model loads while she speaks, instead of after she stops.
       void window.consensus.prepareSpeechToText?.().catch(() => undefined);
@@ -194,7 +239,8 @@ export function useDictation(options: { session?: string; onText: (text: string)
     }
   }, [discard, phase, release, stop]);
 
-  return { phase, seconds, notice, dismissNotice: () => setNotice(undefined), start, stop };
+  const hint = useCallback((text: string) => setNotice({ text, kind: "hint" }), []);
+  return { phase, seconds, notice, dismissNotice: () => setNotice(undefined), start, stop, cancel: discard, hint };
 }
 
 function stopTracks(stream: MediaStream): void {
@@ -205,19 +251,28 @@ function stopTracks(stream: MediaStream): void {
 }
 
 /**
- * The recording as 16 kHz mono samples, the way the engine reads them. An
- * offline context at that rate resamples while decoding, so the recording is
- * never held at the microphone's own rate and no audio output is opened.
+ * Queues one piece; each is given the end of the text before it and the
+ * language of the first. A piece with no voice in it (a pause) is skipped,
+ * and so is the rest once the engine has failed twice in a row.
  */
-async function decodeToSpeechSamples(blob: Blob): Promise<Float32Array> {
-  const data = await blob.arrayBuffer();
-  if (data.byteLength === 0) return new Float32Array(0);
-  const decoded = await new OfflineAudioContext(1, 1, SPEECH_SAMPLE_RATE).decodeAudioData(data);
-  if (decoded.numberOfChannels === 1) return decoded.getChannelData(0);
-  const mono = new Float32Array(decoded.length);
-  for (let channel = 0; channel < decoded.numberOfChannels; channel += 1) {
-    const samples = decoded.getChannelData(channel);
-    for (let index = 0; index < mono.length; index += 1) mono[index] += (samples[index] ?? 0) / decoded.numberOfChannels;
-  }
-  return mono;
+function recognizePiece(recording: Recording, samples: Float32Array): void {
+  if (recording.cancelled || !speechHasVoice(samples)) return;
+  const audio = encodeWavPcm16(samples);
+  recording.queue = recording.queue.then(async () => {
+    if (recording.cancelled || recording.failuresInARow >= FAILURES_IN_A_ROW_LIMIT) return;
+    try {
+      const prompt = speechPromptFrom(joinTranscripts(recording.texts));
+      const result = await window.consensus.transcribeSpeech({
+        audio,
+        ...(prompt ? { prompt } : {}),
+        ...(recording.language ? { language: recording.language } : {})
+      });
+      recording.texts.push(result.text);
+      recording.failuresInARow = 0;
+      if ((result.text.match(/\p{L}/gu)?.length ?? 0) >= LANGUAGE_MIN_LETTERS) recording.language ??= result.language;
+    } catch (error) {
+      recording.failuresInARow += 1;
+      recording.failure ??= cleanIpcError(error) || NOT_RECOGNIZED;
+    }
+  });
 }

@@ -3,7 +3,8 @@ import test from "node:test";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-import type { SpeechToTextState, TranscribeSpeechResult } from "../../../shared/types";
+import type { SpeechToTextState } from "../../../shared/types";
+import { installFakes } from "./dictation-harness.test";
 import { SpeechToTextButton } from "./speech-to-text-button";
 
 assert.ok(
@@ -11,62 +12,7 @@ assert.ok(
   "this test needs a DOM installed before its imports — run it via `npm run test:renderer-components`"
 );
 
-const READY: SpeechToTextState = { status: "ready", modelInstalled: true, downloadedBytes: 1, totalBytes: 1 };
-
-interface FakeTrack { stopped: boolean; stop: () => void; onended: (() => void) | null }
-
-interface Fakes {
-  prepared: number;
-  allowMicrophone: boolean;
-  failRecorder: boolean;
-  tracks: FakeTrack[];
-  transcribe: Array<{ resolve: (result: TranscribeSpeechResult) => void }>;
-}
-
-function installFakes(): Fakes {
-  const fakes: Fakes = { prepared: 0, allowMicrophone: true, failRecorder: false, tracks: [], transcribe: [] };
-  (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
-    getSpeechToTextState: async () => READY,
-    onSpeechToTextState: () => () => undefined,
-    requestMicrophoneAccess: async () => fakes.allowMicrophone,
-    prepareSpeechToText: async () => { fakes.prepared += 1; },
-    transcribeSpeech: () => new Promise<TranscribeSpeechResult>((resolve) => fakes.transcribe.push({ resolve }))
-  };
-  Object.defineProperty(navigator, "mediaDevices", {
-    configurable: true,
-    value: {
-      getUserMedia: async () => {
-        const track: FakeTrack = { stopped: false, onended: null, stop() { this.stopped = true; } };
-        fakes.tracks.push(track);
-        return { getTracks: () => [track], getAudioTracks: () => [track] };
-      }
-    }
-  });
-  class FakeRecorder {
-    static isTypeSupported(): boolean { return true; }
-    state = "inactive";
-    mimeType = "audio/webm";
-    ondataavailable: ((event: { data: Blob }) => void) | null = null;
-    onstop: (() => void) | null = null;
-    constructor() {
-      if (fakes.failRecorder) throw new Error("recorder refused");
-    }
-    start(): void { this.state = "recording"; }
-    stop(): void {
-      this.state = "inactive";
-      this.ondataavailable?.({ data: new Blob([new Uint8Array(64)]) });
-      this.onstop?.();
-    }
-  }
-  class FakeOfflineContext {
-    async decodeAudioData(): Promise<unknown> {
-      const samples = new Float32Array(16_000).map((_, index) => 0.2 * Math.sin(index / 5));
-      return { numberOfChannels: 1, length: samples.length, getChannelData: () => samples };
-    }
-  }
-  Object.assign(globalThis, { MediaRecorder: FakeRecorder, OfflineAudioContext: FakeOfflineContext });
-  return fakes;
-}
+const READY: SpeechToTextState = { status: "ready", modelInstalled: true, downloadedBytes: 1, totalBytes: 1, holdKey: "option" };
 
 async function settle(): Promise<void> {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
@@ -113,7 +59,7 @@ function click(host: HTMLElement, testId: string): Promise<void> {
 }
 
 test("recognized text goes in at the caret and nothing is sent", async () => {
-  const fakes = installFakes();
+  const fakes = installFakes(READY);
   const textarea = field();
   textarea.value = "Start. End.";
   textarea.setSelectionRange(6, 6);
@@ -137,7 +83,7 @@ test("recognized text goes in at the caret and nothing is sent", async () => {
 });
 
 test("text spoken in one thread never lands in the thread opened while it was recognized", async () => {
-  const fakes = installFakes();
+  const fakes = installFakes(READY);
   const textarea = field();
   const drafts: string[] = [];
   const view = await mount({ session: "chat-1:thread-a", textarea, drafts });
@@ -159,7 +105,7 @@ test("text spoken in one thread never lands in the thread opened while it was re
 });
 
 test("a refused microphone says where to turn it on", async () => {
-  const fakes = installFakes();
+  const fakes = installFakes(READY);
   fakes.allowMicrophone = false;
   const textarea = field();
   const view = await mount({ session: "chat-1", textarea, drafts: [] });
@@ -176,7 +122,7 @@ test("a refused microphone says where to turn it on", async () => {
 });
 
 test("a recorder that cannot start releases the microphone", async () => {
-  const fakes = installFakes();
+  const fakes = installFakes(READY);
   fakes.failRecorder = true;
   const textarea = field();
   const view = await mount({ session: "chat-1", textarea, drafts: [] });
@@ -193,7 +139,7 @@ test("a recorder that cannot start releases the microphone", async () => {
 });
 
 test("only one message field dictates at a time", async () => {
-  const fakes = installFakes();
+  const fakes = installFakes(READY);
   const first = field();
   const second = field();
   const a = await mount({ session: "chat-1", textarea: first, drafts: [] });
@@ -204,7 +150,7 @@ test("only one message field dictates at a time", async () => {
     await click(b.host, "composer-dictation-start");
     await settle();
     assert.equal(fakes.tracks.length, 1);
-    assert.match(b.host.querySelector("[data-testid=composer-dictation-notice]")?.textContent ?? "", /already dictating/);
+    assert.match(b.host.querySelector("[data-testid=composer-dictation-notice]")?.textContent ?? "", /Another dictation is in progress/);
     await click(a.host, "composer-dictation-stop");
     await settle();
     fakes.transcribe[0]!.resolve({ text: "" });
@@ -218,5 +164,31 @@ test("only one message field dictates at a time", async () => {
     b.host.remove();
     first.remove();
     second.remove();
+  }
+});
+
+test("opening another chat while a long recording is recognized stops sending the rest", async () => {
+  const fakes = installFakes(READY);
+  const textarea = field();
+  const drafts: string[] = [];
+  const view = await mount({ session: "chat-1", textarea, drafts });
+  try {
+    await click(view.host, "composer-dictation-start");
+    await settle();
+    await act(async () => { fakes.speak(30); });
+    await settle();
+    assert.equal(fakes.transcribe.length, 1, "the first piece is sent while she speaks");
+    await click(view.host, "composer-dictation-stop");
+    await settle();
+    // The rest waits behind the first piece; she opens another chat.
+    await view.rerender("chat-2");
+    fakes.transcribe[0]!.resolve({ text: "Для первого чата." });
+    await settle();
+    assert.equal(fakes.transcribe.length, 1, "the rest is not sent");
+    assert.deepEqual(drafts, []);
+  } finally {
+    await act(async () => { view.root.unmount(); });
+    view.host.remove();
+    textarea.remove();
   }
 });
