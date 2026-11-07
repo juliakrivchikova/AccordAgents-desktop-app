@@ -3347,6 +3347,8 @@ export interface AppBridge {
   /** Stops a download in progress, removes what was downloaded, turns it off. */
   cancelSpeechToTextDownload(): Promise<SpeechToTextState>;
   disableSpeechToText(request: DisableSpeechToTextRequest): Promise<SpeechToTextState>;
+  /** Starts loading the speech model as she begins to dictate; returns at once. */
+  prepareSpeechToText(): Promise<void>;
   /** Recognizes one recording: a 16 kHz mono 16-bit WAV. */
   transcribeSpeech(request: TranscribeSpeechRequest): Promise<TranscribeSpeechResult>;
   /** Asks the system for the microphone; false when it is refused or off. */

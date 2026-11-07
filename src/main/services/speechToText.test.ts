@@ -82,10 +82,28 @@ async function startModelServer(): Promise<ModelServer> {
   return server;
 }
 
+/** Stands in for the warm whisper.cpp server; records what the service asks. */
+class FakeEngine {
+  prepared = 0;
+  transcribed: Uint8Array[] = [];
+  stops: string[] = [];
+  warm = false;
+  respond: (wav: Uint8Array) => Promise<string> = async () => " [BLANK_AUDIO]\n Привет, мир.\n Hello world.\n";
+  constructor(readonly input: { serverPath: string; modelPath: string; idleMs: number }) {}
+  isWarm(): boolean { return this.warm; }
+  async prepare(): Promise<void> { this.prepared += 1; this.warm = true; }
+  async transcribe(wav: Uint8Array): Promise<string> {
+    this.transcribed.push(wav);
+    this.warm = true;
+    return this.respond(wav);
+  }
+  async stop(reason: string): Promise<void> { this.stops.push(reason); this.warm = false; }
+}
+
 interface Harness {
   dir: string;
   server: ModelServer;
-  engineRuns: string[][];
+  engines: FakeEngine[];
   service: SpeechToTextService;
   create: (overrides?: Partial<ConstructorParameters<typeof SpeechToTextService>[0]>) => SpeechToTextService;
   cleanup: () => Promise<void>;
@@ -94,20 +112,20 @@ interface Harness {
 async function harness(overrides: Partial<ConstructorParameters<typeof SpeechToTextService>[0]> = {}): Promise<Harness> {
   const dir = await mkdtemp(path.join(tmpdir(), "speech-test-"));
   const server = await startModelServer();
-  const engineRuns: string[][] = [];
+  const engines: FakeEngine[] = [];
   const create = (more: Partial<ConstructorParameters<typeof SpeechToTextService>[0]> = {}): SpeechToTextService =>
     new SpeechToTextService({
       dir: path.join(dir, "speech-to-text"),
-      engine: () => ({ path: "/fake/whisper-cli" }),
+      engine: () => ({ path: "/fake/whisper-server" }),
       fetch: (url, init) => fetch(url, init),
       model: { url: server.url, bytes: MODEL.length, sha256: MODEL_SHA },
       freeBytes: async () => 100 * 1024 * 1024 * 1024,
       progressIntervalMs: 0,
       stallMs: 5_000,
-      runEngine: async (_engine, args) => {
-        engineRuns.push(args);
-        const base = args[args.indexOf("-of") + 1]!;
-        await writeFile(`${base}.txt`, " [BLANK_AUDIO]\n Привет, мир.\n Hello world.\n");
+      createEngine: (input) => {
+        const engine = new FakeEngine(input);
+        engines.push(engine);
+        return engine;
       },
       ...overrides,
       ...more
@@ -115,7 +133,7 @@ async function harness(overrides: Partial<ConstructorParameters<typeof SpeechToT
   return {
     dir,
     server,
-    engineRuns,
+    engines,
     service: create(),
     create,
     cleanup: async () => {
@@ -330,19 +348,52 @@ test("without the engine it is unavailable and cannot be turned on", async () =>
   }
 });
 
-test("a recording is recognized in any language and its temporary files are removed", async () => {
+test("a recording is recognized in any language by one engine kept for the next ones", async () => {
   const h = await harness();
   try {
     await h.service.enable();
     await settle(h.service, notBusy);
     const result = await h.service.transcribe(recording(2));
     assert.equal(result.text, "Привет, мир. Hello world.");
-    const args = h.engineRuns[0]!;
-    assert.equal(args[args.indexOf("-l") + 1], "auto");
-    assert.equal(args[args.indexOf("-m") + 1], path.join(h.dir, "speech-to-text", SPEECH_MODEL_FILE));
-    const base = args[args.indexOf("-of") + 1]!;
-    assert.equal(existsSync(`${base}.wav`), false);
-    assert.equal(existsSync(`${base}.txt`), false);
+    await h.service.transcribe(recording(1));
+    assert.equal(h.engines.length, 1);
+    assert.equal(h.engines[0]!.input.modelPath, path.join(h.dir, "speech-to-text", SPEECH_MODEL_FILE));
+    assert.equal(h.engines[0]!.input.idleMs, 10 * 60 * 1000);
+    assert.equal(h.engines[0]!.transcribed.length, 2);
+    assert.deepEqual(h.engines[0]!.stops, []);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("pressing the microphone starts loading the model, but only when speech to text is ready", async () => {
+  const h = await harness();
+  try {
+    await h.service.prepare();
+    assert.equal(h.engines.length, 0, "off: nothing is loaded");
+    await h.service.enable();
+    await settle(h.service, notBusy);
+    await h.service.prepare();
+    assert.equal(h.engines[0]!.prepared, 1);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("turning it off, quitting, or losing the model takes the model out of memory", async () => {
+  const h = await harness();
+  try {
+    await h.service.enable();
+    await settle(h.service, notBusy);
+    await h.service.prepare();
+    await h.service.shutdown();
+    await h.service.disable({ deleteModel: false });
+    assert.deepEqual(h.engines[0]!.stops, ["app-quit", "turned-off"]);
+    await h.service.enable();
+    await h.service.prepare();
+    await rm(path.join(h.dir, "speech-to-text", SPEECH_MODEL_FILE));
+    await assert.rejects(h.service.transcribe(recording(1)), /model is missing/);
+    assert.equal(h.engines[0]!.stops.at(-1), "model-missing");
   } finally {
     await h.cleanup();
   }
@@ -356,7 +407,7 @@ test("a click-length or soundless recording gives no text without running the en
     assert.deepEqual(await h.service.transcribe(recording(0.1)), { text: "" });
     // A muted microphone: Whisper would invent words for it.
     assert.deepEqual(await h.service.transcribe(encodeWavPcm16(new Float32Array(SPEECH_SAMPLE_RATE * 3))), { text: "" });
-    assert.equal(h.engineRuns.length, 0);
+    assert.equal(h.engines.length, 0);
     await assert.rejects(h.service.transcribe(new Uint8Array([1, 2, 3])), /empty/);
     await assert.rejects(h.service.transcribe(encodeWavPcm16(new Float32Array(48_000), 48_000)), /format/);
   } finally {
@@ -366,18 +417,16 @@ test("a click-length or soundless recording gives no text without running the en
 
 test("an engine failure becomes a plain message, and the next recording still works", async () => {
   let fail = true;
-  const h = await harness({
-    runEngine: async (_engine, args) => {
-      if (fail) throw new Error("whisper-cli exited with code 3");
-      const base = args[args.indexOf("-of") + 1]!;
-      await writeFile(`${base}.txt`, "ok\n");
-    }
-  });
+  const h = await harness();
   try {
     await h.service.enable();
     await settle(h.service, notBusy);
+    await h.service.prepare();
+    h.engines[0]!.respond = async () => {
+      if (fail) throw new Error("The speech engine answered 500");
+      return "ok\n";
+    };
     await assert.rejects(h.service.transcribe(recording(1)), /could not be recognized/);
-    assert.deepEqual((await readdir(tmpdir())).filter((name) => name.startsWith("accordagents-speech-")), []);
     fail = false;
     assert.equal((await h.service.transcribe(recording(1))).text, "ok");
   } finally {
@@ -388,19 +437,20 @@ test("an engine failure becomes a plain message, and the next recording still wo
 test("recordings are recognized one at a time", async () => {
   let running = 0;
   let most = 0;
-  const h = await harness({
-    runEngine: async (_engine, args) => {
-      running += 1;
-      most = Math.max(most, running);
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      const base = args[args.indexOf("-of") + 1]!;
-      await writeFile(`${base}.txt`, `${path.basename(base)}\n`);
-      running -= 1;
-    }
-  });
+  const h = await harness();
   try {
     await h.service.enable();
     await settle(h.service, notBusy);
+    await h.service.prepare();
+    let count = 0;
+    h.engines[0]!.respond = async () => {
+      running += 1;
+      most = Math.max(most, running);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      running -= 1;
+      count += 1;
+      return `phrase ${count}\n`;
+    };
     const results = await Promise.all([1, 2, 3].map(() => h.service.transcribe(recording(1))));
     assert.equal(most, 1);
     assert.equal(new Set(results.map((result) => result.text)).size, 3);
@@ -415,8 +465,8 @@ test("the engine is looked up beside the app, and only Apple silicon Macs have o
     const base = { platform: "darwin" as NodeJS.Platform, arch: "arm64", packaged: true, resourcesPath: dir, appPath: "/nowhere" };
     assert.ok("unavailable" in resolveSpeechEngine(base));
     await mkdir(path.join(dir, "whisper"));
-    await writeFile(path.join(dir, "whisper", "whisper-cli"), "");
-    assert.deepEqual(resolveSpeechEngine(base), { path: path.join(dir, "whisper", "whisper-cli") });
+    await writeFile(path.join(dir, "whisper", "whisper-server"), "");
+    assert.deepEqual(resolveSpeechEngine(base), { path: path.join(dir, "whisper", "whisper-server") });
     assert.ok("unavailable" in resolveSpeechEngine({ ...base, platform: "win32" }));
     assert.ok("unavailable" in resolveSpeechEngine({ ...base, arch: "x64" }));
   } finally {
@@ -484,7 +534,7 @@ test("a model removed behind the app's back is reported instead of failing every
     const state = await h.service.getState();
     assert.equal(state.status, "interrupted");
     assert.equal(state.modelInstalled, false);
-    assert.equal(h.engineRuns.length, 0);
+    assert.equal(h.engines.length, 0);
   } finally {
     await h.cleanup();
   }
@@ -500,5 +550,30 @@ test("a signed app ignores an engine picked by its environment", async () => {
     assert.deepEqual(resolveSpeechEngine({ ...base, packaged: false }), { path: elsewhere });
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a microphone press while it is being turned off does not load the model again", async () => {
+  const h = await harness();
+  try {
+    await h.service.enable();
+    await settle(h.service, notBusy);
+    await h.service.prepare();
+    const engine = h.engines[0]!;
+    assert.equal(engine.prepared, 1);
+    // A press and a dictation that arrive while the engine is being stopped.
+    let during: Promise<unknown> = Promise.resolve();
+    const stop = engine.stop.bind(engine);
+    engine.stop = async (reason: string) => {
+      during = Promise.all([h.service.prepare(), assert.rejects(h.service.transcribe(recording(1)), /not ready/)]);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return stop(reason);
+    };
+    await h.service.disable({ deleteModel: false });
+    await during;
+    assert.equal(engine.prepared, 1);
+    assert.deepEqual(engine.stops, ["turned-off"]);
+  } finally {
+    await h.cleanup();
   }
 });

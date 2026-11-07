@@ -1,4 +1,4 @@
-// Builds the speech-to-text engine (whisper.cpp's command-line program) from
+// Builds the speech-to-text engine (whisper.cpp's local server program) from
 // the official source at a pinned release, and puts it in dist/whisper. The
 // app ships it as a loose resource and runs it on the User's own Mac; the
 // speech model itself is downloaded later, when she turns the feature on.
@@ -9,6 +9,7 @@
 // ACCORDAGENTS_REQUIRE_WHISPER=1) fails instead, so a release never ships
 // without it.
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -28,22 +29,36 @@ const CMAKE_FLAGS = [
   "-DGGML_NATIVE=OFF",
   "-DGGML_BLAS=ON",
   "-DWHISPER_BUILD_TESTS=OFF",
-  "-DWHISPER_BUILD_SERVER=OFF",
   "-DWHISPER_SDL2=OFF",
   "-DWHISPER_CURL=OFF",
   "-DCMAKE_OSX_ARCHITECTURES=arm64",
   "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
 ];
-const STAMP = `${WHISPER_TAG} ${WHISPER_COMMIT} ${CMAKE_FLAGS.join(" ")}`;
+// One change to the official server: it can listen on a Unix socket, so
+// only her user can reach it (a port on 127.0.0.1 is open to every account
+// on the Mac, and to web pages). It also refuses bodies over 64 MB.
+const SERVER_PATCH_FROM = `    if (!svr->bind_to_port(sparams.hostname, sparams.port))`;
+const SERVER_PATCH_TO = `    // AccordAgents: "--host unix:PATH" listens on a Unix socket at PATH.
+    svr->set_payload_max_length(64 * 1024 * 1024);
+    if (sparams.hostname.rfind("unix:", 0) == 0) {
+        svr->set_address_family(AF_UNIX);
+        sparams.hostname = sparams.hostname.substr(5);
+    }
+    if (!svr->bind_to_port(sparams.hostname, sparams.port))`;
+const PATCH_ID = createHash("sha256").update(SERVER_PATCH_TO).digest("hex").slice(0, 12);
+const STAMP = `whisper-server ${WHISPER_TAG} ${WHISPER_COMMIT} patch-${PATCH_ID} ${CMAKE_FLAGS.join(" ")}`;
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputDir = path.join(repoRoot, "dist", "whisper");
-const outputBinary = path.join(outputDir, "whisper-cli");
-const outputStamp = path.join(outputDir, "whisper-cli.stamp");
+// The app keeps this program running while she dictates, with the model
+// loaded, so a phrase is recognized without loading the model again.
+const ENGINE = "whisper-server";
+const outputBinary = path.join(outputDir, ENGINE);
+const outputStamp = path.join(outputDir, `${ENGINE}.stamp`);
 // Kept outside dist so `make clean` does not cost a two-minute rebuild.
 const cacheDir = path.join(repoRoot, "node_modules", ".cache", "accordagents-whisper", WHISPER_TAG);
-const cachedBinary = path.join(cacheDir, "whisper-cli");
-const cachedStamp = path.join(cacheDir, "whisper-cli.stamp");
+const cachedBinary = path.join(cacheDir, ENGINE);
+const cachedStamp = path.join(cacheDir, `${ENGINE}.stamp`);
 const required = process.env.CI === "true" || process.env.ACCORDAGENTS_REQUIRE_WHISPER === "1";
 
 function log(message) {
@@ -80,6 +95,8 @@ function findCmake() {
 }
 
 async function install(fromBinary) {
+  // Only the engine this build makes ships: an older build's program goes.
+  await rm(outputDir, { recursive: true, force: true });
   await mkdir(outputDir, { recursive: true });
   await copyFile(fromBinary, outputBinary);
   await chmod(outputBinary, 0o755);
@@ -118,10 +135,16 @@ async function main() {
   if (commit !== WHISPER_COMMIT) {
     throw new Error(`whisper.cpp ${WHISPER_TAG} is commit ${commit}, expected ${WHISPER_COMMIT}; refusing to build it.`);
   }
-  log(`building whisper-cli with ${cmake}`);
+  const serverSource = path.join(sourceDir, "examples", "server", "server.cpp");
+  const original = await readFile(serverSource, "utf8");
+  if (original.split(SERVER_PATCH_FROM).length !== 2) {
+    throw new Error("whisper.cpp's server.cpp no longer matches the Unix socket patch; update it.");
+  }
+  await writeFile(serverSource, original.replace(SERVER_PATCH_FROM, SERVER_PATCH_TO));
+  log(`building ${ENGINE} with ${cmake}`);
   run(cmake, ["-S", sourceDir, "-B", buildDir, ...CMAKE_FLAGS]);
-  run(cmake, ["--build", buildDir, "--config", "Release", "--target", "whisper-cli", "-j", String(os.cpus().length)]);
-  await copyFile(path.join(buildDir, "bin", "whisper-cli"), cachedBinary);
+  run(cmake, ["--build", buildDir, "--config", "Release", "--target", ENGINE, "-j", String(os.cpus().length)]);
+  await copyFile(path.join(buildDir, "bin", ENGINE), cachedBinary);
   await writeFile(cachedStamp, `${STAMP}\n`);
   await rm(sourceDir, { recursive: true, force: true });
   await rm(buildDir, { recursive: true, force: true });

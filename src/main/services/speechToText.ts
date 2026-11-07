@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import { mkdir, open, readFile, readdir, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -17,10 +17,10 @@ import {
   speechWavSeconds
 } from "../../shared/speechToText";
 import type { SpeechToTextState, TranscribeSpeechResult } from "../../shared/types";
-import { CommandError, runCommand } from "./command";
+import { ENGINE_DIR_PREFIX, WhisperServerEngine, type SpeechEngine, type SpeechEngineInput } from "./whisperServer";
 
 type SpeechFetch = (url: string, init: { headers: Record<string, string>; signal: AbortSignal }) => Promise<Response>;
-type RunEngine = (enginePath: string, args: string[]) => Promise<void>;
+type CreateEngine = (input: SpeechEngineInput) => SpeechEngine;
 
 export interface SpeechToTextServiceOptions {
   /** Where the model and the on/off choice live (userData/speech-to-text). */
@@ -30,7 +30,9 @@ export interface SpeechToTextServiceOptions {
   fetch: SpeechFetch;
   model?: { url: string; bytes: number; sha256: string };
   freeBytes?: (dir: string) => Promise<number>;
-  runEngine?: RunEngine;
+  createEngine?: CreateEngine;
+  /** The model leaves memory this long after the last dictation. */
+  idleMs?: number;
   /** A download that gets no bytes for this long is stopped. */
   stallMs?: number;
   progressIntervalMs?: number;
@@ -47,9 +49,12 @@ class SpeechError extends Error {}
 const DISK_MARGIN_BYTES = 200 * 1024 * 1024;
 const DEFAULT_STALL_MS = 60_000;
 const DEFAULT_PROGRESS_INTERVAL_MS = 250;
-/** Recordings waiting in the temporary folder after a crash are this old. */
+/** Recordings an earlier version left in the temporary folder by a crash. */
 const STALE_RECORDING_MS = 60 * 60 * 1000;
 const TEMP_PREFIX = "accordagents-speech-";
+/** She chose: loaded when she presses the microphone, gone 10 minutes after
+ *  the last dictation. */
+const DEFAULT_ENGINE_IDLE_MS = 10 * 60 * 1000;
 
 /**
  * Speech to text on this computer: the User's on/off choice, the Whisper
@@ -70,6 +75,9 @@ export class SpeechToTextService {
   private error?: string;
   private download?: { controller: AbortController; done: Promise<void> };
   private transcriptions: Promise<unknown> = Promise.resolve();
+  private engine?: SpeechEngine;
+  /** Turning off is under way: nothing may start the engine again. */
+  private turningOff = false;
   /** Turning on and off run one at a time, so a quick on-off-on never
    *  removes a download another action has just started. */
   private actions: Promise<unknown> = Promise.resolve();
@@ -94,7 +102,7 @@ export class SpeechToTextService {
   /** Whether the microphone may be used now. Answers from what is loaded,
    *  for checks that cannot wait. */
   isReadyNow(): boolean {
-    return this.snapshot().status === "ready";
+    return !this.turningOff && this.snapshot().status === "ready";
   }
 
   enable(): Promise<SpeechToTextState> {
@@ -120,7 +128,50 @@ export class SpeechToTextService {
     return this.serialize(() => this.turnOff(request.deleteModel));
   }
 
+  /**
+   * Starts loading the model when she presses the microphone, so it is
+   * ready, or nearly, by the time she stops speaking. Returns at once.
+   */
+  async prepare(): Promise<void> {
+    await this.load();
+    const engine = this.options.engine();
+    if ("unavailable" in engine || !this.isReadyNow()) return;
+    this.engineFor(engine.path).prepare().catch((error: unknown) => {
+      this.options.log?.("speech.prepare-failed", { message: error instanceof Error ? error.message : String(error) });
+    });
+  }
+
+  /** Frees the model's memory now (the app is quitting). */
+  shutdown(): Promise<void> {
+    return this.stopEngine("app-quit");
+  }
+
+  /** One engine for the app's life (its program does not move meanwhile). */
+  private engineFor(serverPath: string): SpeechEngine {
+    if (!this.engine) {
+      const create = this.options.createEngine ?? ((input) => new WhisperServerEngine({ ...input, log: this.options.log }));
+      this.engine = create({ serverPath, modelPath: this.modelPath, idleMs: this.options.idleMs ?? DEFAULT_ENGINE_IDLE_MS });
+    }
+    return this.engine;
+  }
+
+  private async stopEngine(reason: string): Promise<void> {
+    await this.engine?.stop(reason);
+  }
+
   private async turnOff(deleteModel: boolean): Promise<SpeechToTextState> {
+    // Before anything is awaited: a dictation or microphone press arriving
+    // meanwhile must not load the model again.
+    this.turningOff = true;
+    try {
+      return await this.turnOffNow(deleteModel);
+    } finally {
+      this.turningOff = false;
+    }
+  }
+
+  private async turnOffNow(deleteModel: boolean): Promise<SpeechToTextState> {
+    await this.stopEngine("turned-off");
     await this.stopDownload();
     await rm(this.partialPath, { force: true });
     this.downloadedBytes = 0;
@@ -156,7 +207,7 @@ export class SpeechToTextService {
   private async transcribeNow(audio: Uint8Array): Promise<TranscribeSpeechResult> {
     const engine = this.options.engine();
     if ("unavailable" in engine) throw new Error(engine.unavailable);
-    if (!this.enabled || !this.modelInstalled) {
+    if (!this.enabled || !this.modelInstalled || this.turningOff) {
       throw new Error("Speech to text is not ready. Turn it on in Settings › General.");
     }
     const length = speechWavSeconds(audio);
@@ -168,63 +219,29 @@ export class SpeechToTextService {
     if (await this.fileSize(this.modelPath) !== this.model.bytes) {
       // Removed outside the app: say so instead of failing every dictation.
       this.modelInstalled = false;
+      await this.stopEngine("model-missing");
       this.emit();
       throw new Error("The speech model is missing. Turn speech to text off and on in Settings › General to download it again.");
     }
-    const base = path.join(os.tmpdir(), `${TEMP_PREFIX}${randomUUID()}`);
-    const wavPath = `${base}.wav`;
-    const textPath = `${base}.txt`;
     const startedAt = Date.now();
+    const speechEngine = this.engineFor(engine.path);
+    const warm = speechEngine.isWarm();
     try {
-      await writeFile(wavPath, audio, { mode: 0o600 });
-      const threads = String(Math.max(2, Math.min(8, os.cpus().length)));
-      // Several times slower than real time is already broken; a hung engine
-      // must not hold every later recording in the queue for long.
+      // For recognition once the model is loaded (loading has its own limit):
+      // several times slower than real time is already broken, and a hung
+      // engine must not hold every later recording in the queue for long.
       const timeoutMs = 2 * 60 * 1000 + Math.ceil(length.seconds) * 1000;
-      await this.runEngine(engine.path, timeoutMs, [
-        "-m", this.modelPath,
-        "-f", wavPath,
-        "-l", "auto",
-        "-t", threads,
-        "-np",
-        "-nt",
-        "-sns",
-        "-otxt",
-        "-of", base
-      ]);
-      const text = cleanTranscript(await readFile(textPath, "utf8"));
+      const text = cleanTranscript(await speechEngine.transcribe(audio, timeoutMs));
       this.options.log?.("speech.transcribed", {
         seconds: Math.round(length.seconds * 10) / 10,
         ms: Date.now() - startedAt,
+        warm,
         characters: text.length
       });
       return { text };
     } catch (error) {
       this.options.log?.("speech.transcribe-failed", { message: error instanceof Error ? error.message : String(error) });
       throw new Error("Speech could not be recognized. Try again.");
-    } finally {
-      await rm(wavPath, { force: true });
-      await rm(textPath, { force: true });
-    }
-  }
-
-  private async runEngine(enginePath: string, timeoutMs: number, args: string[]): Promise<void> {
-    if (this.options.runEngine) {
-      await this.options.runEngine(enginePath, args);
-      return;
-    }
-    try {
-      await runCommand(enginePath, args, {
-        timeoutMs,
-        primeLoginShellEnv: false,
-        maxOutputChars: 8_000
-      });
-    } catch (error) {
-      if (error instanceof CommandError) {
-        const detail = error.result.stderr.trim().split(/\r?\n/).slice(-3).join(" ");
-        throw new Error(`${error.message}${detail ? `: ${detail}` : ""}`);
-      }
-      throw error;
     }
   }
 
@@ -430,24 +447,27 @@ export function resolveSpeechEngine(input: {
   // A signed app never runs another program picked by its environment.
   const candidate = (input.packaged ? undefined : input.override?.trim())
     || (input.packaged
-      ? path.join(input.resourcesPath, "whisper", "whisper-cli")
-      : path.join(input.appPath, "dist", "whisper", "whisper-cli"));
+      ? path.join(input.resourcesPath, "whisper", "whisper-server")
+      : path.join(input.appPath, "dist", "whisper", "whisper-server"));
   if (!existsSync(candidate)) {
     return { unavailable: "Speech to text is not included in this build of the app." };
   }
   return { path: candidate };
 }
 
-/** Recordings left in the temporary folder by a crash mid-recognition. */
+/**
+ * Left in the temporary folder by a crash: recordings from versions that ran
+ * whisper-cli, and engine socket folders. Removed when the app starts.
+ */
 async function removeStaleRecordings(): Promise<void> {
   const dir = os.tmpdir();
   const names = await readdir(dir).catch(() => [] as string[]);
   const now = Date.now();
   for (const name of names) {
-    if (!name.startsWith(TEMP_PREFIX)) continue;
+    if (!name.startsWith(TEMP_PREFIX) && !name.startsWith(ENGINE_DIR_PREFIX)) continue;
     const file = path.join(dir, name);
     const info = await stat(file).catch(() => undefined);
-    if (info && now - info.mtimeMs > STALE_RECORDING_MS) await rm(file, { force: true }).catch(() => undefined);
+    if (info && now - info.mtimeMs > STALE_RECORDING_MS) await rm(file, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
