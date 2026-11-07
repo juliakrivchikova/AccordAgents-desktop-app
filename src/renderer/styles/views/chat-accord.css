@@ -35,12 +35,6 @@
   line-height: 1.3;
 }
 
-.chat-accord-header [data-slot="dialog-description"] {
-  color: var(--app-muted);
-  font-size: 12.5px;
-  line-height: 1.45;
-}
-
 .chat-accord-form {
   min-height: 0;
   flex: 1 1 auto;
@@ -64,6 +58,8 @@
   height: 20px !important;
   padding: 0 !important;
   flex: 0 0 auto;
+  border-radius: 5px;
+  font-size: 9px;
 }
 
 .chat-accord-field {
@@ -106,7 +102,7 @@
   border-bottom: 0;
 }
 
-.chat-accord-target:hover {
+.chat-accord-target:not(:has(input:disabled)):hover {
   background: var(--app-surface-hover);
 }
 
@@ -155,6 +151,8 @@
   height: 24px !important;
   padding: 0 !important;
   flex: 0 0 auto;
+  border-radius: 6px;
+  font-size: 10px;
 }
 
 .chat-accord-target-title {
