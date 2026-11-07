@@ -169,6 +169,8 @@ export function useDictation(options: { session?: string; onText: (text: string)
       recorder.start(1_000);
       recordingRef.current = { stream, recorder, chunks, stopped };
       setPhase("recording");
+      // The model loads while she speaks, instead of after she stops.
+      void window.consensus.prepareSpeechToText?.().catch(() => undefined);
     } catch (error) {
       if (stream) stopTracks(stream);
       if (generation !== generationRef.current) return;

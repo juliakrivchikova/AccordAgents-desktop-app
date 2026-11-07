@@ -1,4 +1,4 @@
-// Builds the speech-to-text engine (whisper.cpp's command-line program) from
+// Builds the speech-to-text engine (whisper.cpp's local server program) from
 // the official source at a pinned release, and puts it in dist/whisper. The
 // app ships it as a loose resource and runs it on the User's own Mac; the
 // speech model itself is downloaded later, when she turns the feature on.
@@ -28,22 +28,24 @@ const CMAKE_FLAGS = [
   "-DGGML_NATIVE=OFF",
   "-DGGML_BLAS=ON",
   "-DWHISPER_BUILD_TESTS=OFF",
-  "-DWHISPER_BUILD_SERVER=OFF",
   "-DWHISPER_SDL2=OFF",
   "-DWHISPER_CURL=OFF",
   "-DCMAKE_OSX_ARCHITECTURES=arm64",
   "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
 ];
-const STAMP = `${WHISPER_TAG} ${WHISPER_COMMIT} ${CMAKE_FLAGS.join(" ")}`;
+const STAMP = `whisper-server ${WHISPER_TAG} ${WHISPER_COMMIT} ${CMAKE_FLAGS.join(" ")}`;
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputDir = path.join(repoRoot, "dist", "whisper");
-const outputBinary = path.join(outputDir, "whisper-cli");
-const outputStamp = path.join(outputDir, "whisper-cli.stamp");
+// The app keeps this program running while she dictates, with the model
+// loaded, so a phrase is recognized without loading the model again.
+const ENGINE = "whisper-server";
+const outputBinary = path.join(outputDir, ENGINE);
+const outputStamp = path.join(outputDir, `${ENGINE}.stamp`);
 // Kept outside dist so `make clean` does not cost a two-minute rebuild.
 const cacheDir = path.join(repoRoot, "node_modules", ".cache", "accordagents-whisper", WHISPER_TAG);
-const cachedBinary = path.join(cacheDir, "whisper-cli");
-const cachedStamp = path.join(cacheDir, "whisper-cli.stamp");
+const cachedBinary = path.join(cacheDir, ENGINE);
+const cachedStamp = path.join(cacheDir, `${ENGINE}.stamp`);
 const required = process.env.CI === "true" || process.env.ACCORDAGENTS_REQUIRE_WHISPER === "1";
 
 function log(message) {
@@ -80,6 +82,8 @@ function findCmake() {
 }
 
 async function install(fromBinary) {
+  // Only the engine this build makes ships: an older build's program goes.
+  await rm(outputDir, { recursive: true, force: true });
   await mkdir(outputDir, { recursive: true });
   await copyFile(fromBinary, outputBinary);
   await chmod(outputBinary, 0o755);
@@ -118,10 +122,10 @@ async function main() {
   if (commit !== WHISPER_COMMIT) {
     throw new Error(`whisper.cpp ${WHISPER_TAG} is commit ${commit}, expected ${WHISPER_COMMIT}; refusing to build it.`);
   }
-  log(`building whisper-cli with ${cmake}`);
+  log(`building ${ENGINE} with ${cmake}`);
   run(cmake, ["-S", sourceDir, "-B", buildDir, ...CMAKE_FLAGS]);
-  run(cmake, ["--build", buildDir, "--config", "Release", "--target", "whisper-cli", "-j", String(os.cpus().length)]);
-  await copyFile(path.join(buildDir, "bin", "whisper-cli"), cachedBinary);
+  run(cmake, ["--build", buildDir, "--config", "Release", "--target", ENGINE, "-j", String(os.cpus().length)]);
+  await copyFile(path.join(buildDir, "bin", ENGINE), cachedBinary);
   await writeFile(cachedStamp, `${STAMP}\n`);
   await rm(sourceDir, { recursive: true, force: true });
   await rm(buildDir, { recursive: true, force: true });

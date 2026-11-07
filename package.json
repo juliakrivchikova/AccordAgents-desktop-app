@@ -11,7 +11,7 @@
   "scripts": {
     "build": "npm run build:main && vite build && npm run build:mobile && node scripts/build-machine-bundle.mjs && node scripts/build-hub-bundle.mjs && node scripts/build-whisper.mjs",
     "build:whisper": "node scripts/build-whisper.mjs",
-    "test:speech": "npm run build:main && node --test dist/main/shared/speechToText.test.js dist/main/main/services/speechToText.test.js",
+    "test:speech": "npm run build:main && node --test dist/main/shared/speechToText.test.js dist/main/main/services/speechToText.test.js dist/main/main/services/whisperServer.test.js",
     "build:main": "tsc -p tsconfig.main.json && node scripts/copy-main-assets.mjs",
     "build:mobile": "node scripts/build-mobile-shell.mjs",
     "build:machine": "npm run build:main && node scripts/build-machine-bundle.mjs",

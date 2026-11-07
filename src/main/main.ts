@@ -2679,6 +2679,7 @@ function registerIpc(): void {
   ipcMain.handle("speech:cancel-download", () => speechToTextService.cancelDownload());
   ipcMain.handle("speech:disable", (_event, request: { deleteModel?: unknown } | undefined) =>
     speechToTextService.disable({ deleteModel: request?.deleteModel === true }));
+  ipcMain.handle("speech:prepare", () => speechToTextService.prepare());
   ipcMain.handle("speech:transcribe", (_event, request: { audio?: unknown } | undefined) => {
     const audio = request?.audio;
     if (!(audio instanceof Uint8Array)) {
@@ -3552,6 +3553,9 @@ app.on("will-quit", () => {
   // Here and not in before-quit, which an update's restart skips: every
   // shell in the terminal panel gets its hangup on any kind of quit.
   terminalService.shutdown();
+  // The speech model leaves memory with the app (its engine would also stop
+  // on its own once the app is gone).
+  void speechToTextService.shutdown();
 });
 
 app.on("quit", (_event, exitCode) => {
