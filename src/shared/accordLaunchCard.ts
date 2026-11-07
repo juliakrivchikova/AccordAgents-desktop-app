@@ -16,6 +16,7 @@ export interface AccordLaunchCard {
 }
 
 const FIRST_LINE = /^@(\S+) \/accord$/;
+const FIRST_LINE_START = /^@\S+ \/accord\r?\n/;
 const MEMBERS_LINE = /^Selected accord (?:members|participants): (.+)\.$/;
 // The instruction's last sentence has said what the app enabled in three
 // ways over time; the rest of it never changed.
@@ -24,6 +25,11 @@ const INSTRUCTION = /^Run the accord skill for exactly those selected (?:members
 /** The card for an Accord launch prompt, or undefined when the text is not one. */
 export function parseAccordLaunchCard(content: unknown): AccordLaunchCard | undefined {
   if (typeof content !== "string") {
+    return undefined;
+  }
+  // Every message of the User's is asked on every redraw; one that does not
+  // open like a launch is turned away before a long text is copied or split.
+  if (!FIRST_LINE_START.test(content.trimStart().slice(0, 300))) {
     return undefined;
   }
   const lines = content.replace(/\r\n?/g, "\n").trim().split("\n");

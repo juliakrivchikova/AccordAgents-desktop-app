@@ -32,6 +32,10 @@
   --menu-shadow: 0 12px 30px rgba(22, 25, 31, 0.16);
   /* Something waiting for the User: the desktop's warning colour. */
   --warn: #c98a13;
+  /* The Start Accord glyph's branches, as the desktop's --app-accord-icon-*. */
+  --accord-icon-top: #a855f7;
+  --accord-icon-left: #e73975;
+  --accord-icon-right: #447bf3;
   --warn-soft: rgba(201, 138, 19, 0.16);
   --pill-shadow: 0 6px 18px rgba(22, 25, 31, 0.12);
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", system-ui, sans-serif;
@@ -925,15 +929,15 @@ button.mobile-chat-group-title:active {
 }
 
 .accord-icon-top {
-  stroke: #a855f7;
+  stroke: var(--accord-icon-top);
 }
 
 .accord-icon-left {
-  stroke: #e73975;
+  stroke: var(--accord-icon-left);
 }
 
 .accord-icon-right {
-  stroke: #447bf3;
+  stroke: var(--accord-icon-right);
 }
 
 .accord-launch-meta {
@@ -941,19 +945,17 @@ button.mobile-chat-group-title:active {
   line-height: 1.6;
 }
 
-/* Facts wrap whole, and the dot between two stays at the end of a line. */
-.accord-launch-meta > * {
+/* The dot between two facts stays at the end of a line. */
+.accord-launch-meta > :first-child,
+.accord-launch-meta > :last-child {
   white-space: nowrap;
 }
 
-/* A long member list wraps between members. */
-.accord-launch-meta > .accord-launch-with {
-  white-space: normal;
-}
-
+/* A word joiner keeps the dot on the line of what it follows, also after a
+   member's picture; the space after it is where the line may break. */
 .accord-launch-meta > :not(:last-child)::after {
-  margin: 0 6px;
-  content: "·";
+  content: "\2060\00a0·  " / "";
+  white-space: pre-wrap;
 }
 
 .accord-launch-kind {
@@ -961,15 +963,26 @@ button.mobile-chat-group-title:active {
   font-weight: 500;
 }
 
+/* A member is one piece; a handle longer than the card is cut short. */
 .accord-launch-member {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  max-width: 100%;
   vertical-align: bottom;
 }
 
 .accord-launch-handle {
+  min-width: 0;
+  overflow: hidden;
   color: var(--warn);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A refusal reason is a sentence and wraps. */
+.accord-launch-meta > .message-status {
+  white-space: normal;
 }
 
 /* The row's 32px avatar rule comes later; the card's names are smaller. */

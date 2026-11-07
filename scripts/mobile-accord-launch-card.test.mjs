@@ -25,9 +25,9 @@ const userMessage = (id, minute, content) => ({ id, role: "user", content, statu
 
 test("Accord launches show as cards on the phone", { timeout: 120_000 }, async (t) => {
   const hub = await startMobileHub();
-  const site = await serveMobileShell({ port: 8373, hubOrigins: [hub.base] });
+  const site = await serveMobileShell({ port: 8377, hubOrigins: [hub.base] });
   const profile = await tempProfile("aa-mobile-accord-launch-");
-  const chrome = launchChrome({ port: 9519, profile, url: `${site.origin}/`, width: 430, height: 860 });
+  const chrome = launchChrome({ port: 9523, profile, url: `${site.origin}/`, width: 430, height: 860 });
   let app;
   t.after(async () => {
     app?.close();
@@ -44,7 +44,7 @@ test("Accord launches show as cards on the phone", { timeout: 120_000 }, async (
     userMessage("u-plain", 33, "@taylor /accord please look at this"),
     { id: "m-1", role: "participant", participantId: taylor.id, participantLabel: "@taylor", content: "Starting.", status: "done", createdAt: at(34) }
   ] });
-  app = await attachApp({ port: 9519 });
+  app = await attachApp({ port: 9523 });
   await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
   await openChat(app, "conv-accord");
 

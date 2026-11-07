@@ -6,9 +6,14 @@ import { AccordMergeIcon } from "./accord-merge-icon";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatMessageWhen } from "./chat-streaming";
 
-/** The card for a message that starts an Accord; anything else keeps the message row. */
-export function accordLaunchCardForMessage(message: Pick<ChatMessage, "role" | "content">): AccordLaunchCard | undefined {
-  return message.role === "user" ? parseAccordLaunchCard(message.content) : undefined;
+/** The card for a message that starts an Accord; anything else keeps the
+ *  message row. A message carrying pictures or file references is never one
+ *  the app wrote, and the card would hide them, so it stays a row. */
+export function accordLaunchCardForMessage(message: Pick<ChatMessage, "role" | "content" | "metadata">): AccordLaunchCard | undefined {
+  if (message.role !== "user" || (message.metadata?.imageAttachments?.length ?? 0) > 0 || (message.metadata?.repoFileMentions?.length ?? 0) > 0) {
+    return undefined;
+  }
+  return parseAccordLaunchCard(message.content);
 }
 
 function AccordMember(props: { handle: string; participants?: ChatParticipant[] }): JSX.Element {
@@ -19,7 +24,10 @@ function AccordMember(props: { handle: string; participants?: ChatParticipant[] 
   const avatar = participant ? avatarForChatParticipant(participant, label) : avatarForParticipant(label);
   return (
     <span className="chat-accord-launch-member">
-      <Avatar className="chat-accord-launch-avatar" spec={avatar} tooltip={null} />
+      {/* The handle beside it names the member; the picture is not read out again. */}
+      <span aria-hidden="true" className="chat-accord-launch-avatar-slot">
+        <Avatar className="chat-accord-launch-avatar" spec={avatar} tooltip={null} />
+      </span>
       <span className="chat-mention">{label}</span>
     </span>
   );

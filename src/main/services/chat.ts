@@ -17047,6 +17047,8 @@ export class ChatService {
     );
   }
 
+  // The timeline reads this text back as the Accord card
+  // (src/shared/accordLaunchCard.ts); a change to its wording goes there too.
   private accordStartMessageContent(facilitator: ChatParticipant, targets: ChatParticipant[], subject: string): string {
     const targetNames = targets.map((target) => target.handle).join(", ");
     return [

@@ -9424,6 +9424,8 @@
    *  a bubble. */
   function accordLaunchCardForEntry(entry) {
     if (!entry || entry.author !== "you" || entry.scaffolding) return undefined;
+    // Pictures are never on a launch the app wrote, and the card would hide them.
+    if (Array.isArray(entry.attachments) && entry.attachments.length > 0) return undefined;
     const shared = mobileSharedRules();
     return shared && typeof shared.parseAccordLaunchCard === "function"
       ? shared.parseAccordLaunchCard(entry.content)

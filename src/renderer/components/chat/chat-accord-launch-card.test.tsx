@@ -58,6 +58,11 @@ test("anything that is not exactly a launch prompt keeps its row", () => {
   const userMessage = { role: "user", content: launch("Subject") } as ChatMessage;
   assert.ok(accordLaunchCardForMessage(userMessage));
   assert.equal(accordLaunchCardForMessage({ ...userMessage, role: "participant" }), undefined, "a member quoting the prompt");
+  // The card would hide what the message carries; a launch never carries any.
+  assert.equal(accordLaunchCardForMessage({ ...userMessage, metadata: { imageAttachments: [{ id: "img-1" }] } } as unknown as ChatMessage), undefined, "a lookalike with a picture");
+  assert.equal(accordLaunchCardForMessage({ ...userMessage, metadata: { repoFileMentions: [{ path: "a.ts" }] } } as unknown as ChatMessage), undefined, "a lookalike with a file reference");
+  // A long text that does not open like a launch is turned away at once.
+  assert.equal(parseAccordLaunchCard("x".repeat(500_000)), undefined);
 });
 
 test("the subject's first line is the title, the rest is the body", () => {
@@ -80,6 +85,7 @@ test("the timeline row of a launch is the card: no prompt text, no skills line, 
     status: "done",
     metadata: {
       threadId: "launch-1",
+      serverSeq: 12,
       skillMentions: [{ displayName: "/accord", frontmatterName: "accord", variants: [{ providerKind: "claude-code" }] }],
       reactions: { "👍": [{ actorKind: "participant", actorId: "p-drew", actorLabel: "@drew", at: NOW }] }
     }
@@ -128,4 +134,33 @@ test("the timeline row of a launch is the card: no prompt text, no skills line, 
   act(() => { reaction.props.onClick(); });
   assert.deepEqual(toggled, [["launch-1", "👍"]]);
   assert.ok(root.findAll((node) => node.props?.label === "Reply in thread").length > 0, "reply in thread stays on hover");
+  assert.ok(!String(card.props.className).includes("is-unsent"), "a launch the server holds is not faded");
+});
+
+test("a launch the server refused says why under the card, as her other messages do", () => {
+  const noop = () => undefined;
+  const message = {
+    id: "launch-2", role: "user", content: launch("Refused one"), createdAt: NOW, status: "done",
+    metadata: { threadId: "launch-2", serverRejected: "This chat is archived." }
+  } as unknown as ChatMessage;
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(
+      <TooltipProvider>
+      <ChatMessageItem
+        activityDisclosure={{ expandedProcessingTranscriptMessageIds: new Set<string>() } as unknown as ChatActivityDisclosureState}
+        message={message}
+        conversationId="chat-1"
+        participantStatusById={new Map()}
+        busy={false}
+        onApproveMentions={noop}
+        onRejectMentions={noop}
+        onRespondToChoice={noop}
+        onToggleReaction={noop}
+      />
+      </TooltipProvider>
+    );
+  });
+  const card = renderer!.root.find((node) => node.type === "article" && typeof node.props?.className === "string" && node.props.className.startsWith("chat-accord-launch"));
+  assert.match(textOf(card), /Not taken by your server: This chat is archived\./);
 });
