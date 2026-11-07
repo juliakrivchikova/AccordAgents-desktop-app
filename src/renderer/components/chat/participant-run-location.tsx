@@ -12,12 +12,16 @@ export function ParticipantRunLocation(props: {
   unassigned?: boolean;
   disabled?: boolean;
   locked?: boolean;
+  /** It already ran: a new place moves it there with its session. */
+  moves?: boolean;
+  handle?: string;
   hideLabel?: boolean;
   onChange: (patch: { homeMachineId?: string; cloudRun?: CloudRunSelection; remoteExecution: "local" }) => unknown;
 }): JSX.Element {
   const [machines, setMachines] = useState<MachineRecord[]>([]);
   const [selectionError, setSelectionError] = useState<string>();
   const [progress, setProgress] = useState<CloudRunPreparationState>();
+  const [moving, setMoving] = useState<string>();
   useEffect(() => {
     let alive = true;
     void window.consensus.listMachines().then(result => { if (alive) setMachines(result.machines); }).catch(() => undefined);
@@ -63,16 +67,25 @@ export function ParticipantRunLocation(props: {
   }
 
   function select(value: string): void {
-    if (props.disabled || props.locked || value === "unassigned") return;
+    if (props.disabled || props.locked || moving || value === "unassigned") return;
     setSelectionError(undefined);
     const selectedMachine = machines.find(machine => value === `machine:${machine.id}`);
+    // Moving takes a while (its session travels through your server, and a
+    // stopped machine is started to hand it over): said here until it ends.
+    const destination = value === "local" ? "this computer" : selectedMachine?.name ?? "Cloud run";
+    const track = (pending: unknown): Promise<unknown> => {
+      if (!props.moves) return Promise.resolve(pending);
+      setMoving(`Moving ${props.handle ? `@${props.handle}` : "this member"} to ${destination} with its session…`);
+      return Promise.resolve(pending).finally(() => setMoving(undefined));
+    };
     if (value !== "cloud" && !selectedMachine?.awsInstanceId) {
-      props.onChange({ homeMachineId: value.startsWith("machine:") ? value.slice(8) : undefined, cloudRun: undefined, remoteExecution: "local" });
+      void track(props.onChange({ homeMachineId: value.startsWith("machine:") ? value.slice(8) : undefined, cloudRun: undefined, remoteExecution: "local" }))
+        .catch(error => setSelectionError(error instanceof Error ? error.message : String(error)));
       return;
     }
     if (props.kind !== "codex-cli" && props.kind !== "claude-code") return;
     const selection = selectedMachine?.awsInstanceId ? { instanceId: selectedMachine.awsInstanceId } : {};
-    void Promise.resolve(props.onChange({ homeMachineId: undefined, cloudRun: selection, remoteExecution: "local" }))
+    void track(props.onChange({ homeMachineId: undefined, cloudRun: selection, remoteExecution: "local" }))
       .then(saved => { if (saved !== false) prepare(selection); })
       .catch(error => setSelectionError(error instanceof Error ? error.message : String(error)));
   }
@@ -86,13 +99,14 @@ export function ParticipantRunLocation(props: {
           <span className="chat-rt-ghost-val">{options.find(option => option.value === selected)?.label}</span>
           <ChevronDown size={11} aria-hidden />
           <select className="chat-rt-ghost-native" aria-label="Run on" value={selected}
-            disabled={props.disabled || props.locked} onChange={event => select(event.currentTarget.value)}>
+            disabled={props.disabled || props.locked || Boolean(moving)} onChange={event => select(event.currentTarget.value)}>
             {options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
         </span>
       </div>
       {selectionError && <p role="alert" className="text-destructive text-xs">{selectionError}</p>}
       {props.locked && <p className="text-muted-foreground text-xs">{lockedReason}</p>}
+      {moving && <p className="text-muted-foreground text-xs" role="status">{moving}</p>}
       {props.cloudRun && preparing && <p className="text-muted-foreground text-xs" role="status">{progress.message} You can close this window.</p>}
       {props.cloudRun && preparing && progress.authUrl && <CloudProviderAuth authUrl={progress.authUrl} authCode={progress.authCode} authProvider={progress.authProvider} authRequestId={progress.authRequestId} />}
       {props.cloudRun && progress?.phase === "error" && <div className="text-xs"><p className="text-destructive" role="alert">{progress?.message}</p>

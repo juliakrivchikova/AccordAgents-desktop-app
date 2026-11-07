@@ -288,7 +288,10 @@ export async function startHub(args: HubArgs): Promise<() => Promise<void>> {
   const retention = new HubRetention({
     storage, config: hubRetentionConfig(), log,
     bodiesReady: async () => Boolean(await storage.hub().document(BLOB_PINS_DONE_KEY)),
-    renewPins: () => renewPicturePins(storage)
+    renewPins: async () => {
+      await renewSessionPins(storage);
+      await renewPicturePins(storage);
+    }
   });
   retention.start();
   log("hub.started", { version: HUB_VERSION, https, httpPort: args.httpPort });
@@ -350,6 +353,13 @@ async function renewPicturePins(storage: StorageService): Promise<void> {
   if (Number.isFinite(last) && Date.now() - last < PICTURE_PINS_RENEW_MS) return;
   await storage.deviceEventBlobs().pinOnly(await hub.namedPictureHashes(), "attachment");
   await hub.setDocument(PICTURE_PINS_RENEWED_KEY, { at: new Date().toISOString() }, new Date().toISOString());
+}
+
+/** A member's session handed over for its move is kept while the member
+ *  names it (until its new device took it), looked up before every sweep:
+ *  it was put up with a day's pin only. */
+async function renewSessionPins(storage: StorageService): Promise<void> {
+  await storage.deviceEventBlobs().pinOnly(await storage.hub().namedSessionHandoffHashes(), "session");
 }
 
 function loopbackEndpoint(value: string | undefined): string | undefined {

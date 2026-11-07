@@ -90,6 +90,11 @@ export interface MachineHelloBody {
    *  (a turn with request kind "restart"); absent before that existed, when
    *  such a turn would be taken as an ordinary turn of the member. */
   memberRestartSupported?: boolean;
+  /** This runtime takes a member's session handed over through the User's
+   *  server (`sessionHandoff`) and hands one over on a turn with request kind
+   *  "session.export"; absent before that existed, when the handoff would be
+   *  ignored and the export turn taken as an ordinary turn of the member. */
+  sessionMoveSupported?: boolean;
   /** An enabled scheduled script keeps this machine from stopping when idle.
    *  Not a run: the desktop's update gate does not wait on it. */
   keepAwake?: boolean;

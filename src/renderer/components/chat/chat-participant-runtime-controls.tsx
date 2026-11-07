@@ -53,10 +53,12 @@ export function ParticipantRuntimeControls(props: {
   autoWatchPausedReason?: ChatParticipantWatcherPausedReason;
   roleParticipantDefaults?: ChatRoleParticipantDefaults;
   runLocationLocked: boolean;
+  /** Changing where it runs moves it with its session. */
+  runLocationMoves?: boolean;
   onUpdate: (
     participantId: string,
     patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">
-  ) => void;
+  ) => unknown;
 }): JSX.Element {
   const participant = props.participant;
   const mode = normalizeChatAgentMode(participant.agentMode);
@@ -73,7 +75,7 @@ export function ParticipantRuntimeControls(props: {
 
   // Build the patch by key presence so an intentional reset (model: "") is forwarded
   // rather than collapsing back to the current value.
-  function update(patch: Partial<Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">>): void {
+  function update(patch: Partial<Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">>): unknown {
     return props.onUpdate(participant.id, {
       model: "model" in patch ? patch.model : participant.model,
       reasoningEffort: "reasoningEffort" in patch ? patch.reasoningEffort : participant.reasoningEffort,
@@ -110,7 +112,7 @@ export function ParticipantRuntimeControls(props: {
     <div className="chat-runtime-controls" aria-label={`Runtime controls for ${chatParticipantDisplayName(participant)}`}>
       <ParticipantRunLocation kind={participant.kind} homeMachineId={participant.homeMachineId} cloudRun={participant.cloudRun}
         unassigned={chatParticipantHomeIsUnassigned(participant)} disabled={controlsDisabled}
-        locked={props.runLocationLocked} onChange={update} />
+        locked={props.runLocationLocked} moves={props.runLocationMoves} handle={participant.handle} onChange={update} />
 
       <div className="chat-rt-group">
         <div className="chat-rt-group-title">Model &amp; permissions</div>

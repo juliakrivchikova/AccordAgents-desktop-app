@@ -30,6 +30,8 @@ export function ChatParticipantRosterRow(props: {
   autoWatchPausedReason?: ChatParticipantWatcherPausedReason;
   roleParticipantDefaults?: ChatRoleParticipantDefaults;
   runLocationLocked: boolean;
+  /** Changing where it runs moves it with its session. */
+  runLocationMoves?: boolean;
   renderParticipantAvatar: (participant: ChatParticipant) => React.ReactNode;
   participantRoleLabel: (participant: ChatParticipant) => string;
   participantRoleArchived: (participant: ChatParticipant) => boolean;
@@ -191,6 +193,7 @@ export function ChatParticipantRosterRow(props: {
             autoWatchPausedReason={props.autoWatchPausedReason}
             roleParticipantDefaults={props.roleParticipantDefaults}
             runLocationLocked={props.runLocationLocked}
+            runLocationMoves={props.runLocationMoves}
             onUpdate={props.onUpdateParticipantRuntime}
           />
         )}

@@ -365,3 +365,16 @@ test("a machine's member keeps its name; no member takes another's, the Chat Ass
   scoped = scopeMachineConversationUpdate(chatWith([deskR, lead]), { metadata: { participants: [] } }, "machine-1", { rules });
   assert.deepEqual([...members(scoped).keys()].sort(), ["p-box", "p-desk"], "the last member stays");
 });
+
+test("a machine never writes the session a member is handed when it moves, for its own members or others", () => {
+  const handoff = { provider: "claude-code", sessionId: "s-1", blob: { type: "device.event.blob", blobHash: `sha256:${"a".repeat(64)}`, byteLength: 10, fragments: 1 }, at: "t" };
+  const moving = chat();
+  moving.metadata.participants = [desk, { ...box, sessionHandoff: handoff }] as never;
+  const cleared = scopeMachineConversationUpdate(moving, { metadata: { participants: [desk, box] } }, "machine-1");
+  assert.deepEqual((cleared.update.metadata?.participants as Array<{ id: string; sessionHandoff?: unknown }>)?.find((member) => member.id === "p-box")?.sessionHandoff, handoff,
+    "its own member keeps what the computer handed it");
+  const forged = { ...handoff, sessionId: "s-other" };
+  const written = scopeMachineConversationUpdate(chat(), { metadata: { participants: [{ ...desk, sessionHandoff: forged }, { ...box, sessionHandoff: forged }] } }, "machine-1");
+  const members = (written.update.metadata?.participants ?? [desk, box]) as Array<{ id: string; sessionHandoff?: unknown }>;
+  assert.ok(members.every((member) => member.sessionHandoff === undefined), "nor one it makes up");
+});

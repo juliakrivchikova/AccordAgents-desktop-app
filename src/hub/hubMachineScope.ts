@@ -63,8 +63,9 @@ import type {
 
 type Update = { title?: string; repoPath?: string | null; metadata?: Record<string, unknown>; removedMetadataKeys?: string[] };
 
-/** Where a member runs: what decides which device takes its turns. */
-const HOME_FIELDS = ["homeMachineId", "cloudRun", "remoteExecution"] as const;
+/** Where a member runs: what decides which device takes its turns, and the
+ *  session it is handed when it moves (only the computer writes either). */
+const HOME_FIELDS = ["homeMachineId", "cloudRun", "remoteExecution", "sessionHandoff"] as const;
 
 export interface MachineScopedUpdate {
   update: Update;

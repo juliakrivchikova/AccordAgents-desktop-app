@@ -809,6 +809,8 @@ async function startHubLink(): Promise<void> {
   const blobClient = hubClient;
   // A picture the User sent from the phone is read from the server.
   chatService.setHubBlobReader((reference) => blobClient.downloadBytes(reference));
+  // A member's session moving to a cloud machine goes up from here.
+  chatService.setHubBlobWriter((bytes) => blobClient.uploadBytes(bytes));
   hubPhonePublisher.reset();
   hubMemberRulesPublisher.reset();
   publishHubRoster();
@@ -3178,6 +3180,7 @@ void app.whenReady().then(async () => {
     });
     chatService.setMachineWaitReason((machineId) => machineLink.turnWaitReason(machineId));
     chatService.setMachineMemberRestartSupport((machineId) => machineLink.memberRestartSupport(machineId));
+    chatService.setMachineSessionMove((target) => machineLink.sessionMoveTarget(target));
     // The machines are read before the link to the server starts, so their
     // keys are on the server's roster before anything is written for them;
     // a passing failure to read is tried again first.
