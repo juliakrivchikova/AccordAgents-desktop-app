@@ -916,6 +916,83 @@ button.mobile-chat-group-title:active {
   overflow-wrap: anywhere;
 }
 
+/* The message that starts an Accord: the artifact note's card with the
+   Start Accord glyph, whose three branches keep their own colors on a
+   neutral tile. */
+.accord-launch-icon {
+  border: 1px solid var(--bd);
+  background: var(--surface);
+}
+
+.accord-icon-top {
+  stroke: #a855f7;
+}
+
+.accord-icon-left {
+  stroke: #e73975;
+}
+
+.accord-icon-right {
+  stroke: #447bf3;
+}
+
+.accord-launch-meta {
+  margin-top: 2px;
+  line-height: 1.6;
+}
+
+/* Facts wrap whole, and the dot between two stays at the end of a line. */
+.accord-launch-meta > * {
+  white-space: nowrap;
+}
+
+/* A long member list wraps between members. */
+.accord-launch-meta > .accord-launch-with {
+  white-space: normal;
+}
+
+.accord-launch-meta > :not(:last-child)::after {
+  margin: 0 6px;
+  content: "·";
+}
+
+.accord-launch-kind {
+  color: var(--fg1);
+  font-weight: 500;
+}
+
+.accord-launch-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: bottom;
+}
+
+.accord-launch-handle {
+  color: var(--warn);
+}
+
+/* The row's 32px avatar rule comes later; the card's names are smaller. */
+.accord-launch-meta .accord-launch-avatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  font-size: 9px;
+}
+
+.accord-launch-meta .message-status {
+  color: inherit;
+  font: inherit;
+}
+
+.accord-launch-body {
+  white-space: pre-wrap;
+}
+
+.message-row.is-on-its-way .accord-launch-card {
+  opacity: 0.6;
+}
+
 /* A turn-finished note: the artifact note's card, with the member, the
    reply's first line and a cross. A tap leads back to the reply. */
 .finished-note-card {

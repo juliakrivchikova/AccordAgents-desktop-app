@@ -29,6 +29,7 @@ import {
 import { ChatService } from "./chat";
 import type { HubCard, HubFeedEntry, HubOp, HubOpEffect, HubTurn } from "../../shared/hubOps";
 import { hubTurnRunId } from "../../shared/hubOps";
+import { parseAccordLaunchCard } from "../../shared/accordLaunchCard";
 import type { CodexServerRequestDelivery } from "./codexApprovals";
 import {
   chatAgentPermissionsEqual,
@@ -12515,6 +12516,18 @@ test("startAccord creates structured accord skill mention and dispatches only th
   assert.match(userMessage.content, /@codex \/accord/);
   assert.match(userMessage.content, /Selected accord members: drew\./);
   assert.doesNotMatch(userMessage.content, /@drew/);
+  // The facilitator's turn is this exact text; the timeline only reads it as
+  // a card (accordLaunchCard.ts), it never changes what the member receives.
+  assert.equal(userMessage.content, [
+    "@codex /accord",
+    "",
+    "Subject:",
+    "Pick the launch shape.",
+    "",
+    "Selected accord members: drew.",
+    "Run the accord skill for exactly those selected members and this subject. Use app_chat_request_participants for those members only. The app has enabled request-members permission for you in this chat; the user can revoke it from your member controls."
+  ].join("\n"));
+  assert.deepEqual(parseAccordLaunchCard(userMessage.content), { facilitator: "codex", members: ["drew"], subject: "Pick the launch shape." });
 
   const facilitatorAfterStart = storage.current.metadata.participants.find((participant: ChatParticipant) => participant.id === facilitator.id);
   assert.equal(facilitatorAfterStart.permissions.requestParticipants, "allow");

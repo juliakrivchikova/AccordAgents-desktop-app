@@ -9094,8 +9094,14 @@
       when: formatClockTime(entry.createdAt),
       runId: entry.runId,
       turn: entry.sourceMessageId ? entry.sourceMessageId + ":" + (entry.participantId || "") : undefined,
-      stopRequested: entry.stopRequested
+      stopRequested: entry.stopRequested,
+      accordAvatars: accordLaunchSignatureOf(entry)
     });
+  }
+
+  function accordLaunchSignatureOf(entry) {
+    const card = accordLaunchCardForEntry(entry);
+    return card ? accordLaunchAvatarSignature(entry, card) : undefined;
   }
 
   // A pending agent row with no text yet is a run that has started and not
@@ -9413,6 +9419,108 @@
     return wrap;
   }
 
+  /** A message of the User's that starts an Accord, its launch prompt read
+   *  by the desktop's own parser (accordLaunchCard.ts); anything else stays
+   *  a bubble. */
+  function accordLaunchCardForEntry(entry) {
+    if (!entry || entry.author !== "you" || entry.scaffolding) return undefined;
+    const shared = mobileSharedRules();
+    return shared && typeof shared.parseAccordLaunchCard === "function"
+      ? shared.parseAccordLaunchCard(entry.content)
+      : undefined;
+  }
+
+  // The desktop's Start Accord glyph: a merge whose three branches keep their
+  // own colors (mobile-app.css), so the icon ignores currentColor.
+  const ACCORD_ICON_PATHS = [
+    ["m8 6 4-4 4 4", "top"],
+    ["M12 2v10.3", "top"],
+    ["M12 12.3a4 4 0 0 1-1.172 2.872L4 22", "left"],
+    ["m20 22-5-5", "right"]
+  ];
+
+  function accordIcon(size) {
+    const svg = lineIcon([], size);
+    svg.setAttribute("stroke-width", "2.4");
+    for (const [d, branch] of ACCORD_ICON_PATHS) {
+      const path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("d", d);
+      path.setAttribute("class", "accord-icon-" + branch);
+      svg.append(path);
+    }
+    return svg;
+  }
+
+  /** What the card's member avatars show, so the row is redrawn when the
+   *  member list arrives after it or a member's picture changes. */
+  function accordLaunchAvatarSignature(entry, card) {
+    const members = conversationMembers(entry.conversationId || selectedConversationId());
+    return [card.facilitator].concat(card.members).map(function (handle) {
+      return avatarSignature(avatarForLabel(members, "@" + handle));
+    }).join("|");
+  }
+
+  function accordMemberElement(entry, handle) {
+    const wrap = document.createElement("span");
+    wrap.className = "accord-launch-member";
+    const avatar = document.createElement("span");
+    avatar.className = "message-avatar accord-launch-avatar";
+    avatar.setAttribute("aria-hidden", "true");
+    const conversationId = entry.conversationId || selectedConversationId();
+    paintAvatar(avatar, avatarForLabel(conversationMembers(conversationId), "@" + handle), conversationId);
+    const name = document.createElement("span");
+    name.className = "accord-launch-handle";
+    name.textContent = "@" + handle;
+    wrap.append(avatar, name);
+    return wrap;
+  }
+
+  /** The Accord launch as the desktop shows it: the artifact note's card
+   *  with the Start Accord icon, the subject as its title, and who leads it
+   *  and who is in it. The row keeps the message's own status (its time, or
+   *  why the server refused it) and its replies' chip. */
+  function accordLaunchCardElement(entry, card) {
+    const shared = mobileSharedRules();
+    const parts = shared.accordLaunchTitleAndBody(card.subject);
+    const wrap = document.createElement("div");
+    wrap.className = "artifact-note-card accord-launch-card";
+    const icon = document.createElement("span");
+    icon.className = "artifact-note-icon accord-launch-icon";
+    icon.append(accordIcon(22));
+    const text = document.createElement("div");
+    text.className = "artifact-note-text";
+    const title = document.createElement("div");
+    title.className = "artifact-note-title";
+    title.textContent = parts.title;
+    const meta = document.createElement("div");
+    meta.className = "artifact-note-meta accord-launch-meta";
+    const kind = document.createElement("span");
+    kind.className = "accord-launch-kind";
+    kind.textContent = "Accord";
+    const led = document.createElement("span");
+    led.append(document.createTextNode("led by "), accordMemberElement(entry, card.facilitator));
+    const withMembers = document.createElement("span");
+    withMembers.className = "accord-launch-with";
+    withMembers.append(document.createTextNode("with "));
+    card.members.forEach(function (handle, index) {
+      if (index > 0) withMembers.append(document.createTextNode(", "));
+      withMembers.append(accordMemberElement(entry, handle));
+    });
+    const status = document.createElement("span");
+    status.className = "message-status";
+    status.textContent = messageStatusLabel(entry);
+    meta.append(kind, led, withMembers, status);
+    text.append(title, meta);
+    if (parts.body) {
+      const body = document.createElement("div");
+      body.className = "artifact-note-body accord-launch-body";
+      body.textContent = parts.body;
+      text.append(body);
+    }
+    wrap.append(icon, text);
+    return wrap;
+  }
+
   /** The reply a turn-finished note leads back to; none for any other row. */
   function finishedNoteOfEntry(entry) {
     return entry && entry.author === "system" && !entry.scaffolding && entry.finishedNote && entry.finishedNote.messageId
@@ -9493,6 +9601,15 @@
     if (artifactNote) {
       item.dataset.artifactNote = "1";
       item.append(artifactNoteCardElement(entry, artifactNote));
+      return item;
+    }
+    const accordLaunch = accordLaunchCardForEntry(entry);
+    if (accordLaunch) {
+      item.dataset.accordLaunch = "1";
+      item.classList.toggle("is-on-its-way", Boolean(entry.onItsWay));
+      item.classList.toggle("is-refused", Boolean(entry.refused));
+      item.append(accordLaunchCardElement(entry, accordLaunch));
+      appendThreadChip(item, entry);
       return item;
     }
     if (finishedNoteOfEntry(entry)) {
@@ -9704,6 +9821,9 @@
       return false;
     }
     if (item.dataset.finishedNote === "1" || finishedNoteOfEntry(entry)) {
+      return false;
+    }
+    if (item.dataset.accordLaunch === "1" || accordLaunchCardForEntry(entry)) {
       return false;
     }
     // Scaffolding and a message are different shapes; the reconciler replaces

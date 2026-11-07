@@ -40,6 +40,7 @@ import {
 } from "./chat-conversation-data";
 import { ChatArtifactNoteCard, artifactNoteCardForMessage } from "./chat-artifact-note-card";
 import { ChatTurnFinishedNote } from "./chat-turn-finished-note";
+import { ChatAccordLaunchCard, accordLaunchCardForMessage } from "./chat-accord-launch-card";
 import { turnFinishedNoteOf } from "../../../shared/turnFinishedNoteSource";
 import { ChatChoiceCard } from "./chat-choice-card";
 import { chatMessageCards } from "./chat-server-card";
@@ -125,6 +126,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   if (artifactNote) {
     return <ChatArtifactNoteCard message={message} card={artifactNote} onToggleReaction={props.onToggleReaction} />;
   }
+  const accordLaunch = accordLaunchCardForMessage(message);
   const turnFinishedNote = turnFinishedNoteOf(message);
   if (turnFinishedNote) {
     return (
@@ -265,7 +267,57 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
     props.onToggleReaction(message.id, emoji);
   }
 
+  const reactAndReplyActions = (
+    <>
+      {canReact && (
+        <Popover open={reactionPickerOpen} onOpenChange={setReactionPickerOpen}>
+          <PopoverTrigger asChild>
+            <IconButton
+              size="xs"
+              icon={Smile}
+              label="Add reaction"
+              tooltip="Add reaction"
+            />
+          </PopoverTrigger>
+          <PopoverContent align="end" className="chat-reaction-popover">
+            <div className="chat-reaction-picker" aria-label="Choose reaction">
+              {CHAT_REACTION_EMOJIS.map((emoji) => (
+                <button type="button" className="chat-reaction-option" onClick={() => toggleReaction(emoji)} key={emoji}>
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          </PopoverContent>
+        </Popover>
+      )}
+      {showThreadActions && (
+        <IconButton
+          size="xs"
+          icon={Reply}
+          label="Reply in thread"
+          tooltip="Reply in thread"
+          onClick={() => props.onOpenThread?.(message.id)}
+        />
+      )}
+    </>
+  );
+
   const delivery = messageDelivery(message);
+  if (accordLaunch) {
+    return (
+      <ChatAccordLaunchCard
+        message={message}
+        card={accordLaunch}
+        participants={props.participants}
+        className={`${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""} ${delivery?.state === "unsent" ? "is-unsent" : ""}`}
+        actions={<div className="message-actions">{reactAndReplyActions}</div>}
+      >
+        <ChatMessageRefusal delivery={delivery} />
+        <ChatMessageReactionList reactions={reactionEntries} onToggleReaction={toggleReaction} />
+        {threadActions}
+      </ChatAccordLaunchCard>
+    );
+  }
   return (
     <>
       <article data-message-id={message.id} className={`message chat-message ${choice ? "has-choice" : ""} ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""} ${isStreaming ? "is-running" : ""} ${delivery?.state === "unsent" ? "is-unsent" : ""}`}>
@@ -314,36 +366,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               disabled={!canCopy}
               onClick={() => void copyMessage()}
             />
-            {canReact && (
-              <Popover open={reactionPickerOpen} onOpenChange={setReactionPickerOpen}>
-                <PopoverTrigger asChild>
-                  <IconButton
-                    size="xs"
-                    icon={Smile}
-                    label="Add reaction"
-                    tooltip="Add reaction"
-                  />
-                </PopoverTrigger>
-                <PopoverContent align="end" className="chat-reaction-popover">
-                  <div className="chat-reaction-picker" aria-label="Choose reaction">
-                    {CHAT_REACTION_EMOJIS.map((emoji) => (
-                      <button type="button" className="chat-reaction-option" onClick={() => toggleReaction(emoji)} key={emoji}>
-                        {emoji}
-                      </button>
-                    ))}
-                  </div>
-                </PopoverContent>
-              </Popover>
-            )}
-            {showThreadActions && (
-              <IconButton
-                size="xs"
-                icon={Reply}
-                label="Reply in thread"
-                tooltip="Reply in thread"
-                onClick={() => props.onOpenThread?.(message.id)}
-              />
-            )}
+            {reactAndReplyActions}
           </div>
           <div className="message-meta">
             <strong>{author}</strong>
