@@ -99,7 +99,7 @@ export function ParticipantRunLocation(props: {
           <span className="chat-rt-ghost-val">{options.find(option => option.value === selected)?.label}</span>
           <ChevronDown size={11} aria-hidden />
           <select className="chat-rt-ghost-native" aria-label="Run on" value={selected}
-            disabled={props.disabled || props.locked || Boolean(moving)} onChange={event => select(event.currentTarget.value)}>
+            disabled={props.disabled || props.locked || (moving ? true : undefined)} onChange={event => select(event.currentTarget.value)}>
             {options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
         </span>
