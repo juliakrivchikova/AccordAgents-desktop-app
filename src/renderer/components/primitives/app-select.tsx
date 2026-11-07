@@ -1,3 +1,4 @@
+import type * as React from "react";
 import {
   Select,
   SelectContent,
@@ -10,6 +11,8 @@ import {
 export interface AppSelectOption {
   value: string;
   label: string;
+  /** Shown before the label, in the list and in the closed select. */
+  icon?: React.ReactNode;
   disabled?: boolean;
 }
 
@@ -39,6 +42,7 @@ export function AppSelect(props: {
         <SelectGroup>
           {props.options.map((option) => (
             <SelectItem value={option.value} disabled={option.disabled} key={option.value}>
+              {option.icon}
               {option.label}
             </SelectItem>
           ))}

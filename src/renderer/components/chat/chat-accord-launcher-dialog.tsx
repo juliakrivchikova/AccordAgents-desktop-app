@@ -1,5 +1,5 @@
 import React from "react";
-import { ChevronDown, Loader2 } from "lucide-react";
+import { Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
@@ -18,6 +18,7 @@ import { AppSelect, FormRow } from "../primitives";
 import { Avatar } from "../avatar/avatar";
 import { chatParticipantDisplayName, isChatAssistantParticipant } from "../conversation/conversation-display";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { AccordMergeIcon } from "./accord-merge-icon";
 import { providerLabel } from "./chat-conversation-data";
 
 export interface ChatAccordLauncherPayload {
@@ -131,81 +132,27 @@ export function ChatAccordLauncherDialog(props: {
         data-testid="chat-accord-dialog"
       >
         <DialogHeader className="chat-accord-header">
-          <DialogTitle>Start Accord</DialogTitle>
-          <DialogDescription>
-            Pick the facilitator, the members to include, and the decision to resolve.
+          <DialogTitle className="chat-accord-title">
+            <AccordMergeIcon className="chat-accord-title-icon" />
+            Start Accord
+          </DialogTitle>
+          <DialogDescription className="sr-only">
+            Write the subject, choose who leads, and pick the members who will reach one decision together.
           </DialogDescription>
         </DialogHeader>
 
         <div className="chat-accord-form">
-          <FormRow
-            className="chat-accord-field"
-            label="Facilitator"
-            hint={`${facilitator ? chatParticipantDisplayName(facilitator) : "The facilitator"} can request selected members in this chat without another approval.`}
-          >
-            <AppSelect
-              value={resolvedFacilitatorId}
-              options={participants.map((participant) => ({
-                value: participant.id,
-                label: chatParticipantDisplayName(participant)
-              }))}
-              placeholder="Choose facilitator"
-              ariaLabel="Accord facilitator"
-              testId="chat-accord-facilitator"
-              disabled={saving || props.disabled}
-              onValueChange={setFacilitator}
-            />
-          </FormRow>
-
-          <FormRow className="chat-accord-field" label="Members">
-            <div className="chat-accord-target-list" data-testid="chat-accord-targets">
-              {targetOptions.map((participant) => {
-                const checked = targetIds.includes(participant.id);
-                const displayName = chatParticipantDisplayName(participant);
-                return (
-                  <div className={`chat-accord-target${checked ? " is-selected" : ""}`} key={participant.id}>
-                    <button
-                      type="button"
-                      className="chat-accord-target-main"
-                      disabled={saving || props.disabled}
-                      aria-pressed={checked}
-                      onClick={() => toggleTarget(participant.id)}
-                    >
-                      <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant, displayName)} />
-                      <span className="chat-accord-target-text">
-                        <span className="chat-accord-target-title">
-                          <strong>{displayName}</strong>
-                          <span>- {providerLabel(participant.kind)}</span>
-                        </span>
-                        <small>{props.participantRoleLabel(participant)}</small>
-                      </span>
-                    </button>
-                    <ChevronDown className="chat-accord-target-chevron" size={16} aria-hidden />
-                    <input
-                      className="chat-accord-target-checkbox"
-                      type="checkbox"
-                      checked={checked}
-                      disabled={saving || props.disabled}
-                      aria-label={`Select ${displayName}`}
-                      onChange={() => toggleTarget(participant.id)}
-                    />
-                  </div>
-                );
-              })}
-              {targetOptions.length === 0 && (
-                <div className="chat-accord-empty">Add another member to start Accord.</div>
-              )}
-            </div>
-          </FormRow>
-
           <FormRow className="chat-accord-field" label="Subject" htmlFor="chat-accord-subject">
+            <p className="chat-accord-hint" id="chat-accord-subject-hint">
+              What should the members agree on? Each one answers on its own first, then they settle on one resolution that everyone signs.
+            </p>
             <Textarea
               id="chat-accord-subject"
               className="chat-accord-subject"
               value={subject}
-              rows={4}
-              style={{ minHeight: 112 }}
+              rows={3}
               placeholder="Decision or topic to resolve"
+              aria-describedby="chat-accord-subject-hint"
               disabled={saving || props.disabled}
               data-testid="chat-accord-subject"
               onChange={(event) => setSubject(event.currentTarget.value)}
@@ -227,7 +174,62 @@ export function ChatAccordLauncherDialog(props: {
               </div>
             )}
           </FormRow>
-          {validation && <div className="chat-accord-validation">{validation}</div>}
+
+          <FormRow className="chat-accord-field" label="Led by">
+            <p className="chat-accord-hint">
+              Collects the drafts, writes the resolution and asks everyone to sign. It can ask the chosen members without your approval.
+            </p>
+            <AppSelect
+              value={resolvedFacilitatorId}
+              options={participants.map((participant) => {
+                const displayName = chatParticipantDisplayName(participant);
+                return {
+                  value: participant.id,
+                  label: displayName,
+                  icon: <Avatar className="chat-accord-select-avatar" spec={avatarForChatParticipant(participant, displayName)} tooltip={null} />
+                };
+              })}
+              placeholder="Choose who leads"
+              ariaLabel="Accord lead"
+              testId="chat-accord-facilitator"
+              disabled={saving || props.disabled}
+              onValueChange={setFacilitator}
+            />
+          </FormRow>
+
+          <FormRow className="chat-accord-field" label="Members">
+            <div className="chat-accord-target-list" data-testid="chat-accord-targets">
+              {targetOptions.map((participant) => {
+                const checked = targetIds.includes(participant.id);
+                const displayName = chatParticipantDisplayName(participant);
+                return (
+                  <label className={`chat-accord-target${checked ? " is-selected" : ""}`} key={participant.id}>
+                    <input
+                      className="chat-accord-target-checkbox"
+                      type="checkbox"
+                      checked={checked}
+                      disabled={saving || props.disabled}
+                      aria-label={`Select ${displayName}`}
+                      onChange={() => toggleTarget(participant.id)}
+                    />
+                    <span className="chat-accord-target-check" aria-hidden="true">
+                      <Check size={12} strokeWidth={3.4} />
+                    </span>
+                    <Avatar className="chat-accord-target-avatar" spec={avatarForChatParticipant(participant, displayName)} tooltip={null} />
+                    <span className="chat-accord-target-title" title={props.participantRoleLabel(participant)}>
+                      <strong>{displayName}</strong>
+                      <span>- {providerLabel(participant.kind)}</span>
+                    </span>
+                  </label>
+                );
+              })}
+              {targetOptions.length === 0 && (
+                <div className="chat-accord-empty">Add another member to start Accord.</div>
+              )}
+            </div>
+          </FormRow>
+          {/* An empty subject only keeps Start Accord disabled; the hint above already says what goes there. */}
+          {validation && validation !== SUBJECT_REQUIRED && <div className="chat-accord-validation">{validation}</div>}
         </div>
 
         <DialogFooter className="chat-accord-footer">
@@ -244,15 +246,17 @@ export function ChatAccordLauncherDialog(props: {
   );
 }
 
+const SUBJECT_REQUIRED = "Enter a subject.";
+
 function validationMessage(facilitatorId: string, targetIds: string[], subject: string): string | undefined {
   if (!facilitatorId) {
-    return "Choose a facilitator.";
+    return "Choose who leads.";
   }
   if (targetIds.length === 0) {
     return "Choose at least one member.";
   }
   if (!subject.trim()) {
-    return "Enter a subject.";
+    return SUBJECT_REQUIRED;
   }
   return undefined;
 }
