@@ -303,21 +303,6 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   );
 
   const delivery = messageDelivery(message);
-  if (accordLaunch) {
-    return (
-      <ChatAccordLaunchCard
-        message={message}
-        card={accordLaunch}
-        participants={props.participants}
-        className={`${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""} ${delivery?.state === "unsent" ? "is-unsent" : ""}`}
-        actions={<div className="message-actions">{reactAndReplyActions}</div>}
-      >
-        <ChatMessageRefusal delivery={delivery} />
-        <ChatMessageReactionList reactions={reactionEntries} onToggleReaction={toggleReaction} />
-        {threadActions}
-      </ChatAccordLaunchCard>
-    );
-  }
   return (
     <>
       <article data-message-id={message.id} className={`message chat-message ${choice ? "has-choice" : ""} ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""} ${isStreaming ? "is-running" : ""} ${delivery?.state === "unsent" ? "is-unsent" : ""}`}>
@@ -358,14 +343,17 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 onClick={() => props.activityDisclosure.toggleProcessingTranscript(message.id)}
               />
             )}
-            <IconButton
-              size="xs"
-              icon={copied ? CheckCircle2 : Copy}
-              label={copied ? "Copied" : "Copy message"}
-              tooltip={copied ? "Copied" : "Copy message"}
-              disabled={!canCopy}
-              onClick={() => void copyMessage()}
-            />
+            {/* An Accord launch's text is the prompt for its lead, not hers to copy. */}
+            {!accordLaunch && (
+              <IconButton
+                size="xs"
+                icon={copied ? CheckCircle2 : Copy}
+                label={copied ? "Copied" : "Copy message"}
+                tooltip={copied ? "Copied" : "Copy message"}
+                disabled={!canCopy}
+                onClick={() => void copyMessage()}
+              />
+            )}
             {reactAndReplyActions}
           </div>
           <div className="message-meta">
@@ -412,6 +400,8 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                     view={processingTranscriptView}
                     activityEvents={activityEvents}
                   />
+                ) : accordLaunch ? (
+                  <ChatAccordLaunchCard card={accordLaunch} participants={props.participants} />
                 ) : (
                   <MarkdownText
                     content={displayContent}
@@ -463,7 +453,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               <span>Referenced: {repoFileMentions.map((mention) => mention.path).join(", ")}</span>
             </div>
           )}
-          {skillMentions.length > 0 && (
+          {skillMentions.length > 0 && !accordLaunch && (
             <div className="repo-file-reference-footer skill-reference-footer">
               <ListChecks size={14} />
               <span>Skills: {skillMentions.map((mention) => `${mention.displayName} (${mention.variants.map((variant) => providerLabel(variant.providerKind)).join(", ")})`).join(", ")}</span>

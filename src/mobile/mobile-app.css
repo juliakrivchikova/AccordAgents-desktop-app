@@ -998,8 +998,22 @@ button.mobile-chat-group-title:active {
   font: inherit;
 }
 
+/* The subject is her own words: drawn as message text, not as a heading. */
+.accord-launch-card .artifact-note-title {
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
 .accord-launch-body {
   white-space: pre-wrap;
+}
+
+/* Her own message: on her side of the chat, where her bubbles are. */
+.message-row[data-author="you"] .accord-launch-card {
+  flex: 0 1 auto;
+  max-width: 88%;
+  margin-left: auto;
 }
 
 .message-row.is-on-its-way .accord-launch-card {

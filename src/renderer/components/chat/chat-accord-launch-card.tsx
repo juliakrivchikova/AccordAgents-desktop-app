@@ -1,10 +1,9 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment } from "react";
 import type { ChatMessage, ChatParticipant } from "../../../shared/types";
 import { accordLaunchTitleAndBody, parseAccordLaunchCard, type AccordLaunchCard } from "../../../shared/accordLaunchCard";
 import { Avatar, avatarForParticipant } from "../avatar/avatar";
 import { AccordMergeIcon } from "./accord-merge-icon";
 import { avatarForChatParticipant } from "./chat-avatars";
-import { ChatMessageWhen } from "./chat-streaming";
 
 /** The card for a message that starts an Accord; anything else keeps the
  *  message row. A message carrying pictures or file references is never one
@@ -33,50 +32,41 @@ function AccordMember(props: { handle: string; participants?: ChatParticipant[] 
   );
 }
 
-// The User's Accord launch on the timeline: a card in the artifact notes'
-// shape with the Start Accord icon. The subject is the title, the meta line
-// says it is an Accord, who leads it and who is in it. The message's own
-// controls (react, reply in thread), its reactions, its delivery state and
-// its thread stay with it, as under any message of hers.
+// The User's Accord launch: her message (avatar, "You", time, its controls,
+// reactions and thread) whose content is this card instead of the launch
+// prompt. The card has the artifact notes' shape with the Start Accord icon:
+// the subject in her own words, then that it is an Accord, who leads it and
+// who is in it.
 export function ChatAccordLaunchCard(props: {
-  message: Pick<ChatMessage, "id" | "createdAt">;
   card: AccordLaunchCard;
   participants?: ChatParticipant[];
-  className?: string;
-  actions?: ReactNode;
-  children?: ReactNode;
 }): JSX.Element {
-  const { card, message } = props;
+  const { card } = props;
   const { title, body } = accordLaunchTitleAndBody(card.subject);
   return (
-    <article data-message-id={message.id} className={`chat-accord-launch ${props.className ?? ""}`}>
-      {props.actions}
-      <div className="chat-accord-launch-card">
-        <span className="chat-accord-launch-icon" aria-hidden="true">
-          <AccordMergeIcon className="chat-accord-launch-glyph" />
-        </span>
-        <span className="chat-accord-launch-text">
-          <span className="chat-accord-launch-title">{title}</span>
-          <span className="chat-accord-launch-meta">
-            <span className="chat-accord-launch-kind">Accord</span>
-            <span className="chat-accord-launch-fact">
-              led by <AccordMember handle={card.facilitator} participants={props.participants} />
-            </span>
-            <span className="chat-accord-launch-fact chat-accord-launch-with">
-              with{" "}
-              {card.members.map((handle, index) => (
-                <Fragment key={handle}>
-                  {index > 0 && ", "}
-                  <AccordMember handle={handle} participants={props.participants} />
-                </Fragment>
-              ))}
-            </span>
-            <ChatMessageWhen createdAt={message.createdAt} />
+    <div className="chat-accord-launch-card">
+      <span className="chat-accord-launch-icon" aria-hidden="true">
+        <AccordMergeIcon className="chat-accord-launch-glyph" />
+      </span>
+      <span className="chat-accord-launch-text">
+        <span className="chat-accord-launch-title">{title}</span>
+        {body && <span className="chat-accord-launch-body">{body}</span>}
+        <span className="chat-accord-launch-meta">
+          <span className="chat-accord-launch-kind">Accord</span>
+          <span className="chat-accord-launch-fact">
+            led by <AccordMember handle={card.facilitator} participants={props.participants} />
           </span>
-          {body && <span className="chat-accord-launch-body">{body}</span>}
+          <span className="chat-accord-launch-fact chat-accord-launch-with">
+            with{" "}
+            {card.members.map((handle, index) => (
+              <Fragment key={handle}>
+                {index > 0 && ", "}
+                <AccordMember handle={handle} participants={props.participants} />
+              </Fragment>
+            ))}
+          </span>
         </span>
-      </div>
-      {props.children}
-    </article>
+      </span>
+    </div>
   );
 }

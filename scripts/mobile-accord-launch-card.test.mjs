@@ -84,14 +84,15 @@ test("Accord launches show as cards on the phone", { timeout: 120_000 }, async (
   assert.equal(plain.card, false, "a message that only mentions /accord stays a bubble");
   assert.equal(plain.bubble, true);
 
+  // Her own message: on her side, where her bubbles are, inside the screen.
   const box = await app.evaluate(`(() => {
     const card = document.querySelector('#message-list .accord-launch-card');
-    const text = document.querySelector('#message-list .message-row[data-author="agent"] .message-copy');
-    const c = card.getBoundingClientRect(); const m = text.getBoundingClientRect();
-    return { left: Math.round(c.left), textLeft: Math.round(m.left), right: Math.round(c.right), width: window.innerWidth };
+    const bubble = document.querySelector('#message-list .message-row[data-author="you"] .message-bubble');
+    const c = card.getBoundingClientRect(); const b = bubble.getBoundingClientRect();
+    return { right: Math.round(c.right), bubbleRight: Math.round(b.right), left: Math.round(c.left), width: window.innerWidth };
   })()`);
-  assert.ok(Math.abs(box.left - box.textLeft) <= 1, `the card starts where a member's text does: ${JSON.stringify(box)}`);
-  assert.ok(box.right <= box.width, `the card stays on screen: ${JSON.stringify(box)}`);
+  assert.ok(Math.abs(box.right - box.bubbleRight) <= 1, `the card ends where her bubbles do: ${JSON.stringify(box)}`);
+  assert.ok(box.left >= 0 && box.right <= box.width, `the card stays on screen: ${JSON.stringify(box)}`);
 
   // Redrawn rows keep their shape: a reply gives the launch its thread chip.
   await hub.addMessages("conv-accord", [

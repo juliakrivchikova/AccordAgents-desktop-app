@@ -70,7 +70,7 @@ test("the subject's first line is the title, the rest is the body", () => {
   assert.deepEqual(accordLaunchTitleAndBody("Title\n\nMore\nlines"), { title: "Title", body: "More\nlines" });
 });
 
-test("the timeline row of a launch is the card: no prompt text, no skills line, the thread and reactions kept", () => {
+test("a launch is her message with the card as its content: no prompt text, no skills line, no Copy; thread and reactions kept", () => {
   const opened: string[] = [];
   const toggled: Array<[string, string]> = [];
   const participants = [
@@ -113,8 +113,11 @@ test("the timeline row of a launch is the card: no prompt text, no skills line, 
     );
   });
   const root = renderer!.root;
-  const card = root.find((node) => node.type === "article" && typeof node.props?.className === "string" && node.props.className.startsWith("chat-accord-launch"));
+  const card = root.find((node) => node.type === "article" && typeof node.props?.className === "string" && node.props.className.includes("chat-message"));
   assert.equal(card.props["data-message-id"], "launch-1");
+  assert.equal(root.findAll((node) => node.props?.className === "chat-accord-launch-card").length, 1, "the card is the message's content");
+  assert.match(textOf(root.find((node) => node.props?.className === "message-meta")), /^You/, "her name and time head it, as on any message of hers");
+  assert.equal(root.findAll((node) => node.props?.label === "Copy message").length, 0, "nothing to copy: the text is the lead's prompt");
   const all = textOf(card);
   assert.doesNotMatch(all, /app_chat_request_participants|Selected accord|Skills:|\/accord/);
   const part = (className: string) => root.find((node) => node.type === "span" && node.props?.className === className);
@@ -123,7 +126,7 @@ test("the timeline row of a launch is the card: no prompt text, no skills line, 
   assert.equal(textOf(part("chat-accord-launch-kind")), "Accord");
   const mentions = part("chat-accord-launch-meta").findAll((node) => node.type === "span" && node.props?.className === "chat-mention").map(textOf);
   assert.deepEqual(mentions, ["@taylor", "@drew", "@gera"], "who leads it, then who is in it");
-  assert.match(textOf(part("chat-accord-launch-meta")), /led by .*@taylor.*with .*@drew, .*@gera.*\d\d:\d\d$/);
+  assert.match(textOf(part("chat-accord-launch-meta")), /led by .*@taylor.*with .*@drew, .*@gera$/);
   // A removed member still shows by handle.
   assert.equal(root.findAll((node) => node.props?.className === "chat-accord-launch-member").length, 3);
   const pill = root.find((node) => node.type === "button" && node.props?.className === "chat-thread-pill");
@@ -161,6 +164,7 @@ test("a launch the server refused says why under the card, as her other messages
       </TooltipProvider>
     );
   });
-  const card = renderer!.root.find((node) => node.type === "article" && typeof node.props?.className === "string" && node.props.className.startsWith("chat-accord-launch"));
-  assert.match(textOf(card), /Not taken by your server: This chat is archived\./);
+  const row = renderer!.root.find((node) => node.type === "article" && typeof node.props?.className === "string" && node.props.className.includes("chat-message"));
+  assert.equal(row.findAll((node) => node.props?.className === "chat-accord-launch-card").length, 1);
+  assert.match(textOf(row), /Not taken by your server: This chat is archived\./);
 });
