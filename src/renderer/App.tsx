@@ -47,6 +47,7 @@ import { useChatSearch } from "./app/use-chat-search";
 import { useChatSearchShortcut } from "./app/chat-search-shortcut";
 import { useAppNavigation } from "./app/use-app-navigation";
 import { AppNotices } from "./app/app-notices";
+import { DictationHoldKey } from "./components/chat/dictation-hold-key";
 import { pluginNewChatDraft, pluginNewChatMentions } from "./app/plugin-new-chat";
 import { clearActivityItem, markActivityItemRead } from "./app/activity-item-state";
 import { errorText } from "./components/review/review-conversation-data";
@@ -436,6 +437,8 @@ function App(): JSX.Element {
         />
       )}
     >
+      <DictationHoldKey />
+
       <AppNotices
         error={state.error}
         warnings={view.visibleWarnings}

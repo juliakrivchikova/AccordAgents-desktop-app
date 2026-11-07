@@ -2,12 +2,19 @@ import { useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { formatSpeechBytes } from "../../../shared/speechToText";
+import { formatSpeechBytes, isSpeechHoldKey } from "../../../shared/speechToText";
 import type { SpeechToTextState } from "../../../shared/types";
 import { useSpeechToTextState } from "../../app/use-speech-to-text";
 import { cleanIpcError } from "../../lib/ipc-error";
 import { isWindowsPlatform } from "../../lib/platform";
+import { AppSelect } from "../primitives";
 import { AwsDialog } from "./aws-dialog";
+
+const HOLD_KEY_OPTIONS = [
+  { value: "option", label: "Option" },
+  { value: "right-option", label: "Right Option" },
+  { value: "off", label: "Off" }
+];
 
 type Dialog = "download" | "turn-off" | undefined;
 
@@ -100,6 +107,31 @@ export function SpeechToTextRow(): JSX.Element | null {
           <span />
         </label>
       </div>
+      {state.status !== "unavailable" ? (
+        <>
+          <div className="gen-card-divider" />
+          <div className="gen-row" data-testid="speech-to-text-hold-key-row">
+            <div className="gen-row-text">
+              <div className="gen-row-title">Hold to dictate</div>
+              <div className="gen-row-desc">
+                While AccordAgents is in front, hold this key and speak; release it to put the text where the cursor is.
+              </div>
+            </div>
+            <AppSelect
+              value={state.holdKey}
+              options={HOLD_KEY_OPTIONS}
+              placeholder="Key"
+              ariaLabel="Key to hold to dictate"
+              testId="speech-to-text-hold-key"
+              size="sm"
+              disabled={pending}
+              onValueChange={(value) => {
+                if (isSpeechHoldKey(value)) void act(() => window.consensus.setSpeechToTextHoldKey(value));
+              }}
+            />
+          </div>
+        </>
+      ) : null}
       <AwsDialog
         open={dialog === "download"}
         title="Download the speech model?"

@@ -15,7 +15,7 @@ assert.ok(
 const TOTAL = 1_624_555_275;
 
 function state(patch: Partial<SpeechToTextState>): SpeechToTextState {
-  return { status: "off", modelInstalled: false, downloadedBytes: 0, totalBytes: TOTAL, ...patch };
+  return { status: "off", modelInstalled: false, downloadedBytes: 0, totalBytes: TOTAL, holdKey: "option", ...patch };
 }
 
 function find(testId: string): HTMLElement | null {
@@ -45,6 +45,10 @@ async function mount(initial: SpeechToTextState) {
       return answer(state({ status: initial.modelInstalled ? "ready" : "downloading", modelInstalled: initial.modelInstalled, downloadedBytes: 0 }))();
     },
     cancelSpeechToTextDownload: async () => { calls.push("cancel"); return answer(state({}))(); },
+    setSpeechToTextHoldKey: async (holdKey: string) => {
+      calls.push(`hold-key:${holdKey}`);
+      return answer(state({ ...initial, holdKey: holdKey as SpeechToTextState["holdKey"] }))();
+    },
     disableSpeechToText: async (request: { deleteModel: boolean }) => {
       calls.push(`disable:${request.deleteModel ? "delete" : "keep"}`);
       return answer(state({ modelInstalled: !request.deleteModel }))();
@@ -141,5 +145,21 @@ test("a build without the engine shows why and cannot be switched on", async () 
     assert.match(find("speech-to-text-status")?.textContent ?? "", /not included in this build/);
   } finally {
     await view.unmount();
+  }
+});
+
+test("the key held to dictate is shown with speech to text, and not where it cannot run", async () => {
+  const view = await mount(state({ status: "ready", modelInstalled: true, downloadedBytes: TOTAL, holdKey: "right-option" }));
+  try {
+    assert.ok(find("speech-to-text-hold-key-row"));
+    assert.match(find("speech-to-text-hold-key")?.textContent ?? "", /Right Option/);
+  } finally {
+    await view.unmount();
+  }
+  const unavailable = await mount(state({ status: "unavailable", error: "Not in this build." }));
+  try {
+    assert.equal(find("speech-to-text-hold-key-row"), null);
+  } finally {
+    await unavailable.unmount();
   }
 });

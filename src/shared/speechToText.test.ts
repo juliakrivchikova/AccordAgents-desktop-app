@@ -2,7 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  SPEECH_PIECE_MAX_SECONDS,
+  SPEECH_PIECE_MIN_SECONDS,
   SPEECH_SAMPLE_RATE,
+  SpeechPieces,
+  isHoldKeyEvent,
+  joinTranscripts,
+  quietestCut,
+  spacedDictation,
+  speechPromptFrom,
   cleanTranscript,
   encodeWavPcm16,
   formatSpeechBytes,
@@ -68,4 +76,69 @@ test("a recording with no sound at all is told apart from a quiet one", () => {
   const quiet = new Float32Array(16_000);
   quiet[8_000] = 0.01;
   assert.equal(speechWavIsSilent(encodeWavPcm16(quiet)), false);
+});
+
+/** Speech-like sound with a pause of the given length at the given second. */
+function speechWithPause(seconds: number, pauseAt: number, pauseSeconds = 0.5): Float32Array {
+  const samples = new Float32Array(Math.round(seconds * SPEECH_SAMPLE_RATE));
+  for (let index = 0; index < samples.length; index += 1) {
+    const time = index / SPEECH_SAMPLE_RATE;
+    samples[index] = time >= pauseAt && time < pauseAt + pauseSeconds ? 0 : 0.3 * Math.sin(index / 7);
+  }
+  return samples;
+}
+
+test("a long recording is cut in a pause between the marks, not in a word", () => {
+  const samples = speechWithPause(30, 23);
+  const cut = quietestCut(samples, SPEECH_SAMPLE_RATE, SPEECH_PIECE_MIN_SECONDS, SPEECH_PIECE_MAX_SECONDS);
+  const second = cut / SPEECH_SAMPLE_RATE;
+  assert.ok(second > 23 && second < 23.5, `cut at ${second}s`);
+});
+
+test("pieces come out while recording, each under the engine's 30 s, and the rest at the end", () => {
+  const pieces = new SpeechPieces();
+  const recording = speechWithPause(70, 21);
+  const out: Float32Array[] = [];
+  // As the microphone delivers it: 100 ms at a time.
+  for (let offset = 0; offset < recording.length; offset += 1_600) {
+    const piece = pieces.push(recording.slice(offset, offset + 1_600));
+    if (piece) out.push(piece);
+  }
+  const rest = pieces.finish();
+  assert.ok(out.length >= 2, `${out.length} pieces during the recording`);
+  for (const piece of out) assert.ok(piece.length <= SPEECH_PIECE_MAX_SECONDS * SPEECH_SAMPLE_RATE);
+  assert.ok(Math.abs(out[0]!.length / SPEECH_SAMPLE_RATE - 21.25) < 0.3, "the first cut is in the pause");
+  assert.equal(out.reduce((sum, piece) => sum + piece.length, 0) + rest.length, recording.length, "nothing lost or doubled");
+  assert.ok(rest.length < SPEECH_PIECE_MAX_SECONDS * SPEECH_SAMPLE_RATE);
+  assert.equal(pieces.finish().length, 0);
+});
+
+test("a short recording is one piece, handed over only when she stops", () => {
+  const pieces = new SpeechPieces();
+  assert.equal(pieces.push(new Float32Array(SPEECH_SAMPLE_RATE * 5)), undefined);
+  assert.equal(pieces.finish().length, SPEECH_SAMPLE_RATE * 5);
+});
+
+test("pieces' text joins into one paragraph, and the next piece gets the end of it", () => {
+  assert.equal(joinTranscripts([" Первая часть.", "", " Second part. "]), "Первая часть. Second part.");
+  assert.equal(speechPromptFrom(""), undefined);
+  assert.equal(speechPromptFrom("x".repeat(500))!.length, 200);
+});
+
+test("the hold key: Option is either side, right Option only the right one, off is nothing", () => {
+  const left = { key: "Alt", code: "AltLeft" };
+  const right = { key: "Alt", code: "AltRight" };
+  assert.equal(isHoldKeyEvent("option", left), true);
+  assert.equal(isHoldKeyEvent("option", right), true);
+  assert.equal(isHoldKeyEvent("right-option", left), false);
+  assert.equal(isHoldKeyEvent("right-option", right), true);
+  assert.equal(isHoldKeyEvent("off", left), false);
+  assert.equal(isHoldKeyEvent("option", { key: "Meta", code: "MetaLeft" }), false);
+});
+
+test("dictated text is spaced from the words around it", () => {
+  assert.equal(spacedDictation("Hello", "", "world"), " world");
+  assert.equal(spacedDictation("Hello ", ". Next", "world"), "world");
+  assert.equal(spacedDictation("", "rest", "Start"), "Start ");
+  assert.equal(spacedDictation("a", "b", "   "), "");
 });

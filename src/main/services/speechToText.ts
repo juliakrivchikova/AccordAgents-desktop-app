@@ -11,11 +11,14 @@ import {
   SPEECH_MODEL_FILE,
   SPEECH_MODEL_SHA256,
   SPEECH_MODEL_URL,
+  DEFAULT_SPEECH_HOLD_KEY,
   cleanTranscript,
+  isSpeechHoldKey,
   formatSpeechBytes,
   speechWavIsSilent,
   speechWavSeconds
 } from "../../shared/speechToText";
+import type { SpeechHoldKey } from "../../shared/speechToText";
 import type { SpeechToTextState, TranscribeSpeechResult } from "../../shared/types";
 import { ENGINE_DIR_PREFIX, WhisperServerEngine, type SpeechEngine, type SpeechEngineInput } from "./whisperServer";
 
@@ -41,6 +44,7 @@ export interface SpeechToTextServiceOptions {
 
 interface StoredChoice {
   enabled: boolean;
+  holdKey?: SpeechHoldKey;
 }
 
 /** An error whose message is already a sentence for the User. */
@@ -69,6 +73,7 @@ export class SpeechToTextService {
   private readonly listeners = new Set<(state: SpeechToTextState) => void>();
   private loaded?: Promise<void>;
   private enabled = false;
+  private holdKey: SpeechHoldKey = DEFAULT_SPEECH_HOLD_KEY;
   private modelInstalled = false;
   private phase: "idle" | "downloading" | "verifying" = "idle";
   private downloadedBytes = 0;
@@ -197,14 +202,24 @@ export class SpeechToTextService {
 
   /** Recognizes one recording. Recordings wait for each other: one engine
    *  at a time holds the model in memory. */
-  async transcribe(audio: Uint8Array): Promise<TranscribeSpeechResult> {
+  /** The key held to dictate; kept whether speech to text is on or off. */
+  setHoldKey(holdKey: unknown): Promise<SpeechToTextState> {
+    return this.serialize(async () => {
+      if (!isSpeechHoldKey(holdKey)) throw new Error("That key cannot be used to dictate.");
+      if (holdKey !== this.holdKey) await this.saveChoice(this.enabled, holdKey);
+      this.emit();
+      return this.snapshot();
+    });
+  }
+
+  async transcribe(audio: Uint8Array, prompt?: string): Promise<TranscribeSpeechResult> {
     await this.load();
-    const run = this.transcriptions.then(() => this.transcribeNow(audio), () => this.transcribeNow(audio));
+    const run = this.transcriptions.then(() => this.transcribeNow(audio, prompt), () => this.transcribeNow(audio, prompt));
     this.transcriptions = run.catch(() => undefined);
     return run;
   }
 
-  private async transcribeNow(audio: Uint8Array): Promise<TranscribeSpeechResult> {
+  private async transcribeNow(audio: Uint8Array, prompt?: string): Promise<TranscribeSpeechResult> {
     const engine = this.options.engine();
     if ("unavailable" in engine) throw new Error(engine.unavailable);
     if (!this.enabled || !this.modelInstalled || this.turningOff) {
@@ -231,7 +246,7 @@ export class SpeechToTextService {
       // several times slower than real time is already broken, and a hung
       // engine must not hold every later recording in the queue for long.
       const timeoutMs = 2 * 60 * 1000 + Math.ceil(length.seconds) * 1000;
-      const text = cleanTranscript(await speechEngine.transcribe(audio, timeoutMs));
+      const text = cleanTranscript(await speechEngine.transcribe(audio, timeoutMs, prompt));
       this.options.log?.("speech.transcribed", {
         seconds: Math.round(length.seconds * 10) / 10,
         ms: Date.now() - startedAt,
@@ -248,6 +263,7 @@ export class SpeechToTextService {
   private snapshot(): SpeechToTextState {
     const engine = this.options.engine();
     const base = {
+      holdKey: this.holdKey,
       modelInstalled: this.modelInstalled,
       downloadedBytes: this.modelInstalled && this.phase === "idle" ? this.model.bytes : this.downloadedBytes,
       totalBytes: this.model.bytes
@@ -276,6 +292,7 @@ export class SpeechToTextService {
       try {
         const stored = JSON.parse(await readFile(this.choicePath, "utf8")) as Partial<StoredChoice>;
         this.enabled = stored.enabled === true;
+        this.holdKey = isSpeechHoldKey(stored.holdKey) ? stored.holdKey : DEFAULT_SPEECH_HOLD_KEY;
       } catch {
         this.enabled = false;
       }
@@ -287,11 +304,12 @@ export class SpeechToTextService {
   }
 
   /** Saved first, then applied: a failed save leaves the app as it was. */
-  private async saveChoice(enabled: boolean): Promise<void> {
+  private async saveChoice(enabled: boolean, holdKey: SpeechHoldKey = this.holdKey): Promise<void> {
     await mkdir(this.options.dir, { recursive: true });
-    const stored: StoredChoice = { enabled };
+    const stored: StoredChoice = { enabled, holdKey };
     await writeFile(this.choicePath, `${JSON.stringify(stored)}\n`);
     this.enabled = enabled;
+    this.holdKey = holdKey;
   }
 
   private async fileSize(file: string): Promise<number | undefined> {

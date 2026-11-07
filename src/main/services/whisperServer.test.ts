@@ -36,12 +36,14 @@ setTimeout(() => {
   http.createServer((req, res) => {
     if (req.url === "/health") { res.end('{"status":"ok"}'); return; }
     if (req.method === "POST" && req.url === "/inference") {
-      let bytes = 0;
-      req.on("data", (chunk) => { bytes += chunk.length; });
+      const chunks = [];
+      req.on("data", (chunk) => { chunks.push(chunk); });
       req.on("end", () => setTimeout(() => {
         if (o.inferStatus) { res.statusCode = o.inferStatus; res.end('{"error":"no"}'); return; }
+        const body = Buffer.concat(chunks).toString("latin1");
+        const prompt = /name="prompt"\\r\\n\\r\\n([^\\r]*)/.exec(body);
         res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify({ text: " heard " + bytes + "\\n" }));
+        res.end(JSON.stringify({ text: " heard " + body.length + (prompt ? " after " + Buffer.from(prompt[1], "latin1").toString("utf8") : "") + "\\n" }));
       }, o.inferMs || 0));
       return;
     }
@@ -307,5 +309,17 @@ test("when the app dies without stopping it, the engine does not stay in memory"
   } finally {
     await polite.cleanup();
     await stubborn.cleanup();
+  }
+});
+
+test("a piece of a long recording is sent with the text before it", async () => {
+  const t = await setup();
+  const engine = new WhisperServerEngine({ serverPath: t.server, modelPath: "/m.bin", idleMs: 60_000 });
+  try {
+    assert.doesNotMatch(await engine.transcribe(WAV, 5_000), /after/);
+    assert.match(await engine.transcribe(WAV, 5_000, "Привет, мир."), /after Привет, мир\./);
+  } finally {
+    await engine.stop("test");
+    await t.cleanup();
   }
 });

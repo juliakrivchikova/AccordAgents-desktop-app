@@ -16,6 +16,31 @@ export const SPEECH_SAMPLE_RATE = 16_000;
 export const SPEECH_MIN_SECONDS = 0.4;
 /** One recording's limit; longer ones are refused rather than cut. */
 export const SPEECH_MAX_SECONDS = 30 * 60;
+/**
+ * A long recording is recognized in pieces while she speaks: once this much
+ * is waiting, a piece is cut at the quietest moment between the two marks
+ * and sent, so after she stops only the last piece is still to come. The
+ * engine reads 30 s at a time, so a piece never needs more than one pass.
+ */
+export const SPEECH_PIECE_MAX_SECONDS = 28;
+export const SPEECH_PIECE_MIN_SECONDS = 18;
+/** Previous text given to the engine with the next piece, for continuity. */
+const SPEECH_PROMPT_CHARS = 200;
+
+/** The key held to dictate, in the app only. fn never reaches web content. */
+export type SpeechHoldKey = "option" | "right-option" | "off";
+export const SPEECH_HOLD_KEYS: readonly SpeechHoldKey[] = ["option", "right-option", "off"];
+export const DEFAULT_SPEECH_HOLD_KEY: SpeechHoldKey = "option";
+
+export function isSpeechHoldKey(value: unknown): value is SpeechHoldKey {
+  return typeof value === "string" && (SPEECH_HOLD_KEYS as readonly string[]).includes(value);
+}
+
+/** Whether a key event is the chosen hold key, pressed or released. */
+export function isHoldKeyEvent(holdKey: SpeechHoldKey, event: { key: string; code: string }): boolean {
+  if (holdKey === "off" || event.key !== "Alt") return false;
+  return holdKey === "option" || event.code === "AltRight";
+}
 const WAV_HEADER_BYTES = 44;
 
 /** "1.6 GB" for a byte count, in the units macOS shows. */
@@ -113,6 +138,95 @@ export function cleanTranscript(raw: string): string {
 }
 
 /**
+ * The index where a piece of a long recording ends: the middle of the
+ * quietest 300 ms between the two marks (a pause between words, not the
+ * middle of one). Before the first mark there is nothing to cut.
+ */
+export function quietestCut(samples: Float32Array, sampleRate: number, fromSeconds: number, toSeconds: number): number {
+  const windowSize = Math.max(1, Math.round(sampleRate * 0.3));
+  const step = Math.max(1, Math.round(sampleRate * 0.05));
+  const from = Math.min(samples.length, Math.round(fromSeconds * sampleRate));
+  const to = Math.min(samples.length, Math.round(toSeconds * sampleRate));
+  if (to - from < windowSize) return to;
+  let best = from;
+  let bestEnergy = Number.POSITIVE_INFINITY;
+  for (let start = from; start + windowSize <= to; start += step) {
+    let energy = 0;
+    for (let index = start; index < start + windowSize; index += 1) {
+      const sample = samples[index] ?? 0;
+      energy += sample * sample;
+    }
+    if (energy < bestEnergy) {
+      bestEnergy = energy;
+      best = start;
+    }
+  }
+  return best + Math.floor(windowSize / 2);
+}
+
+/**
+ * Collects a recording as it arrives and hands out pieces of a long one to
+ * recognize while she still speaks; what is left goes when she stops.
+ */
+export class SpeechPieces {
+  private parts: Float32Array[] = [];
+  private length = 0;
+
+  constructor(private readonly sampleRate: number = SPEECH_SAMPLE_RATE) {}
+
+  /** Adds samples; returns a piece when one is ready. */
+  push(samples: Float32Array): Float32Array | undefined {
+    this.parts.push(samples);
+    this.length += samples.length;
+    if (this.length < SPEECH_PIECE_MAX_SECONDS * this.sampleRate) return undefined;
+    const waiting = this.take();
+    const cut = quietestCut(waiting, this.sampleRate, SPEECH_PIECE_MIN_SECONDS, SPEECH_PIECE_MAX_SECONDS);
+    const rest = waiting.slice(cut);
+    this.parts = rest.length ? [rest] : [];
+    this.length = rest.length;
+    return waiting.slice(0, cut);
+  }
+
+  /** Everything not handed out yet. */
+  finish(): Float32Array {
+    const rest = this.take();
+    this.parts = [];
+    this.length = 0;
+    return rest;
+  }
+
+  private take(): Float32Array {
+    const all = new Float32Array(this.length);
+    let offset = 0;
+    for (const part of this.parts) {
+      all.set(part, offset);
+      offset += part.length;
+    }
+    return all;
+  }
+}
+
+/** The pieces' text as one paragraph. */
+export function joinTranscripts(parts: readonly string[]): string {
+  return parts.map((part) => part.trim()).filter(Boolean).join(" ");
+}
+
+/** The end of what was recognized so far, given with the next piece. */
+export function speechPromptFrom(text: string): string | undefined {
+  const tail = text.trim().slice(-SPEECH_PROMPT_CHARS);
+  return tail || undefined;
+}
+
+/** Dictated text spaced from the words before and after where it goes. */
+export function spacedDictation(before: string, after: string, text: string): string {
+  const insert = text.trim();
+  if (!insert) return "";
+  const leading = before.length > 0 && !/\s$/.test(before) ? " " : "";
+  const trailing = after.length > 0 && !/^[\s.,!?;:)\]}»"']/.test(after) ? " " : "";
+  return `${leading}${insert}${trailing}`;
+}
+
+/**
  * The draft with dictated text put where the caret is (replacing a
  * selection), spaced from the words around it, and where the caret goes next.
  */
@@ -124,14 +238,11 @@ export function insertDictatedText(
 ): { value: string; caret: number } {
   const start = clampIndex(Math.min(selectionStart, selectionEnd), draft.length);
   const end = clampIndex(Math.max(selectionStart, selectionEnd), draft.length);
-  const insert = text.trim();
-  if (!insert) return { value: draft, caret: end };
   const before = draft.slice(0, start);
   const after = draft.slice(end);
-  const leading = before.length > 0 && !/\s$/.test(before) ? " " : "";
-  const trailing = after.length > 0 && !/^[\s.,!?;:)\]}»"']/.test(after) ? " " : "";
-  const value = `${before}${leading}${insert}${trailing}${after}`;
-  return { value, caret: before.length + leading.length + insert.length + trailing.length };
+  const insert = spacedDictation(before, after, text);
+  if (!insert) return { value: draft, caret: end };
+  return { value: `${before}${insert}${after}`, caret: before.length + insert.length };
 }
 
 function clampIndex(index: number, length: number): number {

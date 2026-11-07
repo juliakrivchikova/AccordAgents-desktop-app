@@ -293,6 +293,7 @@ const bridge: AppBridge = {
   enableSpeechToText: () => ipcRenderer.invoke("speech:enable"),
   cancelSpeechToTextDownload: () => ipcRenderer.invoke("speech:cancel-download"),
   disableSpeechToText: (request: DisableSpeechToTextRequest) => ipcRenderer.invoke("speech:disable", request),
+  setSpeechToTextHoldKey: (holdKey: string) => ipcRenderer.invoke("speech:set-hold-key", holdKey),
   prepareSpeechToText: () => ipcRenderer.invoke("speech:prepare"),
   transcribeSpeech: (request: TranscribeSpeechRequest) => ipcRenderer.invoke("speech:transcribe", request),
   requestMicrophoneAccess: () => ipcRenderer.invoke("speech:request-microphone"),

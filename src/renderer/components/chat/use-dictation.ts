@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { SPEECH_MAX_SECONDS, SPEECH_SAMPLE_RATE, encodeWavPcm16 } from "../../../shared/speechToText";
+import { SPEECH_MAX_SECONDS, SpeechPieces, encodeWavPcm16, joinTranscripts, speechPromptFrom } from "../../../shared/speechToText";
 import { cleanIpcError } from "../../lib/ipc-error";
+import { startSpeechRecorder, type SpeechRecorder } from "./speech-recorder";
 
 export type DictationPhase = "idle" | "starting" | "recording" | "recognizing";
 
@@ -18,9 +19,13 @@ const HINT_MS = 6_000;
 
 interface Recording {
   stream: MediaStream;
-  recorder: MediaRecorder;
-  chunks: Blob[];
-  stopped: Promise<void>;
+  recorder?: SpeechRecorder;
+  pieces: SpeechPieces;
+  /** Recognized pieces, in order. */
+  texts: string[];
+  /** Pieces are recognized one after another, while she still speaks. */
+  queue: Promise<void>;
+  failure?: string;
 }
 
 /** One microphone, one dictation: the main field and a thread field never
@@ -59,7 +64,7 @@ export function useDictation(options: { session?: string; onText: (text: string)
     const recording = recordingRef.current;
     recordingRef.current = undefined;
     if (recording) {
-      if (recording.recorder.state !== "inactive") recording.recorder.stop();
+      void recording.recorder?.stop();
       stopTracks(recording.stream);
     }
     release();
@@ -82,21 +87,20 @@ export function useDictation(options: { session?: string; onText: (text: string)
     recordingRef.current = undefined;
     setPhase("recognizing");
     try {
-      if (recording.recorder.state !== "inactive") recording.recorder.stop();
-      await recording.stopped;
+      await recording.recorder?.stop();
       stopTracks(recording.stream);
-      const blob = new Blob(recording.chunks, { type: recording.recorder.mimeType || "audio/webm" });
-      recording.chunks.length = 0;
-      const samples = await decodeToSpeechSamples(blob).catch(() => undefined);
+      // Only what was said since the last piece is still to recognize.
+      const rest = recording.pieces.finish();
+      if (rest.length) recognizePiece(recording, rest);
+      await recording.queue;
       if (generation !== generationRef.current) return;
-      if (!samples || samples.length === 0) {
+      const text = joinTranscripts(recording.texts);
+      if (text) onTextRef.current(text);
+      if (recording.failure) {
+        setNotice({ text: text ? "Part of the recording could not be recognized." : recording.failure, kind: "error" });
+      } else if (!text) {
         setNotice({ text: NOTHING_HEARD, kind: "hint" });
-        return;
       }
-      const result = await window.consensus.transcribeSpeech({ audio: encodeWavPcm16(samples) });
-      if (generation !== generationRef.current) return;
-      if (result.text) onTextRef.current(result.text);
-      else setNotice({ text: NOTHING_HEARD, kind: "hint" });
     } catch (error) {
       if (generation !== generationRef.current) return;
       setNotice({ text: cleanIpcError(error) || "Speech could not be recognized.", kind: "error" });
@@ -157,24 +161,28 @@ export function useDictation(options: { session?: string; onText: (text: string)
         stopTracks(stream);
         return;
       }
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : undefined;
-      const recorder = new MediaRecorder(stream, { ...(mimeType ? { mimeType } : {}), audioBitsPerSecond: 32_000 });
-      const chunks: Blob[] = [];
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunks.push(event.data);
-      };
-      const stopped = new Promise<void>((resolve) => {
-        recorder.onstop = () => resolve();
+      const recording: Recording = { stream, pieces: new SpeechPieces(), texts: [], queue: Promise.resolve() };
+      recording.recorder = await startSpeechRecorder({
+        stream,
+        onSamples: (samples) => {
+          // A long recording is recognized piece by piece as she speaks.
+          const piece = recording.pieces.push(samples);
+          if (piece) recognizePiece(recording, piece);
+        }
       });
+      if (generation !== generationRef.current) {
+        void recording.recorder.stop();
+        stopTracks(stream);
+        return;
+      }
       // A microphone that goes away (unplugged, headset off) ends the
       // recording with what was said so far.
       for (const track of stream.getAudioTracks()) {
         track.onended = () => {
-          if (recordingRef.current?.recorder === recorder) void stop();
+          if (recordingRef.current === recording) void stop();
         };
       }
-      recorder.start(1_000);
-      recordingRef.current = { stream, recorder, chunks, stopped };
+      recordingRef.current = recording;
       setPhase("recording");
       // The model loads while she speaks, instead of after she stops.
       void window.consensus.prepareSpeechToText?.().catch(() => undefined);
@@ -204,20 +212,16 @@ function stopTracks(stream: MediaStream): void {
   }
 }
 
-/**
- * The recording as 16 kHz mono samples, the way the engine reads them. An
- * offline context at that rate resamples while decoding, so the recording is
- * never held at the microphone's own rate and no audio output is opened.
- */
-async function decodeToSpeechSamples(blob: Blob): Promise<Float32Array> {
-  const data = await blob.arrayBuffer();
-  if (data.byteLength === 0) return new Float32Array(0);
-  const decoded = await new OfflineAudioContext(1, 1, SPEECH_SAMPLE_RATE).decodeAudioData(data);
-  if (decoded.numberOfChannels === 1) return decoded.getChannelData(0);
-  const mono = new Float32Array(decoded.length);
-  for (let channel = 0; channel < decoded.numberOfChannels; channel += 1) {
-    const samples = decoded.getChannelData(channel);
-    for (let index = 0; index < mono.length; index += 1) mono[index] += (samples[index] ?? 0) / decoded.numberOfChannels;
-  }
-  return mono;
+/** Queues one piece; each is given the end of the text before it. */
+function recognizePiece(recording: Recording, samples: Float32Array): void {
+  const audio = encodeWavPcm16(samples);
+  recording.queue = recording.queue.then(async () => {
+    try {
+      const prompt = speechPromptFrom(joinTranscripts(recording.texts));
+      const result = await window.consensus.transcribeSpeech({ audio, ...(prompt ? { prompt } : {}) });
+      recording.texts.push(result.text);
+    } catch (error) {
+      recording.failure ??= cleanIpcError(error) || "Speech could not be recognized.";
+    }
+  });
 }

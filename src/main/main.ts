@@ -2680,12 +2680,14 @@ function registerIpc(): void {
   ipcMain.handle("speech:disable", (_event, request: { deleteModel?: unknown } | undefined) =>
     speechToTextService.disable({ deleteModel: request?.deleteModel === true }));
   ipcMain.handle("speech:prepare", () => speechToTextService.prepare());
-  ipcMain.handle("speech:transcribe", (_event, request: { audio?: unknown } | undefined) => {
+  ipcMain.handle("speech:set-hold-key", (_event, holdKey: unknown) => speechToTextService.setHoldKey(holdKey));
+  ipcMain.handle("speech:transcribe", (_event, request: { audio?: unknown; prompt?: unknown } | undefined) => {
     const audio = request?.audio;
     if (!(audio instanceof Uint8Array)) {
       throw new Error("The recording did not arrive.");
     }
-    return speechToTextService.transcribe(audio);
+    const prompt = typeof request?.prompt === "string" ? request.prompt.slice(-1_000) : undefined;
+    return speechToTextService.transcribe(audio, prompt);
   });
   ipcMain.handle("speech:request-microphone", async () => {
     // Chromium's stand-in microphone (a test run fed from an audio file)

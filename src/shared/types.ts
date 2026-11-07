@@ -3347,6 +3347,8 @@ export interface AppBridge {
   /** Stops a download in progress, removes what was downloaded, turns it off. */
   cancelSpeechToTextDownload(): Promise<SpeechToTextState>;
   disableSpeechToText(request: DisableSpeechToTextRequest): Promise<SpeechToTextState>;
+  /** The key held to dictate while the app is in front. */
+  setSpeechToTextHoldKey(holdKey: import("./speechToText").SpeechHoldKey): Promise<SpeechToTextState>;
   /** Starts loading the speech model as she begins to dictate; returns at once. */
   prepareSpeechToText(): Promise<void>;
   /** Recognizes one recording: a 16 kHz mono 16-bit WAV. */
@@ -3474,6 +3476,8 @@ export interface SpeechToTextState {
   totalBytes: number;
   /** What went wrong, in a sentence for the User. */
   error?: string;
+  /** The key held to dictate while the app is in front. */
+  holdKey: import("./speechToText").SpeechHoldKey;
 }
 
 export interface DisableSpeechToTextRequest {
@@ -3483,6 +3487,8 @@ export interface DisableSpeechToTextRequest {
 export interface TranscribeSpeechRequest {
   /** A 16 kHz mono 16-bit PCM WAV file. */
   audio: Uint8Array;
+  /** The end of the text recognized before this piece of a long recording. */
+  prompt?: string;
 }
 
 export interface TranscribeSpeechResult {
