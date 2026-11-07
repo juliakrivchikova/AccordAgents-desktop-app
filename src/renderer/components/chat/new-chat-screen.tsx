@@ -18,7 +18,6 @@ import {
   ImagePlus,
   Plus,
   RefreshCw,
-  Settings,
   XCircle
 } from "lucide-react";
 
@@ -48,7 +47,7 @@ import {
 } from "./chat-participant-drafts";
 import { participantOptionInvalidReason } from "./chat-cli-readiness";
 import {
-  cliProviderMetadata,
+  assistantSubstituteNote,
   readyProviderKinds,
   resolveAssistantProviderKind
 } from "../../../shared/cliReadiness";
@@ -128,9 +127,29 @@ export function NewChatScreen(props: {
     }),
     [props.agents, props.settings.assistantProviderKind, props.settings.providers]
   );
-  const unavailableAssistantProviderKind = props.settings.assistantProviderKind && !assistantProviderKind
-    ? props.settings.assistantProviderKind
-    : undefined;
+  // The saved Assistant CLI is not ready: this chat takes a ready one, and says so.
+  const assistantNote = useMemo(
+    () => assistantSubstituteNote({
+      agents: props.agents,
+      providers: props.settings.providers,
+      explicitKind: props.settings.assistantProviderKind
+    }),
+    [props.agents, props.settings.assistantProviderKind, props.settings.providers]
+  );
+  // The Assistant moved to another CLI (its saved one signed in or out):
+  // model, effort and where it runs were chosen for the one before.
+  const assistantKindShown = useRef(assistantProviderKind);
+  const { onSelectedParticipantRuntimeOverridesChange } = props;
+  useEffect(() => {
+    const before = assistantKindShown.current;
+    assistantKindShown.current = assistantProviderKind;
+    if (!before || !assistantProviderKind || before === assistantProviderKind) return;
+    onSelectedParticipantRuntimeOverridesChange((current) => {
+      if (!(NEW_CHAT_ASSISTANT_PARTICIPANT_ID in current)) return current;
+      const { [NEW_CHAT_ASSISTANT_PARTICIPANT_ID]: _forTheOtherCli, ...rest } = current;
+      return rest;
+    });
+  }, [assistantProviderKind, onSelectedParticipantRuntimeOverridesChange]);
   const assistantParticipant = useMemo(
     () => assistantProviderKind ? newChatAssistantParticipantConfig(assistantProviderKind) : undefined,
     [assistantProviderKind]
@@ -327,16 +346,6 @@ export function NewChatScreen(props: {
         />
       )}
 
-      {unavailableAssistantProviderKind && (
-        <div className="new-chat-provider-warning" data-testid="new-chat-provider-unavailable">
-          <strong>{cliProviderMetadata(unavailableAssistantProviderKind).label} is unavailable</strong>
-          <span>The saved Assistant provider is not ready. Choose another provider in General Settings.</span>
-          <button type="button" onClick={props.onOpenProviderSettings}>
-            <Settings size={15} aria-hidden /> Open General Settings
-          </button>
-        </div>
-      )}
-
       <div className="new-chat-card" hidden={needsProviderSetup}>
         <ChatComposerAttachmentChips
           pendingImages={images.pendingImages}
@@ -524,6 +533,9 @@ export function NewChatScreen(props: {
       )}
 
       {readyKinds.length > 0 && validation && <div className="inline-error new-chat-error">{validation}</div>}
+      {!needsProviderSetup && assistantNote && (
+        <p className="new-chat-assistant-note" data-testid="new-chat-assistant-note">{assistantNote}</p>
+      )}
     </div>
   );
 }

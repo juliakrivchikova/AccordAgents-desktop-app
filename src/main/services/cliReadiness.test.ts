@@ -12,7 +12,8 @@ import {
   deriveAgentReadiness,
   isAgentSnapshotStale,
   readyProviderKinds,
-  resolveAssistantProviderKind
+  resolveAssistantProviderKind,
+  assistantSubstituteNote
 } from "../../shared/cliReadiness";
 import { CommandError, type CommandResult } from "./command";
 import {
@@ -78,7 +79,26 @@ test("assistant resolution uses Codex, Claude, then Antigravity without using di
   const agents = readyAgents(["gemini-cli", "claude-code", "codex-cli"]);
   assert.equal(resolveAssistantProviderKind({ agents, providers: PROVIDERS }), "codex-cli");
   assert.equal(resolveAssistantProviderKind({ agents, providers: PROVIDERS, explicitKind: "claude-code" }), "claude-code");
-  assert.equal(resolveAssistantProviderKind({ agents: readyAgents(["codex-cli"]), providers: PROVIDERS, explicitKind: "claude-code" }), undefined);
+  assert.equal(
+    resolveAssistantProviderKind({ agents: readyAgents(["codex-cli"]), providers: PROVIDERS, explicitKind: "claude-code" }),
+    "codex-cli",
+    "a saved CLI that is not ready gives way to a ready one"
+  );
+  assert.equal(resolveAssistantProviderKind({ agents: [], providers: PROVIDERS, explicitKind: "claude-code" }), undefined);
+  assert.equal(assistantSubstituteNote({ agents, providers: PROVIDERS, explicitKind: "claude-code" }), undefined);
+  assert.equal(assistantSubstituteNote({ agents: readyAgents(["codex-cli"]), providers: PROVIDERS }), undefined, "nothing saved: nothing replaced");
+  assert.equal(assistantSubstituteNote({ agents: [], providers: PROVIDERS, explicitKind: "claude-code" }), undefined, "none ready: the setup says why");
+  assert.match(
+    assistantSubstituteNote({
+      agents: readyAgents(["claude-code", "codex-cli"]),
+      providers: PROVIDERS.map((provider) => provider.kind === "claude-code" ? { ...provider, enabled: false } : provider),
+      explicitKind: "claude-code"
+    }) ?? "",
+    /^The Assistant uses Codex in this chat: Claude Code, your saved choice, is turned off\.$/
+  );
+  const failed = readyAgents(["codex-cli"]).concat({ ...readyAgents(["claude-code"])[0], runnable: "failed" });
+  assert.match(assistantSubstituteNote({ agents: failed, providers: PROVIDERS, explicitKind: "claude-code" }) ?? "", /Claude Code, your saved choice, is not ready\.$/);
+  assert.match(assistantSubstituteNote({ agents: readyAgents(["codex-cli"]), providers: PROVIDERS, explicitKind: "claude-code" }) ?? "", /^The Assistant uses Codex in this chat: Claude Code, your saved choice, is (not installed|not ready)\.$/);
   assert.equal(resolveAssistantProviderKind({ agents: readyAgents(["claude-code"]), providers: PROVIDERS }), "claude-code");
   assert.equal(resolveAssistantProviderKind({
     agents,

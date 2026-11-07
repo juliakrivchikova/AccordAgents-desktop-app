@@ -32,6 +32,8 @@ import type {
   AppBridge,
   AddChatParticipantRequest,
   AgentDetectionRequest,
+  CliSignInKind,
+  CliSignInState,
   CliProviderHostUpdate,
   ArtifactsUpdatedEvent,
   ChatBehaviorRuleConfigUpdate,
@@ -234,6 +236,15 @@ const bridge: AppBridge = {
   updateLastRepoPath: (repoPath: string) => ipcRenderer.invoke("settings:update-last-repo-path", repoPath),
   listProviderModels: (kind) => ipcRenderer.invoke("settings:list-provider-models", kind),
   detectAgents: (request?: AgentDetectionRequest) => ipcRenderer.invoke("agents:detect", request),
+  startCliSignIn: (kind: CliSignInKind) => ipcRenderer.invoke("cli-sign-in:start", kind),
+  listCliSignIns: () => ipcRenderer.invoke("cli-sign-in:list"),
+  submitCliSignInCode: (request: { requestId: string; code: string }) => ipcRenderer.invoke("cli-sign-in:submit-code", request),
+  cancelCliSignIn: (requestId: string) => ipcRenderer.invoke("cli-sign-in:cancel", requestId),
+  onCliSignInUpdated: (callback: (state: CliSignInState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: CliSignInState) => callback(state);
+    ipcRenderer.on("cli-sign-in:updated", listener);
+    return () => ipcRenderer.removeListener("cli-sign-in:updated", listener);
+  },
   selectRepoDirectory: () => ipcRenderer.invoke("dialog:select-repo"),
   inspectRepo: (repoPath: string) => ipcRenderer.invoke("git:inspect-repo", repoPath),
   getDiff: (request: GitDiffRequest) => ipcRenderer.invoke("git:get-diff", request),

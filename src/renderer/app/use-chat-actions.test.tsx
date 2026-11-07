@@ -9,55 +9,58 @@ import type { AppState } from "./app-state";
 import { useChatActions, type ChatActions } from "./use-chat-actions";
 import type { ConversationActions } from "./use-conversation-actions";
 
-test("unavailable saved Assistant provider reports a visible Settings error without creating", async () => {
+test("a saved Assistant CLI that is not ready gives way to a ready one; with none ready the chat is not created", async () => {
   let createCalls = 0;
-  let refreshCalls = 0;
   (globalThis as any).window = {
     consensus: {
       createChatConversation: async () => {
         createCalls += 1;
-        throw new Error("must not create");
+        throw new Error("stop after create request");
       }
     }
   };
-  let error: string | undefined;
   const currentSettings = settings();
   currentSettings.providers = [
     { kind: "claude-code", label: "Claude Code", enabled: true },
     { kind: "codex-cli", label: "Codex", enabled: true }
   ];
   currentSettings.assistantProviderKind = "claude-code";
-  const state = {
-    question: "Draft",
-    agents: [readyAgent("codex-cli")],
-    settings: currentSettings,
-    selectedChatParticipantRuntimeOverrides: {},
-    setError: (value: string | undefined) => { error = value; },
-    setWarnings: () => undefined
-  } as unknown as AppState;
-  let actions: ChatActions | undefined;
-
-  function Harness(): null {
-    actions = useChatActions(state, {
-      refreshAgents: async () => {
-        refreshCalls += 1;
-        return [];
-      }
-    } as ConversationActions);
-    return null;
+  for (const [agents, expected] of [
+    [[readyAgent("codex-cli")], "stop after create request"],
+    [[], "Set up and sign in to at least one CLI provider to start a chat."],
+    [[{ ...readyAgent("codex-cli"), authentication: "required" as const }], "Set up and sign in to at least one CLI provider to start a chat."]
+  ] as const) {
+    let error: string | undefined;
+    let refreshed = false;
+    const state = {
+      question: "Draft",
+      agents,
+      settings: currentSettings,
+      selectedChatParticipantConfigIds: new Set<string>(),
+      selectedChatParticipantRuntimeOverrides: {},
+      startingChatRef: { current: false },
+      chatCreationRef: { current: undefined },
+      chatBeforeActivityRef: { current: undefined }, openConversationRequestRef: { current: 0 }, railViewRef: { current: "chats" },
+      repoPath: "",
+      setError: (value: string | undefined) => { error = value; },
+      setWarnings: () => undefined,
+      setCurrentRunId: () => undefined,
+      setBusy: () => undefined
+    } as unknown as AppState;
+    let actions: ChatActions | undefined;
+    function Harness(): null {
+      actions = useChatActions(state, { refreshAgents: async () => { refreshed = true; return [...agents]; } } as unknown as ConversationActions);
+      return null;
+    }
+    const renderer = create(<Harness />);
+    let started: boolean | undefined;
+    await act(async () => { started = await actions?.startChat(); });
+    assert.equal(started, false);
+    assert.equal(error, expected);
+    assert.equal(refreshed, agents.length === 0, "a fresh check is used as it is");
+    renderer.unmount();
   }
-
-  const renderer = create(<Harness />);
-  let started: boolean | undefined;
-  await act(async () => {
-    started = await actions?.startChat();
-  });
-
-  assert.equal(started, false);
-  assert.equal(createCalls, 0);
-  assert.equal(refreshCalls, 0);
-  assert.equal(error, "Claude Code is not ready. Change the Assistant provider in General Settings.");
-  renderer.unmount();
+  assert.equal(createCalls, 1, "created only when a CLI is ready");
 });
 
 test("stale readiness refreshes before creating without a per-chat provider override", async () => {

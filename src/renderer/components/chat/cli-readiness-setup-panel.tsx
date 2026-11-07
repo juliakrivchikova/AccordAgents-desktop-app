@@ -16,16 +16,19 @@ import type {
   AgentHealth,
   AgentReadinessState,
   AppSettings,
-  ChatProviderKind
+  ChatProviderKind,
+  CliSignInState
 } from "../../../shared/types";
 import {
   CLI_PROVIDER_DISPLAY_ORDER,
   cliProviderMetadata,
   deriveAgentReadiness,
+  isCliSignInKind,
   isCliTerminalPlatform,
   providerEnabled
 } from "../../../shared/cliReadiness";
 import { IconButton } from "../primitives";
+import { CliSignInStep, useCliSignIns } from "./cli-sign-in-step";
 
 export function CliReadinessSetupPanel(props: {
   agents: AgentHealth[];
@@ -42,6 +45,7 @@ export function CliReadinessSetupPanel(props: {
   const [refreshing, setRefreshing] = useState(false);
   const [actionError, setActionError] = useState<string | undefined>();
   const checking = props.checking || refreshing;
+  const { signIns, checkingAfterSignIn } = useCliSignIns(refreshAll);
 
   useEffect(() => {
     if (didResolveInitialExpansionRef.current) {
@@ -135,6 +139,8 @@ export function CliReadinessSetupPanel(props: {
                   health={health}
                   readiness={readiness}
                   copiedValue={copiedValue}
+                  signIn={isCliSignInKind(kind) ? signIns[kind] : undefined}
+                  checkingAfterSignIn={isCliSignInKind(kind) && Boolean(checkingAfterSignIn[kind])}
                   onCopy={copyCommand}
                   onOpenSettings={props.onOpenSettings}
                   onError={setActionError}
@@ -147,7 +153,7 @@ export function CliReadinessSetupPanel(props: {
       {actionError && <p className="inline-error cli-readiness-error">{actionError}</p>}
       <p className="cli-readiness-note">
         <ShieldCheck size={15} aria-hidden />
-        <span>Commands are copied only when you choose <strong>Copy</strong>. AccordAgents never installs software or signs in for you.</span>
+        <span>AccordAgents never installs software. <strong>Sign in</strong> runs the CLI's own sign-in; the CLI keeps your credentials.</span>
       </p>
     </section>
   );
@@ -174,6 +180,8 @@ function CliReadinessDetails(props: {
   health?: AgentHealth;
   readiness: AgentReadinessState;
   copiedValue?: string;
+  signIn?: CliSignInState;
+  checkingAfterSignIn: boolean;
   onCopy: (command: string) => Promise<void>;
   onOpenSettings: () => void;
   onError: (message: string | undefined) => void;
@@ -241,16 +249,23 @@ function CliReadinessDetails(props: {
     );
   }
 
+  // Claude Code and Codex sign in from here; Antigravity only from its app.
+  const appSignIn = isCliSignInKind(props.kind) ? props.kind : undefined;
+  const tryOnly = props.readiness === "could-not-verify";
   return (
     <div className="cli-readiness-steps">
       <SetupStep number={1} done>Install the CLI in Terminal</SetupStep>
       <SetupStep number={2}>
-        {props.readiness === "could-not-verify" ? "Try sign-in from Terminal" : "Sign in from Terminal"}
+        {appSignIn ? (tryOnly ? "Try signing in with your browser" : "Sign in with your browser") : tryOnly ? "Try sign-in from Terminal" : "Sign in from Terminal"}
       </SetupStep>
+      {appSignIn && (
+        <CliSignInStep kind={appSignIn} label={props.metadata.label} signIn={props.signIn} checkingAfterSignIn={props.checkingAfterSignIn} onError={props.onError} />
+      )}
+      {appSignIn && <p className="cli-sign-in-fallback">Or in Terminal:</p>}
       <SetupCommand
         command={props.metadata.loginCommand}
         copiedValue={props.copiedValue}
-        label={props.readiness === "could-not-verify" ? "try sign-in" : "sign-in"}
+        label={tryOnly ? "try sign-in" : "sign-in"}
         onCopy={props.onCopy}
       />
       <CliReadinessActionButtons guideUrl={props.metadata.guideUrl} onError={props.onError} />

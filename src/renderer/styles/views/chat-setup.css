@@ -117,42 +117,10 @@
   display: none;
 }
 
-.new-chat-provider-warning {
-  width: min(100%, var(--new-chat-card-width));
-  margin-top: 22px;
-  border: 1px solid var(--app-border);
-  border-radius: 18px;
-  background: var(--app-surface);
-}
-
-.new-chat-provider-warning {
-  display: grid;
-  gap: 8px;
-  padding: 16px;
-  color: var(--app-text);
-}
-
-.new-chat-provider-warning > span,
 .cli-readiness-heading p {
   color: var(--app-muted);
   font-size: 13px;
   line-height: 1.45;
-}
-
-.new-chat-provider-warning button {
-  display: inline-flex;
-  min-height: 34px;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  padding: 7px 11px;
-  border: 1px solid var(--app-border);
-  border-radius: 9px;
-  background: var(--app-surface-subtle);
-  color: var(--app-text-strong);
-  font: inherit;
-  white-space: nowrap;
-  cursor: pointer;
 }
 
 .cli-readiness-panel {
@@ -482,6 +450,16 @@
   color: var(--cli-fg1);
 }
 
+.cli-sign-in .cli-readiness-settings-action:hover:not(:disabled) {
+  border-color: var(--cli-border-strong);
+  background: var(--cli-bg-sunken);
+}
+
+.cli-sign-in .cli-readiness-settings-action:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
 .cli-readiness-note {
   display: flex;
   gap: 9px;
@@ -506,6 +484,78 @@
 
 .cli-readiness-error {
   margin: 10px 16px 0;
+}
+
+.cli-sign-in {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--cli-fg2);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.cli-sign-in-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cli-sign-in-row p {
+  color: var(--cli-fg1);
+}
+
+.cli-sign-in-hint {
+  color: var(--cli-fg3);
+}
+
+.cli-sign-in-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--cli-fg1);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.cli-sign-in-code {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cli-sign-in-code label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cli-sign-in-code input {
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--cli-border);
+  border-radius: 9px;
+  background: var(--cli-surface);
+  color: var(--cli-fg1);
+  font: 400 12.5px/1.4 var(--font-code);
+}
+
+.cli-sign-in-code input:focus-visible {
+  outline: none;
+  border-color: var(--app-focus-border);
+}
+
+.cli-readiness-steps .cli-sign-in-error {
+  margin: 0;
+}
+
+.cli-readiness-steps .cli-sign-in-fallback {
+  margin-top: 2px;
+  color: var(--cli-fg3);
+  font-size: 12px;
 }
 
 @media (max-width: 520px) {
@@ -1012,6 +1062,17 @@
 
 .new-chat-error {
   margin-top: 10px;
+  text-align: center;
+}
+
+.new-chat-assistant-note {
+  position: relative;
+  z-index: 1;
+  width: min(100%, var(--new-chat-card-width));
+  margin: 10px 0 0;
+  color: var(--app-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
   text-align: center;
 }
 

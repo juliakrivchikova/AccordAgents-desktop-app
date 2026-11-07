@@ -4215,7 +4215,7 @@ test("with no CLI ready the phone's New chat says why in the computer's words, a
   const { service } = testService({ agents: [], settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], chatParticipantConfigs: [saved, legacy] } });
   const offered = await service.newChatOptions([]);
   assert.ok(offered);
-  assert.equal(offered.unavailable, "Set up and sign in to at least one CLI provider before creating a chat.");
+  assert.equal(offered.unavailable, "Set up and sign in to at least one CLI provider to start a chat.");
   assert.equal(offered.assistant.roleConfigId, "administrator");
   assert.deepEqual(offered.members.map((member) => member.configId), ["saved-drew"]);
 });
@@ -5206,6 +5206,30 @@ test("chat creation uses the saved Assistant provider when multiple CLIs are rea
   const assistant = (result.conversation.metadata.participants as ChatParticipant[])
     .find((participant) => participant.roleConfigId === ADMIN_ROLE.id);
   assert.equal(assistant?.kind, "codex-cli");
+});
+
+test("a saved Assistant CLI that is not ready gives way to a ready one, on the computer and the phone, and the saved choice stays", { timeout: 10_000 }, async () => {
+  // The User, 2026-11-07: once one CLI is signed in nothing else stands in
+  // the way of a chat.
+  const agents: AgentHealth[] = [
+    { kind: "codex-cli", label: "Codex", installed: true, detection: "detected", runnable: "ready", authentication: "ready" },
+    { kind: "claude-code", label: "Claude Code", installed: true, detection: "detected", runnable: "ready", authentication: "required" }
+  ];
+  const { service } = testService({
+    agents,
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], assistantProviderKind: "claude-code" }
+  });
+
+  const result = await service.createConversation({ title: "Fresh chat", participants: [], skipDefaultParticipants: true });
+  const assistant = (result.conversation.metadata.participants as ChatParticipant[])
+    .find((participant) => participant.roleConfigId === ADMIN_ROLE.id);
+  assert.equal(assistant?.kind, "codex-cli");
+
+  const offered = await service.newChatOptions([]);
+  assert.equal(offered?.unavailable, undefined);
+  assert.equal(offered?.assistant.kind, "codex-cli");
+  assert.equal(offered?.assistantNote, "The Assistant uses Codex in this chat: Claude Code, your saved choice, needs sign-in.",
+    "the note names the saved CLI, so the saved choice is still Claude Code");
 });
 
 test("chat creation allows an unready provider only for remote participants", async () => {

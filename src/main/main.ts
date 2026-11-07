@@ -158,7 +158,7 @@ import type {
 } from "../shared/machineInstall";
 import type { MachineRuntimePayloadLocation } from "./services/machineInstaller";
 import { type CreateMobilePairingResult, type MobilePairingPackage } from "../shared/mobilePairing";
-import { CliAgentRunner } from "./services/cliAgents";
+import { CLAUDE_CODE_COMMAND_ENV_OPTIONS, CliAgentRunner } from "./services/cliAgents";
 import { ConsensusService } from "./services/consensus";
 import { AppMcpService } from "./services/appMcp";
 import { AppSkillsService } from "./services/appSkills";
@@ -176,6 +176,7 @@ import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, refreshLog
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService, enabledCloudProviders } from "./services/cloudRunDoctor";
 import { CloudRunSetupSession } from "./services/cloudRunSetupSession";
+import { LocalCliSignInService } from "./services/localCliSignIn";
 import { CloudRunAwsService } from "./services/cloudRunAws";
 import { AwsWorkerSetupService } from "./services/awsWorkerSetup";
 import { DebugLogService } from "./services/debugLogs";
@@ -396,6 +397,21 @@ const cliAgentRunner = new CliAgentRunner(
   debugLogService,
   () => settingsService.getManualAgentEnvironment(),
   { electronAppPath: app.getAppPath() }
+);
+// A CLI's own sign-in, started from the setup panel with the environment
+// members run with, so the credentials land where they will look.
+const localCliSignInService = new LocalCliSignInService(
+  (state) => { sendToMainWindow("cli-sign-in:updated", state); },
+  {
+    manualEnvironment: async () => (await settingsService.getManualAgentEnvironment()).env,
+    envOptions: { "claude-code": CLAUDE_CODE_COMMAND_ENV_OPTIONS },
+    onSignedIn: () => {
+      cliAgentRunner.invalidateAgentReadiness();
+      // The phone's New chat offers the Assistant on a ready CLI too.
+      hubPhonePublisher.scheduleCatalog();
+    }
+  },
+  debugLogService
 );
 void settingsService.getCliAgentRunTimeoutMs()
   .then((timeoutMs) => cliAgentRunner.setRunTimeoutMs(timeoutMs))
@@ -1457,12 +1473,12 @@ function isAppPageUrl(url: string): boolean {
 
 /** Refuses a call that does not come from the app's own page in a window's
  *  main frame (a subframe, or a document the window navigated to). */
-function assertAppPage(event: Electron.IpcMainInvokeEvent): void {
+function assertAppPage(event: Electron.IpcMainInvokeEvent, what = "The terminal", logEvent = "terminal.refused-sender"): void {
   const frame = event.senderFrame;
   const fromAppPage = Boolean(frame) && frame === event.sender.mainFrame && isAppPageUrl(frame?.url ?? "");
   if (!fromAppPage) {
-    void debugLogService.write("terminal.refused-sender", { url: frame?.url ?? null });
-    throw new Error("The terminal is only available to the app's own window.");
+    void debugLogService.write(logEvent, { url: frame?.url ?? null });
+    throw new Error(`${what} is only available to the app's own window.`);
   }
 }
 
@@ -2120,6 +2136,23 @@ function registerIpc(): void {
       return cliAgentRunner.listModelCatalog(kind, configuredModel, settings.lastRepoPath);
     }
     return providerRunner.listModelCatalog(kind);
+  });
+  // Starting a program is for the app's own page only, as the terminal is.
+  ipcMain.handle("cli-sign-in:start", (event, kind: unknown) => {
+    assertAppPage(event, "CLI sign-in", "cli-sign-in.refused-sender");
+    return localCliSignInService.start(kind);
+  });
+  ipcMain.handle("cli-sign-in:list", (event) => {
+    assertAppPage(event, "CLI sign-in", "cli-sign-in.refused-sender");
+    return localCliSignInService.list();
+  });
+  ipcMain.handle("cli-sign-in:submit-code", (event, request: { requestId?: unknown; code?: unknown } | undefined) => {
+    assertAppPage(event, "CLI sign-in", "cli-sign-in.refused-sender");
+    localCliSignInService.submitCode(request?.requestId, request?.code);
+  });
+  ipcMain.handle("cli-sign-in:cancel", (event, requestId: unknown) => {
+    assertAppPage(event, "CLI sign-in", "cli-sign-in.refused-sender");
+    localCliSignInService.cancel(requestId);
   });
   ipcMain.handle("agents:detect", async (_event, request?: AgentDetectionRequest) => {
     const agents = await detectAgentsWithAppSkills(normalizeAgentDetectionRequest(request));
@@ -3409,6 +3442,7 @@ app.on("will-quit", () => {
   // Here and not in before-quit, which an update's restart skips: every
   // shell in the terminal panel gets its hangup on any kind of quit.
   terminalService.shutdown();
+  localCliSignInService.shutdown();
 });
 
 app.on("quit", (_event, exitCode) => {

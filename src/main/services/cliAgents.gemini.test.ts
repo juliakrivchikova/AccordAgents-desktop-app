@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { ParticipantConfig } from "../../shared/types";
+import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 import {
   antigravityExpectProgram,
   antigravityInteractiveGoalAtPrompt,
@@ -19,7 +20,9 @@ import {
   buildGeminiExecInvocation,
   buildGeminiInteractiveGoalInvocation,
   extractGeminiLogConversationId,
+  geminiHeadlessDenial,
   geminiTranscriptPathForConversation,
+  geminiUserSettings,
   isGeminiResumeMissText,
   parseGeminiExecResult,
   parseGeminiTranscriptActivity
@@ -129,6 +132,46 @@ test("buildGeminiExecInvocation: app MCP url/token travel through the process en
   });
   assert.equal(invocation.env?.ACCORD_AGENTS_MCP_URL, "http://127.0.0.1:5123/mcp");
   assert.equal(invocation.env?.ACCORD_AGENTS_MCP_TOKEN, "secret-token");
+});
+
+test("a read-only agy run allows the app's own tools, as Claude Code's --allowedTools does, and keeps the User's rules", () => {
+  // agy 1.5.x, 2026-11-07: without a rule, headless agy denies the app tool
+  // (naming the chat) and the turn ends with no answer.
+  const appMcp = { url: "http://127.0.0.1:5123/mcp", token: "t", toolNames: ["app_chat_set_title", "app_chat_send_message", "bad name"] };
+  const userSettings = { readable: true as const, permissions: { allow: ["command(npm test)"], deny: ["read_file(/secret/*)"] } };
+  const tools = ["mcp(accord_agents/app_chat_set_title)", "mcp(accord_agents/app_chat_send_message)"];
+  for (const build of [buildGeminiExecInvocation, buildGeminiInteractiveGoalInvocation]) {
+    const readOnly = build({ participant, prompt: "Hi", kind: "chat", options: { appMcp, userSettings, settingsPath: "/run/settings.json" } });
+    assert.equal(flagValue(readOnly.args, "--settings"), "/run/settings.json", "her rules go in the run's file, not on the command line");
+    assert.deepEqual(readOnly.settings, { permissions: { allow: ["command(npm test)", ...tools], deny: ["read_file(/secret/*)"] } });
+    assert.equal(readOnly.args.includes("--sandbox"), true);
+
+    const resumed = build({ participant, prompt: "Hi", kind: "chat", options: { sessionId: "11111111-2222-4333-8444-555555555555", appMcp } });
+    assert.deepEqual(JSON.parse(flagValue(resumed.args, "--settings") ?? "{}"), { permissions: { allow: tools } }, "her real case: no rules of her own");
+
+    for (const options of [{ appMcp, agentMode: "auto" as const }, { appMcp, permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true } }]) {
+      const skipping = build({ participant, prompt: "Hi", kind: "chat", options });
+      assert.equal(skipping.args.includes("--settings"), false, "skipping confirmations already lets the tools run");
+    }
+    assert.equal(build({ participant, prompt: "Hi", kind: "chat", options: { userSettings } }).args.includes("--settings"), false, "no app tools, nothing added");
+    for (const unreadable of [{ readable: false as const }, { readable: true as const, permissions: { allow: "mcp(*)" } }]) {
+      const left = build({ participant, prompt: "Hi", kind: "chat", options: { appMcp, userSettings: unreadable } });
+      assert.equal(left.args.includes("--settings"), false, "settings the app cannot add to are left to agy as they are");
+    }
+  }
+});
+
+test("the User's agy settings and agy's headless denial are read as agy writes them", () => {
+  assert.deepEqual(geminiUserSettings('\uFEFF{"trustedWorkspaces":["/x"],"permissions":{"allow":["mcp(*)"]}}'), { readable: true, permissions: { allow: ["mcp(*)"] } });
+  assert.deepEqual(geminiUserSettings('{"trustedWorkspaces":["/x"]}'), { readable: true });
+  assert.deepEqual(geminiUserSettings(undefined), { readable: true }, "no file: no rules");
+  assert.deepEqual(geminiUserSettings('{ // a comment\n "permissions": {} }'), { readable: false });
+  assert.deepEqual(geminiUserSettings('{"permissions":[]}'), { readable: false });
+  assert.equal(
+    geminiHeadlessDenial("jetski: no output produced — a tool required the \"command\" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. command(<target>)). Alternatively, re-run with --dangerously-skip-permissions to auto-approve all tools.\n"),
+    "A tool required the \"command\" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. command(<target>))."
+  );
+  assert.equal(geminiHeadlessDenial("some other noise\n"), undefined);
 });
 
 test("Gemini MCP proxy generically forwards the participant activity tool", async () => {

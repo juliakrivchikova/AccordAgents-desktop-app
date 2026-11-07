@@ -360,3 +360,35 @@ test("the @ list in New chat offers every member, the rest reached by scrolling,
   await type("@victor and @a");
   await app.waitFor(`${offered}[0] === "assistant" && ${menu}.scrollTop === 0`, "narrowed, from the first match");
 });
+
+test("when the Assistant runs on another CLI than the saved one, the phone says so as the computer does and the chat can start", { timeout: 120_000 }, async (t) => {
+  // The User, 2026-11-07: once one CLI is signed in nothing else stands in
+  // the way of a chat; the computer tells the phone which CLI the Assistant
+  // uses instead of the one saved in Settings.
+  const hub = await startMobileHub({});
+  const site = await serveMobileShell({ port: 8345, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-new-chat-assistant-");
+  const chrome = launchChrome({ port: 9485, profile, url: `${site.origin}/`, width: 402, height: 874 });
+  let app;
+  t.after(async () => {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  await hub.createChat("conv-old", { title: "Old", participants: [member("drew")] });
+  const assistantNote = "The Assistant uses Codex in this chat: Claude Code, your saved choice, needs sign-in.";
+  const newChat = { projects: [], assistant: { id: "t-assistant", handle: "assistant", roleConfigId: "administrator", kind: "codex-cli" }, members: [], assistantNote };
+  const published = await hub.call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(), roles: { administrator: "Chat Assistant" }, prompts: [], skills: [], avatars: {}, newChat } });
+  assert.equal(published.ok, true);
+  app = await attachApp({ port: 9485 });
+  await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+  await app.waitFor(`!document.getElementById("new-chat-button").hidden`, "the New chat button");
+  await app.evaluate(`document.getElementById("new-chat-button").click()`);
+  await app.waitFor(`document.querySelectorAll("#new-chat-members .new-chat-member").length === 1`, "the Chat Assistant");
+  await app.evaluate(`(() => { const input = document.getElementById("new-chat-input"); input.value = "hello"; input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  assert.deepEqual(await app.evaluate(`(() => { const node = document.getElementById("new-chat-note");
+    return { text: node.hidden ? "" : node.textContent, tone: node.dataset.tone || "", start: document.getElementById("new-chat-start").disabled }; })()`),
+    { text: assistantNote, tone: "info", start: false }, "said quietly, and nothing is blocked");
+});

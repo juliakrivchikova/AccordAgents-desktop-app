@@ -3,6 +3,8 @@ import type {
   AgentReadinessState,
   ChatProviderKind,
   CliProviderHost,
+  CliSignInKind,
+  CliSignInStatus,
   ProviderSettings
 } from "./types";
 import { CHAT_PROVIDER_PREFERENCE } from "./chatProviders";
@@ -76,6 +78,16 @@ export const CLI_PROVIDER_SETUP: Record<ChatProviderKind, CliProviderSetupMetada
     probeStrategy: "codex-login-status"
   }
 };
+
+/** The CLIs whose own sign-in the app can start: Claude Code and Codex.
+ *  Antigravity has no sign-in command and is signed in from its app. */
+export function isCliSignInKind(kind: unknown): kind is CliSignInKind {
+  return kind === "claude-code" || kind === "codex-cli";
+}
+
+export function isCliSignInRunning(status: CliSignInStatus | undefined): boolean {
+  return status === "starting" || status === "waiting" || status === "checking-code";
+}
 
 export function cliProviderMetadata(kind: ChatProviderKind): CliProviderSetupMetadata {
   return CLI_PROVIDER_SETUP[kind];
@@ -170,17 +182,50 @@ export function preferredReadyAssistantProviderKind(
   return CHAT_PROVIDER_PREFERENCE.find((kind) => readinessForProvider(kind, agents, providers) === "ready");
 }
 
+/** The CLI a new chat's Assistant runs on: the one saved in Settings when it
+ *  is ready, otherwise a ready one. A saved CLI that is signed out or turned
+ *  off does not stop a chat while another is ready, and the saved choice
+ *  stays as it is (the User, 2026-11-07). */
 export function resolveAssistantProviderKind(options: {
   agents: AgentHealth[];
   providers: Array<Pick<ProviderSettings, "kind" | "enabled">>;
   explicitKind?: ChatProviderKind;
 }): ChatProviderKind | undefined {
-  if (options.explicitKind) {
-    return readinessForProvider(options.explicitKind, options.agents, options.providers) === "ready"
-      ? options.explicitKind
-      : undefined;
+  if (options.explicitKind && readinessForProvider(options.explicitKind, options.agents, options.providers) === "ready") {
+    return options.explicitKind;
   }
   return preferredReadyAssistantProviderKind(options.agents, options.providers);
+}
+
+/** Why no chat can start: no CLI is ready. The same words on the computer
+ *  and the phone. */
+export const NO_READY_CLI_MESSAGE = "Set up and sign in to at least one CLI provider to start a chat.";
+
+const SUBSTITUTE_REASON: Record<Exclude<AgentReadinessState, "ready">, string> = {
+  disabled: "is turned off",
+  "sign-in-required": "needs sign-in",
+  "not-detected": "is not installed",
+  "failed-to-run": "is not ready",
+  "could-not-verify": "is not ready",
+  checking: "is not ready"
+};
+
+/** The line a new chat shows when its Assistant runs on another CLI than the
+ *  saved one; nothing when they are the same. Worded for the computer and the
+ *  phone alike, so it names no screen. */
+export function assistantSubstituteNote(options: {
+  agents: AgentHealth[];
+  providers: Array<Pick<ProviderSettings, "kind" | "enabled">>;
+  explicitKind?: ChatProviderKind;
+}): string | undefined {
+  const saved = options.explicitKind;
+  const used = resolveAssistantProviderKind(options);
+  if (!saved || !used || used === saved) {
+    return undefined;
+  }
+  const state = readinessForProvider(saved, options.agents, options.providers);
+  const why = state === "ready" ? "is not ready" : SUBSTITUTE_REASON[state];
+  return `The Assistant uses ${CLI_PROVIDER_SETUP[used].label} in this chat: ${CLI_PROVIDER_SETUP[saved].label}, your saved choice, ${why}.`;
 }
 
 export function isAgentSnapshotStale(agents: AgentHealth[], now = Date.now()): boolean {

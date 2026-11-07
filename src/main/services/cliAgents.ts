@@ -81,7 +81,12 @@ import {
   buildGeminiExecInvocation,
   buildGeminiInteractiveGoalInvocation,
   extractGeminiLogConversationId,
+  GEMINI_APP_MCP_SERVER,
+  geminiHeadlessDenial,
   geminiTranscriptPathForConversation,
+  geminiUserSettings,
+  geminiUserSettingsPath,
+  type GeminiExecInvocation,
   isGeminiResumeMissText,
   parseGeminiExecResult,
   parseGeminiTranscriptActivity
@@ -143,7 +148,7 @@ const CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS = [
 ];
 const CLAUDE_CODE_SKIP_PROMPT_HISTORY_ENV = "CLAUDE_CODE_SKIP_PROMPT_HISTORY";
 const CLAUDE_CODE_FORCE_SESSION_PERSISTENCE_ENV = "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE";
-const CLAUDE_CODE_COMMAND_ENV_OPTIONS: CommandEnvironmentOptions = {
+export const CLAUDE_CODE_COMMAND_ENV_OPTIONS: CommandEnvironmentOptions = {
   dropProcessEnvKeysAbsentFromLoginShell: CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS
 };
 const CODEX_AUTO_APPROVALS_REVIEWER = "auto_review";
@@ -1157,13 +1162,13 @@ export async function syncGeminiMcpConfig(
     throw new Error("Antigravity MCP config field mcpServers must contain a JSON object.");
   }
   const servers = (config.mcpServers ?? {}) as Record<string, unknown>;
-  if (JSON.stringify(servers.accord_agents) === JSON.stringify(desiredEntry)) {
+  if (JSON.stringify(servers[GEMINI_APP_MCP_SERVER]) === JSON.stringify(desiredEntry)) {
     return;
   }
   await mkdir(path.dirname(configPath), { recursive: true });
   await writeFile(configPath, `${JSON.stringify({
     ...config,
-    mcpServers: { ...servers, accord_agents: desiredEntry }
+    mcpServers: { ...servers, [GEMINI_APP_MCP_SERVER]: desiredEntry }
   }, null, 2)}\n`, "utf8");
 }
 
@@ -1962,9 +1967,12 @@ export class CliAgentRunner {
           appMcp: options.appMcp,
           agentMode: options.agentMode,
           permissions: options.permissions,
-          extraEnv: this.agentRunEnv(options)
+          extraEnv: this.agentRunEnv(options),
+          userSettings: await this.readGeminiUserSettings(),
+          settingsPath: path.join(logDir, "settings.json")
         }
       });
+      await this.writeGeminiSessionSettings(invocation);
       const initialTranscriptLines = options.sessionId
         ? this.completeLineCount(await this.readOptionalFile(
             geminiTranscriptPathForConversation(homedir(), options.sessionId)
@@ -2197,9 +2205,12 @@ export class CliAgentRunner {
           agentMode: options.agentMode,
           permissions: options.permissions,
           timeoutMs: options.timeoutMs ?? this.runTimeoutMs,
-          extraEnv: this.agentRunEnv(options)
+          extraEnv: this.agentRunEnv(options),
+          userSettings: await this.readGeminiUserSettings(),
+          settingsPath: path.join(logDir, "settings.json")
         }
       });
+      await this.writeGeminiSessionSettings(invocation);
       if (options.sessionId) {
         this.reportSessionId(options.onSessionId, options.sessionId);
       }
@@ -2237,6 +2248,8 @@ export class CliAgentRunner {
       // final response. Treat a non-SUCCESS status that carries a response as a
       // completed run with a warning, not a hard failure that discards the answer.
       if (nonSuccess && !content && !options.allowEmptyContent) {
+        const denial = geminiHeadlessDenial(result.stderr);
+        if (denial) throw new Error(denial);
         throw new Error(`Antigravity CLI run ended with status ${parsed.status}${parsed.error ? `: ${this.truncateText(parsed.error, MAX_CLI_ERROR_CHARS)}` : "."}`);
       }
       if (nonSuccess && content) {
@@ -2245,7 +2258,8 @@ export class CliAgentRunner {
         );
       }
       if (!content && !options.allowEmptyContent) {
-        throw new Error("Antigravity CLI completed without response content.");
+        // A tool it could not ask about was denied: say so in agy's words.
+        throw new Error(geminiHeadlessDenial(result.stderr) ?? "Antigravity CLI completed without response content.");
       }
       const sessionId = parsed.conversationId ?? options.sessionId;
       this.reportSessionId(options.onSessionId, sessionId);
@@ -8734,6 +8748,25 @@ export class CliAgentRunner {
       }
     }
     return undefined;
+  }
+
+  /** The User's own agy settings, read for each run as agy reads them. */
+  private async readGeminiUserSettings(): Promise<ReturnType<typeof geminiUserSettings>> {
+    try {
+      return geminiUserSettings(await readFile(geminiUserSettingsPath(homedir()), "utf8"));
+    } catch (error) {
+      return (error as NodeJS.ErrnoException)?.code === "ENOENT" ? geminiUserSettings(undefined) : { readable: false };
+    }
+  }
+
+  /** The run's session settings go in its own folder, not on the command
+   *  line, where any process on the computer could read the User's rules. */
+  private async writeGeminiSessionSettings(invocation: GeminiExecInvocation): Promise<void> {
+    const index = invocation.args.indexOf("--settings");
+    const at = index >= 0 ? invocation.args[index + 1] : undefined;
+    if (invocation.settings && at && !at.startsWith("{")) {
+      await writeFile(at, JSON.stringify(invocation.settings), { encoding: "utf8", mode: 0o600 });
+    }
   }
 
   private async readOptionalFile(filePath: string): Promise<string> {
