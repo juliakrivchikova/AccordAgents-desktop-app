@@ -205,7 +205,7 @@ test("a handed session gone from the server: the member starts a new session and
   assert.equal(storage.current.messages.at(-1)?.metadata?.memberSessionTaken?.taken, false, "the computer lets the server go of it");
 });
 
-test("a handoff nobody may give is never taken: a Codex member's, or one on this computer's member that this computer did not make", async () => {
+test("a Codex member's handoff is never taken: only a Claude member moves with its session", async () => {
   const packed = await packMemberSession(portableMemberSession(chatSession(chatParticipant(), "sess-1")), TRANSCRIPT);
   const handoff = await handoffOf(packed);
   const codex = chatParticipant({ id: "codex", handle: "codex", kind: "codex-cli", homeMachineId: "box", sessionHandoff: handoff });
@@ -214,13 +214,38 @@ test("a handoff nobody may give is never taken: a Codex member's, or one on this
   let reads = 0;
   onMachine.service.setHubBlobReader(async () => { reads += 1; return packed; });
   await (onMachine.service as any).sessionForParticipant(clone(onMachine.storage.current), codex);
-
-  const local = chatParticipant({ sessionHandoff: handoff });
-  const desktop = testService(chatConversation([local], []));
-  desktop.service.setHubBlobReader(async () => { reads += 1; return packed; });
-  const state = await (desktop.service as any).sessionForParticipant(clone(desktop.storage.current), local);
-  assert.equal(state.session.sessionId, "");
   assert.equal(reads, 0);
+});
+
+test("how far the chat reached the session moves with it", async () => {
+  const pointers = { timeline: { messageId: "m-7", sequence: 7 } };
+  const packed = await packMemberSession(portableMemberSession(chatSession(chatParticipant(), "sess-1")), TRANSCRIPT, { promptContextPointers: pointers });
+  const handoff = await handoffOf(packed);
+  const participant = chatParticipant({ homeMachineId: "box", sessionHandoff: handoff });
+  const { service, storage, runner } = testService(chatConversation([participant], []));
+  service.setHostMachineId("box");
+  runner.claudeProjectsDirectory = async () => tempDir();
+  service.setHubBlobReader(async () => packed);
+  await (service as any).sessionForParticipant(clone(storage.current), participant);
+  const kept = (service as any).normalizedPromptContextPointers(storage.current.metadata.promptContextPointers)[participant.id];
+  assert.deepEqual(kept?.timeline?.messageId, "m-7", "its next turn there sends only what is new to it");
+});
+
+test("a member that is moving is not restarted, and a machine lets its held turns go when the computer gives the move up", async () => {
+  const participant = chatParticipant({ homeMachineId: "box" });
+  const conversation = chatConversation([participant], [chatSession(participant, "sess-1")]);
+  conversation.messages.push(acceptedMessage());
+  const { service } = testService(conversation);
+  service.setHostMachineId("box");
+  const link = fakeServerLink("machine-device");
+  service.setServerLink(link);
+  const release = (service as any).openMemberMoveGate(conversation.id, participant.id);
+  await assert.rejects(service.restartParticipant({ conversationId: conversation.id, participantId: participant.id }), /@admin is moving/);
+  await service.applyServerEntries([fromServer("desktop-device", { kind: "message.create",
+    message: { id: "gave-up", role: "system", content: "@admin stays where it was.", createdAt: NOW, status: "done",
+      metadata: { hiddenFromTimeline: true, serverSeq: 950, serverWriter: "desktop-device", memberMoveCancelled: { participantId: participant.id, runId: "turn-x" } } } as any })]);
+  assert.equal((service as any).memberMoveGate(conversation.id, participant.id), undefined);
+  release();
 });
 
 // --- leaving a machine ---------------------------------------------------------

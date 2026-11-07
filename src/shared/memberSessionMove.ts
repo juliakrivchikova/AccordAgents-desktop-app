@@ -23,9 +23,9 @@ export const MEMBER_SESSION_EXPORT_TURN_TTL_MS = 10 * 60_000;
 
 /** After a machine hands a member's session over, it leaves the member's
  *  turns waiting until the computer made the move (the member's home leaves
- *  the machine), or this long when it plainly will not: a reply it ran
+ *  the machine), the computer says it gave up, or this long: a reply it ran
  *  meanwhile would be missing from the session that moved. */
-export const MEMBER_SESSION_EXPORT_HOLD_MS = 15 * 60_000;
+export const MEMBER_SESSION_EXPORT_HOLD_MS = 5 * 60_000;
 
 export interface MemberSessionExportTurnRequest {
   kind: typeof MEMBER_SESSION_EXPORT_TURN_KIND;

@@ -354,16 +354,7 @@ interface ParticipantMoveApplied {
   handoff?: ChatSessionHandoff;
   /** Its session was here and left with it. */
   dropLocalSession: boolean;
-  /** Moving here with this session: this computer takes it. */
-  expectHere?: ChatSessionHandoff;
   line: string;
-}
-
-/** Device-local: the sessions this computer handed its own members when it
- *  moved them here, by member (only those are taken here). */
-function readExpectedSessionHandoffs(metadata: Conversation["metadata"]): Record<string, string> {
-  const value = metadata.expectedSessionHandoffs;
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, string> : {};
 }
 
 interface ChatParticipantSessionState {
@@ -2217,12 +2208,6 @@ export class ChatService {
         if (moved.dropLocalSession) {
           conversation.metadata.participantSessions = this.chatSessions(conversation).filter((session) => session.participantId !== target.id);
         }
-        // Moving here: the session it carries is the one this computer made
-        // the handoff for, and only that one is taken (takeSessionHandoff).
-        const expected = { ...readExpectedSessionHandoffs(conversation.metadata) };
-        if (moved.expectHere) expected[target.id] = moved.expectHere.blob.blobHash;
-        else delete expected[target.id];
-        conversation.metadata.expectedSessionHandoffs = expected;
         conversation.messages.push(this.message("system", moved.line));
       }
       conversation.updatedAt = new Date().toISOString();
@@ -2424,6 +2409,11 @@ export class ChatService {
     progress?: ProgressCallback
   ): Promise<StartReviewResult> {
     const runId = request.runId ?? randomUUID();
+    // A member that is moving is compacted once it moved, where it runs then.
+    const stored = (await this.readStoredChatStateForRefresh(request.conversationId)).stored;
+    const compacted = stored && stored.kind === "chat" ? this.compactRequestParticipant(stored, request) : undefined;
+    const moving = compacted ? this.memberMoveGate(request.conversationId, compacted.id) : undefined;
+    if (moving) await abortableWait(moving, signal);
     const triggeredBy = request.triggeredBy === "agent" ? "agent" : "user";
     const compactInstructions = this.normalizeCompactInstructions(request.instructions);
     const warnings: string[] = [];
@@ -2507,6 +2497,11 @@ export class ChatService {
       const conversation = ingest.conversation;
       const participant = ingest.participant;
       const session = ingest.session;
+      // It moved while this waited: what was read is another device's now.
+      const placedNow = await this.memberWhereItRunsNow(conversation, participant);
+      if ((placedNow.homeMachineId ?? "") !== (participant.homeMachineId ?? "") || JSON.stringify(placedNow.cloudRun) !== JSON.stringify(participant.cloudRun)) {
+        throw new Error(`@${participant.handle} moved while its compaction waited. Compact it again.`);
+      }
       if (!session) {
         return await this.compactParticipantOnMachine(conversation, participant, request, runId, compactInstructions, warnings, auditBase, signal, progress);
       }
@@ -2880,6 +2875,7 @@ export class ChatService {
     }
     const inFlightKey = `${conversation.id}:${participant.id}`;
     if (this.memberRestartsInFlight.has(inFlightKey)) throw new Error(`@${participant.handle} is already restarting.`);
+    if (this.memberMoveGate(conversation.id, participant.id)) throw new Error(`@${participant.handle} is moving. Restart it once it moved.`);
     this.memberRestartsInFlight.add(inFlightKey);
     try {
       void this.debugLogs.write("chat.restart.requested", {
@@ -3155,19 +3151,30 @@ export class ChatService {
         ? `Could not move ${label}: ${destinationName} still runs an older version of AccordAgents that cannot take a member's session. This computer updates it the next time it is connected and idle; move it again after that.`
         : `Could not move ${label}: ${destinationName} has not connected to this computer yet. Move it again once it is connected.`);
     }
-    if (this.memberAnswersNow(conversation, member.id)) throw new Error(`${label} is busy. Move it when it is done.`);
-    if ((this.memberBackgroundTasks.get(conversation.id)?.get(member.id)?.labels.length ?? 0) > 0) {
-      throw new Error(`${label} has background tasks running. Move it when they are done.`);
-    }
+    const refuseBusy = (chat: Conversation): void => {
+      if (this.memberAnswersNow(chat, member.id) || this.memberRestartsInFlight.has(`${chat.id}:${member.id}`)) {
+        throw new Error(`${label} is busy. Move it when it is done.`);
+      }
+      if ((this.memberBackgroundTasks.get(chat.id)?.get(member.id)?.labels.length ?? 0) > 0) {
+        throw new Error(`${label} has background tasks running. Move it when they are done.`);
+      }
+    };
+    refuseBusy(conversation);
     const releaseGate = this.openMemberMoveGate(conversation.id, member.id);
     const reservation = this.reserveParticipantTurn(conversation.id, member.id, "exclusive");
     let moved: Conversation | undefined;
+    // A machine that handed the session over holds the member's turns for
+    // the move; a move that then fails tells it to let them go.
+    let exportedFrom: { runId: string; machineId: string } | undefined;
+    let applied = false;
     try {
       await reservation.wait();
-      // As it is now: a turn that ran just before may have changed it.
+      // As it is now: a turn, a compaction or a restart that began just
+      // before may have changed it, or still be under way.
       const latest = await this.requireChat(conversation.id);
       const current = this.chatParticipants(latest).find((item) => item.id === member.id);
       if (!current) throw new Error(`${label} was removed from this chat.`);
+      refuseBusy(latest);
       const fromHere = this.runsHere(current);
       const sourceMachineId = current.homeMachineId;
       if ((fromHere && toHere) || (sourceMachineId && destination?.machineId === sourceMachineId) ||
@@ -3179,21 +3186,30 @@ export class ChatService {
       let handoff: ChatSessionHandoff | undefined;
       let sessionNote: string | undefined;
       let dropLocalSession = false;
+      if (!toHere && destination?.machineId && conversation.repoPath) {
+        // The project is on the machine before the member is: a turn of it
+        // there (the phone's too) finds its folder.
+        await this.prepareParticipantProjects(conversation.repoPath, [{ homeMachineId: destination.machineId }]).catch((error: unknown) => {
+          throw new Error(`Could not move ${label}: the project could not be copied to ${destinationName} (${error instanceof Error ? error.message : String(error)}).`);
+        });
+      }
       if (fromHere) {
         if (runner.memberProcessAnswering?.call(this.cliRunner, conversation.id, member.id)) throw new Error(`${label} is busy. Move it when it is done.`);
         const session = this.chatSessions(latest).find((item) => item.participantId === member.id);
         dropLocalSession = Boolean(session);
-        if (session?.sessionId) {
-          await runner.closeWarmAgents?.call(this.cliRunner, conversation.id, member.id, "member-moved");
-          handoff = await this.packLocalSession(session, label);
-          if (!handoff) sessionNote = "Its session was not found on this computer, so it starts a new one there.";
-        } else if (current.sessionHandoff) {
+        if (current.sessionHandoff && session?.importedHandoff !== current.sessionHandoff.blob.blobHash) {
+          // Handed here and not taken yet: that session goes on, as it is.
           handoff = current.sessionHandoff;
+        } else if (session?.sessionId) {
+          await runner.closeWarmAgents?.call(this.cliRunner, conversation.id, member.id, "member-moved");
+          handoff = await this.packLocalSession(latest, session, label);
+          if (!handoff) sessionNote = "Its session was not found on this computer, so it starts a new one there.";
         }
       } else if (sourceMachineId) {
         const exported = await this.exportSessionFromMachine(latest, current);
         handoff = exported.handoff;
         sessionNote = exported.note;
+        exportedFrom = exported.runId ? { runId: exported.runId, machineId: sourceMachineId } : undefined;
       } else {
         // A Cloud choice not prepared yet: what it was handed still waits.
         handoff = current.sessionHandoff;
@@ -3201,13 +3217,14 @@ export class ChatService {
       const line = [memberMovedLine(member.handle, destinationName, Boolean(handoff)), sessionNote].filter(Boolean).join(" ");
       // A known machine that takes sessions is its home at once, so its turns
       // (the phone's too) go there without waiting for a Cloud preparation.
-      const applied: UpdateChatParticipantRuntimeRequest = !toHere && !nextHomeMachineId && destination?.machineId && destination.support === "supported"
+      const appliedRequest: UpdateChatParticipantRuntimeRequest = !toHere && !nextHomeMachineId && destination?.machineId && destination.support === "supported"
         ? { ...request, homeMachineId: destination.machineId }
         : request;
-      await this.updateParticipantRuntime(applied, { handoff, dropLocalSession, expectHere: toHere ? handoff : undefined, line });
+      await this.updateParticipantRuntime(appliedRequest, { handoff, dropLocalSession, line });
+      applied = true;
       void this.debugLogs.write("chat.member-move.done", {
         conversationId: conversation.id, participantId: member.id, from: fromHere ? "here" : sourceMachineId ?? "cloud-pending",
-        to: toHere ? "here" : applied.homeMachineId ?? nextCloudRun?.instanceId ?? "cloud-pending", withSession: Boolean(handoff), bytes: handoff?.blob.byteLength
+        to: toHere ? "here" : appliedRequest.homeMachineId ?? nextCloudRun?.instanceId ?? "cloud-pending", withSession: Boolean(handoff), bytes: handoff?.blob.byteLength
       });
       moved = await this.requireChat(conversation.id);
       const arrived = this.chatParticipants(moved).find((item) => item.id === member.id);
@@ -3220,6 +3237,17 @@ export class ChatService {
         });
         moved = await this.requireChat(conversation.id);
       }
+    } catch (error) {
+      if (exportedFrom && !applied) {
+        // The member stays on its machine: its turns there go on now.
+        await this.withChatMutation(conversation, async () => {
+          conversation.messages.push(this.message("system", `@${member.handle} stays where it was.`, undefined,
+            { hiddenFromTimeline: true, memberMoveCancelled: { participantId: member.id, runId: exportedFrom!.runId } }));
+          conversation.updatedAt = new Date().toISOString();
+          await this.saveConversation(conversation);
+        }).catch(() => undefined);
+      }
+      throw error;
     } finally {
       reservation.release();
       releaseGate();
@@ -3233,13 +3261,16 @@ export class ChatService {
   /** This computer's session of a member, packed and put on the User's
    *  server; undefined when its transcript is not here (the CLI removes old
    *  sessions). */
-  private async packLocalSession(session: ChatParticipantSession, label: string): Promise<ChatSessionHandoff | undefined> {
+  private async packLocalSession(conversation: Conversation, session: ChatParticipantSession, label: string): Promise<ChatSessionHandoff | undefined> {
     const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "claudeProjectsDirectory">>;
     if (!runner.claudeProjectsDirectory) throw new Error(`Could not move ${label}: this device cannot read Claude Code's sessions.`);
     const file = await findClaudeTranscript(await runner.claudeProjectsDirectory.call(this.cliRunner), session.sessionId);
     if (!file) return undefined;
     if (!this.hubBlobWriter) throw new Error(`Could not move ${label}: this device is not linked to your server, which carries the session.`);
-    const packed = await packMemberSession(portableMemberSession(session), await readClaudeTranscript(file));
+    // How far the chat reached the session goes with it: the next turn there
+    // sends only what is new to it, as a resumed CLI session expects.
+    const pointers = this.normalizedPromptContextPointers(conversation.metadata.promptContextPointers)[session.participantId];
+    const packed = await packMemberSession(portableMemberSession(session), await readClaudeTranscript(file), pointers ? { promptContextPointers: pointers } : {});
     const blob = await this.hubBlobWriter(packed).catch((error: unknown) => {
       throw new Error(`Could not move ${label}: its session did not reach your server (${error instanceof Error ? error.message : String(error)}).`);
     });
@@ -3253,7 +3284,7 @@ export class ChatService {
    * hidden line naming where it put the session, and keeps the member's turns
    * waiting until the move is made; nothing else changes there.
    */
-  private async exportSessionFromMachine(conversation: Conversation, member: ChatParticipant): Promise<{ handoff?: ChatSessionHandoff; note?: string }> {
+  private async exportSessionFromMachine(conversation: Conversation, member: ChatParticipant): Promise<{ handoff?: ChatSessionHandoff; note?: string; runId?: string }> {
     const label = `@${member.handle}`;
     const machineId = member.homeMachineId!;
     const link = this.serverLink;
@@ -3313,15 +3344,15 @@ export class ChatService {
     switch (report.reason) {
       case "busy": throw new Error(`${label} is busy on ${machineName}. Move it when it is done.`);
       case "background": throw new Error(`${label} has background tasks running on ${machineName}. Move it when they are done.`);
-      case "not-found": return { note: `Its session was not found on ${machineName}, so it starts a new one.` };
-      case "none": return {};
+      case "not-found": return { note: `Its session was not found on ${machineName}, so it starts a new one.`, runId: serverRunId };
+      case "none": return { runId: serverRunId };
       case undefined: break;
       default: throw new Error(`Could not move ${label}: ${machineName} could not hand over its session. ${stays}`);
     }
     if (turn.outcome !== "done" || !report.blob || !report.sessionId) {
       throw new Error(`Could not move ${label}: ${machineName} could not hand over its session. ${stays}`);
     }
-    return { handoff: { provider: "claude-code", sessionId: report.sessionId, blob: report.blob, at: new Date().toISOString() } };
+    return { handoff: { provider: "claude-code", sessionId: report.sessionId, blob: report.blob, at: new Date().toISOString() }, runId: serverRunId };
   }
 
   /** Machine side: the turn that asks this machine for a member's session.
@@ -3400,7 +3431,7 @@ export class ChatService {
       }
       if (!session?.sessionId) return { reason: "none" };
       await runner.closeWarmAgents?.call(this.cliRunner, chat.id, participant.id, "member-moved");
-      const packed = await this.packLocalSession(session, `@${participant.handle}`);
+      const packed = await this.packLocalSession(latest, session, `@${participant.handle}`);
       if (!packed) return { reason: "not-found" };
       return { sessionId: packed.sessionId, blob: packed.blob };
     } finally {
@@ -3459,8 +3490,6 @@ export class ChatService {
     }
     const existing = this.chatSessions(conversation).find((session) => session.participantId === participant.id);
     if (existing?.importedHandoff === handoff.blob.blobHash) return;
-    // The computer takes only a handoff it made itself.
-    if (!this.machineRuntime && readExpectedSessionHandoffs(conversation.metadata)[participant.id] !== handoff.blob.blobHash) return;
     const running = this.sessionHandoffsTaking.get(key);
     if (running) {
       await running;
@@ -3481,6 +3510,7 @@ export class ChatService {
     if (this.chatSessions(conversation).some((session) => session.participantId === participant.id && session.importedHandoff === handoff.blob.blobHash)) return;
     let taken: ChatParticipantSession | undefined;
     let lostReason: string | undefined;
+    let contextPointers: ReturnType<ChatService["normalizedPromptContextPointers"]>[string] | undefined;
     try {
       if (!this.hubBlobReader) throw new Error("this device is not linked to your server");
       const bytes = await this.hubBlobReader(handoff.blob).catch((error: unknown) => {
@@ -3495,6 +3525,8 @@ export class ChatService {
       try {
         unpacked = await unpackMemberSession(bytes);
         if (unpacked.session.sessionId !== handoff.sessionId) throw new Error("the moved session names another session");
+        const moved = this.normalizedPromptContextPointers({ [participant.id]: unpacked.promptContextPointers })[participant.id];
+        if (moved && Object.keys(moved).length > 0) contextPointers = moved;
       } catch (error) {
         lostReason = error instanceof Error ? error.message : String(error);
         throw error;
@@ -3554,6 +3586,10 @@ export class ChatService {
         conversation.messages.push(this.message("system", `${label}'s session could not be moved here (${lostReason}). It starts a new session.`));
       }
       conversation.metadata.participantSessions = sessions;
+      if (taken && contextPointers) {
+        const pointers = this.normalizedPromptContextPointers(conversation.metadata.promptContextPointers);
+        conversation.metadata.promptContextPointers = { ...pointers, [participant.id]: contextPointers };
+      }
       if (this.machineRuntime) {
         // The computer lets the server go of it once it reads this.
         conversation.messages.push(this.message("system", `Took @${member.handle}'s session over.`, undefined,
@@ -3565,9 +3601,6 @@ export class ChatService {
           const { sessionHandoff: _taken, ...rest } = item;
           return rest;
         });
-        const expected = { ...readExpectedSessionHandoffs(conversation.metadata) };
-        delete expected[participant.id];
-        conversation.metadata.expectedSessionHandoffs = expected;
       }
       conversation.updatedAt = new Date().toISOString();
       await this.saveConversation(conversation);
@@ -22484,6 +22517,14 @@ export class ChatService {
     if (this.membersArrivedHere(previousHomes, target)) void this.resumeServerTurns().catch(() => undefined);
     // A member that moved away from this machine: its session here goes.
     if (this.machineRuntime) void this.retireMovedMembers(target, previousHomes).catch(() => undefined);
+    // A move the computer gave up on after this machine handed the session
+    // over: the member's held turns go on here now.
+    if (this.machineRuntime) {
+      const cancelled = entries.flatMap((entry) => entry.effect.kind === "message.create" && entry.deviceId !== me
+        ? [entry.effect.message.metadata?.memberMoveCancelled?.participantId].filter((id): id is string => typeof id === "string") : []);
+      for (const participantId of cancelled) this.memberMoveGates.get(`${conversationId}:${participantId}`)?.release();
+      if (cancelled.length > 0) void this.resumeServerTurns().catch(() => undefined);
+    }
     // A session handed to a machine that has since answered as the member.
     if (!this.machineRuntime && this.takenSessionHandoffs(target).length > 0) void this.clearTakenSessionHandoffs(target).catch(() => undefined);
     // A member this device runs that the chat no longer has (removed on any
@@ -22941,10 +22982,6 @@ export class ChatService {
   private async openServerTurnNow(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage, localRunId: string, signal?: AbortSignal): Promise<ServerTurnOpen> {
     const link = this.serverLink;
     if (!link) return { kind: "none" };
-    // A member that is moving is routed once it moved: by its new home.
-    const moving = this.memberMoveGate(conversation.id, participant.id);
-    if (moving) await abortableWait(moving, signal);
-    participant = await this.memberWhereItRunsNow(conversation, participant);
     const targets = deliveryTargetsOf(triggerMessage);
     const canonical = triggerMessage.role === "user" && targets.includes(participant.id);
     const serverRunId = canonical ? hubTurnRunId(triggerMessage.id, participant.id) : localRunId.startsWith("turn-") ? localRunId : `turn-${localRunId}`;
@@ -22953,6 +22990,11 @@ export class ChatService {
     this.localRunOfServer.set(serverRunId, localRunId);
     let claimOpId: string | undefined;
     try {
+      // A member that is moving is routed once it moved, by its new home; a
+      // Stop meanwhile ends the turn on the server like any Stop before it starts.
+      const moving = this.memberMoveGate(conversation.id, participant.id);
+      if (moving) await abortableWait(moving, signal);
+      participant = await this.memberWhereItRunsNow(conversation, participant);
       // Д13: the message this turn answers is on the server before the
       // member starts — with no server reachable, it waits, visibly unsent.
       await this.waitForQueuedSave(conversation.id);

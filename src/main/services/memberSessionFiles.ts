@@ -118,18 +118,22 @@ interface PackHeader {
   version: number;
   provider: "claude-code";
   session: PortableMemberSession;
+  /** How far the chat reached the session (the member's prompt context
+   *  pointers on the device it left). */
+  promptContextPointers?: unknown;
   transcriptBytes: number;
 }
 
 /** One body for the User's server: a line naming what it is and the app's
  *  record of the session, then the CLI's transcript as it is on disk; all of
  *  it gzipped off the main thread (a long session is tens of megabytes). */
-export async function packMemberSession(session: PortableMemberSession, transcript: Buffer): Promise<Buffer> {
-  const header: PackHeader = { format: PACK_FORMAT, version: PACK_VERSION, provider: "claude-code", session, transcriptBytes: transcript.length };
+export async function packMemberSession(session: PortableMemberSession, transcript: Buffer, extra: { promptContextPointers?: unknown } = {}): Promise<Buffer> {
+  const header: PackHeader = { format: PACK_FORMAT, version: PACK_VERSION, provider: "claude-code", session,
+    ...(extra.promptContextPointers !== undefined ? { promptContextPointers: extra.promptContextPointers } : {}), transcriptBytes: transcript.length };
   return gzipAsync(Buffer.concat([Buffer.from(`${JSON.stringify(header)}\n`, "utf8"), transcript]));
 }
 
-export async function unpackMemberSession(packed: Buffer): Promise<{ provider: "claude-code"; session: PortableMemberSession; transcript: Buffer }> {
+export async function unpackMemberSession(packed: Buffer): Promise<{ provider: "claude-code"; session: PortableMemberSession; transcript: Buffer; promptContextPointers?: unknown }> {
   let bytes: Buffer;
   try {
     bytes = await gunzipAsync(packed);
@@ -152,7 +156,7 @@ export async function unpackMemberSession(packed: Buffer): Promise<{ provider: "
   }
   const transcript = bytes.subarray(end + 1);
   if (transcript.length !== header.transcriptBytes) throw new Error("the moved session arrived incomplete");
-  return { provider: "claude-code", session, transcript };
+  return { provider: "claude-code", session, transcript, ...(header.promptContextPointers !== undefined ? { promptContextPointers: header.promptContextPointers } : {}) };
 }
 
 /** A session id is a file name here: nothing that could leave its folder. */

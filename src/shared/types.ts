@@ -1667,6 +1667,9 @@ export interface ChatMessageMetadata {
   memberSessionExport?: import("./memberSessionMove").MemberSessionExportReport;
   /** A machine's hidden word that it took the session its member was handed. */
   memberSessionTaken?: import("./memberSessionMove").MemberSessionTakenReport;
+  /** The computer's hidden word that a move it asked a machine for was not
+   *  made: the machine lets the member's held turns go. */
+  memberMoveCancelled?: { participantId: string; runId: string };
   workedMs?: number;
   queuedBehind?: { handle: string };
   appMessageSource?: string;
