@@ -35,6 +35,8 @@ export { mobileChatGroupLabel, mobileSnippet } from "./mobileChatRow";
 // An artifact note becomes a card on the timeline: the same reading of the
 // note's sentence and the same words on the desktop and the phone.
 export { artifactNoteActorLabel, artifactNoteVerb, parseArtifactNoteCard } from "./artifactNoteCard";
+// Each note's drafts and signatures as they stood, the same marks as the desktop's.
+export { artifactNoteProgressById } from "./artifactNoteProgress";
 // The message that starts an Accord becomes a card on the timeline: the same
 // reading of the launch prompt on the desktop and the phone.
 export { accordLaunchTitleAndBody, parseAccordLaunchCard } from "./accordLaunchCard";

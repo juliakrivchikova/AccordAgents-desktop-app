@@ -36,6 +36,9 @@ import {
   liveMessageProgressById
 } from "./chat-conversation-data";
 import { ArtifactsContext } from "../artifacts/artifacts-context";
+import { ArtifactNoteProgressContext } from "./chat-artifact-note-card";
+import { artifactNoteProgressById } from "../../../shared/artifactNoteProgress";
+import { ARTIFACT_NOTE_MESSAGE_SOURCE } from "../../../shared/artifacts";
 import { AttachmentPanelContext } from "../files/file-panel-context";
 import { ChatSidePanel, useChatSidePanel } from "./chat-side-panel";
 import { ChatConversationTimeline } from "./chat-conversation-timeline";
@@ -105,6 +108,15 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     [participants, props.settings.chatRoleConfigs, sessionsByParticipant, contextUsageByParticipant]
   );
   const artifacts = props.artifacts;
+  // Each artifact note's drafts and signatures as they stood when it was
+  // written, read from the notes loaded for this chat.
+  const artifactNoteProgress = useMemo(() => {
+    const byId = artifacts.context.byId;
+    return artifactNoteProgressById(
+      props.conversation.messages.filter((message) => message.role === "system" && message.metadata?.appMessageSource === ARTIFACT_NOTE_MESSAGE_SOURCE),
+      (artifactId) => byId.get(artifactId)?.approval.requiredSigners.length || undefined
+    );
+  }, [props.conversation.messages, artifacts.context.byId]);
   const [selectedThreadRootId, setSelectedThreadRootId] = useState<string | undefined>();
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const [threadWidth, setThreadWidth] = useState(CHAT_THREAD_DEFAULT_WIDTH);
@@ -339,6 +351,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     <MentionDirectoryContext.Provider value={mentionDirectory}>
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
       <ArtifactsContext.Provider value={artifacts.context}>
+      <ArtifactNoteProgressContext.Provider value={artifactNoteProgress}>
       <LocalFileLinkContext.Provider value={localFileOpen.localFileLinkContext}>
       <AttachmentPanelContext.Provider value={sidePanel.attachmentContext}>
         <div
@@ -486,6 +499,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
         </div>
       </AttachmentPanelContext.Provider>
       </LocalFileLinkContext.Provider>
+      </ArtifactNoteProgressContext.Provider>
       </ArtifactsContext.Provider>
     </MessageLinkContext.Provider>
     </MentionDirectoryContext.Provider>

@@ -4828,10 +4828,56 @@ button.composer-active-run-row-main:focus-visible {
   min-width: 0;
 }
 
+/* Who did what leads the card; the artifact and the time follow in grey. */
 .chat-artifact-note-title {
-  font-size: 15px;
-  font-weight: 500;
+  font-size: 14px;
+  line-height: 1.42;
   overflow-wrap: anywhere;
+}
+
+.chat-artifact-note-version {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  vertical-align: 1px;
+}
+
+/* One mark per member the artifact waits for: grey until their draft or
+   signature is in, lilac once it is, green when every signature is. */
+.chat-artifact-note-marks {
+  display: flex;
+  flex: none;
+  align-self: center;
+  gap: 6px;
+  margin-left: auto;
+  padding-left: 8px;
+}
+
+.chat-artifact-note-mark {
+  display: flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--app-muted) 12%, transparent);
+  color: color-mix(in srgb, var(--app-muted) 75%, transparent);
+}
+
+.chat-artifact-note-mark.is-given {
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}
+
+.chat-artifact-note-mark.is-complete {
+  background: var(--app-success-soft);
+  color: var(--app-success);
 }
 
 .chat-artifact-note-meta {

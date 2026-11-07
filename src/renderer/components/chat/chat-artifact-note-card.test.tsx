@@ -51,11 +51,15 @@ test("the card names the artifact as it is now, says who did what, and opens it"
   const root = renderer!.root;
   const [first, second] = root.findAll((node) => node.props?.className === "chat-artifact-note");
   const part = (scope: ReactTestInstance, className: string) => scope.findAll((node) => node.type === "span" && node.props?.className === className);
-  assert.equal(textOf(part(first!, "chat-artifact-note-title")[0]!), "Plan v2", "a rename shows on old notes too");
-  assert.match(textOf(part(first!, "chat-artifact-note-meta")[0]!), /^@taylor revised · v4 · \d\d:\d\d$/);
+  // Who did what leads; the artifact's current name and the time follow.
+  assert.equal(textOf(part(first!, "chat-artifact-note-title")[0]!), "@taylor revisedv4", "a revision names its version in a tag");
+  assert.equal(textOf(part(first!, "chat-artifact-note-version")[0]!), "v4");
+  assert.match(textOf(part(first!, "chat-artifact-note-meta")[0]!), /^Plan v2 · \d\d:\d\d$/, "a rename shows on old notes too");
   assert.equal(textOf(part(first!, "chat-artifact-note-body")[0]!), "Choice rule");
   assert.equal(part(first!, "chat-artifact-note-actor chat-mention").length, 1, "a member is shown as a mention");
-  assert.match(textOf(part(second!, "chat-artifact-note-meta")[0]!), /^You signed · v4 · fully approved · \d\d:\d\d$/);
+  assert.equal(textOf(part(second!, "chat-artifact-note-title")[0]!), "You signed · v4 · fully approved");
+  assert.equal(part(second!, "chat-artifact-note-version").length, 0, "only a new version gets the tag");
+  assert.match(textOf(part(second!, "chat-artifact-note-meta")[0]!), /^Plan v2 · \d\d:\d\d$/);
   assert.equal(part(second!, "chat-artifact-note-body").length, 0, "no note line without a note");
   assert.equal(part(second!, "chat-artifact-note-actor").length, 1, "the User is not shown as a mention");
   assert.equal(root.findAll((node) => typeof node.props?.className === "string" && node.props.className.includes("message-avatar")).length, 0);
@@ -70,8 +74,8 @@ test("a card for an artifact the screen does not know names it as the note did",
   act(() => {
     renderer = create(<ChatArtifactNoteCard message={{ id: "note-1", createdAt: NOW }} card={card} onToggleReaction={() => undefined} />);
   });
-  const title = renderer!.root.find((node) => node.type === "span" && node.props?.className === "chat-artifact-note-title");
-  assert.equal(textOf(title), "Plan v1");
+  const meta = renderer!.root.find((node) => node.type === "span" && node.props?.className === "chat-artifact-note-meta");
+  assert.match(textOf(meta), /^Plan v1 · /);
   assert.doesNotThrow(() => act(() => { renderer!.root.findByType("button").props.onClick(); }), "no artifacts list: a click does nothing");
 });
 

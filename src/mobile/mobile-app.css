@@ -33,6 +33,9 @@
   /* Something waiting for the User: the desktop's warning colour. */
   --warn: #c98a13;
   /* The Start Accord glyph's branches, as the desktop's --app-accord-icon-*. */
+  /* Every signature in: the desktop's --app-success pair. */
+  --ok: #08794e;
+  --ok-soft: #e8f8f1;
   --accord-icon-top: #a855f7;
   --accord-icon-left: #e73975;
   --accord-icon-right: #447bf3;
@@ -893,19 +896,60 @@ button.mobile-chat-group-title:active {
 }
 
 .artifact-note-title {
-  font-size: 15.5px;
-  font-weight: 500;
-  line-height: 1.35;
+  font-size: 15px;
+  line-height: 1.4;
   overflow-wrap: anywhere;
 }
 
 .artifact-note-meta {
   margin-top: 1px;
-  /* Darker than --mut: the line says who did what, and --mut on the card
-     falls short of readable contrast. */
+  /* Darker than --mut: --mut on the card falls short of readable contrast. */
   color: color-mix(in srgb, var(--fg) 70%, var(--mut));
   font-size: 13.5px;
   line-height: 1.4;
+}
+
+.artifact-note-version {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accs);
+  color: var(--acc);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 18px;
+  vertical-align: 1px;
+}
+
+/* One mark per member the artifact waits for, as on the desktop. */
+.artifact-note-marks {
+  display: flex;
+  flex: none;
+  align-self: center;
+  gap: 5px;
+  margin-left: auto;
+}
+
+.artifact-note-mark {
+  display: flex;
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--mut) 12%, transparent);
+  color: color-mix(in srgb, var(--mut) 75%, transparent);
+}
+
+.artifact-note-mark.is-given {
+  background: var(--accs);
+  color: var(--acc);
+}
+
+.artifact-note-mark.is-complete {
+  background: var(--ok-soft);
+  color: var(--ok);
 }
 
 .artifact-note-actor.is-member {
@@ -2864,6 +2908,8 @@ button.mobile-chat-group-title:active {
     --surface-fg: #0d0f13;
     --user-bub: #232a35;
     --note-card: #1f232a;
+    --ok: #78d9aa;
+    --ok-soft: #143b2c;
     --code-bg: rgba(255, 255, 255, 0.08);
     --pre-bg: #0d0f13;
     --pre-fg: #e5e9f0;

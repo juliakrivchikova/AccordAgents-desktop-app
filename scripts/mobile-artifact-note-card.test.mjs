@@ -49,6 +49,8 @@ test("artifact notes show as cards on the phone", { timeout: 120_000 }, async (t
     actorIsMember: Boolean(row.querySelector(".artifact-note-actor.is-member")),
     body: row.querySelector(".artifact-note-body")?.textContent ?? null,
     icon: Boolean(row.querySelector(".artifact-note-icon svg")),
+    marks: row.querySelectorAll(".artifact-note-mark").length,
+    complete: row.querySelectorAll(".artifact-note-mark.is-complete").length,
     text: row.textContent
   })))()`);
   // The time as the page writes it, in the browser's own locale.
@@ -61,15 +63,20 @@ test("artifact notes show as cards on the phone", { timeout: 120_000 }, async (t
     { card: true, bubble: false, avatar: false, icon: true, actorIsMember: true },
     "a member's revision is a card with no avatar or bubble"
   );
-  assert.equal(revised.title, "Память участников — план v1");
-  assert.equal(revised.meta, `@taylor revised · v4 · ${await pageClock(at(32))}`);
+  // Who did what leads, a new version in a tag; the artifact and the time follow.
+  assert.equal(revised.title, "@taylor revisedv4");
+  assert.equal(revised.meta, `Память участников — план v1 · ${await pageClock(at(32))}`);
   assert.equal(revised.body, "Правило выбора: знания проекта — в репозиторий");
   assert.ok(!revised.text.includes("#artifact:"), "the link's markup is not printed");
 
   assert.equal(signed.card, true);
   assert.equal(signed.actorIsMember, false, "the User is not coloured as a member");
-  assert.equal(signed.meta, `You signed · v4 · fully approved · ${await pageClock(at(40))}`);
+  assert.equal(signed.title, "You signed · v4 · fully approved");
+  assert.equal(signed.meta, `Память участников — план v1 · ${await pageClock(at(40))}`);
   assert.equal(signed.body, null, "no note line when there is no note");
+  // The one signature it waited for is in: its mark is green.
+  assert.deepEqual({ marks: signed.marks, complete: signed.complete }, { marks: 1, complete: 1 });
+  assert.equal(revised.marks, 0, "no marks where the notes do not say how many signers there are");
 
   assert.equal(unknown.card, false, "a note the card cannot read stays a bubble");
   assert.equal(unknown.bubble, true);
@@ -95,5 +102,6 @@ test("artifact notes show as cards on the phone", { timeout: 120_000 }, async (t
   const redrawn = await rows();
   assert.equal(redrawn.length, 3, "still three note rows");
   assert.ok(redrawn.every((row) => row.card && !row.bubble), `every note row is a card and nothing else: ${JSON.stringify(redrawn)}`);
-  assert.equal(redrawn[2].meta, `@taylor archived · ${await pageClock(at(41))}`);
+  assert.equal(redrawn[2].title, "@taylor archived");
+  assert.equal(redrawn[2].meta, `Plan · ${await pageClock(at(41))}`);
 });
