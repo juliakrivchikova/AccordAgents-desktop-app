@@ -2,10 +2,9 @@
 
 A machine is a computer that runs the app without a window. Getting the runtime
 onto it, and replacing it later, is the only thing in the machines transport
-that uses SSH. Rule 1 of the signed cutover accord (artifact
-`a6f1e5ad-097e-442f-9396-f7566984a01f` v4, §1.6) allows SSH for exactly three
-things — installing and upgrading the app on a machine, bootstrapping a project
-mirror, and an emergency process stop — and for nothing else. Installing also
+that uses SSH. Which SSH paths exist, and the rule that a new one needs the
+User's approval before it is built, are in `docs/parity-requirements.md`
+("Every device talks only to the User's own server"). Installing also
 reads the identity the new runtime signs its requests with (the `identity`
 phase below), so the User's server admits the machine before it first
 connects. No chat ever travels over SSH: since 2026-10-29 the machine reads

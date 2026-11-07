@@ -204,6 +204,32 @@ How far it is built, so the two are not confused:
   on the computer; nothing here is a difference between a local and a cloud
   member.
 
+Nothing new goes around the server (the User, 2026-11-07). Every feature
+that moves data or commands between devices (the computer, the phone, the
+server, and machines: an AWS instance or any other computer set up as one)
+goes through the User's server, moving a member's session to another device
+included. A path around it (SSH, rsync or scp to a machine or to the server,
+a direct connection between devices, a third-party relay, or an outside
+service used to carry data from one device to another) needs a weighty
+reason and the User's personal approval before it is built: bring her the
+reason together with how the same thing would work through the server, and
+never build it and report it afterwards. No engineer, review or accord
+approves it. Outside services used for their own purpose (a branch and a
+pull request on GitHub, the AWS API that creates, starts, stops or resizes
+an instance, the providers' APIs) are not such a path. The direct paths that
+exist today stay as they are, and they are setup and maintenance only:
+checking a machine and reconnecting to it (enrolling this computer's SSH key
+there, the automatic recovery of its program); installing and upgrading the
+machine program and the server, the automatic upgrade included; installing
+the tools members need there and copying the git identity; copying the
+User's agent setup (rules, MCP servers, skills); signing Claude and Codex in
+there; copying a project to a machine, the first time or again after its
+copy was deleted; and Settings → AWS (the disk tools, the projects list).
+Some of them run at the start of a cloud member's turn to get its machine or
+project ready; none carries the turn itself (its prompt, events, replies,
+approvals, Stop, files or pictures), and none may be made to carry anything
+else.
+
 ## Exceptions
 
 An exception is a deliberate, user-visible divergence from Requirement 1 or 2.

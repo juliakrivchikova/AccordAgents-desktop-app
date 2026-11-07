@@ -21,6 +21,8 @@ Treat the dedicated CLI as the source of truth. Do not invent app-specific seman
 
 **AccordAgents does not manage git worktrees.** The app never creates, moves, or deletes a worktree — not locally, not on a cloud worker, not per participant, not per run. When a task needs isolation, the User asks the participant for it and the participant creates the worktree itself with ordinary git commands, exactly as it would in its dedicated CLI. Do not propose or build app-managed worktrees; do not let any app operation destroy a participant-created worktree or its uncommitted changes on its own (the User may still delete such a project copy herself in Settings, where it is marked). Recorded in `docs/parity-requirements.md`.
 
+**Nothing new goes around the User's server.** Every feature that moves data or commands between the desktop, the phone, the server and machines goes through the User's server by default. A path around it (SSH, rsync or scp, a direct connection between devices, a third-party relay, or an outside service used to carry data between devices) needs a weighty reason and the User's personal approval *before* it is built: bring her the reason and how the same thing would work through the server; never build it and report it afterwards. No engineer, review or accord approves it. The SSH paths that exist today are setup and maintenance only and must not be made to carry anything else; their list is in `docs/parity-requirements.md` ("Every device talks only to the User's own server"). Recorded in `docs/parity-requirements.md`.
+
 ## Commands
 
 Prefer the Makefile aliases; they wrap the npm scripts in `package.json`.
