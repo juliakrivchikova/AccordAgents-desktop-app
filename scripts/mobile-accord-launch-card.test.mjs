@@ -116,7 +116,7 @@ test("Accord launches show as cards on the phone", { timeout: 120_000 }, async (
     filed("n-1", 36, `@taylor created draft collection ${ref} · Drafts 0/3`),
     filed("n-2", 37, `@taylor submitted a draft to ${ref} · Submitted`),
     filed("n-other", 38, "@taylor created artifact [Notes](#artifact:art-9) · v1", null),
-    // Filed under a launch that is not on this page: it keeps its card.
+    // Filed under an Accord whose launch is not on this page: out of the chat too.
     filed("n-away", 38, "@taylor created draft collection [Elsewhere](#artifact:art-7) · Drafts 0/2", "u-not-loaded")
   ]);
   const progress = () => app.evaluate(`(() => {
@@ -139,7 +139,7 @@ test("Accord launches show as cards on the phone", { timeout: 120_000 }, async (
   const drafting = await progress();
   assert.deepEqual(drafting.stages, [["Drafts", "is-active"], ["Publish", "is-todo"], ["Signatures", "is-todo"], ["Accord reached", "is-todo"]]);
   assert.deepEqual(drafting.drafted, [["@taylor", true], ["@drew", false]]);
-  assert.equal(drafting.notes.length, 2, `only the notes of other documents are cards of their own: ${JSON.stringify(drafting.notes)}`);
+  assert.equal(drafting.notes.length, 1, `only the note of a document filed under no Accord is a card: ${JSON.stringify(drafting.notes)}`);
   assert.equal(drafting.title, "Launch shape", "the pinned card is titled with the document");
   assert.equal(drafting.inFeed, false, "the launch in the timeline stays its own compact card");
   assert.ok(drafting.aboveComposer >= 0 && drafting.aboveComposer <= 12, `pinned right above the composer: ${drafting.aboveComposer}`);
@@ -156,7 +156,7 @@ test("Accord launches show as cards on the phone", { timeout: 120_000 }, async (
   assert.deepEqual(signing.stages, [["Drafts", "is-done"], ["v1 published", "is-done"], ["Signatures", "is-active"], ["Accord reached", "is-todo"]]);
   assert.equal(signing.note, "One short round, then ship.");
   assert.equal(signing.open, false, "the phone has no document viewer, so no Open");
-  assert.equal(signing.notes.length, 2, "the unlinked note of the Accord's document folds too");
+  assert.equal(signing.notes.length, 1, "the unlinked note of the Accord's document folds too");
 
   // The head folds it into one line; × closes it for this Accord, also
   // after the chat is opened again.
@@ -168,4 +168,5 @@ test("Accord launches show as cards on the phone", { timeout: 120_000 }, async (
   await openChat(app, "conv-accord");
   await app.waitFor(`document.querySelectorAll('#message-list .message-row[data-author="you"]').length >= 3`, "the chat is open again");
   assert.equal(await app.evaluate(`document.getElementById("accord-dock").hidden`), true, "closed stays closed");
+  assert.equal((await progress()).notes.length, 1, "closed, the Accord's notes stay out of the chat");
 });

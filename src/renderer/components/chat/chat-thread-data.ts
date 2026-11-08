@@ -5,18 +5,17 @@ import {
   chatParticipantRequestReplyRootMap
 } from "../../../shared/chatParticipantRequestThreads";
 import { accordFoldedMessageIds } from "../../../shared/accordProgress";
-import { closedAccordDockLaunches } from "./accord-dock-store";
 import { turnFinishedNoteOf } from "../../../shared/turnFinishedNoteSource";
 import type { ChatParticipantRequestBatch, Conversation } from "../../../shared/types";
 
 const SHOW_CHAT_SYSTEM_MESSAGES = import.meta.env.VITE_ACCORD_AGENTS_SHOW_SYSTEM_MESSAGES === "1";
 
 /** A message the chat draws no row for, on the timeline or in a thread. A
- *  note of the document the pinned Accord card shows is one, while the card is
- *  pinned: the card shows that step (accordProgress.ts). */
+ *  note of an Accord's document is one: its steps are on the Accord's card or
+ *  in the document (accordProgress.ts). */
 export function isChatMessageHiddenInChat(conversation: Pick<Conversation, "messages">, message: Conversation["messages"][number]): boolean {
   return chatMessageHiddenFromTimeline(conversation, message, { showSystemMessages: SHOW_CHAT_SYSTEM_MESSAGES }) ||
-    (message.role === "system" && accordFoldedMessageIds(conversation.messages, closedAccordDockLaunches()).has(message.id));
+    (message.role === "system" && accordFoldedMessageIds(conversation.messages).has(message.id));
 }
 
 /** A message drawn as a row of the chat's main timeline: shown, and not a thread reply. */

@@ -4,12 +4,12 @@ import { ARTIFACT_NOTE_MESSAGE_SOURCE } from "./artifacts";
 
 // One card per Accord (the User, 2026-11-08): the launch card shows where the
 // Accord stands, worked out from the artifact notes of its document, and
-// those notes leave the timeline. The app files a note under the launch
+// the notes of every Accord's document leave the timeline. The app files a note under the launch
 // (metadata.accordLaunchMessageId) when the facilitator's document records
 // the launch it was started for; that names the document, and every note of
 // that document counts, also one written without the link (a device on an
-// older version, a copy that failed to update). Only the newest document
-// filed under a launch is the card's; another one keeps its notes as cards.
+// older version, a copy that failed to update). The card pinned above the
+// composer shows the chat's newest Accord; the others are in their documents.
 // The same reading on the desktop and the phone, over the same notes, so the
 // two cannot drift apart. Accords from before the link keep their notes.
 
@@ -78,16 +78,6 @@ export function dockedAccordFrom(launches: AccordLaunchInput[], notes: AccordNot
   if (!newest) return undefined;
   const progress = accordProgressFromNotes(newest.id, newest.card, notes);
   return progress ? { launchId: newest.id, card: newest.card, progress } : undefined;
-}
-
-/** Keys of the notes of one document, the one the pinned card shows; also
- *  notes written without the link. */
-export function accordDocumentNoteKeys(artifactId: string, notes: AccordFoldInput[]): Set<string> {
-  const keys = new Set<string>();
-  for (const input of notes) {
-    if (parseArtifactNoteCard(input.content)?.artifactId === artifactId) keys.add(input.key);
-  }
-  return keys;
 }
 
 const VERSION = /^v(\d+)$/;
@@ -262,20 +252,17 @@ export interface AccordFoldInput extends AccordNoteInput {
   key: string;
 }
 
-/** Keys of the notes an Accord card on the timeline shows instead: the notes
- *  of each document a card in `launchIds` shows. */
-export function accordFoldedNoteKeys(launchIds: ReadonlySet<string>, notes: AccordFoldInput[]): Set<string> {
-  const folded = new Set<string>();
-  if (launchIds.size === 0) return folded;
+/** Keys of the notes that leave the timeline: every note of a document
+ *  filed under an Accord (the User, 2026-11-08: pinned, closed or older, an
+ *  Accord's steps are on its card or in its document, never in the chat),
+ *  also one written without the link. */
+export function accordFoldedNoteKeys(notes: AccordFoldInput[]): Set<string> {
   const parsed = notes.flatMap((input) => {
     const note = parseArtifactNoteCard(input.content);
-    return note ? [{ key: input.key, note, ...(typeof input.accordLaunchMessageId === "string" && input.accordLaunchMessageId ? { launchId: input.accordLaunchMessageId } : {}) }] : [];
+    return note ? [{ key: input.key, artifactId: note.artifactId, linked: typeof input.accordLaunchMessageId === "string" && Boolean(input.accordLaunchMessageId) }] : [];
   });
-  const shown = new Set([...documentsByLaunch(parsed)].filter(([launchId]) => launchIds.has(launchId)).map(([, artifactId]) => artifactId));
-  for (const { key, note } of parsed) {
-    if (shown.has(note.artifactId)) folded.add(key);
-  }
-  return folded;
+  const documents = new Set(parsed.filter((note) => note.linked).map((note) => note.artifactId));
+  return new Set(parsed.filter((note) => documents.has(note.artifactId)).map((note) => note.key));
 }
 
 type FoldMessage = {
@@ -310,23 +297,19 @@ export function dockedAccordOfMessages(messages: readonly FoldMessage[]): Docked
   return notes.some((note) => note.accordLaunchMessageId) ? dockedAccordFrom(launches, notes) : undefined;
 }
 
-// Worked out once per message list (and closed set), not once per message asked about.
-const foldedByMessages = new WeakMap<readonly FoldMessage[], { closedKey: string; ids: Set<string> }>();
+// Worked out once per message list, not once per message asked about.
+const foldedByMessages = new WeakMap<readonly FoldMessage[], Set<string>>();
 
-/** Ids of a chat's messages the pinned Accord card shows instead of their own
- *  row: the notes of its document, while it is pinned. Closed (`closed` names
- *  launches whose card the User closed), its notes are back in the chat. */
-export function accordFoldedMessageIds(messages: readonly FoldMessage[], closed: ReadonlySet<string> = new Set()): Set<string> {
-  const closedKey = [...closed].join(",");
-  const cached = foldedByMessages.get(messages);
-  if (cached && cached.closedKey === closedKey) return cached.ids;
-  const docked = dockedAccordOfMessages(messages);
-  const ids = docked && !closed.has(docked.launchId)
-    ? accordDocumentNoteKeys(docked.progress.artifactId, messages
+/** Ids of a chat's loaded messages that leave the timeline: the notes of
+ *  every Accord's document (accordFoldedNoteKeys). */
+export function accordFoldedMessageIds(messages: readonly FoldMessage[]): Set<string> {
+  let ids = foldedByMessages.get(messages);
+  if (!ids) {
+    ids = accordFoldedNoteKeys(messages
       .filter((message) => message.role === "system" && message.metadata?.appMessageSource === ARTIFACT_NOTE_MESSAGE_SOURCE)
-      .map((message) => ({ key: message.id, content: message.content })))
-    : new Set<string>();
-  foldedByMessages.set(messages, { closedKey, ids });
+      .map((message) => ({ key: message.id, content: message.content, accordLaunchMessageId: message.metadata?.accordLaunchMessageId })));
+    foldedByMessages.set(messages, ids);
+  }
   return ids;
 }
 

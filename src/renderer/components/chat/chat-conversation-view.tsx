@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { ArrowDown } from "lucide-react";
 
@@ -39,7 +39,6 @@ import { ArtifactsContext } from "../artifacts/artifacts-context";
 import { ArtifactNoteProgressContext } from "./chat-artifact-note-card";
 import { artifactNoteProgressById } from "../../../shared/artifactNoteProgress";
 import { ChatAccordDockSlot } from "./chat-accord-dock";
-import { accordDockVersion, subscribeAccordDock } from "./accord-dock-store";
 import { useDockedAccord } from "./use-accord-progress";
 import { ARTIFACT_NOTE_MESSAGE_SOURCE } from "../../../shared/artifacts";
 import { AttachmentPanelContext } from "../files/file-panel-context";
@@ -100,10 +99,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     participantsById,
     props.participantStatusById
   ]);
-  // Closing the pinned Accord brings its notes back into the chat.
-  const accordDock = useSyncExternalStore(subscribeAccordDock, accordDockVersion);
-  const topLevelMessages = useMemo(() => chatTopLevelMessages(props.conversation), [props.conversation.messages, accordDock]);
-  const threadSummaries = useMemo(() => chatThreadSummaryMap(props.conversation), [props.conversation.messages, accordDock]);
+  const topLevelMessages = useMemo(() => chatTopLevelMessages(props.conversation), [props.conversation.messages]);
+  const threadSummaries = useMemo(() => chatThreadSummaryMap(props.conversation), [props.conversation.messages]);
   const inferredParticipantRequestsByTrigger = useMemo(() => chatInferredParticipantRequestBatchesByTrigger(props.conversation), [props.conversation.messages]);
   const continuedMentionRequestIds = useMemo(() => chatContinuedMentionRequestIds(props.conversation), [props.conversation.messages]);
   const contextUsageByParticipant = useMemo(() => chatContextUsageByParticipant(props.conversation), [props.conversation.metadata]);
