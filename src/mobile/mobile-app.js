@@ -545,7 +545,9 @@
       attachmentIds(left) === attachmentIds(right) &&
       turns(left) === turns(right) &&
       // A note an older shell stored as a plain row becomes the card.
-      ((left.finishedNote && left.finishedNote.messageId) || "") === ((right.finishedNote && right.finishedNote.messageId) || "");
+      ((left.finishedNote && left.finishedNote.messageId) || "") === ((right.finishedNote && right.finishedNote.messageId) || "") &&
+      (left.accordLaunchMessageId || "") === (right.accordLaunchMessageId || "") &&
+      JSON.stringify(left.accordLaunch || null) === JSON.stringify(right.accordLaunch || null);
   }
 
   function sameMobileEvent(left, right) {
@@ -2397,7 +2399,7 @@
     });
     const keys = [CHAT_LIST_KEY, CHAT_LIST_AT_KEY, CONTROL_CARDS_KEY, CONTROL_CARD_SENT_KEY, UNREAD_KEY, TIMELINE_PAGES_KEY,
       ACTIVE_CONVERSATION_KEY, OPEN_THREAD_KEY, OPEN_STREAM_KEY, STARTED_CHATS_KEY, VIEWED_AT_KEY, LIST_ACTIVITY_SEEN_KEY,
-      ACTIVITY_CLEARED_KEY, TERMINAL_RUNS_KEY, SYNC_WAIT_KEY, SEND_LOG_SEEN_KEY, SETTLE_TURNS_KEY];
+      ACTIVITY_CLEARED_KEY, TERMINAL_RUNS_KEY, SYNC_WAIT_KEY, SEND_LOG_SEEN_KEY, SETTLE_TURNS_KEY, ACCORD_DOCK_STORAGE_KEY];
     for (const key of keys) {
       try {
         localStorage.removeItem(key);
@@ -5194,6 +5196,13 @@
         ...(typeof event.sourceMessageId === "string" && event.sourceMessageId ? { sourceMessageId: event.sourceMessageId } : {}),
         // A turn-finished note: the reply it leads back to.
         ...(role === "system" ? finishedNoteOfEvent(event) : {}),
+        // An artifact note filed under an Accord: the launch whose card shows it.
+        ...(role === "system" && typeof event.accordLaunchMessageId === "string" && event.accordLaunchMessageId
+          ? { accordLaunchMessageId: event.accordLaunchMessageId } : {}),
+        // Who leads that Accord and who is in it: its card without its launch.
+        ...(role === "system" && event.accordLaunch && typeof event.accordLaunch.facilitator === "string" && Array.isArray(event.accordLaunch.members)
+          ? { accordLaunch: { facilitator: event.accordLaunch.facilitator, members: event.accordLaunch.members.filter(function (member) { return typeof member === "string"; }) } }
+          : {}),
         // The User's message: where each turn it asked for stands.
         ...(role === "you" && Array.isArray(event.turns) ? { turns: event.turns.filter(function (turn) {
           return turn && typeof turn.participantId === "string" && typeof turn.runId === "string" && typeof turn.state === "string";
@@ -8736,6 +8745,8 @@
         attachments: entry.attachments,
         author: entry.role === "you" ? "you" : entry.role === "system" ? "system" : "agent",
         ...(entry.finishedNote ? { finishedNote: entry.finishedNote } : {}),
+        ...(entry.accordLaunchMessageId ? { accordLaunchMessageId: entry.accordLaunchMessageId } : {}),
+        ...(entry.accordLaunch ? { accordLaunch: entry.accordLaunch } : {}),
         // The desktop publishes the in-progress row the moment it accepts the
         // message, before routing has picked anyone, and can only guess a
         // handle from an explicit @mention in the text. With no mention there
@@ -8779,6 +8790,12 @@
     rows = dedupeRenderRowsByKey(rows).sort(function (left, right) {
       return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
     });
+    // One card per Accord: its progress from the notes filed under its
+    // launch, and those notes leave the timeline (accordProgress.ts).
+    renderAccordProgress = accordProgressFor(rows);
+    rows = rows.filter(function (row) { return !accordFoldedRow(row); });
+    // The desktop pins it above the chat's own composer only, not a thread's.
+    renderAccordDock(activeId, openThreadRootId() ? null : renderAccordProgress.docked);
     renderStreamView(rows, connectionStatus);
     const openThread = openThreadRootId();
     const grouped = groupRowsIntoThreads(rows, openThread);
@@ -8838,6 +8855,7 @@
     }
     renderCardIndex = null;
     renderNoteProgress = null;
+    renderAccordProgress = null;
     lastScrolledConversationId = activeId;
     if (focusedMessage && focusedMessage.conversationId === activeId) {
       // A row redrawn for a change in it keeps the mark.
@@ -9572,6 +9590,174 @@
     return wrap;
   }
 
+  function accordStageElement(entry, stage) {
+    const item = document.createElement("li");
+    item.className = "accord-progress-stage is-" + stage.state;
+    const mark = document.createElement("span");
+    mark.className = "accord-progress-mark is-" + stage.state;
+    mark.setAttribute("aria-hidden", "true");
+    if (stage.state === "done") mark.append(lineIcon(["M20 6 9 17l-5-5"], 12));
+    const text = document.createElement("div");
+    text.className = "accord-progress-stage-text";
+    const name = document.createElement("span");
+    name.className = "accord-progress-label";
+    name.textContent = stage.label;
+    text.append(name);
+    if (stage.detail) {
+      const line = document.createElement("span");
+      line.className = "accord-progress-detail";
+      line.textContent = stage.detail;
+      text.append(line);
+    }
+    if (stage.members.length > 0) {
+      const list = document.createElement("span");
+      list.className = "accord-progress-members";
+      for (const member of stage.members) list.append(accordProgressMemberElement(entry, member));
+      text.append(list);
+    }
+    item.append(mark, text);
+    return item;
+  }
+
+  function accordProgressMemberElement(entry, member) {
+    const chip = accordMemberElement(entry, member.handle);
+    chip.classList.add("accord-progress-member");
+    if (member.given) chip.classList.add("is-given");
+    else if (member.waiting) chip.classList.add("is-waiting");
+    if (member.given) {
+      const check = lineIcon(["M20 6 9 17l-5-5"], 12);
+      check.classList.add("accord-progress-member-check");
+      chip.append(check);
+    }
+    return chip;
+  }
+
+  // The chat's newest Accord, pinned above the composer as on the desktop
+  // (the User, 2026-11-08): it stays until she closes it or a new Accord
+  // starts, and its head folds it into one line. Both are this phone's own
+  // choice, kept per chat.
+  const ACCORD_DOCK_STORAGE_KEY = "accordagents.accordDock.v1";
+
+  function readAccordDockState() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(ACCORD_DOCK_STORAGE_KEY) || "{}");
+      return {
+        closed: parsed && typeof parsed.closed === "object" && parsed.closed ? parsed.closed : {},
+        folded: parsed && typeof parsed.folded === "object" && parsed.folded ? parsed.folded : {}
+      };
+    } catch (error) {
+      return { closed: {}, folded: {} };
+    }
+  }
+
+  function setAccordDockChoice(key, conversationId, launchId, on) {
+    const state = readAccordDockState();
+    if (on) state[key][conversationId] = launchId;
+    else delete state[key][conversationId];
+    try {
+      localStorage.setItem(ACCORD_DOCK_STORAGE_KEY, JSON.stringify(state));
+    } catch (error) {
+      // A full or blocked storage only forgets the choice after a reload.
+    }
+  }
+
+  function renderAccordDock(conversationId, docked) {
+    const dock = document.getElementById("accord-dock");
+    if (!dock) return;
+    const state = readAccordDockState();
+    const shown = docked && state.closed[conversationId] !== docked.launchId ? docked : null;
+    const folded = Boolean(shown) && state.folded[conversationId] === shown.launchId;
+    const signature = shown ? JSON.stringify([conversationId, shown.launchId, shown.progress, folded, accordLaunchAvatarSignature({ conversationId: conversationId }, shown.card)]) : "";
+    if (dock.dataset.signature === signature) return;
+    dock.dataset.signature = signature;
+    // The timeline gets shorter or longer: a reader at the latest message stays there.
+    keepingReaderAtLatest(function () {
+      dock.replaceChildren();
+      dock.hidden = !shown;
+      if (shown) dock.append(accordDockElement(conversationId, shown, folded));
+    });
+  }
+
+  function accordDockElement(conversationId, docked, folded) {
+    const shared = mobileSharedRules();
+    const progress = docked.progress;
+    const entry = { conversationId: conversationId };
+    const card = document.createElement("section");
+    card.className = "accord-dock-card" + (progress.reached ? " is-reached" : "") + (folded ? " is-folded" : "");
+    card.setAttribute("aria-label", "Accord");
+    const head = document.createElement("div");
+    head.className = "accord-dock-head";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "accord-dock-toggle";
+    toggle.setAttribute("aria-expanded", String(!folded));
+    toggle.addEventListener("click", function () {
+      setAccordDockChoice("folded", conversationId, docked.launchId, !folded);
+      renderAccordDock(conversationId, docked);
+    });
+    const icon = document.createElement("span");
+    icon.className = "accord-dock-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.append(accordIcon(folded ? 16 : 20));
+    const heading = document.createElement("span");
+    heading.className = "accord-dock-heading";
+    const title = document.createElement("span");
+    title.className = "accord-dock-title";
+    title.textContent = progress.title;
+    heading.append(title);
+    if (!folded) {
+      const meta = document.createElement("span");
+      meta.className = "accord-dock-meta";
+      const kind = document.createElement("span");
+      kind.className = "accord-dock-kind";
+      kind.textContent = "Accord";
+      meta.append(kind, document.createTextNode(" · led by @" + docked.card.facilitator + " · with " +
+        docked.card.members.map(function (handle) { return "@" + handle; }).join(", ")));
+      heading.append(meta);
+    }
+    const status = document.createElement("span");
+    status.className = "accord-progress-status";
+    status.textContent = shared.accordProgressStatus(progress);
+    toggle.append(icon, heading, status);
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "accord-dock-close";
+    close.setAttribute("aria-label", "Close");
+    close.append(lineIcon(["M18 6 6 18", "m6 6 12 12"], 16));
+    close.addEventListener("click", function () {
+      setAccordDockChoice("closed", conversationId, docked.launchId, true);
+      renderAccordDock(conversationId, docked);
+      void render();
+    });
+    head.append(toggle, close);
+    card.append(head);
+    if (folded) return card;
+    const stages = document.createElement("ol");
+    stages.className = "accord-progress-stages";
+    stages.setAttribute("aria-label", "Accord progress");
+    for (const stage of shared.accordProgressStages(progress)) stages.append(accordStageElement(entry, stage));
+    card.append(stages);
+    const version = progress.version;
+    if (version) {
+      // The phone has no artifact viewer, so it offers no Open (as its
+      // artifact notes open nothing).
+      const note = document.createElement("div");
+      note.className = "accord-progress-note";
+      const noteHead = document.createElement("span");
+      noteHead.className = "accord-progress-note-head";
+      noteHead.textContent = shared.accordProgressNoteHead(version);
+      note.append(noteHead);
+      if (version.note) {
+        const body = document.createElement("span");
+        body.className = "accord-progress-note-body";
+        body.textContent = version.note;
+        note.append(body);
+      }
+      card.append(note);
+    }
+    return card;
+  }
+
   /** The reply a turn-finished note leads back to; none for any other row. */
   function finishedNoteOfEntry(entry) {
     return entry && entry.author === "system" && !entry.scaffolding && entry.finishedNote && entry.finishedNote.messageId
@@ -9744,6 +9930,52 @@
   function noteProgressOf(entry) {
     return renderNoteProgress ? renderNoteProgress.get(entry.rowKey || entry.id) : undefined;
   }
+
+  // Each Accord's progress for the rows being drawn, by launch message id,
+  // and the launches drawn as cards (their notes are folded into them).
+  let renderAccordProgress = null;
+
+  function accordLaunchIdOf(row) {
+    return accordLaunchCardForEntry(row) ? (row.messageId || row.sourceId) : undefined;
+  }
+
+  function accordProgressFor(rows) {
+    const shared = mobileSharedRules();
+    const empty = { folded: new Set(), docked: null };
+    if (!shared || typeof shared.dockedAccordFrom !== "function") return empty;
+    const notes = rows.filter(function (row) {
+      return row.author === "system" && Boolean(artifactNoteCardForEntry(row));
+    }).map(function (row) {
+      return {
+        key: row.rowKey || row.id, content: row.content, createdAt: row.createdAt,
+        accordLaunchMessageId: row.accordLaunchMessageId, accordLaunch: row.accordLaunch
+      };
+    });
+    if (!notes.some(function (note) { return note.accordLaunchMessageId; })) return empty;
+    const launches = [];
+    for (const row of rows) {
+      const id = accordLaunchIdOf(row);
+      if (id) launches.push({ id: id, card: accordLaunchCardForEntry(row), createdAt: row.createdAt });
+    }
+    const docked = shared.dockedAccordFrom(launches, notes);
+    return {
+      folded: docked ? accordFoldedKeys(docked, notes) : new Set(),
+      docked: docked
+    };
+  }
+
+  /** The notes the pinned card shows instead of their own cards: its
+   *  document's, while the card is pinned (closed, they are back in the chat). */
+  function accordFoldedKeys(docked, notes) {
+    const conversationId = selectedConversationId();
+    if (readAccordDockState().closed[conversationId] === docked.launchId) return new Set();
+    return mobileSharedRules().accordDocumentNoteKeys(docked.progress.artifactId, notes);
+  }
+
+  function accordFoldedRow(row) {
+    return Boolean(renderAccordProgress) && renderAccordProgress.folded.has(row.rowKey || row.id);
+  }
+
 
   function cardIndexFor(conversationId) {
     // Only the render that built it may use it: a render cut short cannot

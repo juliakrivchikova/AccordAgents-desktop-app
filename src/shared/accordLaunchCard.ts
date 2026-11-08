@@ -63,3 +63,17 @@ export function accordLaunchTitleAndBody(subject: string): { title: string; body
   const body = rest.join("\n").trim();
   return body ? { title: first.trim(), body } : { title: first.trim() };
 }
+
+/** The card for a message that starts an Accord; anything else keeps the
+ *  message row. A message carrying pictures or file references is never one
+ *  the app wrote, and the card would hide them, so it stays a row. */
+export function accordLaunchCardForMessage(message: {
+  role: string;
+  content: unknown;
+  metadata?: { imageAttachments?: unknown[]; repoFileMentions?: unknown[] };
+}): AccordLaunchCard | undefined {
+  if (message.role !== "user" || (message.metadata?.imageAttachments?.length ?? 0) > 0 || (message.metadata?.repoFileMentions?.length ?? 0) > 0) {
+    return undefined;
+  }
+  return parseAccordLaunchCard(message.content);
+}

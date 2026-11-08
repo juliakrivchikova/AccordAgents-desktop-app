@@ -5183,6 +5183,346 @@ button.composer-active-run-row-main:focus-visible {
   white-space: pre-wrap;
 }
 
+/* The chat's newest Accord, pinned between the timeline and the composer:
+   a framed card as the mockup has it, its head folding it into one line. */
+.chat-accord-dock-wrap {
+  position: relative;
+  z-index: 20;
+  padding: 8px 28px 0;
+  background: var(--app-surface);
+}
+
+/* A closed card leaves no band above the composer. */
+.chat-accord-dock-wrap:not(:has(.chat-accord-dock)) {
+  padding-top: 0;
+}
+
+/* The jump to the latest message keeps to the timeline, above the card. */
+.chat-accord-dock-wrap > .chat-jump-to-latest {
+  bottom: calc(100% + 12px);
+}
+
+.chat-accord-dock {
+  overflow: hidden;
+  max-height: min(40vh, 360px);
+  overflow-y: auto;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 14px;
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.chat-accord-dock-head {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px 0 0;
+  background: var(--app-surface);
+}
+
+.chat-accord-dock:not(.is-folded) .chat-accord-dock-head {
+  border-bottom: 1px solid var(--app-border);
+}
+
+.chat-accord-dock-toggle {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 6px 11px 12px;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.chat-accord-dock.is-folded .chat-accord-dock-toggle {
+  padding-block: 7px;
+}
+
+.chat-accord-dock-toggle:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: -2px;
+}
+
+.chat-accord-dock-icon {
+  display: flex;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--chat-artifact-note-bg);
+}
+
+.chat-accord-dock.is-folded .chat-accord-dock-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+.chat-accord-dock-glyph {
+  width: 20px;
+  height: 20px;
+}
+
+.chat-accord-dock.is-folded .chat-accord-dock-glyph {
+  width: 16px;
+  height: 16px;
+}
+
+.chat-accord-dock-heading {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.chat-accord-dock-title {
+  overflow: hidden;
+  color: var(--app-text-strong);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-accord-dock-meta {
+  overflow: hidden;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-accord-dock-kind {
+  color: var(--app-text-strong);
+  font-weight: 500;
+}
+
+.chat-accord-dock-chevron {
+  flex: none;
+  color: var(--app-text-secondary);
+  transition: transform 150ms ease;
+}
+
+.chat-accord-dock.is-folded .chat-accord-dock-chevron {
+  transform: rotate(-90deg);
+}
+
+.chat-accord-dock-close {
+  flex: none;
+}
+
+/* Where the Accord stands: one state by the title, then its stages. */
+.chat-accord-progress-status {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.chat-accord-dock.is-reached .chat-accord-progress-status {
+  background: var(--app-success-soft);
+  color: var(--app-success);
+}
+
+.chat-accord-progress-stages {
+  margin: 0;
+  padding: 6px 16px 8px 22px;
+  list-style: none;
+}
+
+.chat-accord-progress-stage {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 0;
+}
+
+.chat-accord-progress-mark {
+  display: inline-flex;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  margin-top: 1px;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid var(--app-border-strong);
+  border-radius: 50%;
+}
+
+.chat-accord-progress-mark.is-active {
+  border: 2px dashed var(--app-accent);
+  animation: chat-accord-progress-spin 2.4s linear infinite;
+}
+
+.chat-accord-progress-mark.is-done {
+  border: 0;
+  background: var(--app-accent);
+  color: var(--app-surface);
+}
+
+.chat-accord-dock.is-reached .chat-accord-progress-mark.is-done {
+  background: var(--app-success);
+}
+
+@keyframes chat-accord-progress-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-accord-progress-mark.is-active { animation: none; }
+}
+
+.chat-accord-progress-stage-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.chat-accord-progress-label {
+  color: var(--app-text-strong);
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.chat-accord-progress-stage.is-todo .chat-accord-progress-label {
+  color: var(--app-text-secondary);
+  font-weight: 400;
+}
+
+.chat-accord-progress-detail {
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.chat-accord-progress-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 5px;
+}
+
+.chat-accord-progress-members:empty {
+  display: none;
+}
+
+.chat-accord-progress-member {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px 2px 3px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  color: var(--app-text);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.chat-accord-progress-member.is-waiting:not(.is-given) {
+  border-style: dashed;
+  border-color: var(--app-accent);
+}
+
+.chat-accord-progress-avatar-slot {
+  display: inline-flex;
+  flex: none;
+}
+
+.chat-accord-progress-avatar {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  font-size: 8px;
+}
+
+.chat-accord-progress-member-check {
+  margin-left: -1px;
+  color: var(--app-accent);
+}
+
+.chat-accord-dock.is-reached .chat-accord-progress-member-check {
+  color: var(--app-success);
+}
+
+/* The current version's note, and Open for the whole document: a note is
+   meant to be short; a long one stops after three lines. */
+.chat-accord-progress-note {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 16px 12px;
+  border-top: 1px solid var(--app-border);
+  background: var(--chat-artifact-note-bg);
+}
+
+.chat-accord-progress-note-text {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-accord-progress-note-head {
+  color: var(--app-text-secondary);
+  font-size: 12px;
+}
+
+.chat-accord-progress-note-body {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  font-size: 13.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* Black in the light theme, white in the dark one, as the primary buttons. */
+.chat-accord-progress-open {
+  flex: none;
+  padding: 7px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--app-text-strong);
+  color: var(--app-surface);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.chat-accord-progress-open:hover {
+  opacity: 0.86;
+}
+
+.chat-accord-progress-open:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 2px;
+}
+
 /* Restarting a member with background work asks first, inside its row. */
 .chat-participant-restart-confirm {
   display: flex;

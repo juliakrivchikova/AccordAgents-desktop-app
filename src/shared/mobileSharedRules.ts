@@ -40,3 +40,8 @@ export { artifactNoteProgressById } from "./artifactNoteProgress";
 // The message that starts an Accord becomes a card on the timeline: the same
 // reading of the launch prompt on the desktop and the phone.
 export { accordLaunchTitleAndBody, parseAccordLaunchCard } from "./accordLaunchCard";
+// One card per Accord: its progress from the notes filed under its launch,
+// and which notes the card shows instead, the same on the desktop and the phone.
+export {
+  accordDocumentNoteKeys, accordProgressNoteHead, accordProgressStages, accordProgressStatus, dockedAccordFrom
+} from "./accordProgress";

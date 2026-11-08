@@ -324,7 +324,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       const opened = await storageService.openConversation(conversationId, 1);
       return opened?.conversation.kind === "chat" ? artifactMembersForConversation(opened.conversation) : undefined;
     },
-    postNote: (conversationId, eventId, content) => chatService.postArtifactChatNote(conversationId, eventId, content),
+    postNote: (conversationId, eventId, content, links) => chatService.postArtifactChatNote(conversationId, eventId, content, links),
     hasChat: async (conversationId) => (await storageService.openConversation(conversationId, 1))?.conversation.kind === "chat",
     logger: log
   });

@@ -349,7 +349,8 @@ export class ArtifactService {
           draftRosterRevision: 0,
           headVersion: 0,
           createdAt: now,
-          updatedAt: now
+          updatedAt: now,
+          ...(isOriginMessageId(request.originMessageId) ? { originMessageId: request.originMessageId } : {})
         };
         const operation = this.operation(
           request.conversationId,
@@ -1543,7 +1544,7 @@ export class ArtifactService {
         artifact,
         actor,
         "published",
-        `${artifactMemberLabel(actor)} published ${artifactReference(artifact.id, artifact.name)} · v1`,
+        `${artifactMemberLabel(actor)} published ${artifactReference(artifact.id, artifact.name)} · v1${note ? ` — ${note}` : ""}`,
         now
       );
       const storedValue: PublishedArtifactReadResult = {
@@ -1914,6 +1915,7 @@ export class ArtifactService {
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
       archivedAt: record.archivedAt,
+      ...(record.originMessageId ? { originMessageId: record.originMessageId } : {}),
       approval: computeArtifactApproval(
         record.requiredSigners,
         headSignatures.map((signature) => ({ signer: signature.signer, signedAt: signature.signedAt }))
@@ -1997,6 +1999,11 @@ function normalizeLabels(raw: string[] | undefined): string[] | string {
     return `At most ${ARTIFACT_MAX_LABELS} labels are allowed.`;
   }
   return labels;
+}
+
+/** A message id the app passed with a collection, when it is one. */
+function isOriginMessageId(raw: unknown): raw is string {
+  return typeof raw === "string" && raw.length > 0 && raw.length <= 256 && !/\s/.test(raw);
 }
 
 function normalizeNote(raw: unknown): string | undefined {

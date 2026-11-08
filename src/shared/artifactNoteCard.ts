@@ -70,12 +70,14 @@ const VERB_BY_ACTION: Record<ArtifactNoteAction, string> = {
 /** What follows the reference, per action; anything else is not a note this parser knows. */
 function noteTail(action: ArtifactNoteAction, tail: string): Pick<ArtifactNoteCard, "details" | "note"> | undefined {
   switch (action) {
+    // Since 2026-11-08 a publication carries its version's note, as a
+    // revision does.
+    case "published":
     case "revised": {
       const match = /^ · (v\d+)(?: — (.+))?$/s.exec(tail);
       return match ? { details: [match[1]!], ...(match[2]?.trim() ? { note: match[2].trim() } : {}) } : undefined;
     }
     case "created":
-    case "published":
     case "created-collection": {
       const match = /^ · (v\d+|Drafts \d+\/\d+)$/.exec(tail);
       return match ? { details: [match[1]!] } : undefined;

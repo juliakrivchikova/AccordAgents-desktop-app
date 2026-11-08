@@ -369,3 +369,23 @@ test("a turn-finished note travels to the phone with the reply it leads to, and 
   assert.equal(mobileWhoLabel(note), "taylor:");
   assert.equal(mobileWhoLabel({ ...note, metadata: { ...note.metadata, turnFinishedNote: { ...note.metadata.turnFinishedNote, participantLabel: "" } } }), "system:");
 });
+
+test("an artifact note filed under an Accord travels to the phone with its launch, so the phone folds it into the Accord's card", () => {
+  const conversation: Conversation = {
+    id: "accord-chat", kind: "chat", title: "Accord", createdAt: "2026-11-08T10:00:00Z", updatedAt: "2026-11-08T10:02:00Z", findings: [], metadata: {},
+    messages: [
+      {
+        id: "filed", role: "system", status: "done", createdAt: "2026-11-08T10:01:00Z",
+        content: "@fable created draft collection [Plan](#artifact:art-1) · Drafts 0/2",
+        metadata: { appMessageSource: "app_artifact_note", artifactEventId: "event-1", accordLaunchMessageId: "launch-1" }
+      },
+      {
+        id: "older", role: "system", status: "done", createdAt: "2026-11-08T10:02:00Z",
+        content: "@fable created artifact [Notes](#artifact:art-2) · v1",
+        metadata: { appMessageSource: "app_artifact_note", artifactEventId: "event-2" }
+      }
+    ]
+  };
+  const events = timelineEventsFromSnapshot(conversation);
+  assert.deepEqual(events.map((event) => [event.id, event.accordLaunchMessageId]), [["filed", "launch-1"], ["older", undefined]]);
+});

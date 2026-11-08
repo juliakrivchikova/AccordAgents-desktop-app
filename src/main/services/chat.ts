@@ -170,6 +170,8 @@ import type {
   RemoteRunSyncInfo
 } from "../../shared/types";
 import { isAutoWatchStableMessage, isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
+import { accordLaunchCardForMessage } from "../../shared/accordLaunchCard";
+import type { ArtifactNoteLinks } from "./artifactClient";
 import { turnFinishedNoteFor } from "../../shared/turnFinishedNote";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
 import { isMachineCompactionLine } from "../../shared/machineLink";
@@ -6654,12 +6656,50 @@ export class ChatService {
     return normalizeArtifactMember(participant.handle);
   }
 
+  // The Accord launch a member's turn runs for, when that member is its
+  // facilitator: the User's launch message at the root of the turn's thread
+  // (or the turn's own trigger). Worked out by the app from its own records,
+  // so a member cannot tie a document to an Accord it does not lead.
+  async accordLaunchMessageIdForActor(actor: ChatAppMcpActor): Promise<string | undefined> {
+    const conversation = await this.requireChat(actor.conversationId);
+    const participant = this.chatParticipants(conversation).find((candidate) => candidate.id === actor.participantId);
+    if (!participant) {
+      return undefined;
+    }
+    const handle = normalizeArtifactMember(participant.handle);
+    // Nearest first: a second Accord started inside another's thread is its own.
+    const candidates = [actor.triggerMessageId, actor.triggerThreadId, actor.triggerChatThreadRootId]
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    for (const messageId of Array.from(new Set(candidates))) {
+      const message = conversation.messages.find((candidate) => candidate.id === messageId)
+        ?? await this.storage.conversationMessageById(actor.conversationId, messageId);
+      // Read as the chat reads a launch, so a document is filed only under a
+      // message the chat draws as an Accord card.
+      const card = message ? accordLaunchCardForMessage(message) : undefined;
+      if (card && normalizeArtifactMember(card.facilitator) === handle) {
+        return messageId;
+      }
+    }
+    return undefined;
+  }
+
   // Append a brief artifact note ("@gera revised [Plan](#artifact:id) · v3") to
   // the chat timeline. Notes are system messages flagged with
   // ARTIFACT_NOTE_MESSAGE_SOURCE so the timeline keeps them visible; they carry
   // a link token, never artifact bodies.
-  async postArtifactChatNote(conversationId: string, eventId: string, content: string): Promise<void> {
+  async postArtifactChatNote(
+    conversationId: string,
+    eventId: string,
+    content: string,
+    links?: ArtifactNoteLinks
+  ): Promise<void> {
     const conversation = await this.requireChat(conversationId);
+    const launchId = links?.originMessageId;
+    const launch = launchId
+      ? accordLaunchCardForMessage(conversation.messages.find((message) => message.id === launchId)
+        ?? await this.storage.conversationMessageById(conversationId, launchId).catch(() => undefined)
+        ?? { role: "", content: "" })
+      : undefined;
     await this.withChatMutation(conversation, async () => {
       if (conversation.messages.some((message) => message.metadata?.artifactEventId === eventId)) {
         return;
@@ -6672,7 +6712,11 @@ export class ChatService {
         status: "done",
         metadata: {
           appMessageSource: ARTIFACT_NOTE_MESSAGE_SOURCE,
-          artifactEventId: eventId
+          artifactEventId: eventId,
+          // Only an Accord's launch is recorded as a document's origin (see
+          // accordLaunchMessageIdForActor), so the note is filed under it.
+          ...(launchId ? { accordLaunchMessageId: launchId } : {}),
+          ...(launch ? { accordLaunch: { facilitator: launch.facilitator, members: launch.members } } : {})
         }
       } satisfies ChatMessage;
       const previousUpdatedAt = conversation.updatedAt;
