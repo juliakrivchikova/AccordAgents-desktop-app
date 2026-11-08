@@ -63,8 +63,9 @@ import type {
 
 type Update = { title?: string; repoPath?: string | null; metadata?: Record<string, unknown>; removedMetadataKeys?: string[] };
 
-/** Where a member runs: what decides which device takes its turns. */
-const HOME_FIELDS = ["homeMachineId", "cloudRun", "remoteExecution"] as const;
+/** Where a member runs: what decides which device takes its turns, and the
+ *  session it is handed when it moves (only the computer writes either). */
+const HOME_FIELDS = ["homeMachineId", "cloudRun", "remoteExecution", "sessionHandoff"] as const;
 
 export interface MachineScopedUpdate {
   update: Update;
@@ -220,6 +221,12 @@ function keepRequestRight(next: ChatParticipant, current: ChatParticipant, given
 }
 
 // --- its own members ----------------------------------------------------------
+
+function withoutHandoff(member: ChatParticipant): ChatParticipant {
+  if (!("sessionHandoff" in member)) return member;
+  const { sessionHandoff: _handoff, ...rest } = member;
+  return rest;
+}
 
 function keepHome(next: ChatParticipant, current: ChatParticipant): ChatParticipant {
   const merged = { ...next } as Record<string, unknown>;
@@ -558,8 +565,12 @@ export function scopeMachineConversationUpdate(conversation: Conversation, updat
         // A name another member has would speak for that one.
         const clash = [...beforeById.values(), ...taken].some((other) => other.id !== participant.id && handleKey(other.handle) === handleKey(participant.handle));
         if (!clash && additionAllowed(participant, changes)) {
-          taken.push(participant);
-          return [participant];
+          // A member a machine adds brings no session with it: only the
+          // computer hands a member its session, when it moves it.
+          const added = withoutHandoff(participant);
+          if (added !== participant) refused.push(`participants.${participant.id}.sessionHandoff`);
+          taken.push(added);
+          return [added];
         }
         refused.push(`participants.${participant.id}.added`);
         return [];

@@ -967,6 +967,10 @@ export interface ChatParticipant {
   homeMachineId?: string;
   /** Cloud choice is saved before the machine is ready. */
   cloudRun?: import("./cloudRunPreparation").CloudRunSelection;
+  /** The member's session, put on the User's server by the device it moved
+   *  away from, for the device it runs on now to take before its next turn.
+   *  Written only by the computer, like the other home fields. */
+  sessionHandoff?: import("./memberSessionMove").ChatSessionHandoff;
   skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
 }
@@ -994,6 +998,9 @@ export interface ChatParticipantSession {
   remoteSession?: RemoteParticipantSessionHandle;
   invalidatedRemoteSessionId?: string;
   invalidatedRemoteSessionAt?: string;
+  /** The handoff (its body's hash) this session was taken from, so it is
+   *  taken once on this device; see ChatParticipant.sessionHandoff. */
+  importedHandoff?: string;
   updatedAt: string;
 }
 
@@ -1655,6 +1662,14 @@ export interface ChatMessageMetadata {
     outcome: "completed" | "failed" | "no-active-session";
     instructionsProvided: boolean;
   };
+  /** A machine's hidden answer to a `session.export` turn: where it put the
+   *  member's session on the User's server for its move. */
+  memberSessionExport?: import("./memberSessionMove").MemberSessionExportReport;
+  /** A machine's hidden word that it took the session its member was handed. */
+  memberSessionTaken?: import("./memberSessionMove").MemberSessionTakenReport;
+  /** The computer's hidden word that a move it asked a machine for was not
+   *  made: the machine lets the member's held turns go. */
+  memberMoveCancelled?: { participantId: string; runId: string };
   workedMs?: number;
   queuedBehind?: { handle: string };
   appMessageSource?: string;

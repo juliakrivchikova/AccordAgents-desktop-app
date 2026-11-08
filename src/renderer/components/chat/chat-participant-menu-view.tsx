@@ -1,4 +1,5 @@
 import type { MemberRestartInProgress } from "../../../shared/memberRestart";
+import { memberSessionMoves } from "../../../shared/memberSessionMove";
 import React, { useState } from "react";
 import { ChevronLeft, ChevronRight, Plus, Users } from "lucide-react";
 
@@ -165,7 +166,8 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                   renderParticipantAvatar={props.renderParticipantAvatar}
                   participantRoleLabel={props.participantRoleLabel}
                   participantRoleArchived={props.participantRoleArchived}
-                  runLocationLocked={props.participantHasRunById.get(participant.id) === true}
+                  runLocationLocked={props.participantHasRunById.get(participant.id) === true && !memberSessionMoves(participant)}
+                  runLocationMoves={props.participantHasRunById.get(participant.id) === true && memberSessionMoves(participant)}
                   onInsertMention={insertParticipantMention}
                   onJumpToLastMessage={jumpToParticipantLastMessage}
                   onUpdateParticipantRuntime={props.onUpdateParticipantRuntime}

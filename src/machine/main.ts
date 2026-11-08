@@ -488,6 +488,8 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     fetchAttachment: (conversationId, attachmentId) => host.requestAttachment(conversationId, attachmentId)
   });
   chatService.setHubBlobReader((reference) => hubClient.downloadBytes(reference));
+  // A member's session leaving this machine goes up from here.
+  chatService.setHubBlobWriter((bytes) => hubClient.uploadBytes(bytes));
   // The settings the computer published for this machine on the User's
   // server, sealed for it alone.
   const machineSettings = new MachineServerSettings({

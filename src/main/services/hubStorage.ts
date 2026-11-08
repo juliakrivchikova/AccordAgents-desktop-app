@@ -365,6 +365,19 @@ export class HubStorage {
     return rows.map((row) => row.blobHash).filter((hash): hash is string => typeof hash === "string");
   }
 
+  /** The sessions members were handed when they moved and their new device
+   *  has not taken yet (ChatParticipant.sessionHandoff). */
+  async namedSessionHandoffHashes(): Promise<string[]> {
+    await this.init();
+    const rows = await this.database.query<{ blobHash: string | null }>(`
+      select distinct json_extract(p.value, '$.sessionHandoff.blob.blobHash') as blobHash
+      from conversations c, json_each(coalesce(nullif(c.body_json, ''), c.payload_json), '$.metadata.participants') p
+      where instr(coalesce(nullif(c.body_json, ''), c.payload_json), '"sessionHandoff"') > 0
+        and json_valid(coalesce(nullif(c.body_json, ''), c.payload_json));
+    `);
+    return rows.map((row) => row.blobHash).filter((hash): hash is string => typeof hash === "string");
+  }
+
   /** Setup only: the desktop that set the hub up. Never replaced afterwards. */
   async setOwner(device: Omit<HubDevice, "role">): Promise<void> {
     await this.init();

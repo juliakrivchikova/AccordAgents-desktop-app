@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants, type Dirent } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { claudeProjectsDir } from "./memberSessionFiles";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { readCliHelpText } from "./cliHelpText";
@@ -7193,6 +7194,12 @@ export class CliAgentRunner {
     await ensureLoginShellEnvPrimed();
     const manual = filterAllowedAgentEnvironment((await this.manualReadinessEnvironment?.().catch(() => undefined))?.env);
     return commandEnvironment(Object.keys(manual).length > 0 ? manual : undefined, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
+  }
+
+  /** Where this device's Claude Code keeps its members' sessions (the
+   *  environment members get decides it: CLAUDE_CONFIG_DIR on a machine). */
+  async claudeProjectsDirectory(): Promise<string> {
+    return claudeProjectsDir(await this.claudeSettingsEnvironment());
   }
 
   /** Claude in Chrome as this computer's Claude Code has it (`/chrome`). */

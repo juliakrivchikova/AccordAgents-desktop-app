@@ -113,3 +113,22 @@ test("failed persistence does not start Cloud setup, successful persistence star
     assert.equal(calls, saved ? 1 : 0);
   }
 });
+
+test("a Claude member that already ran moves when its place changes, and the control says so until the move ends", async () => {
+  bridge();
+  let finish!: (value: unknown) => void;
+  const changes: unknown[] = [];
+  let view!: ReactTestRenderer;
+  await act(async () => { view = create(<ParticipantRunLocation kind="claude-code" handle="admin" moves
+    onChange={patch => { changes.push(patch); return new Promise(resolve => { finish = resolve; }); }} />); });
+  await act(async () => { view.root.findByType("select").props.onChange({ currentTarget: { value: "machine:cloud" } }); });
+  assert.deepEqual(changes, [{ homeMachineId: undefined, cloudRun: { instanceId: "i-abc" }, remoteExecution: "local" }]);
+  assert.equal(view.root.findByProps({ role: "status" }).props.children, "Moving @admin to Cloud with its session…");
+  assert.equal(view.root.findByType("select").props.disabled, true, "one move at a time");
+  await act(async () => { view.root.findByType("select").props.onChange({ currentTarget: { value: "local" } }); });
+  assert.equal(changes.length, 1);
+  await act(async () => { finish(true); });
+  assert.equal(view.root.findAllByProps({ role: "status" }).length, 0);
+  assert.equal(view.root.findByType("select").props.disabled, undefined);
+  view.unmount();
+});
