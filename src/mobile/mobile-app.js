@@ -9727,7 +9727,6 @@
     close.addEventListener("click", function () {
       setAccordDockChoice("closed", conversationId, docked.launchId, true);
       renderAccordDock(conversationId, docked);
-      void render();
     });
     head.append(toggle, close);
     card.append(head);
@@ -9942,7 +9941,7 @@
   function accordProgressFor(rows) {
     const shared = mobileSharedRules();
     const empty = { folded: new Set(), docked: null };
-    if (!shared || typeof shared.dockedAccordFrom !== "function") return empty;
+    if (!shared || typeof shared.dockedAccordFrom !== "function" || typeof shared.accordFoldedNoteKeys !== "function") return empty;
     const notes = rows.filter(function (row) {
       return row.author === "system" && Boolean(artifactNoteCardForEntry(row));
     }).map(function (row) {
@@ -9958,18 +9957,9 @@
       if (id) launches.push({ id: id, card: accordLaunchCardForEntry(row), createdAt: row.createdAt });
     }
     const docked = shared.dockedAccordFrom(launches, notes);
-    return {
-      folded: docked ? accordFoldedKeys(docked, notes) : new Set(),
-      docked: docked
-    };
-  }
-
-  /** The notes the pinned card shows instead of their own cards: its
-   *  document's, while the card is pinned (closed, they are back in the chat). */
-  function accordFoldedKeys(docked, notes) {
-    const conversationId = selectedConversationId();
-    if (readAccordDockState().closed[conversationId] === docked.launchId) return new Set();
-    return mobileSharedRules().accordDocumentNoteKeys(docked.progress.artifactId, notes);
+    // Every Accord's document notes leave the chat: pinned, closed or older,
+    // its steps are on its card or in its document (the User, 2026-11-08).
+    return { folded: shared.accordFoldedNoteKeys(notes), docked: docked };
   }
 
   function accordFoldedRow(row) {

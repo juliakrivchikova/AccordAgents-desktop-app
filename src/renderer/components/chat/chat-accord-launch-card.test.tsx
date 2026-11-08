@@ -198,10 +198,10 @@ test("the newest Accord with a document is pinned above the composer: stages, no
     ]
   } as unknown as Conversation;
 
-  // Folded: every note of the Accord's document; one from before stays a card.
+  // Folded: every note of an Accord's document; one filed under no Accord stays a card.
   assert.deepEqual(chatTopLevelMessages(conversation).map((message) => message.id), ["launch-1", "old"]);
   assert.deepEqual(chatTopLevelMessages({ ...conversation, messages: conversation.messages.slice(1) }).map((message) => message.id),
-    ["n1", "n2", "n3", "n4", "n5", "old"], "its launch is not loaded: the notes keep their cards");
+    ["old"], "also when its launch is not loaded");
 
   const card = parseAccordLaunchCard(launchMessage.content)!;
   const progress = accordProgressFromNotes("launch-1", card, conversation.messages.map((message) => ({
@@ -250,7 +250,7 @@ test("the newest Accord with a document is pinned above the composer: stages, no
   act(() => { close.props.onClick(); });
   assert.equal(byClass("chat-accord-dock").length, 0);
   assert.deepEqual(chatTopLevelMessages({ ...conversation, messages: [...conversation.messages] }).map((message) => message.id),
-    ["launch-1", "n1", "n2", "n3", "n4", "n5", "old"], "closed: its notes are back in the chat");
+    ["launch-1", "old"], "closed: the notes stay out of the chat, in the document (the User, 2026-11-08)");
   act(() => {
     renderer!.unmount();
     renderer = create(

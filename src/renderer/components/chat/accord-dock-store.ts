@@ -1,7 +1,5 @@
 // The pinned Accord card's own choices on this device: which Accords' cards
 // the User closed and which she folded into one line, by launch message id.
-// Closing brings the Accord's notes back into the chat, so the timeline reads
-// the closed set too and redraws when it changes.
 
 const DOCK_STORAGE_KEY = "accordagents.accordDock.v2";
 /** Launch ids kept per choice; the oldest go first. */
@@ -45,11 +43,6 @@ export function accordDockClosed(launchId: string): boolean {
 
 export function accordDockFolded(launchId: string): boolean {
   return read().folded.includes(launchId);
-}
-
-/** Launches whose card the User closed. */
-export function closedAccordDockLaunches(): ReadonlySet<string> {
-  return new Set(read().closed);
 }
 
 export function setAccordDockChoice(choice: keyof DockChoices, launchId: string, on: boolean): void {

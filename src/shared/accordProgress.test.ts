@@ -92,22 +92,21 @@ test("reached is only what the document says: a signer beyond the Accord's peopl
   assert.deepEqual(mixed.drafts.authors, ["fable", "argon"]);
 });
 
-test("a note written without the link still counts for its document, and only the card's document folds", () => {
+test("a note written without the link still counts for its document, and every Accord document's notes leave the chat", () => {
   // @argon's device was on an older version: its note carries no link.
   const unlinked = { content: `@argon submitted a draft to ${ref} · Submitted` };
   const progress = accordProgressFromNotes(LAUNCH, card, [created, fableDraft, unlinked])!;
   assert.deepEqual(progress.drafts.submitted, ["fable", "argon"]);
   const other = { content: "@fable created artifact [Notes](#artifact:art-9) · v1" };
   const notes = [created, fableDraft, unlinked, other].map((note, index) => ({ key: `k${index}`, ...note }));
-  assert.deepEqual([...accordFoldedNoteKeys(new Set([LAUNCH]), notes)], ["k0", "k1", "k2"]);
-  assert.equal(accordFoldedNoteKeys(new Set(["launch-2"]), notes).size, 0, "its launch is not loaded: the notes keep their cards");
+  assert.deepEqual([...accordFoldedNoteKeys(notes)], ["k0", "k1", "k2"], "a document filed under no Accord keeps its card");
 
-  // The facilitator made the document again: the card follows the newest,
-  // and the first one's notes keep their cards rather than vanish.
+  // The facilitator made the document again: the card follows the newest;
+  // both documents' notes stay out of the chat (they are in the documents).
   const again = "[Applied Materials v2](#artifact:art-2)";
   const second = [created, fableDraft, filed(`@fable created draft collection ${again} · Drafts 0/2`), filed(`@fable submitted a draft to ${again} · Submitted`)];
   assert.equal(accordProgressFromNotes(LAUNCH, card, second)!.artifactId, "art-2");
-  assert.deepEqual([...accordFoldedNoteKeys(new Set([LAUNCH]), second.map((note, index) => ({ key: `k${index}`, ...note })))], ["k2", "k3"]);
+  assert.deepEqual([...accordFoldedNoteKeys(second.map((note, index) => ({ key: `k${index}`, ...note })))], ["k0", "k1", "k2", "k3"]);
 });
 
 test("the chat's folded notes: worked out from the loaded messages once per list", () => {
@@ -126,7 +125,7 @@ test("the chat's folded notes: worked out from the loaded messages once per list
   const messages = [launch, note("n1", created), note("n2", fableDraft), note("n3", { content: "@fable created artifact [Notes](#artifact:art-9) · v1" })];
   assert.deepEqual([...accordFoldedMessageIds(messages)], ["n1", "n2"]);
   assert.equal(accordFoldedMessageIds(messages), accordFoldedMessageIds(messages), "the same list is not read twice");
-  assert.equal(accordFoldedMessageIds(messages.slice(1)).size, 0, "without the launch nothing folds");
+  assert.deepEqual([...accordFoldedMessageIds(messages.slice(1))], ["n1", "n2"], "also without the launch loaded");
 });
 
 test("the stages carry the same words on both screens", () => {
@@ -162,13 +161,12 @@ test("the pinned Accord is the chat's newest, also when only its notes are loade
   assert.equal(dockedAccordFrom([], [{ content: created.content, createdAt: at(1) }]), undefined);
 });
 
-test("closing the pinned card brings its notes back into the chat", () => {
+test("an Accord's notes stay out of the chat, also without its launch loaded", () => {
   const at = "2026-11-08T10:00:00Z";
   const note = (id: string, input: { content: string; accordLaunchMessageId?: string }) => ({
     id, role: "system", createdAt: at, content: input.content,
     metadata: { appMessageSource: "app_artifact_note", accordLaunchMessageId: input.accordLaunchMessageId, accordLaunch: { facilitator: "fable", members: ["argon"] } }
   });
   const messages = [note("n1", created), note("n2", fableDraft)];
-  assert.deepEqual([...accordFoldedMessageIds(messages)], ["n1", "n2"], "pinned from its notes alone");
-  assert.equal(accordFoldedMessageIds(messages, new Set([LAUNCH])).size, 0, "closed: the notes are back");
+  assert.deepEqual([...accordFoldedMessageIds(messages)], ["n1", "n2"]);
 });
