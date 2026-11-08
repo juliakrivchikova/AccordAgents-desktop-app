@@ -32,6 +32,13 @@
   --menu-shadow: 0 12px 30px rgba(22, 25, 31, 0.16);
   /* Something waiting for the User: the desktop's warning colour. */
   --warn: #c98a13;
+  /* Every signature in: the desktop's --app-success pair. */
+  --ok: #08794e;
+  --ok-soft: #e8f8f1;
+  /* The Start Accord glyph's branches, as the desktop's --app-accord-icon-*. */
+  --accord-icon-top: #a855f7;
+  --accord-icon-left: #e73975;
+  --accord-icon-right: #447bf3;
   --warn-soft: rgba(201, 138, 19, 0.16);
   --pill-shadow: 0 6px 18px rgba(22, 25, 31, 0.12);
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", system-ui, sans-serif;
@@ -889,19 +896,76 @@ button.mobile-chat-group-title:active {
 }
 
 .artifact-note-title {
-  font-size: 15.5px;
-  font-weight: 500;
-  line-height: 1.35;
+  font-size: 15px;
+  line-height: 1.4;
   overflow-wrap: anywhere;
 }
 
 .artifact-note-meta {
   margin-top: 1px;
-  /* Darker than --mut: the line says who did what, and --mut on the card
-     falls short of readable contrast. */
+  /* Darker than --mut: --mut on the card falls short of readable contrast. */
   color: color-mix(in srgb, var(--fg) 70%, var(--mut));
   font-size: 13.5px;
   line-height: 1.4;
+}
+
+.artifact-note-version {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accs);
+  color: var(--acc);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 18px;
+  vertical-align: 1px;
+}
+
+/* One mark per member the artifact waits for, as on the desktop. */
+.artifact-note-marks {
+  display: flex;
+  flex: none;
+  align-self: center;
+  gap: 5px;
+  margin-left: auto;
+}
+
+.artifact-note-mark {
+  display: flex;
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--mut) 12%, transparent);
+  color: color-mix(in srgb, var(--mut) 75%, transparent);
+}
+
+/* Many members: smaller marks, so the text keeps its room on a phone. */
+.artifact-note-marks.is-many {
+  gap: 3px;
+}
+
+.artifact-note-marks.is-many .artifact-note-mark {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+}
+
+.artifact-note-marks.is-many svg {
+  width: 12px;
+  height: 12px;
+}
+
+.artifact-note-mark.is-given {
+  background: var(--accs);
+  color: var(--acc);
+}
+
+.artifact-note-mark.is-complete {
+  background: var(--ok-soft);
+  color: var(--ok);
 }
 
 .artifact-note-actor.is-member {
@@ -914,6 +978,106 @@ button.mobile-chat-group-title:active {
   font-size: 14px;
   line-height: 1.4;
   overflow-wrap: anywhere;
+}
+
+/* The message that starts an Accord: the artifact note's card with the
+   Start Accord glyph, whose three branches keep their own colors on a
+   neutral tile. */
+.accord-launch-icon {
+  border: 1px solid var(--bd);
+  background: var(--surface);
+}
+
+.accord-icon-top {
+  stroke: var(--accord-icon-top);
+}
+
+.accord-icon-left {
+  stroke: var(--accord-icon-left);
+}
+
+.accord-icon-right {
+  stroke: var(--accord-icon-right);
+}
+
+.accord-launch-meta {
+  margin-top: 2px;
+  line-height: 1.6;
+}
+
+/* The dot between two facts stays at the end of a line. */
+.accord-launch-meta > :first-child,
+.accord-launch-meta > :last-child {
+  white-space: nowrap;
+}
+
+/* A word joiner keeps the dot on the line of what it follows, also after a
+   member's picture; the space after it is where the line may break. */
+.accord-launch-meta > :not(:last-child)::after {
+  content: "\2060\00a0·  " / "";
+  white-space: pre-wrap;
+}
+
+.accord-launch-kind {
+  color: var(--fg1);
+  font-weight: 500;
+}
+
+/* A member is one piece; a handle longer than the card is cut short. */
+.accord-launch-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  vertical-align: bottom;
+}
+
+.accord-launch-handle {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--warn);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A refusal reason is a sentence and wraps. */
+.accord-launch-meta > .message-status {
+  white-space: normal;
+}
+
+/* The row's 32px avatar rule comes later; the card's names are smaller. */
+.accord-launch-meta .accord-launch-avatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  font-size: 9px;
+}
+
+.accord-launch-meta .message-status {
+  color: inherit;
+  font: inherit;
+}
+
+/* The subject is her own words: drawn as message text, not as a heading. */
+.accord-launch-card .artifact-note-title {
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.accord-launch-body {
+  white-space: pre-wrap;
+}
+
+/* Her own message: on her side of the chat, where her bubbles are. */
+.message-row[data-author="you"] .accord-launch-card {
+  flex: 0 1 auto;
+  max-width: 88%;
+  margin-left: auto;
+}
+
+.message-row.is-on-its-way .accord-launch-card {
+  opacity: 0.6;
 }
 
 /* A turn-finished note: the artifact note's card, with the member, the
@@ -2760,6 +2924,8 @@ button.mobile-chat-group-title:active {
     --surface-fg: #0d0f13;
     --user-bub: #232a35;
     --note-card: #1f232a;
+    --ok: #78d9aa;
+    --ok-soft: #143b2c;
     --code-bg: rgba(255, 255, 255, 0.08);
     --pre-bg: #0d0f13;
     --pre-fg: #e5e9f0;

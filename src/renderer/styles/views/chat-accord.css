@@ -12,8 +12,19 @@
 
 .chat-accord-header {
   flex: 0 0 auto;
-  padding: 18px 22px !important;
-  border-bottom: 1px solid var(--app-border);
+  padding: 18px 22px 2px !important;
+}
+
+.chat-accord-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-accord-title-icon {
+  width: 20px;
+  height: 20px;
+  flex: none;
 }
 
 .chat-accord-header [data-slot="dialog-title"] {
@@ -24,19 +35,31 @@
   line-height: 1.3;
 }
 
-.chat-accord-header [data-slot="dialog-description"] {
+.chat-accord-form {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: grid;
+  gap: 18px;
+  overflow-y: auto;
+  padding: 14px 22px 6px;
+}
+
+/* What a field is for, in grey between its label and the field. */
+.chat-accord-hint {
+  margin: -2px 0 0;
   color: var(--app-muted);
   font-size: 12.5px;
   line-height: 1.45;
 }
 
-.chat-accord-form {
-  min-height: 0;
-  flex: 1 1 auto;
-  display: grid;
-  gap: 16px;
-  overflow-y: auto;
-  padding: 18px 22px;
+.chat-accord-select-avatar {
+  box-sizing: border-box;
+  width: 20px !important;
+  height: 20px !important;
+  padding: 0 !important;
+  flex: 0 0 auto;
+  border-radius: 5px;
+  font-size: 9px;
 }
 
 .chat-accord-field {
@@ -46,144 +69,114 @@
 }
 
 .chat-accord-field .app-select-trigger {
-  width: 100%;
+  width: 100% !important;
   border-color: var(--app-border) !important;
   border-radius: 9px !important;
   box-shadow: none !important;
 }
 
+/* One list, a checkbox on the left of each member; a chosen row is not
+   filled, only its box is. */
 .chat-accord-target-list {
   display: grid;
-  gap: 4px;
   max-height: min(252px, 32vh);
   overflow: auto;
-  padding: 1px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
 }
 
 .chat-accord-target {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 24px 24px;
+  position: relative;
+  display: flex;
+  min-height: 46px;
   align-items: center;
-  gap: 6px;
-  min-height: 58px;
-  padding: 0 7px 0 0;
-  border: 1px solid transparent;
-  border-radius: var(--radius-control);
-  background: transparent;
+  gap: 11px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--app-border);
   color: var(--app-text);
+  cursor: pointer;
   transition: background 120ms ease;
 }
 
-.chat-accord-target:hover {
+.chat-accord-target:last-child {
+  border-bottom: 0;
+}
+
+.chat-accord-target:not(:has(input:disabled)):hover {
   background: var(--app-surface-hover);
 }
 
-.chat-accord-target.is-selected {
-  background: transparent;
-}
-
-.chat-accord-target.is-selected:hover {
-  background: var(--app-surface-hover);
-}
-
-.chat-accord-target-main {
-  display: flex;
-  min-width: 0;
-  min-height: 58px;
-  align-items: center;
-  gap: 11px;
-  padding: 9px 6px 9px 9px;
-  border: 0;
-  border-radius: var(--radius-control);
-  background: transparent;
-  color: var(--app-text);
-  cursor: pointer;
-  font-family: var(--font-body);
-  text-align: left;
-}
-
-.chat-accord-target-main:disabled {
+.chat-accord-target:has(input:disabled) {
   cursor: default;
   opacity: 0.58;
 }
 
-.chat-accord-target-main:focus-visible {
-  outline: none;
+/* The real checkbox stays for the keyboard and screen readers; the box
+   beside it is what is seen. */
+.chat-accord-target-checkbox {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat-accord-target-check {
+  display: flex;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid var(--app-border-strong);
+  border-radius: 4px;
+  background: var(--app-surface);
+  color: transparent;
+}
+
+.chat-accord-target.is-selected .chat-accord-target-check {
+  border-color: var(--app-text-strong);
+  background: var(--app-text-strong);
+  color: var(--app-surface);
+}
+
+.chat-accord-target-checkbox:focus-visible + .chat-accord-target-check {
   box-shadow: var(--focus-ring);
 }
 
-.chat-accord-target .mini-avatar {
+.chat-accord-target-avatar {
   box-sizing: border-box;
-  width: 32px !important;
-  height: 32px !important;
+  width: 24px !important;
+  height: 24px !important;
   padding: 0 !important;
   flex: 0 0 auto;
-}
-
-.chat-accord-target-text {
-  display: grid;
-  flex: 1 1 auto;
-  min-width: 0;
-  gap: 3px;
-}
-
-.chat-accord-target-title,
-.chat-accord-target-text small {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  border-radius: 6px;
+  font-size: 10px;
 }
 
 .chat-accord-target-title {
   display: inline-flex;
+  min-width: 0;
   align-items: baseline;
   gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .chat-accord-target-title strong {
   min-width: 0;
-  max-width: 100%;
-  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--app-text-strong);
-  font-family: var(--font-code);
   font-size: 13px;
   font-weight: 600;
 }
 
-.chat-accord-target-title span,
-.chat-accord-target-text small {
-  color: var(--app-muted);
-  font-size: 12.5px;
-}
-
 .chat-accord-target-title span {
   flex: 0 0 auto;
-  font-weight: 500;
-}
-
-.chat-accord-target-text small {
-  line-height: 1.25;
-}
-
-.chat-accord-target-chevron {
-  justify-self: center;
   color: var(--app-muted);
-}
-
-.chat-accord-target input {
-  width: 18px;
-  height: 18px;
-  justify-self: center;
-  margin: 0;
-  accent-color: var(--app-accent);
-}
-
-.chat-accord-target input:disabled {
-  cursor: default;
+  font-size: 12.5px;
 }
 
 .chat-accord-empty {
@@ -197,7 +190,7 @@
 }
 
 .chat-accord-dialog .chat-accord-subject {
-  min-height: 110px !important;
+  min-height: 76px !important;
   padding: 11px 12px !important;
   border: 1px solid var(--app-border) !important;
   border-radius: 9px !important;
@@ -272,8 +265,8 @@
   justify-content: flex-end !important;
   gap: 9px !important;
   margin: 0 !important;
-  padding: 14px 22px !important;
-  border-top: 1px solid var(--app-border);
+  padding: 14px 22px 18px !important;
+  border-top: 0 !important;
   border-radius: 0 !important;
   background: var(--app-surface) !important;
 }
@@ -288,4 +281,12 @@
   to {
     transform: rotate(360deg);
   }
+}
+
+/* Labels in the app's text color: each field already has its grey hint. */
+.chat-accord-field > [data-slot="label"] {
+  color: var(--app-text-strong) !important;
+  font-size: 12.5px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0 !important;
 }

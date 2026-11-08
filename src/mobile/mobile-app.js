@@ -8813,6 +8813,7 @@
     }));
     // Each row's change check is worked out once per redraw and used twice:
     // for whether anything changed, and for which rows to patch.
+    renderNoteProgress = noteProgressFor(rows);
     const rowSignatures = rows.map(messageRowSignature);
     const rowsFingerprint = rows.map(function (row, index) {
       return (row.rowKey || row.id) + "\u0000" + rowSignatures[index];
@@ -8836,6 +8837,7 @@
       if (surface && Math.abs(drift) >= 1) surface.scrollTop += drift;
     }
     renderCardIndex = null;
+    renderNoteProgress = null;
     lastScrolledConversationId = activeId;
     if (focusedMessage && focusedMessage.conversationId === activeId) {
       // A row redrawn for a change in it keeps the mark.
@@ -9097,8 +9099,15 @@
       when: formatClockTime(entry.createdAt),
       runId: entry.runId,
       turn: entry.sourceMessageId ? entry.sourceMessageId + ":" + (entry.participantId || "") : undefined,
-      stopRequested: entry.stopRequested
+      stopRequested: entry.stopRequested,
+      accordAvatars: accordLaunchSignatureOf(entry),
+      noteProgress: noteProgressOf(entry)
     });
+  }
+
+  function accordLaunchSignatureOf(entry) {
+    const card = accordLaunchCardForEntry(entry);
+    return card ? accordLaunchAvatarSignature(entry, card) : undefined;
   }
 
   // A pending agent row with no text yet is a run that has started and not
@@ -9394,22 +9403,169 @@
     icon.append(lineIcon(ARTIFACT_NOTE_ICON_PATHS, 20));
     const text = document.createElement("div");
     text.className = "artifact-note-text";
+    // Who did what leads the card; the artifact and the time follow in grey.
     const title = document.createElement("div");
     title.className = "artifact-note-title";
-    title.textContent = card.label;
-    const meta = document.createElement("div");
-    meta.className = "artifact-note-meta";
     const actor = document.createElement("span");
     actor.className = card.actor === "user" ? "artifact-note-actor" : "artifact-note-actor is-member";
     actor.textContent = shared.artifactNoteActorLabel(card.actor);
+    title.append(actor, document.createTextNode(" " + shared.artifactNoteVerb(card.action)));
+    const version = card.action === "published" || card.action === "revised"
+      ? card.details.find(function (detail) { return /^v\d+$/.test(detail); })
+      : undefined;
+    if (version) {
+      const tag = document.createElement("span");
+      tag.className = "artifact-note-version";
+      tag.textContent = version;
+      title.append(tag);
+    }
+    const details = card.details.filter(function (detail) { return detail !== version; });
+    if (details.length) title.append(document.createTextNode(" · " + details.join(" · ")));
+    const meta = document.createElement("div");
+    meta.className = "artifact-note-meta";
     const when = formatClockTime(entry.createdAt);
-    const facts = [shared.artifactNoteVerb(card.action)].concat(card.details, when ? [when] : []);
-    meta.append(actor, document.createTextNode(" " + facts.join(" · ")));
+    meta.textContent = card.label + (when ? " · " + when : "");
     text.append(title, meta);
     if (card.note) {
       const body = document.createElement("div");
       body.className = "artifact-note-body";
       body.textContent = card.note;
+      text.append(body);
+    }
+    wrap.append(icon, text);
+    const progress = noteProgressOf(entry);
+    if (progress) wrap.append(artifactNoteMarksElement(progress));
+    return wrap;
+  }
+
+  // The desktop's FileText and BadgeCheck outlines: a draft, a signature.
+  const DRAFT_MARK_PATHS = [
+    "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z",
+    "M14 2v4a2 2 0 0 0 2 2h4",
+    "M10 9H8",
+    "M16 13H8",
+    "M16 17H8"
+  ];
+  const SIGNATURE_MARK_PATHS = [
+    "M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z",
+    "m9 12 2 2 4-4"
+  ];
+
+  /** One mark per member the artifact waits for: grey until their draft or
+   *  signature is in, lilac once it is, green when every signature is. */
+  function artifactNoteMarksElement(progress) {
+    const marks = document.createElement("span");
+    marks.className = "artifact-note-marks" + (progress.total > 3 ? " is-many" : "");
+    marks.setAttribute("role", "img");
+    marks.setAttribute("aria-label", (progress.kind === "drafts" ? "Drafts " : "Signed ") + progress.done.length + " of " + progress.total);
+    for (let index = 0; index < progress.total; index += 1) {
+      const mark = document.createElement("span");
+      const given = index < progress.done.length;
+      mark.className = "artifact-note-mark" + (given ? (progress.complete ? " is-complete" : " is-given") : "");
+      mark.append(lineIcon(progress.kind === "drafts" ? DRAFT_MARK_PATHS : SIGNATURE_MARK_PATHS, 15));
+      marks.append(mark);
+    }
+    return marks;
+  }
+
+  /** A message of the User's that starts an Accord, its launch prompt read
+   *  by the desktop's own parser (accordLaunchCard.ts); anything else stays
+   *  a bubble. */
+  function accordLaunchCardForEntry(entry) {
+    if (!entry || entry.author !== "you" || entry.scaffolding) return undefined;
+    // Pictures are never on a launch the app wrote, and the card would hide them.
+    if (Array.isArray(entry.attachments) && entry.attachments.length > 0) return undefined;
+    const shared = mobileSharedRules();
+    return shared && typeof shared.parseAccordLaunchCard === "function"
+      ? shared.parseAccordLaunchCard(entry.content)
+      : undefined;
+  }
+
+  // The desktop's Start Accord glyph: a merge whose three branches keep their
+  // own colors (mobile-app.css), so the icon ignores currentColor.
+  const ACCORD_ICON_PATHS = [
+    ["m8 6 4-4 4 4", "top"],
+    ["M12 2v10.3", "top"],
+    ["M12 12.3a4 4 0 0 1-1.172 2.872L4 22", "left"],
+    ["m20 22-5-5", "right"]
+  ];
+
+  function accordIcon(size) {
+    const svg = lineIcon([], size);
+    svg.setAttribute("stroke-width", "2.4");
+    for (const [d, branch] of ACCORD_ICON_PATHS) {
+      const path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("d", d);
+      path.setAttribute("class", "accord-icon-" + branch);
+      svg.append(path);
+    }
+    return svg;
+  }
+
+  /** What the card's member avatars show, so the row is redrawn when the
+   *  member list arrives after it or a member's picture changes. */
+  function accordLaunchAvatarSignature(entry, card) {
+    const members = conversationMembers(entry.conversationId || selectedConversationId());
+    return [card.facilitator].concat(card.members).map(function (handle) {
+      return avatarSignature(avatarForLabel(members, "@" + handle));
+    }).join("|");
+  }
+
+  function accordMemberElement(entry, handle) {
+    const wrap = document.createElement("span");
+    wrap.className = "accord-launch-member";
+    const avatar = document.createElement("span");
+    avatar.className = "message-avatar accord-launch-avatar";
+    avatar.setAttribute("aria-hidden", "true");
+    const conversationId = entry.conversationId || selectedConversationId();
+    paintAvatar(avatar, avatarForLabel(conversationMembers(conversationId), "@" + handle), conversationId);
+    const name = document.createElement("span");
+    name.className = "accord-launch-handle";
+    name.textContent = "@" + handle;
+    wrap.append(avatar, name);
+    return wrap;
+  }
+
+  /** The Accord launch as the desktop shows it: the artifact note's card
+   *  with the Start Accord icon, the subject as its title, and who leads it
+   *  and who is in it. The row keeps the message's own status (its time, or
+   *  why the server refused it) and its replies' chip. */
+  function accordLaunchCardElement(entry, card) {
+    const shared = mobileSharedRules();
+    const parts = shared.accordLaunchTitleAndBody(card.subject);
+    const wrap = document.createElement("div");
+    wrap.className = "artifact-note-card accord-launch-card";
+    const icon = document.createElement("span");
+    icon.className = "artifact-note-icon accord-launch-icon";
+    icon.append(accordIcon(22));
+    const text = document.createElement("div");
+    text.className = "artifact-note-text";
+    const title = document.createElement("div");
+    title.className = "artifact-note-title";
+    title.textContent = parts.title;
+    const meta = document.createElement("div");
+    meta.className = "artifact-note-meta accord-launch-meta";
+    const kind = document.createElement("span");
+    kind.className = "accord-launch-kind";
+    kind.textContent = "Accord";
+    const led = document.createElement("span");
+    led.append(document.createTextNode("led by "), accordMemberElement(entry, card.facilitator));
+    const withMembers = document.createElement("span");
+    withMembers.className = "accord-launch-with";
+    withMembers.append(document.createTextNode("with "));
+    card.members.forEach(function (handle, index) {
+      if (index > 0) withMembers.append(document.createTextNode(", "));
+      withMembers.append(accordMemberElement(entry, handle));
+    });
+    const status = document.createElement("span");
+    status.className = "message-status";
+    status.textContent = messageStatusLabel(entry);
+    meta.append(kind, led, withMembers, status);
+    text.append(title, meta);
+    if (parts.body) {
+      const body = document.createElement("div");
+      body.className = "artifact-note-body accord-launch-body";
+      body.textContent = parts.body;
       text.append(body);
     }
     wrap.append(icon, text);
@@ -9498,6 +9654,15 @@
       item.append(artifactNoteCardElement(entry, artifactNote));
       return item;
     }
+    const accordLaunch = accordLaunchCardForEntry(entry);
+    if (accordLaunch) {
+      item.dataset.accordLaunch = "1";
+      item.classList.toggle("is-on-its-way", Boolean(entry.onItsWay));
+      item.classList.toggle("is-refused", Boolean(entry.refused));
+      item.append(accordLaunchCardElement(entry, accordLaunch));
+      appendThreadChip(item, entry);
+      return item;
+    }
     if (finishedNoteOfEntry(entry)) {
       item.dataset.finishedNote = "1";
       item.append(finishedNoteCardElement(entry));
@@ -9563,6 +9728,22 @@
   // The chat's cards by the message they belong to, read once per render: a
   // chat keeps every choice ever asked, and each row asks several times.
   let renderCardIndex = null;
+  // Each artifact note's marks for the rows being drawn, by row key.
+  let renderNoteProgress = null;
+
+  function noteProgressFor(rows) {
+    const shared = mobileSharedRules();
+    if (!shared || typeof shared.artifactNoteProgressById !== "function") return null;
+    return shared.artifactNoteProgressById(rows.filter(function (entry) {
+      return Boolean(artifactNoteCardForEntry(entry));
+    }).map(function (entry) {
+      return { id: entry.rowKey || entry.id, content: entry.content };
+    }));
+  }
+
+  function noteProgressOf(entry) {
+    return renderNoteProgress ? renderNoteProgress.get(entry.rowKey || entry.id) : undefined;
+  }
 
   function cardIndexFor(conversationId) {
     // Only the render that built it may use it: a render cut short cannot
@@ -9707,6 +9888,9 @@
       return false;
     }
     if (item.dataset.finishedNote === "1" || finishedNoteOfEntry(entry)) {
+      return false;
+    }
+    if (item.dataset.accordLaunch === "1" || accordLaunchCardForEntry(entry)) {
       return false;
     }
     // Scaffolding and a message are different shapes; the reconciler replaces

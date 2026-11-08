@@ -1,3 +1,4 @@
+import type * as React from "react";
 import {
   Select,
   SelectContent,
@@ -10,6 +11,8 @@ import {
 export interface AppSelectOption {
   value: string;
   label: string;
+  /** Shown before the label, in the list and in the closed select. */
+  icon?: React.ReactNode;
   disabled?: boolean;
 }
 
@@ -38,7 +41,9 @@ export function AppSelect(props: {
       <SelectContent>
         <SelectGroup>
           {props.options.map((option) => (
-            <SelectItem value={option.value} disabled={option.disabled} key={option.value}>
+            <SelectItem value={option.value} textValue={option.label} disabled={option.disabled} key={option.value}>
+              {/* Typing a name finds the option, and it is read out once. */}
+              {option.icon && <span aria-hidden="true" className="contents">{option.icon}</span>}
               {option.label}
             </SelectItem>
           ))}

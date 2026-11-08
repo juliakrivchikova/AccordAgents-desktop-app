@@ -40,6 +40,7 @@ import {
 } from "./chat-conversation-data";
 import { ChatArtifactNoteCard, artifactNoteCardForMessage } from "./chat-artifact-note-card";
 import { ChatTurnFinishedNote } from "./chat-turn-finished-note";
+import { ChatAccordLaunchCard, accordLaunchCardForMessage } from "./chat-accord-launch-card";
 import { turnFinishedNoteOf } from "../../../shared/turnFinishedNoteSource";
 import { ChatChoiceCard } from "./chat-choice-card";
 import { chatMessageCards } from "./chat-server-card";
@@ -125,6 +126,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   if (artifactNote) {
     return <ChatArtifactNoteCard message={message} card={artifactNote} onToggleReaction={props.onToggleReaction} />;
   }
+  const accordLaunch = accordLaunchCardForMessage(message);
   const turnFinishedNote = turnFinishedNoteOf(message);
   if (turnFinishedNote) {
     return (
@@ -265,6 +267,41 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
     props.onToggleReaction(message.id, emoji);
   }
 
+  const reactAndReplyActions = (
+    <>
+      {canReact && (
+        <Popover open={reactionPickerOpen} onOpenChange={setReactionPickerOpen}>
+          <PopoverTrigger asChild>
+            <IconButton
+              size="xs"
+              icon={Smile}
+              label="Add reaction"
+              tooltip="Add reaction"
+            />
+          </PopoverTrigger>
+          <PopoverContent align="end" className="chat-reaction-popover">
+            <div className="chat-reaction-picker" aria-label="Choose reaction">
+              {CHAT_REACTION_EMOJIS.map((emoji) => (
+                <button type="button" className="chat-reaction-option" onClick={() => toggleReaction(emoji)} key={emoji}>
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          </PopoverContent>
+        </Popover>
+      )}
+      {showThreadActions && (
+        <IconButton
+          size="xs"
+          icon={Reply}
+          label="Reply in thread"
+          tooltip="Reply in thread"
+          onClick={() => props.onOpenThread?.(message.id)}
+        />
+      )}
+    </>
+  );
+
   const delivery = messageDelivery(message);
   return (
     <>
@@ -306,44 +343,18 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 onClick={() => props.activityDisclosure.toggleProcessingTranscript(message.id)}
               />
             )}
-            <IconButton
-              size="xs"
-              icon={copied ? CheckCircle2 : Copy}
-              label={copied ? "Copied" : "Copy message"}
-              tooltip={copied ? "Copied" : "Copy message"}
-              disabled={!canCopy}
-              onClick={() => void copyMessage()}
-            />
-            {canReact && (
-              <Popover open={reactionPickerOpen} onOpenChange={setReactionPickerOpen}>
-                <PopoverTrigger asChild>
-                  <IconButton
-                    size="xs"
-                    icon={Smile}
-                    label="Add reaction"
-                    tooltip="Add reaction"
-                  />
-                </PopoverTrigger>
-                <PopoverContent align="end" className="chat-reaction-popover">
-                  <div className="chat-reaction-picker" aria-label="Choose reaction">
-                    {CHAT_REACTION_EMOJIS.map((emoji) => (
-                      <button type="button" className="chat-reaction-option" onClick={() => toggleReaction(emoji)} key={emoji}>
-                        {emoji}
-                      </button>
-                    ))}
-                  </div>
-                </PopoverContent>
-              </Popover>
-            )}
-            {showThreadActions && (
+            {/* An Accord launch's text is the prompt for its lead, not hers to copy. */}
+            {!accordLaunch && (
               <IconButton
                 size="xs"
-                icon={Reply}
-                label="Reply in thread"
-                tooltip="Reply in thread"
-                onClick={() => props.onOpenThread?.(message.id)}
+                icon={copied ? CheckCircle2 : Copy}
+                label={copied ? "Copied" : "Copy message"}
+                tooltip={copied ? "Copied" : "Copy message"}
+                disabled={!canCopy}
+                onClick={() => void copyMessage()}
               />
             )}
+            {reactAndReplyActions}
           </div>
           <div className="message-meta">
             <strong>{author}</strong>
@@ -389,6 +400,8 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                     view={processingTranscriptView}
                     activityEvents={activityEvents}
                   />
+                ) : accordLaunch ? (
+                  <ChatAccordLaunchCard card={accordLaunch} participants={props.participants} />
                 ) : (
                   <MarkdownText
                     content={displayContent}
@@ -440,7 +453,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               <span>Referenced: {repoFileMentions.map((mention) => mention.path).join(", ")}</span>
             </div>
           )}
-          {skillMentions.length > 0 && (
+          {skillMentions.length > 0 && !accordLaunch && (
             <div className="repo-file-reference-footer skill-reference-footer">
               <ListChecks size={14} />
               <span>Skills: {skillMentions.map((mention) => `${mention.displayName} (${mention.variants.map((variant) => providerLabel(variant.providerKind)).join(", ")})`).join(", ")}</span>
