@@ -43,8 +43,11 @@ import {
   MEMBER_SESSION_EXPORT_HOLD_MS,
   MEMBER_SESSION_EXPORT_TURN_KIND,
   MEMBER_SESSION_EXPORT_TURN_TTL_MS,
+  cloudMachineName,
   memberMovedLine,
+  memberMovedNote,
   memberSessionMoves,
+  USER_COMPUTER_NAME,
   type ChatSessionHandoff,
   type MachineSessionMoveTarget,
   type MemberSessionExportReport,
@@ -919,6 +922,13 @@ interface CloudRunDoctorProbe {
 /** Copy for values adopted out of a stored snapshot into the live
  *  conversation, so in-place edits of the live object never reach the snapshot
  *  (see readStoredChatStateForRefresh). */
+/** A place's name as a member is told it: one short line of text. */
+function placeName(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const line = value.replace(/[\r\n\t]+/g, " ").trim().slice(0, 80);
+  return line || undefined;
+}
+
 /** Waits for `done`, or rejects when `signal` aborts first. */
 function abortableWait(done: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
   if (!signal) return done;
@@ -1162,6 +1172,8 @@ export class ChatService {
   /** Handoffs being taken here, and those taken, so one is taken once. */
   private readonly sessionHandoffsTaking = new Map<string, Promise<void>>();
   private readonly sessionHandoffsTaken = new Set<string>();
+  /** Move notes a running turn of the member carries (memberMovedNote). */
+  private readonly moveNotesInFlight = new Set<string>();
   /** Restarts asked here that have not ended, by chat and member: one at a time. */
   private readonly memberRestartsInFlight = new Set<string>();
   /** Desktop side: runs before a turn of a machine member is asked (the
@@ -3214,6 +3226,15 @@ export class ChatService {
         // A Cloud choice not prepared yet: what it was handed still waits.
         handoff = current.sessionHandoff;
       }
+      if (handoff) {
+        // What the member is told on its first turn there: where it was, and
+        // where it is now. A session passed on without having run here keeps
+        // where it last ran.
+        const passedOn = Boolean(current.sessionHandoff && handoff.blob.blobHash === current.sessionHandoff.blob.blobHash);
+        const fromName = passedOn ? current.sessionHandoff?.fromName
+          : fromHere ? USER_COMPUTER_NAME : sourceMachineId ? cloudMachineName(this.serverLink?.machineName(sourceMachineId)) : handoff.fromName;
+        handoff = { ...handoff, ...(fromName ? { fromName } : {}), toName: toHere ? USER_COMPUTER_NAME : cloudMachineName(destination?.name) };
+      }
       const line = [memberMovedLine(member.handle, destinationName, Boolean(handoff)), sessionNote].filter(Boolean).join(" ");
       // A known machine that takes sessions is its home at once, so its turns
       // (the phone's too) go there without waiting for a Cloud preparation.
@@ -3563,6 +3584,11 @@ export class ChatService {
         ...(typeof moved.roleLabel === "string" ? { roleLabel: moved.roleLabel } : {}),
         ...(Array.isArray(moved.participantBehaviorRules) ? { participantBehaviorRules: moved.participantBehaviorRules } : {}),
         importedHandoff: handoff.blob.blobHash,
+        movedHere: {
+          from: placeName(handoff.fromName) ?? "another computer",
+          to: placeName(handoff.toName) ?? (this.machineRuntime ? cloudMachineName(undefined) : USER_COMPUTER_NAME),
+          at: new Date().toISOString()
+        },
         updatedAt: new Date().toISOString()
       };
     } catch (error) {
@@ -9242,12 +9268,22 @@ export class ChatService {
     const memoryIndexBlock = memoryIndexResult?.text;
     // Shown again after a compaction until the server's list was given.
     if (memoryIndexResult?.delivered) this.memoryIndexDue.delete(this.memoryIndexKey(conversation.id, participant.id));
+    // It moved here with its session: told once where it is now (until a
+    // turn of it succeeded, below).
+    const moveNoteKey = session.movedHere ? `${conversation.id}:${participant.id}:${session.movedHere.at}` : undefined;
+    // A turn that overlaps one already carrying the note does not carry it too.
+    const moveNoteBlock = session.movedHere && moveNoteKey && !this.moveNotesInFlight.has(moveNoteKey)
+      ? memberMovedNote(session.movedHere, this.runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions), process.platform)
+      : undefined;
+    const carriedMoveNote = moveNoteBlock && moveNoteKey ? moveNoteKey : undefined;
+    if (carriedMoveNote) this.moveNotesInFlight.add(carriedMoveNote);
     const primary = this.buildPromptParts(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: primaryIncludeRoleInstructions,
       agentMode,
       permissions,
       promptContextBlock: preparedPromptContext.block,
-      memoryIndexBlock
+      memoryIndexBlock,
+      moveNoteBlock
     });
     const prompt = primary.prompt;
     const promptFallbackPrompt = this.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
@@ -9255,7 +9291,8 @@ export class ChatService {
       agentMode,
       permissions,
       promptContextBlock: preparedPromptContext.block,
-      memoryIndexBlock
+      memoryIndexBlock,
+      moveNoteBlock
     });
     const resumeFallbackPrompt = isResumingSession
       ? this.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
@@ -9263,7 +9300,8 @@ export class ChatService {
           agentMode,
           permissions,
           promptContextBlock: preparedPromptContext.resumeFallbackBlock,
-          memoryIndexBlock
+          memoryIndexBlock,
+          moveNoteBlock
         })
       : undefined;
     const role = usePromptRole ? undefined : this.cliRoleOptions(participant, session, promptFallbackPrompt);
@@ -9602,6 +9640,8 @@ export class ChatService {
         }
         session.lastSyncedMessageId = pendingMessage.id;
       }
+      // Told where it is now (its CLI answered this prompt): not again.
+      if (carriedMoveNote && !signal?.aborted && result.ok) delete session.movedHere;
       this.upsertSession(conversation, session);
       this.lockParticipantRoleVersion(conversation, participant, session.roleConfigVersion);
       return [pendingMessage];
@@ -9611,6 +9651,7 @@ export class ChatService {
       }
       throw error;
     } finally {
+      if (carriedMoveNote) this.moveNotesInFlight.delete(carriedMoveNote);
       unregisterRunProgressCallback();
       options.writeGate?.markWritten();
       this.releaseInFlightPromptContext(runId);
@@ -10145,7 +10186,7 @@ export class ChatService {
     triggerMessage: ChatMessage,
     workspacePath: string,
     continuation: boolean,
-    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string; memoryIndexBlock?: string }
+    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string; memoryIndexBlock?: string; moveNoteBlock?: string }
   ): string {
     return this.buildPromptParts(conversation, participant, session, triggerMessage, workspacePath, continuation, options).prompt;
   }
@@ -10157,7 +10198,7 @@ export class ChatService {
     triggerMessage: ChatMessage,
     workspacePath: string,
     continuation: boolean,
-    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string; memoryIndexBlock?: string }
+    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string; memoryIndexBlock?: string; moveNoteBlock?: string }
   ): { prompt: string; sections: ChatPromptSectionSizes } {
     const canRequestPermissions = this.canRequestPermissionChanges(session);
     const dynamicHeader = this.participantDynamicHeader(conversation, participant, session, options);
@@ -10212,6 +10253,7 @@ export class ChatService {
 
     const orderedBlocks = [
       staticEnvelope || dynamicHeader,
+      options.moveNoteBlock ?? "",
       promptContextBlock,
       memoryIndexBlock,
       triggerBlock,
