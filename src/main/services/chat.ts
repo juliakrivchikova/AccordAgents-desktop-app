@@ -43,8 +43,11 @@ import {
   MEMBER_SESSION_EXPORT_HOLD_MS,
   MEMBER_SESSION_EXPORT_TURN_KIND,
   MEMBER_SESSION_EXPORT_TURN_TTL_MS,
+  cloudMachineName,
   memberMovedLine,
+  memberMovedNote,
   memberSessionMoves,
+  USER_COMPUTER_NAME,
   type ChatSessionHandoff,
   type MachineSessionMoveTarget,
   type MemberSessionExportReport,
@@ -3214,6 +3217,12 @@ export class ChatService {
         // A Cloud choice not prepared yet: what it was handed still waits.
         handoff = current.sessionHandoff;
       }
+      if (handoff) {
+        // What the member is told on its first turn there: where it was, and
+        // where it is now (a handoff carried on keeps where it last ran).
+        const fromName = fromHere ? USER_COMPUTER_NAME : sourceMachineId ? cloudMachineName(this.serverLink?.machineName(sourceMachineId)) : handoff.fromName;
+        handoff = { ...handoff, ...(fromName ? { fromName } : {}), toName: toHere ? USER_COMPUTER_NAME : cloudMachineName(destination?.name) };
+      }
       const line = [memberMovedLine(member.handle, destinationName, Boolean(handoff)), sessionNote].filter(Boolean).join(" ");
       // A known machine that takes sessions is its home at once, so its turns
       // (the phone's too) go there without waiting for a Cloud preparation.
@@ -3563,6 +3572,11 @@ export class ChatService {
         ...(typeof moved.roleLabel === "string" ? { roleLabel: moved.roleLabel } : {}),
         ...(Array.isArray(moved.participantBehaviorRules) ? { participantBehaviorRules: moved.participantBehaviorRules } : {}),
         importedHandoff: handoff.blob.blobHash,
+        movedHere: {
+          from: handoff.fromName ?? "another computer",
+          to: handoff.toName ?? (this.machineRuntime ? cloudMachineName(undefined) : USER_COMPUTER_NAME),
+          at: new Date().toISOString()
+        },
         updatedAt: new Date().toISOString()
       };
     } catch (error) {
@@ -9242,12 +9256,18 @@ export class ChatService {
     const memoryIndexBlock = memoryIndexResult?.text;
     // Shown again after a compaction until the server's list was given.
     if (memoryIndexResult?.delivered) this.memoryIndexDue.delete(this.memoryIndexKey(conversation.id, participant.id));
+    // It moved here with its session: told once where it is now (until a
+    // turn of it succeeded, below).
+    const moveNoteBlock = session.movedHere
+      ? memberMovedNote(session.movedHere, this.runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions), process.platform)
+      : undefined;
     const primary = this.buildPromptParts(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: primaryIncludeRoleInstructions,
       agentMode,
       permissions,
       promptContextBlock: preparedPromptContext.block,
-      memoryIndexBlock
+      memoryIndexBlock,
+      moveNoteBlock
     });
     const prompt = primary.prompt;
     const promptFallbackPrompt = this.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
@@ -9255,7 +9275,8 @@ export class ChatService {
       agentMode,
       permissions,
       promptContextBlock: preparedPromptContext.block,
-      memoryIndexBlock
+      memoryIndexBlock,
+      moveNoteBlock
     });
     const resumeFallbackPrompt = isResumingSession
       ? this.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
@@ -9263,7 +9284,8 @@ export class ChatService {
           agentMode,
           permissions,
           promptContextBlock: preparedPromptContext.resumeFallbackBlock,
-          memoryIndexBlock
+          memoryIndexBlock,
+          moveNoteBlock
         })
       : undefined;
     const role = usePromptRole ? undefined : this.cliRoleOptions(participant, session, promptFallbackPrompt);
@@ -9602,6 +9624,8 @@ export class ChatService {
         }
         session.lastSyncedMessageId = pendingMessage.id;
       }
+      // Told where it is now: not again.
+      delete session.movedHere;
       this.upsertSession(conversation, session);
       this.lockParticipantRoleVersion(conversation, participant, session.roleConfigVersion);
       return [pendingMessage];
@@ -10145,7 +10169,7 @@ export class ChatService {
     triggerMessage: ChatMessage,
     workspacePath: string,
     continuation: boolean,
-    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string; memoryIndexBlock?: string }
+    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string; memoryIndexBlock?: string; moveNoteBlock?: string }
   ): string {
     return this.buildPromptParts(conversation, participant, session, triggerMessage, workspacePath, continuation, options).prompt;
   }
@@ -10157,7 +10181,7 @@ export class ChatService {
     triggerMessage: ChatMessage,
     workspacePath: string,
     continuation: boolean,
-    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string; memoryIndexBlock?: string }
+    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string; memoryIndexBlock?: string; moveNoteBlock?: string }
   ): { prompt: string; sections: ChatPromptSectionSizes } {
     const canRequestPermissions = this.canRequestPermissionChanges(session);
     const dynamicHeader = this.participantDynamicHeader(conversation, participant, session, options);
@@ -10212,6 +10236,7 @@ export class ChatService {
 
     const orderedBlocks = [
       staticEnvelope || dynamicHeader,
+      options.moveNoteBlock ?? "",
       promptContextBlock,
       memoryIndexBlock,
       triggerBlock,

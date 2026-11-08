@@ -10,7 +10,7 @@ import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../.
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import type { DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { HubFeedEntry, HubOp, HubOpEffect, HubTurn } from "../../shared/hubOps";
-import type { ChatSessionHandoff } from "../../shared/memberSessionMove";
+import { memberMovedNote, type ChatSessionHandoff } from "../../shared/memberSessionMove";
 import { ChatService } from "./chat";
 import type { ChatServerLink } from "./chatServerOps";
 import { blobReferenceOf, HubHttpError } from "./hubClient";
@@ -85,7 +85,8 @@ test("a Claude member that ran here moves to a machine with its session: put on 
   assert.equal(member.homeMachineId, "box", "a known machine is its home at once: the phone's turns reach it there");
   assert.deepEqual(member.cloudRun, { instanceId: "i-1" });
   assert.equal(uploaded.length, 1);
-  assert.deepEqual(member.sessionHandoff, { provider: "claude-code", sessionId: "sess-1", blob: blobReferenceOf(uploaded[0]), at: member.sessionHandoff?.at });
+  assert.deepEqual(member.sessionHandoff, { provider: "claude-code", sessionId: "sess-1", blob: blobReferenceOf(uploaded[0]), at: member.sessionHandoff?.at,
+    fromName: "the User's computer", toName: "cloud machine Box" });
   assert.deepEqual((await unpackMemberSession(uploaded[0])).transcript, TRANSCRIPT);
   assert.equal((storage.current.metadata.participantSessions as ChatParticipantSession[]).length, 0, "its session is no longer this computer's");
   assert.equal(storage.current.messages.at(-1)?.content, "@admin moved to Box. Its session moved with it.");
@@ -516,3 +517,42 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void
   throw new Error("Timed out waiting for the condition.");
 }
 
+
+test("the member is told once, on its first turn after the move, where it runs now", async () => {
+  const packed = await packMemberSession(portableMemberSession(chatSession(chatParticipant(), "sess-1")), TRANSCRIPT);
+  const handoff = { ...await handoffOf(packed), fromName: "the User's computer", toName: "cloud machine Box" };
+  const participant = chatParticipant({ homeMachineId: "box", sessionHandoff: handoff });
+  const conversation = chatConversation([participant], []);
+  conversation.repoPath = "/home/ubuntu/ws/mirrors/proj/repo";
+  const { service, storage, runner } = testService(conversation);
+  service.setHostMachineId("box");
+  runner.claudeProjectsDirectory = async () => tempDir();
+  service.setHubBlobReader(async () => packed);
+
+  const state = await (service as any).sessionForParticipant(clone(storage.current), participant);
+  assert.deepEqual({ from: state.session.movedHere?.from, to: state.session.movedHere?.to }, { from: "the User's computer", to: "cloud machine Box" });
+  const build = (session: ChatParticipantSession, note?: string) => (service as any).buildPromptParts(clone(storage.current), participant, session, acceptedMessage(), "/tmp/chat", false,
+    { includeRoleInstructions: false, agentMode: "default", permissions: participant.permissions, moveNoteBlock: note }).prompt as string;
+  const note = memberMovedNote(state.session.movedHere, "/home/ubuntu/ws/mirrors/proj/repo", "linux");
+  assert.match(note, /moved from the User's computer to cloud machine Box/);
+  assert.match(note, /\(Linux\); your working folder there is \/home\/ubuntu\/ws\/mirrors\/proj\/repo/);
+  assert.match(note, /check them before you rely on them/);
+  assert.ok(build(state.session, note).includes(note), "it goes with that turn's prompt");
+  assert.equal(build({ ...state.session, movedHere: undefined }).includes("Note from AccordAgents"), false, "and not with later ones");
+  assert.equal((portableMemberSession(state.session) as ChatParticipantSession).movedHere, undefined, "it never moves on with the session");
+});
+
+test("a move says on the handoff where the member was and where it goes", async () => {
+  const participant = chatParticipant();
+  const conversation = withReply(chatConversation([participant], [chatSession(participant, "sess-1")]), participant);
+  const { service, storage, runner } = testService(conversation);
+  const projects = await tempDir();
+  await placeClaudeTranscript(projects, "/Users/me/proj", "sess-1", TRANSCRIPT);
+  runner.claudeProjectsDirectory = async () => projects;
+  service.setHubBlobWriter(async (bytes) => blobReferenceOf(bytes));
+  service.setMachineSessionMove(() => ({ support: "supported", name: "Box", machineId: "box" }));
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: participant.id, homeMachineId: "box", cloudRun: undefined, remoteExecution: "local" });
+  const member = storage.current.metadata.participants[0] as ChatParticipant;
+  assert.equal(member.sessionHandoff?.fromName, "the User's computer");
+  assert.equal(member.sessionHandoff?.toName, "cloud machine Box");
+});

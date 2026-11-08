@@ -47,6 +47,10 @@ export interface ChatSessionHandoff {
   blob: DeviceEventBlobReference;
   /** When it was handed over (the moving desktop's clock). */
   at: string;
+  /** Where it ran and where it goes, as the member is told on its first turn
+   *  there ("the User's computer", "cloud machine Box"). */
+  fromName?: string;
+  toName?: string;
 }
 
 /** What a machine's export turn reports, on a hidden line of the chat. The
@@ -72,7 +76,7 @@ export interface MemberSessionTakenReport {
 
 /** What the session a member's handoff carries holds besides the transcript:
  *  the app's own record of it, as the device it left had it. */
-export type PortableMemberSession = Omit<ChatParticipantSession, "remoteSession" | "invalidatedRemoteSessionId" | "invalidatedRemoteSessionAt" | "importedHandoff">;
+export type PortableMemberSession = Omit<ChatParticipantSession, "remoteSession" | "invalidatedRemoteSessionId" | "invalidatedRemoteSessionAt" | "importedHandoff" | "movedHere">;
 
 /** Only a Claude Code member on its own sign-in moves with its session; a
  *  member through an added provider stays where it first ran. */
@@ -90,6 +94,24 @@ export interface MachineSessionMoveTarget {
   name?: string;
   machineId?: string;
   deviceId?: string;
+}
+
+/** How the app names the two kinds of place a member runs. */
+export const USER_COMPUTER_NAME = "the User's computer";
+export function cloudMachineName(name: string | undefined): string {
+  return name ? `cloud machine ${name}` : "a cloud machine";
+}
+
+/** What the member is told, once, on its first turn after it moved: it now
+ *  works on another computer, so what it knew of paths, files, tools and
+ *  access there may not hold. */
+export function memberMovedNote(move: { from: string; to: string }, folder: string, platform: string): string {
+  const system = platform === "darwin" ? "macOS" : platform === "linux" ? "Linux" : platform === "win32" ? "Windows" : platform;
+  return [
+    "Note from AccordAgents: you moved since your last reply.",
+    `Your session was moved from ${move.from} to ${move.to}, and you now run on that other computer (${system}); your working folder there is ${folder}.`,
+    "Paths, files, tools and access you used before may be different or missing here (absolute paths and files from the earlier computer, local apps, sign-ins, anything outside the project), so check them before you rely on them."
+  ].join("\n");
 }
 
 /** The line the chat shows once a member moved. */

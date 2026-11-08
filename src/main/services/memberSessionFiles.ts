@@ -109,7 +109,7 @@ export async function readClaudeTranscript(file: string): Promise<Buffer> {
 /** The app's record of a session, without what only the device it left
  *  means (a legacy worker handle, the handoff it was itself taken from). */
 export function portableMemberSession(session: ChatParticipantSession): PortableMemberSession {
-  const { remoteSession: _remote, invalidatedRemoteSessionId: _invalidated, invalidatedRemoteSessionAt: _invalidatedAt, importedHandoff: _imported, ...portable } = session;
+  const { remoteSession: _remote, invalidatedRemoteSessionId: _invalidated, invalidatedRemoteSessionAt: _invalidatedAt, importedHandoff: _imported, movedHere: _moved, ...portable } = session;
   return portable;
 }
 

@@ -1001,6 +1001,9 @@ export interface ChatParticipantSession {
   /** The handoff (its body's hash) this session was taken from, so it is
    *  taken once on this device; see ChatParticipant.sessionHandoff. */
   importedHandoff?: string;
+  /** Device-local: it moved here with this session, and its next turn tells
+   *  it so (memberMovedNote); cleared once a turn of it succeeded. */
+  movedHere?: { from: string; to: string; at: string };
   updatedAt: string;
 }
 
