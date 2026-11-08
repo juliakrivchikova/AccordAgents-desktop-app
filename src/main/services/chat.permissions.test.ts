@@ -15167,3 +15167,36 @@ test("members' memory: every member is told how to keep it, a new session's prom
   assert.doesNotMatch(prompts[3], /Long-term memory \(notes members keep/);
   assert.equal(asked.length, 2);
 });
+
+test("a moved member's note goes with its turns until one is answered, and only then is gone", async () => {
+  const prompts: string[] = [];
+  let ok = false;
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant], {
+    participantSessions: [{ participantId: participant.id, sessionId: "sess-moved", roleConfigId: ROLE.id, roleConfigVersion: ROLE.version, roleLabel: ROLE.label,
+      roleInstructions: ROLE.instructions, updatedAt: NOW, movedHere: { from: "cloud machine Box", to: "the User's computer", at: NOW } }]
+  });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, prompt) => {
+      prompts.push(String(prompt));
+      return ok
+        ? { participant: runParticipant, ok: true, content: "done", durationMs: 1, sessionId: "sess-moved" }
+        : { participant: runParticipant, ok: false, content: "", error: "The command was cancelled before native execution started.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const turn = (runId: string) => (service as any).runParticipantTurnSerialized(storage.current, participant, storage.current.messages[0], runId, undefined, undefined, { warnings: [] })
+    .catch(() => undefined);
+  const moved = () => storage.current.metadata.participantSessions.find((session: any) => session.participantId === participant.id)?.movedHere;
+
+  await turn("never-started");
+  assert.match(prompts[0], /Your session was moved from cloud machine Box to the User's computer/);
+  assert.ok(moved(), "a turn its CLI never answered leaves the note for the next one");
+  ok = true;
+  await turn("answered");
+  assert.match(prompts[1], /Note from AccordAgents: you moved/);
+  assert.equal(moved(), undefined, "told once");
+  await turn("later");
+  assert.equal(prompts[2].includes("Note from AccordAgents"), false);
+});

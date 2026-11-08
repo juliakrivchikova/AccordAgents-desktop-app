@@ -922,6 +922,13 @@ interface CloudRunDoctorProbe {
 /** Copy for values adopted out of a stored snapshot into the live
  *  conversation, so in-place edits of the live object never reach the snapshot
  *  (see readStoredChatStateForRefresh). */
+/** A place's name as a member is told it: one short line of text. */
+function placeName(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const line = value.replace(/[\r\n\t]+/g, " ").trim().slice(0, 80);
+  return line || undefined;
+}
+
 /** Waits for `done`, or rejects when `signal` aborts first. */
 function abortableWait(done: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
   if (!signal) return done;
@@ -1165,6 +1172,8 @@ export class ChatService {
   /** Handoffs being taken here, and those taken, so one is taken once. */
   private readonly sessionHandoffsTaking = new Map<string, Promise<void>>();
   private readonly sessionHandoffsTaken = new Set<string>();
+  /** Move notes a running turn of the member carries (memberMovedNote). */
+  private readonly moveNotesInFlight = new Set<string>();
   /** Restarts asked here that have not ended, by chat and member: one at a time. */
   private readonly memberRestartsInFlight = new Set<string>();
   /** Desktop side: runs before a turn of a machine member is asked (the
@@ -3219,8 +3228,11 @@ export class ChatService {
       }
       if (handoff) {
         // What the member is told on its first turn there: where it was, and
-        // where it is now (a handoff carried on keeps where it last ran).
-        const fromName = fromHere ? USER_COMPUTER_NAME : sourceMachineId ? cloudMachineName(this.serverLink?.machineName(sourceMachineId)) : handoff.fromName;
+        // where it is now. A session passed on without having run here keeps
+        // where it last ran.
+        const passedOn = Boolean(current.sessionHandoff && handoff.blob.blobHash === current.sessionHandoff.blob.blobHash);
+        const fromName = passedOn ? current.sessionHandoff?.fromName
+          : fromHere ? USER_COMPUTER_NAME : sourceMachineId ? cloudMachineName(this.serverLink?.machineName(sourceMachineId)) : handoff.fromName;
         handoff = { ...handoff, ...(fromName ? { fromName } : {}), toName: toHere ? USER_COMPUTER_NAME : cloudMachineName(destination?.name) };
       }
       const line = [memberMovedLine(member.handle, destinationName, Boolean(handoff)), sessionNote].filter(Boolean).join(" ");
@@ -3573,8 +3585,8 @@ export class ChatService {
         ...(Array.isArray(moved.participantBehaviorRules) ? { participantBehaviorRules: moved.participantBehaviorRules } : {}),
         importedHandoff: handoff.blob.blobHash,
         movedHere: {
-          from: handoff.fromName ?? "another computer",
-          to: handoff.toName ?? (this.machineRuntime ? cloudMachineName(undefined) : USER_COMPUTER_NAME),
+          from: placeName(handoff.fromName) ?? "another computer",
+          to: placeName(handoff.toName) ?? (this.machineRuntime ? cloudMachineName(undefined) : USER_COMPUTER_NAME),
           at: new Date().toISOString()
         },
         updatedAt: new Date().toISOString()
@@ -9258,9 +9270,13 @@ export class ChatService {
     if (memoryIndexResult?.delivered) this.memoryIndexDue.delete(this.memoryIndexKey(conversation.id, participant.id));
     // It moved here with its session: told once where it is now (until a
     // turn of it succeeded, below).
-    const moveNoteBlock = session.movedHere
+    const moveNoteKey = session.movedHere ? `${conversation.id}:${participant.id}:${session.movedHere.at}` : undefined;
+    // A turn that overlaps one already carrying the note does not carry it too.
+    const moveNoteBlock = session.movedHere && moveNoteKey && !this.moveNotesInFlight.has(moveNoteKey)
       ? memberMovedNote(session.movedHere, this.runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions), process.platform)
       : undefined;
+    const carriedMoveNote = moveNoteBlock && moveNoteKey ? moveNoteKey : undefined;
+    if (carriedMoveNote) this.moveNotesInFlight.add(carriedMoveNote);
     const primary = this.buildPromptParts(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: primaryIncludeRoleInstructions,
       agentMode,
@@ -9624,8 +9640,8 @@ export class ChatService {
         }
         session.lastSyncedMessageId = pendingMessage.id;
       }
-      // Told where it is now: not again.
-      delete session.movedHere;
+      // Told where it is now (its CLI answered this prompt): not again.
+      if (carriedMoveNote && !signal?.aborted && result.ok) delete session.movedHere;
       this.upsertSession(conversation, session);
       this.lockParticipantRoleVersion(conversation, participant, session.roleConfigVersion);
       return [pendingMessage];
@@ -9635,6 +9651,7 @@ export class ChatService {
       }
       throw error;
     } finally {
+      if (carriedMoveNote) this.moveNotesInFlight.delete(carriedMoveNote);
       unregisterRunProgressCallback();
       options.writeGate?.markWritten();
       this.releaseInFlightPromptContext(runId);
