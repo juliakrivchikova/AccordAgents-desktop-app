@@ -13,8 +13,10 @@ import type {
 } from "../../shared/types";
 import { HubOps } from "../../hub/hubOps";
 import { HubServer } from "../../hub/hubServer";
-import { createArtifactToolDispatcher } from "../appToolWiring";
-import { APP_ARTIFACT_CREATE_TOOL, APP_ARTIFACT_REVISE_TOOL, APP_ARTIFACT_SIGN_TOOL } from "./appMcp";
+import { createArtifactToolDispatcher, wireArtifactToolHandler } from "../appToolWiring";
+import {
+  APP_ARTIFACT_CREATE_TOOL, APP_ARTIFACT_DRAFT_SAVE_TOOL, APP_ARTIFACT_DRAFT_SUBMIT_TOOL, APP_ARTIFACT_REVISE_TOOL, APP_ARTIFACT_SIGN_TOOL
+} from "./appMcp";
 import { ArtifactClient } from "./artifactClient";
 import { ArtifactService } from "./artifacts";
 import { ArtifactStore } from "./artifactStore";
@@ -64,7 +66,7 @@ function documents(storage: StorageService, dbPath: string, chat: ChatService, d
       const opened = await storage.openConversation(conversationId, 1);
       return opened?.conversation.kind === "chat" ? artifactMembersForConversation(opened.conversation) : undefined;
     },
-    postNote: (conversationId, eventId, content) => chat.postArtifactChatNote(conversationId, eventId, content),
+    postNote: (conversationId, eventId, content, links) => chat.postArtifactChatNote(conversationId, eventId, content, links),
     hasChat: async (conversationId) => (await storage.openConversation(conversationId, 1))?.conversation.kind === "chat",
     logger: (event, payload) => trace(device, event, payload),
     ...(serverWaitMs !== undefined ? { serverWaitMs } : {})
@@ -278,6 +280,81 @@ test("a member on the computer creates and revises a document, a member on a mac
       (current?.messages.filter((message) => message.metadata?.artifactEventId).length ?? 0) === 3);
     assert.equal(new Set(chat!.messages.map((message) => message.metadata?.artifactEventId).filter(Boolean)).size, 3);
   }
+});
+
+test("an Accord's collection records its launch: every device's copy and every note of it name the launch, and a member cannot set it", async (t) => {
+  const conversation = localChat("chat-accord");
+  const launchId = "chat-accord-launch";
+  conversation.messages.push({
+    id: launchId, role: "user", createdAt: "2026-10-28T08:01:00.000Z", status: "done",
+    content: [
+      "@taylor /accord", "", "Subject:", "Sell now or hold?", "", "Selected accord members: drew.",
+      "Run the accord skill for exactly those selected members and this subject. Use app_chat_request_participants for those members only. The app has enabled request-members permission for you in this chat; the user can revoke it from your member controls."
+    ].join("\n"),
+    metadata: { threadId: launchId }
+  });
+  const h = await setup(t, conversation);
+
+  // The app works the launch out from the facilitator's turn; anyone else's
+  // turn, or a turn not under a launch, gets none.
+  const actor = { conversationId: "chat-accord", participantId: desk.id, roleConfigId: "software-engineer", roleConfigVersion: 1, capabilities: [] };
+  assert.equal(await h.desktopChat.accordLaunchMessageIdForActor({ ...actor, triggerMessageId: "reply-in-thread", triggerThreadId: launchId }), launchId);
+  assert.equal(await h.desktopChat.accordLaunchMessageIdForActor({ ...actor, participantId: remote.id, triggerThreadId: launchId }), undefined,
+    "@drew does not lead it");
+  assert.equal(await h.desktopChat.accordLaunchMessageIdForActor({ ...actor, triggerMessageId: "chat-accord-start" }), undefined, "not a launch");
+
+  const roster = {
+    initialState: "collecting_drafts",
+    name: "Sell or hold",
+    allowedDraftAuthors: ["taylor", "drew"],
+    requiredDraftAuthors: ["taylor", "drew"],
+    audiencePolicyByAuthor: {
+      taylor: { allowedReaders: [], requiredReaders: [] },
+      drew: { allowedReaders: ["taylor"], requiredReaders: ["taylor"] }
+    },
+    operationId: `accord:${launchId}:create`,
+    // A member's own say is not taken.
+    originMessageId: "made-up"
+  };
+  const created = value<ArtifactReadResult>(await h.desktopTool("taylor", "chat-accord", APP_ARTIFACT_CREATE_TOOL, roster, { originMessageId: launchId }));
+  assert.equal(created.summary.originMessageId, launchId);
+  const artifactId = created.summary.id;
+  const ignored = value<ArtifactReadResult>(await h.desktopTool("taylor", "chat-accord", APP_ARTIFACT_CREATE_TOOL, {
+    ...roster, name: "Other", operationId: "other:create"
+  }));
+  assert.equal(ignored.summary.originMessageId, undefined, "an argument from the member sets nothing");
+
+  // The machine's copy has it from the server, and its member's draft note,
+  // written by the machine, names the launch as well.
+  await until(() => h.machineArtifacts.read("drew", { conversationId: "chat-accord", artifactId }),
+    (read) => read.ok && read.value.summary.originMessageId === launchId);
+  const draft = value<{ id: string; editRevision: number }>(await h.machineTool("drew", "chat-accord", APP_ARTIFACT_DRAFT_SAVE_TOOL, {
+    artifactId, expectedEditRevision: 0, content: "Hold.", readers: ["taylor"], operationId: "drew:save"
+  }));
+  value(await h.machineTool("drew", "chat-accord", APP_ARTIFACT_DRAFT_SUBMIT_TOOL, {
+    artifactId, draftId: draft.id, expectedEditRevision: draft.editRevision, operationId: "drew:submit"
+  }));
+  const notes = await until(() => h.page("chat-accord"), (current) =>
+    current.messages.filter((message) => message.metadata?.artifactEventId && message.content.includes(artifactId)).length === 2);
+  const filed = notes.messages.filter((message) => message.metadata?.artifactEventId && message.content.includes(artifactId));
+  assert.deepEqual(filed.map((message) => message.metadata?.accordLaunchMessageId), [launchId, launchId]);
+  assert.ok(filed.some((message) => message.metadata?.serverWriter === h.machineIdentity.originId), "the machine wrote its own note");
+  // The other document's note is filed under nothing.
+  const other = notes.messages.find((message) => message.metadata?.artifactEventId && message.content.includes(ignored.summary.id));
+  assert.equal(other?.metadata?.accordLaunchMessageId, undefined);
+
+  // Through the App MCP wiring itself: the facilitator's collection in the
+  // launch's thread records it; a published document, or another member's
+  // collection, records nothing.
+  let handler: ((actor: unknown, toolName: string, request: unknown) => Promise<unknown>) | undefined;
+  wireArtifactToolHandler({ setArtifactToolHandler: (next: typeof handler) => { handler = next; } } as never, h.desktopChat, h.desktopTool);
+  const facilitatorTurn = { ...actor, triggerMessageId: "a-reply", triggerThreadId: launchId };
+  const viaTool = value<ArtifactReadResult>(await handler!(facilitatorTurn, APP_ARTIFACT_CREATE_TOOL, {
+    ...roster, name: "Via tool", operationId: "via-tool:create", originMessageId: undefined
+  }));
+  assert.equal(viaTool.summary.originMessageId, launchId);
+  const publishedDoc = value<ArtifactReadResult>(await handler!(facilitatorTurn, APP_ARTIFACT_CREATE_TOOL, { name: "Plain", content: "Text" }));
+  assert.equal(publishedDoc.summary.originMessageId, undefined);
 });
 
 test("a stale revision is refused on both devices, with the current version to redo it on", async (t) => {

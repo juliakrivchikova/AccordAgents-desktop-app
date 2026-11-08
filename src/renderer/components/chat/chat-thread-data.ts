@@ -4,14 +4,19 @@ import {
   chatMessageVisualThreadRootId,
   chatParticipantRequestReplyRootMap
 } from "../../../shared/chatParticipantRequestThreads";
+import { accordFoldedMessageIds } from "../../../shared/accordProgress";
+import { closedAccordDockLaunches } from "./accord-dock-store";
 import { turnFinishedNoteOf } from "../../../shared/turnFinishedNoteSource";
 import type { ChatParticipantRequestBatch, Conversation } from "../../../shared/types";
 
 const SHOW_CHAT_SYSTEM_MESSAGES = import.meta.env.VITE_ACCORD_AGENTS_SHOW_SYSTEM_MESSAGES === "1";
 
-/** A message the chat draws no row for, on the timeline or in a thread. */
+/** A message the chat draws no row for, on the timeline or in a thread. A
+ *  note of the document the pinned Accord card shows is one, while the card is
+ *  pinned: the card shows that step (accordProgress.ts). */
 export function isChatMessageHiddenInChat(conversation: Pick<Conversation, "messages">, message: Conversation["messages"][number]): boolean {
-  return chatMessageHiddenFromTimeline(conversation, message, { showSystemMessages: SHOW_CHAT_SYSTEM_MESSAGES });
+  return chatMessageHiddenFromTimeline(conversation, message, { showSystemMessages: SHOW_CHAT_SYSTEM_MESSAGES }) ||
+    (message.role === "system" && accordFoldedMessageIds(conversation.messages, closedAccordDockLaunches()).has(message.id));
 }
 
 /** A message drawn as a row of the chat's main timeline: shown, and not a thread reply. */
@@ -43,7 +48,7 @@ export function chatThreadSummaryMap(conversation: Conversation): Map<string, Ch
   const summaries = new Map<string, ChatThreadSummary>();
   const participantRequestReplyRoots = chatParticipantRequestReplyRootMap(conversation);
   for (const message of conversation.messages) {
-    if (chatMessageHiddenFromTimeline(conversation, message, { showSystemMessages: SHOW_CHAT_SYSTEM_MESSAGES })) {
+    if (isChatMessageHiddenInChat(conversation, message)) {
       continue;
     }
     const rootId = chatMessageVisualThreadRootId(conversation, message, participantRequestReplyRoots);

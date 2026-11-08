@@ -917,6 +917,7 @@ test("collecting lifecycle enforces draft ACLs, blocks early publication, and pu
       conversationId: CONVERSATION_ID,
       artifactId: created.summary.id,
       content: "PUBLISHED-V1",
+      note: "Ship on Monday,\n  after the fix.",
       requiredSigners: ["gera", "codex", "drew"],
       sources: [
         { draftId: ownerSubmitted.id, disposition: "considered" },
@@ -929,6 +930,7 @@ test("collecting lifecycle enforces draft ACLs, blocks early publication, and pu
       conversationId: CONVERSATION_ID,
       artifactId: created.summary.id,
       content: "PUBLISHED-V1",
+      note: "Ship on Monday,\n  after the fix.",
       requiredSigners: ["gera", "codex", "drew"],
       sources: [
         { draftId: ownerSubmitted.id, disposition: "considered" },
@@ -945,6 +947,10 @@ test("collecting lifecycle enforces draft ACLs, blocks early publication, and pu
     assert.equal(published.sources?.length, 3);
     assert.equal(publishedRetry.version.version, 1);
     assert.equal(h.notes.filter((note) => note.includes(" published ")).length, 1);
+    // The publication's note carries the version's note, read back as the
+    // card's outcome; on one line, as a revision's.
+    const publishedNote = parseArtifactNoteCard(h.notes.find((note) => note.includes(" published "))!);
+    assert.deepEqual([publishedNote?.action, publishedNote?.details, publishedNote?.note], ["published", ["v1"], "Ship on Monday, after the fix."]);
     assert.ok(published.sources?.every((source) => /^[a-f0-9]{64}$/.test(source.contentHash)));
 
     const publicNotes = h.notes.join("\n");
