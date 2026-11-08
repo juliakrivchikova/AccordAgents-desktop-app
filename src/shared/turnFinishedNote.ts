@@ -1,4 +1,5 @@
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "./appMcpToolContracts";
+import { accordFoldedMessageIds } from "./accordProgress";
 import {
   chatMessageHiddenFromTimeline,
   chatMessageVisualThreadRootId,
@@ -72,6 +73,8 @@ export function turnFinishedNoteFor(
     !turnFinishedNoteOf(message) &&
     !message.metadata?.serverRejected &&
     !chatMessageHiddenFromTimeline(conversation, message) &&
+    // An Accord's document note is drawn on the Accord's card, not below.
+    !accordFoldedMessageIds(conversation.messages).has(message.id) &&
     chatMessageVisualThreadRootId(conversation, message, roots) === where
   );
   if (!below) {

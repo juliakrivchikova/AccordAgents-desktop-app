@@ -12,7 +12,7 @@
          draws a grey letter (the User, 2026-11-01). The Mac app's icon
          (assets/icon.icns), full bleed at 180px: iOS rounds the corners. -->
     <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-    <link rel="stylesheet" href="mobile-app.css?v=2026-11-07-accord-launch-card" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-11-08-accord-notes-in-document" />
   </head>
   <body>
     <div class="mobile-stage">
@@ -193,6 +193,8 @@
             <span class="timeline-syncing-spinner" aria-hidden="true"></span>
             <span>Looking for new messages&hellip;</span>
           </div>
+          <!-- The chat's newest Accord, pinned above the composer. -->
+          <div id="accord-dock" class="accord-dock" hidden></div>
           <form id="composer-form" class="composer">
             <div id="mention-menu" class="mobile-mention-menu" role="listbox" aria-label="Members" hidden></div>
             <!-- The "/" menu: commands, saved prompts and skills, as the desktop
@@ -353,15 +355,15 @@
       </main>
     </div>
     <!-- The database description both the page and the service worker load. -->
-    <script src="mobile-db.js?v=2026-11-07-accord-launch-card" defer></script>
-    <script src="jsqr.js?v=2026-11-07-accord-launch-card" defer></script>
+    <script src="mobile-db.js?v=2026-11-08-accord-notes-in-document" defer></script>
+    <script src="jsqr.js?v=2026-11-08-accord-notes-in-document" defer></script>
     <!-- How the phone talks to the User's server (signed requests carrying
          its operations), and the rules shared with the desktop verbatim
          (avatars, timeline visibility), bundled from src/shared by the mobile
          build. -->
-    <script src="mobile-hub-client.js?v=2026-11-07-accord-launch-card" defer></script>
-    <script src="mobile-shared.js?v=2026-11-07-accord-launch-card" defer></script>
-    <script src="mobile-activity.js?v=2026-11-07-accord-launch-card" defer></script>
-    <script src="mobile-app.js?v=2026-11-07-accord-launch-card" defer></script>
+    <script src="mobile-hub-client.js?v=2026-11-08-accord-notes-in-document" defer></script>
+    <script src="mobile-shared.js?v=2026-11-08-accord-notes-in-document" defer></script>
+    <script src="mobile-activity.js?v=2026-11-08-accord-notes-in-document" defer></script>
+    <script src="mobile-app.js?v=2026-11-08-accord-notes-in-document" defer></script>
   </body>
 </html>

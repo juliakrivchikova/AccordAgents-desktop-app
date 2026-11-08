@@ -51,6 +51,8 @@ export interface ArtifactRecord {
   createdAt: string;
   updatedAt: string;
   archivedAt?: string;
+  /** The chat message this collection was started for (see types.ts). */
+  originMessageId?: string;
 }
 
 export interface ArtifactDraftRecord {
@@ -148,6 +150,7 @@ interface ArtifactRow {
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
+  originMessageId: string | null;
 }
 
 interface ArtifactDraftRow {
@@ -232,7 +235,8 @@ const ARTIFACT_SELECT = `
     head_version as headVersion,
     created_at as createdAt,
     updated_at as updatedAt,
-    archived_at as archivedAt
+    archived_at as archivedAt,
+    origin_message_id as originMessageId
   from artifacts
 `;
 
@@ -324,7 +328,8 @@ export class ArtifactStore {
       ["required_draft_authors_json", "alter table artifacts add column required_draft_authors_json text not null default '[]';"],
       ["audience_policy_json", "alter table artifacts add column audience_policy_json text not null default '{}';"],
       ["draft_roster_revision", "alter table artifacts add column draft_roster_revision integer not null default 0;"],
-      ["archived_at", "alter table artifacts add column archived_at text;"]
+      ["archived_at", "alter table artifacts add column archived_at text;"],
+      ["origin_message_id", "alter table artifacts add column origin_message_id text;"]
     ] as const;
     for (const [name, sql] of additions) {
       await this.ensureArtifactColumn(name, sql);
@@ -485,7 +490,7 @@ export class ArtifactStore {
         contributors_json, required_signers_json, labels_json,
         lifecycle, allowed_draft_authors_json, required_draft_authors_json,
         audience_policy_json, draft_roster_revision,
-        head_version, created_at, updated_at
+        head_version, created_at, updated_at, origin_message_id
       )
       select
         ${sqlString(record.id)},
@@ -503,7 +508,8 @@ export class ArtifactStore {
         ${Math.floor(record.draftRosterRevision)},
         0,
         ${sqlString(record.createdAt)},
-        ${sqlString(record.updatedAt)}
+        ${sqlString(record.updatedAt)},
+        ${sqlString(record.originMessageId)}
       where ${this.operationPendingSql(operation)}
         and not exists (
           select 1 from artifact_conversation_tombstones
@@ -1414,18 +1420,20 @@ export class ArtifactStore {
         and name_key = ${sqlString(artifactNameKey(record.name))};`);
       statements.push(`insert into artifacts (id, conversation_id, name, name_key, owner, contributors_json, required_signers_json, labels_json,
           lifecycle, allowed_draft_authors_json, required_draft_authors_json, audience_policy_json, draft_roster_revision, head_version,
-          created_at, updated_at, archived_at)
+          created_at, updated_at, archived_at, origin_message_id)
         values (${id}, ${chat}, ${sqlString(record.name)}, ${sqlString(artifactNameKey(record.name))}, ${sqlString(record.owner)},
           ${sqlString(JSON.stringify(record.contributors))}, ${sqlString(JSON.stringify(record.requiredSigners))}, ${sqlString(JSON.stringify(record.labels))},
           ${sqlString(record.lifecycle)}, ${sqlString(JSON.stringify(record.allowedDraftAuthors))}, ${sqlString(JSON.stringify(record.requiredDraftAuthors))},
           ${sqlString(JSON.stringify(record.audiencePolicyByAuthor))}, ${Math.floor(record.draftRosterRevision)}, ${Math.floor(record.headVersion)},
-          ${sqlString(record.createdAt)}, ${sqlString(record.updatedAt)}, ${sqlString(record.archivedAt)})
+          ${sqlString(record.createdAt)}, ${sqlString(record.updatedAt)}, ${sqlString(record.archivedAt)},
+          ${sqlString(record.originMessageId)})
         on conflict(id) do update set name = excluded.name, name_key = excluded.name_key, owner = excluded.owner,
           contributors_json = excluded.contributors_json, required_signers_json = excluded.required_signers_json, labels_json = excluded.labels_json,
           lifecycle = excluded.lifecycle, allowed_draft_authors_json = excluded.allowed_draft_authors_json,
           required_draft_authors_json = excluded.required_draft_authors_json, audience_policy_json = excluded.audience_policy_json,
           draft_roster_revision = excluded.draft_roster_revision, head_version = excluded.head_version, created_at = excluded.created_at,
-          updated_at = excluded.updated_at, archived_at = excluded.archived_at
+          updated_at = excluded.updated_at, archived_at = excluded.archived_at,
+          origin_message_id = excluded.origin_message_id
         where artifacts.conversation_id = excluded.conversation_id;`);
       statements.push(`delete from artifact_version_projection where artifact_id = ${id};`);
       statements.push(`delete from artifact_bound_signatures where artifact_id = ${id};`);
@@ -1541,12 +1549,13 @@ export class ArtifactStore {
       existing.set(artifactNameKey(name), record.id);
       statements.push(`insert or ignore into artifacts (id, conversation_id, name, name_key, owner, contributors_json, required_signers_json, labels_json,
           lifecycle, allowed_draft_authors_json, required_draft_authors_json, audience_policy_json, draft_roster_revision, head_version,
-          created_at, updated_at, archived_at)
+          created_at, updated_at, archived_at, origin_message_id)
         values (${sqlString(record.id)}, ${chat}, ${sqlString(name)}, ${sqlString(artifactNameKey(name))}, ${sqlString(record.owner)},
           ${sqlString(JSON.stringify(record.contributors))}, ${sqlString(JSON.stringify(record.requiredSigners))}, ${sqlString(JSON.stringify(record.labels))},
           ${sqlString(record.lifecycle)}, ${sqlString(JSON.stringify(record.allowedDraftAuthors))}, ${sqlString(JSON.stringify(record.requiredDraftAuthors))},
           ${sqlString(JSON.stringify(record.audiencePolicyByAuthor))}, ${Math.floor(record.draftRosterRevision)}, ${Math.floor(record.headVersion)},
-          ${sqlString(record.createdAt)}, ${sqlString(record.updatedAt)}, ${sqlString(record.archivedAt)});`);
+          ${sqlString(record.createdAt)}, ${sqlString(record.updatedAt)}, ${sqlString(record.archivedAt)},
+          ${sqlString(record.originMessageId)});`);
     }
     // Rows of a document go only to that document, in this chat.
     const owned = (artifactId: string) => `exists(select 1 from artifacts a where a.id = ${sqlString(artifactId)} and a.conversation_id = ${chat})`;
@@ -1621,7 +1630,8 @@ export class ArtifactStore {
       headVersion: typeof row.headVersion === "number" ? row.headVersion : Number.parseInt(String(row.headVersion), 10) || 0,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
-      archivedAt: row.archivedAt ?? undefined
+      archivedAt: row.archivedAt ?? undefined,
+      ...(row.originMessageId ? { originMessageId: row.originMessageId } : {})
     };
   }
 
@@ -1786,8 +1796,8 @@ function revisionMeta(row: RevisionMetaRow): HubArtifactRevisionMeta {
 }
 
 function hubRecord(record: ArtifactRecord): HubArtifactRecord {
-  const { archivedAt, ...rest } = record;
-  return { ...rest, ...(archivedAt ? { archivedAt } : {}) };
+  const { archivedAt, originMessageId, ...rest } = record;
+  return { ...rest, ...(archivedAt ? { archivedAt } : {}), ...(originMessageId ? { originMessageId } : {}) };
 }
 
 function hubDraft(draft: ArtifactDraftRecord): HubArtifactDraftRow {

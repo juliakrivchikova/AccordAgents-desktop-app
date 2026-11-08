@@ -1680,6 +1680,12 @@ export interface ChatMessageMetadata {
   scriptId?: string;
   scriptName?: string;
   artifactEventId?: string;
+  /** An artifact note: the Accord launch message its document belongs to, so
+   *  that Accord's card shows the step instead of a card of its own. */
+  accordLaunchMessageId?: string;
+  /** Who leads that Accord and who is in it, as its launch names them, so the
+   *  Accord's card can be drawn when the launch itself is not loaded. */
+  accordLaunch?: { facilitator: string; members: string[] };
   /** On a turn-finished note (appMessageSource TURN_FINISHED_NOTE_SOURCE): the
    *  member's reply it points at, which had other messages below it when the
    *  turn ended. */
@@ -2982,6 +2988,9 @@ export interface ArtifactSummary {
   createdAt: string;
   updatedAt: string;
   archivedAt?: string;
+  /** The chat message the document was started for, when the app recorded
+   *  one: that message's card in the chat shows the document's progress. */
+  originMessageId?: string;
   approval: ArtifactApproval;
 }
 
@@ -3104,6 +3113,9 @@ export interface CreateCollectingArtifactRequest {
   requiredDraftAuthors: string[];
   audiencePolicyByAuthor: ArtifactDraftAudiencePolicyByAuthor;
   operationId: string;
+  /** The chat message this collection was started for. Set by the app from
+   *  the creating member's turn, never taken from the member's arguments. */
+  originMessageId?: string;
 }
 
 export type CreateArtifactRequest = CreatePublishedArtifactRequest | CreateCollectingArtifactRequest;

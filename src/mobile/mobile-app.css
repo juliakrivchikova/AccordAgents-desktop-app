@@ -1058,6 +1058,298 @@ button.mobile-chat-group-title:active {
   font: inherit;
 }
 
+/* The chat's newest Accord, pinned above the composer: a framed card as on
+   the desktop, its head folding it into one line. */
+.accord-dock {
+  flex-shrink: 0;
+  padding: 8px 12px 0;
+}
+
+.accord-dock[hidden] {
+  display: none;
+}
+
+.accord-dock-card {
+  overflow-x: hidden;
+  overflow-y: auto;
+  /* The usable height, which the keyboard shrinks, not the screen's. */
+  max-height: calc(var(--app-h, 100dvh) * 0.36);
+  border: 1px solid var(--bd);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--fg1);
+  font-family: var(--sans);
+}
+
+/* While she types, the keyboard takes half the screen: the card keeps only
+   its head line, so the conversation stays in view. */
+#timeline-screen:has(#composer-input:focus) .accord-dock-card > :not(.accord-dock-head) {
+  display: none;
+}
+
+#timeline-screen:has(#composer-input:focus) .accord-dock-head {
+  border-bottom: 0;
+}
+
+.accord-dock-head {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  display: flex;
+  align-items: center;
+  padding-right: 6px;
+  background: var(--surface);
+}
+
+.accord-dock-card:not(.is-folded) .accord-dock-head {
+  border-bottom: 1px solid var(--bd);
+}
+
+.accord-dock-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 6px 10px 11px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.accord-dock-card.is-folded .accord-dock-toggle {
+  padding-block: 7px;
+}
+
+.accord-dock-icon {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--bd);
+  border-radius: 10px;
+  background: var(--note-card);
+}
+
+.accord-dock-card.is-folded .accord-dock-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+.accord-dock-heading {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.accord-dock-title {
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.accord-dock-meta {
+  overflow: hidden;
+  color: var(--mut);
+  font-size: 12.5px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.accord-dock-kind {
+  color: var(--fg1);
+  font-weight: 500;
+}
+
+.accord-dock-close {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--mut);
+}
+
+.accord-progress-status {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--accs);
+  color: var(--acc);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.accord-dock-card.is-reached .accord-progress-status {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.accord-progress-stages {
+  margin: 0;
+  padding: 6px 14px 8px 18px;
+  list-style: none;
+}
+
+.accord-progress-stage {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 0;
+}
+
+.accord-progress-mark {
+  display: inline-flex;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border: 1.5px solid var(--bd);
+  border-radius: 50%;
+}
+
+.accord-progress-mark.is-active {
+  border: 2px dashed var(--acc);
+  animation: accord-progress-spin 2.4s linear infinite;
+}
+
+.accord-progress-mark.is-done {
+  border: 0;
+  background: var(--acc);
+  color: var(--surface);
+}
+
+.accord-dock-card.is-reached .accord-progress-mark.is-done {
+  background: var(--ok);
+}
+
+.accord-progress-mark svg {
+  stroke-width: 3;
+}
+
+@keyframes accord-progress-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .accord-progress-mark.is-active { animation: none; }
+}
+
+.accord-progress-stage-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.accord-progress-label {
+  color: var(--fg1);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.accord-progress-stage.is-todo .accord-progress-label {
+  color: var(--mut);
+  font-weight: 400;
+}
+
+.accord-progress-detail {
+  color: var(--mut);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.accord-progress-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 5px;
+}
+
+.accord-progress-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 2px 8px 2px 3px;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  color: var(--fg);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.accord-progress-member .accord-launch-handle {
+  color: inherit;
+}
+
+.accord-progress-member.is-waiting {
+  border-style: dashed;
+  border-color: var(--acc);
+}
+
+.accord-progress-member .accord-launch-avatar {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  font-size: 8px;
+}
+
+.accord-progress-member-check {
+  margin-left: -1px;
+  color: var(--acc);
+  stroke-width: 3;
+}
+
+.accord-dock-card.is-reached .accord-progress-member-check {
+  color: var(--ok);
+}
+
+/* A note is meant to be short; a long one stops after three lines. */
+.accord-progress-note {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 11px 14px 12px;
+  border-top: 1px solid var(--bd);
+  background: var(--note-card);
+}
+
+.accord-progress-note-head {
+  color: var(--mut);
+  font-size: 12.5px;
+}
+
+.accord-progress-note-body {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 /* The subject is her own words: drawn as message text, not as a heading. */
 .accord-launch-card .artifact-note-title {
   font-size: 15px;

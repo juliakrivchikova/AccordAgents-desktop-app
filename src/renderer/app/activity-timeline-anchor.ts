@@ -73,7 +73,8 @@ export async function visibleTimelineAnchor(input: {
 function belongsToMessageId(conversation: Pick<Conversation, "messages">, message: ChatMessage): string | undefined {
   const metadata = message.metadata;
   const candidates = isChatMessageHiddenInChat(conversation, message)
-    ? [metadata?.chatThreadRootId, metadata?.parentMessageId, metadata?.sourceMessageId]
+    // An Accord's document note is shown on the Accord's card, its launch.
+    ? [metadata?.chatThreadRootId, metadata?.parentMessageId, metadata?.sourceMessageId, metadata?.accordLaunchMessageId]
     : [chatMessageVisualThreadRootId(conversation, message), metadata?.chatThreadRootId, metadata?.parentMessageId];
   for (const value of candidates) {
     if (typeof value === "string" && value.trim() && value.trim() !== message.id) {

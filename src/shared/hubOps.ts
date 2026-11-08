@@ -425,6 +425,8 @@ export interface HubArtifactRecord {
   createdAt: string;
   updatedAt: string;
   archivedAt?: string;
+  /** The chat message the collection was started for, when recorded. */
+  originMessageId?: string;
 }
 
 /** One immutable revision, without its body. `originalVersion` is the number
@@ -712,7 +714,8 @@ function isArtifactRecord(value: unknown): value is HubArtifactRecord {
     isStringList(value.allowedDraftAuthors) && isStringList(value.requiredDraftAuthors) &&
     isRecord(policy) && Object.values(policy).every((entry) => isRecord(entry) && isStringList(entry.allowedReaders) && isStringList(entry.requiredReaders)) &&
     Number.isSafeInteger(value.draftRosterRevision) && Number.isSafeInteger(value.headVersion) &&
-    isText(value.createdAt, 64) && isText(value.updatedAt, 64) && isOptionalText(value.archivedAt, 64);
+    isText(value.createdAt, 64) && isText(value.updatedAt, 64) && isOptionalText(value.archivedAt, 64) &&
+    isOptionalText(value.originMessageId, 256);
 }
 
 function isArtifactRevision(value: unknown): value is HubArtifactRevision {

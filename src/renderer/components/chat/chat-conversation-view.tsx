@@ -38,6 +38,8 @@ import {
 import { ArtifactsContext } from "../artifacts/artifacts-context";
 import { ArtifactNoteProgressContext } from "./chat-artifact-note-card";
 import { artifactNoteProgressById } from "../../../shared/artifactNoteProgress";
+import { ChatAccordDockSlot } from "./chat-accord-dock";
+import { useDockedAccord } from "./use-accord-progress";
 import { ARTIFACT_NOTE_MESSAGE_SOURCE } from "../../../shared/artifacts";
 import { AttachmentPanelContext } from "../files/file-panel-context";
 import { ChatSidePanel, useChatSidePanel } from "./chat-side-panel";
@@ -124,6 +126,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
       return summary ? { signers: summary.approval.requiredSigners.length, drafters: summary.requiredDraftCount || undefined } : undefined;
     });
   }, [artifactNotesKey, artifacts.context.byId]);
+  const dockedAccord = useDockedAccord(props.conversation.messages, artifactNotesKey);
   const [selectedThreadRootId, setSelectedThreadRootId] = useState<string | undefined>();
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const [threadWidth, setThreadWidth] = useState(CHAT_THREAD_DEFAULT_WIDTH);
@@ -416,9 +419,16 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               virtualItems={viewport.chatVirtualItems}
               virtualizer={viewport.chatVirtualizer}
             />
-            {!viewport.isStuckToBottom && topLevelMessages.length > 0 && (
-              <IconButton className="chat-jump-to-latest" floating label="Jump to latest" icon={ArrowDown} onClick={viewport.scrollToChatBottom} />
-            )}
+            <ChatAccordDockSlot
+              docked={dockedAccord}
+              conversationId={props.conversation.id}
+              participants={participants}
+              keepAtLatest={() => { if (viewport.isStuckToBottom) viewport.scrollToChatBottom(); }}
+            >
+              {!viewport.isStuckToBottom && topLevelMessages.length > 0 && (
+                <IconButton className="chat-jump-to-latest" floating label="Jump to latest" icon={ArrowDown} onClick={viewport.scrollToChatBottom} />
+              )}
+            </ChatAccordDockSlot>
             <ChatComposer
               participants={participants}
               savedPrompts={props.settings.chatSavedPrompts}

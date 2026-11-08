@@ -81,13 +81,19 @@ export type ArtifactOperations = Pick<ArtifactService,
   "list" | "read" | "diff" | "create" | "revise" | "rename" | "sign" | "updateAccess" | "setArchived" |
   "listDrafts" | "readDraft" | "saveDraft" | "submitDraft" | "replaceDraft" | "withdrawDraft" | "updateDraftRoster" | "publish">;
 
+/** What a document's chat note is filed under besides its own text. */
+export interface ArtifactNoteLinks {
+  originMessageId?: string;
+}
+
 export interface ArtifactClientDeps {
   /** This device's copy of the documents. */
   store: ArtifactStore;
   /** A chat's members on this device ("user" + handles), undefined for no chat. */
   getMembers(conversationId: string): Promise<string[] | undefined>;
-  /** Writes a document's chat note into the chat (once per note id). */
-  postNote(conversationId: string, eventId: string, content: string): Promise<void>;
+  /** Writes a document's chat note into the chat (once per note id), with
+   *  the message the document was started for when it has one. */
+  postNote(conversationId: string, eventId: string, content: string, links?: ArtifactNoteLinks): Promise<void>;
   /** Whether this device holds the chat. */
   hasChat(conversationId: string): Promise<boolean>;
   /** This chat's documents changed here. */
@@ -315,7 +321,7 @@ export class ArtifactClient implements ArtifactOperations {
   async applyServerEntries(entries: HubFeedEntry[]): Promise<void> {
     const me = this.link?.deviceId();
     const changed = new Map<string, string>(this.uncopied);
-    const notes: Array<{ conversationId: string; note: HubArtifactNote }> = [];
+    const notes: Array<{ conversationId: string; artifactId: string; note: HubArtifactNote }> = [];
     for (const entry of entries) {
       const effect = entry.effect;
       if (effect.kind === "artifact.import") {
@@ -325,12 +331,15 @@ export class ArtifactClient implements ArtifactOperations {
       if (!isHubArtifactOpKind(effect.kind)) continue;
       const change = effect as Extract<HubOpEffect, { kind: HubArtifactOpKind }>;
       changed.set(change.artifactId, entry.conversationId);
-      if (change.note && me && entry.deviceId === me) notes.push({ conversationId: entry.conversationId, note: change.note });
+      if (change.note && me && entry.deviceId === me) notes.push({ conversationId: entry.conversationId, artifactId: change.artifactId, note: change.note });
     }
     for (const [artifactId, conversationId] of changed) await this.refresh(conversationId, artifactId);
-    for (const { conversationId, note } of notes) {
+    for (const { conversationId, artifactId, note } of notes) {
       if (!await this.deps.hasChat(conversationId)) continue;
-      await this.deps.postNote(conversationId, note.eventId, note.content);
+      // The copy was just replaced with the server's, so it knows the message
+      // the document was started for (that message's card shows the note).
+      const originMessageId = (await this.deps.store.getById(artifactId).catch(() => undefined))?.originMessageId;
+      await this.deps.postNote(conversationId, note.eventId, note.content, originMessageId ? { originMessageId } : undefined);
     }
   }
 

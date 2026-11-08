@@ -40,3 +40,9 @@ export { artifactNoteProgressById } from "./artifactNoteProgress";
 // The message that starts an Accord becomes a card on the timeline: the same
 // reading of the launch prompt on the desktop and the phone.
 export { accordLaunchTitleAndBody, parseAccordLaunchCard } from "./accordLaunchCard";
+// The pinned Accord card: the chat's newest Accord and its progress, and the
+// notes of every Accord's document, which stay out of the chat; the same on
+// the desktop and the phone.
+export {
+  accordFoldedNoteKeys, accordProgressNoteHead, accordProgressStages, accordProgressStatus, dockedAccordFrom
+} from "./accordProgress";

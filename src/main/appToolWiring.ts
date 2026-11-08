@@ -35,11 +35,18 @@ import {
   type AppMcpService
 } from "./services/appMcp";
 
+/** What the app itself knows about the call, never taken from the member's
+ *  arguments: the chat message a new collection is started for. */
+export interface ArtifactToolContext {
+  originMessageId?: string;
+}
+
 export type ArtifactToolDispatcher = (
   member: string,
   conversationId: string,
   toolName: string,
-  rawRequest: unknown
+  rawRequest: unknown,
+  context?: ArtifactToolContext
 ) => Promise<unknown>;
 
 /** Registers every chat-facing app tool handler on the App MCP service. */
@@ -99,12 +106,22 @@ export function wireArtifactToolHandler(
         error: { code: "access_denied", message: error instanceof Error ? error.message : String(error) }
       };
     }
-    return dispatch(member, actor.conversationId, toolName, request);
+    // Only a new draft collection records where it was started: an Accord's
+    // launch, when the member leads that Accord (its card shows the progress).
+    const creatingCollection = toolName === APP_ARTIFACT_CREATE_TOOL && isCollectingCreate(request);
+    const originMessageId = creatingCollection
+      ? await chatService.accordLaunchMessageIdForActor(actor).catch(() => undefined)
+      : undefined;
+    return dispatch(member, actor.conversationId, toolName, request, originMessageId ? { originMessageId } : undefined);
   });
 }
 
+function isCollectingCreate(request: unknown): boolean {
+  return Boolean(request) && typeof request === "object" && (request as Record<string, unknown>).initialState === "collecting_drafts";
+}
+
 export function createArtifactToolDispatcher(artifactService: ArtifactOperations): ArtifactToolDispatcher {
-  return async (member, conversationId, toolName, rawRequest) => {
+  return async (member, conversationId, toolName, rawRequest, context) => {
     const args = rawRequest && typeof rawRequest === "object" && !Array.isArray(rawRequest)
       ? rawRequest as Record<string, unknown>
       : {};
@@ -134,7 +151,7 @@ export function createArtifactToolDispatcher(artifactService: ArtifactOperations
         if (validationError) {
           return { ok: false, error: { code: "invalid_request", message: validationError } };
         }
-        return artifactService.create(member, args.initialState === "collecting_drafts" ? {
+        return artifactService.create(member, isCollectingCreate(args) ? {
           conversationId,
           name: typeof args.name === "string" ? args.name : "",
           initialState: "collecting_drafts",
@@ -143,7 +160,8 @@ export function createArtifactToolDispatcher(artifactService: ArtifactOperations
           allowedDraftAuthors: artifactToolStringArray(args.allowedDraftAuthors) ?? [],
           requiredDraftAuthors: artifactToolStringArray(args.requiredDraftAuthors) ?? [],
           audiencePolicyByAuthor: artifactToolAudiencePolicy(args.audiencePolicyByAuthor),
-          operationId: typeof args.operationId === "string" ? args.operationId : ""
+          operationId: typeof args.operationId === "string" ? args.operationId : "",
+          ...(context?.originMessageId ? { originMessageId: context.originMessageId } : {})
         } : {
           conversationId,
           name: typeof args.name === "string" ? args.name : "",

@@ -1,19 +1,12 @@
 import { Fragment } from "react";
-import type { ChatMessage, ChatParticipant } from "../../../shared/types";
-import { accordLaunchTitleAndBody, parseAccordLaunchCard, type AccordLaunchCard } from "../../../shared/accordLaunchCard";
+import type { ChatParticipant } from "../../../shared/types";
+import { accordLaunchCardForMessage, accordLaunchTitleAndBody, type AccordLaunchCard } from "../../../shared/accordLaunchCard";
 import { Avatar, avatarForParticipant } from "../avatar/avatar";
 import { AccordMergeIcon } from "./accord-merge-icon";
 import { avatarForChatParticipant } from "./chat-avatars";
 
-/** The card for a message that starts an Accord; anything else keeps the
- *  message row. A message carrying pictures or file references is never one
- *  the app wrote, and the card would hide them, so it stays a row. */
-export function accordLaunchCardForMessage(message: Pick<ChatMessage, "role" | "content" | "metadata">): AccordLaunchCard | undefined {
-  if (message.role !== "user" || (message.metadata?.imageAttachments?.length ?? 0) > 0 || (message.metadata?.repoFileMentions?.length ?? 0) > 0) {
-    return undefined;
-  }
-  return parseAccordLaunchCard(message.content);
-}
+// Read the same way by the desktop, the phone and the main process.
+export { accordLaunchCardForMessage };
 
 function AccordMember(props: { handle: string; participants?: ChatParticipant[] }): JSX.Element {
   const label = `@${props.handle}`;

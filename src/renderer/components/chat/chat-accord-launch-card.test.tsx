@@ -3,9 +3,14 @@ import test from "node:test";
 import { act, create, type ReactTestInstance } from "react-test-renderer";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
-import type { ChatMessage, ChatParticipant } from "../../../shared/types";
+import type { ChatMessage, ChatParticipant, Conversation } from "../../../shared/types";
 import { accordLaunchTitleAndBody, parseAccordLaunchCard } from "../../../shared/accordLaunchCard";
+import { accordProgressFromNotes } from "../../../shared/accordProgress";
+import { ArtifactsContext } from "../artifacts/artifacts-context";
 import { accordLaunchCardForMessage } from "./chat-accord-launch-card";
+import { ChatAccordDockSlot } from "./chat-accord-dock";
+import { resetAccordDockStoreForTests } from "./accord-dock-store";
+import { chatTopLevelMessages } from "./chat-thread-data";
 import { ChatMessageItem } from "./chat-message-item";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
@@ -167,4 +172,93 @@ test("a launch the server refused says why under the card, as her other messages
   const row = renderer!.root.find((node) => node.type === "article" && typeof node.props?.className === "string" && node.props.className.includes("chat-message"));
   assert.equal(row.findAll((node) => node.props?.className === "chat-accord-launch-card").length, 1);
   assert.match(textOf(row), /Not taken by your server: This chat is archived\./);
+});
+
+test("the newest Accord with a document is pinned above the composer: stages, note and Open; its notes leave the timeline", () => {
+  const participants = [
+    { id: "p-taylor", handle: "taylor", kind: "claude-code" },
+    { id: "p-drew", handle: "drew", kind: "codex-cli" }
+  ] as ChatParticipant[];
+  const ref = "[Ship or wait](#artifact:art-1)";
+  const note = (id: string, content: string, accordLaunchMessageId?: string) => ({
+    id, role: "system", content, createdAt: NOW, status: "done",
+    metadata: { appMessageSource: "app_artifact_note", artifactEventId: `e-${id}`, ...(accordLaunchMessageId ? { accordLaunchMessageId } : {}) }
+  }) as unknown as ChatMessage;
+  const launchMessage = { id: "launch-1", role: "user", content: launch("Ship or wait?", "drew"), createdAt: NOW, status: "done", metadata: { threadId: "launch-1" } } as unknown as ChatMessage;
+  const conversation = {
+    id: "chat-1", kind: "chat", title: "Chat", createdAt: NOW, updatedAt: NOW, findings: [], metadata: {},
+    messages: [
+      launchMessage,
+      note("n1", `@taylor created draft collection ${ref} · Drafts 0/2`, "launch-1"),
+      note("n2", `@taylor submitted a draft to ${ref} · Submitted`, "launch-1"),
+      note("n3", `@drew submitted a draft to ${ref} · Submitted`, "launch-1"),
+      note("n4", `@taylor published ${ref} · v1 — Wait for the fix, then ship on Monday.`, "launch-1"),
+      note("n5", `@taylor signed ${ref} v1 (1/2 signed)`, "launch-1"),
+      note("old", "@taylor created artifact [Other](#artifact:art-2) · v1")
+    ]
+  } as unknown as Conversation;
+
+  // Folded: every note of an Accord's document; one filed under no Accord stays a card.
+  assert.deepEqual(chatTopLevelMessages(conversation).map((message) => message.id), ["launch-1", "old"]);
+  assert.deepEqual(chatTopLevelMessages({ ...conversation, messages: conversation.messages.slice(1) }).map((message) => message.id),
+    ["old"], "also when its launch is not loaded");
+
+  const card = parseAccordLaunchCard(launchMessage.content)!;
+  const progress = accordProgressFromNotes("launch-1", card, conversation.messages.map((message) => ({
+    content: message.content, accordLaunchMessageId: message.metadata?.accordLaunchMessageId
+  })))!;
+  // The test runs without a page: a storage of its own for the dock's choices.
+  const stored = new Map<string, string>();
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => { stored.set(key, value); } }
+  });
+  resetAccordDockStoreForTests();
+  const opened: string[] = [];
+  let renderer: ReturnType<typeof create> | undefined;
+  const render = () => create(
+    <TooltipProvider>
+      <ArtifactsContext.Provider value={{ byId: new Map(), openArtifact: (id) => opened.push(id) }}>
+        <ChatAccordDockSlot docked={{ launchId: "launch-1", card, progress }} conversationId="chat-1" participants={participants} />
+      </ArtifactsContext.Provider>
+    </TooltipProvider>
+  );
+  act(() => { renderer = render(); });
+  const root = () => renderer!.root;
+  const byClass = (className: string) => root().findAll((node) => typeof node.props?.className === "string" && node.props.className.split(" ").includes(className));
+  assert.equal(textOf(byClass("chat-accord-dock-title")[0]!), "Ship or wait");
+  assert.match(textOf(byClass("chat-accord-dock-meta")[0]!), /^Accord · led by @taylor · with @drew$/);
+  assert.equal(textOf(byClass("chat-accord-progress-status")[0]!), "v1 · 1/2 signed");
+  assert.deepEqual(byClass("chat-accord-progress-label").map(textOf), ["Drafts", "v1 published", "Signatures", "Accord reached"]);
+  assert.deepEqual(byClass("chat-accord-progress-stage").map((node) => node.props.className.split(" ")[1]), ["is-done", "is-done", "is-active", "is-todo"]);
+  assert.equal(textOf(byClass("chat-accord-progress-note-head")[0]!), "v1 · note by @taylor");
+  assert.equal(textOf(byClass("chat-accord-progress-note-body")[0]!), "Wait for the fix, then ship on Monday.");
+  const open = root().find((node) => node.type === "button" && node.props?.className === "chat-accord-progress-open");
+  act(() => { open.props.onClick(); });
+  assert.deepEqual(opened, ["art-1"]);
+
+  // The head folds it into one line, and the choice is kept.
+  const toggle = root().find((node) => node.type === "button" && node.props?.className === "chat-accord-dock-toggle");
+  act(() => { toggle.props.onClick(); });
+  assert.equal(byClass("chat-accord-progress-stage").length, 0);
+  assert.equal(textOf(byClass("chat-accord-progress-status")[0]!), "v1 · 1/2 signed", "the folded line keeps the state");
+  act(() => { renderer!.unmount(); renderer = render(); });
+  assert.equal(byClass("chat-accord-progress-stage").length, 0, "still folded when shown again");
+
+  // Closed, it stays closed for this Accord; a newer one in the chat shows.
+  const close = root().find((node) => node.props?.label === "Close" && typeof node.props?.onClick === "function");
+  act(() => { close.props.onClick(); });
+  assert.equal(byClass("chat-accord-dock").length, 0);
+  assert.deepEqual(chatTopLevelMessages({ ...conversation, messages: [...conversation.messages] }).map((message) => message.id),
+    ["launch-1", "old"], "closed: the notes stay out of the chat, in the document (the User, 2026-11-08)");
+  act(() => {
+    renderer!.unmount();
+    renderer = create(
+      <TooltipProvider>
+        <ChatAccordDockSlot docked={{ launchId: "launch-2", card, progress }} conversationId="chat-1" participants={participants} />
+      </TooltipProvider>
+    );
+  });
+  assert.equal(byClass("chat-accord-dock").length, 1, "a new Accord opens again");
+  assert.equal(byClass("chat-accord-progress-stage").length, 4, "unfolded");
 });

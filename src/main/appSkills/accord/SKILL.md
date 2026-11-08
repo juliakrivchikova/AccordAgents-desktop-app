@@ -112,6 +112,12 @@ never skip independent draft submission.
    restart independent draft collection merely because a signing concern caused
    a revision.
 
+   Give v1 and every later revision a `note` that states the resolution itself
+   for the User in one to three plain sentences: the decision and the condition
+   it rests on, not what changed. The Accord's card in the chat shows the current
+   version's note as the Accord's outcome, so a reader who never opens the
+   document still knows what was decided.
+
    Before publishing, inspect every current submitted draft and assert its actual
    `effectiveReaders` set: your facilitator draft is readable by exactly User and
    you; each participant draft is readable by exactly User, its author, and you.

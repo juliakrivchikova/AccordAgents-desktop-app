@@ -115,6 +115,11 @@ export interface MobileTimelineEvent {
   /** A turn-finished note (system): the member's reply it leads back to.
    *  Its content is the reply's first line. */
   finishedNote?: ChatTurnFinishedNoteMetadata;
+  /** An artifact note (system) filed under an Accord: the launch message
+   *  whose card shows it (accordProgress.ts). */
+  accordLaunchMessageId?: string;
+  /** Who leads that Accord and who is in it (the card without its launch). */
+  accordLaunch?: { facilitator: string; members: string[] };
 }
 
 export interface MobileTimelineTurn {
@@ -263,6 +268,9 @@ function timelineEventFromMessage(
     ...(hidden ? { hidden: true as const } : {}),
     ...(midTurn ? { midTurn: true as const } : {}),
     ...(finishedNote ? { finishedNote } : {}),
+    ...(message.role === "system" && typeof message.metadata?.accordLaunchMessageId === "string" && message.metadata.accordLaunchMessageId
+      ? { accordLaunchMessageId: message.metadata.accordLaunchMessageId } : {}),
+    ...(message.role === "system" && message.metadata?.accordLaunch ? { accordLaunch: message.metadata.accordLaunch } : {}),
     // A scheduled script's message is not the User's: the phone has no script
     // author, so it shows as an author named after the script.
     role: message.role === "participant" || message.role === "script" ? "participant" : message.role === "system" ? "system" : "you",
