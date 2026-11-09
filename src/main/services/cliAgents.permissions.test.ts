@@ -333,6 +333,55 @@ test("a Chrome switch waits for a busy member process instead of the member wait
   }
 });
 
+test("a changed agent environment closes only member processes that hold no work", async () => {
+  const runner = makeRunner() as any;
+  const closed: string[] = [];
+  runner.closeWarmAgent = async (entry: { key: string; closed: boolean }, reason: string) => {
+    entry.closed = true;
+    closed.push(`${entry.key}:${reason}`);
+  };
+  const entry = (key: string, extra: Record<string, unknown> = {}) => ({ key, scopeKey: key, closed: false, queue: Promise.resolve(), ...extra });
+  runner.warmAgents.set("idle-claude", entry("idle-claude", { isIdle: () => true }));
+  runner.warmAgents.set("answering-claude", entry("answering-claude", { isIdle: () => false }));
+  runner.warmAgents.set("background-claude", entry("background-claude", { isIdle: () => false, hasLiveBackgroundWork: () => true }));
+  runner.warmAgents.set("idle-codex", entry("idle-codex"));
+  const codex: Record<string, unknown> = entry("running-codex");
+  runner.warmAgents.set("running-codex", codex);
+  let finish!: () => void;
+  const turn = runner.enqueueWarmRun(codex, () => new Promise<void>((resolve) => { finish = resolve; }));
+
+  await runner.retireIdleWarmAgents("environment-changed");
+  assert.deepEqual(closed.sort(), ["idle-claude:environment-changed", "idle-codex:environment-changed"]);
+  assert.deepEqual([...runner.warmAgents.keys()].sort(), ["answering-claude", "background-claude", "running-codex"],
+    "a reply in progress, background tasks and a running turn keep their process");
+  assert.equal(runner.warmShutdown, undefined, "new turns are not refused meanwhile");
+
+  finish();
+  await turn;
+  assert.equal(codex.activeRuns, 0);
+  await runner.retireIdleWarmAgents("environment-changed");
+  assert.ok(closed.includes("running-codex:environment-changed"), "once its turn is over it holds no work");
+});
+
+test("an environment change waits for a busy member process instead of the member waiting for it", () => {
+  const runner = makeRunner() as any;
+  const member = { id: "p1", kind: "claude-code" };
+  const warm = { conversationId: "c1", participantId: "p1", contextKey: "", idleTimeoutMs: 1 };
+  const runningKey = runner.warmAgentKey(member, "/r", "chat", { warm, agentEnvKey: "v1" });
+  let idle = false;
+  runner.warmAgents.set(runningKey, { key: runningKey, scopeKey: "c1:p1", closed: false, isIdle: () => idle });
+  const envKey = (runOptions: Record<string, unknown>, kind = "chat") =>
+    runner.withBusyMemberEnvironment(member, "/r", kind, runOptions).agentEnvKey;
+  const options = { warm, agentEnvKey: "v2" };
+  assert.equal(envKey(options), "v1", "busy (a background task): its messages go into the session already running");
+  assert.equal(runner.warmAgentKey(member, "/r", "chat", { ...options, agentEnvKey: envKey(options) }), runningKey);
+  assert.equal(envKey({ ...options, nativeGoal: { objective: "x" } }), "v2", "a goal runs in its own process: the values as they are now");
+  assert.equal(envKey({ ...options, warm: { ...warm, contextKey: "changed" } }), "v2", "other settings changed too: the process is replaced anyway");
+  assert.equal(envKey({ ...options, warm: { ...warm, participantId: "p2" } }), "v2", "another member's busy process changes nothing");
+  idle = true;
+  assert.equal(envKey(options), "v2", "idle: its next turn gets the new values");
+});
+
 test("a shutdown while a Claude turn reads its Chrome setting stops the turn", async () => {
   for (const compact of [false, true]) {
     const runner = makeRunner() as any;

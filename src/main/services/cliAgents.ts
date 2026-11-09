@@ -158,6 +158,16 @@ const CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS = [
 const CLAUDE_CODE_SKIP_PROMPT_HISTORY_ENV = "CLAUDE_CODE_SKIP_PROMPT_HISTORY";
 const CLAUDE_CODE_FORCE_SESSION_PERSISTENCE_ENV = "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE";
 /** Whether a warm process key was started with Claude in Chrome. */
+/** The agent environment version a member process was started with. */
+function warmKeyAgentEnvKey(key: string): string | undefined {
+  try {
+    const parsed = JSON.parse(key) as { agentEnvKey?: unknown };
+    return typeof parsed.agentEnvKey === "string" ? parsed.agentEnvKey : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function warmKeyClaudeChrome(key: string): boolean | undefined {
   try {
     const parsed = JSON.parse(key) as { claudeChrome?: unknown; providerKind?: unknown };
@@ -462,6 +472,8 @@ interface WarmAgentEntry {
   /** Claude only: the CLI's figures for the last compaction it ran. */
   lastCompactBoundary?: () => ClaudeCompactBoundary | undefined;
   queue: Promise<void>;
+  /** Runs admitted on this process and not yet settled (queued ones too). */
+  activeRuns?: number;
   idleTimer?: NodeJS.Timeout;
   closed: boolean;
   /** Set when the process can no longer carry another turn cleanly (an error
@@ -1398,7 +1410,8 @@ export class CliAgentRunner {
       // with the same Claude in Chrome. Read before the checks below, so a
       // shutdown during the read stops the turn too.
       const runOptions = participant.kind === "claude-code"
-        ? await this.withClaudeChrome(participant, effectiveRepoPath, kind, effectiveOptions)
+        ? this.withBusyMemberEnvironment(participant, effectiveRepoPath, kind,
+          await this.withClaudeChrome(participant, effectiveRepoPath, kind, effectiveOptions))
         : effectiveOptions;
       const refusal = await this.hostRefusal("this native command");
       if (shutdownGeneration !== this.nativeShutdownGeneration) return this.failed(participant, new Error("Native sessions shut down while this command waited; it did not start."));
@@ -1445,7 +1458,8 @@ export class CliAgentRunner {
       // The same key as its turns: a compaction must not replace the process
       // the member's turns run in only because Chrome was not looked up here.
       const compactOptions = participant.kind === "claude-code"
-        ? await this.withClaudeChrome(participant, effectiveRepoPath, kind, options)
+        ? this.withBusyMemberEnvironment(participant, effectiveRepoPath, kind,
+          await this.withClaudeChrome(participant, effectiveRepoPath, kind, options))
         : options;
       const compactionRefusal = await this.hostRefusal("compaction");
       if (shutdownGeneration !== this.nativeShutdownGeneration) return this.failedCompact(participant, new Error("Native sessions shut down while compaction waited; it did not start."));
@@ -1515,6 +1529,22 @@ export class CliAgentRunner {
     })();
     this.warmShutdown = closing.finally(() => { this.warmShutdown = undefined; });
     return this.warmShutdown;
+  }
+
+  /** A changed agent environment: resident processes holding no work close
+   * now. A process still answering, queued for, or carrying background work
+   * keeps running with the values it started with, as a running dedicated CLI
+   * does, and keeps taking its member's messages meanwhile
+   * (withBusyMemberEnvironment); its key carries the environment version, so
+   * the member's first turn once it is idle replaces it, and otherwise its idle
+   * timer retires it. Nothing is fenced: turns keep starting meanwhile. */
+  async retireIdleWarmAgents(reason: string): Promise<void> {
+    // Taken out of the map in one step, before any await, so no turn can pick
+    // one of them up between this check and its close.
+    const idle = [...this.warmAgents.values()].filter((entry) =>
+      !entry.closed && !entry.activeRuns && entry.isIdle?.() !== false && !entry.hasLiveBackgroundWork?.());
+    for (const entry of idle) this.warmAgents.delete(entry.key);
+    await Promise.all(idle.map((entry) => this.closeWarmAgent(entry, reason)));
   }
 
   /** Archive/delete closes resident processes, while leaving provider session
@@ -7091,11 +7121,12 @@ export class CliAgentRunner {
   private trackWarmRun<T>(entry: WarmAgentEntry, task: () => Promise<T>, after?: Promise<void>): Promise<T> {
     if (this.nativeAdmissionsFenced) return Promise.reject(new Error("The machine is stopping after idle; this native command did not start."));
     this.warmOperations++;
+    entry.activeRuns = (entry.activeRuns ?? 0) + 1;
     const run = (after ?? Promise.resolve()).catch(() => undefined).then(async () => {
       const refusal = await this.hostRefusal("this native command");
       if (refusal || this.nativeAdmissionsFenced || this.warmShutdown || entry.closed) throw new Error(refusal ?? "Native admission is fenced.");
       return task();
-    }).finally(() => { this.warmOperations--; });
+    }).finally(() => { this.warmOperations--; entry.activeRuns = (entry.activeRuns ?? 1) - 1; });
     if (after) {
       entry.queue = run.then(() => undefined, () => undefined);
     }
@@ -7257,6 +7288,31 @@ export class CliAgentRunner {
       }
     }
     return { ...options, claudeChrome: wanted };
+  }
+
+  /** A changed agent environment waits for a busy member process (answering,
+   *  or carrying background tasks) the way a Chrome switch does: the member's
+   *  messages keep going into the session already running, which keeps the
+   *  values it started with, as in the dedicated CLI, and nothing waits. Its
+   *  first turn once that process is idle starts with the new values. A run
+   *  that would not use that process anyway (a goal, or other settings changed
+   *  too) gets the environment as it is now. */
+  private withBusyMemberEnvironment(
+    participant: ParticipantConfig,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    options: CliAgentRunOptions
+  ): CliAgentRunOptions {
+    if (!options.warm || options.nativeGoal || kind !== "chat") return options;
+    const scopeKey = this.warmAgentScopeKey(options.warm);
+    const busy = Array.from(this.warmAgents.values()).find((entry) => entry.scopeKey === scopeKey && !entry.closed && entry.isIdle?.() === false);
+    const running = busy ? warmKeyAgentEnvKey(busy.key) : undefined;
+    if (running === undefined || running === (options.agentEnvKey ?? "") ||
+      busy!.key !== this.warmAgentKey(participant, repoPath, kind, { ...options, agentEnvKey: running })) {
+      return options;
+    }
+    void this.writeDebugLog("cli.agent-environment-change-deferred", { participantId: options.warm.participantId });
+    return { ...options, agentEnvKey: running };
   }
 
   /** Retire every warm process of one member, e.g. when the credential it was
