@@ -2144,7 +2144,9 @@ function registerIpc(): void {
   ipcMain.handle("settings:get-agent-environment", () => agentEnvironmentService.snapshot());
   ipcMain.handle("settings:save-agent-environment-variable", async (_event, request: SaveAgentEnvironmentVariableRequest) => {
     await settingsService.saveAgentEnvironmentVariable(request);
-    await cliAgentRunner.shutdownWarmAgents();
+    // Work in progress keeps running with the values it started with; each
+    // member gets the new ones once its process is idle (retireIdleWarmAgents).
+    await cliAgentRunner.retireIdleWarmAgents("environment-changed");
     cliAgentRunner.invalidateAgentReadiness();
     return agentEnvironmentService.snapshot();
   });
@@ -2163,7 +2165,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:delete-agent-environment-variable", async (_event, request: DeleteAgentEnvironmentVariableRequest) => {
     await settingsService.deleteAgentEnvironmentVariable(request.key);
-    await cliAgentRunner.shutdownWarmAgents();
+    await cliAgentRunner.retireIdleWarmAgents("environment-changed");
     cliAgentRunner.invalidateAgentReadiness();
     return agentEnvironmentService.snapshot();
   });
