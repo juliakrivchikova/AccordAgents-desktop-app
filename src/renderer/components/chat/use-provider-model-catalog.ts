@@ -9,6 +9,16 @@ export interface ProviderModelCatalogState {
   error: string | undefined;
 }
 
+/** Why no model could be listed, in the CLI's own words, when detection failed
+ *  and nothing was offered instead. */
+export function modelDetectionFailureText(catalog: ProviderModelCatalog | undefined): string | undefined {
+  if (!catalog?.error || catalog.models.length > 0) {
+    return undefined;
+  }
+  const reason = catalog.error.replace(/\s+/g, " ").trim().replace(/([^.!?])$/, "$1.");
+  return reason ? `Model detection unavailable: ${reason} Use manual override.` : "Model detection unavailable; use manual override.";
+}
+
 /** Model catalog for a member: the vendor's fixed list for a member on an added
  *  provider whose vendor has one, otherwise the CLI's own list (first-party
  *  vendors and built-in members). Keyed on the vendor so URL / name edits and

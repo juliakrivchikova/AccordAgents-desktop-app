@@ -10,7 +10,7 @@ import {
   normalizeOptionalChatParticipantRequestPermission
 } from "../../../shared/agentPermissions";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
-import { useProviderModelCatalog } from "./use-provider-model-catalog";
+import { modelDetectionFailureText, useProviderModelCatalog } from "./use-provider-model-catalog";
 import type {
   ChatAgentMode,
   ChatAgentPermissions,
@@ -278,13 +278,12 @@ function GhostSelect(props: {
       </select>
     </span>
   );
-  if (!props.tooltip) {
-    return control;
-  }
+  // Always wrapped: a tooltip that appears later (a failed model lookup) must
+  // not remount the select the user may have open.
   return (
     <Tooltip>
       <TooltipTrigger asChild>{control}</TooltipTrigger>
-      <TooltipContent side="top">{props.tooltip}</TooltipContent>
+      {props.tooltip && <TooltipContent side="top">{props.tooltip}</TooltipContent>}
     </Tooltip>
   );
 }
@@ -325,6 +324,7 @@ function GhostModelSelect(props: {
         muted={!model}
         disabled={props.disabled}
         options={options}
+        tooltip={modelDetectionFailureText(catalog)}
         onChange={(next) => {
           if (next === MODEL_DEFAULT_VALUE) {
             setManual(false);

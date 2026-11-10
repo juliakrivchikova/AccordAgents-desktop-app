@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdtempSync } from "node:fs";
-import { access, chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { NativeProcessRegistry } from "./nativeProcessRegistry";
 import {
+  ClaudeFolderNotTrustedError,
   claudeModelProbeEnv,
   CliAgentRunner,
   CodexAppServerRunError,
   parseClaudeModelPickerOutput,
+  probeClaudeModelsInFolder,
   resolveClaudeModelProbeCwd,
   resolveCodexCompactTimeoutMs,
   runClaudeModelProbeInPty,
@@ -442,6 +445,13 @@ test("parseClaudeModelPickerOutput handles ConPTY rows without whitespace betwee
   ]);
 });
 
+test("parseClaudeModelPickerOutput keeps a Unicode cursor on a lower row out of the row above", () => {
+  const output = "Select model 1. Default (recommended) ✔ Opus 5.5 · Best for tasks2. Opus Opus 5.5 · Best for tasks❯ 3. Sonnet Sonnet 5.5 · Routine tasks● Enter to set · Esc to cancel";
+  const models = parseClaudeModelPickerOutput(output);
+  assert.deepEqual(models.map((model) => model.id), ["opus", "sonnet"]);
+  assert.equal(models.some((model) => model.label.includes("❯")), false);
+});
+
 test("parseClaudeModelPickerOutput uses the final ConPTY redraw", () => {
   const output = [
     "Select model 1. Default (recommended) ✔ Opus 5 2. Opus Opus 5 Enter to set · Esc to cancel",
@@ -783,7 +793,7 @@ test("Windows Claude model discovery drives only the non-persistent interactive 
 
   const probe = runClaudeModelProbeInPty({
     executable: "C:\\Program Files\\Claude\\claude.exe",
-    env: { PATH: "C:\\Windows\\System32", CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1" },
+    env: { PATH: "C:\\Windows\\System32", CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1", NO_COLOR: "1" },
     cwd: "C:\\trusted\\repo",
     timeoutMs: 1_000,
     initialDelayMs: 0,
@@ -821,7 +831,8 @@ test("Windows Claude model discovery drives only the non-persistent interactive 
     cwd: "C:\\trusted\\repo",
     env: {
       PATH: "C:\\Windows\\System32",
-      CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1"
+      CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1",
+      TERM: "xterm-256color"
     }
   });
   assert.deepEqual(writes, ["/model\r", "\u001b", "/exit\r"]);
@@ -829,36 +840,129 @@ test("Windows Claude model discovery drives only the non-persistent interactive 
   assert.equal(writes.some((value) => !["/model\r", "\u001b", "/exit\r"].includes(value)), false);
 });
 
-test("Windows Claude model discovery never accepts a folder trust prompt", async () => {
-  const writes: string[] = [];
-  let killed = false;
-  let onData: ((data: string) => void) | undefined;
+// Claude Code 2.1.316's folder trust question as ConPTY drew it (recorded
+// 2026-11-10; only the folder is replaced). The highlight starts on "No, exit".
+const claudeTrustQuestion = (folder: string): string => "\u001b[38;2;255;193;7m\r\n" + "─".repeat(120)
+  + `\u001b[1m\u001b[3;2HAccessing\u001b[1Cworkspace:\u001b[m\u001b[1m\u001b[5;2H${folder}\u001b[22m`
+  + "\u001b[8;2HQuick\u001b[1Csafety\u001b[1Ccheck:\u001b[1CIs\u001b[1Cthis\u001b[1Ca\u001b[1Cproject\u001b[1Cyou\u001b[1Ccreated\u001b[1Cor\u001b[1Cone\u001b[1Cyou\u001b[1Ctrust?"
+  + "\u001b[1C(Like\u001b[1Cyour\u001b[1Cown\u001b[1Ccode,\u001b[1Ca\u001b[1Cwell-known\u001b[1Copen\u001b[1Csource\u001b[9;2Hproject,\u001b[1Cor\u001b[1Cwork\u001b[1Cfrom\u001b[1Cyour\u001b[1Cteam)."
+  + "\u001b[1CIf\u001b[1Cnot,\u001b[1Ctake\u001b[1Ca\u001b[1Cmoment\u001b[1Cto\u001b[1Creview\u001b[1Cwhat's\u001b[1Cin\u001b[1Cthis\u001b[1Cfolder\u001b[1Cfirst."
+  + "\u001b[11;2HClaude\u001b[1CCode'll\u001b[1Cbe\u001b[1Cable\u001b[1Cto\u001b[1Cread,\u001b[1Cedit,\u001b[1Cand\u001b[1Cexecute\u001b[1Cfiles\u001b[1Chere."
+  + "\u001b[38;2;153;153;153m\u001b[13;2HSecurity\u001b[1Cguide\u001b[38;2;177;185;249m\u001b[15;2H❯\u001b[1CNo,\u001b[1Cexit\u001b[m\u001b[16;4HYes,\u001b[1CI\u001b[1Ctrust\u001b[1Cthis\u001b[1Cfolder"
+  + "\u001b[38;2;153;153;153m\u001b[18;2HEnter\u001b[1Cto\u001b[1Cconfirm\u001b[1C·\u001b[1CEsc\u001b[1Cto\u001b[1Ccancel";
+// What the same Claude Code drew after one Down (recorded with the question above).
+const claudeTrustDownRedraw = ["\u001b[m\u001b[15;2H \u001b[1CNo, exit\u001b[38;2;177;185;249m\u001b[16;2H❯\u001b[1CYes, I trust this folder", "\u001b[m"];
+const windowsProbe = {
+  executable: "C:\\Program Files\\Claude\\claude.exe",
+  env: { PATH: "C:\\Windows\\System32" },
+  timeoutMs: 1_000,
+  initialDelayMs: 0,
+  pickerSettleDelayMs: 0,
+  exitDelayMs: 0,
+  trustKeyIntervalMs: 0
+};
 
-  const probe = runClaudeModelProbeInPty({
-    executable: "C:\\Program Files\\Claude\\claude.exe",
-    env: { PATH: "C:\\Windows\\System32" },
-    cwd: "C:\\untrusted\\repo",
-    timeoutMs: 1_000,
-    initialDelayMs: 0,
-    pickerSettleDelayMs: 0,
-    exitDelayMs: 0,
-    spawnPty: () => {
-      queueMicrotask(() => onData?.("Quick safety check: Is this a project you trust? 1. Yes, I trust this folder"));
-      return {
-        write: (data) => writes.push(data),
-        kill: () => { killed = true; },
-        onData: (listener) => {
-          onData = listener;
-          return { dispose: () => undefined };
-        },
-        onExit: () => ({ dispose: () => undefined })
-      };
-    }
+/** A fake ConPTY: `first` is drawn at start, and each press of a key draws its
+ *  next list of chunks (an empty list: the key drew nothing). */
+function fakeClaudePty(first: string[], replies: Record<string, string[][]>) {
+  const writes: string[] = [];
+  const state = { killed: false };
+  let onData: ((data: string) => void) | undefined;
+  let onExit: ((event: { exitCode: number }) => void) | undefined;
+  const draw = (chunks: string[] = []): void => {
+    for (const chunk of chunks) queueMicrotask(() => onData?.(chunk));
+  };
+  const spawnPty = () => {
+    draw(first);
+    return {
+      write: (data: string) => {
+        writes.push(data);
+        draw(replies[data]?.shift());
+        if (data === "/exit\r") queueMicrotask(() => onExit?.({ exitCode: 0 }));
+      },
+      kill: () => { state.killed = true; },
+      onData: (listener: (data: string) => void) => {
+        onData = listener;
+        return { dispose: () => undefined };
+      },
+      onExit: (listener: (event: { exitCode: number }) => void) => {
+        onExit = listener;
+        return { dispose: () => undefined };
+      }
+    };
+  };
+  return { spawnPty, writes, state };
+}
+
+test("Windows Claude model discovery refuses a folder trust prompt outside the app's own folder", async () => {
+  for (const ownFolder of [undefined, "C:\\app\\probe"]) {
+    const pty = fakeClaudePty([claudeTrustQuestion("C:\\untrusted\\repo")], {});
+    const probe = runClaudeModelProbeInPty({ ...windowsProbe, cwd: "C:\\untrusted\\repo", ownFolder, spawnPty: pty.spawnPty });
+    // The class is what sends the probe on to the app's own folder.
+    await assert.rejects(probe, (error) => error instanceof ClaudeFolderNotTrustedError && error.folder === "C:\\untrusted\\repo");
+    assert.deepEqual(pty.writes, []);
+    assert.equal(pty.state.killed, true);
+  }
+});
+
+test("Windows Claude model discovery answers Yes in the app's own folder, after a lost Down, and ignores the question's late footer", async () => {
+  const pty = fakeClaudePty([claudeTrustQuestion("C:\\app\\probe")], {
+    "\u001b[B": [[], claudeTrustDownRedraw],
+    // A redraw can deliver the question's "Esc to cancel" after Yes was chosen.
+    "\r": [["\u001b[18;2HEnter\u001b[1Cto\u001b[1Cconfirm\u001b[1C·\u001b[1CEsc\u001b[1Cto\u001b[1Ccancel", "Safe mode: customizations disabled\r\nTranscript saving is off"]],
+    "/model\r": [["Select model\r\n1. Default (recommended) ✔ Opus 5.5\r\n2. Opus Opus 5.5\r\n3. Haiku Haiku 5.5\r\n● Enter to set · Esc to cancel"]]
   });
 
-  await assert.rejects(probe, /requires this folder to be trusted/);
-  assert.deepEqual(writes, []);
-  assert.equal(killed, true);
+  const transcript = await runClaudeModelProbeInPty({ ...windowsProbe, cwd: "C:\\app\\probe", ownFolder: "C:\\app\\probe", spawnPty: pty.spawnPty });
+  assert.deepEqual(pty.writes, ["\u001b[B", "\u001b[B", "\r", "/model\r", "\u001b", "/exit\r"]);
+  assert.deepEqual(parseClaudeModelPickerOutput(transcript).map((model) => model.id), ["opus", "haiku"]);
+});
+
+test("Claude model discovery reads an untrusted or missing project folder's models in the app's own folder, its own git work tree", async () => {
+  // userData inside a repository: Claude Code would record trust for the
+  // whole repository unless the app's folder is a work tree of its own.
+  const root = await mkdtemp(path.join(tmpdir(), "accord-claude-probe-folder-"));
+  const project = path.join(root, "project");
+  const ownFolder = path.join(root, "app", "claude-model-probe");
+  await mkdir(project);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  try {
+    // No project folder: the app's own folder, not the folder the app started in.
+    assert.equal(await resolveClaudeModelProbeCwd(undefined, ownFolder), ownFolder);
+    const cases: Array<{ name: string; cwd: string; project: "trusted" | "untrusted" | "broken"; calls: string[]; result: string | RegExp }> = [
+      { name: "trusted project", cwd: project, project: "trusted", calls: [project], result: "models in project" },
+      { name: "untrusted project", cwd: project, project: "untrusted", calls: [project, ownFolder], result: "models in app folder" },
+      { name: "project probe failing otherwise", cwd: project, project: "broken", calls: [project], result: /timed out/ },
+      { name: "no project", cwd: ownFolder, project: "trusted", calls: [ownFolder], result: "models in app folder" }
+    ];
+    for (const item of cases) {
+      await rm(ownFolder, { recursive: true, force: true });
+      const calls: string[] = [];
+      const run = probeClaudeModelsInFolder(item.cwd, ownFolder, async (folder) => {
+        calls.push(folder);
+        if (folder === ownFolder) {
+          const workTree = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: ownFolder, encoding: "utf8" }).trim();
+          assert.equal(path.resolve(workTree), await realpath(ownFolder), item.name);
+          return "models in app folder";
+        }
+        if (item.project === "untrusted") throw new ClaudeFolderNotTrustedError(folder);
+        if (item.project === "broken") throw new Error("Claude model picker probe timed out.");
+        return "models in project";
+      });
+      if (typeof item.result === "string") assert.equal(await run, item.result, item.name);
+      else await assert.rejects(run, item.result, item.name);
+      assert.deepEqual(calls, item.calls, item.name);
+    }
+
+    // A link in place of the app's folder would carry the trust to its target.
+    const linked = path.join(root, "app", "linked-probe");
+    await symlink(project, linked, "junction");
+    let probed = false;
+    await assert.rejects(probeClaudeModelsInFolder(linked, linked, async () => { probed = true; return ""; }));
+    assert.equal(probed, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Windows Claude model discovery bounds captured output", async () => {
