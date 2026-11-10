@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants, type Dirent } from "node:fs";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { claudeProjectsDir } from "./memberSessionFiles";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -141,6 +141,15 @@ const MODEL_CATALOG_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_TIMEOUT_MS = 8_000;
 const CLAUDE_WINDOWS_MODEL_PROBE_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_MAX_OUTPUT_BYTES = 256 * 1024;
+/** The app's own empty folder for the Windows model picker when no project
+ *  folder is known or Claude Code does not trust it. Not the folder the app
+ *  was started in: that is its install folder, which changes with every
+ *  update and which Claude Code does not trust. */
+const CLAUDE_MODEL_PROBE_DIR = "claude-model-probe";
+const CLAUDE_FOLDER_TRUST_PROMPT = /Quick\s+safety\s+check|Yes,?\s+I\s+trust\s+this\s+folder/i;
+const CLAUDE_FOLDER_TRUST_CHOICE = /[❯›>]\s*(?:\d+\.\s*)?(No,?\s*exit|Yes,?\s*I\s*trust\s*this\s*folder)/gi;
+const CLAUDE_FOLDER_TRUST_MAX_KEYS = 3;
+const CLAUDE_FOLDER_TRUST_KEY_INTERVAL_MS = 1_000;
 const CLAUDE_EXECUTABLE_ENV = "ACCORD_AGENTS_CLAUDE_EXECUTABLE";
 const ANTIGRAVITY_EXECUTABLE_ENV = "ACCORD_AGENTS_ANTIGRAVITY_EXECUTABLE";
 const NATIVE_GOAL_IDLE_WARNING_MS = 5 * 60_000;
@@ -787,6 +796,11 @@ interface ClaudeModelProbePtyOptions {
   env: NodeJS.ProcessEnv;
   cwd: string;
   spawnPty: ClaudeModelProbePtySpawn;
+  /** The app's own empty probe folder. Claude Code's folder trust question is
+   *  answered with Yes only when `cwd` is this folder: a project folder's
+   *  trust is the User's to give. */
+  ownFolder?: string;
+  trustKeyIntervalMs?: number;
   timeoutMs?: number;
   initialDelayMs?: number;
   pickerSettleDelayMs?: number;
@@ -809,6 +823,14 @@ interface CliAgentRunnerOptions {
   codexExecutable?: string;
   electronAppPath?: string;
   nativeProcessDbPath?: string;
+  claudeModelProbeDir?: string;
+}
+
+export class ClaudeFolderNotTrustedError extends Error {
+  constructor(readonly folder: string) {
+    super(`Claude Code requires this folder to be trusted: ${folder}. Open Claude Code there and complete its trust prompt, then refresh models.`);
+    this.name = "ClaudeFolderNotTrustedError";
+  }
 }
 
 class CliGeminiResumeMissError extends Error {
@@ -869,7 +891,7 @@ export function parseClaudeModelPickerOutput(output: string): ProviderModel[] {
   // end of one description can touch the next numbered item ("tasks2.").
   // Numbered picker rows are still authoritative boundaries even without
   // intervening whitespace.
-  const itemPattern = /(?:[›>]\s*)?(\d+)\.\s+([A-Za-z][A-Za-z0-9_-]*)(?:\s+|(?=\())([\s\S]*?)(?=(?:[›>]\s*)?\d+\.\s+[A-Za-z]|●\s+|Enter\s+to|$)/g;
+  const itemPattern = /(?:[❯›>]\s*)?(\d+)\.\s+([A-Za-z][A-Za-z0-9_-]*)(?:\s+|(?=\())([\s\S]*?)(?=(?:[❯›>]\s*)?\d+\.\s+[A-Za-z]|●\s+|Enter\s+to|$)/g;
 
   for (const match of body.matchAll(itemPattern)) {
     const alias = match[2]?.trim();
@@ -915,13 +937,54 @@ export function claudeModelProbeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return probeEnv;
 }
 
-export async function resolveClaudeModelProbeCwd(probeCwd?: string): Promise<string> {
+export async function resolveClaudeModelProbeCwd(probeCwd?: string, fallback = process.cwd()): Promise<string> {
   const candidate = probeCwd?.trim();
   if (!candidate) {
-    return process.cwd();
+    return fallback;
   }
   const info = await stat(candidate).catch(() => undefined);
-  return info?.isDirectory() ? candidate : process.cwd();
+  return info?.isDirectory() ? candidate : fallback;
+}
+
+/** Reads the model picker in `cwd`, or in the app's own folder when `cwd` is
+ *  that folder or a project folder Claude Code does not trust. Only the app's
+ *  own folder ever gets its trust question answered. */
+export async function probeClaudeModelsInFolder(
+  cwd: string,
+  ownFolder: string | undefined,
+  probe: (folder: string) => Promise<string>
+): Promise<string> {
+  if (!ownFolder) {
+    return probe(cwd);
+  }
+  if (cwd !== ownFolder) {
+    try {
+      return await probe(cwd);
+    } catch (error) {
+      if (!(error instanceof ClaudeFolderNotTrustedError)) throw error;
+    }
+  }
+  await prepareOwnProbeFolder(ownFolder);
+  return probe(ownFolder);
+}
+
+/** Claude Code records a folder's trust for the git work tree around it, so
+ *  the app's own folder is made its own work tree: otherwise answering Yes in
+ *  a userData that sits inside a repository (a home folder kept in git) would
+ *  trust that whole repository. A link is refused for the same reason. */
+async function prepareOwnProbeFolder(ownFolder: string): Promise<void> {
+  await mkdir(ownFolder, { recursive: true });
+  if ((await lstat(ownFolder)).isSymbolicLink()) {
+    throw new Error(`${ownFolder} is a link, so the app does not answer Claude Code's trust question there.`);
+  }
+  if (!(await stat(path.join(ownFolder, ".git")).catch(() => undefined))) {
+    try {
+      await runCommand("git", ["init", "--quiet"], { cwd: ownFolder, timeoutMs: 10_000 });
+    } catch (error) {
+      const detail = error instanceof CommandError ? error.result.stderr.trim() || error.message : error instanceof Error ? error.message : String(error);
+      throw new Error(`Could not prepare ${ownFolder} for reading Claude Code's models: git init failed (${detail}).`);
+    }
+  }
 }
 
 export function runClaudeModelProbeWithExpect({
@@ -1011,6 +1074,8 @@ export function runClaudeModelProbeInPty({
   env,
   cwd,
   spawnPty,
+  ownFolder,
+  trustKeyIntervalMs = CLAUDE_FOLDER_TRUST_KEY_INTERVAL_MS,
   timeoutMs = CLAUDE_WINDOWS_MODEL_PROBE_TIMEOUT_MS,
   initialDelayMs = 1_500,
   pickerSettleDelayMs = 750,
@@ -1020,6 +1085,11 @@ export function runClaudeModelProbeInPty({
   return new Promise<string>((resolve, reject) => {
     let output = "";
     let capturedBytes = 0;
+    let trustAnswering = false;
+    let trustAccepted = false;
+    let trustKeys = 0;
+    let trustFrameStart = 0;
+    let modelCommandAt = -1;
     let modelCommandScheduled = false;
     let pickerObserved = false;
     let pickerClosed = false;
@@ -1037,7 +1107,11 @@ export function runClaudeModelProbeInPty({
 
     let terminal: ClaudeModelProbePty;
     try {
-      const probeEnv = claudeModelProbeEnv(env);
+      // A color terminal, whatever the app inherited: with NO_COLOR (or no
+      // TERM) Claude Code redraws only the moved marker of the trust
+      // question, not the highlighted choice the probe reads.
+      const probeEnv: NodeJS.ProcessEnv = { ...claudeModelProbeEnv(env), TERM: "xterm-256color" };
+      delete probeEnv.NO_COLOR;
       terminal = spawnPty(executable, ["--safe-mode", "--no-chrome"], {
         name: "xterm-256color",
         cols: 120,
@@ -1078,10 +1152,38 @@ export function runClaudeModelProbeInPty({
       }
     };
 
-    const timeout = setTimeout(() => {
-      finish(new Error("Claude model picker probe timed out."));
-    }, timeoutMs);
-    timers.add(timeout);
+    const armTimeout = (): void => schedule(() => finish(new Error("Claude model picker probe timed out.")), timeoutMs);
+    armTimeout();
+
+    // Claude Code 2.1.316 highlights "No, exit" first. Enter goes only once a
+    // frame drawn since the last key shows Yes highlighted; Down otherwise,
+    // and again when a key drew nothing (it was lost).
+    const answerTrust = (): void => {
+      if (finished || trustAccepted) {
+        return;
+      }
+      const drawn = output.slice(trustFrameStart);
+      const choice = [...stripAnsi(drawn).matchAll(CLAUDE_FOLDER_TRUST_CHOICE)].at(-1)?.[1];
+      if (choice && /^Yes/i.test(choice)) {
+        trustAccepted = true;
+        terminal.write("\r");
+        // The picker gets its own full time, as on every later run.
+        for (const timer of timers) clearTimeout(timer);
+        timers.clear();
+        armTimeout();
+        return;
+      }
+      if (choice || !drawn) {
+        if (trustKeys >= CLAUDE_FOLDER_TRUST_MAX_KEYS) {
+          finish(new Error(`Claude Code's trust question for ${cwd} could not be answered.`));
+          return;
+        }
+        trustKeys += 1;
+        trustFrameStart = output.length;
+        terminal.write("\u001b[B");
+      }
+      schedule(answerTrust, trustKeyIntervalMs);
+    };
 
     dataSubscription = terminal.onData((data) => {
       capturedBytes += Buffer.byteLength(data);
@@ -1091,17 +1193,27 @@ export function runClaudeModelProbeInPty({
       }
       output += data;
       const plainOutput = stripAnsi(output);
-      if (/Quick\s+safety\s+check|Yes,?\s+I\s+trust\s+this\s+folder/i.test(plainOutput)) {
-        finish(new Error("Claude Code requires this folder to be trusted. Open Claude Code in the folder and complete its trust prompt, then refresh models."));
+      if (!trustAccepted && CLAUDE_FOLDER_TRUST_PROMPT.test(plainOutput)) {
+        if (cwd !== ownFolder) {
+          finish(new ClaudeFolderNotTrustedError(cwd));
+        } else if (!trustAnswering) {
+          trustAnswering = true;
+          schedule(answerTrust, trustKeyIntervalMs);
+        }
         return;
       }
       const mainPromptReady = /Safe\s+mode:/i.test(plainOutput)
         && /Transcript\s+saving\s+is\s+off/i.test(plainOutput);
       if (!modelCommandScheduled && mainPromptReady) {
         modelCommandScheduled = true;
-        schedule(() => terminal.write("/model\r"), initialDelayMs);
+        schedule(() => {
+          modelCommandAt = output.length;
+          terminal.write("/model\r");
+        }, initialDelayMs);
       }
-      if (/(?:Esc\s*to\s*cancel|\bcancel\b)/i.test(plainOutput)) {
+      // Only the picker /model opens counts: the trust question has its own
+      // "Esc to cancel", which may arrive after Yes was chosen.
+      if (modelCommandAt >= 0 && /(?:Esc\s*to\s*cancel|\bcancel\b)/i.test(stripAnsi(output.slice(modelCommandAt)))) {
         pickerObserved = true;
       }
       if (pickerObserved && !pickerClosed) {
@@ -1254,6 +1366,7 @@ export class CliAgentRunner {
   private geminiMcpConfigSyncing?: Promise<string | undefined>;
   private runTimeoutMs = CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS;
   private readonly nativeProcessDbPath?: string;
+  private readonly claudeModelProbeDir?: string;
   private readonly warmAgentCreations = new Map<string, Promise<WarmAgentEntry>>();
   private readonly conversationShutdowns = new Map<string, Promise<void>>();
   private readonly conversationOperations = new Map<string, number>();
@@ -1281,6 +1394,7 @@ export class CliAgentRunner {
       ? { codexExecutable: codexExecutableOrOptions }
       : codexExecutableOrOptions;
     this.nativeProcessDbPath = options.nativeProcessDbPath ?? (hasConfiguredHostPlatform() ? path.join(userDataPath(), NATIVE_PROCESS_REGISTRY_FILE) : undefined);
+    this.claudeModelProbeDir = options.claudeModelProbeDir ?? (hasConfiguredHostPlatform() ? path.join(userDataPath(), CLAUDE_MODEL_PROBE_DIR) : undefined);
     this.codexExecutable = options.codexExecutable ?? "codex";
     this.electronAppPath = options.electronAppPath ?? process.argv[1];
     this.readiness = new CliReadinessService(debugLogs, {
@@ -1842,15 +1956,12 @@ export class CliAgentRunner {
     await ensureLoginShellEnvPrimed();
     const env = commandEnvironment(undefined, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
     const claudeExecutable = await resolveCommandPath("claude", env);
-    const cwd = await resolveClaudeModelProbeCwd(probeCwd);
+    const ownFolder = process.platform === "win32" ? this.claudeModelProbeDir : undefined;
+    const cwd = await resolveClaudeModelProbeCwd(probeCwd, ownFolder);
     if (process.platform === "win32") {
       const spawnPty = this.claudeModelProbePtySpawn ?? (await import("node-pty")).spawn;
-      return runClaudeModelProbeInPty({
-        executable: claudeExecutable,
-        env,
-        cwd,
-        spawnPty
-      });
+      return probeClaudeModelsInFolder(cwd, ownFolder, (folder) =>
+        runClaudeModelProbeInPty({ executable: claudeExecutable, env, cwd: folder, spawnPty, ownFolder }));
     }
     return runClaudeModelProbeWithExpect({
       executable: claudeExecutable,

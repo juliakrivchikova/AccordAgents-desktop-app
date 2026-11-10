@@ -15,7 +15,7 @@ import type {
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { cliProviderHostDefaultModel } from "../../../shared/cliProviderHosts";
 import { chatInheritedCliSettingLabel, chatModelDefaultLabel } from "./chat-participant-drafts";
-import { useProviderModelCatalog } from "./use-provider-model-catalog";
+import { modelDetectionFailureText, useProviderModelCatalog } from "./use-provider-model-catalog";
 
 const MODEL_DEFAULT_VALUE = "__accordagents_default_model__";
 const MODEL_MANUAL_VALUE = "__accordagents_manual_model__";
@@ -164,9 +164,7 @@ function modelPickerStatus(catalog: ProviderModelCatalog | undefined, loading: b
     return "Model detection failed; use manual override.";
   }
   if (catalog?.error) {
-    return catalog.models.length > 0
-      ? "Using fallback models; exact detection failed."
-      : "Model detection unavailable; use manual override.";
+    return modelDetectionFailureText(catalog) ?? "Using fallback models; exact detection failed.";
   }
   if (catalog && catalog.models.length === 0) {
     return "No models detected; use manual override.";
