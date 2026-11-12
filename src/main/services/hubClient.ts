@@ -1,3 +1,4 @@
+import { HUB_ALERTS_PATH, type HubAlertRequest, type HubAlertResult } from "../../shared/urgentAlerts";
 import { BLOB_FRAGMENT_MAX_BYTES, isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import { HUB_MEMORY_PATH, isMemoryChangeAction, type HubMemoryRequest, type MemoryResult } from "../../shared/memory";
 import {
@@ -268,6 +269,12 @@ export class HubClient {
     }
     return this.request<MemoryResult<T>>("GET", `${HUB_MEMORY_PATH}?${new URLSearchParams({ request: JSON.stringify(request) }).toString()}`,
       undefined, undefined, REQUEST_TIMEOUT_MS, cancel);
+  }
+
+  /** Urgent alerts (HubAlerts): a member's alert, the User closing one, or
+   *  the owner's settings. */
+  alerts<T>(request: HubAlertRequest, cancel?: AbortSignal): Promise<HubAlertResult<T>> {
+    return this.request<HubAlertResult<T>>("POST", HUB_ALERTS_PATH, JSON.stringify(request), "application/json", REQUEST_TIMEOUT_MS, cancel);
   }
 
   waitingTurns(): Promise<HubTurnsResponse> {

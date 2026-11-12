@@ -21,6 +21,9 @@
   --pre-fg: #f9fafb;
   --link: #2563eb;
   --danger: #b4443a;
+  /* An urgent alert's header: the desktop's --app-urgent pair. */
+  --urgent: #dc2626;
+  --urgent-fg: #ffffff;
   /* Avatar discs, the desktop's values: a member's picture must sit on the
      same colour here as on the desktop. */
   --avatar-bg: #f8fbff;
@@ -3987,4 +3990,166 @@ button.mobile-chat-group-title:active {
 .finished-note-close:focus-visible {
   outline: 2px solid var(--fg1);
   outline-offset: 1px;
+}
+
+/* An urgent alert a member raised: the desktop's card (the User, 2026-11-12),
+   a saturated red header whatever its state. */
+.urgent-alert-card {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  font-family: var(--sans);
+}
+
+.urgent-alert-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.urgent-alert-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: var(--mut);
+  font-size: 12.5px;
+}
+
+.urgent-alert-meta strong {
+  color: var(--fg1);
+  font-size: 14px;
+}
+
+.urgent-alert-panel {
+  overflow: hidden;
+  border: 1px solid var(--urgent);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.urgent-alert-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px 6px 14px;
+  background: var(--urgent);
+  color: var(--urgent-fg);
+}
+
+.urgent-alert-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.urgent-alert-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin-left: auto;
+  -webkit-tap-highlight-color: transparent;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+}
+
+.urgent-alert-text {
+  padding: 12px 14px 10px;
+  color: var(--fg1);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.urgent-alert-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0 14px 13px;
+  list-style: none;
+}
+
+.urgent-alert-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg);
+  font-size: 13px;
+}
+
+.urgent-alert-line svg {
+  flex: none;
+  color: var(--mut);
+}
+
+.urgent-alert-line.is-ok svg {
+  color: var(--ok);
+}
+
+.urgent-alert-line.is-bad svg {
+  color: var(--danger);
+}
+
+.urgent-alert-line.is-wait {
+  color: var(--fg1);
+  font-weight: 500;
+}
+
+.urgent-alert-at {
+  color: var(--mut);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.urgent-alert-foot {
+  padding: 10px 14px;
+  border-top: 1px solid var(--bd);
+  color: var(--fg);
+  font-size: 13px;
+}
+
+.urgent-alert-card.is-folded {
+  display: block;
+}
+
+.urgent-alert-folded {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 9px 12px;
+  -webkit-tap-highlight-color: transparent;
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+
+.urgent-alert-folded svg {
+  flex: none;
+  color: var(--urgent);
+}
+
+.urgent-alert-folded-title {
+  flex: none;
+  color: var(--fg1);
+  font-weight: 500;
+}
+
+.urgent-alert-folded-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

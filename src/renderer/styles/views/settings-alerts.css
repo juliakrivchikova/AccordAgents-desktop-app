@@ -1,0 +1,312 @@
+/* Settings → Alerts and its two connect dialogs (alerts-settings-section.tsx,
+   alerts-connect-dialogs.tsx), as the User approved the design on 2026-11-12. */
+.settings-view .alerts-settings {
+  max-width: 740px;
+}
+
+.settings-view .alerts-intro {
+  max-width: 600px;
+  margin: -4px 0 22px;
+  color: var(--app-text-secondary);
+  font-size: 13px;
+  line-height: 19px;
+}
+
+.settings-view .alerts-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--app-success);
+}
+
+.settings-view .alerts-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.alerts-tile {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  color: var(--app-urgent-fg);
+}
+
+.alerts-tile.is-telegram {
+  background: var(--brand-telegram, var(--app-info));
+}
+
+.alerts-tile.is-phone {
+  background: var(--app-urgent);
+}
+
+.settings-view .alerts-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-view .alerts-stepper {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: 28px;
+  overflow: hidden;
+  border: 1px solid var(--app-hairline);
+  border-radius: 10px;
+}
+
+.settings-view .alerts-stepper button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--app-muted);
+  cursor: pointer;
+}
+
+.settings-view .alerts-stepper button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.settings-view .alerts-stepper span {
+  min-width: 64px;
+  border-right: 1px solid var(--app-hairline);
+  border-left: 1px solid var(--app-hairline);
+  color: var(--app-text-strong);
+  font-size: 13px;
+  line-height: 26px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-view .alerts-hint,
+.settings-view .alerts-notice {
+  margin: 10px 2px 0;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+}
+
+.settings-view .alerts-footnote {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  max-width: 640px;
+  margin: 4px 0 0;
+  color: var(--app-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.settings-view .alerts-footnote svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.alerts-steps {
+  display: flex;
+  flex-direction: column;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.alerts-step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 12px;
+  padding: 8px 0 14px;
+}
+
+.alerts-step:not(:last-child)::after {
+  position: absolute;
+  top: 34px;
+  bottom: 0;
+  left: 11px;
+  width: 1px;
+  background: var(--app-border);
+  content: "";
+}
+
+.alerts-step-mark {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 50%;
+  background: var(--app-surface);
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.alerts-step.is-done .alerts-step-mark {
+  border-color: var(--app-success);
+  background: var(--app-success);
+  color: var(--app-urgent-fg);
+}
+
+.alerts-step.is-now .alerts-step-mark {
+  border-color: var(--app-primary);
+  color: var(--app-primary);
+}
+
+.alerts-step-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.alerts-step-title {
+  color: var(--app-text-strong);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.alerts-step.is-later .alerts-step-title {
+  color: var(--app-text-secondary);
+}
+
+.alerts-step-detail {
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.alerts-step-detail code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--app-surface-subtle);
+  color: var(--app-text-strong);
+  font-family: var(--font-code);
+  font-size: 12px;
+}
+
+.alerts-note {
+  display: flex;
+  gap: 6px;
+}
+
+.alerts-note svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.alerts-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--app-info);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.alerts-input {
+  font-family: var(--font-code);
+}
+
+.gen-aws-dialog .alerts-input {
+  width: 100%;
+}
+
+.alerts-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.alerts-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.alerts-field > span {
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.alerts-step-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.alerts-waiting,
+.alerts-done-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+}
+
+.alerts-done-line {
+  color: var(--app-success);
+  font-weight: 500;
+}
+
+.alerts-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.alerts-choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.alerts-choice.is-selected {
+  border-color: var(--app-primary);
+  box-shadow: inset 0 0 0 0.5px var(--app-primary);
+}
+
+.alerts-choice small {
+  margin-left: auto;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.alerts-radio {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--app-border-strong);
+  border-radius: 50%;
+}
+
+.alerts-choice.is-selected .alerts-radio {
+  border: 4px solid var(--app-primary);
+}
+
+.alerts-number {
+  font-variant-numeric: tabular-nums;
+}

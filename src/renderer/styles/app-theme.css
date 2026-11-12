@@ -106,6 +106,9 @@
   --app-danger: #b3352d;
   --app-danger-soft: #fff0ef;
   --app-danger-border: #f2c0bb;
+  /* An urgent alert's card header: a saturated red, the same in both themes. */
+  --app-urgent: #dc2626;
+  --app-urgent-fg: #ffffff;
   --app-avatar-bg: #f8fbff;
   --app-avatar-border: #cbd5e1;
   --app-avatar-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
@@ -116,6 +119,7 @@
   --app-info-fg: #ffffff;
   --app-border-subtle: #eef0f3;
   --brand-anthropic: #d97757;
+  --brand-telegram: #2aabee;
   --brand-anthropic-soft: #fbeee8;
   --brand-codex: #3941ff;
   --brand-codex-soft: #eceeff;
@@ -342,6 +346,8 @@
   --app-danger: #ff8b7e;
   --app-danger-soft: #421f1d;
   --app-danger-border: #823c35;
+  --app-urgent: #dc2626;
+  --app-urgent-fg: #ffffff;
   --app-avatar-bg: #1b202b;
   --app-avatar-border: #3a4353;
   --app-avatar-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
@@ -352,6 +358,7 @@
   --app-info-fg: #07111f;
   --app-border-subtle: #232936;
   --brand-anthropic: #e8896b;
+  --brand-telegram: #2aabee;
   --brand-anthropic-soft: rgba(217, 119, 87, 0.20);
   --brand-codex: #b1a7ff;
   --brand-codex-soft: rgba(122, 157, 255, 0.20);

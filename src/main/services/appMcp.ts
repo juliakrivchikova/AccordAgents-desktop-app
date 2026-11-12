@@ -48,6 +48,7 @@ import {
   APP_ARTIFACT_TOOL_NAMES,
   APP_SCRIPT_TOOL_NAMES,
   APP_MEMORY_TOOL_NAMES,
+  APP_URGENT_ALERT_TOOL,
   APP_MCP_TOOL_POLICIES,
   appMcpToolDefinitionsForCapabilities
 } from "../../shared/appMcpToolContracts";
@@ -138,6 +139,7 @@ type AppChatSetTitleHandler = (actor: AppMcpActor, request: unknown) => Promise<
 type AppArtifactToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
 type AppScriptToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
 type AppMemoryToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
+type AppUrgentAlertToolHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 /** A scheduled script's run, identified by its per-run script token. */
 export interface ScriptApiContext {
   scriptId: string;
@@ -199,6 +201,7 @@ export class AppMcpService {
   private artifactToolHandler?: AppArtifactToolHandler;
   private scriptToolHandler?: AppScriptToolHandler;
   private memoryToolHandler?: AppMemoryToolHandler;
+  private urgentAlertToolHandler?: AppUrgentAlertToolHandler;
   private scriptApiHandler?: ScriptApiHandler;
   /** Script tokens live apart from agent tokens: a script token opens only
    *  the script API, and an agent token never opens it. */
@@ -298,6 +301,10 @@ export class AppMcpService {
   setArtifactToolHandler(handler: AppArtifactToolHandler): void {
     this.artifactToolHandler = handler;
   }
+  setUrgentAlertToolHandler(handler: AppUrgentAlertToolHandler | undefined): void {
+    this.urgentAlertToolHandler = handler;
+  }
+
   setMemoryToolHandler(handler: AppMemoryToolHandler | undefined): void {
     this.memoryToolHandler = handler;
   }
@@ -634,6 +641,12 @@ export class AppMcpService {
         throw new Error("Artifact tools are not available.");
       }
       return this.toolTextResult(await this.artifactToolHandler(actor, record.name, record.arguments));
+    }
+    if (record.name === APP_URGENT_ALERT_TOOL) {
+      if (!this.urgentAlertToolHandler) {
+        throw new Error("Urgent alerts are not available on this host yet.");
+      }
+      return this.toolTextResult(await this.urgentAlertToolHandler(actor, record.arguments));
     }
     if (typeof record.name === "string" && (APP_MEMORY_TOOL_NAMES as readonly string[]).includes(record.name)) {
       if (!this.memoryToolHandler) {

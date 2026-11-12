@@ -54,6 +54,7 @@ import { errorText } from "./components/review/review-conversation-data";
 import { isCodexActivityApprovalItem } from "../shared/chatActivity";
 import { CHAT_SPLIT_WORKSPACE_MIN_WIDTH } from "./lib/chat-split-sizing";
 import { ChatBackgroundTasksContext } from "./components/chat/chat-roster-status";
+import { UrgentAlertActionsContext } from "./components/chat/urgent-alert-context";
 import { restartingMembers } from "../shared/memberRestart";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
 import { useTerminalPanel } from "./components/terminal/use-terminal-panel";
@@ -102,6 +103,7 @@ function App(): JSX.Element {
   const navigation = useAppNavigation(state, conversationActions);
   useFileEditLifecycle({ conversationId: state.conversation?.id, artifacts, openChat: navigation.openChat });
   const { openSettingsSection } = navigation;
+  const urgentAlertActions = React.useMemo(() => ({ openAlertSettings: () => openSettingsSection("alerts") }), [openSettingsSection]);
   // A control that hides itself (a sidebar toggle, Activity, Settings, Back)
   // hands focus to its counterpart, so the keyboard and VoiceOver keep their
   // place. Only after a keyboard press: after a mouse click the moved focus
@@ -613,7 +615,9 @@ function App(): JSX.Element {
   );
   return (
     <ChatBackgroundTasksContext.Provider value={view.participantBackgroundTasksById}>
-      {shell}
+      <UrgentAlertActionsContext.Provider value={urgentAlertActions}>
+        {shell}
+      </UrgentAlertActionsContext.Provider>
     </ChatBackgroundTasksContext.Provider>
   );
 }

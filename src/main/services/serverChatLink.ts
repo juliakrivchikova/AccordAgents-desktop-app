@@ -1,3 +1,4 @@
+import type { HubAlertRequest, HubAlertResult } from "../../shared/urgentAlerts";
 import { HubClient, HubIdentityError, HubHttpError } from "./hubClient";
 import { HubOpsClient, HUB_FEED_CURSOR_KEY, type HubOpOutcome } from "./hubOpsClient";
 import { conversationFieldsOf, newOpId, type ChatServerLink } from "./chatServerOps";
@@ -129,6 +130,27 @@ export class ServerChatLink {
       return { ok: false, error: { code: "server_unavailable", message: "Memory is moving to your server (or this link is still starting); try again in a minute. It does not mean there is no memory." } };
     }
     return this.memoryVia<T>(client, request, cancel);
+  }
+
+  /**
+   * One request about urgent alerts (HubAlerts), which only the server
+   * carries. A request without an answer says so; it never reads as sent.
+   */
+  async alerts<T>(request: HubAlertRequest, cancel?: AbortSignal): Promise<HubAlertResult<T>> {
+    const client = this.client;
+    if (!client) {
+      return { ok: false, error: { code: "server_unavailable", message: "This device is not linked to your server yet." } };
+    }
+    try {
+      return await client.alerts<T>(request, cancel);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.options.log("server.alerts.failed", { action: request.action, status: error instanceof HubHttpError ? error.status : undefined, message: message.slice(0, 300) });
+      if (error instanceof HubHttpError && error.status === 404) {
+        return { ok: false, error: { code: "server_unavailable", message: "Your server is older than this app and has no urgent alerts yet; it will once it updates." } };
+      }
+      return { ok: false, error: { code: "server_unavailable", message: `Your server could not be reached (${message.slice(0, 200)}).` } };
+    }
   }
 
   /** The computer's copy reads and writes through the link it started on,

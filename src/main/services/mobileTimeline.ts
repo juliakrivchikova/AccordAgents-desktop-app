@@ -1,3 +1,4 @@
+import type { UrgentAlertView } from "../../shared/urgentAlerts";
 import type { ChatMessage, ChatParticipant, ChatTurnFinishedNoteMetadata, Conversation } from "../../shared/types";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
@@ -115,6 +116,9 @@ export interface MobileTimelineEvent {
   /** A turn-finished note (system): the member's reply it leads back to.
    *  Its content is the reply's first line. */
   finishedNote?: ChatTurnFinishedNoteMetadata;
+  /** An urgent alert a member raised (shared/urgentAlerts.ts), as the server
+   *  keeps it: the phone shows the same red card, with its cross. */
+  urgentAlert?: UrgentAlertView;
   /** An artifact note (system) filed under an Accord: the launch message
    *  whose card shows it (accordProgress.ts). */
   accordLaunchMessageId?: string;
@@ -268,6 +272,7 @@ function timelineEventFromMessage(
     ...(hidden ? { hidden: true as const } : {}),
     ...(midTurn ? { midTurn: true as const } : {}),
     ...(finishedNote ? { finishedNote } : {}),
+    ...(message.role === "participant" && message.metadata?.urgentAlert ? { urgentAlert: message.metadata.urgentAlert } : {}),
     ...(message.role === "system" && typeof message.metadata?.accordLaunchMessageId === "string" && message.metadata.accordLaunchMessageId
       ? { accordLaunchMessageId: message.metadata.accordLaunchMessageId } : {}),
     ...(message.role === "system" && message.metadata?.accordLaunch ? { accordLaunch: message.metadata.accordLaunch } : {}),

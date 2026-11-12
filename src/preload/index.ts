@@ -294,6 +294,7 @@ const bridge: AppBridge = {
   createPhoneInvite: (request?: import("../shared/types").CreatePhoneInviteRequest) => ipcRenderer.invoke("mobile:create-phone-invite", request ?? {}),
   revokePhoneInvite: (request: { inviteId: string }) => ipcRenderer.invoke("mobile:revoke-phone-invite", request),
   getHubSetupState: () => ipcRenderer.invoke("hub:setup-state"),
+  urgentAlertRequest: (request) => ipcRenderer.invoke("alerts:request", request),
   getHubSetupCommand: (request: HubSetupCommandRequest) => ipcRenderer.invoke("hub:setup-command", request),
   installHub: (request: HubInstallRequest) => ipcRenderer.invoke("hub:install", request),
   onHubSetupProgress: (callback: (state: HubSetupState) => void) => {

@@ -1,3 +1,4 @@
+import { URGENT_ALERT_USER_ACTIONS, type UrgentAlertUserRequest } from "../shared/urgentAlerts";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -109,7 +110,7 @@ import { artifactMembersForConversation } from "../shared/artifacts";
 import { normalizeExternalUrlForOpen } from "../shared/externalLinks";
 import { ArtifactClient } from "./services/artifactClient";
 import { ArtifactStore } from "./services/artifactStore";
-import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers, wireMemoryToolHandler } from "./appToolWiring";
+import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers, wireMemoryToolHandler, wireUrgentAlertToolHandler } from "./appToolWiring";
 import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
 import { HubClient } from "./services/hubClient";
@@ -1361,6 +1362,7 @@ const dispatchArtifactTool = createArtifactToolDispatcher(artifactService);
 wireArtifactToolHandler(appMcpService, chatService, dispatchArtifactTool);
 // Members' memory lives on the User's server only (shared/memory.ts).
 wireMemoryToolHandler(appMcpService, chatService, () => serverChatLink);
+wireUrgentAlertToolHandler(appMcpService, () => serverChatLink);
 
 /** Settings → Memory: every note on the User's server, with the names of
  *  the roles and chats they are kept for. */
@@ -2704,6 +2706,20 @@ function registerIpc(): void {
     return { machine, enrollmentJson: JSON.stringify(pairing, null, 2) };
   });
   ipcMain.handle("hub:setup-state", () => hubInstaller.state());
+  ipcMain.handle("alerts:request", async (_event, request: unknown) => {
+    const action = (request as { action?: unknown } | undefined)?.action;
+    if (!request || typeof request !== "object" || typeof action !== "string" || !URGENT_ALERT_USER_ACTIONS.has(action)) {
+      return { ok: false, error: { code: "invalid_request", message: "Unknown alert request." } };
+    }
+    if (action !== "close") {
+      // Where Twilio reaches the server: the address this computer links to,
+      // when it is the User's own server (https); none for the one in the app.
+      const config = await settingsService.getHubConfig();
+      const url = config?.url && /^https:\/\//.test(config.url) ? config.url : undefined;
+      await serverChatLink.alerts({ action: "public-url", ...(url ? { url } : {}) });
+    }
+    return serverChatLink.alerts(request as UrgentAlertUserRequest);
+  });
   ipcMain.handle("hub:setup-command", async (_event, request: import("../shared/hubSetup").HubSetupCommandRequest) => {
     const region = typeof request?.region === "string" ? request.region.trim() : "";
     return { command: await hubInstaller.command(region), region };
