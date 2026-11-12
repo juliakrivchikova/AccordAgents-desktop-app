@@ -1,7 +1,8 @@
 import os from "node:os";
 import { app } from "electron";
 import type * as SentryMain from "@sentry/electron/main";
-import { CRASH_REPORT_EXCLUDED_INTEGRATIONS, scrubCrashReportBreadcrumb, scrubCrashReportEvent } from "../../shared/crashReportPrivacy";
+import { CRASH_REPORT_EXCLUDED_INTEGRATIONS, scrubCrashReportBreadcrumb, scrubCrashReportEvent, scrubSerializedUsageLogs, scrubUsageLog } from "../../shared/crashReportPrivacy";
+import { crashReportReleaseName, type UsageSignalAttributes } from "../../shared/usageSignals";
 import { discardCrashReportData } from "./crashReportPreferences";
 
 // The project's ingest key. A DSN only allows sending events to this project,
@@ -14,6 +15,8 @@ export const CRASH_REPORTS_ACTIVE_ARG = "--accordagents-crash-reports=on";
 
 /** A desktop left open for days still counts as active every day. */
 const SESSION_ROLLOVER_MS = 24 * 60 * 60 * 1000;
+/** How long a usage signal's send may take before it is left to the queue. */
+const USAGE_SIGNAL_FLUSH_MS = 5000;
 
 let active = false;
 // Loaded only when reports are on, so a launch with them off pays nothing.
@@ -48,6 +51,9 @@ export function startCrashReporting(installId: string): CrashReportingStartResul
     sdk.init({
       dsn: CRASH_REPORT_DSN,
       environment: crashReportEnvironment(app.isPackaged, app.getVersion()),
+      // The system is part of the release so active installs can be counted
+      // per system: Sentry groups sessions only by release and environment.
+      release: crashReportReleaseName(app.getVersion(), process.platform),
       sendDefaultPii: false,
       includeLocalVariables: false,
       attachScreenshot: false,
@@ -73,7 +79,27 @@ export function startCrashReporting(installId: string): CrashReportingStartResul
         sdk.childProcessIntegration({ events: ["abnormal-exit", "launch-failed", "integrity-failure", "crashed", "oom"] })
       ],
       beforeSend: (event) => scrubCrashReportEvent(event, homeDir),
+      // Usage signals are logs, so they never show among the errors; no
+      // other log leaves the computer.
+      enableLogs: true,
+      beforeSendLog: (log) => scrubUsageLog(log),
       beforeBreadcrumb: (breadcrumb) => scrubCrashReportBreadcrumb(breadcrumb, homeDir)
+    });
+    // Every log on its way out, whatever path it took (the window's logs and
+    // scope attributes skip beforeSendLog), is checked again.
+    sdk.getClient()?.on("beforeEnvelope", (envelope) => {
+      const items = envelope[1] as unknown as Array<[{ type?: string; item_count?: number }, { items?: unknown[] }]>;
+      for (let index = items.length - 1; index >= 0; index -= 1) {
+        const [header, payload] = items[index];
+        if (header?.type !== "log") continue;
+        const logs = Array.isArray(payload?.items) ? scrubSerializedUsageLogs(payload.items) : [];
+        if (logs.length === 0) {
+          items.splice(index, 1);
+        } else {
+          payload.items = logs;
+          header.item_count = logs.length;
+        }
+      }
     });
     active = true;
     rolloverTimer = setInterval(() => {
@@ -93,6 +119,23 @@ export function startCrashReporting(installId: string): CrashReportingStartResul
 
 export function crashReportingActive(): boolean {
   return active;
+}
+
+/**
+ * Sends one usage signal as an info log and sends it on at once (the SDK
+ * otherwise holds logs for a while, and the app may quit first). False when
+ * reports are off: nothing is sent or kept, and the caller does not count the
+ * signal as sent.
+ */
+export function sendUsageSignal(name: string, attributes: UsageSignalAttributes): boolean {
+  if (!active || !Sentry) return false;
+  try {
+    Sentry.logger.info(name, attributes);
+    void Sentry.flush(USAGE_SIGNAL_FLUSH_MS).catch(() => false);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Turning reports off takes effect at once: nothing more is sent from this

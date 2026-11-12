@@ -638,6 +638,48 @@ export class StorageService {
     });
   }
 
+  /** Each chat's members, as the runtime fields that say which provider they
+   *  run on (the CLI and any added provider) and their role (to tell the
+   *  Assistant apart), for the usage signals. One
+   *  query over the chats' own rows, the same body the chat list reads, that
+   *  returns only those fields; no message is read, and a chat whose
+   *  row cannot be read is left out rather than failing the rest. */
+  async listChatMemberProviders(): Promise<Array<Array<{ kind?: unknown; hostId?: unknown; hostVendor?: unknown; roleConfigId?: unknown }>>> {
+    await this.init();
+    const rows = await this.queryJson<{ id: string; kind?: unknown; hostId?: unknown; hostVendor?: unknown; roleConfigId?: unknown; member?: number | null }>(
+      `select c.id as id,
+              json_extract(p.value, '$.kind') as kind,
+              json_extract(p.value, '$.hostId') as hostId,
+              json_extract(p.value, '$.hostVendor') as hostVendor,
+              json_extract(p.value, '$.roleConfigId') as roleConfigId,
+              p.key as member
+       from (
+         select id, coalesce(nullif(body_json, ''), payload_json) as body
+         from conversations
+         where kind = 'chat' and json_valid(coalesce(nullif(body_json, ''), payload_json))
+       ) c
+       left join json_each(
+         case when json_type(c.body, '$.metadata.participants') = 'array' then c.body else '{"metadata":{"participants":[]}}' end,
+         '$.metadata.participants'
+       ) p
+       order by c.id;`
+    );
+    const chats = new Map<string, Array<{ kind?: unknown; hostId?: unknown; hostVendor?: unknown; roleConfigId?: unknown }>>();
+    for (const row of rows) {
+      const members = chats.get(row.id) ?? [];
+      if (row.member !== null && row.member !== undefined) {
+        members.push({
+          kind: row.kind ?? undefined,
+          hostId: row.hostId ?? undefined,
+          hostVendor: row.hostVendor ?? undefined,
+          roleConfigId: row.roleConfigId ?? undefined
+        });
+      }
+      chats.set(row.id, members);
+    }
+    return [...chats.values()];
+  }
+
   /** The messages whose choice still waits for the User, in the given chats:
    *  what the phone's chat list carries so a phone can drop a card the
    *  desktop no longer waits on. One query over the listed chats' rows (their

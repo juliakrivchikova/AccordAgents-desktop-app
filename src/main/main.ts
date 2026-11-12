@@ -170,7 +170,9 @@ import { AppMcpService } from "./services/appMcp";
 import { AppSkillsService } from "./services/appSkills";
 import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
-import { CRASH_REPORTS_ACTIVE_ARG, crashReportingActive, startCrashReporting, stopCrashReporting } from "./services/crashReporting";
+import { CRASH_REPORTS_ACTIVE_ARG, crashReportingActive, sendUsageSignal, startCrashReporting, stopCrashReporting } from "./services/crashReporting";
+import { UsageMilestones, usageHistoryFrom, usageProfileUsedBefore } from "./services/usageMilestones";
+import { usageLocale, usageOs } from "../shared/usageSignals";
 import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "./services/crashReportPreferences";
 import { isServerUpdateLoaderWindow, openServerUpdateLoader, updateServerBeforeOpening } from "./services/serverUpdateLoader";
 import { ACTIVITY_RECHECK_MS, appHiddenForUpdate, bootstrapAppUpdater, createUpdateRestart, createUpdateRestartGate, currentUpdateWindows, quitAndInstallUpdate, showUpdateRestartPrompt, updatePromptWindowShown } from "./services/appUpdater";
@@ -245,6 +247,11 @@ const userDataDirOverride = desktopUserDataDirOverride();
 if (userDataDirOverride) {
   app.setPath("userData", userDataDirOverride);
 }
+
+// Whether this profile was used by an earlier launch (its chat database is
+// there), read before anything of this launch writes to it: an installation
+// first seen by the usage signals is new only when it was not.
+const profileUsedBeforeLaunch = usageProfileUsedBefore(app.getPath("userData"));
 
 // Once the profile directory is final and before the app is ready: the SDK
 // registers the scheme the window reports through and starts the native
@@ -450,6 +457,34 @@ let machineLinkService: MachineLinkService | undefined;
 /** When this desktop started connecting to its machines. */
 let machineLinkStartedAt: number | undefined;
 const DESKTOP_LINK_STARTUP_GRACE_MS = 60_000;
+/** The once-per-installation usage signals; only in a launch with reports
+ *  on, and only on the computer (a machine's runtime has none). */
+const usageMilestones = crashReportingStart.active
+  ? new UsageMilestones({
+    userDataDir: app.getPath("userData"),
+    profileUsedBefore: profileUsedBeforeLaunch,
+    send: sendUsageSignal,
+    installFacts: () => ({
+      os: usageOs(process.platform),
+      appVersion: app.getVersion(),
+      locale: usageLocale([...app.getPreferredSystemLanguages(), app.getSystemLocale(), app.getLocale()])
+    }),
+    readHistory: async () => {
+      const [chats, documents, machines] = await Promise.all([
+        storageService.listChatMemberProviders(),
+        artifactStore.multiSignerDocumentStatus(),
+        settingsService.listMachines()
+      ]);
+      return usageHistoryFrom(chats, documents, machines.length);
+    },
+    readDocuments: (since) => artifactStore.multiSignerDocumentStatus(since),
+    log: (event, payload) => {
+      void debugLogService.write(event, payload);
+    }
+  })
+  : undefined;
+cliAgentRunner.setAgentsDetectedObserver(usageMilestones ? (agents) => usageMilestones.observeAgents(agents) : undefined);
+
 const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation, update) => {
   // The renderer receives the delta form — the messages that changed plus the
   // newest window — because on a chat with thousands of messages the full
@@ -457,6 +492,11 @@ const chatService = new ChatService(storageService, settingsService, cliAgentRun
   sendToMainWindow("conversations:updated", update);
   // Which members live on machines (their live progress is theirs to publish).
   hubPhonePublisher.noteConversation(conversation);
+  try {
+    usageMilestones?.observeConversation(conversation, update.messages);
+  } catch {
+    // Usage signals never get in the way of a chat.
+  }
 }, userSkillsService, (progress) => emitReviewProgress(progress));
 // Every progress path reaches the phone (through the server), not only the
 // renderer: interactive runs (chat:send, accord, compaction) pass their own
@@ -510,6 +550,7 @@ const artifactService = new ArtifactClient({
   hasChat: async (conversationId) => (await storageService.openConversation(conversationId, 1))?.conversation.kind === "chat",
   onChanged: (conversationId) => {
     sendToMainWindow("artifacts:updated", { conversationId });
+    usageMilestones?.observeDocuments();
   },
   logger: (event, payload) => {
     void debugLogService.write(event, payload);
@@ -1962,6 +2003,7 @@ function registerIpc(): void {
   ipcMain.handle("settings:set-crash-reports", async (_event, enabled: unknown) => {
     // Off stops first, so a failed write cannot leave reports running.
     if (enabled === false) {
+      usageMilestones?.pause();
       await stopCrashReporting(app.getPath("userData"));
       void debugLogService.write("crash-reports.stopped", {});
     }
@@ -3033,6 +3075,9 @@ async function resolvePluginListRequest(request?: PluginListRequest): Promise<{
 
 void app.whenReady().then(async () => {
   await validateSqliteExecutable({ executable: sqliteExecutable });
+  void usageMilestones?.start().catch((error: unknown) => {
+    void debugLogService.write("usage.start-failed", { message: error instanceof Error ? error.message : String(error) });
+  });
   protocol.handle(FILE_PREVIEW_PROTOCOL, (request) => filePreviewService.handleProtocolRequest(request));
   registerIpc();
   installMediaPermissionGate();
@@ -3234,6 +3279,7 @@ void app.whenReady().then(async () => {
     // A restarted runtime greets again with a new instance; until then its
     // requests are refused, so it is asked again once it has.
     machineLinkService.onHello((event) => broadcastScripts([event.machineId]));
+    machineLinkService.onHello(() => usageMilestones?.reach("first_cloud_machine"));
     machineLinkService.onMemberBackgroundTasks((event) => {
       if (event.member) {
         chatService.applyMachineBackgroundTasks(event.machineId, event.member);

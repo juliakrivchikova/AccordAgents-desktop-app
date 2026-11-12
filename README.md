@@ -222,8 +222,19 @@ the npm scripts directly: `npm run dev`, `npm run build`, `npm start`,
 - Cloud run mirrors the selected project and a snapshot of your settings
   (including environment values you configured) to your own instance.
 - Crash and usage reports are on by default, also when running from source:
-  the desktop app sends error reports and an anonymous count of active
-  installs to Sentry. Before sending, it masks file paths, links, email
+  the desktop app sends error reports and anonymous usage counts to Sentry:
+  active installs (the release name ends in `+mac`, `+win` or `+linux`), and
+  once per installation each first step it reaches (first launch, a CLI ready
+  with which of Claude Code, Codex and Antigravity are ready, first chat,
+  first reply, members of two provider families you added to one chat, first
+  member request, first Accord started and signed, first cloud machine), and
+  each provider family it first uses (`claude-code`, `codex`, `antigravity`,
+  `glm`, `kimi`, `minimax`, `deepseek`, `anthropic-api`, `openai-api`, or
+  `custom` for any endpoint of your own), with the system, the system
+  language (`zh-CN`) and the app version. These are Sentry logs with fixed
+  names and values only, never messages, code, file names, model names,
+  handles or keys, and nothing done while reports are off is sent later.
+  Before sending an error report, it masks file paths, links, email
   addresses, and anything that looks like a secret or token, and cuts error
   text to 300 characters; no screenshots, local variables, console output, or
   crash dumps are sent. Turn them off in Settings → General → **Crash and
