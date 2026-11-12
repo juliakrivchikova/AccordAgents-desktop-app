@@ -129,6 +129,7 @@ export interface HubAlertsOptions {
   callRetryMs?: number;
   /** Tests: how long a minute of the wait before a call is. */
   minuteMs?: number;
+  telegramRetryMs?: number;
   telegramWaitSeconds?: number;
 }
 
@@ -177,6 +178,8 @@ export class HubAlerts {
 
   close(): void {
     this.closed = true;
+    for (const timer of this.cardRetries.values()) clearTimeout(timer);
+    this.cardRetries.clear();
     if (this.timer) clearTimeout(this.timer);
     for (const poll of this.polls.values()) clearTimeout(poll);
     this.polls.clear();
@@ -360,7 +363,7 @@ export class HubAlerts {
     if (outcome.changed) {
       this.reschedule();
       // A call still ringing when she reacted elsewhere stops ringing.
-      if (outcome.ringing && source !== "call") void this.endCall(outcome.ringing);
+      if (outcome.ringing && source !== "call") void this.endCall(outcome.ringing).catch((error: unknown) => this.log("hub.alert.call.end-failed", { message: messageOf(error) }));
       void this.editTelegram(outcome.record).catch(() => undefined);
     }
     return outcome.record.view;
@@ -374,12 +377,25 @@ export class HubAlerts {
     let sentAt: string | undefined;
     let error: string | undefined;
     let messageId: number | undefined;
-    try {
-      messageId = await this.bot(telegram).sendMessage(telegram.chatId, telegramText(record, settings), [{ text: "Got it", data: `ack:${alertId}` }]);
-      sentAt = this.now().toISOString();
-    } catch (failure) {
-      error = failure instanceof AlertChannelError ? failure.message : "Telegram could not be reached.";
-      this.log("hub.alert.telegram.failed", { alertId, message: messageOf(failure) });
+    // A failure that may pass (no network, too many requests, Telegram's own
+    // trouble) is tried again a few times; a refusal is not.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        messageId = await this.bot(telegram).sendMessage(telegram.chatId, telegramText(record, settings), [{ text: "Got it", data: `ack:${alertId}` }]);
+        sentAt = this.now().toISOString();
+        break;
+      } catch (failure) {
+        const status = failure instanceof AlertChannelError ? failure.status : 0;
+        const passing = status === 0 || status === 429 || status >= 500;
+        if (passing && attempt < 4 && !this.closed) {
+          this.log("hub.alert.telegram.retry", { alertId, attempt, status });
+          await delay((this.options.telegramRetryMs ?? 5_000) * attempt, new AbortController().signal);
+          continue;
+        }
+        error = failure instanceof AlertChannelError ? failure.message : "Telegram could not be reached.";
+        this.log("hub.alert.telegram.failed", { alertId, message: messageOf(failure) });
+        break;
+      }
     }
     await this.serialize(async () => {
       const current = await this.record(alertId);
@@ -433,8 +449,13 @@ export class HubAlerts {
   private async callDue(): Promise<void> {
     const nowMs = this.now().getTime();
     const due = (await this.openRecords()).filter((record) => record.nextCallAt !== undefined && record.nextCallAt <= nowMs && !record.callSid);
-    for (const record of due) await this.placeCall(record.view.id);
-    this.reschedule();
+    try {
+      for (const record of due) {
+        await this.placeCall(record.view.id).catch((error: unknown) => this.log("hub.alert.call.error", { alertId: record.view.id, message: messageOf(error) }));
+      }
+    } finally {
+      this.reschedule();
+    }
   }
 
   private async placeCall(alertId: string): Promise<void> {
@@ -475,6 +496,11 @@ export class HubAlerts {
         const reason = error instanceof AlertChannelError ? error.message : "Twilio could not be reached.";
         record.view.calls.push({ attempt, startedAt, status: "failed", endedAt: startedAt, error: reason });
         this.log("hub.alert.call.failed", { alertId, attempt, message: messageOf(error) });
+        if (error instanceof AlertChannelError && error.badCredentials) {
+          void this.updateSettings((current) => {
+            if (current.phone) current.phone.error = "Twilio no longer accepts these keys. Connect the phone again.";
+          }).catch(() => undefined);
+        }
         this.afterCallEnded(record);
       }
       await this.save(record);
@@ -503,16 +529,18 @@ export class HubAlerts {
   private pollCall(alertId: string, sid: string): void {
     if (this.closed) return;
     this.stopPolling(alertId);
-    const startedAt = this.now().getTime();
+    let failingSince: number | undefined;
     const tick = (): void => {
       this.polls.delete(alertId);
-      void this.checkCall(alertId, sid, startedAt).then((again) => {
+      void this.checkCall(alertId, sid, failingSince).then((again) => {
+        failingSince = undefined;
         if (again && !this.closed) {
           const poll = setTimeout(tick, this.options.callPollMs ?? 4_000);
           poll.unref?.();
           this.polls.set(alertId, poll);
         }
       }, (error: unknown) => {
+        failingSince ??= this.now().getTime();
         this.log("hub.alert.poll.error", { alertId, message: messageOf(error) });
         if (!this.closed) {
           const poll = setTimeout(tick, (this.options.callPollMs ?? 4_000) * 3);
@@ -533,7 +561,7 @@ export class HubAlerts {
   }
 
   /** One look at a call; true while it still rings or talks. */
-  private async checkCall(alertId: string, sid: string, pollingSince: number): Promise<boolean> {
+  private async checkCall(alertId: string, sid: string, failingSince: number | undefined): Promise<boolean> {
     const settings = await this.settings();
     let status: UrgentAlertCallStatus;
     if (!settings.phone) {
@@ -544,7 +572,7 @@ export class HubAlerts {
         status = (await this.twilio(settings.phone).call(sid)).status;
       } catch (error) {
         // Lost for minutes: counted as a call that ended unanswered.
-        if (this.now().getTime() - pollingSince < 10 * 60_000) throw error;
+        if (failingSince === undefined || this.now().getTime() - failingSince < 10 * 60_000) throw error;
         status = "failed";
       }
     }
@@ -618,7 +646,12 @@ export class HubAlerts {
     }
     const digits = params.Digits ?? "";
     if (digits === "1") {
-      await this.acknowledge(alertId, "call");
+      // Twilio waits 15 s at most: answer it soon, let the rest finish after.
+      const acknowledged = this.acknowledge(alertId, "call").catch((error: unknown) => {
+        this.log("hub.alert.ack.error", { alertId, message: messageOf(error) });
+        return undefined;
+      });
+      await Promise.race([acknowledged, new Promise((resolve) => setTimeout(resolve, 4_000).unref?.())]);
       return { status: 200, twiml: confirmedTwiml() };
     }
     return { status: 200, twiml: callTwiml("keypad", spokenAlert(record.requester, record.chatTitle, record.text), this.keypadUrl(settings, record)) };
@@ -645,7 +678,15 @@ export class HubAlerts {
     if (!token || this.closed) return;
     const loop = new AbortController();
     this.telegramLoop = loop;
-    void this.readTelegram(token, loop.signal);
+    void this.readTelegram(token, loop.signal).catch((error: unknown) => {
+      this.log("hub.alert.telegram.loop-failed", { message: messageOf(error) });
+      // Read again later, unless something else took over meanwhile.
+      if (this.telegramLoop === loop) {
+        this.telegramLoop = undefined;
+        this.telegramToken = undefined;
+        setTimeout(() => { void this.restartTelegram().catch(() => undefined); }, 30_000).unref?.();
+      }
+    });
   }
 
   private async readTelegram(token: string, signal: AbortSignal): Promise<void> {
@@ -671,6 +712,11 @@ export class HubAlerts {
             if (settings.telegram?.token === token) settings.telegram.error = "Telegram no longer accepts this bot's token. Connect Telegram again.";
           });
           this.log("hub.alert.telegram.revoked", {});
+          if (this.telegramToken === token) {
+            this.telegramLoop?.abort();
+            this.telegramLoop = undefined;
+            this.telegramToken = undefined;
+          }
           return;
         }
         if (error instanceof AlertChannelError && error.status === 409) await bot.deleteWebhook().catch(() => undefined);
@@ -739,7 +785,7 @@ export class HubAlerts {
     if (callback.data.startsWith("ack:")) {
       const alertId = callback.data.slice(4);
       const record = await this.record(alertId);
-      if (!record || record.telegramChatId !== chatId) {
+      if (!record || (record.telegramChatId ?? telegram.chatId) !== chatId) {
         await bot.answerCallbackQuery(callback.id).catch(() => undefined);
         return;
       }
@@ -932,11 +978,43 @@ export class HubAlerts {
       status: "done",
       metadata: { urgentAlert: record.view }
     };
-    const outcome = await this.options.ops.writeServerMessage(record.conversationId, message);
+    let outcome: { seq: number } | { refused: string };
+    try {
+      outcome = await this.options.ops.writeServerMessage(record.conversationId, message);
+    } catch (error) {
+      if (options.strict) throw error;
+      // The alert goes on (its calls, Telegram); the card catches up shortly.
+      this.log("hub.alert.card.write-failed", { alertId: record.view.id, message: messageOf(error) });
+      this.retryCard(record.view.id);
+      return;
+    }
     if ("refused" in outcome) {
       this.log("hub.alert.card.refused", { alertId: record.view.id, reason: outcome.refused });
       if (options.strict) throw new Error(outcome.refused);
     }
+  }
+
+  private readonly cardRetries = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** Writes the card again from the record as it then stands. */
+  private retryCard(alertId: string, attempt = 1): void {
+    if (this.closed || this.cardRetries.has(alertId) || attempt > 6) return;
+    const timer = setTimeout(() => {
+      this.cardRetries.delete(alertId);
+      void this.serialize(async () => {
+        const record = await this.record(alertId);
+        if (!record) return;
+        await this.options.ops.writeServerMessage(record.conversationId, {
+          id: record.messageId, role: "participant", participantId: record.participantId, participantLabel: record.requester,
+          content: record.text, createdAt: record.view.createdAt, status: "done", metadata: { urgentAlert: record.view }
+        });
+      }).catch((error: unknown) => {
+        this.log("hub.alert.card.write-failed", { alertId, attempt, message: messageOf(error) });
+        this.retryCard(alertId, attempt + 1);
+      });
+    }, 5_000 * attempt);
+    timer.unref?.();
+    this.cardRetries.set(alertId, timer);
   }
 }
 

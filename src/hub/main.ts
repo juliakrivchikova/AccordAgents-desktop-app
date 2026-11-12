@@ -114,7 +114,7 @@ export function composeHub(options: {
    *  confirmed by answering the call). */
   embedded?: boolean;
   /** Tests: Telegram and Twilio stand-ins, and quicker alert timing. */
-  alerts?: Partial<Pick<HubAlertsOptions, "telegramBaseUrl" | "twilioBaseUrl" | "callPollMs" | "callRetryMs" | "minuteMs" | "telegramWaitSeconds" | "publicUrlOverride" | "now">>;
+  alerts?: Partial<Pick<HubAlertsOptions, "telegramBaseUrl" | "twilioBaseUrl" | "callPollMs" | "callRetryMs" | "minuteMs" | "telegramRetryMs" | "telegramWaitSeconds" | "publicUrlOverride" | "now">>;
 }) {
   const { storage, log } = options;
   // Which chats' copies changed, for the phones reading them here.

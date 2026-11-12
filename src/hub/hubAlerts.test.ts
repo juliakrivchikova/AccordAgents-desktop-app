@@ -47,6 +47,8 @@ function outside() {
   const calls: Array<{ sid: string; to: string; from: string; twiml: string; status: string }> = [];
   /** How each new call ends, in order (default: rings out unanswered). */
   const outcomes: string[] = [];
+  /** Telegram answers "too many requests" to this many sends first. */
+  const throttle = { sends: 0 };
   const buttonsOf = (markup: unknown) => ((markup as { inline_keyboard?: Array<Array<{ callback_data: string }>> } | undefined)?.inline_keyboard ?? [])
     .flat().map((button) => button.callback_data);
   const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
@@ -66,6 +68,10 @@ function outside() {
         return ok(ready);
       }
       if (method === "sendMessage") {
+        if (throttle.sends > 0) {
+          throttle.sends -= 1;
+          return new Response(JSON.stringify({ ok: false, error_code: 429, description: "Too Many Requests: retry after 1" }), { status: 429 });
+        }
         const messageId = ++nextMessage;
         sent.push({ chatId: Number(body.chat_id), text: String(body.text), buttons: buttonsOf(body.reply_markup), messageId });
         return ok({ message_id: messageId });
@@ -118,7 +124,7 @@ function outside() {
   };
   const start = (code?: string, chat = USER_CHAT) => pushUpdate({ message: { message_id: 1, chat: { id: chat, first_name: "Svetlana" }, from: { id: chat, first_name: "Svetlana" }, text: code ? `/start ${code}` : "/start" } });
   const press = (data: string, messageId: number) => pushUpdate({ callback_query: { id: `cb-${nextUpdate}`, from: { id: USER_CHAT }, data, message: { message_id: messageId, chat: { id: USER_CHAT } } } });
-  return { fetchImpl, sent, edits, answers, calls, outcomes, start, press };
+  return { fetchImpl, sent, edits, answers, calls, outcomes, throttle, start, press };
 }
 
 const member: ChatParticipant = { id: "p-taylor", handle: "taylor", roleConfigId: "software-engineer", kind: "claude-code" };
@@ -136,7 +142,7 @@ async function hub(t: test.TestContext, options: { publicUrl?: boolean; dir?: st
   const composed = composeHub({
     storage, hubId: "hub-alerts-test", version: "test", keys: vapid(), log: () => undefined, fetchImpl: world.fetchImpl, pushDebounceMs: 50,
     alerts: {
-      telegramBaseUrl: TELEGRAM, twilioBaseUrl: TWILIO, callPollMs: 20, callRetryMs: 120, minuteMs: 150, telegramWaitSeconds: 1,
+      telegramBaseUrl: TELEGRAM, twilioBaseUrl: TWILIO, callPollMs: 20, callRetryMs: 120, minuteMs: 150, telegramWaitSeconds: 1, telegramRetryMs: 20,
       ...(options.publicUrl ? { publicUrlOverride: PUBLIC } : {})
     }
   });
@@ -456,4 +462,17 @@ test("a phone disconnected while it rings ends that call; no further call is pla
   const after = await stateOf(h, alertId);
   assert.equal(after?.phone, false);
   assert.equal(view.calls.length, 1);
+});
+
+test("Telegram that is briefly too busy still gets the alert", async (t) => {
+  const h = await hub(t);
+  await seedChat(h);
+  await connectTelegram(h);
+  h.world.throttle.sends = 2;
+  const raised = await raise(h, h.owner);
+  const alertId = raised.value!.alertId;
+  await until(() => h.world.sent.find((item) => item.buttons.includes(`ack:${alertId}`)), "the alert after two refusals");
+  const view = await until(async () => { const current = await stateOf(h, alertId); return current?.telegram?.sentAt ? current : undefined; }, "the card to say sent");
+  assert.equal(view.telegram?.error, undefined);
+  assert.equal(view.state, "waiting");
 });
