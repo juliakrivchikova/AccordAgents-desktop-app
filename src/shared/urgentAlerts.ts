@@ -18,6 +18,10 @@ export const HUB_ALERTS_PATH = "/v3/alerts";
  *  request is signed by Twilio with the account's auth token instead). */
 export const HUB_ALERTS_TWILIO_PATH = "/v1/alerts/twilio";
 
+/** The writer the server's own messages carry (HUB_SERVER_WRITER on the
+ *  server): only such a message shows as an alert's card. */
+export const URGENT_ALERT_SERVER_WRITER = "server";
+
 export const URGENT_ALERT_MESSAGE_MAX_CHARS = 1_000;
 export const URGENT_ALERT_DEFAULT_WAIT_MINUTES = 5;
 export const URGENT_ALERT_WAIT_MINUTES_MIN = 1;
@@ -91,6 +95,9 @@ export interface UrgentAlertSettingsView {
     connected: boolean;
     /** Waiting for Start, or for Got it on the test message. */
     step?: "start" | "test";
+    /** The one-time code the bot's Start link carries while it waits for
+     *  Start: only that Start connects (not anyone who finds the bot). */
+    startCode?: string;
     error?: string;
   };
   phone?: {

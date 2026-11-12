@@ -40,6 +40,7 @@ import {
   type HubTurn
 } from "../shared/hubOps";
 import type { ChatMessage, ChatMessageReactions, Conversation } from "../shared/types";
+import { URGENT_ALERT_SERVER_WRITER } from "../shared/urgentAlerts";
 
 /** Bookkeeping the server keeps on every message it holds: the message's
  *  place in the server's order, and the device that wrote it (the only one
@@ -49,7 +50,7 @@ export const SERVER_MESSAGE_KEYS = ["serverSeq", "serverWriter"] as const;
 /** The writer of the messages the server writes itself (an urgent alert's
  *  card, shared/urgentAlerts.ts): no device has this id, so every device
  *  takes such a message from the feed as another's, and none may change it. */
-export const HUB_SERVER_WRITER = "server";
+export const HUB_SERVER_WRITER = URGENT_ALERT_SERVER_WRITER;
 
 /** What a message says, to tell whether it changed. */
 function contentHash(content: string | undefined): string {
@@ -920,6 +921,8 @@ function storedMessage(message: ChatMessage, server: { serverSeq: number; server
   const metadata: Record<string, unknown> = { ...(message.metadata ?? {}) };
   for (const key of LOCAL_MESSAGE_METADATA_KEYS) delete metadata[key];
   delete metadata.reactions;
+  // An urgent alert's card is the server's alone: a device cannot make one.
+  if (server.serverWriter !== HUB_SERVER_WRITER) delete metadata.urgentAlert;
   if (server.reactions && Object.keys(server.reactions).length) metadata.reactions = server.reactions;
   metadata.serverSeq = server.serverSeq;
   metadata.serverWriter = server.serverWriter;

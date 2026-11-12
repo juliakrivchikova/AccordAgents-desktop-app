@@ -493,8 +493,7 @@ const MEMBER_MEMORY_INSTRUCTIONS = [
  *  asked by the User on 2026-11-12: what she asked them to watch, or a real
  *  emergency; how often is her arrangement with the member. */
 const URGENT_ALERT_INSTRUCTIONS = [
-  "Urgent alerts:",
-  "- When something User asked you to watch (a deployment, a long job) goes wrong, or in a real emergency she must act on now, call `app_urgent_alert` with one short message in User's language: what happened and what to do. It reaches her Telegram and, if she does not react, rings her phone. Never use it for progress, questions or finished work. Follow whatever User arranged with you about when and how often to alert."
+  "Urgent alerts: if something User asked you to watch goes wrong, or an emergency needs her now, call `app_urgent_alert` (her Telegram, then her phone). Never for routine news; follow what User arranged with you."
 ] as const;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_EXECUTOR_LEASE_TTL_MS = 15 * 60_000;

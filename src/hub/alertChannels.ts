@@ -285,9 +285,18 @@ export function voiceFor(text: string): { voice: string; language: string } {
     : { voice: "Polly.Joanna", language: "en-US" };
 }
 
+/** What XML 1.0 cannot carry (control codes such as a log's colors), and
+ *  ANSI color sequences themselves, read as nothing. */
+function speakable(text: string): string {
+  return text
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\uFFFE\uFFFF]/g, " ");
+}
+
 function say(text: string): string {
-  const { voice, language } = voiceFor(text);
-  return `<Say voice="${voice}" language="${language}">${xmlEscape(text)}</Say>`;
+  const clean = speakable(text);
+  const { voice, language } = voiceFor(clean);
+  return `<Say voice="${voice}" language="${language}">${xmlEscape(clean)}</Say>`;
 }
 
 /** The spoken text of an alert: who and where, then the member's message. */

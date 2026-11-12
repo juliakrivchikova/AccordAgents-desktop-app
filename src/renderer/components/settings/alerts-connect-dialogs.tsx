@@ -99,10 +99,10 @@ export function TelegramConnectDialog(props: {
           {telegram?.error ? <div className="gen-row-error" role="alert">{telegram.error}</div> : null}
         </Step>
         <Step n={2} state={step > 2 ? "done" : step === 2 ? "now" : "later"} title="Press Start in your bot">
-          <div className="alerts-step-detail">That's how the bot learns where to write to you.</div>
+          <div className="alerts-step-detail">Use this button: it opens your bot with a one-time code, so only your Start connects it.</div>
           {step === 2 ? (
             <div className="alerts-step-actions">
-              <Button type="button" size="sm" onClick={() => void window.consensus.openExternal(`https://t.me/${telegram?.botUsername ?? ""}?start=connect`)}>
+              <Button type="button" size="sm" onClick={() => void window.consensus.openExternal(`https://t.me/${telegram?.botUsername ?? ""}${telegram?.startCode ? `?start=${encodeURIComponent(telegram.startCode)}` : ""}`)}>
                 <ExternalLink size={13} aria-hidden /> Open {bot}
               </Button>
               <span className="alerts-waiting"><Loader2 size={13} className="gen-aws-spinner" aria-hidden /> Waiting for Start…</span>

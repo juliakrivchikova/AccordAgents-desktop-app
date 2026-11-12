@@ -1,4 +1,4 @@
-import type { UrgentAlertView } from "../../shared/urgentAlerts";
+import { URGENT_ALERT_SERVER_WRITER, type UrgentAlertView } from "../../shared/urgentAlerts";
 import type { ChatMessage, ChatParticipant, ChatTurnFinishedNoteMetadata, Conversation } from "../../shared/types";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
@@ -272,7 +272,8 @@ function timelineEventFromMessage(
     ...(hidden ? { hidden: true as const } : {}),
     ...(midTurn ? { midTurn: true as const } : {}),
     ...(finishedNote ? { finishedNote } : {}),
-    ...(message.role === "participant" && message.metadata?.urgentAlert ? { urgentAlert: message.metadata.urgentAlert } : {}),
+    ...(message.role === "participant" && message.metadata?.urgentAlert && message.metadata.serverWriter === URGENT_ALERT_SERVER_WRITER
+      ? { urgentAlert: message.metadata.urgentAlert } : {}),
     ...(message.role === "system" && typeof message.metadata?.accordLaunchMessageId === "string" && message.metadata.accordLaunchMessageId
       ? { accordLaunchMessageId: message.metadata.accordLaunchMessageId } : {}),
     ...(message.role === "system" && message.metadata?.accordLaunch ? { accordLaunch: message.metadata.accordLaunch } : {}),

@@ -66,9 +66,14 @@ interface StoredTelegram {
   chatName?: string;
   connected: boolean;
   step?: "start" | "test";
+  /** The code the owner's Start link carries (`/start <code>`). */
+  startCode?: string;
   testNonce?: string;
   testMessageId?: number;
   error?: string;
+  /** The next update to read from this bot (so a restart reads nothing
+   *  twice); kept with the bot, since another bot numbers its own. */
+  offset?: number;
 }
 
 interface StoredPhone {
@@ -87,8 +92,6 @@ interface StoredSettings {
   waitMinutes: number;
   /** Where Twilio reaches this server, as the computer that set it up said. */
   publicUrl?: string;
-  /** The next Telegram update to read (so a restart reads nothing twice). */
-  telegramOffset?: number;
 }
 
 interface AlertRecord {
@@ -157,11 +160,17 @@ export class HubAlerts {
   /** Picks up what was going on before a restart: waits, calls, Telegram. */
   async start(): Promise<void> {
     await this.init();
+    const undelivered: string[] = [];
     await this.serialize(async () => {
       for (const record of await this.openRecords()) {
         if (record.callSid) this.pollCall(record.view.id, record.callSid);
+        // Raised right before a stop, never sent: sent now rather than never.
+        if (!record.view.telegram) undelivered.push(record.view.id);
       }
     });
+    for (const alertId of undelivered) {
+      void this.deliverTelegram(alertId).catch((error: unknown) => this.log("hub.alert.telegram.error", { alertId, message: messageOf(error) }));
+    }
     this.reschedule();
     await this.restartTelegram();
   }
@@ -258,7 +267,13 @@ export class HubAlerts {
       };
       await this.storage().runSql(`insert into urgent_alerts(id, request_key, conversation_id, state, record_json, created_at, updated_at) values (
         ${quote(id)}, ${quote(requestKey)}, ${quote(record.conversationId)}, ${quote(record.view.state)}, ${quote(JSON.stringify(record))}, ${quote(createdAt)}, ${quote(createdAt)});`);
-      await this.writeCard(record);
+      try {
+        await this.writeCard(record, { strict: true });
+      } catch (error) {
+        // No card, no alert: the member's retry (same request id) raises it again.
+        await this.storage().runSql(`delete from urgent_alerts where id = ${quote(id)};`).catch(() => undefined);
+        throw error;
+      }
       this.log("hub.alert.raised", { alertId: id, conversationId: record.conversationId, participantId: record.participantId, telegram, phone });
       return { record, fresh: true };
     });
@@ -427,6 +442,15 @@ export class HubAlerts {
     const placed = await this.serialize(async () => {
       const record = await this.record(alertId);
       if (!record || !OPEN_STATES.includes(record.view.state) || record.callSid || record.nextCallAt === undefined) return undefined;
+      if (await this.options.storage.conversationTombstones().isDeleted(record.conversationId)) {
+        // Its chat is gone: nobody can close it any more, so nothing rings.
+        delete record.nextCallAt;
+        delete record.view.callAt;
+        record.view.state = "unanswered";
+        await this.save(record);
+        this.log("hub.alert.chat-deleted", { alertId });
+        return undefined;
+      }
       const attempt = record.view.calls.length + 1;
       const startedAt = this.now().toISOString();
       delete record.nextCallAt;
@@ -441,10 +465,7 @@ export class HubAlerts {
       }
       const mode = this.callMode(settings);
       record.view.callMode = mode;
-      const spoken = spokenAlert(record.requester, record.chatTitle, record.text);
-      const twiml = mode === "keypad"
-        ? keypadTwiml(spoken, this.keypadUrl(settings, record))
-        : readOutTwiml(spoken);
+      const twiml = callTwiml(mode, spokenAlert(record.requester, record.chatTitle, record.text), this.keypadUrl(settings, record));
       try {
         const call = await this.twilio(settings.phone).createCall({ to: settings.phone.to, from: settings.phone.from, twiml, ringSeconds: URGENT_ALERT_RING_SECONDS });
         record.callSid = call.sid;
@@ -514,14 +535,18 @@ export class HubAlerts {
   /** One look at a call; true while it still rings or talks. */
   private async checkCall(alertId: string, sid: string, pollingSince: number): Promise<boolean> {
     const settings = await this.settings();
-    if (!settings.phone) return false;
     let status: UrgentAlertCallStatus;
-    try {
-      status = (await this.twilio(settings.phone).call(sid)).status;
-    } catch (error) {
-      // Lost for minutes: counted as a call that ended unanswered.
-      if (this.now().getTime() - pollingSince < 10 * 60_000) throw error;
-      status = "failed";
+    if (!settings.phone) {
+      // Disconnected while it rang: nothing can ask Twilio any more.
+      status = "canceled";
+    } else {
+      try {
+        status = (await this.twilio(settings.phone).call(sid)).status;
+      } catch (error) {
+        // Lost for minutes: counted as a call that ended unanswered.
+        if (this.now().getTime() - pollingSince < 10 * 60_000) throw error;
+        status = "failed";
+      }
     }
     const final = TWILIO_FINAL_STATUSES.has(status);
     const ended = await this.serialize(async () => {
@@ -596,7 +621,7 @@ export class HubAlerts {
       await this.acknowledge(alertId, "call");
       return { status: 200, twiml: confirmedTwiml() };
     }
-    return { status: 200, twiml: keypadTwiml(spokenAlert(record.requester, record.chatTitle, record.text), this.keypadUrl(settings, record)) };
+    return { status: 200, twiml: callTwiml("keypad", spokenAlert(record.requester, record.chatTitle, record.text), this.keypadUrl(settings, record)) };
   }
 
   // --- Telegram -------------------------------------------------------------------
@@ -625,7 +650,8 @@ export class HubAlerts {
 
   private async readTelegram(token: string, signal: AbortSignal): Promise<void> {
     const bot = new TelegramBot(token, this.fetchImpl, this.options.telegramBaseUrl);
-    let offset = (await this.settings()).telegramOffset;
+    const stored = (await this.settings()).telegram;
+    let offset = stored?.token === token ? stored.offset : undefined;
     while (!signal.aborted && !this.closed) {
       try {
         const updates = await bot.getUpdates(offset, this.options.telegramWaitSeconds ?? 25, signal);
@@ -633,7 +659,11 @@ export class HubAlerts {
           offset = update.update_id + 1;
           await this.telegramUpdate(bot, update).catch((error: unknown) => this.log("hub.alert.telegram.update-error", { message: messageOf(error) }));
         }
-        if (updates.length) await this.updateSettings((settings) => { settings.telegramOffset = offset; });
+        if (updates.length) {
+          await this.updateSettings((settings) => {
+            if (settings.telegram?.token === token) settings.telegram.offset = offset;
+          });
+        }
       } catch (error) {
         if (signal.aborted || this.closed) return;
         if (error instanceof AlertChannelError && error.badCredentials) {
@@ -656,6 +686,12 @@ export class HubAlerts {
     if (!telegram) return;
     const message = update.message;
     if (message?.text?.trim().startsWith("/start")) {
+      const code = message.text.trim().slice("/start".length).trim();
+      if (telegram.step === "start" && !telegram.connected && telegram.startCode && code !== telegram.startCode) {
+        // Someone opened the bot without the owner's link: it connects nobody.
+        await bot.sendMessage(message.chat.id, "To connect, open this bot with the button in AccordAgents: Settings → Alerts → Connect Telegram.");
+        return;
+      }
       if (telegram.step === "start" && !telegram.connected) {
         const nonce = randomBytes(9).toString("base64url");
         const chatName = message.from?.first_name ?? message.chat.first_name ?? message.from?.username ?? "";
@@ -667,6 +703,7 @@ export class HubAlerts {
           current.telegram.chatId = message.chat.id;
           current.telegram.chatName = chatName;
           current.telegram.step = "test";
+          delete current.telegram.startCode;
           current.telegram.testNonce = nonce;
           current.telegram.testMessageId = testMessageId;
         });
@@ -720,8 +757,10 @@ export class HubAlerts {
         return { ok: true, value: this.settingsView(await this.settings()) };
       case "public-url": {
         const url = typeof request.url === "string" && /^https:\/\/[^\s/]+/.test(request.url) ? request.url.replace(/\/+$/, "") : undefined;
-        const settings = await this.updateSettings((current) => {
-          if (url) current.publicUrl = url; else delete current.publicUrl;
+        const current = await this.settings();
+        if ((current.publicUrl ?? undefined) === url) return { ok: true, value: this.settingsView(current) };
+        const settings = await this.updateSettings((stored) => {
+          if (url) stored.publicUrl = url; else delete stored.publicUrl;
         });
         return { ok: true, value: this.settingsView(settings) };
       }
@@ -739,8 +778,7 @@ export class HubAlerts {
         const me = await bot.getMe();
         await bot.deleteWebhook().catch(() => undefined);
         const settings = await this.updateSettings((current) => {
-          current.telegram = { token, botUsername: me.username ?? "", connected: false, step: "start" };
-          delete current.telegramOffset;
+          current.telegram = { token, botUsername: me.username ?? "", connected: false, step: "start", startCode: randomBytes(12).toString("base64url") };
         });
         await this.restartTelegram();
         return { ok: true, value: this.settingsView(settings) };
@@ -748,7 +786,6 @@ export class HubAlerts {
       case "telegram.disconnect": {
         const settings = await this.updateSettings((current) => {
           delete current.telegram;
-          delete current.telegramOffset;
         });
         await this.restartTelegram();
         return { ok: true, value: this.settingsView(settings) };
@@ -822,6 +859,7 @@ export class HubAlerts {
           ...(settings.telegram.chatName ? { chatName: settings.telegram.chatName } : {}),
           connected: settings.telegram.connected,
           ...(settings.telegram.step ? { step: settings.telegram.step } : {}),
+          ...(settings.telegram.startCode ? { startCode: settings.telegram.startCode } : {}),
           ...(settings.telegram.error ? { error: settings.telegram.error } : {})
         }
       } : {}),
@@ -881,8 +919,9 @@ export class HubAlerts {
       updated_at = ${quote(this.now().toISOString())} where id = ${quote(record.view.id)};`);
   }
 
-  /** The alert's card in its chat, as the server writes it. */
-  private async writeCard(record: AlertRecord): Promise<void> {
+  /** The alert's card in its chat, as the server writes it. `strict`: a
+   *  refusal fails (raising an alert in a chat the server cannot write to). */
+  private async writeCard(record: AlertRecord, options: { strict?: boolean } = {}): Promise<void> {
     const message: ChatMessage = {
       id: record.messageId,
       role: "participant",
@@ -894,7 +933,10 @@ export class HubAlerts {
       metadata: { urgentAlert: record.view }
     };
     const outcome = await this.options.ops.writeServerMessage(record.conversationId, message);
-    if ("refused" in outcome) this.log("hub.alert.card.refused", { alertId: record.view.id, reason: outcome.refused });
+    if ("refused" in outcome) {
+      this.log("hub.alert.card.refused", { alertId: record.view.id, reason: outcome.refused });
+      if (options.strict) throw new Error(outcome.refused);
+    }
   }
 }
 
@@ -919,6 +961,21 @@ export function telegramText(record: Pick<AlertRecord, "view" | "requester" | "c
     footer = `📞 Called you ${calls} times with no answer. Press Got it when you see this.`;
   }
   return `${head}\n\n${record.text}${footer ? `\n\n${footer}` : ""}`;
+}
+
+/** Twilio takes at most 4000 characters of TwiML in a call request: a long
+ *  message (escaped, read twice) is cut rather than the call refused. */
+const TWIML_MAX_CHARS = 3_900;
+
+export function callTwiml(mode: "keypad" | "answer", spoken: string, keypadUrl: string): string {
+  const build = (text: string) => mode === "keypad" ? keypadTwiml(text, keypadUrl) : readOutTwiml(text);
+  let text = spoken;
+  let twiml = build(text);
+  while (twiml.length > TWIML_MAX_CHARS && text.length > 80) {
+    text = `${text.slice(0, Math.floor(text.length * 0.8)).trimEnd()}…`;
+    twiml = build(text);
+  }
+  return twiml;
 }
 
 function twilioCredentials(accountSid: unknown, authToken: unknown): { accountSid: string; authToken: string } | undefined {

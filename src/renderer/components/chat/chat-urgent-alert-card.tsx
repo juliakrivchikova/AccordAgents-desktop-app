@@ -1,7 +1,7 @@
 import { BellRing, Check, Clock, Phone, X } from "lucide-react";
 import { useContext, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { isOpenUrgentAlert, urgentAlertLines, type UrgentAlertView } from "../../../shared/urgentAlerts";
+import { URGENT_ALERT_SERVER_WRITER, isOpenUrgentAlert, urgentAlertLines, type UrgentAlertView } from "../../../shared/urgentAlerts";
 import type { ChatMessage, ChatParticipant } from "../../../shared/types";
 import { Avatar, avatarForParticipant } from "../avatar/avatar";
 import { avatarForChatParticipant } from "./chat-avatars";
@@ -9,7 +9,9 @@ import { ChatMessageWhen } from "./chat-streaming";
 import { UrgentAlertActionsContext } from "./urgent-alert-context";
 
 /** The alert a message carries, if it is an urgent alert's card. */
-export function urgentAlertOf(message: Pick<ChatMessage, "metadata">): UrgentAlertView | undefined {
+export function urgentAlertOf(message: Pick<ChatMessage, "metadata" | "role">): UrgentAlertView | undefined {
+  // Only a card the User's server wrote (a device cannot forge one there).
+  if (message.role !== "participant" || message.metadata?.serverWriter !== URGENT_ALERT_SERVER_WRITER) return undefined;
   const alert = message.metadata?.urgentAlert;
   return alert && typeof alert === "object" && typeof alert.id === "string" ? alert : undefined;
 }

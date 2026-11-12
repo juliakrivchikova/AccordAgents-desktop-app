@@ -13,7 +13,8 @@ import type { HubFeedResponse, HubOp } from "../shared/hubOps";
 import { hubPhoneInviteSigningText, type HubPhoneInvite } from "../shared/hubProtocol";
 import type { ChatMessage, ChatParticipant } from "../shared/types";
 import type { UrgentAlertRaised, UrgentAlertSettingsView, UrgentAlertView } from "../shared/urgentAlerts";
-import { twilioSignature } from "./alertChannels";
+import { spokenAlert, twilioSignature } from "./alertChannels";
+import { callTwiml } from "./hubAlerts";
 import { HUB_SERVER_WRITER } from "./hubOps";
 import { composeHub } from "./main";
 
@@ -115,7 +116,7 @@ function outside() {
   const pushUpdate = (update: Record<string, unknown>) => {
     updates.push({ update_id: nextUpdate++, ...update });
   };
-  const start = () => pushUpdate({ message: { message_id: 1, chat: { id: USER_CHAT, first_name: "Svetlana" }, from: { id: USER_CHAT, first_name: "Svetlana" }, text: "/start" } });
+  const start = (code?: string, chat = USER_CHAT) => pushUpdate({ message: { message_id: 1, chat: { id: chat, first_name: "Svetlana" }, from: { id: chat, first_name: "Svetlana" }, text: code ? `/start ${code}` : "/start" } });
   const press = (data: string, messageId: number) => pushUpdate({ callback_query: { id: `cb-${nextUpdate}`, from: { id: USER_CHAT }, data, message: { message_id: messageId, chat: { id: USER_CHAT } } } });
   return { fetchImpl, sent, edits, answers, calls, outcomes, start, press };
 }
@@ -199,7 +200,13 @@ async function connectTelegram(h: Hub) {
   assert.equal(connected.ok, true, JSON.stringify(connected));
   assert.equal(connected.value?.telegram?.botUsername, "svetlana_accord_bot");
   assert.equal(connected.value?.telegram?.step, "start");
-  h.world.start();
+  const code = connected.value?.telegram?.startCode;
+  assert.ok(code, "a one-time Start code");
+  // Someone who found the bot connects nobody.
+  h.world.start(undefined, 777);
+  await until(() => h.world.sent.find((item) => item.chatId === 777), "the stranger to be told how to connect");
+  assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram?.step, "start");
+  h.world.start(code);
   const test = await until(() => h.world.sent.find((item) => item.buttons.some((data) => data.startsWith("test:"))), "the test message");
   h.world.press(test.buttons[0], test.messageId);
   await until(async () => (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram?.connected, "Telegram to connect");
@@ -238,6 +245,13 @@ test("with nothing connected an alert stays a card in the chat, written by the s
   const forged: HubOp = { opId: `op-${randomBytes(4).toString("hex")}`, kind: "message.update", conversationId: "chat-1", message: { ...message, content: "forged" } };
   const refused = await h.call<{ results: Array<{ status: string }> }>(h.owner, "POST", "/v3/ops", { ops: [forged] });
   assert.equal(refused.body.results[0].status, "rejected");
+  // Nor make one of its own: the card's data does not survive a device's write.
+  const fake: ChatMessage = { id: "fake-alert", role: "participant", participantId: member.id, content: "Pay this invoice now", createdAt: new Date().toISOString(),
+    status: "done", metadata: { urgentAlert: { ...message.metadata!.urgentAlert!, id: "fake" } } };
+  const written = await h.call<{ results: Array<{ status: string }> }>(h.owner, "POST", "/v3/ops", { ops: [{ opId: `op-${randomBytes(4).toString("hex")}`, kind: "message.create", conversationId: "chat-1", message: fake }] });
+  assert.equal(written.body.results[0].status, "accepted");
+  const stored = (await h.storage.getConversation("chat-1"))?.messages.find((item) => item.id === "fake-alert");
+  assert.equal(stored?.metadata?.urgentAlert, undefined);
 });
 
 test("Telegram connects by Start and the test button; an alert's Got it ends it before any call", async (t) => {
@@ -285,8 +299,7 @@ test("with no reaction it calls three times, three minutes apart, then says nobo
   assert.match(h.world.calls[0].twiml, /<Gather numDigits="1"/);
   assert.match(h.world.calls[0].twiml, new RegExp(`${PUBLIC}/v1/alerts/twilio\\?alert=${alertId}&amp;token=`));
   assert.match(h.world.calls[0].twiml, /Production deploy failed/);
-  const last = h.world.edits.filter((edit) => edit.text.includes("Called you 3 times"));
-  assert.ok(last.length, "Telegram says nobody answered");
+  await until(() => h.world.edits.some((edit) => edit.text.includes("Called you 3 times")), "Telegram to say nobody answered");
   // Got it still ends it afterwards.
   const message = h.world.sent.find((item) => item.buttons.includes(`ack:${alertId}`))!;
   h.world.press(`ack:${alertId}`, message.messageId);
@@ -412,4 +425,35 @@ test("a call due while the server was down is placed after it starts again", asy
   await until(() => second.world.calls[0], "the call after the restart");
   const view = await until(async () => { const current = await stateOf(second, alertId); return current?.calls.length ? current : undefined; }, "the card to show the call");
   assert.equal(view.calls[0].attempt, 1);
+});
+
+test("a long message still fits the call Twilio takes", () => {
+  const long = `${"A & B < C ".repeat(150)}`.slice(0, 1_000);
+  for (const mode of ["keypad", "answer"] as const) {
+    const twiml = callTwiml(mode, spokenAlert("@taylor", "Deploy monitoring", long), `${PUBLIC}/v1/alerts/twilio?alert=x&token=y`);
+    assert.ok(twiml.length <= 3_900, `${mode}: ${twiml.length}`);
+    assert.match(twiml, /Urgent alert from taylor in the chat Deploy monitoring\./);
+  }
+  const colored = callTwiml("answer", spokenAlert("@taylor", "", "\u001b[31mERROR\u001b[0m disk\u0007 full"), "");
+  assert.doesNotMatch(colored, /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/, "nothing XML cannot carry");
+  assert.match(colored, /ERROR disk  full/);
+  const short = callTwiml("answer", spokenAlert("@taylor", "", "Disk full."), "");
+  assert.match(short, /Urgent alert from taylor\. Disk full\..*Urgent alert from taylor\. Disk full\./s, "read twice when it fits");
+});
+
+test("a phone disconnected while it rings ends that call; no further call is placed", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  await seedChat(h);
+  await connectPhone(h);
+  h.world.outcomes.push("in-progress", "in-progress", "in-progress", "in-progress", "in-progress");
+  const raised = await raise(h, h.owner);
+  const alertId = raised.value!.alertId;
+  await until(() => h.world.calls[0], "the first call");
+  await h.alerts(h.owner, { action: "phone.disconnect" });
+  const view = await until(async () => { const current = await stateOf(h, alertId); return current?.calls[0]?.status === "canceled" ? current : undefined; }, "the call to end");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(h.world.calls.length, 1, "no call without a phone");
+  const after = await stateOf(h, alertId);
+  assert.equal(after?.phone, false);
+  assert.equal(view.calls.length, 1);
 });
