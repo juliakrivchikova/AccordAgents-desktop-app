@@ -417,3 +417,41 @@ test("callers that open a new database at the same time share one set-up and the
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("usage signals read each chat's member providers without reading messages", async () => {
+  const { storage, directory } = await openStorage();
+  try {
+    assert.deepEqual(await storage.listChatMemberProviders(), []);
+    const chat = conversation([message("m1", "a prompt that is never read", 1)]);
+    chat.metadata = { participants: [
+      { id: "p1", handle: "taylor", roleConfigId: "administrator", kind: "claude-code" },
+      { id: "p2", handle: "glm", roleConfigId: "engineer", kind: "claude-code", hostId: "h1", hostLabel: "Z.ai", hostVendor: "zai", model: "glm-5.3" }
+    ] } as unknown as Conversation["metadata"];
+    await storage.saveConversation(chat);
+    await storage.saveConversation({ ...conversation([]), id: "review-1", kind: "code-review" } as Conversation);
+    assert.deepEqual(await storage.listChatMemberProviders(), [[
+      { kind: "claude-code", hostId: undefined, hostVendor: undefined, roleConfigId: "administrator" },
+      { kind: "claude-code", hostId: "h1", hostVendor: "zai", roleConfigId: "engineer" }
+    ]]);
+
+    // A chat whose row is damaged is left out, an old row without a body is
+    // read from its payload, and a chat without members is still a chat.
+    const raw = storage as unknown as { runSql(statement: string): Promise<void> };
+    await raw.runSql(`insert into conversations (id, title, kind, created_at, updated_at, body_json, payload_json)
+      values ('broken', 'x', 'chat', '2026-01-01', '2026-01-01', '{not json', '{not json');`);
+    await raw.runSql(`insert into conversations (id, title, kind, created_at, updated_at, body_json, payload_json)
+      values ('legacy', 'x', 'chat', '2026-01-01', '2026-01-01', '', '{"metadata":{"participants":[{"kind":"codex-cli","handle":"drew"}]}}');`);
+    await raw.runSql(`insert into conversations (id, title, kind, created_at, updated_at, body_json, payload_json)
+      values ('odd', 'x', 'chat', '2026-01-01', '2026-01-01', '{"metadata":{"participants":"nobody"}}', '{}');`);
+    assert.deepEqual(await storage.listChatMemberProviders(), [
+      [
+        { kind: "claude-code", hostId: undefined, hostVendor: undefined, roleConfigId: "administrator" },
+        { kind: "claude-code", hostId: "h1", hostVendor: "zai", roleConfigId: "engineer" }
+      ],
+      [{ kind: "codex-cli", hostId: undefined, hostVendor: undefined, roleConfigId: undefined }],
+      []
+    ]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

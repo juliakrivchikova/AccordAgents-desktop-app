@@ -1337,6 +1337,7 @@ export function geminiMcpProxyLaunchArgs(
 
 export class CliAgentRunner {
   private readonly readiness: CliReadinessService;
+  private agentsDetected?: (agents: AgentHealth[]) => void;
   private readonly codexExecutable: string;
   private readonly electronAppPath: string | undefined;
   private readonly warmAgents = new Map<string, WarmAgentEntry>();
@@ -1426,7 +1427,17 @@ export class CliAgentRunner {
     if (agents.some((agent) => agent.kind === "gemini-cli" && agent.installed)) {
       void this.ensureGeminiMcpConfig().catch(() => undefined);
     }
+    try {
+      this.agentsDetected?.(agents);
+    } catch {
+      // An observer never changes what the caller gets.
+    }
     return agents;
+  }
+
+  /** Told every result of `detectAgents` (the computer's usage signals). */
+  setAgentsDetectedObserver(observer: ((agents: AgentHealth[]) => void) | undefined): void {
+    this.agentsDetected = observer;
   }
 
   invalidateAgentReadiness(): number {

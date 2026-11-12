@@ -1,7 +1,17 @@
-// What leaves the User's machine in a crash or error report. Shared because
-// the renderer drops its own breadcrumbs before they reach the main process,
-// and the main process scrubs every event (its own and the renderer's) before
-// it is sent.
+// What leaves the User's machine in a crash or error report, and in a usage
+// signal (the only logs that are sent). Shared because the renderer drops its
+// own breadcrumbs before they reach the main process, and the main process
+// scrubs every event (its own and the renderer's) before it is sent.
+
+import {
+  USAGE_LOCALE_PATTERN,
+  USAGE_SIGNAL_ATTRIBUTE_KEYS,
+  USAGE_SIGNAL_NAMES,
+  isUsageInstallCohort,
+  isUsageOs,
+  isUsageProviderFamily,
+  isUsageReadyAttribute
+} from "./usageSignals";
 
 /** Longest piece of free text kept in a report; error messages can quote a
  *  prompt, a command line or a file, and the start is enough to group them. */
@@ -206,4 +216,94 @@ export function scrubCrashReportEvent<T extends CrashReportEvent>(event: T, home
     scrubbed.user = scrubbed.user.id === undefined ? undefined : { id: scrubbed.user.id };
   }
   return scrubbed as T;
+}
+
+export interface CrashReportLog {
+  level: string;
+  message: unknown;
+  attributes?: Record<string, unknown>;
+}
+
+/** What Sentry adds to every log of its own accord and may go: the random
+ *  install id, the release, the environment and the SDK. Its user name and
+ *  email (never set here) and anything else it adds do not. */
+const USAGE_LOG_SDK_ATTRIBUTES: ReadonlySet<string> = new Set([
+  "user.id",
+  "sentry.release",
+  "sentry.environment",
+  "sentry.sdk.name",
+  "sentry.sdk.version"
+]);
+
+/** Added by the SDK after the log is built: an ordering number. */
+const USAGE_LOG_SEQUENCE_ATTRIBUTE = "sentry.timestamp.sequence";
+
+const APP_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/;
+
+/** Whether one attribute of a usage signal may leave, by its name and value. */
+function usageLogAttributeAllowed(key: string, value: unknown): boolean {
+  if (USAGE_LOG_SDK_ATTRIBUTES.has(key)) return typeof value === "string";
+  if (isUsageReadyAttribute(key)) return typeof value === "boolean";
+  switch (key) {
+    case "milestone": return typeof value === "string" && USAGE_SIGNAL_NAMES.has(value);
+    case "install_cohort": return isUsageInstallCohort(value);
+    case "os": return isUsageOs(value);
+    case "app_version": return typeof value === "string" && APP_VERSION_PATTERN.test(value);
+    case "locale": return typeof value === "string" && USAGE_LOCALE_PATTERN.test(value);
+    case "provider_family": return isUsageProviderFamily(value);
+    default: return false;
+  }
+}
+
+/**
+ * The only logs that leave the computer are usage signals, with the known
+ * attributes and values only; any other log, from the SDK or a library, is
+ * dropped whole.
+ */
+export function scrubUsageLog<T extends CrashReportLog>(log: T): T | null {
+  const attributes = log.attributes ?? {};
+  const name = attributes.milestone;
+  if (log.message !== name || typeof name !== "string" || !USAGE_SIGNAL_NAMES.has(name)) {
+    return null;
+  }
+  const kept: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(attributes)) {
+    if (USAGE_SIGNAL_ATTRIBUTE_KEYS.has(key) || USAGE_LOG_SDK_ATTRIBUTES.has(key)) {
+      if (usageLogAttributeAllowed(key, value)) kept[key] = value;
+    }
+  }
+  return { ...log, level: "info", attributes: kept };
+}
+
+/** A log as the SDK sends it: each attribute a typed value. */
+interface SerializedUsageLog {
+  body?: unknown;
+  attributes?: Record<string, { value?: unknown; type?: unknown } | undefined>;
+  [field: string]: unknown;
+}
+
+/**
+ * The same rules applied once more to logs about to be sent, whatever path
+ * they took: the window's logs and attributes set on a scope reach the
+ * envelope without passing `scrubUsageLog`. Logs that are not usage signals
+ * go; the rest keep only the allowed attributes. Returns the logs to send.
+ */
+export function scrubSerializedUsageLogs(items: ReadonlyArray<unknown>): SerializedUsageLog[] {
+  const kept: SerializedUsageLog[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const log = item as SerializedUsageLog;
+    const attributes = log.attributes ?? {};
+    const name = attributes.milestone?.value;
+    if (typeof log.body !== "string" || log.body !== name || !USAGE_SIGNAL_NAMES.has(log.body)) continue;
+    const keptAttributes: Record<string, { value?: unknown; type?: unknown }> = {};
+    for (const [key, attribute] of Object.entries(attributes)) {
+      if (!attribute) continue;
+      if (key === USAGE_LOG_SEQUENCE_ATTRIBUTE ? typeof attribute.value === "number" : usageLogAttributeAllowed(key, attribute.value)) {
+        keptAttributes[key] = attribute;
+      }
+    }
+    kept.push({ ...log, attributes: keptAttributes });
+  }
+  return kept;
 }

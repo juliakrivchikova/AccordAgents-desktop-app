@@ -1,7 +1,7 @@
 {
   "name": "accordagents",
   "productName": "AccordAgents",
-  "version": "1.11.8-beta.2",
+  "version": "1.11.8",
   "private": true,
   "description": "Desktop app for multi-participant AI chat that debates a question or code diff and converges on a consensus answer.",
   "author": "Iuliia Svetlichnaia",
@@ -31,7 +31,7 @@
     "test:command": "npm run build:main && node --test dist/main/main/services/command.test.js",
     "test:terminal": "npm run build:main && node --test --test-force-exit dist/main/main/terminal/terminalHostCore.test.js dist/main/main/terminal/terminalService.test.js dist/main/main/terminal/quitConfirmation.test.js && node scripts/build-renderer-component-tests.mjs && node --test --test-force-exit --import ./scripts/renderer-jsdom-setup.mjs dist/renderer-tests/renderer/components/terminal/terminal-port.test.mjs",
     "test:scripts": "npm run build:main && node --test dist/main/main/services/scripts.test.js dist/main/shared/scriptSchedule.test.js dist/main/main/services/command.test.js",
-    "test:crash-reports": "npm run build:main && node --test dist/main/shared/crashReportPrivacy.test.js dist/main/main/services/crashReportPreferences.test.js",
+    "test:crash-reports": "npm run build:main && node --test dist/main/shared/crashReportPrivacy.test.js dist/main/shared/usageSignals.test.js dist/main/main/services/crashReportPreferences.test.js dist/main/main/services/usageMilestones.test.js",
     "test:cli-readiness": "npm run build:main && node --test dist/main/main/services/cliReadiness.test.js dist/main/main/services/command.test.js dist/main/main/services/localCliSignIn.test.js",
     "test:file-opener": "npm run build:main && node --test dist/main/main/services/intellijLauncher.test.js dist/main/main/services/localFileOpener.test.js dist/main/main/services/filePreview.test.js dist/main/main/services/filePanelWindow.test.js dist/main/main/services/settings.repoFileOpenAction.test.js",
     "test:links": "npm run build:main && node --test dist/main/main/services/externalLinks.test.js dist/main/main/services/markdownInline.test.js",
