@@ -42,10 +42,23 @@ export function TelegramConnectDialog(props: {
   // While it waits for Start or Got it, the server is asked what it saw.
   useEffect(() => {
     if (!props.open || (step !== 2 && step !== 3)) return undefined;
-    const timer = setInterval(() => {
-      void alertRequest<UrgentAlertSettingsView>({ action: "settings" }).then((result) => { if (result.ok) onSettings(result.value); });
-    }, 1_500);
-    return () => clearInterval(timer);
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // The next look only after the last answer: a slow server is never asked twice at once.
+    const look = (): void => {
+      timer = setTimeout(() => {
+        void alertRequest<UrgentAlertSettingsView>({ action: "settings" }).then((result) => {
+          if (stopped) return;
+          if (result.ok) onSettings(result.value);
+          look();
+        });
+      }, 1_500);
+    };
+    look();
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [props.open, step, onSettings]);
 
   async function connect(): Promise<void> {

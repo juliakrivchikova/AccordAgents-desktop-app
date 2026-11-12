@@ -1,18 +1,12 @@
 /* An urgent alert's card (chat-urgent-alert-card.tsx): the design the User
    approved on 2026-11-12 — a saturated red header with a bell and a cross,
    the member's message, then what happened, in grey. */
-/* The same columns as a member's message beside it: avatar, then content. */
+/* No avatar: in the messages' text column (past their 38 px avatar and
+   12 px gap), as a turn-finished note is. */
 .chat-urgent-alert {
-  display: grid;
-  grid-template-columns: 38px minmax(0, 1fr);
-  gap: 12px;
-  max-width: min(703px, 100%);
+  max-width: min(653px, calc(100% - 50px));
+  margin-left: 50px;
   padding: 4px 0;
-}
-
-.chat-urgent-alert .chat-urgent-alert-avatar.message-avatar {
-  width: 38px;
-  height: 38px;
 }
 
 .chat-urgent-alert-body {
@@ -155,7 +149,7 @@
 }
 
 .chat-urgent-alert.is-folded {
-  display: block;
+  padding: 2px 0 6px;
 }
 
 .chat-urgent-alert-folded {
@@ -195,4 +189,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chat-urgent-alert-folded:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }

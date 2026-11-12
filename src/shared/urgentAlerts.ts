@@ -80,8 +80,11 @@ export interface UrgentAlertView {
   closedAt?: string;
 }
 
+/** States in which a call may still come; the server and every card agree. */
+export const URGENT_ALERT_OPEN_STATES: readonly UrgentAlertState[] = ["waiting", "calling"];
+
 export function isOpenUrgentAlert(alert: Pick<UrgentAlertView, "state">): boolean {
-  return alert.state === "waiting" || alert.state === "calling";
+  return URGENT_ALERT_OPEN_STATES.includes(alert.state);
 }
 
 // --- settings ---------------------------------------------------------------
@@ -180,7 +183,8 @@ export function urgentAlertClock(iso: string | undefined): string {
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function left(ms: number): string {
+/** "4:12 left" until a moment `ms` from now. */
+export function urgentAlertTimeLeft(ms: number): string {
   const seconds = Math.max(0, Math.ceil(ms / 1000));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")} left`;
 }
@@ -205,7 +209,7 @@ export function urgentAlertLines(alert: UrgentAlertView, requester: string, now:
       key: "next",
       tone: "wait",
       text: `${again ? "Calling again" : "Calling you"} at ${urgentAlertClock(alert.callAt)} unless you press Got it`,
-      at: Number.isFinite(due) ? left(due - now) : undefined
+      at: Number.isFinite(due) ? urgentAlertTimeLeft(due - now) : undefined
     });
   }
   if (alert.state === "acknowledged") {

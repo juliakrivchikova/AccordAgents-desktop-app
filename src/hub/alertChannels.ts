@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import type { UrgentAlertCallStatus } from "../shared/urgentAlerts";
 
 /** What both outside services are reached with; tests pass a stand-in. */
 export type AlertFetch = (input: string, init?: RequestInit) => Promise<Response>;
@@ -138,7 +139,7 @@ export class TelegramBot {
 // ---------------------------------------------------------------------------
 // Twilio
 
-export type TwilioCallStatus = "queued" | "initiated" | "ringing" | "in-progress" | "completed" | "busy" | "no-answer" | "failed" | "canceled";
+export type TwilioCallStatus = UrgentAlertCallStatus;
 
 export const TWILIO_FINAL_STATUSES: ReadonlySet<string> = new Set(["completed", "busy", "no-answer", "failed", "canceled"]);
 

@@ -215,7 +215,9 @@ export function composeHub(options: {
   const memory = new HubMemory(storage, log);
   // Urgent alerts: Telegram, then calls (shared/urgentAlerts.ts). Local QA
   // gives the address a tunnel reaches this server at.
-  const publicUrlOverride = options.alerts?.publicUrlOverride ?? (process.env.ACCORDAGENTS_HUB_PUBLIC_URL?.trim() || undefined);
+  const publicUrlOverride = options.alerts && "publicUrlOverride" in options.alerts
+    ? options.alerts.publicUrlOverride || undefined
+    : process.env.ACCORDAGENTS_HUB_PUBLIC_URL?.trim() || undefined;
   // Local QA only: Telegram and Twilio stand-ins on this computer.
   const qaTelegram = process.env.ACCORDAGENTS_ALERTS_TELEGRAM_URL?.trim();
   const qaTwilio = process.env.ACCORDAGENTS_ALERTS_TWILIO_URL?.trim();
@@ -226,7 +228,7 @@ export function composeHub(options: {
     ...(qaTwilio && /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(qaTwilio) ? { twilioBaseUrl: qaTwilio } : {}),
     ...(options.embedded ? { embedded: true } : {}),
     ...options.alerts,
-    ...(publicUrlOverride ? { publicUrlOverride } : {})
+    publicUrlOverride
   });
   const server = new HubServer({
     hubId: options.hubId, version: options.version, storage, search, vapidPublicKey: options.keys.publicKey,
@@ -252,7 +254,7 @@ export function composeHub(options: {
     close: async () => {
       push.close();
       waker.close();
-      alerts.close();
+      await alerts.close();
       dropping.abort();
       await server.close();
       await dropped;

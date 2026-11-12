@@ -2706,6 +2706,7 @@ function registerIpc(): void {
     return { machine, enrollmentJson: JSON.stringify(pairing, null, 2) };
   });
   ipcMain.handle("hub:setup-state", () => hubInstaller.state());
+  let alertsPublicUrlSaid: { key: string; at: number } | undefined;
   ipcMain.handle("alerts:request", async (_event, request: unknown) => {
     const action = (request as { action?: unknown } | undefined)?.action;
     if (!request || typeof request !== "object" || typeof action !== "string" || !URGENT_ALERT_USER_ACTIONS.has(action)) {
@@ -2714,9 +2715,14 @@ function registerIpc(): void {
     if (action !== "close") {
       // Where Twilio reaches the server: the address this computer links to,
       // when it is the User's own server (https); none for the one in the app.
+      // Said again when it changes, and every few minutes (a new server).
       const config = await settingsService.getHubConfig();
       const url = config?.url && /^https:\/\//.test(config.url) ? config.url : undefined;
-      await serverChatLink.alerts({ action: "public-url", ...(url ? { url } : {}) });
+      const key = `${config?.url ?? "in-app"}|${url ?? ""}`;
+      if (alertsPublicUrlSaid?.key !== key || Date.now() - alertsPublicUrlSaid.at > 5 * 60_000) {
+        const said = await serverChatLink.alerts({ action: "public-url", ...(url ? { url } : {}) });
+        alertsPublicUrlSaid = said.ok ? { key, at: Date.now() } : undefined;
+      }
     }
     return serverChatLink.alerts(request as UrgentAlertUserRequest);
   });

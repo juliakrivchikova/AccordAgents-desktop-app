@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { HubAlertRequest, HubAlertResult, UrgentAlertRaised } from "../../shared/urgentAlerts";
 
 /** The one way to urgent alerts: the User's server (ServerChatLink.alerts). */
@@ -17,16 +17,21 @@ export async function callUrgentAlertTool(access: UrgentAlertServerAccess | unde
     return { ok: false, error: { code: "server_unavailable", message: "This device is not linked to your server yet, so the alert was not sent. Tell User in the chat instead." } };
   }
   const args = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  const text = typeof args.message === "string" ? args.message : "";
   const result = await access.alerts<UrgentAlertRaised>({
     action: "raise",
     conversationId: actor.conversationId,
     participantId: actor.participantId,
-    text: typeof args.message === "string" ? args.message : "",
-    requestId: typeof args.requestId === "string" && args.requestId ? args.requestId : randomUUID()
+    text,
+    // Without one: the same message within a minute (a retry after a lost
+    // answer) is the same alert; a later one is a new alert.
+    requestId: typeof args.requestId === "string" && args.requestId
+      ? args.requestId
+      : createHash("sha256").update(`${actor.conversationId}\n${actor.participantId}\n${text}\n${Math.floor(Date.now() / 60_000)}`).digest("hex").slice(0, 32)
   });
   if (!result.ok) {
     return result.error.code === "server_unavailable"
-      ? { ok: false, error: { ...result.error, message: `${result.error.message} The alert was not sent; tell User in the chat instead.` } }
+      ? { ok: false, error: { ...result.error, message: `${result.error.message} The alert may not have been sent; call the tool again with the same message (it is not sent twice), or tell User in the chat.` } }
       : result;
   }
   const raised = result.value;

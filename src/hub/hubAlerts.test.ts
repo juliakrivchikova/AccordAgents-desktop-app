@@ -130,7 +130,7 @@ function outside() {
 const member: ChatParticipant = { id: "p-taylor", handle: "taylor", roleConfigId: "software-engineer", kind: "claude-code" };
 const cloudMember: ChatParticipant = { id: "p-box", handle: "box", roleConfigId: "software-engineer", kind: "claude-code", homeMachineId: "m-1" };
 
-async function hub(t: test.TestContext, options: { publicUrl?: boolean; dir?: string } = {}) {
+async function hub(t: test.TestContext, options: { publicUrl?: boolean; dir?: string; minuteMs?: number } = {}) {
   const dir = options.dir ?? await mkdtemp(path.join(tmpdir(), "accord-hub-alerts-"));
   const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
   await storage.init();
@@ -143,7 +143,8 @@ async function hub(t: test.TestContext, options: { publicUrl?: boolean; dir?: st
     storage, hubId: "hub-alerts-test", version: "test", keys: vapid(), log: () => undefined, fetchImpl: world.fetchImpl, pushDebounceMs: 50,
     alerts: {
       telegramBaseUrl: TELEGRAM, twilioBaseUrl: TWILIO, callPollMs: 20, callRetryMs: 120, minuteMs: 150, telegramWaitSeconds: 1, telegramRetryMs: 20,
-      ...(options.publicUrl ? { publicUrlOverride: PUBLIC } : {})
+      publicUrlOverride: options.publicUrl ? PUBLIC : "",
+      ...(options.minuteMs ? { minuteMs: options.minuteMs } : {})
     }
   });
   const http = await composed.server.listenHttp(0, "127.0.0.1");
@@ -261,7 +262,8 @@ test("with nothing connected an alert stays a card in the chat, written by the s
 });
 
 test("Telegram connects by Start and the test button; an alert's Got it ends it before any call", async (t) => {
-  const h = await hub(t, { publicUrl: true });
+  // A wait no test run outlasts: no call may come at all.
+  const h = await hub(t, { publicUrl: true, minuteMs: 60_000 });
   await seedChat(h);
   await connectTelegram(h);
   await connectPhone(h);
@@ -280,8 +282,7 @@ test("Telegram connects by Start and the test button; an alert's Got it ends it 
   const done = await until(async () => { const view = await stateOf(h, alertId); return view?.state === "acknowledged" ? view : undefined; }, "Got it");
   assert.equal(done.ackSource, "telegram");
   assert.equal(done.callAt, undefined);
-  const edit = await until(() => h.world.edits.find((item) => item.messageId === message.messageId), "the Telegram message to change");
-  assert.match(edit.text, /You pressed Got it/);
+  const edit = await until(() => h.world.edits.find((item) => item.messageId === message.messageId && /You pressed Got it/.test(item.text)), "the Telegram message to change");
   assert.deepEqual(edit.buttons, []);
   // Well past the wait: no call.
   await new Promise((resolve) => setTimeout(resolve, 400));
@@ -340,7 +341,7 @@ test("1 on the call ends it, by a request Twilio signed; a forged one is refused
 });
 
 test("closing the card in the app counts as Got it and folds it; the phone closes it too, a machine never", async (t) => {
-  const h = await hub(t, { publicUrl: true });
+  const h = await hub(t, { publicUrl: true, minuteMs: 60_000 });
   await seedChat(h, [cloudMember]);
   await connectTelegram(h);
   await connectPhone(h);
@@ -360,8 +361,7 @@ test("closing the card in the app counts as Got it and folds it; the phone close
   assert.equal(closed.value?.state, "acknowledged");
   assert.equal(closed.value?.ackSource, "app");
   assert.ok(closed.value?.closedAt);
-  const edit = await until(() => h.world.edits.find((item) => item.messageId === message.messageId), "Telegram to say closed");
-  assert.match(edit.text, /Closed in the app/);
+  const edit = await until(() => h.world.edits.find((item) => item.messageId === message.messageId && /Closed in the app/.test(item.text)), "Telegram to say closed");
   assert.deepEqual(edit.buttons, []);
   // From the phone, the way the phone app asks.
   const token = randomBytes(32).toString("base64url");
@@ -465,7 +465,7 @@ test("a phone disconnected while it rings ends that call; no further call is pla
 });
 
 test("Telegram that is briefly too busy still gets the alert", async (t) => {
-  const h = await hub(t);
+  const h = await hub(t, { minuteMs: 60_000 });
   await seedChat(h);
   await connectTelegram(h);
   h.world.throttle.sends = 2;
@@ -475,4 +475,52 @@ test("Telegram that is briefly too busy still gets the alert", async (t) => {
   const view = await until(async () => { const current = await stateOf(h, alertId); return current?.telegram?.sentAt ? current : undefined; }, "the card to say sent");
   assert.equal(view.telegram?.error, undefined);
   assert.equal(view.state, "waiting");
+});
+
+test("Got it while a call rings stops that call, and the card says it was stopped", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  await seedChat(h);
+  await connectTelegram(h);
+  await connectPhone(h);
+  h.world.outcomes.push("in-progress", "in-progress", "in-progress", "in-progress", "in-progress", "in-progress");
+  const raised = await raise(h, h.owner);
+  const alertId = raised.value!.alertId;
+  const call = await until(() => h.world.calls[0], "the first call");
+  const message = h.world.sent.find((item) => item.buttons.includes(`ack:${alertId}`))!;
+  h.world.press(`ack:${alertId}`, message.messageId);
+  const view = await until(async () => { const current = await stateOf(h, alertId); return current?.state === "acknowledged" ? current : undefined; }, "Got it");
+  assert.equal(view.calls[0].status, "canceled");
+  await until(() => call.status === "completed" || call.status === "canceled", "Twilio to be told to end the call");
+});
+
+test("Twilio's key press is refused with the wrong token; 2 repeats the message", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  await seedChat(h);
+  await connectPhone(h);
+  h.world.outcomes.push("in-progress", "in-progress", "in-progress", "in-progress", "in-progress", "in-progress");
+  await raise(h, h.owner);
+  await until(() => h.world.calls[0], "the first call");
+  const action = /action="([^"]+)"/.exec(h.world.calls[0].twiml)![1].replace(/&amp;/g, "&");
+  const params = { CallSid: h.world.calls[0].sid, Digits: "2" };
+  const post = (url: string) => fetch(`${h.base}${new URL(url).pathname}${new URL(url).search}`, { method: "POST", body: new URLSearchParams(params).toString(),
+    headers: { "content-type": "application/x-www-form-urlencoded", "x-twilio-signature": twilioSignature(AUTH_TOKEN, url, params) } });
+  const wrong = action.replace(/token=[^&]+/, "token=nope");
+  assert.equal((await post(wrong)).status, 403);
+  const repeat = await post(action);
+  assert.equal(repeat.status, 200);
+  assert.match(await repeat.text(), /<Gather numDigits="1"[\s\S]*Production deploy failed/);
+});
+
+test("settings refuse what cannot work: wait bounds, a plain-http address, malformed keys", async (t) => {
+  const h = await hub(t);
+  for (const minutes of [0, 61, Number.NaN]) assert.equal((await h.alerts(h.owner, { action: "wait", minutes })).error?.code, "invalid_request");
+  assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "wait", minutes: 7 })).value?.waitMinutes, 7);
+  const http = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "public-url", url: "http://1.2.3.4" });
+  assert.equal(http.value?.callMode, "answer", "only https is an address Twilio may post to");
+  const https = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "public-url", url: "https://1.2.3.4/" });
+  assert.equal(https.value?.callMode, "keypad");
+  assert.equal((await h.alerts(h.owner, { action: "telegram.connect", token: "not a token" })).error?.code, "invalid_request");
+  assert.equal((await h.alerts(h.owner, { action: "phone.check", accountSid: "AC123", authToken: "x" })).error?.code, "invalid_request");
+  assert.equal((await h.alerts(h.owner, { action: "telegram.test" })).error?.code, "not_set_up");
+  assert.equal((await h.alerts(h.owner, { action: "nonsense" })).error?.code, "invalid_request");
 });

@@ -3994,12 +3994,12 @@ button.mobile-chat-group-title:active {
 
 /* An urgent alert a member raised: the desktop's card (the User, 2026-11-12),
    a saturated red header whatever its state. */
+/* No avatar: in the messages' text column, as a turn-finished note is. */
 .urgent-alert-card {
   flex: 1;
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
   min-width: 0;
+  margin-left: 43px;
   font-family: var(--sans);
 }
 
@@ -4047,8 +4047,8 @@ button.mobile-chat-group-title:active {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   margin-left: auto;
   -webkit-tap-highlight-color: transparent;
   border: 0;
@@ -4152,4 +4152,18 @@ button.mobile-chat-group-title:active {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.urgent-alert-close:active {
+  background: color-mix(in srgb, var(--urgent-fg) 18%, transparent);
+}
+
+.urgent-alert-folded:active {
+  background: var(--press);
+}
+
+.urgent-alert-close:focus-visible,
+.urgent-alert-folded:focus-visible {
+  outline: 2px solid var(--fg1);
+  outline-offset: 2px;
 }

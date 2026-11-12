@@ -5,6 +5,7 @@ import type { ChatMessage, ChatParticipant, Conversation } from "../shared/types
 import {
   URGENT_ALERT_CALL_ATTEMPTS,
   URGENT_ALERT_CALL_RETRY_MS,
+  URGENT_ALERT_OPEN_STATES,
   URGENT_ALERT_DEFAULT_WAIT_MINUTES,
   URGENT_ALERT_MESSAGE_MAX_CHARS,
   URGENT_ALERT_RING_SECONDS,
@@ -55,7 +56,7 @@ create table if not exists urgent_alerts (
 create index if not exists urgent_alerts_state on urgent_alerts(state);
 `;
 
-const OPEN_STATES = ["waiting", "calling"];
+const OPEN_STATES: readonly string[] = URGENT_ALERT_OPEN_STATES;
 /** States Got it still ends: an alert nobody answered can still be seen. */
 const ACKNOWLEDGEABLE = new Set(["waiting", "calling", "unanswered"]);
 
@@ -176,7 +177,9 @@ export class HubAlerts {
     await this.restartTelegram();
   }
 
-  close(): void {
+  /** Stops timers and readers, and waits for the change under way (so the
+   *  storage is not taken away under it). */
+  async close(): Promise<void> {
     this.closed = true;
     for (const timer of this.cardRetries.values()) clearTimeout(timer);
     this.cardRetries.clear();
@@ -184,6 +187,10 @@ export class HubAlerts {
     for (const poll of this.polls.values()) clearTimeout(poll);
     this.polls.clear();
     this.telegramLoop?.abort();
+    await Promise.race([
+      Promise.all([this.queue, this.settingsQueue]).catch(() => undefined),
+      new Promise((resolve) => setTimeout(resolve, 5_000).unref?.())
+    ]);
   }
 
   private init(): Promise<void> {
@@ -199,7 +206,8 @@ export class HubAlerts {
   }
 
   private serialize<T>(work: () => Promise<T>): Promise<T> {
-    const run = this.queue.then(work);
+    // Nothing new starts once closing: the storage is going away.
+    const run = this.queue.then(() => this.closed ? Promise.reject(new Error("Urgent alerts are closing.")) : work());
     this.queue = run.catch(() => undefined);
     return run;
   }
@@ -247,6 +255,7 @@ export class HubAlerts {
       const telegram = Boolean(settings.telegram?.connected && settings.telegram.chatId !== undefined);
       const phone = Boolean(settings.phone);
       const createdAt = this.now().toISOString();
+      const dueAt = phone ? this.now().getTime() + settings.waitMinutes * (this.options.minuteMs ?? 60_000) : undefined;
       const id = randomUUID();
       const record: AlertRecord = {
         view: {
@@ -256,7 +265,7 @@ export class HubAlerts {
           calls: [],
           phone,
           callMode: this.callMode(settings),
-          ...(phone ? { callAt: new Date(this.now().getTime() + settings.waitMinutes * (this.options.minuteMs ?? 60_000)).toISOString() } : {})
+          ...(dueAt !== undefined ? { callAt: new Date(dueAt).toISOString() } : {})
         },
         conversationId: request.conversationId,
         messageId: randomUUID(),
@@ -266,7 +275,7 @@ export class HubAlerts {
         text,
         requestKey,
         webhookToken: randomBytes(18).toString("base64url"),
-        ...(phone ? { nextCallAt: this.now().getTime() + settings.waitMinutes * (this.options.minuteMs ?? 60_000) } : {})
+        ...(dueAt !== undefined ? { nextCallAt: dueAt } : {})
       };
       await this.storage().runSql(`insert into urgent_alerts(id, request_key, conversation_id, state, record_json, created_at, updated_at) values (
         ${quote(id)}, ${quote(requestKey)}, ${quote(record.conversationId)}, ${quote(record.view.state)}, ${quote(JSON.stringify(record))}, ${quote(createdAt)}, ${quote(createdAt)});`);
@@ -346,14 +355,16 @@ export class HubAlerts {
           this.stopPolling(alertId);
           const call = view.calls[view.calls.length - 1];
           if (call && !call.endedAt) {
-            call.status = "completed";
+            // Pressed 1 on it: it was answered; reacted elsewhere: it is stopped.
+            call.status = source === "call" ? "completed" : "canceled";
             call.endedAt = view.ackedAt;
           }
         }
         delete record.callSid;
       }
-      if (options.close && !view.closedAt) view.closedAt = this.now().toISOString();
-      if (!acknowledgedNow && !options.close) return { record, changed: false, ringing: undefined };
+      const closingNow = Boolean(options.close && !view.closedAt);
+      if (closingNow) view.closedAt = this.now().toISOString();
+      if (!acknowledgedNow && !closingNow) return { record, changed: false, ringing: undefined };
       await this.save(record);
       await this.writeCard(record);
       this.log("hub.alert.acknowledged", { alertId, source, acknowledgedNow, closed: options.close === true });
@@ -490,7 +501,7 @@ export class HubAlerts {
       try {
         const call = await this.twilio(settings.phone).createCall({ to: settings.phone.to, from: settings.phone.from, twiml, ringSeconds: URGENT_ALERT_RING_SECONDS });
         record.callSid = call.sid;
-        record.view.calls.push({ attempt, startedAt, status: call.status as UrgentAlertCallStatus });
+        record.view.calls.push({ attempt, startedAt, status: call.status });
         record.view.state = "calling";
       } catch (error) {
         const reason = error instanceof AlertChannelError ? error.message : "Twilio could not be reached.";
@@ -584,10 +595,9 @@ export class HubAlerts {
       const changed = call && call.status !== status;
       if (call) call.status = status;
       if (!final) {
-        if (changed) {
-          await this.save(record);
-          await this.writeCard(record);
-        }
+        // Queued, ringing or talking all read "Calling you now": the card is
+        // written again only when the call ends.
+        if (changed) await this.save(record);
         return { stop: false, record: undefined };
       }
       if (call) call.endedAt = this.now().toISOString();
@@ -625,9 +635,15 @@ export class HubAlerts {
 
   // --- Twilio's key presses -----------------------------------------------------
 
+  /** Where Twilio reaches this server: the key-press address is built and
+   *  its signature checked from this one place. */
+  private publicBase(settings: StoredSettings): string {
+    return (this.options.publicUrlOverride || settings.publicUrl || "").replace(/\/+$/, "");
+  }
+
   /** The address Twilio posts a key to, with the alert and its token. */
   private keypadUrl(settings: StoredSettings, record: AlertRecord): string {
-    const base = (this.options.publicUrlOverride ?? settings.publicUrl ?? "").replace(/\/+$/, "");
+    const base = this.publicBase(settings);
     return `${base}${HUB_ALERTS_TWILIO_PATH}?${new URLSearchParams({ alert: record.view.id, token: record.webhookToken }).toString()}`;
   }
 
@@ -638,7 +654,7 @@ export class HubAlerts {
     const alertId = url.searchParams.get("alert") ?? "";
     const record = alertId ? await this.record(alertId) : undefined;
     const params = Object.fromEntries(new URLSearchParams(body.toString("utf8")).entries());
-    const base = (this.options.publicUrlOverride ?? settings.publicUrl ?? "").replace(/\/+$/, "");
+    const base = this.publicBase(settings);
     if (!settings.phone || !record || url.searchParams.get("token") !== record.webhookToken ||
       !validTwilioSignature(settings.phone.authToken, `${base}${url.pathname}${url.search}`, params, signature)) {
       this.log("hub.alert.twilio.refused", { alertId, hasRecord: Boolean(record) });
@@ -894,7 +910,7 @@ export class HubAlerts {
   }
 
   private callMode(settings: StoredSettings): "keypad" | "answer" {
-    return !this.options.embedded && (this.options.publicUrlOverride ?? settings.publicUrl) ? "keypad" : "answer";
+    return !this.options.embedded && (this.options.publicUrlOverride || settings.publicUrl) ? "keypad" : "answer";
   }
 
   private settingsView(settings: StoredSettings): UrgentAlertSettingsView {
@@ -933,6 +949,7 @@ export class HubAlerts {
   /** Settings change one at a time (the Telegram reader writes them too). */
   private updateSettings(change: (settings: StoredSettings) => void): Promise<StoredSettings> {
     const run = this.settingsQueue.then(async () => {
+      if (this.closed) throw new Error("Urgent alerts are closing.");
       const settings = await this.settings();
       change(settings);
       await this.options.storage.hub().setDocument(SETTINGS_DOCUMENT, settings, this.now().toISOString());

@@ -310,3 +310,19 @@
 .alerts-number {
   font-variant-numeric: tabular-nums;
 }
+
+.settings-view .alerts-stepper button:not(:disabled):hover,
+.alerts-choice:hover {
+  background: var(--app-surface-hover);
+}
+
+.alerts-link:hover {
+  text-decoration: underline;
+}
+
+.settings-view .alerts-stepper button:focus-visible,
+.alerts-link:focus-visible,
+.alerts-choice:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}

@@ -48,4 +48,4 @@ export {
 } from "./accordProgress";
 // An urgent alert's card: the lines it shows and whether a call is still due,
 // worded once for the desktop's card and the phone's.
-export { HUB_ALERTS_PATH, isOpenUrgentAlert, urgentAlertLines } from "./urgentAlerts";
+export { HUB_ALERTS_PATH, isOpenUrgentAlert, urgentAlertLines, urgentAlertTimeLeft } from "./urgentAlerts";

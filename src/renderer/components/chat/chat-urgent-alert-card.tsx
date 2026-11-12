@@ -3,8 +3,6 @@ import { useContext, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { URGENT_ALERT_SERVER_WRITER, isOpenUrgentAlert, urgentAlertLines, type UrgentAlertView } from "../../../shared/urgentAlerts";
 import type { ChatMessage, ChatParticipant } from "../../../shared/types";
-import { Avatar, avatarForParticipant } from "../avatar/avatar";
-import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatMessageWhen } from "./chat-streaming";
 import { UrgentAlertActionsContext } from "./urgent-alert-context";
 
@@ -21,6 +19,8 @@ export function urgentAlertOf(message: Pick<ChatMessage, "metadata" | "role">): 
  * alert"): a saturated red header whatever its state, the member's message,
  * and what happened since; the cross closes it, which counts as Got it while
  * a call is still due. Closed, it folds into one line that opens again.
+ * No avatar (the User, 2026-11-12): the card sits in the messages' text
+ * column, under its line naming the member.
  */
 export function ChatUrgentAlertCard(props: {
   message: Pick<ChatMessage, "id" | "content" | "createdAt" | "participantId" | "participantLabel">;
@@ -30,7 +30,6 @@ export function ChatUrgentAlertCard(props: {
   const { message, alert, participant } = props;
   const actions = useContext(UrgentAlertActionsContext);
   const requester = participant ? `@${participant.handle}` : message.participantLabel || "A member";
-  const avatar = participant ? avatarForChatParticipant(participant, requester) : avatarForParticipant(requester, message.participantId ?? message.id);
   const [now, setNow] = useState(() => Date.now());
   const [closing, setClosing] = useState(false);
   const [error, setError] = useState<string | undefined>();
@@ -71,7 +70,6 @@ export function ChatUrgentAlertCard(props: {
   const lines = urgentAlertLines(alert, requester, now);
   return (
     <article data-message-id={message.id} className="chat-urgent-alert" aria-label={`Urgent alert from ${requester}`}>
-      <Avatar className="message-avatar chat-urgent-alert-avatar" spec={avatar} />
       <div className="chat-urgent-alert-body">
         <div className="chat-urgent-alert-meta">
           <strong>{requester}</strong>

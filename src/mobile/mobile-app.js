@@ -9777,7 +9777,7 @@
     return card;
   }
 
-  /** The reply a turn-finished note leads back to; none for any other row. */
+  /** An urgent alert's card on a member's row; none for any other row. */
   function urgentAlertOfEntry(entry) {
     return entry && entry.author === "agent" && !entry.scaffolding && entry.urgentAlert && typeof entry.urgentAlert.id === "string"
       ? entry.urgentAlert
@@ -9804,7 +9804,7 @@
   function urgentAlertCardElement(entry) {
     const alert = urgentAlertOfEntry(entry);
     const shared = mobileSharedRules();
-    const open = shared && typeof shared.isOpenUrgentAlert === "function" ? shared.isOpenUrgentAlert(alert) : alert.state === "waiting" || alert.state === "calling";
+    const open = Boolean(shared && typeof shared.isOpenUrgentAlert === "function" && shared.isOpenUrgentAlert(alert));
     const label = entry.participantLabel || "A member";
     const wrap = document.createElement("div");
     wrap.className = "urgent-alert-card";
@@ -9825,10 +9825,7 @@
       wrap.append(folded);
       return wrap;
     }
-    const avatar = document.createElement("div");
-    avatar.className = "message-avatar";
-    avatar.setAttribute("aria-hidden", "true");
-    applyRowIdentity(avatar, entry);
+    // No avatar (the User, 2026-11-12): the line above names the member.
     const body = document.createElement("div");
     body.className = "urgent-alert-body";
     const meta = document.createElement("div");
@@ -9871,7 +9868,10 @@
       for (const line of lines) {
         const li = document.createElement("li");
         li.className = "urgent-alert-line is-" + line.tone;
-        if (line.key === "next") li.dataset.urgentAlertCountdown = alert.callAt || "";
+        if (line.key === "next") {
+          li.dataset.urgentAlertCountdown = alert.callAt || "";
+          startUrgentAlertClock();
+        }
         li.append(lineIcon(URGENT_ALERT_LINE_PATHS[line.tone] || URGENT_ALERT_LINE_PATHS.plain, 14));
         const words = document.createElement("span");
         words.textContent = line.text;
@@ -9893,21 +9893,37 @@
       panel.append(hint);
     }
     body.append(meta, panel);
-    wrap.append(avatar, body);
+    wrap.append(body);
     return wrap;
   }
 
-  // The time left before a call ticks down on every card that shows one.
-  setInterval(function () {
+  // The time left before a call ticks down on every card that shows one; the
+  // clock runs only while one is on screen and the app is in front.
+  let urgentAlertClock;
+  function tickUrgentAlertCountdowns() {
+    const lines = document.hidden ? [] : [...document.querySelectorAll("[data-urgent-alert-countdown]")];
+    if (!lines.length) {
+      if (urgentAlertClock) clearInterval(urgentAlertClock);
+      urgentAlertClock = undefined;
+      return;
+    }
+    const shared = mobileSharedRules();
     const now = Date.now();
-    for (const line of document.querySelectorAll("[data-urgent-alert-countdown]")) {
+    for (const line of lines) {
       const due = Date.parse(line.dataset.urgentAlertCountdown || "");
       const at = line.querySelector(".urgent-alert-at");
-      if (!Number.isFinite(due) || !at) continue;
-      const seconds = Math.max(0, Math.ceil((due - now) / 1000));
-      at.textContent = "· " + Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0") + " left";
+      if (!Number.isFinite(due) || !at || !shared || typeof shared.urgentAlertTimeLeft !== "function") continue;
+      at.textContent = "· " + shared.urgentAlertTimeLeft(due - now);
     }
-  }, 1000);
+  }
+  function startUrgentAlertClock() {
+    if (!urgentAlertClock) urgentAlertClock = setInterval(tickUrgentAlertCountdowns, 1000);
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden && document.querySelector("[data-urgent-alert-countdown]")) startUrgentAlertClock();
+    });
+  }
 
   function toggleUrgentAlert(alertId, row) {
     if (!alertId) return;
@@ -9937,6 +9953,7 @@
     rerenderUrgentAlertRow(row);
   }
 
+  /** The reply a turn-finished note leads back to; none for any other row. */
   function finishedNoteOfEntry(entry) {
     return entry && entry.author === "system" && !entry.scaffolding && entry.finishedNote && entry.finishedNote.messageId
       ? entry.finishedNote
