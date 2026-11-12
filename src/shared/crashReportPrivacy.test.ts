@@ -8,7 +8,9 @@ import {
   CRASH_REPORT_MAX_TEXT,
   scrubCrashReportBreadcrumb,
   scrubCrashReportEvent,
-  scrubCrashReportText
+  scrubCrashReportText,
+  scrubSerializedUsageLogs,
+  scrubUsageLog
 } from "./crashReportPrivacy";
 
 const HOME = "/Users/julia";
@@ -164,4 +166,90 @@ test("an event keeps its shape but loses request data, extra objects and everyth
     minidump: { crashed_url: "[link]" },
     trace: { trace_id: "0123456789abcdef0123456789abcdef" }
   });
+});
+
+test("only usage signals leave as logs, with their known attributes only", () => {
+  const signal = {
+    level: "info",
+    message: "provider_first_used",
+    attributes: {
+      milestone: "provider_first_used",
+      install_cohort: "new",
+      os: "mac",
+      app_version: "1.11.9-beta.1",
+      locale: "zh-Hans-CN",
+      provider_family: "custom",
+      codex_ready: true,
+      "user.id": "6f1c1a52-6f3b-4d7a-9d55-3f1e0f6f2b10",
+      "user.email": "julia@example.com",
+      "user.name": "Julia",
+      "server.address": "Julias-MacBook-Pro",
+      "sentry.release": "AccordAgents@1.11.9-beta.1+mac",
+      "sentry.environment": "beta",
+      "sentry.sdk.name": "sentry.javascript.electron",
+      "sentry.sdk.version": "7.20.0",
+      handle: "taylor",
+      chat_title: "Acme merger"
+    }
+  };
+  assert.deepEqual(scrubUsageLog(signal), {
+    level: "info",
+    message: "provider_first_used",
+    attributes: {
+      milestone: "provider_first_used",
+      install_cohort: "new",
+      os: "mac",
+      app_version: "1.11.9-beta.1",
+      locale: "zh-Hans-CN",
+      provider_family: "custom",
+      codex_ready: true,
+      "user.id": "6f1c1a52-6f3b-4d7a-9d55-3f1e0f6f2b10",
+      "sentry.release": "AccordAgents@1.11.9-beta.1+mac",
+      "sentry.environment": "beta",
+      "sentry.sdk.name": "sentry.javascript.electron",
+      "sentry.sdk.version": "7.20.0"
+    }
+  });
+  // Values outside the known ones are dropped.
+  assert.deepEqual(scrubUsageLog({ level: "info", message: "first_chat", attributes: { milestone: "first_chat", locale: "/Users/julia", provider_family: "acme", os: "haiku", app_version: "dev build" } })?.attributes, { milestone: "first_chat" });
+  // Any other log is dropped whole.
+  assert.equal(scrubUsageLog({ level: "info", message: "Sending prompt to @taylor", attributes: {} }), null);
+  assert.equal(scrubUsageLog({ level: "error", message: "first_chat", attributes: { milestone: "first_reply" } }), null);
+  assert.equal(scrubUsageLog({ level: "info", message: "unknown_step", attributes: { milestone: "unknown_step" } }), null);
+});
+
+test("logs about to be sent are checked again, whatever path they took", () => {
+  const signal = {
+    timestamp: 1794514099.45,
+    level: "info",
+    body: "first_chat",
+    trace_id: "0123456789abcdef0123456789abcdef",
+    severity_number: 9,
+    attributes: {
+      milestone: { value: "first_chat", type: "string" },
+      install_cohort: { value: "new", type: "string" },
+      os: { value: "mac", type: "string" },
+      codex_ready: { value: true, type: "boolean" },
+      "user.id": { value: "6f1c1a52-6f3b-4d7a-9d55-3f1e0f6f2b10", type: "string" },
+      "sentry.release": { value: "AccordAgents@1.11.9+mac", type: "string" },
+      "sentry.timestamp.sequence": { value: 0, type: "integer" },
+      // Set on a scope, or added by the window's SDK: never sent.
+      chat_title: { value: "Acme merger", type: "string" },
+      "device.model": { value: "MacBookPro18,3", type: "string" },
+      "os.name": { value: "macOS", type: "string" }
+    }
+  };
+  const fromWindow = { timestamp: 1, level: "info", body: "Sending prompt to @taylor", attributes: { "device.model": { value: "MacBookPro18,3", type: "string" } } };
+  assert.deepEqual(scrubSerializedUsageLogs([signal, fromWindow, null, "x"]), [{
+    ...signal,
+    attributes: {
+      milestone: { value: "first_chat", type: "string" },
+      install_cohort: { value: "new", type: "string" },
+      os: { value: "mac", type: "string" },
+      codex_ready: { value: true, type: "boolean" },
+      "user.id": { value: "6f1c1a52-6f3b-4d7a-9d55-3f1e0f6f2b10", type: "string" },
+      "sentry.release": { value: "AccordAgents@1.11.9+mac", type: "string" },
+      "sentry.timestamp.sequence": { value: 0, type: "integer" }
+    }
+  }]);
 });

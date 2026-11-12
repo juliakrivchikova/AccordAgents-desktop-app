@@ -216,7 +216,7 @@ export function GeneralSettingsSection(props: {
             <div className="gen-row-text">
               <div className="gen-row-title">Crash and usage reports</div>
               <div className="gen-row-desc">
-                Send error reports and an anonymous count of active installs to help fix bugs. File paths, links and secrets are removed. Turning on applies on next restart.
+                Send error reports and anonymous usage counts: active installs, your operating system and language, which supported CLIs are set up, which first steps you have reached (like your first chat) and which model providers you connect. Never your messages, code, file names or keys; file paths, links and secrets are removed from error reports. Turning on applies on next restart.
               </div>
             </div>
             <label className="toggle">

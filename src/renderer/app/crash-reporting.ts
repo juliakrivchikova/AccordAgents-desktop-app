@@ -15,6 +15,8 @@ export function startRendererCrashReporting(): void {
       // Console output can quote prompts and replies; the click trail names
       // chats and members.
       integrations: [breadcrumbsIntegration({ console: false, dom: false })],
+      // The window sends no logs; usage signals come from the main process.
+      enableLogs: false,
       beforeBreadcrumb: (breadcrumb) => scrubCrashReportBreadcrumb(breadcrumb)
     });
   } catch {

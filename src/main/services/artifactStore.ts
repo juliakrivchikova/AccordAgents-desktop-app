@@ -621,6 +621,42 @@ export class ArtifactStore {
     );
   }
 
+  /** Whether any chat has a document for two or more signers (or draft
+   *  authors), and whether one has its newest version signed by every one of
+   *  them. With `since`, only a document made since then counts as started,
+   *  and only one whose last signature came since then as signed (a copy of
+   *  an older document from the server does not). Over the documents' own
+   *  small tables; no body is read. */
+  async multiSignerDocumentStatus(since?: string): Promise<{ started: boolean; signed: boolean }> {
+    await this.init();
+    const after = (column: string) => (since ? `and julianday(${column}) >= julianday(${sqlString(since)})` : "");
+    const headSignature = `
+      select 1 from artifact_bound_signatures s
+      join artifact_version_projection p on p.artifact_id = s.artifact_id and p.version_event_id = s.version_event_id
+      join artifact_revisions r on r.version_event_id = s.version_event_id and r.content_hash = s.content_hash
+      where s.artifact_id = a.id and p.version = a.head_version`;
+    const rows = await this.queryJson<{ started: number; signed: number }>(
+      `
+        select
+          exists(
+            select 1 from artifacts a
+            where (json_array_length(a.required_signers_json) >= 2 or json_array_length(a.required_draft_authors_json) >= 2)
+              ${after("a.created_at")}
+          ) as started,
+          exists(
+            select 1 from artifacts a
+            where a.lifecycle = 'published' and json_array_length(a.required_signers_json) >= 2
+              and not exists (
+                select 1 from json_each(a.required_signers_json) required
+                where not exists (${headSignature} and s.signer = required.value)
+              )
+              ${since ? `and exists (${headSignature} and s.signer in (select value from json_each(a.required_signers_json)) ${after("s.signed_at")})` : ""}
+          ) as signed;
+      `
+    );
+    return { started: Number(rows[0]?.started) === 1, signed: Number(rows[0]?.signed) === 1 };
+  }
+
   async listHeadSignaturesByArtifact(conversationId: string): Promise<Map<string, ArtifactSignatureRecord[]>> {
     await this.init();
     const rows = await this.queryJson<ArtifactSignatureRecord>(
