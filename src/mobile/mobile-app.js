@@ -9836,8 +9836,8 @@
     const headTitle = document.createElement("span");
     headTitle.className = "urgent-alert-title";
     headTitle.textContent = "Urgent alert";
-    // Who and when, in the header (the User, 2026-11-12): no line above the card.
-    const from = document.createElement("span");
+    // Who and when, inside the card above the message (the User, 2026-11-13).
+    const from = document.createElement("div");
     from.className = "urgent-alert-from";
     const when = formatClockTime(entry.createdAt);
     from.textContent = label + (when ? " · " + when : "");
@@ -9852,11 +9852,11 @@
       close.dataset.urgentAlertClose = alert.id;
     }
     close.append(lineIcon(FINISHED_NOTE_CLOSE_PATHS, 18));
-    head.append(bell, headTitle, from, close);
+    head.append(bell, headTitle, close);
     const text = document.createElement("div");
     text.className = "urgent-alert-text";
     text.textContent = entry.content || "";
-    panel.append(head, text);
+    panel.append(head, from, text);
     const lines = shared && typeof shared.urgentAlertLines === "function" ? shared.urgentAlertLines(alert, label, Date.now()) : [];
     if (lines.length) {
       const list = document.createElement("ul");

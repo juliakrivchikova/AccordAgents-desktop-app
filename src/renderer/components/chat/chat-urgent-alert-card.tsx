@@ -72,11 +72,9 @@ export function ChatUrgentAlertCard(props: {
     <article data-message-id={message.id} className="chat-urgent-alert" aria-label={`Urgent alert from ${requester}`}>
       <div className="chat-urgent-alert-body">
         <div className="chat-urgent-alert-panel">
-          {/* Who and when live in the header (the User, 2026-11-12): no line above the card. */}
           <div className="chat-urgent-alert-head">
             <BellRing className="chat-urgent-alert-bell" size={18} aria-hidden="true" />
             <span className="chat-urgent-alert-title">Urgent alert</span>
-            <span className="chat-urgent-alert-from">{requester} · <ChatMessageWhen createdAt={message.createdAt} /></span>
             {(!alert.closedAt || isOpenUrgentAlert(alert)) ? (
               <button
                 type="button"
@@ -94,6 +92,8 @@ export function ChatUrgentAlertCard(props: {
               </button>
             )}
           </div>
+          {/* Who and when, inside the card above the message (the User, 2026-11-13). */}
+          <div className="chat-urgent-alert-from">{requester} · <ChatMessageWhen createdAt={message.createdAt} /></div>
           <div className="chat-urgent-alert-text">{message.content}</div>
           {lines.length > 0 && (
             <ul className="chat-urgent-alert-lines">

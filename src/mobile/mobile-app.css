@@ -4009,14 +4009,11 @@ button.mobile-chat-group-title:active {
 }
 
 .urgent-alert-from {
-  min-width: 0;
-  overflow: hidden;
-  color: color-mix(in srgb, var(--urgent-fg) 82%, transparent);
+  padding: 12px 14px 0;
+  color: var(--mut);
   font-size: 13px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .urgent-alert-panel {
@@ -4055,7 +4052,7 @@ button.mobile-chat-group-title:active {
 }
 
 .urgent-alert-text {
-  padding: 12px 14px 10px;
+  padding: 4px 14px 10px;
   color: var(--fg1);
   font-size: 15px;
   font-weight: 600;
