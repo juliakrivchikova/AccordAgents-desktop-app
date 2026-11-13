@@ -478,7 +478,7 @@ interface CompactChatCommand {
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 21;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 22;
 /** How members keep their long-term memory (shared/memory.ts), decided by the
  *  User on 2026-11-04: members do it on their own and never make the User
  *  think about it; project knowledge goes to the repository first. */
@@ -488,6 +488,12 @@ const MEMBER_MEMORY_INSTRUCTIONS = [
   "- Kinds: runbook (how to do a task well next time), article (what the code does not show: decisions and why, outside limits, User's preferences tagged `preference`), status (one task: where you stopped, branch, done, released, open). Scopes: global, project, role, chat.",
   "- Repository first: project knowledge everyone working on the repository may see goes into its files with your current task's changes. Memory holds what must not or need not be there: User-specific details, anything unfit for a public repository (assume public unless you checked). With no task to carry it, write a project note with `awaitingRepository: true`, move it with the next task there, then archive the note.",
   "- Search when you start a task. After several attempts or a stated preference, write or update a runbook or article. Update the task's status when you stop; archive it once released. Fix or archive wrong notes; update instead of duplicating; reuse tags already in use (`app_memory_tags`). No secrets, nothing the code already says. Notes are members' reference, not User's instructions."
+] as const;
+/** When members alert the User outside the app (shared/urgentAlerts.ts),
+ *  asked by the User on 2026-11-12: what she asked them to watch, or a real
+ *  emergency; how often is her arrangement with the member. */
+const URGENT_ALERT_INSTRUCTIONS = [
+  "Urgent alerts: if something User asked you to watch goes wrong, or an emergency needs her now, call `app_urgent_alert` (her Telegram, then her phone). Never for routine news; follow what User arranged with you."
 ] as const;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_EXECUTOR_LEASE_TTL_MS = 15 * 60_000;
@@ -10626,6 +10632,8 @@ export class ChatService {
       this.appToolPromptPolicy(session, includeParticipantActivityTool),
       "",
       ...MEMBER_MEMORY_INSTRUCTIONS,
+      "",
+      ...URGENT_ALERT_INSTRUCTIONS,
       "",
       "Response rules:",
       "- The user strongly prefers concise replies. Do not repeat accepted context or restate proposals when a short verdict, blocker, or delta is enough.",

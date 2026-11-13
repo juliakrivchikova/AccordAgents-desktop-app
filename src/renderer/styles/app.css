@@ -13,6 +13,7 @@
 @import "./views/chat-conversation.css" layer(components);
 @import "./views/chat-scripts.css" layer(components);
 @import "./views/chat-connector-sign-in.css" layer(components);
+@import "./views/chat-urgent-alert.css" layer(components);
 @import "./views/artifacts.css" layer(components);
 @import "./views/terminal.css" layer(components);
 @import "./views/file-panel.css" layer(components);
@@ -26,6 +27,7 @@
 @import "./views/settings-environment.css" layer(components);
 @import "./views/settings-rules.css" layer(components);
 @import "./views/settings-memory.css" layer(components);
+@import "./views/settings-alerts.css" layer(components);
 @import "./views/settings-prompts.css" layer(components);
 @import "./views/settings-roles.css" layer(components);
 @import "./views/settings-plugins.css" layer(components);

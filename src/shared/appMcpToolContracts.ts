@@ -88,6 +88,10 @@ export const APP_MEMORY_WRITE_TOOL = "app_memory_write";
 export const APP_MEMORY_ARCHIVE_TOOL = "app_memory_archive";
 export const APP_MEMORY_TAGS_TOOL = "app_memory_tags";
 
+/** Reaching the User outside the app when something urgent happens
+ *  (shared/urgentAlerts.ts). */
+export const APP_URGENT_ALERT_TOOL = "app_urgent_alert";
+
 export const APP_MEMORY_TOOL_NAMES = [
   APP_MEMORY_SEARCH_TOOL,
   APP_MEMORY_TAGS_TOOL,
@@ -2607,6 +2611,30 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
         "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false
+      }
+    },
+  },
+  {
+    name: APP_URGENT_ALERT_TOOL,
+    policyOrder: 47,
+    effect: "app-managed",
+    desktop: {
+      "title": "Urgent Alert",
+      "description": "Reach User outside the app when something urgent happens that she must act on now: a deployment or job she asked you to watch failed, production is down, data is at risk. User gets your message in Telegram with a Got it button; if she does not press it in time, her phone rings and the message is read out (up to three calls). A red card with the alert appears in this chat too. Use it only for what User asked you to watch or for a real emergency, never for ordinary progress, questions or a finished task. Write one short message that says what happened and what she should do, in User's language. The call returns at once; it does not wait for her.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "message": { "type": "string", "description": "What happened and what User should do, at most 1000 characters. It is read out on the call." },
+          "requestId": { "type": "string", "description": "Optional; send the same value again when retrying the same alert." }
+        },
+        "required": ["message"]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     },
   },

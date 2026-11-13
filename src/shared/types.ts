@@ -2,6 +2,7 @@ import type { CreateTerminalRequest, TerminalHostStateEvent, TerminalListResult,
 import type { ChatScriptChangeRequest } from "./scripts";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import type { DeviceEventBlobReference } from "./deviceEventBlobs";
+import type { UrgentAlertView } from "./urgentAlerts";
 import type {
   CreateMachineRequest,
   CreateMachineResult,
@@ -1586,6 +1587,9 @@ export interface ChatTurnFinishedNoteMetadata {
 }
 
 export interface ChatMessageMetadata {
+  /** An urgent alert a member raised (shared/urgentAlerts.ts): the User's
+   *  server writes this message and keeps the alert's state in it. */
+  urgentAlert?: UrgentAlertView;
   /** A machine member could not start because the machine's copy of the
    *  project is gone: the computer that made the copy forgets it, so the
    *  next message copies it again. */
@@ -3394,6 +3398,9 @@ export interface AppBridge {
   /** The User's own hub: what is set up, the command that creates its server,
    *  and the installation from the line that command prints. */
   getHubSetupState(): Promise<import("./hubSetup").HubSetupState>;
+  /** Urgent alerts on the User's server: Settings → Alerts, and closing an
+   *  alert's card (shared/urgentAlerts.ts). */
+  urgentAlertRequest(request: import("./urgentAlerts").UrgentAlertUserRequest): Promise<import("./urgentAlerts").HubAlertResult<unknown>>;
   getHubSetupCommand(request: import("./hubSetup").HubSetupCommandRequest): Promise<import("./hubSetup").HubSetupCommandResult>;
   installHub(request: import("./hubSetup").HubInstallRequest): Promise<import("./hubSetup").HubSetupState>;
   onHubSetupProgress(callback: (state: import("./hubSetup").HubSetupState) => void): () => void;

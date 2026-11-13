@@ -30,9 +30,10 @@ import { PluginsSettingsSection } from "./plugins/plugins-settings-section";
 import { X } from "lucide-react";
 import { AwsSettingsPage } from "./aws-settings-page";
 import { ScriptsSettingsSection } from "./scripts-settings-section";
+import { AlertsSettingsSection } from "./alerts-settings-section";
 import { MemorySettingsSection } from "./memory-settings-section";
 
-export type SettingsSection = "general" | "aws" | "environment" | "scripts" | "roles" | "behavior-rules" | "saved-prompts" | "participants" | "plugins" | "memory";
+export type SettingsSection = "general" | "aws" | "environment" | "scripts" | "alerts" | "roles" | "behavior-rules" | "saved-prompts" | "participants" | "plugins" | "memory";
 
 export function SettingsView(props: {
   section: SettingsSection;
@@ -77,6 +78,8 @@ export function SettingsView(props: {
       ? "Environment"
     : props.section === "scripts"
       ? "Scheduled Tasks"
+    : props.section === "alerts"
+      ? "Alerts"
       : props.section === "roles"
         ? "Roles"
         : props.section === "behavior-rules"
@@ -145,6 +148,7 @@ export function SettingsView(props: {
           />
         )}
         {props.section === "scripts" && <ScriptsSettingsSection />}
+        {props.section === "alerts" && <AlertsSettingsSection />}
         {props.section === "memory" && <MemorySettingsSection />}
         {props.section === "plugins" && (
           <PluginsSettingsSection

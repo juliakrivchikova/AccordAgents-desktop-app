@@ -1,7 +1,7 @@
 import { isMemberRestartTurnRequest } from "../shared/memberRestart";
 import { isMemberSessionExportTurnRequest } from "../shared/memberSessionMove";
 import { CommandError } from "../main/services/command";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "../main/services/chatChanges";
 import { claimOutcomeFor } from "../main/services/hubOpsStore";
 import { HubArtifacts } from "./hubArtifacts";
@@ -40,11 +40,17 @@ import {
   type HubTurn
 } from "../shared/hubOps";
 import type { ChatMessage, ChatMessageReactions, Conversation } from "../shared/types";
+import { URGENT_ALERT_SERVER_WRITER } from "../shared/urgentAlerts";
 
 /** Bookkeeping the server keeps on every message it holds: the message's
  *  place in the server's order, and the device that wrote it (the only one
  *  that may change it). Whatever a device sends for these is replaced. */
 export const SERVER_MESSAGE_KEYS = ["serverSeq", "serverWriter"] as const;
+
+/** The writer of the messages the server writes itself (an urgent alert's
+ *  card, shared/urgentAlerts.ts): no device has this id, so every device
+ *  takes such a message from the feed as another's, and none may change it. */
+export const HUB_SERVER_WRITER = URGENT_ALERT_SERVER_WRITER;
 
 /** What a message says, to tell whether it changed. */
 function contentHash(content: string | undefined): string {
@@ -179,6 +185,56 @@ export class HubOps {
     }
     if (results.some((result) => result.status === "accepted")) this.wake();
     return { results, head: await this.head() };
+  }
+
+  /**
+   * A message the server writes itself: an urgent alert's card, created or
+   * changed as the alert moves on (with no device online). Placed in the
+   * same order as devices' operations and fed to every device; only an
+   * alert card, and only one the server wrote, can be changed this way.
+   */
+  writeServerMessage(conversationId: string, message: ChatMessage): Promise<{ seq: number } | { refused: string }> {
+    const run = this.queue.then(() => this.applyServerMessage(conversationId, message));
+    this.queue = run.catch(() => undefined);
+    return run.then((outcome) => {
+      if (!("applied" in outcome)) return outcome;
+      this.wake();
+      for (const listener of this.listeners) {
+        try { listener(outcome.applied); } catch { /* a listener never breaks the order */ }
+      }
+      return { seq: outcome.applied.entry.seq };
+    }, (error: unknown) => {
+      this.cache.clear();
+      throw error;
+    });
+  }
+
+  private async applyServerMessage(conversationId: string, message: ChatMessage): Promise<{ applied: HubOpApplied } | { refused: string }> {
+    if (!message.metadata?.urgentAlert) return { refused: "The server writes only urgent alert cards." };
+    if (await this.storage.conversationTombstones().isDeleted(conversationId)) return { refused: "This chat was deleted." };
+    const store = this.storage.hubOps();
+    if (await store.isRemoved(conversationId, message.id)) return { refused: "This message was removed." };
+    const loaded = await this.load(conversationId);
+    if (!loaded) return { refused: "There is no such chat." };
+    const conversation: Conversation = { ...loaded, messages: [...loaded.messages], metadata: { ...loaded.metadata } };
+    const opId = randomUUID();
+    const acceptedAt = this.now().toISOString();
+    const seq = (await store.head()) + 1;
+    const index = conversation.messages.findIndex((item) => item.id === message.id);
+    const current = index >= 0 ? conversation.messages[index] : undefined;
+    if (current && current.metadata?.serverWriter !== HUB_SERVER_WRITER) return { refused: "A device wrote this message." };
+    const stored = storedMessage(message, {
+      serverSeq: typeof current?.metadata?.serverSeq === "number" ? current.metadata.serverSeq : seq,
+      serverWriter: HUB_SERVER_WRITER,
+      reactions: current?.metadata?.reactions
+    });
+    if (current) conversation.messages[index] = stored; else conversation.messages.push(stored);
+    conversation.updatedAt = acceptedAt;
+    const effect: HubOpEffect = current ? { kind: "message.update", message: stored } : { kind: "message.create", message: stored };
+    const result: HubOpResult = { opId, status: "accepted", seq };
+    const entry: HubFeedEntry = { seq, opId, deviceId: HUB_SERVER_WRITER, conversationId, acceptedAt, effect };
+    await this.save(conversation, { result, entry });
+    return { applied: { deviceId: HUB_SERVER_WRITER, entry, conversation, ...(current ? { previous: current } : {}) } };
   }
 
   private async applyOne(device: HubDevice, raw: unknown, devices: HubDevice[]): Promise<Outcome> {
@@ -865,6 +921,8 @@ function storedMessage(message: ChatMessage, server: { serverSeq: number; server
   const metadata: Record<string, unknown> = { ...(message.metadata ?? {}) };
   for (const key of LOCAL_MESSAGE_METADATA_KEYS) delete metadata[key];
   delete metadata.reactions;
+  // An urgent alert's card is the server's alone: a device cannot make one.
+  if (server.serverWriter !== HUB_SERVER_WRITER) delete metadata.urgentAlert;
   if (server.reactions && Object.keys(server.reactions).length) metadata.reactions = server.reactions;
   metadata.serverSeq = server.serverSeq;
   metadata.serverWriter = server.serverWriter;

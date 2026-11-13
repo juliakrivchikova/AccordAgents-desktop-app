@@ -1,4 +1,4 @@
-const ASSET_VERSION = "2026-11-08-accord-notes-in-document";
+const ASSET_VERSION = "2026-11-12-urgent-alerts";
 // Tied to the marker the documented deploy step bumps, so a new shell really
 // replaces the cached one rather than living beside it.
 const CACHE_NAME = `accordagents-mobile-shell-v73-${ASSET_VERSION}`;
