@@ -9828,15 +9828,6 @@
     // No avatar (the User, 2026-11-12): the line above names the member.
     const body = document.createElement("div");
     body.className = "urgent-alert-body";
-    const meta = document.createElement("div");
-    meta.className = "urgent-alert-meta";
-    const who = document.createElement("strong");
-    who.textContent = label;
-    const kind = document.createElement("span");
-    kind.textContent = "Urgent alert";
-    const when = document.createElement("span");
-    when.textContent = formatClockTime(entry.createdAt);
-    meta.append(who, kind, when);
     const panel = document.createElement("div");
     panel.className = "urgent-alert-panel";
     const head = document.createElement("div");
@@ -9845,6 +9836,11 @@
     const headTitle = document.createElement("span");
     headTitle.className = "urgent-alert-title";
     headTitle.textContent = "Urgent alert";
+    // Who and when, in the header (the User, 2026-11-12): no line above the card.
+    const from = document.createElement("span");
+    from.className = "urgent-alert-from";
+    const when = formatClockTime(entry.createdAt);
+    from.textContent = label + (when ? " · " + when : "");
     const close = document.createElement("button");
     close.type = "button";
     close.className = "urgent-alert-close";
@@ -9856,7 +9852,7 @@
       close.dataset.urgentAlertClose = alert.id;
     }
     close.append(lineIcon(FINISHED_NOTE_CLOSE_PATHS, 18));
-    head.append(bell, headTitle, close);
+    head.append(bell, headTitle, from, close);
     const text = document.createElement("div");
     text.className = "urgent-alert-text";
     text.textContent = entry.content || "";
@@ -9892,7 +9888,7 @@
       hint.textContent = "Set up alerts on your computer: Settings → Alerts.";
       panel.append(hint);
     }
-    body.append(meta, panel);
+    body.append(panel);
     wrap.append(body);
     return wrap;
   }

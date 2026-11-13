@@ -13,24 +13,22 @@
   min-width: 0;
 }
 
-.chat-urgent-alert-meta {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  min-height: 20px;
-  margin-bottom: 6px;
-}
-
-.chat-urgent-alert-meta strong {
-  color: var(--app-text-strong);
+/* The member and the time, in the header after the title. */
+.chat-urgent-alert-from {
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--app-urgent-fg) 82%, transparent);
   font-size: 13px;
-}
-
-.chat-urgent-alert-meta span {
-  color: var(--app-muted);
-  font-size: 12px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-urgent-alert-from .message-when,
+.chat-urgent-alert-from time {
+  color: inherit;
+  font-size: inherit;
 }
 
 .chat-urgent-alert-panel {

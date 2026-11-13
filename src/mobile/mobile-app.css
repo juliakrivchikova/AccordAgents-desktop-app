@@ -4008,18 +4008,15 @@ button.mobile-chat-group-title:active {
   min-width: 0;
 }
 
-.urgent-alert-meta {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 6px;
-  color: var(--mut);
-  font-size: 12.5px;
-}
-
-.urgent-alert-meta strong {
-  color: var(--fg1);
-  font-size: 14px;
+.urgent-alert-from {
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--urgent-fg) 82%, transparent);
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .urgent-alert-panel {
