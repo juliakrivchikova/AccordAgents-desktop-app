@@ -427,6 +427,10 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       try { return !presence || presence.stopIntent()?.phase === "committed"; }
       catch { return true; }
     },
+    hostStopSeen: () => {
+      try { return presence?.stopIntent()?.phase === "committed"; }
+      catch { return false; }
+    },
     detectProviders: () => cliAgentRunner.detectAgents(),
     onNativeActivitySettled: () => idlePower?.noteActivity() ?? Promise.resolve(),
     idleStopWarning: () => presenceWarning || idlePower?.warning(),

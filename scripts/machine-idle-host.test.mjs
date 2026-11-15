@@ -248,8 +248,8 @@ test("a turn being taken, or one turned down while the stop is prepared, keeps t
 
     // The desktop holds turns for an update: the machine stays on.
     host.holdTurns(new Date(Date.now() + 60_000).toISOString(), "update");
-    assert.equal(await host.hasWorkForIdleStop(), false, "a hold is no activity: the idle time goes on counting");
-    assert.equal(await prepare(), undefined, "but the stop waits for the hold to end");
+    assert.equal(await host.hasWorkForIdleStop(), true, "not while the desktop holds its turns");
+    assert.equal(await prepare(), undefined);
     assert.equal(paused, 2, "nothing is fenced or paused for it");
     host.releaseTurns("done");
     assert.equal(await host.hasWorkForIdleStop(), false);
@@ -312,6 +312,19 @@ test("a machine restarted while its committed stop goes on reads nothing from th
     // reads nothing from the server either.
     host.close();
     assert.equal(host.goingDown(), true);
+    // Another program's stop counts only when it was read: one that cannot be
+    // read (no coordination on this host) keeps the machine from taking new
+    // turns, but not from reading the feed.
+    let seen = false;
+    const other = new MachineHostService(chat, { write: async () => undefined }, {
+      pairing, deviceId: identity.originId, appVersion: "test", publicKeyDerBase64: identity.publicKeyDerBase64,
+      identity: () => deviceIdentity.getOrCreateDeviceIdentity(), createClient: () => client, storage,
+      hostStopCommitted: () => true, hostStopSeen: () => seen });
+    assert.equal(other.takesNewWork(), false);
+    assert.equal(other.goingDown(), false);
+    seen = true;
+    assert.equal(other.goingDown(), true);
+    other.close();
   } finally {
     host?.close();
     await rm(dir, { recursive: true, force: true });

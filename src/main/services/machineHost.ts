@@ -61,6 +61,9 @@ export interface MachineHostOptions {
   nativeProcessDbPath?: string;
   /** True while another deployment on this host has committed an idle stop. */
   hostStopCommitted?: () => boolean;
+  /** A stop another program on this instance has made final, as read (not
+   *  assumed when it cannot be read): the feed is not read then. */
+  hostStopSeen?: () => boolean;
   detectProviders?: () => Promise<AgentHealth[]>;
   /** Commits idle accounting once a member's run here has ended. */
   onNativeActivitySettled?: () => Promise<void>;
@@ -312,7 +315,7 @@ export class MachineHostService {
    *  from the server, so what arrives stays unread there and the server
    *  starts the machine again for it. */
   goingDown(): boolean {
-    return this.closed || this.draining || Boolean(this.options.hostStopCommitted?.());
+    return this.closed || this.draining || Boolean(this.options.hostStopSeen?.());
   }
 
   /** A desktop holds this machine's turns (an update about to run). */
@@ -384,7 +387,10 @@ export class MachineHostService {
     // due time. This vetoes idle stop only; it is not a run, so the desktop's
     // update gate (hello run ids) does not wait for it.
     if (this.options.scripts?.keepsHostAwake()) return true;
-    if (this.closed || this.draining || this.declinedWhileFenced || this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork() ||
+    // A desktop's hold (an update about to run) keeps it on, as the update's
+    // own maintenance does: a turn it turned down meanwhile is taken when the
+    // hold ends, and other programs on the instance see it busy.
+    if (this.closed || this.draining || this.held() || this.declinedWhileFenced || this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork() ||
         this.mentionExecutor.hasActiveWork() || (this.chat.activeParticipantRuns?.().length ?? 0) > 0 || (this.chat.liveRunIds?.().length ?? 0) > 0 ||
         // A turn taken from the server that has not become a run yet.
         (this.chat.serverTurnsStarting?.() ?? 0) > 0) return true;
@@ -400,10 +406,7 @@ export class MachineHostService {
     stopProviders(): Promise<void>;
     commitHostStop?(prepareLocal: () => Promise<boolean>): Promise<boolean>;
   }): Promise<(() => Promise<void>) | undefined> {
-    // A desktop's hold (an update about to run) puts the stop off without
-    // counting as activity: a turn it turned down meanwhile was read, and is
-    // taken when the hold ends.
-    if (this.idleFenced || this.held() || await this.hasWorkForIdleStop()) return undefined;
+    if (this.idleFenced || await this.hasWorkForIdleStop()) return undefined;
     if (this.idleFenced) return undefined;
     this.idleFenced = true;
     this.declinedWhileFenced = false;
