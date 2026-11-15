@@ -40,6 +40,7 @@ export function PhoneConnectDialog(props: {
   const [to, setTo] = useState("");
   const [busy, setBusy] = useState<"check" | "buy" | "try" | "save" | undefined>();
   const [error, setError] = useState<string | undefined>();
+  const [boughtNumbers, setBoughtNumbers] = useState<string[]>([]);
   const [test, setTest] = useState<{ id: string; result: UrgentAlertPhoneTest; from: string; to: string } | undefined>();
   const sidField = useRef<HTMLInputElement>(null);
   const phoneField = useRef<HTMLInputElement>(null);
@@ -52,6 +53,7 @@ export function PhoneConnectDialog(props: {
       setAuthToken("");
       setChecked(undefined);
       setTest(undefined);
+      setBoughtNumbers([]);
       setError(undefined);
       return;
     }
@@ -103,6 +105,7 @@ export function PhoneConnectDialog(props: {
     setBusy(undefined);
     if (!bought.ok) return setError(bought.error.message);
     setChecked((current) => current ? { ...current, numbers: [...current.numbers, bought.value.number] } : current);
+    setBoughtNumbers((current) => [...current, bought.value.number]);
     setFrom(bought.value.number);
   }
 
@@ -194,7 +197,7 @@ export function PhoneConnectDialog(props: {
               {checked.numbers.map((number) => (
                 <label key={number} className={`alerts-choice${from === number ? " is-selected" : ""}`}>
                   <input type="radio" name="alerts-from" checked={from === number} onChange={() => setFrom(number)} />
-                  <span className="alerts-number">{number}</span><small>already in your account</small>
+                  <span className="alerts-number">{number}</span><small>{boughtNumbers.includes(number) ? "bought just now" : "already in your account"}</small>
                 </label>
               ))}
               <label className={`alerts-choice${from === "buy" ? " is-selected" : ""}`}>
