@@ -54,9 +54,40 @@ call", artifact "План: Urgent alert — Telegram и звонок".
   tool on the computer and on cloud machines (same code), through
   `ServerChatLink.alerts` → `POST /v3/alerts`.
 - Desktop: `chat-urgent-alert-card.tsx`, Settings → Alerts
-  (`alerts-settings-section.tsx`, `alerts-connect-dialogs.tsx`).
+  (`alerts-settings-section.tsx`, `alerts-settings-parts.tsx`,
+  `alerts-connect-dialogs.tsx`, `alerts-phone-dialog.tsx`; what each state
+  says is `src/shared/urgentAlertSettings.ts`).
 - Phone: `urgentAlertCardElement` in `src/mobile/mobile-app.js`; its Got it
   (and its cross on a card nobody closed) posts `close` to `/v3/alerts`.
+
+## Settings → Alerts
+
+Approved by the User on 2026-11-15 after five design reviews:
+
+- One band on top says whether an alert reaches her now, the worst first: a
+  channel that stopped working (red, with Reconnect), including a phone whose
+  last test call failed (red "Calls aren't going out" with the reason and
+  Change phone call; the User, 2026-11-15; a test whose result was lost to a
+  restart is not a failure), the server inside the
+  app (alerts only while the Mac is awake; answering counts as Got it, with
+  Set up your server), her server that Twilio cannot reach, Telegram only,
+  a call only, all set, or off.
+- "What happens when an alert comes in": Telegram at once, then calls at the
+  wait and 3 minutes apart; the wait is chosen there.
+- "Where alerts go": Telegram and Phone call, each with its status beside its
+  name (Ready / Needs attention / Not finished / Not set up / Not tested), its
+  last test, the next action, and ⋯ (Use a different bot, Change, Remove,
+  each removal confirmed). Never "Ready" next to an error.
+- The phone is Ready only once a test call reached her: 1 pressed on it, or,
+  where Twilio cannot reach the server, answered. The connect dialog makes
+  that call before Save (`phone.try` / `phone.try-status`, keypad TwiML with
+  its own token, signed by the keys it was placed with); the page's Test
+  call (`phone.test`) keeps its outcome as the phone's `lastTest`. Telegram
+  keeps its last test message and whether Got it came back.
+- Changing the phone or the number reuses the saved Twilio keys (requests
+  without keys use the saved ones). Buying a number is never chosen for her
+  and says its price. On a trial account her phone is checked against
+  Twilio's verified numbers.
 
 ## With and without the User's own server
 

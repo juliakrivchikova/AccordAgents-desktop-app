@@ -1,108 +1,347 @@
-/* Settings → Alerts and its two connect dialogs (alerts-settings-section.tsx,
-   alerts-connect-dialogs.tsx), as the User approved the design on 2026-11-12. */
+/* Settings → Alerts and its connect dialogs (alerts-settings-section.tsx,
+   alerts-settings-parts.tsx, alerts-connect-dialogs.tsx,
+   alerts-phone-dialog.tsx), as the User approved them on 2026-11-15: a
+   status band on top, what happens when an alert comes in, and one card for
+   where alerts go with each channel's status beside its name. */
 .settings-view .alerts-settings {
   max-width: 740px;
 }
 
 .settings-view .alerts-intro {
-  max-width: 600px;
-  margin: -4px 0 22px;
+  max-width: 640px;
+  margin: -4px 0 18px;
   color: var(--app-text-secondary);
   font-size: 13px;
   line-height: 19px;
 }
 
-.settings-view .alerts-ok {
-  display: inline-flex;
+.settings-view .alerts-intro b {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+/* The band: whether an alert reaches her now. */
+.settings-view .alerts-band {
+  display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--app-hairline);
+  border-radius: 14px;
+  background: var(--app-surface);
+}
+
+.settings-view .alerts-band-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--app-surface-subtle);
+  color: var(--app-text-strong);
+}
+
+.settings-view .alerts-band-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-view .alerts-band-title {
+  color: var(--app-text-strong);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.settings-view .alerts-band-detail {
+  margin-top: 1px;
+  overflow-wrap: anywhere;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.settings-view .alerts-band.is-ok .alerts-band-icon {
+  background: var(--app-success-soft);
   color: var(--app-success);
 }
 
-.settings-view .alerts-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
+.settings-view .alerts-band.is-bad {
+  border-color: var(--app-danger-border);
+  background: var(--app-danger-soft);
 }
 
-.alerts-tile {
+.settings-view .alerts-band.is-bad .alerts-band-icon {
+  background: var(--app-surface);
+  color: var(--app-danger);
+}
+
+.settings-view .alerts-band.is-bad .alerts-band-title {
+  color: var(--app-danger);
+}
+
+.settings-view .alerts-band.is-warn {
+  border-color: var(--app-warning-border);
+  background: var(--app-warning-soft);
+}
+
+.settings-view .alerts-band.is-warn .alerts-band-icon {
+  background: var(--app-surface);
+  color: var(--app-status-warning-text);
+}
+
+.settings-view .alerts-band.is-warn .alerts-band-title {
+  color: var(--app-status-warning-text);
+}
+
+/* What happens when an alert comes in. */
+.settings-view .alerts-flow {
+  margin-bottom: 22px;
+  padding: 12px 16px;
+  border: 1px solid var(--app-hairline);
+  border-radius: 14px;
+}
+
+.settings-view .alerts-flow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.settings-view .alerts-flow-title {
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.settings-view .alerts-chain {
+  display: flex;
+  align-items: flex-start;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-view .alerts-node {
+  display: flex;
+  min-width: 72px;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+
+.settings-view .alerts-node-dot {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--app-border);
+  border-radius: 50%;
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+}
+
+.settings-view .alerts-node-label {
+  color: var(--app-text-strong);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.settings-view .alerts-node-time {
+  min-height: 15px;
+  color: var(--app-text-secondary);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.settings-view .alerts-node.is-off .alerts-node-dot {
+  border-style: dashed;
+  color: var(--app-text-secondary);
+}
+
+.settings-view .alerts-node.is-off .alerts-node-label {
+  color: var(--app-text-secondary);
+}
+
+.settings-view .alerts-edge {
+  position: relative;
+  flex: 1;
+  height: 1px;
+  margin-top: 13px;
+  background: var(--app-border);
+}
+
+.settings-view .alerts-edge.is-off {
+  border-top: 1px dashed var(--app-border);
+  background: none;
+}
+
+.settings-view .alerts-edge span {
+  position: absolute;
+  top: -9px;
+  left: 50%;
+  padding: 0 4px;
+  background: var(--app-surface);
+  color: var(--app-text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+.settings-view .alerts-flow-foot {
+  margin-top: 6px;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+}
+
+/* Where alerts go: one row per channel. */
+.settings-view .alerts-row {
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.settings-view .alerts-tile {
   display: grid;
   flex: none;
   place-items: center;
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  color: var(--app-urgent-fg);
+  background: var(--app-surface-subtle);
+  color: var(--app-text-secondary);
 }
 
-.alerts-tile.is-telegram {
-  background: var(--brand-telegram, var(--app-info));
+.settings-view .alerts-row .gen-row-desc {
+  max-width: none;
+  margin-top: 1px;
+  font-variant-numeric: tabular-nums;
 }
 
-.alerts-tile.is-phone {
-  background: var(--app-urgent);
+.settings-view .alerts-row .gen-row-desc.alerts-line-main {
+  color: var(--app-text-strong);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.settings-view .alerts-row .gen-row-desc.alerts-line-error {
+  color: var(--app-danger);
+  overflow-wrap: anywhere;
+}
+
+.settings-view .alerts-row .gen-row-desc.alerts-line-warn {
+  color: var(--app-status-warning-text);
+}
+
+.settings-view .alerts-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--app-text-strong);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.alerts-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  color: var(--app-text-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.alerts-pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.alerts-pill.is-ready {
+  border-color: var(--app-success-border);
+  background: var(--app-success-soft);
+  color: var(--app-success);
+}
+
+.alerts-pill.is-attention {
+  border-color: var(--app-danger-border);
+  background: var(--app-danger-soft);
+  color: var(--app-danger);
 }
 
 .settings-view .alerts-actions {
   display: flex;
   flex: none;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  margin-top: 2px;
 }
 
-.settings-view .alerts-stepper {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  height: 28px;
-  overflow: hidden;
-  border: 1px solid var(--app-hairline);
-  border-radius: 10px;
-}
-
-.settings-view .alerts-stepper button {
+.settings-view .alerts-more {
   display: grid;
   place-items: center;
   width: 28px;
-  height: 100%;
+  height: 28px;
   border: 0;
+  border-radius: 8px;
   background: transparent;
-  color: var(--app-muted);
+  color: var(--app-text-secondary);
   cursor: pointer;
 }
 
-.settings-view .alerts-stepper button:disabled {
-  opacity: 0.45;
-  cursor: default;
+.settings-view .alerts-more:hover {
+  background: var(--app-surface-hover);
 }
 
-.settings-view .alerts-stepper span {
-  min-width: 64px;
-  border-right: 1px solid var(--app-hairline);
-  border-left: 1px solid var(--app-hairline);
+.alerts-menu {
+  display: flex;
+  flex-direction: column;
+}
+
+.alerts-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
   color: var(--app-text-strong);
   font-size: 13px;
-  line-height: 26px;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
+  text-align: left;
+  cursor: pointer;
 }
 
-.settings-view .alerts-hint,
-.settings-view .alerts-notice {
-  margin: 10px 2px 0;
-  color: var(--app-text-secondary);
-  font-size: 12px;
+.alerts-menu-item:hover {
+  background: var(--app-surface-hover);
+}
+
+.alerts-menu-item.is-danger {
+  color: var(--app-danger);
 }
 
 .settings-view .alerts-footnote {
   display: flex;
   align-items: flex-start;
   gap: 7px;
-  max-width: 640px;
+  max-width: 680px;
   margin: 4px 0 0;
-  color: var(--app-muted);
-  font-size: 12.5px;
+  color: var(--app-text-secondary);
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -111,6 +350,26 @@
   margin-top: 2px;
 }
 
+/* The connect dialogs: never taller than the window (the phone's, with its
+   three steps, is tall), the body scrolls instead. */
+.gen-aws-dialog.alerts-dialog {
+  max-height: calc(100vh - 32px);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.alerts-dialog-body {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.alerts-dialog .gen-aws-dialog-note {
+  color: var(--app-text-secondary);
+}
+
+/* The connect dialogs. */
 .alerts-steps {
   display: flex;
   flex-direction: column;
@@ -146,16 +405,16 @@
   height: 24px;
   border: 1px solid var(--app-border-strong);
   border-radius: 50%;
-  background: var(--app-surface);
+  background: var(--popover);
   color: var(--app-text-secondary);
   font-size: 12px;
   font-weight: 600;
 }
 
+/* Done: a quiet tick, not a filled disc (readable in both themes). */
 .alerts-step.is-done .alerts-step-mark {
-  border-color: var(--app-success);
-  background: var(--app-success);
-  color: var(--app-urgent-fg);
+  border-color: var(--app-text-strong);
+  color: var(--app-text-strong);
 }
 
 .alerts-step.is-now .alerts-step-mark {
@@ -167,14 +426,22 @@
   display: flex;
   min-width: 0;
   flex-direction: column;
+  align-items: flex-start;
   gap: 8px;
 }
 
 .alerts-step-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--app-text-strong);
   font-size: 13.5px;
   font-weight: 600;
   line-height: 24px;
+}
+
+.alerts-step.is-done .alerts-step-title {
+  font-weight: 500;
 }
 
 .alerts-step.is-later .alerts-step-title {
@@ -187,60 +454,137 @@
   line-height: 1.45;
 }
 
-.alerts-step-detail code {
+.alerts-step-detail b,
+.alerts-howto b {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.alerts-howto {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
+  list-style: decimal outside;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.alerts-howto li::marker {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.alerts-howto code {
   padding: 1px 5px;
   border-radius: 5px;
-  background: var(--app-surface-subtle);
+  background: var(--app-surface-active);
   color: var(--app-text-strong);
   font-family: var(--font-code);
   font-size: 12px;
 }
 
-.alerts-note {
-  display: flex;
-  gap: 6px;
+.alerts-howto li:first-child {
+  display: list-item;
 }
 
-.alerts-note svg {
-  flex: none;
-  margin-top: 2px;
+.alerts-howto li:first-child > button {
+  margin-left: 4px;
+  vertical-align: middle;
 }
 
-.alerts-link {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--app-info);
-  font: inherit;
-  font-weight: 500;
-  cursor: pointer;
+.alerts-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
 }
 
-.alerts-input {
-  font-family: var(--font-code);
+.alerts-chip.is-warn {
+  border: 1px solid var(--app-warning-border);
+  background: var(--app-warning-soft);
+  color: var(--app-status-warning-text);
 }
 
 .gen-aws-dialog .alerts-input {
   width: 100%;
+  font-family: var(--font-code);
 }
 
-.alerts-fields {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
+.gen-aws-dialog .gen-input:disabled {
+  background: var(--app-surface-subtle);
+  color: var(--app-text-secondary);
 }
 
 .alerts-field {
   display: flex;
+  width: 100%;
   min-width: 0;
   flex-direction: column;
   gap: 5px;
 }
 
-.alerts-field > span {
+.alerts-field > span:first-child,
+.alerts-field > label,
+.alerts-label {
+  color: var(--app-text-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.alerts-secret {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.alerts-secret .alerts-input {
+  padding-right: 56px;
+}
+
+.alerts-show {
+  position: absolute;
+  right: 8px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
   color: var(--app-text-secondary);
   font-size: 12px;
-  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.alerts-hint {
+  margin-top: -3px;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.alerts-text-button {
+  padding: 1px 3px;
+  margin: -1px -3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--app-text-strong);
+  font: inherit;
+  font-size: 12.5px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.alerts-text-button:disabled {
+  color: var(--app-text-secondary);
+  cursor: default;
 }
 
 .alerts-step-actions {
@@ -251,21 +595,36 @@
 }
 
 .alerts-waiting,
-.alerts-done-line {
+.alerts-done-line,
+.alerts-ok-line,
+.alerts-warn-line {
   display: inline-flex;
   align-items: center;
   gap: 7px;
   color: var(--app-text-secondary);
   font-size: 12.5px;
+  line-height: 1.45;
 }
 
-.alerts-done-line {
+.alerts-done-line,
+.alerts-ok-line {
   color: var(--app-success);
-  font-weight: 500;
+  font-weight: 600;
+}
+
+.alerts-warn-line {
+  display: inline;
+  color: var(--app-status-warning-text);
+}
+
+.alerts-warn-line svg {
+  margin-right: 4px;
+  vertical-align: -2px;
 }
 
 .alerts-choices {
   display: flex;
+  width: 100%;
   flex-direction: column;
   gap: 7px;
 }
@@ -277,11 +636,16 @@
   padding: 9px 11px;
   border: 1px solid var(--app-border);
   border-radius: 10px;
-  background: var(--app-surface);
+  background: var(--popover);
   color: var(--app-text-strong);
   font-size: 13px;
-  text-align: left;
   cursor: pointer;
+}
+
+.alerts-choice input {
+  flex: none;
+  margin: 0;
+  accent-color: var(--app-primary);
 }
 
 .alerts-choice.is-selected {
@@ -291,38 +655,42 @@
 
 .alerts-choice small {
   margin-left: auto;
-  color: var(--app-muted);
+  color: var(--app-text-secondary);
   font-size: 12px;
 }
 
-.alerts-radio {
-  flex: none;
-  width: 14px;
-  height: 14px;
-  border: 1.5px solid var(--app-border-strong);
-  border-radius: 50%;
-}
-
-.alerts-choice.is-selected .alerts-radio {
-  border: 4px solid var(--app-primary);
-}
-
 .alerts-number {
+  font-family: var(--font-code);
+  font-size: 12.5px;
   font-variant-numeric: tabular-nums;
 }
 
-.settings-view .alerts-stepper button:not(:disabled):hover,
-.alerts-choice:hover {
+.alerts-cost {
+  margin-top: 2px;
+  padding: 9px 11px;
+  border: 1px solid var(--app-hairline);
+  border-radius: 10px;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.alerts-cost b {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.alerts-choice:hover,
+.alerts-text-button:not(:disabled):hover,
+.alerts-show:hover {
   background: var(--app-surface-hover);
 }
 
-.alerts-link:hover {
-  text-decoration: underline;
-}
-
-.settings-view .alerts-stepper button:focus-visible,
-.alerts-link:focus-visible,
-.alerts-choice:focus-visible {
+.settings-view .alerts-more:focus-visible,
+.alerts-menu-item:focus-visible,
+.alerts-text-button:focus-visible,
+.alerts-show:focus-visible,
+.alerts-choice:focus-within {
   outline: none;
   box-shadow: var(--focus-ring);
 }

@@ -216,6 +216,12 @@ export class TwilioClient {
       .filter((entry) => entry.phoneNumber);
   }
 
+  /** The numbers the account may call while it is a trial (Verified Caller IDs). */
+  async verifiedNumbers(): Promise<string[]> {
+    const raw = await this.request<{ outgoing_caller_ids?: Array<Record<string, unknown>> }>("GET", "/OutgoingCallerIds.json?PageSize=50");
+    return (raw.outgoing_caller_ids ?? []).map((entry) => String(entry.phone_number ?? "")).filter(Boolean);
+  }
+
   /** The first local US number that can make calls, or undefined. */
   async availableNumber(country = "US"): Promise<string | undefined> {
     const raw = await this.request<{ available_phone_numbers?: Array<Record<string, unknown>> }>(

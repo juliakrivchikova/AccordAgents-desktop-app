@@ -45,10 +45,17 @@ function outside() {
   let nextUpdate = 1;
   let nextMessage = 100;
   const calls: Array<{ sid: string; to: string; from: string; twiml: string; status: string }> = [];
+  /** Numbers bought, in order (each one is billed). */
+  const bought: string[] = [];
   /** How each new call ends, in order (default: rings out unanswered). */
   const outcomes: string[] = [];
   /** Telegram answers "too many requests" to this many sends first. */
   const throttle = { sends: 0 };
+  /** Twilio fails this many call-status reads (a server that lost Twilio);
+   *  `blocked`: she blocked the bot, so Telegram refuses messages to her. */
+  /** `placedUnanswered`: the next call is placed but Twilio's answer is lost;
+   *  `revoked`: Twilio refuses the keys from now on. */
+  const faults = { callStatus: 0, blocked: false, sendDelayMs: 0, placedUnanswered: false, revoked: false };
   const buttonsOf = (markup: unknown) => ((markup as { inline_keyboard?: Array<Array<{ callback_data: string }>> } | undefined)?.inline_keyboard ?? [])
     .flat().map((button) => button.callback_data);
   const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
@@ -68,6 +75,10 @@ function outside() {
         return ok(ready);
       }
       if (method === "sendMessage") {
+        // Decided when the message arrives; the answer may come back late.
+        const blockedNow = faults.blocked;
+        if (faults.sendDelayMs) await new Promise((resolve) => setTimeout(resolve, faults.sendDelayMs));
+        if (blockedNow) return new Response(JSON.stringify({ ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" }), { status: 403 });
         if (throttle.sends > 0) {
           throttle.sends -= 1;
           return new Response(JSON.stringify({ ok: false, error_code: 429, description: "Too Many Requests: retry after 1" }), { status: 429 });
@@ -88,18 +99,32 @@ function outside() {
     }
     if (url.startsWith(TWILIO)) {
       const auth = new Headers(init?.headers).get("authorization") ?? "";
-      if (auth !== `Basic ${Buffer.from(`${ACCOUNT_SID}:${AUTH_TOKEN}`).toString("base64")}`) {
+      if (faults.revoked || auth !== `Basic ${Buffer.from(`${ACCOUNT_SID}:${AUTH_TOKEN}`).toString("base64")}`) {
         return new Response(JSON.stringify({ message: "Authenticate" }), { status: 401 });
       }
       const form = Object.fromEntries(new URLSearchParams(String(init?.body ?? "")).entries());
       if (url.endsWith(`/Accounts/${ACCOUNT_SID}.json`)) return Response.json({ sid: ACCOUNT_SID, friendly_name: "My first account", type: "Trial", status: "active" });
       if (url.includes("/IncomingPhoneNumbers.json") && init?.method === "GET") return Response.json({ incoming_phone_numbers: [{ phone_number: "+14155550134", friendly_name: "x", capabilities: { voice: true } }] });
+      if (url.includes("/OutgoingCallerIds.json")) return Response.json({ outgoing_caller_ids: [{ phone_number: "+35799123342" }] });
+      if (url.includes("/AvailablePhoneNumbers/US/")) return Response.json({ available_phone_numbers: [{ phone_number: `+1415555${String(300 + bought.length).padStart(4, "0")}` }] });
+      if (url.includes("/IncomingPhoneNumbers.json") && init?.method === "POST") {
+        bought.push(form.PhoneNumber);
+        return Response.json({ phone_number: form.PhoneNumber, friendly_name: form.PhoneNumber }, { status: 201 });
+      }
       if (url.endsWith("/Calls.json")) {
         const sid = `CA${randomBytes(16).toString("hex")}`;
         calls.push({ sid, to: form.To, from: form.From, twiml: form.Twiml, status: "ringing" });
+        if (faults.placedUnanswered) {
+          faults.placedUnanswered = false;
+          return new Response(JSON.stringify({ message: "Service Unavailable" }), { status: 503 });
+        }
         return Response.json({ sid, status: "queued" });
       }
       const callMatch = /\/Calls\/(CA[0-9a-f]+)\.json$/.exec(url);
+      if (callMatch && init?.method !== "POST" && faults.callStatus > 0) {
+        faults.callStatus -= 1;
+        return new Response(JSON.stringify({ message: "Service Unavailable" }), { status: 503 });
+      }
       if (callMatch) {
         const call = calls.find((item) => item.sid === callMatch[1]);
         if (!call) return new Response("{}", { status: 404 });
@@ -124,13 +149,13 @@ function outside() {
   };
   const start = (code?: string, chat = USER_CHAT) => pushUpdate({ message: { message_id: 1, chat: { id: chat, first_name: "Svetlana" }, from: { id: chat, first_name: "Svetlana" }, text: code ? `/start ${code}` : "/start" } });
   const press = (data: string, messageId: number) => pushUpdate({ callback_query: { id: `cb-${nextUpdate}`, from: { id: USER_CHAT }, data, message: { message_id: messageId, chat: { id: USER_CHAT } } } });
-  return { fetchImpl, sent, edits, answers, calls, outcomes, throttle, start, press };
+  return { fetchImpl, sent, edits, answers, calls, bought, outcomes, throttle, faults, start, press };
 }
 
 const member: ChatParticipant = { id: "p-taylor", handle: "taylor", roleConfigId: "software-engineer", kind: "claude-code" };
 const cloudMember: ChatParticipant = { id: "p-box", handle: "box", roleConfigId: "software-engineer", kind: "claude-code", homeMachineId: "m-1" };
 
-async function hub(t: test.TestContext, options: { publicUrl?: boolean; dir?: string; minuteMs?: number } = {}) {
+async function hub(t: test.TestContext, options: { publicUrl?: boolean; dir?: string; minuteMs?: number; clock?: { shift: number } } = {}) {
   const dir = options.dir ?? await mkdtemp(path.join(tmpdir(), "accord-hub-alerts-"));
   const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
   await storage.init();
@@ -144,7 +169,8 @@ async function hub(t: test.TestContext, options: { publicUrl?: boolean; dir?: st
     alerts: {
       telegramBaseUrl: TELEGRAM, twilioBaseUrl: TWILIO, callPollMs: 20, callRetryMs: 120, minuteMs: 150, telegramWaitSeconds: 1, telegramRetryMs: 20,
       publicUrlOverride: options.publicUrl ? PUBLIC : "",
-      ...(options.minuteMs ? { minuteMs: options.minuteMs } : {})
+      ...(options.minuteMs ? { minuteMs: options.minuteMs } : {}),
+      ...(options.clock ? { now: () => new Date(Date.now() + options.clock!.shift) } : {})
     }
   });
   const http = await composed.server.listenHttp(0, "127.0.0.1");
@@ -221,10 +247,10 @@ async function connectTelegram(h: Hub) {
 
 async function connectPhone(h: Hub) {
   const checked = await h.alerts<{ trial: boolean; numbers: string[] }>(h.owner, { action: "phone.check", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN });
-  assert.deepEqual(checked.value, { accountName: "My first account", trial: true, numbers: ["+14155550134"] });
+  assert.deepEqual(checked.value, { accountName: "My first account", trial: true, numbers: ["+14155550134"], verified: ["+35799123342"] });
   const saved = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "phone.save", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+357 99 123 342" });
   assert.equal(saved.ok, true, JSON.stringify(saved));
-  assert.deepEqual(saved.value?.phone, { from: "+14155550134", to: "+35799123342", trial: true });
+  assert.deepEqual(saved.value?.phone, { from: "+14155550134", to: "+35799123342", trial: true, accountName: "My first account" });
   await h.alerts(h.owner, { action: "wait", minutes: 1 });
 }
 
@@ -356,6 +382,332 @@ test("1 on the call ends it, by a request Twilio signed; a forged one is refused
   assert.equal(done.ackSource, "call");
   await new Promise((resolve) => setTimeout(resolve, 400));
   assert.equal(h.world.calls.length, 1, "no further call");
+});
+
+/** Presses a key on a call the way Twilio does: a POST signed with the keys. */
+async function pressOnCall(h: Hub, twiml: string, sid: string, digits = "1", signature?: string) {
+  const action = /action="([^"]+)"/.exec(twiml)![1].replace(/&amp;/g, "&");
+  const address = new URL(action);
+  const params = { CallSid: sid, Digits: digits, From: "+14155550134", To: "+35799123342" };
+  return fetch(`${h.base}${address.pathname}${address.search}`, {
+    method: "POST",
+    body: new URLSearchParams(params).toString(),
+    headers: { "content-type": "application/x-www-form-urlencoded", "x-twilio-signature": signature ?? twilioSignature(AUTH_TOKEN, action, params) }
+  });
+}
+
+test("a test call before Save: 1 on it is shown, Save keeps it, and a change of phone reuses the saved keys", async (t) => {
+  // The settings redesign (the User, 2026-11-15): the phone is "Ready" only
+  // once a test call reached her, and changing the phone needs no keys again.
+  const h = await hub(t, { publicUrl: true });
+  h.world.outcomes.push(...Array(20).fill("in-progress"));
+  const tried = await h.alerts<{ testId: string; test: { state: string } }>(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+357 99 123 342" });
+  assert.equal(tried.ok, true, JSON.stringify(tried));
+  assert.equal(tried.value?.test.state, "calling");
+  const placed = await until(() => h.world.calls[0], "the test call");
+  assert.match(placed.twiml, /<Gather numDigits="1"/, "with a server Twilio reaches, the test asks for 1");
+  assert.match(placed.twiml, /test call from AccordAgents/);
+  // A key press nobody signed changes nothing.
+  assert.equal((await pressOnCall(h, placed.twiml, placed.sid, "1", "bm9wZQ==")).status, 403);
+  assert.equal((await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: tried.value!.testId })).value?.test.state, "calling");
+  const pressed = await pressOnCall(h, placed.twiml, placed.sid);
+  assert.equal(pressed.status, 200);
+  assert.match(await pressed.text(), /Got it\. Goodbye\./);
+  assert.equal((await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: tried.value!.testId })).value?.test.state, "pressed");
+
+  const saved = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "phone.save", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342", testId: tried.value!.testId });
+  assert.equal(saved.value?.phone?.lastTest?.state, "pressed", "the test she just made is the phone's last test");
+  assert.equal(saved.value?.phone?.accountName, "My first account");
+
+  // No keys pasted: the saved ones are used, and the dialog is told so.
+  const again = await h.alerts<{ saved?: boolean; accountName: string }>(h.owner, { action: "phone.check" });
+  assert.deepEqual([again.ok, again.value?.saved, again.value?.accountName], [true, true, "My first account"]);
+  const moved = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "phone.save", from: "+14155550134", to: "+357 99 000 111" });
+  assert.equal(moved.ok, true, JSON.stringify(moved));
+  assert.equal(moved.value?.phone?.to, "+35799000111");
+  assert.equal(moved.value?.phone?.lastTest, undefined, "a test of another phone proves nothing about this one");
+
+  // A test of the saved phone from the page: its outcome lands in the settings.
+  h.world.outcomes.splice(0, h.world.outcomes.length, "no-answer");
+  const test = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "phone.test" });
+  assert.equal(test.value?.phone?.lastTest?.state, "calling");
+  const after = await until(async () => {
+    const view = (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value;
+    return view?.phone?.lastTest?.state !== "calling" ? view : undefined;
+  }, "the test call to end");
+  assert.equal(after.phone?.lastTest?.state, "no-answer");
+  // Keys pasted wrong are refused, not mixed with the saved ones.
+  assert.equal((await h.alerts(h.owner, { action: "phone.check", accountSid: "nope" })).ok, false);
+});
+
+test("one test call at a time, and one left ringing by a restart does not stay \"calling\"", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-alerts-test-restart-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const first = await hub(t, { publicUrl: true, dir });
+  await first.storage.hub().setOwner({ deviceId: first.owner.originId, publicKeyDerBase64: first.owner.publicKeyDerBase64, name: "Mac", addedAt: new Date().toISOString() });
+  await connectPhone(first);
+  first.world.outcomes.push(...Array(50).fill("in-progress"));
+  // Two asked at the same moment: one rings, the other is refused.
+  const both = await Promise.all([1, 2].map(() => first.alerts(first.owner, { action: "phone.try", from: "+14155550134", to: "+35799123342" })));
+  assert.deepEqual(both.map((answer) => answer.ok).sort(), [false, true]);
+  assert.equal(first.world.calls.length, 1, "one call placed");
+  first.world.calls[0].status = "completed";
+  await until(async () => {
+    const tried = both.find((answer) => answer.ok) as { value?: { testId: string } };
+    return (await first.alerts<{ test: { state: string } }>(first.owner, { action: "phone.try-status", testId: tried.value!.testId })).value?.test.state !== "calling";
+  }, "the first test to end");
+  const ringing = await first.alerts<UrgentAlertSettingsView>(first.owner, { action: "phone.test" });
+  assert.equal(ringing.value?.phone?.lastTest?.state, "calling");
+  // A second one while it rings is refused: each is billed, two would ring at once.
+  const again = await first.alerts(first.owner, { action: "phone.try", from: "+14155550134", to: "+35799123342" });
+  assert.deepEqual([again.ok, again.error?.message], [false, "A test call is still ringing. Wait for it to end."]);
+  await first.close();
+  const second = await hub(t, { publicUrl: true, dir });
+  const after = await until(async () => {
+    const view = (await second.alerts<UrgentAlertSettingsView>(first.owner, { action: "settings" })).value;
+    return view?.phone?.lastTest?.state === "failed" ? view : undefined;
+  }, "the test left ringing to end");
+  assert.match(after.phone?.lastTest?.error ?? "", /restarted during the test call/);
+  assert.equal(after.phone?.lastTest?.lost, true, "a lost result, not a failed call");
+});
+
+test("saved keys Twilio refuses on a test call mark the phone, so the page never says Ready beside them", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  await connectPhone(h);
+  const stored = (await h.storage.hub().document("urgent-alerts"))?.value as { phone: { authToken: string } };
+  stored.phone.authToken = "b".repeat(32);
+  await h.storage.hub().setDocument("urgent-alerts", stored, new Date().toISOString());
+  const test = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "phone.test" });
+  assert.equal(test.ok, true);
+  assert.equal(test.value?.phone?.lastTest?.state, "failed");
+  assert.equal(test.value?.phone?.error, "Twilio no longer accepts these keys. Connect the phone again.");
+  // A test placed with other keys (pasted, same account) is not the saved phone's test.
+  const pasted = await h.alerts<{ testId: string }>(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" });
+  assert.equal(pasted.ok, true);
+  await until(async () => (await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: pasted.value!.testId })).value?.test.state !== "calling", "the pasted-keys test to end");
+  assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.phone?.lastTest?.state, "failed", "still the saved keys' own result");
+});
+
+test("a number is bought once: a second press, or one after a lost answer, gets the same number", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  await connectPhone(h);
+  const [first, second] = await Promise.all([1, 2].map(() => h.alerts<{ number: string }>(h.owner, { action: "phone.buy" })));
+  assert.equal(first.value?.number, "+14155550300");
+  assert.equal(second.value?.number, "+14155550300", "the press while it was buying");
+  assert.equal((await h.alerts<{ number: string }>(h.owner, { action: "phone.buy" })).value?.number, "+14155550300", "a press after");
+  assert.deepEqual(h.world.bought, ["+14155550300"], "billed once");
+  // The same account with a wrong token is refused by Twilio, not handed the number.
+  const wrong = await h.alerts(h.owner, { action: "phone.buy", accountSid: ACCOUNT_SID, authToken: "c".repeat(32) });
+  assert.equal(wrong.error?.code, "channel_failed");
+});
+
+test("a test call that ends long after a newer one does not overwrite the newer one's result", async (t) => {
+  const clock = { shift: 0 };
+  const h = await hub(t, { publicUrl: true, clock });
+  await connectPhone(h);
+  h.world.outcomes.push(...Array(400).fill("in-progress"));
+  await h.alerts(h.owner, { action: "phone.test" });
+  const older = await until(() => h.world.calls[0], "the first test call");
+  // Its end never comes; once no call could last that long, another may start.
+  clock.shift = 6 * 60_000;
+  const newer = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "phone.test" });
+  assert.equal(newer.ok, true, JSON.stringify(newer));
+  const placed = await until(() => h.world.calls[1], "the second test call");
+  assert.equal((await pressOnCall(h, placed.twiml, placed.sid)).status, 200);
+  await until(async () => (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.phone?.lastTest?.state === "pressed", "1 on the newer call");
+  older.status = "completed";
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.phone?.lastTest?.state, "pressed");
+});
+
+test("a test of other numbers does not stop the saved phone's own test from recording", async (t) => {
+  const clock = { shift: 0 };
+  const h = await hub(t, { publicUrl: true, clock });
+  await connectPhone(h);
+  h.world.outcomes.push(...Array(400).fill("in-progress"));
+  await h.alerts(h.owner, { action: "phone.test" });
+  const saved = await until(() => h.world.calls[0], "the saved phone's test");
+  clock.shift = 6 * 60_000;
+  const other = await h.alerts(h.owner, { action: "phone.try", from: "+14155550134", to: "+35799000000" });
+  assert.equal(other.ok, true, JSON.stringify(other));
+  await until(() => h.world.calls[1], "the other numbers' test");
+  assert.equal((await pressOnCall(h, saved.twiml, saved.sid)).status, 200);
+  await until(async () => (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.phone?.lastTest?.state === "pressed", "the saved phone's 1");
+});
+
+test("a late refusal about an older message does not undo a newer message that went through", async (t) => {
+  const h = await hub(t, { minuteMs: 60_000 });
+  await seedChat(h);
+  await connectTelegram(h);
+  h.world.faults.blocked = true;
+  h.world.faults.sendDelayMs = 400;
+  const raised = await raise(h, h.owner);
+  // She unblocks and presses Start while the alert's refusal is still on its way.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  h.world.faults.blocked = false;
+  h.world.faults.sendDelayMs = 0;
+  h.world.start();
+  await until(() => h.world.sent.find((item) => item.text.startsWith("This chat is connected")), "Start to be answered");
+  await until(async () => (await stateOf(h, raised.value!.alertId))?.telegram?.error, "the alert's late refusal");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram?.error, undefined);
+});
+
+test("a test call placed without Twilio's answer is unknown, not failed, and 1 on it still counts", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  await connectPhone(h);
+  h.world.faults.placedUnanswered = true;
+  const tested = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "phone.test" });
+  assert.equal(tested.value?.phone?.lastTest?.state, "failed");
+  assert.equal(tested.value?.phone?.lastTest?.lost, true, "the call may have gone out");
+  // It did ring: 1 on it proves calls reach her.
+  const placed = await until(() => h.world.calls[0], "the call Twilio placed");
+  assert.equal((await pressOnCall(h, placed.twiml, placed.sid)).status, 200);
+  await until(async () => (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.phone?.lastTest?.state === "pressed", "1 to count");
+});
+
+test("keys Twilio refuses while a test call rings end it as a failure and mark the phone", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  await connectPhone(h);
+  h.world.outcomes.push(...Array(50).fill("in-progress"));
+  await h.alerts(h.owner, { action: "phone.test" });
+  await until(() => h.world.calls[0], "the test call");
+  h.world.faults.revoked = true;
+  const view = await until(async () => {
+    const current = (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value;
+    return current?.phone?.lastTest?.state === "failed" ? current : undefined;
+  }, "the refused keys to end the test");
+  assert.equal(view.phone?.lastTest?.lost, undefined, "known, not lost");
+  assert.equal(view.phone?.error, "Twilio no longer accepts these keys. Connect the phone again.");
+});
+
+test("saved keys Twilio refuses when the phone dialog opens mark the phone too", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  await connectPhone(h);
+  const stored = (await h.storage.hub().document("urgent-alerts"))?.value as { phone: { authToken: string } };
+  stored.phone.authToken = "b".repeat(32);
+  await h.storage.hub().setDocument("urgent-alerts", stored, new Date().toISOString());
+  // Pasted keys refused say so, and leave the saved phone as it is.
+  const pasted = await h.alerts(h.owner, { action: "phone.check", accountSid: ACCOUNT_SID, authToken: "c".repeat(32) });
+  assert.equal(pasted.error?.code, "channel_failed");
+  assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.phone?.error, undefined);
+  for (const action of ["phone.check", "phone.buy"]) {
+    const refused = await h.alerts(h.owner, { action });
+    assert.equal(refused.error?.code, "channel_failed", action);
+  }
+  assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.phone?.error, "Twilio no longer accepts these keys. Connect the phone again.");
+});
+
+test("a test call's key press: a wrong token or test is refused, 2 repeats, and 1 stays 1 when the call ends", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  h.world.outcomes.push("in-progress", "in-progress", "completed");
+  const tried = await h.alerts<{ testId: string }>(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" });
+  const placed = await until(() => h.world.calls[0], "the test call");
+  const action = /action="([^"]+)"/.exec(placed.twiml)![1].replace(/&amp;/g, "&");
+  const signedFor = async (address: string, digits: string) => {
+    const params = { CallSid: placed.sid, Digits: digits, From: "+14155550134", To: "+35799123342" };
+    const local = new URL(address);
+    return fetch(`${h.base}${local.pathname}${local.search}`, { method: "POST", body: new URLSearchParams(params).toString(),
+      headers: { "content-type": "application/x-www-form-urlencoded", "x-twilio-signature": twilioSignature(AUTH_TOKEN, address, params) } });
+  };
+  // Signed by Twilio's key, but not this test's token, or not a test it knows.
+  assert.equal((await signedFor(action.replace(/token=[^&]+/, "token=nope"), "1")).status, 403);
+  assert.equal((await signedFor(action.replace(/test=[^&]+/, "test=nope"), "1")).status, 403);
+  const repeat = await signedFor(action, "2");
+  assert.equal(repeat.status, 200);
+  assert.match(await repeat.text(), /<Gather numDigits="1"/, "2 hears the test again");
+  assert.equal((await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: tried.value!.testId })).value?.test.state, "calling");
+  assert.equal((await signedFor(action, "1")).status, 200);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal((await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: tried.value!.testId })).value?.test.state, "pressed", "the call ending after 1 does not undo it");
+  assert.equal((await h.alerts(h.owner, { action: "phone.try-status", testId: "gone" })).ok, false);
+});
+
+test("a test call Twilio stops answering about ends as failed, and the next one may start", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  h.world.faults.callStatus = 1_000;
+  const tried = await h.alerts<{ testId: string }>(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" });
+  const done = await until(async () => {
+    const answer = await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: tried.value!.testId });
+    return answer.value?.test.state !== "calling" ? answer.value?.test : undefined;
+  }, "the lost test call to end", 8_000);
+  assert.equal(done.state, "failed");
+  assert.equal((done as { lost?: boolean }).lost, true, "how it went is unknown, not a failed call");
+  h.world.faults.callStatus = 0;
+  assert.equal((await h.alerts(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" })).ok, true);
+});
+
+test("with no phone saved, a request without keys is refused, never filled from nothing", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  for (const request of [{ action: "phone.check" }, { action: "phone.try", from: "+14155550134", to: "+35799123342" }, { action: "phone.save", from: "+14155550134", to: "+35799123342" }]) {
+    const answer = await h.alerts(h.owner, request);
+    assert.deepEqual([answer.ok, answer.error?.code], [false, "invalid_request"], request.action);
+  }
+  await connectPhone(h);
+  // A token alone is a pasted pair with a part missing, not the saved SID with it.
+  assert.equal((await h.alerts(h.owner, { action: "phone.check", authToken: AUTH_TOKEN })).ok, false);
+});
+
+test("without a server Twilio reaches, answering the test call is what passes it", async (t) => {
+  const h = await hub(t);
+  h.world.outcomes.push("completed");
+  const tried = await h.alerts<{ testId: string }>(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" });
+  const placed = await until(() => h.world.calls[0], "the test call");
+  assert.doesNotMatch(placed.twiml, /<Gather/, "no key can be heard: the message is read out");
+  const done = await until(async () => {
+    const answer = await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: tried.value!.testId });
+    return answer.value?.test.state !== "calling" ? answer.value?.test : undefined;
+  }, "the test call to end");
+  assert.equal(done.state, "answered");
+});
+
+test("Telegram keeps its last test: the connect check, then Send test message and its Got it", async (t) => {
+  const h = await hub(t);
+  await connectTelegram(h);
+  const connected = (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value;
+  assert.equal(connected?.telegram?.lastTest?.gotIt, true);
+  const sent = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "telegram.test" });
+  assert.equal(sent.value?.telegram?.lastTest?.gotIt, false, "sent, Got it not pressed yet");
+  const message = await until(() => h.world.sent.filter((item) => item.text.startsWith("Test alert")).pop(), "the test message");
+  h.world.press(message.buttons[0], message.messageId);
+  await until(async () => (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram?.lastTest?.gotIt, "Got it on the test");
+
+  // Got it on an older test message does not stand for the newest one.
+  await h.alerts(h.owner, { action: "telegram.test" });
+  h.world.press(message.buttons[0], message.messageId);
+  await until(() => h.world.edits.filter((item) => item.messageId === message.messageId).length >= 2, "the old message's Got it to be answered");
+  assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram?.lastTest?.gotIt, false);
+});
+
+test("Telegram refusing her chat (the bot blocked) shows Telegram needs attention until a message goes through", async (t) => {
+  const h = await hub(t, { minuteMs: 60_000 });
+  await seedChat(h);
+  await connectTelegram(h);
+  h.world.faults.blocked = true;
+  const raised = await raise(h, h.owner);
+  const alertId = raised.value!.alertId;
+  await until(async () => (await stateOf(h, alertId))?.telegram?.error, "the alert's Telegram to fail");
+  const broken = (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram;
+  assert.equal(broken?.connected, true, "the bot stays connected: it still hears her");
+  assert.equal(broken?.error, "Telegram refused the last message (Forbidden: bot was blocked by the user). Open @svetlana_accord_bot in Telegram and press Start, or connect Telegram again.");
+  // Send test message is refused the same way and keeps it said.
+  const refused = await h.alerts(h.owner, { action: "telegram.test" });
+  assert.equal(refused.error?.code, "channel_failed");
+  // She unblocks the bot: Start in her chat is answered, and that answer
+  // going through ends the refusal (the reader never stopped).
+  h.world.faults.blocked = false;
+  h.world.start();
+  await until(() => h.world.sent.find((item) => item.text.startsWith("This chat is connected")), "Start to be answered");
+  await until(async () => (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram?.error === undefined, "the refusal to end");
+  h.world.faults.blocked = true;
+  assert.equal((await h.alerts(h.owner, { action: "telegram.test" })).error?.code, "channel_failed");
+  h.world.faults.blocked = false;
+  const sent = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "telegram.test" });
+  assert.equal(sent.ok, true);
+  assert.equal(sent.value?.telegram?.error, undefined, "a message went through again");
+  const message = await until(() => h.world.sent.filter((item) => item.text.startsWith("Test alert")).pop(), "the test message");
+  h.world.press(message.buttons[0], message.messageId);
+  await until(async () => (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram?.lastTest?.gotIt, "Got it read by the bot");
 });
 
 test("closing the card in the app counts as Got it and folds it; the phone closes it too, a machine never", async (t) => {

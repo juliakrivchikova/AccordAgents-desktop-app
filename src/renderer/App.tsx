@@ -103,7 +103,10 @@ function App(): JSX.Element {
   const navigation = useAppNavigation(state, conversationActions);
   useFileEditLifecycle({ conversationId: state.conversation?.id, artifacts, openChat: navigation.openChat });
   const { openSettingsSection } = navigation;
-  const urgentAlertActions = React.useMemo(() => ({ openAlertSettings: () => openSettingsSection("alerts") }), [openSettingsSection]);
+  const urgentAlertActions = React.useMemo(() => ({
+    openAlertSettings: () => openSettingsSection("alerts"),
+    openServerSettings: () => openSettingsSection("aws")
+  }), [openSettingsSection]);
   // A control that hides itself (a sidebar toggle, Activity, Settings, Back)
   // hands focus to its counterpart, so the keyboard and VoiceOver keep their
   // place. Only after a keyboard press: after a mouse click the moved focus
