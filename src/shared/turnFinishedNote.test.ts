@@ -145,8 +145,10 @@ test("an urgent alert's card below a reply is not a reason for a note", () => {
   // The same message from a device is no card: it still counts.
   const forged: ChatMessage = { ...alert, metadata: { ...alert.metadata, serverWriter: "device-1" } as ChatMessageMetadata };
   assert.ok(turnFinishedNoteFor({ messages: [user("ask", "@taylor watch it"), card, forged] }, [card], NOTE));
-  // Anything else below still does.
+  // Anything else below still does, another member's alert too.
   assert.ok(turnFinishedNoteFor({ messages: [user("ask", "@taylor watch it"), card, alert, post("p1", "Rolling back")] }, [card], NOTE));
+  const theirs: ChatMessage = { ...alert, participantId: "gera", participantLabel: "@gera" };
+  assert.ok(turnFinishedNoteFor({ messages: [user("ask", "@taylor watch it"), card, theirs] }, [card], NOTE));
 });
 
 test("the preview is the reply's first line of words, without markdown", () => {

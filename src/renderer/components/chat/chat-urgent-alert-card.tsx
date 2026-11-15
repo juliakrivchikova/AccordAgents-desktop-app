@@ -34,7 +34,11 @@ export function ChatUrgentAlertCard(props: {
   alert: UrgentAlertView;
   participant?: ChatParticipant;
 }): JSX.Element {
-  const { message, alert, participant } = props;
+  const { message, participant } = props;
+  // What the server answered to Got it here, shown until its new card comes
+  // through the feed (a slow feed must not bring Got it back meanwhile).
+  const [answered, setAnswered] = useState<UrgentAlertView | undefined>();
+  const alert = answered ?? props.alert;
   const actions = useContext(UrgentAlertActionsContext);
   const requester = participant ? `@${participant.handle}` : message.participantLabel || "A member";
   const [now, setNow] = useState(() => Date.now());
@@ -48,15 +52,24 @@ export function ChatUrgentAlertCard(props: {
   // she pressed is gone, so the one that undoes it takes the focus.
   const card = useRef<HTMLElement>(null);
   const keepFocus = useRef(false);
-  // A failed Got it or close is about the alert as it was: once it changed
-  // (Got it from anywhere else, closed elsewhere) the message no longer holds.
-  useEffect(() => setError(undefined), [alert.state, alert.closedAt]);
+  useEffect(() => setAnswered(undefined), [props.alert.state, props.alert.closedAt]);
+  // A failed Got it holds while the alert still waits for one (a call placed
+  // meanwhile changes nothing about it); once it no longer waits, or is
+  // closed, it is moot.
+  useEffect(() => setError(undefined), [awaiting, alert.closedAt]);
   useEffect(() => {
     if (!counting) return undefined;
+    const due = Date.parse(alert.callAt ?? "");
     setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    // Ticks until the moment of the call, then stops: past it the card says
+    // the call is being placed and waits for the server.
+    const timer = setInterval(() => {
+      const current = Date.now();
+      setNow(current);
+      if (!(current < due)) clearInterval(timer);
+    }, 1_000);
     return () => clearInterval(timer);
-  }, [counting]);
+  }, [counting, alert.callAt]);
   useLayoutEffect(() => {
     if (!keepFocus.current) return;
     keepFocus.current = false;
@@ -64,7 +77,7 @@ export function ChatUrgentAlertCard(props: {
     // she went meanwhile (the composer while the server answered).
     const active = document.activeElement;
     if (active && active !== document.body && !card.current?.contains(active)) return;
-    card.current?.querySelector<HTMLElement>(folded ? ".chat-urgent-alert-folded" : ".chat-urgent-alert-close")?.focus();
+    card.current?.querySelector<HTMLElement>(folded ? ".chat-urgent-alert-folded" : ".chat-urgent-alert-close")?.focus({ preventScroll: true });
   }, [folded]);
 
   function rememberFocus(): void {
@@ -79,9 +92,16 @@ export function ChatUrgentAlertCard(props: {
     setError(undefined);
     try {
       const result = await window.consensus.urgentAlertRequest({ action: "close", alertId: alert.id });
-      if (!result.ok) setError(result.error.message);
-      else setExpanded(false);
+      if (!result.ok) {
+        keepFocus.current = false;
+        setError(result.error.message);
+      } else {
+        setExpanded(false);
+        const view = result.value as UrgentAlertView | undefined;
+        if (view && typeof view === "object" && view.id === alert.id && typeof view.state === "string") setAnswered(view);
+      }
     } catch (failure) {
+      keepFocus.current = false;
       setError(failure instanceof Error ? failure.message : String(failure));
     } finally {
       setClosing(false);

@@ -9906,10 +9906,11 @@
         detail.textContent = status.detail;
         words.append(detail);
       }
-      // A failure stays only while the alert is as it was when it failed: Got
-      // it from anywhere else (or a close that went through) clears it.
+      // A failed Got it holds while the alert still waits for one (a call
+      // placed meanwhile changes nothing about it); once it no longer waits,
+      // or is closed, it is moot.
       const failure = urgentAlertErrors.get(alert.id);
-      if (failure && failure.state === alert.state && !alert.closedAt) {
+      if (failure && failure.awaiting === awaiting && !alert.closedAt) {
         const error = document.createElement("div");
         error.className = "urgent-alert-error";
         error.setAttribute("role", "alert");
@@ -9990,17 +9991,24 @@
     card.replaceWith(next);
     if (hadFocus) {
       const target = next.querySelector(".urgent-alert-folded, .urgent-alert-close, .urgent-alert-action");
-      if (target) target.focus();
+      if (target) target.focus({ preventScroll: true });
     }
   }
 
   /** Got it, or the cross on a card nobody closed yet: the server closes it on
    *  every device (Got it while it waits for one); the card changes when the
    *  server's copy of the message does, like every other change. */
-  async function closeUrgentAlert(alertId, row) {
+  async function closeUrgentAlert(alertId, tappedRow) {
     if (!alertId) return;
-    const buttons = row && row.querySelectorAll ? [...row.querySelectorAll("[data-urgent-alert-close]")] : [];
+    const buttons = tappedRow && tappedRow.querySelectorAll ? [...tappedRow.querySelectorAll("[data-urgent-alert-close]")] : [];
     for (const button of buttons) button.disabled = true;
+    // The row on screen when the answer comes: the timeline may have drawn the
+    // card again meanwhile (Telegram delivered, a call placed).
+    const liveRow = function () {
+      return [...document.querySelectorAll(".message-row[data-urgent-alert]")]
+        .find(function (item) { const shown = item.__urgentAlertEntry && urgentAlertOfEntry(item.__urgentAlertEntry); return shown && shown.id === alertId; }) || tappedRow;
+    };
+    let row = tappedRow;
     try {
       const client = hubClient();
       if (!client) throw new Error("this phone is not paired with a server");
@@ -10011,10 +10019,14 @@
       }
       urgentAlertErrors.delete(alertId);
       expandedUrgentAlerts.delete(alertId);
+      row = liveRow();
       if (row) row.__urgentAlertEntry = { ...(row.__urgentAlertEntry || {}), urgentAlert: answer.value };
     } catch (error) {
+      row = liveRow();
       const current = row && row.__urgentAlertEntry ? urgentAlertOfEntry(row.__urgentAlertEntry) : undefined;
-      urgentAlertErrors.set(alertId, { message: error && error.message ? error.message : "try again", state: current ? current.state : "" });
+      const shared = mobileSharedRules();
+      const awaiting = Boolean(current && shared && typeof shared.urgentAlertAwaitsGotIt === "function" && shared.urgentAlertAwaitsGotIt(current));
+      urgentAlertErrors.set(alertId, { message: error && error.message ? error.message : "try again", awaiting: awaiting });
     }
     rerenderUrgentAlertRow(row);
   }

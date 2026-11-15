@@ -20,9 +20,10 @@ test("while it waits, the band says when the phone rings and offers Got it", () 
   assert.equal(waiting.detail, "Sent to Telegram. Got it here or there stops the call.");
   assert.deepEqual([waiting.tone, waiting.icon, waiting.action], ["now", "clock", "got-it"]);
 
-  // Its moment came and the server has not placed it yet: no "0:00".
+  // Its moment came and the server has not placed it yet: no "0:00", and no
+  // claim that it rings.
   const due = urgentAlertStatus({ ...base, callAt: "2026-11-12T18:52:30.000Z" }, "@taylor", now);
-  assert.equal(main(due), "Calling you now · call 1 of 3");
+  assert.equal(main(due), "Placing the call · call 1 of 3");
   assert.equal(due.countdown, undefined);
 
   const ringing = urgentAlertStatus({ ...base, state: "calling", calls: [{ attempt: 1, startedAt: "2026-11-12T18:57:00.000Z", status: "ringing" }] }, "@taylor", now);
@@ -110,6 +111,13 @@ test("the edges: no channel at all, one unanswered call, calls that never rang, 
   // Twilio reported them failed without saying why: they never rang either.
   const failed = urgentAlertStatus({ ...base, state: "unanswered", calls: [1, 2, 3].map((attempt) => call(attempt, "2026-11-12T18:57:00.000Z", "failed")) }, "@taylor", now);
   assert.equal(failed.lead, "Couldn't call you · no more calls");
+  assert.match(failed.detail ?? "", /: didn't go through$/);
+  // Only the calls that got through count as unanswered.
+  const some = urgentAlertStatus({ ...base, state: "unanswered", calls: [call(1, "2026-11-12T18:57:00.000Z", "no-answer"), call(2, "2026-11-12T19:00:00.000Z", "failed"), call(3, "2026-11-12T19:03:00.000Z", "no-answer")] }, "@taylor", now);
+  assert.equal(some.lead, "Nobody answered 2 calls · no more calls");
+  // Telegram refused it while a call is still ahead: the band says so.
+  const refusedTelegram = urgentAlertStatus({ ...base, telegram: { error: "Forbidden" }, callAt: "2026-11-12T18:57:00.000Z" }, "@taylor", now);
+  assert.equal(refusedTelegram.detail, "Telegram didn't take it. Got it here stops the call.");
 
   const future = urgentAlertStatus({ ...base, state: "snoozed" as UrgentAlertState }, "@taylor", now);
   assert.equal(future.action, undefined, "no Got it the card cannot stand behind");

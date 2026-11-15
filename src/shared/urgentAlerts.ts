@@ -239,10 +239,10 @@ export function urgentAlertStatus(alert: UrgentAlertView, requester: string, now
       return { tone: "done", icon: "check", lead: `Got it · ${by}${at ? ` at ${at}` : ""}`, detail: joined(history) };
     }
     case "unanswered": {
-      // A call Twilio refused or reported failed never rang.
-      const placed = calls.some((call) => !call.error && call.status !== "failed");
-      const lead = !placed ? "Couldn't call you · no more calls"
-        : `Nobody answered ${calls.length === 1 ? "the call" : `${calls.length} calls`} · no more calls`;
+      // A call Twilio refused or reported failed never got through.
+      const through = calls.filter((call) => !call.error && call.status !== "failed").length;
+      const lead = through === 0 ? "Couldn't call you · no more calls"
+        : `Nobody answered ${through === 1 ? "the call" : `${through} calls`} · no more calls`;
       return { tone: "bad", icon: "missed", lead, detail: joined(historyParts(alert, calls)), action: "got-it" };
     }
     case "waiting":
@@ -259,16 +259,23 @@ export function urgentAlertStatus(alert: UrgentAlertView, requester: string, now
     const countdown = { to: alert.callAt as string, text: urgentAlertCountdown(due - now) };
     if (calls.length === 0) {
       return { tone: "now", icon: "clock", lead: "Calling you in ", countdown,
-        detail: telegramSent ? "Sent to Telegram. Got it here or there stops the call." : "Got it here stops the call.", action: "got-it" };
+        detail: telegramSent ? "Sent to Telegram. Got it here or there stops the call."
+          : alert.telegram?.error ? "Telegram didn't take it. Got it here stops the call."
+          : "Got it here stops the call.", action: "got-it" };
     }
     return { tone: "now", icon: "clock", lead: "Calling again in ", countdown,
       tail: ` · call ${calls.length + 1} of ${URGENT_ALERT_CALL_ATTEMPTS}`, detail: joined(historyParts(alert, calls)), action: "got-it" };
   }
-  if (ringing || alert.phone) {
-    // Ringing, or its moment came and the server is placing it.
-    const attempt = ringing ? ringing.attempt : calls.length + 1;
-    return { tone: "now", icon: "ringing", lead: `Calling you now · call ${Math.min(attempt, URGENT_ALERT_CALL_ATTEMPTS)} of ${URGENT_ALERT_CALL_ATTEMPTS}`,
-      detail: alert.callMode === "keypad" ? "Answer and press 1, or press Got it here." : "Answer it, or press Got it here.", action: "got-it" };
+  const press = alert.callMode === "keypad" ? "Answer and press 1, or press Got it here." : "Answer it, or press Got it here.";
+  if (ringing) {
+    return { tone: "now", icon: "ringing", lead: `Calling you now · call ${Math.min(ringing.attempt, URGENT_ALERT_CALL_ATTEMPTS)} of ${URGENT_ALERT_CALL_ATTEMPTS}`,
+      detail: press, action: "got-it" };
+  }
+  if (alert.phone) {
+    // Its moment came and her server has not placed it yet: say only that,
+    // never that it rings (a server that stalled would leave it so).
+    const attempt = Math.min(calls.length + 1, URGENT_ALERT_CALL_ATTEMPTS);
+    return { tone: "now", icon: "ringing", lead: `Placing the call · call ${attempt} of ${URGENT_ALERT_CALL_ATTEMPTS}`, detail: press, action: "got-it" };
   }
   // No phone: Telegram is all there is.
   return { tone: "now", icon: "sent", lead: telegramSent ? "Sent to Telegram" : "Waiting for Got it",
@@ -287,7 +294,8 @@ export function urgentAlertOutcome(alert: UrgentAlertView): { text: string; done
     return { text: at ? `${how} ${at}` : how, done: true };
   }
   if (alert.state === "not_set_up" || alert.state === "failed") return { text: "Not sent outside the app", done: false };
-  return { text: "No answer", done: false };
+  if (alert.state === "unanswered") return { text: "No answer", done: false };
+  return { text: "Closed", done: false };
 }
 
 /** What the card says when Got it, or the cross, did not go through. */
@@ -324,7 +332,7 @@ function callOutcome(call: UrgentAlertCall, alert: UrgentAlertView): string {
     case "completed": return alert.callMode === "keypad" ? "1 wasn't pressed" : "answered";
     case "busy": return "busy";
     case "canceled": return "stopped";
-    case "failed": return "couldn't place it";
+    case "failed": return "didn't go through";
     default: return "no answer";
   }
 }
