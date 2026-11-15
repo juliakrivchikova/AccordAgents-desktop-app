@@ -9,6 +9,7 @@
 import {
   URGENT_ALERT_CALL_ATTEMPTS,
   URGENT_ALERT_CALL_RETRY_MS,
+  URGENT_ALERT_TEST_STALE_MS,
   urgentAlertPhoneTestPassed,
   type UrgentAlertPhoneTest,
   type UrgentAlertSettingsView
@@ -40,11 +41,11 @@ export function alertsTelegramStatus(view: Pick<UrgentAlertSettingsView, "telegr
   return telegram.connected ? "ready" : "not-finished";
 }
 
-export function alertsPhoneStatus(view: Pick<UrgentAlertSettingsView, "phone">): AlertsChannelStatus {
+export function alertsPhoneStatus(view: Pick<UrgentAlertSettingsView, "phone" | "callMode">): AlertsChannelStatus {
   const phone = view.phone;
   if (!phone) return "not-set-up";
   if (phone.error) return "attention";
-  return urgentAlertPhoneTestPassed(phone.lastTest) ? "ready" : "not-tested";
+  return urgentAlertPhoneTestPassed(phone.lastTest, view.callMode) ? "ready" : "not-tested";
 }
 
 /** The one line on top: what reaches her now, the worst first. */
@@ -168,14 +169,10 @@ export function alertsTelegramTestLine(view: Pick<UrgentAlertSettingsView, "tele
   return test.gotIt ? `Tested ${when} · you pressed Got it` : `Test message sent ${when} · press Got it on it`;
 }
 
-/** A test call longer than any call rings is over, whatever the last word:
- *  the page stops waiting for it (a server that stopped mid-call never says). */
-const PHONE_TEST_STALE_MS = 5 * 60_000;
-
 /** A test call still under way (not one whose answer never came). */
 export function alertsPhoneTesting(view: Pick<UrgentAlertSettingsView, "phone">, now: Date = new Date()): boolean {
   const test = view.phone?.lastTest;
-  return test?.state === "calling" && now.getTime() - Date.parse(test.at) < PHONE_TEST_STALE_MS;
+  return test?.state === "calling" && now.getTime() - Date.parse(test.at) < URGENT_ALERT_TEST_STALE_MS;
 }
 
 export function alertsPhoneTestLine(view: Pick<UrgentAlertSettingsView, "phone" | "callMode">, now?: Date): string | undefined {
@@ -185,7 +182,7 @@ export function alertsPhoneTestLine(view: Pick<UrgentAlertSettingsView, "phone" 
   switch (test.state) {
     case "calling": return alertsPhoneTesting(view, now) ? "Calling you now…" : `Test ${when}: its result never came. Call again`;
     case "pressed": return `Tested ${when} · you pressed 1`;
-    case "answered": return `Tested ${when} · you answered`;
+    case "answered": return view.callMode === "keypad" ? `Tested ${when} by answering · calls now ask for 1, so test again` : `Tested ${when} · you answered`;
     case "not-pressed": return `Test ${when}: you picked up, but 1 wasn't pressed`;
     case "no-answer": return `Test ${when}: no answer`;
     case "busy": return `Test ${when}: the line was busy`;

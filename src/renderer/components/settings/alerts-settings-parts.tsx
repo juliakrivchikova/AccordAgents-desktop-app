@@ -36,7 +36,11 @@ export function AlertsStatusBand(props: { band: AlertsBand; action?: ReactNode }
   );
 }
 
-export function AlertsBandPlaceholder(props: { loading: boolean; error?: string; onRetry: () => void }): JSX.Element {
+export function AlertsBandPlaceholder(props: { loading: boolean; error?: { code: string; message: string }; onRetry: () => void }): JSX.Element {
+  // Reached, but not to be changed from here (another computer set the server
+  // up), or reached, but too old for alerts: neither is "can't reach".
+  const notOwner = props.error?.code === "access_denied";
+  const older = /older than this app/.test(props.error?.message ?? "");
   return props.loading ? (
     <div className="alerts-band is-off" role="status" data-testid="alerts-band">
       <span className="alerts-band-icon" aria-hidden><Loader2 size={18} className="gen-aws-spinner" /></span>
@@ -46,8 +50,8 @@ export function AlertsBandPlaceholder(props: { loading: boolean; error?: string;
     <div className="alerts-band is-bad" role="alert" data-testid="alerts-band">
       <span className="alerts-band-icon" aria-hidden><Server size={18} /></span>
       <div className="alerts-band-text">
-        <div className="alerts-band-title">Can't reach your server</div>
-        <div className="alerts-band-detail">{props.error ? `${props.error} ` : ""}Alerts may not go out either.</div>
+        <div className="alerts-band-title">{notOwner ? "Alerts are set up on another computer" : older ? "Your server hasn't updated yet" : "Can't reach your server"}</div>
+        <div className="alerts-band-detail">{props.error ? `${props.error.message} ` : ""}{notOwner || older ? "" : "Alerts may not go out either."}</div>
       </div>
       <Button type="button" size="sm" onClick={props.onRetry}>Try again</Button>
     </div>

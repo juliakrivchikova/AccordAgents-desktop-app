@@ -7,7 +7,12 @@ import type { HubAlertResult, UrgentAlertSettingsView, UrgentAlertUserRequest } 
 
 export async function alertRequest<T>(request: UrgentAlertUserRequest): Promise<HubAlertResult<T>> {
   try {
-    return await window.consensus.urgentAlertRequest(request) as HubAlertResult<T>;
+    const result = await window.consensus.urgentAlertRequest(request) as HubAlertResult<T>;
+    // A server not yet updated to this app knows the alerts but not this step.
+    if (!result.ok && /^Unknown alert action/.test(result.error.message)) {
+      return { ok: false, error: { code: result.error.code, message: "Your server is older than this app and can't do this yet; it will once it updates." } };
+    }
+    return result;
   } catch (error) {
     return { ok: false, error: { code: "server_unavailable", message: error instanceof Error ? error.message : String(error) } };
   }

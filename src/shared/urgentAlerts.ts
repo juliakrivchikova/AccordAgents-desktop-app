@@ -136,9 +136,15 @@ export function urgentAlertPhoneTestDone(test: Pick<UrgentAlertPhoneTest, "state
   return Boolean(test && test.state !== "calling");
 }
 
-/** A test call proved calls reach her. */
-export function urgentAlertPhoneTestPassed(test: Pick<UrgentAlertPhoneTest, "state"> | undefined): boolean {
-  return test?.state === "pressed" || test?.state === "answered";
+/** A test call longer than any call rings is over, whatever the last word:
+ *  nobody waits for it any more (a server that stopped mid-call never says). */
+export const URGENT_ALERT_TEST_STALE_MS = 5 * 60_000;
+
+/** A test call proved calls reach her the way they work now: where 1 ends a
+ *  call, only 1 pressed on the test proves it (an answer made before her
+ *  server could hear keys does not). */
+export function urgentAlertPhoneTestPassed(test: Pick<UrgentAlertPhoneTest, "state"> | undefined, callMode: "keypad" | "answer"): boolean {
+  return test?.state === "pressed" || (callMode === "answer" && test?.state === "answered");
 }
 
 export interface UrgentAlertPhoneCheck {

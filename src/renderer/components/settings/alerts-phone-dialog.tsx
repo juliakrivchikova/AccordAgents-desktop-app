@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   URGENT_ALERT_CALL_ATTEMPTS,
+  URGENT_ALERT_TEST_STALE_MS,
   normalizePhoneNumber,
   urgentAlertPhoneTestDone,
   urgentAlertPhoneTestPassed,
@@ -44,10 +45,14 @@ export function PhoneConnectDialog(props: {
   const [test, setTest] = useState<{ id: string; result: UrgentAlertPhoneTest; from: string; to: string } | undefined>();
   const sidField = useRef<HTMLInputElement>(null);
   const phoneField = useRef<HTMLInputElement>(null);
+  /** Each opening and closing: an answer that comes back after the dialog
+   *  closed (or opened again) belongs to the old one and is dropped. */
+  const opening = useRef(0);
 
   // Opened on a phone that works: the saved account is used at once; on a new
   // one, or one whose keys Twilio refused, the keys are asked for.
   useEffect(() => {
+    opening.current += 1;
     if (!props.open) {
       setAccountSid("");
       setAuthToken("");
@@ -71,9 +76,11 @@ export function PhoneConnectDialog(props: {
         if (stopped) return;
         if (answer.ok) setTest((current) => current && current.id === answer.value.testId ? { ...current, result: answer.value.test } : current);
         // The server no longer knows it: over. Any other failure (a moment
-        // without the server): asked again, the call may still ring.
+        // without the server): asked again while the call may still ring.
         else if (answer.error.code === "invalid_request") setTest((current) => current ? { ...current, result: { state: "failed", at: new Date().toISOString(), error: answer.error.message } } : current);
-        else setTest((current) => current ? { ...current } : current);
+        else if (Date.now() - Date.parse(test.result.at) > URGENT_ALERT_TEST_STALE_MS) {
+          setTest((current) => current ? { ...current, result: { state: "failed", at: new Date().toISOString(), error: "Your server stopped answering, so how the call went is unknown." } } : current);
+        } else setTest((current) => current ? { ...current } : current);
       });
     }, 1_500);
     return () => {
@@ -85,11 +92,13 @@ export function PhoneConnectDialog(props: {
   const keys = checked?.saved ? {} : { accountSid: accountSid.trim(), authToken: authToken.trim() };
 
   async function check(useSaved = false): Promise<void> {
+    const asked = opening.current;
     setBusy("check");
     setError(undefined);
     const result = await alertRequest<UrgentAlertPhoneCheck>(useSaved
       ? { action: "phone.check" }
       : { action: "phone.check", accountSid: accountSid.trim(), authToken: authToken.trim() });
+    if (asked !== opening.current) return;
     setBusy(undefined);
     if (!result.ok) return setError(result.error.message);
     setChecked(result.value);
@@ -99,20 +108,40 @@ export function PhoneConnectDialog(props: {
   }
 
   async function buy(): Promise<void> {
+    const asked = opening.current;
+    const before = checked?.numbers ?? [];
     setBusy("buy");
     setError(undefined);
     const bought = await alertRequest<{ number: string }>({ action: "phone.buy", ...keys });
+    if (asked !== opening.current) return;
+    if (bought.ok) {
+      setBusy(undefined);
+      setChecked((current) => current ? { ...current, numbers: [...current.numbers, bought.value.number] } : current);
+      return took([bought.value.number]);
+    }
+    // The answer was lost, but Twilio may have sold the number all the same:
+    // the account's list is read again before she could buy a second one.
+    const again = await alertRequest<UrgentAlertPhoneCheck>({ action: "phone.check", ...keys });
+    if (asked !== opening.current) return;
     setBusy(undefined);
-    if (!bought.ok) return setError(bought.error.message);
-    setChecked((current) => current ? { ...current, numbers: [...current.numbers, bought.value.number] } : current);
-    setBoughtNumbers((current) => [...current, bought.value.number]);
-    setFrom(bought.value.number);
+    const appeared = again.ok ? again.value.numbers.filter((number) => !before.includes(number)) : [];
+    if (again.ok) setChecked((current) => current ? { ...current, numbers: again.value.numbers } : current);
+    if (appeared.length) return took(appeared);
+    setError(bought.error.message);
+  }
+
+  /** Numbers bought in this dialog: labelled so, and the newest chosen. */
+  function took(numbers: string[]): void {
+    setBoughtNumbers((current) => [...current, ...numbers]);
+    setFrom(numbers[numbers.length - 1]);
   }
 
   async function callMe(): Promise<void> {
+    const asked = opening.current;
     setBusy("try");
     setError(undefined);
     const result = await alertRequest<{ testId: string; test: UrgentAlertPhoneTest }>({ action: "phone.try", ...keys, from, to });
+    if (asked !== opening.current) return;
     setBusy(undefined);
     if (!result.ok) return setError(result.error.message);
     setTest({ id: result.value.testId, result: result.value.test, from, to: normalizePhoneNumber(to) ?? to });
@@ -251,6 +280,6 @@ function PhoneTestLine(props: { test?: UrgentAlertPhoneTest; to?: string; keypad
   const test = props.test;
   if (!test) return <div className="alerts-step-detail">{words}</div>;
   if (test.state === "calling") return <div className="alerts-waiting" role="status"><Loader2 size={13} className="gen-aws-spinner" aria-hidden /> {words}</div>;
-  if (urgentAlertPhoneTestPassed(test)) return <div className="alerts-ok-line" role="status"><CircleCheck size={14} aria-hidden /> {words}</div>;
+  if (urgentAlertPhoneTestPassed(test, props.keypad ? "keypad" : "answer")) return <div className="alerts-ok-line" role="status"><CircleCheck size={14} aria-hidden /> {words}</div>;
   return <div className="alerts-warn-line" role="status"><AlertTriangle size={13} aria-hidden /> {words}</div>;
 }

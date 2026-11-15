@@ -23,6 +23,9 @@ type Confirm = "remove-telegram" | "different-bot" | "remove-phone";
 
 /** How long after Send test message the page keeps looking for its Got it. */
 const TELEGRAM_TEST_WATCH_MS = 2 * 60_000;
+/** How long the page keeps looking for a bot's Start or Got it once she left
+ *  it unfinished (the page left open does not ask her server for ever). */
+const TELEGRAM_FINISH_WATCH_MS = 10 * 60_000;
 
 /**
  * Settings → Alerts, as the User approved it on 2026-11-15 (five reviews,
@@ -34,7 +37,8 @@ const TELEGRAM_TEST_WATCH_MS = 2 * 60_000;
 export function AlertsSettingsSection(): JSX.Element {
   const actions = useContext(UrgentAlertActionsContext);
   const [settings, setSettings] = useState<UrgentAlertSettingsView | undefined>();
-  const [loadError, setLoadError] = useState<string | undefined>();
+  const [loadError, setLoadError] = useState<{ code: string; message: string } | undefined>();
+  const [watchFrom, setWatchFrom] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
   const [dialog, setDialog] = useState<"telegram" | "phone" | undefined>();
   const [busy, setBusy] = useState<string | undefined>();
@@ -44,13 +48,14 @@ export function AlertsSettingsSection(): JSX.Element {
 
   const load = useCallback(async () => {
     setLoading(true);
+    setWatchFrom(Date.now());
     const result = await alertRequest<UrgentAlertSettingsView>({ action: "settings" });
     setLoading(false);
     if (result.ok) {
       setSettings(result.value);
       setLoadError(undefined);
     } else {
-      setLoadError(result.error.message);
+      setLoadError(result.error);
     }
   }, []);
 
@@ -63,7 +68,7 @@ export function AlertsSettingsSection(): JSX.Element {
   const testSentAt = telegram?.lastTest && !telegram.lastTest.gotIt ? Date.parse(telegram.lastTest.at) : Number.NaN;
   const watching = Boolean(settings) && !dialog && (
     alertsPhoneTesting(settings ?? {}) ||
-    Boolean(telegram && !telegram.connected && !telegram.error) ||
+    (Boolean(telegram && !telegram.connected && !telegram.error) && Date.now() - watchFrom < TELEGRAM_FINISH_WATCH_MS) ||
     (Number.isFinite(testSentAt) && Date.now() - testSentAt < TELEGRAM_TEST_WATCH_MS));
   useSettingsWatch(watching, setSettings);
 
@@ -74,6 +79,9 @@ export function AlertsSettingsSection(): JSX.Element {
     setBusy(undefined);
     if (!result.ok) {
       setRowError({ row, text: result.error.message });
+      // What failed may have changed what the server knows (a refused bot,
+      // refused keys): the page shows it at once, not after a reload.
+      void alertRequest<UrgentAlertSettingsView>({ action: "settings" }).then((fresh) => { if (fresh.ok) setSettings(fresh.value); });
       return false;
     }
     setSettings(result.value);
@@ -93,7 +101,9 @@ export function AlertsSettingsSection(): JSX.Element {
     if (which === "different-bot") setDialog("telegram");
   }
 
-  const errorFor = (row: "telegram" | "phone" | "wait") => rowError?.row === row ? { text: rowError.text, tone: "error" as const } : undefined;
+  // A channel's own error already says what went wrong: not said twice.
+  const ownError = (row: "telegram" | "phone" | "wait") => (row === "telegram" ? settings?.telegram?.error : row === "phone" ? settings?.phone?.error : undefined);
+  const errorFor = (row: "telegram" | "phone" | "wait") => rowError?.row === row && !ownError(row) ? { text: rowError.text, tone: "error" as const } : undefined;
   const band = settings ? alertsBand(settings) : undefined;
   const bandAction = band?.action === "reconnect-telegram" ? <Button type="button" size="sm" onClick={() => setDialog("telegram")}>Reconnect Telegram</Button>
     : band?.action === "reconnect-phone" ? <Button type="button" size="sm" onClick={() => setDialog("phone")}>Reconnect phone call</Button>

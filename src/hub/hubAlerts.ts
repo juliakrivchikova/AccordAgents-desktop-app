@@ -9,6 +9,7 @@ import {
   URGENT_ALERT_DEFAULT_WAIT_MINUTES,
   URGENT_ALERT_MESSAGE_MAX_CHARS,
   URGENT_ALERT_RING_SECONDS,
+  URGENT_ALERT_TEST_STALE_MS,
   URGENT_ALERT_WAIT_MINUTES_MAX,
   URGENT_ALERT_WAIT_MINUTES_MIN,
   HUB_ALERTS_TWILIO_PATH,
@@ -73,11 +74,18 @@ interface StoredTelegram {
   testNonce?: string;
   testMessageId?: number;
   error?: string;
+  /** Telegram refused the last message to her chat (she blocked the bot,
+   *  deleted the chat): kept apart from `error`, which stops the reader,
+   *  since the bot still hears her; cleared by the next message that goes. */
+  deliveryError?: string;
   /** The next update to read from this bot (so a restart reads nothing
    *  twice); kept with the bot, since another bot numbers its own. */
   offset?: number;
   /** The last test message (the connect check or Send test message). */
   lastTest?: { at: string; gotIt: boolean };
+  /** The Got it of the newest Send test message: an older one's does not
+   *  stand for it. */
+  lastTestNonce?: string;
 }
 
 interface StoredPhone {
@@ -110,6 +118,7 @@ interface PhoneTestRun {
 const PHONE_TEST_KEEP_MS = 60 * 60_000;
 const PHONE_TEST_KEEP_MAX = 20;
 const PHONE_TEST_SPOKEN = "This is a test call from AccordAgents. Urgent alerts will be read out like this.";
+const PHONE_KEYS_REFUSED = "Twilio no longer accepts these keys. Connect the phone again.";
 
 interface StoredSettings {
   version: 1;
@@ -176,6 +185,8 @@ export class HubAlerts {
   private readonly polls = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly tests = new Map<string, PhoneTestRun>();
   private readonly testPolls = new Set<ReturnType<typeof setTimeout>>();
+  /** A test call being placed (before it is kept): one at a time. */
+  private testStarting = false;
   private telegramLoop?: AbortController;
   private telegramToken?: string;
   private closed = false;
@@ -443,9 +454,11 @@ export class HubAlerts {
         }
         error = failure instanceof AlertChannelError ? failure.message : "Telegram could not be reached.";
         this.log("hub.alert.telegram.failed", { alertId, message: messageOf(failure) });
+        await this.telegramDelivered(telegram.token, failure);
         break;
       }
     }
+    if (sentAt) await this.telegramDelivered(telegram.token);
     await this.serialize(async () => {
       const current = await this.record(alertId);
       if (!current) return;
@@ -547,7 +560,7 @@ export class HubAlerts {
         this.log("hub.alert.call.failed", { alertId, attempt, message: messageOf(error) });
         if (error instanceof AlertChannelError && error.badCredentials) {
           void this.updateSettings((current) => {
-            if (current.phone) current.phone.error = "Twilio no longer accepts these keys. Connect the phone again.";
+            if (current.phone) current.phone.error = PHONE_KEYS_REFUSED;
           }).catch(() => undefined);
         }
         this.afterCallEnded(record);
@@ -718,8 +731,19 @@ export class HubAlerts {
    *  answering) proves calls reach her. Its result lands in the settings when
    *  it is a test of exactly the saved phone. */
   private async startTest(credentials: { accountSid: string; authToken: string }, from: string, to: string): Promise<PhoneTestRun | undefined> {
-    // One test call at a time: each is billed, and two would ring at once.
-    if ([...this.tests.values()].some((run) => run.result.state === "calling")) return undefined;
+    // One test call at a time: each is billed, and two would ring at once
+    // (one whose end never came stops counting once no call could last).
+    const now = this.now().getTime();
+    if (this.testStarting || [...this.tests.values()].some((run) => run.result.state === "calling" && now - run.startedAt < URGENT_ALERT_TEST_STALE_MS)) return undefined;
+    this.testStarting = true;
+    try {
+      return await this.placeTest(credentials, from, to);
+    } finally {
+      this.testStarting = false;
+    }
+  }
+
+  private async placeTest(credentials: { accountSid: string; authToken: string }, from: string, to: string): Promise<PhoneTestRun> {
     const settings = await this.settings();
     const mode = this.callMode(settings);
     const run: PhoneTestRun = {
@@ -739,15 +763,11 @@ export class HubAlerts {
     try {
       const call = await new TwilioClient(credentials.accountSid, credentials.authToken, this.fetchImpl, this.options.twilioBaseUrl)
         .createCall({ to, from, twiml, ringSeconds: URGENT_ALERT_RING_SECONDS });
+      if (!call.sid) throw new AlertChannelError("Twilio did not say which call it placed.", 0);
       run.sid = call.sid;
     } catch (error) {
       run.result = { state: "failed", at: this.now().toISOString(), error: error instanceof AlertChannelError ? error.message : "Twilio could not be reached." };
-      if (error instanceof AlertChannelError && error.badCredentials) {
-        // The saved keys refused: the phone needs attention, as after an alert's call.
-        await this.updateSettings((current) => {
-          if (current.phone && sameKeys(current.phone, credentials)) current.phone.error = "Twilio no longer accepts these keys. Connect the phone again.";
-        }).catch(() => undefined);
-      }
+      await this.keysRefused(error, credentials);
       await this.recordTest(run);
       return run;
     }
@@ -759,7 +779,8 @@ export class HubAlerts {
   private keepTest(run: PhoneTestRun): void {
     const now = this.now().getTime();
     for (const [id, kept] of this.tests) {
-      if (now - kept.startedAt > PHONE_TEST_KEEP_MS && kept.result.state !== "calling") this.tests.delete(id);
+      // A call still "calling" after an hour never ended for us: gone too.
+      if (now - kept.startedAt > PHONE_TEST_KEEP_MS) this.tests.delete(id);
     }
     // Over the limit: the oldest finished ones go (one at a time rings, so
     // there is always a finished one to drop).
@@ -949,7 +970,9 @@ export class HubAlerts {
         await bot.answerCallbackQuery(callback.id, "Connected").catch(() => undefined);
       } else {
         await this.updateSettings((current) => {
-          if (current.telegram?.token === telegram.token && current.telegram.connected) current.telegram.lastTest = { at: this.now().toISOString(), gotIt: true };
+          if (current.telegram?.token === telegram.token && current.telegram.connected && nonce === current.telegram.lastTestNonce) {
+            current.telegram.lastTest = { at: this.now().toISOString(), gotIt: true };
+          }
         });
         if (callback.message) await bot.editMessageText(chatId, callback.message.message_id, "Test alert from AccordAgents: it works.").catch(() => undefined);
         await bot.answerCallbackQuery(callback.id, "It works").catch(() => undefined);
@@ -1014,10 +1037,18 @@ export class HubAlerts {
         const settings = await this.settings();
         const telegram = settings.telegram;
         if (!telegram?.connected || telegram.chatId === undefined) return failure("not_set_up", "Telegram is not connected.");
-        await this.bot(telegram).sendMessage(telegram.chatId, "Test alert from AccordAgents. Press Got it to check the button.",
-          [{ text: "Got it", data: `test:${randomBytes(9).toString("base64url")}` }]);
+        const nonce = randomBytes(9).toString("base64url");
+        try {
+          await this.bot(telegram).sendMessage(telegram.chatId, "Test alert from AccordAgents. Press Got it to check the button.", [{ text: "Got it", data: `test:${nonce}` }]);
+        } catch (error) {
+          await this.telegramDelivered(telegram.token, error);
+          throw error;
+        }
         const sent = await this.updateSettings((current) => {
-          if (current.telegram?.token === telegram.token) current.telegram.lastTest = { at: this.now().toISOString(), gotIt: false };
+          if (current.telegram?.token !== telegram.token) return;
+          current.telegram.lastTest = { at: this.now().toISOString(), gotIt: false };
+          current.telegram.lastTestNonce = nonce;
+          delete current.telegram.deliveryError;
         });
         return { ok: true, value: this.settingsView(sent) };
       }
@@ -1025,8 +1056,10 @@ export class HubAlerts {
         const credentials = await this.phoneCredentials(request);
         if (!credentials) return failure("invalid_request", "Paste the Account SID (starts with AC) and the Auth Token from the Twilio Console.");
         const client = new TwilioClient(credentials.accountSid, credentials.authToken, this.fetchImpl, this.options.twilioBaseUrl);
-        const account = await client.account();
-        const numbers = await client.incomingNumbers();
+        const [account, numbers] = await Promise.all([client.account(), client.incomingNumbers()]).catch(async (error: unknown) => {
+          await this.keysRefused(error, credentials);
+          throw error;
+        });
         const trial = account.type === "Trial";
         // A trial calls only verified numbers: the dialog checks hers against them.
         const verified = trial ? await client.verifiedNumbers().catch(() => undefined) : undefined;
@@ -1043,7 +1076,10 @@ export class HubAlerts {
         const credentials = await this.phoneCredentials(request);
         if (!credentials) return failure("invalid_request", "Paste the Account SID and the Auth Token first.");
         const client = new TwilioClient(credentials.accountSid, credentials.authToken, this.fetchImpl, this.options.twilioBaseUrl);
-        const available = await client.availableNumber("US");
+        const available = await client.availableNumber("US").catch(async (error: unknown) => {
+          await this.keysRefused(error, credentials);
+          throw error;
+        });
         if (!available) return failure("channel_failed", "Twilio has no US number to offer right now. Try again later, or buy one in the Twilio Console.");
         const bought = await client.buyNumber(available);
         return { ok: true, value: { number: bought.phoneNumber } };
@@ -1055,7 +1091,11 @@ export class HubAlerts {
         const to = normalizePhoneNumber(String(request.to ?? ""));
         if (!from) return failure("invalid_request", "Choose the number to call from.");
         if (!to) return failure("invalid_request", "Enter your phone with the country code, like +357 99 123456.");
-        const account = await new TwilioClient(credentials.accountSid, credentials.authToken, this.fetchImpl, this.options.twilioBaseUrl).account();
+        const account = await new TwilioClient(credentials.accountSid, credentials.authToken, this.fetchImpl, this.options.twilioBaseUrl).account()
+          .catch(async (error: unknown) => {
+            await this.keysRefused(error, credentials);
+            throw error;
+          });
         const keys = { accountSid: credentials.accountSid, authToken: credentials.authToken };
         // The test call she just made of exactly this (or the one kept for it).
         const tried = typeof request.testId === "string" ? this.tests.get(request.testId) : undefined;
@@ -1113,6 +1153,31 @@ export class HubAlerts {
     return phone ? { accountSid: phone.accountSid, authToken: phone.authToken, saved: true } : undefined;
   }
 
+  /** Twilio refused keys that are the saved ones: the phone needs attention
+   *  (as after an alert's call), not only this one request. */
+  private async keysRefused(error: unknown, credentials: { accountSid: string; authToken: string }): Promise<void> {
+    if (!(error instanceof AlertChannelError) || !error.badCredentials) return;
+    await this.updateSettings((current) => {
+      if (current.phone && sameKeys(current.phone, credentials)) current.phone.error = PHONE_KEYS_REFUSED;
+    }).catch((failure: unknown) => this.log("hub.alert.phone.mark-failed", { message: messageOf(failure) }));
+  }
+
+  /** How the last message to her chat went: a refusal (her chat, not the
+   *  network or Telegram's own trouble) says Telegram needs attention until a
+   *  message goes through again. */
+  private async telegramDelivered(token: string, failure?: unknown): Promise<void> {
+    const status = failure instanceof AlertChannelError ? failure.status : 0;
+    const refused = status >= 400 && status < 500 && status !== 429;
+    if (failure !== undefined && !refused) return;
+    const settings = await this.settings();
+    const wanted = refused ? `Telegram refused the last message (${(failure as AlertChannelError).message.replace(/^Telegram: /, "")}). Connect Telegram again.` : undefined;
+    if (settings.telegram?.token !== token || settings.telegram.deliveryError === wanted) return;
+    await this.updateSettings((current) => {
+      if (current.telegram?.token !== token) return;
+      if (wanted) current.telegram.deliveryError = wanted; else delete current.telegram.deliveryError;
+    }).catch((error: unknown) => this.log("hub.alert.telegram.mark-failed", { message: messageOf(error) }));
+  }
+
   private callMode(settings: StoredSettings): "keypad" | "answer" {
     return !this.options.embedded && (this.options.publicUrlOverride || settings.publicUrl) ? "keypad" : "answer";
   }
@@ -1126,7 +1191,7 @@ export class HubAlerts {
           connected: settings.telegram.connected,
           ...(settings.telegram.step ? { step: settings.telegram.step } : {}),
           ...(settings.telegram.startCode ? { startCode: settings.telegram.startCode } : {}),
-          ...(settings.telegram.error ? { error: settings.telegram.error } : {}),
+          ...(settings.telegram.error || settings.telegram.deliveryError ? { error: settings.telegram.error ?? settings.telegram.deliveryError } : {}),
           ...(settings.telegram.lastTest ? { lastTest: { ...settings.telegram.lastTest } } : {})
         }
       } : {}),

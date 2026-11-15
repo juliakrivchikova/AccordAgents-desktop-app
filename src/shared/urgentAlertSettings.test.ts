@@ -44,11 +44,15 @@ test("each channel's status, never Ready beside an error or before a call reache
   assert.equal(alertsTelegramStatus({ telegram }), "ready");
 
   assert.equal(alertsPhoneStatus(base), "not-set-up");
-  assert.equal(alertsPhoneStatus({ phone }), "not-tested");
-  assert.equal(alertsPhoneStatus({ phone: { ...phone, lastTest: { state: "no-answer", at: today } } }), "not-tested");
-  assert.equal(alertsPhoneStatus({ phone: { ...phone, lastTest: { state: "pressed", at: today } } }), "ready");
-  assert.equal(alertsPhoneStatus({ phone: { ...phone, lastTest: { state: "answered", at: today } } }), "ready");
-  assert.equal(alertsPhoneStatus({ phone: { ...phone, error: "keys", lastTest: { state: "pressed", at: today } } }), "attention");
+  assert.equal(alertsPhoneStatus({ callMode: "keypad", phone }), "not-tested");
+  assert.equal(alertsPhoneStatus({ callMode: "keypad", phone: { ...phone, lastTest: { state: "no-answer", at: today } } }), "not-tested");
+  assert.equal(alertsPhoneStatus({ callMode: "keypad", phone: { ...phone, lastTest: { state: "pressed", at: today } } }), "ready");
+  assert.equal(alertsPhoneStatus({ callMode: "answer", phone: { ...phone, lastTest: { state: "answered", at: today } } }), "ready");
+  assert.equal(alertsPhoneStatus({ callMode: "keypad", phone: { ...phone, error: "keys", lastTest: { state: "pressed", at: today } } }), "attention");
+  // Answered while 1 could not be heard; now 1 ends a call: that is not proven.
+  const answeredBefore = { callMode: "keypad" as const, phone: { ...phone, lastTest: { state: "answered" as const, at: today } } };
+  assert.equal(alertsPhoneStatus(answeredBefore), "not-tested");
+  assert.match(alertsPhoneTestLine(answeredBefore, now) ?? "", /by answering · calls now ask for 1, so test again$/);
 });
 
 test("the last test of each channel, in words", () => {

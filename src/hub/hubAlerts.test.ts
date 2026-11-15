@@ -49,8 +49,9 @@ function outside() {
   const outcomes: string[] = [];
   /** Telegram answers "too many requests" to this many sends first. */
   const throttle = { sends: 0 };
-  /** Twilio fails this many call-status reads (a server that lost Twilio). */
-  const faults = { callStatus: 0 };
+  /** Twilio fails this many call-status reads (a server that lost Twilio);
+   *  `blocked`: she blocked the bot, so Telegram refuses messages to her. */
+  const faults = { callStatus: 0, blocked: false };
   const buttonsOf = (markup: unknown) => ((markup as { inline_keyboard?: Array<Array<{ callback_data: string }>> } | undefined)?.inline_keyboard ?? [])
     .flat().map((button) => button.callback_data);
   const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
@@ -70,6 +71,7 @@ function outside() {
         return ok(ready);
       }
       if (method === "sendMessage") {
+        if (faults.blocked) return new Response(JSON.stringify({ ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" }), { status: 403 });
         if (throttle.sends > 0) {
           throttle.sends -= 1;
           return new Response(JSON.stringify({ ok: false, error_code: 429, description: "Too Many Requests: retry after 1" }), { status: 429 });
@@ -410,6 +412,15 @@ test("one test call at a time, and one left ringing by a restart does not stay \
   await first.storage.hub().setOwner({ deviceId: first.owner.originId, publicKeyDerBase64: first.owner.publicKeyDerBase64, name: "Mac", addedAt: new Date().toISOString() });
   await connectPhone(first);
   first.world.outcomes.push(...Array(50).fill("in-progress"));
+  // Two asked at the same moment: one rings, the other is refused.
+  const both = await Promise.all([1, 2].map(() => first.alerts(first.owner, { action: "phone.try", from: "+14155550134", to: "+35799123342" })));
+  assert.deepEqual(both.map((answer) => answer.ok).sort(), [false, true]);
+  assert.equal(first.world.calls.length, 1, "one call placed");
+  first.world.calls[0].status = "completed";
+  await until(async () => {
+    const tried = both.find((answer) => answer.ok) as { value?: { testId: string } };
+    return (await first.alerts<{ test: { state: string } }>(first.owner, { action: "phone.try-status", testId: tried.value!.testId })).value?.test.state !== "calling";
+  }, "the first test to end");
   const ringing = await first.alerts<UrgentAlertSettingsView>(first.owner, { action: "phone.test" });
   assert.equal(ringing.value?.phone?.lastTest?.state, "calling");
   // A second one while it rings is refused: each is billed, two would ring at once.
@@ -439,6 +450,23 @@ test("saved keys Twilio refuses on a test call mark the phone, so the page never
   assert.equal(pasted.ok, true);
   await until(async () => (await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: pasted.value!.testId })).value?.test.state !== "calling", "the pasted-keys test to end");
   assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.phone?.lastTest?.state, "failed", "still the saved keys' own result");
+});
+
+test("saved keys Twilio refuses when the phone dialog opens mark the phone too", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  await connectPhone(h);
+  const stored = (await h.storage.hub().document("urgent-alerts"))?.value as { phone: { authToken: string } };
+  stored.phone.authToken = "b".repeat(32);
+  await h.storage.hub().setDocument("urgent-alerts", stored, new Date().toISOString());
+  // Pasted keys refused say so, and leave the saved phone as it is.
+  const pasted = await h.alerts(h.owner, { action: "phone.check", accountSid: ACCOUNT_SID, authToken: "c".repeat(32) });
+  assert.equal(pasted.error?.code, "channel_failed");
+  assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.phone?.error, undefined);
+  for (const action of ["phone.check", "phone.buy"]) {
+    const refused = await h.alerts(h.owner, { action });
+    assert.equal(refused.error?.code, "channel_failed", action);
+  }
+  assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.phone?.error, "Twilio no longer accepts these keys. Connect the phone again.");
 });
 
 test("a test call's key press: a wrong token or test is refused, 2 repeats, and 1 stays 1 when the call ends", async (t) => {
@@ -513,6 +541,36 @@ test("Telegram keeps its last test: the connect check, then Send test message an
   const message = await until(() => h.world.sent.filter((item) => item.text.startsWith("Test alert")).pop(), "the test message");
   h.world.press(message.buttons[0], message.messageId);
   await until(async () => (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram?.lastTest?.gotIt, "Got it on the test");
+
+  // Got it on an older test message does not stand for the newest one.
+  await h.alerts(h.owner, { action: "telegram.test" });
+  h.world.press(message.buttons[0], message.messageId);
+  await until(() => h.world.edits.filter((item) => item.messageId === message.messageId).length >= 2, "the old message's Got it to be answered");
+  assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram?.lastTest?.gotIt, false);
+});
+
+test("Telegram refusing her chat (the bot blocked) shows Telegram needs attention until a message goes through", async (t) => {
+  const h = await hub(t, { minuteMs: 60_000 });
+  await seedChat(h);
+  await connectTelegram(h);
+  h.world.faults.blocked = true;
+  const raised = await raise(h, h.owner);
+  const alertId = raised.value!.alertId;
+  await until(async () => (await stateOf(h, alertId))?.telegram?.error, "the alert's Telegram to fail");
+  const broken = (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram;
+  assert.equal(broken?.connected, true, "the bot stays connected: it still hears her");
+  assert.equal(broken?.error, "Telegram refused the last message (Forbidden: bot was blocked by the user). Connect Telegram again.");
+  // Send test message is refused the same way and keeps it said.
+  const refused = await h.alerts(h.owner, { action: "telegram.test" });
+  assert.equal(refused.error?.code, "channel_failed");
+  // The reader still runs: Got it on the alert's card is not lost for it.
+  h.world.faults.blocked = false;
+  const sent = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "telegram.test" });
+  assert.equal(sent.ok, true);
+  assert.equal(sent.value?.telegram?.error, undefined, "a message went through again");
+  const message = await until(() => h.world.sent.filter((item) => item.text.startsWith("Test alert")).pop(), "the test message");
+  h.world.press(message.buttons[0], message.messageId);
+  await until(async () => (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram?.lastTest?.gotIt, "Got it read by the bot");
 });
 
 test("closing the card in the app counts as Got it and folds it; the phone closes it too, a machine never", async (t) => {
