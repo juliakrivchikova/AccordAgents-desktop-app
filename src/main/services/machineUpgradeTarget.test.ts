@@ -17,8 +17,8 @@ function harness(overrides: Partial<MachineUpgradeTargetOptions> = {}) {
   const options: MachineUpgradeTargetOptions = {
     machineInstanceId: async () => INSTANCE,
     configuredInstanceId: async () => INSTANCE,
-    renewAccess: async (instanceId) => {
-      calls.push(`renew:${instanceId}`);
+    ensureExistingWorker: async (instanceId, opts) => {
+      calls.push(`renew:${instanceId}:start=${String(opts.start)}`);
       return { host: "54.235.55.108", user: "ubuntu", identityFile: "/key", hostKeyAlias: ALIAS };
     },
     inspect: async () => {
@@ -36,12 +36,13 @@ test("an update to the app's AWS instance renews this computer's SSH access befo
   // only from the address her computer had when it last started it.
   const h = harness();
   const target = await machineUpgradeTarget(record(), h.options);
-  assert.deepEqual(h.calls, [`renew:${INSTANCE}`]);
+  // Never with a start: an instance that stopped meanwhile stays stopped.
+  assert.deepEqual(h.calls, [`renew:${INSTANCE}:start=false`]);
   assert.deepEqual(target, { host: "54.235.55.108", user: "ubuntu", port: undefined, identityFile: "/key", hostKeyAlias: ALIAS });
 });
 
 test("access that cannot be renewed still sends the update to the address AWS names, and says why", async () => {
-  const h = harness({ renewAccess: async () => { throw new Error("UnauthorizedOperation: ec2:AuthorizeSecurityGroupIngress"); } });
+  const h = harness({ ensureExistingWorker: async () => { throw new Error("UnauthorizedOperation: ec2:AuthorizeSecurityGroupIngress"); } });
   const target = await machineUpgradeTarget(record(), h.options);
   assert.deepEqual(h.calls, ["inspect"]);
   assert.equal(target?.host, "54.235.55.108");
@@ -51,7 +52,7 @@ test("access that cannot be renewed still sends the update to the address AWS na
 
 test("a stopped instance is not started for an update: it waits", async () => {
   const stopped = async (): Promise<never> => { throw new Error("The AWS instance is stopped, so nothing was started."); };
-  const h = harness({ renewAccess: stopped, inspect: stopped });
+  const h = harness({ ensureExistingWorker: stopped, inspect: stopped });
   assert.equal(await machineUpgradeTarget(record(), h.options), undefined);
 });
 
@@ -72,8 +73,25 @@ test("a machine that is not on AWS keeps the address it was set up with", async 
 test("a machine matched only by its pinned host key is renewed too, and keeps its saved address when AWS cannot name one", async () => {
   const renewed = harness({ machineInstanceId: async () => undefined });
   assert.equal((await machineUpgradeTarget(record(), renewed.options))?.host, "54.235.55.108");
-  assert.deepEqual(renewed.calls, [`renew:${INSTANCE}`]);
+  assert.deepEqual(renewed.calls, [`renew:${INSTANCE}:start=false`]);
   const down = async (): Promise<never> => { throw new Error("throttled"); };
-  const h = harness({ machineInstanceId: async () => undefined, renewAccess: down, inspect: down });
+  const h = harness({ machineInstanceId: async () => undefined, ensureExistingWorker: down, inspect: down });
   assert.equal((await machineUpgradeTarget(record(), h.options))?.host, "54.0.0.1");
+});
+
+test("settings that cannot be read do not hold the update: it goes to the address AWS names", async () => {
+  const h = harness({ configuredInstanceId: async () => { throw new Error("settings busy"); } });
+  assert.equal((await machineUpgradeTarget(record(), h.options))?.host, "54.235.55.108");
+  assert.deepEqual(h.calls, ["inspect"]);
+});
+
+test("a renewal still retrying SSH after the wait does not hold the update", async () => {
+  // On a network where SSH does not get through, the renewal retries for
+  // minutes; the update goes on and fails with its own error instead.
+  const h = harness({ accessWaitMs: 20, ensureExistingWorker: () => new Promise(() => undefined) });
+  const started = Date.now();
+  assert.equal((await machineUpgradeTarget(record(), h.options))?.host, "54.235.55.108");
+  assert.ok(Date.now() - started < 2_000);
+  assert.deepEqual(h.calls, ["inspect"]);
+  assert.equal(h.logs[0]?.event, "machines.auto-upgrade.access-renew-slow");
 });

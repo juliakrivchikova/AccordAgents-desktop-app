@@ -432,6 +432,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       const status = await serverChatLink.status();
       return status ? { queued: status.queued, ...(status.lastError ? { lastError: status.lastError } : {}) } : undefined;
     },
+    pauseServerFeed: () => serverChatLink.pauseFeed(),
     // Its members' live progress, for the phone (the server keeps none of it).
     postProgress: async (frames) => { await hubClient.postProgress(frames); },
     // These two reach `scriptService`, built below: the desktop's greeting and
@@ -523,10 +524,23 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   // while this machine stops; its settings and its project folder as the
   // computer last published them.
   chatService.setServerTurnPreparation(async (turn) => {
-    if (!host.takesNewWork()) return false;
-    await machineSettings.refresh("turn");
-    await chatService.refreshMachineRepository(turn.conversationId);
-    return host.takesNewWork();
+    if (!host.takesNewWork()) {
+      host.noteWorkDeclined();
+      return false;
+    }
+    // A refresh that failed does not hold the turn (it runs on what this
+    // machine has), but whether the machine takes work is asked again.
+    try {
+      await machineSettings.refresh("turn");
+      await chatService.refreshMachineRepository(turn.conversationId);
+    } catch (error) {
+      log("machine.server-turn.prepare-error", { conversationId: turn.conversationId, message: error instanceof Error ? error.message : String(error) });
+    }
+    if (!host.takesNewWork()) {
+      host.noteWorkDeclined();
+      return false;
+    }
+    return true;
   });
   host.onFenceLifted(() => {
     void chatService.resumeServerTurns().catch((error) => log("machine.server-turns.resume-error", { message: error instanceof Error ? error.message : String(error) }));

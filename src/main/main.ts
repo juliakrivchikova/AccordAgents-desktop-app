@@ -3331,7 +3331,7 @@ void app.whenReady().then(async () => {
       resolveTarget: (record) => machineUpgradeTarget(record, {
         machineInstanceId: async (machineId) => (await settingsService.listMachines()).find((item) => item.id === machineId)?.awsInstanceId,
         configuredInstanceId: async () => (await settingsService.getPublicSettings()).cloudRuns.awsHandle?.instanceId,
-        renewAccess: (instanceId) => cloudRunAwsService.ensureExistingWorkerForRun(instanceId, { start: false }),
+        ensureExistingWorker: (instanceId, options) => cloudRunAwsService.ensureExistingWorkerForRun(instanceId, options),
         inspect: () => cloudRunAwsService.workerForInspection(),
         log: (event, payload) => { void debugLogService.write(event, payload); }
       }),

@@ -3,8 +3,12 @@ import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { StorageService } from "./storage";
 import { MachineIdleScheduler } from "./machineIdle";
+
+const execFileAsync = promisify(execFile);
 
 test("maintenance and idle drain cannot both acquire the local power gate", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "machine-power-gate-"));
@@ -71,7 +75,12 @@ test("the idle stop commits on a machine database without the tables of the old 
     const dbPath = path.join(dir, "state.sqlite3");
     const storage = new StorageService({ dbPath });
     await storage.init();
-    await storage.dropLegacyEventTables({ keepBodies: false });
+    // What an older machine kept, then dropped by this version.
+    await execFileAsync("sqlite3", [dbPath, `create table native_commands (command_id text primary key, phase text);
+      create table chat_events (event_id text primary key, kind text);
+      create table device_event_inbox (event_id text primary key, applied_at text);`]);
+    const dropped = await storage.dropLegacyEventTables({ keepBodies: false });
+    assert.ok(dropped.tables.includes("native_commands"));
     const power = storage.machinePower();
     await power.write({ version: 1, bootId: "boot", idleSinceMs: 100 });
     assert.equal(await power.tryFence("boot", 10_000, "idle-stop", 100), true);

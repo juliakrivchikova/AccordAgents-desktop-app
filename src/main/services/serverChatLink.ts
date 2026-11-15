@@ -537,6 +537,13 @@ export class ServerChatLink {
     this.machineNames = new Map((await this.options.machineNames()).map((machine) => [machine.id, machine.name]));
   }
 
+  /** Stops reading the server's feed until the returned resume is called
+   *  (an idle stop): see HubOpsClient.pauseReading. Not linked: nothing is
+   *  read, nothing to pause. */
+  async pauseFeed(): Promise<() => void> {
+    return this.ops ? this.ops.pauseReading() : () => undefined;
+  }
+
   /** Whether writes reach the server now (undefined: not linked). */
   reachable(): boolean | undefined {
     if (!this.ops) return undefined;
