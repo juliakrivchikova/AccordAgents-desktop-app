@@ -985,6 +985,13 @@ export class ChatService {
     return [...new Set([...this.activeRunIds, ...this.chatRunMeta.keys(), ...requestRunners])];
   }
 
+  /** Turns the server asked of members here that this device took and that
+   *  are not over: from before they become a run (reading the chat,
+   *  preparing the machine) to their end. */
+  serverTurnsStarting(): number {
+    return this.pendingServerTurns.size;
+  }
+
   onParticipantRunSettled(listener: (run: ChatParticipantRun) => Promise<void> | void): () => void {
     this.participantRunSettledListeners.add(listener);
     return () => { this.participantRunSettledListeners.delete(listener); };

@@ -311,6 +311,8 @@ export class HubOpsClient {
   private readerWake?: () => void;
   /** Cancels the feed read in flight (a stop does not wait out its long wait). */
   private reading_?: AbortController;
+  /** A batch of the feed being applied now. */
+  private applying?: Promise<void>;
   /** Operations in a request on its way now: they cannot be taken back. */
   private readonly inFlight = new Set<string>();
   /** Operations their writer took back: never sent, even if a batch read
@@ -338,6 +340,10 @@ export class HubOpsClient {
      *  tried again, like a request that did not get through. */
     beforeSend?(ops: HubOp[], client: HubClient): Promise<boolean>;
     onAnswered?(row: HubClientOpRow, outcome: HubOpOutcome): void;
+    /** True while the feed is not to be read (a machine stopping): what the
+     *  server places meanwhile stays unread there, as for a device that is
+     *  away, and this device's place in the feed does not move past it. */
+    readPaused?(): boolean;
     log(event: string, payload: Record<string, unknown>): void;
     now?: () => number;
   }) {}
@@ -672,14 +678,32 @@ export class HubOpsClient {
     });
   }
 
-  /** Wakes the reader early (the link came back). */
+  /** Wakes the reader early (the link came back, a pause ended). */
   wakeReader(): void {
     this.readerWake?.();
+  }
+
+  /** Once readPaused says so: ends the read in flight and waits for a batch
+   *  being applied (at most `maxWaitMs`), so nothing more is taken in. */
+  async quiesceReading(maxWaitMs = 60_000): Promise<void> {
+    this.reading_?.abort();
+    const applying = this.applying;
+    if (!applying) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      applying.catch(() => undefined),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, maxWaitMs); timer.unref?.(); })
+    ]);
+    if (timer) clearTimeout(timer);
   }
 
   private async readLoop(): Promise<void> {
     let failures = 0;
     while (!this.stopped) {
+      if (this.options.readPaused?.()) {
+        await this.sleep(60_000);
+        continue;
+      }
       const client = this.options.client();
       if (!client) {
         await this.sleep(2_000);
@@ -701,10 +725,17 @@ export class HubOpsClient {
           this.reading_ = undefined;
           break;
         }
+        if (this.options.readPaused?.()) {
+          this.reading_ = undefined;
+          continue;
+        }
         try {
           page = await client.feed(cursor, HUB_FEED_WAIT_MAX_MS, cancel.signal);
         } catch (error) {
           if (this.stopped) return;
+          // Ended for a pause (even one already over): not a failure, and
+          // nothing of it is taken.
+          if (cancel.signal.aborted || this.options.readPaused?.()) continue;
           if (!(error instanceof HubHttpError && error.status === 410)) throw error;
           this.options.log("hub.feed.gone", { after: cursor });
           const head = await this.options.resync();
@@ -714,8 +745,16 @@ export class HubOpsClient {
         } finally {
           if (this.reading_ === cancel) this.reading_ = undefined;
         }
+        // Paused just as the page came: it stays unread and is read again.
+        if (this.options.readPaused?.()) continue;
         if (page.entries.length > 0) {
-          await this.options.apply(page.entries);
+          const applying = this.options.apply(page.entries);
+          this.applying = applying;
+          try {
+            await applying;
+          } finally {
+            if (this.applying === applying) this.applying = undefined;
+          }
           await this.options.cursor.set(String(page.entries[page.entries.length - 1].seq));
           this.noteApplied(page.entries[page.entries.length - 1].seq);
         }
