@@ -61,3 +61,20 @@ test("lease expiry never revives an old operation and external activity resets a
     now = 2200; await scheduler.check(); assert.equal(stops, 1); scheduler.close();
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test("the idle stop commits on a machine database without the tables of the old signed-event order", async () => {
+  // A machine set up since the server owns the chats never had them, and an
+  // older one dropped them: the final idle check named one and failed every
+  // stop, so the instance stayed on for good.
+  const dir = await mkdtemp(path.join(tmpdir(), "machine-power-legacy-dropped-"));
+  try {
+    const dbPath = path.join(dir, "state.sqlite3");
+    const storage = new StorageService({ dbPath });
+    await storage.init();
+    await storage.dropLegacyEventTables({ keepBodies: false });
+    const power = storage.machinePower();
+    await power.write({ version: 1, bootId: "boot", idleSinceMs: 100 });
+    assert.equal(await power.tryFence("boot", 10_000, "idle-stop", 100), true);
+    assert.equal(await power.stopFence("boot"), "idle-stop");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

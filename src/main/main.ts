@@ -178,6 +178,7 @@ import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashRepo
 import { isServerUpdateLoaderWindow, openServerUpdateLoader, updateServerBeforeOpening } from "./services/serverUpdateLoader";
 import { ACTIVITY_RECHECK_MS, appHiddenForUpdate, bootstrapAppUpdater, createUpdateRestart, createUpdateRestartGate, currentUpdateWindows, quitAndInstallUpdate, showUpdateRestartPrompt, updatePromptWindowShown } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
+import { machineUpgradeTarget } from "./services/machineUpgradeTarget";
 import { MachineRecoveryService } from "./services/machineRecovery";
 import { MachineInactivityCheck } from "./services/machineInactivity";
 import { isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase, isMachineRecoveryOperation } from "../shared/machineInstall";
@@ -3327,23 +3328,13 @@ void app.whenReady().then(async () => {
       listInstalls: () => settingsService.listMachineInstalls(),
       machineName: async (machineId) => (await settingsService.listMachines()).find((machine) => machine.id === machineId)?.name,
       machineActivity: (machineId) => link.machineActivity(machineId),
-      resolveTarget: async (record) => {
-        // An AWS instance gets a new public address every stop/start; the
-        // record remembers the one the last setup used. Ask AWS for the
-        // running instance's address without waking anything.
-        const machine = (await settingsService.listMachines()).find((item) => item.id === record.machineId);
-        // A machine installed over an instance's pinned host key is on that
-        // instance too, even when its record does not name it.
-        const instanceId = machine?.awsInstanceId ?? /^accordagents-(i-[a-f0-9]+)$/.exec(record.target?.hostKeyAlias ?? "")?.[1];
-        if (!instanceId) return record.target;
-        const worker = await cloudRunAwsService.workerForInspection().catch(() => undefined);
-        if (!worker?.host || worker.hostKeyAlias !== `accordagents-${instanceId}`) {
-          // Only a machine known to be on the app's instance waits for AWS to
-          // name its address; one matched by its host key keeps the saved one.
-          return machine?.awsInstanceId ? undefined : record.target;
-        }
-        return { host: worker.host, user: worker.user, port: worker.port, identityFile: worker.identityFile, hostKeyAlias: worker.hostKeyAlias };
-      },
+      resolveTarget: (record) => machineUpgradeTarget(record, {
+        machineInstanceId: async (machineId) => (await settingsService.listMachines()).find((item) => item.id === machineId)?.awsInstanceId,
+        configuredInstanceId: async () => (await settingsService.getPublicSettings()).cloudRuns.awsHandle?.instanceId,
+        renewAccess: (instanceId) => cloudRunAwsService.ensureExistingWorkerForRun(instanceId, { start: false }),
+        inspect: () => cloudRunAwsService.workerForInspection(),
+        log: (event, payload) => { void debugLogService.write(event, payload); }
+      }),
       payloadReady: () => {
         const payload = machineInstallerService.readPayload();
         return payload.ok ? { ok: true } : { ok: false, message: payload.message };
