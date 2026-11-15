@@ -65,7 +65,7 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
       await evaluate(`Array.from(document.querySelectorAll(".mobile-chat-row")).find(row => row.textContent.includes(${JSON.stringify("Chat " + id)})).click()`);
     };
     await pairPage(app, { hub, siteOrigin: origin });
-    await until("document.querySelectorAll('.mobile-chat-row').length === 2");
+    await until("document.querySelectorAll('#chat-list .mobile-chat-group[data-section=\"project\"] .mobile-chat-row').length === 2");
     await ingest(batch("A", [event("a", "ONLY_CHAT_A")]));
     await ingest(batch("B", [event("b", "ONLY_CHAT_B")]));
     await select("A");
@@ -317,7 +317,7 @@ test("the PWA keeps persisted and rendered messages in their own chat", { timeou
       assert.equal(await ingest(batch(undefined, [event("unlabelled", "UNLABELLED_PACKET")])), 0);
       await app.send("Page.reload", { ignoreCache: true });
       await reopenAfterStart("A");
-      await until("document.querySelectorAll('.mobile-chat-row').length === 2");
+      await until("document.querySelectorAll('#chat-list .mobile-chat-group[data-section=\"project\"] .mobile-chat-row').length === 2");
       for (const id of ["A", "B"]) {
         await select(id);
         await until(`document.getElementById("message-list").textContent.includes(${JSON.stringify("ONLY_CHAT_" + id)})`);

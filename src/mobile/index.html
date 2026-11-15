@@ -12,7 +12,7 @@
          draws a grey letter (the User, 2026-11-01). The Mac app's icon
          (assets/icon.icns), full bleed at 180px: iOS rounds the corners. -->
     <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-    <link rel="stylesheet" href="mobile-app.css?v=2026-11-12-urgent-alerts" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-11-15-pinned-recents" />
   </head>
   <body>
     <div class="mobile-stage">
@@ -45,6 +45,20 @@
           <button id="enable-alerts" class="mobile-alerts-banner" type="button" hidden>Enable message alerts</button>
           <div id="chat-list-refresh" class="pull-refresh" aria-hidden="true"><span class="pull-refresh-spinner"></span></div>
           <div id="chat-list" class="mobile-chat-list mscroll" aria-live="polite"></div>
+          <!-- A long press on a chat: what can be done to it from the list. -->
+          <div id="chat-actions-sheet" class="members-sheet chat-actions-sheet" role="dialog" aria-modal="true" aria-labelledby="chat-actions-title" hidden>
+            <div class="members-sheet-backdrop" data-chat-actions-close="1"></div>
+            <div class="members-sheet-panel">
+              <div class="members-sheet-grip" aria-hidden="true"></div>
+              <div class="members-sheet-head">
+                <strong id="chat-actions-title">Chat</strong>
+                <button id="chat-actions-close" class="members-sheet-close" type="button">Cancel</button>
+              </div>
+              <div class="chat-actions-list">
+                <button id="chat-actions-pin" class="chat-actions-row" type="button">Pin</button>
+              </div>
+            </div>
+          </div>
         </section>
         <!-- What members are doing across every chat, from what the server
              already delivered: runs in progress, questions waiting for you,
@@ -355,15 +369,15 @@
       </main>
     </div>
     <!-- The database description both the page and the service worker load. -->
-    <script src="mobile-db.js?v=2026-11-12-urgent-alerts" defer></script>
-    <script src="jsqr.js?v=2026-11-12-urgent-alerts" defer></script>
+    <script src="mobile-db.js?v=2026-11-15-pinned-recents" defer></script>
+    <script src="jsqr.js?v=2026-11-15-pinned-recents" defer></script>
     <!-- How the phone talks to the User's server (signed requests carrying
          its operations), and the rules shared with the desktop verbatim
          (avatars, timeline visibility), bundled from src/shared by the mobile
          build. -->
-    <script src="mobile-hub-client.js?v=2026-11-12-urgent-alerts" defer></script>
-    <script src="mobile-shared.js?v=2026-11-12-urgent-alerts" defer></script>
-    <script src="mobile-activity.js?v=2026-11-12-urgent-alerts" defer></script>
-    <script src="mobile-app.js?v=2026-11-12-urgent-alerts" defer></script>
+    <script src="mobile-hub-client.js?v=2026-11-15-pinned-recents" defer></script>
+    <script src="mobile-shared.js?v=2026-11-15-pinned-recents" defer></script>
+    <script src="mobile-activity.js?v=2026-11-15-pinned-recents" defer></script>
+    <script src="mobile-app.js?v=2026-11-15-pinned-recents" defer></script>
   </body>
 </html>

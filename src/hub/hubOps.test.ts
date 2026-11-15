@@ -101,6 +101,39 @@ test("a write is accepted once, with its place; the same id again is a duplicate
   assert.equal((page.body.conversation.metadata as Record<string, unknown>).warnings, undefined);
 });
 
+test("pinning a chat, from any device, orders the User's list without making the chat recent", async (t) => {
+  const h = await hub(t);
+  const chat = id("chat");
+  await h.write(h.owner, createChat(chat));
+  const before = (await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`)).body.conversation.updatedAt;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const pin = await h.write(h.phone, { opId: id("op"), kind: "conversation.update", conversationId: chat, metadata: { pinned: true, pinnedAt: "2026-11-15T10:00:00.000Z" } });
+  assert.equal(pin.body.results[0].status, "accepted");
+  let page = await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`);
+  assert.equal(page.body.conversation.metadata.pinned, true, "shared with every device");
+  assert.equal(page.body.conversation.metadata.pinnedAt, "2026-11-15T10:00:00.000Z");
+  assert.equal(page.body.conversation.updatedAt, before, "not activity: the chat keeps its time");
+  const unpin = await h.write(h.owner, { opId: id("op"), kind: "conversation.update", conversationId: chat, removedMetadataKeys: ["pinned", "pinnedAt"] });
+  assert.equal(unpin.body.results[0].status, "accepted");
+  page = await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`);
+  assert.equal(page.body.conversation.metadata.pinned, undefined);
+  assert.equal(page.body.conversation.updatedAt, before);
+  // Only a real pin is taken: anything else sent for it reaches no device.
+  await h.write(h.phone, { opId: id("op"), kind: "conversation.update", conversationId: chat, metadata: { pinned: "yes", pinnedAt: "x".repeat(10_000) } });
+  page = await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`);
+  assert.deepEqual([page.body.conversation.metadata.pinned, page.body.conversation.metadata.pinnedAt], [undefined, undefined]);
+  assert.equal(page.body.conversation.updatedAt, before, "a refused pin is no activity either");
+  await h.write(h.phone, { opId: id("op"), kind: "conversation.update", conversationId: chat, metadata: { pinned: true, pinnedAt: "not a time" } });
+  page = await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`);
+  assert.deepEqual([page.body.conversation.metadata.pinned, page.body.conversation.metadata.pinnedAt], [true, undefined]);
+  assert.equal(page.body.conversation.updatedAt, before);
+  // Anything else changed with it is activity as before.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await h.write(h.owner, { opId: id("op"), kind: "conversation.update", conversationId: chat, title: "Renamed", metadata: { pinned: true, pinnedAt: "2026-11-15T11:00:00.000Z" } });
+  page = await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`);
+  assert.ok(page.body.conversation.updatedAt > before, "a rename moves the chat's time");
+});
+
 test("every device may change the chat's own fields; only a member's home writes the member's messages", async (t) => {
   const h = await hub(t);
   const chat = id("chat");

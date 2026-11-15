@@ -33,6 +33,11 @@ export interface MobileChatListItem {
    *  them now. The phone drops a pending card it holds that is not here: the
    *  batch that closed it can be lost, and nothing else would ever say so. */
   pendingCards?: MobileControlCard[];
+  /** Pinned by the User, and when: the phone lists it under Pinned. */
+  pinned?: boolean;
+  pinnedAt?: string;
+  /** A member's choice card in it waits for the User's answer. */
+  waitingChoice?: boolean;
 }
 
 export interface MobileChatMember {

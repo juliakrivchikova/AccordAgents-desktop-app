@@ -1309,6 +1309,8 @@
         who: typeof chat.who === "string" ? chat.who : undefined,
         updatedAt: typeof chat.updatedAt === "string" ? chat.updatedAt : nowIso(),
         running: chat.running === true,
+        ...(chat.pinned === true ? { pinned: true, ...(typeof chat.pinnedAt === "string" ? { pinnedAt: chat.pinnedAt } : {}) } : {}),
+        ...(chat.waitingChoice === true ? { waitingChoice: true } : {}),
         participants: Array.isArray(chat.participants) ? chat.participants.filter(function (item) {
           return typeof item === "string" && item.trim();
         }).slice(0, 4) : [],
@@ -2726,6 +2728,13 @@
     }
     if (entry.kind === "card.answer") return { ...base, kind: "card.answer", cardId: payload.cardId, answer: payload.answer || {} };
     if (entry.kind === "message.remove") return { ...base, kind: "message.remove", messageId: payload.messageId };
+    // Pinning orders the User's list on every device; the server keeps the
+    // chat's time for it.
+    if (entry.kind === "conversation.pin") {
+      return payload.pinned === true
+        ? { ...base, kind: "conversation.update", metadata: { pinned: true, pinnedAt: payload.pinnedAt } }
+        : { ...base, kind: "conversation.update", removedMetadataKeys: ["pinned", "pinnedAt"] };
+    }
     throw new Error("This phone cannot send a " + String(entry.kind || "change") + ".");
   }
 
@@ -3024,6 +3033,9 @@
       text = String(payload.conversation && payload.conversation.title || "");
     } else if (entry.kind === "message.remove") {
       text = "Dismiss a finished-answering note";
+    } else if (entry.kind === "conversation.pin") {
+      const chat = loadChats().find(function (item) { return item.id === entry.conversationId; });
+      text = (payload.pinned === true ? "Pin " : "Unpin ") + (chat && chat.title ? "“" + chat.title + "”" : "a chat");
     }
     return {
       entryId: entry.eventId,
@@ -3124,6 +3136,7 @@
     if (record.kind === "card.answer") return "Answer: ";
     if (record.kind === "message.system") return "Note ";
     if (record.kind === "conversation.create") return "New chat: ";
+    if (record.kind === "conversation.pin") return "";
     return "Message ";
   }
 
@@ -6039,6 +6052,73 @@
     return cut || "Asked you a question";
   }
 
+  /** How many chats Recents lists, as Claude's does (and the desktop). */
+  const RECENT_CHAT_LIMIT = 20;
+  /** The folds of the two lists above the projects (never a project's name). */
+  const PINNED_GROUP_KEY = "\u0000pinned";
+  const RECENTS_GROUP_KEY = "\u0000recents";
+  /** A pin this phone asked for, shown until the server's list says so: kept
+   *  while it waits to be sent (no connection), dropped when the server
+   *  refused it, and once taken, kept this long at most for the list to
+   *  catch up. */
+  const PIN_OVERRIDE_TAKEN_MS = 60_000;
+  const pinOverrides = new Map();
+
+  function chatWithPinOverride(chat) {
+    const override = pinOverrides.get(chat.id);
+    if (!override) return chat;
+    const sent = override.eventId ? outboxStatusById.get(override.eventId) : undefined;
+    const status = sent && sent.status;
+    if (status === OUTBOX_SENT && !override.takenAt) override.takenAt = Date.now();
+    const settled = (chat.pinned === true) === override.pinned;
+    const refused = status === OUTBOX_REFUSED || status === OUTBOX_SUPERSEDED;
+    const stale = override.takenAt !== undefined && Date.now() - override.takenAt > PIN_OVERRIDE_TAKEN_MS;
+    if (settled || refused || stale) {
+      pinOverrides.delete(chat.id);
+      return chat;
+    }
+    if (override.pinned) return { ...chat, pinned: true, pinnedAt: override.pinnedAt };
+    const { pinned: _pinned, pinnedAt: _pinnedAt, ...rest } = chat;
+    return rest;
+  }
+
+  function chatTimeValue(value) {
+    const time = Date.parse(value || "");
+    return Number.isFinite(time) ? time : 0;
+  }
+
+  /** Pinned chats in the order they were pinned (a new one goes to the
+   *  bottom; one whose time is not known, last), as the desktop orders them
+   *  (pinnedChatSummaries). */
+  function pinnedChats(chats) {
+    const pinnedAtValue = function (chat) {
+      const value = Date.parse(chat.pinnedAt || "");
+      return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+    };
+    return chats.filter(function (chat) { return chat.pinned === true; }).sort(function (left, right) {
+      return pinnedAtValue(left) - pinnedAtValue(right) ||
+        String(left.title).localeCompare(String(right.title)) || String(left.id).localeCompare(String(right.id));
+    });
+  }
+
+  /** The newest chats of every project, pinned ones included, as the desktop
+   *  lists them (recentChatSummaries). */
+  function recentChats(chats) {
+    return chats.slice().sort(function (left, right) {
+      return chatTimeValue(right.updatedAt) - chatTimeValue(left.updatedAt) ||
+        String(left.title).localeCompare(String(right.title)) || String(left.id).localeCompare(String(right.id));
+    }).slice(0, RECENT_CHAT_LIMIT);
+  }
+
+  /** The one mark a chat shows (the User, 2026-11-15): a member at work, else
+   *  a question waiting for her, else something new, else none. */
+  function chatRowMark(chat, unread) {
+    if (chat.running) return "running";
+    if (chat.waitingChoice === true) return "waiting";
+    if (unread) return "unread";
+    return "none";
+  }
+
   function renderChatList() {
     const listContainer = document.getElementById("chat-list");
     if (listContainer) {
@@ -6048,7 +6128,7 @@
     if (!container) {
       return;
     }
-    const allChats = loadChats();
+    const allChats = loadChats().map(chatWithPinOverride);
     const chats = filterChatsByQuery(allChats, chatSearchQuery);
     const activeId = selectedConversationId();
     const unreadIds = loadUnreadConversationIds();
@@ -6070,6 +6150,8 @@
           snippet: chat.snippet,
           who: chat.who,
           running: chat.running,
+          pinned: chat.pinned === true ? chat.pinnedAt || true : false,
+          waitingChoice: chat.waitingChoice === true,
           updatedAt: chat.updatedAt
         };
       })
@@ -6102,11 +6184,24 @@
       container.append(empty);
       return;
     }
+    // Pinned and Recents above the projects, as on the desktop (the User,
+    // 2026-11-15); a chat may be listed in all three. A search lists by
+    // project only, each match once.
+    const sections = [];
+    if (!searching) {
+      const pinned = pinnedChats(chats);
+      if (pinned.length) sections.push({ key: PINNED_GROUP_KEY, name: "Pinned", kind: "pinned", items: pinned });
+      sections.push({ key: RECENTS_GROUP_KEY, name: "Recents", kind: "recents", items: recentChats(chats) });
+    }
     for (const group of groupedChats(chats)) {
-      const collapsed = collapsedGroups.indexOf(group.name) >= 0;
+      sections.push({ key: group.name, name: group.name, kind: "project", items: group.items });
+    }
+    for (const group of sections) {
+      const collapsed = collapsedGroups.indexOf(group.key) >= 0;
       const title = document.createElement(searching ? "div" : "button");
       title.className = "mobile-chat-group-title";
       title.dataset.group = group.name;
+      title.dataset.section = group.kind;
       const name = document.createElement("span");
       name.className = "mobile-chat-group-name";
       name.textContent = group.name;
@@ -6136,7 +6231,7 @@
       }
       if (!searching) {
         title.addEventListener("click", function () {
-          toggleChatGroupCollapsed(group.name);
+          toggleChatGroupCollapsed(group.key);
           renderChatList();
         });
       }
@@ -6146,57 +6241,201 @@
       }
       const list = document.createElement("div");
       list.className = "mobile-chat-group";
+      list.dataset.section = group.kind;
       for (const chat of group.items) {
-        const row = document.createElement("button");
-        const unread = unreadIds.indexOf(chat.id) >= 0;
-        row.className = "mobile-chat-row" + (chat.id === activeId ? " is-active" : "") + (unread ? " is-unread" : "");
-        row.type = "button";
-        row.dataset.conversationId = chat.id;
-        if (unread) {
-          row.dataset.unread = "1";
-        }
-        row.addEventListener("click", function () {
-          openConversation(chat.id);
-        });
-        // No avatars on a row (the User, 2026-11-01): the title, the last
-        // line and when.
-        const copy = document.createElement("div");
-        copy.className = "mobile-chat-copy";
-        const titleLine = document.createElement("div");
-        titleLine.className = "mobile-chat-title-line";
-        const strong = document.createElement("strong");
-        strong.textContent = chat.title;
-        titleLine.append(strong);
-        if (chat.running) {
-          const live = document.createElement("span");
-          live.className = "mobile-live-dot";
-          titleLine.append(live);
-        }
-        if (unread) {
-          const dot = document.createElement("span");
-          dot.className = "mobile-unread-dot";
-          dot.setAttribute("aria-label", "New activity");
-          titleLine.append(dot);
-        }
-        const snippet = document.createElement("div");
-        snippet.className = "mobile-chat-snippet";
-        if (chat.who) {
-          const who = document.createElement("b");
-          who.textContent = chat.who;
-          snippet.append(who);
-        }
-        const snippetText = document.createElement("span");
-        snippetText.textContent = snippetDisplayText(chat);
-        snippet.append(snippetText);
-        copy.append(titleLine, snippet);
-        const when = document.createElement("div");
-        when.className = "mobile-chat-time";
-        when.textContent = relativeTime(chat.updatedAt);
-        row.append(copy, when);
-        list.append(row);
+        list.append(chatListRow(chat, activeId, unreadIds));
       }
       container.append(title, list);
     }
+  }
+
+  /** One chat's row, the same wherever it is listed. */
+  function chatListRow(chat, activeId, unreadIds) {
+    const row = document.createElement("button");
+    const unread = unreadIds.indexOf(chat.id) >= 0;
+    const mark = chatRowMark(chat, unread);
+    // One mark per row (the User, 2026-11-15): the unread look only when news is the mark.
+    row.className = "mobile-chat-row" + (chat.id === activeId ? " is-active" : "") + (mark === "unread" ? " is-unread" : "");
+    row.type = "button";
+    row.dataset.conversationId = chat.id;
+    if (mark === "unread") {
+      row.dataset.unread = "1";
+    }
+    if (chat.pinned === true) {
+      row.dataset.pinned = "1";
+    }
+    row.dataset.mark = mark;
+    row.addEventListener("click", function () {
+      // The tap that ended a long press opened the chat's actions, not the chat.
+      if (row.dataset.longPressed === "1") {
+        delete row.dataset.longPressed;
+        return;
+      }
+      openConversation(chat.id);
+    });
+    wireChatRowLongPress(row, chat.id);
+    // No avatars on a row (the User, 2026-11-01): the title, the last
+    // line and when.
+    const copy = document.createElement("div");
+    copy.className = "mobile-chat-copy";
+    const titleLine = document.createElement("div");
+    titleLine.className = "mobile-chat-title-line";
+    const strong = document.createElement("strong");
+    strong.textContent = chat.title;
+    titleLine.append(strong);
+    if (mark === "running") {
+      const live = document.createElement("span");
+      live.className = "mobile-live-dot";
+      titleLine.append(live);
+    } else if (mark === "waiting") {
+      const dot = document.createElement("span");
+      dot.className = "mobile-waiting-dot";
+      dot.setAttribute("aria-label", "Waiting for your answer");
+      titleLine.append(dot);
+    } else if (mark === "unread") {
+      const dot = document.createElement("span");
+      dot.className = "mobile-unread-dot";
+      dot.setAttribute("aria-label", "New activity");
+      titleLine.append(dot);
+    }
+    const snippet = document.createElement("div");
+    snippet.className = "mobile-chat-snippet";
+    if (chat.who) {
+      const who = document.createElement("b");
+      who.textContent = chat.who;
+      snippet.append(who);
+    }
+    const snippetText = document.createElement("span");
+    snippetText.textContent = snippetDisplayText(chat);
+    snippet.append(snippetText);
+    copy.append(titleLine, snippet);
+    const when = document.createElement("div");
+    when.className = "mobile-chat-time";
+    when.textContent = relativeTime(chat.updatedAt);
+    row.append(copy, when);
+    return row;
+  }
+
+  // --- a chat's actions (a long press on its row) ----------------------------
+
+  const CHAT_LONG_PRESS_MS = 500;
+  const CHAT_LONG_PRESS_SLOP_PX = 10;
+  let chatActionsConversationId;
+  let chatActionsOpenedAt = 0;
+  /** A tap on the sheet this soon after it opened is the long press ending. */
+  const CHAT_ACTIONS_SETTLE_MS = 400;
+
+  /** Held still for a moment, the row opens the chat's actions; moved, it
+   *  scrolls the list as before. A right click (or a desktop browser's
+   *  long press) does the same. */
+  function wireChatRowLongPress(row, conversationId) {
+    let timer;
+    let startX = 0;
+    let startY = 0;
+    const cancel = function () {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    };
+    row.addEventListener("touchstart", function (event) {
+      if (event.touches.length !== 1) return;
+      delete row.dataset.longPressed;
+      startX = event.touches[0].clientX;
+      startY = event.touches[0].clientY;
+      cancel();
+      timer = setTimeout(function () {
+        timer = undefined;
+        row.dataset.longPressed = "1";
+        openChatActions(conversationId, true);
+      }, CHAT_LONG_PRESS_MS);
+    }, { passive: true });
+    row.addEventListener("touchmove", function (event) {
+      if (!timer || event.touches.length !== 1) return;
+      const dx = event.touches[0].clientX - startX;
+      const dy = event.touches[0].clientY - startY;
+      if (Math.abs(dx) > CHAT_LONG_PRESS_SLOP_PX || Math.abs(dy) > CHAT_LONG_PRESS_SLOP_PX) cancel();
+    }, { passive: true });
+    // The finger lifting after a long press must not also tap what opened
+    // under it (the sheet's backdrop or its Pin row).
+    row.addEventListener("touchend", function (event) {
+      cancel();
+      if (row.dataset.longPressed === "1" && event.cancelable) event.preventDefault();
+    });
+    row.addEventListener("touchcancel", cancel);
+    row.addEventListener("contextmenu", function (event) {
+      event.preventDefault();
+      cancel();
+      openChatActions(conversationId, false);
+    });
+  }
+
+  /** `byTouch`: opened by a finger still on the glass, whose lifting must not
+   *  tap the sheet. */
+  function openChatActions(conversationId, byTouch) {
+    const sheet = document.getElementById("chat-actions-sheet");
+    const title = document.getElementById("chat-actions-title");
+    const pin = document.getElementById("chat-actions-pin");
+    const chat = loadChats().map(chatWithPinOverride).find(function (item) { return item.id === conversationId; });
+    if (!sheet || !title || !pin || !chat) return;
+    chatActionsConversationId = conversationId;
+    title.textContent = chat.title || "Chat";
+    pin.textContent = chat.pinned === true ? "Unpin" : "Pin";
+    pin.dataset.pinned = chat.pinned === true ? "1" : "0";
+    if (byTouch) chatActionsOpenedAt = Date.now();
+    else if (sheet.hidden) chatActionsOpenedAt = 0;
+    sheet.hidden = false;
+    pin.focus({ preventScroll: true });
+    // Haptics where the phone offers them: the press was taken.
+    if (navigator.vibrate) {
+      try { navigator.vibrate(10); } catch { /* not offered */ }
+    }
+  }
+
+  function closeChatActions() {
+    const sheet = document.getElementById("chat-actions-sheet");
+    if (sheet) sheet.hidden = true;
+    chatActionsConversationId = undefined;
+  }
+
+  function wireChatActionsSheet() {
+    const sheet = document.getElementById("chat-actions-sheet");
+    if (!sheet) return;
+    const settling = function () { return Date.now() - chatActionsOpenedAt < CHAT_ACTIONS_SETTLE_MS; };
+    sheet.addEventListener("click", function (event) {
+      const target = event.target;
+      if (settling()) return;
+      if (target instanceof Element && target.closest("[data-chat-actions-close]")) closeChatActions();
+    });
+    document.getElementById("chat-actions-close")?.addEventListener("click", closeChatActions);
+    document.getElementById("chat-actions-pin")?.addEventListener("click", function (event) {
+      if (settling()) {
+        event.stopPropagation();
+        return;
+      }
+      const conversationId = chatActionsConversationId;
+      const pinned = event.currentTarget instanceof HTMLElement && event.currentTarget.dataset.pinned === "1";
+      closeChatActions();
+      if (conversationId) void setChatPinnedFromPhone(conversationId, !pinned);
+    });
+  }
+
+  /** Pins or unpins a chat for every device: shown here at once, sent to the
+   *  User's server like everything else the phone writes. */
+  async function setChatPinnedFromPhone(conversationId, pinned) {
+    const pinnedAt = nowIso();
+    const override = { pinned: pinned, pinnedAt: pinnedAt };
+    pinOverrides.set(conversationId, override);
+    renderChatList();
+    try {
+      const entry = await createOutboxEvent({ conversationId: conversationId, kind: "conversation.pin", payload: { pinned: pinned, pinnedAt: pinnedAt } })
+        .then(persistOutboundEvent);
+      override.eventId = entry.eventId;
+    } catch (error) {
+      pinOverrides.delete(conversationId);
+      renderChatList();
+      recordRelayDebug({ event: "chat-pin-not-queued", message: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    await sendNow();
   }
 
   // Treat "within this many pixels of the end" as reading the latest message.
@@ -11136,6 +11375,7 @@
     wireChatSearch();
     wireHomeDock();
     wireMembersSheet();
+    wireChatActionsSheet();
     wireSendLog();
     wireNewChat();
     wireImageViewer();

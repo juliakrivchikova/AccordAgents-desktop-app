@@ -2,7 +2,7 @@ import { isMemberRestartTurnRequest } from "../shared/memberRestart";
 import { isMemberSessionExportTurnRequest } from "../shared/memberSessionMove";
 import { CommandError } from "../main/services/command";
 import { createHash, randomUUID } from "node:crypto";
-import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "../main/services/chatChanges";
+import { CHAT_LIST_ORDER_METADATA_KEYS, LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "../main/services/chatChanges";
 import { claimOutcomeFor } from "../main/services/hubOpsStore";
 import { HubArtifacts } from "./hubArtifacts";
 import { approvedMessageId, askNeedsApproval, changesMembers, keptApproval, machineMayAsk, runsOnMachine, scopeMachineConversationUpdate } from "./hubMachineScope";
@@ -324,14 +324,21 @@ export class HubOps {
         else if (asked.repoPath !== undefined) conversation.repoPath = asked.repoPath;
         for (const [key, value] of Object.entries(metadata)) (conversation.metadata as Record<string, unknown>)[key] = value;
         for (const key of removed) delete (conversation.metadata as Record<string, unknown>)[key];
-        conversation.updatedAt = acceptedAt;
+        // Pinning orders the User's list; it is not activity in the chat, so
+        // the chat keeps its time (and its place among the recent ones). An
+        // update left with nothing but a pin, or with nothing at all once the
+        // keys it may not change were taken out, does not move it either.
+        const pinOnly = asked.title === undefined && asked.repoPath === undefined &&
+          [...Object.keys(metadata), ...removed].every((key) => CHAT_LIST_ORDER_METADATA_KEYS.includes(key)) &&
+          (Object.keys(asked.metadata ?? {}).length > 0 || (asked.removedMetadataKeys ?? []).length > 0);
+        if (!pinOnly) conversation.updatedAt = acceptedAt;
         const done = accepted({
           kind: "conversation.update",
           ...(asked.title !== undefined ? { title: asked.title } : {}),
           ...(asked.repoPath !== undefined ? { repoPath: asked.repoPath } : {}),
           ...(Object.keys(metadata).length ? { metadata } : {}),
           ...(removed.length ? { removedMetadataKeys: removed } : {}),
-          updatedAt: acceptedAt
+          updatedAt: conversation.updatedAt
         });
         // What gave a lasting change gives it once, noted in the same commit
         // as the change it allowed.
@@ -892,6 +899,15 @@ function reject(opId: string, reason: string): Outcome {
 function sharedMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
   const shared: Record<string, unknown> = {};
   for (const key of SHARED_CONVERSATION_METADATA_KEYS) if (metadata[key] !== undefined) shared[key] = metadata[key];
+  // A pin is `true` and when it was made; anything else a device sends for
+  // it is not taken (it would reach every device's list).
+  if (shared.pinned !== undefined && shared.pinned !== true) {
+    delete shared.pinned;
+    delete shared.pinnedAt;
+  }
+  if (shared.pinnedAt !== undefined && !(typeof shared.pinnedAt === "string" && shared.pinnedAt.length <= 64 && Number.isFinite(Date.parse(shared.pinnedAt)))) {
+    delete shared.pinnedAt;
+  }
   return shared;
 }
 

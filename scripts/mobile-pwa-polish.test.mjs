@@ -103,7 +103,7 @@ test("PWA polish: search, times, unread, members, earlier history, slash menu, r
     await new Promise((r) => setTimeout(r, 2000));
 
     // --- the list, and searching it --------------------------------------
-    const rowTitles = async () => await evaluate(`(() => [...document.querySelectorAll("#chat-list .mobile-chat-row strong")].map((n) => n.textContent))()`);
+    const rowTitles = async () => await evaluate(`(() => [...document.querySelectorAll('#chat-list .mobile-chat-group[data-section="project"] .mobile-chat-row strong')].map((n) => n.textContent))()`);
     await waitFor(rowTitles, (titles) => titles.length === 3, "the three chats from the desktop are listed");
     // Paired for every chat, the phone starts new ones as the computer does
     // (the User, 2026-10-29; scripts/mobile-new-chat.test.mjs drives it).
@@ -121,9 +121,9 @@ test("PWA polish: search, times, unread, members, earlier history, slash menu, r
 
     // --- unread: news in a chat that is not on screen ----------------------
     await hub.addMessages(CHAT_B, [message("b-001", 20, DREW, "Fixed the crash for real.")]);
-    const unreadRows = async () => await evaluate(`(() => [...document.querySelectorAll('#chat-list .mobile-chat-row[data-unread="1"]')].map((n) => n.dataset.conversationId))()`);
+    const unreadRows = async () => await evaluate(`(() => [...document.querySelectorAll('#chat-list .mobile-chat-group[data-section="project"] .mobile-chat-row[data-unread="1"]')].map((n) => n.dataset.conversationId))()`);
     await waitFor(unreadRows, (ids) => ids.length === 1 && ids[0] === CHAT_B, "a reply landing in a chat that is not open marks it unread");
-    assert.equal(await evaluate(`(() => document.querySelectorAll('#chat-list .mobile-chat-row[data-conversation-id="${CHAT_B}"] .mobile-unread-dot').length)()`), 1, "the row shows the dot");
+    assert.equal(await evaluate(`(() => document.querySelectorAll('#chat-list .mobile-chat-group[data-section="project"] .mobile-chat-row[data-conversation-id="${CHAT_B}"] .mobile-unread-dot').length)()`), 1, "the row shows the dot");
     await waitFor(() => evaluate(`(() => window.__badge.at(-1))()`), (n) => n === 1, "the icon number is the count of unread chats");
     await evaluate(`(() => { document.querySelector('#chat-list .mobile-chat-row[data-conversation-id="${CHAT_B}"]').click(); return true; })()`);
     await waitFor(() => evaluate(`(() => document.getElementById("timeline-screen").classList.contains("is-active"))()`), Boolean, "the chat opens");

@@ -65,6 +65,8 @@ import type {
   ReadChatAttachmentRequest,
   RenameChatConversationRequest,
   SetChatArchivedRequest,
+  SetChatPinnedRequest,
+  ChatPinState,
   RepoFileSearchRequest,
   RespondToChatAppToolApprovalRequest,
   RespondToChatChoiceRequest,
@@ -2479,6 +2481,13 @@ function registerIpc(): void {
   });
   ipcMain.handle("chat:set-archived", async (_event, request: SetChatArchivedRequest) => {
     return chatService.setArchived(request);
+  });
+  ipcMain.handle("chat:set-pinned", async (_event, request: SetChatPinnedRequest): Promise<ChatPinState | undefined> => {
+    const saved = await chatService.setPinned(request);
+    if (!saved) return undefined;
+    const pinned = saved.metadata.pinned === true;
+    const pinnedAt = typeof saved.metadata.pinnedAt === "string" ? saved.metadata.pinnedAt : undefined;
+    return { conversationId: saved.id, pinned, ...(pinned && pinnedAt ? { pinnedAt } : {}) };
   });
   ipcMain.handle("chat:delete", async (_event, request: DeleteChatConversationRequest) => {
     return chatService.deleteConversation(request);
