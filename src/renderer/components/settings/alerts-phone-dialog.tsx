@@ -118,7 +118,7 @@ export function PhoneConnectDialog(props: {
     if (asked !== opening.current) return;
     if (bought.ok) {
       setBusy(undefined);
-      setChecked((current) => current ? { ...current, numbers: [...current.numbers, bought.value.number] } : current);
+      setChecked((current) => current && !current.numbers.includes(bought.value.number) ? { ...current, numbers: [...current.numbers, bought.value.number] } : current);
       return took([bought.value.number]);
     }
     // The answer was lost, but Twilio may have sold the number all the same:

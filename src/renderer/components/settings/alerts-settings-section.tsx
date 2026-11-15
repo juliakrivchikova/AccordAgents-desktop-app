@@ -67,11 +67,16 @@ export function AlertsSettingsSection(): JSX.Element {
   // ringing, a bot waiting for Start or Got it, a test message's Got it.
   // A bot she left unfinished, or one Telegram refused (pressing Start in it
   // ends that), is looked at for a while after the page opened.
+  // The while counts from when the error (or the unfinished bot) appeared,
+  // not from when the page opened.
+  const telegramWaits = Boolean(telegram && (!telegram.connected || telegram.error));
+  const telegramError = telegram?.error;
+  useEffect(() => { if (telegramWaits) setWatchFrom(Date.now()); }, [telegramWaits, telegramError]);
   const testSentAt = telegram?.lastTest && !telegram.lastTest.gotIt ? Date.parse(telegram.lastTest.at) : Number.NaN;
   const phoneTestAt = settings && alertsPhoneTesting(settings) ? Date.parse(settings.phone?.lastTest?.at ?? "") : Number.NaN;
   const deadlines = [
     phoneTestAt + URGENT_ALERT_TEST_STALE_MS,
-    telegram && (!telegram.connected || telegram.error) ? watchFrom + TELEGRAM_FINISH_WATCH_MS : Number.NaN,
+    telegramWaits ? watchFrom + TELEGRAM_FINISH_WATCH_MS : Number.NaN,
     testSentAt + TELEGRAM_TEST_WATCH_MS
   ].filter((at) => Number.isFinite(at) && at > Date.now());
   const watchUntil = deadlines.length ? Math.max(...deadlines) : undefined;

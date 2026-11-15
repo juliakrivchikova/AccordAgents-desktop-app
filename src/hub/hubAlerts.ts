@@ -191,11 +191,15 @@ export class HubAlerts {
   private readonly testPolls = new Set<ReturnType<typeof setTimeout>>();
   /** A test call being placed (before it is kept): one at a time. */
   private testStarting = false;
-  /** The newest test call: only its result is the phone's last test (an
-   *  older one that ends late does not overwrite it). */
-  private latestTest: string | undefined;
+  /** The newest test call of each account, number and phone: only its result
+   *  is that phone's last test (an older one that ends late does not
+   *  overwrite it; a test of other numbers does not stop it). */
+  private readonly latestTests = new Map<string, string>();
   /** Numbers bought per Twilio account, kept for PURCHASE_REUSE_MS. */
   private readonly purchases = new Map<string, { at: number; authToken: string; number: Promise<string> }>();
+  /** When the message whose outcome Telegram's state last took was sent: a
+   *  late answer about an older message does not undo a newer one's. */
+  private telegramOutcomeAt = 0;
   private telegramLoop?: AbortController;
   private telegramToken?: string;
   private closed = false;
@@ -243,6 +247,7 @@ export class HubAlerts {
     for (const poll of this.polls.values()) clearTimeout(poll);
     this.polls.clear();
     for (const poll of this.testPolls) clearTimeout(poll);
+    this.purchases.clear();
     this.testPolls.clear();
     this.telegramLoop?.abort();
     await Promise.race([
@@ -446,9 +451,11 @@ export class HubAlerts {
     let sentAt: string | undefined;
     let error: string | undefined;
     let messageId: number | undefined;
+    let attemptAt = Date.now();
     // A failure that may pass (no network, too many requests, Telegram's own
     // trouble) is tried again a few times; a refusal is not.
     for (let attempt = 1; ; attempt += 1) {
+      attemptAt = Date.now();
       try {
         messageId = await this.bot(telegram).sendMessage(telegram.chatId, telegramText(record, settings), [{ text: "Got it", data: `ack:${alertId}` }]);
         sentAt = this.now().toISOString();
@@ -463,11 +470,11 @@ export class HubAlerts {
         }
         error = failure instanceof AlertChannelError ? failure.message : "Telegram could not be reached.";
         this.log("hub.alert.telegram.failed", { alertId, message: messageOf(failure) });
-        await this.telegramDelivered(telegram.token, failure);
+        await this.telegramDelivered(telegram.token, attemptAt, failure);
         break;
       }
     }
-    if (sentAt) await this.telegramDelivered(telegram.token);
+    if (sentAt) await this.telegramDelivered(telegram.token, attemptAt);
     await this.serialize(async () => {
       const current = await this.record(alertId);
       if (!current) return;
@@ -766,7 +773,7 @@ export class HubAlerts {
       startedAt: this.now().getTime()
     };
     this.keepTest(run);
-    this.latestTest = run.id;
+    this.latestTests.set(testKeyOf(run), run.id);
     const twiml = mode === "keypad"
       ? keypadTwiml(PHONE_TEST_SPOKEN, `${this.publicBase(settings)}${HUB_ALERTS_TWILIO_PATH}?${new URLSearchParams({ test: run.id, token: run.token }).toString()}`)
       : readOutTwiml(PHONE_TEST_SPOKEN);
@@ -834,7 +841,7 @@ export class HubAlerts {
 
   /** A test of exactly the saved account, number and phone is its last test. */
   private async recordTest(run: PhoneTestRun): Promise<void> {
-    if (run.id !== this.latestTest) return;
+    if (this.latestTests.get(testKeyOf(run)) !== run.id) return;
     await this.updateSettings((current) => {
       const phone = current.phone;
       if (phone && sameKeys(phone, run.credentials) && phone.from === run.from && phone.to === run.to) phone.lastTest = { ...run.result };
@@ -958,13 +965,14 @@ export class HubAlerts {
       } else if (telegram.chatId === message.chat.id) {
         // Start again in her chat (after unblocking the bot, say): a message
         // that goes through ends what a refused one said.
+        const sentAt = Date.now();
         try {
           await bot.sendMessage(message.chat.id, "This chat is connected: urgent alerts from AccordAgents come here.");
         } catch (error) {
-          await this.telegramDelivered(telegram.token, error);
+          await this.telegramDelivered(telegram.token, sentAt, error);
           throw error;
         }
-        await this.telegramDelivered(telegram.token);
+        await this.telegramDelivered(telegram.token, sentAt);
       }
       return;
     }
@@ -1057,17 +1065,18 @@ export class HubAlerts {
         const telegram = settings.telegram;
         if (!telegram?.connected || telegram.chatId === undefined) return failure("not_set_up", "Telegram is not connected.");
         const nonce = randomBytes(9).toString("base64url");
+        const sentAt = Date.now();
         try {
           await this.bot(telegram).sendMessage(telegram.chatId, "Test alert from AccordAgents. Press Got it to check the button.", [{ text: "Got it", data: `test:${nonce}` }]);
         } catch (error) {
-          await this.telegramDelivered(telegram.token, error);
+          await this.telegramDelivered(telegram.token, sentAt, error);
           throw error;
         }
+        await this.telegramDelivered(telegram.token, sentAt);
         const sent = await this.updateSettings((current) => {
           if (current.telegram?.token !== telegram.token) return;
           current.telegram.lastTest = { at: this.now().toISOString(), gotIt: false };
           current.telegram.lastTestNonce = nonce;
-          delete current.telegram.deliveryError;
         });
         return { ok: true, value: this.settingsView(sent) };
       }
@@ -1148,6 +1157,7 @@ export class HubAlerts {
         return { ok: true, value: this.settingsView(await this.settings()) };
       }
       case "phone.disconnect":
+        this.purchases.clear();
         return { ok: true, value: this.settingsView(await this.updateSettings((current) => { delete current.phone; })) };
       default:
         return failure("invalid_request", `Unknown alert action: ${String((request as { action?: unknown }).action).slice(0, 40)}.`);
@@ -1177,15 +1187,16 @@ export class HubAlerts {
   /** How the last message to her chat went: a refusal (her chat, not the
    *  network or Telegram's own trouble) says Telegram needs attention until a
    *  message goes through again. */
-  private async telegramDelivered(token: string, failure?: unknown): Promise<void> {
+  private async telegramDelivered(token: string, sentAt: number, failure?: unknown): Promise<void> {
     const status = failure instanceof AlertChannelError ? failure.status : 0;
     const refused = status >= 400 && status < 500 && status !== 429;
     if (failure !== undefined && !refused) return;
-    // Decided in the queue, against what is stored then: a refusal and a
-    // later success that cross on the way land in their order.
+    // Decided in the queue, in the order the messages were sent: a late
+    // answer about an older message does not undo what a newer one said.
     await this.updateSettings((current) => {
       const telegram = current.telegram;
-      if (telegram?.token !== token) return false;
+      if (telegram?.token !== token || sentAt < this.telegramOutcomeAt) return false;
+      this.telegramOutcomeAt = sentAt;
       const bot = telegram.botUsername ? `@${telegram.botUsername}` : "your bot";
       const wanted = refused
         ? `Telegram refused the last message (${(failure as AlertChannelError).message.replace(/^Telegram: /, "")}). Open ${bot} in Telegram and press Start, or connect Telegram again.`
@@ -1213,10 +1224,13 @@ export class HubAlerts {
       return (await client.buyNumber(available)).phoneNumber;
     })();
     this.purchases.set(credentials.accountSid, { at: now, authToken: credentials.authToken, number });
-    // Not bought: the next press tries again.
-    number.catch(() => {
+    const forget = () => {
       if (this.purchases.get(credentials.accountSid)?.number === number) this.purchases.delete(credentials.accountSid);
-    });
+    };
+    // Not bought: the next press tries again. Bought: its keys are not kept
+    // in memory past the time a repeat could come.
+    number.catch(forget);
+    setTimeout(forget, PURCHASE_REUSE_MS).unref?.();
     return number;
   }
 
@@ -1392,6 +1406,11 @@ export function callTwiml(mode: "keypad" | "answer", spoken: string, keypadUrl: 
 /** The same Twilio keys (a pasted pair is the saved one only if both match). */
 function sameKeys(left: { accountSid: string; authToken: string }, right: { accountSid: string; authToken: string }): boolean {
   return left.accountSid === right.accountSid && sameSecret(left.authToken, right.authToken);
+}
+
+/** Which phone a test call is a test of: its account, number and phone. */
+function testKeyOf(run: PhoneTestRun): string {
+  return `${run.credentials.accountSid}|${run.from}|${run.to}`;
 }
 
 function sameSecret(left: string, right: string): boolean {

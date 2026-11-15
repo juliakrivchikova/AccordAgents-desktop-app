@@ -53,7 +53,7 @@ function outside() {
   const throttle = { sends: 0 };
   /** Twilio fails this many call-status reads (a server that lost Twilio);
    *  `blocked`: she blocked the bot, so Telegram refuses messages to her. */
-  const faults = { callStatus: 0, blocked: false };
+  const faults = { callStatus: 0, blocked: false, sendDelayMs: 0 };
   const buttonsOf = (markup: unknown) => ((markup as { inline_keyboard?: Array<Array<{ callback_data: string }>> } | undefined)?.inline_keyboard ?? [])
     .flat().map((button) => button.callback_data);
   const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
@@ -73,7 +73,10 @@ function outside() {
         return ok(ready);
       }
       if (method === "sendMessage") {
-        if (faults.blocked) return new Response(JSON.stringify({ ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" }), { status: 403 });
+        // Decided when the message arrives; the answer may come back late.
+        const blockedNow = faults.blocked;
+        if (faults.sendDelayMs) await new Promise((resolve) => setTimeout(resolve, faults.sendDelayMs));
+        if (blockedNow) return new Response(JSON.stringify({ ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" }), { status: 403 });
         if (throttle.sends > 0) {
           throttle.sends -= 1;
           return new Response(JSON.stringify({ ok: false, error_code: 429, description: "Too Many Requests: retry after 1" }), { status: 429 });
@@ -490,6 +493,39 @@ test("a test call that ends long after a newer one does not overwrite the newer 
   older.status = "completed";
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.phone?.lastTest?.state, "pressed");
+});
+
+test("a test of other numbers does not stop the saved phone's own test from recording", async (t) => {
+  const clock = { shift: 0 };
+  const h = await hub(t, { publicUrl: true, clock });
+  await connectPhone(h);
+  h.world.outcomes.push(...Array(400).fill("in-progress"));
+  await h.alerts(h.owner, { action: "phone.test" });
+  const saved = await until(() => h.world.calls[0], "the saved phone's test");
+  clock.shift = 6 * 60_000;
+  const other = await h.alerts(h.owner, { action: "phone.try", from: "+14155550134", to: "+35799000000" });
+  assert.equal(other.ok, true, JSON.stringify(other));
+  await until(() => h.world.calls[1], "the other numbers' test");
+  assert.equal((await pressOnCall(h, saved.twiml, saved.sid)).status, 200);
+  await until(async () => (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.phone?.lastTest?.state === "pressed", "the saved phone's 1");
+});
+
+test("a late refusal about an older message does not undo a newer message that went through", async (t) => {
+  const h = await hub(t, { minuteMs: 60_000 });
+  await seedChat(h);
+  await connectTelegram(h);
+  h.world.faults.blocked = true;
+  h.world.faults.sendDelayMs = 400;
+  const raised = await raise(h, h.owner);
+  // She unblocks and presses Start while the alert's refusal is still on its way.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  h.world.faults.blocked = false;
+  h.world.faults.sendDelayMs = 0;
+  h.world.start();
+  await until(() => h.world.sent.find((item) => item.text.startsWith("This chat is connected")), "Start to be answered");
+  await until(async () => (await stateOf(h, raised.value!.alertId))?.telegram?.error, "the alert's late refusal");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram?.error, undefined);
 });
 
 test("saved keys Twilio refuses when the phone dialog opens mark the phone too", async (t) => {
