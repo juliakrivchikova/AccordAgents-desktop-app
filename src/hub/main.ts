@@ -12,7 +12,7 @@ import { HubAlerts, type HubAlertsOptions } from "./hubAlerts";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
 import { HubRetention, hubRetentionConfig } from "./hubRetention";
 import { HubChangeFeed, HubPhoneApi } from "./hubPhone";
-import { HubProgress, HubWaker, cardNotice, phoneMessageWork, replyNotice } from "./hubPhoneState";
+import { HubProgress, HubWaker, cardNotice, phoneMessageHomes, replyNotice } from "./hubPhoneState";
 import { isDeviceEventBlobReference } from "../shared/deviceEventBlobs";
 import { HubServer } from "./hubServer";
 import { loadOrCreateHubKey, type HubKey } from "./hubKey";
@@ -120,13 +120,7 @@ export function composeHub(options: {
   // Which chats' copies changed, for the phones reading them here.
   const feed = new HubChangeFeed();
   const progress = new HubProgress();
-  const waker = new HubWaker({ storage, endpointOverride: options.ec2Endpoint, log, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
-    // A machine that read its work as it stopped did not take it: a turn
-    // still requested, an answer still not applied. It is woken for it.
-    untaken: async ({ runIds, cardIds }) => {
-      if ((await storage.hubOps().stillRequested(runIds)).length > 0) return true;
-      return (await storage.hubOps().stillAnswered(cardIds)).length > 0;
-    } });
+  const waker = new HubWaker({ storage, endpointOverride: options.ec2Endpoint, log, ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}) });
   // Set below: the push asks the phone views whether a phone is looking.
   let phone: HubPhoneApi | undefined;
   const push = new HubPush({
@@ -171,7 +165,7 @@ export function composeHub(options: {
     // own members (a stopped machine is woken for it).
     if (effect.kind === "card.answer" && effect.card.state === "answered" && effect.card.participantId) {
       void turnHome(effect.card.conversationId, effect.card.participantId).then((machineId) => {
-        if (machineId) waker.noteWork(machineId, entry.seq, { cardId: effect.card.cardId });
+        if (machineId) waker.noteWork(machineId, entry.seq);
       }).catch(() => undefined);
       return;
     }
@@ -179,7 +173,7 @@ export function composeHub(options: {
     // member's request, a compaction) is work for that machine too.
     if (effect.kind === "turn.request" && effect.turn.state === "requested") {
       void turnHome(effect.turn.conversationId, effect.turn.participantId).then((machineId) => {
-        if (machineId) waker.noteWork(machineId, entry.seq, { runId: effect.turn.runId });
+        if (machineId) waker.noteWork(machineId, entry.seq);
       }).catch(() => undefined);
       return;
     }
@@ -202,7 +196,7 @@ export function composeHub(options: {
     }
     // Work for a member on a machine that is not reading: woken soon.
     if (effect.kind === "message.create" && message.role === "user") {
-      for (const { machineId, runId } of phoneMessageWork(conversation, message)) waker.noteWork(machineId, entry.seq, { runId });
+      for (const machineId of phoneMessageHomes(conversation, message)) waker.noteWork(machineId, entry.seq);
     }
   });
   const search = new ChatSearchService(storage);

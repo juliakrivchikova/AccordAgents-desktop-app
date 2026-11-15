@@ -207,8 +207,8 @@ test("a turn being taken, or one turned down while the stop is prepared, keeps t
       capabilities: [{ scope: "device", canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }],
       fingerprint: "race-test", createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString() };
     const client = { on: () => () => undefined, connect: async () => undefined, close: () => undefined, sendCiphertext: async () => [] };
-    let starting = 0; let lifted = 0; let unsentChecks = 0;
-    let onUnsent = () => undefined; let onFenceNative = () => undefined;
+    let starting = 0; let lifted = 0; let unsentChecks = 0; let paused = 0; let resumed = 0;
+    let onUnsent = () => undefined; let onFenceNative = () => undefined; let onPause = () => undefined;
     const chat = {
       respondToChoice: async () => undefined, respondToAppToolApproval: async () => undefined,
       activeParticipantRuns: () => [], liveRunIds: () => [], serverTurnsStarting: () => starting,
@@ -217,7 +217,8 @@ test("a turn being taken, or one turned down while the stop is prepared, keeps t
     host = new MachineHostService(chat, { write: async () => undefined }, {
       pairing, deviceId: identity.originId, appVersion: "test", publicKeyDerBase64: identity.publicKeyDerBase64,
       identity: () => deviceIdentity.getOrCreateDeviceIdentity(), createClient: () => client, storage,
-      unsentServerWrites: async () => { unsentChecks++; onUnsent(); return { queued: 0 }; } });
+      unsentServerWrites: async () => { unsentChecks++; onUnsent(); return { queued: 0 }; },
+      pauseServerFeed: async () => { paused++; onPause(); return () => { resumed++; }; } });
     host.onFenceLifted(() => { lifted += 1; });
     await host.start();
     const power = storage.machinePower();
@@ -231,18 +232,33 @@ test("a turn being taken, or one turned down while the stop is prepared, keeps t
     assert.equal(await prepare(), undefined, "not while a turn is being taken");
     starting = 0;
 
-    // Read and turned down while the stop is checked again.
-    onUnsent = () => { if (!host.takesNewWork()) host.noteWorkDeclined(); };
+    // The batch being applied as the feed paused held a turn, turned down.
+    onPause = () => { assert.equal(host.takesNewWork(), false); host.noteWorkDeclined(); };
     assert.equal(await prepare(), undefined, "a turned-down turn keeps the machine on");
+    assert.equal(paused, 1); assert.equal(resumed, 1, "reading the feed goes on");
     assert.equal(host.takesNewWork(), true); assert.equal(lifted, 1, "the turn is taken up again");
     assert.equal(await power.stopFence("boot"), undefined);
+    onPause = () => undefined;
+
+    // Read and turned down while the stop is checked again.
+    onUnsent = () => { if (!host.takesNewWork()) host.noteWorkDeclined(); };
+    assert.equal(await prepare(), undefined, "turned down during the second look");
+    assert.equal(resumed, 2); assert.equal(lifted, 2);
     onUnsent = () => undefined;
+
+    // The desktop holds turns for an update: the machine stays on.
+    host.holdTurns(new Date(Date.now() + 60_000).toISOString(), "update");
+    assert.equal(await host.hasWorkForIdleStop(), true, "not while the desktop holds its turns");
+    assert.equal(await prepare(), undefined);
+    host.releaseTurns("done");
+    assert.equal(await host.hasWorkForIdleStop(), false);
+    assert.equal(lifted, 3, "turns held meanwhile are taken up");
 
     // One turned down at the last moment, as the fence is written.
     onFenceNative = () => host.noteWorkDeclined();
     assert.equal(await prepare(), undefined, "turned down as the fence is written");
     assert.equal(await power.stopFence("boot"), undefined, "no fence is written over it");
-    assert.equal(lifted, 2);
+    assert.equal(lifted, 4); assert.equal(resumed, 3);
     onFenceNative = () => undefined;
 
     // A turn turned down outside any stop is not held against the next one.
@@ -250,8 +266,46 @@ test("a turn being taken, or one turned down while the stop is prepared, keeps t
     const drain = await prepare();
     assert.equal(typeof drain, "function", "nothing waits: the machine stops");
     assert.ok(await power.stopFence("boot"));
+    assert.equal(paused, 4); assert.equal(resumed, 3, "the feed stays unread while it stops");
     assert.ok(unsentChecks > 0);
     await drain();
+  } finally {
+    host?.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a machine restarted while its committed stop goes on reads nothing from the server until that stop is over", async () => {
+  // Turns placed while it stops must stay unread on the server, so the
+  // server starts the machine again for them; a restart in the middle of
+  // the stop must not read and turn them down.
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-host-retained-"));
+  let host;
+  try {
+    const storage = new StorageService({ dbPath: path.join(dir, "host.sqlite3") });
+    const source = new StorageService({ dbPath: path.join(dir, "source.sqlite3") });
+    const deviceIdentity = new DeviceIdentityService(storage); const sourceIdentity = new DeviceIdentityService(source);
+    const [identity, sender] = await Promise.all([deviceIdentity.getOrCreateDeviceIdentity(), sourceIdentity.getOrCreateDeviceIdentity()]);
+    const pairing = { version: 1, purpose: "machine-host", issuer: sender, rendezvousId: "retained-room", stableRoutingId: "retained-route",
+      relaySealKeyBase64: Buffer.alloc(32, 8).toString("base64url"), hubUrl: "http://127.0.0.1:1",
+      capabilities: [{ scope: "device", canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }],
+      fingerprint: "retained-test", createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString() };
+    const client = { on: () => () => undefined, connect: async () => undefined, close: () => undefined, sendCiphertext: async () => [] };
+    let pauses = 0; let resumes = 0;
+    const chat = { respondToChoice: async () => undefined, respondToAppToolApproval: async () => undefined,
+      activeParticipantRuns: () => [], liveRunIds: () => [], onParticipantRunSettled: () => () => undefined };
+    host = new MachineHostService(chat, { write: async () => undefined }, {
+      pairing, deviceId: identity.originId, appVersion: "test", publicKeyDerBase64: identity.publicKeyDerBase64,
+      identity: () => deviceIdentity.getOrCreateDeviceIdentity(), createClient: () => client, storage,
+      pauseServerFeed: () => { pauses++; return Promise.resolve(() => { resumes++; }); } });
+    host.retainIdleFence();
+    assert.equal(pauses, 1, "paused at once, before the link to the server starts");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(host.takesNewWork(), false);
+    // The stop turned out never to have been written: reading goes on.
+    assert.equal(await host.recoverIdleFence("boot"), false);
+    assert.equal(resumes, 1);
+    assert.equal(host.takesNewWork(), true);
   } finally {
     host?.close();
     await rm(dir, { recursive: true, force: true });

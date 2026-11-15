@@ -331,6 +331,7 @@ export class ServerChatLink {
       client: () => this.ready ? this.client : undefined,
       apply: (entries: HubFeedEntry[]) => this.applyEntries(entries),
       resync: () => this.resync(),
+      readPaused: () => this.feedPauses > 0,
       beforeSend: (ops, sendingTo) => this.putPictures(ops, sendingTo),
       onAnswered: (row, outcome: HubOpOutcome) => {
         if (outcome.status === "rejected") this.options.log("chat.server.op-rejected", { opId: row.opId, kind: row.kind, conversationId: row.conversationId, reason: outcome.reason });
@@ -535,6 +536,26 @@ export class ServerChatLink {
 
   async refreshMachineNames(): Promise<void> {
     this.machineNames = new Map((await this.options.machineNames()).map((machine) => [machine.id, machine.name]));
+  }
+
+  /** Holders of pauseFeed: while any holds it, the feed is not read. */
+  private feedPauses = 0;
+
+  /** Stops reading the server's feed until the returned resume is called (a
+   *  machine stopping), once a batch being applied is done; holds from
+   *  before the link starts too. What the server places meanwhile stays
+   *  unread there, so the server starts the machine again for it. */
+  async pauseFeed(): Promise<() => void> {
+    this.feedPauses += 1;
+    let resumed = false;
+    const resume = (): void => {
+      if (resumed) return;
+      resumed = true;
+      this.feedPauses -= 1;
+      if (this.feedPauses === 0) this.ops?.wakeReader();
+    };
+    await this.ops?.quiesceReading();
+    return resume;
   }
 
   /** Whether writes reach the server now (undefined: not linked). */

@@ -207,3 +207,116 @@ async function until(check: () => Promise<boolean>, ms = 10_000): Promise<void> 
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
+
+test("a paused reader leaves what the server placed meanwhile unread, waits for a batch being applied, and reads on when resumed", async (t) => {
+  // A machine stopping after idle pauses it: work the server places then must
+  // stay unread there, so the server starts the machine again for it.
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-ops-client-pause-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const storage = new StorageService({ dbPath: path.join(dir, "device.sqlite3") });
+  const placed: number[] = [];
+  let arrived: (() => void) | undefined;
+  const fakeClient = { feed: async (after: number, waitMs: number, signal?: AbortSignal) => {
+    const ready = () => placed.filter((seq) => seq > after);
+    if (ready().length === 0) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, Math.min(waitMs, 5_000));
+        arrived = () => { clearTimeout(timer); resolve(); };
+        signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new DOMException("aborted", "AbortError")); });
+      });
+    }
+    return { entries: ready().map((seq) => ({ seq })), head: Math.max(0, ...placed), more: false };
+  } };
+  let cursor = "0";
+  const applied: number[] = [];
+  let slow: Promise<void> | undefined;
+  let paused = 0;
+  let applyStarted: (() => void) | undefined;
+  const client = new HubOpsClient({
+    store: storage.hubClientOps(),
+    cursor: { get: async () => cursor, set: async (value) => { cursor = value; } },
+    client: () => fakeClient as never,
+    apply: async (entries) => {
+      applyStarted?.();
+      if (slow) await slow;
+      applied.push(...entries.map((entry) => entry.seq));
+    },
+    resync: async () => 0,
+    readPaused: () => paused > 0,
+    log: () => undefined
+  });
+  // As ServerChatLink.pauseFeed does it.
+  const pauseReading = async () => {
+    paused += 1;
+    await client.quiesceReading();
+    let done = false;
+    return () => { if (done) return; done = true; paused -= 1; if (paused === 0) client.wakeReader(); };
+  };
+  const until = async (check: () => boolean) => {
+    for (let i = 0; i < 200 && !check(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(check());
+  };
+  const place = (seq: number) => { placed.push(seq); arrived?.(); };
+  t.after(() => client.stop());
+  client.start();
+  place(1);
+  await until(() => cursor === "1");
+
+  const resume = await pauseReading();
+  place(2);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual(applied, [1], "placed while paused: not read");
+  assert.equal(cursor, "1", "its place stays before it, so the server counts it unread");
+  resume();
+  await until(() => cursor === "2");
+  assert.deepEqual(applied, [1, 2]);
+
+  // A batch being applied as the pause comes is finished first.
+  let release!: () => void;
+  slow = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { applyStarted = resolve; });
+  place(3);
+  await started;
+  let pausedNow = false;
+  const pausing = pauseReading().then((resumeAgain) => { pausedNow = true; return resumeAgain; });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(pausedNow, false, "the pause waits for the batch in hand");
+  release();
+  const resumeAgain = await pausing;
+  assert.deepEqual(applied, [1, 2, 3]);
+  slow = undefined;
+  place(4);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.ok(!applied.includes(4));
+  resumeAgain();
+  await until(() => applied.includes(4));
+});
+
+test("a pause taken before the reader starts holds from its first read", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-ops-client-pause-early-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const storage = new StorageService({ dbPath: path.join(dir, "device.sqlite3") });
+  let reads = 0;
+  let paused = true;
+  const client = new HubOpsClient({
+    store: storage.hubClientOps(),
+    cursor: { get: async () => "0", set: async () => undefined },
+    client: () => ({ feed: async () => {
+      reads += 1;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return { entries: [], head: 1, more: false };
+    } }) as never,
+    apply: async () => undefined,
+    resync: async () => 0,
+    readPaused: () => paused,
+    log: () => undefined
+  });
+  t.after(() => client.stop());
+  client.start();
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(reads, 0, "a machine whose retained stop goes on reads nothing");
+  paused = false;
+  client.wakeReader();
+  for (let i = 0; i < 100 && reads === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(reads > 0);
+});
