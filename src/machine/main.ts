@@ -432,7 +432,6 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       const status = await serverChatLink.status();
       return status ? { queued: status.queued, ...(status.lastError ? { lastError: status.lastError } : {}) } : undefined;
     },
-    pauseServerFeed: () => serverChatLink.pauseFeed(),
     // Its members' live progress, for the phone (the server keeps none of it).
     postProgress: async (frames) => { await hubClient.postProgress(frames); },
     // These two reach `scriptService`, built below: the desktop's greeting and

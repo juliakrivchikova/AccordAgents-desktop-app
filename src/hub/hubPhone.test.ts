@@ -688,3 +688,99 @@ test("only turns taken by a device that still exists count as running for the ph
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("a machine that read a turn as it stopped and did not take it is woken for it; a start refused while it is still stopping is asked again soon", async (t) => {
+  // An idle stop: the machine reads the feed until it powers off, and a turn
+  // it reads then is turned down. Read is not taken: the server waits for
+  // the turn to be taken, and starts the machine once it no longer reads.
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-wake-untaken-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
+  await storage.init();
+  const machine = createDeviceIdentity(new Date().toISOString());
+  await storage.hub().replaceRoster([{ deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Cloud box", machineId: "m-1", addedAt: "" }], new Date().toISOString());
+  await storage.hub().replaceMachineWake([{ machineId: "m-1", configJson: JSON.stringify({ machineId: "m-1", instanceId: "i-0123456789abcdef0", region: "us-east-1",
+    credentials: { accessKeyId: "AKIAEXAMPLEEXAMPLE12", secretAccessKey: "secretsecretsecretsecretsecret", region: "us-east-1" } }) }], new Date().toISOString());
+  let clock = Date.now();
+  let calls = 0;
+  let stopping = true;
+  const requested = new Set(["turn-1"]);
+  const asked: Array<{ runIds: string[]; cardIds: string[] }> = [];
+  const waker = new HubWaker({ storage, now: () => clock,
+    untaken: async (work) => { asked.push(work); return work.runIds.some((id) => requested.has(id)); },
+    fetchImpl: (async () => {
+      calls += 1;
+      return stopping
+        ? new Response("<Response><Errors><Error><Code>IncorrectInstanceState</Code></Error></Errors></Response>", { status: 400 })
+        : new Response("<StartInstancesResponse/>", { status: 200 });
+    }) as unknown as typeof fetch });
+  waker.noteWork("m-1", 10, { runId: "turn-1" });
+  // It reads past the turn (and keeps reading until it powers off).
+  await storage.hubOps().recordRead(machine.originId, 12, new Date(clock).toISOString());
+  clock += 31_000;
+  await storage.hubOps().recordRead(machine.originId, 12, new Date(clock - 5_000).toISOString());
+  await waker.check();
+  assert.equal(calls, 0, "a machine still reading is not started");
+  assert.deepEqual(asked.at(-1), { runIds: ["turn-1"], cardIds: [] });
+  // It powered off; AWS still reports it stopping.
+  clock += 40_000;
+  await waker.check();
+  assert.equal(calls, 1);
+  const status = (await waker.status())[0];
+  assert.equal(status.wakeError, undefined, "still stopping is no error on the phone");
+  assert.equal(status.waking, true);
+  clock += 31_000;
+  stopping = false;
+  await waker.check();
+  assert.equal(calls, 2, "asked again soon, not in five minutes");
+  // Started: it comes up, reads and takes the turn; nothing waits.
+  clock += 60_000;
+  requested.delete("turn-1");
+  await storage.hubOps().recordRead(machine.originId, 14, new Date(clock).toISOString());
+  await waker.check();
+  clock += 10 * 60_000;
+  await waker.check();
+  assert.equal(calls, 2);
+  assert.equal((await waker.status())[0].waking, false);
+});
+
+test("a machine that read and took its work is not woken, whatever the answer to whether it was taken", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-wake-taken-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
+  await storage.init();
+  const machine = createDeviceIdentity(new Date().toISOString());
+  await storage.hub().replaceRoster([{ deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Cloud box", machineId: "m-1", addedAt: "" }], new Date().toISOString());
+  await storage.hub().replaceMachineWake([{ machineId: "m-1", configJson: JSON.stringify({ machineId: "m-1", instanceId: "i-0123456789abcdef0", region: "us-east-1",
+    credentials: { accessKeyId: "AKIAEXAMPLEEXAMPLE12", secretAccessKey: "secretsecretsecretsecretsecret", region: "us-east-1" } }) }], new Date().toISOString());
+  let clock = Date.now();
+  let calls = 0;
+  const waker = new HubWaker({ storage, now: () => clock, untaken: async () => { throw new Error("database busy"); },
+    fetchImpl: (async () => { calls += 1; return new Response("<StartInstancesResponse/>", { status: 200 }); }) as unknown as typeof fetch });
+  waker.noteWork("m-1", 10, { cardId: "card-1" });
+  await storage.hubOps().recordRead(machine.originId, 11, new Date(clock).toISOString());
+  clock += 10 * 60_000;
+  await waker.check();
+  assert.equal(calls, 0, "a failed look counts as taken, as reading past it did before");
+});
+
+test("the server keeps a phone's message for a machine waiting while its turn is only read, and lets it go once the machine claims it", async (t) => {
+  const h = await hub(t);
+  const machine = createDeviceIdentity(new Date().toISOString());
+  const { opId, write } = await seedChat(h, machine);
+  const { client } = await pairPhone(h);
+  const message = phoneMessage("@box are you there", [machineMember.id]);
+  const posted = await client.postOps([{ opId: message.id, kind: "message.create", conversationId: "chat-1", message }]);
+  const seq = posted.results[0].status === "accepted" ? posted.results[0].seq : 0;
+  await h.settle();
+  const waiting = (h.waker as unknown as { waiting: Map<string, unknown> }).waiting;
+  assert.equal(waiting.has("m-1"), true, "work for the machine is noted");
+  // The machine read past it as it stopped and did not take it.
+  await h.storage.hubOps().recordRead(machine.originId, seq + 5, new Date().toISOString());
+  await h.waker.check();
+  assert.equal(waiting.has("m-1"), true, "read is not taken: it still waits");
+  // Up again, it claims the turn: nothing waits for it.
+  await write(machine, { opId: opId(), kind: "turn.claim", conversationId: "chat-1", runId: hubTurnRunId(message.id, machineMember.id), messageId: message.id, participantId: machineMember.id });
+  await h.waker.check();
+  assert.equal(waiting.has("m-1"), false);
+});

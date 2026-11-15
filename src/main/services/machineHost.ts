@@ -72,11 +72,6 @@ export interface MachineHostOptions {
   /** What this machine wrote that the User's server has not taken yet. An
    *  idle stop waits for it: a reply must not sleep with the machine. */
   unsentServerWrites?: () => Promise<{ queued: number; lastError?: string } | undefined>;
-  /** Stops reading the User's server's feed until the returned resume is
-   *  called, once what was being applied is done. What the server places for
-   *  this machine meanwhile stays unread there, so the server starts this
-   *  machine again for it after an idle stop. */
-  pauseServerFeed?: () => Promise<() => void>;
   /** Posts this machine's members' live progress to the User's server, for
    *  the phone (POST /v1/progress). */
   postProgress?: (frames: MachineProgressFrame[]) => Promise<void>;
@@ -154,7 +149,6 @@ export class MachineHostService {
   private heldUntil?: number;
   private heldTimer?: ReturnType<typeof setTimeout>;
   private uncertainIdleRelease?: () => void;
-  private uncertainFeedResume?: () => void;
   private unsubscribeRunSettled?: () => void;
   private unsubscribeBackgroundTasks?: () => void;
   /** requestId -> whoever is waiting for those picture bytes. */
@@ -306,8 +300,9 @@ export class MachineHostService {
   }
 
   /** A turn the server asked of a member here was not taken (takesNewWork
-   *  said no). Read from the feed already, it would otherwise sleep with an
-   *  idle-stopped machine: the server no longer counts it as unread. */
+   *  said no). One turned down while an idle stop is prepared keeps the
+   *  machine on; it is taken up when the fence lifts. (Once the machine has
+   *  stopped, the server starts it again for a turn still not taken.) */
   noteWorkDeclined(): void {
     if (this.idleFenced) this.declinedWhileFenced = true;
   }
@@ -378,14 +373,8 @@ export class MachineHostService {
     this.idleFenced = true;
     this.declinedWhileFenced = false;
     let releaseNative: (() => void) | undefined;
-    let resumeFeed: (() => void) | undefined;
     let committed = false;
     try {
-      // Nothing more is read from the server from here: a turn placed for a
-      // member here during the stop stays unread there, and the server starts
-      // this machine again for it. One read just before is a turn starting
-      // or one turned down, and either keeps the machine on.
-      resumeFeed = await this.options.pauseServerFeed?.();
       await this.inbound;
       // A script request already taken (switching one on) is part of what
       // decides whether this machine may stop.
@@ -402,15 +391,11 @@ export class MachineHostService {
       // An uncertain file/SQLite result is not permission to reopen native
       // work after a durable fence might have committed.
       committed = Boolean(await this.options.storage.machinePower().stopFence(request.bootId).catch(() => "unconfirmed"));
-      if (committed) {
-        this.uncertainIdleRelease = releaseNative;
-        this.uncertainFeedResume = resumeFeed;
-      }
+      if (committed) this.uncertainIdleRelease = releaseNative;
       throw error;
     } finally {
       if (!committed) {
         releaseNative?.();
-        resumeFeed?.();
         this.idleFenced = false;
         this.declinedWhileFenced = false;
         this.fenceLifted();
@@ -423,8 +408,6 @@ export class MachineHostService {
     if (await this.options.storage.machinePower().stopFence(bootId)) return true;
     this.uncertainIdleRelease?.();
     this.uncertainIdleRelease = undefined;
-    this.uncertainFeedResume?.();
-    this.uncertainFeedResume = undefined;
     this.idleFenced = false;
     this.declinedWhileFenced = false;
     this.fenceLifted();

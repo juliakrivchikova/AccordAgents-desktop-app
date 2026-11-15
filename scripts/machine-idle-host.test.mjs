@@ -190,9 +190,11 @@ test("host stop loss leaves no local fence; failure after local commit keeps adm
   } finally { await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 
-test("a turn read just as the machine stops keeps it on, and what the server places after is left unread there for its next start", async () => {
-  // The machine reads the server's feed: a turn it read and turned down
-  // because it was stopping counted as delivered, and slept with it.
+test("a turn being taken, or one turned down while the stop is prepared, keeps the machine on and is taken up again", async () => {
+  // The machine reads the server's feed until it powers off: a turn it reads
+  // while it prepares the stop is turned down. The stop then does not go
+  // ahead over it (once stopped, the server starts it again for a turn still
+  // not taken).
   const dir = await mkdtemp(path.join(tmpdir(), "accord-idle-host-race-"));
   let host;
   try {
@@ -205,8 +207,8 @@ test("a turn read just as the machine stops keeps it on, and what the server pla
       capabilities: [{ scope: "device", canRead: true, canWrite: true, canRunCloudParticipants: true, canListConversations: true }],
       fingerprint: "race-test", createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3600_000).toISOString() };
     const client = { on: () => () => undefined, connect: async () => undefined, close: () => undefined, sendCiphertext: async () => [] };
-    let starting = 0; let paused = 0; let resumed = 0; let lifted = 0;
-    let onPause = () => undefined; let onFenceNative = () => undefined;
+    let starting = 0; let lifted = 0; let unsentChecks = 0;
+    let onUnsent = () => undefined; let onFenceNative = () => undefined;
     const chat = {
       respondToChoice: async () => undefined, respondToAppToolApproval: async () => undefined,
       activeParticipantRuns: () => [], liveRunIds: () => [], serverTurnsStarting: () => starting,
@@ -215,8 +217,7 @@ test("a turn read just as the machine stops keeps it on, and what the server pla
     host = new MachineHostService(chat, { write: async () => undefined }, {
       pairing, deviceId: identity.originId, appVersion: "test", publicKeyDerBase64: identity.publicKeyDerBase64,
       identity: () => deviceIdentity.getOrCreateDeviceIdentity(), createClient: () => client, storage,
-      unsentServerWrites: async () => ({ queued: 0 }),
-      pauseServerFeed: async () => { paused++; onPause(); return () => { resumed++; }; } });
+      unsentServerWrites: async () => { unsentChecks++; onUnsent(); return { queued: 0 }; } });
     host.onFenceLifted(() => { lifted += 1; });
     await host.start();
     const power = storage.machinePower();
@@ -230,19 +231,18 @@ test("a turn read just as the machine stops keeps it on, and what the server pla
     assert.equal(await prepare(), undefined, "not while a turn is being taken");
     starting = 0;
 
-    // The batch being applied as the stop began held a turn, turned down.
-    onPause = () => { assert.equal(host.takesNewWork(), false); host.noteWorkDeclined(); };
+    // Read and turned down while the stop is checked again.
+    onUnsent = () => { if (!host.takesNewWork()) host.noteWorkDeclined(); };
     assert.equal(await prepare(), undefined, "a turned-down turn keeps the machine on");
-    assert.equal(paused, 1); assert.equal(resumed, 1, "reading the feed goes on");
     assert.equal(host.takesNewWork(), true); assert.equal(lifted, 1, "the turn is taken up again");
     assert.equal(await power.stopFence("boot"), undefined);
-    onPause = () => undefined;
+    onUnsent = () => undefined;
 
     // One turned down at the last moment, as the fence is written.
     onFenceNative = () => host.noteWorkDeclined();
     assert.equal(await prepare(), undefined, "turned down as the fence is written");
     assert.equal(await power.stopFence("boot"), undefined, "no fence is written over it");
-    assert.equal(resumed, 2); assert.equal(lifted, 2);
+    assert.equal(lifted, 2);
     onFenceNative = () => undefined;
 
     // A turn turned down outside any stop is not held against the next one.
@@ -250,7 +250,7 @@ test("a turn read just as the machine stops keeps it on, and what the server pla
     const drain = await prepare();
     assert.equal(typeof drain, "function", "nothing waits: the machine stops");
     assert.ok(await power.stopFence("boot"));
-    assert.equal(paused, 3); assert.equal(resumed, 2, "the feed stays unread while it stops");
+    assert.ok(unsentChecks > 0);
     await drain();
   } finally {
     host?.close();

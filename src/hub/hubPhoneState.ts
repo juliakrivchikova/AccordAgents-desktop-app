@@ -1,4 +1,4 @@
-import type { HubCard } from "../shared/hubOps";
+import { hubTurnRunId, type HubCard } from "../shared/hubOps";
 import type { HubDevice, HubMachineWakeRequest, HubMachineStatus, HubPhoneScope } from "../shared/hubProtocol";
 import { decodeMachineProgress, type MachineProgressFrame } from "../shared/machineProgress";
 import { machineWakeRequest, webCryptoMachineWake, type MachineWakeSubtleCrypto } from "../shared/machineWakeRequest";
@@ -149,24 +149,29 @@ export function cardNotice(conversation: Conversation, card: HubCard): Omit<HubN
   };
 }
 
-/** Members a phone's message is for, as the phone resolved them, by home. */
-export function phoneMessageHomes(conversation: Conversation, message: ChatMessage): string[] {
+type WakeConfig = HubMachineWakeRequest["machines"][number];
+
+/** The turns a User's message asks of members on machines: which machine
+ *  each runs on, and the turn's id (hubTurnRunId), by which the server tells
+ *  whether the machine took it. */
+export function phoneMessageWork(conversation: Conversation, message: ChatMessage): Array<{ machineId: string; runId: string }> {
   const targets = message.metadata && Array.isArray((message.metadata as { deliveryTargets?: unknown }).deliveryTargets)
     ? (message.metadata as { deliveryTargets: unknown[] }).deliveryTargets.filter((id): id is string => typeof id === "string")
     : [];
   const participants = Array.isArray(conversation.metadata?.participants) ? conversation.metadata.participants as ChatParticipant[] : [];
-  return [...new Set(targets.flatMap((id) => {
+  return [...new Set(targets)].flatMap((id) => {
     const home = participants.find((participant) => participant?.id === id)?.homeMachineId;
-    return typeof home === "string" && home ? [home] : [];
-  }))];
+    return typeof home === "string" && home ? [{ machineId: home, runId: hubTurnRunId(message.id, id) }] : [];
+  });
 }
-
-type WakeConfig = HubMachineWakeRequest["machines"][number];
 
 /** How long a machine may leave work unread before the hub wakes it. */
 export const HUB_WAKE_AFTER_MS = 30_000;
 /** One start request per machine this often at most. */
 const WAKE_MIN_INTERVAL_MS = 5 * 60_000;
+/** AWS refused a start because the instance is still stopping: asked again
+ *  this soon, and not counted as a try. */
+const WAKE_WHILE_STOPPING_RETRY_MS = 30_000;
 /** A Wake from the phone is answered this often at most. */
 const MANUAL_WAKE_MIN_INTERVAL_MS = 60_000;
 /** Automatic starts for one piece of waiting work, at most, and how long
@@ -184,8 +189,8 @@ const WAKE_CHECK_MS = 10_000;
 export class HubWaker {
   /** Work waiting per machine: since when, where in the feed, and how
    *  many times the hub started the machine for it. */
-  private readonly waiting = new Map<string, { since: number; hubSeq: number; wakes: number }>();
-  private readonly attempts = new Map<string, { at: number; manual: boolean; result: string; ok: boolean }>();
+  private readonly waiting = new Map<string, { since: number; hubSeq: number; wakes: number; runIds: Set<string>; cardIds: Set<string> }>();
+  private readonly attempts = new Map<string, { at: number; manual: boolean; result: string; ok: boolean; stopping?: boolean }>();
   private timer?: ReturnType<typeof setInterval>;
 
   constructor(private readonly options: {
@@ -196,6 +201,9 @@ export class HubWaker {
     subtle?: MachineWakeSubtleCrypto;
     now?: () => number;
     log?: (event: string, payload: Record<string, unknown>) => void;
+    /** Whether any of these is still not taken: a turn still requested, a
+     *  card's answer not yet applied. */
+    untaken?: (work: { runIds: string[]; cardIds: string[] }) => Promise<boolean>;
   }) {}
 
   start(): void {
@@ -212,11 +220,16 @@ export class HubWaker {
     return this.options.now?.() ?? Date.now();
   }
 
-  /** Work for a member homed on `machineId` landed at `hubSeq`. */
-  noteWork(machineId: string, hubSeq: number): void {
-    const current = this.waiting.get(machineId);
-    if (!current) this.waiting.set(machineId, { since: this.now(), hubSeq, wakes: 0 });
-    else current.hubSeq = Math.max(current.hubSeq, hubSeq);
+  /** Work for a member homed on `machineId` landed at `hubSeq`: a turn
+   *  (`runId`) or a card's answer (`cardId`) it is to take. */
+  noteWork(machineId: string, hubSeq: number, item: { runId?: string; cardId?: string } = {}): void {
+    let current = this.waiting.get(machineId);
+    if (!current) {
+      current = { since: this.now(), hubSeq, wakes: 0, runIds: new Set(), cardIds: new Set() };
+      this.waiting.set(machineId, current);
+    } else current.hubSeq = Math.max(current.hubSeq, hubSeq);
+    if (item.runId) current.runIds.add(item.runId);
+    if (item.cardId) current.cardIds.add(item.cardId);
   }
 
   private async configs(): Promise<Map<string, WakeConfig>> {
@@ -247,8 +260,10 @@ export class HubWaker {
     for (const [machineId, work] of [...this.waiting]) {
       const device = devices.get(machineId);
       const cursor = device ? cursors.get(device.deviceId) : undefined;
-      // Read past the work: the machine is awake and has it.
-      if (cursor && cursor.hubSeq >= work.hubSeq) {
+      // Read past the work: the machine is awake and has it, unless it read
+      // it and did not take it (it was stopping): that still waits, and
+      // wakes the machine once it no longer reads.
+      if (cursor && cursor.hubSeq >= work.hubSeq && !await this.untaken(work)) {
         this.waiting.delete(machineId);
         continue;
       }
@@ -264,7 +279,18 @@ export class HubWaker {
         continue;
       }
       const result = await this.wake(config, false);
-      if (result.attempted) work.wakes += 1;
+      if (result.attempted && !result.stopping) work.wakes += 1;
+    }
+  }
+
+  private async untaken(work: { runIds: Set<string>; cardIds: Set<string> }): Promise<boolean> {
+    if (!this.options.untaken || (work.runIds.size === 0 && work.cardIds.size === 0)) return false;
+    try {
+      // The newest few: a machine that took none of a long run of them is
+      // woken for the newest as surely as for all.
+      return await this.options.untaken({ runIds: [...work.runIds].slice(-100), cardIds: [...work.cardIds].slice(-100) });
+    } catch {
+      return false;
     }
   }
 
@@ -276,12 +302,13 @@ export class HubWaker {
     return { ok, message };
   }
 
-  private async wake(config: WakeConfig, manual: boolean): Promise<{ ok: boolean; message: string; attempted: boolean }> {
+  private async wake(config: WakeConfig, manual: boolean): Promise<{ ok: boolean; message: string; attempted: boolean; stopping?: boolean }> {
     const last = this.attempts.get(config.machineId);
-    const interval = manual ? MANUAL_WAKE_MIN_INTERVAL_MS : WAKE_MIN_INTERVAL_MS;
+    const interval = last?.stopping ? WAKE_WHILE_STOPPING_RETRY_MS : manual ? MANUAL_WAKE_MIN_INTERVAL_MS : WAKE_MIN_INTERVAL_MS;
     if (last && this.now() - last.at < interval) return { ok: last.ok, message: last.result, attempted: false };
     const at = this.now();
     let ok = false;
+    let stopping = false;
     let message: string;
     try {
       const subtle = this.options.subtle ?? (globalThis.crypto?.subtle as unknown as MachineWakeSubtleCrypto);
@@ -297,14 +324,19 @@ export class HubWaker {
       });
       const text = await response.text().catch(() => "");
       ok = response.ok;
-      message = response.ok ? "Starting the machine." : `AWS refused to start the machine (${response.status}${/<Code>([^<]+)<\/Code>/.exec(text)?.[1] ? `: ${/<Code>([^<]+)<\/Code>/.exec(text)![1]}` : ""}).`;
+      const code = /<Code>([^<]+)<\/Code>/.exec(text)?.[1];
+      // Still stopping (it stopped itself a moment ago): started once it has.
+      stopping = !response.ok && code === "IncorrectInstanceState";
+      message = response.ok ? "Starting the machine."
+        : stopping ? "The machine is still stopping; it is started again once it has stopped."
+          : `AWS refused to start the machine (${response.status}${code ? `: ${code}` : ""}).`;
     } catch (error) {
       message = `The machine could not be started: ${error instanceof Error ? error.message : String(error)}`;
     }
-    this.attempts.set(config.machineId, { at, manual, result: message, ok });
+    this.attempts.set(config.machineId, { at, manual, result: message, ok, ...(stopping ? { stopping } : {}) });
     await this.options.storage.hub().noteMachineWakeAttempt(config.machineId, new Date(at).toISOString(), message).catch(() => undefined);
     this.options.log?.("hub.wake.attempt", { machineId: config.machineId, manual, ok, message });
-    return { ok, message, attempted: true };
+    return { ok, message, attempted: true, ...(stopping ? { stopping } : {}) };
   }
 
   /** What the phone shows about each machine. */
@@ -317,13 +349,14 @@ export class HubWaker {
       const cursor = cursors.get(device.deviceId);
       const attempt = this.attempts.get(machineId);
       const work = this.waiting.get(machineId);
-      const waking = Boolean(work && attempt?.ok && attempt.at >= work.since && (!cursor || Date.parse(cursor.updatedAt) < attempt.at));
+      // Still stopping counts: it is started once it has stopped.
+      const waking = Boolean(work && attempt && (attempt.ok || attempt.stopping) && attempt.at >= work.since && (!cursor || Date.parse(cursor.updatedAt) < attempt.at));
       return {
         machineId,
         name: device.name,
         ...(cursor ? { lastSeenAt: cursor.updatedAt } : {}),
         waking,
-        ...(attempt && !attempt.ok ? { wakeError: attempt.result } : {}),
+        ...(attempt && !attempt.ok && !attempt.stopping ? { wakeError: attempt.result } : {}),
         canWake: configs.has(machineId)
       };
     });
