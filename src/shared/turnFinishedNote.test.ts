@@ -129,6 +129,26 @@ test("a message the server refused is not below a reply", () => {
   assert.equal(turnFinishedNoteFor({ messages: [user("ask", "go"), card, refused] }, [card], NOTE), undefined);
 });
 
+test("an urgent alert's card below a reply is not a reason for a note", () => {
+  // The card the User's server writes during the turn sits right under the
+  // reply: a note would only repeat it (the User, 2026-11-15).
+  const card = reply("card", "Done: the deploy is rolled back.");
+  const alert: ChatMessage = {
+    ...reply("alert", "Production deploy failed.", { createdAt: "2026-11-04T20:41:00.000Z" }),
+    metadata: {
+      threadId: "alert",
+      serverWriter: "server",
+      urgentAlert: { id: "a1", state: "waiting", createdAt: "2026-11-04T20:41:00.000Z", calls: [], phone: true, callMode: "keypad" }
+    } as ChatMessageMetadata
+  };
+  assert.equal(turnFinishedNoteFor({ messages: [user("ask", "@taylor watch it"), card, alert] }, [card], NOTE), undefined);
+  // The same message from a device is no card: it still counts.
+  const forged: ChatMessage = { ...alert, metadata: { ...alert.metadata, serverWriter: "device-1" } as ChatMessageMetadata };
+  assert.ok(turnFinishedNoteFor({ messages: [user("ask", "@taylor watch it"), card, forged] }, [card], NOTE));
+  // Anything else below still does.
+  assert.ok(turnFinishedNoteFor({ messages: [user("ask", "@taylor watch it"), card, alert, post("p1", "Rolling back")] }, [card], NOTE));
+});
+
 test("the preview is the reply's first line of words, without markdown", () => {
   assert.equal(turnFinishedNotePreview("\n\n## **Готово**: всё [работает](https://x.test)\nвторая"), "Готово: всё работает");
   assert.equal(turnFinishedNotePreview("```ts\ncode\n```"), "code");

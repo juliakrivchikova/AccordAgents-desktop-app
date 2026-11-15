@@ -9008,13 +9008,11 @@
       if (!row) {
         return;
       }
-      // An urgent alert's cross: closing it counts as Got it on the server
-      // (no call); a closed one folds, and a tap opens it again.
+      // An urgent alert's Got it (or its cross once it no longer waits): the
+      // server closes it; a closed one folds, and a tap opens it again.
       const alertClose = event.target.closest("[data-urgent-alert-close]");
       if (alertClose) {
-        void closeUrgentAlert(alertClose.dataset.urgentAlertClose, row).catch(function (error) {
-          flashRowNotice(row, "Could not close: " + (error && error.message ? error.message : "try again"));
-        });
+        if (!alertClose.disabled) void closeUrgentAlert(alertClose.dataset.urgentAlertClose, row);
         return;
       }
       const alertToggle = event.target.closest("[data-urgent-alert-toggle]");
@@ -9786,130 +9784,174 @@
 
   // Alerts the User opened again after closing them, on this screen only.
   const expandedUrgentAlerts = new Set();
+  // Got it that the server did not confirm, by alert: shown in the card until
+  // the next try (a call may still come, so it must not flash away).
+  const urgentAlertErrors = new Map();
   const URGENT_ALERT_BELL_PATHS = [
     "M10.268 21a2 2 0 0 0 3.464 0", "M22 8c0-2.3-.8-4.3-2-6",
     "M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326",
     "M4 2C2.8 3.7 2 5.7 2 8"
   ];
-  const URGENT_ALERT_LINE_PATHS = {
-    ok: ["M20 6 9 17l-5-5"],
-    wait: ["M12 6v6l4 2", "M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0"],
-    bad: ["M18 6 6 18", "m6 6 12 12"],
-    plain: ["M18 6 6 18", "m6 6 12 12"]
+  const URGENT_ALERT_PHONE_PATH = "M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384";
+  const URGENT_ALERT_CIRCLE_PATH = "M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0";
+  // The desktop's lucide icons for the status band, by urgentAlertStatus().icon.
+  const URGENT_ALERT_STATUS_PATHS = {
+    clock: ["M12 6v6l4 2", URGENT_ALERT_CIRCLE_PATH],
+    ringing: ["M13 2a9 9 0 0 1 9 9", "M13 6a5 5 0 0 1 5 5", URGENT_ALERT_PHONE_PATH],
+    sent: ["M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z", "m21.854 2.147-10.94 10.939"],
+    missed: ["m16 2 6 6", "m22 2-6 6", URGENT_ALERT_PHONE_PATH],
+    check: [URGENT_ALERT_CIRCLE_PATH, "m9 12 2 2 4-4"],
+    off: ["M10.268 21a2 2 0 0 0 3.464 0", "M17 17H4a1 1 0 0 1-.74-1.673C4.59 13.956 6 12.499 6 8a6 6 0 0 1 .258-1.742", "m2 2 20 20", "M8.668 3.01A6 6 0 0 1 18 8c0 2.687.77 4.653 1.707 6.05"],
+    failed: ["m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3", "M12 9v4", "M12 17h.01"]
   };
+  const URGENT_ALERT_CHEVRON_PATHS = ["m6 9 6 6 6-6"];
 
-  /** An urgent alert a member raised: the desktop's card, a saturated red
-   *  header with a bell and a cross, the member's message and what happened
-   *  since (the User, 2026-11-12). Closed, it folds into one line. */
+  /** An urgent alert a member raised: the desktop's card as the User approved
+   *  it on 2026-11-15 — the red header whatever its state, the member and the
+   *  time, the message, then a status band that says what happens now, with
+   *  Got it while the alert waits for her (no cross then). Got it here folds
+   *  it into one line; after Got it in Telegram or on the call it stays open
+   *  with a cross that folds it. */
   function urgentAlertCardElement(entry) {
     const alert = urgentAlertOfEntry(entry);
     const shared = mobileSharedRules();
-    const open = Boolean(shared && typeof shared.isOpenUrgentAlert === "function" && shared.isOpenUrgentAlert(alert));
+    const awaiting = Boolean(shared && typeof shared.urgentAlertAwaitsGotIt === "function" && shared.urgentAlertAwaitsGotIt(alert));
     const label = entry.participantLabel || "A member";
     const wrap = document.createElement("div");
     wrap.className = "urgent-alert-card";
-    if (alert.closedAt && !open && !expandedUrgentAlerts.has(alert.id)) {
+    if (alert.closedAt && !awaiting && !expandedUrgentAlerts.has(alert.id)) {
+      const outcome = shared && typeof shared.urgentAlertOutcome === "function" ? shared.urgentAlertOutcome(alert) : { text: "closed", done: true };
       wrap.classList.add("is-folded");
       const folded = document.createElement("button");
       folded.type = "button";
-      folded.className = "urgent-alert-folded";
+      folded.className = "urgent-alert-folded" + (outcome.done ? "" : " is-unresolved");
       folded.dataset.urgentAlertToggle = alert.id;
-      folded.append(lineIcon(URGENT_ALERT_BELL_PATHS, 14));
-      const title = document.createElement("span");
-      title.className = "urgent-alert-folded-title";
-      title.textContent = "Urgent alert from " + label + " · closed";
+      folded.setAttribute("aria-expanded", "false");
+      folded.setAttribute("aria-label", "Urgent alert from " + label + ": " + outcome.text + ". Show it");
+      const bell = lineIcon(URGENT_ALERT_BELL_PATHS, 14);
+      bell.classList.add("urgent-alert-folded-bell");
       const preview = document.createElement("span");
       preview.className = "urgent-alert-folded-preview";
       preview.textContent = entry.content || "";
-      folded.append(title, preview);
+      const end = document.createElement("span");
+      end.className = "urgent-alert-folded-outcome";
+      end.textContent = outcome.text;
+      const chevron = lineIcon(URGENT_ALERT_CHEVRON_PATHS, 14);
+      chevron.classList.add("urgent-alert-folded-chevron");
+      folded.append(bell, preview, end, chevron);
       wrap.append(folded);
       return wrap;
     }
-    // No avatar (the User, 2026-11-12): the line above names the member.
-    const body = document.createElement("div");
-    body.className = "urgent-alert-body";
     const panel = document.createElement("div");
     panel.className = "urgent-alert-panel";
+    panel.setAttribute("role", "group");
+    panel.setAttribute("aria-label", "Urgent alert from " + label);
     const head = document.createElement("div");
     head.className = "urgent-alert-head";
-    const bell = lineIcon(URGENT_ALERT_BELL_PATHS, 18);
     const headTitle = document.createElement("span");
     headTitle.className = "urgent-alert-title";
     headTitle.textContent = "Urgent alert";
+    head.append(lineIcon(URGENT_ALERT_BELL_PATHS, 18), headTitle);
+    if (!awaiting) {
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "urgent-alert-close";
+      if (alert.closedAt) {
+        close.setAttribute("aria-label", "Fold alert");
+        close.setAttribute("aria-expanded", "true");
+        close.dataset.urgentAlertToggle = alert.id;
+      } else {
+        close.setAttribute("aria-label", "Close alert");
+        close.dataset.urgentAlertClose = alert.id;
+      }
+      close.append(lineIcon(FINISHED_NOTE_CLOSE_PATHS, 18));
+      head.append(close);
+    }
     // Who and when, inside the card above the message (the User, 2026-11-13).
     const from = document.createElement("div");
     from.className = "urgent-alert-from";
     const when = formatClockTime(entry.createdAt);
     from.textContent = label + (when ? " · " + when : "");
-    const close = document.createElement("button");
-    close.type = "button";
-    close.className = "urgent-alert-close";
-    if (alert.closedAt && !open) {
-      close.setAttribute("aria-label", "Fold alert");
-      close.dataset.urgentAlertToggle = alert.id;
-    } else {
-      close.setAttribute("aria-label", open ? "Close alert (no call)" : "Close alert");
-      close.dataset.urgentAlertClose = alert.id;
-    }
-    close.append(lineIcon(FINISHED_NOTE_CLOSE_PATHS, 18));
-    head.append(bell, headTitle, close);
     const text = document.createElement("div");
     text.className = "urgent-alert-text";
     text.textContent = entry.content || "";
     panel.append(head, from, text);
-    const lines = shared && typeof shared.urgentAlertLines === "function" ? shared.urgentAlertLines(alert, label, Date.now()) : [];
-    if (lines.length) {
-      const list = document.createElement("ul");
-      list.className = "urgent-alert-lines";
-      for (const line of lines) {
-        const li = document.createElement("li");
-        li.className = "urgent-alert-line is-" + line.tone;
-        if (line.key === "next") {
-          li.dataset.urgentAlertCountdown = alert.callAt || "";
-          startUrgentAlertClock();
-        }
-        li.append(lineIcon(URGENT_ALERT_LINE_PATHS[line.tone] || URGENT_ALERT_LINE_PATHS.plain, 14));
-        const words = document.createElement("span");
-        words.textContent = line.text;
-        li.append(words);
-        if (line.at) {
-          const at = document.createElement("span");
-          at.className = "urgent-alert-at";
-          at.textContent = "· " + line.at;
-          li.append(at);
-        }
-        list.append(li);
+    const status = shared && typeof shared.urgentAlertStatus === "function" ? shared.urgentAlertStatus(alert, label, Date.now()) : undefined;
+    if (status) {
+      const band = document.createElement("div");
+      band.className = "urgent-alert-status is-" + status.tone;
+      const icon = lineIcon(URGENT_ALERT_STATUS_PATHS[status.icon] || URGENT_ALERT_STATUS_PATHS.clock, 16);
+      icon.classList.add("urgent-alert-status-icon");
+      const words = document.createElement("div");
+      words.className = "urgent-alert-status-words";
+      const main = document.createElement("div");
+      main.className = "urgent-alert-status-main";
+      main.append(document.createTextNode(status.lead));
+      if (status.countdown) {
+        const countdown = document.createElement("strong");
+        countdown.className = "urgent-alert-countdown";
+        countdown.dataset.urgentAlertCountdown = status.countdown.to;
+        countdown.textContent = status.countdown.text;
+        main.append(countdown);
+        startUrgentAlertClock();
       }
-      panel.append(list);
+      if (status.tail) main.append(document.createTextNode(status.tail));
+      words.append(main);
+      if (status.detail) {
+        const detail = document.createElement("div");
+        detail.className = "urgent-alert-status-detail";
+        detail.textContent = status.detail;
+        words.append(detail);
+      }
+      const failure = urgentAlertErrors.get(alert.id);
+      if (failure && awaiting) {
+        const error = document.createElement("div");
+        error.className = "urgent-alert-error";
+        error.setAttribute("role", "alert");
+        error.textContent = "Not confirmed: " + failure + ". A call may still come.";
+        words.append(error);
+      }
+      band.append(icon, words);
+      if (status.action === "got-it") {
+        const gotIt = document.createElement("button");
+        gotIt.type = "button";
+        gotIt.className = "urgent-alert-action";
+        gotIt.dataset.urgentAlertClose = alert.id;
+        gotIt.textContent = "Got it";
+        band.append(gotIt);
+      } else if (status.action === "set-up") {
+        const hint = document.createElement("div");
+        hint.className = "urgent-alert-hint";
+        hint.textContent = "Set up alerts on your computer: Settings → Alerts.";
+        band.append(hint);
+      }
+      panel.append(band);
     }
-    if (alert.state === "not_set_up") {
-      const hint = document.createElement("div");
-      hint.className = "urgent-alert-foot";
-      hint.textContent = "Set up alerts on your computer: Settings → Alerts.";
-      panel.append(hint);
-    }
-    body.append(panel);
-    wrap.append(body);
+    wrap.append(panel);
     return wrap;
   }
 
   // The time left before a call ticks down on every card that shows one; the
-  // clock runs only while one is on screen and the app is in front.
+  // clock runs only while one is on screen and the app is in front. When it
+  // runs out the card is drawn again ("Calling you now").
   let urgentAlertClock;
   function tickUrgentAlertCountdowns() {
-    const lines = document.hidden ? [] : [...document.querySelectorAll("[data-urgent-alert-countdown]")];
-    if (!lines.length) {
+    const countdowns = document.hidden ? [] : [...document.querySelectorAll("[data-urgent-alert-countdown]")];
+    if (!countdowns.length) {
       if (urgentAlertClock) clearInterval(urgentAlertClock);
       urgentAlertClock = undefined;
       return;
     }
     const shared = mobileSharedRules();
     const now = Date.now();
-    for (const line of lines) {
-      const due = Date.parse(line.dataset.urgentAlertCountdown || "");
-      const at = line.querySelector(".urgent-alert-at");
-      if (!Number.isFinite(due) || !at || !shared || typeof shared.urgentAlertTimeLeft !== "function") continue;
-      at.textContent = "· " + shared.urgentAlertTimeLeft(due - now);
+    for (const countdown of countdowns) {
+      const due = Date.parse(countdown.dataset.urgentAlertCountdown || "");
+      if (!Number.isFinite(due) || !shared || typeof shared.urgentAlertCountdown !== "function") continue;
+      if (due <= now) {
+        rerenderUrgentAlertRow(countdown.closest(".message-row"));
+        continue;
+      }
+      countdown.textContent = shared.urgentAlertCountdown(due - now);
     }
   }
   function startUrgentAlertClock() {
@@ -9917,7 +9959,10 @@
   }
   if (typeof document !== "undefined") {
     document.addEventListener("visibilitychange", function () {
-      if (!document.hidden && document.querySelector("[data-urgent-alert-countdown]")) startUrgentAlertClock();
+      if (!document.hidden && document.querySelector("[data-urgent-alert-countdown]")) {
+        tickUrgentAlertCountdowns();
+        startUrgentAlertClock();
+      }
     });
   }
 
@@ -9933,19 +9978,27 @@
     if (card && entry) card.replaceWith(urgentAlertCardElement(entry));
   }
 
-  /** The cross: the server takes it as Got it; the card changes when the
+  /** Got it, or the cross on a card nobody closed yet: the server closes it on
+   *  every device (Got it while it waits for one); the card changes when the
    *  server's copy of the message does, like every other change. */
   async function closeUrgentAlert(alertId, row) {
     if (!alertId) return;
-    const client = hubClient();
-    if (!client) throw new Error("this phone is not paired with a server");
-    const shared = mobileSharedRules();
-    const answer = await client.postJson(shared && shared.HUB_ALERTS_PATH ? shared.HUB_ALERTS_PATH : "/v3/alerts", { action: "close", alertId: alertId });
-    if (!answer || answer.ok !== true) {
-      throw new Error(answer && answer.error && answer.error.message ? answer.error.message : "your server did not answer");
+    const buttons = row && row.querySelectorAll ? [...row.querySelectorAll("[data-urgent-alert-close]")] : [];
+    for (const button of buttons) button.disabled = true;
+    try {
+      const client = hubClient();
+      if (!client) throw new Error("this phone is not paired with a server");
+      const shared = mobileSharedRules();
+      const answer = await client.postJson(shared && shared.HUB_ALERTS_PATH ? shared.HUB_ALERTS_PATH : "/v3/alerts", { action: "close", alertId: alertId });
+      if (!answer || answer.ok !== true) {
+        throw new Error(answer && answer.error && answer.error.message ? answer.error.message : "your server did not answer");
+      }
+      urgentAlertErrors.delete(alertId);
+      expandedUrgentAlerts.delete(alertId);
+      if (row) row.__urgentAlertEntry = { ...(row.__urgentAlertEntry || {}), urgentAlert: answer.value };
+    } catch (error) {
+      urgentAlertErrors.set(alertId, error && error.message ? error.message : "try again");
     }
-    expandedUrgentAlerts.delete(alertId);
-    if (row) row.__urgentAlertEntry = { ...(row.__urgentAlertEntry || {}), urgentAlert: answer.value };
     rerenderUrgentAlertRow(row);
   }
 
