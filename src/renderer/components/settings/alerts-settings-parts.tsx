@@ -3,11 +3,13 @@ import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
+  ALERTS_FLOW_CHANNEL_WORD,
   ALERTS_STATUS_LABEL,
   alertsCallMinutes,
   alertsWaitChoices,
   type AlertsBand,
-  type AlertsChannelStatus
+  type AlertsChannelStatus,
+  type AlertsFlowChannel
 } from "../../../shared/urgentAlertSettings";
 import { AppSelect } from "../primitives";
 
@@ -55,8 +57,8 @@ export function AlertsBandPlaceholder(props: { loading: boolean; error?: string;
 /** What happens when an alert comes in, in order, with the wait to choose. */
 export function AlertsFlow(props: {
   waitMinutes: number;
-  telegram: boolean;
-  phone: boolean;
+  telegram: AlertsFlowChannel;
+  phone: AlertsFlowChannel;
   answerMode: boolean;
   busy: boolean;
   onWait: (minutes: number) => void;
@@ -79,10 +81,10 @@ export function AlertsFlow(props: {
         />
       </div>
       <ol className="alerts-chain" aria-label="When each step comes">
-        <FlowNode icon={<Bell size={14} />} label="Alert" time="now" />
-        <FlowEdge off={!props.telegram} />
-        <FlowNode icon={<Send size={14} />} label="Telegram" time={props.telegram ? "at once" : "not set up"} off={!props.telegram} />
-        <FlowEdge label={`${props.waitMinutes} min`} off={!props.phone} />
+        <FlowNode icon={<Bell size={14} />} label="Alert" time={clock(0)} />
+        <FlowEdge off={props.telegram !== "ready"} />
+        <FlowNode icon={<Send size={14} />} label="Telegram" time={props.telegram === "ready" ? "at once" : ALERTS_FLOW_CHANNEL_WORD[props.telegram]} off={props.telegram !== "ready"} />
+        <FlowEdge label={`${props.waitMinutes} min`} off={props.phone !== "ready"} />
         {calls.map((minutes, index) => (
           <FlowCall key={minutes} index={index} minutes={minutes} retry={retry} phone={props.phone} />
         ))}
@@ -94,11 +96,17 @@ export function AlertsFlow(props: {
   );
 }
 
-function FlowCall(props: { index: number; minutes: number; retry: number; phone: boolean }): JSX.Element {
+function FlowCall(props: { index: number; minutes: number; retry: number; phone: AlertsFlowChannel }): JSX.Element {
+  const ready = props.phone === "ready";
   return <>
-    {props.index > 0 ? <FlowEdge label={`${props.retry} min`} off={!props.phone} /> : null}
-    <FlowNode icon={<Phone size={14} />} label={`Call ${props.index + 1}`} time={props.phone ? `${props.minutes} min` : props.index === 0 ? "not set up" : ""} off={!props.phone} />
+    {props.index > 0 ? <FlowEdge label={`${props.retry} min`} off={!ready} /> : null}
+    <FlowNode icon={<Phone size={14} />} label={`Call ${props.index + 1}`} time={ready ? clock(props.minutes) : props.index === 0 ? ALERTS_FLOW_CHANNEL_WORD[props.phone as Exclude<AlertsFlowChannel, "ready">] : ""} off={!ready} />
   </>;
+}
+
+/** Minutes after the alert as h:mm, as on the approved mockup (0:05). */
+function clock(minutes: number): string {
+  return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}`;
 }
 
 function FlowNode(props: { icon: ReactNode; label: string; time: string; off?: boolean }): JSX.Element {
@@ -155,7 +163,7 @@ export function AlertsChannelRow(props: {
                 <MoreHorizontal size={16} aria-hidden />
               </button>
             </PopoverTrigger>
-            <PopoverContent align="end" className="alerts-menu">
+            <PopoverContent align="end" className="alerts-menu w-[200px] gap-0 p-[5px]" aria-label={`${props.name} options`}>
               {props.menu.map((item) => (
                 <button key={item.label} type="button" className={`alerts-menu-item${item.danger ? " is-danger" : ""}`} onClick={() => { setOpen(false); item.onSelect(); }}>
                   {item.label}

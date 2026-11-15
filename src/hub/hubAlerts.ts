@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { StorageService } from "../main/services/storage";
 import type { HubDevice } from "../shared/hubProtocol";
 import type { ChatMessage, ChatParticipant, Conversation } from "../shared/types";
@@ -175,6 +175,7 @@ export class HubAlerts {
   private timer?: ReturnType<typeof setTimeout>;
   private readonly polls = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly tests = new Map<string, PhoneTestRun>();
+  private readonly testPolls = new Set<ReturnType<typeof setTimeout>>();
   private telegramLoop?: AbortController;
   private telegramToken?: string;
   private closed = false;
@@ -199,6 +200,15 @@ export class HubAlerts {
     for (const alertId of undelivered) {
       void this.deliverTelegram(alertId).catch((error: unknown) => this.log("hub.alert.telegram.error", { alertId, message: messageOf(error) }));
     }
+    // A test call ringing when the server stopped: nobody follows it any more,
+    // so it must not read "calling" for ever (written only when it does).
+    if ((await this.settings()).phone?.lastTest?.state === "calling") {
+      await this.updateSettings((current) => {
+        if (current.phone?.lastTest?.state === "calling" && ![...this.tests.values()].some((run) => run.result.state === "calling")) {
+          current.phone.lastTest = { state: "failed", at: this.now().toISOString(), error: "The server restarted during the test call. Call again." };
+        }
+      }).catch((error: unknown) => this.log("hub.alert.test.reconcile-failed", { message: messageOf(error) }));
+    }
     this.reschedule();
     await this.restartTelegram();
   }
@@ -212,6 +222,8 @@ export class HubAlerts {
     if (this.timer) clearTimeout(this.timer);
     for (const poll of this.polls.values()) clearTimeout(poll);
     this.polls.clear();
+    for (const poll of this.testPolls) clearTimeout(poll);
+    this.testPolls.clear();
     this.telegramLoop?.abort();
     await Promise.race([
       Promise.all([this.queue, this.settingsQueue]).catch(() => undefined),
@@ -705,7 +717,9 @@ export class HubAlerts {
   /** Calls her with a short test: 1 on it (or, where no key can be heard,
    *  answering) proves calls reach her. Its result lands in the settings when
    *  it is a test of exactly the saved phone. */
-  private async startTest(credentials: { accountSid: string; authToken: string }, from: string, to: string): Promise<PhoneTestRun> {
+  private async startTest(credentials: { accountSid: string; authToken: string }, from: string, to: string): Promise<PhoneTestRun | undefined> {
+    // One test call at a time: each is billed, and two would ring at once.
+    if ([...this.tests.values()].some((run) => run.result.state === "calling")) return undefined;
     const settings = await this.settings();
     const mode = this.callMode(settings);
     const run: PhoneTestRun = {
@@ -728,6 +742,12 @@ export class HubAlerts {
       run.sid = call.sid;
     } catch (error) {
       run.result = { state: "failed", at: this.now().toISOString(), error: error instanceof AlertChannelError ? error.message : "Twilio could not be reached." };
+      if (error instanceof AlertChannelError && error.badCredentials) {
+        // The saved keys refused: the phone needs attention, as after an alert's call.
+        await this.updateSettings((current) => {
+          if (current.phone && sameKeys(current.phone, credentials)) current.phone.error = "Twilio no longer accepts these keys. Connect the phone again.";
+        }).catch(() => undefined);
+      }
       await this.recordTest(run);
       return run;
     }
@@ -741,10 +761,11 @@ export class HubAlerts {
     for (const [id, kept] of this.tests) {
       if (now - kept.startedAt > PHONE_TEST_KEEP_MS && kept.result.state !== "calling") this.tests.delete(id);
     }
-    while (this.tests.size >= PHONE_TEST_KEEP_MAX) {
-      const oldest = this.tests.keys().next().value;
-      if (oldest === undefined) break;
-      this.tests.delete(oldest);
+    // Over the limit: the oldest finished ones go (one at a time rings, so
+    // there is always a finished one to drop).
+    for (const [id, kept] of this.tests) {
+      if (this.tests.size < PHONE_TEST_KEEP_MAX) break;
+      if (kept.result.state !== "calling") this.tests.delete(id);
     }
     this.tests.set(run.id, run);
   }
@@ -752,6 +773,7 @@ export class HubAlerts {
   private pollTest(run: PhoneTestRun, failures: number): void {
     if (this.closed || !run.sid) return;
     const timer = setTimeout(() => {
+      this.testPolls.delete(timer);
       void new TwilioClient(run.credentials.accountSid, run.credentials.authToken, this.fetchImpl, this.options.twilioBaseUrl).call(run.sid as string)
         .then(async (call) => {
           if (!TWILIO_FINAL_STATUSES.has(call.status)) return this.pollTest(run, 0);
@@ -765,6 +787,7 @@ export class HubAlerts {
         .catch((error: unknown) => this.log("hub.alert.test.error", { message: messageOf(error) }));
     }, this.options.callPollMs ?? 4_000);
     timer.unref?.();
+    this.testPolls.add(timer);
   }
 
   private async finishTest(run: PhoneTestRun, status: UrgentAlertCallStatus): Promise<void> {
@@ -782,7 +805,7 @@ export class HubAlerts {
   private async recordTest(run: PhoneTestRun): Promise<void> {
     await this.updateSettings((current) => {
       const phone = current.phone;
-      if (phone && phone.accountSid === run.credentials.accountSid && phone.from === run.from && phone.to === run.to) phone.lastTest = { ...run.result };
+      if (phone && sameKeys(phone, run.credentials) && phone.from === run.from && phone.to === run.to) phone.lastTest = { ...run.result };
     }).catch((error: unknown) => this.log("hub.alert.test.record-failed", { message: messageOf(error) }));
   }
 
@@ -791,7 +814,7 @@ export class HubAlerts {
   private async testKey(url: URL, body: Buffer, signature: string | undefined, settings: StoredSettings): Promise<{ status: number; twiml: string }> {
     const run = this.tests.get(url.searchParams.get("test") ?? "");
     const params = Object.fromEntries(new URLSearchParams(body.toString("utf8")).entries());
-    if (!run || url.searchParams.get("token") !== run.token ||
+    if (!run || !sameSecret(url.searchParams.get("token") ?? "", run.token) ||
       !validTwilioSignature(run.credentials.authToken, `${this.publicBase(settings)}${url.pathname}${url.search}`, params, signature)) {
       this.log("hub.alert.twilio.refused", { test: true, hasRun: Boolean(run) });
       return { status: 403, twiml: "" };
@@ -1037,9 +1060,9 @@ export class HubAlerts {
         // The test call she just made of exactly this (or the one kept for it).
         const tried = typeof request.testId === "string" ? this.tests.get(request.testId) : undefined;
         const settings = await this.updateSettings((current) => {
-          const same = (phone: { accountSid: string; from: string; to: string } | undefined) =>
-            phone && phone.accountSid === keys.accountSid && phone.from === from && phone.to === to;
-          const lastTest = same(tried ? { accountSid: tried.credentials.accountSid, from: tried.from, to: tried.to } : undefined) ? tried?.result
+          const same = (phone: { accountSid: string; authToken: string; from: string; to: string } | undefined) =>
+            phone && sameKeys(phone, keys) && phone.from === from && phone.to === to;
+          const lastTest = same(tried ? { ...tried.credentials, from: tried.from, to: tried.to } : undefined) ? tried?.result
             : same(current.phone) ? current.phone?.lastTest : undefined;
           current.phone = {
             ...keys, from, to, trial: account.type === "Trial",
@@ -1057,6 +1080,7 @@ export class HubAlerts {
         if (!from) return failure("invalid_request", "Choose the number to call from.");
         if (!to) return failure("invalid_request", "Enter your phone with the country code, like +357 99 123456.");
         const run = await this.startTest({ accountSid: credentials.accountSid, authToken: credentials.authToken }, from, to);
+        if (!run) return failure("invalid_request", "A test call is still ringing. Wait for it to end.");
         return { ok: true, value: { testId: run.id, test: run.result } };
       }
       case "phone.try-status": {
@@ -1067,7 +1091,8 @@ export class HubAlerts {
       case "phone.test": {
         const settings = await this.settings();
         if (!settings.phone) return failure("not_set_up", "No phone is connected.");
-        await this.startTest({ accountSid: settings.phone.accountSid, authToken: settings.phone.authToken }, settings.phone.from, settings.phone.to);
+        const run = await this.startTest({ accountSid: settings.phone.accountSid, authToken: settings.phone.authToken }, settings.phone.from, settings.phone.to);
+        if (!run) return failure("invalid_request", "A test call is still ringing. Wait for it to end.");
         return { ok: true, value: this.settingsView(await this.settings()) };
       }
       case "phone.disconnect":
@@ -1254,6 +1279,17 @@ export function callTwiml(mode: "keypad" | "answer", spoken: string, keypadUrl: 
     twiml = build(text);
   }
   return twiml;
+}
+
+/** The same Twilio keys (a pasted pair is the saved one only if both match). */
+function sameKeys(left: { accountSid: string; authToken: string }, right: { accountSid: string; authToken: string }): boolean {
+  return left.accountSid === right.accountSid && sameSecret(left.authToken, right.authToken);
+}
+
+function sameSecret(left: string, right: string): boolean {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 function twilioCredentials(accountSid: unknown, authToken: unknown): { accountSid: string; authToken: string } | undefined {

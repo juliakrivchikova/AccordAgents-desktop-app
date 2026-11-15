@@ -3,14 +3,18 @@ import { useCallback, useContext, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   alertsBand,
+  alertsFlowChannels,
+  alertsIntroCall,
   alertsPhoneStatus,
+  alertsPhoneTesting,
   alertsPhoneTestLine,
   alertsTelegramStatus,
   alertsTelegramTestLine
 } from "../../../shared/urgentAlertSettings";
 import type { UrgentAlertSettingsView } from "../../../shared/urgentAlerts";
 import { UrgentAlertActionsContext } from "../chat/urgent-alert-context";
-import { TelegramConnectDialog, alertRequest, useSettingsWatch } from "./alerts-connect-dialogs";
+import { TelegramConnectDialog } from "./alerts-connect-dialogs";
+import { alertRequest, useSettingsWatch } from "./alerts-shared";
 import { PhoneConnectDialog } from "./alerts-phone-dialog";
 import { AlertsBandPlaceholder, AlertsChannelRow, AlertsFlow, AlertsStatusBand } from "./alerts-settings-parts";
 import { AwsConfirmDialog } from "./aws-dialog";
@@ -58,7 +62,7 @@ export function AlertsSettingsSection(): JSX.Element {
   // ringing, a bot waiting for Start or Got it, a test message's Got it.
   const testSentAt = telegram?.lastTest && !telegram.lastTest.gotIt ? Date.parse(telegram.lastTest.at) : Number.NaN;
   const watching = Boolean(settings) && !dialog && (
-    phone?.lastTest?.state === "calling" ||
+    alertsPhoneTesting(settings ?? {}) ||
     Boolean(telegram && !telegram.connected && !telegram.error) ||
     (Number.isFinite(testSentAt) && Date.now() - testSentAt < TELEGRAM_TEST_WATCH_MS));
   useSettingsWatch(watching, setSettings);
@@ -100,19 +104,18 @@ export function AlertsSettingsSection(): JSX.Element {
   const phoneStatus = settings ? alertsPhoneStatus(settings) : "not-set-up";
   const bot = telegram?.botUsername ? `@${telegram.botUsername}` : "your bot";
   const keypad = settings?.callMode !== "answer";
-  const testing = phone?.lastTest?.state === "calling";
+  const testing = settings ? alertsPhoneTesting(settings) : false;
   return (
     <div className="alerts-settings" data-testid="alerts-settings">
       <p className="alerts-intro">
-        When a member raises an urgent alert, it comes to your Telegram with a <b>Got it</b> button. If you don't press Got it in time, you get a call that reads it out; press <b>1</b> on the call for Got it.
+        When a member raises an urgent alert, it comes to your Telegram with a <b>Got it</b> button. If you don't press Got it in time, you get a call that reads it out; {settings ? alertsIntroCall(settings) : "press 1 on the call for Got it."}
       </p>
       {band ? <AlertsStatusBand band={band} action={bandAction} /> : <AlertsBandPlaceholder loading={loading} error={loadError} onRetry={() => void load()} />}
 
       {settings ? <>
         <AlertsFlow
           waitMinutes={settings.waitMinutes}
-          telegram={telegramStatus === "ready"}
-          phone={Boolean(phone && !phone.error)}
+          {...alertsFlowChannels(settings)}
           answerMode={!keypad}
           busy={Boolean(busy)}
           onWait={(minutes) => void act("wait", "wait", () => alertRequest({ action: "wait", minutes }))}
@@ -194,6 +197,7 @@ export function AlertsSettingsSection(): JSX.Element {
             ? `Alerts stop coming from ${bot} until you connect the new bot.`
             : `Alerts won't reach you in Telegram. ${bot} stays in Telegram; delete it in @BotFather if you no longer need it.`}
         confirmLabel={confirm === "different-bot" ? "Continue" : "Remove"}
+        danger={confirm !== "different-bot"}
         pending={busy === "confirm"}
         error={confirmError}
         testId="alerts-confirm"

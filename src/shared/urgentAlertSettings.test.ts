@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  alertsBand, alertsCallMinutes, alertsPhoneStatus, alertsPhoneTestLine, alertsTelegramStatus, alertsTelegramTestLine, alertsWaitChoices, alertsWhen
+  alertsBand, alertsCallMinutes, alertsDialogTestLine, alertsFlowChannels, alertsIntroCall, alertsPhoneStatus, alertsPhoneTesting, alertsPhoneTestLine, alertsTelegramStatus, alertsTelegramTestLine, alertsWaitChoices, alertsWhen
 } from "./urgentAlertSettings";
 import type { UrgentAlertSettingsView } from "./urgentAlerts";
 
@@ -59,7 +59,14 @@ test("the last test of each channel, in words", () => {
   const line = (state: "calling" | "pressed" | "not-pressed" | "failed", error?: string) =>
     alertsPhoneTestLine({ callMode: "keypad", phone: { ...phone, lastTest: { state, at: today, ...(error ? { error } : {}) } } }, now);
   assert.equal(alertsPhoneTestLine({ callMode: "keypad", phone }, now), "Not tested yet");
-  assert.equal(line("calling"), "Calling you now…");
+  const ringingNow = new Date(2026, 10, 15, 14, 29).toISOString();
+  assert.equal(alertsPhoneTestLine({ callMode: "keypad", phone: { ...phone, lastTest: { state: "calling", at: ringingNow } } }, now), "Calling you now…");
+  // A "calling" nobody finished (the server stopped mid-call) ends on its own.
+  const old = new Date(2026, 10, 15, 14, 20).toISOString();
+  const stuck = { callMode: "keypad" as const, phone: { ...phone, lastTest: { state: "calling" as const, at: old } } };
+  assert.equal(alertsPhoneTesting(stuck, now), false);
+  assert.match(alertsPhoneTestLine(stuck, now) ?? "", /its result never came\. Call again$/);
+  assert.equal(alertsPhoneTesting({ phone: { ...phone, lastTest: { state: "calling", at: new Date(2026, 10, 15, 14, 29).toISOString() } } }, now), true);
   assert.match(line("pressed") ?? "", /^Tested today .* · you pressed 1$/);
   assert.match(line("not-pressed") ?? "", /you picked up, but 1 wasn't pressed$/);
   assert.match(line("failed", "Twilio: The number is unverified.") ?? "", /failed: Twilio: The number is unverified\.$/);
@@ -72,4 +79,17 @@ test("call times and wait choices", () => {
   assert.deepEqual(alertsWaitChoices(7).slice(0, 5), [1, 2, 3, 5, 7], "a saved wait outside the list is still offered");
   assert.match(alertsWhen(new Date(2026, 10, 14, 9, 10).toISOString(), now), /^yesterday /);
   assert.equal(alertsWhen("nope", now), "");
+});
+
+test("the flow, the first sentence and the dialog's test line say what is true now", () => {
+  assert.deepEqual(alertsFlowChannels({ telegram, phone }), { telegram: "ready", phone: "ready" });
+  assert.deepEqual(alertsFlowChannels({ telegram: { ...telegram, error: "revoked" }, phone: { ...phone, error: "keys" } }), { telegram: "broken", phone: "broken" });
+  assert.deepEqual(alertsFlowChannels({ telegram: { botUsername: "x", connected: false, step: "start" } }), { telegram: "not-finished", phone: "none" });
+  assert.equal(alertsIntroCall({ callMode: "keypad" }), "press 1 on the call for Got it.");
+  assert.equal(alertsIntroCall({ callMode: "answer" }), "answering the call counts as Got it.");
+  assert.equal(alertsDialogTestLine(undefined, "+35799123342", true), "We call your phone; press 1 when you hear it.");
+  assert.equal(alertsDialogTestLine({ state: "calling", at: today }, "+35799123342", false), "Calling +35799123342… Answer it.");
+  assert.match(alertsDialogTestLine({ state: "pressed", at: today }, "x", true), /^You pressed 1 at .*\. Calls work\.$/);
+  assert.equal(alertsDialogTestLine({ state: "failed", at: today, error: "Twilio: The number is unverified." }, "x", true), "The call didn't go through: Twilio: The number is unverified. Call again?");
+  assert.equal(alertsDialogTestLine({ state: "no-answer", at: today }, "x", true), "Nobody answered. Call again?");
 });

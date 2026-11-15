@@ -10,6 +10,7 @@ import {
   URGENT_ALERT_CALL_ATTEMPTS,
   URGENT_ALERT_CALL_RETRY_MS,
   urgentAlertPhoneTestPassed,
+  type UrgentAlertPhoneTest,
   type UrgentAlertSettingsView
 } from "./urgentAlerts";
 
@@ -99,6 +100,43 @@ export function alertsBand(view: UrgentAlertSettingsView): AlertsBand {
   return { kind: "ok", title: "Alerts will reach you", detail: "Telegram at once, then a call if you don't press Got it. Works with this Mac closed." };
 }
 
+/** How the flow names a channel that does not work right now. */
+export type AlertsFlowChannel = "ready" | "broken" | "not-finished" | "none";
+
+export function alertsFlowChannels(view: Pick<UrgentAlertSettingsView, "telegram" | "phone">): { telegram: AlertsFlowChannel; phone: AlertsFlowChannel } {
+  const telegram = alertsTelegramStatus(view);
+  return {
+    telegram: telegram === "ready" ? "ready" : telegram === "attention" ? "broken" : telegram === "not-finished" ? "not-finished" : "none",
+    phone: !view.phone ? "none" : view.phone.error ? "broken" : "ready"
+  };
+}
+
+export const ALERTS_FLOW_CHANNEL_WORD: Record<Exclude<AlertsFlowChannel, "ready">, string> = {
+  broken: "not working",
+  "not-finished": "not finished",
+  none: "not set up"
+};
+
+/** The page's first sentence ends with what ends a call: 1, or answering it. */
+export function alertsIntroCall(view: Pick<UrgentAlertSettingsView, "callMode">): string {
+  return view.callMode === "answer" ? "answering the call counts as Got it." : "press 1 on the call for Got it.";
+}
+
+/** A test call in the connect dialog, in words (none before the first). */
+export function alertsDialogTestLine(test: UrgentAlertPhoneTest | undefined, to: string, keypad: boolean): string {
+  if (!test) return keypad ? "We call your phone; press 1 when you hear it." : "We call your phone; answer it.";
+  const at = new Date(test.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  switch (test.state) {
+    case "calling": return `Calling ${to}… ${keypad ? "Press 1 when you hear it." : "Answer it."}`;
+    case "pressed": return `You pressed 1 at ${at}. Calls work.`;
+    case "answered": return `You answered at ${at}. Calls work.`;
+    case "not-pressed": return "You picked up, but 1 wasn't pressed. Call again?";
+    case "no-answer": return "Nobody answered. Call again?";
+    case "busy": return "The line was busy. Call again?";
+    default: return `The call didn't go through${test.error ? `: ${sentence(test.error)}` : "."} Call again?`;
+  }
+}
+
 /** Minutes after an alert at which each call comes, if nobody presses Got it. */
 export function alertsCallMinutes(waitMinutes: number): number[] {
   const retry = Math.round(URGENT_ALERT_CALL_RETRY_MS / 60_000);
@@ -130,12 +168,22 @@ export function alertsTelegramTestLine(view: Pick<UrgentAlertSettingsView, "tele
   return test.gotIt ? `Tested ${when} · you pressed Got it` : `Test message sent ${when} · press Got it on it`;
 }
 
+/** A test call longer than any call rings is over, whatever the last word:
+ *  the page stops waiting for it (a server that stopped mid-call never says). */
+const PHONE_TEST_STALE_MS = 5 * 60_000;
+
+/** A test call still under way (not one whose answer never came). */
+export function alertsPhoneTesting(view: Pick<UrgentAlertSettingsView, "phone">, now: Date = new Date()): boolean {
+  const test = view.phone?.lastTest;
+  return test?.state === "calling" && now.getTime() - Date.parse(test.at) < PHONE_TEST_STALE_MS;
+}
+
 export function alertsPhoneTestLine(view: Pick<UrgentAlertSettingsView, "phone" | "callMode">, now?: Date): string | undefined {
   const test = view.phone?.lastTest;
   if (!test) return view.phone && !view.phone.error ? "Not tested yet" : undefined;
   const when = alertsWhen(test.at, now);
   switch (test.state) {
-    case "calling": return "Calling you now…";
+    case "calling": return alertsPhoneTesting(view, now) ? "Calling you now…" : `Test ${when}: its result never came. Call again`;
     case "pressed": return `Tested ${when} · you pressed 1`;
     case "answered": return `Tested ${when} · you answered`;
     case "not-pressed": return `Test ${when}: you picked up, but 1 wasn't pressed`;

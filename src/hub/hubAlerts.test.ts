@@ -49,6 +49,8 @@ function outside() {
   const outcomes: string[] = [];
   /** Telegram answers "too many requests" to this many sends first. */
   const throttle = { sends: 0 };
+  /** Twilio fails this many call-status reads (a server that lost Twilio). */
+  const faults = { callStatus: 0 };
   const buttonsOf = (markup: unknown) => ((markup as { inline_keyboard?: Array<Array<{ callback_data: string }>> } | undefined)?.inline_keyboard ?? [])
     .flat().map((button) => button.callback_data);
   const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
@@ -101,6 +103,10 @@ function outside() {
         return Response.json({ sid, status: "queued" });
       }
       const callMatch = /\/Calls\/(CA[0-9a-f]+)\.json$/.exec(url);
+      if (callMatch && init?.method !== "POST" && faults.callStatus > 0) {
+        faults.callStatus -= 1;
+        return new Response(JSON.stringify({ message: "Service Unavailable" }), { status: 503 });
+      }
       if (callMatch) {
         const call = calls.find((item) => item.sid === callMatch[1]);
         if (!call) return new Response("{}", { status: 404 });
@@ -125,7 +131,7 @@ function outside() {
   };
   const start = (code?: string, chat = USER_CHAT) => pushUpdate({ message: { message_id: 1, chat: { id: chat, first_name: "Svetlana" }, from: { id: chat, first_name: "Svetlana" }, text: code ? `/start ${code}` : "/start" } });
   const press = (data: string, messageId: number) => pushUpdate({ callback_query: { id: `cb-${nextUpdate}`, from: { id: USER_CHAT }, data, message: { message_id: messageId, chat: { id: USER_CHAT } } } });
-  return { fetchImpl, sent, edits, answers, calls, outcomes, throttle, start, press };
+  return { fetchImpl, sent, edits, answers, calls, outcomes, throttle, faults, start, press };
 }
 
 const member: ChatParticipant = { id: "p-taylor", handle: "taylor", roleConfigId: "software-engineer", kind: "claude-code" };
@@ -395,6 +401,93 @@ test("a test call before Save: 1 on it is shown, Save keeps it, and a change of 
   assert.equal(after.phone?.lastTest?.state, "no-answer");
   // Keys pasted wrong are refused, not mixed with the saved ones.
   assert.equal((await h.alerts(h.owner, { action: "phone.check", accountSid: "nope" })).ok, false);
+});
+
+test("one test call at a time, and one left ringing by a restart does not stay \"calling\"", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-alerts-test-restart-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const first = await hub(t, { publicUrl: true, dir });
+  await first.storage.hub().setOwner({ deviceId: first.owner.originId, publicKeyDerBase64: first.owner.publicKeyDerBase64, name: "Mac", addedAt: new Date().toISOString() });
+  await connectPhone(first);
+  first.world.outcomes.push(...Array(50).fill("in-progress"));
+  const ringing = await first.alerts<UrgentAlertSettingsView>(first.owner, { action: "phone.test" });
+  assert.equal(ringing.value?.phone?.lastTest?.state, "calling");
+  // A second one while it rings is refused: each is billed, two would ring at once.
+  const again = await first.alerts(first.owner, { action: "phone.try", from: "+14155550134", to: "+35799123342" });
+  assert.deepEqual([again.ok, again.error?.message], [false, "A test call is still ringing. Wait for it to end."]);
+  await first.close();
+  const second = await hub(t, { publicUrl: true, dir });
+  const after = await until(async () => {
+    const view = (await second.alerts<UrgentAlertSettingsView>(first.owner, { action: "settings" })).value;
+    return view?.phone?.lastTest?.state === "failed" ? view : undefined;
+  }, "the test left ringing to end");
+  assert.match(after.phone?.lastTest?.error ?? "", /restarted during the test call/);
+});
+
+test("saved keys Twilio refuses on a test call mark the phone, so the page never says Ready beside them", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  await connectPhone(h);
+  const stored = (await h.storage.hub().document("urgent-alerts"))?.value as { phone: { authToken: string } };
+  stored.phone.authToken = "b".repeat(32);
+  await h.storage.hub().setDocument("urgent-alerts", stored, new Date().toISOString());
+  const test = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "phone.test" });
+  assert.equal(test.ok, true);
+  assert.equal(test.value?.phone?.lastTest?.state, "failed");
+  assert.equal(test.value?.phone?.error, "Twilio no longer accepts these keys. Connect the phone again.");
+  // A test placed with other keys (pasted, same account) is not the saved phone's test.
+  const pasted = await h.alerts<{ testId: string }>(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" });
+  assert.equal(pasted.ok, true);
+  await until(async () => (await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: pasted.value!.testId })).value?.test.state !== "calling", "the pasted-keys test to end");
+  assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.phone?.lastTest?.state, "failed", "still the saved keys' own result");
+});
+
+test("a test call's key press: a wrong token or test is refused, 2 repeats, and 1 stays 1 when the call ends", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  h.world.outcomes.push("in-progress", "in-progress", "completed");
+  const tried = await h.alerts<{ testId: string }>(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" });
+  const placed = await until(() => h.world.calls[0], "the test call");
+  const action = /action="([^"]+)"/.exec(placed.twiml)![1].replace(/&amp;/g, "&");
+  const signedFor = async (address: string, digits: string) => {
+    const params = { CallSid: placed.sid, Digits: digits, From: "+14155550134", To: "+35799123342" };
+    const local = new URL(address);
+    return fetch(`${h.base}${local.pathname}${local.search}`, { method: "POST", body: new URLSearchParams(params).toString(),
+      headers: { "content-type": "application/x-www-form-urlencoded", "x-twilio-signature": twilioSignature(AUTH_TOKEN, address, params) } });
+  };
+  // Signed by Twilio's key, but not this test's token, or not a test it knows.
+  assert.equal((await signedFor(action.replace(/token=[^&]+/, "token=nope"), "1")).status, 403);
+  assert.equal((await signedFor(action.replace(/test=[^&]+/, "test=nope"), "1")).status, 403);
+  const repeat = await signedFor(action, "2");
+  assert.equal(repeat.status, 200);
+  assert.match(await repeat.text(), /<Gather numDigits="1"/, "2 hears the test again");
+  assert.equal((await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: tried.value!.testId })).value?.test.state, "calling");
+  assert.equal((await signedFor(action, "1")).status, 200);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal((await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: tried.value!.testId })).value?.test.state, "pressed", "the call ending after 1 does not undo it");
+  assert.equal((await h.alerts(h.owner, { action: "phone.try-status", testId: "gone" })).ok, false);
+});
+
+test("a test call Twilio stops answering about ends as failed, and the next one may start", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  h.world.faults.callStatus = 1_000;
+  const tried = await h.alerts<{ testId: string }>(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" });
+  const done = await until(async () => {
+    const answer = await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: tried.value!.testId });
+    return answer.value?.test.state !== "calling" ? answer.value?.test : undefined;
+  }, "the lost test call to end", 8_000);
+  assert.equal(done.state, "failed");
+  h.world.faults.callStatus = 0;
+  assert.equal((await h.alerts(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" })).ok, true);
+});
+
+test("with no phone saved, a request without keys is refused, never filled from nothing", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  for (const request of [{ action: "phone.check" }, { action: "phone.try", from: "+14155550134", to: "+35799123342" }, { action: "phone.save", from: "+14155550134", to: "+35799123342" }]) {
+    const answer = await h.alerts(h.owner, request);
+    assert.deepEqual([answer.ok, answer.error?.code], [false, "invalid_request"], request.action);
+  }
+  await connectPhone(h);
+  // A token alone is a pasted pair with a part missing, not the saved SID with it.
+  assert.equal((await h.alerts(h.owner, { action: "phone.check", authToken: AUTH_TOKEN })).ok, false);
 });
 
 test("without a server Twilio reaches, answering the test call is what passes it", async (t) => {

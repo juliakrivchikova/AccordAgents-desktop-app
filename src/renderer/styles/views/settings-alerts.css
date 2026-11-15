@@ -57,6 +57,7 @@
 
 .settings-view .alerts-band-detail {
   margin-top: 1px;
+  overflow-wrap: anywhere;
   color: var(--app-text-secondary);
   font-size: 12.5px;
   line-height: 1.45;
@@ -231,6 +232,7 @@
 
 .settings-view .alerts-row .gen-row-desc.alerts-line-error {
   color: var(--app-danger);
+  overflow-wrap: anywhere;
 }
 
 .settings-view .alerts-row .gen-row-desc.alerts-line-warn {
@@ -305,8 +307,8 @@
 }
 
 .alerts-menu {
-  width: 200px;
-  padding: 5px;
+  display: flex;
+  flex-direction: column;
 }
 
 .alerts-menu-item {
@@ -348,6 +350,25 @@
   margin-top: 2px;
 }
 
+/* The connect dialogs: never taller than the window (the phone's, with its
+   three steps, is tall), the body scrolls instead. */
+.gen-aws-dialog.alerts-dialog {
+  max-height: calc(100vh - 32px);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.alerts-dialog-body {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.alerts-dialog .gen-aws-dialog-note {
+  color: var(--app-text-secondary);
+}
+
 /* The connect dialogs. */
 .alerts-steps {
   display: flex;
@@ -384,7 +405,7 @@
   height: 24px;
   border: 1px solid var(--app-border-strong);
   border-radius: 50%;
-  background: var(--app-surface);
+  background: var(--popover);
   color: var(--app-text-secondary);
   font-size: 12px;
   font-weight: 600;
@@ -445,6 +466,7 @@
   gap: 5px;
   margin: 0;
   padding-left: 18px;
+  list-style: decimal outside;
   color: var(--app-text-secondary);
   font-size: 12.5px;
   line-height: 1.45;
@@ -508,6 +530,7 @@
 }
 
 .alerts-field > span:first-child,
+.alerts-field > label,
 .alerts-label {
   color: var(--app-text-strong);
   font-size: 12px;
@@ -613,7 +636,7 @@
   padding: 9px 11px;
   border: 1px solid var(--app-border);
   border-radius: 10px;
-  background: var(--app-surface);
+  background: var(--popover);
   color: var(--app-text-strong);
   font-size: 13px;
   cursor: pointer;

@@ -21,6 +21,8 @@ export function AwsDialog(props: {
   /** False for a dialog only its own buttons may close: Escape and a click
    *  beside it do nothing, so coming back from the browser cannot cancel. */
   dismissible?: boolean;
+  /** More classes for the dialog (its own layout on top of the shared shape). */
+  className?: string;
   /** The element to focus when it opens (the field to fill), instead of its
    *  first control. */
   initialFocus?: () => HTMLElement | null | undefined;
@@ -31,7 +33,7 @@ export function AwsDialog(props: {
   return (
     <Dialog open={props.open} onOpenChange={(next) => { if (!next && !props.busy && props.dismissible !== false) props.onClose(); }}>
       <DialogContent
-        className={`gen-aws-dialog${props.wide ? " gen-aws-dialog-wide" : ""}`}
+        className={`gen-aws-dialog${props.wide ? " gen-aws-dialog-wide" : ""}${props.className ? ` ${props.className}` : ""}`}
         data-testid={props.testId}
         showCloseButton={false}
         onOpenAutoFocus={initialFocus ? (event) => {
@@ -61,6 +63,8 @@ export function AwsConfirmDialog(props: {
   title: string;
   description: ReactNode;
   confirmLabel: string;
+  /** The action removes something: its button says so in red. */
+  danger?: boolean;
   pending?: boolean;
   error?: string;
   testId?: string;
@@ -77,7 +81,7 @@ export function AwsConfirmDialog(props: {
       onClose={props.onClose}
       actions={<>
         <Button type="button" variant="outline" size="sm" disabled={props.pending} onClick={props.onClose}>Cancel</Button>
-        <Button type="button" size="sm" disabled={props.pending} data-testid={props.testId ? `${props.testId}-confirm` : undefined} onClick={props.onConfirm}>
+        <Button type="button" variant={props.danger ? "destructive" : "default"} size="sm" disabled={props.pending} data-testid={props.testId ? `${props.testId}-confirm` : undefined} onClick={props.onConfirm}>
           {props.pending ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
           {props.confirmLabel}
         </Button>
