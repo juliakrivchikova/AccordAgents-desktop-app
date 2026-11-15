@@ -94,6 +94,7 @@ function outside() {
       const form = Object.fromEntries(new URLSearchParams(String(init?.body ?? "")).entries());
       if (url.endsWith(`/Accounts/${ACCOUNT_SID}.json`)) return Response.json({ sid: ACCOUNT_SID, friendly_name: "My first account", type: "Trial", status: "active" });
       if (url.includes("/IncomingPhoneNumbers.json") && init?.method === "GET") return Response.json({ incoming_phone_numbers: [{ phone_number: "+14155550134", friendly_name: "x", capabilities: { voice: true } }] });
+      if (url.includes("/OutgoingCallerIds.json")) return Response.json({ outgoing_caller_ids: [{ phone_number: "+35799123342" }] });
       if (url.endsWith("/Calls.json")) {
         const sid = `CA${randomBytes(16).toString("hex")}`;
         calls.push({ sid, to: form.To, from: form.From, twiml: form.Twiml, status: "ringing" });
@@ -221,10 +222,10 @@ async function connectTelegram(h: Hub) {
 
 async function connectPhone(h: Hub) {
   const checked = await h.alerts<{ trial: boolean; numbers: string[] }>(h.owner, { action: "phone.check", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN });
-  assert.deepEqual(checked.value, { accountName: "My first account", trial: true, numbers: ["+14155550134"] });
+  assert.deepEqual(checked.value, { accountName: "My first account", trial: true, numbers: ["+14155550134"], verified: ["+35799123342"] });
   const saved = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "phone.save", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+357 99 123 342" });
   assert.equal(saved.ok, true, JSON.stringify(saved));
-  assert.deepEqual(saved.value?.phone, { from: "+14155550134", to: "+35799123342", trial: true });
+  assert.deepEqual(saved.value?.phone, { from: "+14155550134", to: "+35799123342", trial: true, accountName: "My first account" });
   await h.alerts(h.owner, { action: "wait", minutes: 1 });
 }
 
@@ -338,6 +339,87 @@ test("1 on the call ends it, by a request Twilio signed; a forged one is refused
   assert.equal(done.ackSource, "call");
   await new Promise((resolve) => setTimeout(resolve, 400));
   assert.equal(h.world.calls.length, 1, "no further call");
+});
+
+/** Presses a key on a call the way Twilio does: a POST signed with the keys. */
+async function pressOnCall(h: Hub, twiml: string, sid: string, digits = "1", signature?: string) {
+  const action = /action="([^"]+)"/.exec(twiml)![1].replace(/&amp;/g, "&");
+  const address = new URL(action);
+  const params = { CallSid: sid, Digits: digits, From: "+14155550134", To: "+35799123342" };
+  return fetch(`${h.base}${address.pathname}${address.search}`, {
+    method: "POST",
+    body: new URLSearchParams(params).toString(),
+    headers: { "content-type": "application/x-www-form-urlencoded", "x-twilio-signature": signature ?? twilioSignature(AUTH_TOKEN, action, params) }
+  });
+}
+
+test("a test call before Save: 1 on it is shown, Save keeps it, and a change of phone reuses the saved keys", async (t) => {
+  // The settings redesign (the User, 2026-11-15): the phone is "Ready" only
+  // once a test call reached her, and changing the phone needs no keys again.
+  const h = await hub(t, { publicUrl: true });
+  h.world.outcomes.push(...Array(20).fill("in-progress"));
+  const tried = await h.alerts<{ testId: string; test: { state: string } }>(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+357 99 123 342" });
+  assert.equal(tried.ok, true, JSON.stringify(tried));
+  assert.equal(tried.value?.test.state, "calling");
+  const placed = await until(() => h.world.calls[0], "the test call");
+  assert.match(placed.twiml, /<Gather numDigits="1"/, "with a server Twilio reaches, the test asks for 1");
+  assert.match(placed.twiml, /test call from AccordAgents/);
+  // A key press nobody signed changes nothing.
+  assert.equal((await pressOnCall(h, placed.twiml, placed.sid, "1", "bm9wZQ==")).status, 403);
+  assert.equal((await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: tried.value!.testId })).value?.test.state, "calling");
+  const pressed = await pressOnCall(h, placed.twiml, placed.sid);
+  assert.equal(pressed.status, 200);
+  assert.match(await pressed.text(), /Got it\. Goodbye\./);
+  assert.equal((await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: tried.value!.testId })).value?.test.state, "pressed");
+
+  const saved = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "phone.save", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342", testId: tried.value!.testId });
+  assert.equal(saved.value?.phone?.lastTest?.state, "pressed", "the test she just made is the phone's last test");
+  assert.equal(saved.value?.phone?.accountName, "My first account");
+
+  // No keys pasted: the saved ones are used, and the dialog is told so.
+  const again = await h.alerts<{ saved?: boolean; accountName: string }>(h.owner, { action: "phone.check" });
+  assert.deepEqual([again.ok, again.value?.saved, again.value?.accountName], [true, true, "My first account"]);
+  const moved = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "phone.save", from: "+14155550134", to: "+357 99 000 111" });
+  assert.equal(moved.ok, true, JSON.stringify(moved));
+  assert.equal(moved.value?.phone?.to, "+35799000111");
+  assert.equal(moved.value?.phone?.lastTest, undefined, "a test of another phone proves nothing about this one");
+
+  // A test of the saved phone from the page: its outcome lands in the settings.
+  h.world.outcomes.splice(0, h.world.outcomes.length, "no-answer");
+  const test = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "phone.test" });
+  assert.equal(test.value?.phone?.lastTest?.state, "calling");
+  const after = await until(async () => {
+    const view = (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value;
+    return view?.phone?.lastTest?.state !== "calling" ? view : undefined;
+  }, "the test call to end");
+  assert.equal(after.phone?.lastTest?.state, "no-answer");
+  // Keys pasted wrong are refused, not mixed with the saved ones.
+  assert.equal((await h.alerts(h.owner, { action: "phone.check", accountSid: "nope" })).ok, false);
+});
+
+test("without a server Twilio reaches, answering the test call is what passes it", async (t) => {
+  const h = await hub(t);
+  h.world.outcomes.push("completed");
+  const tried = await h.alerts<{ testId: string }>(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" });
+  const placed = await until(() => h.world.calls[0], "the test call");
+  assert.doesNotMatch(placed.twiml, /<Gather/, "no key can be heard: the message is read out");
+  const done = await until(async () => {
+    const answer = await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: tried.value!.testId });
+    return answer.value?.test.state !== "calling" ? answer.value?.test : undefined;
+  }, "the test call to end");
+  assert.equal(done.state, "answered");
+});
+
+test("Telegram keeps its last test: the connect check, then Send test message and its Got it", async (t) => {
+  const h = await hub(t);
+  await connectTelegram(h);
+  const connected = (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value;
+  assert.equal(connected?.telegram?.lastTest?.gotIt, true);
+  const sent = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "telegram.test" });
+  assert.equal(sent.value?.telegram?.lastTest?.gotIt, false, "sent, Got it not pressed yet");
+  const message = await until(() => h.world.sent.filter((item) => item.text.startsWith("Test alert")).pop(), "the test message");
+  h.world.press(message.buttons[0], message.messageId);
+  await until(async () => (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram?.lastTest?.gotIt, "Got it on the test");
 });
 
 test("closing the card in the app counts as Got it and folds it; the phone closes it too, a machine never", async (t) => {

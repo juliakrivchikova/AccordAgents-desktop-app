@@ -102,21 +102,53 @@ export interface UrgentAlertSettingsView {
      *  Start: only that Start connects (not anyone who finds the bot). */
     startCode?: string;
     error?: string;
+    /** The last test message: when it went, and whether Got it came back. */
+    lastTest?: { at: string; gotIt: boolean };
   };
   phone?: {
     from: string;
     to: string;
     trial: boolean;
+    /** The Twilio account's name, as Twilio gives it. */
+    accountName?: string;
     error?: string;
+    /** The last test call to this phone from this number. */
+    lastTest?: UrgentAlertPhoneTest;
   };
   waitMinutes: number;
   callMode: "keypad" | "answer";
+  /** The server inside the app (no own server): alerts go out only while
+   *  this computer is awake. */
+  embedded?: boolean;
+}
+
+/** A test call and how it went. "pressed": 1 on the call; "answered": picked
+ *  up where no key can be heard (answering is Got it there); "not-pressed":
+ *  picked up, but 1 never came. */
+export interface UrgentAlertPhoneTest {
+  state: "calling" | "pressed" | "answered" | "not-pressed" | "no-answer" | "busy" | "failed";
+  at: string;
+  error?: string;
+}
+
+/** A test call is over (and how it went is known). */
+export function urgentAlertPhoneTestDone(test: Pick<UrgentAlertPhoneTest, "state"> | undefined): boolean {
+  return Boolean(test && test.state !== "calling");
+}
+
+/** A test call proved calls reach her. */
+export function urgentAlertPhoneTestPassed(test: Pick<UrgentAlertPhoneTest, "state"> | undefined): boolean {
+  return test?.state === "pressed" || test?.state === "answered";
 }
 
 export interface UrgentAlertPhoneCheck {
   accountName: string;
   trial: boolean;
   numbers: string[];
+  /** On a trial account: the numbers Twilio lets it call (verified ones). */
+  verified?: string[];
+  /** The keys checked were the saved ones (none were pasted). */
+  saved?: boolean;
 }
 
 // --- requests ----------------------------------------------------------------
@@ -131,9 +163,13 @@ export type HubAlertRequest =
   | { action: "telegram.connect"; token: string }
   | { action: "telegram.disconnect" }
   | { action: "telegram.test" }
-  | { action: "phone.check"; accountSid: string; authToken: string }
-  | { action: "phone.buy"; accountSid: string; authToken: string }
-  | { action: "phone.save"; accountSid: string; authToken: string; from: string; to: string }
+  // Twilio keys left out: the saved ones (changing the number keeps the account).
+  | { action: "phone.check"; accountSid?: string; authToken?: string }
+  | { action: "phone.buy"; accountSid?: string; authToken?: string }
+  | { action: "phone.save"; accountSid?: string; authToken?: string; from: string; to: string; testId?: string }
+  /** A test call before saving (the connect dialog's last step). */
+  | { action: "phone.try"; accountSid?: string; authToken?: string; from: string; to: string }
+  | { action: "phone.try-status"; testId: string }
   | { action: "phone.test" }
   | { action: "phone.disconnect" }
   | { action: "wait"; minutes: number }
@@ -146,7 +182,7 @@ export type UrgentAlertUserRequest = Exclude<HubAlertRequest, { action: "raise" 
 
 export const URGENT_ALERT_USER_ACTIONS: ReadonlySet<string> = new Set([
   "close", "settings", "telegram.connect", "telegram.disconnect", "telegram.test",
-  "phone.check", "phone.buy", "phone.save", "phone.test", "phone.disconnect", "wait"
+  "phone.check", "phone.buy", "phone.save", "phone.try", "phone.try-status", "phone.test", "phone.disconnect", "wait"
 ]);
 
 export interface UrgentAlertError {

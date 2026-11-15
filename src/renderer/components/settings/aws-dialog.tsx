@@ -21,12 +21,26 @@ export function AwsDialog(props: {
   /** False for a dialog only its own buttons may close: Escape and a click
    *  beside it do nothing, so coming back from the browser cannot cancel. */
   dismissible?: boolean;
+  /** The element to focus when it opens (the field to fill), instead of its
+   *  first control. */
+  initialFocus?: () => HTMLElement | null | undefined;
   testId?: string;
   onClose: () => void;
 }): JSX.Element {
+  const { initialFocus } = props;
   return (
     <Dialog open={props.open} onOpenChange={(next) => { if (!next && !props.busy && props.dismissible !== false) props.onClose(); }}>
-      <DialogContent className={`gen-aws-dialog${props.wide ? " gen-aws-dialog-wide" : ""}`} data-testid={props.testId} showCloseButton={false}>
+      <DialogContent
+        className={`gen-aws-dialog${props.wide ? " gen-aws-dialog-wide" : ""}`}
+        data-testid={props.testId}
+        showCloseButton={false}
+        onOpenAutoFocus={initialFocus ? (event) => {
+          const target = initialFocus();
+          if (!target) return;
+          event.preventDefault();
+          target.focus();
+        } : undefined}
+      >
         <DialogHeader>
           <DialogTitle>{props.title}</DialogTitle>
           <DialogDescription>{props.description}</DialogDescription>
