@@ -5,6 +5,7 @@ import type { ChatMessage, ChatParticipant, Conversation } from "../shared/types
 import {
   URGENT_ALERT_CALL_ATTEMPTS,
   URGENT_ALERT_CALL_RETRY_MS,
+  URGENT_ALERT_ACKNOWLEDGEABLE_STATES,
   URGENT_ALERT_OPEN_STATES,
   URGENT_ALERT_DEFAULT_WAIT_MINUTES,
   URGENT_ALERT_MESSAGE_MAX_CHARS,
@@ -58,7 +59,7 @@ create index if not exists urgent_alerts_state on urgent_alerts(state);
 
 const OPEN_STATES: readonly string[] = URGENT_ALERT_OPEN_STATES;
 /** States Got it still ends: an alert nobody answered can still be seen. */
-const ACKNOWLEDGEABLE = new Set(["waiting", "calling", "unanswered"]);
+const ACKNOWLEDGEABLE: ReadonlySet<string> = new Set(URGENT_ALERT_ACKNOWLEDGEABLE_STATES);
 
 interface StoredTelegram {
   token: string;

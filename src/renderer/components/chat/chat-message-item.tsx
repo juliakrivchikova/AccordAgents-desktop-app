@@ -40,7 +40,8 @@ import {
 } from "./chat-conversation-data";
 import { ChatArtifactNoteCard, artifactNoteCardForMessage } from "./chat-artifact-note-card";
 import { ChatTurnFinishedNote } from "./chat-turn-finished-note";
-import { ChatUrgentAlertCard, urgentAlertOf } from "./chat-urgent-alert-card";
+import { ChatUrgentAlertCard } from "./chat-urgent-alert-card";
+import { urgentAlertOfMessage } from "../../../shared/urgentAlerts";
 import { ChatAccordLaunchCard, accordLaunchCardForMessage } from "./chat-accord-launch-card";
 import { turnFinishedNoteOf } from "../../../shared/turnFinishedNoteSource";
 import { ChatChoiceCard } from "./chat-choice-card";
@@ -123,7 +124,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   }
   const [copied, setCopied] = useState(false);
   const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
-  const urgentAlert = urgentAlertOf(message);
+  const urgentAlert = urgentAlertOfMessage(message);
   if (urgentAlert) {
     return <ChatUrgentAlertCard message={message} alert={urgentAlert} participant={props.participants?.find((item) => item.id === message.participantId)} />;
   }

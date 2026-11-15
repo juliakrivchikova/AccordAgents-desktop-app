@@ -3,7 +3,7 @@
  * a long job) reaches her outside the app when it goes wrong. The User's
  * server sends the member's message to her Telegram with a Got it button;
  * if nobody reacts in time it calls her phone (Twilio) and reads it out, up
- * to three calls. Got it in Telegram, 1 on the call, or closing the alert in
+ * to three calls. Got it in Telegram, 1 on the call, or Got it on the card in
  * the app (computer or phone) ends it.
  *
  * The server owns every alert and writes its card into the chat itself (a
@@ -80,12 +80,12 @@ export interface UrgentAlertView {
   closedAt?: string;
 }
 
-/** States in which a call may still come; the server and every card agree. */
+/** States in which the server may still place a call. */
 export const URGENT_ALERT_OPEN_STATES: readonly UrgentAlertState[] = ["waiting", "calling"];
 
-export function isOpenUrgentAlert(alert: Pick<UrgentAlertView, "state">): boolean {
-  return URGENT_ALERT_OPEN_STATES.includes(alert.state);
-}
+/** States in which Got it (from Telegram, the call or the app) ends the alert:
+ *  the server takes it in these, and the card offers it in exactly these. */
+export const URGENT_ALERT_ACKNOWLEDGEABLE_STATES: readonly UrgentAlertState[] = ["waiting", "calling", "unanswered"];
 
 // --- settings ---------------------------------------------------------------
 
@@ -175,7 +175,12 @@ export function maskedPhoneNumber(number: string): string {
   return number.length > 7 ? `${number.slice(0, 4)} ••• ${number.slice(-3)}` : number;
 }
 
-// --- what a card says (the computer and the phone show the same lines) ---
+// --- what a card says (the computer and the phone show the same words) ---
+//
+// The card the User approved on 2026-11-15 (five reviews, mockup "Urgent
+// alert · new card", header variant 5A): the red header always, the member's
+// message, then one status band that answers "what now, and when does my
+// phone ring", with what happened before in one grey line under it.
 
 export function urgentAlertClock(iso: string | undefined): string {
   if (!iso) return "";
@@ -183,70 +188,168 @@ export function urgentAlertClock(iso: string | undefined): string {
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-/** "4:12 left" until a moment `ms` from now. */
-export function urgentAlertTimeLeft(ms: number): string {
+/** "4:12" until a moment `ms` from now. */
+export function urgentAlertCountdown(ms: number): string {
   const seconds = Math.max(0, Math.ceil(ms / 1000));
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")} left`;
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-export type UrgentAlertLine = { key: string; tone: "ok" | "wait" | "bad" | "plain"; text: string; at?: string };
-
-/** What happened so far, one line each, as the server keeps it. */
-export function urgentAlertLines(alert: UrgentAlertView, requester: string, now: number): UrgentAlertLine[] {
-  const lines: UrgentAlertLine[] = [];
-  if (alert.state === "not_set_up") {
-    lines.push({ key: "setup", tone: "bad", text: `Alerts aren't set up, so ${requester} couldn't reach you outside the app.` });
-    return lines;
-  }
-  if (alert.telegram?.sentAt) lines.push({ key: "telegram", tone: "ok", text: "Sent to Telegram", at: urgentAlertClock(alert.telegram.sentAt) });
-  else if (alert.telegram?.error) lines.push({ key: "telegram", tone: "bad", text: `Telegram didn't take it: ${alert.telegram.error}` });
-  if (alert.state === "failed") lines.push({ key: "failed", tone: "bad", text: "No phone is connected, so it reached you only here." });
-  alert.calls.forEach((call) => lines.push(callLine(call, alert)));
-  if (isOpenUrgentAlert(alert) && alert.callAt) {
-    const due = Date.parse(alert.callAt);
-    const again = alert.calls.length > 0;
-    lines.push({
-      key: "next",
-      tone: "wait",
-      text: `${again ? "Calling again" : "Calling you"} at ${urgentAlertClock(alert.callAt)} unless you press Got it`,
-      at: Number.isFinite(due) ? urgentAlertTimeLeft(due - now) : undefined
-    });
-  }
-  if (alert.state === "acknowledged") {
-    const how = alert.ackSource === "telegram" ? "You pressed Got it"
-      : alert.ackSource === "app" ? "Closed in the app"
-      : alert.callMode === "keypad" ? "You pressed 1 on the call" : "You answered the call";
-    lines.push({ key: "ack", tone: "ok", text: how, at: urgentAlertClock(alert.ackedAt) });
-    if (alert.phone && alert.calls.length === 0) lines.push({ key: "nocall", tone: "plain", text: "No call" });
-  }
-  if (alert.state === "unanswered") {
-    lines.push({ key: "unanswered", tone: "bad", text: `Called you ${alert.calls.length} times with no answer` });
-  }
-  return lines;
+/** The status band: its main line (`lead`, then the countdown in bold when a
+ *  call is due, then `tail`), a grey line under it, and what the band offers. */
+export interface UrgentAlertStatus {
+  /** "now": it waits for her; "done": she reacted; "bad": it never reached her. */
+  tone: "now" | "done" | "bad";
+  icon: "clock" | "ringing" | "sent" | "missed" | "check" | "off" | "failed";
+  lead: string;
+  /** The next call's moment and the time left until it, while it is ahead. */
+  countdown?: { to: string; text: string };
+  tail?: string;
+  detail?: string;
+  /** "got-it" while the alert waits for her (no cross then); "set-up" when it
+   *  never left the app. */
+  action?: "got-it" | "set-up";
 }
 
-function callLine(call: UrgentAlertCall, alert: UrgentAlertView): UrgentAlertLine {
-  const of = `call ${call.attempt} of ${URGENT_ALERT_CALL_ATTEMPTS}`;
-  const at = urgentAlertClock(call.startedAt);
-  if (call.error) return { key: `call-${call.attempt}`, tone: "bad", text: `Couldn't place ${of}: ${call.error}`, at };
-  switch (call.status) {
-    case "queued":
-    case "initiated":
-    case "ringing":
-    case "in-progress":
-      return { key: `call-${call.attempt}`, tone: "wait", text: `Calling you now (${of})`, at };
-    case "completed":
-      return {
-        key: `call-${call.attempt}`,
-        tone: alert.state === "acknowledged" && alert.ackSource === "call" ? "ok" : "plain",
-        text: alert.state === "acknowledged" && alert.ackSource === "call" ? `Called you (${of})` : `Called you (${of}): 1 wasn't pressed`,
-        at
-      };
-    case "busy":
-      return { key: `call-${call.attempt}`, tone: "plain", text: `Called you (${of}): busy`, at };
-    case "canceled":
-      return { key: `call-${call.attempt}`, tone: "plain", text: `Call ${call.attempt} stopped`, at };
+/** Whether the alert still waits for her Got it: the card offers the button
+ *  and no cross. */
+export function urgentAlertAwaitsGotIt(alert: Pick<UrgentAlertView, "state">): boolean {
+  return URGENT_ALERT_ACKNOWLEDGEABLE_STATES.includes(alert.state);
+}
+
+export function urgentAlertStatus(alert: UrgentAlertView, requester: string, now: number): UrgentAlertStatus {
+  const calls = alert.calls ?? [];
+  const telegramSent = Boolean(alert.telegram?.sentAt);
+  switch (alert.state) {
+    case "not_set_up":
+      return { tone: "bad", icon: "off", lead: "Not sent outside the app",
+        detail: `Alerts aren't set up, so ${requester} could reach you only here.`, action: "set-up" };
+    case "failed":
+      return { tone: "bad", icon: "failed", lead: "Not sent outside the app",
+        detail: `Telegram didn't take it${alert.telegram?.error ? ` (${alert.telegram.error})` : ""} and no phone is connected.`, action: "set-up" };
+    case "acknowledged": {
+      const at = urgentAlertClock(alert.ackedAt);
+      const by = alert.ackSource === "telegram" ? "you pressed it in Telegram"
+        : alert.ackSource === "app" ? "you pressed it in the app"
+        : alert.callMode === "keypad" ? `you pressed 1 on call ${Math.max(calls.length, 1)}`
+        : `you answered call ${Math.max(calls.length, 1)}`;
+      // The call she answered is the Got it itself, not history.
+      const before = alert.ackSource === "call" ? calls.slice(0, -1) : calls;
+      const history = [...historyParts(alert, before)];
+      if (alert.phone && calls.length === 0) history.push("No call was made");
+      return { tone: "done", icon: "check", lead: `Got it · ${by}${at ? ` at ${at}` : ""}`, detail: joined(history) };
+    }
+    case "unanswered": {
+      // A call Twilio refused or reported failed never got through.
+      const through = calls.filter((call) => !call.error && call.status !== "failed").length;
+      const lead = through === 0 ? "Couldn't call you · no more calls"
+        : `Nobody answered ${through === 1 ? "the call" : `${through} calls`} · no more calls`;
+      return { tone: "bad", icon: "missed", lead, detail: joined(historyParts(alert, calls)), action: "got-it" };
+    }
+    case "waiting":
+    case "calling":
+      break;
     default:
-      return { key: `call-${call.attempt}`, tone: "plain", text: `Called you (${of}): no answer`, at };
+      // A state a newer server knows and this app does not: no promise about calls.
+      return { tone: "now", icon: "clock", lead: "This app can't show this alert's state", detail: "Update the app to see it." };
   }
+  // Waiting or calling: it still waits for her.
+  const due = alert.callAt ? Date.parse(alert.callAt) : Number.NaN;
+  const ringing = calls.find(callInFlight);
+  if (!ringing && Number.isFinite(due) && due > now) {
+    const countdown = { to: alert.callAt as string, text: urgentAlertCountdown(due - now) };
+    if (calls.length === 0) {
+      return { tone: "now", icon: "clock", lead: "Calling you in ", countdown,
+        detail: telegramSent ? "Sent to Telegram. Got it here or there stops the call."
+          : alert.telegram?.error ? "Telegram didn't take it. Got it here stops the call."
+          : "Got it here stops the call.", action: "got-it" };
+    }
+    return { tone: "now", icon: "clock", lead: "Calling again in ", countdown,
+      tail: ` · call ${calls.length + 1} of ${URGENT_ALERT_CALL_ATTEMPTS}`, detail: joined(historyParts(alert, calls)), action: "got-it" };
+  }
+  const press = alert.callMode === "keypad" ? "Answer and press 1, or press Got it here." : "Answer it, or press Got it here.";
+  if (ringing) {
+    return { tone: "now", icon: "ringing", lead: `Calling you now · call ${Math.min(ringing.attempt, URGENT_ALERT_CALL_ATTEMPTS)} of ${URGENT_ALERT_CALL_ATTEMPTS}`,
+      detail: press, action: "got-it" };
+  }
+  if (alert.phone) {
+    // Its moment came and her server has not placed it yet: say only that,
+    // never that it rings (a server that stalled would leave it so).
+    const attempt = Math.min(calls.length + 1, URGENT_ALERT_CALL_ATTEMPTS);
+    return { tone: "now", icon: "ringing", lead: `Placing the call · call ${attempt} of ${URGENT_ALERT_CALL_ATTEMPTS}`, detail: press, action: "got-it" };
+  }
+  // No phone: Telegram is all there is.
+  return { tone: "now", icon: "sent", lead: telegramSent ? "Sent to Telegram" : "Waiting for Got it",
+    detail: "No phone is connected, so no call will follow.", action: "got-it" };
+}
+
+/** A closed card's one line: how it ended (`text` on the computer; `short`
+ *  on the phone, whose line has room for little more than the message, as
+ *  the approved phone mockup shows). `done` when she reacted. Only an alert
+ *  that no longer waits for Got it folds, and closing one that waits is Got
+ *  it, so in practice it is acknowledged or never left the app. */
+export function urgentAlertOutcome(alert: UrgentAlertView): { text: string; short: string; done: boolean } {
+  if (alert.state === "acknowledged") {
+    const at = urgentAlertClock(alert.ackedAt);
+    const how = alert.ackSource === "telegram" ? "Got it in Telegram"
+      : alert.ackSource === "app" ? "Got it in the app"
+      : alert.callMode === "keypad" ? "Got it on the call" : "Answered the call";
+    return { text: at ? `${how} ${at}` : how, short: at ? `Got it ${at}` : "Got it", done: true };
+  }
+  if (alert.state === "not_set_up" || alert.state === "failed") return { text: "Not sent outside the app", short: "Not sent", done: false };
+  if (alert.state === "unanswered") return { text: "No answer", short: "No answer", done: false };
+  return { text: "Closed", short: "Closed", done: false };
+}
+
+/** What the card says when Got it, or the cross, did not go through: while a
+ *  call may still come it says so; after the last call it does not. */
+export function urgentAlertFailureText(alert: Pick<UrgentAlertView, "state">, message: string): string {
+  const reason = message.trim().replace(/[.\s]+$/, "");
+  if (URGENT_ALERT_OPEN_STATES.includes(alert.state)) return `Not confirmed: ${reason}. A call may still come.`;
+  return urgentAlertAwaitsGotIt(alert) ? `Not confirmed: ${reason}.` : `Could not close: ${reason}.`;
+}
+
+/** A call still queued, ringing or talking. */
+function callInFlight(call: UrgentAlertCall): boolean {
+  return !call.endedAt && !call.error && RINGING.has(call.status);
+}
+
+const RINGING: ReadonlySet<UrgentAlertCallStatus> = new Set(["queued", "initiated", "ringing", "in-progress"]);
+
+/** What happened before now, oldest first: Telegram, then the calls (one
+ *  part for all of them when they ended the same way). */
+function historyParts(alert: UrgentAlertView, calls: UrgentAlertCall[]): string[] {
+  const parts: string[] = [];
+  if (alert.telegram?.sentAt) parts.push("Sent to Telegram");
+  else if (alert.telegram?.error) parts.push("Telegram didn't take it");
+  const ended = calls.filter((call) => !callInFlight(call));
+  const outcomes = ended.map((call) => callOutcome(call, alert));
+  if (ended.length > 1 && outcomes.every((outcome) => outcome === outcomes[0])) {
+    parts.push(`Calls at ${ended.map((call) => urgentAlertClock(call.startedAt)).join(", ")}: ${outcomes[0]}`);
+  } else {
+    ended.forEach((call, index) => parts.push(`Call ${call.attempt} at ${urgentAlertClock(call.startedAt)}: ${outcomes[index]}`));
+  }
+  return parts;
+}
+
+function callOutcome(call: UrgentAlertCall, alert: UrgentAlertView): string {
+  if (call.error) return `couldn't place it (${call.error})`;
+  switch (call.status) {
+    case "completed": return alert.callMode === "keypad" ? "1 wasn't pressed" : "answered";
+    case "busy": return "busy";
+    case "canceled": return "stopped";
+    case "failed": return "didn't go through";
+    default: return "no answer";
+  }
+}
+
+function joined(parts: string[]): string | undefined {
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
+/** A message that is an urgent alert's card: written by the User's server
+ *  (a device cannot forge one there) on a member's row. */
+export function urgentAlertOfMessage(message: { role?: string; metadata?: { serverWriter?: unknown; urgentAlert?: unknown } }): UrgentAlertView | undefined {
+  if (message.role !== "participant" || message.metadata?.serverWriter !== URGENT_ALERT_SERVER_WRITER) return undefined;
+  const alert = message.metadata?.urgentAlert as UrgentAlertView | undefined;
+  return alert && typeof alert === "object" && typeof alert.id === "string" ? alert : undefined;
 }

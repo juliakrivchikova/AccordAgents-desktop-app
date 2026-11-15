@@ -7,6 +7,7 @@ import {
 } from "./chatParticipantRequestThreads";
 import { TURN_FINISHED_NOTE_SOURCE, turnFinishedNoteOf } from "./turnFinishedNoteSource";
 import type { ChatMessage, Conversation } from "./types";
+import { urgentAlertOfMessage } from "./urgentAlerts";
 
 /** How much of the reply a note carries: one line, cut by the card anyway. */
 export const TURN_FINISHED_NOTE_PREVIEW_MAX = 200;
@@ -40,8 +41,10 @@ export const TURN_FINISHED_NOTE_REMOVALS_PER_PAGE = 100;
  *
  * Below it counts what the chat draws there for the User: not another note
  * (two members finishing one after the other would each leave one for the
- * other's), and not a message her server refused, which stays at the end of
- * the chat on this device only.
+ * other's), not a message her server refused, which stays at the end of
+ * the chat on this device only, and not an urgent alert's card the same member
+ * raised: it sits right under the reply, and a note only repeated the reply
+ * (the User, 2026-11-15).
  */
 export function turnFinishedNoteFor(
   conversation: Pick<Conversation, "messages">,
@@ -72,6 +75,9 @@ export function turnFinishedNoteFor(
     !written.has(message.id) &&
     !turnFinishedNoteOf(message) &&
     !message.metadata?.serverRejected &&
+    // The alert this member raised during the turn; another member's alert
+    // below still buries the reply.
+    !(urgentAlertOfMessage(message) && message.participantId === reply.participantId) &&
     !chatMessageHiddenFromTimeline(conversation, message) &&
     // An Accord's document note is drawn on the Accord's card, not below.
     !accordFoldedMessageIds(conversation.messages).has(message.id) &&

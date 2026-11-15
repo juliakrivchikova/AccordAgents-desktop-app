@@ -1,31 +1,13 @@
-/* An urgent alert's card (chat-urgent-alert-card.tsx): the design the User
-   approved on 2026-11-12 — a saturated red header with a bell and a cross,
-   the member's message, then what happened, in grey. */
+/* An urgent alert's card (chat-urgent-alert-card.tsx), as the User approved it
+   on 2026-11-15: the red header whatever the state, the member and the time,
+   the message, then a status band (what happens now, the history in one grey
+   line, Got it or Set up alerts on the right). */
 /* No avatar: in the messages' text column (past their 38 px avatar and
    12 px gap), as a turn-finished note is. */
 .chat-urgent-alert {
   max-width: min(653px, calc(100% - 50px));
   margin-left: 50px;
   padding: 4px 0;
-}
-
-.chat-urgent-alert-body {
-  min-width: 0;
-}
-
-/* The member and the time, inside the card above the message. */
-.chat-urgent-alert-from {
-  padding: 12px 15px 0;
-  color: var(--app-muted);
-  font-size: 12.5px;
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-}
-
-.chat-urgent-alert-from .message-when,
-.chat-urgent-alert-from time {
-  color: inherit;
-  font-size: inherit;
 }
 
 .chat-urgent-alert-panel {
@@ -41,7 +23,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 11px 15px;
+  height: 44px;
+  padding: 0 10px 0 15px;
   background: var(--app-urgent);
   color: var(--app-urgent-fg);
 }
@@ -54,8 +37,8 @@
 .chat-urgent-alert-close {
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   margin-left: auto;
   border: 0;
   border-radius: 8px;
@@ -69,8 +52,8 @@
 }
 
 .chat-urgent-alert-close:focus-visible {
-  outline: none;
-  box-shadow: inset 0 0 0 1px var(--app-urgent-fg);
+  outline: 2px solid var(--app-urgent-fg);
+  outline-offset: -2px;
 }
 
 .chat-urgent-alert-close:disabled {
@@ -78,71 +61,97 @@
   cursor: default;
 }
 
+/* The member and the time, inside the card above the message. */
+.chat-urgent-alert-from {
+  padding: 12px 15px 0;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-urgent-alert-from .message-when,
+.chat-urgent-alert-from time {
+  color: inherit;
+  font-size: inherit;
+}
+
 .chat-urgent-alert-text {
-  padding: 4px 15px 10px;
+  padding: 4px 15px 14px;
   color: var(--app-text-strong);
-  font-size: 14.5px;
+  font-size: 15px;
   font-weight: 600;
-  line-height: 1.4;
+  line-height: 1.42;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
-.chat-urgent-alert-lines {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 0;
-  padding: 0 15px 13px;
-  list-style: none;
-}
-
-.chat-urgent-alert-line {
+/* What happens now. */
+.chat-urgent-alert-status {
   display: flex;
   align-items: center;
-  gap: 8px;
-  color: var(--app-text-secondary);
-  font-size: 12.5px;
+  gap: 11px;
+  padding: 12px 12px 12px 15px;
+  border-top: 1px solid var(--app-border);
+  background: var(--app-surface-subtle);
 }
 
-.chat-urgent-alert-line svg {
+.chat-urgent-alert-status.is-bad {
+  border-top-color: var(--app-danger-border);
+  background: var(--app-danger-soft);
+}
+
+.chat-urgent-alert-status-icon {
   flex: none;
-  color: var(--app-muted);
+  align-self: flex-start;
+  margin-top: 2px;
+  color: var(--app-text-strong);
 }
 
-.chat-urgent-alert-line.is-ok svg {
+.chat-urgent-alert-status.is-done .chat-urgent-alert-status-icon {
   color: var(--app-success);
 }
 
-.chat-urgent-alert-line.is-bad svg {
+.chat-urgent-alert-status.is-bad .chat-urgent-alert-status-icon,
+.chat-urgent-alert-status.is-bad .chat-urgent-alert-status-main {
   color: var(--app-danger);
 }
 
-.chat-urgent-alert-line.is-wait {
-  color: var(--app-text-strong);
-  font-weight: 500;
+.chat-urgent-alert-status-words {
+  flex: 1;
+  min-width: 0;
 }
 
-.chat-urgent-alert-at {
+.chat-urgent-alert-status-main {
+  color: var(--app-text-strong);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-urgent-alert-countdown {
+  font-weight: 750;
+}
+
+.chat-urgent-alert-status-detail {
+  margin-top: 2px;
   color: var(--app-text-secondary);
-  font-weight: 400;
+  font-size: 12.5px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
 }
 
 .chat-urgent-alert-error {
-  margin: 0;
-  padding: 0 15px 12px;
+  margin-top: 4px;
   color: var(--app-danger);
   font-size: 12.5px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
-.chat-urgent-alert-foot {
-  display: flex;
-  justify-content: flex-end;
-  padding: 10px 15px;
-  border-top: 1px solid var(--app-border);
-}
-
+/* Closed: one line, the message first, then who and how it ended. */
 .chat-urgent-alert.is-folded {
   padding: 2px 0 6px;
 }
@@ -150,43 +159,65 @@
 .chat-urgent-alert-folded {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
   max-width: 624px;
   min-width: 0;
-  padding: 7px 12px;
+  min-height: 40px;
+  padding: 0 10px 0 12px;
   border: 1px solid var(--app-border);
   border-radius: 10px;
   background: var(--app-surface);
-  color: var(--app-text-secondary);
-  font-size: 12.5px;
+  font-size: 13px;
   text-align: left;
   cursor: pointer;
-}
-
-.chat-urgent-alert-folded svg {
-  flex: none;
-  color: var(--app-urgent);
 }
 
 .chat-urgent-alert-folded:hover {
   background: var(--app-surface-hover);
 }
 
-.chat-urgent-alert-folded-title {
+.chat-urgent-alert-folded:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* A grey bell once she reacted; red when it never reached her. */
+.chat-urgent-alert-folded-bell {
   flex: none;
-  color: var(--app-text-strong);
-  font-weight: 500;
+  color: var(--app-muted);
+}
+
+.chat-urgent-alert-folded.is-unresolved .chat-urgent-alert-folded-bell {
+  color: var(--app-urgent);
 }
 
 .chat-urgent-alert-folded-preview {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
+  color: var(--app-text-strong);
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.chat-urgent-alert-folded:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
+.chat-urgent-alert-folded-outcome {
+  flex: none;
+  max-width: 50%;
+  overflow: hidden;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-urgent-alert-folded.is-unresolved .chat-urgent-alert-folded-outcome {
+  color: var(--app-danger);
+}
+
+.chat-urgent-alert-folded-chevron {
+  flex: none;
+  color: var(--app-text-secondary);
 }

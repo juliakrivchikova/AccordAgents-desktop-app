@@ -15,9 +15,22 @@ even when she forgot it was watching.
 3. Without a reaction it calls her phone through her Twilio account and reads
    the message out: 1 confirms, 2 repeats. Without 1 it calls twice more,
    3 minutes apart (three calls in all), then says nobody answered.
-4. What ends it: Got it in Telegram, 1 on the call, or the cross on the card
-   in the app (computer or phone). A text reply in Telegram does not. The
-   cross on a closed alert folds the card into one line; a click opens it.
+4. What ends it: Got it in Telegram, 1 on the call, or Got it on the card in
+   the app (computer or phone). A text reply in Telegram does not. Got it on
+   the card folds it into one line (the message, then how it ended); a click
+   opens it. After Got it in Telegram or on the call the card stays open with
+   the outcome, and its cross folds it.
+
+The card (approved by the User on 2026-11-15 after five design reviews,
+header variant 5A): the red header whatever the state; the member and the
+time; the message; one status band that says what happens now ("Calling you
+in 0:49", "Calling you now · call 1 of 3", "Nobody answered 3 calls · no more
+calls", "Got it · …", "Not sent outside the app") with what happened before
+in one grey line. While the alert waits for her (waiting, calling, nobody
+answered) the band has Got it and the header has no cross. The wording is
+`urgentAlertStatus` / `urgentAlertOutcome` in `src/shared/urgentAlerts.ts`,
+shared by the desktop and the phone. An alert's card below a member's reply
+does not make a "finished answering" note: it would only repeat the reply.
 5. Several alerts are separate: each has its own message, wait and calls. How
    often to alert is the User's arrangement with the member; the app does not
    group or limit them.
@@ -27,8 +40,8 @@ call", artifact "План: Urgent alert — Telegram и звонок".
 
 ## Where it lives
 
-- `src/shared/urgentAlerts.ts` — wire format, states, the card's lines (shared
-  by the desktop card and the phone's, through `mobileSharedRules.ts`).
+- `src/shared/urgentAlerts.ts` — wire format, states, what the card says
+  (shared by the desktop card and the phone's, through `mobileSharedRules.ts`).
 - `src/hub/hubAlerts.ts` — the alert's course on the server: settings
   (`hub_documents` key `urgent-alerts`), alerts (`urgent_alerts` table),
   Telegram long polling, calls and their status, Twilio key presses.
@@ -42,8 +55,8 @@ call", artifact "План: Urgent alert — Telegram и звонок".
   `ServerChatLink.alerts` → `POST /v3/alerts`.
 - Desktop: `chat-urgent-alert-card.tsx`, Settings → Alerts
   (`alerts-settings-section.tsx`, `alerts-connect-dialogs.tsx`).
-- Phone: `urgentAlertCardElement` in `src/mobile/mobile-app.js`; its cross
-  posts `close` to `/v3/alerts`.
+- Phone: `urgentAlertCardElement` in `src/mobile/mobile-app.js`; its Got it
+  (and its cross on a card nobody closed) posts `close` to `/v3/alerts`.
 
 ## With and without the User's own server
 
