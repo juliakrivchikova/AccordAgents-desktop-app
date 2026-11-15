@@ -74,7 +74,11 @@ export function AlertsSettingsSection(): JSX.Element {
   const telegramError = telegram?.error;
   useEffect(() => { if (telegramWaits) setWatchFrom(Date.now()); }, [telegramWaits, telegramError]);
   const testSentAt = telegram?.lastTest && !telegram.lastTest.gotIt ? Date.parse(telegram.lastTest.at) : Number.NaN;
-  const phoneTestAt = settings && alertsPhoneTesting(settings) ? Date.parse(settings.phone?.lastTest?.at ?? "") : Number.NaN;
+  // A test ringing, or one whose placing went unanswered (it may still ring,
+  // and 1 on it still counts), is watched as long as a call could last.
+  const lastPhoneTest = settings?.phone?.lastTest;
+  const phoneTestAt = settings && (alertsPhoneTesting(settings) || (lastPhoneTest?.state === "failed" && lastPhoneTest.lost))
+    ? Date.parse(lastPhoneTest?.at ?? "") : Number.NaN;
   const deadlines = [
     phoneTestAt + URGENT_ALERT_TEST_STALE_MS,
     telegramWaits ? watchFrom + TELEGRAM_FINISH_WATCH_MS : Number.NaN,
