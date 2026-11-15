@@ -393,9 +393,12 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   // The User's server owns every chat (Д1): this machine writes its members'
   // replies there and takes their turns from there, like every device (Д2).
   // It moves nothing there: the computer did that.
+  // Set once the host exists (below); the link reads nothing before start.
+  let goingDown = (): boolean => false;
   const serverChatLink = new ServerChatLink({
     storage: storageService,
     chat: chatService,
+    readPaused: () => goingDown(),
     identity: deviceIdentity,
     hubConfig: async () => ({ url: hubUrl }),
     machineNames: async () => [],
@@ -450,6 +453,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       scheduledCount: () => scriptService.scheduledCount(),
     }
   });
+  goingDown = () => host.goingDown();
   hostRef = host;
   // Scheduled scripts that live on this machine: they run here with the lid
   // of the laptop closed, keep the instance awake while one is switched on,

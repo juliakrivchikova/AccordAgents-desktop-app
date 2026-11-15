@@ -321,9 +321,14 @@ export class HubWaker {
       // Still stopping: started once it has stopped. An episode is such
       // answers in a row; one from long before starts anew.
       const episode = last?.stoppingSince !== undefined && at - last.at <= WAKE_WHILE_STOPPING_GRACE_MS ? last.stoppingSince : at;
-      stoppingSince = !response.ok && code === "IncorrectInstanceState" ? episode : undefined;
+      // AWS accepts a start of an instance that has not stopped yet (still
+      // running while its machine stops, reading nothing): the same wait.
+      const previous = /<previousState>[\s\S]*?<name>([^<]+)<\/name>/.exec(text)?.[1];
+      const notStoppedYet = response.ok && !manual && (previous === "running" || previous === "pending" || previous === "stopping");
+      stoppingSince = (!response.ok && code === "IncorrectInstanceState") || notStoppedYet ? episode : undefined;
       stopping = stoppingSince !== undefined && at - stoppingSince <= WAKE_WHILE_STOPPING_GRACE_MS;
-      message = response.ok ? "Starting the machine."
+      message = response.ok && !stopping ? "Starting the machine."
+        : notStoppedYet ? "The machine is still stopping; it is started once it has stopped."
         : stopping ? (manual ? "The machine is still stopping. Press Wake again in a minute." : "The machine is still stopping; it is started once it has stopped.")
           : `AWS refused to start the machine (${response.status}${code ? `: ${code}` : ""}).`;
     } catch (error) {

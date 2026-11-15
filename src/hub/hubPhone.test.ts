@@ -754,3 +754,36 @@ test("the phone's Wake while the machine is still stopping says to press it agai
   assert.equal(answer.ok, false);
   assert.match(answer.message, /still stopping\. Press Wake again/);
 });
+
+test("a start AWS takes while the instance has not stopped yet is not counted and is asked again soon", async (t) => {
+  // The machine stopped reading as it stops; AWS still has it running and
+  // answers the start with success, which starts nothing.
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-wake-not-stopped-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
+  await storage.init();
+  const machine = createDeviceIdentity(new Date().toISOString());
+  await storage.hub().replaceRoster([{ deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Cloud box", machineId: "m-1", addedAt: "" }], new Date().toISOString());
+  await storage.hub().replaceMachineWake([{ machineId: "m-1", configJson: JSON.stringify({ machineId: "m-1", instanceId: "i-0123456789abcdef0", region: "us-east-1",
+    credentials: { accessKeyId: "AKIAEXAMPLEEXAMPLE12", secretAccessKey: "secretsecretsecretsecretsecret", region: "us-east-1" } }) }], new Date().toISOString());
+  let clock = Date.now();
+  let calls = 0;
+  let previous = "running";
+  const waker = new HubWaker({ storage, now: () => clock, fetchImpl: (async () => {
+    calls += 1;
+    return new Response(`<StartInstancesResponse><instancesSet><item><currentState><name>pending</name></currentState><previousState><code>16</code><name>${previous}</name></previousState></item></instancesSet></StartInstancesResponse>`, { status: 200 });
+  }) as unknown as typeof fetch });
+  await storage.hubOps().recordRead(machine.originId, 3, new Date(clock).toISOString());
+  waker.noteWork("m-1", 10);
+  clock += 31_000;
+  await waker.check();
+  assert.equal(calls, 1);
+  assert.equal((await waker.status())[0].waking, true);
+  clock += 31_000;
+  previous = "stopped";
+  await waker.check();
+  assert.equal(calls, 2, "asked again soon: the first started nothing");
+  clock += 31_000;
+  await waker.check();
+  assert.equal(calls, 2, "a real start waits its turn");
+});

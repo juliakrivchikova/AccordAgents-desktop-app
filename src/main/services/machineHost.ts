@@ -307,6 +307,19 @@ export class MachineHostService {
     return !this.closed && !this.draining && !this.idleFenced && !held && !this.options.hostStopCommitted?.();
   }
 
+  /** This machine goes down (draining for a shutdown, closed, or stopped by
+   *  another of its programs on the same instance): it reads nothing more
+   *  from the server, so what arrives stays unread there and the server
+   *  starts the machine again for it. */
+  goingDown(): boolean {
+    return this.closed || this.draining || Boolean(this.options.hostStopCommitted?.());
+  }
+
+  /** A desktop holds this machine's turns (an update about to run). */
+  private held(): boolean {
+    return this.heldUntil !== undefined && this.now().getTime() < this.heldUntil;
+  }
+
   /** A turn the server asked of a member here was not taken (takesNewWork
    *  said no). One turned down while an idle stop is prepared (read just
    *  before the feed paused) keeps the machine on; it is taken up when the
@@ -371,10 +384,7 @@ export class MachineHostService {
     // due time. This vetoes idle stop only; it is not a run, so the desktop's
     // update gate (hello run ids) does not wait for it.
     if (this.options.scripts?.keepsHostAwake()) return true;
-    // A desktop's hold (an update about to run) keeps it on: a turn it
-    // turned down meanwhile is taken when the hold ends.
-    const held = this.heldUntil !== undefined && this.now().getTime() < this.heldUntil;
-    if (this.closed || this.draining || held || this.declinedWhileFenced || this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork() ||
+    if (this.closed || this.draining || this.declinedWhileFenced || this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork() ||
         this.mentionExecutor.hasActiveWork() || (this.chat.activeParticipantRuns?.().length ?? 0) > 0 || (this.chat.liveRunIds?.().length ?? 0) > 0 ||
         // A turn taken from the server that has not become a run yet.
         (this.chat.serverTurnsStarting?.() ?? 0) > 0) return true;
@@ -390,7 +400,10 @@ export class MachineHostService {
     stopProviders(): Promise<void>;
     commitHostStop?(prepareLocal: () => Promise<boolean>): Promise<boolean>;
   }): Promise<(() => Promise<void>) | undefined> {
-    if (this.idleFenced || await this.hasWorkForIdleStop()) return undefined;
+    // A desktop's hold (an update about to run) puts the stop off without
+    // counting as activity: a turn it turned down meanwhile was read, and is
+    // taken when the hold ends.
+    if (this.idleFenced || this.held() || await this.hasWorkForIdleStop()) return undefined;
     if (this.idleFenced) return undefined;
     this.idleFenced = true;
     this.declinedWhileFenced = false;
@@ -410,7 +423,7 @@ export class MachineHostService {
       if (await this.hasWorkForIdleStop()) return undefined;
       releaseNative = request.fenceNative();
       if (!releaseNative) return undefined;
-      const prepareLocal = async () => !this.declinedWhileFenced && (this.chat?.serverTurnsStarting?.() ?? 0) === 0 &&
+      const prepareLocal = async () => !this.declinedWhileFenced && !this.held() && (this.chat?.serverTurnsStarting?.() ?? 0) === 0 &&
         await this.options.storage.machinePower().tryFence(request.bootId, request.uptimeMs, randomUUID(), request.idleSinceMs);
       committed = await (request.commitHostStop ? request.commitHostStop(prepareLocal) : prepareLocal());
       if (!committed) return undefined;

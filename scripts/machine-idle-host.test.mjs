@@ -248,8 +248,9 @@ test("a turn being taken, or one turned down while the stop is prepared, keeps t
 
     // The desktop holds turns for an update: the machine stays on.
     host.holdTurns(new Date(Date.now() + 60_000).toISOString(), "update");
-    assert.equal(await host.hasWorkForIdleStop(), true, "not while the desktop holds its turns");
-    assert.equal(await prepare(), undefined);
+    assert.equal(await host.hasWorkForIdleStop(), false, "a hold is no activity: the idle time goes on counting");
+    assert.equal(await prepare(), undefined, "but the stop waits for the hold to end");
+    assert.equal(paused, 2, "nothing is fenced or paused for it");
     host.releaseTurns("done");
     assert.equal(await host.hasWorkForIdleStop(), false);
     assert.equal(lifted, 3, "turns held meanwhile are taken up");
@@ -298,6 +299,7 @@ test("a machine restarted while its committed stop goes on reads nothing from th
       pairing, deviceId: identity.originId, appVersion: "test", publicKeyDerBase64: identity.publicKeyDerBase64,
       identity: () => deviceIdentity.getOrCreateDeviceIdentity(), createClient: () => client, storage,
       pauseServerFeed: () => { pauses++; return Promise.resolve(() => { resumes++; }); } });
+    assert.equal(host.goingDown(), false);
     host.retainIdleFence();
     assert.equal(pauses, 1, "paused at once, before the link to the server starts");
     await new Promise((resolve) => setImmediate(resolve));
@@ -306,6 +308,10 @@ test("a machine restarted while its committed stop goes on reads nothing from th
     assert.equal(await host.recoverIdleFence("boot"), false);
     assert.equal(resumes, 1);
     assert.equal(host.takesNewWork(), true);
+    // Going down for any other reason (a shutdown, another program's stop)
+    // reads nothing from the server either.
+    host.close();
+    assert.equal(host.goingDown(), true);
   } finally {
     host?.close();
     await rm(dir, { recursive: true, force: true });

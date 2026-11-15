@@ -73,6 +73,10 @@ export class ServerChatLink {
   constructor(private readonly options: {
     storage: StorageService;
     chat: ChatService;
+    /** True while this device goes down (a machine draining, closed, or
+     *  stopped by another of its programs): the feed is not read then, so
+     *  nothing it would turn down counts as taken on the server. */
+    readPaused?: () => boolean;
     identity: () => Promise<HubSigningIdentity & { publicKeyDerBase64: string }>;
     /** The User's own server, when she set one up. */
     hubConfig: () => Promise<{ url: string; hubId?: string; hubKey?: string } | undefined>;
@@ -331,7 +335,7 @@ export class ServerChatLink {
       client: () => this.ready ? this.client : undefined,
       apply: (entries: HubFeedEntry[]) => this.applyEntries(entries),
       resync: () => this.resync(),
-      readPaused: () => this.feedPauses > 0,
+      readPaused: () => this.feedPauses > 0 || this.options.readPaused?.() === true,
       beforeSend: (ops, sendingTo) => this.putPictures(ops, sendingTo),
       onAnswered: (row, outcome: HubOpOutcome) => {
         if (outcome.status === "rejected") this.options.log("chat.server.op-rejected", { opId: row.opId, kind: row.kind, conversationId: row.conversationId, reason: outcome.reason });
