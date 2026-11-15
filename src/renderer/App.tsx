@@ -401,6 +401,8 @@ function App(): JSX.Element {
           />
         ) : (
           <Sidebar
+            pinnedSessions={view.pinnedSessions}
+            recentSessions={view.recentSessions}
             projectGroups={view.projectSessionGroups}
             archivedSessions={view.archivedSessions}
             activeId={state.conversation?.id}
@@ -424,6 +426,7 @@ function App(): JSX.Element {
             onArchive={(id) => void chatActions.setChatArchived(id, true)}
             onUnarchive={(id) => void chatActions.setChatArchived(id, false)}
             onDelete={(id) => chatActions.deleteChatConversation(id)}
+            onSetPinned={(id, pinned) => void chatActions.setChatPinned(id, pinned)}
             onToggleSidebar={collapseSidebar}
             footerActions={windowActions}
           />

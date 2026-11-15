@@ -1040,9 +1040,10 @@ export interface ChatPendingChoice {
   cancelledAt?: string;
   /** When the member asked it (the end of the reply that carries it). */
   askedAt?: string;
-  /** Closed by the app, not by the User: an hour after it was asked, once
-   *  the User had gone on with its member. Its status is `cancelled`, so it
-   *  is closed everywhere a cancelled choice is; it is shown as expired. */
+  /** Closed by the app, not by the User: as soon as a message of hers,
+   *  written after it, started a turn of its member (she went on instead of
+   *  choosing; the User, 2026-11-15). Its status is `cancelled`, so it is
+   *  closed everywhere a cancelled choice is; it is shown as expired. */
   expiredAt?: string;
   /** The durable answer which saved this selection, before native admission. */
   decisionEventId?: string;
@@ -1969,6 +1970,19 @@ export interface SetChatArchivedRequest {
   onlyIfEmpty?: boolean;
 }
 
+export interface SetChatPinnedRequest {
+  conversationId: string;
+  pinned: boolean;
+}
+
+/** A chat's pin as saved: all the window needs back (the chat itself can be
+ *  megabytes, and its list row updates from the chat's own update). */
+export interface ChatPinState {
+  conversationId: string;
+  pinned: boolean;
+  pinnedAt?: string;
+}
+
 export interface DeleteChatConversationRequest {
   conversationId: string;
 }
@@ -2454,6 +2468,13 @@ export interface ConversationSummary {
    *  nothing (a reply whose machine is gone may never end). */
   replyPending?: boolean;
   archived?: boolean;
+  /** Pinned by the User (shared through her server, like the archive state):
+   *  the chat list shows it under Pinned, in the order it was pinned. */
+  pinned?: boolean;
+  pinnedAt?: string;
+  /** A member's choice card in the chat waits for the User's answer
+   *  (`isWaitingChoice`): the chat list marks the chat with it. */
+  waitingChoice?: boolean;
   chatParticipants?: ConversationSummaryChatParticipant[];
 }
 
@@ -2639,6 +2660,9 @@ export interface ConversationMessageDelta {
    *  (`isPendingReply`): the carried messages may not include it
    *  (`ConversationSummary.replyPending`). */
   replyPending?: boolean;
+  /** Whether any member's choice card in the whole chat waits for the User
+   *  (`isWaitingChoice`; `ConversationSummary.waitingChoice`). */
+  waitingChoice?: boolean;
 }
 
 export interface ConversationUpdate extends Conversation {
@@ -3372,6 +3396,7 @@ export interface AppBridge {
   createChatConversation(request: CreateChatConversationRequest): Promise<StartReviewResult>;
   renameChatConversation(request: RenameChatConversationRequest): Promise<Conversation | undefined>;
   setChatArchived(request: SetChatArchivedRequest): Promise<Conversation | undefined>;
+  setChatPinned(request: SetChatPinnedRequest): Promise<ChatPinState | undefined>;
   deleteChatConversation(request: DeleteChatConversationRequest): Promise<boolean>;
   startChatAccord(request: StartChatAccordRequest): Promise<StartChatAccordResult>;
   dismissConversationWarnings(request: DismissConversationWarningsRequest): Promise<Conversation | undefined>;

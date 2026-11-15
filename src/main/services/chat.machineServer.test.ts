@@ -380,6 +380,44 @@ test("a turn the machine has not taken is stopped on the server and never starts
   assert.ok(desktop!.messages.some((message) => message.role === "participant" && message.content === "machine reply to @drew second"));
 });
 
+test("a chat pinned on the computer is pinned on every device through the server, and keeps its time everywhere", async (t) => {
+  const h = await linked(t, localChat("chat-pin"));
+  const before = (await h.desktopStorage.getConversation("chat-pin"))!.updatedAt;
+  const machineBefore = (await until(() => h.machineStorage.getConversation("chat-pin"), (chat) => Boolean(chat)))!.updatedAt;
+  await h.desktopChat.setPinned({ conversationId: "chat-pin", pinned: true });
+  const server = await until(() => h.page("chat-pin"), (page) => page.conversation?.metadata?.pinned === true);
+  assert.equal(server.conversation.updatedAt, before, "the server keeps the chat's time");
+  const machine = await until(() => h.machineStorage.getConversation("chat-pin"), (chat) => chat?.metadata.pinned === true);
+  assert.equal(typeof machine!.metadata.pinnedAt, "string");
+  assert.equal(machine!.updatedAt, machineBefore, "a device that receives the pin keeps the chat's time");
+  const desktop = (await h.desktopStorage.listConversations()).find((summary) => summary.id === "chat-pin");
+  assert.deepEqual([desktop?.pinned, desktop?.updatedAt], [true, before], "the computer's own list keeps its time too");
+  await h.desktopChat.setPinned({ conversationId: "chat-pin", pinned: false });
+  const unpinned = await until(() => h.machineStorage.getConversation("chat-pin"), (chat) => chat?.metadata.pinned === undefined && chat?.metadata.pinnedAt === undefined);
+  assert.equal(unpinned!.updatedAt, machineBefore);
+});
+
+test("an unpin made while a member's turn holds an older copy of the chat stays unpinned, here and on the server", async (t) => {
+  const h = await linked(t, localChat("chat-pin-run"));
+  await h.desktopChat.setPinned({ conversationId: "chat-pin-run", pinned: true });
+  await until(() => h.page("chat-pin-run"), (page) => page.conversation?.metadata?.pinned === true);
+  // A long-running flow read the chat while it was pinned...
+  const stale = (await h.desktopStorage.getConversation("chat-pin-run"))!;
+  assert.equal(stale.metadata.pinned, true);
+  // ...the User unpins meanwhile...
+  await h.desktopChat.setPinned({ conversationId: "chat-pin-run", pinned: false });
+  await until(() => h.page("chat-pin-run"), (page) => page.conversation?.metadata?.pinned === undefined);
+  // ...and the flow saves its copy.
+  const internals = h.desktopChat as unknown as { withChatMutation(conversation: unknown, mutate: () => Promise<void>): Promise<void>; saveConversation(conversation: unknown): Promise<void> };
+  await internals.withChatMutation(stale, async () => {
+    stale.updatedAt = new Date().toISOString();
+    await internals.saveConversation(stale);
+  });
+  assert.equal((await h.desktopStorage.getConversation("chat-pin-run"))!.metadata.pinned, undefined, "not pinned again here");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal((await h.page("chat-pin-run")).conversation.metadata.pinned, undefined, "nor on the server");
+});
+
 test("a chat deleted on the computer is deleted on the machine too, through the server, with its members' sessions there closed", async (t) => {
   const h = await linked(t, localChat("chat-g"));
   await h.desktopChat.setArchived({ conversationId: "chat-g", archived: true } as never);

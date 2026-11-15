@@ -463,7 +463,8 @@ test("mobile shell builds static installable PWA assets", async () => {
   assert.match(app, /async function initHubSession\(pairing\) \{[\s\S]+const flushResult = await retryOutboxNow\(\)[\s\S]+await requestChatListViaRelay\(pairing\);/);
   // Opening a chat, from the list or from Activity, goes through one helper.
   assert.match(app, /function openConversation\(conversationId, options\)[\s\S]+requestTimelineViaRelay\(pairing, conversationId\)/);
-  assert.match(app, /row\.addEventListener\("click", function \(\) \{\s*(void )?openConversation\(chat\.id\)/);
+  // (After the tap that ended a long press, which opened the chat's actions instead.)
+  assert.match(app, /row\.addEventListener\("click", function \(\) \{\s*(\/\/[^\n]*\n\s*)*(if \(row\.dataset\.longPressed === "1"\) \{[^}]*\}\s*)?(void )?openConversation\(chat\.id\)/);
   assert.match(app, /globalThis\.AccordAgentsMobile/);
 });
 

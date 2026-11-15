@@ -389,3 +389,21 @@ test("an artifact note filed under an Accord travels to the phone with its launc
   const events = timelineEventsFromSnapshot(conversation);
   assert.deepEqual(events.map((event) => [event.id, event.accordLaunchMessageId]), [["filed", "launch-1"], ["older", undefined]]);
 });
+
+test("the phone lists the newest hundred chats and every pinned one however old, never an archived or out-of-scope one", async () => {
+  const { MOBILE_CHAT_LIST_LIMIT, mobileListedChats } = await import("./mobileChatCatalog");
+  const summary = (index: number, extra: Record<string, unknown> = {}) => ({
+    id: `chat-${index}`, title: `Chat ${index}`, kind: "chat" as const, createdAt: "2026-11-01T00:00:00.000Z",
+    updatedAt: new Date(Date.parse("2026-11-15T00:00:00.000Z") - index * 60_000).toISOString(), ...extra
+  });
+  const summaries = [
+    ...Array.from({ length: MOBILE_CHAT_LIST_LIMIT + 5 }, (_, index) => summary(index)),
+    summary(500, { pinned: true, pinnedAt: "2026-11-15T00:00:00.000Z" }),
+    summary(501, { pinned: true, archived: true }),
+    summary(502, { pinned: true })
+  ];
+  const listed = mobileListedChats(summaries, (item) => item.id !== "chat-502").map((item) => item.id);
+  assert.equal(listed.length, MOBILE_CHAT_LIST_LIMIT + 1);
+  assert.equal(listed.at(-1), "chat-500", "the old pinned chat after the newest hundred");
+  assert.ok(!listed.includes("chat-501") && !listed.includes("chat-502") && !listed.includes(`chat-${MOBILE_CHAT_LIST_LIMIT}`));
+});

@@ -1,4 +1,4 @@
-import { Archive, ArchiveRestore, Loader2, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, Loader2, Pin, PinOff, Trash2 } from "lucide-react";
 
 import {
   ContextMenu,
@@ -18,10 +18,25 @@ interface SidebarSessionRowProps {
   /** Work is shown: a run here, or a member's reply not ended anywhere. */
   working: boolean;
   unread: boolean;
+  /** Where the row is listed, for tests and styles (one chat can be listed
+   *  under Pinned, Recents and its project at once). */
+  section?: "pinned" | "recent" | "project" | "archived";
   onSelect: (id: string) => void;
   onArchive?: (id: string) => void;
   onUnarchive?: (id: string) => void;
   onDelete?: (summary: ConversationSummary) => void;
+  onSetPinned?: (id: string, pinned: boolean) => void;
+}
+
+/** The one mark a chat row shows (the User, 2026-11-15): work in progress,
+ *  else a member's question waiting for her, else something new, else none. */
+export type SidebarSessionMark = "working" | "waiting" | "unread" | "none";
+
+export function sidebarSessionMark(state: { working: boolean; waitingChoice: boolean; unread: boolean }): SidebarSessionMark {
+  if (state.working) return "working";
+  if (state.waitingChoice) return "waiting";
+  if (state.unread) return "unread";
+  return "none";
 }
 export const SidebarSessionRow = ({
   summary,
@@ -30,13 +45,17 @@ export const SidebarSessionRow = ({
   running,
   working,
   unread,
+  section,
   onSelect,
   onArchive,
   onUnarchive,
-  onDelete
+  onDelete,
+  onSetPinned
 }: SidebarSessionRowProps): JSX.Element => {
   const relativeTime = formatCompactRelativeTime(summary.updatedAt);
   const archived = summary.archived === true;
+  const pinned = summary.pinned === true;
+  const mark = pending ? "working" : sidebarSessionMark({ working, waitingChoice: summary.waitingChoice === true, unread });
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -45,8 +64,12 @@ export const SidebarSessionRow = ({
           onClick={() => onSelect(summary.id)}
           data-selected={selected ? "true" : undefined}
           data-running={working ? "true" : undefined}
-          data-unread={unread ? "true" : undefined}
+          data-unread={mark === "unread" ? "true" : undefined}
+          data-waiting={mark === "waiting" ? "true" : undefined}
           data-archived={archived ? "true" : undefined}
+          data-pinned={pinned ? "true" : undefined}
+          data-section={section}
+          data-conversation-id={summary.id}
           data-testid="project-session"
           aria-busy={pending || working ? "true" : undefined}
           className={cn(
@@ -58,14 +81,28 @@ export const SidebarSessionRow = ({
           )}
         >
           <span className="flex w-full min-w-0 items-center gap-1.5 text-[13px] leading-tight">
-            {(pending || working) && <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />}
+            {mark === "working" && <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />}
             <span className="min-w-0 flex-1 truncate">{summary.title}</span>
-            {unread && <span className="size-2 shrink-0 rounded-full bg-[var(--app-accent)]" aria-label="New activity" title="New activity" />}
+            {mark === "waiting" && (
+              <span
+                className="size-2 shrink-0 rounded-full bg-[var(--app-warning)]"
+                data-testid="session-waiting-mark"
+                aria-label="Waiting for your answer"
+                title="Waiting for your answer"
+              />
+            )}
+            {mark === "unread" && <span className="size-2 shrink-0 rounded-full bg-[var(--app-accent)]" aria-label="New activity" title="New activity" />}
             {relativeTime && <span className="shrink-0 text-[11px] text-muted-foreground">{relativeTime}</span>}
           </span>
         </button>
       </ContextMenuTrigger>
       <ContextMenuContent>
+        {!archived && onSetPinned && (
+          <ContextMenuItem onSelect={() => onSetPinned(summary.id, !pinned)} data-testid="session-pin-toggle">
+            {pinned ? <PinOff aria-hidden /> : <Pin aria-hidden />}
+            {pinned ? "Unpin" : "Pin"}
+          </ContextMenuItem>
+        )}
         {archived ? (
           <>
             <ContextMenuItem onSelect={() => onUnarchive?.(summary.id)}>

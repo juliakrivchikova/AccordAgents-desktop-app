@@ -104,7 +104,7 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
       src: node.querySelector("img") ? node.querySelector("img").getAttribute("src") : null,
       text: node.querySelector("span.avatar-media") ? node.querySelector("span.avatar-media").textContent : null
     })`;
-    const listRows = async () => await evaluate(`(() => [...document.querySelectorAll("#chat-list .mobile-chat-row")].map((row) => ({
+    const listRows = async () => await evaluate(`(() => [...document.querySelectorAll('#chat-list .mobile-chat-group[data-section="project"] .mobile-chat-row')].map((row) => ({
       id: row.dataset.conversationId,
       avatars: row.querySelectorAll(".mobile-chat-avatar, .avatar-icon, img").length
     })))()`);
@@ -118,7 +118,7 @@ test("PWA parity: avatars resolve like the desktop, internal system rows are gon
     }
 
     // --- projects fold, and stay folded across a reload --------------------
-    const headers = async () => await evaluate(`(() => [...document.querySelectorAll("#chat-list .mobile-chat-group-title")].map((n) => ({
+    const headers = async () => await evaluate(`(() => [...document.querySelectorAll('#chat-list .mobile-chat-group-title[data-section="project"]')].map((n) => ({
       name: n.querySelector(".mobile-chat-group-name").textContent, expanded: n.getAttribute("aria-expanded"),
       count: n.querySelector(".mobile-chat-group-count") ? n.querySelector(".mobile-chat-group-count").textContent : null,
       rows: n.nextElementSibling && n.nextElementSibling.classList.contains("mobile-chat-group") ? n.nextElementSibling.querySelectorAll(".mobile-chat-row").length : 0,

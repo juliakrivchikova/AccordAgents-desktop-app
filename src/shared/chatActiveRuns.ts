@@ -20,6 +20,15 @@ export function isPendingReply(message: Pick<ChatMessage, "role" | "status">): b
   return message.role === "participant" && message.status === "pending";
 }
 
+/** A member's choice card that still waits for the User's answer: not one
+ *  she answered on her server that the member's machine has not applied yet.
+ *  The chat list (`ConversationSummary.waitingChoice`,
+ *  `StorageService.listConversations`) states the same rule in SQL. */
+export function isWaitingChoice(message: Pick<ChatMessage, "role" | "metadata">): boolean {
+  return message.role === "participant" && message.metadata?.pendingChoice?.status === "pending" &&
+    message.metadata?.serverCard?.state !== "answered";
+}
+
 export function activeRunIdsForConversation(conversation: ConversationRunState): string[] {
   const ids: string[] = [];
   const seen = new Set<string>();

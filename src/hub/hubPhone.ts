@@ -8,7 +8,7 @@ import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../sh
 import type { HubComposerCatalog, HubDevice, HubPhoneScope } from "../shared/hubProtocol";
 import type { HubCard } from "../shared/hubOps";
 import { controlCardFromChoiceMessage, controlCardFromHubCard, type MobileControlCard } from "../shared/mobileControlCards";
-import { MOBILE_CHAT_LIST_LIMIT, buildMobileChatList, buildMobileTimelinePage, mobileChatMembers } from "../main/services/mobileChatCatalog";
+import { buildMobileChatList, buildMobileTimelinePage, mobileChatMembers, mobileListedChats } from "../main/services/mobileChatCatalog";
 import { timelineEventsFromSnapshot, type MobileChatListItem, type MobileTimelineEvent, type MobileTimelineTurn } from "../main/services/mobileTimeline";
 import { TURN_FINISHED_NOTE_ID_PREFIX, TURN_FINISHED_NOTE_REMOVALS_PER_PAGE } from "../shared/turnFinishedNote";
 import type { StorageService } from "../main/services/storage";
@@ -253,9 +253,7 @@ export class HubPhoneApi {
     const include = (summary: ConversationSummary) => scopeCovers(scope, summary.id);
     if (this.rowCache.size > 4_000) this.rowCache.clear();
     const summaries = await this.options.store.listConversations();
-    const listed = summaries
-      .filter((summary) => summary.kind === "chat" && summary.archived !== true && include(summary))
-      .slice(0, MOBILE_CHAT_LIST_LIMIT);
+    const listed = mobileListedChats(summaries, include);
     const stale = new Set(listed.filter((summary) => {
       const row = this.rowCache.get(summary.id);
       return !row || row.updatedAt !== summary.updatedAt || feed.lastChange(summary.id) > row.seq;

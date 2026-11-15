@@ -11,7 +11,7 @@ import { newChatIntro, newChatProjects, participantConfigUsage, participantConfi
 import { normalizedChatAvatarId } from "../../shared/chatAvatarCatalog";
 import type { HubNewChatOptions } from "../../shared/hubProtocol";
 import { chatChangesToOps, furthestTurnMarks, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
-import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
+import { CHAT_LIST_ORDER_METADATA_KEYS, LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
 import { hubTurnRunId, isHubTurnRunId, type HubCard, type HubCardState, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
 import {
   choiceCardId,
@@ -27,7 +27,7 @@ import {
   type WantedHubCard
 } from "../../shared/hubCards";
 import { ServerCardBook, type CardApplyResult, type ChatCardAppliers } from "./chatCards";
-import { CHAT_CHOICE_EXPIRY_MS, choiceExpiryPlan, type ChoiceExpiryPlan } from "./chatChoiceExpiry";
+import { choiceExpiryPlan, choicesClosedByMessage, type ChoiceExpiryPlan } from "./chatChoiceExpiry";
 import { HUB_OP_TAKEN_BACK, type HubOpOutcome } from "./hubOpsClient";
 import { blobReferenceOf, HubHttpError } from "./hubClient";
 import {
@@ -152,6 +152,7 @@ import type {
   ReadChatAttachmentRequest,
   RenameChatConversationRequest,
   SetChatArchivedRequest,
+  SetChatPinnedRequest,
   RespondToChatAppToolApprovalRequest,
   RespondToChatChoiceRequest,
   RespondToChatMentionsRequest,
@@ -1914,6 +1915,37 @@ export class ChatService {
     }, {
       rejectIfQueued: true,
       queuedMessage: "Chat cannot be archived while members are running."
+    });
+  }
+
+  /** Pins a chat to the top of the chat list, or unpins it. The User's own
+   *  ordering, shared through her server like the archive state; allowed
+   *  while members run. It is not activity in the chat, so `updatedAt` stays
+   *  and the chat keeps its place among the recent ones. */
+  async setPinned(request: SetChatPinnedRequest): Promise<Conversation | undefined> {
+    await this.waitForQueuedSave(request.conversationId);
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation) {
+      return undefined;
+    }
+    if (conversation.kind !== "chat") {
+      throw new Error("Only chat conversations can be pinned.");
+    }
+    return this.withChatMutation(conversation, async () => {
+      if ((conversation.metadata.pinned === true) === (request.pinned === true)) {
+        return conversation;
+      }
+      const nextMetadata = { ...conversation.metadata };
+      if (request.pinned === true) {
+        nextMetadata.pinned = true;
+        nextMetadata.pinnedAt = new Date().toISOString();
+      } else {
+        delete nextMetadata.pinned;
+        delete nextMetadata.pinnedAt;
+      }
+      conversation.metadata = nextMetadata;
+      await this.saveConversation(conversation);
+      return conversation;
     });
   }
 
@@ -10265,6 +10297,7 @@ export class ChatService {
         `App MCP is the source of truth for chat context. History files at ${historyMarkdownPath} and ${historyJsonPath} are debug-only fallbacks.`
       ].join("\n");
     }
+    const closedChoicesNote = this.closedChoicesPromptSection(conversation, participant, triggerMessage);
     const triggerBlock = [
       "Triggering message identifiers:",
       this.triggeringMessageIdentifiers(triggerMessage),
@@ -10272,7 +10305,8 @@ export class ChatService {
       "Triggering message:",
       triggerMessage.role === "script"
         ? this.delimitedScriptMessage(triggerMessage)
-        : this.formatMessage(triggerMessage, false, false)
+        : this.formatMessage(triggerMessage, false, false),
+      ...(closedChoicesNote ? [closedChoicesNote] : [])
     ].join("\n\n");
     const promptContextBlock = options.promptContextBlock ?? "";
     const memoryIndexBlock = options.memoryIndexBlock ?? "";
@@ -11994,6 +12028,13 @@ export class ChatService {
     // long-running flow is older.
     if (storedMetadata.pendingChatReactions !== undefined) merged.pendingChatReactions = storedMetadata.pendingChatReactions;
     else delete merged.pendingChatReactions;
+    // So is the pin (setPinned, or a pin from another device applied here),
+    // which may change while a member runs: a turn's older copy must not
+    // pin again what she unpinned.
+    for (const key of CHAT_LIST_ORDER_METADATA_KEYS) {
+      if (storedMetadata[key] !== undefined) merged[key] = storedMetadata[key];
+      else delete merged[key];
+    }
     if (merged.autoTitle) {
       delete merged.autoTitleEligibility;
     }
@@ -18687,32 +18728,56 @@ export class ChatService {
     };
   }
 
-  // --- choices that expire once the User went on with their member ---------
+  // --- choices that close once the User went on with their member ---------
 
-  /** The waiting choices of this device's members that the User went on
-   *  past (choiceExpiryPlan): those due now, and when the next one is. */
-  private choiceExpiryPlanFor(conversation: Conversation): ChoiceExpiryPlan {
+  /** Which cards this device closes: its own members' ones it wrote. */
+  private choiceClosedHere(conversation: Conversation): (message: ChatMessage) => boolean {
     const participants = this.chatParticipants(conversation);
     const me = this.serverLink?.deviceId();
-    return choiceExpiryPlan(conversation.messages, this.choiceExpiryNow(), (message) => {
+    return (message) => {
       const participant = participants.find((item) => item.id === message.participantId);
       if (!participant || !this.runsHere(participant)) return false;
       const writer = message.metadata?.serverWriter;
       return !(typeof writer === "string" && me && writer !== me);
-    });
+    };
   }
 
-  /** A member's turn starts (inside its chat mutation): the chat's expiry
-   *  timer is set for what the User's going on made due. Closing happens in
-   *  sweepChoiceExpiry, which asks the server first. */
+  /** The waiting choices of this device's members that the User went on
+   *  past (choiceExpiryPlan): those due now. */
+  private choiceExpiryPlanFor(conversation: Conversation): ChoiceExpiryPlan {
+    return choiceExpiryPlan(conversation.messages, this.choiceClosedHere(conversation));
+  }
+
+  /** A member's turn starts (inside its chat mutation): what the User's going
+   *  on made due is closed at once. Closing happens in sweepChoiceExpiry,
+   *  which asks the server first. */
   private noteChoiceExpiry(conversation: Conversation): void {
     const nowMs = this.choiceExpiryNow();
     const plan = this.choiceExpiryPlanFor(conversation);
+    if (plan.due.length === 0) return;
     // A due card whose answer is being applied here waits for it: looked at
     // again later, not at every turn meanwhile.
     const free = plan.due.some((messageId) => !this.choiceAnsweredHere(messageId));
-    const atMs = free ? nowMs : plan.due.length > 0 ? Math.min(plan.nextAtMs ?? Infinity, nowMs + CHOICE_EXPIRY_RETRY_MS) : plan.nextAtMs;
-    this.scheduleChoiceExpiry(conversation.id, atMs, { replace: true });
+    this.scheduleChoiceExpiry(conversation.id, free ? nowMs : nowMs + CHOICE_EXPIRY_RETRY_MS, { replace: free });
+  }
+
+  /** What the member's turn on the User's message is told about its cards
+   *  that message closed (the User, 2026-11-15): she wrote instead of
+   *  choosing, so the card is no longer waiting above. */
+  private closedChoicesPromptSection(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage): string {
+    const closedHere = this.choiceClosedHere(conversation);
+    // A card whose answer this device has heard of is closed by that answer,
+    // never by her going on (sweepChoiceExpiry leaves it to the answer).
+    const closed = choicesClosedByMessage(conversation.messages, participant.id, triggerMessage, (message) =>
+      closedHere(message) && message.metadata?.serverCard?.state !== "answered" && !this.choiceAnsweredHere(message.id));
+    if (closed.length === 0) return "";
+    return [
+      closed.length === 1
+        ? "Your earlier choice card was closed without an answer: User went on with the triggering message instead of picking one of its options."
+        : "Your earlier choice cards were closed without an answer: User went on with the triggering message instead of picking one of their options.",
+      ...closed.map((choice) => `- ${(choice.title || choice.question).replace(/\s+/g, " ").trim().slice(0, 200)}`),
+      "Treat the triggering message as User's answer or new direction. Do not say a card is waiting above; if you still need that decision, ask again."
+    ].join("\n");
   }
 
   /** This device heard of an answer to this card (or applies one now). */
@@ -18721,8 +18786,9 @@ export class ChatService {
     return this.serverCards.applying.has(cardId) || this.serverCards.known(cardId)?.state === "answered";
   }
 
-  /** One timer per chat, for its earliest choice to expire. `replace` sets
-   *  it to `atMs` (none when undefined); otherwise an earlier one is kept. */
+  /** One timer per chat: close what is due now, or look again after a
+   *  retry. `replace` sets it to `atMs` (none when undefined); otherwise an
+   *  earlier one is kept. */
   private scheduleChoiceExpiry(conversationId: string, atMs: number | undefined, options: { replace?: boolean } = {}): void {
     const current = this.choiceExpiryTimers.get(conversationId);
     if (current && !options.replace && atMs !== undefined && current.atMs <= atMs) return;
@@ -18732,9 +18798,9 @@ export class ChatService {
       this.choiceExpiryTimers.delete(conversationId);
     }
     if (atMs === undefined) return;
-    // Never longer than the expiry itself: a time far ahead (a wrong clock)
-    // is looked at again within it, never overflowing the timer.
-    const delayMs = Math.min(Math.max(0, atMs - this.choiceExpiryNow()), CHAT_CHOICE_EXPIRY_MS) + CHOICE_EXPIRY_TIMER_SLACK_MS;
+    // Never longer than a retry: a time far ahead (a wrong clock) is looked
+    // at again within it, never overflowing the timer.
+    const delayMs = Math.min(Math.max(0, atMs - this.choiceExpiryNow()), CHOICE_EXPIRY_RETRY_MS) + CHOICE_EXPIRY_TIMER_SLACK_MS;
     const timer = setTimeout(() => {
       if (this.choiceExpiryTimers.get(conversationId)?.timer === timer) this.choiceExpiryTimers.delete(conversationId);
       void this.sweepChoiceExpiry(conversationId);
@@ -18757,7 +18823,7 @@ export class ChatService {
       if (!conversation || conversation.kind !== "chat") return;
       const plan = this.choiceExpiryPlanFor(conversation);
       if (plan.due.length === 0) {
-        this.scheduleChoiceExpiry(conversationId, plan.nextAtMs, { replace: true });
+        this.scheduleChoiceExpiry(conversationId, undefined, { replace: true });
         return;
       }
       let serverStates: Map<string, HubCardState> | undefined;
@@ -18786,11 +18852,12 @@ export class ChatService {
   }
 
   /** Closes, in place, the due choices nobody answered (inside the chat's
-   *  mutation; the caller saves), and sets the chat's timer for the next. */
+   *  mutation; the caller saves), and sets the chat's timer to look again at
+   *  those an answer is being applied to. */
   private expireDueChoices(conversation: Conversation, serverStates: Map<string, HubCardState> | undefined): boolean {
     const nowMs = this.choiceExpiryNow();
     const plan = this.choiceExpiryPlanFor(conversation);
-    let nextAtMs = plan.nextAtMs;
+    let nextAtMs: number | undefined;
     const due = new Set<string>();
     for (const messageId of plan.due) {
       const message = conversation.messages.find((item) => item.id === messageId);
@@ -18838,8 +18905,8 @@ export class ChatService {
 
   /**
    * After the server's open cards were first read (resumeServerCards): the
-   * choices that expired while this device was off are closed, and timers
-   * kept for the ones still to come. `conversationIds` are the chats that
+   * choices the User went on past while this device was off are closed.
+   * `conversationIds` are the chats that
    * read named; only those holding a waiting choice are opened.
    */
   async resumeChoiceExpiry(conversationIds: string[]): Promise<void> {

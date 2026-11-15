@@ -34,7 +34,7 @@ import {
 } from "../components/review/review-conversation-data";
 import type { AppState } from "./app-state";
 import type { ConversationActions } from "./use-conversation-actions";
-import { upsertConversationSummary } from "./conversation-summaries";
+import { upsertConversationSummary, withPinnedState } from "./conversation-summaries";
 import { newChatTitle } from "../../shared/newChat";
 import { persistLastViewedAt } from "./storage";
 import { cleanIpcError } from "../lib/ipc-error";
@@ -50,6 +50,7 @@ export interface ChatActions {
   startChat: (options?: StartChatOptions) => Promise<boolean>;
   renameChatConversation: (title: string) => Promise<boolean>;
   setChatArchived: (conversationId: string, archived: boolean) => Promise<void>;
+  setChatPinned: (conversationId: string, pinned: boolean) => Promise<void>;
   deleteChatConversation: (conversationId: string) => Promise<void>;
   sendChatMessage: (options?: SendChatMessageOptions) => Promise<boolean>;
   respondToChatMentions: (sourceMessageId: string, targetParticipantIds: string[], approve: boolean, continueRequester?: boolean) => Promise<void>;
@@ -294,6 +295,44 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setConversation((current) => (current?.id === conversationId ? saved : current));
       state.setSummaries((current) => upsertConversationSummary(current, saved));
     } catch (caught) {
+      state.setError(errorText(caught));
+    }
+  }
+
+  /** Pins or unpins a chat. The list shows it at once; only the chat's pin
+   *  state is taken from the answer, never its messages (an open chat keeps
+   *  what it shows, its runs included). A failure puts the row back. */
+  async function setChatPinned(conversationId: string, pinned: boolean): Promise<void> {
+    state.setError(undefined);
+    const previous = state.summaries.find((summary) => summary.id === conversationId);
+    const at = new Date().toISOString();
+    state.setSummaries((current) => current.map((summary) => summary.id === conversationId ? withPinnedState(summary, pinned, at) : summary));
+    try {
+      const saved = await window.consensus.setChatPinned({ conversationId, pinned });
+      if (!saved) {
+        throw new Error("Chat was not found.");
+      }
+      const savedPinned = saved.pinned;
+      const savedAt = saved.pinnedAt ?? at;
+      state.setSummaries((current) => current.map((summary) => summary.id === conversationId ? withPinnedState(summary, savedPinned, savedAt) : summary));
+      state.setConversation((current) => {
+        if (current?.id !== conversationId) return current;
+        const metadata = { ...current.metadata };
+        if (savedPinned) {
+          metadata.pinned = true;
+          metadata.pinnedAt = savedAt;
+        } else {
+          delete metadata.pinned;
+          delete metadata.pinnedAt;
+        }
+        return { ...current, metadata };
+      });
+    } catch (caught) {
+      if (previous) {
+        const wasPinned = previous.pinned === true;
+        const wasAt = previous.pinnedAt ?? at;
+        state.setSummaries((current) => current.map((summary) => summary.id === conversationId ? withPinnedState(summary, wasPinned, wasAt) : summary));
+      }
       state.setError(errorText(caught));
     }
   }
@@ -659,7 +698,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
   }
 
   return {
-    startChat, renameChatConversation, setChatArchived, deleteChatConversation, sendChatMessage, respondToChatMentions,
+    startChat, renameChatConversation, setChatArchived, setChatPinned, deleteChatConversation, sendChatMessage, respondToChatMentions,
     toggleChatReaction, dismissTurnFinishedNote, respondToChatChoice, addChatParticipant, addSavedChatParticipant,
     updateChatParticipantRuntime, removeChatParticipant, compactChatParticipant, restartChatParticipant, startChatAccord, respondToChatAppToolApproval
   };

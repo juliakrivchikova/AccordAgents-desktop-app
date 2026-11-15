@@ -18,7 +18,7 @@ export function ChatChoiceCard(props: {
   const [note, setNote] = useState(choice.note ?? "");
   const isAnswered = choice.status === "selected";
   const isCancelled = choice.status === "cancelled";
-  // Closed by the app an hour after the User went on with its member.
+  // Closed by the app when the User went on with its member instead of choosing.
   const isExpired = isCancelled && Boolean(choice.expiredAt);
   const isResolved = isAnswered || isCancelled;
   const selectedOptionId = isCancelled ? "" : choice.selectedOptionId ?? draftSelection;

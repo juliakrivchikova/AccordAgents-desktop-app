@@ -26,6 +26,10 @@ export interface ProjectSessionGroup {
 }
 
 export interface SidebarProps {
+  /** Pinned chats, in the order they were pinned. */
+  pinnedSessions?: ConversationSummary[];
+  /** The most recent chats of every project, newest first. */
+  recentSessions?: ConversationSummary[];
   projectGroups: ProjectSessionGroup[];
   archivedSessions?: ConversationSummary[];
   activeId?: string;
@@ -44,12 +48,15 @@ export interface SidebarProps {
   onArchive?: (id: string) => void;
   onUnarchive?: (id: string) => void;
   onDelete?: (id: string) => Promise<void>;
+  onSetPinned?: (id: string, pinned: boolean) => void;
   onToggleSidebar?: () => void;
   // Small window-level controls (theme, refresh) shown next to Settings.
   footerActions?: ReactNode;
 }
 
 export const Sidebar = ({
+  pinnedSessions = [],
+  recentSessions = [],
   projectGroups,
   archivedSessions = [],
   activeId,
@@ -68,10 +75,13 @@ export const Sidebar = ({
   onArchive,
   onUnarchive,
   onDelete,
+  onSetPinned,
   onToggleSidebar,
   footerActions
 }: SidebarProps): JSX.Element => {
   const [collapsedProjectKeys, setCollapsedProjectKeys] = useState<Set<string>>(new Set());
+  const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
+  const [recentsCollapsed, setRecentsCollapsed] = useState(false);
   const [expandedProjectKeys, setExpandedProjectKeys] = useState<Set<string>>(new Set());
   const [archivedCollapsed, setArchivedCollapsed] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<ConversationSummary>();
@@ -87,6 +97,33 @@ export const Sidebar = ({
       }
       return next;
     });
+  }
+
+  /** One chat's row: the same chat may be listed under Pinned, Recents and
+   *  its project at once, and every listing shows it the same way. */
+  function renderSessionRow(summary: ConversationSummary, section: "pinned" | "recent" | "project"): JSX.Element {
+    const pending = summary.id === pendingId;
+    const selected = summary.id === activeId || pending;
+    const running = summary.running === true;
+    const working = running || summary.replyPending === true;
+    const unread = !selected && !working && unreadIds?.has(summary.id) === true;
+    return (
+      <SidebarSessionRow
+        key={summary.id}
+        summary={summary}
+        selected={selected}
+        pending={pending}
+        running={running}
+        working={working}
+        unread={unread}
+        section={section}
+        onSelect={onSelect}
+        onArchive={onArchive}
+        onUnarchive={onUnarchive}
+        onDelete={setDeleteTarget}
+        onSetPinned={onSetPinned}
+      />
+    );
   }
 
   function showMoreSessions(key: string): void {
@@ -153,12 +190,31 @@ export const Sidebar = ({
         />
       </nav>
 
-      <div className="px-[var(--app-gutter-tight)] pb-1 pt-2 text-[11.5px] font-semibold tracking-[0.01em] text-muted-foreground">
-        Projects
-      </div>
-
       <ScrollArea className="min-h-0 min-w-0 flex-1 px-[var(--app-gutter-tight)] pb-2">
         <div className="flex min-w-0 flex-col gap-1">
+          {!loading && pinnedSessions.length > 0 && (
+            <SidebarChatSection
+              label="Pinned"
+              testId="pinned-group"
+              collapsed={pinnedCollapsed}
+              onToggle={() => setPinnedCollapsed((current) => !current)}
+            >
+              {pinnedSessions.map((summary) => renderSessionRow(summary, "pinned"))}
+            </SidebarChatSection>
+          )}
+          {!loading && recentSessions.length > 0 && (
+            <SidebarChatSection
+              label="Recents"
+              testId="recents-group"
+              collapsed={recentsCollapsed}
+              onToggle={() => setRecentsCollapsed((current) => !current)}
+            >
+              {recentSessions.map((summary) => renderSessionRow(summary, "recent"))}
+            </SidebarChatSection>
+          )}
+          <div className="px-1 pb-1 pt-2 text-[11.5px] font-semibold tracking-[0.01em] text-muted-foreground" data-testid="projects-heading">
+            Projects
+          </div>
           {loading ? (
             <HistoryLoadingState />
           ) : projectGroups.length === 0 ? (
@@ -201,28 +257,7 @@ export const Sidebar = ({
 
                   {!collapsed && (
                     <div className="ml-3 flex min-w-0 flex-col gap-0.5">
-                      {visibleSessions.map((summary) => {
-                        const pending = summary.id === pendingId;
-                        const selected = summary.id === activeId || pending;
-                        const running = summary.running === true;
-                        const working = running || summary.replyPending === true;
-                        const unread = !selected && !working && unreadIds?.has(summary.id) === true;
-                        return (
-                          <SidebarSessionRow
-                            key={summary.id}
-                            summary={summary}
-                            selected={selected}
-                            pending={pending}
-                            running={running}
-                            working={working}
-                            unread={unread}
-                            onSelect={onSelect}
-                            onArchive={onArchive}
-                            onUnarchive={onUnarchive}
-                            onDelete={setDeleteTarget}
-                          />
-                        );
-                      })}
+                      {visibleSessions.map((summary) => renderSessionRow(summary, "project"))}
                       {hiddenCount > 0 && (
                         <button
                           type="button"
@@ -277,6 +312,7 @@ export const Sidebar = ({
                         running={summary.running === true}
                         working={summary.running === true || summary.replyPending === true}
                         unread={false}
+                        section="archived"
                         onSelect={onSelect}
                         onArchive={onArchive}
                         onUnarchive={onUnarchive}
@@ -324,3 +360,38 @@ export const Sidebar = ({
     </aside>
   );
 };
+
+/** A top-level list of chats (Pinned, Recents): a heading that folds it. */
+function SidebarChatSection({
+  label,
+  testId,
+  collapsed,
+  onToggle,
+  children
+}: {
+  label: string;
+  testId: string;
+  collapsed: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}): JSX.Element {
+  return (
+    <section className="min-w-0 pb-1" data-testid={testId}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={!collapsed}
+        data-testid={`${testId}-toggle`}
+        className={cn(
+          "flex min-w-0 w-full items-center gap-1 rounded-md px-1 pb-1 pt-2 text-left",
+          "text-[11.5px] font-semibold tracking-[0.01em] text-muted-foreground transition-colors hover:text-[var(--app-text)]",
+          "focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]"
+        )}
+      >
+        <span className="min-w-0 truncate">{label}</span>
+        {collapsed ? <ChevronRight className="size-3 shrink-0" aria-hidden /> : <ChevronDown className="size-3 shrink-0" aria-hidden />}
+      </button>
+      {!collapsed && <div className="flex min-w-0 flex-col gap-0.5">{children}</div>}
+    </section>
+  );
+}
