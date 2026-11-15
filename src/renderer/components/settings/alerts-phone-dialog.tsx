@@ -60,6 +60,8 @@ export function PhoneConnectDialog(props: {
       setTest(undefined);
       setBoughtNumbers([]);
       setError(undefined);
+      // Closed while asking: the answer is dropped, so nothing else ends it.
+      setBusy(undefined);
       return;
     }
     setTo(saved?.to ?? "");

@@ -130,7 +130,7 @@ export function alertsDialogTestLine(test: UrgentAlertPhoneTest | undefined, to:
   switch (test.state) {
     case "calling": return `Calling ${to}… ${keypad ? "Press 1 when you hear it." : "Answer it."}`;
     case "pressed": return `You pressed 1 at ${at}. Calls work.`;
-    case "answered": return `You answered at ${at}. Calls work.`;
+    case "answered": return keypad ? `You answered at ${at}, but calls now ask for 1. Call again?` : `You answered at ${at}. Calls work.`;
     case "not-pressed": return "You picked up, but 1 wasn't pressed. Call again?";
     case "no-answer": return "Nobody answered. Call again?";
     case "busy": return "The line was busy. Call again?";

@@ -34,13 +34,16 @@ export function AlertsStep(props: { n: number; state: "done" | "now" | "later"; 
 }
 
 /** Asks the server again every 1.5 s while `active`: the next look only after
- *  the last answer, so a slow server is never asked twice at once. */
-export function useSettingsWatch(active: boolean, onSettings: (settings: UrgentAlertSettingsView) => void): void {
+ *  the last answer, so a slow server is never asked twice at once. With
+ *  `until`, it stops then, answered or not (a server that never answers is
+ *  not asked for ever). */
+export function useSettingsWatch(active: boolean, onSettings: (settings: UrgentAlertSettingsView) => void, until?: number): void {
   useEffect(() => {
     if (!active) return undefined;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const look = (): void => {
+      if (until !== undefined && Date.now() > until) return;
       timer = setTimeout(() => {
         void alertRequest<UrgentAlertSettingsView>({ action: "settings" }).then((result) => {
           if (stopped) return;
@@ -54,5 +57,5 @@ export function useSettingsWatch(active: boolean, onSettings: (settings: UrgentA
       stopped = true;
       if (timer) clearTimeout(timer);
     };
-  }, [active, onSettings]);
+  }, [active, onSettings, until]);
 }

@@ -96,4 +96,6 @@ test("the flow, the first sentence and the dialog's test line say what is true n
   assert.match(alertsDialogTestLine({ state: "pressed", at: today }, "x", true), /^You pressed 1 at .*\. Calls work\.$/);
   assert.equal(alertsDialogTestLine({ state: "failed", at: today, error: "Twilio: The number is unverified." }, "x", true), "The call didn't go through: Twilio: The number is unverified. Call again?");
   assert.equal(alertsDialogTestLine({ state: "no-answer", at: today }, "x", true), "Nobody answered. Call again?");
+  assert.match(alertsDialogTestLine({ state: "answered", at: today }, "x", false), /^You answered at .*\. Calls work\.$/);
+  assert.match(alertsDialogTestLine({ state: "answered", at: today }, "x", true), /, but calls now ask for 1\. Call again\?$/);
 });

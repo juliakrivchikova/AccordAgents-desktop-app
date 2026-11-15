@@ -11,7 +11,7 @@ import {
   alertsTelegramStatus,
   alertsTelegramTestLine
 } from "../../../shared/urgentAlertSettings";
-import type { UrgentAlertSettingsView } from "../../../shared/urgentAlerts";
+import { URGENT_ALERT_TEST_STALE_MS, type UrgentAlertSettingsView } from "../../../shared/urgentAlerts";
 import { UrgentAlertActionsContext } from "../chat/urgent-alert-context";
 import { TelegramConnectDialog } from "./alerts-connect-dialogs";
 import { alertRequest, useSettingsWatch } from "./alerts-shared";
@@ -65,12 +65,17 @@ export function AlertsSettingsSection(): JSX.Element {
   const phone = settings?.phone;
   // The page keeps asking while something is under way elsewhere: a test call
   // ringing, a bot waiting for Start or Got it, a test message's Got it.
+  // A bot she left unfinished, or one Telegram refused (pressing Start in it
+  // ends that), is looked at for a while after the page opened.
   const testSentAt = telegram?.lastTest && !telegram.lastTest.gotIt ? Date.parse(telegram.lastTest.at) : Number.NaN;
-  const watching = Boolean(settings) && !dialog && (
-    alertsPhoneTesting(settings ?? {}) ||
-    (Boolean(telegram && !telegram.connected && !telegram.error) && Date.now() - watchFrom < TELEGRAM_FINISH_WATCH_MS) ||
-    (Number.isFinite(testSentAt) && Date.now() - testSentAt < TELEGRAM_TEST_WATCH_MS));
-  useSettingsWatch(watching, setSettings);
+  const phoneTestAt = settings && alertsPhoneTesting(settings) ? Date.parse(settings.phone?.lastTest?.at ?? "") : Number.NaN;
+  const deadlines = [
+    phoneTestAt + URGENT_ALERT_TEST_STALE_MS,
+    telegram && (!telegram.connected || telegram.error) ? watchFrom + TELEGRAM_FINISH_WATCH_MS : Number.NaN,
+    testSentAt + TELEGRAM_TEST_WATCH_MS
+  ].filter((at) => Number.isFinite(at) && at > Date.now());
+  const watchUntil = deadlines.length ? Math.max(...deadlines) : undefined;
+  useSettingsWatch(Boolean(settings) && !dialog && watchUntil !== undefined, setSettings, watchUntil);
 
   async function act(name: string, row: "telegram" | "phone" | "wait", run: () => ReturnType<typeof alertRequest<UrgentAlertSettingsView>>): Promise<boolean> {
     setBusy(name);
