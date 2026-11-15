@@ -313,6 +313,24 @@ test("with no reaction it calls three times, three minutes apart, then says nobo
   await until(async () => (await stateOf(h, alertId))?.state === "acknowledged", "a late Got it");
 });
 
+test("Got it on the card after nobody answered ends the alert and folds the card", async (t) => {
+  // The card offers Got it on an unanswered alert (the User, 2026-11-15): the
+  // server must take it there as Got it from the app, not only as a close.
+  const h = await hub(t, { publicUrl: true });
+  await seedChat(h);
+  await connectTelegram(h);
+  await connectPhone(h);
+  const raised = await raise(h, h.owner);
+  const alertId = raised.value!.alertId;
+  await until(async () => (await stateOf(h, alertId))?.state === "unanswered", "three calls", 8_000);
+  const closed = await h.alerts<UrgentAlertView>(h.owner, { action: "close", alertId });
+  assert.equal(closed.ok, true);
+  assert.equal(closed.value?.state, "acknowledged");
+  assert.equal(closed.value?.ackSource, "app");
+  assert.ok(closed.value?.closedAt, "Got it here folds the card");
+  assert.equal(h.world.calls.length, 3, "no call after it");
+});
+
 test("1 on the call ends it, by a request Twilio signed; a forged one is refused", async (t) => {
   const h = await hub(t, { publicUrl: true });
   await seedChat(h);

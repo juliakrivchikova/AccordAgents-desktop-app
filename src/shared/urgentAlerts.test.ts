@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  maskedPhoneNumber, normalizePhoneNumber, urgentAlertAwaitsGotIt, urgentAlertClock, urgentAlertOfMessage, urgentAlertOutcome,
-  urgentAlertStatus, type UrgentAlertView
+  URGENT_ALERT_ACKNOWLEDGEABLE_STATES, maskedPhoneNumber, normalizePhoneNumber, urgentAlertAwaitsGotIt, urgentAlertClock, urgentAlertCountdown,
+  urgentAlertFailureText, urgentAlertOfMessage, urgentAlertOutcome, urgentAlertStatus, type UrgentAlertState, type UrgentAlertView
 } from "./urgentAlerts";
 
 const base: UrgentAlertView = { id: "a1", state: "waiting", createdAt: "2026-11-12T18:52:00.000Z", calls: [], phone: true, callMode: "keypad" };
@@ -98,6 +98,40 @@ test("only a card the User's server wrote is an alert's card", () => {
   assert.equal(urgentAlertOfMessage({ role: "participant", metadata: { serverWriter: "device-1", urgentAlert: view } }), undefined);
   assert.equal(urgentAlertOfMessage({ role: "user", metadata: { serverWriter: "server", urgentAlert: view } }), undefined);
   assert.equal(urgentAlertOfMessage({ role: "participant", metadata: { serverWriter: "server", urgentAlert: { state: "waiting" } } }), undefined);
+});
+
+test("the edges: no channel at all, one unanswered call, calls that never rang, a state this app does not know", () => {
+  const nothing = urgentAlertStatus({ ...base, phone: false }, "@taylor", now);
+  assert.deepEqual([nothing.lead, nothing.action], ["Waiting for Got it", "got-it"]);
+
+  const once = urgentAlertStatus({ ...base, state: "unanswered", calls: [call(1, "2026-11-12T18:57:00.000Z", "no-answer")] }, "@taylor", now);
+  assert.equal(once.lead, "Nobody answered the call · no more calls");
+
+  // Twilio reported them failed without saying why: they never rang either.
+  const failed = urgentAlertStatus({ ...base, state: "unanswered", calls: [1, 2, 3].map((attempt) => call(attempt, "2026-11-12T18:57:00.000Z", "failed")) }, "@taylor", now);
+  assert.equal(failed.lead, "Couldn't call you · no more calls");
+
+  const future = urgentAlertStatus({ ...base, state: "snoozed" as UrgentAlertState }, "@taylor", now);
+  assert.equal(future.action, undefined, "no Got it the card cannot stand behind");
+  assert.equal(urgentAlertAwaitsGotIt({ state: "snoozed" as UrgentAlertState }), false);
+});
+
+test("the card offers Got it in exactly the states the server takes it", () => {
+  const all: UrgentAlertState[] = ["waiting", "calling", "acknowledged", "unanswered", "not_set_up", "failed"];
+  assert.deepEqual(all.filter((state) => urgentAlertAwaitsGotIt({ state })), [...URGENT_ALERT_ACKNOWLEDGEABLE_STATES]);
+  for (const state of all) {
+    const status = urgentAlertStatus({ ...base, state, callAt: "2026-11-12T18:57:00.000Z" }, "@taylor", now);
+    assert.equal(status.action === "got-it", urgentAlertAwaitsGotIt({ state }), state);
+  }
+});
+
+test("the countdown and the failure text", () => {
+  assert.equal(urgentAlertCountdown(0), "0:00");
+  assert.equal(urgentAlertCountdown(-5_000), "0:00");
+  assert.equal(urgentAlertCountdown(1), "0:01", "a part of a second still left reads as a second");
+  assert.equal(urgentAlertCountdown(61 * 60_000), "61:00");
+  assert.equal(urgentAlertFailureText(true, "your server did not answer"), "Not confirmed: your server did not answer. A call may still come.");
+  assert.equal(urgentAlertFailureText(false, "your server did not answer"), "Could not close: your server did not answer");
 });
 
 test("phone numbers are taken with their country code only", () => {

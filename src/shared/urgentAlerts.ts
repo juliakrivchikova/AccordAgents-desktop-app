@@ -3,7 +3,7 @@
  * a long job) reaches her outside the app when it goes wrong. The User's
  * server sends the member's message to her Telegram with a Got it button;
  * if nobody reacts in time it calls her phone (Twilio) and reads it out, up
- * to three calls. Got it in Telegram, 1 on the call, or closing the alert in
+ * to three calls. Got it in Telegram, 1 on the call, or Got it on the card in
  * the app (computer or phone) ends it.
  *
  * The server owns every alert and writes its card into the chat itself (a
@@ -80,12 +80,12 @@ export interface UrgentAlertView {
   closedAt?: string;
 }
 
-/** States in which a call may still come; the server and every card agree. */
+/** States in which the server may still place a call. */
 export const URGENT_ALERT_OPEN_STATES: readonly UrgentAlertState[] = ["waiting", "calling"];
 
-export function isOpenUrgentAlert(alert: Pick<UrgentAlertView, "state">): boolean {
-  return URGENT_ALERT_OPEN_STATES.includes(alert.state);
-}
+/** States in which Got it (from Telegram, the call or the app) ends the alert:
+ *  the server takes it in these, and the card offers it in exactly these. */
+export const URGENT_ALERT_ACKNOWLEDGEABLE_STATES: readonly UrgentAlertState[] = ["waiting", "calling", "unanswered"];
 
 // --- settings ---------------------------------------------------------------
 
@@ -211,9 +211,9 @@ export interface UrgentAlertStatus {
 }
 
 /** Whether the alert still waits for her Got it: the card offers the button
- *  and no cross. The server takes Got it in these states (unanswered too). */
+ *  and no cross. */
 export function urgentAlertAwaitsGotIt(alert: Pick<UrgentAlertView, "state">): boolean {
-  return alert.state === "waiting" || alert.state === "calling" || alert.state === "unanswered";
+  return URGENT_ALERT_ACKNOWLEDGEABLE_STATES.includes(alert.state);
 }
 
 export function urgentAlertStatus(alert: UrgentAlertView, requester: string, now: number): UrgentAlertStatus {
@@ -239,17 +239,22 @@ export function urgentAlertStatus(alert: UrgentAlertView, requester: string, now
       return { tone: "done", icon: "check", lead: `Got it · ${by}${at ? ` at ${at}` : ""}`, detail: joined(history) };
     }
     case "unanswered": {
-      const placed = calls.some((call) => !call.error);
+      // A call Twilio refused or reported failed never rang.
+      const placed = calls.some((call) => !call.error && call.status !== "failed");
       const lead = !placed ? "Couldn't call you · no more calls"
         : `Nobody answered ${calls.length === 1 ? "the call" : `${calls.length} calls`} · no more calls`;
       return { tone: "bad", icon: "missed", lead, detail: joined(historyParts(alert, calls)), action: "got-it" };
     }
-    default:
+    case "waiting":
+    case "calling":
       break;
+    default:
+      // A state a newer server knows and this app does not: no promise about calls.
+      return { tone: "now", icon: "clock", lead: "This app can't show this alert's state", detail: "Update the app to see it." };
   }
   // Waiting or calling: it still waits for her.
   const due = alert.callAt ? Date.parse(alert.callAt) : Number.NaN;
-  const ringing = calls.find((call) => !call.endedAt && !call.error && RINGING.has(call.status));
+  const ringing = calls.find(callInFlight);
   if (!ringing && Number.isFinite(due) && due > now) {
     const countdown = { to: alert.callAt as string, text: urgentAlertCountdown(due - now) };
     if (calls.length === 0) {
@@ -270,7 +275,9 @@ export function urgentAlertStatus(alert: UrgentAlertView, requester: string, now
     detail: "No phone is connected, so no call will follow.", action: "got-it" };
 }
 
-/** A closed card's one line: how it ended. `done` when she reacted. */
+/** A closed card's one line: how it ended. `done` when she reacted. Only an
+ *  alert that no longer waits for Got it folds, and closing one that waits
+ *  is Got it, so in practice it is acknowledged or never left the app. */
 export function urgentAlertOutcome(alert: UrgentAlertView): { text: string; done: boolean } {
   if (alert.state === "acknowledged") {
     const at = urgentAlertClock(alert.ackedAt);
@@ -280,8 +287,17 @@ export function urgentAlertOutcome(alert: UrgentAlertView): { text: string; done
     return { text: at ? `${how} ${at}` : how, done: true };
   }
   if (alert.state === "not_set_up" || alert.state === "failed") return { text: "Not sent outside the app", done: false };
-  if (alert.state === "unanswered") return { text: "No answer", done: false };
-  return { text: "Open", done: false };
+  return { text: "No answer", done: false };
+}
+
+/** What the card says when Got it, or the cross, did not go through. */
+export function urgentAlertFailureText(awaiting: boolean, message: string): string {
+  return awaiting ? `Not confirmed: ${message}. A call may still come.` : `Could not close: ${message}`;
+}
+
+/** A call still queued, ringing or talking. */
+function callInFlight(call: UrgentAlertCall): boolean {
+  return !call.endedAt && !call.error && RINGING.has(call.status);
 }
 
 const RINGING: ReadonlySet<UrgentAlertCallStatus> = new Set(["queued", "initiated", "ringing", "in-progress"]);
@@ -292,7 +308,7 @@ function historyParts(alert: UrgentAlertView, calls: UrgentAlertCall[]): string[
   const parts: string[] = [];
   if (alert.telegram?.sentAt) parts.push("Sent to Telegram");
   else if (alert.telegram?.error) parts.push("Telegram didn't take it");
-  const ended = calls.filter((call) => call.error || !RINGING.has(call.status) || call.endedAt);
+  const ended = calls.filter((call) => !callInFlight(call));
   const outcomes = ended.map((call) => callOutcome(call, alert));
   if (ended.length > 1 && outcomes.every((outcome) => outcome === outcomes[0])) {
     parts.push(`Calls at ${ended.map((call) => urgentAlertClock(call.startedAt)).join(", ")}: ${outcomes[0]}`);

@@ -4124,6 +4124,7 @@ button.mobile-chat-group-title:active {
   color: var(--danger);
   font-size: 13px;
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .urgent-alert-action {
@@ -4152,11 +4153,7 @@ button.mobile-chat-group-title:active {
   line-height: 1.4;
 }
 
-/* Closed: one line, the message first, then how it ended. */
-.urgent-alert-card.is-folded {
-  display: block;
-}
-
+/* Closed: one line, the message first, then who and how it ended. */
 .urgent-alert-folded {
   display: flex;
   align-items: center;

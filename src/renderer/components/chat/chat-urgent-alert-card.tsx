@@ -1,18 +1,12 @@
 import { BellOff, BellRing, ChevronDown, CircleCheck, Clock, PhoneCall, PhoneMissed, Send, TriangleAlert, X, type LucideIcon } from "lucide-react";
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
-  urgentAlertAwaitsGotIt, urgentAlertOfMessage, urgentAlertOutcome, urgentAlertStatus, type UrgentAlertStatus, type UrgentAlertView
+  urgentAlertAwaitsGotIt, urgentAlertFailureText, urgentAlertOutcome, urgentAlertStatus, type UrgentAlertStatus, type UrgentAlertView
 } from "../../../shared/urgentAlerts";
 import type { ChatMessage, ChatParticipant } from "../../../shared/types";
 import { ChatMessageWhen } from "./chat-streaming";
 import { UrgentAlertActionsContext } from "./urgent-alert-context";
-
-/** The alert a message carries, if it is an urgent alert's card. */
-export function urgentAlertOf(message: Pick<ChatMessage, "metadata" | "role">): UrgentAlertView | undefined {
-  // Only a card the User's server wrote (a device cannot forge one there).
-  return urgentAlertOfMessage(message);
-}
 
 const STATUS_ICONS: Record<UrgentAlertStatus["icon"], LucideIcon> = {
   clock: Clock,
@@ -49,16 +43,38 @@ export function ChatUrgentAlertCard(props: {
   const [expanded, setExpanded] = useState(false);
   const awaiting = urgentAlertAwaitsGotIt(alert);
   const counting = awaiting && Boolean(alert.callAt);
+  const folded = Boolean(alert.closedAt) && !awaiting && !expanded;
+  // Keyboard focus follows the card when she folds or opens it: the button
+  // she pressed is gone, so the one that undoes it takes the focus.
+  const card = useRef<HTMLElement>(null);
+  const keepFocus = useRef(false);
+  // A failed Got it or close is about the alert as it was: once it changed
+  // (Got it from anywhere else, closed elsewhere) the message no longer holds.
+  useEffect(() => setError(undefined), [alert.state, alert.closedAt]);
   useEffect(() => {
     if (!counting) return undefined;
     setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 1_000);
     return () => clearInterval(timer);
   }, [counting]);
+  useLayoutEffect(() => {
+    if (!keepFocus.current) return;
+    keepFocus.current = false;
+    // Only when the focus was lost with the button: never taken from where
+    // she went meanwhile (the composer while the server answered).
+    const active = document.activeElement;
+    if (active && active !== document.body && !card.current?.contains(active)) return;
+    card.current?.querySelector<HTMLElement>(folded ? ".chat-urgent-alert-folded" : ".chat-urgent-alert-close")?.focus();
+  }, [folded]);
+
+  function rememberFocus(): void {
+    keepFocus.current = Boolean(card.current?.contains(document.activeElement));
+  }
 
   /** Got it, or the cross on a card nobody closed yet: the server closes it
    *  on every device (and takes it as Got it while it waits for one). */
   async function close(): Promise<void> {
+    rememberFocus();
     setClosing(true);
     setError(undefined);
     try {
@@ -72,18 +88,21 @@ export function ChatUrgentAlertCard(props: {
     }
   }
 
-  if (alert.closedAt && !awaiting && !expanded) {
+  if (folded) {
     const outcome = urgentAlertOutcome(alert);
     return (
-      <article data-message-id={message.id} className="chat-urgent-alert is-folded">
+      <article ref={card} data-message-id={message.id} className="chat-urgent-alert is-folded">
         <button
           type="button"
           className={`chat-urgent-alert-folded${outcome.done ? "" : " is-unresolved"}`}
           aria-expanded={false}
-          aria-label={`Urgent alert from ${requester}: ${outcome.text}. Show it`}
-          onClick={() => setExpanded(true)}
+          onClick={() => {
+            rememberFocus();
+            setExpanded(true);
+          }}
         >
           <BellRing className="chat-urgent-alert-folded-bell" size={14} aria-hidden="true" />
+          <span className="sr-only">Urgent alert: </span>
           <span className="chat-urgent-alert-folded-preview">{message.content}</span>
           <span className="chat-urgent-alert-folded-outcome">{requester} · {outcome.text}</span>
           <ChevronDown className="chat-urgent-alert-folded-chevron" size={14} aria-hidden="true" />
@@ -96,7 +115,7 @@ export function ChatUrgentAlertCard(props: {
   const StatusIcon = STATUS_ICONS[status.icon];
   const folds = Boolean(alert.closedAt) && !awaiting;
   return (
-    <article data-message-id={message.id} className="chat-urgent-alert" aria-label={`Urgent alert from ${requester}`}>
+    <article ref={card} data-message-id={message.id} className="chat-urgent-alert" aria-label={`Urgent alert from ${requester}`}>
       <div className="chat-urgent-alert-panel">
         <div className="chat-urgent-alert-head">
           <BellRing className="chat-urgent-alert-bell" size={18} aria-hidden="true" />
@@ -109,7 +128,11 @@ export function ChatUrgentAlertCard(props: {
               aria-expanded={folds ? true : undefined}
               title={folds ? "Fold" : "Close"}
               disabled={closing}
-              onClick={() => (folds ? setExpanded(false) : void close())}
+              onClick={() => {
+                if (!folds) return void close();
+                rememberFocus();
+                setExpanded(false);
+              }}
             >
               <X size={18} aria-hidden="true" />
             </button>
@@ -127,15 +150,15 @@ export function ChatUrgentAlertCard(props: {
               {status.tail}
             </div>
             {status.detail && <div className="chat-urgent-alert-status-detail">{status.detail}</div>}
-            {error && <div className="chat-urgent-alert-error" role="alert">{awaiting ? `Not confirmed: ${error}. A call may still come.` : error}</div>}
+            {error && <div className="chat-urgent-alert-error" role="alert">{urgentAlertFailureText(awaiting, error)}</div>}
           </div>
           {status.action === "got-it" && (
-            <Button type="button" className="chat-urgent-alert-action" disabled={closing} onClick={() => void close()}>
+            <Button type="button" className={ACTION_CLASSES} disabled={closing} onClick={() => void close()}>
               Got it
             </Button>
           )}
           {status.action === "set-up" && actions && (
-            <Button type="button" className="chat-urgent-alert-action" onClick={() => actions.openAlertSettings()}>
+            <Button type="button" className={ACTION_CLASSES} onClick={() => actions.openAlertSettings()}>
               Set up alerts
             </Button>
           )}
@@ -144,3 +167,8 @@ export function ChatUrgentAlertCard(props: {
     </article>
   );
 }
+
+/** The band's button: the app's primary button, a little wider and bolder;
+ *  while Got it is on its way it stays a dimmed primary, not a grey ghost on
+ *  the band's grey. */
+const ACTION_CLASSES = "px-[15px] font-semibold disabled:border-[var(--app-primary)] disabled:bg-primary disabled:text-primary-foreground disabled:opacity-50";

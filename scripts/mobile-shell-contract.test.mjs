@@ -100,6 +100,11 @@ test("mobile shell builds static installable PWA assets", async () => {
   // The phone falls back to raw text when the bundle lacks this, which is the
   // defect it was added for: the fallback must never be reached silently.
   assert.match(shared, /stripChatControlBlocks/);
+  // An urgent alert's card: without these a waiting alert would show no Got it
+  // on the phone, so she could not stop the call from it.
+  for (const name of ["urgentAlertAwaitsGotIt", "urgentAlertStatus", "urgentAlertOutcome", "urgentAlertCountdown", "urgentAlertFailureText", "HUB_ALERTS_PATH"]) {
+    assert.match(shared, new RegExp(`\\b${name}\\b`), `the shared rules carry ${name} for the urgent alert card`);
+  }
   assert.ok(html.indexOf('src="mobile-shared.js') < html.indexOf('src="mobile-app.js'), "the shared rules load before the app");
   assert.ok(worker.includes("./mobile-shared.js?v="), "service worker must precache the shared rules");
   // Activity's rules: without them an installed phone opened offline or on a

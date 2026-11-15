@@ -148,12 +148,7 @@
   color: var(--app-danger);
   font-size: 12.5px;
   line-height: 1.4;
-}
-
-.chat-urgent-alert-action {
-  flex: none;
-  padding: 0 15px;
-  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 /* Closed: one line, the message first, then who and how it ended. */

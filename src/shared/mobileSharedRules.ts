@@ -49,5 +49,5 @@ export {
 // An urgent alert's card: its status band, its folded line and whether it
 // still waits for Got it, worded once for the desktop's card and the phone's.
 export {
-  HUB_ALERTS_PATH, urgentAlertAwaitsGotIt, urgentAlertCountdown, urgentAlertOutcome, urgentAlertStatus
+  HUB_ALERTS_PATH, urgentAlertAwaitsGotIt, urgentAlertCountdown, urgentAlertFailureText, urgentAlertOutcome, urgentAlertStatus
 } from "./urgentAlerts";

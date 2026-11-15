@@ -9827,18 +9827,21 @@
       folded.className = "urgent-alert-folded" + (outcome.done ? "" : " is-unresolved");
       folded.dataset.urgentAlertToggle = alert.id;
       folded.setAttribute("aria-expanded", "false");
-      folded.setAttribute("aria-label", "Urgent alert from " + label + ": " + outcome.text + ". Show it");
       const bell = lineIcon(URGENT_ALERT_BELL_PATHS, 14);
       bell.classList.add("urgent-alert-folded-bell");
+      // Read out as what it shows, after what it is.
+      const kind = document.createElement("span");
+      kind.className = "sr-only";
+      kind.textContent = "Urgent alert: ";
       const preview = document.createElement("span");
       preview.className = "urgent-alert-folded-preview";
       preview.textContent = entry.content || "";
       const end = document.createElement("span");
       end.className = "urgent-alert-folded-outcome";
-      end.textContent = outcome.text;
+      end.textContent = label + " · " + outcome.text;
       const chevron = lineIcon(URGENT_ALERT_CHEVRON_PATHS, 14);
       chevron.classList.add("urgent-alert-folded-chevron");
-      folded.append(bell, preview, end, chevron);
+      folded.append(bell, kind, preview, end, chevron);
       wrap.append(folded);
       return wrap;
     }
@@ -9903,12 +9906,16 @@
         detail.textContent = status.detail;
         words.append(detail);
       }
+      // A failure stays only while the alert is as it was when it failed: Got
+      // it from anywhere else (or a close that went through) clears it.
       const failure = urgentAlertErrors.get(alert.id);
-      if (failure && awaiting) {
+      if (failure && failure.state === alert.state && !alert.closedAt) {
         const error = document.createElement("div");
         error.className = "urgent-alert-error";
         error.setAttribute("role", "alert");
-        error.textContent = "Not confirmed: " + failure + ". A call may still come.";
+        error.textContent = typeof shared.urgentAlertFailureText === "function"
+          ? shared.urgentAlertFailureText(awaiting, failure.message)
+          : "Not confirmed: " + failure.message;
         words.append(error);
       }
       band.append(icon, words);
@@ -9972,10 +9979,19 @@
     rerenderUrgentAlertRow(row);
   }
 
+  /** Draws the row's card again. Focus that was on the card (the button she
+   *  pressed is gone) goes to the new card's button, so it is not lost. */
   function rerenderUrgentAlertRow(row) {
     const card = row && row.querySelector ? row.querySelector(".urgent-alert-card") : undefined;
     const entry = row && row.__urgentAlertEntry;
-    if (card && entry) card.replaceWith(urgentAlertCardElement(entry));
+    if (!card || !entry) return;
+    const hadFocus = card.contains(document.activeElement);
+    const next = urgentAlertCardElement(entry);
+    card.replaceWith(next);
+    if (hadFocus) {
+      const target = next.querySelector(".urgent-alert-folded, .urgent-alert-close, .urgent-alert-action");
+      if (target) target.focus();
+    }
   }
 
   /** Got it, or the cross on a card nobody closed yet: the server closes it on
@@ -9997,7 +10013,8 @@
       expandedUrgentAlerts.delete(alertId);
       if (row) row.__urgentAlertEntry = { ...(row.__urgentAlertEntry || {}), urgentAlert: answer.value };
     } catch (error) {
-      urgentAlertErrors.set(alertId, error && error.message ? error.message : "try again");
+      const current = row && row.__urgentAlertEntry ? urgentAlertOfEntry(row.__urgentAlertEntry) : undefined;
+      urgentAlertErrors.set(alertId, { message: error && error.message ? error.message : "try again", state: current ? current.state : "" });
     }
     rerenderUrgentAlertRow(row);
   }
