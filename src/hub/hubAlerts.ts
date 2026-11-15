@@ -195,7 +195,7 @@ export class HubAlerts {
    *  older one that ends late does not overwrite it). */
   private latestTest: string | undefined;
   /** Numbers bought per Twilio account, kept for PURCHASE_REUSE_MS. */
-  private readonly purchases = new Map<string, { at: number; number: Promise<string> }>();
+  private readonly purchases = new Map<string, { at: number; authToken: string; number: Promise<string> }>();
   private telegramLoop?: AbortController;
   private telegramToken?: string;
   private closed = false;
@@ -1201,7 +1201,8 @@ export class HubAlerts {
   private buyOnce(credentials: { accountSid: string; authToken: string }): Promise<string> {
     const now = this.now().getTime();
     const kept = this.purchases.get(credentials.accountSid);
-    if (kept && now - kept.at < PURCHASE_REUSE_MS) return kept.number;
+    // Handed back only to the same keys: a wrong token is not let past Twilio.
+    if (kept && now - kept.at < PURCHASE_REUSE_MS && sameSecret(credentials.authToken, kept.authToken)) return kept.number;
     const number = (async () => {
       const client = new TwilioClient(credentials.accountSid, credentials.authToken, this.fetchImpl, this.options.twilioBaseUrl);
       const available = await client.availableNumber("US").catch(async (error: unknown) => {
@@ -1211,7 +1212,7 @@ export class HubAlerts {
       if (!available) throw new AlertChannelError("Twilio has no US number to offer right now. Try again later, or buy one in the Twilio Console.", 0);
       return (await client.buyNumber(available)).phoneNumber;
     })();
-    this.purchases.set(credentials.accountSid, { at: now, number });
+    this.purchases.set(credentials.accountSid, { at: now, authToken: credentials.authToken, number });
     // Not bought: the next press tries again.
     number.catch(() => {
       if (this.purchases.get(credentials.accountSid)?.number === number) this.purchases.delete(credentials.accountSid);

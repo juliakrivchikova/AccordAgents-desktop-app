@@ -468,6 +468,9 @@ test("a number is bought once: a second press, or one after a lost answer, gets 
   assert.equal(second.value?.number, "+14155550300", "the press while it was buying");
   assert.equal((await h.alerts<{ number: string }>(h.owner, { action: "phone.buy" })).value?.number, "+14155550300", "a press after");
   assert.deepEqual(h.world.bought, ["+14155550300"], "billed once");
+  // The same account with a wrong token is refused by Twilio, not handed the number.
+  const wrong = await h.alerts(h.owner, { action: "phone.buy", accountSid: ACCOUNT_SID, authToken: "c".repeat(32) });
+  assert.equal(wrong.error?.code, "channel_failed");
 });
 
 test("a test call that ends long after a newer one does not overwrite the newer one's result", async (t) => {
