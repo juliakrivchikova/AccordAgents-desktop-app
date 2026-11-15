@@ -85,8 +85,15 @@ export function AlertsSettingsSection(): JSX.Element {
     if (!result.ok) {
       setRowError({ row, text: result.error.message });
       // What failed may have changed what the server knows (a refused bot,
-      // refused keys): the page shows it at once, not after a reload.
-      void alertRequest<UrgentAlertSettingsView>({ action: "settings" }).then((fresh) => { if (fresh.ok) setSettings(fresh.value); });
+      // refused keys): the page shows it at once, not after a reload, and the
+      // channel's own line then says it (this one would outlive that line).
+      const failed = result.error.message;
+      void alertRequest<UrgentAlertSettingsView>({ action: "settings" }).then((fresh) => {
+        if (!fresh.ok) return;
+        setSettings(fresh.value);
+        const own = row === "telegram" ? fresh.value.telegram?.error : row === "phone" ? fresh.value.phone?.error : undefined;
+        if (own) setRowError((current) => (current?.row === row && current.text === failed ? undefined : current));
+      });
       return false;
     }
     setSettings(result.value);
