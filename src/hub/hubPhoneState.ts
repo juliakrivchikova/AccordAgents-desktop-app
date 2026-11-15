@@ -1,4 +1,4 @@
-import { hubTurnRunId, type HubCard } from "../shared/hubOps";
+import { HUB_FEED_WAIT_MAX_MS, hubTurnRunId, type HubCard } from "../shared/hubOps";
 import type { HubDevice, HubMachineWakeRequest, HubMachineStatus, HubPhoneScope } from "../shared/hubProtocol";
 import { decodeMachineProgress, type MachineProgressFrame } from "../shared/machineProgress";
 import { machineWakeRequest, webCryptoMachineWake, type MachineWakeSubtleCrypto } from "../shared/machineWakeRequest";
@@ -170,8 +170,19 @@ export const HUB_WAKE_AFTER_MS = 30_000;
 /** One start request per machine this often at most. */
 const WAKE_MIN_INTERVAL_MS = 5 * 60_000;
 /** AWS refused a start because the instance is still stopping: asked again
- *  this soon, and not counted as a try. */
+ *  this soon, and not counted as a try for this long after the first such
+ *  answer (an instance stuck stopping, or gone, then shows its error). */
 const WAKE_WHILE_STOPPING_RETRY_MS = 30_000;
+const WAKE_WHILE_STOPPING_GRACE_MS = 10 * 60_000;
+/** Work a machine read but did not take is stranded only when the machine
+ *  went away this soon after reading it (it was stopping). One that went on
+ *  reading turned it down for a reason a start does not change: forgotten,
+ *  as read work always was. */
+const READ_UNTAKEN_STRANDED_WITHIN_MS = 2 * 60_000;
+/** A machine that read its work is not reading any more once this long has
+ *  passed without a read: longer than one long wait of the feed and what
+ *  it applies after. */
+const READ_UNTAKEN_SILENCE_MS = 2 * HUB_FEED_WAIT_MAX_MS + 10_000;
 /** A Wake from the phone is answered this often at most. */
 const MANUAL_WAKE_MIN_INTERVAL_MS = 60_000;
 /** Automatic starts for one piece of waiting work, at most, and how long
@@ -189,8 +200,9 @@ const WAKE_CHECK_MS = 10_000;
 export class HubWaker {
   /** Work waiting per machine: since when, where in the feed, and how
    *  many times the hub started the machine for it. */
-  private readonly waiting = new Map<string, { since: number; hubSeq: number; wakes: number; runIds: Set<string>; cardIds: Set<string> }>();
-  private readonly attempts = new Map<string, { at: number; manual: boolean; result: string; ok: boolean; stopping?: boolean }>();
+  private readonly waiting = new Map<string, { since: number; hubSeq: number; wakes: number; runIds: Set<string>; cardIds: Set<string>; readAt?: number }>();
+  private readonly attempts = new Map<string, { at: number; manual: boolean; result: string; ok: boolean; stopping?: boolean; stoppingSince?: number }>();
+  private checking = false;
   private timer?: ReturnType<typeof setInterval>;
 
   constructor(private readonly options: {
@@ -227,7 +239,10 @@ export class HubWaker {
     if (!current) {
       current = { since: this.now(), hubSeq, wakes: 0, runIds: new Set(), cardIds: new Set() };
       this.waiting.set(machineId, current);
-    } else current.hubSeq = Math.max(current.hubSeq, hubSeq);
+    } else if (hubSeq > current.hubSeq) {
+      // New work tries again: its own wait, its own starts.
+      Object.assign(current, { since: this.now(), hubSeq, wakes: 0, readAt: undefined });
+    }
     if (item.runId) current.runIds.add(item.runId);
     if (item.cardId) current.cardIds.add(item.cardId);
   }
@@ -252,7 +267,18 @@ export class HubWaker {
 
   /** Wakes the machines whose work has waited; forgets work they have read. */
   async check(): Promise<void> {
-    if (this.waiting.size === 0) return;
+    // One pass at a time: a pass waits on AWS, and two would start a
+    // machine twice.
+    if (this.waiting.size === 0 || this.checking) return;
+    this.checking = true;
+    try {
+      await this.checkNow();
+    } finally {
+      this.checking = false;
+    }
+  }
+
+  private async checkNow(): Promise<void> {
     const devices = await this.machineDevices();
     // Where each machine read the server's feed (its work is placed there).
     const cursors = await this.options.storage.hubOps().cursorTimes();
@@ -260,15 +286,24 @@ export class HubWaker {
     for (const [machineId, work] of [...this.waiting]) {
       const device = devices.get(machineId);
       const cursor = device ? cursors.get(device.deviceId) : undefined;
-      // Read past the work: the machine is awake and has it, unless it read
-      // it and did not take it (it was stopping): that still waits, and
-      // wakes the machine once it no longer reads.
-      if (cursor && cursor.hubSeq >= work.hubSeq && !await this.untaken(work)) {
-        this.waiting.delete(machineId);
-        continue;
-      }
       const lastRead = cursor ? Date.parse(cursor.updatedAt) : 0;
-      if (this.now() - work.since < HUB_WAKE_AFTER_MS || this.now() - lastRead < HUB_WAKE_AFTER_MS) continue;
+      if (cursor && cursor.hubSeq >= work.hubSeq) {
+        // Read past the work: the machine is awake and has it, unless it
+        // read it and did not take it.
+        if (!await this.untaken(work)) {
+          this.waiting.delete(machineId);
+          continue;
+        }
+        work.readAt ??= this.now();
+        if (this.now() - lastRead < READ_UNTAKEN_SILENCE_MS) {
+          // Still reading: it went on after it read the work, so it turned
+          // it down for its own reason. Forgotten, as read work always was.
+          if (this.now() - work.readAt > READ_UNTAKEN_STRANDED_WITHIN_MS) this.waiting.delete(machineId);
+          continue;
+        }
+        // It stopped reading right after it read the work (it was
+        // stopping): the work is stranded, and the machine is started for it.
+      } else if (this.now() - work.since < HUB_WAKE_AFTER_MS || this.now() - lastRead < HUB_WAKE_AFTER_MS) continue;
       const config = configs.get(machineId);
       // A machine started this often for the same work that still does not
       // read it (an older runtime, a crash at start) is not started again
@@ -304,11 +339,12 @@ export class HubWaker {
 
   private async wake(config: WakeConfig, manual: boolean): Promise<{ ok: boolean; message: string; attempted: boolean; stopping?: boolean }> {
     const last = this.attempts.get(config.machineId);
-    const interval = last?.stopping ? WAKE_WHILE_STOPPING_RETRY_MS : manual ? MANUAL_WAKE_MIN_INTERVAL_MS : WAKE_MIN_INTERVAL_MS;
+    const interval = last?.stopping && !manual ? WAKE_WHILE_STOPPING_RETRY_MS : manual ? MANUAL_WAKE_MIN_INTERVAL_MS : WAKE_MIN_INTERVAL_MS;
     if (last && this.now() - last.at < interval) return { ok: last.ok, message: last.result, attempted: false };
     const at = this.now();
     let ok = false;
     let stopping = false;
+    let stoppingSince: number | undefined;
     let message: string;
     try {
       const subtle = this.options.subtle ?? (globalThis.crypto?.subtle as unknown as MachineWakeSubtleCrypto);
@@ -325,15 +361,20 @@ export class HubWaker {
       const text = await response.text().catch(() => "");
       ok = response.ok;
       const code = /<Code>([^<]+)<\/Code>/.exec(text)?.[1];
-      // Still stopping (it stopped itself a moment ago): started once it has.
-      stopping = !response.ok && code === "IncorrectInstanceState";
+      // Still stopping (it stopped itself a moment ago): started once it
+      // has, for a while; past that it is an error like any other, for as
+      // long as AWS gives this answer.
+      // An episode is answers in a row: one from long before starts anew.
+      const episode = last?.stoppingSince !== undefined && at - last.at <= WAKE_WHILE_STOPPING_GRACE_MS ? last.stoppingSince : at;
+      stoppingSince = !response.ok && code === "IncorrectInstanceState" ? episode : undefined;
+      stopping = stoppingSince !== undefined && at - stoppingSince <= WAKE_WHILE_STOPPING_GRACE_MS;
       message = response.ok ? "Starting the machine."
-        : stopping ? "The machine is still stopping; it is started again once it has stopped."
+        : stopping ? (manual ? "The machine is still stopping. Press Wake again in a minute." : "The machine is still stopping; it is started once it has stopped.")
           : `AWS refused to start the machine (${response.status}${code ? `: ${code}` : ""}).`;
     } catch (error) {
       message = `The machine could not be started: ${error instanceof Error ? error.message : String(error)}`;
     }
-    this.attempts.set(config.machineId, { at, manual, result: message, ok, ...(stopping ? { stopping } : {}) });
+    this.attempts.set(config.machineId, { at, manual, result: message, ok, ...(stopping ? { stopping } : {}), ...(stoppingSince !== undefined ? { stoppingSince } : {}) });
     await this.options.storage.hub().noteMachineWakeAttempt(config.machineId, new Date(at).toISOString(), message).catch(() => undefined);
     this.options.log?.("hub.wake.attempt", { machineId: config.machineId, manual, ok, message });
     return { ok, message, attempted: true, ...(stopping ? { stopping } : {}) };

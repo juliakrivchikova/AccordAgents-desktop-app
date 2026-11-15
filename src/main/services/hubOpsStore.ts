@@ -345,6 +345,15 @@ export class HubOpsStore {
     return rows.map((row) => row.runId);
   }
 
+  /** Which of these cards are answered and their answer not applied yet. */
+  async stillAnswered(cardIds: string[]): Promise<string[]> {
+    if (cardIds.length === 0) return [];
+    await this.init();
+    const rows = await this.database.query<{ cardId: string }>(`select card_id as cardId from hub_cards where state = 'answered'
+      and card_id in (${cardIds.map(quote).join(", ")});`);
+    return rows.map((row) => row.cardId);
+  }
+
   /** Turns this device took and has not finished, oldest first. */
   async claimedBy(deviceId: string, limit = 500): Promise<HubTurn[]> {
     await this.init();

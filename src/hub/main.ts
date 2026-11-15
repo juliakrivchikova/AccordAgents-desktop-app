@@ -125,8 +125,7 @@ export function composeHub(options: {
     // still requested, an answer still not applied. It is woken for it.
     untaken: async ({ runIds, cardIds }) => {
       if ((await storage.hubOps().stillRequested(runIds)).length > 0) return true;
-      for (const cardId of cardIds) if ((await storage.hubOps().card(cardId))?.state === "answered") return true;
-      return false;
+      return (await storage.hubOps().stillAnswered(cardIds)).length > 0;
     } });
   // Set below: the push asks the phone views whether a phone is looking.
   let phone: HubPhoneApi | undefined;

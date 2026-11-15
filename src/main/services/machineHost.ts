@@ -382,7 +382,7 @@ export class MachineHostService {
       if (await this.hasWorkForIdleStop()) return undefined;
       releaseNative = request.fenceNative();
       if (!releaseNative) return undefined;
-      const prepareLocal = async () => !this.declinedWhileFenced &&
+      const prepareLocal = async () => !this.declinedWhileFenced && (this.chat?.serverTurnsStarting?.() ?? 0) === 0 &&
         await this.options.storage.machinePower().tryFence(request.bootId, request.uptimeMs, randomUUID(), request.idleSinceMs);
       committed = await (request.commitHostStop ? request.commitHostStop(prepareLocal) : prepareLocal());
       if (!committed) return undefined;
