@@ -170,7 +170,7 @@ export function ChatUrgentAlertCard(props: {
               {status.tail}
             </div>
             {status.detail && <div className="chat-urgent-alert-status-detail">{status.detail}</div>}
-            {error && <div className="chat-urgent-alert-error" role="alert">{urgentAlertFailureText(awaiting, error)}</div>}
+            {error && <div className="chat-urgent-alert-error" role="alert">{urgentAlertFailureText(alert, error)}</div>}
           </div>
           {status.action === "got-it" && (
             <Button type="button" className={ACTION_CLASSES} disabled={closing} onClick={() => void close()}>

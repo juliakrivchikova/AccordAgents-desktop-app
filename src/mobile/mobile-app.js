@@ -9820,7 +9820,7 @@
     const wrap = document.createElement("div");
     wrap.className = "urgent-alert-card";
     if (alert.closedAt && !awaiting && !expandedUrgentAlerts.has(alert.id)) {
-      const outcome = shared && typeof shared.urgentAlertOutcome === "function" ? shared.urgentAlertOutcome(alert) : { text: "closed", done: true };
+      const outcome = shared && typeof shared.urgentAlertOutcome === "function" ? shared.urgentAlertOutcome(alert) : { text: "Closed", short: "Closed", done: true };
       wrap.classList.add("is-folded");
       const folded = document.createElement("button");
       folded.type = "button";
@@ -9838,10 +9838,16 @@
       preview.textContent = entry.content || "";
       const end = document.createElement("span");
       end.className = "urgent-alert-folded-outcome";
-      end.textContent = label + " · " + outcome.text;
+      // The short outcome: a phone's line has room for little more than the
+      // message (the approved phone mockup); the card it opens says the rest.
+      end.textContent = outcome.short || outcome.text;
+      const who = document.createElement("span");
+      who.className = "sr-only";
+      who.textContent = " from " + label + ": " + outcome.text;
       const chevron = lineIcon(URGENT_ALERT_CHEVRON_PATHS, 14);
       chevron.classList.add("urgent-alert-folded-chevron");
-      folded.append(bell, kind, preview, end, chevron);
+      end.setAttribute("aria-hidden", "true");
+      folded.append(bell, kind, preview, who, end, chevron);
       wrap.append(folded);
       return wrap;
     }
@@ -9915,7 +9921,7 @@
         error.className = "urgent-alert-error";
         error.setAttribute("role", "alert");
         error.textContent = typeof shared.urgentAlertFailureText === "function"
-          ? shared.urgentAlertFailureText(awaiting, failure.message)
+          ? shared.urgentAlertFailureText(alert, failure.message)
           : "Not confirmed: " + failure.message;
         words.append(error);
       }

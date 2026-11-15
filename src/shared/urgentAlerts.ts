@@ -282,25 +282,30 @@ export function urgentAlertStatus(alert: UrgentAlertView, requester: string, now
     detail: "No phone is connected, so no call will follow.", action: "got-it" };
 }
 
-/** A closed card's one line: how it ended. `done` when she reacted. Only an
- *  alert that no longer waits for Got it folds, and closing one that waits
- *  is Got it, so in practice it is acknowledged or never left the app. */
-export function urgentAlertOutcome(alert: UrgentAlertView): { text: string; done: boolean } {
+/** A closed card's one line: how it ended (`text` on the computer; `short`
+ *  on the phone, whose line has room for little more than the message, as
+ *  the approved phone mockup shows). `done` when she reacted. Only an alert
+ *  that no longer waits for Got it folds, and closing one that waits is Got
+ *  it, so in practice it is acknowledged or never left the app. */
+export function urgentAlertOutcome(alert: UrgentAlertView): { text: string; short: string; done: boolean } {
   if (alert.state === "acknowledged") {
     const at = urgentAlertClock(alert.ackedAt);
     const how = alert.ackSource === "telegram" ? "Got it in Telegram"
       : alert.ackSource === "app" ? "Got it in the app"
       : alert.callMode === "keypad" ? "Got it on the call" : "Answered the call";
-    return { text: at ? `${how} ${at}` : how, done: true };
+    return { text: at ? `${how} ${at}` : how, short: at ? `Got it ${at}` : "Got it", done: true };
   }
-  if (alert.state === "not_set_up" || alert.state === "failed") return { text: "Not sent outside the app", done: false };
-  if (alert.state === "unanswered") return { text: "No answer", done: false };
-  return { text: "Closed", done: false };
+  if (alert.state === "not_set_up" || alert.state === "failed") return { text: "Not sent outside the app", short: "Not sent", done: false };
+  if (alert.state === "unanswered") return { text: "No answer", short: "No answer", done: false };
+  return { text: "Closed", short: "Closed", done: false };
 }
 
-/** What the card says when Got it, or the cross, did not go through. */
-export function urgentAlertFailureText(awaiting: boolean, message: string): string {
-  return awaiting ? `Not confirmed: ${message}. A call may still come.` : `Could not close: ${message}`;
+/** What the card says when Got it, or the cross, did not go through: while a
+ *  call may still come it says so; after the last call it does not. */
+export function urgentAlertFailureText(alert: Pick<UrgentAlertView, "state">, message: string): string {
+  const reason = message.trim().replace(/[.\s]+$/, "");
+  if (URGENT_ALERT_OPEN_STATES.includes(alert.state)) return `Not confirmed: ${reason}. A call may still come.`;
+  return urgentAlertAwaitsGotIt(alert) ? `Not confirmed: ${reason}.` : `Could not close: ${reason}.`;
 }
 
 /** A call still queued, ringing or talking. */

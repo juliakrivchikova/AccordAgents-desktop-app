@@ -65,7 +65,7 @@ test("after Got it the band says who reacted where, and the folded line says how
   const telegram = { ...base, state: "acknowledged" as const, ackSource: "telegram" as const, ackedAt: acked, telegram: sent };
   assert.equal(main(urgentAlertStatus(telegram, "@taylor", now)), `Got it · you pressed it in Telegram at ${at(acked)}`);
   assert.equal(urgentAlertStatus(telegram, "@taylor", now).detail, "Sent to Telegram · No call was made");
-  assert.deepEqual(urgentAlertOutcome(telegram), { text: `Got it in Telegram ${at(acked)}`, done: true });
+  assert.deepEqual(urgentAlertOutcome(telegram), { text: `Got it in Telegram ${at(acked)}`, short: `Got it ${at(acked)}`, done: true });
 
   const pressed = { ...base, state: "acknowledged" as const, ackSource: "call" as const, ackedAt: acked, telegram: sent,
     calls: [call(1, "2026-11-12T18:55:00.000Z", "no-answer"), call(2, "2026-11-12T18:58:00.000Z", "completed")] };
@@ -87,7 +87,7 @@ test("after Got it the band says who reacted where, and the folded line says how
 test("an alert that never left the app says so and offers to set alerts up", () => {
   const unset = urgentAlertStatus({ ...base, state: "not_set_up", phone: false }, "@taylor", now);
   assert.deepEqual([unset.lead, unset.detail, unset.tone, unset.action], ["Not sent outside the app", "Alerts aren't set up, so @taylor could reach you only here.", "bad", "set-up"]);
-  assert.deepEqual(urgentAlertOutcome({ ...base, state: "not_set_up" }), { text: "Not sent outside the app", done: false });
+  assert.deepEqual(urgentAlertOutcome({ ...base, state: "not_set_up" }), { text: "Not sent outside the app", short: "Not sent", done: false });
   const failed = urgentAlertStatus({ ...base, state: "failed", phone: false, telegram: { error: "Forbidden: bot was blocked by the user" } }, "@taylor", now);
   assert.equal(failed.detail, "Telegram didn't take it (Forbidden: bot was blocked by the user) and no phone is connected.");
   assert.equal(failed.action, "set-up");
@@ -138,8 +138,12 @@ test("the countdown and the failure text", () => {
   assert.equal(urgentAlertCountdown(-5_000), "0:00");
   assert.equal(urgentAlertCountdown(1), "0:01", "a part of a second still left reads as a second");
   assert.equal(urgentAlertCountdown(61 * 60_000), "61:00");
-  assert.equal(urgentAlertFailureText(true, "your server did not answer"), "Not confirmed: your server did not answer. A call may still come.");
-  assert.equal(urgentAlertFailureText(false, "your server did not answer"), "Could not close: your server did not answer");
+  assert.equal(urgentAlertFailureText({ state: "waiting" }, "your server did not answer"), "Not confirmed: your server did not answer. A call may still come.");
+  // The server's own words end in a full stop: never two of them.
+  assert.equal(urgentAlertFailureText({ state: "calling" }, "Your server could not be reached (fetch failed). "), "Not confirmed: Your server could not be reached (fetch failed). A call may still come.");
+  // After the last call no call comes, so it does not say one may.
+  assert.equal(urgentAlertFailureText({ state: "unanswered" }, "Your server could not be reached."), "Not confirmed: Your server could not be reached.");
+  assert.equal(urgentAlertFailureText({ state: "acknowledged" }, "your server did not answer"), "Could not close: your server did not answer.");
 });
 
 test("phone numbers are taken with their country code only", () => {

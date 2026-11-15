@@ -4153,7 +4153,7 @@ button.mobile-chat-group-title:active {
   line-height: 1.4;
 }
 
-/* Closed: one line, the message first, then who and how it ended. */
+/* Closed: one line, the message first, then how it ended. */
 .urgent-alert-folded {
   display: flex;
   align-items: center;
