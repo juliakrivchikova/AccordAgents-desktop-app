@@ -444,6 +444,7 @@ test("one test call at a time, and one left ringing by a restart does not stay \
     return view?.phone?.lastTest?.state === "failed" ? view : undefined;
   }, "the test left ringing to end");
   assert.match(after.phone?.lastTest?.error ?? "", /restarted during the test call/);
+  assert.equal(after.phone?.lastTest?.lost, true, "a lost result, not a failed call");
 });
 
 test("saved keys Twilio refuses on a test call mark the phone, so the page never says Ready beside them", async (t) => {
@@ -579,6 +580,7 @@ test("a test call Twilio stops answering about ends as failed, and the next one 
     return answer.value?.test.state !== "calling" ? answer.value?.test : undefined;
   }, "the lost test call to end", 8_000);
   assert.equal(done.state, "failed");
+  assert.equal((done as { lost?: boolean }).lost, true, "how it went is unknown, not a failed call");
   h.world.faults.callStatus = 0;
   assert.equal((await h.alerts(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" })).ok, true);
 });

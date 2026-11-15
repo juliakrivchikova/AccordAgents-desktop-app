@@ -79,9 +79,9 @@ export function PhoneConnectDialog(props: {
         if (answer.ok) setTest((current) => current && current.id === answer.value.testId ? { ...current, result: answer.value.test } : current);
         // The server no longer knows it: over. Any other failure (a moment
         // without the server): asked again while the call may still ring.
-        else if (answer.error.code === "invalid_request") setTest((current) => current ? { ...current, result: { state: "failed", at: new Date().toISOString(), error: answer.error.message } } : current);
+        else if (answer.error.code === "invalid_request") setTest((current) => current ? { ...current, result: { state: "failed", at: new Date().toISOString(), error: answer.error.message, lost: true } } : current);
         else if (Date.now() - Date.parse(test.result.at) > URGENT_ALERT_TEST_STALE_MS) {
-          setTest((current) => current ? { ...current, result: { state: "failed", at: new Date().toISOString(), error: "Your server stopped answering, so how the call went is unknown." } } : current);
+          setTest((current) => current ? { ...current, result: { state: "failed", at: new Date().toISOString(), error: "Your server stopped answering, so how the call went is unknown.", lost: true } } : current);
         } else setTest((current) => current ? { ...current } : current);
       });
     }, 1_500);

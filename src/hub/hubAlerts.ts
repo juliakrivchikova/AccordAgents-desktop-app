@@ -229,7 +229,7 @@ export class HubAlerts {
     if ((await this.settings()).phone?.lastTest?.state === "calling") {
       await this.updateSettings((current) => {
         if (current.phone?.lastTest?.state === "calling" && ![...this.tests.values()].some((run) => run.result.state === "calling")) {
-          current.phone.lastTest = { state: "failed", at: this.now().toISOString(), error: "The server restarted during the test call. Call again." };
+          current.phone.lastTest = { state: "failed", at: this.now().toISOString(), error: "The server restarted during the test call. Call again.", lost: true };
         }
       }).catch((error: unknown) => this.log("hub.alert.test.reconcile-failed", { message: messageOf(error) }));
     }
@@ -819,7 +819,7 @@ export class HubAlerts {
         }, async (error: unknown) => {
           this.log("hub.alert.test.poll-error", { message: messageOf(error) });
           // Lost for a few minutes: say so rather than "calling" for ever.
-          if (failures >= 30) await this.finishTest(run, "failed");
+          if (failures >= 30) await this.finishTest(run, "failed", true);
           else this.pollTest(run, failures + 1);
         })
         .catch((error: unknown) => this.log("hub.alert.test.error", { message: messageOf(error) }));
@@ -828,13 +828,14 @@ export class HubAlerts {
     this.testPolls.add(timer);
   }
 
-  private async finishTest(run: PhoneTestRun, status: UrgentAlertCallStatus): Promise<void> {
+  /** `lost`: Twilio stopped answering about it, so how it went is unknown. */
+  private async finishTest(run: PhoneTestRun, status: UrgentAlertCallStatus, lost = false): Promise<void> {
     if (run.result.state === "calling") {
       const state: UrgentAlertPhoneTest["state"] = status === "completed" ? (run.mode === "answer" ? "answered" : "not-pressed")
         : status === "busy" ? "busy"
         : status === "failed" ? "failed"
         : "no-answer";
-      run.result = { state, at: this.now().toISOString() };
+      run.result = { state, at: this.now().toISOString(), ...(lost ? { lost: true } : {}) };
     }
     await this.recordTest(run);
   }

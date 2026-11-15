@@ -50,7 +50,10 @@ call", artifact "План: Urgent alert — Telegram и звонок".
 Approved by the User on 2026-11-15 after five design reviews:
 
 - One band on top says whether an alert reaches her now, the worst first: a
-  channel that stopped working (red, with Reconnect), the server inside the
+  channel that stopped working (red, with Reconnect), including a phone whose
+  last test call failed (red "Calls aren't going out" with the reason and
+  Change phone call; the User, 2026-11-15; a test whose result was lost to a
+  restart is not a failure), the server inside the
   app (alerts only while the Mac is awake; answering counts as Got it, with
   Set up your server), her server that Twilio cannot reach, Telegram only,
   a call only, all set, or off.

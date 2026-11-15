@@ -5,6 +5,7 @@ import {
   alertsBand,
   alertsFlowChannels,
   alertsIntroCall,
+  alertsPhoneProblem,
   alertsPhoneStatus,
   alertsPhoneTesting,
   alertsPhoneTestLine,
@@ -124,6 +125,7 @@ export function AlertsSettingsSection(): JSX.Element {
   const band = settings ? alertsBand(settings) : undefined;
   const bandAction = band?.action === "reconnect-telegram" ? <Button type="button" size="sm" onClick={() => setDialog("telegram")}>Reconnect Telegram</Button>
     : band?.action === "reconnect-phone" ? <Button type="button" size="sm" onClick={() => setDialog("phone")}>Reconnect phone call</Button>
+    : band?.action === "change-phone" ? <Button type="button" size="sm" onClick={() => setDialog("phone")}>Change phone call</Button>
     : band?.action === "set-up-server" && actions ? <Button type="button" variant="outline" size="sm" onClick={() => actions.openServerSettings()}><Server size={13} aria-hidden /> Set up your server</Button>
     : undefined;
 
@@ -187,7 +189,7 @@ export function AlertsSettingsSection(): JSX.Element {
                 : [
                   { text: `Calls ${phone.to} from ${phone.from}` },
                   phone.error ? { text: phone.error, tone: "error" }
-                    : { text: [keypad ? "On the call, press 1 for Got it" : "Answering the call counts as Got it", alertsPhoneTestLine(settings)].filter(Boolean).join(" · ") },
+                    : { text: [keypad ? "On the call, press 1 for Got it" : "Answering the call counts as Got it", alertsPhoneTestLine(settings)].filter(Boolean).join(" · "), ...(alertsPhoneProblem(phone) ? { tone: "error" as const } : {}) },
                   phone.trial ? { text: "Twilio trial: calls reach only numbers verified in Twilio and start with Twilio's notice.", tone: "warn" } : undefined,
                   errorFor("phone")
                 ]}

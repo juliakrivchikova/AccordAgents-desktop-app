@@ -129,6 +129,9 @@ export interface UrgentAlertPhoneTest {
   state: "calling" | "pressed" | "answered" | "not-pressed" | "no-answer" | "busy" | "failed";
   at: string;
   error?: string;
+  /** "failed" because nobody learned how it went (the server restarted or
+   *  lost Twilio mid-call): not a sign that calls fail. */
+  lost?: boolean;
 }
 
 /** A test call is over (and how it went is known). */

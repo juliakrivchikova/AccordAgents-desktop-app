@@ -21,7 +21,7 @@ export interface AlertsBand {
   kind: AlertsBandKind;
   title: string;
   detail: string;
-  action?: "reconnect-telegram" | "reconnect-phone" | "set-up-server";
+  action?: "reconnect-telegram" | "reconnect-phone" | "change-phone" | "set-up-server";
 }
 
 export type AlertsChannelStatus = "ready" | "attention" | "not-finished" | "not-set-up" | "not-tested";
@@ -41,10 +41,22 @@ export function alertsTelegramStatus(view: Pick<UrgentAlertSettingsView, "telegr
   return telegram.connected ? "ready" : "not-finished";
 }
 
+/** Why calls aren't going out now: Twilio refused the saved keys, or the last
+ *  test call failed (the User, 2026-11-15: the top line must not say alerts
+ *  reach her while the phone row shows a failed test). A test whose result
+ *  was lost says nothing about calls. */
+export function alertsPhoneProblem(phone: UrgentAlertSettingsView["phone"]): string | undefined {
+  if (!phone) return undefined;
+  if (phone.error) return phone.error;
+  const test = phone.lastTest;
+  if (test?.state !== "failed" || test.lost) return undefined;
+  return test.error ? `The last test call failed: ${sentence(test.error)}` : "The last test call failed.";
+}
+
 export function alertsPhoneStatus(view: Pick<UrgentAlertSettingsView, "phone" | "callMode">): AlertsChannelStatus {
   const phone = view.phone;
   if (!phone) return "not-set-up";
-  if (phone.error) return "attention";
+  if (alertsPhoneProblem(phone)) return "attention";
   return urgentAlertPhoneTestPassed(phone.lastTest, view.callMode) ? "ready" : "not-tested";
 }
 
@@ -53,7 +65,8 @@ export function alertsBand(view: UrgentAlertSettingsView): AlertsBand {
   const telegram = view.telegram;
   const phone = view.phone;
   const telegramWorks = Boolean(telegram?.connected && !telegram.error);
-  const phoneWorks = Boolean(phone && !phone.error);
+  const phoneProblem = alertsPhoneProblem(phone);
+  const phoneWorks = Boolean(phone && !phoneProblem);
   if (telegram?.error) {
     return {
       kind: "bad",
@@ -62,12 +75,13 @@ export function alertsBand(view: UrgentAlertSettingsView): AlertsBand {
       action: "reconnect-telegram"
     };
   }
-  if (phone?.error) {
+  if (phoneProblem) {
     return {
       kind: "bad",
       title: "Calls aren't going out",
-      detail: `${sentence(phone.error)}${telegramWorks ? " Telegram still works." : ""}`,
-      action: "reconnect-phone"
+      detail: `${sentence(phoneProblem)}${telegramWorks ? " Telegram still works." : ""}`,
+      // Refused keys need new ones; a failed test, another number or phone.
+      action: phone?.error ? "reconnect-phone" : "change-phone"
     };
   }
   if (!telegramWorks && !phoneWorks) {
@@ -108,7 +122,7 @@ export function alertsFlowChannels(view: Pick<UrgentAlertSettingsView, "telegram
   const telegram = alertsTelegramStatus(view);
   return {
     telegram: telegram === "ready" ? "ready" : telegram === "attention" ? "broken" : telegram === "not-finished" ? "not-finished" : "none",
-    phone: !view.phone ? "none" : view.phone.error ? "broken" : "ready"
+    phone: !view.phone ? "none" : alertsPhoneProblem(view.phone) ? "broken" : "ready"
   };
 }
 
@@ -134,7 +148,7 @@ export function alertsDialogTestLine(test: UrgentAlertPhoneTest | undefined, to:
     case "not-pressed": return "You picked up, but 1 wasn't pressed. Call again?";
     case "no-answer": return "Nobody answered. Call again?";
     case "busy": return "The line was busy. Call again?";
-    default: return `The call didn't go through${test.error ? `: ${sentence(test.error)}` : "."} Call again?`;
+    default: return test.lost ? "Its result never came. Call again?" : `The call didn't go through${test.error ? `: ${sentence(test.error)}` : "."} Call again?`;
   }
 }
 
@@ -186,7 +200,7 @@ export function alertsPhoneTestLine(view: Pick<UrgentAlertSettingsView, "phone" 
     case "not-pressed": return `Test ${when}: you picked up, but 1 wasn't pressed`;
     case "no-answer": return `Test ${when}: no answer`;
     case "busy": return `Test ${when}: the line was busy`;
-    default: return `Test ${when} failed${test.error ? `: ${test.error}` : ""}`;
+    default: return test.lost ? `Test ${when}: its result never came. Call again` : `Test ${when} failed${test.error ? `: ${test.error}` : ""}`;
   }
 }
 

@@ -32,6 +32,18 @@ test("the band answers whether an alert reaches her now, the worst first", () =>
   assert.equal(alertsBand({ ...base, telegram, phone, callMode: "answer" }).title, "Answering the call counts as Got it");
 
   assert.equal(alertsBand({ ...base, telegram }).title, "Alerts reach you in Telegram only");
+
+  // A failed test call means calls aren't going out (the User, 2026-11-15);
+  // one whose result was lost to a restart says nothing about calls.
+  const failedTest = { ...phone, lastTest: { state: "failed" as const, at: today, error: "Twilio: The number is unverified" } };
+  const failed = alertsBand({ ...base, telegram, phone: failedTest });
+  assert.deepEqual([failed.kind, failed.title, failed.action], ["bad", "Calls aren't going out", "change-phone"]);
+  assert.equal(failed.detail, "The last test call failed: Twilio: The number is unverified. Telegram still works.");
+  assert.doesNotMatch(alertsBand({ ...base, telegram: { ...telegram, error: "revoked" }, phone: failedTest }).detail, /Calls still work/);
+  assert.deepEqual(alertsFlowChannels({ telegram, phone: failedTest }), { telegram: "ready", phone: "broken" });
+  const lostTest = { ...phone, lastTest: { state: "failed" as const, at: today, error: "The server restarted during the test call. Call again.", lost: true } };
+  assert.equal(alertsBand({ ...base, telegram, phone: lostTest }).kind, "ok");
+  assert.deepEqual(alertsFlowChannels({ telegram, phone: lostTest }), { telegram: "ready", phone: "ready" });
   assert.equal(alertsBand({ ...base, phone, waitMinutes: 10 }).detail, "The first call comes 10 min after an alert. Connect Telegram to get the message at once.");
   // A bot not finished yet does not count as Telegram.
   assert.equal(alertsBand({ ...base, telegram: { botUsername: "x", connected: false, step: "start" } }).kind, "off");
@@ -49,6 +61,10 @@ test("each channel's status, never Ready beside an error or before a call reache
   assert.equal(alertsPhoneStatus({ callMode: "keypad", phone: { ...phone, lastTest: { state: "pressed", at: today } } }), "ready");
   assert.equal(alertsPhoneStatus({ callMode: "answer", phone: { ...phone, lastTest: { state: "answered", at: today } } }), "ready");
   assert.equal(alertsPhoneStatus({ callMode: "keypad", phone: { ...phone, error: "keys", lastTest: { state: "pressed", at: today } } }), "attention");
+  assert.equal(alertsPhoneStatus({ callMode: "keypad", phone: { ...phone, lastTest: { state: "failed", at: today, error: "unverified" } } }), "attention");
+  const lost = { callMode: "keypad" as const, phone: { ...phone, lastTest: { state: "failed" as const, at: today, lost: true } } };
+  assert.equal(alertsPhoneStatus(lost), "not-tested");
+  assert.match(alertsPhoneTestLine(lost, now) ?? "", /its result never came\. Call again$/);
   // Answered while 1 could not be heard; now 1 ends a call: that is not proven.
   const answeredBefore = { callMode: "keypad" as const, phone: { ...phone, lastTest: { state: "answered" as const, at: today } } };
   assert.equal(alertsPhoneStatus(answeredBefore), "not-tested");
@@ -96,6 +112,7 @@ test("the flow, the first sentence and the dialog's test line say what is true n
   assert.match(alertsDialogTestLine({ state: "pressed", at: today }, "x", true), /^You pressed 1 at .*\. Calls work\.$/);
   assert.equal(alertsDialogTestLine({ state: "failed", at: today, error: "Twilio: The number is unverified." }, "x", true), "The call didn't go through: Twilio: The number is unverified. Call again?");
   assert.equal(alertsDialogTestLine({ state: "no-answer", at: today }, "x", true), "Nobody answered. Call again?");
+  assert.equal(alertsDialogTestLine({ state: "failed", at: today, error: "gone", lost: true }, "x", true), "Its result never came. Call again?");
   assert.match(alertsDialogTestLine({ state: "answered", at: today }, "x", false), /^You answered at .*\. Calls work\.$/);
   assert.match(alertsDialogTestLine({ state: "answered", at: today }, "x", true), /, but calls now ask for 1\. Call again\?$/);
 });
