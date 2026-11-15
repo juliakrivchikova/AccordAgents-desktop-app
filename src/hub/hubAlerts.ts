@@ -783,7 +783,16 @@ export class HubAlerts {
       if (!call.sid) throw new AlertChannelError("Twilio did not say which call it placed.", 0);
       run.sid = call.sid;
     } catch (error) {
-      run.result = { state: "failed", at: this.now().toISOString(), error: error instanceof AlertChannelError ? error.message : "Twilio could not be reached." };
+      // No answer, Twilio's own trouble, too many requests: the call may have
+      // gone out all the same, so how it went is unknown, not failed.
+      const status = error instanceof AlertChannelError ? error.status : 0;
+      const unknown = status === 0 || status === 429 || status >= 500;
+      run.result = {
+        state: "failed",
+        at: this.now().toISOString(),
+        error: error instanceof AlertChannelError ? error.message : "Twilio could not be reached.",
+        ...(unknown ? { lost: true } : {})
+      };
       await this.keysRefused(error, credentials);
       await this.recordTest(run);
       return run;
@@ -818,8 +827,13 @@ export class HubAlerts {
           await this.finishTest(run, call.status);
         }, async (error: unknown) => {
           this.log("hub.alert.test.poll-error", { message: messageOf(error) });
-          // Lost for a few minutes: say so rather than "calling" for ever.
-          if (failures >= 30) await this.finishTest(run, "failed", true);
+          // The keys were refused mid-call: that is known, and says the phone
+          // needs attention. Lost for a few minutes: unknown, not "calling" for ever.
+          if (error instanceof AlertChannelError && error.badCredentials) {
+            await this.keysRefused(error, run.credentials);
+            if (run.result.state === "calling") run.result = { state: "failed", at: this.now().toISOString(), error: error.message };
+            await this.recordTest(run);
+          } else if (failures >= 30) await this.finishTest(run, "failed", true);
           else this.pollTest(run, failures + 1);
         })
         .catch((error: unknown) => this.log("hub.alert.test.error", { message: messageOf(error) }));
@@ -860,7 +874,8 @@ export class HubAlerts {
       return { status: 403, twiml: "" };
     }
     if ((params.Digits ?? "") === "1") {
-      if (run.result.state === "calling") run.result = { state: "pressed", at: this.now().toISOString() };
+      // 1 proves calls reach her, also on a call whose placing went unanswered.
+      if (run.result.state === "calling" || run.result.lost) run.result = { state: "pressed", at: this.now().toISOString() };
       await Promise.race([this.recordTest(run), new Promise((resolve) => setTimeout(resolve, 4_000).unref?.())]);
       return { status: 200, twiml: confirmedTwiml() };
     }

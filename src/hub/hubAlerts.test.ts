@@ -53,7 +53,9 @@ function outside() {
   const throttle = { sends: 0 };
   /** Twilio fails this many call-status reads (a server that lost Twilio);
    *  `blocked`: she blocked the bot, so Telegram refuses messages to her. */
-  const faults = { callStatus: 0, blocked: false, sendDelayMs: 0 };
+  /** `placedUnanswered`: the next call is placed but Twilio's answer is lost;
+   *  `revoked`: Twilio refuses the keys from now on. */
+  const faults = { callStatus: 0, blocked: false, sendDelayMs: 0, placedUnanswered: false, revoked: false };
   const buttonsOf = (markup: unknown) => ((markup as { inline_keyboard?: Array<Array<{ callback_data: string }>> } | undefined)?.inline_keyboard ?? [])
     .flat().map((button) => button.callback_data);
   const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
@@ -97,7 +99,7 @@ function outside() {
     }
     if (url.startsWith(TWILIO)) {
       const auth = new Headers(init?.headers).get("authorization") ?? "";
-      if (auth !== `Basic ${Buffer.from(`${ACCOUNT_SID}:${AUTH_TOKEN}`).toString("base64")}`) {
+      if (faults.revoked || auth !== `Basic ${Buffer.from(`${ACCOUNT_SID}:${AUTH_TOKEN}`).toString("base64")}`) {
         return new Response(JSON.stringify({ message: "Authenticate" }), { status: 401 });
       }
       const form = Object.fromEntries(new URLSearchParams(String(init?.body ?? "")).entries());
@@ -112,6 +114,10 @@ function outside() {
       if (url.endsWith("/Calls.json")) {
         const sid = `CA${randomBytes(16).toString("hex")}`;
         calls.push({ sid, to: form.To, from: form.From, twiml: form.Twiml, status: "ringing" });
+        if (faults.placedUnanswered) {
+          faults.placedUnanswered = false;
+          return new Response(JSON.stringify({ message: "Service Unavailable" }), { status: 503 });
+        }
         return Response.json({ sid, status: "queued" });
       }
       const callMatch = /\/Calls\/(CA[0-9a-f]+)\.json$/.exec(url);
@@ -527,6 +533,34 @@ test("a late refusal about an older message does not undo a newer message that w
   await until(async () => (await stateOf(h, raised.value!.alertId))?.telegram?.error, "the alert's late refusal");
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal((await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.telegram?.error, undefined);
+});
+
+test("a test call placed without Twilio's answer is unknown, not failed, and 1 on it still counts", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  await connectPhone(h);
+  h.world.faults.placedUnanswered = true;
+  const tested = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "phone.test" });
+  assert.equal(tested.value?.phone?.lastTest?.state, "failed");
+  assert.equal(tested.value?.phone?.lastTest?.lost, true, "the call may have gone out");
+  // It did ring: 1 on it proves calls reach her.
+  const placed = await until(() => h.world.calls[0], "the call Twilio placed");
+  assert.equal((await pressOnCall(h, placed.twiml, placed.sid)).status, 200);
+  await until(async () => (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value?.phone?.lastTest?.state === "pressed", "1 to count");
+});
+
+test("keys Twilio refuses while a test call rings end it as a failure and mark the phone", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  await connectPhone(h);
+  h.world.outcomes.push(...Array(50).fill("in-progress"));
+  await h.alerts(h.owner, { action: "phone.test" });
+  await until(() => h.world.calls[0], "the test call");
+  h.world.faults.revoked = true;
+  const view = await until(async () => {
+    const current = (await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "settings" })).value;
+    return current?.phone?.lastTest?.state === "failed" ? current : undefined;
+  }, "the refused keys to end the test");
+  assert.equal(view.phone?.lastTest?.lost, undefined, "known, not lost");
+  assert.equal(view.phone?.error, "Twilio no longer accepts these keys. Connect the phone again.");
 });
 
 test("saved keys Twilio refuses when the phone dialog opens mark the phone too", async (t) => {
