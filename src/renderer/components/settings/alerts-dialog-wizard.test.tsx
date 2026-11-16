@@ -50,6 +50,7 @@ async function type(selector: string, value: string): Promise<void> {
 test("the phone wizard shows one step at a time, with the step's own action where Next would be", async () => {
   const requests: Array<Record<string, unknown>> = [];
   let buys = 0;
+  let calls = 0;
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
     openExternal: async () => undefined,
     urgentAlertRequest: async (request: Record<string, unknown>) => {
@@ -59,7 +60,13 @@ test("the phone wizard shows one step at a time, with the step's own action wher
         buys += 1;
         return buys === 1 ? { ok: false, error: { code: "channel_failed", message: KYC } } : { ok: true, value: { number: "+14155550201" } };
       }
-      if (request.action === "phone.try") return { ok: true, value: { testId: "t1", test: { state: "pressed", at: new Date().toISOString() } } };
+      if (request.action === "phone.try") {
+        calls += 1;
+        // The first call is refused by Twilio's identity check, as a failed test.
+        return calls === 1
+          ? { ok: true, value: { testId: "t0", test: { state: "failed", at: new Date().toISOString(), error: KYC } } }
+          : { ok: true, value: { testId: "t1", test: { state: "pressed", at: new Date().toISOString() } } };
+      }
       if (request.action === "phone.save") return { ok: true, value: { waitMinutes: 5, callMode: "keypad" } };
       return { ok: false, error: { code: "invalid_request", message: `unexpected ${String(request.action)}` } };
     }
@@ -107,13 +114,66 @@ test("the phone wizard shows one step at a time, with the step's own action wher
   assert.equal(currentStep(), "Test call");
   assert.deepEqual(dialogButtons(), ["Back", "Save without a test", "Call me now"]);
   await click("Call me now");
+  // Refused by the identity check: said there, Save anyway still possible…
+  assert.ok(document.querySelector("[data-testid='alerts-phone-identity']"));
+  assert.deepEqual(dialogButtons(), ["Back", "Save anyway", "Open Trust Hub"]);
+  // …and only there: the steps before are as they were.
+  await click("Back");
+  assert.equal(currentStep(), "Your phone");
+  assert.equal(document.querySelector("[data-testid='alerts-phone-identity']"), null);
+  await click("Back");
+  assert.equal(currentStep(), "Call from");
+  assert.equal(document.querySelector("[data-testid='alerts-phone-identity']"), null);
+  assert.deepEqual(dialogButtons(), ["Back", "Buy another · $1.15 / month", "Next"]);
+  await click("Next");
+  await click("Next");
+  // Back on the test step, the refused call is still this phone's result.
+  assert.deepEqual(dialogButtons(), ["Back", "Save anyway", "Open Trust Hub"]);
+  await click("Save anyway");
+  const save = requests.find((request) => request.action === "phone.save");
+  assert.equal(save?.testId, "t0", "the refused test goes with the phone, so the page says calls aren't going out");
+  assert.equal(save?.from, "+14155550201");
+  assert.ok(savedSettings, "the page gets the saved settings");
+  assert.equal(closed, 1);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("changing a working phone: the saved account, then a call that works and Save", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    openExternal: async () => undefined,
+    urgentAlertRequest: async (request: Record<string, unknown>) => {
+      requests.push(request);
+      if (request.action === "phone.check") return { ok: true, value: { accountName: "My first account", trial: false, numbers: ["+14155550201"], saved: true } };
+      if (request.action === "phone.try") return { ok: true, value: { testId: "t1", test: { state: "pressed", at: new Date().toISOString() } } };
+      if (request.action === "phone.save") return { ok: true, value: { waitMinutes: 5, callMode: "keypad" } };
+      return { ok: false, error: { code: "invalid_request", message: `unexpected ${String(request.action)}` } };
+    }
+  };
+  let closed = 0;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const settings: UrgentAlertSettingsView = { waitMinutes: 5, callMode: "keypad", phone: { from: "+14155550201", to: "+35799123342", trial: false } };
+  await act(async () => {
+    root.render(<PhoneConnectDialog open settings={settings} onSettings={() => undefined} onClose={() => { closed += 1; }} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  // The saved account is checked and shown: no keys to paste.
+  assert.equal(requests[0]?.accountSid, undefined, "the saved keys, not pasted ones");
+  assert.match(document.body.textContent ?? "", /My first account/);
+  await click("Next");
+  await click("Next");
+  await click("Next");
+  assert.equal(currentStep(), "Test call");
+  await click("Call me now");
   assert.match(document.body.textContent ?? "", /You pressed 1 at .*\. Calls work\./);
   assert.deepEqual(dialogButtons(), ["Back", "Call again", "Save"]);
   await click("Save");
   const save = requests.find((request) => request.action === "phone.save");
-  assert.equal(save?.testId, "t1", "the test call's result goes with the phone");
-  assert.equal(save?.from, "+14155550201");
-  assert.ok(savedSettings, "the page gets the saved settings");
+  assert.equal(save?.testId, "t1");
+  assert.equal(save?.accountSid, undefined, "the saved keys stay as they are");
   assert.equal(closed, 1);
   await act(async () => root.unmount());
   host.remove();
@@ -143,11 +203,8 @@ test("the Telegram wizard follows the server: token, Start, Got it, connected", 
 
   await show({ ...base, telegram: { botUsername: "svetlana_accord_bot", connected: false, step: "test", chatName: "Svetlana" } });
   assert.equal(currentStep(), "Got it");
-  assert.deepEqual(dialogButtons(), ["Back", "Finish later"]);
-  // Back shows the Start screen again (to open the bot), the server still waits.
-  await click("Back");
-  assert.equal(currentStep(), "Start");
-  assert.match(document.body.textContent ?? "", /Start received/);
+  // Start came: the bot has her chat, so there is no Back that could drop it.
+  assert.deepEqual(dialogButtons(), ["Finish later"]);
 
   await show({ ...base, telegram: { botUsername: "svetlana_accord_bot", connected: true, chatName: "Svetlana" } });
   assert.equal(document.querySelector(".alerts-wizard-step.is-now"), null, "every step done");

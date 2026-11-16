@@ -28,12 +28,10 @@ export function TelegramConnectDialog(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [startHelp, setStartHelp] = useState(false);
-  /** Back on Got it: the Start screen again (to open the bot), while the
-   *  server goes on waiting for Got it. */
-  const [backToStart, setBackToStart] = useState(false);
   const tokenField = useRef<HTMLInputElement>(null);
+  const openBotButton = useRef<HTMLButtonElement>(null);
   const serverStep = !telegram || telegram.error ? 0 : telegram.connected ? 3 : telegram.step === "test" ? 2 : 1;
-  const step = serverStep === 2 && backToStart ? 1 : serverStep;
+  const step = serverStep;
   const { onSettings } = props;
   useSettingsWatch(props.open && (serverStep === 1 || serverStep === 2), onSettings);
 
@@ -45,7 +43,8 @@ export function TelegramConnectDialog(props: {
     }
   }, [props.open]);
 
-  useEffect(() => setBackToStart(false), [props.open, serverStep]);
+  // What went wrong belongs to the step it happened on.
+  useEffect(() => setError(undefined), [serverStep]);
 
   useEffect(() => {
     setStartHelp(false);
@@ -88,9 +87,13 @@ export function TelegramConnectDialog(props: {
       current={step}
       busy={busy}
       testId="alerts-telegram-dialog"
-      initialFocus={() => tokenField.current}
+      initialFocus={() => tokenField.current ?? openBotButton.current}
+      focusKey={String(step)}
       onClose={props.onClose}
-      onBack={step === 1 ? () => void differentBot() : step === 2 ? () => setBackToStart(true) : undefined}
+      // Back from Start drops the bot waiting for it. Once Start came, the bot
+      // has her chat: no Back that could drop it (Use a different bot is on
+      // the page's menu, with a confirmation).
+      onBack={step === 1 ? () => void differentBot() : undefined}
       backDisabled={busy}
       note={step === 2 ? "Your bot is saved." : undefined}
       actions={step === 0 ? (
@@ -99,7 +102,7 @@ export function TelegramConnectDialog(props: {
         </Button>
       ) : step === 1 ? <>
         {finishLater}
-        <Button type="button" size="sm" disabled={busy} onClick={openStart} data-testid="alerts-telegram-open-bot">
+        <Button ref={openBotButton} type="button" size="sm" disabled={busy} onClick={openStart} data-testid="alerts-telegram-open-bot">
           Open {bot} <ExternalLink size={13} aria-hidden />
         </Button>
       </> : step === 2 ? finishLater : (
@@ -147,13 +150,12 @@ export function TelegramConnectDialog(props: {
       </> : step === 1 ? <>
         <p className="alerts-wizard-text">Bot <b>{bot}</b></p>
         <p className="alerts-wizard-text">Open it and press <b>Start</b> at the bottom of the chat. The button opens your bot with a one-time code, so only your Start connects it.</p>
-        {serverStep === 1 ? <>
-          <div className="alerts-waiting" role="status"><Loader2 size={13} className="gen-aws-spinner" aria-hidden /> Waiting for Start…</div>
-          {startHelp ? <p className="alerts-wizard-text">Nothing yet? <button type="button" className="alerts-text-button" onClick={openStart}>Open it again</button></p> : null}
-        </> : <div className="alerts-ok-line" role="status"><Check size={13} aria-hidden /> Start received. A test message with Got it is in your chat.</div>}
+        <div className="alerts-waiting" role="status"><Loader2 size={13} className="gen-aws-spinner" aria-hidden /> Waiting for Start…</div>
+        {startHelp ? <p className="alerts-wizard-text">Nothing yet? <button type="button" className="alerts-text-button" onClick={openStart}>Open it again</button></p> : null}
       </> : step === 2 ? <>
         <p className="alerts-wizard-title">Press Got it in Telegram</p>
-        <p className="alerts-wizard-text">A test message with a <b>Got it</b> button is in your chat with {bot}. Press Got it on it.</p>
+        <p className="alerts-wizard-text">A test message with a <b>Got it</b> button is in your chat with {bot}. Press Got it on it.{" "}
+          <button type="button" className="alerts-text-button" onClick={openStart}>Open {bot}</button></p>
         <div className="alerts-waiting" role="status"><Loader2 size={13} className="gen-aws-spinner" aria-hidden /> Waiting for Got it…</div>
       </> : (
         <div className="alerts-wizard-done" role="status">

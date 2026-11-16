@@ -97,16 +97,6 @@ export function PhoneConnectDialog(props: {
     };
   }, [test]);
 
-  // The field of the step on screen takes the focus.
-  useEffect(() => {
-    if (!props.open) return undefined;
-    const timer = setTimeout(() => {
-      if (step === 0 && !checked) sidField.current?.focus();
-      if (step === 2) phoneField.current?.focus();
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [props.open, step, checked]);
-
   const keys = checked?.saved ? {} : { accountSid: accountSid.trim(), authToken: authToken.trim() };
 
   function goTo(next: number): void {
@@ -193,15 +183,27 @@ export function PhoneConnectDialog(props: {
   const calling = busy === "try" || currentTest?.state === "calling";
   // Twilio has not confirmed who she is: nothing can be bought or called until
   // it has, whatever she does here.
-  const identity = (step === 1 || step === 3) &&
-    (alertsTwilioNeedsIdentity(error) || (currentTest?.state === "failed" && alertsTwilioNeedsIdentity(currentTest.error)));
+  // On the number step (buying refused) or the test step (the call refused),
+  // only where it happened.
+  const identity = (step === 1 && alertsTwilioNeedsIdentity(error)) ||
+    (step === 3 && (alertsTwilioNeedsIdentity(error) || (currentTest?.state === "failed" && alertsTwilioNeedsIdentity(currentTest.error))));
+  /** Numbers she can still choose from while Twilio will not sell another. */
+  const numbersLeft = Boolean(checked?.numbers.length);
   const spinner = (name: typeof busy) => busy === name ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null;
 
-  const actions = identity ? <>
-    <Button type="button" variant="outline" size="sm" onClick={props.onClose}>Close</Button>
+  const trustHub = (
     <Button type="button" size="sm" onClick={() => void window.consensus.openExternal(TWILIO_TRUST_HUB)} data-testid="alerts-phone-trust-hub">
       Open Trust Hub <ExternalLink size={13} aria-hidden />
     </Button>
+  );
+  const actions = identity && step === 1 && !numbersLeft ? <>
+    <Button type="button" variant="outline" size="sm" onClick={props.onClose}>Close</Button>
+    {trustHub}
+  </> : identity && step === 3 ? <>
+    <Button type="button" variant="outline" size="sm" disabled={Boolean(busy)} onClick={() => void save()} data-testid="alerts-phone-save">
+      {spinner("save")}Save anyway
+    </Button>
+    {trustHub}
   </> : step === 0 ? (
     <Button type="button" size="sm" disabled={Boolean(busy) || (!checked && (!accountSid.trim() || !authToken.trim()))}
       onClick={() => (checked ? goTo(1) : void check())} data-testid="alerts-phone-next">
@@ -241,11 +243,12 @@ export function PhoneConnectDialog(props: {
       // A working saved account is checked at once: nothing to focus until then.
       initialFocus={() => (saved && !saved.error ? null : sidField.current)}
       onClose={props.onClose}
+      focusKey={`${step}:${checked ? "checked" : "keys"}`}
       onBack={step > 0 ? () => goTo(step - 1) : undefined}
       backDisabled={Boolean(busy)}
       actions={actions}
     >
-      {identity ? <IdentityNeeded title={step === 1 ? "The number calls come from" : "Make sure it rings"} telegram={Boolean(props.settings?.telegram?.connected && !props.settings.telegram.error)} /> : step === 0 ? (checked ? <>
+      {identity && !(step === 1 && numbersLeft) ? <IdentityNeeded title={step === 1 ? "The number calls come from" : "Make sure it rings"} telegram={Boolean(props.settings?.telegram?.connected && !props.settings.telegram.error)} /> : step === 0 ? (checked ? <>
         <p className="alerts-wizard-text">Calls come from this Twilio account.</p>
         <div className="alerts-account">
           <span className="alerts-account-name">{checked.accountName || "Your Twilio account"}</span>
@@ -267,7 +270,7 @@ export function PhoneConnectDialog(props: {
         <div className="alerts-where">In Twilio: <b>Account → API keys &amp; tokens → Live credentials</b></div>
         <label className="alerts-field">
           <span>Account SID</span>
-          <input ref={sidField} className="gen-input alerts-input" value={accountSid} placeholder="AC…" autoComplete="off" spellCheck={false}
+          <input ref={sidField} data-wizard-autofocus className="gen-input alerts-input" value={accountSid} placeholder="AC…" autoComplete="off" spellCheck={false}
             data-testid="alerts-phone-sid" onChange={(event) => setAccountSid(event.target.value)} />
         </label>
         <label className="alerts-field">
@@ -284,6 +287,9 @@ export function PhoneConnectDialog(props: {
         <div className="alerts-hint">Kept on your server only.</div>
       </>) : step === 1 ? <>
         <p className="alerts-wizard-title">The number calls come from</p>
+        {identity ? <div className="alerts-identity" role="alert" data-testid="alerts-phone-identity">
+          <b>Twilio won't sell another number yet.</b> It first has to confirm who you are in Trust Hub; you can still use a number you have.
+        </div> : null}
         {checked?.numbers.length ? (
           <div className="alerts-choices" role="radiogroup" aria-label="Number to call from">
             {checked.numbers.map((number) => (
@@ -301,7 +307,7 @@ export function PhoneConnectDialog(props: {
         <p className="alerts-wizard-title">The phone that rings</p>
         <label className="alerts-field">
           <span>Your phone</span>
-          <input ref={phoneField} className="gen-input alerts-input" value={to} placeholder="+357 99 123456" inputMode="tel" autoComplete="tel"
+          <input ref={phoneField} data-wizard-autofocus className="gen-input alerts-input" value={to} placeholder="+357 99 123456" inputMode="tel" autoComplete="tel"
             aria-describedby="alerts-phone-to-hint" data-testid="alerts-phone-to" onChange={(event) => setTo(event.target.value)}
             onKeyDown={(event) => { if (event.key === "Enter" && normalizedTo) goTo(3); }} />
         </label>

@@ -1,5 +1,5 @@
 import { AlertTriangle, Bell, BellOff, CircleCheck, Loader2, Moon, MoreHorizontal, Phone, Send, Server } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -149,6 +149,9 @@ export function AlertsChannelRow(props: {
   testId: string;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
+  /** An item was chosen: what it opens (a dialog) takes the focus, so the
+   *  closing menu does not hand it back to its button behind that dialog. */
+  const picked = useRef(false);
   return (
     <div className="gen-row alerts-row" data-testid={props.testId}>
       <span className="alerts-tile" aria-hidden>{props.icon}</span>
@@ -167,9 +170,10 @@ export function AlertsChannelRow(props: {
                 <MoreHorizontal size={16} aria-hidden />
               </button>
             </PopoverTrigger>
-            <PopoverContent align="end" className="alerts-menu w-[200px] gap-0 p-[5px]" aria-label={`${props.name} options`}>
+            <PopoverContent align="end" className="alerts-menu w-[200px] gap-0 p-[5px]" aria-label={`${props.name} options`}
+              onCloseAutoFocus={(event) => { if (picked.current) event.preventDefault(); picked.current = false; }}>
               {props.menu.map((item) => (
-                <button key={item.label} type="button" className={`alerts-menu-item${item.danger ? " is-danger" : ""}`} onClick={() => { setOpen(false); item.onSelect(); }}>
+                <button key={item.label} type="button" className={`alerts-menu-item${item.danger ? " is-danger" : ""}`} onClick={() => { picked.current = true; setOpen(false); item.onSelect(); }}>
                   {item.label}
                 </button>
               ))}
