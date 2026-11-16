@@ -195,6 +195,35 @@ test("changing a working phone: the saved account, then a call that works and Sa
   host.remove();
 });
 
+test("a call made by answering passes, even if the page last read that calls ask for 1", async () => {
+  (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    openExternal: async () => undefined,
+    urgentAlertRequest: async (request: Record<string, unknown>) => {
+      if (request.action === "phone.check") return { ok: true, value: { accountName: "My first account", trial: false, numbers: ["+14155550201"], saved: true, callMode: "answer" } };
+      if (request.action === "phone.try") return { ok: true, value: { testId: "t1", test: { state: "answered", at: new Date().toISOString() }, mode: "answer" } };
+      return { ok: false, error: { code: "invalid_request", message: `unexpected ${String(request.action)}` } };
+    }
+  };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  // The page's settings still say keypad (the server changed since it read them).
+  const settings: UrgentAlertSettingsView = { waitMinutes: 5, callMode: "keypad", phone: { from: "+14155550201", to: "+35799123342", trial: false } };
+  await act(async () => {
+    root.render(<PhoneConnectDialog open settings={settings} onSettings={() => undefined} onClose={() => undefined} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await click("Next");
+  await click("Next");
+  await click("Next");
+  assert.match(document.body.textContent ?? "", /We call your phone; answer it\./, "the server's way, not the page's");
+  await click("Call me now");
+  assert.match(document.body.textContent ?? "", /You answered at .*\. Calls work\./);
+  assert.deepEqual(dialogButtons(), ["Back", "Call again", "Save"]);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
 test("the Telegram wizard follows the server: token, Start, Got it, connected", async () => {
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
     openExternal: async () => undefined,

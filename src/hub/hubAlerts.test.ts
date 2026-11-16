@@ -247,7 +247,7 @@ async function connectTelegram(h: Hub) {
 
 async function connectPhone(h: Hub) {
   const checked = await h.alerts<{ trial: boolean; numbers: string[] }>(h.owner, { action: "phone.check", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN });
-  assert.deepEqual(checked.value, { accountName: "My first account", trial: true, numbers: ["+14155550134"], verified: ["+35799123342"] });
+  assert.deepEqual({ ...checked.value, callMode: undefined }, { accountName: "My first account", trial: true, numbers: ["+14155550134"], verified: ["+35799123342"], callMode: undefined });
   const saved = await h.alerts<UrgentAlertSettingsView>(h.owner, { action: "phone.save", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+357 99 123 342" });
   assert.equal(saved.ok, true, JSON.stringify(saved));
   assert.deepEqual(saved.value?.phone, { from: "+14155550134", to: "+35799123342", trial: true, accountName: "My first account" });
@@ -651,7 +651,11 @@ test("with no phone saved, a request without keys is refused, never filled from 
 test("without a server Twilio reaches, answering the test call is what passes it", async (t) => {
   const h = await hub(t);
   h.world.outcomes.push("completed");
-  const tried = await h.alerts<{ testId: string }>(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" });
+  const tried = await h.alerts<{ testId: string; mode?: string }>(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" });
+  // The dialog judges the test by how it was made, not by what its page last read.
+  assert.equal(tried.value?.mode, "answer");
+  const checked = await h.alerts<{ callMode?: string }>(h.owner, { action: "phone.check", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN });
+  assert.equal(checked.value?.callMode, "answer");
   const placed = await until(() => h.world.calls[0], "the test call");
   assert.doesNotMatch(placed.twiml, /<Gather/, "no key can be heard: the message is read out");
   const done = await until(async () => {
