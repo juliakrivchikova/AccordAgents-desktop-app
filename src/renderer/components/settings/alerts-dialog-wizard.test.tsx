@@ -1,0 +1,322 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import type { AlertsFlowChannel } from "../../../shared/urgentAlertSettings";
+import type { UrgentAlertSettingsView } from "../../../shared/urgentAlerts";
+import { TelegramConnectDialog } from "./alerts-connect-dialogs";
+import { PhoneConnectDialog } from "./alerts-phone-dialog";
+import { AlertsFlow } from "./alerts-settings-parts";
+
+// The DOM comes from scripts/renderer-jsdom-setup.mjs via `node --import`
+// (Radix reads `document` when it is first imported).
+assert.ok(
+  (globalThis as unknown as { ACCORD_RENDERER_JSDOM?: boolean }).ACCORD_RENDERER_JSDOM,
+  "this test needs a DOM installed before its imports — run it via `npm run test:renderer-components`"
+);
+
+const KYC = "Twilio: Primary compliance profile is not approved. Please refer to documentation and complete the KYC process in Trust Hub to gain access.";
+
+function dialogButtons(): string[] {
+  const dialog = document.querySelector("[data-slot='dialog-content']");
+  return [...(dialog?.querySelectorAll("[data-slot='dialog-footer'] button") ?? [])].map((node) => (node.textContent ?? "").trim());
+}
+
+function button(text: string): HTMLButtonElement {
+  const found = [...document.querySelectorAll("button")].find((node) => (node.textContent ?? "").trim() === text) as HTMLButtonElement | undefined;
+  assert.ok(found, `a "${text}" button (have: ${dialogButtons().join(", ")})`);
+  return found;
+}
+
+function currentStep(): string {
+  return (document.querySelector(".alerts-wizard-step.is-now")?.textContent ?? "").replace(/^\d/, "");
+}
+
+async function settle(): Promise<void> {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  });
+}
+
+async function click(text: string): Promise<void> {
+  await act(async () => {
+    button(text).click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+async function type(selector: string, value: string): Promise<void> {
+  const input = document.querySelector(selector) as HTMLInputElement | null;
+  assert.ok(input, selector);
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+test("the phone wizard shows one step at a time, with the step's own action where Next would be", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  let buys = 0;
+  let calls = 0;
+  let saves = 0;
+  (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    openExternal: async () => undefined,
+    urgentAlertRequest: async (request: Record<string, unknown>) => {
+      requests.push(request);
+      if (request.action === "phone.check") return { ok: true, value: { accountName: "My first account", trial: true, numbers: [], verified: ["+35799123342"] } };
+      if (request.action === "phone.buy") {
+        buys += 1;
+        return buys === 1 ? { ok: false, error: { code: "channel_failed", message: KYC } } : { ok: true, value: { number: "+14155550201" } };
+      }
+      if (request.action === "phone.try") {
+        calls += 1;
+        // The first call is refused by Twilio's identity check, as a failed test.
+        return calls === 1
+          ? { ok: true, value: { testId: "t0", test: { state: "failed", at: new Date().toISOString(), error: KYC } } }
+          : { ok: true, value: { testId: "t1", test: { state: "pressed", at: new Date().toISOString() } } };
+      }
+      if (request.action === "phone.save") {
+        saves += 1;
+        return saves === 1 ? { ok: false, error: { code: "server_unavailable", message: "Your server could not be reached." } } : { ok: true, value: { waitMinutes: 5, callMode: "keypad" } };
+      }
+      return { ok: false, error: { code: "invalid_request", message: `unexpected ${String(request.action)}` } };
+    }
+  };
+  let closed = 0;
+  let savedSettings: UrgentAlertSettingsView | undefined;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(<PhoneConnectDialog open settings={{ waitMinutes: 5, callMode: "keypad" }} onSettings={(value) => { savedSettings = value; }} onClose={() => { closed += 1; }} />);
+  });
+
+  // 1 · the keys: Next only once both are in.
+  assert.equal(currentStep(), "Twilio account");
+  assert.deepEqual(dialogButtons(), ["Next"]);
+  assert.equal(button("Next").disabled, true);
+  await type("[data-testid='alerts-phone-sid']", `AC${"1".repeat(32)}`);
+  await type("[data-testid='alerts-phone-token']", "a".repeat(32));
+  await click("Next");
+
+  // 2 · no number yet: buying is the step's action, there is no Next.
+  assert.equal(currentStep(), "Call from");
+  assert.deepEqual(dialogButtons(), ["Back", "Buy a US number · $1.15 / month"]);
+  await settle();
+  assert.notEqual((document.activeElement?.textContent ?? "").trim(), "Buy a US number · $1.15 / month", "Enter must never buy a number");
+  await click("Buy a US number · $1.15 / month");
+  // Twilio has not confirmed who she is: said in plain words, with the way there.
+  assert.ok(document.querySelector("[data-testid='alerts-phone-identity']"), "the identity notice");
+  assert.doesNotMatch(document.body.textContent ?? "", /Primary compliance profile is not approved/, "not Twilio's own sentence");
+  assert.deepEqual(dialogButtons(), ["Back", "Close", "Open Trust Hub"]);
+  await click("Back");
+  assert.equal(currentStep(), "Twilio account");
+  await click("Next");
+  await click("Buy a US number · $1.15 / month");
+  assert.match(document.body.textContent ?? "", /\+14155550201bought just now/);
+  assert.deepEqual(dialogButtons(), ["Back", "Buy another · $1.15 / month", "Next"]);
+  await click("Next");
+
+  // 3 · her phone, checked against the trial's verified numbers.
+  assert.equal(currentStep(), "Your phone");
+  await type("[data-testid='alerts-phone-to']", "+357 99 123342");
+  assert.match(document.body.textContent ?? "", /Verified in Twilio/);
+  await click("Next");
+
+  // 4 · the call is the main action until it worked; then Save is.
+  assert.equal(currentStep(), "Test call");
+  assert.deepEqual(dialogButtons(), ["Back", "Save without a test", "Call me now"]);
+  await click("Call me now");
+  // Refused by the identity check: said there, Save anyway still possible…
+  assert.ok(document.querySelector("[data-testid='alerts-phone-identity']"));
+  assert.deepEqual(dialogButtons(), ["Back", "Save anyway", "Open Trust Hub"]);
+  // …and only there: the steps before are as they were.
+  await click("Back");
+  assert.equal(currentStep(), "Your phone");
+  assert.equal(document.querySelector("[data-testid='alerts-phone-identity']"), null);
+  await click("Back");
+  assert.equal(currentStep(), "Call from");
+  assert.equal(document.querySelector("[data-testid='alerts-phone-identity']"), null);
+  assert.deepEqual(dialogButtons(), ["Back", "Buy another · $1.15 / month", "Next"]);
+  await click("Next");
+  await click("Next");
+  // Back on the test step, the refused call is still this phone's result.
+  assert.deepEqual(dialogButtons(), ["Back", "Save anyway", "Open Trust Hub"]);
+  await click("Save anyway");
+  // A save that fails is said, also on the identity screen.
+  assert.match(document.body.textContent ?? "", /Your server could not be reached\./);
+  assert.equal(closed, 0);
+  await click("Save anyway");
+  const save = requests.filter((request) => request.action === "phone.save").pop();
+  assert.equal(save?.testId, "t0", "the refused test goes with the phone, so the page says calls aren't going out");
+  assert.equal(save?.from, "+14155550201");
+  assert.ok(savedSettings, "the page gets the saved settings");
+  assert.equal(closed, 1);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("changing a working phone: the saved account, then a call that works and Save", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    openExternal: async () => undefined,
+    urgentAlertRequest: async (request: Record<string, unknown>) => {
+      requests.push(request);
+      if (request.action === "phone.check") return { ok: true, value: { accountName: "My first account", trial: false, numbers: ["+14155550201"], saved: true } };
+      if (request.action === "phone.try") return { ok: true, value: { testId: "t1", test: { state: "pressed", at: new Date().toISOString() } } };
+      if (request.action === "phone.save") return { ok: true, value: { waitMinutes: 5, callMode: "keypad" } };
+      return { ok: false, error: { code: "invalid_request", message: `unexpected ${String(request.action)}` } };
+    }
+  };
+  let closed = 0;
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const settings: UrgentAlertSettingsView = { waitMinutes: 5, callMode: "keypad", phone: { from: "+14155550201", to: "+35799123342", trial: false } };
+  await act(async () => {
+    root.render(<PhoneConnectDialog open settings={settings} onSettings={() => undefined} onClose={() => { closed += 1; }} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  // The saved account is checked and shown: no keys to paste.
+  assert.equal(requests[0]?.accountSid, undefined, "the saved keys, not pasted ones");
+  assert.match(document.body.textContent ?? "", /My first account/);
+  await click("Next");
+  await click("Next");
+  await click("Next");
+  assert.equal(currentStep(), "Test call");
+  await click("Call me now");
+  assert.match(document.body.textContent ?? "", /You pressed 1 at .*\. Calls work\./);
+  assert.deepEqual(dialogButtons(), ["Back", "Call again", "Save"]);
+  await click("Save");
+  const save = requests.find((request) => request.action === "phone.save");
+  assert.equal(save?.testId, "t1");
+  assert.equal(save?.accountSid, undefined, "the saved keys stay as they are");
+  assert.equal(closed, 1);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("a call made by answering passes, even if the page last read that calls ask for 1", async () => {
+  (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    openExternal: async () => undefined,
+    urgentAlertRequest: async (request: Record<string, unknown>) => {
+      if (request.action === "phone.check") return { ok: true, value: { accountName: "My first account", trial: false, numbers: ["+14155550201"], saved: true, callMode: "answer" } };
+      if (request.action === "phone.try") return { ok: true, value: { testId: "t1", test: { state: "answered", at: new Date().toISOString() }, callMode: "answer" } };
+      return { ok: false, error: { code: "invalid_request", message: `unexpected ${String(request.action)}` } };
+    }
+  };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  // The page's settings still say keypad (the server changed since it read them).
+  const settings: UrgentAlertSettingsView = { waitMinutes: 5, callMode: "keypad", phone: { from: "+14155550201", to: "+35799123342", trial: false } };
+  await act(async () => {
+    root.render(<PhoneConnectDialog open settings={settings} onSettings={() => undefined} onClose={() => undefined} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await click("Next");
+  await click("Next");
+  await click("Next");
+  assert.match(document.body.textContent ?? "", /We call your phone; answer it\./, "the server's way, not the page's");
+  await click("Call me now");
+  assert.match(document.body.textContent ?? "", /You answered at .*\. Calls work\./);
+  assert.deepEqual(dialogButtons(), ["Back", "Call again", "Save"]);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("the Telegram wizard follows the server: token, Start, Got it, connected", async () => {
+  (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    openExternal: async () => undefined,
+    urgentAlertRequest: async () => ({ ok: false, error: { code: "server_unavailable", message: "no server in this test" } })
+  };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const show = async (settings: UrgentAlertSettingsView) => {
+    await act(async () => {
+      root.render(<TooltipProvider><TelegramConnectDialog open settings={settings} onSettings={() => undefined} onClose={() => undefined} /></TooltipProvider>);
+    });
+  };
+  const base: UrgentAlertSettingsView = { waitMinutes: 5, callMode: "keypad" };
+  await show(base);
+  assert.equal(currentStep(), "Your bot");
+  assert.deepEqual(dialogButtons(), ["Next"]);
+
+  await show({ ...base, telegram: { botUsername: "svetlana_accord_bot", connected: false, step: "start", startCode: "code" } });
+  assert.equal(currentStep(), "Start");
+  assert.deepEqual(dialogButtons(), ["Back", "Finish later", "Open @svetlana_accord_bot"]);
+
+  await show({ ...base, telegram: { botUsername: "svetlana_accord_bot", connected: false, step: "test", chatName: "Svetlana" } });
+  assert.equal(currentStep(), "Got it");
+  // Start came: the bot has her chat, so there is no Back that could drop it.
+  assert.deepEqual(dialogButtons(), ["Finish later"]);
+
+  await show({ ...base, telegram: { botUsername: "svetlana_accord_bot", connected: true, chatName: "Svetlana" } });
+  assert.equal(document.querySelector(".alerts-wizard-step.is-now"), null, "every step done");
+  assert.match(document.body.textContent ?? "", /Connected to Svetlana/);
+  assert.deepEqual(dialogButtons(), ["Done"]);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("the flow strip is green for what will happen and dim for what will not", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const nodes = async (telegram: AlertsFlowChannel, phone: AlertsFlowChannel) => {
+    await act(async () => {
+      root.render(<AlertsFlow waitMinutes={5} telegram={telegram} phone={phone} answerMode={false} busy={false} onWait={() => undefined} />);
+    });
+    const time = (item: Element) => [...(item.querySelector(".alerts-node-time")?.childNodes ?? [])].filter((child) => child.nodeType === 3).map((child) => child.textContent).join("");
+    const node = (item: Element) => `${item.className.replace("alerts-node is-", "")}:${(item.querySelector(".alerts-node-label")?.textContent ?? "")}:${time(item)}`;
+    const edge = (item: Element) => item.className.replace("alerts-edge is-", "");
+    return [...host.querySelectorAll(".alerts-chain > li")].map((item) => item.classList.contains("alerts-node") ? node(item) : edge(item));
+  };
+
+  assert.deepEqual(await nodes("ready", "ready"), ["on:Alert:0:00", "on", "on:Telegram:at once", "on", "on:Call 1:0:05", "on", "on:Call 2:0:08", "on", "on:Call 3:0:11"]);
+  // Only Telegram works: the calls are dim, the first says why, no times on the rest.
+  assert.deepEqual(await nodes("ready", "none"), ["on:Alert:0:00", "on", "on:Telegram:at once", "off", "off:Call 1:not set up", "off", "off:Call 2:", "off", "off:Call 3:"]);
+  // The later calls show no reason, but a screen reader still hears it.
+  assert.deepEqual([...host.querySelectorAll(".alerts-node .sr-only")].map((item) => item.textContent), ["not set up", "not set up"]);
+  // A broken channel is red, not merely dim.
+  assert.deepEqual(await nodes("broken", "broken"), ["on:Alert:0:00", "off", "bad:Telegram:not working", "off", "bad:Call 1:not working", "off", "off:Call 2:", "off", "off:Call 3:"]);
+  assert.deepEqual((await nodes("not-finished", "ready")).slice(0, 5), ["on:Alert:0:00", "off", "off:Telegram:not finished", "on", "on:Call 1:0:05"]);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("an answered test call stops passing once her server asks for 1, as the page would judge it", async () => {
+  let callMode: "keypad" | "answer" = "answer";
+  (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    openExternal: async () => undefined,
+    urgentAlertRequest: async (request: Record<string, unknown>) => {
+      if (request.action === "phone.check") return { ok: true, value: { accountName: "My first account", trial: false, numbers: ["+14155550201"], saved: true, callMode: "answer" } };
+      if (request.action === "phone.try") return { ok: true, value: { testId: "t1", test: { state: "calling", at: new Date().toISOString() }, callMode: "answer" } };
+      if (request.action === "phone.try-status") return { ok: true, value: { testId: "t1", test: { state: "answered", at: new Date().toISOString() }, callMode } };
+      return { ok: false, error: { code: "invalid_request", message: `unexpected ${String(request.action)}` } };
+    }
+  };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const settings: UrgentAlertSettingsView = { waitMinutes: 5, callMode: "answer", phone: { from: "+14155550201", to: "+35799123342", trial: false } };
+  await act(async () => {
+    root.render(<PhoneConnectDialog open settings={settings} onSettings={() => undefined} onClose={() => undefined} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await click("Next");
+  await click("Next");
+  await click("Next");
+  await click("Call me now");
+  // While it rang, her server got a public address: calls now ask for 1.
+  callMode = "keypad";
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+  });
+  assert.match(document.body.textContent ?? "", /You answered at .*, but calls now ask for 1\. Call again\?/);
+  assert.ok(!dialogButtons().includes("Save"), `no plain Save for a test the page would call untested (have: ${dialogButtons().join(", ")})`);
+  await act(async () => root.unmount());
+  host.remove();
+});

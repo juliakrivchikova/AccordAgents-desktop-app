@@ -1,5 +1,5 @@
 import { AlertTriangle, Bell, BellOff, CircleCheck, Loader2, Moon, MoreHorizontal, Phone, Send, Server } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -85,10 +85,10 @@ export function AlertsFlow(props: {
         />
       </div>
       <ol className="alerts-chain" aria-label="When each step comes">
-        <FlowNode icon={<Bell size={14} />} label="Alert" time={clock(0)} />
-        <FlowEdge off={props.telegram !== "ready"} />
-        <FlowNode icon={<Send size={14} />} label="Telegram" time={props.telegram === "ready" ? "at once" : ALERTS_FLOW_CHANNEL_WORD[props.telegram]} off={props.telegram !== "ready"} />
-        <FlowEdge label={`${props.waitMinutes} min`} off={props.phone !== "ready"} />
+        <FlowNode icon={<Bell size={14} />} label="Alert" time={clock(0)} state="on" />
+        <FlowEdge on={props.telegram === "ready"} />
+        <FlowNode icon={<Send size={14} />} label="Telegram" time={props.telegram === "ready" ? "at once" : ALERTS_FLOW_CHANNEL_WORD[props.telegram]} state={flowState(props.telegram)} />
+        <FlowEdge label={`${props.waitMinutes} min`} on={props.phone === "ready"} />
         {calls.map((minutes, index) => (
           <FlowCall key={minutes} index={index} minutes={minutes} retry={retry} phone={props.phone} />
         ))}
@@ -103,9 +103,18 @@ export function AlertsFlow(props: {
 function FlowCall(props: { index: number; minutes: number; retry: number; phone: AlertsFlowChannel }): JSX.Element {
   const ready = props.phone === "ready";
   return <>
-    {props.index > 0 ? <FlowEdge label={`${props.retry} min`} off={!ready} /> : null}
-    <FlowNode icon={<Phone size={14} />} label={`Call ${props.index + 1}`} time={ready ? clock(props.minutes) : props.index === 0 ? ALERTS_FLOW_CHANNEL_WORD[props.phone as Exclude<AlertsFlowChannel, "ready">] : ""} off={!ready} />
+    {props.index > 0 ? <FlowEdge label={`${props.retry} min`} on={ready} /> : null}
+    <FlowNode icon={<Phone size={14} />} label={`Call ${props.index + 1}`} time={ready ? clock(props.minutes) : props.index === 0 ? ALERTS_FLOW_CHANNEL_WORD[props.phone as Exclude<AlertsFlowChannel, "ready">] : ""}
+      // Later calls show no reason (the first one says it); a screen reader still hears it.
+      spoken={!ready && props.index > 0 ? ALERTS_FLOW_CHANNEL_WORD[props.phone as Exclude<AlertsFlowChannel, "ready">] : undefined}
+      state={props.index === 0 ? flowState(props.phone) : ready ? "on" : "off"} />
   </>;
+}
+
+/** What will happen is green, what will not is dim grey (the User,
+ *  2026-11-16); a channel that is broken says so in red under it. */
+function flowState(channel: AlertsFlowChannel): "on" | "off" | "bad" {
+  return channel === "ready" ? "on" : channel === "broken" ? "bad" : "off";
 }
 
 /** Minutes after the alert as h:mm, as on the approved mockup (0:05). */
@@ -113,18 +122,18 @@ function clock(minutes: number): string {
   return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}`;
 }
 
-function FlowNode(props: { icon: ReactNode; label: string; time: string; off?: boolean }): JSX.Element {
+function FlowNode(props: { icon: ReactNode; label: string; time: string; spoken?: string; state: "on" | "off" | "bad" }): JSX.Element {
   return (
-    <li className={`alerts-node${props.off ? " is-off" : ""}`}>
+    <li className={`alerts-node is-${props.state}`}>
       <span className="alerts-node-dot" aria-hidden>{props.icon}</span>
       <span className="alerts-node-label">{props.label}</span>
-      <span className="alerts-node-time">{props.time}</span>
+      <span className="alerts-node-time">{props.time}{props.spoken ? <span className="sr-only">{props.spoken}</span> : null}</span>
     </li>
   );
 }
 
-function FlowEdge(props: { label?: string; off?: boolean }): JSX.Element {
-  return <li className={`alerts-edge${props.off ? " is-off" : ""}`} aria-hidden>{props.label ? <span>{props.label}</span> : null}</li>;
+function FlowEdge(props: { label?: string; on: boolean }): JSX.Element {
+  return <li className={`alerts-edge is-${props.on ? "on" : "off"}`} aria-hidden>{props.label ? <span>{props.label}</span> : null}</li>;
 }
 
 export function AlertsStatusPill(props: { status: AlertsChannelStatus }): JSX.Element {
@@ -149,6 +158,9 @@ export function AlertsChannelRow(props: {
   testId: string;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
+  /** An item was chosen: what it opens (a dialog) takes the focus, so the
+   *  closing menu does not hand it back to its button behind that dialog. */
+  const picked = useRef(false);
   return (
     <div className="gen-row alerts-row" data-testid={props.testId}>
       <span className="alerts-tile" aria-hidden>{props.icon}</span>
@@ -167,9 +179,10 @@ export function AlertsChannelRow(props: {
                 <MoreHorizontal size={16} aria-hidden />
               </button>
             </PopoverTrigger>
-            <PopoverContent align="end" className="alerts-menu w-[200px] gap-0 p-[5px]" aria-label={`${props.name} options`}>
+            <PopoverContent align="end" className="alerts-menu w-[200px] gap-0 p-[5px]" aria-label={`${props.name} options`}
+              onCloseAutoFocus={(event) => { if (picked.current) event.preventDefault(); picked.current = false; }}>
               {props.menu.map((item) => (
-                <button key={item.label} type="button" className={`alerts-menu-item${item.danger ? " is-danger" : ""}`} onClick={() => { setOpen(false); item.onSelect(); }}>
+                <button key={item.label} type="button" className={`alerts-menu-item${item.danger ? " is-danger" : ""}`} onClick={() => { picked.current = true; setOpen(false); item.onSelect(); }}>
                   {item.label}
                 </button>
               ))}

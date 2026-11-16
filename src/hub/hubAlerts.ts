@@ -1113,7 +1113,8 @@ export class HubAlerts {
           trial,
           numbers: numbers.map((number) => number.phoneNumber),
           ...(verified ? { verified } : {}),
-          ...(credentials.saved ? { saved: true } : {})
+          ...(credentials.saved ? { saved: true } : {}),
+          callMode: this.callMode(await this.settings())
         };
         return { ok: true, value };
       }
@@ -1159,12 +1160,13 @@ export class HubAlerts {
         if (!to) return failure("invalid_request", "Enter your phone with the country code, like +357 99 123456.");
         const run = await this.startTest({ accountSid: credentials.accountSid, authToken: credentials.authToken }, from, to);
         if (!run) return failure("invalid_request", "A test call is still ringing. Wait for it to end.");
-        return { ok: true, value: { testId: run.id, test: run.result } };
+        return { ok: true, value: { testId: run.id, test: run.result, callMode: run.mode } };
       }
       case "phone.try-status": {
         const run = typeof request.testId === "string" ? this.tests.get(request.testId) : undefined;
         if (!run) return failure("invalid_request", "That test call is no longer known. Call again.");
-        return { ok: true, value: { testId: run.id, test: run.result } };
+        // How calls end now, as the page will judge the saved test by.
+        return { ok: true, value: { testId: run.id, test: run.result, callMode: this.callMode(await this.settings()) } };
       }
       case "phone.test": {
         const settings = await this.settings();

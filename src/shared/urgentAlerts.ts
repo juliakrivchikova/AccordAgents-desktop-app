@@ -158,6 +158,17 @@ export interface UrgentAlertPhoneCheck {
   verified?: string[];
   /** The keys checked were the saved ones (none were pasted). */
   saved?: boolean;
+  /** How calls end on her server now: 1 pressed, or answering. */
+  callMode?: "keypad" | "answer";
+}
+
+/** A test call as the connect dialog follows it: its result, and how calls
+ *  end on her server now (1 pressed, or answering), which is what the page
+ *  judges the saved test by. */
+export interface UrgentAlertPhoneTry {
+  testId: string;
+  test: UrgentAlertPhoneTest;
+  callMode?: "keypad" | "answer";
 }
 
 // --- requests ----------------------------------------------------------------

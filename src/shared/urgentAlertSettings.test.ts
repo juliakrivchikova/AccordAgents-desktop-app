@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  alertsBand, alertsCallMinutes, alertsDialogTestLine, alertsFlowChannels, alertsIntroCall, alertsPhoneStatus, alertsPhoneTesting, alertsPhoneTestLine, alertsTelegramStatus, alertsTelegramTestLine, alertsWaitChoices, alertsWhen
+  alertsBand, alertsCallMinutes, alertsTwilioNeedsIdentity, alertsDialogTestLine, alertsFlowChannels, alertsIntroCall, alertsPhoneStatus, alertsPhoneTesting, alertsPhoneTestLine, alertsTelegramStatus, alertsTelegramTestLine, alertsWaitChoices, alertsWhen
 } from "./urgentAlertSettings";
 import type { UrgentAlertSettingsView } from "./urgentAlerts";
 
@@ -115,4 +115,10 @@ test("the flow, the first sentence and the dialog's test line say what is true n
   assert.equal(alertsDialogTestLine({ state: "failed", at: today, error: "gone", lost: true }, "x", true), "Its result never came. Call again?");
   assert.match(alertsDialogTestLine({ state: "answered", at: today }, "x", false), /^You answered at .*\. Calls work\.$/);
   assert.match(alertsDialogTestLine({ state: "answered", at: today }, "x", true), /, but calls now ask for 1\. Call again\?$/);
+});
+
+test("Twilio's identity check is recognised in its own words", () => {
+  assert.equal(alertsTwilioNeedsIdentity("Twilio: Primary compliance profile is not approved. Please refer to documentation and complete the KYC process in Trust Hub to gain access."), true);
+  assert.equal(alertsTwilioNeedsIdentity("Twilio: The number +35799123342 is unverified."), false);
+  assert.equal(alertsTwilioNeedsIdentity(undefined), false);
 });
