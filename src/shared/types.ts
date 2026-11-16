@@ -1045,6 +1045,11 @@ export interface ChatPendingChoice {
    *  choosing; the User, 2026-11-15). Its status is `cancelled`, so it is
    *  closed everywhere a cancelled choice is; it is shown as expired. */
   expiredAt?: string;
+  /** Closed by the app because its member is no longer in the chat (removed,
+   *  or replaced by a member of the same name): nobody is there to take an
+   *  answer. Shown as expired; never refused by the server for an answer
+   *  given before (the answer has nobody to go to either). */
+  memberGoneAt?: string;
   /** The durable answer which saved this selection, before native admission. */
   decisionEventId?: string;
   responseMessageId?: string;

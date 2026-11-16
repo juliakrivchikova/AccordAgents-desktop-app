@@ -13,6 +13,26 @@ export function choiceAskedAtMs(message: ChatMessage): number {
 export interface ChoiceExpiryPlan {
   /** Messages whose waiting choice expires now. */
   due: string[];
+  /** Of those, the ones whose member is no longer in the chat. */
+  memberGone?: string[];
+  /** Messages of members no longer in the chat whose mention approvals still
+   *  wait (not choices: rejected, not expired). */
+  goneMentions?: string[];
+}
+
+/** A waiting choice closed because its member left the chat (removed, or
+ *  replaced by a member of the same name): nobody can take an answer. */
+export function choiceClosedForGoneMember(choice: ChatPendingChoice, now: string): ChatPendingChoice {
+  return { ...choice, status: "cancelled", cancelledAt: now, expiredAt: now, memberGoneAt: now };
+}
+
+/** The waiting choices of members no longer in the chat. `include` says
+ *  which of their messages this device may close. */
+export function choicesOfGoneMembers(messages: ChatMessage[], memberIds: ReadonlySet<string>, include: (message: ChatMessage) => boolean): string[] {
+  return messages
+    .filter((message) => message.role === "participant" && message.metadata?.pendingChoice?.status === "pending" &&
+      (!message.participantId || !memberIds.has(message.participantId)) && include(message))
+    .map((message) => message.id);
 }
 
 /** A message of the User's that started a turn of a member. */
