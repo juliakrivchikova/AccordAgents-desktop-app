@@ -3,17 +3,18 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type { UrgentAlertSettingsView } from "../../../shared/urgentAlerts";
 import { CopyButton } from "../primitives";
-import { AlertsStep, alertRequest, useSettingsWatch } from "./alerts-shared";
-import { AwsDialog } from "./aws-dialog";
+import { AlertsWizard, alertRequest, useSettingsWatch } from "./alerts-shared";
 
 /** How long Start may take before "Nothing yet?" offers the link again. */
 const START_HELP_MS = 30_000;
+const TELEGRAM_STEPS = ["Your bot", "Start", "Got it"] as const;
 
 /**
- * Connect Telegram, as the User approved it on 2026-11-15: the User's own
- * bot (BotFather's steps spelled out, the token hidden), Start in the bot,
- * then Got it on a test message. Each step is read back from the server,
- * which does it. While it waits, closing loses nothing: the bot is saved.
+ * Connect Telegram one step at a time, as the User approved it on 2026-11-16:
+ * her own bot (BotFather's steps spelled out, the token hidden), Start in the
+ * bot, then Got it on a test message. Each step is read back from the server,
+ * which does it, so Start and Got it move the dialog on by themselves. While
+ * it waits, closing loses nothing: the bot is saved.
  */
 export function TelegramConnectDialog(props: {
   open: boolean;
@@ -27,11 +28,14 @@ export function TelegramConnectDialog(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [startHelp, setStartHelp] = useState(false);
+  /** Back on Got it: the Start screen again (to open the bot), while the
+   *  server goes on waiting for Got it. */
+  const [backToStart, setBackToStart] = useState(false);
   const tokenField = useRef<HTMLInputElement>(null);
-  const openBotButton = useRef<HTMLButtonElement>(null);
-  const step = !telegram || telegram.error ? 1 : telegram.connected ? 4 : telegram.step === "test" ? 3 : 2;
+  const serverStep = !telegram || telegram.error ? 0 : telegram.connected ? 3 : telegram.step === "test" ? 2 : 1;
+  const step = serverStep === 2 && backToStart ? 1 : serverStep;
   const { onSettings } = props;
-  useSettingsWatch(props.open && (step === 2 || step === 3), onSettings);
+  useSettingsWatch(props.open && (serverStep === 1 || serverStep === 2), onSettings);
 
   useEffect(() => {
     if (!props.open) {
@@ -41,9 +45,11 @@ export function TelegramConnectDialog(props: {
     }
   }, [props.open]);
 
+  useEffect(() => setBackToStart(false), [props.open, serverStep]);
+
   useEffect(() => {
     setStartHelp(false);
-    if (!props.open || step !== 2) return undefined;
+    if (!props.open || step !== 1) return undefined;
     const timer = setTimeout(() => setStartHelp(true), START_HELP_MS);
     return () => clearTimeout(timer);
   }, [props.open, step]);
@@ -56,11 +62,10 @@ export function TelegramConnectDialog(props: {
     if (!result.ok) return setError(result.error.message);
     setToken("");
     props.onSettings(result.value);
-    // The field is gone: the next thing to press takes the focus.
-    setTimeout(() => openBotButton.current?.focus(), 0);
   }
 
-  /** Another bot: the saved one is dropped and the first step comes back. */
+  /** Back to the first step: the bot waiting for Start is dropped, another
+   *  token is asked for. */
   async function differentBot(): Promise<void> {
     setBusy(true);
     setError(undefined);
@@ -73,95 +78,91 @@ export function TelegramConnectDialog(props: {
 
   const bot = telegram?.botUsername ? `@${telegram.botUsername}` : "your bot";
   const openStart = () => void window.consensus.openExternal(`https://t.me/${telegram?.botUsername ?? ""}${telegram?.startCode ? `?start=${encodeURIComponent(telegram.startCode)}` : ""}`);
-  const fieldError = step === 1 ? (error ?? telegram?.error) : undefined;
+  const fieldError = step === 0 ? (error ?? telegram?.error) : undefined;
+  const finishLater = <Button type="button" variant="outline" size="sm" disabled={busy} onClick={props.onClose} data-testid="alerts-telegram-close">Finish later</Button>;
   return (
-    <AwsDialog
+    <AlertsWizard
       open={props.open}
       title="Connect Telegram"
-      description="About 3 minutes. Your own bot sends you each alert."
+      steps={TELEGRAM_STEPS}
+      current={step}
       busy={busy}
       testId="alerts-telegram-dialog"
-      className="alerts-dialog"
-      initialFocus={() => tokenField.current ?? openBotButton.current}
+      initialFocus={() => tokenField.current}
       onClose={props.onClose}
-      note={step === 2 || step === 3 ? "Your bot is saved. Finish any time from Settings → Alerts." : undefined}
-      actions={step === 4
-        ? <Button type="button" size="sm" onClick={props.onClose} data-testid="alerts-telegram-done">Done</Button>
-        : step === 1
-          ? <>
-            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={props.onClose}>Cancel</Button>
-            <Button type="button" size="sm" disabled={busy || !token.trim()} onClick={() => void connect()} data-testid="alerts-telegram-continue">
-              {busy ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}Continue
-            </Button>
-          </>
-          : <Button type="button" variant="outline" size="sm" disabled={busy} onClick={props.onClose} data-testid="alerts-telegram-close">Close</Button>}
+      onBack={step === 1 ? () => void differentBot() : step === 2 ? () => setBackToStart(true) : undefined}
+      backDisabled={busy}
+      note={step === 2 ? "Your bot is saved." : undefined}
+      actions={step === 0 ? (
+        <Button type="button" size="sm" disabled={busy || !token.trim()} onClick={() => void connect()} data-testid="alerts-telegram-continue">
+          {busy ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}Next
+        </Button>
+      ) : step === 1 ? <>
+        {finishLater}
+        <Button type="button" size="sm" disabled={busy} onClick={openStart} data-testid="alerts-telegram-open-bot">
+          Open {bot} <ExternalLink size={13} aria-hidden />
+        </Button>
+      </> : step === 2 ? finishLater : (
+        <Button type="button" size="sm" onClick={props.onClose} data-testid="alerts-telegram-done">Done</Button>
+      )}
     >
-      <div className="alerts-dialog-body">
-      <ol className="alerts-steps">
-        <AlertsStep n={1} state={step > 1 ? "done" : "now"} title={step > 1 ? <>Bot {bot}{step < 4 ? (
-          <button type="button" className="alerts-text-button" disabled={busy} onClick={() => void differentBot()} data-testid="alerts-telegram-different">Use a different bot</button>
-        ) : null}</> : "Create your bot"}>
-          {step === 1 ? <>
-            <div className="alerts-step-actions">
-              <Button type="button" variant="outline" size="sm" onClick={() => void window.consensus.openExternal("https://t.me/BotFather")}>
-                <ExternalLink size={13} aria-hidden /> Open BotFather
-              </Button>
-            </div>
-            <ol className="alerts-howto">
-              <li>Send <code>/newbot</code> <CopyButton text="/newbot" label="Copy /newbot" size="xs" /></li>
-              <li>Name: anything. Username: must end in <b>bot</b>, like alerts_for_me_bot.</li>
-              <li>Copy the token it sends you.</li>
-            </ol>
-            <div className="alerts-field">
-              <label htmlFor="alerts-telegram-token">Bot token</label>
-              <span className="alerts-secret">
-                <input
-                  ref={tokenField}
-                  id="alerts-telegram-token"
-                  className="gen-input alerts-input"
-                  type={showToken ? "text" : "password"}
-                  value={token}
-                  placeholder="123456789:AAH…"
-                  autoComplete="off"
-                  spellCheck={false}
-                  aria-invalid={fieldError ? true : undefined}
-                  aria-describedby="alerts-telegram-token-hint"
-                  data-testid="alerts-telegram-token"
-                  onChange={(event) => setToken(event.target.value)}
-                  onKeyDown={(event) => { if (event.key === "Enter" && token.trim() && !busy) void connect(); }}
-                />
-                <button type="button" className="alerts-show" aria-label="Show token" aria-pressed={showToken} onClick={() => setShowToken((shown) => !shown)}>
-                  {showToken ? "Hide" : "Show"}
-                </button>
-              </span>
-            </div>
-            {fieldError
-              ? <div className="gen-row-error" role="alert" id="alerts-telegram-token-hint">{fieldError}</div>
-              : <div className="alerts-hint" id="alerts-telegram-token-hint">Kept on your server only.</div>}
-          </> : null}
-        </AlertsStep>
-        <AlertsStep n={2} state={step > 2 ? "done" : step === 2 ? "now" : "later"} title="Press Start in your bot">
-          {step === 2 ? <>
-            <div className="alerts-step-actions">
-              <Button ref={openBotButton} type="button" size="sm" onClick={openStart} data-testid="alerts-telegram-open-bot">
-                <ExternalLink size={13} aria-hidden /> Open {bot}
-              </Button>
-            </div>
-            <div className="alerts-step-detail">In the chat, press <b>Start</b> at the bottom. The button opens your bot with a one-time code, so only your Start connects it.</div>
-            <div className="alerts-waiting" role="status"><Loader2 size={13} className="gen-aws-spinner" aria-hidden /> Waiting for Start…</div>
-            {startHelp ? <div className="alerts-step-detail">Nothing yet? <button type="button" className="alerts-text-button" onClick={openStart}>Open it again</button></div> : null}
-          </> : null}
-        </AlertsStep>
-        <AlertsStep n={3} state={step > 3 ? "done" : step === 3 ? "now" : "later"} title="Press Got it on a test message">
-          {step === 3 ? <>
-            <div className="alerts-step-detail">A test message with a Got it button is in your Telegram. Press Got it on it.</div>
-            <div className="alerts-waiting" role="status"><Loader2 size={13} className="gen-aws-spinner" aria-hidden /> Waiting for Got it…</div>
-          </> : null}
-          {step === 4 ? <div className="alerts-done-line" role="status"><Check size={13} aria-hidden /> Connected{telegram?.chatName ? ` to ${telegram.chatName}` : ""}</div> : null}
-        </AlertsStep>
-      </ol>
-      {step !== 1 && error ? <div className="gen-row-error" role="alert">{error}</div> : null}
-      </div>
-    </AwsDialog>
+      {step === 0 ? <>
+        <p className="alerts-wizard-text">Your own bot sends you each alert with a Got it button. About 3 minutes.</p>
+        <div className="alerts-step-actions">
+          <Button type="button" variant="outline" size="sm" onClick={() => void window.consensus.openExternal("https://t.me/BotFather")}>
+            Open BotFather <ExternalLink size={13} aria-hidden />
+          </Button>
+        </div>
+        <ol className="alerts-howto">
+          <li>Send <code>/newbot</code> <CopyButton text="/newbot" label="Copy /newbot" size="xs" /></li>
+          <li>Name: anything. Username: must end in <b>bot</b>, like alerts_for_me_bot.</li>
+          <li>Copy the token it sends you.</li>
+        </ol>
+        <div className="alerts-field">
+          <label htmlFor="alerts-telegram-token">Bot token</label>
+          <span className="alerts-secret">
+            <input
+              ref={tokenField}
+              id="alerts-telegram-token"
+              className="gen-input alerts-input"
+              type={showToken ? "text" : "password"}
+              value={token}
+              placeholder="123456789:AAH…"
+              autoComplete="off"
+              spellCheck={false}
+              aria-invalid={fieldError ? true : undefined}
+              aria-describedby="alerts-telegram-token-hint"
+              data-testid="alerts-telegram-token"
+              onChange={(event) => setToken(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter" && token.trim() && !busy) void connect(); }}
+            />
+            <button type="button" className="alerts-show" aria-label="Show token" aria-pressed={showToken} onClick={() => setShowToken((shown) => !shown)}>
+              {showToken ? "Hide" : "Show"}
+            </button>
+          </span>
+        </div>
+        {fieldError
+          ? <div className="gen-row-error" role="alert" id="alerts-telegram-token-hint">{fieldError}</div>
+          : <div className="alerts-hint" id="alerts-telegram-token-hint">Kept on your server only.</div>}
+      </> : step === 1 ? <>
+        <p className="alerts-wizard-text">Bot <b>{bot}</b></p>
+        <p className="alerts-wizard-text">Open it and press <b>Start</b> at the bottom of the chat. The button opens your bot with a one-time code, so only your Start connects it.</p>
+        {serverStep === 1 ? <>
+          <div className="alerts-waiting" role="status"><Loader2 size={13} className="gen-aws-spinner" aria-hidden /> Waiting for Start…</div>
+          {startHelp ? <p className="alerts-wizard-text">Nothing yet? <button type="button" className="alerts-text-button" onClick={openStart}>Open it again</button></p> : null}
+        </> : <div className="alerts-ok-line" role="status"><Check size={13} aria-hidden /> Start received. A test message with Got it is in your chat.</div>}
+      </> : step === 2 ? <>
+        <p className="alerts-wizard-title">Press Got it in Telegram</p>
+        <p className="alerts-wizard-text">A test message with a <b>Got it</b> button is in your chat with {bot}. Press Got it on it.</p>
+        <div className="alerts-waiting" role="status"><Loader2 size={13} className="gen-aws-spinner" aria-hidden /> Waiting for Got it…</div>
+      </> : (
+        <div className="alerts-wizard-done" role="status">
+          <span className="alerts-wizard-done-mark"><Check size={20} strokeWidth={2.4} aria-hidden /></span>
+          <p className="alerts-wizard-title">Connected{telegram?.chatName ? ` to ${telegram.chatName}` : ""}</p>
+          <p className="alerts-wizard-text">Alerts come to your chat with {bot}.</p>
+        </div>
+      )}
+      {step !== 0 && error ? <div className="gen-row-error" role="alert">{error}</div> : null}
+    </AlertsWizard>
   );
 }

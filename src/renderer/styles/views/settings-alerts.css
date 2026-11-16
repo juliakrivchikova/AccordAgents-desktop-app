@@ -350,8 +350,8 @@
   margin-top: 2px;
 }
 
-/* The connect dialogs: never taller than the window (the phone's, with its
-   three steps, is tall), the body scrolls instead. */
+/* The connect dialogs: never taller than the window, the body scrolls
+   instead. */
 .gen-aws-dialog.alerts-dialog {
   max-height: calc(100vh - 32px);
   grid-template-rows: auto minmax(0, 1fr) auto;
@@ -369,83 +369,194 @@
   color: var(--app-text-secondary);
 }
 
-/* The connect dialogs. */
-.alerts-steps {
+/* The connect dialogs, one step at a time: the steps named under the title,
+   the current one dark, the done ones ticked. */
+.alerts-wizard-steps {
   display: flex;
-  flex-direction: column;
-  margin: 4px 0 0;
-  padding: 0;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--app-border);
   list-style: none;
+  white-space: nowrap;
 }
 
-.alerts-step {
-  position: relative;
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
-  gap: 12px;
-  padding: 8px 0 14px;
-}
-
-.alerts-step:not(:last-child)::after {
-  position: absolute;
-  top: 34px;
-  bottom: 0;
-  left: 11px;
-  width: 1px;
-  background: var(--app-border);
-  content: "";
-}
-
-.alerts-step-mark {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border: 1px solid var(--app-border-strong);
-  border-radius: 50%;
-  background: var(--popover);
-  color: var(--app-text-secondary);
+.alerts-wizard-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--app-muted);
   font-size: 12px;
+}
+
+.alerts-wizard-step.is-done {
+  color: var(--app-text-secondary);
+}
+
+.alerts-wizard-step.is-now {
+  color: var(--app-text-strong);
   font-weight: 600;
 }
 
-/* Done: a quiet tick, not a filled disc (readable in both themes). */
-.alerts-step.is-done .alerts-step-mark {
+.alerts-wizard-dot {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 50%;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.alerts-wizard-step.is-done .alerts-wizard-dot {
   border-color: var(--app-text-strong);
   color: var(--app-text-strong);
 }
 
-.alerts-step.is-now .alerts-step-mark {
+.alerts-wizard-step.is-now .alerts-wizard-dot {
   border-color: var(--app-primary);
-  color: var(--app-primary);
+  background: var(--app-primary);
+  color: var(--primary-foreground);
 }
 
-.alerts-step-text {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
+.alerts-wizard-sep {
+  flex: 1;
+  min-width: 8px;
+  height: 1px;
+  background: var(--app-border);
 }
 
-.alerts-step-title {
+/* Back (and a short note) on the left, the step's own action on the right. */
+.alerts-wizard [data-slot="dialog-footer"] {
+  align-items: center;
+}
+
+.alerts-wizard-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-right: auto;
+}
+
+.alerts-wizard .alerts-wizard-left .gen-aws-dialog-note {
+  margin-right: 0;
+}
+
+.alerts-wizard .alerts-dialog-body {
+  min-height: 210px;
+}
+
+.alerts-wizard-text {
+  margin: 0;
+  color: var(--app-text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.alerts-wizard-text b {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.alerts-wizard-title {
+  margin: 0;
+  color: var(--app-text-strong);
+  font-size: 14.5px;
+  font-weight: 650;
+}
+
+.alerts-where {
+  padding: 8px 11px;
+  border-radius: var(--radius-control);
+  background: var(--app-surface-subtle);
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+}
+
+.alerts-where b {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.alerts-account {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  font-size: 13px;
+}
+
+.alerts-account-name {
   color: var(--app-text-strong);
-  font-size: 13.5px;
   font-weight: 600;
-  line-height: 24px;
 }
 
-.alerts-step.is-done .alerts-step-title {
-  font-weight: 500;
+.alerts-account .alerts-text-button {
+  margin-left: auto;
 }
 
-.alerts-step.is-later .alerts-step-title {
-  color: var(--app-text-secondary);
+.alerts-route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  color: var(--app-muted);
+}
+
+.alerts-route > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.alerts-route small {
+  color: var(--app-muted);
+  font-size: 11.5px;
+}
+
+.alerts-route b {
+  overflow-wrap: anywhere;
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.alerts-identity {
+  padding: 11px 12px;
+  border: 1px solid var(--app-status-danger-border);
+  border-radius: var(--radius-control);
+  background: var(--app-status-danger-bg);
+  color: var(--app-status-danger-text);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.alerts-wizard-done {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 26px 0 6px;
+  text-align: center;
+}
+
+.alerts-wizard-done-mark {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: var(--app-success-soft);
+  color: var(--app-success);
 }
 
 .alerts-step-detail {
@@ -665,20 +776,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-.alerts-cost {
-  margin-top: 2px;
-  padding: 9px 11px;
-  border: 1px solid var(--app-hairline);
-  border-radius: 10px;
-  color: var(--app-text-secondary);
-  font-size: 12px;
-  line-height: 1.5;
-}
 
-.alerts-cost b {
-  color: var(--app-text-strong);
-  font-weight: 600;
-}
 
 .alerts-choice:hover,
 .alerts-text-button:not(:disabled):hover,

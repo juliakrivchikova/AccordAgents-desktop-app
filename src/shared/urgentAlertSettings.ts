@@ -209,3 +209,10 @@ function sentence(text: string): string {
   const trimmed = text.trim();
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
+
+/** Twilio refuses to sell numbers or place calls until it has confirmed who
+ *  owns the account (its Trust Hub "primary compliance profile", KYC): the
+ *  dialog explains that instead of showing Twilio's own sentence. */
+export function alertsTwilioNeedsIdentity(message: string | undefined): boolean {
+  return Boolean(message && /compliance profile|trust ?hub|\bKYC\b/i.test(message));
+}

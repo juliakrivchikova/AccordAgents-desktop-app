@@ -1,9 +1,11 @@
 import { Check } from "lucide-react";
-import { useEffect, type ReactNode } from "react";
+import { Fragment, useEffect, type ReactNode } from "react";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { HubAlertResult, UrgentAlertSettingsView, UrgentAlertUserRequest } from "../../../shared/urgentAlerts";
 
 // What the Alerts page and its two connect dialogs share: asking the server,
-// watching it while something happens elsewhere, and a step of a dialog.
+// watching it while something happens elsewhere, and the dialogs' frame.
 
 export async function alertRequest<T>(request: UrgentAlertUserRequest): Promise<HubAlertResult<T>> {
   try {
@@ -18,18 +20,71 @@ export async function alertRequest<T>(request: UrgentAlertUserRequest): Promise<
   }
 }
 
-export function AlertsStep(props: { n: number; state: "done" | "now" | "later"; title: ReactNode; children?: ReactNode }): JSX.Element {
+/**
+ * The connect dialogs, one step at a time (the User, 2026-11-16): the steps
+ * named under the title, only the current one on screen, Back on the left and
+ * the step's own action where Next would be. The cross closes it.
+ */
+export function AlertsWizard(props: {
+  open: boolean;
+  title: string;
+  steps: readonly string[];
+  /** The step on screen, from 0; `steps.length` once every step is done. */
+  current: number;
+  /** While true (buying, saving) it cannot be closed. */
+  busy?: boolean;
+  testId?: string;
+  initialFocus?: () => HTMLElement | null | undefined;
+  onClose: () => void;
+  onBack?: () => void;
+  backDisabled?: boolean;
+  /** A short line beside Back. */
+  note?: ReactNode;
+  actions: ReactNode;
+  children: ReactNode;
+}): JSX.Element {
+  const { initialFocus, steps, current } = props;
   return (
-    <li className={`alerts-step is-${props.state}`} aria-current={props.state === "now" ? "step" : undefined}>
-      <span className="alerts-step-mark" aria-hidden>{props.state === "done" ? <Check size={13} /> : props.n}</span>
-      <div className="alerts-step-text">
-        <div className="alerts-step-title">
-          {props.title}
-          <span className="sr-only">{props.state === "done" ? " (done)" : props.state === "later" ? " (not yet)" : ""}</span>
-        </div>
-        {props.children}
-      </div>
-    </li>
+    <Dialog open={props.open} onOpenChange={(next) => { if (!next && !props.busy) props.onClose(); }}>
+      <DialogContent
+        className="gen-aws-dialog alerts-dialog alerts-wizard"
+        data-testid={props.testId}
+        onOpenAutoFocus={initialFocus ? (event) => {
+          const target = initialFocus();
+          if (!target) return;
+          event.preventDefault();
+          target.focus();
+        } : undefined}
+      >
+        <DialogHeader>
+          <DialogTitle>{props.title}</DialogTitle>
+          <DialogDescription className="sr-only">
+            {current < steps.length ? `Step ${current + 1} of ${steps.length}: ${steps[current]}` : "All steps done"}
+          </DialogDescription>
+          <ol className="alerts-wizard-steps" aria-hidden>
+            {steps.map((label, index) => (
+              <Fragment key={label}>
+                {index > 0 ? <li className="alerts-wizard-sep" /> : null}
+                <li className={`alerts-wizard-step is-${index < current ? "done" : index === current ? "now" : "later"}`}>
+                  <span className="alerts-wizard-dot">{index < current ? <Check size={11} strokeWidth={2.5} /> : index + 1}</span>
+                  {label}
+                </li>
+              </Fragment>
+            ))}
+          </ol>
+        </DialogHeader>
+        <div className="alerts-dialog-body">{props.children}</div>
+        <DialogFooter>
+          {props.onBack || props.note ? (
+            <span className="alerts-wizard-left">
+              {props.onBack ? <Button type="button" variant="outline" size="sm" disabled={props.backDisabled} onClick={props.onBack} data-testid="alerts-wizard-back">Back</Button> : null}
+              {props.note ? <span className="gen-aws-dialog-note">{props.note}</span> : null}
+            </span>
+          ) : null}
+          {props.actions}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

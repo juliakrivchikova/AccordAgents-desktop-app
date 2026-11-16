@@ -40,6 +40,7 @@ await build({
     "renderer/components/chat/cli-readiness-setup-panel.test.tsx",
     "renderer/components/chat/cli-sign-in-step.test.tsx",
     "renderer/components/settings/device-pairing-revoke.test.tsx",
+    "renderer/components/settings/alerts-dialog-wizard.test.tsx",
     "renderer/components/settings/hub-server-section.test.tsx",
     "renderer/components/settings/speech-to-text-row.test.tsx",
     "renderer/components/chat/speech-to-text-button.test.tsx",
