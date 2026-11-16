@@ -1,5 +1,6 @@
 import { ARTIFACT_NOTE_MESSAGE_SOURCE } from "./artifacts";
 import { turnFinishedNoteOf } from "./turnFinishedNoteSource";
+import { accordClosedLaunchId } from "./accordProgress";
 import type { ChatMessage } from "./types";
 
 export function isParticipantRequestWaitingStatus(content: string): boolean {
@@ -29,6 +30,10 @@ export function isChatMessageHiddenFromTimeline(
   }
   // So is the note that a member finished answering above the newest messages.
   if (turnFinishedNoteOf(message)) {
+    return false;
+  }
+  // And the line a closed Accord leaves where the User closed it.
+  if (accordClosedLaunchId(message)) {
     return false;
   }
   return options.showSystemMessages !== true;

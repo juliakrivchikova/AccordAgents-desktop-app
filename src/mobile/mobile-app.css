@@ -3294,13 +3294,18 @@ button.mobile-chat-group-title:active {
   }
 }
 
-/* A question the User already answered, kept under its own message the way the
-   desktop keeps it: the card without its controls, and what was chosen. */
-.control-card-answered,
+/* A card folded to what was answered while it is not done yet (approved and
+   waiting to be applied, or an answer on its way); an answered question is one
+   line (.control-card-answered.card-row). */
 .control-card-folded {
   margin-top: 8px;
   background: var(--s2);
   box-shadow: none;
+}
+
+/* A used choice is one line under its message, like a folded urgent alert. */
+.control-card-answered.card-row {
+  margin-top: 8px;
 }
 
 .message-cards > .control-card-folded,
@@ -3309,7 +3314,6 @@ button.mobile-chat-group-title:active {
   margin-top: 0;
 }
 
-.control-card-answered .control-card-state,
 .control-card-folded .control-card-state {
   color: var(--fg1);
   font-weight: 600;
@@ -4196,8 +4200,10 @@ button.mobile-chat-group-title:active {
   line-height: 1.4;
 }
 
-/* Closed: one line, the message first, then how it ended. */
-.urgent-alert-folded {
+/* Closed: one line, the message first, then how it ended. Every used card is
+   this same line (.card-row: a choice, a closed Accord). */
+.urgent-alert-folded,
+.card-row {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -4215,16 +4221,22 @@ button.mobile-chat-group-title:active {
 }
 
 /* A grey bell once she reacted; red when it never reached her. */
-.urgent-alert-folded-bell {
+.urgent-alert-folded-bell,
+.card-row-icon {
   flex: none;
   color: var(--mut);
+}
+
+.card-row-icon {
+  display: inline-flex;
 }
 
 .urgent-alert-folded.is-unresolved .urgent-alert-folded-bell {
   color: var(--urgent);
 }
 
-.urgent-alert-folded-preview {
+.urgent-alert-folded-preview,
+.card-row-preview {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -4234,7 +4246,8 @@ button.mobile-chat-group-title:active {
   white-space: nowrap;
 }
 
-.urgent-alert-folded-outcome {
+.urgent-alert-folded-outcome,
+.card-row-outcome {
   flex: none;
   max-width: 45%;
   overflow: hidden;
@@ -4249,7 +4262,8 @@ button.mobile-chat-group-title:active {
   color: var(--danger);
 }
 
-.urgent-alert-folded-chevron {
+.urgent-alert-folded-chevron,
+.card-row-chevron {
   flex: none;
   color: var(--fg);
 }
@@ -4258,7 +4272,8 @@ button.mobile-chat-group-title:active {
   background: color-mix(in srgb, var(--urgent-fg) 18%, transparent);
 }
 
-.urgent-alert-folded:active {
+.urgent-alert-folded:active,
+button.card-row:active {
   background: var(--press);
 }
 
@@ -4268,7 +4283,21 @@ button.mobile-chat-group-title:active {
 }
 
 .urgent-alert-action:focus-visible,
-.urgent-alert-folded:focus-visible {
+.urgent-alert-folded:focus-visible,
+button.card-row:focus-visible {
   outline: 2px solid var(--fg1);
   outline-offset: 2px;
+}
+
+/* The line a closed Accord left in the chat; opened, the Accord's own card
+   in the chat, its whole height. */
+.accord-line {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--sans);
+}
+
+.accord-line.is-open .accord-dock-card {
+  max-height: none;
+  overflow: hidden;
 }

@@ -349,6 +349,31 @@ test("the phone's chat list counts a turn in progress that started before the ch
   assert.equal(seen[0].snippet, "post 9", "the last line is still the newest message");
 });
 
+test("a closed Accord's line travels to the phone with its Accord, and is never the chat list's last line", async () => {
+  const { buildMobileChatList } = await import("./mobileChatCatalog");
+  const at = (minute: number) => new Date(Date.UTC(2026, 10, 16, 18, minute)).toISOString();
+  const reply = { id: "reply", role: "participant", participantId: "taylor", participantLabel: "@taylor", content: "Signed.", createdAt: at(1), status: "done" };
+  const line = { id: "line", role: "system", content: "Accord folded: Ship or wait", createdAt: at(2), status: "done",
+    metadata: { appMessageSource: "app_accord_closed", accordClosed: { launchMessageId: "launch-1", title: "Ship or wait" } } };
+  const forged = { ...line, id: "forged", metadata: { appMessageSource: "app_accord_closed", accordClosed: { launchMessageId: 42 } } };
+  const conversation = {
+    id: "chat-accord", kind: "chat", title: "Accord", createdAt: at(0), updatedAt: at(1), findings: [],
+    metadata: { participants: [{ id: "taylor", handle: "taylor", kind: "claude-code", roleConfigId: "engineer" }], accordClosedLaunchIds: ["launch-1", 7] },
+    messages: [reply, line, forged]
+  } as unknown as Conversation;
+  const events = timelineEventsFromSnapshot(conversation);
+  assert.deepEqual(events.find((event) => event.id === "line")?.accordClosed, { launchMessageId: "launch-1", title: "Ship or wait" });
+  assert.equal(events.find((event) => event.id === "forged"), undefined, "a line that names no Accord is a plain system message: not shown");
+  const store = {
+    listConversations: async () => [{ id: "chat-accord", kind: "chat", title: "Accord", createdAt: at(0), updatedAt: at(1) }],
+    openConversation: async () => ({ conversation, messagePage: { hasMoreBefore: false } })
+  } as unknown as Parameters<typeof buildMobileChatList>[0];
+  const list = await buildMobileChatList(store, { roleLabels: new Map<string, string>(), machineNames: new Map<string, string>(), runningFromMessages: true });
+  assert.equal(list[0].snippet, "Signed.", "her view of the chat is not its news");
+  assert.equal(list[0].who, "taylor:");
+  assert.deepEqual(list[0].accordClosed, ["launch-1"], "the server's record of folded Accords, for the phone's pinned card");
+});
+
 test("a turn-finished note travels to the phone with the reply it leads to, and the chat list names its member", () => {
   const note = {
     id: "turn-finished-reply", role: "system" as const, content: "Done: the button fits.", status: "done" as const,

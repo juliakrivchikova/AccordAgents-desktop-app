@@ -19,6 +19,7 @@ import { APP_CONNECTOR_SIGN_IN_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL } from
 import { connectorSignInHost, isConnectorSignInRequest } from "./connectorSignIn";
 import type { HubCard } from "./hubOps";
 import { approvalInstallsScriptCode } from "./scripts";
+import { choiceOutcome } from "./usedCards";
 
 export type MobileControlCardKind = "permission" | "choice";
 
@@ -46,6 +47,8 @@ export interface MobileControlCard {
   waiting?: boolean;
   /** What was decided, once it has been. */
   outcome?: string;
+  /** When it was decided: the used card's line says it beside the outcome. */
+  decidedAt?: string;
   createdAt: string;
   /** Carried back unchanged with the answer: the native provider needs them. */
   codexDecisionId?: string;
@@ -232,6 +235,7 @@ export function controlCardFromApproval(conversationId: string, approval: ChatAp
 export function controlCardFromChoiceMessage(conversationId: string, message: ChatMessage): MobileControlCard | undefined {
   const choice = message.metadata?.pendingChoice;
   if (!choice) return undefined;
+  const outcome = choice.status === "pending" ? undefined : choiceOutcome({ ...choice, options: choice.options ?? [] });
   return {
     id: choice.id,
     kind: "choice",
@@ -246,13 +250,8 @@ export function controlCardFromChoiceMessage(conversationId: string, message: Ch
     allowsCustomAnswer: true,
     allowsCancel: true,
     status: choice.status === "pending" ? "pending" : "answered",
-    outcome: choice.status === "pending"
-      ? undefined
-      : choice.status === "cancelled"
-        ? choice.expiredAt ? "Expired" : "Cancelled"
-        : choice.options?.find((option) => option.id === choice.selectedOptionId)?.label
-          ?? choice.customAnswer
-          ?? "Answered",
+    // Worded as the desktop's one line says it (usedCards.ts).
+    ...(outcome ? { outcome: outcome.text, ...(outcome.at ? { decidedAt: outcome.at } : {}) } : {}),
     createdAt: message.createdAt,
     sourceMessageId: message.id,
     ...(choice.status === "pending" && choice.refusals?.length
@@ -337,11 +336,16 @@ export function controlCardFromHubCard(
     const base: MobileControlCard = { ...pending, id: card.cardId, ...(sourceMessageId ? { sourceMessageId } : { sourceMessageId: undefined }) };
     if (card.state === "pending") return base;
     const answer = card.answer ?? {};
-    const outcome = answer.cancel === true ? "Cancelled"
-      : base.options.find((option) => option.id === answer.selectedOptionId)?.label
-        ?? (typeof answer.customAnswer === "string" && answer.customAnswer ? answer.customAnswer : "Answered");
+    // Worded as the desktop's one line says it (usedCards.ts).
+    const outcome = choiceOutcome({
+      status: answer.cancel === true ? "cancelled" : "selected",
+      options: base.options,
+      ...(typeof answer.selectedOptionId === "string" ? { selectedOptionId: answer.selectedOptionId } : {}),
+      ...(typeof answer.customAnswer === "string" ? { customAnswer: answer.customAnswer } : {}),
+      ...(card.answeredAt ? { selectedAt: card.answeredAt, cancelledAt: card.answeredAt } : {})
+    });
     const { refusedAnswers: _refused, ...shown } = base;
-    return { ...shown, status: "answered", outcome };
+    return { ...shown, status: "answered", outcome: outcome?.text ?? "Answered", ...(outcome?.at ? { decidedAt: outcome.at } : {}) };
   }
   return undefined;
 }

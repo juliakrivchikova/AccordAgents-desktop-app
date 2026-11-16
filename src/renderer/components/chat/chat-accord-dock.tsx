@@ -1,8 +1,7 @@
 import { useContext, useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 import { Check, ChevronDown, X } from "lucide-react";
-import type { AccordLaunchCard } from "../../../shared/accordLaunchCard";
 import {
-  accordProgressNoteHead, accordProgressStages, accordProgressStatus, type AccordProgress, type AccordStage, type AccordStepState
+  accordProgressNoteHead, accordProgressStages, accordProgressStatus, type AccordStage, type AccordStepState
 } from "../../../shared/accordProgress";
 import type { ChatParticipant } from "../../../shared/types";
 import type { DockedAccord } from "./use-accord-progress";
@@ -11,25 +10,26 @@ import { Avatar, avatarForParticipant } from "../avatar/avatar";
 import { IconButton } from "../primitives";
 import { AccordMergeIcon } from "./accord-merge-icon";
 import {
-  accordDockClosed, accordDockFolded, accordDockVersion, setAccordDockChoice, subscribeAccordDock
+  accordDockClosing, accordDockFolded, accordDockVersion, setAccordDockClosing, setAccordDockFolded, subscribeAccordDock
 } from "./accord-dock-store";
 import { avatarForChatParticipant } from "./chat-avatars";
 
 // The chat's newest Accord, pinned above the composer (the User, 2026-11-08):
 // where it stands, with every member's draft and signature, the current
-// version's note and Open for the whole document. It stays until the User
-// closes it or a new Accord starts; its head folds it into one line. Both are
-// this device's own choice (accord-dock-store.ts).
+// version's note and Open for the whole document. Its head folds it into one
+// line (this device's own choice, accord-dock-store.ts). Its cross folds it
+// into a line at the end of the chat as it stands then, on every device (the
+// User, 2026-11-16): the line opens the same card there, and its cross folds
+// it back (ChatAccordClosedLine).
 
-/** Closed and folded, for the Accord the dock shows: a newer Accord in the
- *  chat opens again, unfolded. */
+/** Folded, for the Accord the dock shows, and whether its cross was just
+ *  pressed here: a newer Accord in the chat shows again, unfolded. */
 function useDockChoice(launchId: string) {
   useSyncExternalStore(subscribeAccordDock, accordDockVersion);
   return {
-    closed: accordDockClosed(launchId),
+    closing: accordDockClosing(launchId),
     folded: accordDockFolded(launchId),
-    close: () => setAccordDockChoice("closed", launchId, true),
-    setFolded: (folded: boolean) => setAccordDockChoice("folded", launchId, folded)
+    setFolded: (folded: boolean) => setAccordDockFolded(launchId, folded)
   };
 }
 
@@ -76,22 +76,31 @@ function Stage(props: { stage: AccordStage; participants?: ChatParticipant[] }):
   );
 }
 
-export function ChatAccordDock(props: {
-  conversationId: string;
-  launchId: string;
-  card: AccordLaunchCard;
-  progress: AccordProgress;
+/** The Accord's name: its document's, as the artifacts know it now, or as
+ *  its newest note gave it. */
+export function accordDisplayTitle(
+  artifacts: { byId: ReadonlyMap<string, { name: string }> } | undefined,
+  progress: Pick<DockedAccord["progress"], "artifactId" | "title">
+): string {
+  return artifacts?.byId.get(progress.artifactId)?.name ?? progress.title;
+}
+
+/** The Accord's card: its head (which folds it into one line), its stages
+ *  and the current version's note with Open. Pinned above the composer, and
+ *  opened from the line a closed Accord left in the chat. */
+export function ChatAccordCard(props: {
+  launch: DockedAccord;
   participants?: ChatParticipant[];
-}): JSX.Element | null {
-  const { progress, card } = props;
+  folded: boolean;
+  onToggleFold: () => void;
+  closeLabel: string;
+  onClose: () => void;
+}): JSX.Element {
+  const { progress, card } = props.launch;
   const artifacts = useContext(ArtifactsContext);
-  const choice = useDockChoice(props.launchId);
-  if (choice.closed) {
-    return null;
-  }
-  const title = artifacts?.byId.get(progress.artifactId)?.name ?? progress.title;
+  const title = accordDisplayTitle(artifacts, progress);
   const { version } = progress;
-  const folded = choice.folded;
+  const folded = props.folded;
   return (
     <section
       className={`chat-accord-dock${progress.reached ? " is-reached" : ""}${folded ? " is-folded" : ""}`}
@@ -104,7 +113,7 @@ export function ChatAccordDock(props: {
           className="chat-accord-dock-toggle"
           aria-expanded={!folded}
           title={folded ? "Show the Accord's steps" : "Fold into one line"}
-          onClick={() => choice.setFolded(!folded)}
+          onClick={props.onToggleFold}
         >
           <span className="chat-accord-dock-icon" aria-hidden="true">
             <AccordMergeIcon className="chat-accord-dock-glyph" />
@@ -121,7 +130,7 @@ export function ChatAccordDock(props: {
           <span className="chat-accord-progress-status">{accordProgressStatus(progress)}</span>
           <ChevronDown className="chat-accord-dock-chevron" size={16} aria-hidden="true" />
         </button>
-        <IconButton className="chat-accord-dock-close" size="xs" label="Close" icon={X} onClick={choice.close} />
+        <IconButton className="chat-accord-dock-close" size="xs" label={props.closeLabel} icon={X} onClick={props.onClose} />
       </div>
       {!folded && (
         <>
@@ -147,6 +156,44 @@ export function ChatAccordDock(props: {
         </>
       )}
     </section>
+  );
+}
+
+export function ChatAccordDock(props: {
+  conversationId: string;
+  launch: DockedAccord;
+  participants?: ChatParticipant[];
+}): JSX.Element | null {
+  const { launch } = props;
+  const choice = useDockChoice(launch.launchId);
+  const artifacts = useContext(ArtifactsContext);
+  if (choice.closing) {
+    return null;
+  }
+  async function close(): Promise<void> {
+    // Gone from above the composer at once; its line and the chat's record
+    // of it come with the chat.
+    setAccordDockClosing(launch.launchId, true);
+    try {
+      await window.consensus.closeAccordCard({
+        conversationId: props.conversationId,
+        launchMessageId: launch.launchId,
+        title: accordDisplayTitle(artifacts, launch.progress)
+      });
+    } catch {
+      // Not written: the card stays where it was, for another try.
+      setAccordDockClosing(launch.launchId, false);
+    }
+  }
+  return (
+    <ChatAccordCard
+      launch={launch}
+      participants={props.participants}
+      folded={choice.folded}
+      onToggleFold={() => choice.setFolded(!choice.folded)}
+      closeLabel="Close"
+      onClose={() => void close()}
+    />
   );
 }
 
@@ -188,9 +235,7 @@ export function ChatAccordDockSlot(props: {
       <ChatAccordDock
         key={props.docked.launchId}
         conversationId={props.conversationId}
-        launchId={props.docked.launchId}
-        card={props.docked.card}
-        progress={props.docked.progress}
+        launch={props.docked}
         participants={props.participants}
       />
     </div>

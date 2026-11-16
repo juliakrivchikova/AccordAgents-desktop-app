@@ -4,7 +4,7 @@ import {
   chatMessageVisualThreadRootId,
   chatParticipantRequestReplyRootMap
 } from "../../../shared/chatParticipantRequestThreads";
-import { accordFoldedMessageIds } from "../../../shared/accordProgress";
+import { accordFoldedMessageIds, isRepeatedAccordClosedLine } from "../../../shared/accordProgress";
 import { turnFinishedNoteOf } from "../../../shared/turnFinishedNoteSource";
 import type { ChatParticipantRequestBatch, Conversation } from "../../../shared/types";
 
@@ -15,7 +15,9 @@ const SHOW_CHAT_SYSTEM_MESSAGES = import.meta.env.VITE_ACCORD_AGENTS_SHOW_SYSTEM
  *  in the document (accordProgress.ts). */
 export function isChatMessageHiddenInChat(conversation: Pick<Conversation, "messages">, message: Conversation["messages"][number]): boolean {
   return chatMessageHiddenFromTimeline(conversation, message, { showSystemMessages: SHOW_CHAT_SYSTEM_MESSAGES }) ||
-    (message.role === "system" && accordFoldedMessageIds(conversation.messages).has(message.id));
+    (message.role === "system" && accordFoldedMessageIds(conversation.messages).has(message.id)) ||
+    // An Accord closed on two devices at once: its first line is the one.
+    (message.role === "system" && isRepeatedAccordClosedLine(conversation.messages, message));
 }
 
 /** A message drawn as a row of the chat's main timeline: shown, and not a thread reply. */

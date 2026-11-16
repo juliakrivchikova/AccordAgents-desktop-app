@@ -212,6 +212,26 @@ test("a card on the User's server is the phone's card: answerable while it waits
   assert.equal(controlCardFromHubCard(hubCard({ cardKind: "mention", card: {} })), undefined, "a card the phone cannot show is not shown");
 });
 
+test("a used choice tells the phone what ended it and when, in the desktop line's words (the User, 2026-11-16)", () => {
+  const message = choiceMessage("read");
+  const choice = message.metadata!.pendingChoice!;
+  const at = "2026-11-16T17:14:00.000Z";
+  const withChoice = (next: Partial<typeof choice>) => ({ ...message, metadata: { pendingChoice: { ...choice, ...next } } }) as ChatMessage;
+  const picked = controlCardFromChoiceMessage("conversation-1", withChoice({ status: "selected", selectedOptionId: "both", selectedAt: at }));
+  assert.deepEqual([picked?.status, picked?.outcome, picked?.decidedAt], ["answered", "Searchable and readable", at]);
+  const own = controlCardFromChoiceMessage("conversation-1", withChoice({ status: "selected", selectedOptionId: "__custom__", customAnswer: " Neither\n of them ", selectedAt: at }));
+  assert.equal(own?.outcome, "Neither of them", "her own words, on one line");
+  const cancelled = controlCardFromChoiceMessage("conversation-1", withChoice({ status: "cancelled", cancelledAt: at }));
+  assert.deepEqual([cancelled?.outcome, cancelled?.decidedAt], ["Cancelled", at]);
+  const expired = controlCardFromChoiceMessage("conversation-1", withChoice({ status: "cancelled", cancelledAt: at, expiredAt: at }));
+  assert.equal(expired?.outcome, "Expired");
+  const asking = controlCardFromChoiceMessage("conversation-1", withChoice({ status: "pending" }));
+  assert.deepEqual([asking?.outcome, asking?.decidedAt], [undefined, undefined]);
+  const onServer = controlCardFromHubCard(hubCard({ cardId: choice.id, cardKind: "choice", card: { choice, sourceMessageId: message.id }, state: "answered",
+    answer: { selectedOptionId: "both" }, answeredAt: at }));
+  assert.equal(onServer?.decidedAt, at, "answered on the server: when it was answered");
+});
+
 test("a permission card asked again after its device refused an answer tells the phone that sent it why", () => {
   const approval = { id: "approval-2", conversationId: "conversation-1", requesterParticipantId: "drew-id", requesterHandle: "drew", requesterRoleConfigId: "software-engineer",
     toolName: "Bash", capability: "shell", status: "pending", request: { command: "ls" }, summary: "Use Bash",

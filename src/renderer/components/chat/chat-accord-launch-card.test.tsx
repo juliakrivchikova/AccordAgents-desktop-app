@@ -5,11 +5,13 @@ import { act, create, type ReactTestInstance } from "react-test-renderer";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ChatMessage, ChatParticipant, Conversation } from "../../../shared/types";
 import { accordLaunchTitleAndBody, parseAccordLaunchCard } from "../../../shared/accordLaunchCard";
-import { accordProgressFromNotes } from "../../../shared/accordProgress";
+import { ACCORD_CLOSED_SOURCE, accordLineOutcome, accordOfMessages, accordProgressFromNotes } from "../../../shared/accordProgress";
 import { ArtifactsContext } from "../artifacts/artifacts-context";
 import { accordLaunchCardForMessage } from "./chat-accord-launch-card";
 import { ChatAccordDockSlot } from "./chat-accord-dock";
-import { resetAccordDockStoreForTests } from "./accord-dock-store";
+import { AccordLinesContext, ChatAccordClosedLine } from "./chat-accord-closed-line";
+import { accordDockClosing, resetAccordDockStoreForTests, setAccordDockClosing } from "./accord-dock-store";
+import { useDockedAccord } from "./use-accord-progress";
 import { chatTopLevelMessages } from "./chat-thread-data";
 import { ChatMessageItem } from "./chat-message-item";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
@@ -174,7 +176,27 @@ test("a launch the server refused says why under the card, as her other messages
   assert.match(textOf(row), /Not taken by your server: This chat is archived\./);
 });
 
-test("the newest Accord with a document is pinned above the composer: stages, note and Open; its notes leave the timeline", () => {
+/** A page's storage and window for one test, put back after it. */
+function stubPage(t: test.TestContext, window?: Record<string, unknown>): Map<string, string> {
+  const stored = new Map<string, string>();
+  const before = { storage: Object.getOwnPropertyDescriptor(globalThis, "localStorage"), window: Object.getOwnPropertyDescriptor(globalThis, "window") };
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => { stored.set(key, value); } }
+  });
+  if (window) Object.defineProperty(globalThis, "window", { configurable: true, value: { setTimeout, clearTimeout, ...window } });
+  resetAccordDockStoreForTests();
+  t.after(() => {
+    for (const [name, descriptor] of [["localStorage", before.storage], ["window", before.window]] as const) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete (globalThis as Record<string, unknown>)[name];
+    }
+    resetAccordDockStoreForTests();
+  });
+  return stored;
+}
+
+test("the newest Accord with a document is pinned above the composer: stages, note and Open; its notes leave the timeline", async (t) => {
   const participants = [
     { id: "p-taylor", handle: "taylor", kind: "claude-code" },
     { id: "p-drew", handle: "drew", kind: "codex-cli" }
@@ -207,13 +229,14 @@ test("the newest Accord with a document is pinned above the composer: stages, no
   const progress = accordProgressFromNotes("launch-1", card, conversation.messages.map((message) => ({
     content: message.content, accordLaunchMessageId: message.metadata?.accordLaunchMessageId
   })))!;
-  // The test runs without a page: a storage of its own for the dock's choices.
-  const stored = new Map<string, string>();
-  Object.defineProperty(globalThis, "localStorage", {
-    configurable: true,
-    value: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => { stored.set(key, value); } }
-  });
-  resetAccordDockStoreForTests();
+  // The test runs without a page: a storage of its own for the dock's choices,
+  // and the app's bridge for the cross.
+  const closes: unknown[] = [];
+  let failClose = true;
+  stubPage(t, { consensus: { closeAccordCard: async (request: unknown) => {
+    closes.push(request);
+    if (failClose) throw new Error("not written");
+  } } });
   const opened: string[] = [];
   let renderer: ReturnType<typeof create> | undefined;
   const render = () => create(
@@ -245,12 +268,20 @@ test("the newest Accord with a document is pinned above the composer: stages, no
   act(() => { renderer!.unmount(); renderer = render(); });
   assert.equal(byClass("chat-accord-progress-stage").length, 0, "still folded when shown again");
 
-  // Closed, it stays closed for this Accord; a newer one in the chat shows.
-  const close = root().find((node) => node.props?.label === "Close" && typeof node.props?.onClick === "function");
-  act(() => { close.props.onClick(); });
+  // Its cross folds it into a line at the end of the chat, on every device
+  // (the User, 2026-11-16): written through the app, gone from above the
+  // composer at once.
+  const close = () => root().find((node) => node.props?.label === "Close" && typeof node.props?.onClick === "function");
+  await act(async () => { close().props.onClick(); });
+  assert.equal(byClass("chat-accord-dock").length, 1, "not written: the card stays, for another try");
+  failClose = false;
+  await act(async () => { close().props.onClick(); });
   assert.equal(byClass("chat-accord-dock").length, 0);
+  assert.deepEqual(closes.at(-1), { conversationId: "chat-1", launchMessageId: "launch-1", title: "Ship or wait" });
   assert.deepEqual(chatTopLevelMessages({ ...conversation, messages: [...conversation.messages] }).map((message) => message.id),
     ["launch-1", "old"], "closed: the notes stay out of the chat, in the document (the User, 2026-11-08)");
+  act(() => { renderer!.unmount(); renderer = render(); });
+  assert.equal(byClass("chat-accord-dock").length, 0, "still a line when shown again");
   act(() => {
     renderer!.unmount();
     renderer = create(
@@ -261,4 +292,119 @@ test("the newest Accord with a document is pinned above the composer: stages, no
   });
   assert.equal(byClass("chat-accord-dock").length, 1, "a new Accord opens again");
   assert.equal(byClass("chat-accord-progress-stage").length, 4, "unfolded");
+});
+
+test("a closed Accord is one line at the end of the chat: its title and where it stands; a click opens its card there and the cross folds it back", () => {
+  const participants = [
+    { id: "p-taylor", handle: "taylor", roleConfigId: "software-engineer", kind: "claude-code" },
+    { id: "p-drew", handle: "drew", roleConfigId: "software-engineer", kind: "codex-cli" }
+  ] as unknown as ChatParticipant[];
+  const ref = "[Ship or wait](#artifact:art-1)";
+  const note = (id: string, content: string) => ({
+    id, role: "system", content, createdAt: NOW, status: "done",
+    metadata: { appMessageSource: "app_artifact_note", accordLaunchMessageId: "launch-1", accordLaunch: { facilitator: "taylor", members: ["drew"] } }
+  });
+  const line = (id: string) => ({
+    id, role: "system", content: "Accord folded: Ship or wait", createdAt: NOW, status: "done",
+    metadata: { appMessageSource: ACCORD_CLOSED_SOURCE, accordClosed: { launchMessageId: "launch-1", title: "Ship or wait" } }
+  });
+  const messages = [
+    note("n1", `@taylor created draft collection ${ref} · Drafts 0/2`),
+    note("n2", `@taylor published ${ref} · v1 — Wait for the fix.`),
+    note("n3", `@taylor signed ${ref} v1 (1/2 signed)`),
+    { id: "reply", role: "participant", participantId: "p-drew", participantLabel: "@drew", content: "Signed.", createdAt: NOW, status: "done" },
+    line("line-1"),
+    // Closed on two devices at once: the first line is the one.
+    line("line-2")
+  ] as unknown as ChatMessage[];
+  const conversation = { id: "chat-1", messages } as unknown as Conversation;
+  assert.deepEqual(chatTopLevelMessages(conversation).map((message) => message.id), ["reply", "line-1"],
+    "the line is on the timeline, once; the notes stay out");
+  const accords = { accordOf: (launchId: string) => accordOfMessages(messages, launchId), participants };
+  let renderer: ReturnType<typeof create> | undefined;
+  const render = (message: ChatMessage, value = accords) => create(
+    <TooltipProvider>
+      <ArtifactsContext.Provider value={{ byId: new Map(), openArtifact: () => undefined }}>
+        <AccordLinesContext.Provider value={value}>
+          <ChatAccordClosedLine message={message} />
+        </AccordLinesContext.Provider>
+      </ArtifactsContext.Provider>
+    </TooltipProvider>
+  );
+  act(() => { renderer = render(messages[4]!); });
+  const root = () => renderer!.root;
+  const byClass = (className: string) => root().findAll((node) => typeof node.props?.className === "string" && node.props.className.split(" ").includes(className));
+  const row = () => root().find((node) => node.type === "button" && node.props?.className === "chat-card-row");
+  assert.equal(textOf(byClass("chat-card-row-preview")[0]!), "Ship or wait");
+  assert.equal(textOf(byClass("chat-card-row-outcome")[0]!), "v1 · 1/2 signed");
+  assert.equal(row().props["aria-expanded"], false);
+  assert.equal(byClass("chat-accord-progress-stage").length, 0, "folded: one line");
+  act(() => { row().props.onClick(); });
+  assert.equal(byClass("chat-card-row").length, 0);
+  assert.equal(byClass("chat-accord-progress-stage").length, 4, "opened: the Accord's card, in the chat");
+  assert.equal(textOf(byClass("chat-accord-progress-note-body")[0]!), "Wait for the fix.");
+  const fold = root().find((node) => node.props?.label === "Fold" && typeof node.props?.onClick === "function");
+  act(() => { fold.props.onClick(); });
+  assert.equal(byClass("chat-accord-progress-stage").length, 0, "its cross folds it back into the line");
+  act(() => { row().props.onClick(); });
+  const head = root().find((node) => node.type === "button" && node.props?.className === "chat-accord-dock-toggle");
+  act(() => { head.props.onClick(); });
+  assert.equal(byClass("chat-card-row").length, 1, "and so does its head");
+  // Reached: the line says so.
+  const reached = [...messages.slice(0, 3), note("n4", `@drew signed ${ref} v1 (2/2 signed)`), messages[4]!] as unknown as ChatMessage[];
+  act(() => { renderer!.unmount(); renderer = render(messages[4]!, { accordOf: (launchId: string) => accordOfMessages(reached, launchId), participants }); });
+  assert.equal(textOf(byClass("chat-card-row-outcome")[0]!), "Accord reached · v1");
+  // Its document's notes not loaded: the line names it and opens nothing.
+  act(() => { renderer!.unmount(); renderer = render(messages[4]!, { accordOf: () => undefined, participants }); });
+  assert.equal(textOf(byClass("chat-card-row-preview")[0]!), "Ship or wait");
+  assert.equal(root().findAll((node) => node.type === "button").length, 0);
+});
+
+test("the pinned card follows the chat's record of its lines: one written on another device takes it, also once out of the loaded messages; a refused one gives it back", (t) => {
+  stubPage(t);
+  const ref = "[Ship or wait](#artifact:art-1)";
+  const note = (id: string, content: string) => ({
+    id, role: "system", content, createdAt: NOW, status: "done",
+    metadata: { appMessageSource: "app_artifact_note", accordLaunchMessageId: "launch-1", accordLaunch: { facilitator: "taylor", members: ["drew"] } }
+  }) as unknown as ChatMessage;
+  const notes = [note("n1", `@taylor created draft collection ${ref} · Drafts 0/2`), note("n2", `@taylor published ${ref} · v1`),
+    note("n3", `@taylor signed ${ref} v1 (1/2 signed)`)];
+  const line = (id: string, extra: Record<string, unknown> = {}) => ({
+    id, role: "system", content: "Accord folded: Ship or wait", createdAt: NOW, status: "done",
+    metadata: { appMessageSource: ACCORD_CLOSED_SOURCE, accordClosed: { launchMessageId: "launch-1", title: "Ship or wait" }, ...extra }
+  }) as unknown as ChatMessage;
+  const participants = [{ id: "p-taylor", handle: "taylor", roleConfigId: "software-engineer", kind: "claude-code" }] as unknown as ChatParticipant[];
+  let seen: ReturnType<typeof useDockedAccord> | undefined;
+  function Harness(props: { messages: ChatMessage[]; closed?: string[] }): JSX.Element {
+    seen = useDockedAccord(props.messages, props.messages.filter((message) => message.role === "system").map((message) => message.id).join(","), participants, props.closed);
+    return <ChatAccordDockSlot docked={seen.docked} conversationId="chat-1" participants={participants} />;
+  }
+  let renderer: ReturnType<typeof create> | undefined;
+  const show = (messages: ChatMessage[], closed?: string[]) => act(() => {
+    const tree = <TooltipProvider><Harness messages={messages} closed={closed} /></TooltipProvider>;
+    if (renderer) renderer.update(tree);
+    else renderer = create(tree);
+  });
+  const pinned = () => renderer!.root.findAll((node) => node.props?.["data-testid"] === "chat-accord-dock").length;
+  show(notes);
+  assert.equal(pinned(), 1, "pinned");
+  show([...notes, line("from-phone")]);
+  assert.equal(pinned(), 0, "a line her phone wrote takes it from above the composer");
+  assert.equal(seen?.accordLines.accordOf("launch-1")?.progress.signatures.given, 1);
+  show([...notes, note("n4", `@drew signed ${ref} v1 (2/2 signed)`), line("from-phone")]);
+  assert.equal(accordLineOutcome(seen!.accordLines.accordOf("launch-1")!.progress), "Accord reached · v1", "the line moves on with its document");
+  // Paged out: the line is not loaded, the chat's record (worked out over
+  // the whole chat) has it.
+  show(notes, ["launch-1"]);
+  assert.equal(pinned(), 0, "still a line once its line is out of the loaded messages");
+  // Her server refused the only line, and the record lost it: pinned again.
+  show([...notes, line("refused", { serverRejected: "This chat has no such Accord." })], []);
+  assert.equal(pinned(), 1);
+  assert.deepEqual(chatTopLevelMessages({ messages: [...notes, line("refused", { serverRejected: "x" })] } as unknown as Conversation).map((message) => message.id), [],
+    "a refused line draws nothing");
+  // Her cross here takes it at once; the record coming clears that.
+  act(() => { setAccordDockClosing("launch-1", true); });
+  assert.equal(pinned(), 0);
+  show(notes, ["launch-1"]);
+  assert.equal(accordDockClosing("launch-1"), false, "the chat's record has it now");
 });

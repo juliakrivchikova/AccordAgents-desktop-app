@@ -10,6 +10,7 @@ import { createDeviceIdentity } from "../main/services/deviceIdentity";
 import { signHubRequest, type HubSigningIdentity } from "../main/services/hubAuth";
 import { StorageService } from "../main/services/storage";
 import { hubTurnRunId, type HubChatPage, type HubFeedResponse, type HubOp, type HubOpsResponse } from "../shared/hubOps";
+import { accordClosedLine } from "../shared/accordProgress";
 import type { ChatMessage } from "../shared/types";
 import { HubOps } from "./hubOps";
 import { HubServer } from "./hubServer";
@@ -947,6 +948,32 @@ test("her \"Allow for this chat\" gives a machine's member leave to ask once: ta
   assert.equal(await leave(), "ask", "she takes it back");
   await raise();
   assert.equal(await leave(), "ask", "the same answer does not give it again");
+});
+
+test("a closed Accord's line comes only from the User's devices, once per Accord of the chat, and keeps the chat's time", async (t) => {
+  // Her view of the chat (the User, 2026-11-16): a machine cannot fold her
+  // Accord, nor can any device name an Accord the chat does not have.
+  const h = await hub(t);
+  const chat = id("chat");
+  await h.write(h.owner, createChat(chat));
+  const write = (device: typeof h.owner, message: ChatMessage) =>
+    h.write(device, { opId: id("op"), kind: "message.create", conversationId: chat, message });
+  await write(h.owner, userMessage("launch-1", "@taylor /accord"));
+  await write(h.owner, { id: "note-2", role: "system", content: "@taylor created draft collection [Other](#artifact:a-2) · Drafts 0/2", status: "done",
+    createdAt: new Date().toISOString(), metadata: { appMessageSource: "app_artifact_note", accordLaunchMessageId: "launch-2" } } as ChatMessage);
+  const before = await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`);
+  const line = (messageId: string, launchMessageId: string) =>
+    accordClosedLine({ id: messageId, launchMessageId, title: "Ship or wait", createdAt: new Date().toISOString() }) as ChatMessage;
+  assert.equal((await write(h.machine, line("l-box", "launch-1"))).body.results[0].status, "rejected", "a machine does not fold her Accord");
+  assert.equal((await write(h.owner, line("l-none", "launch-9"))).body.results[0].status, "rejected", "no such Accord in this chat");
+  assert.equal((await write(h.owner, line("l-long", "x".repeat(201)))).body.results[0].status, "rejected");
+  assert.equal((await write(h.owner, line("l-desk", "launch-1"))).body.results[0].status, "accepted", "her computer, for an Accord launched here");
+  assert.equal((await write(h.phone, line("l-again", "launch-1"))).body.results[0].status, "rejected", "once per Accord");
+  assert.equal((await write(h.phone, line("l-phone", "launch-2"))).body.results[0].status, "accepted", "her phone, for an Accord known by its notes");
+  const page = await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`);
+  assert.deepEqual(page.body.messages.map((message) => message.id), ["launch-1", "note-2", "l-desk", "l-phone"]);
+  assert.equal(page.body.conversation.updatedAt, before.body.conversation.updatedAt, "the chat keeps its place in her list");
+  assert.deepEqual((await h.storage.getConversation(chat))?.metadata.accordClosedLaunchIds, ["launch-1", "launch-2"], "the server's own record, for the phone's list");
 });
 
 test("a note that a member finished answering is written only by the device the member runs on", async (t) => {

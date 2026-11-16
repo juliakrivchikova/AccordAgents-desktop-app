@@ -655,11 +655,6 @@ img.chat-draft-plugin-token-icon {
   box-shadow: 0 1px 2px color-mix(in srgb, var(--shadow-color) 10%, transparent);
 }
 
-.chat-choice-card.answered {
-  border-color: var(--app-border);
-  background: var(--app-surface);
-}
-
 .chat-choice-title-block h3,
 .chat-choice-option-title strong,
 .chat-choice-actions strong,
@@ -671,22 +666,9 @@ img.chat-draft-plugin-token-icon {
   color: var(--app-accent);
 }
 
-.chat-choice-card.answered .chat-choice-kicker {
-  color: var(--app-accent);
-}
-
-.chat-choice-card.answered .chat-choice-text-panel small {
-  color: var(--app-muted);
-}
-
 .chat-choice-option-title small {
   background: var(--app-accent-soft);
   color: var(--app-accent);
-}
-
-.chat-choice-option-title small.chat-choice-override-chip {
-  background: var(--app-surface-hover);
-  color: var(--app-muted);
 }
 
 .chat-choice-question,
@@ -709,39 +691,13 @@ img.chat-draft-plugin-token-icon {
   background: var(--app-surface-hover);
 }
 
-.chat-choice-card.answered .chat-choice-option {
+.chat-choice-custom-icon {
   background: transparent;
   color: var(--app-muted);
 }
 
-.chat-choice-card.answered .chat-choice-option.selected {
-  background: var(--app-surface-hover);
-  color: var(--app-text-strong);
-}
-
-.chat-choice-done {
-  color: var(--app-accent);
-}
-
-.chat-choice-card.answered .chat-choice-option:not(.selected) .chat-choice-option-title strong,
-.chat-choice-card.answered .chat-choice-option:not(.selected) .chat-choice-option-description {
-  color: var(--app-muted-subtle);
-}
-
-.chat-choice-custom-icon,
-.chat-choice-card.answered .chat-choice-option.selected .chat-choice-custom-icon {
-  background: transparent;
-  color: var(--app-muted);
-}
-
-.chat-choice-text-panel,
-.chat-choice-card.answered .chat-choice-text-panel {
+.chat-choice-text-panel {
   border-color: var(--app-border);
-  background: var(--app-surface-subtle);
-}
-
-.chat-choice-card.answered .chat-choice-text-panel.locked {
-  border-left-color: var(--app-border-strong);
   background: var(--app-surface-subtle);
 }
 
@@ -749,10 +705,6 @@ img.chat-draft-plugin-token-icon {
   border-color: var(--app-border);
   background: var(--app-surface);
   color: var(--app-text);
-}
-
-.chat-choice-card.answered .chat-choice-text-panel textarea {
-  border-color: var(--app-border);
 }
 
 .chat-choice-text-panel textarea:focus {

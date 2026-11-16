@@ -1696,6 +1696,9 @@ export interface ChatMessageMetadata {
   /** Who leads that Accord and who is in it, as its launch names them, so the
    *  Accord's card can be drawn when the launch itself is not loaded. */
   accordLaunch?: { facilitator: string; members: string[] };
+  /** On the line a closed Accord leaves in the chat (appMessageSource
+   *  ACCORD_CLOSED_SOURCE): the launch message of the Accord it folds. */
+  accordClosed?: { launchMessageId: string; title?: string };
   /** On a turn-finished note (appMessageSource TURN_FINISHED_NOTE_SOURCE): the
    *  member's reply it points at, which had other messages below it when the
    *  turn ended. */
@@ -2032,6 +2035,15 @@ export interface ToggleChatReactionRequest {
 export interface DismissTurnFinishedNoteRequest {
   conversationId: string;
   messageId: string;
+}
+
+/** Folds the pinned Accord card into a line at the end of the chat (its
+ *  cross), on every device. */
+export interface CloseAccordCardRequest {
+  conversationId: string;
+  launchMessageId: string;
+  /** The document's name, for the line's words. */
+  title?: string;
 }
 
 export type ChatImageMimeType = "image/png" | "image/jpeg" | "image/webp";
@@ -2601,6 +2613,10 @@ export interface ChatPromptSuggestionsUpdate {
 }
 
 export type ConversationMetadata = Record<string, unknown> & {
+  /** This device's own record of the Accords folded into the chat (a line
+   *  her server took), worked out from the whole chat, not the loaded page:
+   *  their cards are not pinned (accordProgress.ts). Never shared. */
+  accordClosedLaunchIds?: string[];
   machineRepository?: { sourcePath: string; paths: Record<string, string> };
   activationProviderKind?: ChatProviderKind;
   activeRunParticipantIdsByRunId?: Record<string, string>;
@@ -3418,6 +3434,7 @@ export interface AppBridge {
   readChatAttachment(request: ReadChatAttachmentRequest): Promise<ReadChatAttachmentResult>;
   toggleChatReaction(request: ToggleChatReactionRequest): Promise<Conversation | undefined>;
   dismissTurnFinishedNote(request: DismissTurnFinishedNoteRequest): Promise<void>;
+  closeAccordCard(request: CloseAccordCardRequest): Promise<void>;
   respondToChatMentions(request: RespondToChatMentionsRequest): Promise<StartReviewResult>;
   respondToChatChoice(request: RespondToChatChoiceRequest): Promise<StartReviewResult>;
   respondToChatAppToolApproval(request: RespondToChatAppToolApprovalRequest): Promise<Conversation | undefined>;

@@ -163,6 +163,7 @@ import type {
   StartChatAccordResult,
   StartReviewResult,
   ToggleChatReactionRequest,
+  CloseAccordCardRequest,
   DismissTurnFinishedNoteRequest,
   UpdateChatParticipantRuntimeRequest,
   RemoveChatParticipantRequest,
@@ -175,6 +176,7 @@ import { accordLaunchCardForMessage } from "../../shared/accordLaunchCard";
 import type { ArtifactNoteLinks } from "./artifactClient";
 import { turnFinishedNoteFor } from "../../shared/turnFinishedNote";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
+import { accordClosedLaunchId, accordClosedLaunchIds, accordClosedLine, recordClosedAccords } from "../../shared/accordProgress";
 import { isMachineCompactionLine } from "../../shared/machineLink";
 import { machineStopPendingText, machineWaitingText } from "../../shared/machineWaitingText";
 import { chatMessageVisualThreadRootId, participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
@@ -6400,8 +6402,9 @@ export class ChatService {
         return false;
       }
       // A turn-finished note is the User's pointer back to a reply members
-      // can read in full: not part of the chat they read.
-      if (turnFinishedNoteOf(message)) {
+      // can read in full, and a closed Accord's line is her own view of the
+      // chat: neither is part of the chat they read.
+      if (this.isUserOnlyMessage(message)) {
         return false;
       }
       // Read the exact canonical message by id. Snapshot visibility still applies, so a
@@ -6496,6 +6499,38 @@ export class ChatService {
       this.markChatMessageRemoved(conversation, request.messageId);
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
+    });
+  }
+
+  /** The User's cross on the pinned Accord card: the card folds into a line
+   *  at the end of the chat as it stands now (accordProgress.ts). The line
+   *  goes to her server like any message, so every device shows it in the
+   *  same place; one line per Accord. It is her view of the chat, not news:
+   *  the chat keeps its place in her list. */
+  async closeAccordCard(request: CloseAccordCardRequest): Promise<void> {
+    const launchMessageId = typeof request.launchMessageId === "string" ? request.launchMessageId.trim() : "";
+    if (!launchMessageId) {
+      return;
+    }
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      throw new Error("This chat is not here.");
+    }
+    await this.withChatMutation(conversation, async () => {
+      // Its line is here already; one her server refused does not count.
+      if (accordClosedLaunchIds(conversation.messages).includes(launchMessageId)) {
+        return;
+      }
+      conversation.messages.push(accordClosedLine({
+        id: randomUUID(),
+        launchMessageId,
+        title: typeof request.title === "string" ? request.title : undefined,
+        createdAt: new Date().toISOString()
+      }));
+      // Saved before the cross is answered (the save records the folded
+      // Accords): a save that fails gives the card back instead of leaving
+      // neither card nor line.
+      await this.saveConversation(conversation);
     });
   }
 
@@ -19054,9 +19089,16 @@ export class ChatService {
   }
 
   private conversationForMembers(conversation: Conversation): Conversation {
-    return conversation.messages.some((message) => turnFinishedNoteOf(message))
-      ? { ...conversation, messages: conversation.messages.filter((message) => !turnFinishedNoteOf(message)) }
+    return conversation.messages.some((message) => this.isUserOnlyMessage(message))
+      ? { ...conversation, messages: conversation.messages.filter((message) => !this.isUserOnlyMessage(message)) }
       : conversation;
+  }
+
+  /** A line of the User's own view of the chat, which members never read:
+   *  a turn-finished note (it points at a reply that is there in full) and a
+   *  closed Accord's line. */
+  private isUserOnlyMessage(message: ChatMessage): boolean {
+    return Boolean(turnFinishedNoteOf(message) || accordClosedLaunchId(message));
   }
 
   private historyFilePaths(
@@ -19083,8 +19125,9 @@ export class ChatService {
       ...participants.map((participant) => `- @${participant.handle}: ${this.roleLabelForParticipant(conversation, participant)} (${participant.kind})`),
       "",
       "## Messages",
-      // A turn-finished note only points back at a reply that is here in full.
-      ...conversation.messages.filter((message) => !turnFinishedNoteOf(message)).map((message) => [
+      // A turn-finished note only points back at a reply that is here in
+      // full; a closed Accord's line is the User's own view of the chat.
+      ...conversation.messages.filter((message) => !this.isUserOnlyMessage(message)).map((message) => [
         `### ${message.createdAt} ${this.messageAuthor(message)}`,
         `Message ID: ${message.id}`,
         message.metadata?.threadId ? `Thread ID: ${message.metadata.threadId}` : "",
@@ -21647,6 +21690,10 @@ export class ChatService {
   }
 
   private buildSnapshot(conversation: Conversation): ReturnType<typeof buildConversationSnapshot> {
+    // Worked out from the whole chat on every save, so no path that changes
+    // its messages (a merge, a reload from the server, the feed) can leave
+    // it behind them.
+    recordClosedAccords(conversation);
     return buildConversationSnapshot(conversation, this.snapshotRowStates.get(conversation.id));
   }
 
@@ -22850,7 +22897,8 @@ export class ChatService {
           for (const turn of effect.turns ?? []) this.markServerTurn(conversation, turn);
         }
         if (incoming.role === "participant") this.recordLastMessageByParticipant(conversation, next);
-        if (incoming.createdAt > conversation.updatedAt) conversation.updatedAt = incoming.createdAt;
+        // A closed Accord's line keeps the chat's place in her list.
+        if (incoming.createdAt > conversation.updatedAt && !accordClosedLaunchId(incoming)) conversation.updatedAt = incoming.createdAt;
         const missingCopy = incoming.metadata?.missingProjectCopy;
         if (!fromHere && !this.machineRuntime && incoming.role === "participant" && missingCopy
           && typeof missingCopy.machineId === "string" && typeof missingCopy.sourcePath === "string") {
@@ -23306,6 +23354,8 @@ export class ChatService {
       const message = conversation.messages.find((item) => item.id === messageId);
       if (!message || message.metadata?.serverRejected === reason) return;
       message.metadata = { ...(message.metadata ?? {}), serverRejected: reason };
+      // A closed Accord's line refused: the save records its card as pinned
+      // again, unless another device's line for it is here.
       await this.saveConversation(conversation, { emitChanges: false });
     });
   }

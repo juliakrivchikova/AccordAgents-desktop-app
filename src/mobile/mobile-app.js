@@ -1311,6 +1311,11 @@
         running: chat.running === true,
         ...(chat.pinned === true ? { pinned: true, ...(typeof chat.pinnedAt === "string" ? { pinnedAt: chat.pinnedAt } : {}) } : {}),
         ...(chat.waitingChoice === true ? { waitingChoice: true } : {}),
+        // The Accords folded into the chat, as her server records them over
+        // the whole chat: their cards are not pinned here.
+        ...(Array.isArray(chat.accordClosed) ? { accordClosed: chat.accordClosed.filter(function (id) {
+          return typeof id === "string" && id;
+        }).slice(0, 200) } : {}),
         participants: Array.isArray(chat.participants) ? chat.participants.filter(function (item) {
           return typeof item === "string" && item.trim();
         }).slice(0, 4) : [],
@@ -5216,6 +5221,9 @@
         // An artifact note filed under an Accord: the launch whose card shows it.
         ...(role === "system" && typeof event.accordLaunchMessageId === "string" && event.accordLaunchMessageId
           ? { accordLaunchMessageId: event.accordLaunchMessageId } : {}),
+        // The line a closed Accord left: the phone draws its card there.
+        ...(role === "system" && event.accordClosed && typeof event.accordClosed.launchMessageId === "string" && event.accordClosed.launchMessageId
+          ? { accordClosed: { launchMessageId: event.accordClosed.launchMessageId, ...(typeof event.accordClosed.title === "string" ? { title: event.accordClosed.title } : {}) } } : {}),
         // Who leads that Accord and who is in it: its card without its launch.
         ...(role === "system" && event.accordLaunch && typeof event.accordLaunch.facilitator === "string" && Array.isArray(event.accordLaunch.members)
           ? { accordLaunch: { facilitator: event.accordLaunch.facilitator, members: event.accordLaunch.members.filter(function (member) { return typeof member === "string"; }) } }
@@ -8991,6 +8999,7 @@
         ...(entry.urgentAlert ? { urgentAlert: entry.urgentAlert } : {}),
         ...(entry.accordLaunchMessageId ? { accordLaunchMessageId: entry.accordLaunchMessageId } : {}),
         ...(entry.accordLaunch ? { accordLaunch: entry.accordLaunch } : {}),
+        ...(entry.accordClosed ? { accordClosed: entry.accordClosed } : {}),
         // The desktop publishes the in-progress row the moment it accepts the
         // message, before routing has picked anyone, and can only guess a
         // handle from an explicit @mention in the text. With no mention there
@@ -9031,6 +9040,18 @@
     if (isHubPairing(loadPairing())) {
       rows = rows.concat(routedRows(activeId, messageEntries, timelineEntries, requestedStopRunIds));
     }
+    // A closed Accord's line this phone wrote, until the server's copy is here.
+    rows = rows.concat(entries.filter(function (entry) {
+      const message = entry.kind === "message.system" && entry.payload ? entry.payload.message : undefined;
+      return Boolean(message && message.metadata && message.metadata.accordClosed) && entry.status !== OUTBOX_REFUSED &&
+        !timelineEntries.some(function (stored) { return stored.messageId === entry.eventId; });
+    }).map(function (entry) {
+      const message = entry.payload.message;
+      return {
+        rowKey: "outbox\0" + entry.eventId, id: entry.eventId, conversationId: entry.conversationId, author: "system",
+        content: message.content, status: "Done", createdAt: entry.createdAt, accordClosed: message.metadata.accordClosed
+      };
+    }));
     rows = dedupeRenderRowsByKey(rows).sort(function (left, right) {
       return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
     });
@@ -9038,6 +9059,19 @@
     // launch, and those notes leave the timeline (accordProgress.ts).
     renderAccordProgress = accordProgressFor(rows);
     rows = rows.filter(function (row) { return !accordFoldedRow(row); });
+    // A line her server refused, and no other written: the card is pinned
+    // again (the refusal is in the send log).
+    const accordLineEntries = entries.filter(function (entry) {
+      const message = entry.kind === "message.system" && entry.payload ? entry.payload.message : undefined;
+      return Boolean(message && message.metadata && message.metadata.accordClosed);
+    });
+    for (const entry of accordLineEntries) {
+      const launchId = entry.payload.message.metadata.accordClosed.launchMessageId;
+      const allRefused = accordLineEntries.every(function (other) {
+        return other.payload.message.metadata.accordClosed.launchMessageId !== launchId || other.status === OUTBOX_REFUSED;
+      });
+      if (allRefused && !renderAccordProgress.lines.has(launchId)) setAccordDockChoice("closedIntoChat", activeId, launchId, false);
+    }
     // The desktop pins it above the chat's own composer only, not a thread's.
     renderAccordDock(activeId, openThreadRootId() ? null : renderAccordProgress.docked);
     renderStreamView(rows, connectionStatus);
@@ -9362,7 +9396,7 @@
       scaffolding: entry.scaffolding,
       content: entry.content,
       answered: answeredCardsForMessage(entry).map(function (card) {
-        return card.id + ":" + (card.outcome || "");
+        return card.id + ":" + (card.outcome || "") + ":" + (card.decidedAt || "");
       }),
       pending: pendingCardsForMessage(entry).map(controlCardSignature),
       attachments: Array.isArray(entry.attachments)
@@ -9376,7 +9410,8 @@
       stopRequested: entry.stopRequested,
       accordAvatars: accordLaunchSignatureOf(entry),
       noteProgress: noteProgressOf(entry),
-      urgentAlert: entry.urgentAlert ? JSON.stringify(entry.urgentAlert) : undefined
+      urgentAlert: entry.urgentAlert ? JSON.stringify(entry.urgentAlert) : undefined,
+      accordLine: accordLineSignatureOf(entry)
     });
   }
 
@@ -9898,19 +9933,22 @@
   function readAccordDockState() {
     try {
       const parsed = JSON.parse(localStorage.getItem(ACCORD_DOCK_STORAGE_KEY) || "{}");
+      // "closed" (the cross closed a card for good on this phone, before
+      // 2026-11-16) is no longer read: the cross folds it into the chat.
       return {
-        closed: parsed && typeof parsed.closed === "object" && parsed.closed ? parsed.closed : {},
+        closedIntoChat: parsed && typeof parsed.closedIntoChat === "object" && parsed.closedIntoChat ? parsed.closedIntoChat : {},
         folded: parsed && typeof parsed.folded === "object" && parsed.folded ? parsed.folded : {}
       };
     } catch (error) {
-      return { closed: {}, folded: {} };
+      return { closedIntoChat: {}, folded: {} };
     }
   }
 
   function setAccordDockChoice(key, conversationId, launchId, on) {
     const state = readAccordDockState();
     if (on) state[key][conversationId] = launchId;
-    else delete state[key][conversationId];
+    // Undone only for the Accord it was set for, not a newer one since.
+    else if (state[key][conversationId] === launchId) delete state[key][conversationId];
     try {
       localStorage.setItem(ACCORD_DOCK_STORAGE_KEY, JSON.stringify(state));
     } catch (error) {
@@ -9922,7 +9960,14 @@
     const dock = document.getElementById("accord-dock");
     if (!dock) return;
     const state = readAccordDockState();
-    const shown = docked && state.closed[conversationId] !== docked.launchId ? docked : null;
+    // Closed into the chat, on any device: the card is its line there now.
+    // Her server's list records it over the whole chat; a line among the
+    // rows here says so too; and her cross here, until the server has it.
+    const chat = docked ? loadChats().find(function (item) { return item.id === conversationId; }) : undefined;
+    const listed = Boolean(chat) && Array.isArray(chat.accordClosed) && chat.accordClosed.indexOf(docked.launchId) >= 0;
+    const closedHere = Boolean(docked) && state.closedIntoChat[conversationId] === docked.launchId;
+    const closedLine = Boolean(docked) && Boolean(renderAccordProgress) && renderAccordProgress.lines.has(docked.launchId);
+    const shown = docked && !closedHere && !closedLine && !listed ? docked : null;
     const folded = Boolean(shown) && state.folded[conversationId] === shown.launchId;
     const signature = shown ? JSON.stringify([conversationId, shown.launchId, shown.progress, folded, accordLaunchAvatarSignature({ conversationId: conversationId }, shown.card)]) : "";
     if (dock.dataset.signature === signature) return;
@@ -9935,7 +9980,10 @@
     });
   }
 
-  function accordDockElement(conversationId, docked, folded) {
+  /** The Accord's card. Pinned above the composer by default; `inline` is the
+   *  card a closed Accord's line opens in the chat, whose head and cross fold
+   *  it back into the line. */
+  function accordDockElement(conversationId, docked, folded, inline) {
     const shared = mobileSharedRules();
     const progress = docked.progress;
     const entry = { conversationId: conversationId };
@@ -9949,6 +9997,7 @@
     toggle.className = "accord-dock-toggle";
     toggle.setAttribute("aria-expanded", String(!folded));
     toggle.addEventListener("click", function () {
+      if (inline) return inline.fold();
       setAccordDockChoice("folded", conversationId, docked.launchId, !folded);
       renderAccordDock(conversationId, docked);
     });
@@ -9979,11 +10028,11 @@
     const close = document.createElement("button");
     close.type = "button";
     close.className = "accord-dock-close";
-    close.setAttribute("aria-label", "Close");
+    close.setAttribute("aria-label", inline ? "Fold" : "Close");
     close.append(lineIcon(["M18 6 6 18", "m6 6 12 12"], 16));
     close.addEventListener("click", function () {
-      setAccordDockChoice("closed", conversationId, docked.launchId, true);
-      renderAccordDock(conversationId, docked);
+      if (inline) return inline.fold();
+      void closeAccordIntoChat(conversationId, docked);
     });
     head.append(toggle, close);
     card.append(head);
@@ -10358,6 +10407,11 @@
       item.append(urgentAlertCardElement(entry));
       return item;
     }
+    if (accordClosedLaunchOf(entry)) {
+      item.dataset.accordLine = "1";
+      item.append(accordLineElement(entry));
+      return item;
+    }
     const artifactNote = artifactNoteCardForEntry(entry);
     if (artifactNote) {
       item.dataset.artifactNote = "1";
@@ -10465,7 +10519,14 @@
 
   function accordProgressFor(rows) {
     const shared = mobileSharedRules();
-    const empty = { folded: new Set(), docked: null };
+    // The lines closed Accords left in the chat: the first for each Accord,
+    // by launch (one closed on two devices at once draws one line).
+    const lines = new Map();
+    for (const row of rows) {
+      const launchId = accordClosedLaunchOf(row);
+      if (launchId && !lines.has(launchId)) lines.set(launchId, row.rowKey || row.id);
+    }
+    const empty = { folded: new Set(), docked: null, lines: lines, accordOf: function () { return null; } };
     if (!shared || typeof shared.dockedAccordFrom !== "function" || typeof shared.accordFoldedNoteKeys !== "function") return empty;
     const notes = rows.filter(function (row) {
       return row.author === "system" && Boolean(artifactNoteCardForEntry(row));
@@ -10482,13 +10543,131 @@
       if (id) launches.push({ id: id, card: accordLaunchCardForEntry(row), createdAt: row.createdAt });
     }
     const docked = shared.dockedAccordFrom(launches, notes);
+    const known = new Map();
     // Every Accord's document notes leave the chat: pinned, closed or older,
     // its steps are on its card or in its document (the User, 2026-11-08).
-    return { folded: shared.accordFoldedNoteKeys(notes), docked: docked };
+    return {
+      folded: shared.accordFoldedNoteKeys(notes), docked: docked, lines: lines,
+      accordOf: function (launchId) {
+        if (typeof shared.accordOfLaunch !== "function") return null;
+        if (!known.has(launchId)) known.set(launchId, shared.accordOfLaunch(launches, notes, launchId) || null);
+        return known.get(launchId);
+      }
+    };
   }
 
   function accordFoldedRow(row) {
-    return Boolean(renderAccordProgress) && renderAccordProgress.folded.has(row.rowKey || row.id);
+    if (!renderAccordProgress) return false;
+    if (renderAccordProgress.folded.has(row.rowKey || row.id)) return true;
+    // A second line for the same Accord draws nothing.
+    const launchId = accordClosedLaunchOf(row);
+    return Boolean(launchId) && renderAccordProgress.lines.get(launchId) !== (row.rowKey || row.id);
+  }
+
+  function accordClosedLaunchOf(row) {
+    const closed = row && row.author === "system" ? row.accordClosed : undefined;
+    return closed && typeof closed.launchMessageId === "string" && closed.launchMessageId ? closed.launchMessageId : undefined;
+  }
+
+  // Lines opened into the Accord's card, by row: this phone's own, as an
+  // urgent alert's are.
+  const expandedAccordLines = new Set();
+
+  /**
+   * The line a closed Accord left at the end of the chat as it stood when the
+   * User pressed the cross on its card (the User, 2026-11-16): one line like
+   * a folded urgent alert -- the document's name, then where it stands. A tap
+   * opens the very card there; its head or its cross folds it back.
+   */
+  function accordLineElement(entry) {
+    const shared = mobileSharedRules();
+    const launchId = accordClosedLaunchOf(entry);
+    // One line per Accord: kept open by it, also when the server's copy takes
+    // the place of this phone's own.
+    const key = entry.conversationId + "\0" + launchId;
+    const accord = launchId && renderAccordProgress ? renderAccordProgress.accordOf(launchId) : null;
+    const wrap = document.createElement("div");
+    wrap.className = "accord-line";
+    const lineIconElement = function () {
+      const icon = document.createElement("span");
+      icon.setAttribute("aria-hidden", "true");
+      icon.append(accordIcon(15));
+      return icon;
+    };
+    if (!accord) {
+      // Its document's notes are not on this phone: the line says which
+      // Accord it was, and opens nothing.
+      const title = entry.accordClosed && typeof entry.accordClosed.title === "string" ? entry.accordClosed.title : "";
+      wrap.append(cardRowElement("div", lineIconElement(), title || "Accord", "Accord", false));
+      return wrap;
+    }
+    const fold = function (open) {
+      return function () {
+        if (open) expandedAccordLines.add(key);
+        else expandedAccordLines.delete(key);
+        const item = wrap.closest("li.message-row");
+        const next = accordLineElement(entry);
+        wrap.replaceWith(next);
+        if (item) item.dataset.rowSignature = messageRowSignature(entry);
+        const target = next.querySelector(open ? ".accord-dock-toggle" : ".card-row");
+        if (target) target.focus({ preventScroll: true });
+        // A render already under way may still draw the row as it was (the
+        // server's copy replacing this phone's): the next one draws it as
+        // she left it.
+        void render("synced");
+      };
+    };
+    if (expandedAccordLines.has(key)) {
+      wrap.classList.add("is-open");
+      wrap.append(accordDockElement(entry.conversationId, accord, false, { fold: fold(false) }));
+      return wrap;
+    }
+    const row = cardRowElement("button", lineIconElement(), accord.progress.title,
+      typeof shared.accordLineOutcome === "function" ? shared.accordLineOutcome(accord.progress) : shared.accordProgressStatus(accord.progress), true);
+    // Read out as what it is, then what it shows.
+    const kind = document.createElement("span");
+    kind.className = "sr-only";
+    kind.textContent = "Accord: ";
+    row.insertBefore(kind, row.querySelector(".card-row-preview"));
+    row.addEventListener("click", fold(true));
+    wrap.append(row);
+    return wrap;
+  }
+
+  function accordLineSignatureOf(entry) {
+    const launchId = accordClosedLaunchOf(entry);
+    if (!launchId) return undefined;
+    const accord = renderAccordProgress ? renderAccordProgress.accordOf(launchId) : null;
+    return JSON.stringify([launchId, expandedAccordLines.has(entry.conversationId + "\0" + launchId), accord ? accord.progress : null,
+      accord ? accordLaunchAvatarSignature({ conversationId: entry.conversationId }, accord.card) : null]);
+  }
+
+  /** The pinned card's cross (the User, 2026-11-16): the card folds into a
+   *  line at the end of the chat as it stands now, written to the server like
+   *  any message, so every device shows it in the same place. It leaves the
+   *  composer at once; the line comes with the chat. */
+  async function closeAccordIntoChat(conversationId, docked) {
+    const shared = mobileSharedRules();
+    if (renderAccordProgress && renderAccordProgress.lines.has(docked.launchId)) return;
+    if (!shared || typeof shared.accordClosedLine !== "function") return;
+    const eventId = createEventId();
+    const createdAt = nowIso();
+    setAccordDockChoice("closedIntoChat", conversationId, docked.launchId, true);
+    renderAccordDock(conversationId, docked);
+    try {
+      await createOutboxEvent({
+        eventId: eventId, conversationId: conversationId, kind: "message.system", createdAt: createdAt,
+        payload: { message: shared.accordClosedLine({ id: eventId, launchMessageId: docked.launchId, title: docked.progress.title, createdAt: createdAt }) }
+      }).then(persistOutboundEvent);
+    } catch (error) {
+      // Not queued: the card stays where it was, for another try.
+      setAccordDockChoice("closedIntoChat", conversationId, docked.launchId, false);
+      renderAccordDock(conversationId, docked);
+      return;
+    }
+    await render("synced");
+    // Where every other write goes, at once.
+    await sendNow();
   }
 
 
@@ -10539,11 +10718,52 @@
     });
   }
 
-  function answeredCardElement(card) {
-    return compactCardElement(card, card.outcome || "", "control-card-answered", "Answered: ");
+  // lucide list-checks: the used choice's line, as on the desktop.
+  const CHOICE_ROW_PATHS = ["m3 17 2 2 4-4", "m3 7 2 2 4-4", "M13 6h8", "M13 12h8", "M13 18h8"];
+
+  /** A used card's one line, like a folded urgent alert: its icon, what it
+   *  was about, then how it ended; a chevron when it opens. */
+  function cardRowElement(tag, icon, previewText, outcomeText, opens) {
+    const row = document.createElement(tag);
+    row.className = "card-row";
+    if (tag === "button") {
+      row.type = "button";
+      row.setAttribute("aria-expanded", "false");
+    }
+    icon.classList.add("card-row-icon");
+    const preview = document.createElement("span");
+    preview.className = "card-row-preview";
+    preview.textContent = previewText;
+    const end = document.createElement("span");
+    end.className = "card-row-outcome";
+    end.textContent = outcomeText;
+    row.append(icon, preview, end);
+    if (opens) {
+      const chevron = lineIcon(URGENT_ALERT_CHEVRON_PATHS, 14);
+      chevron.classList.add("card-row-chevron");
+      row.append(chevron);
+    }
+    return row;
   }
 
-  /** A choice or permission that is done with, folded to what was answered. */
+  /** An answered, cancelled or expired choice: one line, like a folded
+   *  urgent alert (the User, 2026-11-16) -- what was asked, then who asked
+   *  and how it ended. It opens nothing. */
+  function answeredCardElement(card) {
+    const outcome = card.outcome || "Answered";
+    const when = card.decidedAt ? formatClockTime(card.decidedAt) : "";
+    const row = cardRowElement("article", lineIcon(CHOICE_ROW_PATHS, 14), card.title || "Choice",
+      [card.requesterLabel, outcome + (when ? " " + when : "")].filter(Boolean).join(" · "), false);
+    row.classList.add("control-card-answered");
+    row.querySelector(".card-row-outcome").title = outcome;
+    row.dataset.cardId = card.id;
+    row.dataset.cardKind = card.kind;
+    row.setAttribute("aria-label", (card.title || "Choice") + ": " + outcome);
+    return row;
+  }
+
+  /** A card folded to what was answered while it is not done yet: one
+   *  approved and waiting to be applied, or an answer still on its way. */
   function compactCardElement(card, outcome, className, label) {
     const wrap = document.createElement("article");
     wrap.className = "control-card " + className;
@@ -10581,7 +10801,7 @@
    *  itself changed. */
   function syncAnsweredCards(container, entry) {
     const cards = answeredCardsForMessage(entry);
-    const signature = cards.map(function (card) { return card.id + ":" + (card.outcome || ""); }).join("|");
+    const signature = cards.map(function (card) { return card.id + ":" + (card.outcome || "") + ":" + (card.decidedAt || ""); }).join("|");
     if (container.dataset.answeredCards === signature) return;
     container.dataset.answeredCards = signature;
     for (const node of container.querySelectorAll(".control-card-answered")) {
@@ -10638,6 +10858,9 @@
       return false;
     }
     if (item.dataset.accordLaunch === "1" || accordLaunchCardForEntry(entry)) {
+      return false;
+    }
+    if (item.dataset.accordLine === "1" || accordClosedLaunchOf(entry)) {
       return false;
     }
     // Scaffolding and a message are different shapes; the reconciler replaces

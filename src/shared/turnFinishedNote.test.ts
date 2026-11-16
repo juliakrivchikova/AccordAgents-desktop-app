@@ -56,6 +56,13 @@ test("the User's words or another member's reply below count as well", () => {
   assert.ok(turnFinishedNoteFor({ messages: [user("ask", "go"), card, running] }, [card], NOTE), "a turn still running below counts");
 });
 
+test("no note for a closed Accord's line below the reply: it is her own view, not a message", () => {
+  const card = reply("card", "Готово.");
+  const line = { id: "line", role: "system", content: "Accord folded: Plan", createdAt: NOTE.createdAt, status: "done",
+    metadata: { appMessageSource: "app_accord_closed", accordClosed: { launchMessageId: "launch-1" } } } as ChatMessage;
+  assert.equal(turnFinishedNoteFor({ messages: [user("ask", "go"), card, line] }, [card], NOTE), undefined);
+});
+
 test("no note when the reply is last where it stands", () => {
   const card = reply("card", "Done.");
   assert.equal(turnFinishedNoteFor({ messages: [user("ask", "go"), card] }, [card], NOTE), undefined);

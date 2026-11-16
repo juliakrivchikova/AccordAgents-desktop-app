@@ -83,7 +83,13 @@ export function dockedAccordFrom(launches: AccordLaunchInput[], notes: AccordNot
 const VERSION = /^v(\d+)$/;
 const SIGNED_COUNT = /^(\d+)\/(\d+) signed$/;
 
+// Parsed once per list of notes: a render asks for several Accords' cards
+// (the pinned one, each closed one's line) over the same notes.
+const parsedByNotes = new WeakMap<readonly AccordNoteInput[], Array<{ note: ArtifactNoteCard; launchId?: string }>>();
+
 function parsedNotes(notes: AccordNoteInput[]): Array<{ note: ArtifactNoteCard; launchId?: string }> {
+  const known = parsedByNotes.get(notes);
+  if (known) return known;
   const result: Array<{ note: ArtifactNoteCard; launchId?: string }> = [];
   for (const input of notes) {
     const note = parseArtifactNoteCard(input.content);
@@ -91,6 +97,7 @@ function parsedNotes(notes: AccordNoteInput[]): Array<{ note: ArtifactNoteCard; 
       result.push({ note, ...(typeof input.accordLaunchMessageId === "string" && input.accordLaunchMessageId ? { launchId: input.accordLaunchMessageId } : {}) });
     }
   }
+  parsedByNotes.set(notes, result);
   return result;
 }
 
@@ -274,13 +281,14 @@ type FoldMessage = {
     appMessageSource?: string;
     accordLaunchMessageId?: string;
     accordLaunch?: unknown;
+    accordClosed?: unknown;
+    serverRejected?: unknown;
     imageAttachments?: unknown[];
     repoFileMentions?: unknown[];
   };
 };
 
-/** The pinned Accord of a chat's loaded messages. */
-export function dockedAccordOfMessages(messages: readonly FoldMessage[]): DockedAccord | undefined {
+export function accordInputsOfMessages(messages: readonly FoldMessage[]): { launches: AccordLaunchInput[]; notes: AccordFoldInput[] } {
   const launches: AccordLaunchInput[] = [];
   const notes: AccordFoldInput[] = [];
   for (const message of messages) {
@@ -294,7 +302,133 @@ export function dockedAccordOfMessages(messages: readonly FoldMessage[]): Docked
       if (card) launches.push({ id: message.id, card, createdAt: message.createdAt });
     }
   }
+  return { launches, notes };
+}
+
+/** The pinned Accord of a chat's loaded messages. */
+export function dockedAccordOfMessages(messages: readonly FoldMessage[]): DockedAccord | undefined {
+  const { launches, notes } = accordInputsOfMessages(messages);
   return notes.some((note) => note.accordLaunchMessageId) ? dockedAccordFrom(launches, notes) : undefined;
+}
+
+/** The Accord one launch started, as its card shows it: also an older one
+ *  the pinned card no longer shows. Undefined while it has no document. */
+export function accordOfLaunch(launches: AccordLaunchInput[], notes: AccordNoteInput[], launchId: string): DockedAccord | undefined {
+  let card = launches.find((launch) => launch.id === launchId)?.card;
+  for (const note of notes) {
+    if (card) break;
+    if (note.accordLaunchMessageId === launchId) card = launchFromNote(note.accordLaunch);
+  }
+  if (!card) return undefined;
+  const progress = accordProgressFromNotes(launchId, card, notes);
+  return progress ? { launchId, card, progress } : undefined;
+}
+
+/** accordOfLaunch over a chat's loaded messages. */
+export function accordOfMessages(messages: readonly FoldMessage[], launchId: string): DockedAccord | undefined {
+  const { launches, notes } = accordInputsOfMessages(messages);
+  return accordOfLaunch(launches, notes, launchId);
+}
+
+/** metadata.appMessageSource of the line a closed Accord leaves in the chat
+ *  (the User, 2026-11-16): her cross on the pinned card folds it into this
+ *  line, written at the end of the chat as it stood then and kept on her
+ *  server, so every device shows it in the same place; a click opens the
+ *  card there. Members never read it: it is her own view of the chat. */
+export const ACCORD_CLOSED_SOURCE = "app_accord_closed";
+
+/** The line her cross writes, worded the same on every device. */
+export function accordClosedLine(input: { id: string; launchMessageId: string; title?: string; createdAt: string }): {
+  id: string; role: "system"; content: string; createdAt: string; status: "done";
+  metadata: { appMessageSource: string; accordClosed: { launchMessageId: string; title?: string } };
+} {
+  const title = (input.title ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+  return {
+    id: input.id, role: "system", content: title ? `Accord folded: ${title}` : "Accord folded", createdAt: input.createdAt, status: "done",
+    metadata: { appMessageSource: ACCORD_CLOSED_SOURCE, accordClosed: { launchMessageId: input.launchMessageId, ...(title ? { title } : {}) } }
+  };
+}
+
+/** The document's name as the line keeps it, for a line whose Accord's
+ *  notes are not loaded. */
+export function accordClosedLineTitle(message: { metadata?: { accordClosed?: unknown } }): string {
+  const title = (message.metadata?.accordClosed as { title?: unknown } | undefined)?.title;
+  return typeof title === "string" ? title : "";
+}
+
+/** The launch whose Accord this message folds; none for any other message. */
+export function accordClosedLaunchId(
+  message: { role: string; metadata?: { appMessageSource?: unknown; accordClosed?: unknown } }
+): string | undefined {
+  if (message.role !== "system" || message.metadata?.appMessageSource !== ACCORD_CLOSED_SOURCE) return undefined;
+  // Written by another device: read as a string, or not as the line at all.
+  const closed = message.metadata.accordClosed as { launchMessageId?: unknown } | undefined;
+  return closed && typeof closed.launchMessageId === "string" && closed.launchMessageId ? closed.launchMessageId : undefined;
+}
+
+/** The Accords folded into a chat, launch ids in the order of their lines:
+ *  her server's lines only, read anew each time (a copy whose message list
+ *  changes in place -- the computer's, the server's -- records it on every
+ *  save, so the record cannot drift from the lines). */
+export function accordClosedLaunchIds(messages: readonly FoldMessage[]): string[] {
+  const ids: string[] = [];
+  for (const message of messages) {
+    const launchId = accordClosedLaunchId(message);
+    if (launchId && !message.metadata?.serverRejected && !ids.includes(launchId)) ids.push(launchId);
+  }
+  return ids;
+}
+
+/** A chat's record of its folded Accords, as every save of a copy writes it
+ *  into its metadata (ConversationMetadata.accordClosedLaunchIds). */
+export function recordClosedAccords(conversation: { messages: readonly FoldMessage[]; metadata: Record<string, unknown> }): void {
+  const ids = accordClosedLaunchIds(conversation.messages);
+  if (ids.length > 0) conversation.metadata.accordClosedLaunchIds = ids;
+  else delete conversation.metadata.accordClosedLaunchIds;
+}
+
+// Worked out once per message list, not once per message asked about: for
+// the renderer's lists, which are replaced, never changed in place.
+const closedLinesByMessages = new WeakMap<readonly FoldMessage[], Map<string, string>>();
+
+/** The first line written for each closed Accord, launch id to line id: a
+ *  second one (closed on two devices at once) draws nothing, nor does one
+ *  her server refused (its Accord stays pinned, as before the cross). */
+export function accordClosedLines(messages: readonly FoldMessage[]): Map<string, string> {
+  let lines = closedLinesByMessages.get(messages);
+  if (!lines) {
+    lines = new Map<string, string>();
+    for (const message of messages) {
+      const launchId = accordClosedLaunchId(message);
+      if (launchId && !lines.has(launchId) && !message.metadata?.serverRejected) lines.set(launchId, message.id);
+    }
+    closedLinesByMessages.set(messages, lines);
+  }
+  return lines;
+}
+
+/** Accords whose only lines her server refused: their card is pinned again. */
+export function accordRefusedLines(messages: readonly FoldMessage[]): string[] {
+  const lines = accordClosedLines(messages);
+  const refused = new Set<string>();
+  for (const message of messages) {
+    const launchId = accordClosedLaunchId(message);
+    if (launchId && message.metadata?.serverRejected && !lines.has(launchId)) refused.add(launchId);
+  }
+  return [...refused];
+}
+
+/** A closed Accord's line that draws nothing: not the first for its Accord,
+ *  or refused by her server. */
+export function isRepeatedAccordClosedLine(messages: readonly FoldMessage[], message: FoldMessage): boolean {
+  const launchId = accordClosedLaunchId(message);
+  return Boolean(launchId) && accordClosedLines(messages).get(launchId as string) !== message.id;
+}
+
+/** What the line of a closed Accord says after its title: "Accord reached ·
+ *  v3" once reached, otherwise where it stands, as the card's head says it. */
+export function accordLineOutcome(progress: AccordProgress): string {
+  return progress.reached && progress.version ? `Accord reached · v${progress.version.number}` : accordProgressStatus(progress);
 }
 
 // Worked out once per message list, not once per message asked about.

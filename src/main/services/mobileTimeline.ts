@@ -2,6 +2,7 @@ import { URGENT_ALERT_SERVER_WRITER, type UrgentAlertView } from "../../shared/u
 import type { ChatMessage, ChatParticipant, ChatTurnFinishedNoteMetadata, Conversation } from "../../shared/types";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
+import { accordClosedLaunchId, accordClosedLineTitle } from "../../shared/accordProgress";
 import {
   chatMessageHiddenFromTimeline,
   chatMessageVisualThreadRootId,
@@ -17,6 +18,9 @@ import type { MobileControlCard } from "../../shared/mobileControlCards";
 
 export interface MobileChatListItem {
   id: string;
+  /** The Accords folded into the chat (her server's record over the whole
+   *  chat): the phone does not pin their cards. */
+  accordClosed?: string[];
   title: string;
   group: string;
   snippet: string;
@@ -127,6 +131,8 @@ export interface MobileTimelineEvent {
   /** An artifact note (system) filed under an Accord: the launch message
    *  whose card shows it (accordProgress.ts). */
   accordLaunchMessageId?: string;
+  /** The line a closed Accord leaves in the chat (accordProgress.ts). */
+  accordClosed?: { launchMessageId: string; title?: string };
   /** Who leads that Accord and who is in it (the card without its launch). */
   accordLaunch?: { facilitator: string; members: string[] };
 }
@@ -281,6 +287,10 @@ function timelineEventFromMessage(
       ? { urgentAlert: message.metadata.urgentAlert } : {}),
     ...(message.role === "system" && typeof message.metadata?.accordLaunchMessageId === "string" && message.metadata.accordLaunchMessageId
       ? { accordLaunchMessageId: message.metadata.accordLaunchMessageId } : {}),
+    // The line a closed Accord left: the phone draws the Accord's card there.
+    ...(accordClosedLaunchId(message)
+      ? { accordClosed: { launchMessageId: accordClosedLaunchId(message) as string, ...(accordClosedLineTitle(message) ? { title: accordClosedLineTitle(message) } : {}) } }
+      : {}),
     ...(message.role === "system" && message.metadata?.accordLaunch ? { accordLaunch: message.metadata.accordLaunch } : {}),
     // A scheduled script's message is not the User's: the phone has no script
     // author, so it shows as an author named after the script.
