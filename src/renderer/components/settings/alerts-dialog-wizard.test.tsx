@@ -31,6 +31,12 @@ function currentStep(): string {
   return (document.querySelector(".alerts-wizard-step.is-now")?.textContent ?? "").replace(/^\d/, "");
 }
 
+async function settle(): Promise<void> {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  });
+}
+
 async function click(text: string): Promise<void> {
   await act(async () => {
     button(text).click();
@@ -51,6 +57,7 @@ test("the phone wizard shows one step at a time, with the step's own action wher
   const requests: Array<Record<string, unknown>> = [];
   let buys = 0;
   let calls = 0;
+  let saves = 0;
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
     openExternal: async () => undefined,
     urgentAlertRequest: async (request: Record<string, unknown>) => {
@@ -67,7 +74,10 @@ test("the phone wizard shows one step at a time, with the step's own action wher
           ? { ok: true, value: { testId: "t0", test: { state: "failed", at: new Date().toISOString(), error: KYC } } }
           : { ok: true, value: { testId: "t1", test: { state: "pressed", at: new Date().toISOString() } } };
       }
-      if (request.action === "phone.save") return { ok: true, value: { waitMinutes: 5, callMode: "keypad" } };
+      if (request.action === "phone.save") {
+        saves += 1;
+        return saves === 1 ? { ok: false, error: { code: "server_unavailable", message: "Your server could not be reached." } } : { ok: true, value: { waitMinutes: 5, callMode: "keypad" } };
+      }
       return { ok: false, error: { code: "invalid_request", message: `unexpected ${String(request.action)}` } };
     }
   };
@@ -91,6 +101,8 @@ test("the phone wizard shows one step at a time, with the step's own action wher
   // 2 · no number yet: buying is the step's action, there is no Next.
   assert.equal(currentStep(), "Call from");
   assert.deepEqual(dialogButtons(), ["Back", "Buy a US number · $1.15 / month"]);
+  await settle();
+  assert.notEqual((document.activeElement?.textContent ?? "").trim(), "Buy a US number · $1.15 / month", "Enter must never buy a number");
   await click("Buy a US number · $1.15 / month");
   // Twilio has not confirmed who she is: said in plain words, with the way there.
   assert.ok(document.querySelector("[data-testid='alerts-phone-identity']"), "the identity notice");
@@ -130,7 +142,11 @@ test("the phone wizard shows one step at a time, with the step's own action wher
   // Back on the test step, the refused call is still this phone's result.
   assert.deepEqual(dialogButtons(), ["Back", "Save anyway", "Open Trust Hub"]);
   await click("Save anyway");
-  const save = requests.find((request) => request.action === "phone.save");
+  // A save that fails is said, also on the identity screen.
+  assert.match(document.body.textContent ?? "", /Your server could not be reached\./);
+  assert.equal(closed, 0);
+  await click("Save anyway");
+  const save = requests.filter((request) => request.action === "phone.save").pop();
   assert.equal(save?.testId, "t0", "the refused test goes with the phone, so the page says calls aren't going out");
   assert.equal(save?.from, "+14155550201");
   assert.ok(savedSettings, "the page gets the saved settings");

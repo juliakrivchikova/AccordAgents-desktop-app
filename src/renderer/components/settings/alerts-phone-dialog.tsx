@@ -210,12 +210,12 @@ export function PhoneConnectDialog(props: {
       {spinner("check")}Next
     </Button>
   ) : step === 1 ? (checked?.numbers.length ? <>
-    <Button type="button" variant="outline" size="sm" disabled={Boolean(busy)} onClick={() => void buy()} data-testid="alerts-phone-buy">
+    <Button type="button" variant="outline" size="sm" disabled={Boolean(busy)} onClick={() => void buy()} data-testid="alerts-phone-buy" data-wizard-no-autofocus>
       {spinner("buy")}Buy another · {US_NUMBER_PRICE}
     </Button>
     <Button type="button" size="sm" disabled={Boolean(busy) || !from} onClick={() => goTo(2)} data-testid="alerts-phone-next">Next</Button>
   </> : (
-    <Button type="button" size="sm" disabled={Boolean(busy)} onClick={() => void buy()} data-testid="alerts-phone-buy">
+    <Button type="button" size="sm" disabled={Boolean(busy)} onClick={() => void buy()} data-testid="alerts-phone-buy" data-wizard-no-autofocus>
       {spinner("buy")}Buy a US number · {US_NUMBER_PRICE}
     </Button>
   )) : step === 2 ? (
@@ -243,7 +243,7 @@ export function PhoneConnectDialog(props: {
       // A working saved account is checked at once: nothing to focus until then.
       initialFocus={() => (saved && !saved.error ? null : sidField.current)}
       onClose={props.onClose}
-      focusKey={`${step}:${checked ? "checked" : "keys"}`}
+      focusKey={`${step}:${checked ? `checked:${checked.numbers.length}` : "keys"}:${identity ? "identity" : ""}:${passed ? "passed" : ""}`}
       onBack={step > 0 ? () => goTo(step - 1) : undefined}
       backDisabled={Boolean(busy)}
       actions={actions}
@@ -294,7 +294,8 @@ export function PhoneConnectDialog(props: {
           <div className="alerts-choices" role="radiogroup" aria-label="Number to call from">
             {checked.numbers.map((number) => (
               <label key={number} className={`alerts-choice${from === number ? " is-selected" : ""}`}>
-                <input type="radio" name="alerts-from" checked={from === number} onChange={() => setFrom(number)} />
+                <input type="radio" name="alerts-from" checked={from === number} onChange={() => setFrom(number)}
+                  data-wizard-autofocus={from === number || (!from && number === checked.numbers[0]) ? true : undefined} />
                 <span className="alerts-number">{number}</span><small>{boughtNumbers.includes(number) ? "bought just now" : "in your account"}</small>
               </label>
             ))}
@@ -330,7 +331,7 @@ export function PhoneConnectDialog(props: {
         <PhoneTestLine test={currentTest} to={normalizedTo} keypad={keypad} />
         <div className="alerts-hint">Calls are billed by Twilio per minute. One alert rings up to {URGENT_ALERT_CALL_ATTEMPTS} times if you don't press Got it.</div>
       </>}
-      {error && !identity ? <div className="gen-row-error" role="alert">{error}</div> : null}
+      {error && !alertsTwilioNeedsIdentity(error) ? <div className="gen-row-error" role="alert">{error}</div> : null}
     </AlertsWizard>
   );
 }

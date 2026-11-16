@@ -126,6 +126,7 @@ export function TelegramConnectDialog(props: {
           <span className="alerts-secret">
             <input
               ref={tokenField}
+              data-wizard-autofocus
               id="alerts-telegram-token"
               className="gen-input alerts-input"
               type={showToken ? "text" : "password"}

@@ -37,7 +37,8 @@ export function AlertsWizard(props: {
   initialFocus?: () => HTMLElement | null | undefined;
   /** Changes when what is on screen changes (another step, an account
    *  checked): the focus moves to the step's field marked
-   *  data-wizard-autofocus, or else to its own action. */
+   *  data-wizard-autofocus, or else to its own action (never one marked
+   *  data-wizard-no-autofocus, like buying: Enter must not spend money). */
   focusKey?: string;
   onClose: () => void;
   onBack?: () => void;
@@ -66,8 +67,8 @@ export function AlertsWizard(props: {
       const root = body.current?.closest<HTMLElement>("[data-slot='dialog-content']");
       if (!root) return;
       const field = root.querySelector<HTMLElement>("[data-wizard-autofocus]");
-      const actions = [...root.querySelectorAll<HTMLButtonElement>("[data-slot='dialog-footer'] button:not(:disabled)")];
-      (field ?? actions[actions.length - 1])?.focus();
+      const actions = [...root.querySelectorAll<HTMLButtonElement>("[data-slot='dialog-footer'] button:not(:disabled):not([data-wizard-no-autofocus])")];
+      (field ?? actions[actions.length - 1] ?? root).focus();
     }, 0);
     return () => clearTimeout(timer);
   }, [open, focusKey]);
