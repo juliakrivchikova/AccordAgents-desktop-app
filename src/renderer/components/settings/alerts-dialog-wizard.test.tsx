@@ -202,7 +202,7 @@ test("a call made by answering passes, even if the page last read that calls ask
     openExternal: async () => undefined,
     urgentAlertRequest: async (request: Record<string, unknown>) => {
       if (request.action === "phone.check") return { ok: true, value: { accountName: "My first account", trial: false, numbers: ["+14155550201"], saved: true, callMode: "answer" } };
-      if (request.action === "phone.try") return { ok: true, value: { testId: "t1", test: { state: "answered", at: new Date().toISOString() }, mode: "answer" } };
+      if (request.action === "phone.try") return { ok: true, value: { testId: "t1", test: { state: "answered", at: new Date().toISOString() }, callMode: "answer" } };
       return { ok: false, error: { code: "invalid_request", message: `unexpected ${String(request.action)}` } };
     }
   };
@@ -269,7 +269,8 @@ test("the flow strip is green for what will happen and dim for what will not", a
     await act(async () => {
       root.render(<AlertsFlow waitMinutes={5} telegram={telegram} phone={phone} answerMode={false} busy={false} onWait={() => undefined} />);
     });
-    const node = (item: Element) => `${item.className.replace("alerts-node is-", "")}:${(item.querySelector(".alerts-node-label")?.textContent ?? "")}:${item.querySelector(".alerts-node-time")?.textContent ?? ""}`;
+    const time = (item: Element) => [...(item.querySelector(".alerts-node-time")?.childNodes ?? [])].filter((child) => child.nodeType === 3).map((child) => child.textContent).join("");
+    const node = (item: Element) => `${item.className.replace("alerts-node is-", "")}:${(item.querySelector(".alerts-node-label")?.textContent ?? "")}:${time(item)}`;
     const edge = (item: Element) => item.className.replace("alerts-edge is-", "");
     return [...host.querySelectorAll(".alerts-chain > li")].map((item) => item.classList.contains("alerts-node") ? node(item) : edge(item));
   };
@@ -277,9 +278,45 @@ test("the flow strip is green for what will happen and dim for what will not", a
   assert.deepEqual(await nodes("ready", "ready"), ["on:Alert:0:00", "on", "on:Telegram:at once", "on", "on:Call 1:0:05", "on", "on:Call 2:0:08", "on", "on:Call 3:0:11"]);
   // Only Telegram works: the calls are dim, the first says why, no times on the rest.
   assert.deepEqual(await nodes("ready", "none"), ["on:Alert:0:00", "on", "on:Telegram:at once", "off", "off:Call 1:not set up", "off", "off:Call 2:", "off", "off:Call 3:"]);
+  // The later calls show no reason, but a screen reader still hears it.
+  assert.deepEqual([...host.querySelectorAll(".alerts-node .sr-only")].map((item) => item.textContent), ["not set up", "not set up"]);
   // A broken channel is red, not merely dim.
   assert.deepEqual(await nodes("broken", "broken"), ["on:Alert:0:00", "off", "bad:Telegram:not working", "off", "bad:Call 1:not working", "off", "off:Call 2:", "off", "off:Call 3:"]);
   assert.deepEqual((await nodes("not-finished", "ready")).slice(0, 5), ["on:Alert:0:00", "off", "off:Telegram:not finished", "on", "on:Call 1:0:05"]);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("an answered test call stops passing once her server asks for 1, as the page would judge it", async () => {
+  let callMode: "keypad" | "answer" = "answer";
+  (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    openExternal: async () => undefined,
+    urgentAlertRequest: async (request: Record<string, unknown>) => {
+      if (request.action === "phone.check") return { ok: true, value: { accountName: "My first account", trial: false, numbers: ["+14155550201"], saved: true, callMode: "answer" } };
+      if (request.action === "phone.try") return { ok: true, value: { testId: "t1", test: { state: "calling", at: new Date().toISOString() }, callMode: "answer" } };
+      if (request.action === "phone.try-status") return { ok: true, value: { testId: "t1", test: { state: "answered", at: new Date().toISOString() }, callMode } };
+      return { ok: false, error: { code: "invalid_request", message: `unexpected ${String(request.action)}` } };
+    }
+  };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const settings: UrgentAlertSettingsView = { waitMinutes: 5, callMode: "answer", phone: { from: "+14155550201", to: "+35799123342", trial: false } };
+  await act(async () => {
+    root.render(<PhoneConnectDialog open settings={settings} onSettings={() => undefined} onClose={() => undefined} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await click("Next");
+  await click("Next");
+  await click("Next");
+  await click("Call me now");
+  // While it rang, her server got a public address: calls now ask for 1.
+  callMode = "keypad";
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+  });
+  assert.match(document.body.textContent ?? "", /You answered at .*, but calls now ask for 1\. Call again\?/);
+  assert.ok(!dialogButtons().includes("Save"), `no plain Save for a test the page would call untested (have: ${dialogButtons().join(", ")})`);
   await act(async () => root.unmount());
   host.remove();
 });

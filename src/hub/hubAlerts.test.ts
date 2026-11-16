@@ -651,18 +651,19 @@ test("with no phone saved, a request without keys is refused, never filled from 
 test("without a server Twilio reaches, answering the test call is what passes it", async (t) => {
   const h = await hub(t);
   h.world.outcomes.push("completed");
-  const tried = await h.alerts<{ testId: string; mode?: string }>(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" });
-  // The dialog judges the test by how it was made, not by what its page last read.
-  assert.equal(tried.value?.mode, "answer");
+  const tried = await h.alerts<{ testId: string; callMode?: string }>(h.owner, { action: "phone.try", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN, from: "+14155550134", to: "+35799123342" });
+  // The dialog judges the test by how calls end now, not by what its page last read.
+  assert.equal(tried.value?.callMode, "answer");
   const checked = await h.alerts<{ callMode?: string }>(h.owner, { action: "phone.check", accountSid: ACCOUNT_SID, authToken: AUTH_TOKEN });
   assert.equal(checked.value?.callMode, "answer");
   const placed = await until(() => h.world.calls[0], "the test call");
   assert.doesNotMatch(placed.twiml, /<Gather/, "no key can be heard: the message is read out");
   const done = await until(async () => {
-    const answer = await h.alerts<{ test: { state: string } }>(h.owner, { action: "phone.try-status", testId: tried.value!.testId });
-    return answer.value?.test.state !== "calling" ? answer.value?.test : undefined;
+    const answer = await h.alerts<{ test: { state: string }; callMode?: string }>(h.owner, { action: "phone.try-status", testId: tried.value!.testId });
+    return answer.value?.test.state !== "calling" ? answer.value : undefined;
   }, "the test call to end");
-  assert.equal(done.state, "answered");
+  assert.equal(done.test.state, "answered");
+  assert.equal(done.callMode, "answer");
 });
 
 test("Telegram keeps its last test: the connect check, then Send test message and its Got it", async (t) => {

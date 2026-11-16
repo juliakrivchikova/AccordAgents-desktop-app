@@ -105,6 +105,8 @@ function FlowCall(props: { index: number; minutes: number; retry: number; phone:
   return <>
     {props.index > 0 ? <FlowEdge label={`${props.retry} min`} on={ready} /> : null}
     <FlowNode icon={<Phone size={14} />} label={`Call ${props.index + 1}`} time={ready ? clock(props.minutes) : props.index === 0 ? ALERTS_FLOW_CHANNEL_WORD[props.phone as Exclude<AlertsFlowChannel, "ready">] : ""}
+      // Later calls show no reason (the first one says it); a screen reader still hears it.
+      spoken={!ready && props.index > 0 ? ALERTS_FLOW_CHANNEL_WORD[props.phone as Exclude<AlertsFlowChannel, "ready">] : undefined}
       state={props.index === 0 ? flowState(props.phone) : ready ? "on" : "off"} />
   </>;
 }
@@ -120,12 +122,12 @@ function clock(minutes: number): string {
   return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}`;
 }
 
-function FlowNode(props: { icon: ReactNode; label: string; time: string; state: "on" | "off" | "bad" }): JSX.Element {
+function FlowNode(props: { icon: ReactNode; label: string; time: string; spoken?: string; state: "on" | "off" | "bad" }): JSX.Element {
   return (
     <li className={`alerts-node is-${props.state}`}>
       <span className="alerts-node-dot" aria-hidden>{props.icon}</span>
       <span className="alerts-node-label">{props.label}</span>
-      <span className="alerts-node-time">{props.time}</span>
+      <span className="alerts-node-time">{props.time}{props.spoken ? <span className="sr-only">{props.spoken}</span> : null}</span>
     </li>
   );
 }

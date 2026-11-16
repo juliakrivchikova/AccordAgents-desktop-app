@@ -47,9 +47,10 @@ export function PhoneConnectDialog(props: {
   const [busy, setBusy] = useState<"check" | "buy" | "try" | "save" | undefined>();
   const [error, setError] = useState<string | undefined>();
   const [boughtNumbers, setBoughtNumbers] = useState<string[]>([]);
-  /** The test call and how it was made (1 asked for, or answering): what it
-   *  proves is judged by that, not by what this page last read. */
-  const [test, setTest] = useState<{ id: string; result: UrgentAlertPhoneTest; from: string; to: string; mode?: "keypad" | "answer" } | undefined>();
+  /** The test call, and how calls end on her server as of its last answer:
+   *  the test is judged as the page will judge it once saved, not by what
+   *  this page last read. */
+  const [test, setTest] = useState<{ id: string; result: UrgentAlertPhoneTest; from: string; to: string; callMode?: "keypad" | "answer" } | undefined>();
   const sidField = useRef<HTMLInputElement>(null);
   const phoneField = useRef<HTMLInputElement>(null);
   /** Each opening and closing: an answer that comes back after the dialog
@@ -85,7 +86,7 @@ export function PhoneConnectDialog(props: {
     const timer = setTimeout(() => {
       void alertRequest<UrgentAlertPhoneTry>({ action: "phone.try-status", testId: test.id }).then((answer) => {
         if (stopped) return;
-        if (answer.ok) setTest((current) => current && current.id === answer.value.testId ? { ...current, result: answer.value.test, mode: answer.value.mode ?? current.mode } : current);
+        if (answer.ok) setTest((current) => current && current.id === answer.value.testId ? { ...current, result: answer.value.test, callMode: answer.value.callMode ?? current.callMode } : current);
         // The server no longer knows it: over. Any other failure (a moment
         // without the server): asked again while the call may still ring.
         else if (answer.error.code === "invalid_request") setTest((current) => current ? { ...current, result: { state: "failed", at: new Date().toISOString(), error: answer.error.message, lost: true } } : current);
@@ -161,7 +162,7 @@ export function PhoneConnectDialog(props: {
     if (asked !== opening.current) return;
     setBusy(undefined);
     if (!result.ok) return setError(result.error.message);
-    setTest({ id: result.value.testId, result: result.value.test, from, to: normalizePhoneNumber(to) ?? to, ...(result.value.mode ? { mode: result.value.mode } : {}) });
+    setTest({ id: result.value.testId, result: result.value.test, from, to: normalizePhoneNumber(to) ?? to, ...(result.value.callMode ? { callMode: result.value.callMode } : {}) });
   }
 
   const normalizedTo = normalizePhoneNumber(to);
@@ -179,9 +180,9 @@ export function PhoneConnectDialog(props: {
     props.onClose();
   }
 
-  // How a call ends: the test's own way once it was made, else what her
-  // server said when the account was checked (fresher than the page's).
-  const keypad = (matchingTest?.mode ?? checked?.callMode ?? props.settings?.callMode) !== "answer";
+  // How a call ends, as her server last said: with the test's answers, else
+  // when the account was checked (both fresher than the page's).
+  const keypad = (matchingTest?.callMode ?? checked?.callMode ?? props.settings?.callMode) !== "answer";
   const verified = checked?.trial && checked.verified && normalizedTo ? checked.verified.includes(normalizedTo) : undefined;
   const currentTest = matchingTest?.result;
   const passed = urgentAlertPhoneTestPassed(currentTest, keypad ? "keypad" : "answer");

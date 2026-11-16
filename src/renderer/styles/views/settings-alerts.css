@@ -179,10 +179,6 @@
   opacity: 0.4;
 }
 
-.settings-view .alerts-node.is-off .alerts-node-time {
-  color: var(--app-muted);
-}
-
 .settings-view .alerts-node.is-bad .alerts-node-time {
   color: var(--app-danger);
 }
@@ -196,7 +192,7 @@
 }
 
 .settings-view .alerts-edge.is-on {
-  background: var(--app-success-border);
+  background: var(--app-success);
 }
 
 .settings-view .alerts-edge.is-on span {

@@ -162,12 +162,13 @@ export interface UrgentAlertPhoneCheck {
   callMode?: "keypad" | "answer";
 }
 
-/** A test call as the connect dialog follows it: its result, and how it was
- *  made (1 asked for, or answering enough), which is what it proves. */
+/** A test call as the connect dialog follows it: its result, and how calls
+ *  end on her server now (1 pressed, or answering), which is what the page
+ *  judges the saved test by. */
 export interface UrgentAlertPhoneTry {
   testId: string;
   test: UrgentAlertPhoneTest;
-  mode?: "keypad" | "answer";
+  callMode?: "keypad" | "answer";
 }
 
 // --- requests ----------------------------------------------------------------
