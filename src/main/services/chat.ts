@@ -27,7 +27,7 @@ import {
   type WantedHubCard
 } from "../../shared/hubCards";
 import { ServerCardBook, type CardApplyResult, type ChatCardAppliers } from "./chatCards";
-import { choiceExpiryPlan, choicesClosedByMessage, type ChoiceExpiryPlan } from "./chatChoiceExpiry";
+import { choiceClosedForGoneMember, choiceExpiryPlan, choicesClosedByMessage, choicesOfGoneMembers, type ChoiceExpiryPlan } from "./chatChoiceExpiry";
 import { HUB_OP_TAKEN_BACK, type HubOpOutcome } from "./hubOpsClient";
 import { blobReferenceOf, HubHttpError } from "./hubClient";
 import {
@@ -1320,6 +1320,9 @@ export class ChatService {
    *  by its machine when the member list it receives no longer has it (see
    *  membersDroppedFrom). Closing reports its background tasks as ended. */
   private retireRemovedMembers(conversationId: string, removed: ChatParticipant[]): void {
+    // Their waiting cards close (sweepChoiceExpiry), on whichever device wrote
+    // them: a removal that arrived from another device included.
+    if (removed.length > 0) this.scheduleChoiceExpiry(conversationId, this.choiceExpiryNow(), { replace: true });
     for (const participant of removed) {
       if (!this.ownsParticipant(participant)) {
         continue;
@@ -18002,14 +18005,27 @@ export class ChatService {
     removalError: string
   ): ChatMessage {
     const metadata = message.metadata;
-    if (!metadata?.pendingMentions?.length && !metadata?.participantRequest) {
+    if (!metadata?.pendingMentions?.length && !metadata?.participantRequest && !metadata?.pendingChoice) {
       return message;
     }
     let changed = false;
     let nextMetadata: ChatMessageMetadata = { ...metadata };
-    if (metadata.pendingMentions?.length) {
-      const pendingMentions = metadata.pendingMentions.filter((mention) => mention.targetParticipantId !== participant.id);
-      if (pendingMentions.length !== metadata.pendingMentions.length) {
+    // The member's own cards: nobody is left to take an answer to them.
+    if (message.participantId === participant.id) {
+      if (metadata.pendingChoice?.status === "pending") {
+        nextMetadata = { ...nextMetadata, pendingChoice: choiceClosedForGoneMember(metadata.pendingChoice, now) };
+        changed = true;
+      }
+      if (metadata.pendingMentions?.some((mention) => mention.status === "pending")) {
+        nextMetadata = { ...nextMetadata, pendingMentions: metadata.pendingMentions.map((mention) =>
+          mention.status === "pending" ? { ...mention, status: "rejected" as const } : mention) };
+        changed = true;
+      }
+    }
+    if (nextMetadata.pendingMentions?.length) {
+      const before = nextMetadata.pendingMentions;
+      const pendingMentions = before.filter((mention) => mention.targetParticipantId !== participant.id);
+      if (pendingMentions.length !== before.length) {
         changed = true;
         if (pendingMentions.length > 0) {
           nextMetadata = { ...nextMetadata, pendingMentions };
@@ -18752,7 +18768,38 @@ export class ChatService {
   /** The waiting choices of this device's members that the User went on
    *  past (choiceExpiryPlan): those due now. */
   private choiceExpiryPlanFor(conversation: Conversation): ChoiceExpiryPlan {
-    return choiceExpiryPlan(conversation.messages, this.choiceClosedHere(conversation));
+    const plan = choiceExpiryPlan(conversation.messages, this.choiceClosedHere(conversation));
+    const memberIds = this.chatMemberIds(conversation);
+    // A chat always keeps a member: a copy read without its members says
+    // nothing about who left, and closes nothing.
+    if (memberIds.size === 0) return plan;
+    const mayClose = (message: ChatMessage) => this.mayCloseGoneMemberCard(message);
+    const memberGone = choicesOfGoneMembers(conversation.messages, memberIds, mayClose);
+    const goneMentions = conversation.messages
+      .filter((message) => message.role === "participant" && (!message.participantId || !memberIds.has(message.participantId)) &&
+        message.metadata?.pendingMentions?.some((mention) => mention.status === "pending") && mayClose(message))
+      .map((message) => message.id);
+    return memberGone.length || goneMentions.length
+      ? { due: [...plan.due, ...memberGone], memberGone, ...(goneMentions.length ? { goneMentions } : {}) }
+      : plan;
+  }
+
+  /** Every member id the chat lists, as stored: an entry this build cannot
+   *  read whole is still a member, never one that left. */
+  private chatMemberIds(conversation: Conversation): Set<string> {
+    const listed = conversation.metadata?.participants;
+    return new Set(Array.isArray(listed)
+      ? listed.flatMap((item) => item && typeof item === "object" && typeof (item as { id?: unknown }).id === "string" ? [(item as { id: string }).id] : [])
+      : []);
+  }
+
+  /** Which device closes a card whose member left the chat: the one that
+   *  wrote its message, else (a message from before the server kept its
+   *  writer) the computer, never a machine. */
+  private mayCloseGoneMemberCard(message: ChatMessage): boolean {
+    const writer = message.metadata?.serverWriter;
+    if (typeof writer === "string") return writer === this.serverLink?.deviceId();
+    return !this.machineRuntime;
   }
 
   /** A member's turn starts (inside its chat mutation): what the User's going
@@ -18829,7 +18876,7 @@ export class ChatService {
       const conversation = await this.storage.getConversation(conversationId);
       if (!conversation || conversation.kind !== "chat") return;
       const plan = this.choiceExpiryPlanFor(conversation);
-      if (plan.due.length === 0) {
+      if (plan.due.length === 0 && !plan.goneMentions?.length) {
         this.scheduleChoiceExpiry(conversationId, undefined, { replace: true });
         return;
       }
@@ -18847,7 +18894,9 @@ export class ChatService {
         throw new Error("Not linked to the server.");
       }
       await this.withChatMutation(conversation, async () => {
-        if (!this.expireDueChoices(conversation, serverStates)) return;
+        const closed = this.expireDueChoices(conversation, serverStates);
+        const rejected = this.rejectGoneMemberMentions(conversation);
+        if (!closed && !rejected) return;
         conversation.updatedAt = new Date().toISOString();
         await this.saveConversation(conversation);
       });
@@ -18858,6 +18907,21 @@ export class ChatService {
     }
   }
 
+  /** Rejects, in place, the mention approvals members no longer in the chat
+   *  wait on (inside the chat's mutation; the caller saves): nobody is left
+   *  to continue with them. */
+  private rejectGoneMemberMentions(conversation: Conversation): boolean {
+    const gone = new Set(this.choiceExpiryPlanFor(conversation).goneMentions ?? []);
+    if (gone.size === 0) return false;
+    for (const message of conversation.messages) {
+      if (!gone.has(message.id) || !message.metadata?.pendingMentions) continue;
+      message.metadata = { ...message.metadata, pendingMentions: message.metadata.pendingMentions.map((mention) =>
+        mention.status === "pending" ? { ...mention, status: "rejected" as const } : mention) };
+    }
+    void this.debugLogs.write("chat.mentions.member-gone", { conversationId: conversation.id, count: gone.size });
+    return true;
+  }
+
   /** Closes, in place, the due choices nobody answered (inside the chat's
    *  mutation; the caller saves), and sets the chat's timer to look again at
    *  those an answer is being applied to. */
@@ -18866,9 +18930,15 @@ export class ChatService {
     const plan = this.choiceExpiryPlanFor(conversation);
     let nextAtMs: number | undefined;
     const due = new Set<string>();
+    const memberGone = new Set(plan.memberGone ?? []);
     for (const messageId of plan.due) {
       const message = conversation.messages.find((item) => item.id === messageId);
       if (!message) continue;
+      // Its member left the chat: an answer has nobody to go to either.
+      if (memberGone.has(messageId)) {
+        due.add(messageId);
+        continue;
+      }
       const answered = message.metadata?.serverCard?.state === "answered" || serverStates?.get(choiceCardId(message.id)) === "answered" ||
         this.choiceAnsweredHere(message.id);
       // Its answer is applied (or refused, and it is asked again): looked at
@@ -18882,9 +18952,12 @@ export class ChatService {
     for (const message of conversation.messages) {
       const choice = message.metadata?.pendingChoice;
       if (!due.has(message.id) || choice?.status !== "pending") continue;
-      message.metadata = { ...message.metadata, pendingChoice: { ...choice, status: "cancelled", cancelledAt: now, expiredAt: now } };
+      message.metadata = { ...message.metadata, pendingChoice: memberGone.has(message.id)
+        ? choiceClosedForGoneMember(choice, now)
+        : { ...choice, status: "cancelled", cancelledAt: now, expiredAt: now } };
     }
-    void this.debugLogs.write("chat.choice.expired", { conversationId: conversation.id, messageIds: [...due].slice(0, 20), count: due.size });
+    void this.debugLogs.write("chat.choice.expired", { conversationId: conversation.id, messageIds: [...due].slice(0, 20), count: due.size,
+      memberGone: [...due].filter((messageId) => memberGone.has(messageId)).length });
     return true;
   }
 
@@ -18899,6 +18972,17 @@ export class ChatService {
       const message = conversation.messages.find((item) => item.id === messageId);
       const choice = message?.metadata?.pendingChoice;
       if (!message || choice?.status !== "cancelled" || !choice.expiredAt) return;
+      // Its member left the chat meanwhile: her answer has nobody to go to,
+      // and the card closes for good instead (the server takes that close).
+      const memberIds = this.chatMemberIds(conversation);
+      if (memberIds.size > 0 && (!message.participantId || !memberIds.has(message.participantId))) {
+        if (choice.memberGoneAt) return;
+        message.metadata = { ...message.metadata, pendingChoice: choiceClosedForGoneMember(choice, new Date().toISOString()) };
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        void this.debugLogs.write("chat.choice.reopen-member-gone", { conversationId, messageId });
+        return;
+      }
       const { expiredAt: _expiredAt, cancelledAt: _cancelledAt, ...waiting } = choice;
       message.metadata = { ...message.metadata, pendingChoice: { ...waiting, status: "pending" } };
       // Raised as it was; the server holds her answer to it.
@@ -24140,6 +24224,15 @@ export class ChatService {
     const choice = message?.metadata?.pendingChoice;
     if (!message || !choice || choice.id !== request.choiceId) throw new Error("Choice request was not found.");
     if (choice.status !== "pending" || message.metadata?.serverCard) throw new Error("Choice request has already been answered.");
+    // Its member left the chat: nobody takes an answer. Her Cancel closes it
+    // here (the close reaches the other devices when this device wrote the
+    // message; the card on the server was settled when its member left).
+    const memberIds = this.chatMemberIds(conversation);
+    if (memberIds.size > 0 && (!message.participantId || !memberIds.has(message.participantId))) {
+      if (!request.cancel) throw new Error(`${message.participantLabel ?? "This member"} is no longer in this chat: its question can only be cancelled.`);
+      await this.cancelGoneMemberChoice(conversation.id, message.id, choice.id);
+      return;
+    }
     const cardId = choiceCardId(message.id);
     await this.answerServerCard({ conversationId: conversation.id, cardId, raisedHere: this.cardRaisedHere(conversation, cardId), answer: {
       ...(request.selectedOptionId !== undefined ? { selectedOptionId: request.selectedOptionId } : {}),
@@ -24147,6 +24240,22 @@ export class ChatService {
       ...(request.note !== undefined ? { note: request.note } : {}),
       ...(request.cancel ? { cancel: true } : {})
     } });
+  }
+
+  /** Cancels, here, a choice whose member is no longer in the chat. */
+  private async cancelGoneMemberChoice(conversationId: string, messageId: string, choiceId: string): Promise<void> {
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") throw new Error("The chat is not available.");
+    await this.withChatMutation(conversation, async () => {
+      const message = conversation.messages.find((item) => item.id === messageId);
+      const choice = message?.metadata?.pendingChoice;
+      if (!message || !choice || choice.id !== choiceId || choice.status !== "pending") return;
+      const now = new Date().toISOString();
+      message.metadata = { ...message.metadata, pendingChoice: { ...choice, status: "cancelled", cancelledAt: now } };
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      void this.debugLogs.write("chat.choice.cancelled-member-gone", { conversationId, messageId });
+    });
   }
 
   /** The User's answer to a member's mentions waiting for approval, from

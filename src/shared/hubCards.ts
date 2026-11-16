@@ -244,7 +244,9 @@ export function hubCardOutcomeFrom(conversation: Conversation | undefined, cardI
       const choice = message.metadata?.pendingChoice;
       if (!choice) return { result: "closed" };
       const { refusals: _refusals, ...shown } = choice;
-      const expired = result === "closed" && choice.status === "cancelled" && Boolean(choice.expiredAt);
+      // Closed unanswered: the server keeps an answer given first. A card of
+      // a member that left is closed whatever it holds: nobody takes it.
+      const expired = result === "closed" && choice.status === "cancelled" && Boolean(choice.expiredAt) && !choice.memberGoneAt;
       return { result, choice: shown, ...(expired ? { unanswered: true } : {}) };
     }
     return { result, mentions: Array.isArray(message.metadata?.pendingMentions) ? message.metadata!.pendingMentions! : [] };

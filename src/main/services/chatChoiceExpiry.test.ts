@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ChatMessage } from "../../shared/types";
-import { choiceAskedAtMs, choiceExpiryPlan, choicesClosedByMessage } from "./chatChoiceExpiry";
+import { choiceAskedAtMs, choiceClosedForGoneMember, choiceExpiryPlan, choicesClosedByMessage, choicesOfGoneMembers } from "./chatChoiceExpiry";
+import { hubCardOutcomeFrom } from "../../shared/hubCards";
 
 /**
  * Which member choices close (the User, 2026-11-15): as soon as a message of
@@ -126,5 +127,21 @@ test("a message still queued behind the member's running turn closes nothing unt
   assert.deepEqual(choiceExpiryPlan(messages, all), { due: [] }, "queued: not started");
   messages[2] = { ...queued, metadata: { sourceMessageId: "u1", parentMessageId: "u1" } };
   assert.deepEqual(choiceExpiryPlan(messages, all), { due: ["ask"] }, "started");
+});
+
+test("the waiting cards of members no longer in the chat are found, and close for good", () => {
+  const messages = [card("gone", "old-leo", 0), card("here", "taylor", 0), card("answered-gone", "old-leo", 0)];
+  messages[2].metadata!.pendingChoice!.status = "selected";
+  assert.deepEqual(choicesOfGoneMembers(messages, new Set(["taylor"]), all), ["gone"], "only a waiting card of a member that left");
+  assert.deepEqual(choicesOfGoneMembers(messages, new Set(["taylor"]), () => false), [], "only one this device may close");
+  const closed = choiceClosedForGoneMember(messages[0].metadata!.pendingChoice!, iso(5));
+  assert.deepEqual([closed.status, closed.cancelledAt, closed.expiredAt, closed.memberGoneAt], ["cancelled", iso(5), iso(5), iso(5)]);
+  // The server is told it closed, not that nobody answered it: an answer
+  // given before has nobody to go to either, so it is never kept open for one.
+  const chat = { id: "c", messages: [{ ...messages[0], metadata: { pendingChoice: closed } }], metadata: {} } as never;
+  assert.equal((hubCardOutcomeFrom(chat, "choice:gone", "closed") as { unanswered?: boolean }).unanswered, undefined);
+  const expired = { ...closed, memberGoneAt: undefined };
+  const expiredChat = { id: "c", messages: [{ ...messages[0], metadata: { pendingChoice: expired } }], metadata: {} } as never;
+  assert.equal((hubCardOutcomeFrom(expiredChat, "choice:gone", "closed") as { unanswered?: boolean }).unanswered, true, "a card she went on past is still unanswered");
 });
 

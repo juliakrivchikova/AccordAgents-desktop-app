@@ -171,6 +171,46 @@ test("a card this device heard was answered is not reported to the member as clo
   assert.equal(h.choiceOf(asking.id)?.status, "pending", "left to the answer");
 });
 
+test("removing a member closes its waiting cards; a card of a member already gone closes at start, and Cancel closes it too", async (t) => {
+  const h = harness(conversation(), { [taylor.id]: [ASKING] });
+  t.after(h.stopTimers);
+  await h.send("@taylor which store?");
+  const asking = h.askingMessage();
+  // A mention approval of taylor's waits as well.
+  h.storage.current.messages.push({ id: "mentions", role: "participant", participantId: taylor.id, participantLabel: "@taylor", content: "@drew look", status: "done",
+    createdAt: new Date().toISOString(), metadata: { pendingMentions: [{ targetParticipantId: drew.id, targetHandle: "drew", status: "pending" }] } } as ChatMessage);
+  await h.service.removeParticipant({ conversationId: "chat-expiry", participantId: taylor.id });
+  const closed = h.choiceOf(asking.id);
+  assert.deepEqual([closed?.status, Boolean(closed?.expiredAt), Boolean(closed?.memberGoneAt)], ["cancelled", true, true], "closed with its member");
+  assert.equal(h.stored().messages.find((message) => message.id === "mentions")?.metadata?.pendingMentions?.[0]?.status, "rejected", "its mention approvals too");
+  assert.equal(pendingChoiceItems(h.stored()).length, 0, "gone from Pending");
+
+  // A card of a member that left before this fix: closed when the app starts.
+  const gone: ChatMessage = { id: "gone-card", role: "participant", participantId: "old-leo", participantLabel: "@leo", content: "Which?", status: "done",
+    createdAt: new Date(Date.now() - 60_000).toISOString(),
+    metadata: { pendingChoice: { id: "choice-gone", title: "Old", question: "Which?", status: "pending", options: [{ id: "a", label: "A" }] } } };
+  h.storage.current.messages.push(gone);
+  await h.service.resumeChoiceExpiry(["chat-expiry"]);
+  assert.deepEqual([h.choiceOf("gone-card")?.status, Boolean(h.choiceOf("gone-card")?.memberGoneAt)], ["cancelled", true]);
+
+  // A mention approval of a member already gone: rejected by the same pass.
+  h.storage.current.messages.push({ id: "gone-mentions", role: "participant", participantId: "old-leo", participantLabel: "@leo", content: "@drew look", status: "done",
+    createdAt: new Date().toISOString(), metadata: { pendingMentions: [{ targetParticipantId: drew.id, targetHandle: "drew", status: "pending" }] } } as ChatMessage);
+  // A member this build cannot read whole is still a member: its card stays.
+  (h.storage.current.metadata.participants as unknown[]).push({ id: "future-member", handle: "nova", kind: "future-cli" });
+  h.storage.current.messages.push({ ...gone, id: "future-card", participantId: "future-member", metadata: { pendingChoice: { ...gone.metadata!.pendingChoice!, id: "choice-future" } } });
+  await h.service.resumeChoiceExpiry(["chat-expiry"]);
+  assert.equal(h.stored().messages.find((message) => message.id === "gone-mentions")?.metadata?.pendingMentions?.[0]?.status, "rejected");
+  assert.equal(h.choiceOf("future-card")?.status, "pending", "a member this build cannot read has not left");
+
+  // Cancel, where nothing closed it yet: closed here, nobody else asked.
+  h.storage.current.messages.push({ ...gone, id: "gone-card-2", metadata: { pendingChoice: { ...gone.metadata!.pendingChoice!, id: "choice-gone-2" } } });
+  await assert.rejects(h.service.answerChoiceCard({ conversationId: "chat-expiry", sourceMessageId: "gone-card-2", choiceId: "choice-gone-2", selectedOptionId: "a" }),
+    /no longer in this chat: its question can only be cancelled/);
+  await h.service.answerChoiceCard({ conversationId: "chat-expiry", sourceMessageId: "gone-card-2", choiceId: "choice-gone-2", cancel: true });
+  assert.deepEqual([h.choiceOf("gone-card-2")?.status, h.choiceOf("gone-card-2")?.expiredAt], ["cancelled", undefined], "shown as her cancel");
+});
+
 test("a choice does not expire when the User only wrote to another member, or never went on", async (t) => {
   const h = harness(conversation(), { [taylor.id]: [ASKING] });
   t.after(h.stopTimers);
