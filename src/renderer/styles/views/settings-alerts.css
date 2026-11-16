@@ -160,13 +160,31 @@
   white-space: nowrap;
 }
 
-.settings-view .alerts-node.is-off .alerts-node-dot {
-  border-style: dashed;
-  color: var(--app-text-secondary);
+/* What will happen is green; what will not is dim grey, and a broken
+   channel says so in red under it (the User, 2026-11-16). */
+.settings-view .alerts-node.is-on .alerts-node-dot {
+  border-color: var(--app-success-border);
+  background: var(--app-success-soft);
+  color: var(--app-success);
 }
 
-.settings-view .alerts-node.is-off .alerts-node-label {
-  color: var(--app-text-secondary);
+.settings-view .alerts-node.is-on .alerts-node-time {
+  color: var(--app-success);
+}
+
+.settings-view .alerts-node.is-off .alerts-node-dot,
+.settings-view .alerts-node.is-bad .alerts-node-dot,
+.settings-view .alerts-node.is-off .alerts-node-label,
+.settings-view .alerts-node.is-bad .alerts-node-label {
+  opacity: 0.4;
+}
+
+.settings-view .alerts-node.is-off .alerts-node-time {
+  color: var(--app-muted);
+}
+
+.settings-view .alerts-node.is-bad .alerts-node-time {
+  color: var(--app-danger);
 }
 
 .settings-view .alerts-edge {
@@ -177,9 +195,16 @@
   background: var(--app-border);
 }
 
-.settings-view .alerts-edge.is-off {
-  border-top: 1px dashed var(--app-border);
-  background: none;
+.settings-view .alerts-edge.is-on {
+  background: var(--app-success-border);
+}
+
+.settings-view .alerts-edge.is-on span {
+  color: var(--app-success);
+}
+
+.settings-view .alerts-edge.is-off span {
+  color: var(--app-muted-subtle);
 }
 
 .settings-view .alerts-edge span {

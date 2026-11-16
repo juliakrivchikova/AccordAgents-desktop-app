@@ -3,9 +3,11 @@ import test from "node:test";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import type { AlertsFlowChannel } from "../../../shared/urgentAlertSettings";
 import type { UrgentAlertSettingsView } from "../../../shared/urgentAlerts";
 import { TelegramConnectDialog } from "./alerts-connect-dialogs";
 import { PhoneConnectDialog } from "./alerts-phone-dialog";
+import { AlertsFlow } from "./alerts-settings-parts";
 
 // The DOM comes from scripts/renderer-jsdom-setup.mjs via `node --import`
 // (Radix reads `document` when it is first imported).
@@ -255,6 +257,29 @@ test("the Telegram wizard follows the server: token, Start, Got it, connected", 
   assert.equal(document.querySelector(".alerts-wizard-step.is-now"), null, "every step done");
   assert.match(document.body.textContent ?? "", /Connected to Svetlana/);
   assert.deepEqual(dialogButtons(), ["Done"]);
+  await act(async () => root.unmount());
+  host.remove();
+});
+
+test("the flow strip is green for what will happen and dim for what will not", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const nodes = async (telegram: AlertsFlowChannel, phone: AlertsFlowChannel) => {
+    await act(async () => {
+      root.render(<AlertsFlow waitMinutes={5} telegram={telegram} phone={phone} answerMode={false} busy={false} onWait={() => undefined} />);
+    });
+    const node = (item: Element) => `${item.className.replace("alerts-node is-", "")}:${(item.querySelector(".alerts-node-label")?.textContent ?? "")}:${item.querySelector(".alerts-node-time")?.textContent ?? ""}`;
+    const edge = (item: Element) => item.className.replace("alerts-edge is-", "");
+    return [...host.querySelectorAll(".alerts-chain > li")].map((item) => item.classList.contains("alerts-node") ? node(item) : edge(item));
+  };
+
+  assert.deepEqual(await nodes("ready", "ready"), ["on:Alert:0:00", "on", "on:Telegram:at once", "on", "on:Call 1:0:05", "on", "on:Call 2:0:08", "on", "on:Call 3:0:11"]);
+  // Only Telegram works: the calls are dim, the first says why, no times on the rest.
+  assert.deepEqual(await nodes("ready", "none"), ["on:Alert:0:00", "on", "on:Telegram:at once", "off", "off:Call 1:not set up", "off", "off:Call 2:", "off", "off:Call 3:"]);
+  // A broken channel is red, not merely dim.
+  assert.deepEqual(await nodes("broken", "broken"), ["on:Alert:0:00", "off", "bad:Telegram:not working", "off", "bad:Call 1:not working", "off", "off:Call 2:", "off", "off:Call 3:"]);
+  assert.deepEqual((await nodes("not-finished", "ready")).slice(0, 5), ["on:Alert:0:00", "off", "off:Telegram:not finished", "on", "on:Call 1:0:05"]);
   await act(async () => root.unmount());
   host.remove();
 });
