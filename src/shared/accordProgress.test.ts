@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  accordFoldedMessageIds, accordFoldedNoteKeys, accordProgressFromNotes, accordProgressNoteHead, accordProgressStages, accordProgressStatus,
-  dockedAccordFrom
+  ACCORD_CLOSED_SOURCE, accordClosedLaunchId, accordClosedLines, accordFoldedMessageIds, accordFoldedNoteKeys, accordLineOutcome, accordOfLaunch,
+  accordOfMessages, accordProgressFromNotes, accordProgressNoteHead, accordProgressStages, accordProgressStatus, dockedAccordFrom,
+  isRepeatedAccordClosedLine, recordClosedAccords
 } from "./accordProgress";
+import { isChatMessageHiddenFromTimeline } from "./chatTimelineVisibility";
 import { parseArtifactNoteCard } from "./artifactNoteCard";
 
 const LAUNCH = "launch-1";
@@ -169,4 +171,64 @@ test("an Accord's notes stay out of the chat, also without its launch loaded", (
   });
   const messages = [note("n1", created), note("n2", fableDraft)];
   assert.deepEqual([...accordFoldedMessageIds(messages)], ["n1", "n2"]);
+});
+
+test("a closed Accord's line: read only from its own shape, one per Accord, shown on the timeline (the User, 2026-11-16)", () => {
+  const line = (id: string, launchMessageId: unknown = LAUNCH) => ({
+    id, role: "system", content: "Accord folded: Sell or hold", createdAt: "2026-11-16T10:00:00.000Z",
+    metadata: { appMessageSource: ACCORD_CLOSED_SOURCE, accordClosed: { launchMessageId } }
+  });
+  assert.equal(accordClosedLaunchId(line("a")), LAUNCH);
+  assert.equal(accordClosedLaunchId({ ...line("a"), role: "participant" }), undefined, "only the app's line");
+  assert.equal(accordClosedLaunchId(line("a", 42)), undefined, "written by another device: a string, or not a line");
+  assert.equal(accordClosedLaunchId(line("a", "")), undefined);
+  assert.equal(accordClosedLaunchId({ ...line("a"), metadata: { appMessageSource: "app_artifact_note", accordClosed: { launchMessageId: LAUNCH } } }), undefined);
+  const messages = [line("first"), line("second"), line("other", "launch-2")];
+  assert.deepEqual([...accordClosedLines(messages)], [[LAUNCH, "first"], ["launch-2", "other"]]);
+  assert.equal(accordClosedLines(messages), accordClosedLines(messages), "worked out once per list");
+  assert.deepEqual(messages.map((message) => isRepeatedAccordClosedLine(messages, message)), [false, true, false]);
+  assert.equal(isChatMessageHiddenFromTimeline(line("first") as never), false, "her line is on the timeline, as an artifact note is");
+});
+
+test("a copy whose messages change in place records its folded Accords anew on every save", () => {
+  const line = (id: string, launchMessageId: string, extra: Record<string, unknown> = {}) => ({
+    id, role: "system", content: "Accord folded", createdAt: "2026-11-16T10:00:00.000Z",
+    metadata: { appMessageSource: ACCORD_CLOSED_SOURCE, accordClosed: { launchMessageId }, ...extra }
+  });
+  const conversation = { messages: [line("a", "launch-1")] as Array<ReturnType<typeof line>>, metadata: {} as Record<string, unknown> };
+  recordClosedAccords(conversation);
+  assert.deepEqual(conversation.metadata.accordClosedLaunchIds, ["launch-1"]);
+  // The same list, grown in place (the computer's and the server's copies).
+  conversation.messages.push(line("b", "launch-2"), line("c", "launch-2"), line("d", "launch-3", { serverRejected: "no" }));
+  recordClosedAccords(conversation);
+  assert.deepEqual(conversation.metadata.accordClosedLaunchIds, ["launch-1", "launch-2"], "a refused line is not recorded; one per Accord");
+  conversation.messages.splice(0, conversation.messages.length);
+  recordClosedAccords(conversation);
+  assert.equal("accordClosedLaunchIds" in conversation.metadata, false);
+});
+
+test("a closed Accord's card is worked out for its own launch, also an older one, also without its launch loaded", () => {
+  const launches = [{ id: LAUNCH, card, createdAt: "2026-11-01T10:00:00.000Z" }];
+  const notes = [created, fableDraft, argonDraft, v1, fableSignsV1].map((note) => ({ ...note, createdAt: "2026-11-01T10:00:00.000Z" }));
+  const accord = accordOfLaunch(launches, notes, LAUNCH)!;
+  assert.equal(accord.launchId, LAUNCH);
+  assert.deepEqual(accord.card, card);
+  assert.equal(accordLineOutcome(accord.progress), "v1 · 1/2 signed");
+  // A newer Accord is pinned now; the older one's line still opens its own card.
+  const newer = filed(`@argon created draft collection [Other](#artifact:art-9) · Drafts 0/1`, "launch-2");
+  assert.equal(accordOfLaunch(launches, [...notes, { ...newer, createdAt: "2026-11-02T10:00:00.000Z" }], LAUNCH)?.progress.artifactId, "art-1");
+  // Without its launch: the card from what its notes say of it.
+  const withPeople = notes.map((note) => ({ ...note, accordLaunch: { facilitator: "fable", members: ["argon"] } }));
+  assert.deepEqual(accordOfLaunch([], withPeople, LAUNCH)?.card, { facilitator: "fable", members: ["argon"], subject: "" });
+  assert.equal(accordOfLaunch([], notes, LAUNCH), undefined, "nothing says who is in it");
+  assert.equal(accordOfLaunch(launches, [], LAUNCH), undefined, "no document yet");
+  const reached = accordOfLaunch(launches, [...notes, v2, fableSignsV2, argonSignsV2], LAUNCH)!;
+  assert.equal(accordLineOutcome(reached.progress), "Accord reached · v2");
+  // The same over a chat's messages.
+  const messages = [
+    { id: LAUNCH, role: "user", content: "", createdAt: "2026-11-01T09:00:00.000Z" },
+    ...notes.map((note, index) => ({ id: `n${index}`, role: "system", content: note.content, createdAt: note.createdAt,
+      metadata: { appMessageSource: "app_artifact_note", accordLaunchMessageId: LAUNCH, accordLaunch: { facilitator: "fable", members: ["argon"] } } }))
+  ];
+  assert.equal(accordOfMessages(messages, LAUNCH)?.progress.version?.number, 1);
 });

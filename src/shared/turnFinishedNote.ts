@@ -1,5 +1,5 @@
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "./appMcpToolContracts";
-import { accordFoldedMessageIds } from "./accordProgress";
+import { accordClosedLaunchId, accordFoldedMessageIds } from "./accordProgress";
 import {
   chatMessageHiddenFromTimeline,
   chatMessageVisualThreadRootId,
@@ -79,8 +79,10 @@ export function turnFinishedNoteFor(
     // below still buries the reply.
     !(urgentAlertOfMessage(message) && message.participantId === reply.participantId) &&
     !chatMessageHiddenFromTimeline(conversation, message) &&
-    // An Accord's document note is drawn on the Accord's card, not below.
+    // An Accord's document note is drawn on the Accord's card, not below;
+    // a closed Accord's line is her own view, not a message burying it.
     !accordFoldedMessageIds(conversation.messages).has(message.id) &&
+    !accordClosedLaunchId(message) &&
     chatMessageVisualThreadRootId(conversation, message, roots) === where
   );
   if (!below) {

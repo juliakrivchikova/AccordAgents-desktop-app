@@ -79,6 +79,7 @@ import type {
   SaveAgentEnvironmentVariableRequest,
   StartChatAccordRequest,
   ToggleChatReactionRequest,
+  CloseAccordCardRequest,
   DismissTurnFinishedNoteRequest,
   UpdateChatParticipantRuntimeRequest,
   RemoveChatParticipantRequest,
@@ -2638,6 +2639,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("chat:dismiss-turn-finished-note", async (_event, request: DismissTurnFinishedNoteRequest) => {
     await chatService.dismissTurnFinishedNote(request);
+  });
+  ipcMain.handle("chat:close-accord-card", async (_event, request: CloseAccordCardRequest) => {
+    await chatService.closeAccordCard(request);
   });
   // Answers to cards a member waits on go to the User's server (agreement
   // Д9): the device the member runs on applies them, once, whichever device

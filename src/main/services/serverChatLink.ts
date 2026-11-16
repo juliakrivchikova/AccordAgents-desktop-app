@@ -1,4 +1,5 @@
 import type { HubAlertRequest, HubAlertResult } from "../../shared/urgentAlerts";
+import { accordClosedLaunchId } from "../../shared/accordProgress";
 import { HubClient, HubIdentityError, HubHttpError } from "./hubClient";
 import { HubOpsClient, HUB_FEED_CURSOR_KEY, type HubOpOutcome } from "./hubOpsClient";
 import { conversationFieldsOf, newOpId, type ChatServerLink } from "./chatServerOps";
@@ -843,7 +844,11 @@ export class ServerChatLink {
   /** One chat moved to the server, in pages; returns the pages sent. */
   private async importChat(client: HubClient, conversation: Conversation): Promise<number> {
     const fields = { ...conversationFieldsOf(conversation), updatedAt: conversation.updatedAt };
-    const messages = conversation.messages.map(messageForImport);
+    // A closed Accord's line the old server refused draws nothing: moved, it
+    // would fold that Accord on every device.
+    const messages = conversation.messages
+      .filter((message) => !(accordClosedLaunchId(message) && message.metadata?.serverRejected))
+      .map(messageForImport);
     const order = messages.map((message) => message.id);
     const pages: ChatMessage[][] = [];
     let current: ChatMessage[] = [];

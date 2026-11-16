@@ -10,6 +10,7 @@ import type { SavedMessageRow, StorageService } from "../main/services/storage";
 import type { HubDevice, HubMemberRules } from "../shared/hubProtocol";
 import { HUB_CARD_ANSWERED_FIRST } from "../shared/hubCards";
 import { TURN_FINISHED_NOTE_SOURCE, turnFinishedNoteOf } from "../shared/turnFinishedNoteSource";
+import { ACCORD_CLOSED_SOURCE, accordClosedLaunchId, recordClosedAccords } from "../shared/accordProgress";
 import {
   HUB_CHAT_PAGE_MESSAGES,
   HUB_FEED_PAGE_BYTES,
@@ -364,7 +365,11 @@ export class HubOps {
         if (refusal) return reject(opId, refusal.rejected);
         const message = storedMessage(op.message, { serverSeq: seq, serverWriter: device.deviceId });
         conversation.messages.push(message);
-        conversation.updatedAt = acceptedAt;
+        // A closed Accord's line is the User's own view of the chat, not
+        // news: the chat keeps its place in her list, as a pin does. The
+        // server's copy records it over the whole chat, for the phone's list.
+        const closedLaunchId = accordClosedLaunchId(message);
+        if (!closedLaunchId) conversation.updatedAt = acceptedAt;
         // A User's message asks a turn of every member it names: waiting on
         // the server for the device each member runs on (Д4). Only one the
         // User wrote: a machine writes the User's words only for its own
@@ -716,6 +721,18 @@ export class HubOps {
       }
       return undefined;
     }
+    // A closed Accord's line is the User's own view of the chat: written by
+    // her computer or her phone, once per Accord, for an Accord of this chat.
+    if (message.role === "system" && message.metadata?.appMessageSource === ACCORD_CLOSED_SOURCE) {
+      const launchId = accordClosedLaunchId(message);
+      if (device.role === "machine") return { rejected: "Only the User's computer or phone folds an Accord into the chat." };
+      if (!launchId || launchId.length > 200 || message.content.length > 240) return { rejected: "A closed Accord's line names its Accord." };
+      const known = conversation.messages.some((item) => item.id === launchId ||
+        (item.role === "system" && item.metadata?.accordLaunchMessageId === launchId));
+      if (!known) return { rejected: "This chat has no such Accord." };
+      if (conversation.messages.some((item) => accordClosedLaunchId(item) === launchId)) return { rejected: "This Accord is already folded into the chat." };
+      return undefined;
+    }
     if (message.role !== "participant") return undefined;
     if (!message.participantId) return { rejected: "A member's message names its member." };
     const home = homeDeviceId(conversation, message.participantId, devices);
@@ -853,6 +870,9 @@ export class HubOps {
   ): Promise<void> {
     const store = this.storage.hubOps();
     const record = { ...done.entry, kind: done.entry.effect.kind, result: done.result };
+    // The Accords folded into the chat, from its lines, for the phone's list:
+    // written on every save, whichever operation brought the lines.
+    recordClosedAccords(conversation);
     const token = await this.storage.saveConversation(conversation, {
       rows: this.rowsFor(conversation),
       alsoCommit: {

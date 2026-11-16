@@ -12,6 +12,7 @@ import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../.
 import type { ChatImageAttachment, ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
 import { isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import { TURN_FINISHED_NOTE_SOURCE } from "../../shared/turnFinishedNoteSource";
+import { ACCORD_CLOSED_SOURCE, accordClosedLaunchId, accordRefusedLines } from "../../shared/accordProgress";
 import { HubOps } from "../../hub/hubOps";
 import { HubServer } from "../../hub/hubServer";
 import { ChatService } from "./chat";
@@ -648,6 +649,63 @@ for (const where of ["machine", "desktop"] as const) {
     assert.ok(after.messages.some((message) => message.id === reply.id), "the reply is still on the server");
   });
 }
+
+test("the cross on the pinned Accord leaves one line at the end of the chat on the server; the chat keeps its time and members never read it", async (t) => {
+  // The User, 2026-11-16: closing the Accord folds it into a line, placed last
+  // in the chat as it stood then, the same on every device.
+  const id = "chat-accord-line";
+  const h = await linked(t, localChat(id));
+  await h.desktopChat.sendMessage({ conversationId: id, content: "@taylor hello" } as never);
+  const before = await until(() => h.page(id), (page) =>
+    page.messages.some((message) => message.role === "participant" && message.status === "done") &&
+    page.turns.some((turn) => turn.state === "finished"));
+  const lastBefore = before.messages.at(-1)!.id;
+  const chatTime = before.conversation.updatedAt;
+  // The computer's own time for the chat, once it holds what the server has.
+  const settled = await until(() => h.desktopStorage.getConversation(id), (current) =>
+    current?.messages.at(-1)?.id === lastBefore && typeof current.messages.at(-1)?.metadata?.serverSeq === "number");
+  const deskTime = settled!.updatedAt;
+  // The chat's message stands in for an Accord's launch: the server takes a
+  // line only for an Accord of the chat.
+  const launchId = before.messages.find((message) => message.role === "user")!.id;
+  const isLine = (message: ChatMessage) => accordClosedLaunchId(message) === launchId;
+  await h.desktopChat.closeAccordCard({ conversationId: id, launchMessageId: launchId, title: "  Ship\nor wait " });
+  assert.deepEqual((await h.desktopStorage.getConversation(id))!.metadata.accordClosedLaunchIds, [launchId],
+    "recorded by the computer's own save, before the server answers");
+  // Closed again (a second press, another window): still one line.
+  await h.desktopChat.closeAccordCard({ conversationId: id, launchMessageId: launchId, title: "Ship or wait" });
+  await h.desktopChat.closeAccordCard({ conversationId: id, launchMessageId: "  " });
+  const page = await until(() => h.page(id), (current) => current.messages.some(isLine));
+  const line = page.messages.find(isLine)!;
+  assert.equal(page.messages.at(-1)?.id, line.id, "the line is the last message");
+  assert.equal(page.messages.at(-2)?.id, lastBefore, "right after what was last when she pressed the cross");
+  assert.equal(page.messages.filter((message) => accordClosedLaunchId(message)).length, 1, "one line per Accord");
+  assert.equal(line.role, "system");
+  assert.equal(line.content, "Accord folded: Ship or wait");
+  assert.equal(line.metadata?.appMessageSource, ACCORD_CLOSED_SOURCE);
+  assert.equal(page.conversation.updatedAt, chatTime, "the server keeps the chat's place in her list");
+  const held = await until(() => h.desktopStorage.getConversation(id), (current) =>
+    Boolean(current?.messages.some((message) => isLine(message) && typeof message.metadata?.serverSeq === "number")));
+  assert.equal(held!.updatedAt, deskTime, "and so does the computer, also after the server's copy came back");
+  assert.equal(held!.messages.filter((message) => accordClosedLaunchId(message)).length, 1);
+  assert.deepEqual(held!.metadata.accordClosedLaunchIds, [launchId], "the computer's record over the whole chat");
+  // A line for an Accord the chat does not have: the server refuses it, and
+  // the computer marks it so (it draws nothing; the card stays pinned).
+  await h.desktopChat.closeAccordCard({ conversationId: id, launchMessageId: "no-such-launch", title: "Other" });
+  const refused = await until(() => h.desktopStorage.getConversation(id), (current) =>
+    Boolean(current?.messages.some((message) => accordClosedLaunchId(message) === "no-such-launch" && message.metadata?.serverRejected)));
+  assert.match(String(refused!.messages.find((message) => accordClosedLaunchId(message) === "no-such-launch")!.metadata?.serverRejected), /no such Accord/);
+  assert.deepEqual(accordRefusedLines(refused!.messages), ["no-such-launch"]);
+  assert.deepEqual(refused!.metadata.accordClosedLaunchIds, [launchId], "a refused line is not recorded");
+  assert.ok(!(await h.page(id)).messages.some((message) => accordClosedLaunchId(message) === "no-such-launch"), "not on the server");
+  // The machine keeps the server's copy too; its members do not read it.
+  await until(() => h.machineStorage.getConversation(id), (current) => Boolean(current?.messages.some(isLine)));
+  for (const [chat, member] of [[h.desktopChat, desk], [h.machineChat, remote]] as const) {
+    const read = await chat.readChatMessagesForTool({ conversationId: id, participantId: member.id } as never, { limit: 50 });
+    assert.ok((read.messages as Array<{ id: string }>).some((message) => message.id === lastBefore), "members read the chat");
+    assert.ok(!(read.messages as Array<{ id: string }>).some((message) => message.id === line.id), "but not the line");
+  }
+});
 
 for (const where of ["machine", "desktop"] as const) {
   test(`a ${where} member's reply that is last when its turn ends leaves no note`, async (t) => {

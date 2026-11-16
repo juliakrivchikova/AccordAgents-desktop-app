@@ -151,12 +151,14 @@
   overflow-wrap: anywhere;
 }
 
-/* Closed: one line, the message first, then who and how it ended. */
+/* Closed: one line, the message first, then who and how it ended. Every used
+   card is this same line (.chat-card-row: a choice, a closed Accord). */
 .chat-urgent-alert.is-folded {
   padding: 2px 0 6px;
 }
 
-.chat-urgent-alert-folded {
+.chat-urgent-alert-folded,
+.chat-card-row {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -173,17 +175,25 @@
   cursor: pointer;
 }
 
-.chat-urgent-alert-folded:hover {
+/* A row that opens nothing (a used choice) is not a control. */
+div.chat-card-row {
+  cursor: default;
+}
+
+.chat-urgent-alert-folded:hover,
+button.chat-card-row:hover {
   background: var(--app-surface-hover);
 }
 
-.chat-urgent-alert-folded:focus-visible {
+.chat-urgent-alert-folded:focus-visible,
+.chat-card-row:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
 
 /* A grey bell once she reacted; red when it never reached her. */
-.chat-urgent-alert-folded-bell {
+.chat-urgent-alert-folded-bell,
+.chat-card-row-icon {
   flex: none;
   color: var(--app-muted);
 }
@@ -192,7 +202,8 @@
   color: var(--app-urgent);
 }
 
-.chat-urgent-alert-folded-preview {
+.chat-urgent-alert-folded-preview,
+.chat-card-row-preview {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -202,7 +213,8 @@
   white-space: nowrap;
 }
 
-.chat-urgent-alert-folded-outcome {
+.chat-urgent-alert-folded-outcome,
+.chat-card-row-outcome {
   flex: none;
   max-width: 50%;
   overflow: hidden;
@@ -217,7 +229,31 @@
   color: var(--app-danger);
 }
 
-.chat-urgent-alert-folded-chevron {
+.chat-urgent-alert-folded-chevron,
+.chat-card-row-chevron {
   flex: none;
   color: var(--app-text-secondary);
+}
+
+/* The line a closed Accord left in the chat: placed as a folded urgent alert
+   is; opened, the Accord's own card, its whole height in the chat. */
+.chat-accord-line {
+  max-width: min(653px, calc(100% - 50px));
+  margin-left: 50px;
+  padding: 2px 0 6px;
+}
+
+.chat-accord-line .chat-accord-line-glyph {
+  width: 15px;
+  height: 15px;
+}
+
+.chat-accord-line.is-open .chat-accord-dock {
+  max-width: 624px;
+  max-height: none;
+  overflow: hidden;
+}
+
+.chat-accord-line.is-open .chat-accord-dock-head {
+  position: static;
 }
