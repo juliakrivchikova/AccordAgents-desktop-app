@@ -512,6 +512,7 @@ function App(): JSX.Element {
           getAgentEnvironment={settingsActions.getAgentEnvironment}
           saveAgentEnvironmentVariable={settingsActions.saveAgentEnvironmentVariable}
           deleteAgentEnvironmentVariable={settingsActions.deleteAgentEnvironmentVariable}
+          refreshAgentEnvironment={settingsActions.refreshAgentEnvironment}
           onTryPluginInChat={tryPluginInNewChat}
           sidebarCollapsed={state.sidebarCollapsed}
           onExpandSidebar={expandSidebar}

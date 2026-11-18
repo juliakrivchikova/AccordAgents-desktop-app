@@ -185,7 +185,7 @@ import { machineUpgradeTarget } from "./services/machineUpgradeTarget";
 import { MachineRecoveryService } from "./services/machineRecovery";
 import { MachineInactivityCheck } from "./services/machineInactivity";
 import { isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase, isMachineRecoveryOperation } from "../shared/machineInstall";
-import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, refreshLoginShellEnv, runCommand, setCommandDebugLogger, windowsPowerShellPath } from "./services/command";
+import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, onComputerEnvironmentRead, refreshLoginShellEnv, runCommand, setCommandDebugLogger, windowsPowerShellPath } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService, enabledCloudProviders } from "./services/cloudRunDoctor";
 import { CloudRunSetupSession } from "./services/cloudRunSetupSession";
@@ -276,7 +276,16 @@ function discardCrashReportDataAtLaunch(): { active: false; error?: string } {
 
 const gitService = new GitService();
 const settingsService = new SettingsService();
-const agentEnvironmentService = new AgentEnvironmentService(settingsService);
+const agentEnvironmentService = new AgentEnvironmentService(settingsService, undefined, undefined, (error) => {
+  void debugLogService.write("agent-environment.reconcile-error", { message: error instanceof Error ? error.message : String(error) });
+});
+// Every successful reading of this computer brings the automatic variables in
+// step, so the cloud machines follow it without the Environment page open.
+onComputerEnvironmentRead(() => {
+  void agentEnvironmentService.reconcile().catch((error: unknown) => {
+    void debugLogService.write("agent-environment.reconcile-error", { message: error instanceof Error ? error.message : String(error) });
+  });
+});
 const sqliteExecutable = resolveSqliteExecutable({
   appPath: app.getAppPath(),
   resourcesPath: process.resourcesPath,
@@ -2191,13 +2200,14 @@ function registerIpc(): void {
   ipcMain.handle("cloud-runs:aws-delete", () => cloudRunAwsService.deleteWorker());
   ipcMain.handle("settings:get-agent-environment", () => agentEnvironmentService.snapshot());
   ipcMain.handle("settings:save-agent-environment-variable", async (_event, request: SaveAgentEnvironmentVariableRequest) => {
-    await settingsService.saveAgentEnvironmentVariable(request);
+    const snapshot = await agentEnvironmentService.save(request);
     // Work in progress keeps running with the values it started with; each
     // member gets the new ones once its process is idle (retireIdleWarmAgents).
     await cliAgentRunner.retireIdleWarmAgents("environment-changed");
     cliAgentRunner.invalidateAgentReadiness();
-    return agentEnvironmentService.snapshot();
+    return snapshot;
   });
+  ipcMain.handle("settings:refresh-agent-environment", () => agentEnvironmentService.refresh());
   ipcMain.handle("settings:save-cli-provider-host", async (_event, update: CliProviderHostUpdate) => {
     const settings = await settingsService.saveCliProviderHost(update);
     const saved = update.id?.trim() ? settings.cliProviderHosts.find((host) => host.id === update.id?.trim()) : undefined;
@@ -2212,10 +2222,10 @@ function registerIpc(): void {
     return settings;
   });
   ipcMain.handle("settings:delete-agent-environment-variable", async (_event, request: DeleteAgentEnvironmentVariableRequest) => {
-    await settingsService.deleteAgentEnvironmentVariable(request.key);
+    const snapshot = await agentEnvironmentService.delete(request);
     await cliAgentRunner.retireIdleWarmAgents("environment-changed");
     cliAgentRunner.invalidateAgentReadiness();
-    return agentEnvironmentService.snapshot();
+    return snapshot;
   });
   ipcMain.handle("settings:update-provider", async (_event, update: ProviderSettingsUpdate) => {
     const next = await settingsService.updateProvider(update);
@@ -3515,6 +3525,7 @@ void app.whenReady().then(async () => {
       return undefined;
     });
   }
+  // The first reading also brings the automatic variables in step.
   void ensureLoginShellEnvPrimed();
   await detectAgentsWithAppSkills().catch((error) => {
     void debugLogService.write("app-skills-startup-sync-error", {

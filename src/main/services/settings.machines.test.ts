@@ -191,7 +191,7 @@ test("machine export refuses an unreadable enabled secret instead of deleting it
     platform.secrets.decryptString = () => { throw new Error("secret store unavailable"); };
     await assert.rejects(service.exportMachineSettingsSnapshot(), /TEST_TOKEN could not be read/);
     assert.equal(await readFile(file, "utf8"), committed);
-    await service.saveAgentEnvironmentVariable({ key: "TEST_TOKEN", enabled: false });
+    await service.deleteAgentEnvironmentVariable("TEST_TOKEN");
     assert.deepEqual((await service.exportMachineSettingsSnapshot()).agentEnvironment, []);
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
 });

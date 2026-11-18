@@ -31,7 +31,7 @@ import type {
 } from "../../shared/types";
 import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
-import { filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
+import { agentEnvironmentKeyValidationError, filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
 import { GEMINI_API_KEY_SETTINGS, geminiApiKeyEnv } from "../../shared/cliProviderHosts";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS, normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
 import { chatTextEndsAtSentenceOrParagraphBoundary } from "../../shared/processingTranscript";
@@ -321,6 +321,10 @@ export interface CliAgentRunOptions {
    *  CLI's own setting; part of the warm process key). */
   claudeChrome?: boolean;
   agentEnv?: NodeJS.ProcessEnv;
+  /** Only the values from Settings → Environment (no added-provider keys):
+   *  Codex gets them through its own shell policy, which is what wins over
+   *  the shell profile it reads again before each command. */
+  settingsEnv?: NodeJS.ProcessEnv;
   agentEnvKey?: string;
   warm?: CliAgentWarmOptions;
   onOutput?: CliAgentOutputCallback;
@@ -4323,6 +4327,17 @@ export class CliAgentRunner {
     if (reasoningEffort) {
       config.model_reasoning_effort = reasoningEffort;
     }
+    // Codex reads the User's shell profile again before each command
+    // (shell_snapshot), and the profile's exports would win over the values
+    // this process was started with. Its own policy wins over the profile, so
+    // a value changed in Settings → Environment reaches the member's commands
+    // too. Sent with the thread, not on the command line, so it is not in the
+    // process list.
+    for (const [key, value] of Object.entries(options.settingsEnv ?? {})) {
+      if (typeof value === "string" && !agentEnvironmentKeyValidationError(key)) {
+        config[`shell_environment_policy.set.${key}`] = value;
+      }
+    }
     if (options.appMcp) {
       config["mcp_servers.accord_agents.url"] = options.appMcp.url;
       config["mcp_servers.accord_agents.bearer_token_env_var"] = CODEX_APP_SERVER_MCP_TOKEN_ENV;
@@ -8103,7 +8118,11 @@ export class CliAgentRunner {
   }
 
   private agentRunEnv(options: CliAgentRunOptions): NodeJS.ProcessEnv | undefined {
-    const manualEnv = filterAllowedAgentEnvironment(options.agentEnv);
+    const manualEnv: NodeJS.ProcessEnv = filterAllowedAgentEnvironment(options.agentEnv);
+    // A variable the User deleted is not inherited from this computer either.
+    for (const [key, value] of Object.entries(options.agentEnv ?? {})) {
+      if (value === undefined && !agentEnvironmentKeyValidationError(key)) manualEnv[key] = undefined;
+    }
     const appMcpEnv = this.appMcpEnv(options);
     if (Object.keys(manualEnv).length === 0 && !appMcpEnv) {
       return undefined;

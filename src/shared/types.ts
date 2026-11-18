@@ -153,40 +153,33 @@ export interface CloudRunsSettingsUpdate {
   pollIntervalMs?: number;
 }
 
-export type AgentEnvironmentKeySource = "forwarded" | "manual";
-
 export type AgentEnvironmentValueProtection = "os-encrypted" | "local-obfuscated";
 
-export interface ManualAgentEnvironmentVariable {
-  key: string;
-  enabled: boolean;
-  updatedAt: string;
-  protection: AgentEnvironmentValueProtection;
-  overridesDetected: boolean;
-  hasValue: boolean;
-}
+/** Custom: added or changed by the User. Automatic: read from this computer
+ *  and kept in step with it. */
+export type AgentEnvironmentVariableSource = "custom" | "automatic";
 
-export interface AgentEnvironmentKey {
+export interface AgentEnvironmentVariable {
   key: string;
-  source: AgentEnvironmentKeySource;
-  manual: boolean;
-  overridesDetected: boolean;
+  source: AgentEnvironmentVariableSource;
+  /** The first and last characters with the middle hidden; never the value. */
+  preview: string;
+  updatedAt: string;
+  /** A custom variable switched off before the switch was removed; members
+   *  do not get it until a new value is saved. */
+  enabled: boolean;
+  /** An automatic value that is a path on this computer: members here get it,
+   *  cloud machines do not. */
+  thisComputerOnly: boolean;
 }
 
 export interface AgentEnvironmentSnapshot {
-  refreshedAt: string;
-  keys: AgentEnvironmentKey[];
-  manualVariables: ManualAgentEnvironmentVariable[];
-  forwardedCount: number;
-  manualEnabledCount: number;
-  localInheritanceDisclosure: string;
-  valueProtection: AgentEnvironmentValueProtection;
+  variables: AgentEnvironmentVariable[];
 }
 
 export interface SaveAgentEnvironmentVariableRequest {
   key: string;
-  value?: string;
-  enabled?: boolean;
+  value: string;
 }
 
 export interface DeleteAgentEnvironmentVariableRequest {
@@ -3355,6 +3348,8 @@ export interface AppBridge {
   getAgentEnvironment(): Promise<AgentEnvironmentSnapshot>;
   saveAgentEnvironmentVariable(request: SaveAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot>;
   deleteAgentEnvironmentVariable(request: DeleteAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot>;
+  /** Reads this computer's variables again and brings the automatic ones in step. */
+  refreshAgentEnvironment(): Promise<AgentEnvironmentSnapshot>;
   saveCliProviderHost(update: CliProviderHostUpdate): Promise<AppSettings>;
   deleteCliProviderHost(id: string): Promise<AppSettings>;
   getSettings(): Promise<AppSettings>;

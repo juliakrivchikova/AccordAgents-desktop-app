@@ -44,7 +44,7 @@ import type {
   ChatRoleConfig,
   ChatRoleParticipantDefaults,
   ChatRoleConfigUpdate,
-  ManualAgentEnvironmentVariable,
+  AgentEnvironmentVariable,
   ProviderKind,
   ProviderSettings,
   ProviderSettingsUpdate,
@@ -54,8 +54,12 @@ import type {
   SaveAgentEnvironmentVariableRequest
 } from "../../shared/types";
 import {
+  agentEnvironmentKeyValidationError,
+  agentEnvironmentValuePreview,
   assertAgentEnvironmentKeyAllowed,
   filterAllowedAgentEnvironment,
+  isAutomaticAgentEnvironmentKey,
+  isLocalPathValue,
   normalizeAgentEnvironmentKey
 } from "../../shared/agentEnvironment";
 import {
@@ -119,12 +123,31 @@ type StoredProviderSettings = ProviderSettings & {
   encryptedApiKey?: string;
 };
 
+/** How a variable name is compared: Windows ignores case ("Path" is PATH). */
+function environmentKeyId(key: string): string {
+  return process.platform === "win32" ? key.toUpperCase() : key;
+}
+
+/** Deleted names kept from coming back: valid, allowed and listed once. */
+function normalizeRemovedAutomaticKeys(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const keys = new Set<string>();
+  for (const item of value) {
+    const key = normalizeAgentEnvironmentKey(item);
+    if (key && !agentEnvironmentKeyValidationError(key)) keys.add(key);
+  }
+  return [...keys].sort();
+}
+
 interface StoredAgentEnvironmentVariable {
   key: string;
   encryptedValue: string;
   enabled?: boolean;
   updatedAt: string;
   protection?: AgentEnvironmentValueProtection;
+  /** Read from this computer and kept in step with it; absent for a value
+   *  the User added or changed. */
+  source?: "automatic";
 }
 
 interface StoredCliProviderHost {
@@ -140,6 +163,10 @@ interface StoredCliProviderHost {
 
 interface StoredAgentEnvironmentSettings {
   variables?: StoredAgentEnvironmentVariable[];
+  /** Names the User deleted while this computer still sets them: reading the
+   *  computer again does not bring them back, and members here do not get
+   *  the computer's value either. */
+  removedAutomaticKeys?: string[];
 }
 
 /** Which instance the app removed by itself, and when: only that it
@@ -2837,27 +2864,45 @@ export class SettingsService {
     return this.getPublicSettings();
   }
 
-  async listManualAgentEnvironmentVariables(detectedKeys: Set<string> = new Set()): Promise<ManualAgentEnvironmentVariable[]> {
+  /** Every variable members get, with the first and last characters of its
+   *  value: the page never receives a whole value. */
+  async listAgentEnvironmentVariables(): Promise<AgentEnvironmentVariable[]> {
     const stored = await this.readStored();
-    return (stored.agentEnvironment?.variables ?? []).map((variable) => ({
-      key: variable.key,
-      enabled: variable.enabled !== false,
-      updatedAt: variable.updatedAt,
-      protection: variable.protection ?? "local-obfuscated",
-      overridesDetected: detectedKeys.has(variable.key),
-      hasValue: true
-    }));
+    return (stored.agentEnvironment?.variables ?? []).map((variable) => {
+      const value = this.decodeAgentEnvironmentValue(variable);
+      const automatic = variable.source === "automatic";
+      return {
+        key: variable.key,
+        source: automatic ? "automatic" : "custom",
+        preview: value === undefined ? "••••••••" : agentEnvironmentValuePreview(value),
+        updatedAt: variable.updatedAt,
+        enabled: variable.enabled !== false,
+        thisComputerOnly: automatic && value !== undefined && isLocalPathValue(value)
+      };
+    });
   }
 
-  async getManualAgentEnvironment(): Promise<{ env: NodeJS.ProcessEnv; version: string }> {
+  /** The variables members get, and the names they must not get from this
+   *  computer either because the User deleted them. */
+  async getManualAgentEnvironment(): Promise<{ env: NodeJS.ProcessEnv; version: string; removedKeys: string[] }> {
     const stored = await this.readStored();
     return this.readManualAgentEnvironment(stored);
   }
 
-  private readManualAgentEnvironment(stored: StoredSettings, requireComplete = false): { env: NodeJS.ProcessEnv; version: string } {
+  private readManualAgentEnvironment(
+    stored: StoredSettings,
+    requireComplete = false,
+    forCloudMachines = false
+  ): { env: NodeJS.ProcessEnv; version: string; removedKeys: string[] } {
     const env: NodeJS.ProcessEnv = {};
     for (const variable of stored.agentEnvironment?.variables ?? []) {
       if (variable.enabled === false) {
+        continue;
+      }
+      // Members on this computer already inherit its live value; the copy is
+      // what the cloud machines get, so a value the computer just changed is
+      // never replaced here by an older copy.
+      if (!forCloudMachines && variable.source === "automatic") {
         continue;
       }
       if (normalizeAgentEnvironmentKey(variable.key) !== variable.key) {
@@ -2875,57 +2920,124 @@ export class SettingsService {
         if (requireComplete) throw new Error(`The configured environment value ${variable.key} could not be read; no machine settings were sent.`);
         continue;
       }
+      // A folder on this computer does not exist on a cloud machine.
+      if (forCloudMachines && variable.source === "automatic" && isLocalPathValue(value)) {
+        continue;
+      }
       env[variable.key] = value;
     }
     // Native directories belong to the machine, even if the source laptop
     // explicitly configured CODEX_HOME / CLAUDE_CONFIG_DIR in Settings.
     const filtered = filterAllowedAgentEnvironment({ ...env,
       ...(this.options?.profileHome ? machineProfileVariables(this.options.profileHome) : {}) });
-    return { env: filtered, version: this.agentEnvironmentVersion(filtered) };
+    const present = new Set(Object.keys(filtered).map(environmentKeyId));
+    const removedKeys = [...(stored.agentEnvironment?.removedAutomaticKeys ?? [])]
+      .filter((key) => !present.has(environmentKeyId(key)));
+    const version = this.agentEnvironmentVersion(filtered, removedKeys);
+    // An undefined entry takes the name out of what a member inherits from
+    // this computer: child processes skip undefined values.
+    const runEnv: NodeJS.ProcessEnv = { ...filtered };
+    if (!forCloudMachines) {
+      for (const key of removedKeys) runEnv[key] = undefined;
+    }
+    return { env: runEnv, version, removedKeys };
   }
 
-  async saveAgentEnvironmentVariable(update: SaveAgentEnvironmentVariableRequest): Promise<ManualAgentEnvironmentVariable[]> {
+  /** A value the User saves is hers: it stays until she changes or deletes it,
+   *  whatever the computer says later. */
+  async saveAgentEnvironmentVariable(update: SaveAgentEnvironmentVariableRequest): Promise<void> {
     const key = assertAgentEnvironmentKeyAllowed(update.key);
+    if (typeof update.value !== "string" || !update.value) {
+      throw new Error("Enter a value to save.");
+    }
     const stored = await this.readStored();
     const variables = stored.agentEnvironment?.variables ?? [];
-    const now = new Date().toISOString();
-    const existingIndex = variables.findIndex((variable) => variable.key === key);
-    const existing = existingIndex >= 0 ? variables[existingIndex] : undefined;
-    const encoded = typeof update.value === "string"
-      ? this.encodeAgentEnvironmentValue(update.value)
-      : existing
-        ? {
-            encryptedValue: existing.encryptedValue,
-            protection: existing.protection ?? "local-obfuscated" as AgentEnvironmentValueProtection
-          }
-        : this.encodeAgentEnvironmentValue("");
+    const encoded = this.encodeAgentEnvironmentValue(update.value);
     const nextVariable: StoredAgentEnvironmentVariable = {
       key,
       encryptedValue: encoded.encryptedValue,
-      enabled: update.enabled === false ? false : true,
-      updatedAt: now,
+      enabled: true,
+      updatedAt: new Date().toISOString(),
       protection: encoded.protection
     };
-    if (existingIndex >= 0) {
-      variables[existingIndex] = nextVariable;
-    } else {
-      variables.push(nextVariable);
-    }
+    const kept = variables.filter((variable) => environmentKeyId(variable.key) !== environmentKeyId(key));
     stored.agentEnvironment = {
-      variables: this.normalizeAgentEnvironmentVariables(variables)
+      variables: this.normalizeAgentEnvironmentVariables([...kept, nextVariable]),
+      removedAutomaticKeys: (stored.agentEnvironment?.removedAutomaticKeys ?? [])
+        .filter((removed) => environmentKeyId(removed) !== environmentKeyId(key))
     };
     await this.writeStored(stored);
-    return this.listManualAgentEnvironmentVariables();
   }
 
-  async deleteAgentEnvironmentVariable(key: string): Promise<ManualAgentEnvironmentVariable[]> {
+  /** Deleting is the same for every variable. When this computer sets the
+   *  name too (or the variable came from it), the name is remembered so the
+   *  next reading does not bring it back. */
+  async deleteAgentEnvironmentVariable(key: string, setByThisComputer = false): Promise<void> {
     const normalized = assertAgentEnvironmentKeyAllowed(key);
     const stored = await this.readStored();
+    const variables = stored.agentEnvironment?.variables ?? [];
+    const deleted = variables.find((variable) => environmentKeyId(variable.key) === environmentKeyId(normalized));
+    const removed = new Set(stored.agentEnvironment?.removedAutomaticKeys ?? []);
+    if (setByThisComputer || deleted?.source === "automatic") {
+      removed.add(deleted?.key ?? normalized);
+    }
     stored.agentEnvironment = {
-      variables: (stored.agentEnvironment?.variables ?? []).filter((variable) => variable.key !== normalized)
+      variables: variables.filter((variable) => environmentKeyId(variable.key) !== environmentKeyId(normalized)),
+      removedAutomaticKeys: [...removed].sort()
     };
     await this.writeStored(stored);
-    return this.listManualAgentEnvironmentVariables();
+  }
+
+  /** Brings the automatic variables in step with what this computer sets now:
+   *  a new name is added, a changed value is updated, a name the computer no
+   *  longer sets goes away. A value the User saved and a name she deleted are
+   *  left as she made them. Returns whether anything changed. */
+  async reconcileAutomaticAgentEnvironment(computerEnvironment: Record<string, string>): Promise<boolean> {
+    const stored = await this.readStored();
+    const removedNames = stored.agentEnvironment?.removedAutomaticKeys ?? [];
+    const removed = new Set(removedNames.map(environmentKeyId));
+    const current = stored.agentEnvironment?.variables ?? [];
+    const byKey = new Map(current.map((variable) => [environmentKeyId(variable.key), variable]));
+    const computer = new Map(Object.entries(computerEnvironment).map(([key, value]) => [environmentKeyId(key), value]));
+    const now = new Date().toISOString();
+    let changed = false;
+    const next: StoredAgentEnvironmentVariable[] = [];
+    for (const variable of current) {
+      if (variable.source !== "automatic") {
+        next.push(variable);
+        continue;
+      }
+      const value = computer.get(environmentKeyId(variable.key));
+      if (value === undefined || removed.has(environmentKeyId(variable.key))) {
+        changed = true;
+        continue;
+      }
+      const storedValue = this.decodeAgentEnvironmentValue(variable);
+      // Unreadable only because the secret store is away: keep it rather than
+      // rewrite it (and restart members) on every reading.
+      if (storedValue === value || (storedValue === undefined && !this.safeStorageEncryptionAvailable())) {
+        next.push(variable);
+        continue;
+      }
+      next.push({ ...variable, ...this.encodeAgentEnvironmentValue(value), enabled: true, updatedAt: now });
+      changed = true;
+    }
+    for (const [key, value] of Object.entries(computerEnvironment).sort(([left], [right]) => left.localeCompare(right))) {
+      if (byKey.has(environmentKeyId(key)) || removed.has(environmentKeyId(key)) || !isAutomaticAgentEnvironmentKey(key)) {
+        continue;
+      }
+      next.push({ key, ...this.encodeAgentEnvironmentValue(value), enabled: true, updatedAt: now, source: "automatic" });
+      changed = true;
+    }
+    if (!changed) {
+      return false;
+    }
+    stored.agentEnvironment = {
+      variables: this.normalizeAgentEnvironmentVariables(next),
+      removedAutomaticKeys: [...removedNames].sort()
+    };
+    await this.writeStored(stored);
+    return true;
   }
 
   private async readStored(): Promise<StoredSettings> {
@@ -3040,7 +3152,8 @@ export class SettingsService {
       awsWorkerGoneNotice: normalizeAwsWorkerGoneNotice(settings.awsWorkerGoneNotice),
       leavingMachines: normalizeLeavingMachines(settings.leavingMachines),
       agentEnvironment: {
-        variables: this.normalizeAgentEnvironmentVariables(settings.agentEnvironment?.variables)
+        variables: this.normalizeAgentEnvironmentVariables(settings.agentEnvironment?.variables),
+        removedAutomaticKeys: normalizeRemovedAutomaticKeys(settings.agentEnvironment?.removedAutomaticKeys)
       },
       cliProviderHosts: this.normalizedCliProviderHosts(settings),
       assistantProviderKind: this.normalizeChatProviderKind(settings.assistantProviderKind),
@@ -3307,7 +3420,8 @@ export class SettingsService {
         encryptedValue,
         enabled: record.enabled === false ? false : true,
         updatedAt,
-        protection: record.protection === "os-encrypted" ? "os-encrypted" : "local-obfuscated"
+        protection: record.protection === "os-encrypted" ? "os-encrypted" : "local-obfuscated",
+        ...(record.source === "automatic" ? { source: "automatic" as const } : {})
       });
       seen.add(key);
     }
@@ -3342,8 +3456,11 @@ export class SettingsService {
     }
   }
 
-  private agentEnvironmentVersion(env: NodeJS.ProcessEnv): string {
+  private agentEnvironmentVersion(env: NodeJS.ProcessEnv, removedKeys: string[] = []): string {
     const hash = createHash("sha256");
+    for (const key of removedKeys) {
+      hash.update(`-${key}\0`);
+    }
     for (const [key, value] of Object.entries(env).sort(([left], [right]) => left.localeCompare(right))) {
       hash.update(key);
       hash.update("\0");
@@ -3943,7 +4060,7 @@ export class SettingsService {
     } = stored;
     // A partial export would remove the unreadable variable on the receiver.
     // Read the same snapshot and fail before publishing anything instead.
-    const environment = this.readManualAgentEnvironment(stored, true);
+    const environment = this.readManualAgentEnvironment(stored, true, true);
     return {
       version: 1,
       exportedAt: new Date().toISOString(),
