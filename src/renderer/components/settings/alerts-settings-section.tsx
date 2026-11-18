@@ -1,4 +1,4 @@
-import { Info, Loader2, Phone, Send, Server } from "lucide-react";
+import { Loader2, Phone, Send, Server } from "lucide-react";
 import { useCallback, useContext, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -143,7 +143,10 @@ export function AlertsSettingsSection(): JSX.Element {
       <p className="alerts-intro">
         When a member raises an urgent alert, it comes to your Telegram with a <b>Got it</b> button. If you don't press Got it in time, you get a call that reads it out; {settings ? alertsIntroCall(settings) : "press 1 on the call for Got it."}
       </p>
-      {band ? <AlertsStatusBand band={band} action={bandAction} /> : <AlertsBandPlaceholder loading={loading} error={loadError} onRetry={() => void load()} />}
+      {/* When everything works the flow and the Ready pills say it: the band
+          comes only when something needs her (the User, 2026-11-18). */}
+      {band ? (band.kind === "ok" ? null : <AlertsStatusBand band={band} action={bandAction} />)
+        : <AlertsBandPlaceholder loading={loading} error={loadError} onRetry={() => void load()} />}
 
       {settings ? <>
         <AlertsFlow
@@ -212,11 +215,6 @@ export function AlertsSettingsSection(): JSX.Element {
             />
           </div>
         </section>
-
-        <p className="alerts-footnote">
-          <Info size={13} aria-hidden />
-          Your bot token and Twilio keys are kept on your server and used only to message and call you. Telegram and Twilio see an alert's text.
-        </p>
       </> : null}
 
       <TelegramConnectDialog open={dialog === "telegram"} settings={settings} onSettings={setSettings} onClose={() => { setDialog(undefined); void load(); }} />

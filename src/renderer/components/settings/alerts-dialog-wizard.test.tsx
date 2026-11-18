@@ -8,6 +8,7 @@ import type { UrgentAlertSettingsView } from "../../../shared/urgentAlerts";
 import { TelegramConnectDialog } from "./alerts-connect-dialogs";
 import { PhoneConnectDialog } from "./alerts-phone-dialog";
 import { AlertsFlow } from "./alerts-settings-parts";
+import { AlertsSettingsSection } from "./alerts-settings-section";
 
 // The DOM comes from scripts/renderer-jsdom-setup.mjs via `node --import`
 // (Radix reads `document` when it is first imported).
@@ -318,5 +319,46 @@ test("an answered test call stops passing once her server asks for 1, as the pag
   assert.match(document.body.textContent ?? "", /You answered at .*, but calls now ask for 1\. Call again\?/);
   assert.ok(!dialogButtons().includes("Save"), `no plain Save for a test the page would call untested (have: ${dialogButtons().join(", ")})`);
   await act(async () => root.unmount());
+  host.remove();
+});
+
+test("the page shows the status band only when something needs her, and no footnote", async () => {
+  let view: UrgentAlertSettingsView = { waitMinutes: 5, callMode: "keypad" };
+  (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
+    openExternal: async () => undefined,
+    urgentAlertRequest: async (request: Record<string, unknown>) => request.action === "settings"
+      ? { ok: true, value: view }
+      : { ok: false, error: { code: "invalid_request", message: `unexpected ${String(request.action)}` } }
+  };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const show = async (next: UrgentAlertSettingsView) => {
+    view = next;
+    await act(async () => root.unmount());
+    const fresh = createRoot(host);
+    await act(async () => {
+      fresh.render(<TooltipProvider><AlertsSettingsSection /></TooltipProvider>);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    });
+    return { band: host.querySelector("[data-testid='alerts-band']")?.textContent ?? "", fresh };
+  };
+  const telegram = { botUsername: "svetlana_accord_bot", chatName: "Svetlana", connected: true };
+  const phone = { from: "+14155550201", to: "+35799123342", trial: false, lastTest: { state: "pressed" as const, at: new Date().toISOString() } };
+
+  // Everything works: the flow and the Ready pills say it, no band.
+  let shown = await show({ ...view, telegram, phone });
+  assert.equal(shown.band, "");
+  assert.ok(host.querySelector("[data-testid='alerts-flow']"), "the page itself is there");
+  assert.doesNotMatch(host.textContent ?? "", /Alerts will reach you|see an alert's text/);
+  await act(async () => shown.fresh.unmount());
+
+  // Something needs her: the band stays, with what and why.
+  shown = await show({ waitMinutes: 5, callMode: "keypad", telegram });
+  assert.match(shown.band, /Alerts reach you in Telegram only/);
+  await act(async () => shown.fresh.unmount());
+  shown = await show({ waitMinutes: 5, callMode: "keypad" });
+  assert.match(shown.band, /Alerts are off/);
+  await act(async () => shown.fresh.unmount());
   host.remove();
 });

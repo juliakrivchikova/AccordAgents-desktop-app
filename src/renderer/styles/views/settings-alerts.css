@@ -355,22 +355,6 @@
   color: var(--app-danger);
 }
 
-.settings-view .alerts-footnote {
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  max-width: 680px;
-  margin: 4px 0 0;
-  color: var(--app-text-secondary);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.settings-view .alerts-footnote svg {
-  flex: none;
-  margin-top: 2px;
-}
-
 /* The connect dialogs: never taller than the window, the body scrolls
    instead. */
 .gen-aws-dialog.alerts-dialog {
