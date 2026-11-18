@@ -8,12 +8,16 @@ import path from "node:path";
 import test from "node:test";
 import type { ParticipantConfig } from "../../shared/types";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
+import { GEMINI_API_KEY_SETTINGS, geminiApiKeyEnv } from "../../shared/cliProviderHosts";
+import { geminiModelId, savedModelId } from "../../shared/geminiModels";
 import {
   antigravityExpectProgram,
   antigravityInteractiveGoalAtPrompt,
   antigravityInteractivePermissionPrompt,
   CliAgentRunner,
+  agyModelsInvocation,
   geminiMcpProxyLaunchArgs,
+  parseAgyModelList,
   syncGeminiMcpConfig
 } from "./cliAgents";
 import {
@@ -159,6 +163,114 @@ test("a read-only agy run allows the app's own tools, as Claude Code's --allowed
       assert.equal(left.args.includes("--settings"), false, "settings the app cannot add to are left to agy as they are");
     }
   }
+});
+
+test("a member on a Gemini API key carries modelProvider into every agy launch, with or without the app-tool rules", () => {
+  const onKey = { ...participant, geminiSettings: { modelProvider: "gemini" } } as ParticipantConfig;
+  const appMcp = { url: "http://127.0.0.1:5123/mcp", token: "t", toolNames: ["app_chat_set_title"] };
+  const userSettings = { readable: true as const, permissions: { allow: ["command(npm test)"] } };
+  for (const build of [buildGeminiExecInvocation, buildGeminiInteractiveGoalInvocation]) {
+    // Read-only with app tools: one --settings with both, her rules kept.
+    const readOnly = build({ participant: onKey, prompt: "Hi", kind: "chat", options: { appMcp, userSettings, settingsPath: "/run/settings.json" } });
+    assert.equal(readOnly.args.filter((arg) => arg === "--settings").length, 1, "agy takes one --settings");
+    assert.equal(flagValue(readOnly.args, "--settings"), "/run/settings.json");
+    assert.deepEqual(readOnly.settings, {
+      modelProvider: "gemini",
+      permissions: { allow: ["command(npm test)", "mcp(accord_agents/app_chat_set_title)"] }
+    });
+    // Skipping confirmations adds no rules, but the key route still goes along.
+    for (const options of [{ appMcp, agentMode: "auto" as const }, { appMcp, permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true } }]) {
+      const skipping = build({ participant: onKey, prompt: "Hi", kind: "chat", options: { ...options, settingsPath: "/run/settings.json" } });
+      assert.equal(skipping.args.includes("--dangerously-skip-permissions"), true);
+      assert.deepEqual(skipping.settings, { modelProvider: "gemini" });
+    }
+    // Her settings unreadable: no rules added, still on the key.
+    const unreadable = build({ participant: onKey, prompt: "Hi", kind: "chat", options: { appMcp, userSettings: { readable: false } } });
+    assert.deepEqual(JSON.parse(flagValue(unreadable.args, "--settings") ?? "{}"), { modelProvider: "gemini" });
+    // A member on the sign-in gets nothing new.
+    assert.equal(build({ participant, prompt: "Hi", kind: "chat", options: { agentMode: "auto" } }).args.includes("--settings"), false);
+  }
+});
+
+test("agy's model list is read as id and label, and --model gets the id agy accepts", () => {
+  // Captured from `agy models` (agy 1.5.11, 2026-11-18): `<id>\t<label>`.
+  const listed = parseAgyModelList("gemini-4-argon-medium\tGemini 4 Argon (Medium)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n\n");
+  assert.deepEqual(listed, [
+    { id: "gemini-4-argon-medium", label: "Gemini 4 Argon (Medium)", source: "cli", recommended: true },
+    { id: "gemini-3.8-flash-low", label: "Gemini 3.8 Flash (Low)", source: "cli", recommended: false }
+  ]);
+  // Earlier agy printed the label alone, which it also accepts as --model.
+  assert.deepEqual(parseAgyModelList("Fetching available models...\nGemini 3.5 Flash (Medium)\n").map((model) => [model.id, model.label]), [
+    ["Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (Medium)"]
+  ]);
+  // A model saved while the whole line was taken for the id still runs.
+  assert.equal(geminiModelId("gemini-3.8-flash-low\tGemini 3.8 Flash (Low)"), "gemini-3.8-flash-low");
+  assert.equal(geminiModelId("Gemini 3.5 Flash (Medium)"), "Gemini 3.5 Flash (Medium)");
+  assert.equal(geminiModelId("  "), undefined);
+  // The pickers match such a saved model to its entry in the new list; other CLIs are untouched.
+  assert.equal(savedModelId("gemini-cli", "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)"), "gemini-3.8-flash-low");
+  assert.equal(savedModelId("codex-cli", " gpt-5.5 "), "gpt-5.5");
+  const saved = { ...participant, model: "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)" } as ParticipantConfig;
+  for (const build of [buildGeminiExecInvocation, buildGeminiInteractiveGoalInvocation]) {
+    assert.equal(flagValue(build({ participant: saved, prompt: "Hi", kind: "chat" }).args, "--model"), "gemini-3.8-flash-low");
+  }
+});
+
+test("a Gemini API key provider's model list is read from agy on that key, once for every open picker", async () => {
+  const runner = new CliAgentRunner();
+  const calls: Array<{ env: Record<string, string>; settings: Readonly<Record<string, unknown>> } | undefined> = [];
+  let fail = false;
+  (runner as any).listGeminiModelCatalog = async (fetchedAt: string, apiKey?: { env: Record<string, string>; settings: Readonly<Record<string, unknown>> }) => {
+    calls.push(apiKey);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    if (fail) {
+      throw new Error("agy exited with code 3: API key not valid");
+    }
+    return { kind: "gemini-cli", models: parseAgyModelList("gemini-4-carbon-low\tGemini 4 Carbon (Low)\n"), authoritative: true, fetchedAt };
+  };
+  const host = { id: "host-google", label: "Google Gemini API", baseUrl: "https://generativelanguage.googleapis.com", updatedAt: "2026-11-18T00:00:00.000Z" };
+
+  const [first, second] = await Promise.all([
+    runner.listHostModelCatalog({ host, apiKey: "gemini-key" }),
+    runner.listHostModelCatalog({ host, apiKey: "gemini-key" })
+  ]);
+  assert.equal(calls.length, 1, "two pickers at once share one agy run");
+  assert.deepEqual(calls[0], { env: { GEMINI_API_KEY: "gemini-key", GOOGLE_GEMINI_BASE_URL: "" }, settings: { modelProvider: "gemini" } });
+  assert.deepEqual(first.models.map((model) => model.id), ["gemini-4-carbon-low"]);
+  assert.deepEqual(second.models.map((model) => model.id), ["gemini-4-carbon-low"]);
+  assert.equal(first.models[0]?.recommended, false, "agy's default on a key is not the first one listed");
+  await runner.listHostModelCatalog({ host, apiKey: "gemini-key" });
+  assert.equal(calls.length, 1, "cached until the provider changes");
+
+  // A new key or URL reads the list again, through the URL the provider names;
+  // a failed read is not kept, so fixing the key brings the list back.
+  fail = true;
+  const edited = { ...host, baseUrl: "https://gateway.example/gemini", updatedAt: "2026-11-18T01:00:00.000Z" };
+  const failed = await runner.listHostModelCatalog({ host: edited, apiKey: "other-key" });
+  assert.deepEqual(calls[1]?.env, { GEMINI_API_KEY: "other-key", GOOGLE_GEMINI_BASE_URL: "https://gateway.example/gemini" });
+  assert.deepEqual(failed.models, [], "no signed-in list stands in for the key's");
+  assert.match(failed.error ?? "", /API key not valid/);
+  fail = false;
+  const fixed = await runner.listHostModelCatalog({ host: edited, apiKey: "other-key" });
+  assert.equal(calls.length, 3);
+  assert.deepEqual(fixed.models.map((model) => model.id), ["gemini-4-carbon-low"]);
+  assert.deepEqual([...(runner as any).hostModelCatalogs.keys()], ["host-google|2026-11-18T01:00:00.000Z"], "the old version's list is dropped");
+
+  const noKey = await runner.listHostModelCatalog({ host, apiKey: undefined });
+  assert.deepEqual(noKey.models, []);
+  assert.match(noKey.error ?? "", /Google Gemini API has no API key/);
+  const removed = await runner.listHostModelCatalog(undefined);
+  assert.deepEqual(removed.models, []);
+  assert.match(removed.error ?? "", /removed from Settings/);
+  assert.equal(calls.length, 3, "no agy run without a key or a provider");
+});
+
+test("agy models runs as the dedicated CLI does: the key only in the environment, the settings before the command", () => {
+  assert.deepEqual(agyModelsInvocation(), { args: ["models"], env: {} });
+  const onKey = agyModelsInvocation({ env: geminiApiKeyEnv("https://generativelanguage.googleapis.com", "gemini-key"), settings: GEMINI_API_KEY_SETTINGS });
+  assert.deepEqual(onKey.args, ["--settings", "{\"modelProvider\":\"gemini\"}", "models"]);
+  assert.deepEqual(onKey.env, { GEMINI_API_KEY: "gemini-key", GOOGLE_GEMINI_BASE_URL: "" });
+  assert.equal(onKey.args.join(" ").includes("gemini-key"), false, "the key never goes on the command line");
 });
 
 test("the User's agy settings and agy's headless denial are read as agy writes them", () => {

@@ -18,6 +18,7 @@ import type {
   ChatAgentMode,
   ChatAgentPermissions,
   ChatProviderKind,
+  CliProviderHost,
   ChatReasoningEffort,
   ChatShellPermissionRule,
   ClaudeChromeSetting,
@@ -31,6 +32,7 @@ import type {
 import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
 import { filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
+import { GEMINI_API_KEY_SETTINGS, geminiApiKeyEnv } from "../../shared/cliProviderHosts";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS, normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
 import { chatTextEndsAtSentenceOrParagraphBoundary } from "../../shared/processingTranscript";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
@@ -211,6 +213,38 @@ export const COMPACTION_CANCELLED_BEFORE_START = "Compaction was cancelled befor
 /** A compaction Stop ended once it had started (in the member's process or
  *  while it waited there for a reply in progress). */
 export const COMPACTION_CANCELLED = "Compaction was cancelled.";
+
+/** `agy models` prints `<id>\t<label>` per line (seen on agy 1.5.11;
+ *  earlier versions printed the label alone). `--model` takes the id. */
+export function parseAgyModelList(stdout: string): ProviderModel[] {
+  return stdout
+    .split(/\r?\n/)
+    .map((line) => stripAnsi(line).trim())
+    .filter((line) => line && !/^(available|usage|error|fetching)\b/i.test(line))
+    .map((line, index) => {
+      const [first, ...rest] = line.split("\t");
+      const id = first.trim();
+      const label = rest.join(" ").trim() || id;
+      return {
+        id,
+        label,
+        source: "cli" as const,
+        // `agy models` lists the currently selected default first.
+        recommended: index === 0
+      };
+    })
+    .filter((model) => model.id);
+}
+
+/** `agy models` as the dedicated CLI runs it: on the sign-in, or on a Gemini
+ *  API key (its settings on the command line, the key only in the env). */
+export function agyModelsInvocation(
+  apiKey?: { env: Record<string, string>; settings: Readonly<Record<string, unknown>> }
+): { args: string[]; env: Record<string, string> } {
+  return apiKey
+    ? { args: ["--settings", JSON.stringify(apiKey.settings), "models"], env: { ...apiKey.env } }
+    : { args: ["models"], env: {} };
+}
 
 export function antigravityExpectProgram(): string {
   return `
@@ -1356,6 +1390,10 @@ export class CliAgentRunner {
   private readonly warmUnsupportedLogged = new Set<ParticipantConfig["kind"]>();
   private readonly modelCatalogs = new Map<ChatProviderKind, CachedModelCatalog>();
   private readonly modelCatalogRequests = new Map<ChatProviderKind, Promise<ProviderModelCatalog>>();
+  /** Antigravity's list on an added provider's Gemini API key, per provider
+   *  version (a new key or URL reads it again). */
+  private readonly hostModelCatalogs = new Map<string, CachedModelCatalog>();
+  private readonly hostModelCatalogRequests = new Map<string, Promise<ProviderModelCatalog>>();
   private claudeVersionRequest?: Promise<string | undefined>;
   /** Per Claude executable: whether its CLI has `--prompt-suggestions`. An
    *  older CLI rejects the unknown flag and would fail every turn. */
@@ -2071,22 +2109,79 @@ export class CliAgentRunner {
     return dedupeProviderModels(models);
   }
 
-  private async listGeminiModelCatalog(fetchedAt: string): Promise<ProviderModelCatalog> {
+  /** The models an Antigravity member on a Gemini API key provider can pick:
+   *  agy lists other models on a key than on its sign-in. `undefined` = the
+   *  provider is gone. */
+  async listHostModelCatalog(
+    provider: { host: Pick<CliProviderHost, "id" | "label" | "baseUrl" | "updatedAt">; apiKey: string | undefined } | undefined
+  ): Promise<ProviderModelCatalog> {
+    // No guessed list: the signed-in one would offer models the key cannot use.
+    const unavailable = (error: string): ProviderModelCatalog => ({ kind: "gemini-cli", models: [], authoritative: false, fetchedAt: new Date().toISOString(), error });
+    if (!provider) {
+      return unavailable("That provider was removed from Settings");
+    }
+    const { host, apiKey } = provider;
+    if (!apiKey?.trim()) {
+      return unavailable(`${host.label} has no API key`);
+    }
+    const cacheKey = `${host.id}|${host.updatedAt}`;
+    const cached = this.hostModelCatalogs.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.catalog;
+    }
+    // Every open model picker for the member asks at once; one agy run answers them.
+    let request = this.hostModelCatalogRequests.get(cacheKey);
+    if (!request) {
+      request = this.fetchHostModelCatalog(host, apiKey, cacheKey);
+      this.hostModelCatalogRequests.set(cacheKey, request);
+      void request.finally(() => {
+        if (this.hostModelCatalogRequests.get(cacheKey) === request) {
+          this.hostModelCatalogRequests.delete(cacheKey);
+        }
+      });
+    }
+    return request;
+  }
+
+  private async fetchHostModelCatalog(
+    host: Pick<CliProviderHost, "id" | "baseUrl">,
+    apiKey: string,
+    cacheKey: string
+  ): Promise<ProviderModelCatalog> {
+    const fetchedAt = new Date().toISOString();
+    try {
+      const catalog = await this.listGeminiModelCatalog(fetchedAt, {
+        env: geminiApiKeyEnv(host.baseUrl, apiKey),
+        settings: GEMINI_API_KEY_SETTINGS
+      });
+      // On a key agy's own default is not the first model it lists (it ran
+      // Gemini 3.1 Pro with Carbon listed first), so none is marked; the
+      // picker's "Antigravity setting" entry is that default.
+      const normalized = { ...catalog, models: this.dedupeModels(catalog.models).map((model) => ({ ...model, recommended: false })) };
+      for (const key of this.hostModelCatalogs.keys()) {
+        if (key.startsWith(`${host.id}|`)) {
+          this.hostModelCatalogs.delete(key);
+        }
+      }
+      this.hostModelCatalogs.set(cacheKey, { catalog: normalized, expiresAt: Date.now() + MODEL_CATALOG_CACHE_MS });
+      return normalized;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.debugLogs?.write("cli.model-catalog.error", { kind: "gemini-cli", hostId: host.id, message });
+      return { kind: "gemini-cli", models: [], authoritative: false, fetchedAt, error: message };
+    }
+  }
+
+  private async listGeminiModelCatalog(
+    fetchedAt: string,
+    apiKey?: { env: Record<string, string>; settings: Readonly<Record<string, unknown>> }
+  ): Promise<ProviderModelCatalog> {
     await ensureLoginShellEnvPrimed();
-    const env = commandEnvironment();
+    const invocation = agyModelsInvocation(apiKey);
+    const env = commandEnvironment(invocation.env);
     const agyExecutable = await resolveCommandPath("agy", env);
-    const result = await runCommand(agyExecutable, ["models"], { timeoutMs: MODEL_CATALOG_TIMEOUT_MS, env });
-    const models: ProviderModel[] = result.stdout
-      .split(/\r?\n/)
-      .map((line) => stripAnsi(line).trim())
-      .filter((line) => line && !/^(available|usage|error)\b/i.test(line))
-      .map((label, index) => ({
-        id: label,
-        label,
-        source: "cli" as const,
-        // `agy models` lists the currently selected default first.
-        recommended: index === 0
-      }));
+    const result = await runCommand(agyExecutable, invocation.args, { timeoutMs: MODEL_CATALOG_TIMEOUT_MS, env });
+    const models: ProviderModel[] = parseAgyModelList(result.stdout);
     if (models.length === 0) {
       throw new Error("`agy models` returned no models.");
     }

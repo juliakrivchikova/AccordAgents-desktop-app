@@ -664,11 +664,10 @@ export interface ChatBehaviorRuleSnapshot {
 
 export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code" | "gemini-cli">;
 
-/** Which local CLI an added provider runs through. Antigravity has no vendor
- *  that can be reached this way, so it is not included. */
-export type CliProviderHostCli = Extract<ChatProviderKind, "claude-code" | "codex-cli">;
+/** Which local CLI an added provider runs through. */
+export type CliProviderHostCli = Extract<ChatProviderKind, "claude-code" | "codex-cli" | "gemini-cli">;
 
-export type CliProviderHostVendor = "anthropic" | "zai" | "moonshot" | "minimax" | "deepseek" | "openai" | "custom";
+export type CliProviderHostVendor = "anthropic" | "zai" | "moonshot" | "minimax" | "deepseek" | "openai" | "google" | "custom";
 
 /** An added provider (General Settings → Add provider): a vendor endpoint
  *  reached through one of the local CLIs with the user's own API key. It sits
@@ -2167,6 +2166,9 @@ export interface ParticipantConfig {
    *  (exec, app-server, compact); used to route a member through an added
    *  provider's Responses endpoint. */
   codexConfigOverrides?: string[];
+  /** Antigravity session settings (settings.json keys) added to every agy
+   *  launch; used to route a member to the Gemini API with its own key. */
+  geminiSettings?: Record<string, unknown>;
 }
 
 export type AppSkillSyncStatus = "not-installed" | "synced" | "skipped" | "collision" | "error";
@@ -3372,7 +3374,9 @@ export interface AppBridge {
   readCustomAvatar(id: string): Promise<ReadCustomAvatarResult>;
   deleteChatParticipantConfig(id: string): Promise<AppSettings>;
   updateLastRepoPath(repoPath: string): Promise<AppSettings>;
-  listProviderModels(kind: ProviderKind): Promise<ProviderModelCatalog>;
+  /** `hostId`: list the models of a member on that added provider when its
+   *  CLI's list depends on the credential (Antigravity on a Gemini API key). */
+  listProviderModels(kind: ProviderKind, hostId?: string): Promise<ProviderModelCatalog>;
   detectAgents(request?: AgentDetectionRequest): Promise<AgentHealth[]>;
   /** Runs the CLI's own sign-in on this computer (`claude auth login`,
    *  `codex login`); a second start while one runs returns that one. */

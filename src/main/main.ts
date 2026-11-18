@@ -2262,8 +2262,13 @@ function registerIpc(): void {
     return settingsService.deleteChatParticipantConfig(id);
   });
   ipcMain.handle("settings:update-last-repo-path", (_event, repoPath: string) => settingsService.updateLastRepoPath(repoPath));
-  ipcMain.handle("settings:list-provider-models", async (_event, kind: ProviderKind) => {
+  ipcMain.handle("settings:list-provider-models", async (_event, kind: ProviderKind, hostId?: unknown) => {
     if (kind === "codex-cli" || kind === "claude-code" || kind === "gemini-cli") {
+      // Only Antigravity lists other models on a key than on its sign-in.
+      if (kind === "gemini-cli" && typeof hostId === "string" && hostId.trim()) {
+        const secret = await settingsService.getCliProviderHostSecret(hostId);
+        return cliAgentRunner.listHostModelCatalog(secret && secret.host.cli === kind ? secret : undefined);
+      }
       const settings = await settingsService.getPublicSettings();
       const configuredModel = settings.providers.find((provider) => provider.kind === kind)?.model;
       return cliAgentRunner.listModelCatalog(kind, configuredModel, settings.lastRepoPath);

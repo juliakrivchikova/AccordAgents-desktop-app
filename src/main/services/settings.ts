@@ -101,6 +101,7 @@ import {
 import { mobileControlSettingsFromEnvironment } from "../../shared/mobilePairing";
 import { normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
 import {
+  cliProviderHostCliLabel,
   cliProviderHostDefaultModel,
   cliProviderHostValidationError,
   normalizeCliProviderHostBaseUrl,
@@ -4439,7 +4440,7 @@ export class SettingsService {
       throw new Error("That provider no longer exists. Pick another provider for the member.");
     }
     if (host.cli !== update.kind) {
-      throw new Error(`${host.label} runs through ${host.cli === "claude-code" ? "Claude Code" : "Codex"}, not the member's CLI.`);
+      throw new Error(`${host.label} runs through ${cliProviderHostCliLabel(host.cli)}, not the member's CLI.`);
     }
     return host.id;
   }

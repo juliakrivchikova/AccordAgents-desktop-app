@@ -13693,6 +13693,72 @@ test("a Codex member on an added provider gets the provider's -c overrides and k
   ]);
 });
 
+test("an Antigravity member on a Gemini API key runs agy on that key and agy's own model default", async () => {
+  const googleHost: CliProviderHost = {
+    id: "host-google",
+    label: "Google Gemini API",
+    cli: "gemini-cli",
+    vendor: "google",
+    baseUrl: "https://generativelanguage.googleapis.com",
+    hasApiKey: true,
+    updatedAt: NOW
+  };
+  const runs: Array<{ participant: ParticipantConfig; options: any }> = [];
+  const participant: ChatParticipant = { ...chatParticipant("gemini-cli"), hostId: googleHost.id, hostLabel: googleHost.label, hostVendor: "google" };
+  const conversation = chatConversation([participant]);
+  const { service, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      runs.push({ participant: runParticipant, options });
+      return { participant: runParticipant, ok: true, content: "pong", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  (service as any).settings.getManualAgentEnvironment = async () => ({ env: { OTHER_VAR: "kept", GOOGLE_GEMINI_BASE_URL: "https://elsewhere.example" }, version: "env-v1" });
+  installHosts(service, [googleHost], { [googleHost.id]: "gemini-secret" });
+
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-gemini-key", content: "@gemini ping" });
+  await waitFor(() => runs.length === 1);
+  assert.equal(runs[0].participant.kind, "gemini-cli");
+  // No fixed vendor default: agy picks its own model on the key, as in its CLI.
+  assert.equal(runs[0].participant.model, undefined);
+  assert.deepEqual(runs[0].participant.geminiSettings, { modelProvider: "gemini" });
+  assert.equal(runs[0].participant.codexConfigOverrides, undefined);
+  assert.equal(runs[0].options.agentEnv.GEMINI_API_KEY, "gemini-secret");
+  // Pinned to the provider's (default) endpoint, whatever the environment says.
+  assert.equal(runs[0].options.agentEnv.GOOGLE_GEMINI_BASE_URL, "");
+  assert.equal(runs[0].options.agentEnv.OTHER_VAR, "kept");
+  assert.match(runs[0].options.agentEnvKey, /^env-v1\|host:host-google\|/);
+});
+
+test("an Antigravity member whose Gemini key was removed fails visibly instead of falling back to the sign-in", async () => {
+  const googleHost: CliProviderHost = {
+    id: "host-google",
+    label: "Google Gemini API",
+    cli: "gemini-cli",
+    vendor: "google",
+    baseUrl: "https://generativelanguage.googleapis.com",
+    hasApiKey: false,
+    updatedAt: NOW
+  };
+  const runs: ParticipantConfig[] = [];
+  const participant: ChatParticipant = { ...chatParticipant("gemini-cli"), hostId: googleHost.id, hostLabel: googleHost.label, hostVendor: "google" };
+  const conversation = chatConversation([participant]);
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => {
+      runs.push(runParticipant);
+      return { participant: runParticipant, ok: true, content: "pong", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  installHosts(service, [googleHost], { [googleHost.id]: undefined });
+
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-gemini-nokey", content: "@gemini ping" });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => /has no API key/.test(message.content ?? "")));
+  assert.equal(runs.length, 0);
+});
+
 test("a member on an added provider and a built-in member keep independent env", async () => {
   const runs: Array<{ participant: ParticipantConfig; options: any }> = [];
   const glm: ChatParticipant = { ...chatParticipant("claude-code"), id: "glm-participant", handle: "glm", model: "glm-5.2", hostId: ZAI_HOST.id, hostLabel: ZAI_HOST.label, hostVendor: "zai" };

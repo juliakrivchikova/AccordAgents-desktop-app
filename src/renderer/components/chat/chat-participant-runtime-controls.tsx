@@ -10,13 +10,13 @@ import {
   normalizeOptionalChatParticipantRequestPermission
 } from "../../../shared/agentPermissions";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
-import { modelDetectionFailureText, useProviderModelCatalog } from "./use-provider-model-catalog";
+import { modelDetectionFailureText, useProviderModelCatalog, type ProviderModelCatalogHost } from "./use-provider-model-catalog";
+import { savedModelId } from "../../../shared/geminiModels";
 import type {
   ChatAgentMode,
   ChatAgentPermissions,
   ChatParticipant,
   ChatParticipantRequestPermission,
-  CliProviderHost,
   ChatRoleParticipantDefaults,
   ChatParticipantWatcherPausedReason,
   ChatProviderKind,
@@ -63,10 +63,11 @@ export function ParticipantRuntimeControls(props: {
   const participant = props.participant;
   const mode = normalizeChatAgentMode(participant.agentMode);
   const reasoningValue = participant.reasoningEffort ?? REASONING_DEFAULT_VALUE;
-  // The member carries a vendor snapshot of its added provider, enough for the
-  // model list and labels without a settings lookup.
-  const host = participant.hostId && participant.hostVendor && participant.kind !== "gemini-cli"
-    ? { vendor: participant.hostVendor, cli: participant.kind }
+  // The member carries a vendor snapshot of its added provider for the labels;
+  // the id lets an Antigravity member's model list be read with its provider's
+  // key (a removed provider then lists nothing and says so).
+  const host = participant.hostId && participant.hostVendor
+    ? { id: participant.hostId, vendor: participant.hostVendor, cli: participant.kind }
     : undefined;
   const cliSettingLabel = chatInheritedCliSettingLabel(participant.kind);
   const modelDefaultLabel = chatModelDefaultLabel(participant.kind, host);
@@ -290,14 +291,14 @@ function GhostSelect(props: {
 
 function GhostModelSelect(props: {
   kind: ChatProviderKind;
-  host?: Pick<CliProviderHost, "vendor" | "cli">;
+  host?: ProviderModelCatalogHost;
   model?: string;
   defaultLabel: string;
   disabled: boolean;
   onChange: (model: string) => void;
 }): JSX.Element {
   const [manual, setManual] = useState(false);
-  const model = props.model?.trim() || undefined;
+  const model = savedModelId(props.kind, props.model);
   const { catalog } = useProviderModelCatalog(props.kind, props.host);
 
   const models = catalog?.models ?? [];

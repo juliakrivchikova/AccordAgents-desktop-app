@@ -1271,7 +1271,7 @@ export class ChatService {
   private async agentEnvironmentForParticipant(
     participant: ChatParticipant,
     model: string | undefined
-  ): Promise<{ env: NodeJS.ProcessEnv; version: string; codexConfigOverrides?: string[]; problem?: string }> {
+  ): Promise<{ env: NodeJS.ProcessEnv; version: string; codexConfigOverrides?: string[]; geminiSettings?: Record<string, unknown>; problem?: string }> {
     const manual = await this.manualAgentEnvironmentForRun();
     const binding = await this.participantHostBinding(participant);
     if (!binding) {
@@ -1284,7 +1284,8 @@ export class ChatService {
     return {
       env: { ...manual.env, ...runConfig.env },
       version: `${manual.version}|${cliProviderHostRunVersion(binding.host, model)}`,
-      codexConfigOverrides: runConfig.codexConfigOverrides
+      codexConfigOverrides: runConfig.codexConfigOverrides,
+      geminiSettings: runConfig.geminiSettings
     };
   }
 
@@ -2576,7 +2577,7 @@ export class ChatService {
       const runPath = this.runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions);
       const baseCliParticipant = this.cliParticipantForSession(participant, session);
       const agentEnvironment = await this.agentEnvironmentForParticipant(participant, baseCliParticipant.model);
-      const cliParticipant = this.cliParticipantWithHost(baseCliParticipant, agentEnvironment.codexConfigOverrides);
+      const cliParticipant = this.cliParticipantWithHost(baseCliParticipant, agentEnvironment);
       if (agentEnvironment.problem) {
         await this.closeWarmAgentsForParticipant(conversation.id, participant.id);
       }
@@ -9584,9 +9585,7 @@ export class ChatService {
       }
     });
     const agentEnvironment = await this.agentEnvironmentForParticipant(participant, cliParticipant.model);
-    if (agentEnvironment.codexConfigOverrides) {
-      cliParticipant = this.cliParticipantWithHost(cliParticipant, agentEnvironment.codexConfigOverrides);
-    }
+    cliParticipant = this.cliParticipantWithHost(cliParticipant, agentEnvironment);
     const persistSessionId = (sessionId: string): void => {
       this.persistParticipantSessionId(conversation, session, sessionId);
     };
@@ -11146,9 +11145,16 @@ export class ChatService {
     return participant.hostId && participant.hostVendor ? cliProviderHostDefaultModel({ vendor: participant.hostVendor }) : undefined;
   }
 
-  private cliParticipantWithHost(cliParticipant: ParticipantConfig, codexConfigOverrides: string[] | undefined): ParticipantConfig {
-    return codexConfigOverrides && codexConfigOverrides.length > 0
-      ? { ...cliParticipant, codexConfigOverrides }
+  /** The CLI config an added provider adds to every launch of the member:
+   *  Codex `-c` overrides or Antigravity session settings. */
+  private cliParticipantWithHost(
+    cliParticipant: ParticipantConfig,
+    host: { codexConfigOverrides?: string[]; geminiSettings?: Record<string, unknown> }
+  ): ParticipantConfig {
+    const codex = host.codexConfigOverrides && host.codexConfigOverrides.length > 0 ? host.codexConfigOverrides : undefined;
+    const gemini = host.geminiSettings && Object.keys(host.geminiSettings).length > 0 ? host.geminiSettings : undefined;
+    return codex || gemini
+      ? { ...cliParticipant, ...(codex ? { codexConfigOverrides: codex } : {}), ...(gemini ? { geminiSettings: gemini } : {}) }
       : cliParticipant;
   }
 

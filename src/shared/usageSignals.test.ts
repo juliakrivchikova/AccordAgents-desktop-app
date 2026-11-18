@@ -31,6 +31,7 @@ test("provider families come from the CLI or the added provider's vendor only", 
   assert.equal(usageProviderFamily({ kind: "claude-code", hostId: "h", hostVendor: "deepseek" }), "deepseek");
   assert.equal(usageProviderFamily({ kind: "claude-code", hostId: "h", hostVendor: "anthropic" }), "anthropic-api");
   assert.equal(usageProviderFamily({ kind: "codex-cli", hostId: "h", hostVendor: "openai" }), "openai-api");
+  assert.equal(usageProviderFamily({ kind: "gemini-cli", hostId: "h", hostVendor: "google" }), "gemini-api");
   assert.equal(usageProviderFamily({ kind: "codex-cli", hostId: "h", hostVendor: "custom" }), "custom");
   // A vendor this version does not know, or an older member without one.
   assert.equal(usageProviderFamily({ kind: "codex-cli", hostId: "h", hostVendor: "acme.example" }), "custom");

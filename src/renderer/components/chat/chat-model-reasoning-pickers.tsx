@@ -6,7 +6,6 @@ import {
 } from "../primitives";
 import type {
   ChatProviderKind,
-  CliProviderHost,
   ChatReasoningEffort,
   ProviderModel,
   ProviderModelCatalog,
@@ -15,7 +14,8 @@ import type {
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { cliProviderHostDefaultModel } from "../../../shared/cliProviderHosts";
 import { chatInheritedCliSettingLabel, chatModelDefaultLabel } from "./chat-participant-drafts";
-import { modelDetectionFailureText, useProviderModelCatalog } from "./use-provider-model-catalog";
+import { modelDetectionFailureText, useProviderModelCatalog, type ProviderModelCatalogHost } from "./use-provider-model-catalog";
+import { savedModelId } from "../../../shared/geminiModels";
 
 const MODEL_DEFAULT_VALUE = "__accordagents_default_model__";
 const MODEL_MANUAL_VALUE = "__accordagents_manual_model__";
@@ -23,12 +23,12 @@ const REASONING_DEFAULT_VALUE = "__accordagents_default_reasoning__";
 
 export function ChatModelPicker(props: {
   kind: ChatProviderKind;
-  host?: Pick<CliProviderHost, "vendor" | "cli">;
+  host?: ProviderModelCatalogHost;
   model?: string;
   onChange: (model?: string) => void;
 }): JSX.Element {
   const [manualMode, setManualMode] = useState(false);
-  const model = props.model?.trim() || undefined;
+  const model = savedModelId(props.kind, props.model);
   const host = props.host && props.host.cli === props.kind ? props.host : undefined;
   const hostVendor = host?.vendor;
   const { catalog, loading, error } = useProviderModelCatalog(props.kind, host);
@@ -94,12 +94,12 @@ export function ChatModelPicker(props: {
 
 export function ChatReasoningEffortPicker(props: {
   kind: ChatProviderKind;
-  host?: Pick<CliProviderHost, "vendor" | "cli">;
+  host?: ProviderModelCatalogHost;
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   onChange: (reasoningEffort?: ChatReasoningEffort) => void;
 }): JSX.Element {
-  const selectedModel = props.model?.trim() || undefined;
+  const selectedModel = savedModelId(props.kind, props.model);
   const reasoningEffort = normalizeChatReasoningEffort(props.reasoningEffort, props.kind);
   const { catalog, loading, error } = useProviderModelCatalog(props.kind, props.host);
 

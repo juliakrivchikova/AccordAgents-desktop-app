@@ -7,6 +7,7 @@ import type {
   ParticipantConfig
 } from "../../shared/types";
 import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { geminiModelId } from "../../shared/geminiModels";
 
 // Antigravity CLI (`agy`) discovers MCP servers from the global
 // `~/.gemini/config/mcp_config.json` file only — there is no per-invocation MCP
@@ -104,8 +105,9 @@ export function buildGeminiExecInvocation(request: BuildGeminiExecInvocationRequ
   if (request.logFilePath) {
     args.push("--log-file", request.logFilePath);
   }
-  if (request.participant.model && !options.sessionId) {
-    args.push("--model", request.participant.model);
+  const model = geminiModelId(request.participant.model);
+  if (model && !options.sessionId) {
+    args.push("--model", model);
   }
   if (request.repoPath) {
     args.push("--add-dir", request.repoPath);
@@ -123,7 +125,7 @@ export function buildGeminiExecInvocation(request: BuildGeminiExecInvocationRequ
     // contract for file tools.
     args.push("--sandbox");
   }
-  const settings = mode === "auto" || permissions.workspaceWrite ? undefined : geminiAppToolSettings(options);
+  const settings = geminiSessionSettings(request.participant, mode === "auto" || permissions.workspaceWrite ? undefined : geminiAppToolSettings(options));
   if (settings) {
     args.push("--settings", options.settingsPath ?? JSON.stringify(settings));
   }
@@ -148,8 +150,9 @@ export function buildGeminiInteractiveGoalInvocation(
   if (request.logFilePath) {
     args.push("--log-file", request.logFilePath);
   }
-  if (request.participant.model && !options.sessionId) {
-    args.push("--model", request.participant.model);
+  const model = geminiModelId(request.participant.model);
+  if (model && !options.sessionId) {
+    args.push("--model", model);
   }
   if (request.repoPath) {
     args.push("--add-dir", request.repoPath);
@@ -162,7 +165,7 @@ export function buildGeminiInteractiveGoalInvocation(
   } else {
     args.push("--sandbox");
   }
-  const settings = mode === "auto" || permissions.workspaceWrite ? undefined : geminiAppToolSettings(options);
+  const settings = geminiSessionSettings(request.participant, mode === "auto" || permissions.workspaceWrite ? undefined : geminiAppToolSettings(options));
   if (settings) {
     args.push("--settings", options.settingsPath ?? JSON.stringify(settings));
   }
@@ -172,6 +175,16 @@ export function buildGeminiInteractiveGoalInvocation(
     ...(settings ? { settings } : {}),
     goalPrompt: `/goal ${geminiPrompt(request.prompt, request.repoPath, request.kind, mode, permissions)}`
   };
+}
+
+/** agy takes one --settings: the member's own (its Gemini API key route)
+ *  under the app-tool rules, which never set the same keys. */
+function geminiSessionSettings(
+  participant: Pick<ParticipantConfig, "geminiSettings">,
+  appToolSettings: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  const own = participant.geminiSettings && Object.keys(participant.geminiSettings).length > 0 ? participant.geminiSettings : undefined;
+  return own || appToolSettings ? { ...(own ?? {}), ...(appToolSettings ?? {}) } : undefined;
 }
 
 /**
