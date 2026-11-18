@@ -237,8 +237,12 @@ button.chat-card-row:hover {
 
 /* The line a closed Accord left in the chat: placed as a folded urgent alert
    is; opened, the Accord's own card, its whole height in the chat. */
-.chat-accord-line {
+.chat-accord-line,
+.chat-used-approval {
   max-width: min(653px, calc(100% - 50px));
+  /* In a grid (the approvals' list) an item is no narrower than its text
+     unless told: a long line would run under a side panel. */
+  min-width: 0;
   margin-left: 50px;
   padding: 2px 0 6px;
 }
@@ -256,4 +260,17 @@ button.chat-card-row:hover {
 
 .chat-accord-line.is-open .chat-accord-dock-head {
   position: static;
+}
+
+/* A used approval's line (a member added, a task approved, a sign-in
+   done...) is placed as the closed Accord's line above; the ring Activity's
+   Open in chat draws goes on the line itself. */
+.chat-used-approval:focus-visible,
+.chat-used-approval.approval-focused {
+  outline: none;
+}
+
+.chat-used-approval:focus-visible .chat-card-row,
+.chat-used-approval.approval-focused .chat-card-row {
+  box-shadow: var(--focus-ring);
 }

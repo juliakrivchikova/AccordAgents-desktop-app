@@ -8,6 +8,7 @@ import { Avatar, avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { formatChatTime } from "./chat-format";
+import { ChatUsedApprovalLine } from "./chat-used-card-row";
 
 function connectorSignInTitle(handle: string, request: ChatConnectorSignInRequest): string {
   const who = chatParticipantReference(handle);
@@ -16,14 +17,17 @@ function connectorSignInTitle(handle: string, request: ChatConnectorSignInReques
     : `${who} can't reach ${request.connector}`;
 }
 
-/** What came of an answered card. */
-function connectorSignInOutcome(approval: ChatAppToolApproval, request: ChatConnectorSignInRequest): string {
+/** What came of an answered card: a word or two for its line, and the whole
+ *  of it for its tooltip. */
+function connectorSignInEnding(approval: ChatAppToolApproval, request: ChatConnectorSignInRequest): { ended: string; detail: string } {
   if (approval.status === "approved") {
-    if (!approval.consumedAt) return `Reconnecting ${request.connector}…`;
-    return approval.error ?? `Connected to ${request.connector}.`;
+    if (!approval.consumedAt) return { ended: "Reconnecting", detail: `Reconnecting ${request.connector}…` };
+    return approval.error
+      ? { ended: "Not connected", detail: approval.error }
+      : { ended: "Connected", detail: `Connected to ${request.connector}.` };
   }
-  if (approval.status === "denied") return `Not now. ${request.connector} stays as it was.`;
-  return approval.error ? `Closed: ${approval.error}` : "Closed without an answer.";
+  if (approval.status === "denied") return { ended: "Not now", detail: `Not now. ${request.connector} stays as it was.` };
+  return { ended: "Closed", detail: approval.error ? `Closed: ${approval.error}` : "Closed without an answer." };
 }
 
 /** Cards whose Sign in was pressed in this window: the card asks for Done
@@ -87,9 +91,15 @@ export function ChatConnectorSignInCard(props: {
     );
   }
 
+  // Used: one line, like a folded urgent alert (the User, 2026-11-18); its
+  // full outcome on hover.
+  if (!pending) {
+    return <ChatUsedApprovalLine approval={approval} kind="Connector sign-in" icon={PlugZap} preview={request.connector} {...connectorSignInEnding(approval, request)} />;
+  }
+
   return (
     <section
-      className={`chat-app-tool-approval-card is-review-change chat-connector-sign-in-card ${props.embedded ? "is-embedded" : ""} ${pending ? "" : "is-compact-result"} is-${approval.status}`}
+      className={`chat-app-tool-approval-card is-review-change chat-connector-sign-in-card ${props.embedded ? "is-embedded" : ""} is-${approval.status}`}
       aria-label={title}
       data-app-tool-approval-id={approval.id}
       tabIndex={-1}
@@ -98,7 +108,7 @@ export function ChatConnectorSignInCard(props: {
       <div className="chat-app-tool-approval-body">
         <div className="chat-app-tool-approval-meta">
           <strong>{requesterLabel}</strong>
-          <span className="message-provider">{pending ? "Needs a connector" : "Connector"}</span>
+          <span className="message-provider">Needs a connector</span>
           <span className="message-when">{formatChatTime(approval.createdAt)}</span>
         </div>
         <div className="chat-app-tool-approval-panel is-review-change">
@@ -110,54 +120,46 @@ export function ChatConnectorSignInCard(props: {
           </div>
           <div className="chat-connector-sign-in-content">
             <h3 className="chat-connector-sign-in-title">{title}</h3>
-            {pending ? (
-              <>
-                {approval.cardRefusals?.length ? (
-                  <p className="chat-connector-sign-in-error">Your earlier answer was not applied: {approval.cardRefusals[approval.cardRefusals.length - 1].reason}</p>
-                ) : null}
-                {request.reason && <p className="chat-connector-sign-in-reason">{request.reason}</p>}
-                <p className="chat-connector-sign-in-hint">
-                  {elsewhere
-                    ? `Signing in to ${request.connector} finishes in a browser on the computer ${chatParticipantReference(approval.requesterHandle)} runs on, so it cannot be done from here.`
-                    : signIn
-                    ? opened
-                      ? "Finish signing in in your browser, then press Done."
-                      : `Sign in opens ${host ?? "the sign-in page"} in your browser. When you have finished, press Done.`
-                    : "It failed to connect. Fix it (start its program, or correct its settings), then press Reconnect."}
-                </p>
-                {openError && <p className="chat-connector-sign-in-error">{openError}</p>}
-              </>
-            ) : (
-              <p className="chat-connector-sign-in-hint">{connectorSignInOutcome(approval, request)}</p>
-            )}
+            {approval.cardRefusals?.length ? (
+              <p className="chat-connector-sign-in-error">Your earlier answer was not applied: {approval.cardRefusals[approval.cardRefusals.length - 1].reason}</p>
+            ) : null}
+            {request.reason && <p className="chat-connector-sign-in-reason">{request.reason}</p>}
+            <p className="chat-connector-sign-in-hint">
+              {elsewhere
+                ? `Signing in to ${request.connector} finishes in a browser on the computer ${chatParticipantReference(approval.requesterHandle)} runs on, so it cannot be done from here.`
+                : signIn
+                ? opened
+                  ? "Finish signing in in your browser, then press Done."
+                  : `Sign in opens ${host ?? "the sign-in page"} in your browser. When you have finished, press Done.`
+                : "It failed to connect. Fix it (start its program, or correct its settings), then press Reconnect."}
+            </p>
+            {openError && <p className="chat-connector-sign-in-error">{openError}</p>}
           </div>
-          {pending && (
-            <div className="chat-app-tool-review-footer">
-              <button
-                type="button"
-                className="chat-app-tool-review-cancel"
-                disabled={props.submitting}
-                onClick={() => void props.onRespond(approval.id, false)}
-              >
-                Not now
+          <div className="chat-app-tool-review-footer">
+            <button
+              type="button"
+              className="chat-app-tool-review-cancel"
+              disabled={props.submitting}
+              onClick={() => void props.onRespond(approval.id, false)}
+            >
+              Not now
+            </button>
+            {signIn && opened && !elsewhere && (
+              <button type="button" className="chat-app-tool-review-cancel" disabled={props.submitting} onClick={() => void openSignIn()}>
+                Open again
               </button>
-              {signIn && opened && !elsewhere && (
-                <button type="button" className="chat-app-tool-review-cancel" disabled={props.submitting} onClick={() => void openSignIn()}>
-                  Open again
-                </button>
-              )}
-              <Button
-                type="button"
-                variant="default"
-                size="sm"
-                className="chat-app-tool-review-submit"
-                disabled={props.submitting}
-                onClick={() => signIn && !opened && !elsewhere ? void openSignIn() : void props.onRespond(approval.id, true)}
-              >
-                {signIn ? (opened || elsewhere ? "Done" : "Sign in") : "Reconnect"}
-              </Button>
-            </div>
-          )}
+            )}
+            <Button
+              type="button"
+              variant="default"
+              size="sm"
+              className="chat-app-tool-review-submit"
+              disabled={props.submitting}
+              onClick={() => signIn && !opened && !elsewhere ? void openSignIn() : void props.onRespond(approval.id, true)}
+            >
+              {signIn ? (opened || elsewhere ? "Done" : "Sign in") : "Reconnect"}
+            </Button>
+          </div>
         </div>
       </div>
     </section>
