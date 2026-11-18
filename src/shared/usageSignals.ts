@@ -42,6 +42,7 @@ export const USAGE_PROVIDER_FAMILIES = [
   "deepseek",
   "anthropic-api",
   "openai-api",
+  "gemini-api",
   "custom"
 ] as const;
 
@@ -123,6 +124,7 @@ export function usageLocale(candidates: ReadonlyArray<unknown>): string {
 const HOST_VENDOR_FAMILIES: Readonly<Record<string, UsageProviderFamily>> = {
   anthropic: "anthropic-api",
   openai: "openai-api",
+  google: "gemini-api",
   zai: "glm",
   moonshot: "kimi",
   minimax: "minimax",

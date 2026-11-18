@@ -534,6 +534,16 @@ export function classifyAntigravityAuth(result: CliReadinessCommandResult): Auth
   if (result.ok && result.stdout.split(/\r?\n/).some((line) => line.trim())) {
     return { authentication: "ready", exitCode: result.exitCode };
   }
+  // Signed out, `agy models` says only this (agy 1.5.11, 2026-11-18). Saying
+  // so, rather than "could not verify", lets a member on a Gemini API key
+  // run, as agy itself does on the key without a sign-in.
+  const outputLines = [result.stdout, result.stderr]
+    .flatMap((value) => value.split(/\r?\n/))
+    .map((line) => line.trim())
+    .filter((line) => line && !/^Fetching available models/i.test(line));
+  if (!result.ok && outputLines.length === 1 && /^Error: Please sign in to view available models\b/.test(outputLines[0])) {
+    return { authentication: "required", diagnosticCode: "auth-required", exitCode: result.exitCode };
+  }
   return { authentication: "unknown", diagnosticCode: "auth-check-failed", exitCode: result.exitCode };
 }
 

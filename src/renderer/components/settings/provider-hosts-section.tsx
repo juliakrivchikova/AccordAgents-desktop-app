@@ -17,7 +17,7 @@ import { deriveAgentReadiness } from "../../../shared/cliReadiness";
 import { AppSelect, FormRow, IconButton } from "../primitives";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
 
-const CLI_LABELS: Record<CliProviderHostCli, string> = { "claude-code": "Claude Code", "codex-cli": "Codex CLI" };
+const CLI_LABELS: Record<CliProviderHostCli, string> = { "claude-code": "Claude Code", "codex-cli": "Codex CLI", "gemini-cli": "Antigravity CLI" };
 
 /** Added providers listed under the built-in CLIs in Local CLI setup, plus the
  *  Add / edit dialog. A provider is "ready" when its CLI runs and it has a key. */
@@ -56,7 +56,7 @@ export function ProviderHostRows(props: {
           <Plus size={14} aria-hidden />
           Add provider
         </Button>
-        <span className="gen-host-add-hint">Reach another vendor's models through Claude Code or Codex with your own API key.</span>
+        <span className="gen-host-add-hint">Reach another vendor's models through Claude Code, Codex or Antigravity with your own API key.</span>
       </div>
     </>
   );

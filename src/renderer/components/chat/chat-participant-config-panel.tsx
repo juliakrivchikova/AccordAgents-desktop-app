@@ -18,12 +18,12 @@ import type {
   AppSettings,
   ChatAgentPermissions,
   ChatParticipantRequestPermission,
-  CliProviderHost,
   ChatProviderKind,
   ChatRoleParticipantDefaults,
   ChatRosterChangeParticipantInput
 } from "../../../shared/types";
-import { useProviderModelCatalog } from "./use-provider-model-catalog";
+import { useProviderModelCatalog, type ProviderModelCatalogHost } from "./use-provider-model-catalog";
+import { savedModelId } from "../../../shared/geminiModels";
 import { Avatar } from "../avatar/avatar";
 import { AvatarStudioDialog } from "../avatar/avatar-studio-dialog";
 import { useCustomAvatarLibrary } from "../avatar/custom-avatars";
@@ -258,13 +258,13 @@ export function ChatParticipantInlineSelectRow(props: {
 
 export function ChatParticipantInlineModelRow(props: {
   kind: ChatProviderKind;
-  host?: Pick<CliProviderHost, "vendor" | "cli">;
+  host?: ProviderModelCatalogHost;
   model?: string;
   onSelect: (model: string | undefined) => void;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
   const [manual, setManual] = useState("");
-  const value = props.model?.trim() || undefined;
+  const value = savedModelId(props.kind, props.model);
   const host = props.host && props.host.cli === props.kind ? props.host : undefined;
   const { catalog } = useProviderModelCatalog(props.kind, host);
 
