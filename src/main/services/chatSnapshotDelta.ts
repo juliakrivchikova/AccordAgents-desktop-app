@@ -49,10 +49,20 @@ export function buildConversationSnapshot(
   }
   const changedMessageIds: string[] = [];
   const seenIds = new Set<string>();
+  // A message the previous snapshot had that now stands before one it stood
+  // after, older than the newest window: a delta cannot say so (the window
+  // keeps its order), so the renderer gets the whole order once instead.
+  const olderStart = Math.max(0, conversation.messages.length - Math.max(0, tailSize));
+  let furthestPrevious = -1;
+  let reorderedOlder = false;
   const rows = conversation.messages.map((message, index): SnapshotMessageRow => {
     const json = JSON.stringify(message);
     seenIds.add(message.id);
     const previous = previousById.get(message.id);
+    if (previous) {
+      if (previous.index < furthestPrevious && index < olderStart) reorderedOlder = true;
+      furthestPrevious = Math.max(furthestPrevious, previous.index);
+    }
     if (previous && previous.json === json) {
       return previous.index === index ? previous : { ...previous, index };
     }
@@ -71,7 +81,7 @@ export function buildConversationSnapshot(
     .map((row) => row.id);
   const body = cloneConversationBody(conversation);
   const snapshot: Conversation = { ...body, messages: rows.map((row) => row.message) };
-  if (!previousRows) {
+  if (!previousRows || reorderedOlder) {
     return { snapshot, rows, update: snapshot, changedMessageIds, removedMessageIds };
   }
   const tailStart = Math.max(0, rows.length - Math.max(0, tailSize));

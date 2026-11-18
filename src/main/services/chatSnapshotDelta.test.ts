@@ -97,6 +97,19 @@ test("an insertion ahead of unchanged messages shifts their index but keeps thei
   assert.deepEqual(built.update.messages.map((item) => item.id), ["m0", "m1", "m2"]);
 });
 
+test("a message moved back behind the newest window sends the whole order once; a move inside the window stays a delta", () => {
+  // A reply bubble that ended on this device moves from the end back to where
+  // it was written: a delta would leave it where the open chat last saw it.
+  const messages = Array.from({ length: 6 }, (_, index) => message(`m${index}`, `n${index}`, index));
+  const first = buildConversationSnapshot(conversation(messages), undefined, 2);
+  const movedBack = buildConversationSnapshot(conversation([messages[0], messages[5], messages[1], messages[2], messages[3], messages[4]]), first.rows, 2);
+  assert.equal(movedBack.update.messageDelta, undefined, "a full update");
+  assert.deepEqual(movedBack.update.messages.map((item) => item.id), ["m0", "m5", "m1", "m2", "m3", "m4"]);
+  assert.deepEqual(movedBack.changedMessageIds, [], "no message changed, only the order");
+  const inWindow = buildConversationSnapshot(conversation([messages[0], messages[1], messages[2], messages[3], messages[5], messages[4]]), first.rows, 2);
+  assert.ok(inWindow.update.messageDelta, "the newest window carries its own order");
+});
+
 test("edge cases: an empty conversation, an empty previous row set, and every message removed", () => {
   const empty = buildConversationSnapshot(conversation([]), undefined);
   assert.deepEqual(empty.update.messages, []);

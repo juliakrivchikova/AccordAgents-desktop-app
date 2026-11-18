@@ -16,6 +16,7 @@ import { ACCORD_CLOSED_SOURCE, accordClosedLaunchId, accordRefusedLines } from "
 import { HubOps } from "../../hub/hubOps";
 import { HubServer } from "../../hub/hubServer";
 import { ChatService } from "./chat";
+import { buildChatParticipantStatusMap } from "../../shared/chatRosterStatus";
 import { DeviceIdentityService } from "./deviceIdentity";
 import { ChatSearchService } from "./chatSearch";
 import { HubClient, HubHttpError } from "./hubClient";
@@ -749,3 +750,35 @@ for (const where of ["machine", "desktop"] as const) {
     assert.equal(held!.messages.filter(isFinishedNote).length, 0);
   });
 }
+
+test("a cloud member's reply that failed here before its turn started stays where it was written, so its later replies count as its newest", async (t) => {
+  // A cloud member whose machine is chosen when it is first asked, as the
+  // User's was: the first time, her AWS instance was stopped.
+  const cloudy: ChatParticipant = { ...remote, homeMachineId: undefined, cloudRun: {} } as ChatParticipant;
+  const h = await linked(t, localChat("chat-failed-start", { metadata: { participants: [desk, cloudy], participantSessions: [], running: false, warnings: [] } as never }));
+  let attempts = 0;
+  h.desktopChat.setCloudRunPreparation(async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("Start your AWS instance in Settings → AWS, then select Cloud run again.");
+    return "box";
+  });
+  await h.desktopChat.sendMessage({ conversationId: "chat-failed-start", content: "@drew first" } as never);
+  const failed = await until(() => h.desktopStorage.getConversation("chat-failed-start"), (chat) =>
+    Boolean(chat?.messages.some((message) => message.participantId === cloudy.id && message.status === "error")));
+  const failure = failed!.messages.find((message) => message.participantId === cloudy.id && message.status === "error")!;
+  assert.match(failure.content, /Start your AWS instance/);
+  assert.equal(failure.metadata?.serverSeq, undefined, "only this computer has it");
+  // Its machine is ready now: it answers the next messages.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await h.desktopChat.sendMessage({ conversationId: "chat-failed-start", content: "@drew second" } as never);
+  const answered = await until(() => h.desktopStorage.getConversation("chat-failed-start"), (chat) =>
+    Boolean(chat?.messages.some((message) => message.participantId === cloudy.id && message.status === "done" && message.content === "machine reply to @drew second")) &&
+    !chat!.messages.some((message) => message.status === "pending"));
+  const ids = answered!.messages.map((message) => message.id);
+  const second = answered!.messages.find((message) => message.role === "user" && message.content === "@drew second")!;
+  assert.ok(ids.includes(failure.id), "the failed bubble is kept, as a local member's is");
+  assert.ok(ids.indexOf(failure.id) < ids.indexOf(second.id), `the failed bubble stays before the later message: ${JSON.stringify(answered!.messages.map((message) => [message.role, message.content.slice(0, 30), message.status]))}`);
+  const lastOfMember = [...answered!.messages].reverse().find((message) => message.participantId === cloudy.id && message.status !== "pending")!;
+  assert.equal(lastOfMember.status, "done", "its newest reply is the one that went fine");
+  assert.notEqual(buildChatParticipantStatusMap(answered!).get(cloudy.id), "error", "so it does not show Error");
+});

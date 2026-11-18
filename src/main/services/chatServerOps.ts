@@ -139,17 +139,40 @@ export function serverSeqOf(message: ChatMessage): number | undefined {
 }
 
 /** Messages in the server's order; those it has not accepted yet come last,
- *  in the order they were written here. */
+ *  in the order they were written here. A member's reply bubble that ended
+ *  here without the server ever taking a reply (a run that failed before it
+ *  started) never will: it stands where it was written, by its time among the
+ *  server's messages. Kept last, it read as the member's newest reply for
+ *  good: its status showed Error, and a message without an @ went to it. */
 export function sortByServerOrder(messages: ChatMessage[]): ChatMessage[] {
-  return messages
-    .map((message, index) => ({ message, index, seq: serverSeqOf(message) }))
-    .sort((left, right) => {
-      if (left.seq === undefined && right.seq === undefined) return left.index - right.index;
-      if (left.seq === undefined) return 1;
-      if (right.seq === undefined) return -1;
-      return left.seq - right.seq || left.index - right.index;
-    })
-    .map((entry) => entry.message);
+  const entries = messages.map((message, index) => {
+    const at = Date.parse(message.createdAt);
+    return { message, index, seq: serverSeqOf(message), at, settled: serverSeqOf(message) === undefined && endedHereForGood(message) && Number.isFinite(at) };
+  });
+  const seqById = new Map(entries.filter((entry) => entry.seq !== undefined).map((entry) => [entry.message.id, entry.seq!]));
+  const accepted = entries.filter((entry) => entry.seq !== undefined)
+    .sort((left, right) => left.seq! - right.seq! || left.index - right.index);
+  // Never above the message it answers, whatever the devices' clocks say.
+  const settled = entries.filter((entry) => entry.settled)
+    .map((entry) => ({ ...entry, after: seqById.get(entry.message.metadata?.sourceMessageId ?? entry.message.metadata?.parentMessageId ?? "") ?? Number.NEGATIVE_INFINITY }))
+    .sort((left, right) => left.at - right.at || left.index - right.index);
+  const waiting = entries.filter((entry) => entry.seq === undefined && !entry.settled);
+  const ordered: ChatMessage[] = [];
+  let next = 0;
+  for (const entry of accepted) {
+    const at = Number.isFinite(entry.at) ? entry.at : Number.NEGATIVE_INFINITY;
+    while (next < settled.length && settled[next].at < at && entry.seq! > settled[next].after) ordered.push(settled[next++].message);
+    ordered.push(entry.message);
+  }
+  while (next < settled.length) ordered.push(settled[next++].message);
+  for (const entry of waiting) ordered.push(entry.message);
+  return ordered;
+}
+
+/** A reply bubble this device made for a turn the server runs, that ended here
+ *  (failed or stopped before the turn started): the server never gets it. */
+function endedHereForGood(message: ChatMessage): boolean {
+  return message.metadata?.serverPlaceholder === true && message.status !== "pending";
 }
 
 /** A turn as a message keeps it: what the device needs to show "taken to
