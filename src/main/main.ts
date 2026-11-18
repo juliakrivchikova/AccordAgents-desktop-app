@@ -1300,6 +1300,8 @@ const cloudRunPreparation = new CloudRunPreparationService({
   install: (request, progress) => machineInstallerService.install(request, progress),
   awaitActiveInstall: async (machineId) => { await machineInstallerService.activeOperation(machineId)?.catch(() => undefined); },
   isConnected: (machineId) => Boolean(machineLinkService?.isMachineConnected(machineId)),
+  waitForConnected: async (machineId, timeoutMs) => Boolean(await machineLinkService?.waitForConnected(machineId, timeoutMs)),
+  instanceRunningSince: () => cloudRunAwsService.instanceRunningSince(),
   bootstrapProject: (machineId, localPath, signal, progress) => machineInstallerService.bootstrapProjectMirror({ machineId, localPath }, signal, progress),
   saveInstall: (record) => settingsService.saveMachineInstall(record),
   prepareMachine: async (worker, record) => {
@@ -1335,7 +1337,8 @@ const machinePowerHandoffService = new MachinePowerHandoffService({
 
 chatService.setCloudRunPreparation(async (selection, provider, progress) => {
   if (provider !== "codex-cli" && provider !== "claude-code") throw new Error("This provider does not support Cloud run.");
-  const result = await cloudRunPreparation.prepare({ operationId: randomUUID(), provider, instanceId: selection.instanceId }, progress);
+  // A member's turn: a stopped instance is started for it.
+  const result = await cloudRunPreparation.prepare({ operationId: randomUUID(), provider, instanceId: selection.instanceId }, progress, { startStopped: true });
   return result.machine.id;
 });
 chatService.setCloudRunAwsService(cloudRunAwsService);

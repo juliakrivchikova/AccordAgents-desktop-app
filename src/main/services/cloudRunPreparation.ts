@@ -3,6 +3,7 @@ import type { AwsWorkerStatus, CloudRunWorkerSettings } from "../../shared/types
 import type { MachineRecord } from "../../shared/machineLink";
 import type { MachineInstallRecord, MachineInstallRequest, MachineInstallResult, MachineInstallSnapshot, MachineMirrorBootstrapResult } from "../../shared/machineInstall";
 import { MACHINE_RECOVERY_OPERATION_PREFIX } from "../../shared/machineInstall";
+import { MACHINE_RECOVERY_AFTER_MS } from "./machineRecovery";
 import type { CloudRunPreparationProgress, CloudRunPreparationState, PrepareCloudRunRequest, PrepareCloudRunResult } from "../../shared/cloudRunPreparation";
 
 interface Options {
@@ -26,6 +27,11 @@ interface Options {
    *  not fail on a lock held by a background action. */
   awaitActiveInstall?: (machineId: string) => Promise<void>;
   isConnected(machineId: string): boolean;
+  /** Resolves true on the machine's next hello, false after `timeoutMs`:
+   *  how a machine started for a turn is waited for while it boots. */
+  waitForConnected(machineId: string, timeoutMs: number): Promise<boolean>;
+  /** When the instance last started, while it runs (0: AWS does not say). */
+  instanceRunningSince(): Promise<number | undefined>;
   bootstrapProject(machineId: string, localPath: string, signal?: AbortSignal, progress?: (message: string) => void): Promise<MachineMirrorBootstrapResult>;
   saveInstall(record: MachineInstallRecord): Promise<void>;
   prepareMachine(worker: CloudRunWorkerSettings, record: MachineInstallRecord): Promise<void>;
@@ -54,13 +60,31 @@ function withoutTrailingSlash(path: string): string {
   return path.length > 1 ? path.replace(/\/+$/, "") : path;
 }
 
+/** AWS states a turn may start the instance from (or wait for, while it is
+ *  already starting). */
+const STARTABLE_STATES = new Set<AwsWorkerStatus["state"]>(["stopped", "stopping", "pending"]);
+/** How long a machine started for a turn is given to boot and greet before
+ *  its program is treated as down (and set up again, as on a running one). */
+export const STARTED_MACHINE_GREETING_WAIT_MS = 3 * 60_000;
+
+/** The instance is not running and this preparation may not start it;
+ *  `startable`: a member's turn could. */
+export class InstanceNotRunningError extends Error {
+  // Its name stays "Error": callers show the message as before.
+  constructor(message: string, readonly startable: boolean) {
+    super(message);
+  }
+}
+
 export function cloudEnvironmentDirectory(environmentId: string): string {
   if (!environmentId.trim()) throw new Error("This desktop has no environment identity.");
   return `accordagents-${createHash("sha256").update(environmentId).digest("hex").slice(0, 24)}`;
 }
 
 /** The user's Cloud run selection prepares the existing instance. This never
- * provisions another server, moves a participant or starts a provider turn. */
+ * provisions another server, moves a participant or starts a provider turn.
+ * Selecting Cloud never starts a stopped instance; a member's turn does
+ * (`startStopped`), as the User's server does for a member already on it. */
 export class CloudRunPreparationService {
   private active?: Promise<PrepareCloudRunResult>;
   private activeProvider?: PrepareCloudRunRequest["provider"];
@@ -215,7 +239,10 @@ export class CloudRunPreparationService {
     return task;
   }
 
-  async prepare(request: PrepareCloudRunRequest, progress: (snapshot: CloudRunPreparationProgress) => void): Promise<PrepareCloudRunResult> {
+  /** `startStopped`: a member's turn asks for the machine, so a stopped
+   *  instance is started and waited for; selecting Cloud leaves it as it is. */
+  async prepare(request: PrepareCloudRunRequest, progress: (snapshot: CloudRunPreparationProgress) => void,
+    options: { startStopped?: boolean } = {}): Promise<PrepareCloudRunResult> {
     if (typeof request?.operationId !== "string" || !request.operationId.trim() || (request.provider !== "codex-cli" && request.provider !== "claude-code")) {
       throw new Error("Choose a supported provider before preparing Cloud run.");
     }
@@ -244,7 +271,7 @@ export class CloudRunPreparationService {
       this.publish(request, "preparing", waiting);
       progress({ ...waiting, operationId: request.operationId });
       await this.active.catch(() => undefined);
-      return this.prepare(request, progress);
+      return this.prepare(request, progress, options);
     }
     const listener = (snapshot: Omit<CloudRunPreparationProgress, "operationId">): void => {
       this.publish(request, "preparing", snapshot);
@@ -255,7 +282,7 @@ export class CloudRunPreparationService {
     if (!this.active) {
       this.activeProvider = request.provider;
       this.activeInstance = currentInstance;
-      this.active = this.run(request.provider, currentInstance).catch(error => {
+      this.active = this.run(request.provider, currentInstance, { startStopped: options.startStopped }).catch(error => {
         // Refresh access when retrying the failed provider, without making
         // another member repeat a preparation that already succeeded.
         if (this.prepared && this.prepared.instanceId === currentInstance) this.prepared.retryProviders.add(request.provider);
@@ -267,10 +294,23 @@ export class CloudRunPreparationService {
       this.publish(request, "ready", { message: "Cloud run is ready." }, result.machine);
       return result;
     } catch (error) {
+      // A turn that joined a selection's preparation, which stopped at the
+      // stopped instance, starts the instance itself.
+      if (options.startStopped && error instanceof InstanceNotRunningError && error.startable) {
+        this.listeners.delete(listener);
+        return this.prepare(request, progress, options);
+      }
       this.publish(request, "error", { message: error instanceof Error ? error.message : String(error) });
       throw error;
     }
     finally { this.listeners.delete(listener); }
+  }
+
+  /** The instance started so recently that its program may still be
+   *  coming up (as the automatic recovery counts it). */
+  private async startedRecently(): Promise<boolean> {
+    const since = await this.options.instanceRunningSince().catch(() => undefined);
+    return since !== undefined && since > 0 && Date.now() - since < MACHINE_RECOVERY_AFTER_MS;
   }
 
   private clearActive(): void {
@@ -338,7 +378,7 @@ export class CloudRunPreparationService {
   }
 
   private async run(provider: PrepareCloudRunRequest["provider"] | undefined, expectedInstanceId?: string,
-    runtime: { agentsChecked?: boolean; machineId?: string; start?: boolean } = {}): Promise<PrepareCloudRunResult> {
+    runtime: { agentsChecked?: boolean; machineId?: string; start?: boolean; startStopped?: boolean } = {}): Promise<PrepareCloudRunResult> {
     const prepared = await this.reusableMachine(expectedInstanceId);
     if (prepared && !provider && (!runtime.machineId || prepared.machine.id === runtime.machineId)) return { machine: prepared.machine };
     if (prepared && provider && !prepared.retryProviders.has(provider)) {
@@ -351,8 +391,12 @@ export class CloudRunPreparationService {
     await this.options.requireServer?.();
     this.report({ message: "Checking your AWS instance…" });
     const status = await this.options.aws.status();
-    if (!status.handle || !status.configured || status.state !== "running") {
-      throw new Error(status.message || (!status.configured ? status.notices?.join(" ") : undefined) || "Start your AWS instance in Settings → AWS, then select Cloud run again.");
+    // A turn starts a stopped instance (or waits for one already starting).
+    const startable = STARTABLE_STATES.has(status.state);
+    const starting = Boolean(runtime.startStopped && startable);
+    if (!status.handle || !status.configured || (status.state !== "running" && !starting)) {
+      const message = status.message || (!status.configured ? status.notices?.join(" ") : undefined) || "Start your AWS instance in Settings → AWS, then select Cloud run again.";
+      throw new InstanceNotRunningError(message, Boolean(status.handle && status.configured && startable));
     }
     const instanceId = status.handle.instanceId;
     if (expectedInstanceId && instanceId !== expectedInstanceId) {
@@ -373,10 +417,24 @@ export class CloudRunPreparationService {
     // up here, and a version behind waits for the automatic update, which
     // waits for the machine to be idle.
     if (runtime.agentsChecked && machine && this.options.isConnected(machine.id)) return { machine };
-    this.report({ message: "Connecting to your AWS instance…" });
+    this.report({ message: starting ? "Starting your AWS instance…" : "Connecting to your AWS instance…" });
     const worker = await this.options.aws.ensureExistingWorkerForRun(instanceId, runtime.start === false ? { start: false } : {});
     if (!worker.host) throw new Error("AWS did not return an address for this instance.");
     const existing = installs.find(item => item.machineId === machine?.id);
+    // A machine started just now (by this turn, from Settings, or by the
+    // User's server) greets once it has booted: a turn waits for it, so its
+    // program is not taken for down and set up again.
+    let booted = false;
+    if (runtime.startStopped && machine && existing?.installRoot && !this.options.isConnected(machine.id)
+      && (starting || await this.startedRecently())) {
+      this.report({ message: "Waiting for your cloud machine to connect…" });
+      await this.options.waitForConnected(machine.id, STARTED_MACHINE_GREETING_WAIT_MS);
+      booted = true;
+      // Its greeting can start the automatic update: that one goes first.
+      await this.options.awaitActiveInstall?.(machine.id);
+      const greeted = (await this.options.listMachines()).find(item => item.id === machine?.id);
+      if (greeted) machine = greeted;
+    }
     if (machine && existing?.installRoot && this.options.isConnected(machine.id) && machine.lastHello?.appVersion === this.options.appVersion) {
       // Selecting another member must never drain an already running machine.
       await this.options.prepareMachine(worker, existing);
@@ -389,8 +447,9 @@ export class CloudRunPreparationService {
     // A program that crashed mid-turn keeps reporting that turn: that may
     // not keep it down once the machine itself said nothing runs (a turn
     // asked meanwhile waits on the User's server). A program that came back
-    // meanwhile reports afresh, and that report counts again.
-    const checked = runtime.agentsChecked && !(machine && this.options.isConnected(machine.id));
+    // meanwhile reports afresh, and that report counts again. A machine that
+    // has just booted runs nothing, whatever it reported before it stopped.
+    const checked = (runtime.agentsChecked || booted) && !(machine && this.options.isConnected(machine.id));
     if (!checked && machine?.lastHello?.activeRunIds?.length) {
       throw new Error("The cloud runtime needs an update. Finish its current runs, then select Cloud run again.");
     }
@@ -404,7 +463,7 @@ export class CloudRunPreparationService {
     const result = await this.options.install({
       // A setup that trusted the SSH check is marked, so the drain refuses a
       // program that came back while the new release was being staged.
-      machineId: machine.id, operationId: `${runtime.agentsChecked ? MACHINE_RECOVERY_OPERATION_PREFIX : ""}${randomUUID()}`, requiredProvider: provider,
+      machineId: machine.id, operationId: `${runtime.agentsChecked || booted ? MACHINE_RECOVERY_OPERATION_PREFIX : ""}${randomUUID()}`, requiredProvider: provider,
       installRoot: established?.installRoot || `~/${directory}`,
       userDataDir: established?.userDataDir || undefined,
       serviceName: established?.serviceName || undefined,
