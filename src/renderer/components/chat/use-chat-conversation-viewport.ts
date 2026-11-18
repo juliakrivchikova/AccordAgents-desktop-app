@@ -74,7 +74,7 @@ export function useChatConversationViewport(props: {
         return 170;
       }
       if (row?.type === "approval") {
-        return 220;
+        return 62; // a settled approval: one line (ChatUsedApprovalLine)
       }
       return 56;
     },
