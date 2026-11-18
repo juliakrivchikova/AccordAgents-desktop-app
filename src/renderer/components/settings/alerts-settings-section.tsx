@@ -30,8 +30,9 @@ const TELEGRAM_FINISH_WATCH_MS = 10 * 60_000;
 
 /**
  * Settings → Alerts, as the User approved it on 2026-11-15 (five reviews,
- * mockup "Settings → Alerts · new page"): one line on top that says whether
- * an alert reaches her now, what happens when one comes in (with the wait),
+ * mockup "Settings → Alerts · new page"): a line on top only when an alert
+ * would not fully reach her now (2026-11-18), what happens when one comes in
+ * (with the wait),
  * and one card for where alerts go, each channel's status beside its name.
  * Everything is kept and done on her server; this page only asks it.
  */
