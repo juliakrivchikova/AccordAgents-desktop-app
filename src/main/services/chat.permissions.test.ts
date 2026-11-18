@@ -13684,6 +13684,8 @@ test("a Codex member on an added provider gets the provider's -c overrides and k
   await waitFor(() => runs.length === 1);
   assert.equal(runs[0].participant.model, "glm-5.3");
   assert.equal(runs[0].options.agentEnv.CODEX_PROVIDER_HOST_API_KEY, "zai-secret");
+  // The provider key is for Codex itself, never forced into its shell commands.
+  assert.equal(runs[0].options.settingsEnv?.CODEX_PROVIDER_HOST_API_KEY, undefined);
   assert.deepEqual(runs[0].participant.codexConfigOverrides, [
     'model_provider="accordagents_host"',
     'model_providers.accordagents_host.name="Z.ai GLM · Codex"',

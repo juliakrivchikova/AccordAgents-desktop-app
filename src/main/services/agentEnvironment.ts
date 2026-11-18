@@ -1,68 +1,88 @@
 import type {
-  AgentEnvironmentKey,
   AgentEnvironmentSnapshot,
-  AgentEnvironmentValueProtection
+  DeleteAgentEnvironmentVariableRequest,
+  SaveAgentEnvironmentVariableRequest
 } from "../../shared/types";
-import { hostPlatform } from "../platform";
-import { filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
-import { commandEnvironment, ensureLoginShellEnvPrimed } from "./command";
+import { isAutomaticAgentEnvironmentKey } from "../../shared/agentEnvironment";
+import { computerEnvironment, computerEnvironmentRead, ensureLoginShellEnvPrimed, refreshLoginShellEnv } from "./command";
 import { forwardedDesktopEnvironment } from "./remoteWorkerTarget";
 import type { SettingsService } from "./settings";
 
-export const AGENT_ENVIRONMENT_LOCAL_DISCLOSURE =
-  "Local CLI agents also inherit the broader desktop and login-shell environment. This page lists the curated propagated set plus manual variables to avoid exposing hundreds of machine-local keys.";
+/** The names and values this computer offers as automatic variables: its
+ *  last successful reading, without the app's own and the system's names. */
+export function automaticAgentEnvironmentSource(base: NodeJS.ProcessEnv = computerEnvironment()): Record<string, string> {
+  const source: Record<string, string> = {};
+  for (const [key, value] of Object.entries(forwardedDesktopEnvironment(base))) {
+    if (typeof value === "string" && value && isAutomaticAgentEnvironmentKey(key)) {
+      source[key] = value;
+    }
+  }
+  return source;
+}
 
+/** Settings → Environment: one list of the variables members get. Automatic
+ *  ones follow this computer; the User can change or delete any of them. */
 export class AgentEnvironmentService {
-  constructor(private readonly settings: SettingsService) {}
+  private reconciling: Promise<boolean> = Promise.resolve(false);
 
+  constructor(
+    private readonly settings: SettingsService,
+    private readonly source: () => Record<string, string> = () => automaticAgentEnvironmentSource(),
+    private readonly sourceRead: () => boolean = computerEnvironmentRead,
+    private readonly onError: (error: unknown) => void = () => undefined
+  ) {}
+
+  /** The list as it is, after bringing it in step with the last reading. */
   async snapshot(): Promise<AgentEnvironmentSnapshot> {
     await ensureLoginShellEnvPrimed();
-    const forwarded = forwardedDesktopEnvironment(commandEnvironment());
-    const forwardedKeys = new Set(Object.keys(forwarded).sort((left, right) => left.localeCompare(right)));
-    const manualVariables = await this.settings.listManualAgentEnvironmentVariables(forwardedKeys);
-    const keys = new Map<string, AgentEnvironmentKey>();
-
-    for (const key of forwardedKeys) {
-      keys.set(key, {
-        key,
-        source: "forwarded",
-        manual: false,
-        overridesDetected: false
-      });
-    }
-
-    for (const manual of manualVariables) {
-      if (!manual.enabled) {
-        continue;
-      }
-      keys.set(manual.key, {
-        key: manual.key,
-        source: "manual",
-        manual: true,
-        overridesDetected: forwardedKeys.has(manual.key)
-      });
-    }
-
-    return {
-      refreshedAt: new Date().toISOString(),
-      keys: [...keys.values()].sort((left, right) => left.key.localeCompare(right.key)),
-      manualVariables,
-      forwardedCount: forwardedKeys.size,
-      manualEnabledCount: manualVariables.filter((variable) => variable.enabled).length,
-      localInheritanceDisclosure: AGENT_ENVIRONMENT_LOCAL_DISCLOSURE,
-      valueProtection: this.currentValueProtection()
-    };
+    await this.reconcileQuietly();
+    return this.currentSnapshot();
   }
 
-  async manualEnvForRun(): Promise<{ env: NodeJS.ProcessEnv; version: string }> {
-    const manual = await this.settings.getManualAgentEnvironment();
-    return {
-      env: filterAllowedAgentEnvironment(manual.env),
-      version: manual.version
-    };
+  /** Reads this computer again, then brings the list in step. */
+  async refresh(): Promise<AgentEnvironmentSnapshot> {
+    await refreshLoginShellEnv();
+    await this.reconcileQuietly();
+    return this.currentSnapshot();
   }
 
-  private currentValueProtection(): AgentEnvironmentValueProtection {
-    return hostPlatform().secrets.isEncryptionAvailable() ? "os-encrypted" : "local-obfuscated";
+  async save(request: SaveAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot> {
+    await this.settings.saveAgentEnvironmentVariable(request);
+    return this.currentSnapshot();
+  }
+
+  async delete(request: DeleteAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot> {
+    await ensureLoginShellEnvPrimed();
+    const id = (key: string): string => process.platform === "win32" ? key.toUpperCase() : key;
+    const setByThisComputer = Object.keys(this.source()).some((key) => id(key) === id(request.key));
+    await this.settings.deleteAgentEnvironmentVariable(request.key, setByThisComputer);
+    return this.currentSnapshot();
+  }
+
+  /** Passes run one after another, each with the reading current when it
+   *  starts. Nothing happens until this computer has been read once; a later
+   *  failed reading keeps the last good one. */
+  reconcile(): Promise<boolean> {
+    const run = this.reconciling.catch(() => false).then(() => this.sourceRead()
+      ? this.settings.reconcileAutomaticAgentEnvironment(this.source())
+      : false);
+    this.reconciling = run;
+    return run;
+  }
+
+  /** A failed pass must not take the page down: the list is still there. */
+  private async reconcileQuietly(): Promise<void> {
+    try {
+      await this.reconcile();
+    } catch (error) {
+      this.onError(error);
+    }
+  }
+
+  private async currentSnapshot(): Promise<AgentEnvironmentSnapshot> {
+    const variables = await this.settings.listAgentEnvironmentVariables();
+    return {
+      variables: variables.sort((left, right) => left.key.localeCompare(right.key))
+    };
   }
 }

@@ -9,8 +9,10 @@ import {
   commandLookupInvocation,
   commandExists,
   commandEnvironment,
+  computerEnvironment,
   firstCommandLookupPath,
   parseLoginShellEnvOutput,
+  refreshLoginShellEnv,
   resolveCommandPath,
   resolveCommandTimeoutMs,
   runCommand
@@ -451,4 +453,38 @@ test("an input stream that cannot be read ends the child's input instead of hold
     /ENOENT/
   );
   assert.ok(Date.now() - started < 5_000, "the child saw the end of its input");
+});
+
+test("reading the login shell again drops a variable the profile no longer sets", { skip: process.platform !== "darwin" }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-login-shell-"));
+  const profile = path.join(dir, "profile.sh");
+  const shell = path.join(dir, "fake-shell");
+  // A login shell: reads the profile, then runs the command it was given.
+  await writeFile(shell, `#!/bin/sh\n. "${profile}"\nexec /bin/sh -c "$2"\n`);
+  await chmod(shell, 0o755);
+  const originalShell = process.env.SHELL;
+  process.env.SHELL = shell;
+  try {
+    await writeFile(profile, "export AA_DROPPED_LATER=first\nexport AA_KEPT=one\n");
+    const first = await refreshLoginShellEnv();
+    assert.equal(first.env.AA_DROPPED_LATER, "first");
+    await writeFile(profile, "export AA_KEPT=two\n");
+    const second = await refreshLoginShellEnv();
+    assert.equal(second.env.AA_KEPT, "two");
+    assert.equal(second.env.AA_DROPPED_LATER, undefined);
+    assert.equal(commandEnvironment().AA_DROPPED_LATER, undefined);
+    assert.equal(computerEnvironment().AA_DROPPED_LATER, undefined);
+  } finally {
+    if (originalShell === undefined) delete process.env.SHELL;
+    else process.env.SHELL = originalShell;
+    await refreshLoginShellEnv().catch(() => undefined);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a NUL-separated reading keeps a value that spans lines whole", () => {
+  const env = parseLoginShellEnvOutput("noise\nSTART\nAA_MULTI=line one\nregion=x\u0000AA_NEXT=two\u0000END\n", "START", "END");
+  assert.equal(env.AA_MULTI, "line one\nregion=x");
+  assert.equal(env.AA_NEXT, "two");
+  assert.equal(env.region, undefined);
 });

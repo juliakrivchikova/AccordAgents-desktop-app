@@ -33,6 +33,7 @@ export interface SettingsActions {
   getAgentEnvironment: () => Promise<AgentEnvironmentSnapshot>;
   saveAgentEnvironmentVariable: (request: SaveAgentEnvironmentVariableRequest) => Promise<AgentEnvironmentSnapshot>;
   deleteAgentEnvironmentVariable: (request: DeleteAgentEnvironmentVariableRequest) => Promise<AgentEnvironmentSnapshot>;
+  refreshAgentEnvironment: () => Promise<AgentEnvironmentSnapshot>;
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
   archiveChatRoleConfig: (id: string) => Promise<void>;
   saveChatBehaviorRuleConfig: (update: ChatBehaviorRuleConfigUpdate) => Promise<void>;
@@ -122,13 +123,20 @@ export function useSettingsActions(state: AppState): SettingsActions {
 
   async function saveAgentEnvironmentVariable(request: SaveAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot> {
     const snapshot = await loadSettingResult(() => window.consensus.saveAgentEnvironmentVariable(request));
-    await refreshAgentsAfterEnvironmentMutation();
+    // The page shows the saved value at once; the CLIs are checked again behind it.
+    void refreshAgentsAfterEnvironmentMutation();
     return snapshot;
   }
 
   async function deleteAgentEnvironmentVariable(request: DeleteAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot> {
     const snapshot = await loadSettingResult(() => window.consensus.deleteAgentEnvironmentVariable(request));
-    await refreshAgentsAfterEnvironmentMutation();
+    void refreshAgentsAfterEnvironmentMutation();
+    return snapshot;
+  }
+
+  async function refreshAgentEnvironment(): Promise<AgentEnvironmentSnapshot> {
+    const snapshot = await loadSettingResult(() => window.consensus.refreshAgentEnvironment());
+    void refreshAgentsAfterEnvironmentMutation();
     return snapshot;
   }
 
@@ -250,6 +258,7 @@ export function useSettingsActions(state: AppState): SettingsActions {
     getAgentEnvironment,
     saveAgentEnvironmentVariable,
     deleteAgentEnvironmentVariable,
+    refreshAgentEnvironment,
     saveChatRoleConfig,
     archiveChatRoleConfig,
     saveChatBehaviorRuleConfig,

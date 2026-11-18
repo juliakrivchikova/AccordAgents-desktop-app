@@ -219,6 +219,7 @@ const bridge: AppBridge = {
     ipcRenderer.invoke("settings:save-agent-environment-variable", request),
   deleteAgentEnvironmentVariable: (request: DeleteAgentEnvironmentVariableRequest) =>
     ipcRenderer.invoke("settings:delete-agent-environment-variable", request),
+  refreshAgentEnvironment: () => ipcRenderer.invoke("settings:refresh-agent-environment"),
   saveCliProviderHost: (update: CliProviderHostUpdate) => ipcRenderer.invoke("settings:save-cli-provider-host", update),
   deleteCliProviderHost: (id: string) => ipcRenderer.invoke("settings:delete-cli-provider-host", id),
   getSettings: () => ipcRenderer.invoke("settings:get"),

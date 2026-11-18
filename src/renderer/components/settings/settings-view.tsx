@@ -63,12 +63,13 @@ export function SettingsView(props: {
   getAgentEnvironment: () => Promise<AgentEnvironmentSnapshot>;
   saveAgentEnvironmentVariable: (request: SaveAgentEnvironmentVariableRequest) => Promise<AgentEnvironmentSnapshot>;
   deleteAgentEnvironmentVariable: (request: DeleteAgentEnvironmentVariableRequest) => Promise<AgentEnvironmentSnapshot>;
+  refreshAgentEnvironment: () => Promise<AgentEnvironmentSnapshot>;
   onTryPluginInChat: (plugin: PluginCatalogItem) => void;
   sidebarCollapsed: boolean;
   onExpandSidebar: () => void;
   onClose: () => void;
 }): JSX.Element {
-  const [pluginHeaderAction, setPluginHeaderAction] = useState<ReactNode>();
+  const [headerAction, setHeaderAction] = useState<ReactNode>();
   const title = props.section === "general"
     ? "General"
     : props.section === "aws"
@@ -98,7 +99,7 @@ export function SettingsView(props: {
             <h1>{title}</h1>
           </div>
           <div className="settings-view-head-actions">
-            {props.section === "plugins" && pluginHeaderAction}
+            {(props.section === "plugins" || props.section === "environment") && headerAction}
             <IconButton
               size="sm"
               icon={X}
@@ -142,6 +143,8 @@ export function SettingsView(props: {
             getAgentEnvironment={props.getAgentEnvironment}
             saveAgentEnvironmentVariable={props.saveAgentEnvironmentVariable}
             deleteAgentEnvironmentVariable={props.deleteAgentEnvironmentVariable}
+            refreshAgentEnvironment={props.refreshAgentEnvironment}
+            onHeaderActionChange={setHeaderAction}
           />
         )}
         {props.section === "scripts" && <ScriptsSettingsSection />}
@@ -150,7 +153,7 @@ export function SettingsView(props: {
           <PluginsSettingsSection
             repoPath={props.settings.lastRepoPath}
             onTryPluginInChat={props.onTryPluginInChat}
-            onHeaderActionChange={setPluginHeaderAction}
+            onHeaderActionChange={setHeaderAction}
           />
         )}
         {props.section === "general" && (

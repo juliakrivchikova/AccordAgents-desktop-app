@@ -1255,18 +1255,19 @@ export class ChatService {
   private async agentEnvironmentForParticipant(
     participant: ChatParticipant,
     model: string | undefined
-  ): Promise<{ env: NodeJS.ProcessEnv; version: string; codexConfigOverrides?: string[]; problem?: string }> {
+  ): Promise<{ env: NodeJS.ProcessEnv; settingsEnv: NodeJS.ProcessEnv; version: string; codexConfigOverrides?: string[]; problem?: string }> {
     const manual = await this.manualAgentEnvironmentForRun();
     const binding = await this.participantHostBinding(participant);
     if (!binding) {
-      return manual;
+      return { ...manual, settingsEnv: manual.env };
     }
     if ("problem" in binding) {
-      return { ...manual, problem: binding.problem };
+      return { ...manual, settingsEnv: manual.env, problem: binding.problem };
     }
     const runConfig = cliProviderHostRunConfig(binding.host, binding.apiKey, model);
     return {
       env: { ...manual.env, ...runConfig.env },
+      settingsEnv: manual.env,
       version: `${manual.version}|${cliProviderHostRunVersion(binding.host, model)}`,
       codexConfigOverrides: runConfig.codexConfigOverrides
     };
@@ -2535,6 +2536,7 @@ export class ChatService {
         : await this.cliRunner.compactSession(cliParticipant, runPath, undefined, "chat", signal, {
             ...this.memberProcessOptionsForCompaction(conversation, participant, session, request, runId, runPath, workspacePath, agentMode, permissions),
             agentEnv: agentEnvironment.env,
+            settingsEnv: agentEnvironment.settingsEnv,
             agentEnvKey: agentEnvironment.version,
             ...(compactInstructions ? { compactInstructions } : {}),
             onSessionId: (sessionId) => {
@@ -9567,6 +9569,7 @@ export class ChatService {
             }
           : undefined,
         agentEnv: agentEnvironment.env,
+        settingsEnv: agentEnvironment.settingsEnv,
         agentEnvKey: agentEnvironment.version,
         agentMode,
         permissions,
