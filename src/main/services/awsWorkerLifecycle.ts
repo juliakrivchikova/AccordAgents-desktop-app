@@ -221,15 +221,21 @@ export class AwsWorkerLifecycle {
     if (options.start === false && info.state !== "running") {
       throw new Error(`The AWS instance is ${info.state}, so nothing was started.`);
     }
-    if (info.state === "stopped" || info.state === "stopping") {
-      this.log("aws-worker.starting", { instanceId: handle.instanceId });
-      if (info.state === "stopping") {
-        await this.options.waitForState(
-          () => client.describeInstance(handle.instanceId),
-          (current) => current?.state === "stopped",
-          RUNNING_WAIT_TIMEOUT_MS
-        );
+    if (info.state === "stopping") {
+      // Whatever the stop ends in: stopped, already started again (the
+      // User's server starts it for waiting work), or gone (a Delete, which
+      // AWS shows as stopping until it ends).
+      info = await this.options.waitForState(
+        () => client.describeInstance(handle.instanceId),
+        (current) => current?.state !== "stopping",
+        RUNNING_WAIT_TIMEOUT_MS
+      );
+      if (!info || info.state === "terminated" || info.state === "absent") {
+        throw new Error("The AWS worker instance no longer exists. Create a new worker.");
       }
+    }
+    if (info.state === "stopped") {
+      this.log("aws-worker.starting", { instanceId: handle.instanceId });
       await client.startInstance(handle.instanceId);
     }
     info = await this.options.waitForState(

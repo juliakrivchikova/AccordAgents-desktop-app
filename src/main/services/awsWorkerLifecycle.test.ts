@@ -642,6 +642,27 @@ test("ensureRunning starts a stopped instance and rebuilds ingress to the curren
   assert.deepEqual([...client.ingressCidrs], ["203.0.113.9/32"]);
 });
 
+test("a stop under way is waited for to its end: a stopped instance is started, one started meanwhile is not started again, one deleted fails at once", async () => {
+  const waitingThrough = (client: FakeEc2Client, after: Partial<AwsWorkerInstanceInfo>) => lifecycleWith(client, {
+    waitForState: async (poll: () => Promise<AwsWorkerInstanceInfo | undefined>, predicate: (info: AwsWorkerInstanceInfo | undefined) => boolean) => {
+      if (client.state.state === "stopping") client.state = { ...client.state, ...after };
+      const info = await poll();
+      if (!predicate(info)) throw new Error("predicate not satisfied in test");
+      return info;
+    }
+  });
+  const stopped = new FakeEc2Client({ state: "stopping", publicIp: undefined });
+  assert.equal((await waitingThrough(stopped, { state: "stopped" }).ensureRunning(CREDS, HANDLE)).publicIp, "2.2.2.2");
+  assert.equal(stopped.startCount, 1);
+  // The User's server started it again before a look saw it stopped.
+  const restarted = new FakeEc2Client({ state: "stopping", publicIp: undefined });
+  assert.equal((await waitingThrough(restarted, { state: "running", publicIp: "3.3.3.3" }).ensureRunning(CREDS, HANDLE)).publicIp, "3.3.3.3");
+  assert.equal(restarted.startCount, 0);
+  const deleted = new FakeEc2Client({ state: "stopping", publicIp: undefined });
+  await assert.rejects(waitingThrough(deleted, { state: "terminated" }).ensureRunning(CREDS, HANDLE), /no longer exists/);
+  assert.equal(deleted.startCount, 0);
+});
+
 test("without starting, a stopped instance is left stopped and a running one still gets this device's SSH access", async () => {
   const stopped = new FakeEc2Client({ state: "stopped", publicIp: undefined });
   await assert.rejects(lifecycleWith(stopped).ensureRunning(CREDS, HANDLE, "device", { start: false }), /is stopped, so nothing was started/);
