@@ -348,6 +348,13 @@ function deliveryTargetsOf(message: ChatMessage): string[] {
   return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
 }
 
+/** The members a User's message asks: those the server asks (deliveryTargets)
+ *  and those the device it was written on asks itself. */
+function askedParticipantIdsOf(message: ChatMessage): string[] {
+  const later = message.metadata?.askedParticipantIds;
+  return [...deliveryTargetsOf(message), ...(Array.isArray(later) ? later.filter((id): id is string => typeof id === "string" && id.length > 0) : [])];
+}
+
 /** How a member's turn was opened on the User's server (Д4, Д5, Д13). */
 type ServerTurnOpen =
   | { kind: "none" }
@@ -8090,7 +8097,9 @@ export class ChatService {
         const updatedFacilitator = this.setParticipantRequestPermission(conversation, facilitator.id, "allow") ?? facilitator;
         const userMessage = this.message("user", content, undefined, {
           threadId: randomUUID(),
-          skillMentions: [accordSkill]
+          skillMentions: [accordSkill],
+          // The facilitator is asked by this device, not by the server.
+          askedParticipantIds: [facilitator.id]
         });
         userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
         conversation.messages.push(userMessage);
@@ -8295,6 +8304,15 @@ export class ChatService {
             }));
           }
           dispatch = { ...dispatch, targets: dispatch.targets.filter((target) => present.has(target.id)) };
+          if (dispatch.targets.length > 0) {
+            // Every member it asks, including those asked later below: a
+            // member watching the chat on another device must not wake for it.
+            const askedParticipantIds = dispatch.targets.map((target) => target.id);
+            for (const message of conversation.messages) {
+              if (message.id === userMessage.id) message.metadata = { ...message.metadata, askedParticipantIds };
+            }
+            userMessage.metadata = { ...userMessage.metadata, askedParticipantIds };
+          }
           if (this.serverLink && dispatch.targets.length > 0) {
             // The members this message names, as this device resolved them:
             // the server asks each one's device for its turn (Д4), and this
@@ -12555,6 +12573,8 @@ export class ChatService {
     return this.metadataWithParticipantWatchers(conversation.metadata, watchers);
   }
 
+  /** Turned on, a member looks at the User's latest message, unless that
+   *  message asked it (autoWatchMessagesAfterCursor): it answered that one. */
   private autoWatchToggleOnCursor(conversation: Conversation, participantId: string): string | undefined {
     const eligible = this.autoWatchStableMessages(conversation, participantId);
     let latestUserIndex = -1;
@@ -12608,12 +12628,13 @@ export class ChatService {
         wakeChainDepth: 0,
         updatedAt: now
       };
-      if (existing.lastSeenMessageId === userMessage.id) {
+      const cursor = this.laterAutoWatchCursor(conversation, participant.id, existing.lastSeenMessageId, userMessage.id);
+      if (existing.lastSeenMessageId === cursor) {
         continue;
       }
       watchers[participant.id] = {
         ...existing,
-        lastSeenMessageId: userMessage.id,
+        lastSeenMessageId: cursor,
         updatedAt: now
       };
       changed = true;
@@ -12621,6 +12642,18 @@ export class ChatService {
     if (changed) {
       conversation.metadata = this.metadataWithParticipantWatchers(conversation.metadata, watchers);
     }
+  }
+
+  /** A watcher's cursor only moves forward. Its own turn for a User's message
+   *  starts late on a machine (it readies its settings and project first); a
+   *  watch wake for a later message may have moved the cursor past it by then,
+   *  and moving it back would wake the member for that message again. */
+  private laterAutoWatchCursor(conversation: Conversation, participantId: string, current: string | undefined, next: string): string {
+    if (!current || current === next) return next;
+    const stable = this.autoWatchStableMessages(conversation, participantId);
+    const at = stable.findIndex((message) => message.id === current);
+    const to = stable.findIndex((message) => message.id === next);
+    return at >= 0 && to >= 0 && at > to ? current : next;
   }
 
   private activeAutoWatchParticipant(conversation: Conversation): ChatParticipant | undefined {
@@ -12640,11 +12673,17 @@ export class ChatService {
       const index = messages.findIndex((message) => message.id === cursor);
       return index >= 0 ? messages.slice(index + 1) : messages;
     })();
+    // A User's message that asks this member is answered by its own turn.
+    // The cursor alone does not say so in time: on a cloud machine the
+    // message arrives before that turn starts (the machine readies its
+    // settings and project first, or the computer asks it only once the
+    // project is there), and a wake meanwhile ran the member twice.
+    const notAskedOfIt = afterCursor.filter((message) => !(message.role === "user" && askedParticipantIdsOf(message).includes(participantId)));
     const handledReplyIds = this.autoWatchHandledParticipantRequestMessageIds(conversation, participantId);
     if (handledReplyIds.size === 0) {
-      return afterCursor;
+      return notAskedOfIt;
     }
-    return afterCursor.filter((message) => !handledReplyIds.has(message.id));
+    return notAskedOfIt.filter((message) => !handledReplyIds.has(message.id));
   }
 
   private autoWatchHandledParticipantRequestMessageIds(conversation: Conversation, participantId: string): Set<string> {
@@ -12858,7 +12897,7 @@ export class ChatService {
       };
       watchers[participantId] = {
         ...existingState,
-        lastSeenMessageId: latestMessageId,
+        lastSeenMessageId: this.laterAutoWatchCursor(conversation, participantId, existingState.lastSeenMessageId, latestMessageId),
         lastRunId: runId,
         lastTriggeredAt: now,
         wakeChainDepth: existingState.wakeChainDepth + 1,
