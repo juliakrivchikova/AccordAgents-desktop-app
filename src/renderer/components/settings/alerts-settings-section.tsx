@@ -1,4 +1,4 @@
-import { Info, Loader2, Phone, Send, Server } from "lucide-react";
+import { Loader2, Phone, Send, Server } from "lucide-react";
 import { useCallback, useContext, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -30,8 +30,9 @@ const TELEGRAM_FINISH_WATCH_MS = 10 * 60_000;
 
 /**
  * Settings → Alerts, as the User approved it on 2026-11-15 (five reviews,
- * mockup "Settings → Alerts · new page"): one line on top that says whether
- * an alert reaches her now, what happens when one comes in (with the wait),
+ * mockup "Settings → Alerts · new page"): a line on top only when an alert
+ * would not fully reach her now (2026-11-18), what happens when one comes in
+ * (with the wait),
  * and one card for where alerts go, each channel's status beside its name.
  * Everything is kept and done on her server; this page only asks it.
  */
@@ -143,7 +144,10 @@ export function AlertsSettingsSection(): JSX.Element {
       <p className="alerts-intro">
         When a member raises an urgent alert, it comes to your Telegram with a <b>Got it</b> button. If you don't press Got it in time, you get a call that reads it out; {settings ? alertsIntroCall(settings) : "press 1 on the call for Got it."}
       </p>
-      {band ? <AlertsStatusBand band={band} action={bandAction} /> : <AlertsBandPlaceholder loading={loading} error={loadError} onRetry={() => void load()} />}
+      {/* When everything works the flow and the Ready pills say it: the band
+          comes only when something needs her (the User, 2026-11-18). */}
+      {band ? (band.kind === "ok" ? null : <AlertsStatusBand band={band} action={bandAction} />)
+        : <AlertsBandPlaceholder loading={loading} error={loadError} onRetry={() => void load()} />}
 
       {settings ? <>
         <AlertsFlow
@@ -212,11 +216,6 @@ export function AlertsSettingsSection(): JSX.Element {
             />
           </div>
         </section>
-
-        <p className="alerts-footnote">
-          <Info size={13} aria-hidden />
-          Your bot token and Twilio keys are kept on your server and used only to message and call you. Telegram and Twilio see an alert's text.
-        </p>
       </> : null}
 
       <TelegramConnectDialog open={dialog === "telegram"} settings={settings} onSettings={setSettings} onClose={() => { setDialog(undefined); void load(); }} />

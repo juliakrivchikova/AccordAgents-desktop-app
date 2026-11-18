@@ -1,7 +1,8 @@
 /* Settings → Alerts and its connect dialogs (alerts-settings-section.tsx,
    alerts-settings-parts.tsx, alerts-connect-dialogs.tsx,
    alerts-phone-dialog.tsx), as the User approved them on 2026-11-15: a
-   status band on top, what happens when an alert comes in, and one card for
+   status band on top when something needs her (only then, 2026-11-18),
+   what happens when an alert comes in, and one card for
    where alerts go with each channel's status beside its name. */
 .settings-view .alerts-settings {
   max-width: 740px;
@@ -61,11 +62,6 @@
   color: var(--app-text-secondary);
   font-size: 12.5px;
   line-height: 1.45;
-}
-
-.settings-view .alerts-band.is-ok .alerts-band-icon {
-  background: var(--app-success-soft);
-  color: var(--app-success);
 }
 
 .settings-view .alerts-band.is-bad {
@@ -353,22 +349,6 @@
 
 .alerts-menu-item.is-danger {
   color: var(--app-danger);
-}
-
-.settings-view .alerts-footnote {
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  max-width: 680px;
-  margin: 4px 0 0;
-  color: var(--app-text-secondary);
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.settings-view .alerts-footnote svg {
-  flex: none;
-  margin-top: 2px;
 }
 
 /* The connect dialogs: never taller than the window, the body scrolls

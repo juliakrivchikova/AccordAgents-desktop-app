@@ -1,7 +1,8 @@
 /**
  * What Settings → Alerts says about each state, as the User approved it on
  * 2026-11-15 (five reviews, mockup "Settings → Alerts · new page"): one line
- * on top that answers "will an alert reach me now", a status beside each
+ * on top that answers "will an alert reach me now" (shown only when the
+ * answer is not a plain yes, 2026-11-18), a status beside each
  * channel's name that never says Ready next to an error, and the last test
  * of each channel. Worded here so tests pin it; the page only draws it.
  */
@@ -60,7 +61,8 @@ export function alertsPhoneStatus(view: Pick<UrgentAlertSettingsView, "phone" | 
   return urgentAlertPhoneTestPassed(phone.lastTest, view.callMode) ? "ready" : "not-tested";
 }
 
-/** The one line on top: what reaches her now, the worst first. */
+/** The one line on top: what reaches her now, the worst first. The page
+ *  shows it unless the answer is "ok". */
 export function alertsBand(view: UrgentAlertSettingsView): AlertsBand {
   const telegram = view.telegram;
   const phone = view.phone;
