@@ -4384,6 +4384,7 @@ test("several Cloud choices do not block a local member, and Stop prevents a del
   await waitFor(() => h.storage.current.messages.some((item: ChatMessage) => item.metadata?.cloudRunPreparation?.message === "Waiting for cloud login"));
   const sent = h.storage.current.messages.find((item: ChatMessage) => item.role === "user" && item.content === "@cloud-one hello");
   assert.deepEqual(sent.metadata.deliveryTargets, [], "the server is not asked for a member whose machine is not ready yet");
+  assert.deepEqual(sent.metadata.askedParticipantIds, [one.id], "but the message says it asks that member, so its watch does not wake it too");
   await h.service.sendMessage({ conversationId: conversation.id, content: "@local still available" });
   await waitFor(() => localCalls.length === 2);
   const pending = h.storage.current.messages.find((item: ChatMessage) => item.participantId === one.id && item.status === "pending");
@@ -12537,6 +12538,7 @@ test("startAccord creates structured accord skill mention and dispatches only th
   ) as ChatMessage | undefined;
   assert.ok(userMessage);
   assert.equal(userMessage.metadata?.skillMentions?.[0]?.frontmatterName, "accord");
+  assert.deepEqual(userMessage.metadata?.askedParticipantIds, [facilitator.id], "it asks the facilitator, whose watch then does not wake it too");
   assert.match(userMessage.content, /@codex \/accord/);
   assert.match(userMessage.content, /Selected accord members: drew\./);
   assert.doesNotMatch(userMessage.content, /@drew/);
@@ -14137,6 +14139,89 @@ test("member ownership: direct machine turn advances its own watcher cursor", as
   assert.deepEqual(runs, [participant.id]);
   assert.equal(storage.current.metadata.participantWatchers[participant.id].lastSeenMessageId, "user-message");
   assert.equal(storage.current.messages.some((m: ChatMessage) => m.metadata?.autoWatchTrigger), false);
+});
+
+test("auto-watch never wakes a member for a User's message asked of it, and its late own turn does not wake it again for what came after", async () => {
+  // As on a machine: the User's message (asking the watcher and another
+  // member) is there before the watcher's own turn starts.
+  const watcher = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1", autoWatch: true };
+  const worker = chatParticipant("claude-code");
+  const conversation = chatConversation([watcher, worker], {
+    participantWatchers: { [watcher.id]: { wakeChainDepth: 0, updatedAt: NOW } }
+  });
+  conversation.messages[0].metadata = { threadId: "user-message", deliveryTargets: [watcher.id, worker.id] } as any;
+  const runs: string[] = [];
+  const { service, storage, tempRoot } = testService({ conversation, run: async participant => {
+    runs.push(participant.id);
+    return { participant, ok: true, content: "Observed", durationMs: 1 };
+  } });
+  service.setHostMachineId("machine-1");
+  service.setServerLink(fakeServerLink("machine-device"));
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const triggers = () => storage.current.messages.filter((m: ChatMessage) => m.metadata?.autoWatchTrigger);
+
+  await (service as any).runAutoWatchEvaluation(conversation.id, "server-messages");
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.deepEqual(runs, [], "its own turn answers the message it was asked");
+  assert.equal(triggers().length, 0);
+
+  // The other member's reply arrives while the watcher's own turn is still
+  // being readied: news to the watcher, it wakes for that alone.
+  storage.current.messages.push(participantReplyMessage(worker, "worker-reply", "Done"));
+  await (service as any).runAutoWatchEvaluation(conversation.id, "server-messages");
+  await waitFor(() => runs.length === 1 && !storage.current.metadata.running);
+  assert.deepEqual(triggers().map((m: ChatMessage) => m.metadata!.autoWatchTrigger!.messageIds), [["worker-reply"]]);
+
+  // Its own turn starts now; the cursor stays past the reply it already read.
+  await service.startServerTurn({ runId: hubTurnRunId("user-message", watcher.id), conversationId: conversation.id, messageId: "user-message",
+    participantId: watcher.id, state: "requested" });
+  await waitFor(() => runs.length === 2 && !storage.current.metadata.running);
+  assert.equal(storage.current.metadata.participantWatchers[watcher.id].lastSeenMessageId, "worker-reply", "the cursor never moves back");
+  await (service as any).runAutoWatchEvaluation(conversation.id, "run-idle");
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(runs.length, 2, "once for the User's message, once for the reply");
+  assert.equal(triggers().length, 1);
+});
+
+test("auto-watch does not wake a member for a User's message that asks it but leaves asking it to the computer", async () => {
+  // A cloud member whose machine still gets the project, or an Accord's
+  // facilitator: the computer asks it later, the server does not.
+  const watcher = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1", autoWatch: true };
+  const conversation = chatConversation([watcher], {
+    participantWatchers: { [watcher.id]: { wakeChainDepth: 0, updatedAt: NOW } }
+  });
+  conversation.messages[0].metadata = { threadId: "user-message", deliveryTargets: [], askedParticipantIds: [watcher.id] } as any;
+  const runs: string[] = [];
+  const { service, storage, tempRoot } = testService({ conversation, run: async participant => {
+    runs.push(participant.id);
+    return { participant, ok: true, content: "Observed", durationMs: 1 };
+  } });
+  service.setHostMachineId("machine-1");
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await (service as any).runAutoWatchEvaluation(conversation.id, "server-messages");
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.deepEqual(runs, []);
+  assert.equal(storage.current.messages.some((m: ChatMessage) => m.metadata?.autoWatchTrigger), false);
+});
+
+test("auto-watch still wakes a member for a User's message that asks only other members", async () => {
+  const watcher = { ...chatParticipant("codex-cli"), homeMachineId: "machine-1", autoWatch: true };
+  const worker = chatParticipant("claude-code");
+  const conversation = chatConversation([watcher, worker], {
+    participantWatchers: { [watcher.id]: { wakeChainDepth: 0, updatedAt: NOW } }
+  });
+  conversation.messages[0].metadata = { threadId: "user-message", deliveryTargets: [worker.id], askedParticipantIds: [worker.id] } as any;
+  const runs: string[] = [];
+  const { service, storage, tempRoot } = testService({ conversation, run: async participant => {
+    runs.push(participant.id);
+    return { participant, ok: true, content: "Observed", durationMs: 1 };
+  } });
+  service.setHostMachineId("machine-1");
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await (service as any).runAutoWatchEvaluation(conversation.id, "server-messages");
+  await waitFor(() => runs.length === 1 && !storage.current.metadata.running);
+  const trigger = storage.current.messages.find((m: ChatMessage) => m.metadata?.autoWatchTrigger);
+  assert.deepEqual(trigger.metadata.autoWatchTrigger.messageIds, ["user-message"]);
 });
 
 test("member ownership: replicated replies wake only the owner after the copy barrier", async () => {

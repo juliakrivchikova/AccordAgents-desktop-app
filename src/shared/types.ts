@@ -1713,6 +1713,12 @@ export interface ChatMessageMetadata {
     reason: string;
     messageIds: string[];
   };
+  /** A User's message: every member it asks, as the device it was written on
+   *  resolved them, including those that device asks itself later (a cloud
+   *  member whose machine still gets the project, an Accord's facilitator).
+   *  A member watching the chat is not woken for it: its own turn answers it.
+   *  Unlike deliveryTargets it asks the server for nothing. */
+  askedParticipantIds?: string[];
 }
 
 export interface ChatExecutionLeaseMetadata {
