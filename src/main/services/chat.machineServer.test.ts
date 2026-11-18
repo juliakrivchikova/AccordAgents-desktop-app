@@ -106,7 +106,7 @@ async function setup(t: test.TestContext) {
   const desktopControl = { hold: false, releases: [] as Array<() => void> };
   const applied: MachineSettingsDocument[] = [];
   const machineControl = { hold: false, releases: [] as Array<() => void>, settingsApplied: () => applied.length, takes: true, closed: [] as string[],
-    reply: undefined as ((pending: ChatMessage) => void) | undefined };
+    reply: undefined as ((pending: ChatMessage) => void) | undefined, prepareDelayMs: 0 };
   const desktopChat = chatService(desktopStorage, turns, "desktop", desktopControl);
   const machineChat = chatService(machineStorage, turns, "machine", machineControl);
 
@@ -166,6 +166,9 @@ async function setup(t: test.TestContext) {
   // plays a held or idle-fenced runtime), then its settings and project folder.
   machineChat.setServerTurnPreparation(async (turn) => {
     if (!machineControl.takes) return false;
+    // A real machine reaches the server over the internet and syncs the
+    // project here: that takes it a second or more, not a few milliseconds.
+    if (machineControl.prepareDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, machineControl.prepareDelayMs));
     await machineSettings.refresh("turn");
     await machineChat.refreshMachineRepository(turn.conversationId);
     return true;
@@ -262,6 +265,28 @@ test("a message on the computer to a machine member is taken and answered by the
     !chat!.messages.some((message) => message.metadata?.serverPlaceholder));
   assert.equal(shown!.messages.filter((message) => message.role === "participant").length, 1, "one bubble for the member");
   await until(async () => h.desktopChat.liveRunIds().length, (count) => count === 0);
+});
+
+test("a message on the computer to a machine member that watches the chat runs it once: its watch does not wake it again for the same message", async (t) => {
+  // The machine reads the User's message from the server before it takes the
+  // member's turn (it makes its settings and project current first); its
+  // watch must not answer that message a second time meanwhile.
+  const watcher: ChatParticipant = { ...remote, autoWatch: true };
+  const h = await linked(t, localChat("chat-watch", { metadata: { participants: [desk, watcher], participantSessions: [], running: false, warnings: [] } as never }));
+  // The User's machine took 1-2 s to start the turn (her logs, 2026-11-18).
+  h.machineControl.prepareDelayMs = 1_000;
+  await h.desktopChat.sendMessage({ conversationId: "chat-watch", content: "@drew hello" } as never);
+  const done = await until(() => h.page("chat-watch"), (page) => page.turns.some((turn) => turn.state === "finished"));
+  const user = done.messages.find((message) => message.role === "user")!;
+  // Long enough for a second wake to start, as it did 1 s after the message on
+  // the User's machine.
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  await until(async () => h.desktopChat.liveRunIds().length + h.machineChat.liveRunIds().length, (count) => count === 0);
+  assert.deepEqual(h.turns.map((turn) => [turn.device, turn.runId]), [["machine", hubTurnRunId(user.id, remote.id)]], "run once, on the machine");
+  const machine = await h.machineStorage.getConversation("chat-watch");
+  assert.equal(machine!.messages.some((message) => message.metadata?.autoWatchTrigger), false, "no watch wake for a message asked of the member");
+  const page = await h.page("chat-watch");
+  assert.equal(page.messages.filter((message) => message.role === "participant").length, 1, "one reply on the server");
 });
 
 test("Stop on the computer stops the machine's turn, shown as waiting until the machine confirms", async (t) => {
