@@ -167,6 +167,17 @@ test("with reports off nothing is sent, kept or counted, and it is sent once the
   });
 });
 
+test("one of the team's own installations says so on every step and on the weekly numbers", async () => {
+  await withDir(async (dir) => {
+    const { milestones, sent, snapshots } = harness(dir, { installFacts: () => ({ ...FACTS, teamDevice: true }) });
+    await milestones.start();
+    milestones.reach("first_chat");
+    await milestones.sendWeeklySnapshotIfDue();
+    assert.deepEqual(sent.map((signal) => [signal.name, signal.attributes.team_device]), [["first_launch", true], ["first_chat", true]]);
+    assert.deepEqual(snapshots.map((signal) => [signal.name, signal.attributes.team_device]), [["weekly_snapshot", true]]);
+  });
+});
+
 test("turned off mid-launch, a step is not counted as sent and goes once reports are back", async () => {
   await withDir(async (dir) => {
     let on = true;

@@ -1,10 +1,15 @@
 import { execFileSync } from "node:child_process";
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import path from "node:path";
 import { extractFile, listPackage } from "@electron/asar";
 
 /** Written by the packaging step (forge.config.ts): whether the build was
- *  made from its own release tag. */
+ *  made from its own release tag. The app reads it from the same place
+ *  (src/main/services/teamDevice.ts). */
 export const BUILD_INFO_ENTRY = "dist/main/build-info.json";
+// What a release is numbered; the app counts any other version as one of
+// the team's builds (OFFICIAL_VERSION_PATTERN in teamDevice.ts).
+const RELEASE_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-beta\.\d+)?$/;
 
 export function verifyRuntimeArchive(asarPath) {
   // On Windows the asar lists its entries with backslashes.
@@ -29,24 +34,43 @@ export function verifyUpdaterZip(zipPath) {
   }
 }
 
-export function readBuildInfo(asarPath) {
+function readArchiveJson(asarPath, entry) {
   try {
-    return JSON.parse(extractFile(asarPath, BUILD_INFO_ENTRY).toString("utf8"));
+    // The archive is searched with the system's separator.
+    return JSON.parse(extractFile(asarPath, entry.split("/").join(path.sep)).toString("utf8"));
   } catch {
     return undefined;
   }
 }
 
-/** Whether the checkout's HEAD carries the tag `v<version>`. */
-export function headHasReleaseTag(rootDir, version) {
-  const tags = execFileSync("git", ["tag", "--points-at", "HEAD"], { cwd: rootDir, encoding: "utf8" });
-  return tags.split(/\r?\n/).includes(`v${version}`);
+export function readBuildInfo(asarPath) {
+  return readArchiveJson(asarPath, BUILD_INFO_ENTRY);
 }
 
-// The app counts a build that is not stamped as made from its release tag as
-// one of the team's, and leaves it out of the numbers about real people. A
-// release that lost its stamp would leave out every installation of it.
+/** Whether the checkout's HEAD is the commit the tag `v<version>` names.
+ *  Throws when git cannot tell. */
+export function headHasReleaseTag(rootDir, version) {
+  const git = (args) => execFileSync("git", args, { cwd: rootDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const head = git(["rev-parse", "HEAD"]);
+  try {
+    return git(["rev-parse", "-q", "--verify", `refs/tags/v${version}^{commit}`]) === head;
+  } catch {
+    return false;
+  }
+}
+
+// The app counts a build that is not stamped as made from its release tag, or
+// whose version is not a release number, as one of the team's, and leaves it
+// out of the numbers about real people. A release that lost its stamp would
+// leave out every installation of it.
 export function verifyReleaseBuildInfo(asarPath, tagName) {
+  if (!existsSync(asarPath)) {
+    throw new Error(`The app built for ${tagName} was not found at ${asarPath}.`);
+  }
+  const version = readArchiveJson(asarPath, "package.json")?.version;
+  if (typeof version !== "string" || !RELEASE_VERSION_PATTERN.test(version)) {
+    throw new Error(`The app built for ${tagName} has version ${version}, which the app does not count as a release; every installation of it would report as a team device.`);
+  }
   if (readBuildInfo(asarPath)?.fromReleaseTag !== true) {
     throw new Error(`The app built for ${tagName} is not stamped as built from its release tag (${BUILD_INFO_ENTRY}); every installation of it would report as a team device.`);
   }

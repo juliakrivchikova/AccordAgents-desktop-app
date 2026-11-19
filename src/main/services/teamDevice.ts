@@ -34,13 +34,18 @@ export function teamDeviceForcedOn(env: NodeJS.ProcessEnv): boolean {
   return value === "1" || value === "true" || value === "on" || value === "yes";
 }
 
-export function teamDeviceMarked(userDataDir: string): boolean {
-  try {
-    statSync(path.join(userDataDir, TEAM_DEVICE_MARKER));
-    return true;
-  } catch {
-    return false;
-  }
+/** The marker in any of the profiles: this launch's, and the computer's
+ *  usual one, so one file marks the computer for a profile started with
+ *  `ACCORDAGENTS_USER_DATA_DIR` too. */
+export function teamDeviceMarked(userDataDirs: readonly string[]): boolean {
+  return userDataDirs.some((dir) => {
+    try {
+      statSync(path.join(dir, TEAM_DEVICE_MARKER));
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
@@ -75,6 +80,8 @@ export function teamDeviceFrom(facts: TeamDeviceFacts): boolean {
 
 export interface TeamDeviceSources {
   userDataDir: string;
+  /** The profile the app uses when none is named. */
+  defaultUserDataDir?: string;
   appPath: string;
   isPackaged: boolean;
   version: string;
@@ -87,7 +94,7 @@ export function readTeamDevice(sources: TeamDeviceSources): boolean {
     isPackaged: sources.isPackaged,
     version: sources.version,
     fromReleaseTag: sources.isPackaged ? readBuiltFromReleaseTag(sources.appPath) : undefined,
-    marked: teamDeviceMarked(sources.userDataDir),
+    marked: teamDeviceMarked([sources.userDataDir, ...(sources.defaultUserDataDir ? [sources.defaultUserDataDir] : [])]),
     forcedOn: teamDeviceForcedOn(sources.env ?? process.env)
   });
 }
@@ -95,16 +102,17 @@ export function readTeamDevice(sources: TeamDeviceSources): boolean {
 type EnvelopeItem = [{ type?: string } | undefined, unknown];
 
 /**
- * Moves a team device's sessions out of `production` and `beta` on their way
- * out. Builds that are not packaged already report as `development` and stay
- * there. Error reports and usage signals keep their environment.
+ * Moves a team device's sessions out of the release channels (`production`,
+ * `beta`, any later one) on their way out. Builds that are not packaged
+ * already report as `development` and stay there. Error reports and usage
+ * signals keep their environment.
  */
 export function moveTeamDeviceSessions(items: ReadonlyArray<EnvelopeItem>): void {
   for (const [header, payload] of items) {
     if (header?.type !== "session" && header?.type !== "sessions") continue;
     const attrs = (payload as { attrs?: { environment?: unknown } } | undefined)?.attrs;
     if (!attrs || typeof attrs !== "object") continue;
-    if (attrs.environment === "production" || attrs.environment === "beta") {
+    if (attrs.environment !== "development") {
       attrs.environment = TEAM_DEVICE_SESSION_ENVIRONMENT;
     }
   }

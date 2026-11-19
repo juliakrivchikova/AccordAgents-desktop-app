@@ -258,6 +258,7 @@ const profileUsedBeforeLaunch = usageProfileUsedBefore(app.getPath("userData"));
 // computer marked by hand. Read once, like the choice itself.
 const teamDevice = readTeamDevice({
   userDataDir: app.getPath("userData"),
+  defaultUserDataDir: path.join(app.getPath("appData"), app.getName()),
   appPath: app.getAppPath(),
   isPackaged: app.isPackaged,
   version: app.getVersion()

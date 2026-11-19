@@ -93,13 +93,22 @@ test("a launch reads the marker file, the environment and the build together", a
     assert.equal(readTeamDevice(release), true, "a packaged build of an untagged commit");
     // A profile that is not there yet (first launch) is not a marker.
     assert.equal(readTeamDevice({ ...release, userDataDir: path.join(dir, "missing"), appPath: path.join(dir, "no-app") }), false);
+    // A marker in the computer's usual profile marks a profile named with
+    // ACCORDAGENTS_USER_DATA_DIR too.
+    const usual = path.join(dir, "usual");
+    await mkdir(usual, { recursive: true });
+    await stamp(appPath, JSON.stringify({ fromReleaseTag: true }));
+    assert.equal(readTeamDevice({ ...release, defaultUserDataDir: usual }), false);
+    await writeFile(path.join(usual, TEAM_DEVICE_MARKER), "");
+    assert.equal(readTeamDevice({ ...release, defaultUserDataDir: usual }), true);
   });
 });
 
-test("a team device's sessions leave production and beta; nothing else moves", () => {
+test("a team device's sessions leave the release channels; nothing else moves", () => {
   const session = (environment: string) => ({ sid: "s", status: "ok", attrs: { release: "AccordAgents@1.11.9+mac", environment } });
   const production = session("production");
   const beta = session("beta");
+  const laterChannel = session("rc");
   const development = session("development");
   const aggregate = { aggregates: [{ started: "2026-11-19T18:00:00Z", exited: 1 }], attrs: { release: "AccordAgents@1.11.9+mac", environment: "production" } };
   const error = { event_id: "e", environment: "beta", tags: { team_device: true } };
@@ -107,6 +116,7 @@ test("a team device's sessions leave production and beta; nothing else moves", (
   moveTeamDeviceSessions([
     [{ type: "session" }, production],
     [{ type: "session" }, beta],
+    [{ type: "session" }, laterChannel],
     [{ type: "session" }, development],
     [{ type: "sessions" }, aggregate],
     [{ type: "event" }, error],
@@ -116,6 +126,7 @@ test("a team device's sessions leave production and beta; nothing else moves", (
   ]);
   assert.equal(production.attrs.environment, "team");
   assert.equal(beta.attrs.environment, "team");
+  assert.equal(laterChannel.attrs.environment, "team", "a channel added later is left too");
   assert.equal(development.attrs.environment, "development", "a build that is not packaged keeps its own environment");
   assert.equal(aggregate.attrs.environment, "team");
   assert.equal(error.environment, "beta", "error reports keep their environment");

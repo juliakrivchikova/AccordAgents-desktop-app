@@ -42,17 +42,20 @@ function shouldSkipLooseResourceSigning(filePath: string): boolean {
 // other packaged build as one of the team's (src/main/services/teamDevice.ts).
 // When git cannot tell, nothing is recorded and the build counts as a
 // release: a wrong guess then miscounts one of our builds, never every
-// installation. A release checks its stamp before it ships.
+// installation. A release checks its stamp before it ships. The release
+// check asks git the same way (scripts/packaging-boundary.mjs).
 function builtFromReleaseTag(version: string): boolean | undefined {
+  const git = (args: string[]) => execFileSync("git", args, { cwd: __dirname, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  let head: string;
   try {
-    const tags = execFileSync("git", ["tag", "--points-at", "HEAD"], {
-      cwd: __dirname,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    });
-    return tags.split(/\r?\n/).includes(`v${version}`);
+    head = git(["rev-parse", "HEAD"]);
   } catch {
     return undefined;
+  }
+  try {
+    return git(["rev-parse", "-q", "--verify", `refs/tags/v${version}^{commit}`]) === head;
+  } catch {
+    return false;
   }
 }
 

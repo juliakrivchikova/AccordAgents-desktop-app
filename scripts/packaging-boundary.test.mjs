@@ -39,13 +39,23 @@ test("packaging stamps whether the build is made from its release tag", async ()
     await mkdir(checkout);
     await mkdir(path.join(buildPath, "dist", "main"), { recursive: true });
     await writeFile(path.join(buildPath, "package.json"), JSON.stringify({ version: "1.2.3" }));
+    let packed = 0;
     const stampOf = async (dirname) => {
       await forgeConfigFor("darwin", dirname).hooks.packageAfterCopy({}, buildPath, "39.0.0", "darwin", "arm64");
-      return JSON.parse(await readFile(path.join(buildPath, "dist", "main", "build-info.json"), "utf8"));
+      // What the hook writes is what the release check reads. (A new archive
+      // each time: the asar module keeps each archive's index once read.)
+      packed += 1;
+      const asar = path.join(temporary, `stamped-${packed}.asar`);
+      await createPackage(buildPath, asar);
+      const stamp = JSON.parse(await readFile(path.join(buildPath, "dist", "main", "build-info.json"), "utf8"));
+      assert.deepEqual(readBuildInfo(asar), stamp);
+      return stamp;
     };
     // Outside a git checkout nothing can be told, and nothing is recorded.
     assert.deepEqual(await stampOf(checkout), {});
-    const git = (...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: checkout, stdio: "pipe" });
+    const git = (...args) => execFileSync("git", [
+      "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", ...args
+    ], { cwd: checkout, stdio: "pipe" });
     git("init", "-q");
     git("commit", "-q", "--allow-empty", "-m", "one");
     assert.deepEqual(await stampOf(checkout), { fromReleaseTag: false }, "an untagged commit");
@@ -66,10 +76,10 @@ test("packaging stamps whether the build is made from its release tag", async ()
 test("a release refuses an app not stamped as built from its tag", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "accord-release-stamp-check-"));
   try {
-    const archive = async (name, stamp) => {
+    const archive = async (name, stamp, version = "1.2.3") => {
       const input = path.join(temporary, name);
       await mkdir(path.join(input, "dist", "main"), { recursive: true });
-      await writeFile(path.join(input, "package.json"), "{}");
+      await writeFile(path.join(input, "package.json"), JSON.stringify({ version }));
       if (stamp !== undefined) await writeFile(path.join(input, "dist", "main", "build-info.json"), stamp);
       const asar = path.join(temporary, `${name}.asar`);
       await createPackage(input, asar);
@@ -78,10 +88,17 @@ test("a release refuses an app not stamped as built from its tag", async () => {
     const released = await archive("released", JSON.stringify({ fromReleaseTag: true }));
     assert.deepEqual(readBuildInfo(released), { fromReleaseTag: true });
     assert.doesNotThrow(() => verifyReleaseBuildInfo(released, "v1.2.3"));
+    assert.doesNotThrow(() => verifyReleaseBuildInfo(released, "v1.2.3"));
+    const beta = await archive("beta", JSON.stringify({ fromReleaseTag: true }), "1.2.4-beta.7");
+    assert.doesNotThrow(() => verifyReleaseBuildInfo(beta, "v1.2.4-beta.7"));
     for (const [name, stamp] of [["untagged", JSON.stringify({ fromReleaseTag: false })], ["unknown", "{}"], ["broken", "{"], ["missing", undefined]]) {
       const asar = await archive(name, stamp);
-      assert.throws(() => verifyReleaseBuildInfo(asar, "v1.2.3"), /team device/, name);
+      assert.throws(() => verifyReleaseBuildInfo(asar, "v1.2.3"), /not stamped.*team device/, name);
     }
+    // A version the app would not count as a release.
+    const odd = await archive("odd", JSON.stringify({ fromReleaseTag: true }), "1.2.3-rc.1");
+    assert.throws(() => verifyReleaseBuildInfo(odd, "v1.2.3-rc.1"), /does not count as a release/);
+    assert.throws(() => verifyReleaseBuildInfo(path.join(temporary, "nowhere.asar"), "v1.2.3"), /was not found/);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
