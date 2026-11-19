@@ -13,7 +13,7 @@ interface Sent {
   attributes: UsageSignalAttributes;
 }
 
-const FACTS = { os: "mac" as const, appVersion: "1.11.9", locale: "zh-CN" };
+const FACTS = { os: "mac" as const, appVersion: "1.11.9", locale: "zh-CN", teamDevice: false };
 const NO_FEATURES: UsageFeatureHistory = {
   customRole: false, memberRoleChanged: false, multiRoleChat: false, behaviorRule: false, document: false,
   scheduledTask: false, memoryNote: false, phonePaired: false, urgentAlerts: false
@@ -75,7 +75,7 @@ const CODEX = { kind: "codex-cli", handle: "drew", roleConfigId: "generic-partic
 const MY_ENDPOINT = { kind: "claude-code", handle: "secret-bot", hostId: "host-1", hostLabel: "Acme internal gateway", hostVendor: "custom", model: "acme-llm-7b" };
 
 function base(name: string, cohort: "new" | "existing" = "new"): UsageSignalAttributes {
-  return { milestone: name, install_cohort: cohort, os: "mac", app_version: "1.11.9", locale: "zh-CN" };
+  return { milestone: name, install_cohort: cohort, os: "mac", app_version: "1.11.9", locale: "zh-CN", team_device: false };
 }
 
 /** A history read that answers only once released, whenever it is asked. */
@@ -164,6 +164,17 @@ test("with reports off nothing is sent, kept or counted, and it is sent once the
     await next.milestones.start();
     next.milestones.observeConversation(chat([CLAUDE]), [message({})]);
     assert.deepEqual(next.sent, [{ name: "existing_install", attributes: base("existing_install", "existing") }]);
+  });
+});
+
+test("one of the team's own installations says so on every step and on the weekly numbers", async () => {
+  await withDir(async (dir) => {
+    const { milestones, sent, snapshots } = harness(dir, { installFacts: () => ({ ...FACTS, teamDevice: true }) });
+    await milestones.start();
+    milestones.reach("first_chat");
+    await milestones.sendWeeklySnapshotIfDue();
+    assert.deepEqual(sent.map((signal) => [signal.name, signal.attributes.team_device]), [["first_launch", true], ["first_chat", true]]);
+    assert.deepEqual(snapshots.map((signal) => [signal.name, signal.attributes.team_device]), [["weekly_snapshot", true]]);
   });
 });
 

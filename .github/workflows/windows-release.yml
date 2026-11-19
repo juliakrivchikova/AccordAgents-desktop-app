@@ -99,6 +99,9 @@ jobs:
         run: node .agents/skills/release-beta/scripts/verify-release.mjs preflight
 
       - name: Build and check the unsigned app
+        env:
+          # A release build must be stamped as built from its tag.
+          ACCORDAGENTS_RELEASE_TAG: ${{ inputs.tag }}
         run: npm run release:windows-x64 -- --package-only
 
       - name: Keep the unsigned app
