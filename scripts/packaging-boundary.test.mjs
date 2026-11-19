@@ -7,24 +7,85 @@ import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
 import { createPackage } from "@electron/asar";
-import { verifyRuntimeArchive, verifyUpdaterZip } from "./packaging-boundary.mjs";
+import { execFileSync } from "node:child_process";
+import { headHasReleaseTag, readBuildInfo, verifyReleaseBuildInfo, verifyRuntimeArchive, verifyUpdaterZip } from "./packaging-boundary.mjs";
 
 const root = process.cwd();
 const require = createRequire(path.join(root, "forge.config.ts"));
 const { userPathFilter, populateIgnoredPaths } = require("@electron/packager/dist/copy-filter.js");
 const source = await readFile(path.join(root, "forge.config.ts"), "utf8");
 
-function configFor(platform) {
+function forgeConfigFor(platform, dirname = root) {
   const module = { exports: {} };
   const code = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, esModuleInterop: true }
   }).outputText;
   vm.runInNewContext(code, {
-    module, exports: module.exports, require, __dirname: root,
+    module, exports: module.exports, require, __dirname: dirname,
     process: { platform, env: {} }
   });
-  return module.exports.default.packagerConfig;
+  return module.exports.default;
 }
+
+function configFor(platform) {
+  return forgeConfigFor(platform).packagerConfig;
+}
+
+test("packaging stamps whether the build is made from its release tag", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "accord-release-stamp-"));
+  try {
+    const checkout = path.join(temporary, "checkout");
+    const buildPath = path.join(temporary, "build");
+    await mkdir(checkout);
+    await mkdir(path.join(buildPath, "dist", "main"), { recursive: true });
+    await writeFile(path.join(buildPath, "package.json"), JSON.stringify({ version: "1.2.3" }));
+    const stampOf = async (dirname) => {
+      await forgeConfigFor("darwin", dirname).hooks.packageAfterCopy({}, buildPath, "39.0.0", "darwin", "arm64");
+      return JSON.parse(await readFile(path.join(buildPath, "dist", "main", "build-info.json"), "utf8"));
+    };
+    // Outside a git checkout nothing can be told, and nothing is recorded.
+    assert.deepEqual(await stampOf(checkout), {});
+    const git = (...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: checkout, stdio: "pipe" });
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "one");
+    assert.deepEqual(await stampOf(checkout), { fromReleaseTag: false }, "an untagged commit");
+    git("tag", "v1.2.2");
+    git("tag", "discussion-1.2.3");
+    assert.deepEqual(await stampOf(checkout), { fromReleaseTag: false }, "another version's tag");
+    assert.equal(headHasReleaseTag(checkout, "1.2.3"), false);
+    git("tag", "-a", "v1.2.3", "-m", "release");
+    assert.deepEqual(await stampOf(checkout), { fromReleaseTag: true }, "an annotated release tag");
+    assert.equal(headHasReleaseTag(checkout, "1.2.3"), true);
+    git("commit", "-q", "--allow-empty", "-m", "two");
+    assert.deepEqual(await stampOf(checkout), { fromReleaseTag: false }, "a commit after the release");
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a release refuses an app not stamped as built from its tag", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "accord-release-stamp-check-"));
+  try {
+    const archive = async (name, stamp) => {
+      const input = path.join(temporary, name);
+      await mkdir(path.join(input, "dist", "main"), { recursive: true });
+      await writeFile(path.join(input, "package.json"), "{}");
+      if (stamp !== undefined) await writeFile(path.join(input, "dist", "main", "build-info.json"), stamp);
+      const asar = path.join(temporary, `${name}.asar`);
+      await createPackage(input, asar);
+      return asar;
+    };
+    const released = await archive("released", JSON.stringify({ fromReleaseTag: true }));
+    assert.deepEqual(readBuildInfo(released), { fromReleaseTag: true });
+    assert.doesNotThrow(() => verifyReleaseBuildInfo(released, "v1.2.3"));
+    for (const [name, stamp] of [["untagged", JSON.stringify({ fromReleaseTag: false })], ["unknown", "{}"], ["broken", "{"], ["missing", undefined]]) {
+      const asar = await archive(name, stamp);
+      assert.throws(() => verifyReleaseBuildInfo(asar, "v1.2.3"), /team device/, name);
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
 
 test("release checks reject contaminated archives and oversized update downloads", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "accord-release-boundary-"));

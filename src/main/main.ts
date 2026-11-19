@@ -174,6 +174,7 @@ import { CRASH_REPORTS_ACTIVE_ARG, crashReportingActive, sendUsageSignal, startC
 import { UsageMilestones, usageFeatureHistoryFrom, usageHistoryFrom, usageProfileUsedBefore } from "./services/usageMilestones";
 import { usageCustomRoleCount, usageLocale, usageMultiRoleChat, usageOs, usageRoleChosen, usageWeeklySnapshot } from "../shared/usageSignals";
 import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "./services/crashReportPreferences";
+import { readTeamDevice } from "./services/teamDevice";
 import { isServerUpdateLoaderWindow, openServerUpdateLoader, updateServerBeforeOpening } from "./services/serverUpdateLoader";
 import { ACTIVITY_RECHECK_MS, appHiddenForUpdate, bootstrapAppUpdater, createUpdateRestart, createUpdateRestartGate, currentUpdateWindows, quitAndInstallUpdate, showUpdateRestartPrompt, updatePromptWindowShown } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
@@ -256,8 +257,16 @@ const profileUsedBeforeLaunch = usageProfileUsedBefore(app.getPath("userData"));
 // Once the profile directory is final and before the app is ready: the SDK
 // registers the scheme the window reports through and starts the native
 // crash handler, and neither can happen later.
+// One of the team's own installations: a build that is not a release, or a
+// computer marked by hand. Read once, like the choice itself.
+const teamDevice = readTeamDevice({
+  userDataDir: app.getPath("userData"),
+  appPath: app.getAppPath(),
+  isPackaged: app.isPackaged,
+  version: app.getVersion()
+});
 const crashReportingStart = readCrashReportsEnabled(app.getPath("userData"))
-  ? startCrashReporting(loadOrCreateCrashReportInstallId(app.getPath("userData")))
+  ? startCrashReporting(loadOrCreateCrashReportInstallId(app.getPath("userData")), { teamDevice })
   : discardCrashReportDataAtLaunch();
 
 function discardCrashReportDataAtLaunch(): { active: false; error?: string } {
@@ -370,7 +379,7 @@ function flushRendererFileEdits(): Promise<void> {
 const allowFilePreviewOutsideOpen = createExternalOpenLimiter();
 const providerRunner = new ProviderRunner();
 setCommandDebugLogger(debugLogService);
-void debugLogService.write("crash-reports.start", { ...crashReportingStart });
+void debugLogService.write("crash-reports.start", { ...crashReportingStart, teamDevice });
 
 function runtimeErrorDetails(error: unknown): { message: string; stack?: string } {
   if (error instanceof Error) {
@@ -467,7 +476,8 @@ const usageMilestones = crashReportingStart.active
     installFacts: () => ({
       os: usageOs(process.platform),
       appVersion: app.getVersion(),
-      locale: usageLocale([...app.getPreferredSystemLanguages(), app.getSystemLocale(), app.getLocale()])
+      locale: usageLocale([...app.getPreferredSystemLanguages(), app.getSystemLocale(), app.getLocale()]),
+      teamDevice
     }),
     readHistory: async () => {
       const [chats, documents, machines] = await Promise.all([

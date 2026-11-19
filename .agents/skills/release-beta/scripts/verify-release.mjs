@@ -137,7 +137,7 @@ async function verifyPackagedApp(appArgument) {
     fail(`Packaged app.asar not found: ${asarPath}`);
   }
 
-  const { verifyRuntimeArchive } = await import(pathToFileURL(path.join(rootDir, "scripts", "packaging-boundary.mjs")).href);
+  const { headHasReleaseTag, verifyReleaseBuildInfo, verifyRuntimeArchive } = await import(pathToFileURL(path.join(rootDir, "scripts", "packaging-boundary.mjs")).href);
   let packagedFiles;
   try {
     packagedFiles = new Set(verifyRuntimeArchive(asarPath));
@@ -168,6 +168,19 @@ async function verifyPackagedApp(appArgument) {
 
   pass(`app.asar contains all ${requiredFiles.length} required runtime entries`);
   pass(`packaged version matches ${packageJson.version}`);
+
+  // A build of the release tag must say so, or every installation of it
+  // reports as a team device. Trial builds (no tag) are team builds.
+  if (headHasReleaseTag(rootDir, packageJson.version)) {
+    try {
+      verifyReleaseBuildInfo(asarPath, `v${packageJson.version}`);
+    } catch (error) {
+      fail(error.message);
+    }
+    pass("packaged app is stamped as built from its release tag");
+  } else {
+    pass("not a release tag build: the packaged app reports as a team device");
+  }
 
   // Speech to text runs this program from the app's resources; a Mac app
   // built without it would offer the feature and fail when it is turned on.

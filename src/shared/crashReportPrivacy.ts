@@ -259,6 +259,7 @@ function usageLogAttributeAllowed(key: string, value: unknown, signal?: unknown)
     case "os": return isUsageOs(value);
     case "app_version": return typeof value === "string" && APP_VERSION_PATTERN.test(value);
     case "locale": return typeof value === "string" && USAGE_LOCALE_PATTERN.test(value);
+    case "team_device": return typeof value === "boolean";
     case "provider_family": return isUsageProviderFamily(value);
     case "week": return typeof value === "string" && USAGE_ISO_WEEK_PATTERN.test(value);
     case "members_total":

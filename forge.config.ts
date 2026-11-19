@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { MakerDMG } from "@electron-forge/maker-dmg";
@@ -35,6 +36,24 @@ const looseResourceSignSkipPattern = /\.(?:asar|bin|dat|icns|nib|pak)$/i;
 
 function shouldSkipLooseResourceSigning(filePath: string): boolean {
   return looseResourceSignSkipPattern.test(filePath);
+}
+
+// Whether this build is made from its own release tag; the app counts any
+// other packaged build as one of the team's (src/main/services/teamDevice.ts).
+// When git cannot tell, nothing is recorded and the build counts as a
+// release: a wrong guess then miscounts one of our builds, never every
+// installation. A release checks its stamp before it ships.
+function builtFromReleaseTag(version: string): boolean | undefined {
+  try {
+    const tags = execFileSync("git", ["tag", "--points-at", "HEAD"], {
+      cwd: __dirname,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    return tags.split(/\r?\n/).includes(`v${version}`);
+  } catch {
+    return undefined;
+  }
 }
 
 const osxSignOptions = appleCodesignIdentity
@@ -127,6 +146,15 @@ const config = {
     ...(osxNotarizeOptions ? { osxNotarize: osxNotarizeOptions } : {})
   },
   hooks: {
+    packageAfterCopy: async (_config: unknown, buildPath: string) => {
+      const { readFile, writeFile } = await import("node:fs/promises");
+      const { version } = JSON.parse(await readFile(path.join(buildPath, "package.json"), "utf8")) as { version: string };
+      const fromReleaseTag = builtFromReleaseTag(version);
+      await writeFile(
+        path.join(buildPath, "dist", "main", "build-info.json"),
+        `${JSON.stringify(fromReleaseTag === undefined ? {} : { fromReleaseTag })}\n`
+      );
+    },
     // npm leaves node-pty's spawn-helper without the execute bit, and every
     // terminal fails to start without it. Set before signing and before the
     // asar step copies it out unpacked.

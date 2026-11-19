@@ -246,7 +246,12 @@ the npm scripts directly: `npm run dev`, `npm run build`, `npm start`,
   crash dumps are sent. Turn them off in Settings → General → **Crash and
   usage reports** (turning them back on applies at the next start), or start
   the app with `ACCORDAGENTS_CRASH_REPORTS=0`. The phone app sends no crash
-  reports.
+  reports. Every record also says whether it comes from one of the team's own
+  computers (`team_device`), so those can be left out of the numbers; a build
+  that is not a release says so by itself, and a team computer is marked with
+  an empty `team-device` file in the app's data folder (on macOS
+  `touch ~/Library/Application\ Support/AccordAgents/team-device`) or
+  `ACCORDAGENTS_TEAM_DEVICE=1`.
 - Diagnostic logs (progress events and raw CLI output) are written to
   `userData/debug-logs/<date>.jsonl` when running unpackaged; force them on or
   off with `ACCORD_AGENTS_DEBUG_LOGS=1` / `=0`. The CLI readiness probe logs

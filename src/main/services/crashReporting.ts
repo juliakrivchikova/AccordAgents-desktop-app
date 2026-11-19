@@ -4,6 +4,7 @@ import type * as SentryMain from "@sentry/electron/main";
 import { CRASH_REPORT_EXCLUDED_INTEGRATIONS, scrubCrashReportBreadcrumb, scrubCrashReportEvent, scrubSerializedUsageLogs, scrubUsageLog } from "../../shared/crashReportPrivacy";
 import { crashReportReleaseName, type UsageSignalAttributes } from "../../shared/usageSignals";
 import { discardCrashReportData } from "./crashReportPreferences";
+import { moveTeamDeviceSessions } from "./teamDevice";
 
 // The project's ingest key. A DSN only allows sending events to this project,
 // so it ships inside the app like every client-side Sentry key.
@@ -34,11 +35,17 @@ export interface CrashReportingStartResult {
   error?: string;
 }
 
+export interface CrashReportingOptions {
+  /** One of the team's own installations (teamDevice.ts): its error reports
+   *  are tagged and its sessions go to their own environment. */
+  teamDevice: boolean;
+}
+
 /**
  * Starts error and session reporting. Must run before the app is ready: the
  * SDK registers the privileged scheme the window reports through.
  */
-export function startCrashReporting(installId: string): CrashReportingStartResult {
+export function startCrashReporting(installId: string, options: CrashReportingOptions): CrashReportingStartResult {
   if (active) {
     return { active: true };
   }
@@ -57,7 +64,7 @@ export function startCrashReporting(installId: string): CrashReportingStartResul
       sendDefaultPii: false,
       includeLocalVariables: false,
       attachScreenshot: false,
-      initialScope: { user: { id: installId } },
+      initialScope: { user: { id: installId }, tags: { team_device: options.teamDevice } },
       // Without this the SDK adds sentry-trace and baggage headers (project
       // key, release, trace id) to every request the app makes: providers,
       // AWS, the relay. Nothing outside Sentry gets them.
@@ -89,6 +96,7 @@ export function startCrashReporting(installId: string): CrashReportingStartResul
     // scope attributes skip beforeSendLog), is checked again.
     sdk.getClient()?.on("beforeEnvelope", (envelope) => {
       const items = envelope[1] as unknown as Array<[{ type?: string; item_count?: number }, { items?: unknown[] }]>;
+      if (options.teamDevice) moveTeamDeviceSessions(items);
       for (let index = items.length - 1; index >= 0; index -= 1) {
         const [header, payload] = items[index];
         if (header?.type !== "log") continue;

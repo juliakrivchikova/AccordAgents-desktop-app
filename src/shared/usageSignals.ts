@@ -325,6 +325,9 @@ export interface UsageSignalContext {
   appVersion: string;
   locale: string;
   cohort: UsageInstallCohort;
+  /** One of the team's own installations: the numbers about real people
+   *  leave it out (`!team_device:true`). */
+  teamDevice: boolean;
 }
 
 /** What a signal may add: which CLIs are ready, or a provider family. */
@@ -342,6 +345,7 @@ export const USAGE_SIGNAL_ATTRIBUTE_KEYS: ReadonlySet<string> = new Set([
   "os",
   "app_version",
   "locale",
+  "team_device",
   ...USAGE_READY_ATTRIBUTES,
   "provider_family",
   ...USAGE_WEEKLY_SNAPSHOT_KEYS
@@ -353,7 +357,8 @@ export function usageSignalAttributes(name: UsageSignalName, context: UsageSigna
     install_cohort: context.cohort,
     os: context.os,
     app_version: context.appVersion,
-    locale: context.locale
+    locale: context.locale,
+    team_device: context.teamDevice
   };
   for (const key of USAGE_READY_ATTRIBUTES) {
     const value = extra[key];

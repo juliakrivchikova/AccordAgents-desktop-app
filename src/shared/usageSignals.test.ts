@@ -50,14 +50,16 @@ test("provider families come from the CLI or the added provider's vendor only", 
 });
 
 test("a signal's attributes are the fixed set and nothing else", () => {
-  const context = { os: "win" as const, appVersion: "1.11.9", locale: "en-US", cohort: "new" as const };
+  const context = { os: "win" as const, appVersion: "1.11.9", locale: "en-US", cohort: "new" as const, teamDevice: false };
   assert.deepEqual(usageSignalAttributes("first_chat", context), {
-    milestone: "first_chat", install_cohort: "new", os: "win", app_version: "1.11.9", locale: "en-US"
+    milestone: "first_chat", install_cohort: "new", os: "win", app_version: "1.11.9", locale: "en-US", team_device: false
   });
   assert.deepEqual(
     usageSignalAttributes("provider_first_used", context, { provider_family: "acme" as never, codex_ready: "yes" as never }),
-    { milestone: "provider_first_used", install_cohort: "new", os: "win", app_version: "1.11.9", locale: "en-US" }
+    { milestone: "provider_first_used", install_cohort: "new", os: "win", app_version: "1.11.9", locale: "en-US", team_device: false }
   );
+  // One of our own installations says so on every signal.
+  assert.equal(usageSignalAttributes("first_chat", { ...context, teamDevice: true }).team_device, true);
 });
 
 test("counts go out in buckets: exact up to two, then ranges", () => {
@@ -90,10 +92,11 @@ test("the weekly snapshot: members once across chats, no Assistant, custom roles
   });
   assert.equal(JSON.stringify(snapshot).includes("acme"), false, "a role the person made is never named");
   assert.equal(usageWeeklySnapshot("2026-W47", [], 0).builtin_roles_in_use, "none");
-  const attributes = usageWeeklySnapshotAttributes({ os: "mac", appVersion: "1.11.9", locale: "en-US", cohort: "existing" }, snapshot);
+  const attributes = usageWeeklySnapshotAttributes({ os: "mac", appVersion: "1.11.9", locale: "en-US", cohort: "existing", teamDevice: true }, snapshot);
   assert.equal(attributes.milestone, "weekly_snapshot");
   assert.equal(attributes.install_cohort, "existing");
   assert.equal(attributes.custom_roles_count, 3);
+  assert.equal(attributes.team_device, true, "the weekly record carries the same mark");
 });
 
 test("every built-in role id is a plain app id", () => {

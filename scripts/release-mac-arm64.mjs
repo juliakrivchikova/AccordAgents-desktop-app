@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { verifyReleaseBuildInfo } from "./packaging-boundary.mjs";
 import { createReleaseAtFreshCommit, preflightReleaseRepo, verifyReleaseListing } from "./release-repo-target.mjs";
 
 const rootDir = process.cwd();
@@ -619,6 +620,13 @@ try {
 } catch {
   rollBackLocalBump(tagName);
   fail(`The signed build failed before anything was pushed, so ${tagName} was not used. Fix the cause and release again.`);
+}
+try {
+  const name = productName();
+  verifyReleaseBuildInfo(path.join(rootDir, "out", `${name}-darwin-arm64`, `${name}.app`, "Contents", "Resources", "app.asar"), tagName);
+} catch (error) {
+  rollBackLocalBump(tagName);
+  fail(`${error.message} Nothing was pushed, so ${tagName} was not used.`);
 }
 pushSource(sourceBranch, tagName);
 
