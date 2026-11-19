@@ -254,9 +254,6 @@ if (userDataDirOverride) {
 // first seen by the usage signals is new only when it was not.
 const profileUsedBeforeLaunch = usageProfileUsedBefore(app.getPath("userData"));
 
-// Once the profile directory is final and before the app is ready: the SDK
-// registers the scheme the window reports through and starts the native
-// crash handler, and neither can happen later.
 // One of the team's own installations: a build that is not a release, or a
 // computer marked by hand. Read once, like the choice itself.
 const teamDevice = readTeamDevice({
@@ -265,6 +262,10 @@ const teamDevice = readTeamDevice({
   isPackaged: app.isPackaged,
   version: app.getVersion()
 });
+
+// Once the profile directory is final and before the app is ready: the SDK
+// registers the scheme the window reports through and starts the native
+// crash handler, and neither can happen later.
 const crashReportingStart = readCrashReportsEnabled(app.getPath("userData"))
   ? startCrashReporting(loadOrCreateCrashReportInstallId(app.getPath("userData")), { teamDevice })
   : discardCrashReportDataAtLaunch();
