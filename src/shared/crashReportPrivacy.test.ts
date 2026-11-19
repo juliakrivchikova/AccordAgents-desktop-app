@@ -253,3 +253,45 @@ test("logs about to be sent are checked again, whatever path they took", () => {
     }
   }]);
 });
+
+test("a weekly snapshot leaves with its numbers, and a role the person made is never named", () => {
+  const base = { milestone: "weekly_snapshot", install_cohort: "existing", os: "mac", app_version: "1.11.9", locale: "en-US" };
+  const snapshot = {
+    ...base,
+    week: "2026-W47",
+    members_total: "3-5",
+    max_members_in_chat: "2",
+    chats_with_2plus_members: "1",
+    distinct_roles_in_use: 3,
+    custom_roles_count: 2,
+    builtin_roles_in_use: "product-designer,software-engineer"
+  };
+  assert.deepEqual(scrubUsageLog({ level: "info", message: "weekly_snapshot", attributes: snapshot })?.attributes, snapshot);
+  const leaking = {
+    ...snapshot,
+    builtin_roles_in_use: "software-engineer,acme-sales-closer",
+    members_total: "7",
+    distinct_roles_in_use: 2.5,
+    custom_roles_count: -1,
+    week: "last week",
+    role_names: "Acme sales closer"
+  };
+  assert.deepEqual(scrubUsageLog({ level: "info", message: "weekly_snapshot", attributes: leaking })?.attributes, { ...base, max_members_in_chat: "2", chats_with_2plus_members: "1" });
+  assert.deepEqual(scrubSerializedUsageLogs([{ body: "weekly_snapshot", attributes: {
+    milestone: { value: "weekly_snapshot", type: "string" },
+    custom_roles_count: { value: 2, type: "integer" },
+    builtin_roles_in_use: { value: "my-secret-role", type: "string" }
+  } }]), [{ body: "weekly_snapshot", attributes: {
+    milestone: { value: "weekly_snapshot", type: "string" },
+    custom_roles_count: { value: 2, type: "integer" }
+  } }]);
+});
+
+test("snapshot numbers leave only on a weekly snapshot, and the role list cannot grow or repeat", () => {
+  const roles = (value: string) => scrubUsageLog({ level: "info", message: "weekly_snapshot", attributes: { milestone: "weekly_snapshot", builtin_roles_in_use: value } })?.attributes.builtin_roles_in_use;
+  assert.equal(roles("debugger,software-engineer"), "debugger,software-engineer");
+  assert.equal(roles("software-engineer,debugger"), undefined, "unsorted");
+  assert.equal(roles("debugger,debugger"), undefined, "repeated");
+  assert.equal(roles(Array(5000).fill("debugger").join(",")), undefined, "too long");
+  assert.deepEqual(scrubUsageLog({ level: "info", message: "first_chat", attributes: { milestone: "first_chat", week: "2026-W47", custom_roles_count: 3, builtin_roles_in_use: "debugger" } })?.attributes, { milestone: "first_chat" });
+});

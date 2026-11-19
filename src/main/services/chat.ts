@@ -1216,6 +1216,7 @@ export class ChatService {
   private codexApprovalWaitMs = CHAT_CODEX_APPROVAL_WAIT_MS;
   private promptSuggestionsListener?: (update: ChatPromptSuggestionsUpdate) => void;
   private promptSuggestionForwarder?: (suggestion: ChatMemberPromptSuggestion) => void;
+  private connectorSignedInObserver?: () => void;
   private readonly promptSuggestions = new ChatPromptSuggestionStore((update) => this.promptSuggestionsListener?.(update));
 
   constructor(
@@ -1410,6 +1411,12 @@ export class ChatService {
       suggestion.text,
       sourceMachineId ?? CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE
     );
+  }
+
+  /** Told when a member's connector was connected through the sign-in card
+   *  (the computer's usage signals; a machine's runtime sets none). */
+  setConnectorSignedInObserver(observer: (() => void) | undefined): void {
+    this.connectorSignedInObserver = observer;
   }
 
   /** Scheduled scripts on this host; absent where they are not available. */
@@ -4513,6 +4520,13 @@ export class ChatService {
     if (!reconnect) {
       reconnect = (async () => {
         const result = await this.reconnectConnectorForMember(control, serverNow, request.connector);
+        if (result.status === "connected") {
+          try {
+            this.connectorSignedInObserver?.();
+          } catch {
+            // An observer never changes the sign-in.
+          }
+        }
         await this.recordConnectorSignInResult(actor.conversationId, approval.id, result);
         return result;
       })().finally(() => this.connectorSignInReconnects.delete(approval.id));

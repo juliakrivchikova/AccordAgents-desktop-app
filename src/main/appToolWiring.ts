@@ -15,6 +15,7 @@ import type { ArtifactOperations } from "./services/artifactClient";
 import { validateArtifactCreateToolRequest } from "./services/artifactToolRequest";
 import type { ChatService } from "./services/chat";
 import { callMemoryTool, memoryAccessNow, type MemoryServerAccess } from "./services/memoryTools";
+import { APP_MEMORY_WRITE_TOOL } from "../shared/appMcpToolContracts";
 import {
   APP_ARTIFACT_CREATE_TOOL,
   APP_ARTIFACT_DRAFT_LIST_TOOL,
@@ -84,9 +85,21 @@ export function wireChatAppToolHandlers(appMcpService: AppMcpService, chatServic
 export function wireMemoryToolHandler(
   appMcpService: AppMcpService,
   chatService: ChatService,
-  access: () => MemoryServerAccess | undefined
+  access: () => MemoryServerAccess | undefined,
+  /** Told when a member's note was written (the computer's usage signals). */
+  onNoteWritten?: () => void
 ): void {
-  appMcpService.setMemoryToolHandler((actor, toolName, request) => callMemoryTool(memoryAccessNow(access), actor, toolName, request));
+  appMcpService.setMemoryToolHandler(async (actor, toolName, request) => {
+    const result = await callMemoryTool(memoryAccessNow(access), actor, toolName, request);
+    if (onNoteWritten && toolName === APP_MEMORY_WRITE_TOOL && (result as { ok?: unknown } | undefined)?.ok === true) {
+      try {
+        onNoteWritten();
+      } catch {
+        // An observer never changes the tool's answer.
+      }
+    }
+    return result;
+  });
   chatService.setMemoryAccess(access);
 }
 

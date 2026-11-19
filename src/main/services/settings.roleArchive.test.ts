@@ -36,7 +36,7 @@ function makeParticipant(over: Partial<ChatParticipantConfig> = {}): ChatPartici
 }
 
 function settingsServiceWith(
-  initial: { chatRoleConfigs?: ChatRoleConfig[]; chatParticipantConfigs?: ChatParticipantConfig[] } = {}
+  initial: { chatRoleConfigs?: ChatRoleConfig[]; chatParticipantConfigs?: ChatParticipantConfig[]; chatBehaviorRules?: AppSettings["chatBehaviorRules"] } = {}
 ) {
   const service = Object.create(SettingsService.prototype) as any;
   let stored = {
@@ -60,7 +60,7 @@ function settingsServiceWith(
     },
     providers: [],
     chatRoleConfigs: initial.chatRoleConfigs ?? [],
-    chatBehaviorRules: [],
+    chatBehaviorRules: initial.chatBehaviorRules ?? [],
     chatSavedPrompts: [],
     chatParticipantConfigs: initial.chatParticipantConfigs ?? [],
     chatParticipantSeedState: {},
@@ -508,4 +508,54 @@ test("archiving is idempotent and does not rewrite an already-archived role", as
   const settings: AppSettings = await service.archiveChatRoleConfig("custom-reviewer");
   assert.equal(settings.chatRoleConfigs[0].archivedAt, "2026-06-19T00:00:00.000Z");
   assert.equal(writeCount(), 0, "already-archived role is not rewritten");
+});
+
+test("usage: a new role, a member with a role someone chose and new rules are told; edits that change neither are not", async () => {
+  const { service } = settingsServiceWith({
+    chatRoleConfigs: [makeRole({ id: "generic-participant", builtIn: true, label: "Generic Member" }), makeRole()],
+    chatParticipantConfigs: [makeParticipant({ id: "p1", roleConfigId: "generic-participant", behaviorRuleIds: [] })],
+    chatBehaviorRules: [{ id: "rule-1", label: "Be brief", instructions: "Short.", version: 1, updatedAt: "2026-06-20T00:00:00.000Z" }] as AppSettings["chatBehaviorRules"]
+  });
+  const events: unknown[] = [];
+  service.setUsageObserver((event: unknown) => events.push(event));
+
+  await service.saveChatRoleConfig({ label: "Acme closer", instructions: "Close deals." });
+  await service.saveChatRoleConfig({ id: "custom-reviewer", label: "Reviewer", instructions: "Review more." });
+  await service.saveChatParticipantConfig({ id: "p1", handle: "rev", roleConfigId: "generic-participant", kind: "codex-cli", behaviorRuleIds: [] });
+  await service.saveChatParticipantConfig({ id: "p1", handle: "rev", roleConfigId: "custom-reviewer", kind: "codex-cli", behaviorRuleIds: ["rule-1"] });
+  await service.saveChatParticipantConfig({ id: "p1", handle: "rev", roleConfigId: "custom-reviewer", kind: "codex-cli", behaviorRuleIds: ["rule-1"] });
+
+  assert.deepEqual(events, [
+    { kind: "role-created" },
+    { kind: "member-saved", roleChosen: false, rulesAdded: false },
+    { kind: "member-saved", roleChosen: true, rulesAdded: true },
+    { kind: "member-saved", roleChosen: false, rulesAdded: false }
+  ]);
+});
+
+test("usage: a member's approved role and member change tells a new role and each member once, and a refused one tells nothing", async () => {
+  const { service } = settingsServiceWith({
+    chatRoleConfigs: [makeRole({ id: "generic-participant", builtIn: true, label: "Generic Member" })],
+    chatParticipantConfigs: [makeParticipant({ id: "p1", handle: "rev", roleConfigId: "generic-participant" })],
+    chatBehaviorRules: [{ id: "rule-1", label: "Be brief", instructions: "Short.", version: 1, updatedAt: "2026-06-20T00:00:00.000Z" }] as AppSettings["chatBehaviorRules"]
+  });
+  const events: unknown[] = [];
+  service.setUsageObserver((event: unknown) => events.push(event));
+  await service.saveChatRoleParticipantConfigBatch(
+    [{ type: "create_role", role: { draftRoleRef: "draft-1", label: "Closer", instructions: "Close." } } as never],
+    [
+      { id: "p1", handle: "rev", roleConfigId: "draft-1", kind: "codex-cli", behaviorRuleIds: [] },
+      { handle: "new-one", roleConfigId: "generic-participant", kind: "claude-code", behaviorRuleIds: ["rule-1"] }
+    ]
+  );
+  assert.deepEqual(events, [
+    { kind: "role-created" },
+    { kind: "member-saved", roleChosen: true, rulesAdded: false },
+    { kind: "member-saved", roleChosen: false, rulesAdded: true }
+  ]);
+  events.length = 0;
+  await assert.rejects(service.saveChatRoleParticipantConfigBatch([], [
+    { handle: "rev", roleConfigId: "generic-participant", kind: "codex-cli" },
+  ]));
+  assert.deepEqual(events, [], "a refused save tells nothing");
 });

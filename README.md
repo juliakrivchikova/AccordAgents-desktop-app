@@ -228,7 +228,13 @@ the npm scripts directly: `npm run dev`, `npm run build`, `npm start`,
   once per installation each first step it reaches (first launch, a CLI ready
   with which of Claude Code, Codex and Antigravity are ready, first chat,
   first reply, members of two provider families you added to one chat, first
-  member request, first Accord started and signed, first cloud machine), and
+  member request, first Accord started and signed, first cloud machine),
+  the first use of each feature (a role of your own, a member with a role
+  you chose, members with different roles in one chat, a behavior rule, a
+  document, a scheduled task, a memory note, a paired phone, the terminal,
+  dictation, a file preview, a connector sign-in, urgent alerts, a skill),
+  once a week the number of members, roles and roles of your own (in
+  ranges; only the app's own role ids are named, never a role you made), and
   each provider family it first uses (`claude-code`, `codex`, `antigravity`,
   `glm`, `kimi`, `minimax`, `deepseek`, `anthropic-api`, `openai-api`,
   `gemini-api`, or `custom` for any endpoint of your own), with the system, the system
