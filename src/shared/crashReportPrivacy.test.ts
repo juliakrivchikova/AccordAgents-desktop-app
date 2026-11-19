@@ -180,6 +180,7 @@ test("only usage signals leave as logs, with their known attributes only", () =>
       locale: "zh-Hans-CN",
       provider_family: "custom",
       codex_ready: true,
+      team_device: true,
       "user.id": "6f1c1a52-6f3b-4d7a-9d55-3f1e0f6f2b10",
       "user.email": "julia@example.com",
       "user.name": "Julia",
@@ -203,6 +204,7 @@ test("only usage signals leave as logs, with their known attributes only", () =>
       locale: "zh-Hans-CN",
       provider_family: "custom",
       codex_ready: true,
+      team_device: true,
       "user.id": "6f1c1a52-6f3b-4d7a-9d55-3f1e0f6f2b10",
       "sentry.release": "AccordAgents@1.11.9-beta.1+mac",
       "sentry.environment": "beta",
@@ -211,7 +213,7 @@ test("only usage signals leave as logs, with their known attributes only", () =>
     }
   });
   // Values outside the known ones are dropped.
-  assert.deepEqual(scrubUsageLog({ level: "info", message: "first_chat", attributes: { milestone: "first_chat", locale: "/Users/julia", provider_family: "acme", os: "haiku", app_version: "dev build" } })?.attributes, { milestone: "first_chat" });
+  assert.deepEqual(scrubUsageLog({ level: "info", message: "first_chat", attributes: { milestone: "first_chat", locale: "/Users/julia", provider_family: "acme", os: "haiku", app_version: "dev build", team_device: "Julia's MacBook" } })?.attributes, { milestone: "first_chat" });
   // Any other log is dropped whole.
   assert.equal(scrubUsageLog({ level: "info", message: "Sending prompt to @taylor", attributes: {} }), null);
   assert.equal(scrubUsageLog({ level: "error", message: "first_chat", attributes: { milestone: "first_reply" } }), null);
@@ -230,6 +232,7 @@ test("logs about to be sent are checked again, whatever path they took", () => {
       install_cohort: { value: "new", type: "string" },
       os: { value: "mac", type: "string" },
       codex_ready: { value: true, type: "boolean" },
+      team_device: { value: false, type: "boolean" },
       "user.id": { value: "6f1c1a52-6f3b-4d7a-9d55-3f1e0f6f2b10", type: "string" },
       "sentry.release": { value: "AccordAgents@1.11.9+mac", type: "string" },
       "sentry.timestamp.sequence": { value: 0, type: "integer" },
@@ -247,6 +250,7 @@ test("logs about to be sent are checked again, whatever path they took", () => {
       install_cohort: { value: "new", type: "string" },
       os: { value: "mac", type: "string" },
       codex_ready: { value: true, type: "boolean" },
+      team_device: { value: false, type: "boolean" },
       "user.id": { value: "6f1c1a52-6f3b-4d7a-9d55-3f1e0f6f2b10", type: "string" },
       "sentry.release": { value: "AccordAgents@1.11.9+mac", type: "string" },
       "sentry.timestamp.sequence": { value: 0, type: "integer" }

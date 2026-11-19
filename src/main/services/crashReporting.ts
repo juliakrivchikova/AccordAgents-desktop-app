@@ -1,9 +1,10 @@
 import os from "node:os";
 import { app } from "electron";
 import type * as SentryMain from "@sentry/electron/main";
-import { CRASH_REPORT_EXCLUDED_INTEGRATIONS, scrubCrashReportBreadcrumb, scrubCrashReportEvent, scrubSerializedUsageLogs, scrubUsageLog } from "../../shared/crashReportPrivacy";
+import { CRASH_REPORT_EXCLUDED_INTEGRATIONS, scrubCrashReportBreadcrumb, scrubCrashReportEvent, scrubUsageLog } from "../../shared/crashReportPrivacy";
 import { crashReportReleaseName, type UsageSignalAttributes } from "../../shared/usageSignals";
 import { discardCrashReportData } from "./crashReportPreferences";
+import { outgoingEnvelopeIntegration } from "./crashReportEnvelope";
 
 // The project's ingest key. A DSN only allows sending events to this project,
 // so it ships inside the app like every client-side Sentry key.
@@ -34,11 +35,17 @@ export interface CrashReportingStartResult {
   error?: string;
 }
 
+export interface CrashReportingOptions {
+  /** One of the team's own installations (teamDevice.ts): its error reports
+   *  are tagged and its sessions go to their own environment. */
+  teamDevice: boolean;
+}
+
 /**
  * Starts error and session reporting. Must run before the app is ready: the
  * SDK registers the privileged scheme the window reports through.
  */
-export function startCrashReporting(installId: string): CrashReportingStartResult {
+export function startCrashReporting(installId: string, options: CrashReportingOptions): CrashReportingStartResult {
   if (active) {
     return { active: true };
   }
@@ -57,7 +64,8 @@ export function startCrashReporting(installId: string): CrashReportingStartResul
       sendDefaultPii: false,
       includeLocalVariables: false,
       attachScreenshot: false,
-      initialScope: { user: { id: installId } },
+      // A tag value is text: Sentry would store a boolean as "True".
+      initialScope: { user: { id: installId }, tags: { team_device: options.teamDevice ? "true" : "false" } },
       // Without this the SDK adds sentry-trace and baggage headers (project
       // key, release, trace id) to every request the app makes: providers,
       // AWS, the relay. Nothing outside Sentry gets them.
@@ -69,6 +77,10 @@ export function startCrashReporting(installId: string): CrashReportingStartResul
         shouldStore: () => active
       },
       integrations: (defaults) => [
+        // Every log on its way out is checked again, and a team device's
+        // sessions move to their own environment; listening from the start,
+        // so the launch's first session is covered too.
+        outgoingEnvelopeIntegration({ teamDevice: options.teamDevice }),
         ...defaults.filter((integration) => !CRASH_REPORT_EXCLUDED_INTEGRATIONS.has(integration.name)
           && integration.name !== "MainProcessSession" && integration.name !== "ChildProcess"),
         // Sent when the app starts, not only when it quits, so a running
@@ -84,22 +96,6 @@ export function startCrashReporting(installId: string): CrashReportingStartResul
       enableLogs: true,
       beforeSendLog: (log) => scrubUsageLog(log),
       beforeBreadcrumb: (breadcrumb) => scrubCrashReportBreadcrumb(breadcrumb, homeDir)
-    });
-    // Every log on its way out, whatever path it took (the window's logs and
-    // scope attributes skip beforeSendLog), is checked again.
-    sdk.getClient()?.on("beforeEnvelope", (envelope) => {
-      const items = envelope[1] as unknown as Array<[{ type?: string; item_count?: number }, { items?: unknown[] }]>;
-      for (let index = items.length - 1; index >= 0; index -= 1) {
-        const [header, payload] = items[index];
-        if (header?.type !== "log") continue;
-        const logs = Array.isArray(payload?.items) ? scrubSerializedUsageLogs(payload.items) : [];
-        if (logs.length === 0) {
-          items.splice(index, 1);
-        } else {
-          payload.items = logs;
-          header.item_count = logs.length;
-        }
-      }
     });
     active = true;
     rolloverTimer = setInterval(() => {

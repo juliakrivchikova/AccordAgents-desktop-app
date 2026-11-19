@@ -106,6 +106,7 @@ export interface UsageInstallFacts {
   os: UsageOs;
   appVersion: string;
   locale: string;
+  teamDevice: boolean;
 }
 
 export interface UsageMilestonesOptions {
@@ -615,7 +616,7 @@ export class UsageMilestones {
   private context(cohort = this.state?.cohort ?? "new") {
     // Set by start() before any state exists, so before anything is sent.
     const facts = this.facts as UsageInstallFacts;
-    return { os: facts.os, appVersion: facts.appVersion, locale: facts.locale, cohort };
+    return { os: facts.os, appVersion: facts.appVersion, locale: facts.locale, cohort, teamDevice: facts.teamDevice };
   }
 
   private stamp(): string {
