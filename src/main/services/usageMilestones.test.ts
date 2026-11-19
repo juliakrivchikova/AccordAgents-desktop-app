@@ -608,14 +608,15 @@ test("feature history from what an installation keeps", () => {
   });
   assert.deepEqual(history, {
     customRole: true, memberRoleChanged: true, multiRoleChat: false, behaviorRule: true, document: false,
-    scheduledTask: true, memoryNote: false, phonePaired: true, urgentAlerts: false
-  });
+    scheduledTask: true, memoryNote: false, phonePaired: true, urgentAlerts: true
+  }, "alerts that could not be read count as set up");
   assert.equal(usageFeatureHistoryFrom({ chats: [], roles: [{ id: "old-one", archivedAt: "2026-01-01" }], savedMembers: [], plainDocument: true, approvedScheduledTasks: 0, memoryNotes: 3, phones: 0 }).customRole, true,
     "a role made and later deleted was still made");
   assert.deepEqual(usageFeatureHistoryFrom({}), {
     customRole: true, memberRoleChanged: true, multiRoleChat: true, behaviorRule: true, document: true,
-    scheduledTask: true, memoryNote: true, phonePaired: true, urgentAlerts: false
+    scheduledTask: true, memoryNote: true, phonePaired: true, urgentAlerts: true
   }, "what could not be read counts as used, so nothing old goes as new");
+  assert.equal(usageFeatureHistoryFrom({ urgentAlerts: false }).urgentAlerts, false);
 });
 
 test("the weekly snapshot stays once a week across restarts, and a failed or interrupted read leaves the week due", async () => {
@@ -699,5 +700,64 @@ test("an upgraded installation: skills, chats and documents from before the upgr
       message({ role: "user", content: "/review it", metadata: { skillMentions: [{ frontmatterName: "review" } as never] } })
     ]);
     assert.ok(features().includes("skill_invoked"));
+  });
+});
+
+test("an installation that looked up features before alerts were counted looks again once, and features keep counting from the first look", async () => {
+  await withDir(async (dir) => {
+    await writeFile(path.join(dir, USAGE_MILESTONES_FILE), JSON.stringify({
+      version: 1, cohort: "new", historyChecked: true, featureHistoryVersion: 1, featuresFrom: "2026-11-10T00:00:00.000Z",
+      reached: { first_launch: "2026-11-01T00:00:00.000Z" }, families: {}
+    }));
+    let reads = 0;
+    const { milestones, sent } = harness(dir, { readFeatureHistory: async () => { reads += 1; return { ...NO_FEATURES, urgentAlerts: true }; } });
+    await milestones.start();
+    milestones.reach("urgent_alert_set_up");
+    assert.equal(reads, 1);
+    assert.deepEqual(sent, [], "alerts set up before: recorded, not sent");
+    const stored = JSON.parse(await readFile(path.join(dir, USAGE_MILESTONES_FILE), "utf8")) as { featureHistoryVersion: number; featuresFrom: string };
+    assert.equal(stored.featureHistoryVersion, 2);
+    assert.equal(stored.featuresFrom, "2026-11-10T00:00:00.000Z", "features keep counting from the first look");
+  });
+});
+
+test("urgent alerts: a phone saved, or Telegram connecting while Settings is open, is the first setup; one made before is not", async () => {
+  await withDir(async (dir) => {
+    const first = harness(dir);
+    await first.milestones.start();
+    first.milestones.observeUrgentAlertRequest("settings", { ok: true, value: { telegram: { connected: true } } });
+    first.milestones.observeUrgentAlertRequest("settings", { ok: true, value: { telegram: { connected: true } } });
+    first.milestones.observeUrgentAlertRequest("phone.save", { ok: false });
+    assert.deepEqual(first.sent.map((signal) => signal.name), ["first_launch"], "connected already when first read: not a new setup");
+  });
+  await withDir(async (dir) => {
+    const { milestones, sent } = harness(dir);
+    await milestones.start();
+    milestones.observeUrgentAlertRequest("telegram.connect", { ok: true, value: {} });
+    milestones.observeUrgentAlertRequest("settings", { ok: true, value: { telegram: { connected: false, step: "start" } } });
+    milestones.observeUrgentAlertRequest("settings", { ok: true, value: { telegram: { connected: true } } });
+    assert.deepEqual(sent.map((signal) => signal.name), ["first_launch", "urgent_alert_set_up"]);
+  });
+  await withDir(async (dir) => {
+    const { milestones, sent } = harness(dir);
+    await milestones.start();
+    milestones.observeUrgentAlertRequest("phone.save", { ok: true, value: {} });
+    assert.deepEqual(sent.map((signal) => signal.name), ["first_launch", "urgent_alert_set_up"]);
+  });
+});
+
+test("a new installation from before alerts were counted keeps counting features from its first launch", async () => {
+  await withDir(async (dir) => {
+    await writeFile(path.join(dir, USAGE_MILESTONES_FILE), JSON.stringify({
+      version: 1, cohort: "new", historyChecked: true, featureHistoryVersion: 1,
+      reached: { first_launch: "2026-11-01T00:00:00.000Z" }, families: {}
+    }));
+    const { milestones, sent } = harness(dir);
+    await milestones.start();
+    // A chat made after its first launch, before the update, gets a second role now.
+    milestones.observeConversation(chat([ASSISTANT, ENGINEER, DESIGNER], "2026-11-05T00:00:00.000Z"), []);
+    assert.ok(sent.map((signal) => signal.name).includes("multi_role_chat"));
+    const stored = JSON.parse(await readFile(path.join(dir, USAGE_MILESTONES_FILE), "utf8")) as { featuresFrom?: string };
+    assert.equal(stored.featuresFrom, undefined);
   });
 });

@@ -1,4 +1,4 @@
-import { URGENT_ALERT_USER_ACTIONS, type UrgentAlertUserRequest } from "../shared/urgentAlerts";
+import { URGENT_ALERT_USER_ACTIONS, type UrgentAlertUserRequest, type UrgentAlertSettingsView } from "../shared/urgentAlerts";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -494,13 +494,16 @@ const usageMilestones = crashReportingStart.active
     readFeatureHistory: async () => {
       // A source that cannot be read leaves its features counted as used.
       const soft = <T>(read: Promise<T>): Promise<T | undefined> => read.catch(() => undefined);
-      const [chats, settings, documents, scripts, memoryNotes, devices] = await Promise.all([
+      const [chats, settings, documents, scripts, memoryNotes, devices, alerts] = await Promise.all([
         soft(storageService.listChatMemberProviders()),
         soft(settingsService.getPublicSettings()),
         soft(artifactStore.multiSignerDocumentStatus()),
         soft(scriptService.list()),
         soft(memoryMirror.size()),
-        soft(settingsService.listTrustedDevices())
+        soft(settingsService.listTrustedDevices()),
+        // Not softened: without the server's answer the history is read again
+        // next launch, so an old setup is neither sent nor assumed.
+        readUrgentAlertSettingsForHistory()
       ]);
       return usageFeatureHistoryFrom({
         chats,
@@ -509,7 +512,8 @@ const usageMilestones = crashReportingStart.active
         plainDocument: documents?.plain,
         approvedScheduledTasks: scripts?.filter((script) => script.approved).length,
         memoryNotes,
-        phones: devices?.filter((device) => device.role === "phone").length
+        phones: devices?.filter((device) => device.role === "phone").length,
+        urgentAlerts: alerts !== null && (alerts.telegram?.connected === true || Boolean(alerts.phone))
       });
     },
     readWeeklySnapshot: async (week) => {
@@ -534,6 +538,25 @@ settingsService.setUsageObserver(usageMilestones ? (event) => {
   if (event.roleChosen) usageMilestones.reach("member_role_changed");
   if (event.rulesAdded) usageMilestones.reach("behavior_rule_attached");
 } : undefined);
+
+/** How long the usage history waits for the server to say whether alerts
+ *  were set up (the link may still be starting, or the server updating). */
+const USAGE_ALERTS_HISTORY_WAIT_MS = 3 * 60_000;
+
+/** The alert settings for the usage history: null when this server has no
+ *  alerts to set up (an older server, or a device that may not set them).
+ *  Throws when the server does not answer in time, so the whole history is
+ *  read again next launch rather than guessed. */
+async function readUrgentAlertSettingsForHistory(): Promise<UrgentAlertSettingsView | null> {
+  const deadline = Date.now() + USAGE_ALERTS_HISTORY_WAIT_MS;
+  while (Date.now() < deadline) {
+    const result = await serverChatLink.alerts<UrgentAlertSettingsView>({ action: "settings" }, AbortSignal.timeout(Math.max(1000, deadline - Date.now())));
+    if (result.ok) return result.value;
+    if (result.error.code !== "server_unavailable" || /older than this app/.test(result.error.message)) return null;
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+  throw new Error("The server did not say whether alerts are set up.");
+}
 
 /** A member added to a chat from this computer: a role someone chose, rules,
  *  and a chat whose members have different roles now but did not before. */
@@ -2881,7 +2904,9 @@ function registerIpc(): void {
         alertsPublicUrlSaid = said.ok ? { key, at: Date.now() } : undefined;
       }
     }
-    return serverChatLink.alerts(request as UrgentAlertUserRequest);
+    const result = await serverChatLink.alerts<unknown>(request as UrgentAlertUserRequest);
+    usageMilestones?.observeUrgentAlertRequest(action, result);
+    return result;
   });
   ipcMain.handle("hub:setup-command", async (_event, request: import("../shared/hubSetup").HubSetupCommandRequest) => {
     const region = typeof request?.region === "string" ? request.region.trim() : "";
