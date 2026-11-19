@@ -16,7 +16,10 @@ const AUTH_URL = "https://claude.ai/api/organizations/org/mcp/start-auth/sentry?
 
 test("a connector already connected answers at once, with no card", async () => {
   const { service, storage, cli } = testService({ "claude.ai Sentry": "connected" });
+  let signedIn = 0;
+  service.setConnectorSignedInObserver(() => { signedIn += 1; });
   const result = await service.requestConnectorSignInFromTool(actor(), { connector: "claude.ai Sentry" });
+  assert.equal(signedIn, 0, "already connected: no sign-in through the card");
   assert.equal(result.status, "connected");
   assert.equal(approvals(storage).length, 0);
   assert.deepEqual(cli.sent.map((request) => request.subtype), ["mcp_status"]);
@@ -34,6 +37,8 @@ test("a name the CLI does not list gives the names like it, never the whole list
 
 test("signing in: the card carries the CLI's address, Done reconnects the server and the member gets connected", async () => {
   const { service, storage, cli } = testService({ "claude.ai Sentry": "needs-auth" });
+  let signedIn = 0;
+  service.setConnectorSignedInObserver(() => { signedIn += 1; });
   const asking = service.requestConnectorSignInFromTool(actor(), { connector: "Sentry", reason: "To read the crash in issue 42." });
   const card = await waitForCard(storage);
   assert.equal(card.toolName, APP_CONNECTOR_SIGN_IN_TOOL);
@@ -48,6 +53,7 @@ test("signing in: the card carries the CLI's address, Done reconnects the server
   const result = await asking;
 
   assert.equal(result.status, "connected");
+  assert.equal(signedIn, 1, "the usage signal is told once");
   assert.match(String(result.message), /available now, in this same reply/);
   assert.deepEqual(cli.sent.map((request) => request.subtype), ["mcp_status", "mcp_authenticate", "mcp_reconnect", "mcp_status"]);
   const answered = approvals(storage)[0];
@@ -58,21 +64,27 @@ test("signing in: the card carries the CLI's address, Done reconnects the server
 
 test("Done without finishing in the browser says the CLI still wants a sign-in", async () => {
   const { service, storage } = testService({ "claude.ai Sentry": "needs-auth" });
+  let signedIn = 0;
+  service.setConnectorSignedInObserver(() => { signedIn += 1; });
   const asking = service.requestConnectorSignInFromTool(actor(), { connector: "claude.ai Sentry" });
   const card = await waitForCard(storage);
   await service.respondToAppToolApproval({ conversationId: CHAT_ID, approvalId: card.id, approve: true });
   const result = await asking;
   assert.equal(result.status, "needs-auth");
+  assert.equal(signedIn, 0);
   assert.match(String(approvals(storage)[0].error), /still reports needs-auth/);
 });
 
 test("Not now declines, and nothing is reconnected", async () => {
   const { service, storage, cli } = testService({ "claude.ai Sentry": "needs-auth" });
+  let signedIn = 0;
+  service.setConnectorSignedInObserver(() => { signedIn += 1; });
   const asking = service.requestConnectorSignInFromTool(actor(), { connector: "claude.ai Sentry" });
   const card = await waitForCard(storage);
   await service.respondToAppToolApproval({ conversationId: CHAT_ID, approvalId: card.id, approve: false });
   const result = await asking;
   assert.equal(result.status, "declined");
+  assert.equal(signedIn, 0);
   assert.equal(approvals(storage)[0].status, "denied");
   assert.equal(cli.sent.some((request) => request.subtype === "mcp_reconnect"), false);
 });

@@ -2288,7 +2288,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 test("usage signals: a document for several signers is started, and signed only when all sign its newest version", async () => {
   const h = await harness();
   try {
-    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: false, signed: false });
+    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: false, signed: false, plain: false });
     expectOk(await h.service.create("gera", { conversationId: CONVERSATION_ID, name: "Solo drafts", initialState: "collecting_drafts",
       allowedDraftAuthors: ["gera"], requiredDraftAuthors: ["gera"], audiencePolicyByAuthor: { gera: { allowedReaders: [], requiredReaders: [] } },
       operationId: "usage:solo-drafts" }));
@@ -2296,26 +2296,26 @@ test("usage signals: a document for several signers is started, and signed only 
       name: "One signer", content: "solo", requiredSigners: ["user"] })));
     expectOk(await h.service.sign("user", { conversationId: CONVERSATION_ID, artifactId: solo.summary.id,
       versionEventId: solo.version.versionEventId, contentHash: solo.version.contentHash }));
-    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: false, signed: false }, "a one-signer document does not count");
+    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: false, signed: false, plain: true }, "a one-signer document is a plain one");
 
     const shared = expectPublished(expectOk(await h.service.create("gera", { conversationId: CONVERSATION_ID,
       name: "Resolution", content: "v1", requiredSigners: ["gera", "drew"] })));
-    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: true, signed: false });
+    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: true, signed: false, plain: true });
     const sign = async (actor: string, version: PublishedArtifactReadResult["version"]) => expectOk(await h.service.sign(actor, {
       conversationId: CONVERSATION_ID, artifactId: shared.summary.id, versionEventId: version.versionEventId, contentHash: version.contentHash }));
     await sign("gera", shared.version);
-    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: true, signed: false });
+    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: true, signed: false, plain: true });
     await sign("drew", shared.version);
-    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: true, signed: true });
+    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: true, signed: true, plain: true });
 
     // A newer version: the signatures on the old one no longer count.
     const revised = expectPublished(expectOk(await h.service.revise("gera", { conversationId: CONVERSATION_ID,
       artifactId: shared.summary.id, baseVersion: 1, content: "v2" })));
-    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: true, signed: false });
+    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: true, signed: false, plain: true });
     await sign("gera", revised.version);
-    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: true, signed: false });
+    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: true, signed: false, plain: true });
     await sign("drew", revised.version);
-    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: true, signed: true });
+    assert.deepEqual(await h.store.multiSignerDocumentStatus(), { started: true, signed: true, plain: true });
 
     // Drafts for several authors start one too, before anything is signed.
     const other = await harness();
@@ -2324,14 +2324,14 @@ test("usage signals: a document for several signers is started, and signed only 
         contributors: ["drew"], allowedDraftAuthors: ["gera", "drew"], requiredDraftAuthors: ["gera", "drew"],
         audiencePolicyByAuthor: { gera: { allowedReaders: [], requiredReaders: [] }, drew: { allowedReaders: ["gera"], requiredReaders: ["gera"] } },
         operationId: "usage:collecting" }));
-      assert.deepEqual(await other.store.multiSignerDocumentStatus(), { started: true, signed: false });
+      assert.deepEqual(await other.store.multiSignerDocumentStatus(), { started: true, signed: false, plain: false });
     } finally { await other.cleanup(); }
 
     // Counted from a moment after all of that (a copy of older documents):
     // neither is new. A draft for several authors made since then is.
     const later = new Date(Date.now() + 60_000).toISOString();
-    assert.deepEqual(await h.store.multiSignerDocumentStatus(later), { started: false, signed: false });
+    assert.deepEqual(await h.store.multiSignerDocumentStatus(later), { started: false, signed: false, plain: false });
     const before = new Date(Date.now() - 60 * 60_000).toISOString();
-    assert.deepEqual(await h.store.multiSignerDocumentStatus(before), { started: true, signed: true });
+    assert.deepEqual(await h.store.multiSignerDocumentStatus(before), { started: true, signed: true, plain: true });
   } finally { await h.cleanup(); }
 });

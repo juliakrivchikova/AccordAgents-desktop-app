@@ -6,16 +6,25 @@ import {
   USAGE_EXISTING_INSTALL,
   USAGE_MILESTONES,
   USAGE_PROVIDER_FAMILIES,
+  USAGE_ASSISTANT_ROLE_ID,
+  USAGE_BUILTIN_ROLE_IDS,
+  USAGE_ISO_WEEK_PATTERN,
   USAGE_PROVIDER_FIRST_USED,
+  USAGE_WEEKLY_SNAPSHOT,
+  usageIsoWeek,
   usageMemberFamilies,
+  usageMultiRoleChat,
+  usageRoleChosen,
   usageSignalAttributes,
+  usageWeeklySnapshotAttributes,
   type UsageInstallCohort,
   type UsageMilestone,
   type UsageOs,
   type UsageProviderFamily,
   type UsageSignalAttributes,
   type UsageSignalExtra,
-  type UsageSignalName
+  type UsageSignalName,
+  type UsageWeeklySnapshot
 } from "../../shared/usageSignals";
 
 /** Which signals this installation has sent, so none is sent twice. Outside
@@ -48,6 +57,34 @@ interface UsageMilestonesState {
   /** Steps count from here (set when reports came back on); the first
    *  launch otherwise. */
   countFrom?: string;
+  /** The version of the feature list whose earlier use was looked up
+   *  (installations that started reporting before a feature signal existed
+   *  have not: what they had used is recorded as sent, not sent). */
+  featureHistoryVersion?: number;
+  /** Features count from here on an installation that was already
+   *  reporting when feature signals came: what its chats and documents show
+   *  from before is not a first use. */
+  featuresFrom?: string;
+  /** The ISO week the last weekly snapshot was sent for. */
+  snapshotWeek?: string;
+}
+
+/** Which features an installation had already used before it could report
+ *  them, read from what it keeps. */
+/** The version of the list of features whose earlier use is looked up;
+ *  raised when a feature signal is added, so installations look again. */
+export const USAGE_FEATURE_HISTORY_VERSION = 1;
+
+export interface UsageFeatureHistory {
+  customRole: boolean;
+  memberRoleChanged: boolean;
+  multiRoleChat: boolean;
+  behaviorRule: boolean;
+  document: boolean;
+  scheduledTask: boolean;
+  memoryNote: boolean;
+  phonePaired: boolean;
+  urgentAlerts: boolean;
 }
 
 /** What an installation that was in use before these signals had already
@@ -81,9 +118,13 @@ export interface UsageMilestonesOptions {
   /** Read once the app is ready (the system language is known only then). */
   installFacts(): UsageInstallFacts;
   readHistory(): Promise<UsageHistory>;
-  /** Whether a document for several signers was made since `since`, and
-   *  whether one got the last of its signatures since then. */
-  readDocuments(since: string): Promise<{ started: boolean; signed: boolean }>;
+  readFeatureHistory(): Promise<UsageFeatureHistory>;
+  /** This week's numbers (members, roles), read when one is due. */
+  readWeeklySnapshot(week: string): Promise<UsageWeeklySnapshot>;
+  /** Whether a document for several signers was made since `since`,
+   *  whether one got the last of its signatures since then, and whether a
+   *  document for fewer signers (outside an Accord) was made since then. */
+  readDocuments(since: string, plainSince: string): Promise<{ started: boolean; signed: boolean; plain: boolean }>;
   log?(event: string, payload: Record<string, unknown>): void;
   now?(): Date;
 }
@@ -94,15 +135,13 @@ type PendingSignal =
 
 const STANDALONE_ACCORD_TOKEN = /(^|\s)\/accord\b/i;
 
-/** The Assistant, which every chat has without anyone adding it. */
-const ASSISTANT_ROLE_CONFIG_ID = "administrator";
 
 type UsageMember = { kind?: unknown; hostId?: unknown; hostVendor?: unknown; roleConfigId?: unknown };
 
 /** The provider families of the members a person added to a chat (the
  *  Assistant is in every chat, so it does not make a chat mixed). */
 function addedMemberFamilies(members: ReadonlyArray<UsageMember | null | undefined>): Set<UsageProviderFamily> {
-  return usageMemberFamilies(members.filter((member) => member?.roleConfigId !== ASSISTANT_ROLE_CONFIG_ID));
+  return usageMemberFamilies(members.filter((member) => member?.roleConfigId !== USAGE_ASSISTANT_ROLE_ID));
 }
 
 /** How far before an installation's first launch a chat or message made on
@@ -125,11 +164,15 @@ function madeSince(createdAt: unknown, since: number): boolean {
 export function chatUsageFacts(
   conversation: Pick<Conversation, "kind" | "metadata" | "createdAt">,
   messages: ReadonlyArray<ChatMessage> | undefined,
-  since?: string
+  since?: string,
+  /** Where feature uses count from (`since` when absent). */
+  featureSince?: string
 ): {
   chat: boolean;
   /** Made since `since`. */
   newChat: boolean;
+  /** Made since `featureSince`. */
+  newChatForFeatures: boolean;
   /** Every member's family, the Assistant's too. */
   families: UsageProviderFamily[];
   /** The families of the members a person added. */
@@ -137,18 +180,26 @@ export function chatUsageFacts(
   reply: boolean;
   memberRequest: boolean;
   accordStarted: boolean;
+  /** Members a person added have different roles. */
+  multiRole: boolean;
+  /** A member has a role someone chose (not the app's default). */
+  roleChosen: boolean;
+  /** A person's message used a skill. */
+  skill: boolean;
 } {
   if (conversation.kind !== "chat") {
-    return { chat: false, newChat: false, families: [], addedFamilies: [], reply: false, memberRequest: false, accordStarted: false };
+    return { chat: false, newChat: false, newChatForFeatures: false, families: [], addedFamilies: [], reply: false, memberRequest: false, accordStarted: false, multiRole: false, roleChosen: false, skill: false };
   }
   const sinceMs = since ? Date.parse(since) : Number.NaN;
+  const featureSinceMs = featureSince ? Date.parse(featureSince) : sinceMs;
   const participants = Array.isArray(conversation.metadata?.participants) ? conversation.metadata.participants : [];
   const families = usageMemberFamilies(participants);
-  const assistantIds = new Set(participants.filter((member) => member?.roleConfigId === ASSISTANT_ROLE_CONFIG_ID).map((member) => member.id));
+  const assistantIds = new Set(participants.filter((member) => member?.roleConfigId === USAGE_ASSISTANT_ROLE_ID).map((member) => member.id));
   const roles = new Map((messages ?? []).map((message) => [message.id, message.role]));
   let reply = false;
   let memberRequest = false;
   let accordStarted = false;
+  let skill = false;
   for (const message of messages ?? []) {
     if (!madeSince(message.createdAt, sinceMs)) continue;
     if (message.role === "participant" && message.status === "done" && !message.metadata?.terminalReason && typeof message.content === "string" && message.content.trim()) {
@@ -163,15 +214,25 @@ export function chatUsageFacts(
     if (message.role === "user" && isAccordStart(message)) {
       accordStarted = true;
     }
+    // A skill a person used; an Accord (its launcher adds the mention on its
+    // own) has its own steps.
+    if (message.role === "user" && madeSince(message.createdAt, featureSinceMs) &&
+      (message.metadata?.skillMentions ?? []).some((mention) => mention.frontmatterName !== "accord")) {
+      skill = true;
+    }
   }
   return {
     chat: true,
     newChat: madeSince(conversation.createdAt, sinceMs),
+    newChatForFeatures: madeSince(conversation.createdAt, featureSinceMs),
     families: [...families],
     addedFamilies: [...addedMemberFamilies(participants)],
     reply,
     memberRequest,
-    accordStarted
+    accordStarted,
+    multiRole: usageMultiRoleChat(participants),
+    roleChosen: participants.some((member) => usageRoleChosen(member?.roleConfigId)),
+    skill
   };
 }
 
@@ -207,6 +268,44 @@ export function usageHistoryFrom(
   };
 }
 
+/** Which features an existing installation had already used, from what it
+ *  keeps: its chats' members, its saved members and roles, documents,
+ *  scheduled tasks, memory notes and paired phones. */
+export function usageFeatureHistoryFrom(input: {
+  /** Each source is undefined when it could not be read: a feature it
+   *  would show then counts as used before, so nothing old is sent as new. */
+  chats?: ReadonlyArray<ReadonlyArray<UsageMember & { behaviorRuleCount?: number }>>;
+  roles?: ReadonlyArray<{ id: string; builtIn?: boolean; archivedAt?: string }>;
+  savedMembers?: ReadonlyArray<{ roleConfigId?: string; behaviorRuleIds?: string[] }>;
+  plainDocument?: boolean;
+  /** Scheduled tasks the User approved (a proposal no one approved is not
+   *  one). */
+  approvedScheduledTasks?: number;
+  memoryNotes?: number;
+  phones?: number;
+  urgentAlerts?: boolean;
+}): UsageFeatureHistory {
+  const chatMembers = input.chats?.flat();
+  const savedMembers = input.savedMembers;
+  const usedOrUnknown = (known: boolean | undefined) => known === undefined || known;
+  return {
+    // A role made and later deleted was still made.
+    customRole: usedOrUnknown(input.roles?.some((role) => !role.builtIn && !USAGE_BUILTIN_ROLE_IDS.has(role.id))),
+    memberRoleChanged: !savedMembers || !chatMembers ||
+      savedMembers.some((member) => usageRoleChosen(member.roleConfigId)) ||
+      chatMembers.some((member) => usageRoleChosen(member?.roleConfigId)),
+    multiRoleChat: usedOrUnknown(input.chats?.some((members) => usageMultiRoleChat(members))),
+    behaviorRule: !savedMembers || !chatMembers ||
+      savedMembers.some((member) => (member.behaviorRuleIds?.length ?? 0) > 0) ||
+      chatMembers.some((member) => (member?.behaviorRuleCount ?? 0) > 0),
+    document: usedOrUnknown(input.plainDocument),
+    scheduledTask: usedOrUnknown(input.approvedScheduledTasks === undefined ? undefined : input.approvedScheduledTasks > 0),
+    memoryNote: usedOrUnknown(input.memoryNotes === undefined ? undefined : input.memoryNotes > 0),
+    phonePaired: usedOrUnknown(input.phones === undefined ? undefined : input.phones > 0),
+    urgentAlerts: input.urgentAlerts === true
+  };
+}
+
 /**
  * The once-per-installation usage signals. Exists only in a launch with
  * reports on; a signal counts as sent only once the SDK has taken it, so
@@ -222,6 +321,7 @@ export class UsageMilestones {
   private pending?: Map<string, PendingSignal>;
   private documentsReading = false;
   private documentsAgain = false;
+  private snapshotReading = false;
 
   constructor(private readonly options: UsageMilestonesOptions) {}
 
@@ -251,13 +351,37 @@ export class UsageMilestones {
         version: 1,
         cohort,
         historyChecked: cohort === "new",
+        ...(cohort === "new" ? { featureHistoryVersion: USAGE_FEATURE_HISTORY_VERSION } : {}),
         reached: { first_launch: this.stamp() },
         families: {}
       };
       this.writeState();
     }
-    if (!this.state.historyChecked) {
+    if (!this.state.historyChecked || (this.state.featureHistoryVersion ?? 0) < USAGE_FEATURE_HISTORY_VERSION) {
       await this.checkHistory();
+    }
+    await this.sendWeeklySnapshotIfDue();
+  }
+
+  /** Sends this week's snapshot once, if it has not gone yet (checked at
+   *  start and then now and again while the app stays open). */
+  async sendWeeklySnapshotIfDue(): Promise<void> {
+    const state = this.state;
+    if (!state || this.pending || this.snapshotReading) return;
+    const week = usageIsoWeek(this.options.now?.() ?? new Date());
+    if (state.snapshotWeek === week) return;
+    this.snapshotReading = true;
+    try {
+      const snapshot = await this.options.readWeeklySnapshot(week);
+      // Turned off, or another week's snapshot went, while it was read.
+      if (this.state !== state || state.snapshotWeek === week) return;
+      if (!this.options.send(USAGE_WEEKLY_SNAPSHOT, usageWeeklySnapshotAttributes(this.context(), snapshot))) return;
+      state.snapshotWeek = week;
+      this.writeState();
+    } catch (error) {
+      this.log("usage.snapshot.read-failed", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.snapshotReading = false;
     }
   }
 
@@ -283,6 +407,15 @@ export class UsageMilestones {
     const from = this.state?.reached.first_launch;
     const at = from ? Date.parse(from) : Number.NaN;
     return Number.isFinite(at) ? new Date(at - CLOCK_SKEW_MS).toISOString() : undefined;
+  }
+
+  /** The moment feature uses count from: the same, or later on an
+   *  installation that was reporting before feature signals came. */
+  private featureSince(): string | undefined {
+    const since = this.countingSince();
+    const from = this.state?.featuresFrom;
+    if (!from) return since;
+    return !since || Date.parse(from) > Date.parse(since) ? from : since;
   }
 
   /** A step reached; sent the first time only. */
@@ -320,14 +453,20 @@ export class UsageMilestones {
     // Once every step a message can show is done, the messages are not read.
     const facts = chatUsageFacts(
       conversation,
-      reached.first_reply && reached.first_member_request && reached.first_accord_started ? undefined : messages,
-      this.countingSince()
+      reached.first_reply && reached.first_member_request && reached.first_accord_started && reached.skill_invoked ? undefined : messages,
+      this.countingSince(),
+      this.featureSince()
     );
     this.useFamilies(facts.families);
     if (facts.newChat) {
       this.reach("first_chat");
       if (facts.addedFamilies.length >= 2) this.reach("second_model");
     }
+    if (facts.newChatForFeatures) {
+      if (facts.multiRole) this.reach("multi_role_chat");
+      if (facts.roleChosen) this.reach("member_role_changed");
+    }
+    if (facts.skill) this.reach("skill_invoked");
     if (facts.reply) this.reach("first_reply");
     if (facts.memberRequest) this.reach("first_member_request");
     if (facts.accordStarted) this.reach("first_accord_started");
@@ -350,7 +489,8 @@ export class UsageMilestones {
   /** A chat's documents changed: looks whether an Accord's document now
    *  exists or is signed by all its signers (one read at a time). */
   observeDocuments(): void {
-    if (!this.state || (this.state.reached.first_accord_started && this.state.reached.first_accord_signed)) return;
+    const reached = this.state?.reached;
+    if (!reached || (reached.first_accord_started && reached.first_accord_signed && reached.document_created)) return;
     if (this.documentsReading) {
       this.documentsAgain = true;
       return;
@@ -358,9 +498,10 @@ export class UsageMilestones {
     const since = this.countingSince();
     if (!since) return;
     this.documentsReading = true;
-    void this.options.readDocuments(since).then((documents) => {
+    void this.options.readDocuments(since, this.featureSince() ?? since).then((documents) => {
       if (documents.started) this.reach("first_accord_started");
       if (documents.signed) this.reach("first_accord_signed");
+      if (documents.plain) this.reach("document_created");
     }, (error: unknown) => {
       this.log("usage.documents.read-failed", { message: error instanceof Error ? error.message : String(error) });
     }).finally(() => {
@@ -380,31 +521,32 @@ export class UsageMilestones {
     if (!state) return;
     this.pending = new Map();
     try {
-      const history = await this.options.readHistory();
       const stamp = this.stamp();
       const done = (milestone: UsageMilestone) => {
         state.reached[milestone] ??= stamp;
       };
-      if (history.hasChat) {
-        // A chat in use means the CLIs worked and members answered; replies
-        // and member requests are not looked up one by one (that would mean
-        // reading every message of a profile that can hold gigabytes).
-        done("cli_ready");
-        done("first_chat");
-        done("first_reply");
+      if ((state.featureHistoryVersion ?? 0) < USAGE_FEATURE_HISTORY_VERSION) {
+        const features = await this.options.readFeatureHistory();
+        if (features.customRole) done("custom_role_created");
+        if (features.memberRoleChanged) done("member_role_changed");
+        if (features.multiRoleChat) done("multi_role_chat");
+        if (features.behaviorRule) done("behavior_rule_attached");
+        if (features.document) done("document_created");
+        if (features.scheduledTask) done("scheduled_task_created");
+        if (features.memoryNote) done("memory_note_written");
+        if (features.phonePaired) done("phone_paired");
+        if (features.urgentAlerts) done("urgent_alert_set_up");
+        // The terminal, dictation, file previews, connector sign-ins and
+        // skills leave nothing to read back: their first use from now on is
+        // sent, marked with the installation's cohort.
+        state.featureHistoryVersion = USAGE_FEATURE_HISTORY_VERSION;
+        state.featuresFrom ??= stamp;
       }
-      if (history.mixedFamilies) done("second_model");
-      if (history.accordStarted) {
-        done("first_accord_started");
-        // An Accord's facilitator asks the other members through member
-        // requests, so a document for several signers means one was made.
-        done("first_member_request");
+      if (state.historyChecked) {
+        this.writeState();
+      } else {
+        await this.checkFirstStepHistory(state, done);
       }
-      if (history.accordSigned) done("first_accord_signed");
-      if (history.hasMachine) done("first_cloud_machine");
-      for (const family of history.families) state.families[family] ??= stamp;
-      state.historyChecked = true;
-      this.writeState();
     } catch (error) {
       this.log("usage.history.read-failed", { message: error instanceof Error ? error.message : String(error) });
       this.pending = undefined;
@@ -421,6 +563,32 @@ export class UsageMilestones {
       if (signal.kind === "milestone") this.reach(signal.milestone, signal.extra);
       else this.useFamilies([signal.family]);
     }
+  }
+
+  /** The first steps an existing installation had already taken. */
+  private async checkFirstStepHistory(state: UsageMilestonesState, done: (milestone: UsageMilestone) => void): Promise<void> {
+    const history = await this.options.readHistory();
+    const stamp = this.stamp();
+    if (history.hasChat) {
+      // A chat in use means the CLIs worked and members answered; replies
+      // and member requests are not looked up one by one (that would mean
+      // reading every message of a profile that can hold gigabytes).
+      done("cli_ready");
+      done("first_chat");
+      done("first_reply");
+    }
+    if (history.mixedFamilies) done("second_model");
+    if (history.accordStarted) {
+      done("first_accord_started");
+      // An Accord's facilitator asks the other members through member
+      // requests, so a document for several signers means one was made.
+      done("first_member_request");
+    }
+    if (history.accordSigned) done("first_accord_signed");
+    if (history.hasMachine) done("first_cloud_machine");
+    for (const family of history.families) state.families[family] ??= stamp;
+    state.historyChecked = true;
+    this.writeState();
   }
 
   private context(cohort = this.state?.cohort ?? "new") {
@@ -473,10 +641,13 @@ export class UsageMilestones {
         version: 1,
         cohort: parsed.cohort,
         historyChecked: parsed.historyChecked === true,
+        ...(typeof parsed.featureHistoryVersion === "number" && Number.isInteger(parsed.featureHistoryVersion) ? { featureHistoryVersion: parsed.featureHistoryVersion } : {}),
+        ...(moment(parsed.featuresFrom) ? { featuresFrom: moment(parsed.featuresFrom) } : {}),
         reached,
         families,
         ...(pausedAt ? { pausedAt } : {}),
-        ...(countFrom ? { countFrom } : {})
+        ...(countFrom ? { countFrom } : {}),
+        ...(typeof parsed.snapshotWeek === "string" && USAGE_ISO_WEEK_PATTERN.test(parsed.snapshotWeek) ? { snapshotWeek: parsed.snapshotWeek } : {})
       };
     } catch (error) {
       // A file this launch cannot read (damaged, or from a newer version):

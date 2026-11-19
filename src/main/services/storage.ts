@@ -387,6 +387,19 @@ const LEGACY_META_KEYS = ["chat-event-clock-v1"] as const;
 const LEGACY_DROP_BATCH_ROWS = 500;
 const LEGACY_DROP_PAUSE_MS = 100;
 
+/** One chat member's fields the usage signals read: its provider, role and
+ *  saved member, and how many behavior rules it has. Nothing here is sent;
+ *  the signals reduce it to families, counts and the app's own role ids. */
+export interface ChatMemberProviderRow {
+  kind?: unknown;
+  hostId?: unknown;
+  hostVendor?: unknown;
+  roleConfigId?: unknown;
+  participantConfigId?: unknown;
+  handle?: unknown;
+  behaviorRuleCount?: number;
+}
+
 export class StorageService {
   private sqliteSession?: SqliteSession;
   private hubStorage?: HubStorage;
@@ -644,14 +657,17 @@ export class StorageService {
    *  query over the chats' own rows, the same body the chat list reads, that
    *  returns only those fields; no message is read, and a chat whose
    *  row cannot be read is left out rather than failing the rest. */
-  async listChatMemberProviders(): Promise<Array<Array<{ kind?: unknown; hostId?: unknown; hostVendor?: unknown; roleConfigId?: unknown }>>> {
+  async listChatMemberProviders(): Promise<Array<Array<ChatMemberProviderRow>>> {
     await this.init();
-    const rows = await this.queryJson<{ id: string; kind?: unknown; hostId?: unknown; hostVendor?: unknown; roleConfigId?: unknown; member?: number | null }>(
+    const rows = await this.queryJson<{ id: string; kind?: unknown; hostId?: unknown; hostVendor?: unknown; roleConfigId?: unknown; participantConfigId?: unknown; handle?: unknown; behaviorRuleCount?: unknown; member?: number | null }>(
       `select c.id as id,
               json_extract(p.value, '$.kind') as kind,
               json_extract(p.value, '$.hostId') as hostId,
               json_extract(p.value, '$.hostVendor') as hostVendor,
               json_extract(p.value, '$.roleConfigId') as roleConfigId,
+              json_extract(p.value, '$.participantConfigId') as participantConfigId,
+              json_extract(p.value, '$.handle') as handle,
+              coalesce(json_array_length(p.value, '$.behaviorRuleIds'), 0) as behaviorRuleCount,
               p.key as member
        from (
          select id, coalesce(nullif(body_json, ''), payload_json) as body
@@ -664,7 +680,7 @@ export class StorageService {
        ) p
        order by c.id;`
     );
-    const chats = new Map<string, Array<{ kind?: unknown; hostId?: unknown; hostVendor?: unknown; roleConfigId?: unknown }>>();
+    const chats = new Map<string, Array<ChatMemberProviderRow>>();
     for (const row of rows) {
       const members = chats.get(row.id) ?? [];
       if (row.member !== null && row.member !== undefined) {
@@ -672,7 +688,10 @@ export class StorageService {
           kind: row.kind ?? undefined,
           hostId: row.hostId ?? undefined,
           hostVendor: row.hostVendor ?? undefined,
-          roleConfigId: row.roleConfigId ?? undefined
+          roleConfigId: row.roleConfigId ?? undefined,
+          participantConfigId: row.participantConfigId ?? undefined,
+          handle: row.handle ?? undefined,
+          behaviorRuleCount: typeof row.behaviorRuleCount === "number" ? row.behaviorRuleCount : 0
         });
       }
       chats.set(row.id, members);
