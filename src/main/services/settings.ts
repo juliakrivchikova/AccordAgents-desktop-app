@@ -1,3 +1,4 @@
+import { usageRoleChosen } from "../../shared/usageSignals";
 import { cloudRunSelection } from "../../shared/cloudRunPreparation";
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
@@ -1926,6 +1927,29 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
   ...role
 }));
 
+/** The ids of the app's own roles (the usage signals name only these). */
+export const BUILTIN_CHAT_ROLE_IDS: readonly string[] = DEFAULT_CHAT_ROLES.map((role) => role.id);
+/** The role the app gives a member it adds on its own (a role other than
+ *  this one, or the Assistant's, is a role someone chose). */
+export const DEFAULT_MEMBER_ROLE_ID = GENERIC_PARTICIPANT_ROLE_ID;
+
+/** What a settings save did that the computer's usage signals count. */
+export type SettingsUsageEvent =
+  | { kind: "role-created" }
+  | { kind: "member-saved"; roleChosen: boolean; rulesAdded: boolean };
+
+/** A saved member's change as the usage signals see it: a role someone
+ *  chose that it did not have before, and rules it did not have before. */
+function memberUsageEvent(previous: ChatParticipantConfig | undefined, next: ChatParticipantConfig): SettingsUsageEvent {
+  const chosen = usageRoleChosen(next.roleConfigId);
+  const previousRules = new Set(previous?.behaviorRuleIds ?? []);
+  return {
+    kind: "member-saved",
+    roleChosen: chosen && previous?.roleConfigId !== next.roleConfigId,
+    rulesAdded: (next.behaviorRuleIds ?? []).some((id) => !previousRules.has(id))
+  };
+}
+
 /** `encryptedMachinePowerPrevious` when the key a save replaced was none. */
 const NO_MACHINE_POWER = "none";
 
@@ -1956,6 +1980,22 @@ function normalizeHubSetting(value: unknown): HubLinkConfig | undefined {
 }
 
 export class SettingsService {
+  /** Told what a save did, on the computer only (a machine's runtime sets
+   *  none): the usage signals. */
+  private usageObserver?: (event: SettingsUsageEvent) => void;
+
+  setUsageObserver(observer: ((event: SettingsUsageEvent) => void) | undefined): void {
+    this.usageObserver = observer;
+  }
+
+  private notifyUsage(event: SettingsUsageEvent): void {
+    try {
+      this.usageObserver?.(event);
+    } catch {
+      // An observer never changes what a save does.
+    }
+  }
+
   private readonly settingsPath: string;
   private storedState: StoredSettings | undefined;
   private storedReadError?: unknown;
@@ -2214,6 +2254,7 @@ export class SettingsService {
     }
 
     await this.writeStored(stored);
+    if (!existing) this.notifyUsage({ kind: "role-created" });
     return this.getPublicSettings();
   }
 
@@ -2339,6 +2380,9 @@ export class SettingsService {
     }
 
     let participants = [...(stored.chatParticipantConfigs ?? [])];
+    const usageEvents: SettingsUsageEvent[] = roleOperations.some((operation) => operation.type === "create_role")
+      ? [{ kind: "role-created" }]
+      : [];
     for (const update of participantUpdates) {
       const handle = update.handle.trim().replace(/^@/, "");
       const roleConfigId = roleIdByDraftRoleRef[update.roleConfigId] ?? update.roleConfigId;
@@ -2382,6 +2426,7 @@ export class SettingsService {
         autoWatchEnabled: this.autoWatchEnabledForRole(role, update.autoWatchEnabled),
         updatedAt: now
       };
+      usageEvents.push(memberUsageEvent(existingParticipant, nextParticipant));
       participants = participants.some((participant) => participant.id === nextParticipant.id)
         ? participants.map((participant) => (participant.id === nextParticipant.id ? nextParticipant : participant))
         : [...participants, nextParticipant];
@@ -2390,6 +2435,7 @@ export class SettingsService {
     stored.chatRoleConfigs = roles;
     stored.chatParticipantConfigs = participants;
     await this.writeStored(stored);
+    for (const event of usageEvents) this.notifyUsage(event);
     return { settings: await this.getPublicSettings(), roleIdByDraftRoleRef };
   }
 
@@ -2593,6 +2639,7 @@ export class SettingsService {
       : [...participants, nextParticipant];
 
     await this.writeStored(stored);
+    this.notifyUsage(memberUsageEvent(existingParticipant, nextParticipant));
     return this.getPublicSettings();
   }
 

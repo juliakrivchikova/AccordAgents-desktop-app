@@ -4,8 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { AgentHealth, ChatMessage, Conversation } from "../../shared/types";
-import type { UsageSignalAttributes, UsageSignalName } from "../../shared/usageSignals";
-import { USAGE_MILESTONES_FILE, UsageMilestones, chatUsageFacts, usageHistoryFrom, usageProfileUsedBefore, type UsageHistory, type UsageMilestonesOptions } from "./usageMilestones";
+import { USAGE_ASSISTANT_ROLE_ID, USAGE_BUILTIN_ROLE_IDS, USAGE_DEFAULT_MEMBER_ROLE_ID, type UsageSignalAttributes, type UsageSignalName, type UsageWeeklySnapshot } from "../../shared/usageSignals";
+import { BUILTIN_CHAT_ROLE_IDS, DEFAULT_MEMBER_ROLE_ID } from "./settings";
+import { USAGE_MILESTONES_FILE, UsageMilestones, chatUsageFacts, usageFeatureHistoryFrom, usageHistoryFrom, usageProfileUsedBefore, type UsageFeatureHistory, type UsageHistory, type UsageMilestonesOptions } from "./usageMilestones";
 
 interface Sent {
   name: UsageSignalName;
@@ -13,6 +14,14 @@ interface Sent {
 }
 
 const FACTS = { os: "mac" as const, appVersion: "1.11.9", locale: "zh-CN" };
+const NO_FEATURES: UsageFeatureHistory = {
+  customRole: false, memberRoleChanged: false, multiRoleChat: false, behaviorRule: false, document: false,
+  scheduledTask: false, memoryNote: false, phonePaired: false, urgentAlerts: false
+};
+const EMPTY_SNAPSHOT: UsageWeeklySnapshot = {
+  week: "", members_total: "0", max_members_in_chat: "0", chats_with_2plus_members: "0",
+  distinct_roles_in_use: 0, custom_roles_count: 0, builtin_roles_in_use: "none"
+};
 const NO_HISTORY: UsageHistory = { hasChat: false, families: [], mixedFamilies: false, accordStarted: false, accordSigned: false, hasMachine: false };
 
 async function withDir(run: (dir: string) => Promise<void>): Promise<void> {
@@ -26,22 +35,26 @@ async function withDir(run: (dir: string) => Promise<void>): Promise<void> {
 
 function harness(dir: string, overrides: Partial<UsageMilestonesOptions> & { reportsOn?: () => boolean } = {}) {
   const sent: Sent[] = [];
+  // Weekly snapshots are kept apart: the step tests read `sent` alone.
+  const snapshots: Sent[] = [];
   const reportsOn = overrides.reportsOn ?? (() => true);
   const milestones = new UsageMilestones({
     userDataDir: dir,
     profileUsedBefore: false,
     send: (name, attributes) => {
       if (!reportsOn()) return false;
-      sent.push({ name, attributes });
+      (name === "weekly_snapshot" ? snapshots : sent).push({ name, attributes });
       return true;
     },
     installFacts: () => FACTS,
     readHistory: async () => NO_HISTORY,
-    readDocuments: async () => ({ started: false, signed: false }),
+    readDocuments: async () => ({ started: false, signed: false, plain: false }),
+    readFeatureHistory: async () => NO_FEATURES,
+    readWeeklySnapshot: async (week) => ({ ...EMPTY_SNAPSHOT, week }),
     now: () => NOW,
     ...overrides
   });
-  return { milestones, sent };
+  return { milestones, sent, snapshots };
 }
 
 const NOW = new Date("2026-11-12T10:00:00.000Z");
@@ -57,12 +70,28 @@ function message(fields: Partial<ChatMessage>): ChatMessage {
 }
 
 const ASSISTANT = { id: "assistant-id", kind: "codex-cli", handle: "assistant", roleConfigId: "administrator" };
-const CLAUDE = { kind: "claude-code", handle: "taylor", roleConfigId: "engineer" };
-const CODEX = { kind: "codex-cli", handle: "drew", roleConfigId: "engineer" };
+const CLAUDE = { kind: "claude-code", handle: "taylor", roleConfigId: "generic-participant" };
+const CODEX = { kind: "codex-cli", handle: "drew", roleConfigId: "generic-participant" };
 const MY_ENDPOINT = { kind: "claude-code", handle: "secret-bot", hostId: "host-1", hostLabel: "Acme internal gateway", hostVendor: "custom", model: "acme-llm-7b" };
 
 function base(name: string, cohort: "new" | "existing" = "new"): UsageSignalAttributes {
   return { milestone: name, install_cohort: cohort, os: "mac", app_version: "1.11.9", locale: "zh-CN" };
+}
+
+/** A history read that answers only once released, whenever it is asked. */
+function heldHistory(history: UsageHistory): { readHistory: () => Promise<UsageHistory>; release: () => void } {
+  let released = false;
+  let answer: (() => void) | undefined;
+  return {
+    readHistory: () => new Promise((resolve) => {
+      answer = () => resolve(history);
+      if (released) answer();
+    }),
+    release: () => {
+      released = true;
+      answer?.();
+    }
+  };
 }
 
 async function flushDocuments(): Promise<void> {
@@ -167,14 +196,9 @@ test("a custom endpoint is only `custom`: no name, address or model leaves", asy
 
 test("an existing installation sends existing_install, and what it had done counts as sent", async () => {
   await withDir(async (dir) => {
-    let releaseHistory: () => void = () => undefined;
-    const history: UsageHistory = { hasChat: true, families: ["claude-code"], mixedFamilies: false, accordStarted: false, accordSigned: false, hasMachine: false };
-    const { milestones, sent } = harness(dir, {
-      profileUsedBefore: true,
-      readHistory: () => new Promise((resolve) => {
-        releaseHistory = () => resolve(history);
-      })
-    });
+    const held = heldHistory({ hasChat: true, families: ["claude-code"], mixedFamilies: false, accordStarted: false, accordSigned: false, hasMachine: false });
+    const releaseHistory = held.release;
+    const { milestones, sent } = harness(dir, { profileUsedBefore: true, readHistory: held.readHistory });
     const starting = milestones.start();
     // Seen while the history is read: an old chat's update, and a first
     // member request made right after the update.
@@ -240,19 +264,19 @@ test("cli_ready waits for a ready CLI and says which are ready", async () => {
 
 test("an Accord's document is reported started and then signed, each once", async () => {
   await withDir(async (dir) => {
-    let documents = { started: true, signed: false };
+    let documents: { started: boolean; signed: boolean; plain: boolean } = { started: true, signed: false, plain: false };
     let reads = 0;
     const { milestones, sent } = harness(dir, { readDocuments: async () => { reads += 1; return documents; } });
     await milestones.start();
     milestones.observeDocuments();
     await flushDocuments();
-    documents = { started: true, signed: true };
+    documents = { started: true, signed: true, plain: true };
     milestones.observeDocuments();
     milestones.observeDocuments();
     await flushDocuments();
     milestones.observeDocuments();
     await flushDocuments();
-    assert.deepEqual(sent.map((signal) => signal.name), ["first_launch", "first_accord_started", "first_accord_signed"]);
+    assert.deepEqual(sent.map((signal) => signal.name), ["first_launch", "first_accord_started", "first_accord_signed", "document_created"]);
     assert.equal(reads, 2, "documents are read one at a time and not after both are sent");
   });
 });
@@ -265,7 +289,7 @@ test("chat facts: replies that ended badly and /accord inside code do not count"
     message({ status: "pending" }),
     message({ role: "user", content: "Type `/accord` to start one, or:\n```\n@taylor /accord\n```" })
   ]);
-  assert.deepEqual(facts, { chat: true, newChat: true, families: ["claude-code"], addedFamilies: ["claude-code"], reply: false, memberRequest: false, accordStarted: false });
+  assert.deepEqual(facts, { chat: true, newChat: true, families: ["claude-code"], addedFamilies: ["claude-code"], reply: false, memberRequest: false, accordStarted: false, multiRole: false, roleChosen: false, skill: false, newChatForFeatures: true });
   assert.equal(chatUsageFacts(chat([CLAUDE]), [message({ role: "user", content: "x", metadata: { skillMentions: [{ frontmatterName: "accord" } as never] } })]).accordStarted, true);
   assert.equal(chatUsageFacts({ kind: "code-review", createdAt: LATER, metadata: {} as Conversation["metadata"] }, [message({})]).chat, false);
 });
@@ -304,7 +328,7 @@ test("chats and replies copied from the server that predate the installation are
 
 test("a document change during a read is looked at again, and a failed read does not stop later ones", async () => {
   await withDir(async (dir) => {
-    const answers: Array<(value: { started: boolean; signed: boolean }) => void> = [];
+    const answers: Array<(value: { started: boolean; signed: boolean; plain: boolean }) => void> = [];
     let fail = true;
     const { milestones, sent } = harness(dir, {
       readDocuments: () => {
@@ -322,9 +346,9 @@ test("a document change during a read is looked at again, and a failed read does
 
     milestones.observeDocuments();
     milestones.observeDocuments(); // signed meanwhile; the first read is stale
-    answers.shift()?.({ started: true, signed: false });
+    answers.shift()?.({ started: true, signed: false, plain: false });
     await flushDocuments();
-    answers.shift()?.({ started: true, signed: true });
+    answers.shift()?.({ started: true, signed: true, plain: false });
     await flushDocuments();
     assert.deepEqual(sent.map((signal) => signal.name), ["first_launch", "first_accord_started", "first_accord_signed"]);
   });
@@ -333,14 +357,9 @@ test("a document change during a read is looked at again, and a failed read does
 test("reports turned off while an existing installation's history is read: nothing is sent or recorded", async () => {
   await withDir(async (dir) => {
     let on = true;
-    let release: () => void = () => undefined;
-    const { milestones, sent } = harness(dir, {
-      profileUsedBefore: true,
-      reportsOn: () => on,
-      readHistory: () => new Promise((resolve) => {
-        release = () => resolve(NO_HISTORY);
-      })
-    });
+    const held = heldHistory(NO_HISTORY);
+    const release = held.release;
+    const { milestones, sent } = harness(dir, { profileUsedBefore: true, reportsOn: () => on, readHistory: held.readHistory });
     const starting = milestones.start();
     milestones.observeConversation(chat([CLAUDE]), [message({})]);
     on = false;
@@ -401,7 +420,7 @@ test("what happens while reports are off is never sent, also after they are back
     // what is made from now on counts.
     const backOn = new Date("2026-11-13T10:00:00.000Z");
     let documentsSince = "";
-    const second = harness(dir, { now: () => backOn, readDocuments: async (since) => { documentsSince = since; return { started: false, signed: false }; } });
+    const second = harness(dir, { now: () => backOn, readDocuments: async (since) => { documentsSince = since; return { started: false, signed: false, plain: false }; } });
     await second.milestones.start();
     second.milestones.observeConversation(chat([CLAUDE], "2026-11-12T18:00:00.000Z"), [message({ createdAt: "2026-11-12T18:00:00.000Z" })]);
     // A reply made while off, half a minute before they came back on.
@@ -466,7 +485,7 @@ test("the Assistant does not make a chat mixed, and its reply counts only when i
     ], "no second_model, and the Assistant's own post is not a first reply");
 
     milestones.observeConversation(chat([ASSISTANT, CLAUDE]), [question, message({ participantId: ASSISTANT.id, metadata: { sourceMessageId: "q1" } })]);
-    milestones.observeConversation(chat([ASSISTANT, CLAUDE, { kind: "gemini-cli", handle: "gemini", roleConfigId: "engineer" }]), []);
+    milestones.observeConversation(chat([ASSISTANT, CLAUDE, { kind: "gemini-cli", handle: "gemini", roleConfigId: "generic-participant" }]), []);
     assert.deepEqual(sent.slice(4).map((signal) => signal.name), ["first_reply", "provider_first_used", "second_model"]);
   });
 });
@@ -475,4 +494,210 @@ test("history: a chat is mixed only by members a person added", () => {
   assert.equal(usageHistoryFrom([[ASSISTANT, CLAUDE]], { started: false, signed: false }, 0).mixedFamilies, false);
   assert.deepEqual(usageHistoryFrom([[ASSISTANT, CLAUDE]], { started: false, signed: false }, 0).families, ["codex", "claude-code"]);
   assert.equal(usageHistoryFrom([[ASSISTANT, CLAUDE, CODEX]], { started: false, signed: false }, 0).mixedFamilies, true);
+});
+
+test("the role ids a weekly snapshot may name are exactly the app's built-in roles", () => {
+  assert.deepEqual([...USAGE_BUILTIN_ROLE_IDS].sort(), [...BUILTIN_CHAT_ROLE_IDS].sort());
+  assert.equal(USAGE_DEFAULT_MEMBER_ROLE_ID, DEFAULT_MEMBER_ROLE_ID);
+  assert.ok(BUILTIN_CHAT_ROLE_IDS.includes(USAGE_ASSISTANT_ROLE_ID));
+});
+
+const ENGINEER = { kind: "claude-code", handle: "drew", roleConfigId: "software-engineer" };
+const DESIGNER = { kind: "gemini-cli", handle: "leo", roleConfigId: "product-designer" };
+
+test("roles in chats: a role someone chose, members with different roles, skills; old copied chats do not count", async () => {
+  await withDir(async (dir) => {
+    const { milestones, sent } = harness(dir);
+    await milestones.start();
+    // A chat from before this installation, copied from the server.
+    milestones.observeConversation(chat([ASSISTANT, ENGINEER, DESIGNER], BEFORE_INSTALL), [
+      message({ role: "user", content: "/review", createdAt: BEFORE_INSTALL, metadata: { skillMentions: [{ frontmatterName: "review" } as never] } })
+    ]);
+    const names = () => sent.map((signal) => signal.name).filter((name) => name !== "provider_first_used");
+    assert.deepEqual(names(), ["first_launch"]);
+
+    milestones.observeConversation(chat([ASSISTANT, ENGINEER]), []);
+    assert.deepEqual(names().slice(1), ["first_chat", "member_role_changed"], "one member: no multi-role chat yet");
+    milestones.observeConversation(chat([ASSISTANT, ENGINEER, DESIGNER]), [
+      message({ role: "user", content: "/review this", metadata: { skillMentions: [{ frontmatterName: "review" } as never] } })
+    ]);
+    assert.deepEqual(names().slice(3), ["second_model", "multi_role_chat", "skill_invoked"]);
+  });
+});
+
+test("features used through the app are sent once each, with nothing but their name and the usual fields", async () => {
+  await withDir(async (dir) => {
+    const { milestones, sent } = harness(dir);
+    await milestones.start();
+    const features = ["custom_role_created", "behavior_rule_attached", "scheduled_task_created", "memory_note_written", "phone_paired",
+      "terminal_opened", "dictation_used", "file_preview_opened", "connector_signed_in"] as const;
+    for (let i = 0; i < 2; i += 1) for (const feature of features) milestones.reach(feature);
+    assert.deepEqual(sent.slice(1), features.map((feature) => ({ name: feature, attributes: base(feature) })));
+  });
+});
+
+test("an installation that reported before feature signals existed: features it had used are recorded, not sent", async () => {
+  await withDir(async (dir) => {
+    // The record a 1.11.9 beta wrote: steps checked, features never looked up.
+    await writeFile(path.join(dir, USAGE_MILESTONES_FILE), JSON.stringify({
+      version: 1, cohort: "new", historyChecked: true, reached: { first_launch: "2026-11-15T00:00:00.000Z", first_chat: "2026-11-15T00:01:00.000Z" }, families: {}
+    }));
+    let featureReads = 0;
+    const { milestones, sent } = harness(dir, {
+      readFeatureHistory: async () => {
+        featureReads += 1;
+        return { ...NO_FEATURES, customRole: true, multiRoleChat: true, phonePaired: true };
+      }
+    });
+    await milestones.start();
+    for (const feature of ["custom_role_created", "multi_role_chat", "phone_paired", "terminal_opened"] as const) milestones.reach(feature);
+    assert.deepEqual(sent, [{ name: "terminal_opened", attributes: base("terminal_opened") }], "only the feature first used now goes, with its own cohort");
+    let rereads = 0;
+    const restarted = harness(dir, { readFeatureHistory: async () => { rereads += 1; return NO_FEATURES; } });
+    await restarted.milestones.start();
+    assert.equal(featureReads, 1);
+    assert.equal(rereads, 0, "features are looked up once");
+    restarted.milestones.reach("dictation_used");
+    assert.deepEqual(restarted.sent.map((signal) => signal.name), ["dictation_used"], "the restarted installation still sends what is new");
+  });
+});
+
+test("the weekly snapshot goes once a week, also from an existing installation, and never while reports are off", async () => {
+  await withDir(async (dir) => {
+    let now = new Date("2026-11-19T10:00:00.000Z");
+    let on = true;
+    const snapshot: UsageWeeklySnapshot = {
+      week: "", members_total: "3-5", max_members_in_chat: "2", chats_with_2plus_members: "1",
+      distinct_roles_in_use: 2, custom_roles_count: 1, builtin_roles_in_use: "software-engineer"
+    };
+    const first = harness(dir, { profileUsedBefore: true, now: () => now, reportsOn: () => on, readWeeklySnapshot: async (week) => ({ ...snapshot, week }) });
+    await first.milestones.start();
+    assert.deepEqual(first.snapshots, [{
+      name: "weekly_snapshot",
+      attributes: { ...base("weekly_snapshot", "existing"), ...snapshot, week: "2026-W47" }
+    }], "the first launch describes the installation as it is now");
+    await first.milestones.sendWeeklySnapshotIfDue();
+    now = new Date("2026-11-22T23:00:00.000Z");
+    await first.milestones.sendWeeklySnapshotIfDue();
+    assert.equal(first.snapshots.length, 1, "once per ISO week");
+
+    now = new Date("2026-11-23T08:00:00.000Z");
+    on = false;
+    await first.milestones.sendWeeklySnapshotIfDue();
+    assert.equal(first.snapshots.length, 1, "reports off: nothing sent, the week stays due");
+    on = true;
+    await first.milestones.sendWeeklySnapshotIfDue();
+    assert.deepEqual(first.snapshots.map((signal) => signal.attributes.week), ["2026-W47", "2026-W48"]);
+
+    first.milestones.pause();
+    now = new Date("2026-12-01T08:00:00.000Z");
+    await first.milestones.sendWeeklySnapshotIfDue();
+    assert.equal(first.snapshots.length, 2, "turned off in Settings: no snapshot this launch");
+  });
+});
+
+test("feature history from what an installation keeps", () => {
+  const history = usageFeatureHistoryFrom({
+    chats: [[ASSISTANT, ENGINEER], [ASSISTANT, { ...CLAUDE, behaviorRuleCount: 1 }]],
+    roles: [{ id: "software-engineer", builtIn: true }, { id: "acme-closer" }, { id: "old-one", archivedAt: "2026-01-01" }],
+    savedMembers: [{ roleConfigId: "generic-participant" }],
+    plainDocument: false,
+    approvedScheduledTasks: 2,
+    memoryNotes: 0,
+    phones: 1
+  });
+  assert.deepEqual(history, {
+    customRole: true, memberRoleChanged: true, multiRoleChat: false, behaviorRule: true, document: false,
+    scheduledTask: true, memoryNote: false, phonePaired: true, urgentAlerts: false
+  });
+  assert.equal(usageFeatureHistoryFrom({ chats: [], roles: [{ id: "old-one", archivedAt: "2026-01-01" }], savedMembers: [], plainDocument: true, approvedScheduledTasks: 0, memoryNotes: 3, phones: 0 }).customRole, true,
+    "a role made and later deleted was still made");
+  assert.deepEqual(usageFeatureHistoryFrom({}), {
+    customRole: true, memberRoleChanged: true, multiRoleChat: true, behaviorRule: true, document: true,
+    scheduledTask: true, memoryNote: true, phonePaired: true, urgentAlerts: false
+  }, "what could not be read counts as used, so nothing old goes as new");
+});
+
+test("the weekly snapshot stays once a week across restarts, and a failed or interrupted read leaves the week due", async () => {
+  await withDir(async (dir) => {
+    const week47 = new Date("2026-11-19T10:00:00.000Z");
+    const first = harness(dir, { now: () => week47 });
+    await first.milestones.start();
+    assert.equal(first.snapshots.length, 1);
+    const again = harness(dir, { now: () => week47 });
+    await again.milestones.start();
+    assert.equal(again.snapshots.length, 0, "the same week after a restart: nothing");
+
+    const week48 = new Date("2026-11-24T10:00:00.000Z");
+    let fail = true;
+    const failing = harness(dir, { now: () => week48, readWeeklySnapshot: async (week) => {
+      if (fail) { fail = false; throw new Error("database is locked"); }
+      return { ...EMPTY_SNAPSHOT, week };
+    } });
+    await failing.milestones.start();
+    assert.equal(failing.snapshots.length, 0, "a failed read sends nothing");
+    await failing.milestones.sendWeeklySnapshotIfDue();
+    assert.deepEqual(failing.snapshots.map((signal) => signal.attributes.week), ["2026-W48"], "and is tried again");
+
+    const week49 = new Date("2026-12-01T10:00:00.000Z");
+    let answer: (() => void) | undefined;
+    const paused = harness(dir, { now: () => week49, readWeeklySnapshot: (week) => new Promise((resolve) => { answer = () => resolve({ ...EMPTY_SNAPSHOT, week }); }) });
+    const starting = paused.milestones.start();
+    for (let i = 0; i < 5 && !answer; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    paused.milestones.pause();
+    answer?.();
+    await starting;
+    assert.equal(paused.snapshots.length, 0, "reports turned off during the read: nothing sent");
+    const stored = JSON.parse(await readFile(path.join(dir, USAGE_MILESTONES_FILE), "utf8")) as { snapshotWeek?: string };
+    assert.equal(stored.snapshotWeek, "2026-W48");
+  });
+});
+
+test("a feature used while an upgraded installation's features are looked up is not sent if it was used before", async () => {
+  await withDir(async (dir) => {
+    await writeFile(path.join(dir, USAGE_MILESTONES_FILE), JSON.stringify({
+      version: 1, cohort: "existing", historyChecked: true, reached: { first_launch: "2026-11-15T00:00:00.000Z" }, families: {}
+    }));
+    let release: (() => void) | undefined;
+    const { milestones, sent } = harness(dir, {
+      readFeatureHistory: () => new Promise((resolve) => { release = () => resolve({ ...NO_FEATURES, customRole: true }); })
+    });
+    const starting = milestones.start();
+    for (let i = 0; i < 5 && !release; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    milestones.reach("custom_role_created");
+    milestones.reach("terminal_opened");
+    release?.();
+    await starting;
+    assert.deepEqual(sent.map((signal) => signal.name), ["terminal_opened"]);
+  });
+});
+
+test("an upgraded installation: skills, chats and documents from before the upgrade are not first uses; an Accord is not a skill", async () => {
+  await withDir(async (dir) => {
+    await writeFile(path.join(dir, USAGE_MILESTONES_FILE), JSON.stringify({
+      version: 1, cohort: "new", historyChecked: true, reached: { first_launch: "2026-11-01T00:00:00.000Z" }, families: {}
+    }));
+    let plainSince = "";
+    const { milestones, sent } = harness(dir, { readDocuments: async (_since, plain) => { plainSince = plain; return { started: false, signed: false, plain: false }; } });
+    await milestones.start();
+    const beforeUpgrade = "2026-11-05T09:00:00.000Z";
+    milestones.observeConversation(chat([ASSISTANT, ENGINEER, DESIGNER], beforeUpgrade), [
+      message({ role: "user", content: "/review", createdAt: beforeUpgrade, metadata: { skillMentions: [{ frontmatterName: "review" } as never] } })
+    ]);
+    // First steps still count from the first launch (that chat is a first chat).
+    const features = () => sent.map((signal) => signal.name).filter((name) => !["provider_first_used", "first_reply", "first_chat", "second_model"].includes(name));
+    assert.deepEqual(features(), [], "used before the upgrade, seen after it: not sent");
+    milestones.observeDocuments();
+    await flushDocuments();
+    assert.equal(plainSince, NOW.toISOString(), "documents count from the upgrade too");
+
+    milestones.observeConversation(chat([ASSISTANT, ENGINEER]), [
+      message({ role: "user", content: "@drew /accord ship?", metadata: { skillMentions: [{ frontmatterName: "accord" } as never] } })
+    ]);
+    assert.equal(features().includes("skill_invoked"), false, "an Accord launch is not a skill use");
+    milestones.observeConversation(chat([ASSISTANT, ENGINEER]), [
+      message({ role: "user", content: "/review it", metadata: { skillMentions: [{ frontmatterName: "review" } as never] } })
+    ]);
+    assert.ok(features().includes("skill_invoked"));
+  });
 });

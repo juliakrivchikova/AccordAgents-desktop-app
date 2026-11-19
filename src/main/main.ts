@@ -171,8 +171,8 @@ import { AppSkillsService } from "./services/appSkills";
 import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { CRASH_REPORTS_ACTIVE_ARG, crashReportingActive, sendUsageSignal, startCrashReporting, stopCrashReporting } from "./services/crashReporting";
-import { UsageMilestones, usageHistoryFrom, usageProfileUsedBefore } from "./services/usageMilestones";
-import { usageLocale, usageOs } from "../shared/usageSignals";
+import { UsageMilestones, usageFeatureHistoryFrom, usageHistoryFrom, usageProfileUsedBefore } from "./services/usageMilestones";
+import { usageCustomRoleCount, usageLocale, usageMultiRoleChat, usageOs, usageRoleChosen, usageWeeklySnapshot } from "../shared/usageSignals";
 import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "./services/crashReportPreferences";
 import { isServerUpdateLoaderWindow, openServerUpdateLoader, updateServerBeforeOpening } from "./services/serverUpdateLoader";
 import { ACTIVITY_RECHECK_MS, appHiddenForUpdate, bootstrapAppUpdater, createUpdateRestart, createUpdateRestartGate, currentUpdateWindows, quitAndInstallUpdate, showUpdateRestartPrompt, updatePromptWindowShown } from "./services/appUpdater";
@@ -477,12 +477,63 @@ const usageMilestones = crashReportingStart.active
       ]);
       return usageHistoryFrom(chats, documents, machines.length);
     },
-    readDocuments: (since) => artifactStore.multiSignerDocumentStatus(since),
+    readFeatureHistory: async () => {
+      // A source that cannot be read leaves its features counted as used.
+      const soft = <T>(read: Promise<T>): Promise<T | undefined> => read.catch(() => undefined);
+      const [chats, settings, documents, scripts, memoryNotes, devices] = await Promise.all([
+        soft(storageService.listChatMemberProviders()),
+        soft(settingsService.getPublicSettings()),
+        soft(artifactStore.multiSignerDocumentStatus()),
+        soft(scriptService.list()),
+        soft(memoryMirror.size()),
+        soft(settingsService.listTrustedDevices())
+      ]);
+      return usageFeatureHistoryFrom({
+        chats,
+        roles: settings?.chatRoleConfigs,
+        savedMembers: settings?.chatParticipantConfigs,
+        plainDocument: documents?.plain,
+        approvedScheduledTasks: scripts?.filter((script) => script.approved).length,
+        memoryNotes,
+        phones: devices?.filter((device) => device.role === "phone").length
+      });
+    },
+    readWeeklySnapshot: async (week) => {
+      const [chats, settings] = await Promise.all([storageService.listChatMemberProviders(), settingsService.getPublicSettings()]);
+      return usageWeeklySnapshot(week, chats, usageCustomRoleCount(settings.chatRoleConfigs));
+    },
+    readDocuments: (since, plainSince) => artifactStore.multiSignerDocumentStatus(since, plainSince),
     log: (event, payload) => {
       void debugLogService.write(event, payload);
     }
   })
   : undefined;
+/** How often an open app looks whether this week's snapshot is still due. */
+const USAGE_SNAPSHOT_CHECK_MS = 6 * 60 * 60 * 1000;
+// Saves of roles and saved members (from Settings, or by a member after the
+// User approved it) are the first uses of roles and behavior rules.
+settingsService.setUsageObserver(usageMilestones ? (event) => {
+  if (event.kind === "role-created") {
+    usageMilestones.reach("custom_role_created");
+    return;
+  }
+  if (event.roleChosen) usageMilestones.reach("member_role_changed");
+  if (event.rulesAdded) usageMilestones.reach("behavior_rule_attached");
+} : undefined);
+
+/** A member added to a chat from this computer: a role someone chose, rules,
+ *  and a chat whose members have different roles now but did not before. */
+function observeAddedMember(
+  member: { handle?: string; roleConfigId?: string; behaviorRuleIds?: string[] },
+  chatMembers: ReadonlyArray<{ handle?: string; roleConfigId?: string }>
+): void {
+  if (!usageMilestones) return;
+  if (usageRoleChosen(member.roleConfigId)) usageMilestones.reach("member_role_changed");
+  if ((member.behaviorRuleIds?.length ?? 0) > 0) usageMilestones.reach("behavior_rule_attached");
+  const handle = member.handle?.trim().replace(/^@/, "").toLowerCase();
+  const before = chatMembers.filter((other) => other.handle?.toLowerCase() !== handle);
+  if (usageMultiRoleChat(chatMembers) && !usageMultiRoleChat(before)) usageMilestones.reach("multi_role_chat");
+}
 cliAgentRunner.setAgentsDetectedObserver(usageMilestones ? (agents) => usageMilestones.observeAgents(agents) : undefined);
 
 const chatService = new ChatService(storageService, settingsService, cliAgentRunner, debugLogService, appMcpService, (conversation, update) => {
@@ -700,7 +751,10 @@ async function admitEnrolledPhones(): Promise<number> {
       phoneScope: record.invite.scope
     });
     void debugLogService.write("hub.phone.admitted", { deviceId: record.enrollment.deviceId, inviteId: record.invite.inviteId, admitted });
-    if (admitted) admittedCount += 1;
+    if (admitted) {
+      admittedCount += 1;
+      usageMilestones?.reach("phone_paired");
+    }
   }
   if (admittedCount > 0) {
     publishHubRoster();
@@ -1377,7 +1431,20 @@ function broadcastScripts(refresh?: string[]): void {
       .catch(() => undefined);
   }, 150);
 }
-chatService.setScriptHost(scriptService);
+// A scheduled task the User approved on this computer is its first use.
+chatService.setScriptHost({
+  proposeChange: (input) => scriptService.proposeChange(input),
+  attachApproval: (scriptId, approvalId, revisionId) => scriptService.attachApproval(scriptId, approvalId, revisionId),
+  assertApprovable: (request) => scriptService.assertApprovable(request),
+  applyApproved: async (request) => {
+    const applied = await scriptService.applyApproved(request);
+    if (request.op === "create") usageMilestones?.reach("scheduled_task_created");
+    return applied;
+  },
+  rejectPending: (request) => scriptService.rejectPending(request),
+  listForAgent: (conversationId) => scriptService.listForAgent(conversationId),
+  runs: (id, conversationId, limit) => scriptService.runs(id, conversationId, limit)
+});
 appMcpService.setScriptApiHandler((context, _route, body) => scriptService.postFromScript(context, body));
 // A deleted chat reaches every other device through the User's server (its
 // deletion is an operation there, which every device applies).
@@ -1401,7 +1468,8 @@ app.on("before-quit", quitStep(quitConfirmation, () => {
 const dispatchArtifactTool = createArtifactToolDispatcher(artifactService);
 wireArtifactToolHandler(appMcpService, chatService, dispatchArtifactTool);
 // Members' memory lives on the User's server only (shared/memory.ts).
-wireMemoryToolHandler(appMcpService, chatService, () => serverChatLink);
+wireMemoryToolHandler(appMcpService, chatService, () => serverChatLink, () => usageMilestones?.reach("memory_note_written"));
+chatService.setConnectorSignedInObserver(() => usageMilestones?.reach("connector_signed_in"));
 
 /** Settings → Memory: every note on the User's server, with the names of
  *  the roles and chats they are kept for. */
@@ -1962,10 +2030,12 @@ function registerIpc(): void {
     terminalService.watchWindow(event.sender);
     return terminalService.list();
   });
-  ipcMain.handle("terminal:create", (event, request: CreateTerminalRequest | undefined) => {
+  ipcMain.handle("terminal:create", async (event, request: CreateTerminalRequest | undefined) => {
     assertAppPage(event);
     terminalService.watchWindow(event.sender);
-    return terminalService.create(request ?? {});
+    const created = await terminalService.create(request ?? {});
+    usageMilestones?.reach("terminal_opened");
+    return created;
   });
   ipcMain.handle("terminal:kill", (event, terminalId: string) => {
     assertAppPage(event);
@@ -1988,7 +2058,11 @@ function registerIpc(): void {
   ipcMain.handle("settings:get", () => settingsService.getPublicSettings());
   ipcMain.handle("settings:set-repo-file-open-preference", (_event, action: unknown) => localFileOpenerService.setOpenPreference(action));
   ipcMain.handle("settings:set-repo-file-external-open-preference", (_event, action: unknown) => settingsService.setRepoFileExternalOpenAction(action));
-  ipcMain.handle("files:read", (_event, request: ReadFilePreviewRequest) => filePreviewService.read(request));
+  ipcMain.handle("files:read", async (_event, request: ReadFilePreviewRequest) => {
+    const preview = await filePreviewService.read(request);
+    usageMilestones?.reach("file_preview_opened");
+    return preview;
+  });
   ipcMain.handle("files:write", (_event, request: WriteFilePreviewRequest) => filePreviewService.write(request));
   ipcMain.handle("files:watch", (_event, request: ReadFilePreviewRequest) => filePreviewService.watch(request));
   ipcMain.handle("files:unwatch", (_event, realPath: unknown) => filePreviewService.unwatch(realPath));
@@ -2459,6 +2533,11 @@ function registerIpc(): void {
     event.sender.once("destroyed", cancelCreation);
     try {
       const created = await chatService.createConversation({ ...request, runId }, controller.signal, emitReviewProgress);
+      // Roles and a mixed chat are seen in the new chat itself; its members'
+      // rules only in what was asked for.
+      if ((request.participants ?? []).some((member) => (member.behaviorRuleIds?.length ?? 0) > 0)) {
+        usageMilestones?.reach("behavior_rule_attached");
+      }
       // A new project, or a member used once more: the phone's New chat
       // offers what this one does.
       hubPhonePublisher.scheduleCatalog();
@@ -2485,7 +2564,11 @@ function registerIpc(): void {
     return chatService.dismissConversationWarnings(request);
   });
   ipcMain.handle("chat:add-participant", async (_event, request: AddChatParticipantRequest) => {
-    return chatService.addParticipant(request);
+    const updated = await chatService.addParticipant(request);
+    if (updated && Array.isArray(updated.metadata?.participants)) {
+      observeAddedMember(request.participant, updated.metadata.participants as Array<{ handle?: string; roleConfigId?: string }>);
+    }
+    return updated;
   });
   ipcMain.handle("chat:update-participant-runtime", async (_event, request: UpdateChatParticipantRuntimeRequest) => {
     return chatService.updateParticipantRuntime(request);
@@ -2761,14 +2844,16 @@ function registerIpc(): void {
     speechToTextService.disable({ deleteModel: request?.deleteModel === true }));
   ipcMain.handle("speech:prepare", () => speechToTextService.prepare());
   ipcMain.handle("speech:set-hold-key", (_event, holdKey: unknown) => speechToTextService.setHoldKey(holdKey));
-  ipcMain.handle("speech:transcribe", (_event, request: { audio?: unknown; prompt?: unknown; language?: unknown } | undefined) => {
+  ipcMain.handle("speech:transcribe", async (_event, request: { audio?: unknown; prompt?: unknown; language?: unknown } | undefined) => {
     const audio = request?.audio;
     if (!(audio instanceof Uint8Array)) {
       throw new Error("The recording did not arrive.");
     }
     const prompt = typeof request?.prompt === "string" ? request.prompt.slice(-SPEECH_PROMPT_MAX_CHARS) : undefined;
     const language = isSpeechLanguage(request?.language) ? request.language : undefined;
-    return speechToTextService.transcribe(audio, { prompt, language });
+    const result = await speechToTextService.transcribe(audio, { prompt, language });
+    if (typeof result?.text === "string" && result.text.trim()) usageMilestones?.reach("dictation_used");
+    return result;
   });
   ipcMain.handle("speech:request-microphone", async () => {
     // Chromium's stand-in microphone (a test run fed from an audio file)
@@ -3078,6 +3163,10 @@ void app.whenReady().then(async () => {
   void usageMilestones?.start().catch((error: unknown) => {
     void debugLogService.write("usage.start-failed", { message: error instanceof Error ? error.message : String(error) });
   });
+  if (usageMilestones) {
+    // An app left open across a week boundary still sends that week's numbers.
+    setInterval(() => void usageMilestones.sendWeeklySnapshotIfDue(), USAGE_SNAPSHOT_CHECK_MS).unref();
+  }
   protocol.handle(FILE_PREVIEW_PROTOCOL, (request) => filePreviewService.handleProtocolRequest(request));
   registerIpc();
   installMediaPermissionGate();

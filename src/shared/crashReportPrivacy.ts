@@ -4,6 +4,11 @@
 // scrubs every event (its own and the renderer's) before it is sent.
 
 import {
+  USAGE_BUILTIN_ROLE_IDS,
+  USAGE_COUNT_BUCKETS,
+  USAGE_ISO_WEEK_PATTERN,
+  USAGE_WEEKLY_SNAPSHOT,
+  USAGE_WEEKLY_SNAPSHOT_KEYS,
   USAGE_LOCALE_PATTERN,
   USAGE_SIGNAL_ATTRIBUTE_KEYS,
   USAGE_SIGNAL_NAMES,
@@ -240,8 +245,12 @@ const USAGE_LOG_SEQUENCE_ATTRIBUTE = "sentry.timestamp.sequence";
 
 const APP_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/;
 
+/** The weekly snapshot's own numbers: on any other signal they are dropped. */
+const USAGE_SNAPSHOT_ONLY_KEYS: ReadonlySet<string> = new Set(USAGE_WEEKLY_SNAPSHOT_KEYS);
+
 /** Whether one attribute of a usage signal may leave, by its name and value. */
-function usageLogAttributeAllowed(key: string, value: unknown): boolean {
+function usageLogAttributeAllowed(key: string, value: unknown, signal?: unknown): boolean {
+  if (USAGE_SNAPSHOT_ONLY_KEYS.has(key) && signal !== USAGE_WEEKLY_SNAPSHOT) return false;
   if (USAGE_LOG_SDK_ATTRIBUTES.has(key)) return typeof value === "string";
   if (isUsageReadyAttribute(key)) return typeof value === "boolean";
   switch (key) {
@@ -251,6 +260,23 @@ function usageLogAttributeAllowed(key: string, value: unknown): boolean {
     case "app_version": return typeof value === "string" && APP_VERSION_PATTERN.test(value);
     case "locale": return typeof value === "string" && USAGE_LOCALE_PATTERN.test(value);
     case "provider_family": return isUsageProviderFamily(value);
+    case "week": return typeof value === "string" && USAGE_ISO_WEEK_PATTERN.test(value);
+    case "members_total":
+    case "max_members_in_chat":
+    case "chats_with_2plus_members":
+      return typeof value === "string" && (USAGE_COUNT_BUCKETS as readonly string[]).includes(value);
+    case "distinct_roles_in_use":
+    case "custom_roles_count":
+      return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100_000;
+    case "builtin_roles_in_use": {
+      // Only the app's own role ids, each once and sorted: a role the person
+      // made is never named, and the value cannot grow past the list.
+      if (typeof value !== "string") return false;
+      if (value === "none") return true;
+      const ids = value.split(",");
+      return ids.length <= USAGE_BUILTIN_ROLE_IDS.size &&
+        ids.every((id, index) => USAGE_BUILTIN_ROLE_IDS.has(id) && (index === 0 || ids[index - 1] < id));
+    }
     default: return false;
   }
 }
@@ -269,7 +295,7 @@ export function scrubUsageLog<T extends CrashReportLog>(log: T): T | null {
   const kept: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(attributes)) {
     if (USAGE_SIGNAL_ATTRIBUTE_KEYS.has(key) || USAGE_LOG_SDK_ATTRIBUTES.has(key)) {
-      if (usageLogAttributeAllowed(key, value)) kept[key] = value;
+      if (usageLogAttributeAllowed(key, value, name)) kept[key] = value;
     }
   }
   return { ...log, level: "info", attributes: kept };
@@ -299,7 +325,7 @@ export function scrubSerializedUsageLogs(items: ReadonlyArray<unknown>): Seriali
     const keptAttributes: Record<string, { value?: unknown; type?: unknown }> = {};
     for (const [key, attribute] of Object.entries(attributes)) {
       if (!attribute) continue;
-      if (key === USAGE_LOG_SEQUENCE_ATTRIBUTE ? typeof attribute.value === "number" : usageLogAttributeAllowed(key, attribute.value)) {
+      if (key === USAGE_LOG_SEQUENCE_ATTRIBUTE ? typeof attribute.value === "number" : usageLogAttributeAllowed(key, attribute.value, name)) {
         keptAttributes[key] = attribute;
       }
     }
