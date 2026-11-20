@@ -40,6 +40,7 @@
  */
 
 import {
+  chatAgentPermissionsWithin,
   chatParticipantRequestPermissionExceeds,
   chatParticipantRequestPermissionRank,
   normalizeChatAgentMode,
@@ -410,14 +411,11 @@ function approvedRemovals(item: Approved): string[] {
     .flatMap((operation) => operation?.type === "remove_participant_from_chat" && typeof operation.participantId === "string" ? [operation.participantId] : []);
 }
 
-/** Whether a member's permissions give it nothing beyond `allowed`. */
+/** Whether a member's permissions give it nothing beyond `allowed` (the
+ *  same rule the app holds a member the main session makes to,
+ *  clampChatAgentPermissions). */
 function permissionsWithin(actual: ChatAgentPermissions, allowed: ChatAgentPermissions): boolean {
-  if ((actual.repoRead && !allowed.repoRead) || (actual.workspaceWrite && !allowed.workspaceWrite) || (actual.webAccess && !allowed.webAccess)) return false;
-  if (actual.shell.enabled && !allowed.shell.enabled) return false;
-  const allowedRules = new Set(allowed.shell.rules.map((rule) => JSON.stringify(rule)));
-  if (actual.shell.rules.some((rule) => rule.action !== "deny" && !allowedRules.has(JSON.stringify(rule)))) return false;
-  if (actual.providerNative && JSON.stringify(actual.providerNative) !== JSON.stringify(allowed.providerNative)) return false;
-  return rank(actual.requestParticipants) <= rank(allowed.requestParticipants) && rank(actual.requestCompaction) <= rank(allowed.requestCompaction);
+  return chatAgentPermissionsWithin(actual, allowed);
 }
 
 /** Whether a member added is the one an approved addition adds: its name,
