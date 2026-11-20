@@ -2,6 +2,7 @@ import type { CreateTerminalRequest, TerminalHostStateEvent, TerminalListResult,
 import type { ChatScriptChangeRequest } from "./scripts";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import type { DeviceEventBlobReference } from "./deviceEventBlobs";
+import type { UrgentAlertView } from "./urgentAlerts";
 import type {
   CreateMachineRequest,
   CreateMachineResult,
@@ -152,40 +153,33 @@ export interface CloudRunsSettingsUpdate {
   pollIntervalMs?: number;
 }
 
-export type AgentEnvironmentKeySource = "forwarded" | "manual";
-
 export type AgentEnvironmentValueProtection = "os-encrypted" | "local-obfuscated";
 
-export interface ManualAgentEnvironmentVariable {
-  key: string;
-  enabled: boolean;
-  updatedAt: string;
-  protection: AgentEnvironmentValueProtection;
-  overridesDetected: boolean;
-  hasValue: boolean;
-}
+/** Custom: added or changed by the User. Automatic: read from this computer
+ *  and kept in step with it. */
+export type AgentEnvironmentVariableSource = "custom" | "automatic";
 
-export interface AgentEnvironmentKey {
+export interface AgentEnvironmentVariable {
   key: string;
-  source: AgentEnvironmentKeySource;
-  manual: boolean;
-  overridesDetected: boolean;
+  source: AgentEnvironmentVariableSource;
+  /** The first and last characters with the middle hidden; never the value. */
+  preview: string;
+  updatedAt: string;
+  /** A custom variable switched off before the switch was removed; members
+   *  do not get it until a new value is saved. */
+  enabled: boolean;
+  /** An automatic value that is a path on this computer: members here get it,
+   *  cloud machines do not. */
+  thisComputerOnly: boolean;
 }
 
 export interface AgentEnvironmentSnapshot {
-  refreshedAt: string;
-  keys: AgentEnvironmentKey[];
-  manualVariables: ManualAgentEnvironmentVariable[];
-  forwardedCount: number;
-  manualEnabledCount: number;
-  localInheritanceDisclosure: string;
-  valueProtection: AgentEnvironmentValueProtection;
+  variables: AgentEnvironmentVariable[];
 }
 
 export interface SaveAgentEnvironmentVariableRequest {
   key: string;
-  value?: string;
-  enabled?: boolean;
+  value: string;
 }
 
 export interface DeleteAgentEnvironmentVariableRequest {
@@ -663,11 +657,10 @@ export interface ChatBehaviorRuleSnapshot {
 
 export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code" | "gemini-cli">;
 
-/** Which local CLI an added provider runs through. Antigravity has no vendor
- *  that can be reached this way, so it is not included. */
-export type CliProviderHostCli = Extract<ChatProviderKind, "claude-code" | "codex-cli">;
+/** Which local CLI an added provider runs through. */
+export type CliProviderHostCli = Extract<ChatProviderKind, "claude-code" | "codex-cli" | "gemini-cli">;
 
-export type CliProviderHostVendor = "anthropic" | "zai" | "moonshot" | "minimax" | "deepseek" | "openai" | "custom";
+export type CliProviderHostVendor = "anthropic" | "zai" | "moonshot" | "minimax" | "deepseek" | "openai" | "google" | "custom";
 
 /** An added provider (General Settings → Add provider): a vendor endpoint
  *  reached through one of the local CLIs with the user's own API key. It sits
@@ -1039,10 +1032,16 @@ export interface ChatPendingChoice {
   cancelledAt?: string;
   /** When the member asked it (the end of the reply that carries it). */
   askedAt?: string;
-  /** Closed by the app, not by the User: an hour after it was asked, once
-   *  the User had gone on with its member. Its status is `cancelled`, so it
-   *  is closed everywhere a cancelled choice is; it is shown as expired. */
+  /** Closed by the app, not by the User: as soon as a message of hers,
+   *  written after it, started a turn of its member (she went on instead of
+   *  choosing; the User, 2026-11-15). Its status is `cancelled`, so it is
+   *  closed everywhere a cancelled choice is; it is shown as expired. */
   expiredAt?: string;
+  /** Closed by the app because its member is no longer in the chat (removed,
+   *  or replaced by a member of the same name): nobody is there to take an
+   *  answer. Shown as expired; never refused by the server for an answer
+   *  given before (the answer has nobody to go to either). */
+  memberGoneAt?: string;
   /** The durable answer which saved this selection, before native admission. */
   decisionEventId?: string;
   responseMessageId?: string;
@@ -1586,6 +1585,9 @@ export interface ChatTurnFinishedNoteMetadata {
 }
 
 export interface ChatMessageMetadata {
+  /** An urgent alert a member raised (shared/urgentAlerts.ts): the User's
+   *  server writes this message and keeps the alert's state in it. */
+  urgentAlert?: UrgentAlertView;
   /** A machine member could not start because the machine's copy of the
    *  project is gone: the computer that made the copy forgets it, so the
    *  next message copies it again. */
@@ -1686,6 +1688,9 @@ export interface ChatMessageMetadata {
   /** Who leads that Accord and who is in it, as its launch names them, so the
    *  Accord's card can be drawn when the launch itself is not loaded. */
   accordLaunch?: { facilitator: string; members: string[] };
+  /** On the line a closed Accord leaves in the chat (appMessageSource
+   *  ACCORD_CLOSED_SOURCE): the launch message of the Accord it folds. */
+  accordClosed?: { launchMessageId: string; title?: string };
   /** On a turn-finished note (appMessageSource TURN_FINISHED_NOTE_SOURCE): the
    *  member's reply it points at, which had other messages below it when the
    *  turn ended. */
@@ -1701,6 +1706,12 @@ export interface ChatMessageMetadata {
     reason: string;
     messageIds: string[];
   };
+  /** A User's message: every member it asks, as the device it was written on
+   *  resolved them, including those that device asks itself later (a cloud
+   *  member whose machine still gets the project, an Accord's facilitator).
+   *  A member watching the chat is not woken for it: its own turn answers it.
+   *  Unlike deliveryTargets it asks the server for nothing. */
+  askedParticipantIds?: string[];
 }
 
 export interface ChatExecutionLeaseMetadata {
@@ -1965,6 +1976,19 @@ export interface SetChatArchivedRequest {
   onlyIfEmpty?: boolean;
 }
 
+export interface SetChatPinnedRequest {
+  conversationId: string;
+  pinned: boolean;
+}
+
+/** A chat's pin as saved: all the window needs back (the chat itself can be
+ *  megabytes, and its list row updates from the chat's own update). */
+export interface ChatPinState {
+  conversationId: string;
+  pinned: boolean;
+  pinnedAt?: string;
+}
+
 export interface DeleteChatConversationRequest {
   conversationId: string;
 }
@@ -2009,6 +2033,15 @@ export interface ToggleChatReactionRequest {
 export interface DismissTurnFinishedNoteRequest {
   conversationId: string;
   messageId: string;
+}
+
+/** Folds the pinned Accord card into a line at the end of the chat (its
+ *  cross), on every device. */
+export interface CloseAccordCardRequest {
+  conversationId: string;
+  launchMessageId: string;
+  /** The document's name, for the line's words. */
+  title?: string;
 }
 
 export type ChatImageMimeType = "image/png" | "image/jpeg" | "image/webp";
@@ -2132,6 +2165,9 @@ export interface ParticipantConfig {
    *  (exec, app-server, compact); used to route a member through an added
    *  provider's Responses endpoint. */
   codexConfigOverrides?: string[];
+  /** Antigravity session settings (settings.json keys) added to every agy
+   *  launch; used to route a member to the Gemini API with its own key. */
+  geminiSettings?: Record<string, unknown>;
 }
 
 export type AppSkillSyncStatus = "not-installed" | "synced" | "skipped" | "collision" | "error";
@@ -2450,6 +2486,13 @@ export interface ConversationSummary {
    *  nothing (a reply whose machine is gone may never end). */
   replyPending?: boolean;
   archived?: boolean;
+  /** Pinned by the User (shared through her server, like the archive state):
+   *  the chat list shows it under Pinned, in the order it was pinned. */
+  pinned?: boolean;
+  pinnedAt?: string;
+  /** A member's choice card in the chat waits for the User's answer
+   *  (`isWaitingChoice`): the chat list marks the chat with it. */
+  waitingChoice?: boolean;
   chatParticipants?: ConversationSummaryChatParticipant[];
 }
 
@@ -2571,6 +2614,10 @@ export interface ChatPromptSuggestionsUpdate {
 }
 
 export type ConversationMetadata = Record<string, unknown> & {
+  /** This device's own record of the Accords folded into the chat (a line
+   *  her server took), worked out from the whole chat, not the loaded page:
+   *  their cards are not pinned (accordProgress.ts). Never shared. */
+  accordClosedLaunchIds?: string[];
   machineRepository?: { sourcePath: string; paths: Record<string, string> };
   activationProviderKind?: ChatProviderKind;
   activeRunParticipantIdsByRunId?: Record<string, string>;
@@ -2635,6 +2682,9 @@ export interface ConversationMessageDelta {
    *  (`isPendingReply`): the carried messages may not include it
    *  (`ConversationSummary.replyPending`). */
   replyPending?: boolean;
+  /** Whether any member's choice card in the whole chat waits for the User
+   *  (`isWaitingChoice`; `ConversationSummary.waitingChoice`). */
+  waitingChoice?: boolean;
 }
 
 export interface ConversationUpdate extends Conversation {
@@ -3304,6 +3354,8 @@ export interface AppBridge {
   getAgentEnvironment(): Promise<AgentEnvironmentSnapshot>;
   saveAgentEnvironmentVariable(request: SaveAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot>;
   deleteAgentEnvironmentVariable(request: DeleteAgentEnvironmentVariableRequest): Promise<AgentEnvironmentSnapshot>;
+  /** Reads this computer's variables again and brings the automatic ones in step. */
+  refreshAgentEnvironment(): Promise<AgentEnvironmentSnapshot>;
   saveCliProviderHost(update: CliProviderHostUpdate): Promise<AppSettings>;
   deleteCliProviderHost(id: string): Promise<AppSettings>;
   getSettings(): Promise<AppSettings>;
@@ -3323,7 +3375,9 @@ export interface AppBridge {
   readCustomAvatar(id: string): Promise<ReadCustomAvatarResult>;
   deleteChatParticipantConfig(id: string): Promise<AppSettings>;
   updateLastRepoPath(repoPath: string): Promise<AppSettings>;
-  listProviderModels(kind: ProviderKind): Promise<ProviderModelCatalog>;
+  /** `hostId`: list the models of a member on that added provider when its
+   *  CLI's list depends on the credential (Antigravity on a Gemini API key). */
+  listProviderModels(kind: ProviderKind, hostId?: string): Promise<ProviderModelCatalog>;
   detectAgents(request?: AgentDetectionRequest): Promise<AgentHealth[]>;
   /** Runs the CLI's own sign-in on this computer (`claude auth login`,
    *  `codex login`); a second start while one runs returns that one. */
@@ -3368,6 +3422,7 @@ export interface AppBridge {
   createChatConversation(request: CreateChatConversationRequest): Promise<StartReviewResult>;
   renameChatConversation(request: RenameChatConversationRequest): Promise<Conversation | undefined>;
   setChatArchived(request: SetChatArchivedRequest): Promise<Conversation | undefined>;
+  setChatPinned(request: SetChatPinnedRequest): Promise<ChatPinState | undefined>;
   deleteChatConversation(request: DeleteChatConversationRequest): Promise<boolean>;
   startChatAccord(request: StartChatAccordRequest): Promise<StartChatAccordResult>;
   dismissConversationWarnings(request: DismissConversationWarningsRequest): Promise<Conversation | undefined>;
@@ -3384,6 +3439,7 @@ export interface AppBridge {
   readChatAttachment(request: ReadChatAttachmentRequest): Promise<ReadChatAttachmentResult>;
   toggleChatReaction(request: ToggleChatReactionRequest): Promise<Conversation | undefined>;
   dismissTurnFinishedNote(request: DismissTurnFinishedNoteRequest): Promise<void>;
+  closeAccordCard(request: CloseAccordCardRequest): Promise<void>;
   respondToChatMentions(request: RespondToChatMentionsRequest): Promise<StartReviewResult>;
   respondToChatChoice(request: RespondToChatChoiceRequest): Promise<StartReviewResult>;
   respondToChatAppToolApproval(request: RespondToChatAppToolApprovalRequest): Promise<Conversation | undefined>;
@@ -3394,6 +3450,9 @@ export interface AppBridge {
   /** The User's own hub: what is set up, the command that creates its server,
    *  and the installation from the line that command prints. */
   getHubSetupState(): Promise<import("./hubSetup").HubSetupState>;
+  /** Urgent alerts on the User's server: Settings → Alerts, and closing an
+   *  alert's card (shared/urgentAlerts.ts). */
+  urgentAlertRequest(request: import("./urgentAlerts").UrgentAlertUserRequest): Promise<import("./urgentAlerts").HubAlertResult<unknown>>;
   getHubSetupCommand(request: import("./hubSetup").HubSetupCommandRequest): Promise<import("./hubSetup").HubSetupCommandResult>;
   installHub(request: import("./hubSetup").HubInstallRequest): Promise<import("./hubSetup").HubSetupState>;
   onHubSetupProgress(callback: (state: import("./hubSetup").HubSetupState) => void): () => void;

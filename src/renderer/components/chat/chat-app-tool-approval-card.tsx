@@ -155,52 +155,21 @@ function GenericChatAppToolApprovalCard(props: {
     );
   }
 
+  // Used: one line, like a folded urgent alert (the User, 2026-11-18).
   if ((reviewChange || memberRemoval) && readOnly) {
-    return (
-      <section
-        className={`chat-app-tool-approval-card is-review-change is-compact-result is-${props.approval.status}`}
-        aria-label={displayPrompt}
-        data-app-tool-approval-id={props.approval.id}
-        tabIndex={-1}
-      >
-        <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
-        <div className="chat-app-tool-approval-body">
-          <div className="chat-app-tool-approval-meta">
-            <strong>{requesterLabel}</strong>
-            {requester && <span className="message-provider">Proposed changes</span>}
-            <span className="message-when">{formatChatTime(props.approval.createdAt)}</span>
-          </div>
-          {memberRemoval ? <ChatAppToolMemberRemovalResult approval={props.approval} request={memberRemoval} /> : <ChatAppToolReviewResult
-            approval={props.approval}
-            roleRequest={combinedRequest?.roleRequest ?? roleRequest}
-            participantChange={combinedRequest?.participantRequest ?? participantChange}
-            combinedRequest={combinedRequest}
-            savedParticipants={props.savedParticipants}
-          />}
-        </div>
-      </section>
+    return memberRemoval ? <ChatAppToolMemberRemovalResult approval={props.approval} request={memberRemoval} /> : (
+      <ChatAppToolReviewResult
+        approval={props.approval}
+        roleRequest={combinedRequest?.roleRequest ?? roleRequest}
+        participantChange={combinedRequest?.participantRequest ?? participantChange}
+        combinedRequest={combinedRequest}
+        savedParticipants={props.savedParticipants}
+      />
     );
   }
 
   if (chatCodexApprovalShowsCompactResult(props.approval)) {
-    return (
-      <section
-        className={`chat-app-tool-approval-card is-compact-result is-${props.approval.status}`}
-        aria-label={displayPrompt}
-        data-app-tool-approval-id={props.approval.id}
-        tabIndex={-1}
-      >
-        <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
-        <div className="chat-app-tool-approval-body">
-          <div className="chat-app-tool-approval-meta">
-            <strong>{requesterLabel}</strong>
-            {requester && <span className="message-provider">{participantProviderLabel(requester.kind, requester.hostLabel)}</span>}
-            <span className="message-when">{formatChatTime(props.approval.createdAt)}</span>
-          </div>
-          <ChatCodexApprovalResult approval={props.approval} />
-        </div>
-      </section>
-    );
+    return <ChatCodexApprovalResult approval={props.approval} />;
   }
 
   function submit(): void {

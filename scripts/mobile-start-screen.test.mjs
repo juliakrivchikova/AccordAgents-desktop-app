@@ -47,7 +47,8 @@ async function phone(t, { sitePort, cdpPort, otherHubs = [] }) {
 const shown = (id) => `(() => { const node = document.getElementById(${JSON.stringify(id)}); return Boolean(node && !node.hidden && node.offsetParent !== null); })()`;
 const active = (id) => `document.getElementById(${JSON.stringify(id)}).classList.contains("is-active")`;
 const offerRead = `document.querySelectorAll("#new-chat-members .new-chat-member").length > 0`;
-const rowTitles = `[...document.querySelectorAll("#chat-list .mobile-chat-row strong")].map((node) => node.textContent)`;
+// The projects' rows: Recents lists the same chats again above them.
+const rowTitles = `[...document.querySelectorAll('#chat-list .mobile-chat-group[data-section="project"] .mobile-chat-row strong')].map((node) => node.textContent)`;
 
 /** A tap where a finger would land on the control: whatever is on top there
  *  gets it, so a control under another one is not tapped. */

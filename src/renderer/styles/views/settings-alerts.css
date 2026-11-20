@@ -1,0 +1,795 @@
+/* Settings → Alerts and its connect dialogs (alerts-settings-section.tsx,
+   alerts-settings-parts.tsx, alerts-connect-dialogs.tsx,
+   alerts-phone-dialog.tsx), as the User approved them on 2026-11-15: a
+   status band on top when something needs her (only then, 2026-11-18),
+   what happens when an alert comes in, and one card for
+   where alerts go with each channel's status beside its name. */
+.settings-view .alerts-settings {
+  max-width: 740px;
+}
+
+.settings-view .alerts-intro {
+  max-width: 640px;
+  margin: -4px 0 18px;
+  color: var(--app-text-secondary);
+  font-size: 13px;
+  line-height: 19px;
+}
+
+.settings-view .alerts-intro b {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+/* The band: whether an alert reaches her now. */
+.settings-view .alerts-band {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--app-hairline);
+  border-radius: 14px;
+  background: var(--app-surface);
+}
+
+.settings-view .alerts-band-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--app-surface-subtle);
+  color: var(--app-text-strong);
+}
+
+.settings-view .alerts-band-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-view .alerts-band-title {
+  color: var(--app-text-strong);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.settings-view .alerts-band-detail {
+  margin-top: 1px;
+  overflow-wrap: anywhere;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.settings-view .alerts-band.is-bad {
+  border-color: var(--app-danger-border);
+  background: var(--app-danger-soft);
+}
+
+.settings-view .alerts-band.is-bad .alerts-band-icon {
+  background: var(--app-surface);
+  color: var(--app-danger);
+}
+
+.settings-view .alerts-band.is-bad .alerts-band-title {
+  color: var(--app-danger);
+}
+
+.settings-view .alerts-band.is-warn {
+  border-color: var(--app-warning-border);
+  background: var(--app-warning-soft);
+}
+
+.settings-view .alerts-band.is-warn .alerts-band-icon {
+  background: var(--app-surface);
+  color: var(--app-status-warning-text);
+}
+
+.settings-view .alerts-band.is-warn .alerts-band-title {
+  color: var(--app-status-warning-text);
+}
+
+/* What happens when an alert comes in. */
+.settings-view .alerts-flow {
+  margin-bottom: 22px;
+  padding: 12px 16px;
+  border: 1px solid var(--app-hairline);
+  border-radius: 14px;
+}
+
+.settings-view .alerts-flow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.settings-view .alerts-flow-title {
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.settings-view .alerts-chain {
+  display: flex;
+  align-items: flex-start;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-view .alerts-node {
+  display: flex;
+  min-width: 72px;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+
+.settings-view .alerts-node-dot {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--app-border);
+  border-radius: 50%;
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+}
+
+.settings-view .alerts-node-label {
+  color: var(--app-text-strong);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.settings-view .alerts-node-time {
+  min-height: 15px;
+  color: var(--app-text-secondary);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* What will happen is green; what will not is dim grey, and a broken
+   channel says so in red under it (the User, 2026-11-16). */
+.settings-view .alerts-node.is-on .alerts-node-dot {
+  border-color: var(--app-success-border);
+  background: var(--app-success-soft);
+  color: var(--app-success);
+}
+
+.settings-view .alerts-node.is-on .alerts-node-time {
+  color: var(--app-success);
+}
+
+.settings-view .alerts-node.is-off .alerts-node-dot,
+.settings-view .alerts-node.is-bad .alerts-node-dot,
+.settings-view .alerts-node.is-off .alerts-node-label,
+.settings-view .alerts-node.is-bad .alerts-node-label {
+  opacity: 0.4;
+}
+
+.settings-view .alerts-node.is-bad .alerts-node-time {
+  color: var(--app-danger);
+}
+
+.settings-view .alerts-edge {
+  position: relative;
+  flex: 1;
+  height: 1px;
+  margin-top: 13px;
+  background: var(--app-border);
+}
+
+.settings-view .alerts-edge.is-on {
+  background: var(--app-success);
+}
+
+.settings-view .alerts-edge.is-on span {
+  color: var(--app-success);
+}
+
+.settings-view .alerts-edge.is-off span {
+  color: var(--app-muted-subtle);
+}
+
+.settings-view .alerts-edge span {
+  position: absolute;
+  top: -9px;
+  left: 50%;
+  padding: 0 4px;
+  background: var(--app-surface);
+  color: var(--app-text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+.settings-view .alerts-flow-foot {
+  margin-top: 6px;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+}
+
+/* Where alerts go: one row per channel. */
+.settings-view .alerts-row {
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.settings-view .alerts-tile {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--app-surface-subtle);
+  color: var(--app-text-secondary);
+}
+
+.settings-view .alerts-row .gen-row-desc {
+  max-width: none;
+  margin-top: 1px;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-view .alerts-row .gen-row-desc.alerts-line-main {
+  color: var(--app-text-strong);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.settings-view .alerts-row .gen-row-desc.alerts-line-error {
+  color: var(--app-danger);
+  overflow-wrap: anywhere;
+}
+
+.settings-view .alerts-row .gen-row-desc.alerts-line-warn {
+  color: var(--app-status-warning-text);
+}
+
+.settings-view .alerts-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--app-text-strong);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.alerts-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  color: var(--app-text-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.alerts-pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.alerts-pill.is-ready {
+  border-color: var(--app-success-border);
+  background: var(--app-success-soft);
+  color: var(--app-success);
+}
+
+.alerts-pill.is-attention {
+  border-color: var(--app-danger-border);
+  background: var(--app-danger-soft);
+  color: var(--app-danger);
+}
+
+.settings-view .alerts-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.settings-view .alerts-more {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-text-secondary);
+  cursor: pointer;
+}
+
+.settings-view .alerts-more:hover {
+  background: var(--app-surface-hover);
+}
+
+.alerts-menu {
+  display: flex;
+  flex-direction: column;
+}
+
+.alerts-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-text-strong);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.alerts-menu-item:hover {
+  background: var(--app-surface-hover);
+}
+
+.alerts-menu-item.is-danger {
+  color: var(--app-danger);
+}
+
+/* The connect dialogs: never taller than the window, the body scrolls
+   instead. */
+.gen-aws-dialog.alerts-dialog {
+  max-height: calc(100vh - 32px);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.alerts-dialog-body {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.alerts-dialog .gen-aws-dialog-note {
+  color: var(--app-text-secondary);
+}
+
+/* The connect dialogs, one step at a time: the steps named under the title,
+   the current one dark, the done ones ticked. */
+.alerts-wizard-steps {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--app-border);
+  list-style: none;
+  white-space: nowrap;
+}
+
+.alerts-wizard-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.alerts-wizard-step.is-done {
+  color: var(--app-text-secondary);
+}
+
+.alerts-wizard-step.is-now {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.alerts-wizard-dot {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 50%;
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.alerts-wizard-step.is-done .alerts-wizard-dot {
+  border-color: var(--app-text-strong);
+  color: var(--app-text-strong);
+}
+
+.alerts-wizard-step.is-now .alerts-wizard-dot {
+  border-color: var(--app-primary);
+  background: var(--app-primary);
+  color: var(--primary-foreground);
+}
+
+.alerts-wizard-sep {
+  flex: 1;
+  min-width: 8px;
+  height: 1px;
+  background: var(--app-border);
+}
+
+/* Back (and a short note) on the left, the step's own action on the right. */
+.alerts-wizard [data-slot="dialog-footer"] {
+  align-items: center;
+}
+
+.alerts-wizard-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-right: auto;
+}
+
+.alerts-wizard .alerts-wizard-left .gen-aws-dialog-note {
+  margin-right: 0;
+}
+
+.alerts-wizard .alerts-dialog-body {
+  min-height: 210px;
+}
+
+.alerts-wizard-text {
+  margin: 0;
+  color: var(--app-text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.alerts-wizard-text b {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.alerts-wizard-title {
+  margin: 0;
+  color: var(--app-text-strong);
+  font-size: 14.5px;
+  font-weight: 650;
+}
+
+.alerts-where {
+  padding: 8px 11px;
+  border-radius: var(--radius-control);
+  background: var(--app-surface-subtle);
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+}
+
+.alerts-where b {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.alerts-account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  font-size: 13px;
+}
+
+.alerts-account-name {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.alerts-account .alerts-text-button {
+  margin-left: auto;
+}
+
+.alerts-route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  color: var(--app-muted);
+}
+
+.alerts-route > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.alerts-route small {
+  color: var(--app-muted);
+  font-size: 11.5px;
+}
+
+.alerts-route b {
+  overflow-wrap: anywhere;
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.alerts-identity {
+  padding: 11px 12px;
+  border: 1px solid var(--app-status-danger-border);
+  border-radius: var(--radius-control);
+  background: var(--app-status-danger-bg);
+  color: var(--app-status-danger-text);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.alerts-wizard-done {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 26px 0 6px;
+  text-align: center;
+}
+
+.alerts-wizard-done-mark {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: var(--app-success-soft);
+  color: var(--app-success);
+}
+
+.alerts-step-detail {
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.alerts-step-detail b,
+.alerts-howto b {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.alerts-howto {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
+  list-style: decimal outside;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.alerts-howto li::marker {
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.alerts-howto code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--app-surface-active);
+  color: var(--app-text-strong);
+  font-family: var(--font-code);
+  font-size: 12px;
+}
+
+.alerts-howto li:first-child {
+  display: list-item;
+}
+
+.alerts-howto li:first-child > button {
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+.alerts-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.alerts-chip.is-warn {
+  border: 1px solid var(--app-warning-border);
+  background: var(--app-warning-soft);
+  color: var(--app-status-warning-text);
+}
+
+.gen-aws-dialog .alerts-input {
+  width: 100%;
+  font-family: var(--font-code);
+}
+
+.gen-aws-dialog .gen-input:disabled {
+  background: var(--app-surface-subtle);
+  color: var(--app-text-secondary);
+}
+
+.alerts-field {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.alerts-field > span:first-child,
+.alerts-field > label,
+.alerts-label {
+  color: var(--app-text-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.alerts-secret {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.alerts-secret .alerts-input {
+  padding-right: 56px;
+}
+
+.alerts-show {
+  position: absolute;
+  right: 8px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.alerts-hint {
+  margin-top: -3px;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.alerts-text-button {
+  padding: 1px 3px;
+  margin: -1px -3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--app-text-strong);
+  font: inherit;
+  font-size: 12.5px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.alerts-text-button:disabled {
+  color: var(--app-text-secondary);
+  cursor: default;
+}
+
+.alerts-step-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.alerts-waiting,
+.alerts-done-line,
+.alerts-ok-line,
+.alerts-warn-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.alerts-done-line,
+.alerts-ok-line {
+  color: var(--app-success);
+  font-weight: 600;
+}
+
+.alerts-warn-line {
+  display: inline;
+  color: var(--app-status-warning-text);
+}
+
+.alerts-warn-line svg {
+  margin-right: 4px;
+  vertical-align: -2px;
+}
+
+.alerts-choices {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.alerts-choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--popover);
+  color: var(--app-text-strong);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.alerts-choice input {
+  flex: none;
+  margin: 0;
+  accent-color: var(--app-primary);
+}
+
+.alerts-choice.is-selected {
+  border-color: var(--app-primary);
+  box-shadow: inset 0 0 0 0.5px var(--app-primary);
+}
+
+.alerts-choice small {
+  margin-left: auto;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+}
+
+.alerts-number {
+  font-family: var(--font-code);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+
+
+.alerts-choice:hover,
+.alerts-text-button:not(:disabled):hover,
+.alerts-show:hover {
+  background: var(--app-surface-hover);
+}
+
+.settings-view .alerts-more:focus-visible,
+.alerts-menu-item:focus-visible,
+.alerts-text-button:focus-visible,
+.alerts-show:focus-visible,
+.alerts-choice:focus-within {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}

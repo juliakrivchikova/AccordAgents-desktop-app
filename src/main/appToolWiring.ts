@@ -6,6 +6,7 @@
  * change through the User's server) run.
  */
 
+import { callUrgentAlertTool, type UrgentAlertServerAccess } from "./services/urgentAlertTools";
 import type {
   ArtifactDraftAudiencePolicyByAuthor,
   PublishArtifactSourceRequest
@@ -100,6 +101,19 @@ export function wireMemoryToolHandler(
     return result;
   });
   chatService.setMemoryAccess(access);
+}
+
+/** Registers members' urgent alert tool (shared/urgentAlerts.ts). `access`
+ *  is read at each call: the link to the server may start after wiring. */
+export function wireUrgentAlertToolHandler(
+  appMcpService: AppMcpService,
+  access: () => UrgentAlertServerAccess | undefined
+): void {
+  appMcpService.setUrgentAlertToolHandler((actor, request) => {
+    let now: UrgentAlertServerAccess | undefined;
+    try { now = access(); } catch { now = undefined; }
+    return callUrgentAlertTool(now, actor, request);
+  });
 }
 
 /** Registers the artifact tool handler: resolves the acting member through the

@@ -1,0 +1,276 @@
+/* An urgent alert's card (chat-urgent-alert-card.tsx), as the User approved it
+   on 2026-11-15: the red header whatever the state, the member and the time,
+   the message, then a status band (what happens now, the history in one grey
+   line, Got it or Set up alerts on the right). */
+/* No avatar: in the messages' text column (past their 38 px avatar and
+   12 px gap), as a turn-finished note is. */
+.chat-urgent-alert {
+  max-width: min(653px, calc(100% - 50px));
+  margin-left: 50px;
+  padding: 4px 0;
+}
+
+.chat-urgent-alert-panel {
+  max-width: 624px;
+  overflow: hidden;
+  border: 1px solid var(--app-urgent);
+  border-radius: 14px;
+  background: var(--app-surface);
+  box-shadow: 0 1px 2px var(--app-shadow);
+}
+
+.chat-urgent-alert-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 10px 0 15px;
+  background: var(--app-urgent);
+  color: var(--app-urgent-fg);
+}
+
+.chat-urgent-alert-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.chat-urgent-alert-close {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.chat-urgent-alert-close:hover {
+  background: color-mix(in srgb, var(--app-urgent-fg) 18%, transparent);
+}
+
+.chat-urgent-alert-close:focus-visible {
+  outline: 2px solid var(--app-urgent-fg);
+  outline-offset: -2px;
+}
+
+.chat-urgent-alert-close:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* The member and the time, inside the card above the message. */
+.chat-urgent-alert-from {
+  padding: 12px 15px 0;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-urgent-alert-from .message-when,
+.chat-urgent-alert-from time {
+  color: inherit;
+  font-size: inherit;
+}
+
+.chat-urgent-alert-text {
+  padding: 4px 15px 14px;
+  color: var(--app-text-strong);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.42;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* What happens now. */
+.chat-urgent-alert-status {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 12px 12px 12px 15px;
+  border-top: 1px solid var(--app-border);
+  background: var(--app-surface-subtle);
+}
+
+.chat-urgent-alert-status.is-bad {
+  border-top-color: var(--app-danger-border);
+  background: var(--app-danger-soft);
+}
+
+.chat-urgent-alert-status-icon {
+  flex: none;
+  align-self: flex-start;
+  margin-top: 2px;
+  color: var(--app-text-strong);
+}
+
+.chat-urgent-alert-status.is-done .chat-urgent-alert-status-icon {
+  color: var(--app-success);
+}
+
+.chat-urgent-alert-status.is-bad .chat-urgent-alert-status-icon,
+.chat-urgent-alert-status.is-bad .chat-urgent-alert-status-main {
+  color: var(--app-danger);
+}
+
+.chat-urgent-alert-status-words {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-urgent-alert-status-main {
+  color: var(--app-text-strong);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-urgent-alert-countdown {
+  font-weight: 750;
+}
+
+.chat-urgent-alert-status-detail {
+  margin-top: 2px;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-urgent-alert-error {
+  margin-top: 4px;
+  color: var(--app-danger);
+  font-size: 12.5px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* Closed: one line, the message first, then who and how it ended. Every used
+   card is this same line (.chat-card-row: a choice, a closed Accord). */
+.chat-urgent-alert.is-folded {
+  padding: 2px 0 6px;
+}
+
+.chat-urgent-alert-folded,
+.chat-card-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 624px;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 10px 0 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* A row that opens nothing (a used choice) is not a control. */
+div.chat-card-row {
+  cursor: default;
+}
+
+.chat-urgent-alert-folded:hover,
+button.chat-card-row:hover {
+  background: var(--app-surface-hover);
+}
+
+.chat-urgent-alert-folded:focus-visible,
+.chat-card-row:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* A grey bell once she reacted; red when it never reached her. */
+.chat-urgent-alert-folded-bell,
+.chat-card-row-icon {
+  flex: none;
+  color: var(--app-muted);
+}
+
+.chat-urgent-alert-folded.is-unresolved .chat-urgent-alert-folded-bell {
+  color: var(--app-urgent);
+}
+
+.chat-urgent-alert-folded-preview,
+.chat-card-row-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--app-text-strong);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-urgent-alert-folded-outcome,
+.chat-card-row-outcome {
+  flex: none;
+  max-width: 50%;
+  overflow: hidden;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-urgent-alert-folded.is-unresolved .chat-urgent-alert-folded-outcome {
+  color: var(--app-danger);
+}
+
+.chat-urgent-alert-folded-chevron,
+.chat-card-row-chevron {
+  flex: none;
+  color: var(--app-text-secondary);
+}
+
+/* The line a closed Accord left in the chat: placed as a folded urgent alert
+   is; opened, the Accord's own card, its whole height in the chat. */
+.chat-accord-line,
+.chat-used-approval {
+  max-width: min(653px, calc(100% - 50px));
+  /* In a grid (the approvals' list) an item is no narrower than its text
+     unless told: a long line would run under a side panel. */
+  min-width: 0;
+  margin-left: 50px;
+  padding: 2px 0 6px;
+}
+
+.chat-accord-line .chat-accord-line-glyph {
+  width: 15px;
+  height: 15px;
+}
+
+.chat-accord-line.is-open .chat-accord-dock {
+  max-width: 624px;
+  max-height: none;
+  overflow: hidden;
+}
+
+.chat-accord-line.is-open .chat-accord-dock-head {
+  position: static;
+}
+
+/* A used approval's line (a member added, a task approved, a sign-in
+   done...) is placed as the closed Accord's line above; the ring Activity's
+   Open in chat draws goes on the line itself. */
+.chat-used-approval:focus-visible,
+.chat-used-approval.approval-focused {
+  outline: none;
+}
+
+.chat-used-approval:focus-visible .chat-card-row,
+.chat-used-approval.approval-focused .chat-card-row {
+  box-shadow: var(--focus-ring);
+}

@@ -14,7 +14,7 @@ import {
   planItemReviews,
   requiredPlanItemReviewFindings
 } from "../components/review/review-conversation-data";
-import { buildProjectSessionGroups, compareConversationSummaries } from "./conversation-summaries";
+import { buildProjectSessionGroups, compareConversationSummaries, pinnedChatSummaries, recentChatSummaries } from "./conversation-summaries";
 import type { AppState } from "./app-state";
 import { warningDismissScope, warningNoticeEntries } from "./warnings";
 
@@ -42,6 +42,8 @@ export function useAppViewModel(state: AppState) {
   const visibleWarnings = warningNoticeEntries([...state.warnings, ...conversationMetadataWarnings], dismissedWarningKeys);
   const chatSummaries = useMemo(() => state.summaries.filter((summary) => summary.kind === "chat"), [state.summaries]);
   const projectSessionGroups = useMemo(() => buildProjectSessionGroups(chatSummaries), [chatSummaries]);
+  const pinnedSessions = useMemo(() => pinnedChatSummaries(chatSummaries), [chatSummaries]);
+  const recentSessions = useMemo(() => recentChatSummaries(chatSummaries), [chatSummaries]);
   const archivedSessions = useMemo(
     () => chatSummaries.filter((summary) => summary.archived).sort(compareConversationSummaries),
     [chatSummaries]
@@ -86,6 +88,8 @@ export function useAppViewModel(state: AppState) {
     warningScope,
     visibleWarnings,
     projectSessionGroups,
+    pinnedSessions,
+    recentSessions,
     archivedSessions,
     visibleProgressLog,
     activeChatConversation,

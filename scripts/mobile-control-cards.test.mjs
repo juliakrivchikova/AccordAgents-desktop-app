@@ -174,8 +174,13 @@ test("a card published by the desktop is answered on the phone and survives a re
       return null;
     })();
     assert.ok(answered, "the answered question is kept under its message");
-    assert.match(answered, /Which fix should I build\?/, "the question is still readable");
-    assert.match(answered, /In the relay/, "what was chosen is shown");
+    // One line, like a folded urgent alert (the User, 2026-11-16): what was
+    // asked, then who asked, what was chosen and when.
+    assert.match(answered, /Where to fix/, "what was asked");
+    assert.match(answered, /In the relay \d{1,2}:\d{2}/, "what was chosen is shown, and when");
+    assert.doesNotMatch(answered, /Which fix should I build\?/, "the question itself is not repeated");
+    assert.equal(await evaluate(`document.querySelector("#message-list .control-card-answered").classList.contains("card-row")`), true, "a single line");
+    assert.equal(await evaluate(`document.querySelectorAll("#message-list .control-card-answered button").length`), 0, "the line opens nothing");
     assert.equal(await evaluate(`document.querySelectorAll('#message-list .control-card:not(.control-card-answered)[data-card-id="choice-answered"]').length`), 0,
       "an answered question is not offered for answering again");
 

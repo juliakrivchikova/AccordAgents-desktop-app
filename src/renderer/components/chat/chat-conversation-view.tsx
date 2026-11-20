@@ -40,6 +40,7 @@ import { ArtifactNoteProgressContext } from "./chat-artifact-note-card";
 import { artifactNoteProgressById } from "../../../shared/artifactNoteProgress";
 import { ChatAccordDockSlot } from "./chat-accord-dock";
 import { useDockedAccord } from "./use-accord-progress";
+import { AccordLinesContext } from "./chat-accord-closed-line";
 import { ARTIFACT_NOTE_MESSAGE_SOURCE } from "../../../shared/artifacts";
 import { AttachmentPanelContext } from "../files/file-panel-context";
 import { ChatSidePanel, useChatSidePanel } from "./chat-side-panel";
@@ -61,6 +62,8 @@ import {
 } from "../../lib/chat-split-sizing";
 
 export type { ChatMessageFocusRequest } from "./chat-conversation-types";
+
+const NO_CLOSED_ACCORDS: readonly string[] = [];
 
 export function ChatConversationView(props: ChatConversationViewProps): JSX.Element {
   const participants = useMemo(
@@ -126,7 +129,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
       return summary ? { signers: summary.approval.requiredSigners.length, drafters: summary.requiredDraftCount || undefined } : undefined;
     });
   }, [artifactNotesKey, artifacts.context.byId]);
-  const dockedAccord = useDockedAccord(props.conversation.messages, artifactNotesKey);
+  const { docked: dockedAccord, accordLines } = useDockedAccord(props.conversation.messages, artifactNotesKey, participants,
+    props.conversation.metadata.accordClosedLaunchIds ?? NO_CLOSED_ACCORDS);
   const [selectedThreadRootId, setSelectedThreadRootId] = useState<string | undefined>();
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
   const [threadWidth, setThreadWidth] = useState(CHAT_THREAD_DEFAULT_WIDTH);
@@ -362,6 +366,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
       <ArtifactsContext.Provider value={artifacts.context}>
       <ArtifactNoteProgressContext.Provider value={artifactNoteProgress}>
+      <AccordLinesContext.Provider value={accordLines}>
       <LocalFileLinkContext.Provider value={localFileOpen.localFileLinkContext}>
       <AttachmentPanelContext.Provider value={sidePanel.attachmentContext}>
         <div
@@ -516,6 +521,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
         </div>
       </AttachmentPanelContext.Provider>
       </LocalFileLinkContext.Provider>
+      </AccordLinesContext.Provider>
       </ArtifactNoteProgressContext.Provider>
       </ArtifactsContext.Provider>
     </MessageLinkContext.Provider>

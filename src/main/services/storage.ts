@@ -596,8 +596,11 @@ export class StorageService {
       repoPath?: string;
       running?: number | string | boolean | null;
       archived?: number | string | boolean | null;
+      pinned?: number | string | boolean | null;
+      pinnedAt?: string | null;
       activeRunIdsCount?: number | string | null;
       replyPending?: number | string | null;
+      waitingChoice?: number | string | null;
       chatParticipantsJson?: string | null;
     }>(
       // Besides this device's runs, whether a member's reply has not ended
@@ -612,6 +615,8 @@ export class StorageService {
          repo_path as repoPath,
          json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.running') as running,
          json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.archived') as archived,
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.pinned') as pinned,
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.pinnedAt') as pinnedAt,
          coalesce(json_array_length(coalesce(nullif(body_json, ''), payload_json), '$.metadata.activeRunIds'), 0) as activeRunIdsCount,
          exists (
            select 1 from conversation_messages m
@@ -621,6 +626,15 @@ export class StorageService {
              and json_extract(m.payload_json, '$.status') = 'pending'
              and json_extract(m.payload_json, '$.role') = 'participant'
          ) as replyPending,
+         exists (
+           select 1 from conversation_messages m
+           where m.conversation_id = conversations.id
+             and ${pendingReplyRowHintSql("m.payload_json")}
+             and json_valid(m.payload_json)
+             and json_extract(m.payload_json, '$.role') = 'participant'
+             and json_extract(m.payload_json, '$.metadata.pendingChoice.status') = 'pending'
+             and coalesce(json_extract(m.payload_json, '$.metadata.serverCard.state'), '') <> 'answered'
+         ) as waitingChoice,
          json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participants') as chatParticipantsJson
        from conversations
        order by updated_at desc;`
@@ -633,6 +647,8 @@ export class StorageService {
       const replyPending = row.replyPending === 1 || row.replyPending === "1";
       const isRunning = activeCount > 0 || runningFlag;
       const isArchived = row.archived === 1 || row.archived === "1" || row.archived === true || row.archived === "true";
+      const isPinned = row.pinned === 1 || row.pinned === "1" || row.pinned === true || row.pinned === "true";
+      const waitingChoice = row.waitingChoice === 1 || row.waitingChoice === "1";
       const chatParticipants = row.kind === "chat"
         ? normalizeConversationSummaryChatParticipants(row.chatParticipantsJson)
         : undefined;
@@ -646,6 +662,8 @@ export class StorageService {
         running: isRunning,
         ...(replyPending ? { replyPending: true } : {}),
         archived: isArchived,
+        ...(isPinned ? { pinned: true, ...(typeof row.pinnedAt === "string" && row.pinnedAt ? { pinnedAt: row.pinnedAt } : {}) } : {}),
+        ...(waitingChoice ? { waitingChoice: true } : {}),
         ...(chatParticipants ? { chatParticipants } : {})
       };
     });

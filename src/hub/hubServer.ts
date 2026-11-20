@@ -45,6 +45,8 @@ import { isAllowedPushEndpoint } from "./hubPush";
 import { HUB_PHONE_PATHS, type HubPhoneApi } from "./hubPhone";
 import { HUB_MEMBER_RULES_DOCUMENT, HubOpsRequestError, type HubOps } from "./hubOps";
 import type { HubMemory } from "./hubMemory";
+import type { HubAlerts } from "./hubAlerts";
+import { HUB_ALERTS_PATH, HUB_ALERTS_TWILIO_PATH } from "../shared/urgentAlerts";
 import { HUB_MEMORY_PATH, isMemoryChangeAction } from "../shared/memory";
 import {
   HUB_ARTIFACT_PATH, HUB_ARTIFACTS_PATH, HUB_CARDS_PATH, HUB_CHAT_PATH, HUB_CHATS_PATH, HUB_FEED_PATH, HUB_MACHINE_SETTINGS_PATH, HUB_ME_PATH, HUB_OPS_PATH, HUB_TURNS_PATH,
@@ -71,11 +73,15 @@ export interface HubServerOptions {
   ops?: HubOps;
   /** Members' long-term memory (shared/memory.ts). */
   memory?: HubMemory;
+  /** Urgent alerts: Telegram and calls (shared/urgentAlerts.ts). */
+  alerts?: HubAlerts;
   now?: () => number;
   debugLog?: (event: string, payload: Record<string, unknown>) => void;
 }
 
 const BLOB_PATH = /^\/v1\/blobs\/(sha256:[0-9a-f]{64})$/;
+/** A key Twilio posts: a few dozen form fields. */
+const TWILIO_MAX_BODY_BYTES = 16 * 1024;
 /** A pairing request is a key, a signature and a token. */
 const ENROLL_MAX_BODY_BYTES = 16 * 1024;
 
@@ -557,6 +563,17 @@ export class HubServer {
         return json(response, 200, { ok: true, publicKey: this.options.vapidPublicKey });
       }
       if (openOnly) throw new HubRequestError(403, "Use HTTPS.");
+      if (this.options.alerts && request.method === "POST" && url.pathname === HUB_ALERTS_TWILIO_PATH) {
+        // Unsigned by a device: Twilio signs it with the account's token,
+        // which only this server and Twilio hold (HubAlerts checks it).
+        const body = await readBody(request, TWILIO_MAX_BODY_BYTES);
+        const signature = request.headers["x-twilio-signature"];
+        const answer = await this.options.alerts.twilioKey(url, body, typeof signature === "string" ? signature : undefined);
+        status = answer.status;
+        response.writeHead(answer.status, { "content-type": "text/xml; charset=utf-8", "cache-control": "no-store" });
+        response.end(answer.twiml);
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/v1/phone/enroll") {
         // Unsigned: the phone is not on the roster yet. Its body proves the
         // key it enrolls, and the invite's token proves the owner sent it.
@@ -596,6 +613,10 @@ export class HubServer {
       if (this.options.memory && url.pathname === HUB_MEMORY_PATH) {
         status = await this.handleMemory(request, response, url, device, body);
         return;
+      }
+      if (this.options.alerts && url.pathname === HUB_ALERTS_PATH) {
+        if (request.method !== "POST") throw new HubRequestError(404, "Not found.");
+        return json(response, 200, await this.options.alerts.handle(device, parseJson(body)));
       }
       if (this.options.ops && url.pathname.startsWith("/v3/")) {
         status = await this.handleOps(request, response, url, device, body);

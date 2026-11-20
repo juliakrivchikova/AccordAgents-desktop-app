@@ -71,9 +71,12 @@ export class MachinePowerStore {
     return (await this.database.query<{ busy: number }>(`select exists(select 1 from machine_maintenance_leases where boot_id=${q(bootId)}) as busy;`))[0]?.busy === 1;
   }
 
-  /** Runtime caller already fenced its in-process event/native admissions and
-   * checked active continuations, approvals and background work. This final
-   * shared guard checks durable commands and maintenance in the same commit. */
+  /** Runtime caller already fenced its in-process admissions and checked
+   * member runs, approvals, background work and writes the server has not
+   * taken. This final shared guard checks maintenance in the same commit.
+   * Turns wait on the User's server, not in this database: the tables the
+   * old signed-event order kept them in are dropped, and naming one here
+   * fails every idle stop. */
   async tryFence(bootId: string, uptimeMs: number, fenceId: string, expectedIdleSinceMs: number): Promise<boolean> {
     validateIdentity(bootId); validateIdentity(fenceId); validateTime(uptimeMs); validateTime(expectedIdleSinceMs); await this.database.init();
     const rows = await this.database.query<{ fence: string }>(`pragma synchronous=FULL; begin immediate;
@@ -81,9 +84,6 @@ export class MachinePowerStore {
       update machine_power_state set stop_fence=${q(fenceId)} where singleton=1 and boot_id=${q(bootId)}
         and stop_fence is null and idle_since_ms=${expectedIdleSinceMs}
         and not exists(select 1 from machine_maintenance_leases)
-        and not exists(select 1 from native_commands where phase!='finished')
-        and not exists(select 1 from device_event_inbox i join chat_events e on e.event_id=i.event_id
-          where i.applied_at is null and e.kind = 'machine.turn.request')
       returning stop_fence as fence;
       commit;`);
     return rows.length === 1;

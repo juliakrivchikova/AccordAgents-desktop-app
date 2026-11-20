@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CloudRunPreparationService } from "./cloudRunPreparation";
+import { CloudRunPreparationService, STARTED_MACHINE_GREETING_WAIT_MS } from "./cloudRunPreparation";
 import { conversationOnMachine } from "../../shared/machineRepository";
 import type { Conversation, AwsWorkerStatus } from "../../shared/types";
 import type { MachineRecord } from "../../shared/machineLink";
 import type { MachineInstallRecord, MachineInstallRequest } from "../../shared/machineInstall";
+import { MACHINE_RECOVERY_OPERATION_PREFIX } from "../../shared/machineInstall";
 
 function harness() {
   const machines: MachineRecord[] = [];
@@ -47,6 +48,8 @@ function harness() {
       return { record, snapshot };
     },
     isConnected: () => false,
+    waitForConnected: async () => false,
+    instanceRunningSince: async () => undefined,
     prepareMachine: async () => { calls.push("profile"); },
     prepareProvider: async (_worker, provider) => { calls.push(`provider:${provider}`); },
     bootstrapProject: async () => {
@@ -157,6 +160,149 @@ test("selecting Cloud on an instance the app just found gone says so and sets no
   h.options.aws.status = async () => ({ configured: false, notices: ["Your cloud machine no longer exists in AWS, so it was removed."] } as AwsWorkerStatus);
   await assert.rejects(new CloudRunPreparationService(h.options).prepare(request, () => {}), /no longer exists in AWS, so it was removed/);
   assert.deepEqual(h.calls, []);
+});
+
+const awsStatus = (state: AwsWorkerStatus["state"]) =>
+  ({ configured: true, state, handle: { instanceId: "i-abc", region: "eu-west-1" } } as AwsWorkerStatus);
+const currentHello = { deviceId: "cloud", machineName: "cloud", platform: "linux", appVersion: "test", providers: [] };
+
+/** A machine set up on the instance earlier, whose instance then stopped.
+ *  `greets`: its program greets once waited for, with `hello`. */
+async function stoppedSetUpMachine(options: { greets?: boolean; before?: Partial<MachineRecord["lastHello"]> } = {}) {
+  const h = harness();
+  await h.service.prepare(request, () => {});
+  h.stop();
+  h.calls.length = 0;
+  h.machines[0].lastHello = { ...currentHello, ...options.before } as MachineRecord["lastHello"];
+  let connected = false;
+  const waits: number[] = [];
+  h.options.isConnected = () => connected;
+  h.options.waitForConnected = async (machineId, timeoutMs) => {
+    assert.equal(machineId, "machine-1");
+    waits.push(timeoutMs);
+    if (options.greets === false) return false;
+    connected = true;
+    h.machines[0].lastHello = { ...currentHello };
+    return true;
+  };
+  return { h, waits, service: new CloudRunPreparationService(h.options) };
+}
+
+test("a member's turn starts the stopped instance and waits for its machine to greet before using it", async () => {
+  const { h, waits, service } = await stoppedSetUpMachine();
+  const messages: string[] = [];
+  const result = await service.prepare(request, p => messages.push(p.message), { startStopped: true });
+  assert.equal(result.machine.id, "machine-1");
+  // Started (no ":no-start"), then used as a running one: nothing set up again.
+  assert.deepEqual(h.calls, ["access:i-abc", "profile", "provider:codex-cli"]);
+  assert.deepEqual(waits, [STARTED_MACHINE_GREETING_WAIT_MS]);
+  assert.ok(messages.includes("Starting your AWS instance…"), messages.join(" | "));
+  assert.ok(messages.includes("Waiting for your cloud machine to connect…"), messages.join(" | "));
+});
+
+test("the greeting is what counts: a machine that reported an older version or runs before it stopped is used as it greets now", async () => {
+  const { h, service } = await stoppedSetUpMachine({ before: { appVersion: "old", activeRunIds: ["run-before-stop"] } });
+  await service.prepare(request, () => {}, { startStopped: true });
+  assert.deepEqual(h.calls, ["access:i-abc", "profile", "provider:codex-cli"]);
+});
+
+test("a turn waits for an instance already starting, and one that is stopping, as for a stopped one", async () => {
+  for (const state of ["pending", "stopping"] as const) {
+    const { h, service } = await stoppedSetUpMachine();
+    h.options.aws.status = async () => awsStatus(state);
+    await service.prepare(request, () => {}, { startStopped: true });
+    assert.deepEqual(h.calls, ["access:i-abc", "profile", "provider:codex-cli"], state);
+  }
+});
+
+test("a turn waits for a machine whose instance was started a moment ago elsewhere (Settings, the User's server), not for one running for long", async () => {
+  for (const [sinceMs, waited] of [[30_000, true], [60 * 60_000, false]] as const) {
+    const { h, waits, service } = await stoppedSetUpMachine();
+    h.options.aws.status = async () => awsStatus("running");
+    h.options.instanceRunningSince = async () => Date.now() - sinceMs;
+    await service.prepare(request, () => {}, { startStopped: true });
+    assert.equal(waits.length, waited ? 1 : 0, `running for ${sinceMs} ms`);
+    // Not waited for: its program is down, and it is set up again as before.
+    assert.deepEqual(h.calls, waited ? ["access:i-abc", "profile", "provider:codex-cli"] : ["access:i-abc", "install:machine-1:codex-cli"]);
+  }
+});
+
+test("a machine that greets while its instance starts is not waited for", async () => {
+  const { h, waits, service } = await stoppedSetUpMachine();
+  h.options.isConnected = () => true;
+  await service.prepare(request, () => {}, { startStopped: true });
+  assert.deepEqual(waits, []);
+  assert.deepEqual(h.calls, ["access:i-abc", "profile", "provider:codex-cli"]);
+});
+
+test("a started machine that never greets is set up again, even if it reported runs before it stopped", async () => {
+  const { h, service } = await stoppedSetUpMachine({ greets: false, before: { activeRunIds: ["run-before-stop"] } });
+  await service.prepare(request, () => {}, { startStopped: true });
+  assert.deepEqual(h.calls, ["access:i-abc", "install:machine-1:codex-cli"]);
+  assert.match(h.installRequests.at(-1)?.operationId ?? "", new RegExp(`^${MACHINE_RECOVERY_OPERATION_PREFIX}`),
+    "a program that comes back while it is set up again is not drained");
+});
+
+test("a turn on a stopped instance with no machine on it yet starts it and sets the machine up", async () => {
+  const h = harness(); h.stop();
+  const messages: string[] = [];
+  await h.service.prepare(request, p => messages.push(p.message), { startStopped: true });
+  assert.deepEqual(h.calls, ["access:i-abc", "enroll", "install:machine-1:codex-cli"]);
+  assert.ok(messages.includes("Starting your AWS instance…"), messages.join(" | "));
+});
+
+test("a turn never starts an instance that is gone or not set up", async () => {
+  for (const [status, message] of [
+    [awsStatus("absent"), /Start your AWS instance/],
+    [awsStatus("terminated"), /Start your AWS instance/],
+    [{ configured: false, notices: ["Your cloud machine no longer exists in AWS, so it was removed."] }, /no longer exists in AWS, so it was removed/]
+  ] as const) {
+    const h = harness();
+    h.options.aws.status = async () => status as AwsWorkerStatus;
+    await assert.rejects(new CloudRunPreparationService(h.options).prepare(request, () => {}, { startStopped: true }), message);
+    assert.deepEqual(h.calls, [], JSON.stringify(status));
+  }
+});
+
+test("a turn asked while selecting Cloud is still checking a stopped instance starts it once that check ends", async () => {
+  const { h, service } = await stoppedSetUpMachine();
+  const selection = service.prepare({ ...request, operationId: "select" }, () => {});
+  const turn = service.prepare({ ...request, operationId: "turn" }, () => {}, { startStopped: true });
+  await assert.rejects(selection, /Start your AWS instance/);
+  assert.equal((await turn).machine.id, "machine-1");
+  assert.deepEqual(h.calls, ["access:i-abc", "profile", "provider:codex-cli"]);
+});
+
+test("selecting Cloud while a turn starts the instance takes that start, and starts nothing itself", async () => {
+  const { h, service } = await stoppedSetUpMachine();
+  const turn = service.prepare({ ...request, operationId: "turn" }, () => {}, { startStopped: true });
+  const selection = service.prepare({ ...request, operationId: "select" }, () => {});
+  assert.equal((await selection).machine.id, "machine-1");
+  await turn;
+  assert.deepEqual(h.calls, ["access:i-abc", "profile", "provider:codex-cli"]);
+});
+
+test("a turn that joins a selection on a running instance is shown what it waits for, a sign-in included", async () => {
+  const h = harness();
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const install = h.options.install;
+  h.options.install = async (installRequest, progress) => {
+    progress({ machineId: installRequest.machineId, phase: "preflight", operationId: installRequest.operationId, kind: "install",
+      message: "Sign in to Codex", authUrl: "https://auth.example/device", authCode: "ABCD-1234", authProvider: "codex-cli",
+      updatedAt: "now", completed: [] } as Parameters<typeof progress>[0]);
+    await released;
+    return install(installRequest, progress);
+  };
+  const service = new CloudRunPreparationService(h.options);
+  const selection = service.prepare({ ...request, operationId: "select" }, () => {});
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const seen: Array<{ message: string; authUrl?: string }> = [];
+  const turn = service.prepare({ ...request, operationId: "turn" }, p => seen.push(p), { startStopped: true });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(seen.some(p => p.authUrl === "https://auth.example/device"), JSON.stringify(seen));
+  release();
+  await Promise.all([selection, turn]);
 });
 
 test("choosing an existing AWS machine never silently switches to a different instance", async () => {

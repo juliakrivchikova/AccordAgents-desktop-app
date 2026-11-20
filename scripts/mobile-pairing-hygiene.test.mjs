@@ -49,7 +49,7 @@ test("pairing credentials leave the URL; an old pairing is cleared and said once
         old: localStorage.getItem(${JSON.stringify(OLD_PAIRING_KEY)}),
         hub: localStorage.getItem(${JSON.stringify(HUB_PAIRING_KEY)}),
         notices, stores, meta, outbox,
-        chats: document.querySelectorAll(".mobile-chat-row").length,
+        chats: document.querySelectorAll('#chat-list .mobile-chat-group[data-section="project"] .mobile-chat-row').length,
         dock: !document.getElementById("home-dock").hidden
       };
     })()`);
@@ -113,7 +113,7 @@ test("pairing credentials leave the URL; an old pairing is cleared and said once
 
     // --- pairing with the server: the code leaves the address --------------
     await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
-    await app.waitFor(`document.querySelectorAll(".mobile-chat-row").length === 1`, "the chats from the server");
+    await app.waitFor(`document.querySelectorAll('#chat-list .mobile-chat-group[data-section="project"] .mobile-chat-row').length === 1`, "the chats from the server");
     now = await state();
     assert.ok(now.hub, "the phone is paired with the server");
     assert.equal((await hub.phones()).length, 1, "and the server knows it");
@@ -128,7 +128,7 @@ test("pairing credentials leave the URL; an old pairing is cleared and said once
     // --- paired again with a new code: the same phone, not a second one -----
     const firstId = JSON.parse(now.hub).deviceId;
     await pairPage(app, { hub, siteOrigin: site.origin });
-    await app.waitFor(`document.querySelectorAll(".mobile-chat-row").length === 1`, "the chats after pairing again");
+    await app.waitFor(`document.querySelectorAll('#chat-list .mobile-chat-group[data-section="project"] .mobile-chat-row').length === 1`, "the chats after pairing again");
     const again = JSON.parse((await state()).hub);
     assert.equal(again.deviceId, firstId, "the phone keeps its key when it pairs with the same server again");
     const phones = await hub.phones();
@@ -141,7 +141,7 @@ test("pairing credentials leave the URL; an old pairing is cleared and said once
       return true;
     })()`);
     await app.send("Page.reload", {});
-    await app.waitFor(`Boolean(globalThis.AccordAgentsMobile) && document.querySelectorAll(".mobile-chat-row").length === 1`, "the chats after the relaunch");
+    await app.waitFor(`Boolean(globalThis.AccordAgentsMobile) && document.querySelectorAll('#chat-list .mobile-chat-group[data-section="project"] .mobile-chat-row').length === 1`, "the chats after the relaunch");
     now = await state();
     assert.equal(now.old, null, "the old pairing is dropped");
     assert.deepEqual(now.notices, [], "without a notice: this phone is paired");

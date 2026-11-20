@@ -12,9 +12,11 @@ import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../.
 import type { ChatImageAttachment, ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
 import { isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import { TURN_FINISHED_NOTE_SOURCE } from "../../shared/turnFinishedNoteSource";
+import { ACCORD_CLOSED_SOURCE, accordClosedLaunchId, accordRefusedLines } from "../../shared/accordProgress";
 import { HubOps } from "../../hub/hubOps";
 import { HubServer } from "../../hub/hubServer";
 import { ChatService } from "./chat";
+import { buildChatParticipantStatusMap } from "../../shared/chatRosterStatus";
 import { DeviceIdentityService } from "./deviceIdentity";
 import { ChatSearchService } from "./chatSearch";
 import { HubClient, HubHttpError } from "./hubClient";
@@ -105,7 +107,7 @@ async function setup(t: test.TestContext) {
   const desktopControl = { hold: false, releases: [] as Array<() => void> };
   const applied: MachineSettingsDocument[] = [];
   const machineControl = { hold: false, releases: [] as Array<() => void>, settingsApplied: () => applied.length, takes: true, closed: [] as string[],
-    reply: undefined as ((pending: ChatMessage) => void) | undefined };
+    reply: undefined as ((pending: ChatMessage) => void) | undefined, prepareDelayMs: 0 };
   const desktopChat = chatService(desktopStorage, turns, "desktop", desktopControl);
   const machineChat = chatService(machineStorage, turns, "machine", machineControl);
 
@@ -165,6 +167,9 @@ async function setup(t: test.TestContext) {
   // plays a held or idle-fenced runtime), then its settings and project folder.
   machineChat.setServerTurnPreparation(async (turn) => {
     if (!machineControl.takes) return false;
+    // A real machine reaches the server over the internet and syncs the
+    // project here: that takes it a second or more, not a few milliseconds.
+    if (machineControl.prepareDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, machineControl.prepareDelayMs));
     await machineSettings.refresh("turn");
     await machineChat.refreshMachineRepository(turn.conversationId);
     return true;
@@ -261,6 +266,28 @@ test("a message on the computer to a machine member is taken and answered by the
     !chat!.messages.some((message) => message.metadata?.serverPlaceholder));
   assert.equal(shown!.messages.filter((message) => message.role === "participant").length, 1, "one bubble for the member");
   await until(async () => h.desktopChat.liveRunIds().length, (count) => count === 0);
+});
+
+test("a message on the computer to a machine member that watches the chat runs it once: its watch does not wake it again for the same message", async (t) => {
+  // The machine reads the User's message from the server before it takes the
+  // member's turn (it makes its settings and project current first); its
+  // watch must not answer that message a second time meanwhile.
+  const watcher: ChatParticipant = { ...remote, autoWatch: true };
+  const h = await linked(t, localChat("chat-watch", { metadata: { participants: [desk, watcher], participantSessions: [], running: false, warnings: [] } as never }));
+  // The User's machine took 1-2 s to start the turn (her logs, 2026-11-18).
+  h.machineControl.prepareDelayMs = 1_000;
+  await h.desktopChat.sendMessage({ conversationId: "chat-watch", content: "@drew hello" } as never);
+  const done = await until(() => h.page("chat-watch"), (page) => page.turns.some((turn) => turn.state === "finished"));
+  const user = done.messages.find((message) => message.role === "user")!;
+  // Long enough for a second wake to start, as it did 1 s after the message on
+  // the User's machine.
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  await until(async () => h.desktopChat.liveRunIds().length + h.machineChat.liveRunIds().length, (count) => count === 0);
+  assert.deepEqual(h.turns.map((turn) => [turn.device, turn.runId]), [["machine", hubTurnRunId(user.id, remote.id)]], "run once, on the machine");
+  const machine = await h.machineStorage.getConversation("chat-watch");
+  assert.equal(machine!.messages.some((message) => message.metadata?.autoWatchTrigger), false, "no watch wake for a message asked of the member");
+  const page = await h.page("chat-watch");
+  assert.equal(page.messages.filter((message) => message.role === "participant").length, 1, "one reply on the server");
 });
 
 test("Stop on the computer stops the machine's turn, shown as waiting until the machine confirms", async (t) => {
@@ -378,6 +405,44 @@ test("a turn the machine has not taken is stopped on the server and never starts
   await until(async () => h.desktopChat.liveRunIds().length + h.machineChat.liveRunIds().length, (count) => count === 0);
   const desktop = await until(() => h.desktopStorage.getConversation("chat-f"), (chat) => !chat!.messages.some((message) => message.status === "pending"));
   assert.ok(desktop!.messages.some((message) => message.role === "participant" && message.content === "machine reply to @drew second"));
+});
+
+test("a chat pinned on the computer is pinned on every device through the server, and keeps its time everywhere", async (t) => {
+  const h = await linked(t, localChat("chat-pin"));
+  const before = (await h.desktopStorage.getConversation("chat-pin"))!.updatedAt;
+  const machineBefore = (await until(() => h.machineStorage.getConversation("chat-pin"), (chat) => Boolean(chat)))!.updatedAt;
+  await h.desktopChat.setPinned({ conversationId: "chat-pin", pinned: true });
+  const server = await until(() => h.page("chat-pin"), (page) => page.conversation?.metadata?.pinned === true);
+  assert.equal(server.conversation.updatedAt, before, "the server keeps the chat's time");
+  const machine = await until(() => h.machineStorage.getConversation("chat-pin"), (chat) => chat?.metadata.pinned === true);
+  assert.equal(typeof machine!.metadata.pinnedAt, "string");
+  assert.equal(machine!.updatedAt, machineBefore, "a device that receives the pin keeps the chat's time");
+  const desktop = (await h.desktopStorage.listConversations()).find((summary) => summary.id === "chat-pin");
+  assert.deepEqual([desktop?.pinned, desktop?.updatedAt], [true, before], "the computer's own list keeps its time too");
+  await h.desktopChat.setPinned({ conversationId: "chat-pin", pinned: false });
+  const unpinned = await until(() => h.machineStorage.getConversation("chat-pin"), (chat) => chat?.metadata.pinned === undefined && chat?.metadata.pinnedAt === undefined);
+  assert.equal(unpinned!.updatedAt, machineBefore);
+});
+
+test("an unpin made while a member's turn holds an older copy of the chat stays unpinned, here and on the server", async (t) => {
+  const h = await linked(t, localChat("chat-pin-run"));
+  await h.desktopChat.setPinned({ conversationId: "chat-pin-run", pinned: true });
+  await until(() => h.page("chat-pin-run"), (page) => page.conversation?.metadata?.pinned === true);
+  // A long-running flow read the chat while it was pinned...
+  const stale = (await h.desktopStorage.getConversation("chat-pin-run"))!;
+  assert.equal(stale.metadata.pinned, true);
+  // ...the User unpins meanwhile...
+  await h.desktopChat.setPinned({ conversationId: "chat-pin-run", pinned: false });
+  await until(() => h.page("chat-pin-run"), (page) => page.conversation?.metadata?.pinned === undefined);
+  // ...and the flow saves its copy.
+  const internals = h.desktopChat as unknown as { withChatMutation(conversation: unknown, mutate: () => Promise<void>): Promise<void>; saveConversation(conversation: unknown): Promise<void> };
+  await internals.withChatMutation(stale, async () => {
+    stale.updatedAt = new Date().toISOString();
+    await internals.saveConversation(stale);
+  });
+  assert.equal((await h.desktopStorage.getConversation("chat-pin-run"))!.metadata.pinned, undefined, "not pinned again here");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal((await h.page("chat-pin-run")).conversation.metadata.pinned, undefined, "nor on the server");
 });
 
 test("a chat deleted on the computer is deleted on the machine too, through the server, with its members' sessions there closed", async (t) => {
@@ -611,6 +676,63 @@ for (const where of ["machine", "desktop"] as const) {
   });
 }
 
+test("the cross on the pinned Accord leaves one line at the end of the chat on the server; the chat keeps its time and members never read it", async (t) => {
+  // The User, 2026-11-16: closing the Accord folds it into a line, placed last
+  // in the chat as it stood then, the same on every device.
+  const id = "chat-accord-line";
+  const h = await linked(t, localChat(id));
+  await h.desktopChat.sendMessage({ conversationId: id, content: "@taylor hello" } as never);
+  const before = await until(() => h.page(id), (page) =>
+    page.messages.some((message) => message.role === "participant" && message.status === "done") &&
+    page.turns.some((turn) => turn.state === "finished"));
+  const lastBefore = before.messages.at(-1)!.id;
+  const chatTime = before.conversation.updatedAt;
+  // The computer's own time for the chat, once it holds what the server has.
+  const settled = await until(() => h.desktopStorage.getConversation(id), (current) =>
+    current?.messages.at(-1)?.id === lastBefore && typeof current.messages.at(-1)?.metadata?.serverSeq === "number");
+  const deskTime = settled!.updatedAt;
+  // The chat's message stands in for an Accord's launch: the server takes a
+  // line only for an Accord of the chat.
+  const launchId = before.messages.find((message) => message.role === "user")!.id;
+  const isLine = (message: ChatMessage) => accordClosedLaunchId(message) === launchId;
+  await h.desktopChat.closeAccordCard({ conversationId: id, launchMessageId: launchId, title: "  Ship\nor wait " });
+  assert.deepEqual((await h.desktopStorage.getConversation(id))!.metadata.accordClosedLaunchIds, [launchId],
+    "recorded by the computer's own save, before the server answers");
+  // Closed again (a second press, another window): still one line.
+  await h.desktopChat.closeAccordCard({ conversationId: id, launchMessageId: launchId, title: "Ship or wait" });
+  await h.desktopChat.closeAccordCard({ conversationId: id, launchMessageId: "  " });
+  const page = await until(() => h.page(id), (current) => current.messages.some(isLine));
+  const line = page.messages.find(isLine)!;
+  assert.equal(page.messages.at(-1)?.id, line.id, "the line is the last message");
+  assert.equal(page.messages.at(-2)?.id, lastBefore, "right after what was last when she pressed the cross");
+  assert.equal(page.messages.filter((message) => accordClosedLaunchId(message)).length, 1, "one line per Accord");
+  assert.equal(line.role, "system");
+  assert.equal(line.content, "Accord folded: Ship or wait");
+  assert.equal(line.metadata?.appMessageSource, ACCORD_CLOSED_SOURCE);
+  assert.equal(page.conversation.updatedAt, chatTime, "the server keeps the chat's place in her list");
+  const held = await until(() => h.desktopStorage.getConversation(id), (current) =>
+    Boolean(current?.messages.some((message) => isLine(message) && typeof message.metadata?.serverSeq === "number")));
+  assert.equal(held!.updatedAt, deskTime, "and so does the computer, also after the server's copy came back");
+  assert.equal(held!.messages.filter((message) => accordClosedLaunchId(message)).length, 1);
+  assert.deepEqual(held!.metadata.accordClosedLaunchIds, [launchId], "the computer's record over the whole chat");
+  // A line for an Accord the chat does not have: the server refuses it, and
+  // the computer marks it so (it draws nothing; the card stays pinned).
+  await h.desktopChat.closeAccordCard({ conversationId: id, launchMessageId: "no-such-launch", title: "Other" });
+  const refused = await until(() => h.desktopStorage.getConversation(id), (current) =>
+    Boolean(current?.messages.some((message) => accordClosedLaunchId(message) === "no-such-launch" && message.metadata?.serverRejected)));
+  assert.match(String(refused!.messages.find((message) => accordClosedLaunchId(message) === "no-such-launch")!.metadata?.serverRejected), /no such Accord/);
+  assert.deepEqual(accordRefusedLines(refused!.messages), ["no-such-launch"]);
+  assert.deepEqual(refused!.metadata.accordClosedLaunchIds, [launchId], "a refused line is not recorded");
+  assert.ok(!(await h.page(id)).messages.some((message) => accordClosedLaunchId(message) === "no-such-launch"), "not on the server");
+  // The machine keeps the server's copy too; its members do not read it.
+  await until(() => h.machineStorage.getConversation(id), (current) => Boolean(current?.messages.some(isLine)));
+  for (const [chat, member] of [[h.desktopChat, desk], [h.machineChat, remote]] as const) {
+    const read = await chat.readChatMessagesForTool({ conversationId: id, participantId: member.id } as never, { limit: 50 });
+    assert.ok((read.messages as Array<{ id: string }>).some((message) => message.id === lastBefore), "members read the chat");
+    assert.ok(!(read.messages as Array<{ id: string }>).some((message) => message.id === line.id), "but not the line");
+  }
+});
+
 for (const where of ["machine", "desktop"] as const) {
   test(`a ${where} member's reply that is last when its turn ends leaves no note`, async (t) => {
     const id = `chat-no-note-${where}`;
@@ -628,3 +750,35 @@ for (const where of ["machine", "desktop"] as const) {
     assert.equal(held!.messages.filter(isFinishedNote).length, 0);
   });
 }
+
+test("a cloud member's reply that failed here before its turn started stays where it was written, so its later replies count as its newest", async (t) => {
+  // A cloud member whose machine is chosen when it is first asked, as the
+  // User's was: the first time, her AWS instance was stopped.
+  const cloudy: ChatParticipant = { ...remote, homeMachineId: undefined, cloudRun: {} } as ChatParticipant;
+  const h = await linked(t, localChat("chat-failed-start", { metadata: { participants: [desk, cloudy], participantSessions: [], running: false, warnings: [] } as never }));
+  let attempts = 0;
+  h.desktopChat.setCloudRunPreparation(async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("Start your AWS instance in Settings → AWS, then select Cloud run again.");
+    return "box";
+  });
+  await h.desktopChat.sendMessage({ conversationId: "chat-failed-start", content: "@drew first" } as never);
+  const failed = await until(() => h.desktopStorage.getConversation("chat-failed-start"), (chat) =>
+    Boolean(chat?.messages.some((message) => message.participantId === cloudy.id && message.status === "error")));
+  const failure = failed!.messages.find((message) => message.participantId === cloudy.id && message.status === "error")!;
+  assert.match(failure.content, /Start your AWS instance/);
+  assert.equal(failure.metadata?.serverSeq, undefined, "only this computer has it");
+  // Its machine is ready now: it answers the next messages.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await h.desktopChat.sendMessage({ conversationId: "chat-failed-start", content: "@drew second" } as never);
+  const answered = await until(() => h.desktopStorage.getConversation("chat-failed-start"), (chat) =>
+    Boolean(chat?.messages.some((message) => message.participantId === cloudy.id && message.status === "done" && message.content === "machine reply to @drew second")) &&
+    !chat!.messages.some((message) => message.status === "pending"));
+  const ids = answered!.messages.map((message) => message.id);
+  const second = answered!.messages.find((message) => message.role === "user" && message.content === "@drew second")!;
+  assert.ok(ids.includes(failure.id), "the failed bubble is kept, as a local member's is");
+  assert.ok(ids.indexOf(failure.id) < ids.indexOf(second.id), `the failed bubble stays before the later message: ${JSON.stringify(answered!.messages.map((message) => [message.role, message.content.slice(0, 30), message.status]))}`);
+  const lastOfMember = [...answered!.messages].reverse().find((message) => message.participantId === cloudy.id && message.status !== "pending")!;
+  assert.equal(lastOfMember.status, "done", "its newest reply is the one that went fine");
+  assert.notEqual(buildChatParticipantStatusMap(answered!).get(cloudy.id), "error", "so it does not show Error");
+});

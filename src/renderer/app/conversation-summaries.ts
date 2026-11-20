@@ -1,5 +1,5 @@
 import type { ConversationSummary, ConversationUpdate } from "../../shared/types";
-import { isPendingReply } from "../../shared/chatActiveRuns";
+import { isPendingReply, isWaitingChoice } from "../../shared/chatActiveRuns";
 import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import type { ProjectSessionGroup } from "../components/shell";
 import { NO_PROJECT_GROUP_KEY } from "./constants";
@@ -48,6 +48,39 @@ export function buildProjectSessionGroups(summaries: ConversationSummary[]): Pro
     });
 }
 
+/** How many chats Recents lists, as Claude's does. */
+export const RECENT_CHAT_LIMIT = 20;
+
+/** Pinned chats, in the order they were pinned (a newly pinned chat goes to
+ *  the bottom, so the list does not shift under the User; one whose time is
+ *  not known goes last). The phone orders them the same way. */
+export function pinnedChatSummaries(summaries: ConversationSummary[]): ConversationSummary[] {
+  const pinnedAtValue = (summary: ConversationSummary): number => {
+    const value = Date.parse(summary.pinnedAt ?? "");
+    return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+  };
+  return summaries
+    .filter((summary) => summary.pinned === true && summary.archived !== true)
+    .sort((left, right) => {
+      const timeDelta = pinnedAtValue(left) - pinnedAtValue(right);
+      return timeDelta || left.title.localeCompare(right.title) || left.id.localeCompare(right.id);
+    });
+}
+
+/** The most recent chats of every project, pinned ones included. */
+export function recentChatSummaries(summaries: ConversationSummary[], limit = RECENT_CHAT_LIMIT): ConversationSummary[] {
+  return summaries
+    .filter((summary) => summary.archived !== true)
+    .sort(compareConversationSummaries)
+    .slice(0, limit);
+}
+
+/** The chat as the User just pinned or unpinned it, before her server says so. */
+export function withPinnedState(summary: ConversationSummary, pinned: boolean, at: string): ConversationSummary {
+  const { pinned: _pinned, pinnedAt: _pinnedAt, ...rest } = summary;
+  return pinned ? { ...rest, pinned: true, pinnedAt: at } : rest;
+}
+
 export function upsertConversationSummary(summaries: ConversationSummary[], conversation: ConversationUpdate): ConversationSummary[] {
   const nextSummary = summaryFromConversation(conversation);
   return [
@@ -75,6 +108,12 @@ function summaryFromConversation(conversation: ConversationUpdate): Conversation
   // some messages, so it says whether the whole chat has one; a full update
   // or a loaded chat is read as it is.
   const replyPending = conversation.messageDelta?.replyPending === true || conversation.messages.some(isPendingReply);
+  // The same for a member's choice card waiting for the User.
+  const waitingChoice = conversation.messageDelta
+    ? conversation.messageDelta.waitingChoice === true
+    : conversation.messages.some(isWaitingChoice);
+  const pinned = conversation.metadata?.pinned === true;
+  const pinnedAt = typeof conversation.metadata?.pinnedAt === "string" ? conversation.metadata.pinnedAt : undefined;
   const chatParticipants = conversation.kind === "chat"
     ? normalizeConversationSummaryChatParticipants(conversation.metadata?.participants)
     : undefined;
@@ -88,6 +127,8 @@ function summaryFromConversation(conversation: ConversationUpdate): Conversation
     running,
     ...(replyPending ? { replyPending: true } : {}),
     archived: conversation.metadata?.archived === true,
+    ...(pinned ? { pinned: true, ...(pinnedAt ? { pinnedAt } : {}) } : {}),
+    ...(waitingChoice ? { waitingChoice: true } : {}),
     ...(chatParticipants ? { chatParticipants } : {})
   };
 }

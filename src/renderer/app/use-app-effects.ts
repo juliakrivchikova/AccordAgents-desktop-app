@@ -37,6 +37,14 @@ export function useAppEffects(
   refreshActivity: () => Promise<void>
 ): void {
   const deletedConversationIds = useRef(new Set<string>());
+  // Each listed chat's time as the list last had it: an update that leaves it
+  // where it was (a pin, here or from another device) is no news in the chat,
+  // whether or not the chat was ever opened here. A save is announced before
+  // a list read could see it, so news always moves the time first.
+  const listedUpdatedAt = useRef(new Map<string, string>());
+  useEffect(() => {
+    listedUpdatedAt.current = new Map(state.summaries.map((summary) => [summary.id, summary.updatedAt]));
+  }, [state.summaries]);
 
   useEffect(() => window.consensus.onConversationDeleted(conversationId => {
     deletedConversationIds.current.add(conversationId);
@@ -150,6 +158,8 @@ export function useAppEffects(
   useEffect(() => {
     return window.consensus.onConversationUpdated((update) => {
       if (deletedConversationIds.current.has(update.id)) return;
+      const listedAt = listedUpdatedAt.current.get(update.id);
+      const timeMoved = listedAt === undefined || conversationTimeValue(update.updatedAt) > conversationTimeValue(listedAt);
       const updatedConversation = conversationFromUpdate(update);
       const archived = update.archived === true || update.metadata.archived === true;
       state.activityRevisionByConversationRef.current = {
@@ -209,7 +219,7 @@ export function useAppEffects(
           });
         });
         if (!canReplace) {
-          if (!isActive) {
+          if (!isActive && timeMoved) {
             const lastViewed = state.lastViewedAtRef.current[update.id];
             if (!lastViewed || conversationTimeValue(update.updatedAt) > conversationTimeValue(lastViewed)) {
               state.setUnreadConversationIds((prev) => {

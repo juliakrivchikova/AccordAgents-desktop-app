@@ -33,6 +33,10 @@ test("vendors are offered only through the CLIs their guides document", () => {
   assert.deepEqual(cliProviderHostVendorsFor("claude-code"), ["anthropic", "zai", "moonshot", "minimax", "deepseek", "custom"]);
   // Codex needs a Responses API; Chat-Completions-only vendors are not offered.
   assert.deepEqual(cliProviderHostVendorsFor("codex-cli"), ["zai", "openai", "custom"]);
+  // Antigravity reaches only the Gemini API, with its own GEMINI_API_KEY route.
+  assert.deepEqual(cliProviderHostVendorsFor("gemini-cli"), ["google"]);
+  assert.equal(cliProviderHostDefaultBaseUrl("google", "gemini-cli"), "https://generativelanguage.googleapis.com");
+  assert.equal(cliProviderHostDefaultLabel("google", "gemini-cli"), "Google Gemini API");
   assert.equal(cliProviderHostDefaultBaseUrl("zai", "claude-code"), "https://api.z.ai/api/anthropic");
   assert.equal(cliProviderHostDefaultBaseUrl("zai", "codex-cli"), "https://api.z.ai/api/v1");
   assert.equal(cliProviderHostDefaultBaseUrl("moonshot", "codex-cli"), "");
@@ -43,7 +47,9 @@ test("vendors are offered only through the CLIs their guides document", () => {
 test("validation reports the field that is wrong before anything is stored", () => {
   const base = { cli: "claude-code" as const, vendor: "zai" as const, label: "Z.ai GLM", baseUrl: ZAI.baseUrl };
   assert.equal(cliProviderHostValidationError(base), undefined);
-  assert.match(cliProviderHostValidationError({ ...base, cli: "gemini-cli" as never }) ?? "", /which CLI/);
+  assert.match(cliProviderHostValidationError({ ...base, cli: "other-cli" as never }) ?? "", /which CLI/);
+  assert.match(cliProviderHostValidationError({ ...base, cli: "gemini-cli" }) ?? "", /Z\.ai GLM is not available through Antigravity/);
+  assert.equal(cliProviderHostValidationError({ ...base, cli: "gemini-cli", vendor: "google", label: "Google Gemini API", baseUrl: "https://generativelanguage.googleapis.com" }), undefined);
   assert.match(cliProviderHostValidationError({ ...base, vendor: "nope" as never }) ?? "", /vendor/);
   assert.match(cliProviderHostValidationError({ ...base, cli: "codex-cli", vendor: "moonshot" }) ?? "", /not available through Codex/);
   assert.match(cliProviderHostValidationError({ ...base, label: "  " }) ?? "", /name/);
@@ -62,6 +68,8 @@ test("stored records are repaired or dropped, never half-applied", () => {
   assert.equal(normalizeCliProviderHostRecord({ id: "h1", cli: "claude-code", vendor: "custom" }), undefined);
   assert.equal(normalizeCliProviderHostRecord({ id: "h1", cli: "claude-code", vendor: "other", baseUrl: "https://x" }), undefined);
   assert.equal(normalizeCliProviderHostRecord({ id: "h1", cli: "codex-cli", vendor: "deepseek", baseUrl: "https://x" }), undefined);
+  assert.equal(normalizeCliProviderHostRecord({ id: "h1", cli: "gemini-cli", vendor: "zai", baseUrl: "https://x" }), undefined);
+  assert.equal(normalizeCliProviderHostRecord({ id: "h1", cli: "gemini-cli", vendor: "google" })?.baseUrl, "https://generativelanguage.googleapis.com");
   assert.equal(normalizeCliProviderHostRecord("zai"), undefined);
 });
 
@@ -80,6 +88,10 @@ test("vendor presets carry models, defaults and handle slugs; first-party vendor
   assert.equal(cliProviderHostDefaultModel({ vendor: "deepseek" }), "deepseek-v4-pro");
   assert.equal(cliProviderHostModels({ vendor: "anthropic" }), undefined);
   assert.equal(cliProviderHostModels({ vendor: "openai" }), undefined);
+  // Antigravity's own list on the key, read from agy, not a fixed one.
+  assert.equal(cliProviderHostModels({ vendor: "google" }), undefined);
+  assert.equal(cliProviderHostDefaultModel({ vendor: "google" }), undefined);
+  assert.equal(cliProviderHostHandleSlug({ vendor: "google", cli: "gemini-cli" }), "gemini");
   assert.deepEqual(cliProviderHostModels({ vendor: "custom" }), []);
   assert.equal(cliProviderHostDefaultModel({ vendor: "custom" }), undefined);
   assert.equal(cliProviderHostHandleSlug({ vendor: "zai", cli: "claude-code" }), "glm");
@@ -151,6 +163,27 @@ test("Codex run config routes through a custom model_provider, or the OpenAI key
   assert.equal(proxied.env.OPENAI_BASE_URL, "https://proxy.example/v1");
 });
 
+test("Antigravity run config is its own Gemini API key route: modelProvider gemini plus GEMINI_API_KEY", () => {
+  const google: CliProviderHost = {
+    id: "host-google",
+    label: "Google Gemini API",
+    cli: "gemini-cli",
+    vendor: "google",
+    baseUrl: "https://generativelanguage.googleapis.com",
+    hasApiKey: true,
+    updatedAt: "2026-11-18T00:00:00.000Z"
+  };
+  const direct = cliProviderHostRunConfig(google, "gemini-key", "gemini-4-argon-high");
+  // The default URL is pinned too: an inherited GOOGLE_GEMINI_BASE_URL never takes the key elsewhere.
+  assert.deepEqual(direct.env, { GEMINI_API_KEY: "gemini-key", GOOGLE_GEMINI_BASE_URL: "" });
+  assert.deepEqual(direct.geminiSettings, { modelProvider: "gemini" });
+  assert.equal(direct.codexConfigOverrides, undefined);
+  const proxied = cliProviderHostRunConfig({ ...google, baseUrl: "https://gateway.example/gemini" }, "gemini-key", undefined);
+  assert.deepEqual(proxied.env, { GEMINI_API_KEY: "gemini-key", GOOGLE_GEMINI_BASE_URL: "https://gateway.example/gemini" });
+  // Each run gets its own copy; nothing shared can be changed by a caller.
+  assert.notEqual(direct.geminiSettings, proxied.geminiSettings);
+});
+
 test("run version changes with the provider record and the member's model", () => {
   assert.equal(cliProviderHostRunVersion(undefined, "x"), "");
   const base = cliProviderHostRunVersion(ZAI, "glm-5.3");
@@ -169,6 +202,13 @@ test("readiness: a bound member needs the CLI to run and the provider to have a 
   assert.equal(readinessForParticipant({ kind: "claude-code", host: { ...ZAI, hasApiKey: false } }, agents, providers), "sign-in-required");
   // A host for another CLI does not count.
   assert.equal(readinessForParticipant({ kind: "claude-code", host: { ...ZAI, cli: "codex-cli" } }, agents, providers), "sign-in-required");
+  // agy signed out, a Gemini API key provider: ready, as agy runs on the key alone.
+  const agySignedOut: AgentHealth[] = [
+    { kind: "gemini-cli", label: "Antigravity", installed: true, detection: "detected", runnable: "ready", authentication: "required" }
+  ];
+  const google = { cli: "gemini-cli" as const, hasApiKey: true };
+  assert.equal(readinessForParticipant({ kind: "gemini-cli" }, agySignedOut, [{ kind: "gemini-cli", enabled: true }]), "sign-in-required");
+  assert.equal(readinessForParticipant({ kind: "gemini-cli", host: google }, agySignedOut, [{ kind: "gemini-cli", enabled: true }]), "ready");
   const missing: AgentHealth[] = [{ kind: "claude-code", label: "Claude Code", installed: false, detection: "not-detected" }];
   assert.equal(readinessForParticipant({ kind: "claude-code", host: ZAI }, missing, providers), "not-detected");
 });

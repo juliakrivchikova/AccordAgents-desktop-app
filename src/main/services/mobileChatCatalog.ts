@@ -1,6 +1,7 @@
 import type { ChatMessage, ChatParticipant, Conversation, ConversationSummary } from "../../shared/types";
 import { chatMessageHiddenFromTimeline } from "../../shared/chatParticipantRequestThreads";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
+import { accordClosedLaunchId } from "../../shared/accordProgress";
 import { mobileChatGroupLabel, mobileSnippet } from "../../shared/mobileChatRow";
 import type { MobileControlCard } from "../../shared/mobileControlCards";
 import { phoneActivityEvents, timelineEventsFromSnapshot, type MobileChatListItem, type MobileTimelinePage } from "./mobileTimeline";
@@ -47,11 +48,16 @@ export interface MobileChatListOptions {
   pendingMessagesFor?: (conversationId: string) => Promise<ChatMessage[] | undefined>;
 }
 
+/** The chats the phone lists: the newest ones, and every pinned one however
+ *  old (the phone shows them under Pinned). */
+export function mobileListedChats(summaries: ConversationSummary[], include: (summary: ConversationSummary) => boolean = () => true): ConversationSummary[] {
+  const chats = summaries.filter((summary) => summary.kind === "chat" && summary.archived !== true && include(summary));
+  return [...chats.slice(0, MOBILE_CHAT_LIST_LIMIT), ...chats.slice(MOBILE_CHAT_LIST_LIMIT).filter((summary) => summary.pinned === true)];
+}
+
 export async function buildMobileChatList(store: MobileCatalogStore, options: MobileChatListOptions): Promise<MobileChatListItem[]> {
   const summaries = options.summaries ?? await store.listConversations();
-  const listed = summaries
-    .filter((summary) => summary.kind === "chat" && summary.archived !== true && (options.include?.(summary) ?? true))
-    .slice(0, MOBILE_CHAT_LIST_LIMIT);
+  const listed = mobileListedChats(summaries, (summary) => options.include?.(summary) ?? true);
   const items: MobileChatListItem[] = [];
   for (const summary of listed) {
     // The list needs each chat's members and its last line, not its
@@ -71,7 +77,8 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
     // member's own words the desktop merely tidies away (a waiting status)
     // may stand in; a system trigger or a control message never does.
     const newest = conversation?.messages.slice().reverse().filter((message) => message.content.trim()) ?? [];
-    const lastMessage = newest.find((message) => !chatMessageHiddenFromTimeline(conversation as Conversation, message)) ??
+    // A closed Accord's line is her own view of the chat, not its news.
+    const lastMessage = newest.find((message) => !chatMessageHiddenFromTimeline(conversation as Conversation, message) && !accordClosedLaunchId(message)) ??
       newest.find((message) => message.role === "participant" && message.metadata?.hiddenFromTimeline !== true);
     const members = mobileChatMembers(conversation);
     const pendingCards = options.pendingCardsFor?.(summary.id, conversation);
@@ -89,6 +96,11 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
         .map((participant) => participant.handle.startsWith("@") ? participant.handle : `@${participant.handle}`)
         .slice(0, 4),
       ...(pendingCards ? { pendingCards } : {}),
+      ...(closedAccordsOf(conversation).length ? { accordClosed: closedAccordsOf(conversation) } : {}),
+      ...(summary.pinned === true ? { pinned: true, ...(summary.pinnedAt ? { pinnedAt: summary.pinnedAt } : {}) } : {}),
+      // A choice card waits for the User: the server's own cards say so when
+      // read whole, else the chat's messages do.
+      ...((pendingCards ? pendingCards.some((card) => card.kind === "choice") : summary.waitingChoice === true) ? { waitingChoice: true } : {}),
       ...(activity.length ? { activity } : {}),
       members: members.map((participant) => ({
         id: participant.id,
@@ -194,6 +206,13 @@ export function mobileParticipantDisplayName(participant: Pick<ChatParticipant, 
 
 /** The project's folder name. Split on either separator: the server reads
  *  paths the desktop wrote, whatever system that is. */
+
+/** The Accords folded into a chat, as its copy here records them over the
+ *  whole chat (the loaded page may not hold their lines). */
+function closedAccordsOf(conversation: Conversation | undefined): string[] {
+  const ids = conversation?.metadata?.accordClosedLaunchIds;
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && Boolean(id)) : [];
+}
 
 export function mobileWhoLabel(message: ChatMessage | undefined): string | undefined {
   if (!message) {

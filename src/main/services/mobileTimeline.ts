@@ -1,6 +1,8 @@
+import { URGENT_ALERT_SERVER_WRITER, type UrgentAlertView } from "../../shared/urgentAlerts";
 import type { ChatMessage, ChatParticipant, ChatTurnFinishedNoteMetadata, Conversation } from "../../shared/types";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
+import { accordClosedLaunchId, accordClosedLineTitle } from "../../shared/accordProgress";
 import {
   chatMessageHiddenFromTimeline,
   chatMessageVisualThreadRootId,
@@ -16,6 +18,9 @@ import type { MobileControlCard } from "../../shared/mobileControlCards";
 
 export interface MobileChatListItem {
   id: string;
+  /** The Accords folded into the chat (her server's record over the whole
+   *  chat): the phone does not pin their cards. */
+  accordClosed?: string[];
   title: string;
   group: string;
   snippet: string;
@@ -32,6 +37,11 @@ export interface MobileChatListItem {
    *  them now. The phone drops a pending card it holds that is not here: the
    *  batch that closed it can be lost, and nothing else would ever say so. */
   pendingCards?: MobileControlCard[];
+  /** Pinned by the User, and when: the phone lists it under Pinned. */
+  pinned?: boolean;
+  pinnedAt?: string;
+  /** A member's choice card in it waits for the User's answer. */
+  waitingChoice?: boolean;
 }
 
 export interface MobileChatMember {
@@ -115,9 +125,14 @@ export interface MobileTimelineEvent {
   /** A turn-finished note (system): the member's reply it leads back to.
    *  Its content is the reply's first line. */
   finishedNote?: ChatTurnFinishedNoteMetadata;
+  /** An urgent alert a member raised (shared/urgentAlerts.ts), as the server
+   *  keeps it: the phone shows the same red card, with its cross. */
+  urgentAlert?: UrgentAlertView;
   /** An artifact note (system) filed under an Accord: the launch message
    *  whose card shows it (accordProgress.ts). */
   accordLaunchMessageId?: string;
+  /** The line a closed Accord leaves in the chat (accordProgress.ts). */
+  accordClosed?: { launchMessageId: string; title?: string };
   /** Who leads that Accord and who is in it (the card without its launch). */
   accordLaunch?: { facilitator: string; members: string[] };
 }
@@ -268,8 +283,14 @@ function timelineEventFromMessage(
     ...(hidden ? { hidden: true as const } : {}),
     ...(midTurn ? { midTurn: true as const } : {}),
     ...(finishedNote ? { finishedNote } : {}),
+    ...(message.role === "participant" && message.metadata?.urgentAlert && message.metadata.serverWriter === URGENT_ALERT_SERVER_WRITER
+      ? { urgentAlert: message.metadata.urgentAlert } : {}),
     ...(message.role === "system" && typeof message.metadata?.accordLaunchMessageId === "string" && message.metadata.accordLaunchMessageId
       ? { accordLaunchMessageId: message.metadata.accordLaunchMessageId } : {}),
+    // The line a closed Accord left: the phone draws the Accord's card there.
+    ...(accordClosedLaunchId(message)
+      ? { accordClosed: { launchMessageId: accordClosedLaunchId(message) as string, ...(accordClosedLineTitle(message) ? { title: accordClosedLineTitle(message) } : {}) } }
+      : {}),
     ...(message.role === "system" && message.metadata?.accordLaunch ? { accordLaunch: message.metadata.accordLaunch } : {}),
     // A scheduled script's message is not the User's: the phone has no script
     // author, so it shows as an author named after the script.

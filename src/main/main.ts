@@ -1,3 +1,4 @@
+import { URGENT_ALERT_USER_ACTIONS, type UrgentAlertUserRequest, type UrgentAlertSettingsView } from "../shared/urgentAlerts";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -64,6 +65,8 @@ import type {
   ReadChatAttachmentRequest,
   RenameChatConversationRequest,
   SetChatArchivedRequest,
+  SetChatPinnedRequest,
+  ChatPinState,
   RepoFileSearchRequest,
   RespondToChatAppToolApprovalRequest,
   RespondToChatChoiceRequest,
@@ -76,6 +79,7 @@ import type {
   SaveAgentEnvironmentVariableRequest,
   StartChatAccordRequest,
   ToggleChatReactionRequest,
+  CloseAccordCardRequest,
   DismissTurnFinishedNoteRequest,
   UpdateChatParticipantRuntimeRequest,
   RemoveChatParticipantRequest,
@@ -109,7 +113,7 @@ import { artifactMembersForConversation } from "../shared/artifacts";
 import { normalizeExternalUrlForOpen } from "../shared/externalLinks";
 import { ArtifactClient } from "./services/artifactClient";
 import { ArtifactStore } from "./services/artifactStore";
-import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers, wireMemoryToolHandler } from "./appToolWiring";
+import { createArtifactToolDispatcher, wireArtifactToolHandler, wireChatAppToolHandlers, wireMemoryToolHandler, wireUrgentAlertToolHandler } from "./appToolWiring";
 import { ScriptService } from "./services/scripts";
 import { ScriptHub } from "./services/scriptHub";
 import { HubClient } from "./services/hubClient";
@@ -178,10 +182,11 @@ import { readTeamDevice } from "./services/teamDevice";
 import { isServerUpdateLoaderWindow, openServerUpdateLoader, updateServerBeforeOpening } from "./services/serverUpdateLoader";
 import { ACTIVITY_RECHECK_MS, appHiddenForUpdate, bootstrapAppUpdater, createUpdateRestart, createUpdateRestartGate, currentUpdateWindows, quitAndInstallUpdate, showUpdateRestartPrompt, updatePromptWindowShown } from "./services/appUpdater";
 import { MachineAutoUpgradeService } from "./services/machineAutoUpgrade";
+import { machineUpgradeTarget } from "./services/machineUpgradeTarget";
 import { MachineRecoveryService } from "./services/machineRecovery";
 import { MachineInactivityCheck } from "./services/machineInactivity";
 import { isMachineAutoUpgradeOperation, isMachineInstallTerminalPhase, isMachineRecoveryOperation } from "../shared/machineInstall";
-import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, refreshLoginShellEnv, runCommand, setCommandDebugLogger, windowsPowerShellPath } from "./services/command";
+import { CommandError, commandEnvironment, ensureLoginShellEnvPrimed, onComputerEnvironmentRead, refreshLoginShellEnv, runCommand, setCommandDebugLogger, windowsPowerShellPath } from "./services/command";
 import { buildCloudRunSshTarget, cloudRunSshOptionArgs, cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings, validateCloudRunSshWorkerFields } from "./services/cloudRunWorkers";
 import { CloudRunDoctorService, enabledCloudProviders } from "./services/cloudRunDoctor";
 import { CloudRunSetupSession } from "./services/cloudRunSetupSession";
@@ -282,7 +287,16 @@ function discardCrashReportDataAtLaunch(): { active: false; error?: string } {
 
 const gitService = new GitService();
 const settingsService = new SettingsService();
-const agentEnvironmentService = new AgentEnvironmentService(settingsService);
+const agentEnvironmentService = new AgentEnvironmentService(settingsService, undefined, undefined, (error) => {
+  void debugLogService.write("agent-environment.reconcile-error", { message: error instanceof Error ? error.message : String(error) });
+});
+// Every successful reading of this computer brings the automatic variables in
+// step, so the cloud machines follow it without the Environment page open.
+onComputerEnvironmentRead(() => {
+  void agentEnvironmentService.reconcile().catch((error: unknown) => {
+    void debugLogService.write("agent-environment.reconcile-error", { message: error instanceof Error ? error.message : String(error) });
+  });
+});
 const sqliteExecutable = resolveSqliteExecutable({
   appPath: app.getAppPath(),
   resourcesPath: process.resourcesPath,
@@ -492,13 +506,16 @@ const usageMilestones = crashReportingStart.active
     readFeatureHistory: async () => {
       // A source that cannot be read leaves its features counted as used.
       const soft = <T>(read: Promise<T>): Promise<T | undefined> => read.catch(() => undefined);
-      const [chats, settings, documents, scripts, memoryNotes, devices] = await Promise.all([
+      const [chats, settings, documents, scripts, memoryNotes, devices, alerts] = await Promise.all([
         soft(storageService.listChatMemberProviders()),
         soft(settingsService.getPublicSettings()),
         soft(artifactStore.multiSignerDocumentStatus()),
         soft(scriptService.list()),
         soft(memoryMirror.size()),
-        soft(settingsService.listTrustedDevices())
+        soft(settingsService.listTrustedDevices()),
+        // Not softened: without the server's answer the history is read again
+        // next launch, so an old setup is neither sent nor assumed.
+        readUrgentAlertSettingsForHistory()
       ]);
       return usageFeatureHistoryFrom({
         chats,
@@ -507,7 +524,8 @@ const usageMilestones = crashReportingStart.active
         plainDocument: documents?.plain,
         approvedScheduledTasks: scripts?.filter((script) => script.approved).length,
         memoryNotes,
-        phones: devices?.filter((device) => device.role === "phone").length
+        phones: devices?.filter((device) => device.role === "phone").length,
+        urgentAlerts: alerts !== null && (alerts.telegram?.connected === true || Boolean(alerts.phone))
       });
     },
     readWeeklySnapshot: async (week) => {
@@ -532,6 +550,25 @@ settingsService.setUsageObserver(usageMilestones ? (event) => {
   if (event.roleChosen) usageMilestones.reach("member_role_changed");
   if (event.rulesAdded) usageMilestones.reach("behavior_rule_attached");
 } : undefined);
+
+/** How long the usage history waits for the server to say whether alerts
+ *  were set up (the link may still be starting, or the server updating). */
+const USAGE_ALERTS_HISTORY_WAIT_MS = 3 * 60_000;
+
+/** The alert settings for the usage history: null when this server has no
+ *  alerts to set up (an older server, or a device that may not set them).
+ *  Throws when the server does not answer in time, so the whole history is
+ *  read again next launch rather than guessed. */
+async function readUrgentAlertSettingsForHistory(): Promise<UrgentAlertSettingsView | null> {
+  const deadline = Date.now() + USAGE_ALERTS_HISTORY_WAIT_MS;
+  while (Date.now() < deadline) {
+    const result = await serverChatLink.alerts<UrgentAlertSettingsView>({ action: "settings" }, AbortSignal.timeout(Math.max(1000, deadline - Date.now())));
+    if (result.ok) return result.value;
+    if (result.error.code !== "server_unavailable" || /older than this app/.test(result.error.message)) return null;
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+  throw new Error("The server did not say whether alerts are set up.");
+}
 
 /** A member added to a chat from this computer: a role someone chose, rules,
  *  and a chat whose members have different roles now but did not before. */
@@ -1352,6 +1389,8 @@ const cloudRunPreparation = new CloudRunPreparationService({
   install: (request, progress) => machineInstallerService.install(request, progress),
   awaitActiveInstall: async (machineId) => { await machineInstallerService.activeOperation(machineId)?.catch(() => undefined); },
   isConnected: (machineId) => Boolean(machineLinkService?.isMachineConnected(machineId)),
+  waitForConnected: async (machineId, timeoutMs) => Boolean(await machineLinkService?.waitForConnected(machineId, timeoutMs)),
+  instanceRunningSince: () => cloudRunAwsService.instanceRunningSince(),
   bootstrapProject: (machineId, localPath, signal, progress) => machineInstallerService.bootstrapProjectMirror({ machineId, localPath }, signal, progress),
   saveInstall: (record) => settingsService.saveMachineInstall(record),
   prepareMachine: async (worker, record) => {
@@ -1387,7 +1426,8 @@ const machinePowerHandoffService = new MachinePowerHandoffService({
 
 chatService.setCloudRunPreparation(async (selection, provider, progress) => {
   if (provider !== "codex-cli" && provider !== "claude-code") throw new Error("This provider does not support Cloud run.");
-  const result = await cloudRunPreparation.prepare({ operationId: randomUUID(), provider, instanceId: selection.instanceId }, progress);
+  // A member's turn: a stopped instance is started for it.
+  const result = await cloudRunPreparation.prepare({ operationId: randomUUID(), provider, instanceId: selection.instanceId }, progress, { startStopped: true });
   return result.machine.id;
 });
 chatService.setCloudRunAwsService(cloudRunAwsService);
@@ -1481,6 +1521,7 @@ const dispatchArtifactTool = createArtifactToolDispatcher(artifactService);
 wireArtifactToolHandler(appMcpService, chatService, dispatchArtifactTool);
 // Members' memory lives on the User's server only (shared/memory.ts).
 wireMemoryToolHandler(appMcpService, chatService, () => serverChatLink, () => usageMilestones?.reach("memory_note_written"));
+wireUrgentAlertToolHandler(appMcpService, () => serverChatLink);
 chatService.setConnectorSignedInObserver(() => usageMilestones?.reach("connector_signed_in"));
 
 /** Settings → Memory: every note on the User's server, with the names of
@@ -2271,13 +2312,14 @@ function registerIpc(): void {
   ipcMain.handle("cloud-runs:aws-delete", () => cloudRunAwsService.deleteWorker());
   ipcMain.handle("settings:get-agent-environment", () => agentEnvironmentService.snapshot());
   ipcMain.handle("settings:save-agent-environment-variable", async (_event, request: SaveAgentEnvironmentVariableRequest) => {
-    await settingsService.saveAgentEnvironmentVariable(request);
+    const snapshot = await agentEnvironmentService.save(request);
     // Work in progress keeps running with the values it started with; each
     // member gets the new ones once its process is idle (retireIdleWarmAgents).
     await cliAgentRunner.retireIdleWarmAgents("environment-changed");
     cliAgentRunner.invalidateAgentReadiness();
-    return agentEnvironmentService.snapshot();
+    return snapshot;
   });
+  ipcMain.handle("settings:refresh-agent-environment", () => agentEnvironmentService.refresh());
   ipcMain.handle("settings:save-cli-provider-host", async (_event, update: CliProviderHostUpdate) => {
     const settings = await settingsService.saveCliProviderHost(update);
     const saved = update.id?.trim() ? settings.cliProviderHosts.find((host) => host.id === update.id?.trim()) : undefined;
@@ -2292,10 +2334,10 @@ function registerIpc(): void {
     return settings;
   });
   ipcMain.handle("settings:delete-agent-environment-variable", async (_event, request: DeleteAgentEnvironmentVariableRequest) => {
-    await settingsService.deleteAgentEnvironmentVariable(request.key);
+    const snapshot = await agentEnvironmentService.delete(request);
     await cliAgentRunner.retireIdleWarmAgents("environment-changed");
     cliAgentRunner.invalidateAgentReadiness();
-    return agentEnvironmentService.snapshot();
+    return snapshot;
   });
   ipcMain.handle("settings:update-provider", async (_event, update: ProviderSettingsUpdate) => {
     const next = await settingsService.updateProvider(update);
@@ -2342,8 +2384,13 @@ function registerIpc(): void {
     return settingsService.deleteChatParticipantConfig(id);
   });
   ipcMain.handle("settings:update-last-repo-path", (_event, repoPath: string) => settingsService.updateLastRepoPath(repoPath));
-  ipcMain.handle("settings:list-provider-models", async (_event, kind: ProviderKind) => {
+  ipcMain.handle("settings:list-provider-models", async (_event, kind: ProviderKind, hostId?: unknown) => {
     if (kind === "codex-cli" || kind === "claude-code" || kind === "gemini-cli") {
+      // Only Antigravity lists other models on a key than on its sign-in.
+      if (kind === "gemini-cli" && typeof hostId === "string" && hostId.trim()) {
+        const secret = await settingsService.getCliProviderHostSecret(hostId);
+        return cliAgentRunner.listHostModelCatalog(secret && secret.host.cli === kind ? secret : undefined);
+      }
       const settings = await settingsService.getPublicSettings();
       const configuredModel = settings.providers.find((provider) => provider.kind === kind)?.model;
       return cliAgentRunner.listModelCatalog(kind, configuredModel, settings.lastRepoPath);
@@ -2569,6 +2616,13 @@ function registerIpc(): void {
   ipcMain.handle("chat:set-archived", async (_event, request: SetChatArchivedRequest) => {
     return chatService.setArchived(request);
   });
+  ipcMain.handle("chat:set-pinned", async (_event, request: SetChatPinnedRequest): Promise<ChatPinState | undefined> => {
+    const saved = await chatService.setPinned(request);
+    if (!saved) return undefined;
+    const pinned = saved.metadata.pinned === true;
+    const pinnedAt = typeof saved.metadata.pinnedAt === "string" ? saved.metadata.pinnedAt : undefined;
+    return { conversationId: saved.id, pinned, ...(pinned && pinnedAt ? { pinnedAt } : {}) };
+  });
   ipcMain.handle("chat:delete", async (_event, request: DeleteChatConversationRequest) => {
     return chatService.deleteConversation(request);
   });
@@ -2722,6 +2776,9 @@ function registerIpc(): void {
   ipcMain.handle("chat:dismiss-turn-finished-note", async (_event, request: DismissTurnFinishedNoteRequest) => {
     await chatService.dismissTurnFinishedNote(request);
   });
+  ipcMain.handle("chat:close-accord-card", async (_event, request: CloseAccordCardRequest) => {
+    await chatService.closeAccordCard(request);
+  });
   // Answers to cards a member waits on go to the User's server (agreement
   // Д9): the device the member runs on applies them, once, whichever device
   // answered first; this returns once the server took the answer.
@@ -2841,6 +2898,28 @@ function registerIpc(): void {
     return { machine, enrollmentJson: JSON.stringify(pairing, null, 2) };
   });
   ipcMain.handle("hub:setup-state", () => hubInstaller.state());
+  let alertsPublicUrlSaid: { key: string; at: number } | undefined;
+  ipcMain.handle("alerts:request", async (_event, request: unknown) => {
+    const action = (request as { action?: unknown } | undefined)?.action;
+    if (!request || typeof request !== "object" || typeof action !== "string" || !URGENT_ALERT_USER_ACTIONS.has(action)) {
+      return { ok: false, error: { code: "invalid_request", message: "Unknown alert request." } };
+    }
+    if (action !== "close") {
+      // Where Twilio reaches the server: the address this computer links to,
+      // when it is the User's own server (https); none for the one in the app.
+      // Said again when it changes, and every few minutes (a new server).
+      const config = await settingsService.getHubConfig();
+      const url = config?.url && /^https:\/\//.test(config.url) ? config.url : undefined;
+      const key = `${config?.url ?? "in-app"}|${url ?? ""}`;
+      if (alertsPublicUrlSaid?.key !== key || Date.now() - alertsPublicUrlSaid.at > 5 * 60_000) {
+        const said = await serverChatLink.alerts({ action: "public-url", ...(url ? { url } : {}) });
+        alertsPublicUrlSaid = said.ok ? { key, at: Date.now() } : undefined;
+      }
+    }
+    const result = await serverChatLink.alerts<unknown>(request as UrgentAlertUserRequest);
+    usageMilestones?.observeUrgentAlertRequest(action, result);
+    return result;
+  });
   ipcMain.handle("hub:setup-command", async (_event, request: import("../shared/hubSetup").HubSetupCommandRequest) => {
     const region = typeof request?.region === "string" ? request.region.trim() : "";
     return { command: await hubInstaller.command(region), region };
@@ -3406,23 +3485,13 @@ void app.whenReady().then(async () => {
       listInstalls: () => settingsService.listMachineInstalls(),
       machineName: async (machineId) => (await settingsService.listMachines()).find((machine) => machine.id === machineId)?.name,
       machineActivity: (machineId) => link.machineActivity(machineId),
-      resolveTarget: async (record) => {
-        // An AWS instance gets a new public address every stop/start; the
-        // record remembers the one the last setup used. Ask AWS for the
-        // running instance's address without waking anything.
-        const machine = (await settingsService.listMachines()).find((item) => item.id === record.machineId);
-        // A machine installed over an instance's pinned host key is on that
-        // instance too, even when its record does not name it.
-        const instanceId = machine?.awsInstanceId ?? /^accordagents-(i-[a-f0-9]+)$/.exec(record.target?.hostKeyAlias ?? "")?.[1];
-        if (!instanceId) return record.target;
-        const worker = await cloudRunAwsService.workerForInspection().catch(() => undefined);
-        if (!worker?.host || worker.hostKeyAlias !== `accordagents-${instanceId}`) {
-          // Only a machine known to be on the app's instance waits for AWS to
-          // name its address; one matched by its host key keeps the saved one.
-          return machine?.awsInstanceId ? undefined : record.target;
-        }
-        return { host: worker.host, user: worker.user, port: worker.port, identityFile: worker.identityFile, hostKeyAlias: worker.hostKeyAlias };
-      },
+      resolveTarget: (record) => machineUpgradeTarget(record, {
+        machineInstanceId: async (machineId) => (await settingsService.listMachines()).find((item) => item.id === machineId)?.awsInstanceId,
+        configuredInstanceId: async () => (await settingsService.getPublicSettings()).cloudRuns.awsHandle?.instanceId,
+        ensureExistingWorker: (instanceId, options) => cloudRunAwsService.ensureExistingWorkerForRun(instanceId, options),
+        inspect: () => cloudRunAwsService.workerForInspection(),
+        log: (event, payload) => { void debugLogService.write(event, payload); }
+      }),
       payloadReady: () => {
         const payload = machineInstallerService.readPayload();
         return payload.ok ? { ok: true } : { ok: false, message: payload.message };
@@ -3585,6 +3654,7 @@ void app.whenReady().then(async () => {
       return undefined;
     });
   }
+  // The first reading also brings the automatic variables in step.
   void ensureLoginShellEnvPrimed();
   await detectAgentsWithAppSkills().catch((error) => {
     void debugLogService.write("app-skills-startup-sync-error", {

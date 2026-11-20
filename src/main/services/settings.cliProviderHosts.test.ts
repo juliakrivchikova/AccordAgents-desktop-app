@@ -113,13 +113,27 @@ test("editing keeps the stored key unless a new one is pasted, and an empty past
 
 test("invalid providers are rejected and duplicates by name refused", async () => {
   const { service, stored } = settingsServiceWith();
-  await assert.rejects(service.saveCliProviderHost({ label: "x", cli: "gemini-cli" as never, vendor: "zai", baseUrl: "https://x", apiKey: "k" }), /which CLI/);
+  await assert.rejects(service.saveCliProviderHost({ label: "x", cli: "other-cli" as never, vendor: "zai", baseUrl: "https://x", apiKey: "k" }), /which CLI/);
+  await assert.rejects(service.saveCliProviderHost({ label: "x", cli: "gemini-cli", vendor: "zai", baseUrl: "https://x", apiKey: "k" }), /not available through Antigravity/);
   await assert.rejects(service.saveCliProviderHost({ label: "x", cli: "codex-cli", vendor: "moonshot", baseUrl: "https://x", apiKey: "k" }), /not available through Codex/);
   await assert.rejects(service.saveCliProviderHost({ label: "x", cli: "claude-code", vendor: "zai", baseUrl: "nope", apiKey: "k" }), /http\(s\) URL/);
   await assert.rejects(service.saveCliProviderHost({ id: "ghost", label: "x", cli: "claude-code", vendor: "zai", baseUrl: "https://x", apiKey: "k" }), /no longer exists/);
   await service.saveCliProviderHost({ label: "GLM", cli: "claude-code", vendor: "zai", baseUrl: "https://api.z.ai/api/anthropic", apiKey: "k" });
   await assert.rejects(service.saveCliProviderHost({ label: " glm ", cli: "codex-cli", vendor: "zai", baseUrl: "https://api.z.ai/api/v1", apiKey: "k" }), /already exists/);
   assert.equal(stored().cliProviderHosts.length, 1);
+});
+
+test("a Gemini API key provider is stored for Antigravity and binds only Antigravity members", async () => {
+  const { service, stored } = settingsServiceWith();
+  const host = (await service.saveCliProviderHost({ label: "Google Gemini API", cli: "gemini-cli", vendor: "google", baseUrl: "https://generativelanguage.googleapis.com", apiKey: "gemini-key" })).cliProviderHosts[0];
+  assert.equal(host.cli, "gemini-cli");
+  assert.equal(host.vendor, "google");
+  assert.equal(host.hasApiKey, true);
+  assert.equal((await service.getCliProviderHostSecret(host.id))?.apiKey, "gemini-key");
+  const base = { handle: "gem", roleConfigId: ROLE.id, behaviorRuleIds: [], kind: "gemini-cli" as const };
+  await assert.rejects(service.saveChatParticipantConfig({ ...base, kind: "claude-code", hostId: host.id }), /runs through Antigravity/);
+  await service.saveChatParticipantConfig({ ...base, hostId: host.id });
+  assert.equal(stored().chatParticipantConfigs[0]?.hostId, host.id);
 });
 
 test("member presets bind only to an existing provider on their own CLI, and lose the binding when it is removed", async () => {

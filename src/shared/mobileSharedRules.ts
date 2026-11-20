@@ -43,6 +43,14 @@ export { accordLaunchTitleAndBody, parseAccordLaunchCard } from "./accordLaunchC
 // The pinned Accord card: the chat's newest Accord and its progress, and the
 // notes of every Accord's document, which stay out of the chat; the same on
 // the desktop and the phone.
+// Her cross folds it into a line at the end of the chat, on every device;
+// the line opens the same card (the User, 2026-11-16).
 export {
-  accordFoldedNoteKeys, accordProgressNoteHead, accordProgressStages, accordProgressStatus, dockedAccordFrom
+  ACCORD_CLOSED_SOURCE, accordClosedLine, accordFoldedNoteKeys, accordLineOutcome, accordOfLaunch, accordProgressNoteHead, accordProgressStages,
+  accordProgressStatus, dockedAccordFrom
 } from "./accordProgress";
+// An urgent alert's card: its status band, its folded line and whether it
+// still waits for Got it, worded once for the desktop's card and the phone's.
+export {
+  HUB_ALERTS_PATH, urgentAlertAwaitsGotIt, urgentAlertCountdown, urgentAlertFailureText, urgentAlertOutcome, urgentAlertStatus
+} from "./urgentAlerts";

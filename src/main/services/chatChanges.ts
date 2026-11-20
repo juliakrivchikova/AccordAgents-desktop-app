@@ -15,7 +15,7 @@ import type { ChatMessage, ChatReactor, Conversation } from "../../shared/types"
  *     (where its member runs, or where it was typed);
  *   - reactions: anyone, key by key;
  *   - removal: anyone;
- *   - the chat's own shared fields (title, members, project, archive state).
+ *   - the chat's own shared fields (title, members, project, archive and pin state).
  * Everything else on a chat or a message is device-local run bookkeeping and
  * never leaves the device.
  */
@@ -33,8 +33,14 @@ export const SHARED_CONVERSATION_METADATA_KEYS: readonly string[] = [
   "appToolApprovalPolicies",
   "archived",
   "archivedAt",
+  "pinned",
+  "pinnedAt",
   "residency"
 ];
+
+/** Shared keys that order the User's chat list rather than change the chat:
+ *  a change of these alone is not activity, so the chat keeps its time. */
+export const CHAT_LIST_ORDER_METADATA_KEYS: readonly string[] = ["pinned", "pinnedAt"];
 
 /** Message metadata that describes one device's run of a message. */
 export const LOCAL_MESSAGE_METADATA_KEYS: readonly string[] = [

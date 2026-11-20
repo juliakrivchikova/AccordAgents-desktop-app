@@ -7,6 +7,7 @@ import type {
   ProviderModel,
   ProviderModelCatalog
 } from "./types";
+import { CLI_PROVIDER_SETUP } from "./cliReadiness";
 
 // An added provider is one of the local CLIs pointed at a vendor's compatible
 // endpoint with the user's own API key — exactly what each vendor documents for
@@ -15,7 +16,12 @@ import type {
 // exercised was verified with a live request before it was added here.
 
 export const CLI_PROVIDER_HOST_LABEL_MAX_CHARS = 60;
-export const CLI_PROVIDER_HOST_CLIS: CliProviderHostCli[] = ["claude-code", "codex-cli"];
+export const CLI_PROVIDER_HOST_CLIS: CliProviderHostCli[] = ["claude-code", "codex-cli", "gemini-cli"];
+
+/** Short CLI name for sentences and default provider names. */
+export function cliProviderHostCliLabel(cli: CliProviderHostCli): string {
+  return CLI_PROVIDER_SETUP[cli].label;
+}
 
 /** Env var the app sets for a Codex custom provider's key; Codex reads it
  *  through `model_providers.<id>.env_key`. Not a Settings → Environment name. */
@@ -40,6 +46,13 @@ interface CliProviderHostVendorPreset {
   claudeExtraEnv?: Record<string, string>;
   handleSlug: string;
 }
+
+/** Where Antigravity sends Gemini API requests unless GOOGLE_GEMINI_BASE_URL
+ *  points it elsewhere. */
+const GEMINI_API_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com";
+
+/** Session settings that switch agy from its sign-in to GEMINI_API_KEY. */
+export const GEMINI_API_KEY_SETTINGS: Readonly<Record<string, unknown>> = Object.freeze({ modelProvider: "gemini" });
 
 const ZAI_CLAUDE_EXTRA_ENV = {
   // Z.ai's guide: longer request timeout, a 1M auto-compact window for GLM, and
@@ -129,6 +142,18 @@ const VENDOR_PRESETS: Record<CliProviderHostVendor, CliProviderHostVendorPreset>
     claudeCredential: "auth-token",
     handleSlug: "codex"
   },
+  google: {
+    // Antigravity's own API-key route: `modelProvider: "gemini"` in its
+    // settings plus GEMINI_API_KEY (agy changelog, since 1.1.13; verified on
+    // 1.5.11). Its model list on a key differs from the signed-in one, so it
+    // is read from agy with the key.
+    vendor: "google",
+    label: "Google Gemini API",
+    clis: ["gemini-cli"],
+    baseUrl: { "gemini-cli": GEMINI_API_DEFAULT_BASE_URL },
+    claudeCredential: "auth-token",
+    handleSlug: "gemini"
+  },
   custom: {
     vendor: "custom",
     label: "Custom endpoint",
@@ -140,10 +165,10 @@ const VENDOR_PRESETS: Record<CliProviderHostVendor, CliProviderHostVendorPreset>
   }
 };
 
-export const CLI_PROVIDER_HOST_VENDORS: CliProviderHostVendor[] = ["anthropic", "zai", "moonshot", "minimax", "deepseek", "openai", "custom"];
+export const CLI_PROVIDER_HOST_VENDORS: CliProviderHostVendor[] = ["anthropic", "zai", "moonshot", "minimax", "deepseek", "openai", "google", "custom"];
 
 export function isCliProviderHostCli(value: unknown): value is CliProviderHostCli {
-  return value === "claude-code" || value === "codex-cli";
+  return value === "claude-code" || value === "codex-cli" || value === "gemini-cli";
 }
 
 export function isCliProviderHostVendor(value: unknown): value is CliProviderHostVendor {
@@ -165,7 +190,7 @@ export function cliProviderHostDefaultBaseUrl(vendor: CliProviderHostVendor, cli
 
 export function cliProviderHostDefaultLabel(vendor: CliProviderHostVendor, cli: CliProviderHostCli): string {
   const preset = VENDOR_PRESETS[vendor];
-  return preset.clis.length > 1 ? `${preset.label} · ${cli === "claude-code" ? "Claude Code" : "Codex"}` : preset.label;
+  return preset.clis.length > 1 ? `${preset.label} · ${cliProviderHostCliLabel(cli)}` : preset.label;
 }
 
 /** Fixed model list for the vendor; undefined means "ask the CLI" (first-party
@@ -196,7 +221,7 @@ export function cliProviderHostHandleSlug(host: Pick<CliProviderHost, "vendor" |
     return undefined;
   }
   const preset = VENDOR_PRESETS[host.vendor];
-  return preset.vendor === "custom" ? (host.cli === "claude-code" ? "claude" : "codex") : preset.handleSlug;
+  return preset.vendor === "custom" ? (host.cli === "claude-code" ? "claude" : host.cli === "codex-cli" ? "codex" : "gemini") : preset.handleSlug;
 }
 
 export function isCliProviderHostHandleSlug(slug: string): boolean {
@@ -229,7 +254,7 @@ export function cliProviderHostValidationError(update: Partial<CliProviderHostUp
     return "Choose a provider vendor.";
   }
   if (!VENDOR_PRESETS[update.vendor].clis.includes(update.cli)) {
-    return `${VENDOR_PRESETS[update.vendor].label} is not available through ${update.cli === "claude-code" ? "Claude Code" : "Codex"}.`;
+    return `${VENDOR_PRESETS[update.vendor].label} is not available through ${cliProviderHostCliLabel(update.cli)}.`;
   }
   if (!normalizeCliProviderHostLabel(update.label)) {
     return "Give the provider a name.";
@@ -283,6 +308,8 @@ export function cliProviderHostForParticipant(
 export interface CliProviderHostRunConfig {
   env: Record<string, string>;
   codexConfigOverrides?: string[];
+  /** Antigravity session settings for every agy launch of the member. */
+  geminiSettings?: Record<string, unknown>;
 }
 
 // Claude Code reads its own credentials from these as well; a member on an added
@@ -307,6 +334,9 @@ export function cliProviderHostRunConfig(
   model: string | undefined
 ): CliProviderHostRunConfig {
   const preset = VENDOR_PRESETS[host.vendor];
+  if (host.cli === "gemini-cli") {
+    return { env: geminiApiKeyEnv(host.baseUrl, apiKey), geminiSettings: { ...GEMINI_API_KEY_SETTINGS } };
+  }
   if (host.cli === "codex-cli") {
     if (host.vendor === "openai") {
       const env: Record<string, string> = {
@@ -350,6 +380,18 @@ export function cliProviderHostRunConfig(
     Object.assign(env, preset.claudeExtraEnv ?? {});
   }
   return { env };
+}
+
+/** What agy needs, besides GEMINI_API_KEY_SETTINGS, to run on the key. The
+ *  endpoint is always the provider's: an inherited GOOGLE_GEMINI_BASE_URL
+ *  must not take the key elsewhere, and an empty one is agy's default URL
+ *  (verified with agy 1.5.11, 2026-11-18; agy also takes GEMINI_API_KEY over
+ *  an inherited GOOGLE_API_KEY and ignores GOOGLE_GENAI_USE_VERTEXAI here). */
+export function geminiApiKeyEnv(baseUrl: string, apiKey: string): Record<string, string> {
+  return {
+    GEMINI_API_KEY: apiKey,
+    GOOGLE_GEMINI_BASE_URL: baseUrl === GEMINI_API_DEFAULT_BASE_URL ? "" : baseUrl
+  };
 }
 
 /** Appended to the Settings → Environment version so a warm process is recycled

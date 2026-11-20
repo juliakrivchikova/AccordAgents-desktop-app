@@ -11,7 +11,7 @@ import { newChatIntro, newChatProjects, participantConfigUsage, participantConfi
 import { normalizedChatAvatarId } from "../../shared/chatAvatarCatalog";
 import type { HubNewChatOptions } from "../../shared/hubProtocol";
 import { chatChangesToOps, furthestTurnMarks, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
-import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
+import { CHAT_LIST_ORDER_METADATA_KEYS, LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
 import { hubTurnRunId, isHubTurnRunId, type HubCard, type HubCardState, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
 import {
   choiceCardId,
@@ -27,7 +27,7 @@ import {
   type WantedHubCard
 } from "../../shared/hubCards";
 import { ServerCardBook, type CardApplyResult, type ChatCardAppliers } from "./chatCards";
-import { CHAT_CHOICE_EXPIRY_MS, choiceExpiryPlan, type ChoiceExpiryPlan } from "./chatChoiceExpiry";
+import { choiceClosedForGoneMember, choiceExpiryPlan, choicesClosedByMessage, choicesOfGoneMembers, type ChoiceExpiryPlan } from "./chatChoiceExpiry";
 import { HUB_OP_TAKEN_BACK, type HubOpOutcome } from "./hubOpsClient";
 import { blobReferenceOf, HubHttpError } from "./hubClient";
 import {
@@ -152,6 +152,7 @@ import type {
   ReadChatAttachmentRequest,
   RenameChatConversationRequest,
   SetChatArchivedRequest,
+  SetChatPinnedRequest,
   RespondToChatAppToolApprovalRequest,
   RespondToChatChoiceRequest,
   RespondToChatMentionsRequest,
@@ -162,6 +163,7 @@ import type {
   StartChatAccordResult,
   StartReviewResult,
   ToggleChatReactionRequest,
+  CloseAccordCardRequest,
   DismissTurnFinishedNoteRequest,
   UpdateChatParticipantRuntimeRequest,
   RemoveChatParticipantRequest,
@@ -174,6 +176,7 @@ import { accordLaunchCardForMessage } from "../../shared/accordLaunchCard";
 import type { ArtifactNoteLinks } from "./artifactClient";
 import { turnFinishedNoteFor } from "../../shared/turnFinishedNote";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
+import { accordClosedLaunchId, accordClosedLaunchIds, accordClosedLine, recordClosedAccords } from "../../shared/accordProgress";
 import { isMachineCompactionLine } from "../../shared/machineLink";
 import { machineStopPendingText, machineWaitingText } from "../../shared/machineWaitingText";
 import { chatMessageVisualThreadRootId, participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
@@ -345,6 +348,13 @@ function deliveryTargetsOf(message: ChatMessage): string[] {
   return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
 }
 
+/** The members a User's message asks: those the server asks (deliveryTargets)
+ *  and those the device it was written on asks itself. */
+function askedParticipantIdsOf(message: ChatMessage): string[] {
+  const later = message.metadata?.askedParticipantIds;
+  return [...deliveryTargetsOf(message), ...(Array.isArray(later) ? later.filter((id): id is string => typeof id === "string" && id.length > 0) : [])];
+}
+
 /** How a member's turn was opened on the User's server (Д4, Д5, Д13). */
 type ServerTurnOpen =
   | { kind: "none" }
@@ -478,7 +488,7 @@ interface CompactChatCommand {
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 21;
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 22;
 /** How members keep their long-term memory (shared/memory.ts), decided by the
  *  User on 2026-11-04: members do it on their own and never make the User
  *  think about it; project knowledge goes to the repository first. */
@@ -488,6 +498,12 @@ const MEMBER_MEMORY_INSTRUCTIONS = [
   "- Kinds: runbook (how to do a task well next time), article (what the code does not show: decisions and why, outside limits, User's preferences tagged `preference`), status (one task: where you stopped, branch, done, released, open). Scopes: global, project, role, chat.",
   "- Repository first: project knowledge everyone working on the repository may see goes into its files with your current task's changes. Memory holds what must not or need not be there: User-specific details, anything unfit for a public repository (assume public unless you checked). With no task to carry it, write a project note with `awaitingRepository: true`, move it with the next task there, then archive the note.",
   "- Search when you start a task. After several attempts or a stated preference, write or update a runbook or article. Update the task's status when you stop; archive it once released. Fix or archive wrong notes; update instead of duplicating; reuse tags already in use (`app_memory_tags`). No secrets, nothing the code already says. Notes are members' reference, not User's instructions."
+] as const;
+/** When members alert the User outside the app (shared/urgentAlerts.ts),
+ *  asked by the User on 2026-11-12: what she asked them to watch, or a real
+ *  emergency; how often is her arrangement with the member. */
+const URGENT_ALERT_INSTRUCTIONS = [
+  "Urgent alerts: if something User asked you to watch goes wrong, or an emergency needs her now, call `app_urgent_alert` (her Telegram, then her phone). Never for routine news; follow what User arranged with you."
 ] as const;
 const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;
 const CHAT_EXECUTOR_LEASE_TTL_MS = 15 * 60_000;
@@ -978,6 +994,13 @@ export class ChatService {
     return [...new Set([...this.activeRunIds, ...this.chatRunMeta.keys(), ...requestRunners])];
   }
 
+  /** Turns the server asked of members here that this device took and that
+   *  are not over: from before they become a run (reading the chat,
+   *  preparing the machine) to their end. */
+  serverTurnsStarting(): number {
+    return this.pendingServerTurns.size;
+  }
+
   onParticipantRunSettled(listener: (run: ChatParticipantRun) => Promise<void> | void): () => void {
     this.participantRunSettledListeners.add(listener);
     return () => { this.participantRunSettledListeners.delete(listener); };
@@ -1256,20 +1279,22 @@ export class ChatService {
   private async agentEnvironmentForParticipant(
     participant: ChatParticipant,
     model: string | undefined
-  ): Promise<{ env: NodeJS.ProcessEnv; version: string; codexConfigOverrides?: string[]; problem?: string }> {
+  ): Promise<{ env: NodeJS.ProcessEnv; settingsEnv: NodeJS.ProcessEnv; version: string; codexConfigOverrides?: string[]; geminiSettings?: Record<string, unknown>; problem?: string }> {
     const manual = await this.manualAgentEnvironmentForRun();
     const binding = await this.participantHostBinding(participant);
     if (!binding) {
-      return manual;
+      return { ...manual, settingsEnv: manual.env };
     }
     if ("problem" in binding) {
-      return { ...manual, problem: binding.problem };
+      return { ...manual, settingsEnv: manual.env, problem: binding.problem };
     }
     const runConfig = cliProviderHostRunConfig(binding.host, binding.apiKey, model);
     return {
       env: { ...manual.env, ...runConfig.env },
+      settingsEnv: manual.env,
       version: `${manual.version}|${cliProviderHostRunVersion(binding.host, model)}`,
-      codexConfigOverrides: runConfig.codexConfigOverrides
+      codexConfigOverrides: runConfig.codexConfigOverrides,
+      geminiSettings: runConfig.geminiSettings
     };
   }
 
@@ -1307,6 +1332,9 @@ export class ChatService {
    *  by its machine when the member list it receives no longer has it (see
    *  membersDroppedFrom). Closing reports its background tasks as ended. */
   private retireRemovedMembers(conversationId: string, removed: ChatParticipant[]): void {
+    // Their waiting cards close (sweepChoiceExpiry), on whichever device wrote
+    // them: a removal that arrived from another device included.
+    if (removed.length > 0) this.scheduleChoiceExpiry(conversationId, this.choiceExpiryNow(), { replace: true });
     for (const participant of removed) {
       if (!this.ownsParticipant(participant)) {
         continue;
@@ -1915,6 +1943,37 @@ export class ChatService {
     }, {
       rejectIfQueued: true,
       queuedMessage: "Chat cannot be archived while members are running."
+    });
+  }
+
+  /** Pins a chat to the top of the chat list, or unpins it. The User's own
+   *  ordering, shared through her server like the archive state; allowed
+   *  while members run. It is not activity in the chat, so `updatedAt` stays
+   *  and the chat keeps its place among the recent ones. */
+  async setPinned(request: SetChatPinnedRequest): Promise<Conversation | undefined> {
+    await this.waitForQueuedSave(request.conversationId);
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation) {
+      return undefined;
+    }
+    if (conversation.kind !== "chat") {
+      throw new Error("Only chat conversations can be pinned.");
+    }
+    return this.withChatMutation(conversation, async () => {
+      if ((conversation.metadata.pinned === true) === (request.pinned === true)) {
+        return conversation;
+      }
+      const nextMetadata = { ...conversation.metadata };
+      if (request.pinned === true) {
+        nextMetadata.pinned = true;
+        nextMetadata.pinnedAt = new Date().toISOString();
+      } else {
+        delete nextMetadata.pinned;
+        delete nextMetadata.pinnedAt;
+      }
+      conversation.metadata = nextMetadata;
+      await this.saveConversation(conversation);
+      return conversation;
     });
   }
 
@@ -2533,7 +2592,7 @@ export class ChatService {
       const runPath = this.runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions);
       const baseCliParticipant = this.cliParticipantForSession(participant, session);
       const agentEnvironment = await this.agentEnvironmentForParticipant(participant, baseCliParticipant.model);
-      const cliParticipant = this.cliParticipantWithHost(baseCliParticipant, agentEnvironment.codexConfigOverrides);
+      const cliParticipant = this.cliParticipantWithHost(baseCliParticipant, agentEnvironment);
       if (agentEnvironment.problem) {
         await this.closeWarmAgentsForParticipant(conversation.id, participant.id);
       }
@@ -2542,6 +2601,7 @@ export class ChatService {
         : await this.cliRunner.compactSession(cliParticipant, runPath, undefined, "chat", signal, {
             ...this.memberProcessOptionsForCompaction(conversation, participant, session, request, runId, runPath, workspacePath, agentMode, permissions),
             agentEnv: agentEnvironment.env,
+            settingsEnv: agentEnvironment.settingsEnv,
             agentEnvKey: agentEnvironment.version,
             ...(compactInstructions ? { compactInstructions } : {}),
             onSessionId: (sessionId) => {
@@ -6366,8 +6426,9 @@ export class ChatService {
         return false;
       }
       // A turn-finished note is the User's pointer back to a reply members
-      // can read in full: not part of the chat they read.
-      if (turnFinishedNoteOf(message)) {
+      // can read in full, and a closed Accord's line is her own view of the
+      // chat: neither is part of the chat they read.
+      if (this.isUserOnlyMessage(message)) {
         return false;
       }
       // Read the exact canonical message by id. Snapshot visibility still applies, so a
@@ -6462,6 +6523,38 @@ export class ChatService {
       this.markChatMessageRemoved(conversation, request.messageId);
       conversation.updatedAt = new Date().toISOString();
       this.queueSnapshot(conversation);
+    });
+  }
+
+  /** The User's cross on the pinned Accord card: the card folds into a line
+   *  at the end of the chat as it stands now (accordProgress.ts). The line
+   *  goes to her server like any message, so every device shows it in the
+   *  same place; one line per Accord. It is her view of the chat, not news:
+   *  the chat keeps its place in her list. */
+  async closeAccordCard(request: CloseAccordCardRequest): Promise<void> {
+    const launchMessageId = typeof request.launchMessageId === "string" ? request.launchMessageId.trim() : "";
+    if (!launchMessageId) {
+      return;
+    }
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      throw new Error("This chat is not here.");
+    }
+    await this.withChatMutation(conversation, async () => {
+      // Its line is here already; one her server refused does not count.
+      if (accordClosedLaunchIds(conversation.messages).includes(launchMessageId)) {
+        return;
+      }
+      conversation.messages.push(accordClosedLine({
+        id: randomUUID(),
+        launchMessageId,
+        title: typeof request.title === "string" ? request.title : undefined,
+        createdAt: new Date().toISOString()
+      }));
+      // Saved before the cross is answered (the save records the folded
+      // Accords): a save that fails gives the card back instead of leaving
+      // neither card nor line.
+      await this.saveConversation(conversation);
     });
   }
 
@@ -8018,7 +8111,9 @@ export class ChatService {
         const updatedFacilitator = this.setParticipantRequestPermission(conversation, facilitator.id, "allow") ?? facilitator;
         const userMessage = this.message("user", content, undefined, {
           threadId: randomUUID(),
-          skillMentions: [accordSkill]
+          skillMentions: [accordSkill],
+          // The facilitator is asked by this device, not by the server.
+          askedParticipantIds: [facilitator.id]
         });
         userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
         conversation.messages.push(userMessage);
@@ -8223,6 +8318,15 @@ export class ChatService {
             }));
           }
           dispatch = { ...dispatch, targets: dispatch.targets.filter((target) => present.has(target.id)) };
+          if (dispatch.targets.length > 0) {
+            // Every member it asks, including those asked later below: a
+            // member watching the chat on another device must not wake for it.
+            const askedParticipantIds = dispatch.targets.map((target) => target.id);
+            for (const message of conversation.messages) {
+              if (message.id === userMessage.id) message.metadata = { ...message.metadata, askedParticipantIds };
+            }
+            userMessage.metadata = { ...userMessage.metadata, askedParticipantIds };
+          }
           if (this.serverLink && dispatch.targets.length > 0) {
             // The members this message names, as this device resolved them:
             // the server asks each one's device for its turn (Д4), and this
@@ -9515,9 +9619,7 @@ export class ChatService {
       }
     });
     const agentEnvironment = await this.agentEnvironmentForParticipant(participant, cliParticipant.model);
-    if (agentEnvironment.codexConfigOverrides) {
-      cliParticipant = this.cliParticipantWithHost(cliParticipant, agentEnvironment.codexConfigOverrides);
-    }
+    cliParticipant = this.cliParticipantWithHost(cliParticipant, agentEnvironment);
     const persistSessionId = (sessionId: string): void => {
       this.persistParticipantSessionId(conversation, session, sessionId);
     };
@@ -9581,6 +9683,7 @@ export class ChatService {
             }
           : undefined,
         agentEnv: agentEnvironment.env,
+        settingsEnv: agentEnvironment.settingsEnv,
         agentEnvKey: agentEnvironment.version,
         agentMode,
         permissions,
@@ -10273,6 +10376,7 @@ export class ChatService {
         `App MCP is the source of truth for chat context. History files at ${historyMarkdownPath} and ${historyJsonPath} are debug-only fallbacks.`
       ].join("\n");
     }
+    const closedChoicesNote = this.closedChoicesPromptSection(conversation, participant, triggerMessage);
     const triggerBlock = [
       "Triggering message identifiers:",
       this.triggeringMessageIdentifiers(triggerMessage),
@@ -10280,7 +10384,8 @@ export class ChatService {
       "Triggering message:",
       triggerMessage.role === "script"
         ? this.delimitedScriptMessage(triggerMessage)
-        : this.formatMessage(triggerMessage, false, false)
+        : this.formatMessage(triggerMessage, false, false),
+      ...(closedChoicesNote ? [closedChoicesNote] : [])
     ].join("\n\n");
     const promptContextBlock = options.promptContextBlock ?? "";
     const memoryIndexBlock = options.memoryIndexBlock ?? "";
@@ -10640,6 +10745,8 @@ export class ChatService {
       this.appToolPromptPolicy(session, includeParticipantActivityTool),
       "",
       ...MEMBER_MEMORY_INSTRUCTIONS,
+      "",
+      ...URGENT_ALERT_INSTRUCTIONS,
       "",
       "Response rules:",
       "- The user strongly prefers concise replies. Do not repeat accepted context or restate proposals when a short verdict, blocker, or delta is enough.",
@@ -11073,9 +11180,16 @@ export class ChatService {
     return participant.hostId && participant.hostVendor ? cliProviderHostDefaultModel({ vendor: participant.hostVendor }) : undefined;
   }
 
-  private cliParticipantWithHost(cliParticipant: ParticipantConfig, codexConfigOverrides: string[] | undefined): ParticipantConfig {
-    return codexConfigOverrides && codexConfigOverrides.length > 0
-      ? { ...cliParticipant, codexConfigOverrides }
+  /** The CLI config an added provider adds to every launch of the member:
+   *  Codex `-c` overrides or Antigravity session settings. */
+  private cliParticipantWithHost(
+    cliParticipant: ParticipantConfig,
+    host: { codexConfigOverrides?: string[]; geminiSettings?: Record<string, unknown> }
+  ): ParticipantConfig {
+    const codex = host.codexConfigOverrides && host.codexConfigOverrides.length > 0 ? host.codexConfigOverrides : undefined;
+    const gemini = host.geminiSettings && Object.keys(host.geminiSettings).length > 0 ? host.geminiSettings : undefined;
+    return codex || gemini
+      ? { ...cliParticipant, ...(codex ? { codexConfigOverrides: codex } : {}), ...(gemini ? { geminiSettings: gemini } : {}) }
       : cliParticipant;
   }
 
@@ -12000,6 +12114,13 @@ export class ChatService {
     // long-running flow is older.
     if (storedMetadata.pendingChatReactions !== undefined) merged.pendingChatReactions = storedMetadata.pendingChatReactions;
     else delete merged.pendingChatReactions;
+    // So is the pin (setPinned, or a pin from another device applied here),
+    // which may change while a member runs: a turn's older copy must not
+    // pin again what she unpinned.
+    for (const key of CHAT_LIST_ORDER_METADATA_KEYS) {
+      if (storedMetadata[key] !== undefined) merged[key] = storedMetadata[key];
+      else delete merged[key];
+    }
     if (merged.autoTitle) {
       delete merged.autoTitleEligibility;
     }
@@ -12466,6 +12587,8 @@ export class ChatService {
     return this.metadataWithParticipantWatchers(conversation.metadata, watchers);
   }
 
+  /** Turned on, a member looks at the User's latest message, unless that
+   *  message asked it (autoWatchMessagesAfterCursor): it answered that one. */
   private autoWatchToggleOnCursor(conversation: Conversation, participantId: string): string | undefined {
     const eligible = this.autoWatchStableMessages(conversation, participantId);
     let latestUserIndex = -1;
@@ -12519,12 +12642,13 @@ export class ChatService {
         wakeChainDepth: 0,
         updatedAt: now
       };
-      if (existing.lastSeenMessageId === userMessage.id) {
+      const cursor = this.laterAutoWatchCursor(conversation, participant.id, existing.lastSeenMessageId, userMessage.id);
+      if (existing.lastSeenMessageId === cursor) {
         continue;
       }
       watchers[participant.id] = {
         ...existing,
-        lastSeenMessageId: userMessage.id,
+        lastSeenMessageId: cursor,
         updatedAt: now
       };
       changed = true;
@@ -12532,6 +12656,18 @@ export class ChatService {
     if (changed) {
       conversation.metadata = this.metadataWithParticipantWatchers(conversation.metadata, watchers);
     }
+  }
+
+  /** A watcher's cursor only moves forward. Its own turn for a User's message
+   *  starts late on a machine (it readies its settings and project first); a
+   *  watch wake for a later message may have moved the cursor past it by then,
+   *  and moving it back would wake the member for that message again. */
+  private laterAutoWatchCursor(conversation: Conversation, participantId: string, current: string | undefined, next: string): string {
+    if (!current || current === next) return next;
+    const stable = this.autoWatchStableMessages(conversation, participantId);
+    const at = stable.findIndex((message) => message.id === current);
+    const to = stable.findIndex((message) => message.id === next);
+    return at >= 0 && to >= 0 && at > to ? current : next;
   }
 
   private activeAutoWatchParticipant(conversation: Conversation): ChatParticipant | undefined {
@@ -12551,11 +12687,17 @@ export class ChatService {
       const index = messages.findIndex((message) => message.id === cursor);
       return index >= 0 ? messages.slice(index + 1) : messages;
     })();
+    // A User's message that asks this member is answered by its own turn.
+    // The cursor alone does not say so in time: on a cloud machine the
+    // message arrives before that turn starts (the machine readies its
+    // settings and project first, or the computer asks it only once the
+    // project is there), and a wake meanwhile ran the member twice.
+    const notAskedOfIt = afterCursor.filter((message) => !(message.role === "user" && askedParticipantIdsOf(message).includes(participantId)));
     const handledReplyIds = this.autoWatchHandledParticipantRequestMessageIds(conversation, participantId);
     if (handledReplyIds.size === 0) {
-      return afterCursor;
+      return notAskedOfIt;
     }
-    return afterCursor.filter((message) => !handledReplyIds.has(message.id));
+    return notAskedOfIt.filter((message) => !handledReplyIds.has(message.id));
   }
 
   private autoWatchHandledParticipantRequestMessageIds(conversation: Conversation, participantId: string): Set<string> {
@@ -12769,7 +12911,7 @@ export class ChatService {
       };
       watchers[participantId] = {
         ...existingState,
-        lastSeenMessageId: latestMessageId,
+        lastSeenMessageId: this.laterAutoWatchCursor(conversation, participantId, existingState.lastSeenMessageId, latestMessageId),
         lastRunId: runId,
         lastTriggeredAt: now,
         wakeChainDepth: existingState.wakeChainDepth + 1,
@@ -17960,14 +18102,27 @@ export class ChatService {
     removalError: string
   ): ChatMessage {
     const metadata = message.metadata;
-    if (!metadata?.pendingMentions?.length && !metadata?.participantRequest) {
+    if (!metadata?.pendingMentions?.length && !metadata?.participantRequest && !metadata?.pendingChoice) {
       return message;
     }
     let changed = false;
     let nextMetadata: ChatMessageMetadata = { ...metadata };
-    if (metadata.pendingMentions?.length) {
-      const pendingMentions = metadata.pendingMentions.filter((mention) => mention.targetParticipantId !== participant.id);
-      if (pendingMentions.length !== metadata.pendingMentions.length) {
+    // The member's own cards: nobody is left to take an answer to them.
+    if (message.participantId === participant.id) {
+      if (metadata.pendingChoice?.status === "pending") {
+        nextMetadata = { ...nextMetadata, pendingChoice: choiceClosedForGoneMember(metadata.pendingChoice, now) };
+        changed = true;
+      }
+      if (metadata.pendingMentions?.some((mention) => mention.status === "pending")) {
+        nextMetadata = { ...nextMetadata, pendingMentions: metadata.pendingMentions.map((mention) =>
+          mention.status === "pending" ? { ...mention, status: "rejected" as const } : mention) };
+        changed = true;
+      }
+    }
+    if (nextMetadata.pendingMentions?.length) {
+      const before = nextMetadata.pendingMentions;
+      const pendingMentions = before.filter((mention) => mention.targetParticipantId !== participant.id);
+      if (pendingMentions.length !== before.length) {
         changed = true;
         if (pendingMentions.length > 0) {
           nextMetadata = { ...nextMetadata, pendingMentions };
@@ -18693,32 +18848,87 @@ export class ChatService {
     };
   }
 
-  // --- choices that expire once the User went on with their member ---------
+  // --- choices that close once the User went on with their member ---------
 
-  /** The waiting choices of this device's members that the User went on
-   *  past (choiceExpiryPlan): those due now, and when the next one is. */
-  private choiceExpiryPlanFor(conversation: Conversation): ChoiceExpiryPlan {
+  /** Which cards this device closes: its own members' ones it wrote. */
+  private choiceClosedHere(conversation: Conversation): (message: ChatMessage) => boolean {
     const participants = this.chatParticipants(conversation);
     const me = this.serverLink?.deviceId();
-    return choiceExpiryPlan(conversation.messages, this.choiceExpiryNow(), (message) => {
+    return (message) => {
       const participant = participants.find((item) => item.id === message.participantId);
       if (!participant || !this.runsHere(participant)) return false;
       const writer = message.metadata?.serverWriter;
       return !(typeof writer === "string" && me && writer !== me);
-    });
+    };
   }
 
-  /** A member's turn starts (inside its chat mutation): the chat's expiry
-   *  timer is set for what the User's going on made due. Closing happens in
-   *  sweepChoiceExpiry, which asks the server first. */
+  /** The waiting choices of this device's members that the User went on
+   *  past (choiceExpiryPlan): those due now. */
+  private choiceExpiryPlanFor(conversation: Conversation): ChoiceExpiryPlan {
+    const plan = choiceExpiryPlan(conversation.messages, this.choiceClosedHere(conversation));
+    const memberIds = this.chatMemberIds(conversation);
+    // A chat always keeps a member: a copy read without its members says
+    // nothing about who left, and closes nothing.
+    if (memberIds.size === 0) return plan;
+    const mayClose = (message: ChatMessage) => this.mayCloseGoneMemberCard(message);
+    const memberGone = choicesOfGoneMembers(conversation.messages, memberIds, mayClose);
+    const goneMentions = conversation.messages
+      .filter((message) => message.role === "participant" && (!message.participantId || !memberIds.has(message.participantId)) &&
+        message.metadata?.pendingMentions?.some((mention) => mention.status === "pending") && mayClose(message))
+      .map((message) => message.id);
+    return memberGone.length || goneMentions.length
+      ? { due: [...plan.due, ...memberGone], memberGone, ...(goneMentions.length ? { goneMentions } : {}) }
+      : plan;
+  }
+
+  /** Every member id the chat lists, as stored: an entry this build cannot
+   *  read whole is still a member, never one that left. */
+  private chatMemberIds(conversation: Conversation): Set<string> {
+    const listed = conversation.metadata?.participants;
+    return new Set(Array.isArray(listed)
+      ? listed.flatMap((item) => item && typeof item === "object" && typeof (item as { id?: unknown }).id === "string" ? [(item as { id: string }).id] : [])
+      : []);
+  }
+
+  /** Which device closes a card whose member left the chat: the one that
+   *  wrote its message, else (a message from before the server kept its
+   *  writer) the computer, never a machine. */
+  private mayCloseGoneMemberCard(message: ChatMessage): boolean {
+    const writer = message.metadata?.serverWriter;
+    if (typeof writer === "string") return writer === this.serverLink?.deviceId();
+    return !this.machineRuntime;
+  }
+
+  /** A member's turn starts (inside its chat mutation): what the User's going
+   *  on made due is closed at once. Closing happens in sweepChoiceExpiry,
+   *  which asks the server first. */
   private noteChoiceExpiry(conversation: Conversation): void {
     const nowMs = this.choiceExpiryNow();
     const plan = this.choiceExpiryPlanFor(conversation);
+    if (plan.due.length === 0) return;
     // A due card whose answer is being applied here waits for it: looked at
     // again later, not at every turn meanwhile.
     const free = plan.due.some((messageId) => !this.choiceAnsweredHere(messageId));
-    const atMs = free ? nowMs : plan.due.length > 0 ? Math.min(plan.nextAtMs ?? Infinity, nowMs + CHOICE_EXPIRY_RETRY_MS) : plan.nextAtMs;
-    this.scheduleChoiceExpiry(conversation.id, atMs, { replace: true });
+    this.scheduleChoiceExpiry(conversation.id, free ? nowMs : nowMs + CHOICE_EXPIRY_RETRY_MS, { replace: free });
+  }
+
+  /** What the member's turn on the User's message is told about its cards
+   *  that message closed (the User, 2026-11-15): she wrote instead of
+   *  choosing, so the card is no longer waiting above. */
+  private closedChoicesPromptSection(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage): string {
+    const closedHere = this.choiceClosedHere(conversation);
+    // A card whose answer this device has heard of is closed by that answer,
+    // never by her going on (sweepChoiceExpiry leaves it to the answer).
+    const closed = choicesClosedByMessage(conversation.messages, participant.id, triggerMessage, (message) =>
+      closedHere(message) && message.metadata?.serverCard?.state !== "answered" && !this.choiceAnsweredHere(message.id));
+    if (closed.length === 0) return "";
+    return [
+      closed.length === 1
+        ? "Your earlier choice card was closed without an answer: User went on with the triggering message instead of picking one of its options."
+        : "Your earlier choice cards were closed without an answer: User went on with the triggering message instead of picking one of their options.",
+      ...closed.map((choice) => `- ${(choice.title || choice.question).replace(/\s+/g, " ").trim().slice(0, 200)}`),
+      "Treat the triggering message as User's answer or new direction. Do not say a card is waiting above; if you still need that decision, ask again."
+    ].join("\n");
   }
 
   /** This device heard of an answer to this card (or applies one now). */
@@ -18727,8 +18937,9 @@ export class ChatService {
     return this.serverCards.applying.has(cardId) || this.serverCards.known(cardId)?.state === "answered";
   }
 
-  /** One timer per chat, for its earliest choice to expire. `replace` sets
-   *  it to `atMs` (none when undefined); otherwise an earlier one is kept. */
+  /** One timer per chat: close what is due now, or look again after a
+   *  retry. `replace` sets it to `atMs` (none when undefined); otherwise an
+   *  earlier one is kept. */
   private scheduleChoiceExpiry(conversationId: string, atMs: number | undefined, options: { replace?: boolean } = {}): void {
     const current = this.choiceExpiryTimers.get(conversationId);
     if (current && !options.replace && atMs !== undefined && current.atMs <= atMs) return;
@@ -18738,9 +18949,9 @@ export class ChatService {
       this.choiceExpiryTimers.delete(conversationId);
     }
     if (atMs === undefined) return;
-    // Never longer than the expiry itself: a time far ahead (a wrong clock)
-    // is looked at again within it, never overflowing the timer.
-    const delayMs = Math.min(Math.max(0, atMs - this.choiceExpiryNow()), CHAT_CHOICE_EXPIRY_MS) + CHOICE_EXPIRY_TIMER_SLACK_MS;
+    // Never longer than a retry: a time far ahead (a wrong clock) is looked
+    // at again within it, never overflowing the timer.
+    const delayMs = Math.min(Math.max(0, atMs - this.choiceExpiryNow()), CHOICE_EXPIRY_RETRY_MS) + CHOICE_EXPIRY_TIMER_SLACK_MS;
     const timer = setTimeout(() => {
       if (this.choiceExpiryTimers.get(conversationId)?.timer === timer) this.choiceExpiryTimers.delete(conversationId);
       void this.sweepChoiceExpiry(conversationId);
@@ -18762,8 +18973,8 @@ export class ChatService {
       const conversation = await this.storage.getConversation(conversationId);
       if (!conversation || conversation.kind !== "chat") return;
       const plan = this.choiceExpiryPlanFor(conversation);
-      if (plan.due.length === 0) {
-        this.scheduleChoiceExpiry(conversationId, plan.nextAtMs, { replace: true });
+      if (plan.due.length === 0 && !plan.goneMentions?.length) {
+        this.scheduleChoiceExpiry(conversationId, undefined, { replace: true });
         return;
       }
       let serverStates: Map<string, HubCardState> | undefined;
@@ -18780,7 +18991,9 @@ export class ChatService {
         throw new Error("Not linked to the server.");
       }
       await this.withChatMutation(conversation, async () => {
-        if (!this.expireDueChoices(conversation, serverStates)) return;
+        const closed = this.expireDueChoices(conversation, serverStates);
+        const rejected = this.rejectGoneMemberMentions(conversation);
+        if (!closed && !rejected) return;
         conversation.updatedAt = new Date().toISOString();
         await this.saveConversation(conversation);
       });
@@ -18791,16 +19004,38 @@ export class ChatService {
     }
   }
 
+  /** Rejects, in place, the mention approvals members no longer in the chat
+   *  wait on (inside the chat's mutation; the caller saves): nobody is left
+   *  to continue with them. */
+  private rejectGoneMemberMentions(conversation: Conversation): boolean {
+    const gone = new Set(this.choiceExpiryPlanFor(conversation).goneMentions ?? []);
+    if (gone.size === 0) return false;
+    for (const message of conversation.messages) {
+      if (!gone.has(message.id) || !message.metadata?.pendingMentions) continue;
+      message.metadata = { ...message.metadata, pendingMentions: message.metadata.pendingMentions.map((mention) =>
+        mention.status === "pending" ? { ...mention, status: "rejected" as const } : mention) };
+    }
+    void this.debugLogs.write("chat.mentions.member-gone", { conversationId: conversation.id, count: gone.size });
+    return true;
+  }
+
   /** Closes, in place, the due choices nobody answered (inside the chat's
-   *  mutation; the caller saves), and sets the chat's timer for the next. */
+   *  mutation; the caller saves), and sets the chat's timer to look again at
+   *  those an answer is being applied to. */
   private expireDueChoices(conversation: Conversation, serverStates: Map<string, HubCardState> | undefined): boolean {
     const nowMs = this.choiceExpiryNow();
     const plan = this.choiceExpiryPlanFor(conversation);
-    let nextAtMs = plan.nextAtMs;
+    let nextAtMs: number | undefined;
     const due = new Set<string>();
+    const memberGone = new Set(plan.memberGone ?? []);
     for (const messageId of plan.due) {
       const message = conversation.messages.find((item) => item.id === messageId);
       if (!message) continue;
+      // Its member left the chat: an answer has nobody to go to either.
+      if (memberGone.has(messageId)) {
+        due.add(messageId);
+        continue;
+      }
       const answered = message.metadata?.serverCard?.state === "answered" || serverStates?.get(choiceCardId(message.id)) === "answered" ||
         this.choiceAnsweredHere(message.id);
       // Its answer is applied (or refused, and it is asked again): looked at
@@ -18814,9 +19049,12 @@ export class ChatService {
     for (const message of conversation.messages) {
       const choice = message.metadata?.pendingChoice;
       if (!due.has(message.id) || choice?.status !== "pending") continue;
-      message.metadata = { ...message.metadata, pendingChoice: { ...choice, status: "cancelled", cancelledAt: now, expiredAt: now } };
+      message.metadata = { ...message.metadata, pendingChoice: memberGone.has(message.id)
+        ? choiceClosedForGoneMember(choice, now)
+        : { ...choice, status: "cancelled", cancelledAt: now, expiredAt: now } };
     }
-    void this.debugLogs.write("chat.choice.expired", { conversationId: conversation.id, messageIds: [...due].slice(0, 20), count: due.size });
+    void this.debugLogs.write("chat.choice.expired", { conversationId: conversation.id, messageIds: [...due].slice(0, 20), count: due.size,
+      memberGone: [...due].filter((messageId) => memberGone.has(messageId)).length });
     return true;
   }
 
@@ -18831,6 +19069,17 @@ export class ChatService {
       const message = conversation.messages.find((item) => item.id === messageId);
       const choice = message?.metadata?.pendingChoice;
       if (!message || choice?.status !== "cancelled" || !choice.expiredAt) return;
+      // Its member left the chat meanwhile: her answer has nobody to go to,
+      // and the card closes for good instead (the server takes that close).
+      const memberIds = this.chatMemberIds(conversation);
+      if (memberIds.size > 0 && (!message.participantId || !memberIds.has(message.participantId))) {
+        if (choice.memberGoneAt) return;
+        message.metadata = { ...message.metadata, pendingChoice: choiceClosedForGoneMember(choice, new Date().toISOString()) };
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        void this.debugLogs.write("chat.choice.reopen-member-gone", { conversationId, messageId });
+        return;
+      }
       const { expiredAt: _expiredAt, cancelledAt: _cancelledAt, ...waiting } = choice;
       message.metadata = { ...message.metadata, pendingChoice: { ...waiting, status: "pending" } };
       // Raised as it was; the server holds her answer to it.
@@ -18844,8 +19093,8 @@ export class ChatService {
 
   /**
    * After the server's open cards were first read (resumeServerCards): the
-   * choices that expired while this device was off are closed, and timers
-   * kept for the ones still to come. `conversationIds` are the chats that
+   * choices the User went on past while this device was off are closed.
+   * `conversationIds` are the chats that
    * read named; only those holding a waiting choice are opened.
    */
   async resumeChoiceExpiry(conversationIds: string[]): Promise<void> {
@@ -18902,9 +19151,16 @@ export class ChatService {
   }
 
   private conversationForMembers(conversation: Conversation): Conversation {
-    return conversation.messages.some((message) => turnFinishedNoteOf(message))
-      ? { ...conversation, messages: conversation.messages.filter((message) => !turnFinishedNoteOf(message)) }
+    return conversation.messages.some((message) => this.isUserOnlyMessage(message))
+      ? { ...conversation, messages: conversation.messages.filter((message) => !this.isUserOnlyMessage(message)) }
       : conversation;
+  }
+
+  /** A line of the User's own view of the chat, which members never read:
+   *  a turn-finished note (it points at a reply that is there in full) and a
+   *  closed Accord's line. */
+  private isUserOnlyMessage(message: ChatMessage): boolean {
+    return Boolean(turnFinishedNoteOf(message) || accordClosedLaunchId(message));
   }
 
   private historyFilePaths(
@@ -18931,8 +19187,9 @@ export class ChatService {
       ...participants.map((participant) => `- @${participant.handle}: ${this.roleLabelForParticipant(conversation, participant)} (${participant.kind})`),
       "",
       "## Messages",
-      // A turn-finished note only points back at a reply that is here in full.
-      ...conversation.messages.filter((message) => !turnFinishedNoteOf(message)).map((message) => [
+      // A turn-finished note only points back at a reply that is here in
+      // full; a closed Accord's line is the User's own view of the chat.
+      ...conversation.messages.filter((message) => !this.isUserOnlyMessage(message)).map((message) => [
         `### ${message.createdAt} ${this.messageAuthor(message)}`,
         `Message ID: ${message.id}`,
         message.metadata?.threadId ? `Thread ID: ${message.metadata.threadId}` : "",
@@ -21495,6 +21752,10 @@ export class ChatService {
   }
 
   private buildSnapshot(conversation: Conversation): ReturnType<typeof buildConversationSnapshot> {
+    // Worked out from the whole chat on every save, so no path that changes
+    // its messages (a merge, a reload from the server, the feed) can leave
+    // it behind them.
+    recordClosedAccords(conversation);
     return buildConversationSnapshot(conversation, this.snapshotRowStates.get(conversation.id));
   }
 
@@ -22698,7 +22959,8 @@ export class ChatService {
           for (const turn of effect.turns ?? []) this.markServerTurn(conversation, turn);
         }
         if (incoming.role === "participant") this.recordLastMessageByParticipant(conversation, next);
-        if (incoming.createdAt > conversation.updatedAt) conversation.updatedAt = incoming.createdAt;
+        // A closed Accord's line keeps the chat's place in her list.
+        if (incoming.createdAt > conversation.updatedAt && !accordClosedLaunchId(incoming)) conversation.updatedAt = incoming.createdAt;
         const missingCopy = incoming.metadata?.missingProjectCopy;
         if (!fromHere && !this.machineRuntime && incoming.role === "participant" && missingCopy
           && typeof missingCopy.machineId === "string" && typeof missingCopy.sourcePath === "string") {
@@ -23154,6 +23416,8 @@ export class ChatService {
       const message = conversation.messages.find((item) => item.id === messageId);
       if (!message || message.metadata?.serverRejected === reason) return;
       message.metadata = { ...(message.metadata ?? {}), serverRejected: reason };
+      // A closed Accord's line refused: the save records its card as pinned
+      // again, unless another device's line for it is here.
       await this.saveConversation(conversation, { emitChanges: false });
     });
   }
@@ -24072,6 +24336,15 @@ export class ChatService {
     const choice = message?.metadata?.pendingChoice;
     if (!message || !choice || choice.id !== request.choiceId) throw new Error("Choice request was not found.");
     if (choice.status !== "pending" || message.metadata?.serverCard) throw new Error("Choice request has already been answered.");
+    // Its member left the chat: nobody takes an answer. Her Cancel closes it
+    // here (the close reaches the other devices when this device wrote the
+    // message; the card on the server was settled when its member left).
+    const memberIds = this.chatMemberIds(conversation);
+    if (memberIds.size > 0 && (!message.participantId || !memberIds.has(message.participantId))) {
+      if (!request.cancel) throw new Error(`${message.participantLabel ?? "This member"} is no longer in this chat: its question can only be cancelled.`);
+      await this.cancelGoneMemberChoice(conversation.id, message.id, choice.id);
+      return;
+    }
     const cardId = choiceCardId(message.id);
     await this.answerServerCard({ conversationId: conversation.id, cardId, raisedHere: this.cardRaisedHere(conversation, cardId), answer: {
       ...(request.selectedOptionId !== undefined ? { selectedOptionId: request.selectedOptionId } : {}),
@@ -24079,6 +24352,22 @@ export class ChatService {
       ...(request.note !== undefined ? { note: request.note } : {}),
       ...(request.cancel ? { cancel: true } : {})
     } });
+  }
+
+  /** Cancels, here, a choice whose member is no longer in the chat. */
+  private async cancelGoneMemberChoice(conversationId: string, messageId: string, choiceId: string): Promise<void> {
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") throw new Error("The chat is not available.");
+    await this.withChatMutation(conversation, async () => {
+      const message = conversation.messages.find((item) => item.id === messageId);
+      const choice = message?.metadata?.pendingChoice;
+      if (!message || !choice || choice.id !== choiceId || choice.status !== "pending") return;
+      const now = new Date().toISOString();
+      message.metadata = { ...message.metadata, pendingChoice: { ...choice, status: "cancelled", cancelledAt: now } };
+      conversation.updatedAt = now;
+      await this.saveConversation(conversation);
+      void this.debugLogs.write("chat.choice.cancelled-member-gone", { conversationId, messageId });
+    });
   }
 
   /** The User's answer to a member's mentions waiting for approval, from

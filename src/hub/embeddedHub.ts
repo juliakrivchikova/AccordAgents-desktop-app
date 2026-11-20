@@ -46,7 +46,7 @@ export async function startEmbeddedHub(options: {
     await storage.hub().setOwner({ deviceId: options.owner.deviceId, publicKeyDerBase64: options.owner.publicKeyDerBase64, name: options.owner.name || "Desktop", addedAt: new Date().toISOString() });
   }
   const id = hubId(options.dataDir);
-  const hub = composeHub({ storage, hubId: id, version: options.version, keys: loadOrCreateVapidKeys(path.join(options.dataDir, "vapid.json")), log: options.log });
+  const hub = composeHub({ storage, hubId: id, version: options.version, keys: loadOrCreateVapidKeys(path.join(options.dataDir, "vapid.json")), log: options.log, embedded: true });
   // The whole API over plain HTTP, on loopback only: nothing leaves the computer.
   const http = await hub.server.listenHttp(options.port ?? 0, "127.0.0.1", { openOnly: false });
   const retention = new HubRetention({ storage, config: hubRetentionConfig(), log: options.log });

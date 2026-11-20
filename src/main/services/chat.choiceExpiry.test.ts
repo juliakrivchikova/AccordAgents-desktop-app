@@ -7,18 +7,17 @@ import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { choiceCardId } from "../../shared/hubCards";
 import type { ChatMessage, ChatParticipant, ChatRoleConfig, Conversation, ParticipantConfig } from "../../shared/types";
 import { ChatService } from "./chat";
-import { CHAT_CHOICE_EXPIRY_MS } from "./chatChoiceExpiry";
 
 /**
- * A member's choice card expires (the User, 2026-11-01): an hour after it
- * was asked, once a message of hers written after it started a newer turn
- * of that member. Driven through the real send, turn and choice paths, with
- * the members' CLIs played by the test.
+ * A member's choice card closes (the User, 2026-11-15) as soon as a message
+ * of hers written after it starts a newer turn of that member — she wrote
+ * instead of choosing — and that turn is told so. Driven through the real
+ * send, turn and choice paths, with the members' CLIs played by the test.
  */
 
 const NOW = "2026-01-01T00:00:00.000Z";
 const ROLE: ChatRoleConfig = { id: "generic-participant", label: "Generic participant", instructions: "Answer directly.", version: 1, updatedAt: NOW };
-const HOUR = CHAT_CHOICE_EXPIRY_MS;
+const HOUR = 60 * 60_000;
 const ASKING = ["Which store should I use?", "", "User choice:", "T: Store", "Q: Which store?", "O1: SQLite | fast", "O2: Files", "R: O1"].join("\n");
 
 function member(id: string, handle: string): ChatParticipant {
@@ -54,10 +53,12 @@ function harness(initial: Conversation, replies: Record<string, string[]> = {}) 
     }
   };
   const runs: string[] = [];
+  const prompts: string[] = [];
   const cliRunner = {
     async detectAgents() { return [{ kind: "codex-cli", label: "Codex CLI", installed: true }]; },
-    async run(participant: ParticipantConfig) {
+    async run(participant: ParticipantConfig, prompt: string) {
       runs.push(participant.id);
+      prompts.push(prompt);
       const content = replies[participant.id]?.shift() ?? "ok";
       return { participant, ok: true, content, durationMs: 1 };
     }
@@ -94,7 +95,7 @@ function harness(initial: Conversation, replies: Record<string, string[]> = {}) 
     await settle();
   };
   const askingMessage = () => stored().messages.find((message) => message.metadata?.pendingChoice)!;
-  return { service, internals, storage, runs, events, advance, stored, choiceOf, send, settle, askingMessage,
+  return { service, internals, storage, runs, prompts, events, advance, stored, choiceOf, send, settle, askingMessage,
     stopTimers: () => { for (const { timer } of internals.choiceExpiryTimers.values()) clearTimeout(timer); internals.choiceExpiryTimers.clear(); } };
 }
 
@@ -108,7 +109,7 @@ async function until(done: () => boolean, ms = 5_000): Promise<void> {
 
 const pendingChoiceItems = (saved: Conversation) => buildChatActivityItems(saved).filter((item) => item.kind === "choice" && item.status === "pending");
 
-test("a member's choice expires when the User goes on with that member after the hour: closed everywhere, shown as expired", async (t) => {
+test("a member's choice closes as soon as the User writes to that member instead: closed everywhere, shown as expired, and the member is told", async (t) => {
   const h = harness(conversation(), { [taylor.id]: [ASKING] });
   t.after(h.stopTimers);
   await h.send("@taylor which store?");
@@ -116,9 +117,13 @@ test("a member's choice expires when the User goes on with that member after the
   assert.equal(asking.metadata?.pendingChoice?.status, "pending");
   assert.ok(asking.metadata?.pendingChoice?.askedAt, "the card keeps when it was asked");
   assert.equal(pendingChoiceItems(h.stored()).length, 1, "listed under Pending");
+  assert.equal(h.prompts.at(-1)?.includes("was closed without an answer"), false, "the first turn closed nothing");
 
-  h.advance(2 * HOUR);
   await h.send("@taylor let's do something else first");
+  const told = h.prompts.at(-1) ?? "";
+  assert.ok(told.includes("Your earlier choice card was closed without an answer"), "the turn on her message is told the card closed");
+  assert.ok(told.includes("- Store"), "by its title");
+  assert.ok(told.indexOf("closed without an answer") > told.indexOf("let's do something else first"), "after the message that closed it");
   await until(() => Boolean(h.choiceOf(asking.id)?.expiredAt));
   const choice = h.choiceOf(asking.id);
   assert.equal(choice?.status, "cancelled", "closed as a cancelled card is, on every surface");
@@ -135,21 +140,17 @@ test("a member's choice expires when the User goes on with that member after the
   await until(() => h.runs.length === runsBefore + 1);
 });
 
-test("gone on with within the hour, the choice expires at the hour; a copy read before does not bring it back", async (t) => {
+test("a choice closed at once is not brought back by a copy read before, and the next message is not told again", async (t) => {
   const h = harness(conversation(), { [taylor.id]: [ASKING] });
   t.after(h.stopTimers);
   await h.send("@taylor which store?");
   const asking = h.askingMessage();
-  const askedAtMs = Date.parse(asking.metadata!.pendingChoice!.askedAt!);
-  await h.send("@taylor actually, one more thing");
-  assert.equal(h.choiceOf(asking.id)?.status, "pending", "not before the hour");
-  assert.equal(h.internals.choiceExpiryTimers.get("chat-expiry")?.atMs, askedAtMs + HOUR, "a timer waits for the hour");
-
   const stale = clone(h.stored());
-  h.advance(HOUR);
-  await h.internals.sweepChoiceExpiry("chat-expiry");
-  assert.ok(h.choiceOf(asking.id)?.expiredAt, "expired when the timer fired");
+  await h.send("@taylor actually, one more thing");
+  await until(() => Boolean(h.choiceOf(asking.id)?.expiredAt));
   assert.equal(h.internals.choiceExpiryTimers.has("chat-expiry"), false, "nothing more to wait for");
+  await h.send("@taylor and another");
+  assert.equal(h.prompts.at(-1)?.includes("closed without an answer"), false, "said once, by the message that closed it");
   // A longer flow saves the copy it read while the card still waited.
   await h.internals.withChatMutation(stale, async () => {
     stale.updatedAt = new Date().toISOString();
@@ -158,12 +159,63 @@ test("gone on with within the hour, the choice expires at the hour; a copy read 
   assert.ok(h.choiceOf(asking.id)?.expiredAt, "still expired");
 });
 
+test("a card this device heard was answered is not reported to the member as closed unanswered", async (t) => {
+  const h = harness(conversation(), { [taylor.id]: [ASKING] });
+  t.after(h.stopTimers);
+  await h.send("@taylor which store?");
+  const asking = h.askingMessage();
+  // Her answer from the phone is on its way here while she types on the desktop.
+  h.internals.serverCards.noteServer({ cardId: choiceCardId(asking.id), conversationId: "chat-expiry", cardKind: "choice", state: "answered", card: {} }, 1);
+  await h.send("@taylor and one more thing");
+  assert.equal(h.prompts.at(-1)?.includes("closed without an answer"), false, "her answer closes it, not her message");
+  assert.equal(h.choiceOf(asking.id)?.status, "pending", "left to the answer");
+});
+
+test("removing a member closes its waiting cards; a card of a member already gone closes at start, and Cancel closes it too", async (t) => {
+  const h = harness(conversation(), { [taylor.id]: [ASKING] });
+  t.after(h.stopTimers);
+  await h.send("@taylor which store?");
+  const asking = h.askingMessage();
+  // A mention approval of taylor's waits as well.
+  h.storage.current.messages.push({ id: "mentions", role: "participant", participantId: taylor.id, participantLabel: "@taylor", content: "@drew look", status: "done",
+    createdAt: new Date().toISOString(), metadata: { pendingMentions: [{ targetParticipantId: drew.id, targetHandle: "drew", status: "pending" }] } } as ChatMessage);
+  await h.service.removeParticipant({ conversationId: "chat-expiry", participantId: taylor.id });
+  const closed = h.choiceOf(asking.id);
+  assert.deepEqual([closed?.status, Boolean(closed?.expiredAt), Boolean(closed?.memberGoneAt)], ["cancelled", true, true], "closed with its member");
+  assert.equal(h.stored().messages.find((message) => message.id === "mentions")?.metadata?.pendingMentions?.[0]?.status, "rejected", "its mention approvals too");
+  assert.equal(pendingChoiceItems(h.stored()).length, 0, "gone from Pending");
+
+  // A card of a member that left before this fix: closed when the app starts.
+  const gone: ChatMessage = { id: "gone-card", role: "participant", participantId: "old-leo", participantLabel: "@leo", content: "Which?", status: "done",
+    createdAt: new Date(Date.now() - 60_000).toISOString(),
+    metadata: { pendingChoice: { id: "choice-gone", title: "Old", question: "Which?", status: "pending", options: [{ id: "a", label: "A" }] } } };
+  h.storage.current.messages.push(gone);
+  await h.service.resumeChoiceExpiry(["chat-expiry"]);
+  assert.deepEqual([h.choiceOf("gone-card")?.status, Boolean(h.choiceOf("gone-card")?.memberGoneAt)], ["cancelled", true]);
+
+  // A mention approval of a member already gone: rejected by the same pass.
+  h.storage.current.messages.push({ id: "gone-mentions", role: "participant", participantId: "old-leo", participantLabel: "@leo", content: "@drew look", status: "done",
+    createdAt: new Date().toISOString(), metadata: { pendingMentions: [{ targetParticipantId: drew.id, targetHandle: "drew", status: "pending" }] } } as ChatMessage);
+  // A member this build cannot read whole is still a member: its card stays.
+  (h.storage.current.metadata.participants as unknown[]).push({ id: "future-member", handle: "nova", kind: "future-cli" });
+  h.storage.current.messages.push({ ...gone, id: "future-card", participantId: "future-member", metadata: { pendingChoice: { ...gone.metadata!.pendingChoice!, id: "choice-future" } } });
+  await h.service.resumeChoiceExpiry(["chat-expiry"]);
+  assert.equal(h.stored().messages.find((message) => message.id === "gone-mentions")?.metadata?.pendingMentions?.[0]?.status, "rejected");
+  assert.equal(h.choiceOf("future-card")?.status, "pending", "a member this build cannot read has not left");
+
+  // Cancel, where nothing closed it yet: closed here, nobody else asked.
+  h.storage.current.messages.push({ ...gone, id: "gone-card-2", metadata: { pendingChoice: { ...gone.metadata!.pendingChoice!, id: "choice-gone-2" } } });
+  await assert.rejects(h.service.answerChoiceCard({ conversationId: "chat-expiry", sourceMessageId: "gone-card-2", choiceId: "choice-gone-2", selectedOptionId: "a" }),
+    /no longer in this chat: its question can only be cancelled/);
+  await h.service.answerChoiceCard({ conversationId: "chat-expiry", sourceMessageId: "gone-card-2", choiceId: "choice-gone-2", cancel: true });
+  assert.deepEqual([h.choiceOf("gone-card-2")?.status, h.choiceOf("gone-card-2")?.expiredAt], ["cancelled", undefined], "shown as her cancel");
+});
+
 test("a choice does not expire when the User only wrote to another member, or never went on", async (t) => {
   const h = harness(conversation(), { [taylor.id]: [ASKING] });
   t.after(h.stopTimers);
   await h.send("@taylor which store?");
   const asking = h.askingMessage();
-  h.advance(3 * HOUR);
   await h.internals.sweepChoiceExpiry("chat-expiry");
   assert.equal(h.choiceOf(asking.id)?.status, "pending", "nobody was asked after it");
   await h.send("@drew what do you think?");
@@ -185,12 +237,14 @@ test("answering another of the member's cards goes on with it: the older card ex
       options: [{ id: "json", label: "JSON" }, { id: "csv", label: "CSV" }] } }
   };
   h.storage.current.messages.push(newer);
-  h.advance(2 * HOUR);
   await h.service.respondToChoice({ conversationId: "chat-expiry", sourceMessageId: newer.id, choiceId: "choice-newer", selectedOptionId: "json" });
   await h.settle();
   assert.equal(h.choiceOf(newer.id)?.status, "selected", "the answered card is answered");
   await until(() => Boolean(h.choiceOf(older.id)?.expiredAt));
   assert.equal(h.choiceOf(older.id)?.status, "cancelled", "the older card expired with the turn the answer started");
+  const told = h.prompts.at(-1) ?? "";
+  assert.ok(told.includes("Your earlier choice card was closed without an answer: User went on with the triggering message"), "that turn is told the older card closed");
+  assert.ok(told.includes("- Store") && !told.includes("- Format"), "the older card, not the one she answered");
 });
 
 test("at a start, choices that expired while the app was closed are closed, never over an answer waiting on the User's server", async (t) => {
@@ -254,7 +308,7 @@ test("a far-off expiry time does not overflow the chat's timer", async (t) => {
   schedule("chat-expiry", Date.now() + 40 * 24 * HOUR, { replace: true });
   const entry = h.internals.choiceExpiryTimers.get("chat-expiry");
   assert.ok(entry);
-  assert.ok((entry!.timer as unknown as { _idleTimeout: number })._idleTimeout <= HOUR + 1_000, "fires within the hour and looks again");
+  assert.ok((entry!.timer as unknown as { _idleTimeout: number })._idleTimeout <= 5 * 60_000 + 1_000, "fires within a retry and looks again");
   schedule("chat-expiry", undefined, { replace: true });
   assert.equal(h.internals.choiceExpiryTimers.has("chat-expiry"), false, "none when nothing waits");
 });

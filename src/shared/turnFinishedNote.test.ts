@@ -56,6 +56,13 @@ test("the User's words or another member's reply below count as well", () => {
   assert.ok(turnFinishedNoteFor({ messages: [user("ask", "go"), card, running] }, [card], NOTE), "a turn still running below counts");
 });
 
+test("no note for a closed Accord's line below the reply: it is her own view, not a message", () => {
+  const card = reply("card", "Готово.");
+  const line = { id: "line", role: "system", content: "Accord folded: Plan", createdAt: NOTE.createdAt, status: "done",
+    metadata: { appMessageSource: "app_accord_closed", accordClosed: { launchMessageId: "launch-1" } } } as ChatMessage;
+  assert.equal(turnFinishedNoteFor({ messages: [user("ask", "go"), card, line] }, [card], NOTE), undefined);
+});
+
 test("no note when the reply is last where it stands", () => {
   const card = reply("card", "Done.");
   assert.equal(turnFinishedNoteFor({ messages: [user("ask", "go"), card] }, [card], NOTE), undefined);
@@ -127,6 +134,28 @@ test("a message the server refused is not below a reply", () => {
   const card = reply("card", "Done.");
   const refused = user("refused", "never taken", { serverRejected: "This chat was deleted." } as ChatMessageMetadata);
   assert.equal(turnFinishedNoteFor({ messages: [user("ask", "go"), card, refused] }, [card], NOTE), undefined);
+});
+
+test("an urgent alert's card below a reply is not a reason for a note", () => {
+  // The card the User's server writes during the turn sits right under the
+  // reply: a note would only repeat it (the User, 2026-11-15).
+  const card = reply("card", "Done: the deploy is rolled back.");
+  const alert: ChatMessage = {
+    ...reply("alert", "Production deploy failed.", { createdAt: "2026-11-04T20:41:00.000Z" }),
+    metadata: {
+      threadId: "alert",
+      serverWriter: "server",
+      urgentAlert: { id: "a1", state: "waiting", createdAt: "2026-11-04T20:41:00.000Z", calls: [], phone: true, callMode: "keypad" }
+    } as ChatMessageMetadata
+  };
+  assert.equal(turnFinishedNoteFor({ messages: [user("ask", "@taylor watch it"), card, alert] }, [card], NOTE), undefined);
+  // The same message from a device is no card: it still counts.
+  const forged: ChatMessage = { ...alert, metadata: { ...alert.metadata, serverWriter: "device-1" } as ChatMessageMetadata };
+  assert.ok(turnFinishedNoteFor({ messages: [user("ask", "@taylor watch it"), card, forged] }, [card], NOTE));
+  // Anything else below still does, another member's alert too.
+  assert.ok(turnFinishedNoteFor({ messages: [user("ask", "@taylor watch it"), card, alert, post("p1", "Rolling back")] }, [card], NOTE));
+  const theirs: ChatMessage = { ...alert, participantId: "gera", participantLabel: "@gera" };
+  assert.ok(turnFinishedNoteFor({ messages: [user("ask", "@taylor watch it"), card, theirs] }, [card], NOTE));
 });
 
 test("the preview is the reply's first line of words, without markdown", () => {

@@ -73,7 +73,7 @@ interface UsageMilestonesState {
  *  them, read from what it keeps. */
 /** The version of the list of features whose earlier use is looked up;
  *  raised when a feature signal is added, so installations look again. */
-export const USAGE_FEATURE_HISTORY_VERSION = 1;
+export const USAGE_FEATURE_HISTORY_VERSION = 2;
 
 export interface UsageFeatureHistory {
   customRole: boolean;
@@ -303,7 +303,7 @@ export function usageFeatureHistoryFrom(input: {
     scheduledTask: usedOrUnknown(input.approvedScheduledTasks === undefined ? undefined : input.approvedScheduledTasks > 0),
     memoryNote: usedOrUnknown(input.memoryNotes === undefined ? undefined : input.memoryNotes > 0),
     phonePaired: usedOrUnknown(input.phones === undefined ? undefined : input.phones > 0),
-    urgentAlerts: input.urgentAlerts === true
+    urgentAlerts: usedOrUnknown(input.urgentAlerts)
   };
 }
 
@@ -323,6 +323,8 @@ export class UsageMilestones {
   private documentsReading = false;
   private documentsAgain = false;
   private snapshotReading = false;
+  /** Whether Telegram alerts read as connected last time this launch. */
+  private urgentAlertTelegramConnected?: boolean;
 
   constructor(private readonly options: UsageMilestonesOptions) {}
 
@@ -473,6 +475,23 @@ export class UsageMilestones {
     if (facts.accordStarted) this.reach("first_accord_started");
   }
 
+  /** What Settings → Alerts asked the server and got: urgent alerts set up
+   *  on this computer are a phone saved, or Telegram newly connected (it
+   *  connects only once Start is pressed in Telegram, which the next read of
+   *  the settings shows; a setup made earlier never reads as a change). */
+  observeUrgentAlertRequest(action: string, result: { ok: boolean; value?: unknown }): void {
+    if (!result.ok) return;
+    if (action === "phone.save") {
+      this.reach("urgent_alert_set_up");
+      return;
+    }
+    if (action !== "settings") return;
+    const view = result.value as { telegram?: { connected?: unknown } } | undefined;
+    const connected = view?.telegram?.connected === true;
+    if (this.urgentAlertTelegramConnected === false && connected) this.reach("urgent_alert_set_up");
+    this.urgentAlertTelegramConnected = connected;
+  }
+
   /** The CLIs were checked: the first time one is ready, which ones are. */
   observeAgents(agents: ReadonlyArray<AgentHealth>): void {
     if (!this.state || this.state.reached.cli_ready) return;
@@ -540,8 +559,10 @@ export class UsageMilestones {
         // The terminal, dictation, file previews, connector sign-ins and
         // skills leave nothing to read back: their first use from now on is
         // sent, marked with the installation's cohort.
+        // Features count from the first look only; a later look (a new
+        // feature in the list) does not move it.
+        if (state.featureHistoryVersion === undefined) state.featuresFrom ??= stamp;
         state.featureHistoryVersion = USAGE_FEATURE_HISTORY_VERSION;
-        state.featuresFrom ??= stamp;
       }
       if (state.historyChecked) {
         this.writeState();

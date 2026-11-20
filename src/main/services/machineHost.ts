@@ -61,6 +61,9 @@ export interface MachineHostOptions {
   nativeProcessDbPath?: string;
   /** True while another deployment on this host has committed an idle stop. */
   hostStopCommitted?: () => boolean;
+  /** A stop another program on this instance has made final, as read (not
+   *  assumed when it cannot be read): the feed is not read then. */
+  hostStopSeen?: () => boolean;
   detectProviders?: () => Promise<AgentHealth[]>;
   /** Commits idle accounting once a member's run here has ended. */
   onNativeActivitySettled?: () => Promise<void>;
@@ -72,6 +75,11 @@ export interface MachineHostOptions {
   /** What this machine wrote that the User's server has not taken yet. An
    *  idle stop waits for it: a reply must not sleep with the machine. */
   unsentServerWrites?: () => Promise<{ queued: number; lastError?: string } | undefined>;
+  /** Stops reading the User's server's feed until the returned resume is
+   *  called (ServerChatLink.pauseFeed). A machine that stops reads nothing it
+   *  would turn down: what the server places meanwhile stays unread there,
+   *  and the server starts the machine again for it. */
+  pauseServerFeed?: () => Promise<() => void>;
   /** Posts this machine's members' live progress to the User's server, for
    *  the phone (POST /v1/progress). */
   postProgress?: (frames: MachineProgressFrame[]) => Promise<void>;
@@ -120,7 +128,7 @@ interface MachineAttachmentWaiter {
 
 type HostChat = Pick<ChatService, "respondToChoice" | "respondToAppToolApproval" | "respondToMentions"> &
   Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "onParticipantRunSettled" | "conversationIdForRun" | "setPromptSuggestionForwarder" |
-    "onBackgroundTasksChanged" | "localBackgroundTasks" | "setCardAppliers">>;
+    "onBackgroundTasksChanged" | "localBackgroundTasks" | "setCardAppliers" | "serverTurnsStarting">>;
 
 export class MachineHostService {
   private readonly client: TunnelClient;
@@ -141,11 +149,17 @@ export class MachineHostService {
   private closed = false;
   private draining = false;
   private idleFenced = false;
+  /** A turn the server asked of a member here was turned down while the
+   *  idle stop was being prepared: the stop does not go ahead over it. */
+  private declinedWhileFenced = false;
   /** The desktop asked this machine to take no new turns until then (its
    *  runtime is about to be replaced). */
   private heldUntil?: number;
   private heldTimer?: ReturnType<typeof setTimeout>;
   private uncertainIdleRelease?: () => void;
+  /** Ends the feed pause of a fence that may still stand (an uncertain
+   *  write, or one retained from before a restart). */
+  private fencedFeedResume?: () => void;
   private unsubscribeRunSettled?: () => void;
   private unsubscribeBackgroundTasks?: () => void;
   /** requestId -> whoever is waiting for those picture bytes. */
@@ -296,6 +310,27 @@ export class MachineHostService {
     return !this.closed && !this.draining && !this.idleFenced && !held && !this.options.hostStopCommitted?.();
   }
 
+  /** This machine goes down (draining for a shutdown, closed, or stopped by
+   *  another of its programs on the same instance): it reads nothing more
+   *  from the server, so what arrives stays unread there and the server
+   *  starts the machine again for it. */
+  goingDown(): boolean {
+    return this.closed || this.draining || Boolean(this.options.hostStopSeen?.());
+  }
+
+  /** A desktop holds this machine's turns (an update about to run). */
+  private held(): boolean {
+    return this.heldUntil !== undefined && this.now().getTime() < this.heldUntil;
+  }
+
+  /** A turn the server asked of a member here was not taken (takesNewWork
+   *  said no). One turned down while an idle stop is prepared (read just
+   *  before the feed paused) keeps the machine on; it is taken up when the
+   *  fence lifts. */
+  noteWorkDeclined(): void {
+    if (this.idleFenced) this.declinedWhileFenced = true;
+  }
+
   /** At most this long per hold: a desktop that stops sending it never keeps
    *  the machine from working. */
   private static readonly HOLD_MAX_MS = 30 * 60_000;
@@ -326,7 +361,18 @@ export class MachineHostService {
   }
 
   /** Installed before start() when this boot retained an uncertain AWS Stop. */
-  retainIdleFence(): void { this.idleFenced = true; }
+  retainIdleFence(): void {
+    this.idleFenced = true;
+    // Nothing is read from the server while the retained stop goes on; the
+    // pause is counted at once, so a link that starts after holds it too.
+    const pausing = this.options.pauseServerFeed?.();
+    void pausing?.then((resume) => {
+      if (this.idleFenced) {
+        this.fencedFeedResume?.();
+        this.fencedFeedResume = resume;
+      } else resume();
+    }).catch(() => undefined);
+  }
 
   publishPowerStatus(): Promise<void> { return this.sendHello(); }
 
@@ -341,8 +387,13 @@ export class MachineHostService {
     // due time. This vetoes idle stop only; it is not a run, so the desktop's
     // update gate (hello run ids) does not wait for it.
     if (this.options.scripts?.keepsHostAwake()) return true;
-    if (this.closed || this.draining || this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork() || this.mentionExecutor.hasActiveWork() ||
-        (this.chat.activeParticipantRuns?.().length ?? 0) > 0 || (this.chat.liveRunIds?.().length ?? 0) > 0) return true;
+    // A desktop's hold (an update about to run) keeps it on, as the update's
+    // own maintenance does: a turn it turned down meanwhile is taken when the
+    // hold ends, and other programs on the instance see it busy.
+    if (this.closed || this.draining || this.held() || this.declinedWhileFenced || this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork() ||
+        this.mentionExecutor.hasActiveWork() || (this.chat.activeParticipantRuns?.().length ?? 0) > 0 || (this.chat.liveRunIds?.().length ?? 0) > 0 ||
+        // A turn taken from the server that has not become a run yet.
+        (this.chat.serverTurnsStarting?.() ?? 0) > 0) return true;
     const unsent = await this.options.unsentServerWrites?.().catch(() => ({ queued: 1 }));
     return (unsent?.queued ?? 0) > 0;
   }
@@ -358,9 +409,16 @@ export class MachineHostService {
     if (this.idleFenced || await this.hasWorkForIdleStop()) return undefined;
     if (this.idleFenced) return undefined;
     this.idleFenced = true;
+    this.declinedWhileFenced = false;
     let releaseNative: (() => void) | undefined;
+    let resumeFeed: (() => void) | undefined;
     let committed = false;
     try {
+      // Nothing more is read from the server from here: a turn placed for a
+      // member here during the stop stays unread there, and the server
+      // starts this machine again for it. One read just before is a turn
+      // starting or one turned down, and either keeps the machine on.
+      resumeFeed = await this.options.pauseServerFeed?.();
       await this.inbound;
       // A script request already taken (switching one on) is part of what
       // decides whether this machine may stop.
@@ -368,7 +426,8 @@ export class MachineHostService {
       if (await this.hasWorkForIdleStop()) return undefined;
       releaseNative = request.fenceNative();
       if (!releaseNative) return undefined;
-      const prepareLocal = () => this.options.storage.machinePower().tryFence(request.bootId, request.uptimeMs, randomUUID(), request.idleSinceMs);
+      const prepareLocal = async () => !this.declinedWhileFenced && !this.held() && (this.chat?.serverTurnsStarting?.() ?? 0) === 0 &&
+        await this.options.storage.machinePower().tryFence(request.bootId, request.uptimeMs, randomUUID(), request.idleSinceMs);
       committed = await (request.commitHostStop ? request.commitHostStop(prepareLocal) : prepareLocal());
       if (!committed) return undefined;
       return () => this.shutdown(request.stopProviders, false);
@@ -376,12 +435,18 @@ export class MachineHostService {
       // An uncertain file/SQLite result is not permission to reopen native
       // work after a durable fence might have committed.
       committed = Boolean(await this.options.storage.machinePower().stopFence(request.bootId).catch(() => "unconfirmed"));
-      if (committed) this.uncertainIdleRelease = releaseNative;
+      if (committed) {
+        this.uncertainIdleRelease = releaseNative;
+        this.fencedFeedResume?.();
+        this.fencedFeedResume = resumeFeed;
+      }
       throw error;
     } finally {
       if (!committed) {
         releaseNative?.();
+        resumeFeed?.();
         this.idleFenced = false;
+        this.declinedWhileFenced = false;
         this.fenceLifted();
       }
     }
@@ -392,7 +457,10 @@ export class MachineHostService {
     if (await this.options.storage.machinePower().stopFence(bootId)) return true;
     this.uncertainIdleRelease?.();
     this.uncertainIdleRelease = undefined;
+    this.fencedFeedResume?.();
+    this.fencedFeedResume = undefined;
     this.idleFenced = false;
+    this.declinedWhileFenced = false;
     this.fenceLifted();
     return false;
   }

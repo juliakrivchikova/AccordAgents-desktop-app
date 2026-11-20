@@ -30,9 +30,10 @@ import { PluginsSettingsSection } from "./plugins/plugins-settings-section";
 import { X } from "lucide-react";
 import { AwsSettingsPage } from "./aws-settings-page";
 import { ScriptsSettingsSection } from "./scripts-settings-section";
+import { AlertsSettingsSection } from "./alerts-settings-section";
 import { MemorySettingsSection } from "./memory-settings-section";
 
-export type SettingsSection = "general" | "aws" | "environment" | "scripts" | "roles" | "behavior-rules" | "saved-prompts" | "participants" | "plugins" | "memory";
+export type SettingsSection = "general" | "aws" | "environment" | "scripts" | "alerts" | "roles" | "behavior-rules" | "saved-prompts" | "participants" | "plugins" | "memory";
 
 export function SettingsView(props: {
   section: SettingsSection;
@@ -63,12 +64,13 @@ export function SettingsView(props: {
   getAgentEnvironment: () => Promise<AgentEnvironmentSnapshot>;
   saveAgentEnvironmentVariable: (request: SaveAgentEnvironmentVariableRequest) => Promise<AgentEnvironmentSnapshot>;
   deleteAgentEnvironmentVariable: (request: DeleteAgentEnvironmentVariableRequest) => Promise<AgentEnvironmentSnapshot>;
+  refreshAgentEnvironment: () => Promise<AgentEnvironmentSnapshot>;
   onTryPluginInChat: (plugin: PluginCatalogItem) => void;
   sidebarCollapsed: boolean;
   onExpandSidebar: () => void;
   onClose: () => void;
 }): JSX.Element {
-  const [pluginHeaderAction, setPluginHeaderAction] = useState<ReactNode>();
+  const [headerAction, setHeaderAction] = useState<ReactNode>();
   const title = props.section === "general"
     ? "General"
     : props.section === "aws"
@@ -77,6 +79,8 @@ export function SettingsView(props: {
       ? "Environment"
     : props.section === "scripts"
       ? "Scheduled Tasks"
+    : props.section === "alerts"
+      ? "Alerts"
       : props.section === "roles"
         ? "Roles"
         : props.section === "behavior-rules"
@@ -98,7 +102,7 @@ export function SettingsView(props: {
             <h1>{title}</h1>
           </div>
           <div className="settings-view-head-actions">
-            {props.section === "plugins" && pluginHeaderAction}
+            {(props.section === "plugins" || props.section === "environment") && headerAction}
             <IconButton
               size="sm"
               icon={X}
@@ -142,15 +146,18 @@ export function SettingsView(props: {
             getAgentEnvironment={props.getAgentEnvironment}
             saveAgentEnvironmentVariable={props.saveAgentEnvironmentVariable}
             deleteAgentEnvironmentVariable={props.deleteAgentEnvironmentVariable}
+            refreshAgentEnvironment={props.refreshAgentEnvironment}
+            onHeaderActionChange={setHeaderAction}
           />
         )}
         {props.section === "scripts" && <ScriptsSettingsSection />}
+        {props.section === "alerts" && <AlertsSettingsSection />}
         {props.section === "memory" && <MemorySettingsSection />}
         {props.section === "plugins" && (
           <PluginsSettingsSection
             repoPath={props.settings.lastRepoPath}
             onTryPluginInChat={props.onTryPluginInChat}
-            onHeaderActionChange={setPluginHeaderAction}
+            onHeaderActionChange={setHeaderAction}
           />
         )}
         {props.section === "general" && (

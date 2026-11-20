@@ -13,8 +13,9 @@ export interface MachineIdleStateStore {
 }
 
 /** One local owner measures idle independently of every desktop/phone.
- * prepareStop must atomically fence new native work, recheck durable commands
- * and maintenance, and return undefined when any of them won the race. */
+ * prepareStop must atomically fence new native work, recheck the work in
+ * flight (member runs, turns being taken, unsent server writes) and
+ * maintenance, and return undefined when any of them won the race. */
 export class MachineIdleScheduler {
   private timer?: ReturnType<typeof setTimeout>;
   private checking?: Promise<void>;

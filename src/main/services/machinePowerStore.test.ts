@@ -3,8 +3,12 @@ import test from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { StorageService } from "./storage";
 import { MachineIdleScheduler } from "./machineIdle";
+
+const execFileAsync = promisify(execFile);
 
 test("maintenance and idle drain cannot both acquire the local power gate", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "machine-power-gate-"));
@@ -59,5 +63,27 @@ test("lease expiry never revives an old operation and external activity resets a
     await b.releaseMaintenance("install", "boot"); now = 1200;
     await scheduler.check(); assert.equal(stops, 0, "release outside this process invalidated its original deadline");
     now = 2200; await scheduler.check(); assert.equal(stops, 1); scheduler.close();
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("the idle stop commits on a machine database without the tables of the old signed-event order", async () => {
+  // A machine set up since the server owns the chats never had them, and an
+  // older one dropped them: the final idle check named one and failed every
+  // stop, so the instance stayed on for good.
+  const dir = await mkdtemp(path.join(tmpdir(), "machine-power-legacy-dropped-"));
+  try {
+    const dbPath = path.join(dir, "state.sqlite3");
+    const storage = new StorageService({ dbPath });
+    await storage.init();
+    // What an older machine kept, then dropped by this version.
+    await execFileAsync("sqlite3", [dbPath, `create table native_commands (command_id text primary key, phase text);
+      create table chat_events (event_id text primary key, kind text);
+      create table device_event_inbox (event_id text primary key, applied_at text);`]);
+    const dropped = await storage.dropLegacyEventTables({ keepBodies: false });
+    assert.ok(dropped.tables.includes("native_commands"));
+    const power = storage.machinePower();
+    await power.write({ version: 1, bootId: "boot", idleSinceMs: 100 });
+    assert.equal(await power.tryFence("boot", 10_000, "idle-stop", 100), true);
+    assert.equal(await power.stopFence("boot"), "idle-stop");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

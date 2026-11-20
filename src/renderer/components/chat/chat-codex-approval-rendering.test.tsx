@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { act, create } from "react-test-renderer";
+import { create } from "react-test-renderer";
 
 import type { ChatActivityItem, ChatAppToolApproval, ChatCodexApprovalRequest, ChatMessage } from "../../../shared/types";
 import {
@@ -15,6 +15,7 @@ import {
 import { ChatCodexApprovalOperation } from "./chat-codex-approval-operation";
 import { ChatCodexApprovalResult } from "./chat-codex-approval-result";
 import { chatToolPermissionAllowsChatScope, chatToolPermissionRequest } from "./chat-app-tool-data";
+import { formatChatTime } from "./chat-format";
 
 const NOW = "2026-08-01T05:00:00.000Z";
 
@@ -68,7 +69,7 @@ test("Guardian denial offers a card-only Cancel action", () => {
   assert.equal(chatCodexApprovalShowsCancel(chatCodexApprovalRequest(approval)), true);
 });
 
-test("cancelled Guardian denial renders a compact result without the blocked command", () => {
+test("cancelled Guardian denial is one line without the blocked command", () => {
   const approval = codexApproval("guardian-cancelled", "participant", "run");
   approval.status = "cancelled";
   approval.summary = `Codex Auto Review denied: ${"very-long-command ".repeat(80)}`;
@@ -82,13 +83,14 @@ test("cancelled Guardian denial renders a compact result without the blocked com
   };
   const renderer = create(<ChatCodexApprovalResult approval={approval} />);
   const text = textContent(renderer.toJSON());
+  const row = renderer.root.find((instance) => instance.props?.className === "chat-card-row");
   assert.match(text, /Cancelled/);
-  assert.match(text, /Closed without retrying/);
-  assert.doesNotMatch(text, /very-long-command/);
+  assert.match(String(row.props.title), /Closed without retrying/, "why, on hover");
+  assert.doesNotMatch(`${text}\n${row.props.title}`, /very-long-command/);
   renderer.unmount();
 });
 
-test("decided Codex card clamps a long summary and reveals it on Show more", () => {
+test("a decided Codex card is one line: a long command is cut off there and whole on hover, with nothing to press", () => {
   const approval = codexApproval("guardian-approved-long", "participant", "run");
   approval.status = "approved";
   approval.summary = `Codex Auto Review denied: ${"very-long-command ".repeat(80)}`;
@@ -100,41 +102,20 @@ test("decided Codex card clamps a long summary and reveals it on Show more", () 
       { id: "keepDenied", label: "Keep denied", outcome: "deny" }
     ]
   };
-  // Three clamped lines hide most of the command: the measured box overflows.
-  let renderer!: ReturnType<typeof create>;
-  act(() => {
-    renderer = create(<ChatCodexApprovalResult approval={approval} />, {
-      createNodeMock: () => ({ scrollHeight: 300, clientHeight: 57 })
-    });
-  });
-  const detail = (): { props: { className: string } } => renderer.root.find((instance) =>
-    instance.type === "span" && /(?:^| )chat-app-tool-result-detail(?: |$)/.test(String(instance.props.className ?? ""))
-  ) as never;
-  const toggle = (): { props: { onClick: () => void; children: string } } | undefined =>
-    renderer.root.findAllByType("button")[0] as never;
-  assert.match(detail().props.className, /is-collapsed/);
-  assert.equal(toggle()?.props.children, "Show more");
-  act(() => toggle()?.props.onClick());
-  assert.doesNotMatch(detail().props.className, /is-collapsed/);
-  assert.equal(toggle()?.props.children, "Show less");
-  assert.match(textContent(renderer.toJSON()), /very-long-command/);
-  act(() => toggle()?.props.onClick());
-  assert.match(detail().props.className, /is-collapsed/);
-  assert.equal(toggle()?.props.children, "Show more");
+  const renderer = create(<ChatCodexApprovalResult approval={approval} />);
+  const row = renderer.root.find((instance) => instance.props?.className === "chat-card-row");
+  assert.match(String(row.props.title), /very-long-command/, "the whole command on hover");
+  assert.equal(renderer.root.findAllByType("button").length, 0);
   renderer.unmount();
 });
 
-test("decided Codex card with a short summary offers no Show more", () => {
+test("a decided Codex card with a short summary says who asked, how it ended and when", () => {
   const approval = codexApproval("approved-short", "participant", "run");
   approval.status = "approved";
-  let renderer!: ReturnType<typeof create>;
-  act(() => {
-    renderer = create(<ChatCodexApprovalResult approval={approval} />, {
-      createNodeMock: () => ({ scrollHeight: 19, clientHeight: 19 })
-    });
-  });
+  const renderer = create(<ChatCodexApprovalResult approval={approval} />);
   assert.equal(renderer.root.findAllByType("button").length, 0);
   assert.match(textContent(renderer.toJSON()), /Codex approval/);
+  assert.match(textContent(renderer.toJSON()), new RegExp(`@participant · Approved ${formatChatTime(approval.updatedAt)}`));
   renderer.unmount();
 });
 
@@ -197,15 +178,14 @@ test("Activity hides generic cancellation for Codex while preserving ordinary ap
   assert.equal(chatActivityShowsGenericCancel(ordinaryItem), true);
 });
 
-test("submitted Codex decisions use the existing compact result card with no controls", () => {
+test("submitted Codex decisions are one line with no controls", () => {
   for (const status of ["approved", "denied"] as const) {
     const approval = codexApproval(`approval-${status}`, "participant", "run");
     approval.status = status;
     assert.equal(chatCodexApprovalShowsCompactResult(approval), true);
     const renderer = create(<ChatCodexApprovalResult approval={approval} />);
-    const root = renderer.toJSON() as { props?: { className?: string }; children?: unknown[] };
-    const text = textContent(root);
-    assert.match(root.props?.className ?? "", /chat-app-tool-result-card/);
+    const text = textContent(renderer.toJSON());
+    assert.equal(renderer.root.findAll((instance) => instance.props?.className === "chat-card-row").length, 1);
     assert.match(text, status === "approved" ? /Approved/ : /Denied/);
     assert.doesNotMatch(text, /Submit|Approve one retry|Keep denied/);
     renderer.unmount();

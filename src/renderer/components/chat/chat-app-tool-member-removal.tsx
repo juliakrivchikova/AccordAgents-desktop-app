@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Clock } from "lucide-react";
+import { UserMinus } from "lucide-react";
 
 import type {
   ChatAppToolApproval,
@@ -7,10 +7,15 @@ import type {
   ChatParticipantRemoveOperation
 } from "../../../shared/types";
 import { chatParticipantReference } from "../conversation/conversation-display";
+import { ChatUsedApprovalLine } from "./chat-used-card-row";
 
 /** "@a", "@a and @b", "@a, @b, and @c". */
 function handleList(operations: ChatParticipantRemoveOperation[]): string {
-  const handles = operations.map((operation) => chatParticipantReference(operation.handle));
+  return handleListText(operations.map((operation) => chatParticipantReference(operation.handle)));
+}
+
+/** "a", "a and b", "a, b, and c". */
+export function handleListText(handles: string[]): string {
   if (handles.length <= 1) {
     return handles[0] ?? "";
   }
@@ -100,14 +105,6 @@ export function ChatAppToolMemberRemovalResult(props: {
 }): JSX.Element {
   const summary = memberRemovalResultSummary(props.approval, props.request);
   return (
-    <div className={`chat-app-tool-result-card is-${props.approval.status}`} data-member-removal-state={summary.tone}>
-      <div className={`chat-app-tool-result-icon ${summary.tone === "refused" ? "is-denied" : ""}`} aria-hidden>
-        {summary.tone === "refused" ? <AlertTriangle size={18} /> : summary.tone === "waiting" ? <Clock size={18} /> : <Check size={19} />}
-      </div>
-      <div className="chat-app-tool-result-copy">
-        <strong>{summary.title}</strong>
-        <span>{summary.detail}</span>
-      </div>
-    </div>
+    <ChatUsedApprovalLine approval={props.approval} kind="Member removal" icon={UserMinus} preview={props.approval.summary} ended={summary.title} detail={summary.detail} />
   );
 }

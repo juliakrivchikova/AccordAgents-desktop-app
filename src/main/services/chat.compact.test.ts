@@ -163,6 +163,37 @@ test("/compact on a member with an added provider carries the provider env, and 
   }
 });
 
+test("/compact on an Antigravity member on a Gemini API key stays on that key", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-gemini-key-"));
+  try {
+    const host = { id: "host-google", label: "Google Gemini API", cli: "gemini-cli" as const, vendor: "google" as const, baseUrl: "https://generativelanguage.googleapis.com", hasApiKey: true, updatedAt: NOW };
+    const participant = chatParticipant({ id: "gemini-admin", kind: "gemini-cli", hostId: host.id, hostLabel: host.label, hostVendor: "google" });
+    const conversation = chatConversation([participant], [chatSession(participant, "conversation-1")]);
+    const compactRuns: Array<{ participant: any; options: any }> = [];
+    const { service, storage } = testService({
+      conversation,
+      compactSession: async (runParticipant, _repoPath, _diffMode, _kind, _signal, options) => {
+        compactRuns.push({ participant: runParticipant, options });
+        return { participant: runParticipant, ok: true, sessionId: "conversation-2" };
+      },
+      contextUsageForSession: async () => undefined
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    (service as any).settings.getManualAgentEnvironment = async () => ({ env: {}, version: "env-v1" });
+    (service as any).settings.getCliProviderHostSecret = async (id: string) => (id === host.id ? { host, apiKey: "gemini-secret" } : undefined);
+
+    await service.sendMessage({ conversationId: conversation.id, runId: "compact-gemini-key", content: "@admin /compact" });
+    assert.equal(compactRuns.length, 1);
+    // Both the summary turn and the fresh conversation run on the key, never the sign-in.
+    assert.deepEqual(compactRuns[0].participant.geminiSettings, { modelProvider: "gemini" });
+    assert.equal(compactRuns[0].options.agentEnv.GEMINI_API_KEY, "gemini-secret");
+    assert.match(compactRuns[0].options.agentEnvKey, /^env-v1\|host:host-google\|/);
+    assert.equal(storage.current.messages.at(-1)?.content, "Compacted @admin context.");
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("compactParticipant refreshes stored context usage from the session after compact", async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-usage-"));
   try {

@@ -8,6 +8,7 @@ import { StorageService } from "../main/services/storage";
 import { createHeadlessPlatform, setHostPlatform, userDataPath } from "../main/platform";
 import { HubOps } from "./hubOps";
 import { HubMemory } from "./hubMemory";
+import { HubAlerts, type HubAlertsOptions } from "./hubAlerts";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
 import { HubRetention, hubRetentionConfig } from "./hubRetention";
 import { HubChangeFeed, HubPhoneApi } from "./hubPhone";
@@ -109,6 +110,11 @@ export function composeHub(options: {
   /** Tests: the push service and AWS are stand-ins. */
   fetchImpl?: typeof fetch;
   pushDebounceMs?: number;
+  /** The server inside the app: Twilio can never reach it (alerts are
+   *  confirmed by answering the call). */
+  embedded?: boolean;
+  /** Tests: Telegram and Twilio stand-ins, and quicker alert timing. */
+  alerts?: Partial<Pick<HubAlertsOptions, "telegramBaseUrl" | "twilioBaseUrl" | "callPollMs" | "callRetryMs" | "minuteMs" | "telegramRetryMs" | "telegramWaitSeconds" | "publicUrlOverride" | "now">>;
 }) {
   const { storage, log } = options;
   // Which chats' copies changed, for the phones reading them here.
@@ -207,6 +213,23 @@ export function composeHub(options: {
   const phoneApi = phone;
   // Members' long-term memory, beside the chats (shared/memory.ts).
   const memory = new HubMemory(storage, log);
+  // Urgent alerts: Telegram, then calls (shared/urgentAlerts.ts). Local QA
+  // gives the address a tunnel reaches this server at.
+  const publicUrlOverride = options.alerts && "publicUrlOverride" in options.alerts
+    ? options.alerts.publicUrlOverride || undefined
+    : process.env.ACCORDAGENTS_HUB_PUBLIC_URL?.trim() || undefined;
+  // Local QA only: Telegram and Twilio stand-ins on this computer.
+  const qaTelegram = process.env.ACCORDAGENTS_ALERTS_TELEGRAM_URL?.trim();
+  const qaTwilio = process.env.ACCORDAGENTS_ALERTS_TWILIO_URL?.trim();
+  const alerts = new HubAlerts({
+    storage, ops, log,
+    ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    ...(qaTelegram && /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(qaTelegram) ? { telegramBaseUrl: qaTelegram } : {}),
+    ...(qaTwilio && /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(qaTwilio) ? { twilioBaseUrl: qaTwilio } : {}),
+    ...(options.embedded ? { embedded: true } : {}),
+    ...options.alerts,
+    publicUrlOverride
+  });
   const server = new HubServer({
     hubId: options.hubId, version: options.version, storage, search, vapidPublicKey: options.keys.publicKey,
     ...(options.hubKey ? { hubKey: options.hubKey } : {}),
@@ -215,9 +238,11 @@ export function composeHub(options: {
     onCatalogChanged: () => phoneApi.catalogChanged(),
     onProgress: (frames) => { for (const frame of frames) progress.noteFrame(frame); },
     ops,
-    memory
+    memory,
+    alerts
   });
   waker.start();
+  void alerts.start().catch((error: unknown) => log("hub.alerts.start-error", { message: error instanceof Error ? error.message : String(error) }));
   // What the server kept for the order of signed events it had before it
   // owned the chats (Д7): nothing reads it any more, and it goes once, in the
   // background. The bodies (pictures, avatars) are the server's and stay.
@@ -225,10 +250,11 @@ export function composeHub(options: {
   const dropped = storage.dropLegacyEventTables({ keepBodies: true, signal: dropping.signal, log })
     .catch((error: unknown) => log("hub.legacy-tables.error", { message: error instanceof Error ? error.message : String(error) }));
   return {
-    server, push, waker, feed, progress, phone: phoneApi, ops, memory,
+    server, push, waker, feed, progress, phone: phoneApi, ops, memory, alerts,
     close: async () => {
       push.close();
       waker.close();
+      await alerts.close();
       dropping.abort();
       await server.close();
       await dropped;

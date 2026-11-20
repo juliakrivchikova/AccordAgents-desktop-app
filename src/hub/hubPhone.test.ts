@@ -688,3 +688,102 @@ test("only turns taken by a device that still exists count as running for the ph
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("a start AWS refuses because the machine is still stopping is asked again soon and shown as waking; one that keeps failing ends as an error", async (t) => {
+  // The machine stopped itself a moment ago and left a turn unread: the
+  // first start lands while AWS still has it stopping.
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-wake-stopping-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
+  await storage.init();
+  const machine = createDeviceIdentity(new Date().toISOString());
+  await storage.hub().replaceRoster([{ deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Cloud box", machineId: "m-1", addedAt: "" }], new Date().toISOString());
+  await storage.hub().replaceMachineWake([{ machineId: "m-1", configJson: JSON.stringify({ machineId: "m-1", instanceId: "i-0123456789abcdef0", region: "us-east-1",
+    credentials: { accessKeyId: "AKIAEXAMPLEEXAMPLE12", secretAccessKey: "secretsecretsecretsecretsecret", region: "us-east-1" } }) }], new Date().toISOString());
+  let clock = Date.now();
+  let calls = 0;
+  let stopping = true;
+  const waker = new HubWaker({ storage, now: () => clock, fetchImpl: (async () => {
+    calls += 1;
+    return stopping
+      ? new Response("<Response><Errors><Error><Code>IncorrectInstanceState</Code></Error></Errors></Response>", { status: 400 })
+      : new Response("<StartInstancesResponse/>", { status: 200 });
+  }) as unknown as typeof fetch });
+  await storage.hubOps().recordRead(machine.originId, 3, new Date(clock).toISOString());
+  waker.noteWork("m-1", 10);
+  clock += 31_000;
+  await waker.check();
+  assert.equal(calls, 1);
+  let status = (await waker.status())[0];
+  assert.equal(status.wakeError, undefined, "still stopping is no error on the phone");
+  assert.equal(status.waking, true);
+  clock += 31_000;
+  stopping = false;
+  await waker.check();
+  assert.equal(calls, 2, "asked again soon, not in five minutes");
+  clock += 60_000;
+  await storage.hubOps().recordRead(machine.originId, 12, new Date(clock).toISOString());
+  await waker.check();
+  assert.equal((await waker.status())[0].waking, false, "it came up and read its work");
+
+  // AWS answers "still stopping" for good (stuck, or gone): asked often for
+  // a while, then it is an error that counts, and the server gives up.
+  stopping = true;
+  calls = 0;
+  clock += 60 * 60_000;
+  waker.noteWork("m-1", 20);
+  for (let step = 0; step < 120; step += 1) {
+    clock += 31_000;
+    await waker.check();
+  }
+  assert.ok(calls >= 15 && calls <= 30, `asked ${calls} times`);
+  status = (await waker.status())[0];
+  assert.match(status.wakeError ?? "", /IncorrectInstanceState/);
+});
+
+test("the phone's Wake while the machine is still stopping says to press it again", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-wake-manual-stopping-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
+  await storage.init();
+  await storage.hub().replaceMachineWake([{ machineId: "m-1", configJson: JSON.stringify({ machineId: "m-1", instanceId: "i-0123456789abcdef0", region: "us-east-1",
+    credentials: { accessKeyId: "AKIAEXAMPLEEXAMPLE12", secretAccessKey: "secretsecretsecretsecretsecret", region: "us-east-1" } }) }], new Date().toISOString());
+  const waker = new HubWaker({ storage,
+    fetchImpl: (async () => new Response("<Response><Errors><Error><Code>IncorrectInstanceState</Code></Error></Errors></Response>", { status: 400 })) as unknown as typeof fetch });
+  const answer = await waker.wakeNow("m-1");
+  assert.equal(answer.ok, false);
+  assert.match(answer.message, /still stopping\. Press Wake again/);
+});
+
+test("a start AWS takes while the instance has not stopped yet is not counted and is asked again soon", async (t) => {
+  // The machine stopped reading as it stops; AWS still has it running and
+  // answers the start with success, which starts nothing.
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-wake-not-stopped-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
+  await storage.init();
+  const machine = createDeviceIdentity(new Date().toISOString());
+  await storage.hub().replaceRoster([{ deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Cloud box", machineId: "m-1", addedAt: "" }], new Date().toISOString());
+  await storage.hub().replaceMachineWake([{ machineId: "m-1", configJson: JSON.stringify({ machineId: "m-1", instanceId: "i-0123456789abcdef0", region: "us-east-1",
+    credentials: { accessKeyId: "AKIAEXAMPLEEXAMPLE12", secretAccessKey: "secretsecretsecretsecretsecret", region: "us-east-1" } }) }], new Date().toISOString());
+  let clock = Date.now();
+  let calls = 0;
+  let previous = "running";
+  const waker = new HubWaker({ storage, now: () => clock, fetchImpl: (async () => {
+    calls += 1;
+    return new Response(`<StartInstancesResponse><instancesSet><item><currentState><name>pending</name></currentState><previousState><code>16</code><name>${previous}</name></previousState></item></instancesSet></StartInstancesResponse>`, { status: 200 });
+  }) as unknown as typeof fetch });
+  await storage.hubOps().recordRead(machine.originId, 3, new Date(clock).toISOString());
+  waker.noteWork("m-1", 10);
+  clock += 31_000;
+  await waker.check();
+  assert.equal(calls, 1);
+  assert.equal((await waker.status())[0].waking, true);
+  clock += 31_000;
+  previous = "stopped";
+  await waker.check();
+  assert.equal(calls, 2, "asked again soon: the first started nothing");
+  clock += 31_000;
+  await waker.check();
+  assert.equal(calls, 2, "a real start waits its turn");
+});

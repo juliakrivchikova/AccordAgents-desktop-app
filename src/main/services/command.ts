@@ -55,6 +55,26 @@ export interface CommandEnvironmentOptions {
 }
 
 let loginShellEnv: NodeJS.ProcessEnv | undefined;
+/** The last successful reading of what this computer sets (the login shell on
+ *  macOS, the User and Machine variables on Windows); undefined until one
+ *  succeeded. A later failed reading keeps the previous one. */
+let computerVariables: NodeJS.ProcessEnv | undefined;
+const computerReadListeners = new Set<() => void>();
+
+/** Called after every successful reading of this computer, whoever asked for
+ *  it (Settings, the CLI checks, a terminal), so the automatic variables
+ *  follow the computer without waiting for the Environment page. */
+export function onComputerEnvironmentRead(listener: () => void): () => void {
+  computerReadListeners.add(listener);
+  return () => computerReadListeners.delete(listener);
+}
+
+function computerEnvironmentWasRead(variables: NodeJS.ProcessEnv): void {
+  computerVariables = variables;
+  for (const listener of computerReadListeners) {
+    try { listener(); } catch { /* a listener's failure is not the reading's */ }
+  }
+}
 let loginShellEnvRefresh: Promise<LoginShellEnvironmentRefresh> | undefined;
 let debugLogger: CommandDebugLogger | undefined;
 
@@ -91,16 +111,20 @@ export function refreshLoginShellEnv(): Promise<LoginShellEnvironmentRefresh> {
 
 async function captureFreshLoginShellEnv(): Promise<LoginShellEnvironmentRefresh> {
   if (process.platform === "win32") {
-    loginShellEnv = await captureWindowsPath();
+    const [pathEnv, variables] = await Promise.all([captureWindowsPath(), captureWindowsVariables()]);
+    loginShellEnv = pathEnv;
+    if (variables) computerEnvironmentWasRead(variables);
     return { ok: true, env: loginShellEnv };
   }
   if (process.platform !== "darwin") {
     loginShellEnv = {};
+    computerEnvironmentWasRead({ ...process.env });
     return { ok: true, env: {} };
   }
   try {
     const env = await captureLoginShellEnv();
     loginShellEnv = env;
+    computerEnvironmentWasRead(env);
     return { ok: true, env };
   } catch (error) {
     void writeCommandDebugLog("command.login-shell-env-prime-failed", {
@@ -125,6 +149,20 @@ export function commandEnvironment(extraEnv: NodeJS.ProcessEnv = {}, options: Co
     delete env[key];
   }
   return env;
+}
+
+/** True once this computer has been read successfully. Until then the
+ *  automatic variables are not brought in step: a failed first reading would
+ *  look as if every variable had been removed. */
+export function computerEnvironmentRead(): boolean {
+  return computerVariables !== undefined;
+}
+
+/** What this computer sets right now, from the last successful reading only
+ *  (not the environment the app was started with, which would keep a variable
+ *  the computer no longer sets). The automatic variables come from it. */
+export function computerEnvironment(): NodeJS.ProcessEnv {
+  return { ...(computerVariables ?? {}) };
 }
 
 export class CommandError extends Error {
@@ -370,29 +408,38 @@ function hasOwn(object: NodeJS.ProcessEnv, key: string): boolean {
 }
 
 export function parseLoginShellEnvOutput(stdout: string, startSentinel: string, endSentinel: string): NodeJS.ProcessEnv {
-  const lines = stdout.split(/\r?\n/).map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
-  const startIndex = lines.findIndex((line) => line === startSentinel);
-  if (startIndex < 0) {
+  const startMatch = new RegExp(`(^|\\n)${escapeRegExp(startSentinel)}\\r?\\n`).exec(stdout);
+  if (!startMatch) {
     throw new Error("login shell env capture did not include a start sentinel");
   }
-  const endIndex = lines.findIndex((line, index) => index > startIndex && line === endSentinel);
+  const bodyStart = startMatch.index + startMatch[0].length;
+  const endIndex = stdout.indexOf(endSentinel, bodyStart);
   if (endIndex < 0) {
     throw new Error("login shell env capture did not include an end sentinel");
   }
+  const body = stdout.slice(bodyStart, endIndex);
+  // `env -0` ends every entry with NUL; an older `env` prints one per line.
+  const entries = body.includes("\0")
+    ? body.split("\0")
+    : body.split(/\r?\n/).map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
 
   const env: NodeJS.ProcessEnv = {};
-  for (const line of lines.slice(startIndex + 1, endIndex)) {
-    const separatorIndex = line.indexOf("=");
+  for (const entry of entries) {
+    const separatorIndex = entry.indexOf("=");
     if (separatorIndex <= 0) {
       continue;
     }
-    const key = line.slice(0, separatorIndex);
+    const key = entry.slice(0, separatorIndex);
     if (!LOGIN_SHELL_ENV_KEY_PATTERN.test(key) || VOLATILE_LOGIN_SHELL_ENV_KEYS.has(key)) {
       continue;
     }
-    env[key] = line.slice(separatorIndex + 1);
+    env[key] = entry.slice(separatorIndex + 1);
   }
   return env;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export interface CommandLookupResult {
@@ -551,12 +598,18 @@ async function captureLoginShellEnv(): Promise<NodeJS.ProcessEnv> {
   const endSentinel = `__ACCORD_AGENTS_ENV_END_${randomUUID()}__`;
   const script = [
     `printf '%s\\n' ${shellQuote(startSentinel)}`,
-    "/usr/bin/env",
+    // NUL-separated: a value that spans lines (a key file, JSON) stays whole
+    // instead of turning its later lines into variables of their own.
+    "/usr/bin/env -0",
     `printf '%s\\n' ${shellQuote(endSentinel)}`
   ].join("; ");
 
+  // Exactly the app's own environment, as a new Terminal window starts:
+  // inheriting the previous reading would keep a variable the profile no
+  // longer sets.
   const result = await runCommand(shell, ["-ilc", script], {
     env: process.env,
+    exactEnv: true,
     primeLoginShellEnv: false,
     killProcessGroup: true,
     timeoutMs: LOGIN_SHELL_ENV_TIMEOUT_MS
@@ -581,6 +634,45 @@ async function captureWindowsPath(): Promise<NodeJS.ProcessEnv> {
     });
     return {};
   }
+}
+
+/** The Windows User and Machine variables (User wins), as a new terminal
+ *  would get them. Undefined when they could not be read. */
+async function captureWindowsVariables(): Promise<NodeJS.ProcessEnv | undefined> {
+  try {
+    const result = await runCommand(windowsPowerShellPath(), [
+      "-NoProfile", "-NonInteractive", "-Command",
+      "[Console]::OutputEncoding = [Text.Encoding]::UTF8; $o = [ordered]@{}; "
+        + "foreach ($t in 'Machine','User') { $v = [Environment]::GetEnvironmentVariables($t); foreach ($k in $v.Keys) { $o[[string]$k] = [string]$v[$k] } }; "
+        + "$o | ConvertTo-Json -Compress"
+    ], { env: process.env, primeLoginShellEnv: false, timeoutMs: LOGIN_SHELL_ENV_TIMEOUT_MS });
+    return parseWindowsVariables(result.stdout);
+  } catch (error) {
+    void writeCommandDebugLog("command.windows-variables-read-failed", {
+      reason: error instanceof CommandError && error.result.timedOut ? "timeout" : "failed"
+    });
+    return undefined;
+  }
+}
+
+/** PowerShell's JSON object of names and values; PATH stays with the PATH
+ *  reading, which also keeps this process's own entries. */
+export function parseWindowsVariables(stdout: string): NodeJS.ProcessEnv | undefined {
+  const text = stdout.trim();
+  if (!text) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value !== "string" || key.toUpperCase() === "PATH") continue;
+    env[key] = value;
+  }
+  return env;
 }
 
 export function windowsPowerShellPath(): string {

@@ -18,6 +18,7 @@ import type {
   ChatAgentMode,
   ChatAgentPermissions,
   ChatProviderKind,
+  CliProviderHost,
   ChatReasoningEffort,
   ChatShellPermissionRule,
   ClaudeChromeSetting,
@@ -30,7 +31,8 @@ import type {
 } from "../../shared/types";
 import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
-import { filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
+import { agentEnvironmentKeyValidationError, filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
+import { GEMINI_API_KEY_SETTINGS, geminiApiKeyEnv } from "../../shared/cliProviderHosts";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS, normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
 import { chatTextEndsAtSentenceOrParagraphBoundary } from "../../shared/processingTranscript";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort } from "../../shared/reasoningEffort";
@@ -141,6 +143,14 @@ const MODEL_CATALOG_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_TIMEOUT_MS = 8_000;
 const CLAUDE_WINDOWS_MODEL_PROBE_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_MAX_OUTPUT_BYTES = 256 * 1024;
+const CLAUDE_MODEL_LIST_TIMEOUT_MS = 12_000;
+/** How long the CLI gets to exit by itself after its stdin closes (it takes
+ *  under a second), and then after a polite stop, before it is killed. */
+const CLAUDE_MODEL_LIST_EXIT_GRACE_MS = 3_000;
+const CLAUDE_MODEL_LIST_KILL_GRACE_MS = 1_500;
+/** The initialize answer also lists every command and skill, so it is larger
+ *  than the picker screen. */
+const CLAUDE_MODEL_LIST_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 /** The app's own empty folder for the Windows model picker when no project
  *  folder is known or Claude Code does not trust it. Not the folder the app
  *  was started in: that is its install folder, which changes with every
@@ -211,6 +221,38 @@ export const COMPACTION_CANCELLED_BEFORE_START = "Compaction was cancelled befor
 /** A compaction Stop ended once it had started (in the member's process or
  *  while it waited there for a reply in progress). */
 export const COMPACTION_CANCELLED = "Compaction was cancelled.";
+
+/** `agy models` prints `<id>\t<label>` per line (seen on agy 1.5.11;
+ *  earlier versions printed the label alone). `--model` takes the id. */
+export function parseAgyModelList(stdout: string): ProviderModel[] {
+  return stdout
+    .split(/\r?\n/)
+    .map((line) => stripAnsi(line).trim())
+    .filter((line) => line && !/^(available|usage|error|fetching)\b/i.test(line))
+    .map((line, index) => {
+      const [first, ...rest] = line.split("\t");
+      const id = first.trim();
+      const label = rest.join(" ").trim() || id;
+      return {
+        id,
+        label,
+        source: "cli" as const,
+        // `agy models` lists the currently selected default first.
+        recommended: index === 0
+      };
+    })
+    .filter((model) => model.id);
+}
+
+/** `agy models` as the dedicated CLI runs it: on the sign-in, or on a Gemini
+ *  API key (its settings on the command line, the key only in the env). */
+export function agyModelsInvocation(
+  apiKey?: { env: Record<string, string>; settings: Readonly<Record<string, unknown>> }
+): { args: string[]; env: Record<string, string> } {
+  return apiKey
+    ? { args: ["--settings", JSON.stringify(apiKey.settings), "models"], env: { ...apiKey.env } }
+    : { args: ["models"], env: {} };
+}
 
 export function antigravityExpectProgram(): string {
   return `
@@ -287,6 +329,10 @@ export interface CliAgentRunOptions {
    *  CLI's own setting; part of the warm process key). */
   claudeChrome?: boolean;
   agentEnv?: NodeJS.ProcessEnv;
+  /** Only the values from Settings → Environment (no added-provider keys):
+   *  Codex gets them through its own shell policy, which is what wins over
+   *  the shell profile it reads again before each command. */
+  settingsEnv?: NodeJS.ProcessEnv;
   agentEnvKey?: string;
   warm?: CliAgentWarmOptions;
   onOutput?: CliAgentOutputCallback;
@@ -987,6 +1033,187 @@ async function prepareOwnProbeFolder(ownFolder: string): Promise<void> {
   }
 }
 
+/** Claude Code's own model list, as its `/model` picker shows it (including
+ *  "More models"), from the `models` field of its answer to an SDK
+ *  `initialize` request. "Default" is the inherited setting, so it is not a
+ *  model to pick; the model it resolves to is marked recommended. */
+export function parseClaudeInitializeModels(value: unknown): ProviderModel[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const records = value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
+  const text = (record: Record<string, unknown>, key: string): string | undefined => {
+    const field = record[key];
+    return typeof field === "string" && field.trim() ? field.trim() : undefined;
+  };
+  const defaultModel = records.find((record) => text(record, "value") === "default");
+  const recommendedModel = defaultModel ? text(defaultModel, "resolvedModel") : undefined;
+  let recommendedMarked = false;
+  const models: ProviderModel[] = [];
+  for (const record of records) {
+    const id = text(record, "value");
+    if (!id || id === "default") {
+      continue;
+    }
+    const recommended: boolean = !recommendedMarked && recommendedModel !== undefined && text(record, "resolvedModel") === recommendedModel;
+    recommendedMarked ||= recommended;
+    models.push({
+      id,
+      label: text(record, "displayName") ?? id,
+      description: text(record, "description"),
+      source: "cli",
+      recommended
+    });
+  }
+  return dedupeProviderModels(models);
+}
+
+export class ClaudeModelListTimeoutError extends Error {
+  constructor(detail: string) {
+    super(`Claude Code did not list its models in time${detail ? `: ${detail}` : "."}`);
+    this.name = "ClaudeModelListTimeoutError";
+  }
+}
+
+/** Asks Claude Code for its models the way its SDK does: one `initialize`
+ *  control request in stream-json mode. No prompt is sent, so no model is
+ *  called and no session is written. Resolves with the whole answer (its
+ *  `models` and `account`). Once answered, stdin is closed so the CLI exits on
+ *  its own; a CLI still running after a grace period is stopped with its
+ *  children. */
+export function runClaudeModelListProbe({
+  executable,
+  env,
+  cwd,
+  spawnClaude = spawnCommand,
+  timeoutMs = CLAUDE_MODEL_LIST_TIMEOUT_MS,
+  maxOutputBytes = CLAUDE_MODEL_LIST_MAX_OUTPUT_BYTES,
+  exitGraceMs = CLAUDE_MODEL_LIST_EXIT_GRACE_MS,
+  killGraceMs = CLAUDE_MODEL_LIST_KILL_GRACE_MS
+}: {
+  executable: string;
+  env: NodeJS.ProcessEnv;
+  cwd: string;
+  spawnClaude?: typeof spawnCommand;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+  exitGraceMs?: number;
+  killGraceMs?: number;
+}): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const requestId = `accordagents-models-${randomUUID()}`;
+    const child = spawnClaude(
+      executable,
+      ["-p", "--safe-mode", "--no-chrome", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"],
+      {
+        cwd,
+        env: claudeModelProbeEnv(env),
+        stdio: ["pipe", "pipe", "pipe"],
+        // Its own process group, so a stop reaches what it started; no console window on Windows.
+        detached: process.platform !== "win32",
+        windowsHide: true
+      }
+    );
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    let pending = "";
+    let stderr = "";
+    let capturedBytes = 0;
+    let finished = false;
+    const running = (): boolean => child.exitCode === null && child.signalCode === null;
+    const retire = (): void => {
+      child.stdin?.end();
+      if (!running()) {
+        return;
+      }
+      const stop = setTimeout(() => {
+        if (!running()) {
+          return;
+        }
+        terminateProcess(child, "SIGTERM", true);
+        const kill = setTimeout(() => {
+          if (running()) {
+            terminateProcess(child, "SIGKILL", true);
+          }
+        }, killGraceMs);
+        kill.unref();
+      }, exitGraceMs);
+      stop.unref();
+    };
+    const finish = (error?: Error, answer?: Record<string, unknown>): void => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      clearTimeout(timeout);
+      retire();
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(answer ?? {});
+    };
+    const stderrDetail = (): string => stderr.trim().slice(0, MAX_CLI_ERROR_CHARS);
+    const readLine = (line: string): void => {
+      let message: Record<string, unknown> | undefined;
+      try {
+        const parsed: unknown = JSON.parse(line);
+        message = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : undefined;
+      } catch {
+        return;
+      }
+      const response = message?.type === "control_response" && message.response && typeof message.response === "object"
+        ? message.response as Record<string, unknown>
+        : undefined;
+      if (!response || response.request_id !== requestId) {
+        return;
+      }
+      if (response.subtype !== "success") {
+        finish(new Error(`Claude Code did not list its models: ${typeof response.error === "string" ? response.error : "initialize failed"}.`));
+        return;
+      }
+      finish(undefined, response.response && typeof response.response === "object" ? response.response as Record<string, unknown> : {});
+    };
+    const timeout = setTimeout(() => finish(new ClaudeModelListTimeoutError(stderrDetail())), timeoutMs);
+    timeout.unref();
+    child.stdout?.on("data", (chunk: string | Buffer) => {
+      const value = String(chunk);
+      capturedBytes += Buffer.byteLength(value);
+      if (capturedBytes > maxOutputBytes) {
+        finish(new Error(`Claude Code's model list exceeded ${maxOutputBytes} bytes of output.`));
+        return;
+      }
+      pending += value;
+      let newline = pending.indexOf("\n");
+      while (newline >= 0 && !finished) {
+        const line = pending.slice(0, newline).trim();
+        pending = pending.slice(newline + 1);
+        if (line) {
+          readLine(line);
+        }
+        newline = pending.indexOf("\n");
+      }
+    });
+    child.stderr?.on("data", (chunk: string | Buffer) => {
+      if (stderr.length < MAX_CLI_ERROR_CHARS * 4) {
+        stderr += String(chunk);
+      }
+    });
+    child.stdin?.on("error", () => undefined);
+    child.once("error", (error) => finish(error));
+    // "close", not "exit": the answer may still be in the stdout pipe at exit.
+    child.once("close", (code) => {
+      if (pending.trim()) {
+        readLine(pending.trim());
+        pending = "";
+      }
+      const detail = stderrDetail();
+      finish(new Error(`Claude Code exited with code ${code ?? "unknown"} before listing its models${detail ? `: ${detail}` : "."}`));
+    });
+    child.stdin?.write(`${JSON.stringify({ type: "control_request", request_id: requestId, request: { subtype: "initialize" } })}\n`);
+  });
+}
+
 export function runClaudeModelProbeWithExpect({
   executable,
   env,
@@ -1356,6 +1583,10 @@ export class CliAgentRunner {
   private readonly warmUnsupportedLogged = new Set<ParticipantConfig["kind"]>();
   private readonly modelCatalogs = new Map<ChatProviderKind, CachedModelCatalog>();
   private readonly modelCatalogRequests = new Map<ChatProviderKind, Promise<ProviderModelCatalog>>();
+  /** Antigravity's list on an added provider's Gemini API key, per provider
+   *  version (a new key or URL reads it again). */
+  private readonly hostModelCatalogs = new Map<string, CachedModelCatalog>();
+  private readonly hostModelCatalogRequests = new Map<string, Promise<ProviderModelCatalog>>();
   private claudeVersionRequest?: Promise<string | undefined>;
   /** Per Claude executable: whether its CLI has `--prompt-suggestions`. An
    *  older CLI rejects the unknown flag and would fail every turn. */
@@ -1464,10 +1695,13 @@ export class CliAgentRunner {
         ...catalog,
         models: this.dedupeModels(catalog.models)
       };
-      this.modelCatalogs.set(kind, {
-        catalog: normalized,
-        expiresAt: Date.now() + MODEL_CATALOG_CACHE_MS
-      });
+      // A signed-out Claude Code list is provisional (see listClaudeModelCatalog).
+      if (!(kind === "claude-code" && !catalog.authoritative)) {
+        this.modelCatalogs.set(kind, {
+          catalog: normalized,
+          expiresAt: Date.now() + MODEL_CATALOG_CACHE_MS
+        });
+      }
       return normalized;
     })();
     if (!currentRequest) {
@@ -1930,15 +2164,36 @@ export class CliAgentRunner {
   }
 
   private async listClaudeModelCatalog(fetchedAt: string, probeCwd?: string): Promise<ProviderModelCatalog> {
-    const output = await this.runClaudeModelProbe(probeCwd);
-    const models = parseClaudeModelPickerOutput(output);
+    let models: ProviderModel[] = [];
+    let signedOut = false;
+    let listError: unknown;
+    try {
+      const answer = await this.requestClaudeInitializeAnswer();
+      models = parseClaudeInitializeModels(answer.models);
+      const account = answer.account && typeof answer.account === "object" ? answer.account as Record<string, unknown> : undefined;
+      signedOut = account?.tokenSource === "none";
+    } catch (error) {
+      listError = error;
+      await this.debugLogs?.write("cli.model-catalog.initialize-error", { message: error instanceof Error ? error.message : String(error) });
+      // The /model picker runs the same CLI; one that did not answer in time will not open it either.
+      if (error instanceof ClaudeModelListTimeoutError) {
+        throw error;
+      }
+    }
     if (models.length === 0) {
-      throw new Error("Claude model picker did not expose parseable model choices.");
+      // A Claude Code build that does not list models on initialize: read its /model picker.
+      models = parseClaudeModelPickerOutput(await this.runClaudeModelProbe(probeCwd));
+    }
+    if (models.length === 0) {
+      const reason = listError instanceof Error ? ` ${listError.message}` : "";
+      throw new Error(`Claude Code did not list any models.${reason}`);
     }
     return {
       kind: "claude-code",
       models,
-      authoritative: true,
+      // Signed out, Claude Code lists only its generic models: show them, but
+      // read again next time so signing in brings the account's own list.
+      authoritative: !signedOut,
       fetchedAt
     };
   }
@@ -1961,6 +2216,19 @@ export class CliAgentRunner {
       });
     }
     return options;
+  }
+
+  /** Always in the home folder, never a project folder: without the trust
+   *  question `claude -p` would run that project's own settings commands
+   *  (an `apiKeyHelper`, say) just because a Model menu was opened. */
+  private async requestClaudeInitializeAnswer(): Promise<Record<string, unknown>> {
+    await ensureLoginShellEnvPrimed();
+    const env = commandEnvironment(undefined, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
+    return runClaudeModelListProbe({
+      executable: await resolveCommandPath("claude", env),
+      env,
+      cwd: homedir()
+    });
   }
 
   private async runClaudeModelProbe(probeCwd?: string): Promise<string> {
@@ -2071,22 +2339,79 @@ export class CliAgentRunner {
     return dedupeProviderModels(models);
   }
 
-  private async listGeminiModelCatalog(fetchedAt: string): Promise<ProviderModelCatalog> {
+  /** The models an Antigravity member on a Gemini API key provider can pick:
+   *  agy lists other models on a key than on its sign-in. `undefined` = the
+   *  provider is gone. */
+  async listHostModelCatalog(
+    provider: { host: Pick<CliProviderHost, "id" | "label" | "baseUrl" | "updatedAt">; apiKey: string | undefined } | undefined
+  ): Promise<ProviderModelCatalog> {
+    // No guessed list: the signed-in one would offer models the key cannot use.
+    const unavailable = (error: string): ProviderModelCatalog => ({ kind: "gemini-cli", models: [], authoritative: false, fetchedAt: new Date().toISOString(), error });
+    if (!provider) {
+      return unavailable("That provider was removed from Settings");
+    }
+    const { host, apiKey } = provider;
+    if (!apiKey?.trim()) {
+      return unavailable(`${host.label} has no API key`);
+    }
+    const cacheKey = `${host.id}|${host.updatedAt}`;
+    const cached = this.hostModelCatalogs.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.catalog;
+    }
+    // Every open model picker for the member asks at once; one agy run answers them.
+    let request = this.hostModelCatalogRequests.get(cacheKey);
+    if (!request) {
+      request = this.fetchHostModelCatalog(host, apiKey, cacheKey);
+      this.hostModelCatalogRequests.set(cacheKey, request);
+      void request.finally(() => {
+        if (this.hostModelCatalogRequests.get(cacheKey) === request) {
+          this.hostModelCatalogRequests.delete(cacheKey);
+        }
+      });
+    }
+    return request;
+  }
+
+  private async fetchHostModelCatalog(
+    host: Pick<CliProviderHost, "id" | "baseUrl">,
+    apiKey: string,
+    cacheKey: string
+  ): Promise<ProviderModelCatalog> {
+    const fetchedAt = new Date().toISOString();
+    try {
+      const catalog = await this.listGeminiModelCatalog(fetchedAt, {
+        env: geminiApiKeyEnv(host.baseUrl, apiKey),
+        settings: GEMINI_API_KEY_SETTINGS
+      });
+      // On a key agy's own default is not the first model it lists (it ran
+      // Gemini 3.1 Pro with Carbon listed first), so none is marked; the
+      // picker's "Antigravity setting" entry is that default.
+      const normalized = { ...catalog, models: this.dedupeModels(catalog.models).map((model) => ({ ...model, recommended: false })) };
+      for (const key of this.hostModelCatalogs.keys()) {
+        if (key.startsWith(`${host.id}|`)) {
+          this.hostModelCatalogs.delete(key);
+        }
+      }
+      this.hostModelCatalogs.set(cacheKey, { catalog: normalized, expiresAt: Date.now() + MODEL_CATALOG_CACHE_MS });
+      return normalized;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.debugLogs?.write("cli.model-catalog.error", { kind: "gemini-cli", hostId: host.id, message });
+      return { kind: "gemini-cli", models: [], authoritative: false, fetchedAt, error: message };
+    }
+  }
+
+  private async listGeminiModelCatalog(
+    fetchedAt: string,
+    apiKey?: { env: Record<string, string>; settings: Readonly<Record<string, unknown>> }
+  ): Promise<ProviderModelCatalog> {
     await ensureLoginShellEnvPrimed();
-    const env = commandEnvironment();
+    const invocation = agyModelsInvocation(apiKey);
+    const env = commandEnvironment(invocation.env);
     const agyExecutable = await resolveCommandPath("agy", env);
-    const result = await runCommand(agyExecutable, ["models"], { timeoutMs: MODEL_CATALOG_TIMEOUT_MS, env });
-    const models: ProviderModel[] = result.stdout
-      .split(/\r?\n/)
-      .map((line) => stripAnsi(line).trim())
-      .filter((line) => line && !/^(available|usage|error)\b/i.test(line))
-      .map((label, index) => ({
-        id: label,
-        label,
-        source: "cli" as const,
-        // `agy models` lists the currently selected default first.
-        recommended: index === 0
-      }));
+    const result = await runCommand(agyExecutable, invocation.args, { timeoutMs: MODEL_CATALOG_TIMEOUT_MS, env });
+    const models: ProviderModel[] = parseAgyModelList(result.stdout);
     if (models.length === 0) {
       throw new Error("`agy models` returned no models.");
     }
@@ -4227,6 +4552,17 @@ export class CliAgentRunner {
     const reasoningEffort = this.codexReasoningEffort(participant.reasoningEffort);
     if (reasoningEffort) {
       config.model_reasoning_effort = reasoningEffort;
+    }
+    // Codex reads the User's shell profile again before each command
+    // (shell_snapshot), and the profile's exports would win over the values
+    // this process was started with. Its own policy wins over the profile, so
+    // a value changed in Settings → Environment reaches the member's commands
+    // too. Sent with the thread, not on the command line, so it is not in the
+    // process list.
+    for (const [key, value] of Object.entries(options.settingsEnv ?? {})) {
+      if (typeof value === "string" && !agentEnvironmentKeyValidationError(key)) {
+        config[`shell_environment_policy.set.${key}`] = value;
+      }
     }
     if (options.appMcp) {
       config["mcp_servers.accord_agents.url"] = options.appMcp.url;
@@ -8008,7 +8344,11 @@ export class CliAgentRunner {
   }
 
   private agentRunEnv(options: CliAgentRunOptions): NodeJS.ProcessEnv | undefined {
-    const manualEnv = filterAllowedAgentEnvironment(options.agentEnv);
+    const manualEnv: NodeJS.ProcessEnv = filterAllowedAgentEnvironment(options.agentEnv);
+    // A variable the User deleted is not inherited from this computer either.
+    for (const [key, value] of Object.entries(options.agentEnv ?? {})) {
+      if (value === undefined && !agentEnvironmentKeyValidationError(key)) manualEnv[key] = undefined;
+    }
     const appMcpEnv = this.appMcpEnv(options);
     if (Object.keys(manualEnv).length === 0 && !appMcpEnv) {
       return undefined;

@@ -1,3 +1,5 @@
+import type { HubAlertRequest, HubAlertResult } from "../../shared/urgentAlerts";
+import { accordClosedLaunchId } from "../../shared/accordProgress";
 import { HubClient, HubIdentityError, HubHttpError } from "./hubClient";
 import { HubOpsClient, HUB_FEED_CURSOR_KEY, type HubOpOutcome } from "./hubOpsClient";
 import { conversationFieldsOf, newOpId, type ChatServerLink } from "./chatServerOps";
@@ -72,6 +74,10 @@ export class ServerChatLink {
   constructor(private readonly options: {
     storage: StorageService;
     chat: ChatService;
+    /** True while this device goes down (a machine draining, closed, or
+     *  stopped by another of its programs): the feed is not read then, so
+     *  nothing it would turn down counts as taken on the server. */
+    readPaused?: () => boolean;
     identity: () => Promise<HubSigningIdentity & { publicKeyDerBase64: string }>;
     /** The User's own server, when she set one up. */
     hubConfig: () => Promise<{ url: string; hubId?: string; hubKey?: string } | undefined>;
@@ -129,6 +135,27 @@ export class ServerChatLink {
       return { ok: false, error: { code: "server_unavailable", message: "Memory is moving to your server (or this link is still starting); try again in a minute. It does not mean there is no memory." } };
     }
     return this.memoryVia<T>(client, request, cancel);
+  }
+
+  /**
+   * One request about urgent alerts (HubAlerts), which only the server
+   * carries. A request without an answer says so; it never reads as sent.
+   */
+  async alerts<T>(request: HubAlertRequest, cancel?: AbortSignal): Promise<HubAlertResult<T>> {
+    const client = this.client;
+    if (!client) {
+      return { ok: false, error: { code: "server_unavailable", message: "This device is not linked to your server yet." } };
+    }
+    try {
+      return await client.alerts<T>(request, cancel);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.options.log("server.alerts.failed", { action: request.action, status: error instanceof HubHttpError ? error.status : undefined, message: message.slice(0, 300) });
+      if (error instanceof HubHttpError && error.status === 404) {
+        return { ok: false, error: { code: "server_unavailable", message: "Your server is older than this app and has no urgent alerts yet; it will once it updates." } };
+      }
+      return { ok: false, error: { code: "server_unavailable", message: `Your server could not be reached (${message.slice(0, 200)}).` } };
+    }
   }
 
   /** The computer's copy reads and writes through the link it started on,
@@ -309,6 +336,7 @@ export class ServerChatLink {
       client: () => this.ready ? this.client : undefined,
       apply: (entries: HubFeedEntry[]) => this.applyEntries(entries),
       resync: () => this.resync(),
+      readPaused: () => this.feedPauses > 0 || this.options.readPaused?.() === true,
       beforeSend: (ops, sendingTo) => this.putPictures(ops, sendingTo),
       onAnswered: (row, outcome: HubOpOutcome) => {
         if (outcome.status === "rejected") this.options.log("chat.server.op-rejected", { opId: row.opId, kind: row.kind, conversationId: row.conversationId, reason: outcome.reason });
@@ -513,6 +541,26 @@ export class ServerChatLink {
 
   async refreshMachineNames(): Promise<void> {
     this.machineNames = new Map((await this.options.machineNames()).map((machine) => [machine.id, machine.name]));
+  }
+
+  /** Holders of pauseFeed: while any holds it, the feed is not read. */
+  private feedPauses = 0;
+
+  /** Stops reading the server's feed until the returned resume is called (a
+   *  machine stopping), once a batch being applied is done; holds from
+   *  before the link starts too. What the server places meanwhile stays
+   *  unread there, so the server starts the machine again for it. */
+  async pauseFeed(): Promise<() => void> {
+    this.feedPauses += 1;
+    let resumed = false;
+    const resume = (): void => {
+      if (resumed) return;
+      resumed = true;
+      this.feedPauses -= 1;
+      if (this.feedPauses === 0) this.ops?.wakeReader();
+    };
+    await this.ops?.quiesceReading();
+    return resume;
   }
 
   /** Whether writes reach the server now (undefined: not linked). */
@@ -796,7 +844,11 @@ export class ServerChatLink {
   /** One chat moved to the server, in pages; returns the pages sent. */
   private async importChat(client: HubClient, conversation: Conversation): Promise<number> {
     const fields = { ...conversationFieldsOf(conversation), updatedAt: conversation.updatedAt };
-    const messages = conversation.messages.map(messageForImport);
+    // A closed Accord's line the old server refused draws nothing: moved, it
+    // would fold that Accord on every device.
+    const messages = conversation.messages
+      .filter((message) => !(accordClosedLaunchId(message) && message.metadata?.serverRejected))
+      .map(messageForImport);
     const order = messages.map((message) => message.id);
     const pages: ChatMessage[][] = [];
     let current: ChatMessage[] = [];

@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Clock } from "lucide-react";
+import { Sparkles, UserPlus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import type {
@@ -17,6 +17,8 @@ import type {
 } from "../../../shared/types";
 import { chatParticipantReference } from "../conversation/conversation-display";
 import { chatToolPermissionAllowsChatScope } from "./chat-app-tool-data";
+import { reviewResultPreview } from "./chat-app-tool-review-preview";
+import { ChatUsedApprovalLine } from "./chat-used-card-row";
 
 export function roleReviewChipLabel(request: ChatRoleChangeRequest): string {
   if (request.operations.length !== 1) {
@@ -115,17 +117,15 @@ export function ChatAppToolReviewResult(props: {
   savedParticipants: ChatParticipantConfig[];
 }): JSX.Element {
   const summary = reviewResultSummary(props.approval, props.roleRequest, props.participantChange, props.combinedRequest, props.savedParticipants);
-  const refused = summary.tone === "refused";
   return (
-    <div className={`chat-app-tool-result-card is-${props.approval.status}`} data-review-result-state={summary.tone}>
-      <div className={`chat-app-tool-result-icon ${refused ? "is-denied" : ""}`} aria-hidden>
-        {refused ? <AlertTriangle size={18} /> : summary.tone === "waiting" ? <Clock size={18} /> : <Check size={19} />}
-      </div>
-      <div className="chat-app-tool-result-copy">
-        <strong>{summary.title}</strong>
-        <span>{props.approval.error ? `${summary.detail.replace(/\.$/, "")}: ${props.approval.error}` : summary.detail}</span>
-      </div>
-    </div>
+    <ChatUsedApprovalLine
+      approval={props.approval}
+      kind={props.participantChange || props.combinedRequest ? "Member change" : "Role change"}
+      icon={props.participantChange || props.combinedRequest ? UserPlus : Sparkles}
+      preview={reviewResultPreview(props.approval, props.roleRequest, props.participantChange)}
+      ended={summary.title}
+      detail={props.approval.error ? `${summary.detail.replace(/\.$/, "")}: ${props.approval.error}` : summary.detail}
+    />
   );
 }
 
@@ -138,8 +138,10 @@ export function reviewResultSummary(
   savedParticipants: ChatParticipantConfig[]
 ): { title: string; detail: string; tone: "done" | "waiting" | "refused" } {
   if (approval.status === "denied") {
+    // Denied with an error: the change was not made though nobody refused it
+    // (she approved and making it failed, or its member left the chat).
     return {
-      title: "Request cancelled",
+      title: approval.error ? "Not applied" : "Request cancelled",
       detail: "No role or member changes were made.",
       tone: "refused"
     };

@@ -51,7 +51,7 @@ test("the next snapshot reuses unchanged rows and describes the delta", () => {
   assert.notEqual(built.snapshot.messages[1], first.snapshot.messages[1]);
   assert.deepEqual(built.changedMessageIds, ["m2", "m4"]);
   assert.deepEqual(built.removedMessageIds, ["m3"]);
-  assert.deepEqual(built.update.messageDelta, { totalMessages: 3, tailCount: 2, removedIds: ["m3"], replyPending: false });
+  assert.deepEqual(built.update.messageDelta, { totalMessages: 3, tailCount: 2, removedIds: ["m3"], replyPending: false, waitingChoice: false });
   assert.deepEqual(built.update.messages.map((item) => item.id), ["m2", "m4"]);
   assert.deepEqual(built.snapshot.messages.map((item) => item.id), ["m1", "m2", "m4"]);
 });
@@ -62,7 +62,7 @@ test("a changed message outside the newest window travels ahead of the window", 
   const next = conversation(messages.map((item) => item.id === "m1" ? { ...item, content: "text 1 edited" } : item));
   const built = buildConversationSnapshot(next, first.rows, 2);
   assert.deepEqual(built.update.messages.map((item) => item.id), ["m1", "m4", "m5"]);
-  assert.deepEqual(built.update.messageDelta, { totalMessages: 5, tailCount: 2, removedIds: [], replyPending: false });
+  assert.deepEqual(built.update.messageDelta, { totalMessages: 5, tailCount: 2, removedIds: [], replyPending: false, waitingChoice: false });
   assert.deepEqual(built.changedMessageIds, ["m1"]);
 });
 
@@ -97,15 +97,28 @@ test("an insertion ahead of unchanged messages shifts their index but keeps thei
   assert.deepEqual(built.update.messages.map((item) => item.id), ["m0", "m1", "m2"]);
 });
 
+test("a message moved back behind the newest window sends the whole order once; a move inside the window stays a delta", () => {
+  // A reply bubble that ended on this device moves from the end back to where
+  // it was written: a delta would leave it where the open chat last saw it.
+  const messages = Array.from({ length: 6 }, (_, index) => message(`m${index}`, `n${index}`, index));
+  const first = buildConversationSnapshot(conversation(messages), undefined, 2);
+  const movedBack = buildConversationSnapshot(conversation([messages[0], messages[5], messages[1], messages[2], messages[3], messages[4]]), first.rows, 2);
+  assert.equal(movedBack.update.messageDelta, undefined, "a full update");
+  assert.deepEqual(movedBack.update.messages.map((item) => item.id), ["m0", "m5", "m1", "m2", "m3", "m4"]);
+  assert.deepEqual(movedBack.changedMessageIds, [], "no message changed, only the order");
+  const inWindow = buildConversationSnapshot(conversation([messages[0], messages[1], messages[2], messages[3], messages[5], messages[4]]), first.rows, 2);
+  assert.ok(inWindow.update.messageDelta, "the newest window carries its own order");
+});
+
 test("edge cases: an empty conversation, an empty previous row set, and every message removed", () => {
   const empty = buildConversationSnapshot(conversation([]), undefined);
   assert.deepEqual(empty.update.messages, []);
   assert.equal(empty.update.messageDelta, undefined);
   const fromEmptyRows = buildConversationSnapshot(conversation([message("m1", "one", 1)]), []);
-  assert.deepEqual(fromEmptyRows.update.messageDelta, { totalMessages: 1, tailCount: 1, removedIds: [], replyPending: false });
+  assert.deepEqual(fromEmptyRows.update.messageDelta, { totalMessages: 1, tailCount: 1, removedIds: [], replyPending: false, waitingChoice: false });
   assert.deepEqual(fromEmptyRows.changedMessageIds, ["m1"]);
   const allRemoved = buildConversationSnapshot(conversation([]), fromEmptyRows.rows);
-  assert.deepEqual(allRemoved.update.messageDelta, { totalMessages: 0, tailCount: 0, removedIds: ["m1"], replyPending: false });
+  assert.deepEqual(allRemoved.update.messageDelta, { totalMessages: 0, tailCount: 0, removedIds: ["m1"], replyPending: false, waitingChoice: false });
   assert.deepEqual(allRemoved.update.messages, []);
   assert.equal(snapshotRowsBytes(fromEmptyRows.rows), fromEmptyRows.rows[0].json.length);
   const body = cloneConversationBody(conversation([message("m1", "one", 1)]));
@@ -125,3 +138,18 @@ test("a delta says whether the whole chat has a member's reply not ended, also o
   const ended = buildConversationSnapshot(conversation([{ ...reply, status: "done", content: "Done." }, message("m2", "two", 2), message("m3", "three", 3), message("m4", "four", 4)]), later.rows, 1);
   assert.equal(ended.update.messageDelta?.replyPending, false);
 });
+
+test("a delta says whether a member's choice card waits for the User anywhere in the chat", () => {
+  const asking: ChatMessage = {
+    id: "ask", role: "participant", participantId: "victor", content: "Pick one.", status: "done", createdAt: "2026-01-01T00:00:01.000Z",
+    metadata: { pendingChoice: { id: "c", title: "Which?", question: "Which?", options: [{ id: "a", label: "A" }], status: "pending" } }
+  };
+  const first = buildConversationSnapshot(conversation([asking, message("m2", "two", 2)]), undefined, 1);
+  const later = buildConversationSnapshot(conversation([asking, message("m2", "two", 2), message("m3", "three", 3)]), first.rows, 1);
+  assert.deepEqual(later.update.messages.map((item) => item.id), ["m3"], "the card is not carried");
+  assert.equal(later.update.messageDelta?.waitingChoice, true);
+  const answered = { ...asking, metadata: { pendingChoice: { ...asking.metadata!.pendingChoice!, status: "selected" as const } } };
+  const after = buildConversationSnapshot(conversation([answered, message("m2", "two", 2), message("m3", "three", 3)]), later.rows, 1);
+  assert.equal(after.update.messageDelta?.waitingChoice, false);
+});
+

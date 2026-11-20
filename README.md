@@ -49,8 +49,9 @@ same feedback as a member running on your computer.
 - **Reach other model vendors through the same CLIs.** Settings → General →
   **Add provider** binds a CLI to a vendor endpoint with your own API key:
   Claude Code reaches Anthropic API, Moonshot Kimi, MiniMax, or DeepSeek; Codex
-  reaches OpenAI API; either reaches Z.ai GLM or a custom endpoint. Members on
-  an added provider run on this computer only.
+  reaches OpenAI API; either reaches Z.ai GLM or a custom endpoint; Antigravity
+  reaches the Google Gemini API. Members on an added provider run on this
+  computer only.
 - **Keep the outcome, not just the transcript.** Artifacts are chat-scoped
   documents with versions, drafts, diffs, and signatures. *Start an Accord*
   from the composer runs a facilitated agreement: independent drafts, one
@@ -168,7 +169,7 @@ the npm scripts directly: `npm run dev`, `npm run build`, `npm start`,
   OS sandbox and Claude Code under its native permission modes; Antigravity has
   no OS-enforced sandbox, so its read-only mode is best effort.
 - **Add provider** (Settings → General) adds a vendor endpoint reached through
-  Claude Code or Codex. API keys are stored encrypted, never shown to the UI
+  Claude Code, Codex or Antigravity. API keys are stored encrypted, never shown to the UI
   again, and passed only to the CLI process that uses them.
 - **Your server** (Settings → General) creates a small Lightsail server in your
   AWS account (about $5 a month) from one setup command. The phone app and
@@ -235,8 +236,8 @@ the npm scripts directly: `npm run dev`, `npm run build`, `npm start`,
   once a week the number of members, roles and roles of your own (in
   ranges; only the app's own role ids are named, never a role you made), and
   each provider family it first uses (`claude-code`, `codex`, `antigravity`,
-  `glm`, `kimi`, `minimax`, `deepseek`, `anthropic-api`, `openai-api`, or
-  `custom` for any endpoint of your own), with the system, the system
+  `glm`, `kimi`, `minimax`, `deepseek`, `anthropic-api`, `openai-api`,
+  `gemini-api`, or `custom` for any endpoint of your own), with the system, the system
   language (`zh-CN`) and the app version. These are Sentry logs with fixed
   names and values only, never messages, code, file names, model names,
   handles or keys, and nothing done while reports are off is sent later.

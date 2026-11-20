@@ -129,6 +129,9 @@ test("provider auth fixtures classify ready, signed-out, malformed, offline, and
   assert.equal(classifyCodexAuth({ ...captured(false, ""), timedOut: true }).diagnosticCode, "probe-timeout");
   assert.equal(classifyAntigravityAuth(captured(true, "gemini-2.5-pro")).authentication, "ready");
   assert.equal(classifyAntigravityAuth(captured(false, "Sign in as private@example.com")).authentication, "unknown");
+  // agy 1.5.11 signed out: a member on a Gemini API key may still run.
+  assert.equal(classifyAntigravityAuth(captured(false, "Fetching available models...\nError: Please sign in to view available models. Launch the CLI without arguments to sign in.")).authentication, "required");
+  assert.equal(classifyAntigravityAuth(captured(false, "Error: Please sign in to view available models.\nNetwork unavailable")).authentication, "unknown");
   assert.equal(classifyAntigravityAuth({ ...captured(false, ""), timedOut: true }).diagnosticCode, "probe-timeout");
   assert.deepEqual(Object.keys(classifyClaudeAuth(captured(true, JSON.stringify({ loggedIn: true, email: "private@example.com" })))).sort(), ["authentication", "exitCode"]);
 });

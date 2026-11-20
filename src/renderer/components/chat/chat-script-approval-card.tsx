@@ -8,6 +8,7 @@ import { chatParticipantDisplayName, chatParticipantReference } from "../convers
 import { avatarForChatParticipant } from "./chat-avatars";
 import { formatChatTime } from "./chat-format";
 import { ChatAppToolReviewFooter } from "./chat-app-tool-approval-review";
+import { ChatUsedApprovalLine } from "./chat-used-card-row";
 
 function scriptApprovalTitle(handle: string, request: ChatScriptChangeRequest): string {
   const who = chatParticipantReference(handle);
@@ -18,6 +19,11 @@ function scriptApprovalTitle(handle: string, request: ChatScriptChangeRequest): 
     case "enable": return `${who} wants to switch on a scheduled task`;
     case "disable": return `${who} wants to switch off a scheduled task`;
   }
+}
+
+function scriptApprovedEnding(request: ChatScriptChangeRequest, schedule: string | undefined): string {
+  const done = request.op === "delete" ? "Deleted" : request.op === "disable" ? "Switched off" : request.op === "enable" ? "Switched on" : "Approved";
+  return schedule ? `${done} · ${schedule}` : done;
 }
 
 function scriptApprovalPrimaryLabel(request: ChatScriptChangeRequest): string {
@@ -131,9 +137,23 @@ export function ChatScriptApprovalCard(props: {
     );
   }
 
+  // Used: one line, like a folded urgent alert (the User, 2026-11-18).
+  if (!pending) {
+    // Approved, it ends as the button she pressed says; a task that will run
+    // ends with its schedule, not a second time.
+    const runs = approval.status === "approved" && request.op !== "delete" && request.op !== "disable";
+    const schedule = runs && request.scheduleText ? request.scheduleText : undefined;
+    const ended = approval.status === "approved" ? scriptApprovedEnding(request, schedule)
+      : approval.status === "denied" ? "Declined" : approval.status === "cancelled" ? "Cancelled" : "Expired";
+    return (
+      <ChatUsedApprovalLine approval={approval} kind="Scheduled task" icon={CalendarClock} preview={request.name} ended={ended}
+        withoutTime={Boolean(schedule)} detail={approval.error} />
+    );
+  }
+
   return (
     <section
-      className={`chat-app-tool-approval-card is-review-change chat-script-approval-card ${props.embedded ? "is-embedded" : ""} ${pending ? "" : "is-compact-result"} is-${approval.status}`}
+      className={`chat-app-tool-approval-card is-review-change chat-script-approval-card ${props.embedded ? "is-embedded" : ""} is-${approval.status}`}
       aria-label={title}
       data-app-tool-approval-id={approval.id}
       tabIndex={-1}
@@ -142,7 +162,7 @@ export function ChatScriptApprovalCard(props: {
       <div className="chat-app-tool-approval-body">
         <div className="chat-app-tool-approval-meta">
           <strong>{requesterLabel}</strong>
-          <span className="message-provider">{pending ? "Proposes a scheduled task" : "Scheduled task"}</span>
+          <span className="message-provider">Proposes a scheduled task</span>
           <span className="message-when">{formatChatTime(approval.createdAt)}</span>
         </div>
         <div className="chat-app-tool-approval-panel is-review-change">
@@ -152,131 +172,120 @@ export function ChatScriptApprovalCard(props: {
               Scheduled task
             </div>
           </div>
-          {pending ? (
-            <div className="chat-script-approval-content">
-              <h3 className="chat-script-approval-title">{title}</h3>
-              {approval.cardRefusals?.length ? (
-                <p className="chat-script-approval-error">Your earlier answer was not applied: {approval.cardRefusals[approval.cardRefusals.length - 1].reason}</p>
-              ) : null}
-              <div className="chat-script-approval-name">{request.name}</div>
-              {request.description && <p className="chat-script-approval-description">{request.description}</p>}
-              <dl className="chat-script-approval-facts">
-                <dt>Runs on</dt>
-                <dd>{request.hostLabel}</dd>
-                <dt>Schedule</dt>
-                <dd>{request.scheduleText}</dd>
-                <dt>Posts to</dt>
-                <dd>{chats.join(", ")}</dd>
-                <dt>May wake</dt>
-                <dd>{members.length > 0 ? `${members.join(", ")} · at most ${request.permissions.maxWakeupsPerHour} per hour` : "Nobody; it only posts notes"}</dd>
-                {needsKeys && (
-                  <>
-                    <dt>Stops after</dt>
-                    <dd>{request.timeoutSeconds} s per run</dd>
-                  </>
-                )}
-              </dl>
-              {request.reason && <p className="chat-script-approval-reason">{request.reason}</p>}
-              {needsKeys && request.secretNames.length > 0 && (
-                <div className="chat-script-approval-keys">
-                  <div className="chat-script-approval-section-title">
-                    <KeyRound size={13} aria-hidden />
-                    Keys
-                  </div>
-                  <p className="chat-script-approval-hint">Saved only on {request.hostPhrase}. The task reads them from its environment; agents never see them.</p>
-                  {request.secretNames.map((name) => {
-                    const saved = savedNames.includes(name);
-                    return (
-                      <div className="chat-script-approval-key" key={name}>
-                        <code>{name}</code>
-                        {saved && !(name in drafts && drafts[name] !== "") ? (
-                          <span className="chat-script-approval-key-saved">
-                            <Check size={13} aria-hidden /> Saved
-                            <button type="button" className="chat-script-approval-link" onClick={() => setDrafts((current) => ({ ...current, [name]: " " }))}>
-                              Replace
-                            </button>
-                          </span>
-                        ) : (
-                          <span className="chat-script-approval-key-entry">
-                            <input
-                              type="password"
-                              autoComplete="off"
-                              spellCheck={false}
-                              aria-label={`Value for ${name}`}
-                              placeholder="Paste value"
-                              value={(drafts[name] ?? "").trimStart()}
-                              onChange={(event) => setDrafts((current) => ({ ...current, [name]: event.target.value }))}
-                              onKeyDown={(event) => {
-                                if (event.key === "Enter") {
-                                  event.preventDefault();
-                                  void saveKey(name);
-                                }
-                              }}
-                            />
-                            <button
-                              type="button"
-                              className="chat-script-approval-save-key"
-                              disabled={savingKey === name || !(drafts[name] ?? "").trim()}
-                              onClick={() => void saveKey(name)}
-                            >
-                              Save
-                            </button>
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                  {keyError && <p className="chat-script-approval-error">{keyError}</p>}
-                </div>
-              )}
-              {request.revisionId && (
-                <div className="chat-script-approval-code">
-                  <button type="button" className="chat-script-approval-code-toggle" aria-expanded={codeOpen} onClick={() => setCodeOpen((open) => !open)}>
-                    {codeOpen ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
-                    {codeOpen ? "Hide code" : "Show code"} · {request.runtime} · {request.fileCount} {request.fileCount === 1 ? "file" : "files"}, {formatBytes(request.totalBytes)}
-                  </button>
-                  {codeOpen && (
-                    <div className="chat-script-approval-files">
-                      {codeError && <p className="chat-script-approval-error">{codeError}</p>}
-                      {!code && !codeError && <p className="chat-script-approval-hint">Loading…</p>}
-                      {code?.files.map((file) => (
-                        <div className="chat-script-approval-file" key={file.path}>
-                          <div className="chat-script-approval-file-name">{file.path}{file.path === code.entry ? " (runs this)" : ""}</div>
-                          <pre><code>{file.content}</code></pre>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
+          <div className="chat-script-approval-content">
+            <h3 className="chat-script-approval-title">{title}</h3>
+            {approval.cardRefusals?.length ? (
+              <p className="chat-script-approval-error">Your earlier answer was not applied: {approval.cardRefusals[approval.cardRefusals.length - 1].reason}</p>
+            ) : null}
+            <div className="chat-script-approval-name">{request.name}</div>
+            {request.description && <p className="chat-script-approval-description">{request.description}</p>}
+            <dl className="chat-script-approval-facts">
+              <dt>Runs on</dt>
+              <dd>{request.hostLabel}</dd>
+              <dt>Schedule</dt>
+              <dd>{request.scheduleText}</dd>
+              <dt>Posts to</dt>
+              <dd>{chats.join(", ")}</dd>
+              <dt>May wake</dt>
+              <dd>{members.length > 0 ? `${members.join(", ")} · at most ${request.permissions.maxWakeupsPerHour} per hour` : "Nobody; it only posts notes"}</dd>
               {needsKeys && (
-                <p className="chat-script-approval-warning">
-                  <ShieldAlert size={13} aria-hidden />
-                  Runs with your user&apos;s full permissions on {request.hostPhrase}. Read the code before approving.
-                </p>
+                <>
+                  <dt>Stops after</dt>
+                  <dd>{request.timeoutSeconds} s per run</dd>
+                </>
               )}
-              {missing.length > 0 && (
-                <p className="chat-script-approval-hint">Save {missing.length === 1 ? "the key" : "every key"} above to approve.</p>
-              )}
-            </div>
-          ) : (
-            <div className="chat-script-approval-content">
-              <h3 className="chat-script-approval-title">{request.name}</h3>
-              <p className="chat-script-approval-hint">
-                {approval.status === "approved" ? `Approved · ${request.scheduleText}` : approval.status === "denied" ? "Declined" : approval.status === "cancelled" ? "Cancelled" : "Expired"}
+            </dl>
+            {request.reason && <p className="chat-script-approval-reason">{request.reason}</p>}
+            {needsKeys && request.secretNames.length > 0 && (
+              <div className="chat-script-approval-keys">
+                <div className="chat-script-approval-section-title">
+                  <KeyRound size={13} aria-hidden />
+                  Keys
+                </div>
+                <p className="chat-script-approval-hint">Saved only on {request.hostPhrase}. The task reads them from its environment; agents never see them.</p>
+                {request.secretNames.map((name) => {
+                  const saved = savedNames.includes(name);
+                  return (
+                    <div className="chat-script-approval-key" key={name}>
+                      <code>{name}</code>
+                      {saved && !(name in drafts && drafts[name] !== "") ? (
+                        <span className="chat-script-approval-key-saved">
+                          <Check size={13} aria-hidden /> Saved
+                          <button type="button" className="chat-script-approval-link" onClick={() => setDrafts((current) => ({ ...current, [name]: " " }))}>
+                            Replace
+                          </button>
+                        </span>
+                      ) : (
+                        <span className="chat-script-approval-key-entry">
+                          <input
+                            type="password"
+                            autoComplete="off"
+                            spellCheck={false}
+                            aria-label={`Value for ${name}`}
+                            placeholder="Paste value"
+                            value={(drafts[name] ?? "").trimStart()}
+                            onChange={(event) => setDrafts((current) => ({ ...current, [name]: event.target.value }))}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                void saveKey(name);
+                              }
+                            }}
+                          />
+                          <button
+                            type="button"
+                            className="chat-script-approval-save-key"
+                            disabled={savingKey === name || !(drafts[name] ?? "").trim()}
+                            onClick={() => void saveKey(name)}
+                          >
+                            Save
+                          </button>
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+                {keyError && <p className="chat-script-approval-error">{keyError}</p>}
+              </div>
+            )}
+            {request.revisionId && (
+              <div className="chat-script-approval-code">
+                <button type="button" className="chat-script-approval-code-toggle" aria-expanded={codeOpen} onClick={() => setCodeOpen((open) => !open)}>
+                  {codeOpen ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
+                  {codeOpen ? "Hide code" : "Show code"} · {request.runtime} · {request.fileCount} {request.fileCount === 1 ? "file" : "files"}, {formatBytes(request.totalBytes)}
+                </button>
+                {codeOpen && (
+                  <div className="chat-script-approval-files">
+                    {codeError && <p className="chat-script-approval-error">{codeError}</p>}
+                    {!code && !codeError && <p className="chat-script-approval-hint">Loading…</p>}
+                    {code?.files.map((file) => (
+                      <div className="chat-script-approval-file" key={file.path}>
+                        <div className="chat-script-approval-file-name">{file.path}{file.path === code.entry ? " (runs this)" : ""}</div>
+                        <pre><code>{file.content}</code></pre>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {needsKeys && (
+              <p className="chat-script-approval-warning">
+                <ShieldAlert size={13} aria-hidden />
+                Runs with your user&apos;s full permissions on {request.hostPhrase}. Read the code before approving.
               </p>
-            </div>
-          )}
-          {pending && (
-            <ChatAppToolReviewFooter
-              primaryLabel={scriptApprovalPrimaryLabel(request)}
-              submitting={props.submitting}
-              approveDisabled={missing.length > 0}
-              cancelLabel="Decline"
-              onCancel={() => void props.onRespond(approval.id, false)}
-              onApprove={() => void props.onRespond(approval.id, true, "once")}
-            />
-          )}
+            )}
+            {missing.length > 0 && (
+              <p className="chat-script-approval-hint">Save {missing.length === 1 ? "the key" : "every key"} above to approve.</p>
+            )}
+          </div>
+          <ChatAppToolReviewFooter
+            primaryLabel={scriptApprovalPrimaryLabel(request)}
+            submitting={props.submitting}
+            approveDisabled={missing.length > 0}
+            cancelLabel="Decline"
+            onCancel={() => void props.onRespond(approval.id, false)}
+            onApprove={() => void props.onRespond(approval.id, true, "once")}
+          />
         </div>
       </div>
     </section>
