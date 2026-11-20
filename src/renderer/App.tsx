@@ -28,6 +28,7 @@ import { ChatAccordLauncherDialog } from "./components/chat/chat-accord-launcher
 import { NewChatScreen } from "./components/chat/new-chat-screen";
 import { ChatSearchModal } from "./components/search/chat-search-modal";
 import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
+import { ChatViewHeaderControls } from "./components/chat/chat-view-switch";
 import { chatRoleLabel } from "./components/chat/chat-conversation-data";
 import { avatarForChatParticipant } from "./components/chat/chat-avatars";
 import { defaultChatParticipantDraft } from "./components/chat/chat-participant-drafts";
@@ -295,6 +296,8 @@ function App(): JSX.Element {
   );
   const topBarActions = isNewChatScreen ? terminalToggle : (
     <>
+      {/* The open chat's view switch and members button (its chat view provides them). */}
+      <ChatViewHeaderControls />
       {terminalToggle}
       {state.busy && (
         <Button variant="outline" size="sm" onClick={() => void conversationActions.cancelReview()}>

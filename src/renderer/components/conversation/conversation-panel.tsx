@@ -81,6 +81,11 @@ export function ConversationPanel({
           messageFocusRequest={state.chatMessageFocusRequest}
           onSend={(repoFileMentions, imageAttachments, skillMentions, content) =>
             chatActions.sendChatMessage({ content, repoFileMentions, imageAttachments, skillMentions })}
+          onSendToMember={(request) => chatActions.sendChatMessage(request)}
+          onChatViewSaved={(saved) => state.setConversation((current) => current?.id === saved.conversationId
+            ? { ...current, metadata: { ...current.metadata, chatView: saved.view } }
+            : current)}
+          onChatViewError={state.setError}
           accordDisabledReason={accordDisabledReason}
           onOpenAccord={onOpenAccord}
           onSendThread={(rootMessage, content, repoFileMentions, imageAttachments, skillMentions) => chatActions.sendChatMessage({

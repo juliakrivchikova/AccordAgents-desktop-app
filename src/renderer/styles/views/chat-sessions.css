@@ -1,0 +1,532 @@
+/* The sessions view of a chat with a main session (docs/main-session.md):
+   the header's view switch and members button, the main timeline without
+   avatars, task cards, and the members and member-session panels. */
+
+/* Header: view switch and members button */
+
+.chat-view-header-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 4px;
+}
+
+.chat-view-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 28px;
+  padding: 2px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface-subtle);
+}
+
+.chat-view-switch.is-disabled {
+  opacity: 0.55;
+}
+
+.chat-view-switch-option {
+  height: 22px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: calc(var(--radius-control) - 2px);
+  background: transparent;
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.chat-view-switch-option:hover:not(:disabled) {
+  color: var(--app-text-strong);
+}
+
+.chat-view-switch-option[aria-pressed="true"] {
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.chat-view-switch-option:disabled {
+  cursor: not-allowed;
+}
+
+.chat-view-switch-option:focus-visible,
+.chat-members-button:focus-visible,
+.chat-task-card-row:focus-visible,
+.chat-members-row-main:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-members-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface);
+  color: var(--app-text);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.chat-members-button:hover,
+.chat-members-button.is-open {
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+/* Main timeline: no avatars; the User's messages are bubbles on the right */
+
+.message.chat-message.is-sessions {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.message.chat-message.is-sessions.user {
+  justify-items: end;
+}
+
+.chat-message.is-sessions.user .message-body {
+  width: fit-content;
+  max-width: 80%;
+  padding: 9px 14px;
+  border-radius: 16px;
+  background: var(--app-user-bub);
+}
+
+.chat-message.is-sessions.user .message-meta {
+  display: none;
+}
+
+.chat-message.is-sessions.user .message-content {
+  max-height: none;
+}
+
+.chat-message.is-sessions.participant .message-body {
+  padding-left: 0;
+}
+
+.chat-choice-row.is-sessions {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.chat-choice-row.is-sessions > span[aria-hidden="true"] {
+  display: none;
+}
+
+.chat-view.is-sessions-view .chat-thinking-row {
+  margin-left: 0;
+}
+
+/* Provider marks at row size */
+
+.chat-provider-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--app-surface-subtle);
+}
+
+.chat-provider-icon svg,
+.chat-provider-icon .provider-mark-claude,
+.chat-provider-icon .provider-mark-antigravity {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
+.chat-provider-icon .provider-mark-claude {
+  background: url("../../assets/claude-avatar.png") center / contain no-repeat;
+}
+
+.chat-provider-icon .provider-mark-antigravity {
+  background: url("../../assets/antigravity-logo.png") center / contain no-repeat;
+}
+
+/* Task status (task cards, members panel) */
+
+.chat-work-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--st, var(--app-muted));
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.chat-work-status-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--st, var(--app-muted));
+}
+
+.chat-work-status.is-running {
+  --st: var(--app-accent);
+}
+
+.chat-work-status.is-running .chat-work-status-dot {
+  animation: chat-rt-pulse 1.4s ease-in-out infinite;
+}
+
+.chat-work-status.is-waiting {
+  --st: var(--app-warning);
+}
+
+.chat-work-status.is-done {
+  --st: var(--app-success);
+}
+
+.chat-work-status.is-failed {
+  --st: var(--app-danger);
+}
+
+.chat-work-status.is-stopped .chat-work-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 1.5px;
+}
+
+.chat-work-status.is-idle .chat-work-status-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.6px var(--st, var(--app-muted));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-work-status-dot {
+    animation: none !important;
+  }
+}
+
+/* Task cards */
+
+.chat-task-card {
+  display: grid;
+  width: min(100%, 640px);
+  margin: 2px 0 18px;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-card);
+  background: var(--app-surface);
+}
+
+.chat-task-card-head {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--app-border);
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chat-task-card-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-task-card-row + .chat-task-card-row {
+  border-top: 1px solid var(--app-border);
+}
+
+.chat-task-card-row:hover {
+  background: var(--app-surface-hover);
+}
+
+.chat-task-card-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.chat-task-card-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-task-card-handle {
+  flex: 0 0 auto;
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.chat-task-card-title,
+.chat-task-card-result {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-task-card-title {
+  color: var(--app-text);
+  font-size: 13px;
+}
+
+.chat-task-card-result {
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.chat-task-card-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-task-card-elapsed,
+.chat-members-row-elapsed {
+  color: var(--app-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-task-card-chevron {
+  color: var(--app-muted);
+}
+
+/* A member's open choice card and the "Waiting on" line */
+
+.chat-sessions-choice {
+  display: grid;
+  gap: 6px;
+  width: min(100%, 640px);
+  margin-bottom: 14px;
+}
+
+.chat-sessions-choice-from {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.chat-sessions-choice-from:hover {
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+.chat-sessions-waiting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 var(--app-gutter) 12px;
+  color: var(--app-muted);
+  font-size: 13px;
+}
+
+.chat-sessions-waiting-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Members panel */
+
+.chat-members-body {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.chat-members-empty {
+  margin: 8px 0;
+  color: var(--app-muted);
+  font-size: 13px;
+}
+
+.chat-members-list {
+  display: grid;
+  gap: 2px;
+}
+
+.chat-members-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: var(--radius-control);
+}
+
+.chat-members-row:hover {
+  background: var(--app-surface-hover);
+}
+
+.chat-members-row-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 8px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-members-row-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-members-row-name {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-members-row-name strong {
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.chat-members-row-role,
+.chat-members-row-task {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--app-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-members-row-state {
+  display: grid;
+  justify-items: end;
+  gap: 3px;
+}
+
+.chat-members-previous {
+  display: grid;
+  gap: 4px;
+}
+
+.chat-members-previous-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chat-members-previous-toggle:hover {
+  color: var(--app-text-strong);
+}
+
+.chat-members-previous-count {
+  color: var(--app-muted);
+  font-weight: 500;
+}
+
+/* One member's session */
+
+.thread-panel-head.chat-member-session-head > div:first-child {
+  gap: 8px;
+}
+
+.chat-member-session-title {
+  display: grid;
+  min-width: 0;
+}
+
+.thread-panel-head.chat-member-session-head .chat-member-session-title h2 {
+  font-size: 14px;
+  line-height: 18px;
+}
+
+.chat-member-session-provider {
+  overflow: hidden;
+  color: var(--app-muted);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-member-task {
+  margin-bottom: 14px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface-subtle);
+}
+
+.chat-member-task-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-member-task-label {
+  flex: 0 0 auto;
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.chat-member-task-preview {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--app-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-member-task-body {
+  padding: 0 12px 10px 30px;
+}

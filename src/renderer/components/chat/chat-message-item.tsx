@@ -92,6 +92,12 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   submittingChoiceIds?: ReadonlySet<string>;
   selected?: boolean;
   inThread?: boolean;
+  /** The sessions view (docs/main-session.md): no avatar, no author or
+   *  provider, the User's message a bubble on the right. `authorLabel` names
+   *  an author there when one must be told apart (the main session in a
+   *  member's session). */
+  presentation?: "sessions";
+  authorLabel?: string;
   replyCount?: number;
   replyPreviewMessages?: Conversation["messages"];
   latestReplyAt?: string;
@@ -314,10 +320,11 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   );
 
   const delivery = messageDelivery(message);
+  const sessions = props.presentation === "sessions";
   return (
     <>
-      <article data-message-id={message.id} className={`message chat-message ${choice ? "has-choice" : ""} ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""} ${isStreaming ? "is-running" : ""} ${delivery?.state === "unsent" ? "is-unsent" : ""}`}>
-        {message.role === "participant" ? (
+      <article data-message-id={message.id} data-presentation={props.presentation} className={`message chat-message ${choice ? "has-choice" : ""} ${message.role} ${props.selected ? "selected-thread-root" : ""} ${props.inThread ? "in-thread" : ""} ${isStreaming ? "is-running" : ""} ${delivery?.state === "unsent" ? "is-unsent" : ""} ${sessions ? "is-sessions" : ""}`}>
+        {sessions ? null : message.role === "participant" ? (
           <AgentAvatarWithDetails
             className="message-avatar"
             spec={avatar}
@@ -368,8 +375,8 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             {reactAndReplyActions}
           </div>
           <div className="message-meta">
-            <strong>{author}</strong>
-            {participant && message.role === "participant" && (
+            {!sessions ? <strong>{author}</strong> : props.authorLabel ? <strong>{props.authorLabel}</strong> : null}
+            {!sessions && participant && message.role === "participant" && (
               <span className="message-provider">{participantProviderLabel(participant.kind, participant.hostLabel)}</span>
             )}
             {message.role === "participant" && (
@@ -529,7 +536,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
         </div>
       </article>
       {choice && (
-        <div className={`chat-choice-row ${props.inThread ? "in-thread" : ""}`}>
+        <div className={`chat-choice-row ${props.inThread ? "in-thread" : ""} ${sessions ? "is-sessions" : ""}`}>
           <span aria-hidden="true" />
           <div className="chat-choice-row-body">
             <ChatChoiceCard

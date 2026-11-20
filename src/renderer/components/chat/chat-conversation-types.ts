@@ -5,6 +5,7 @@ import type {
   ChatAppToolApprovalScope,
   ChatImageInput,
   ChatSkillMention,
+  ChatViewState,
   Conversation,
   RepoFileMention,
   RepoFileExternalOpenAction,
@@ -16,6 +17,7 @@ import type { ArtifactsState } from "../artifacts/use-artifacts";
 import type { ChatChoiceResponse } from "./chat-message-item";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 import type { ChatComposerPicks } from "./chat-composer";
+import type { ChatMemberSendRequest } from "./chat-member-session-panel";
 
 export interface ChatMessageFocusRequest {
   conversationId?: string;
@@ -58,6 +60,11 @@ export interface ChatConversationViewProps {
     imageAttachments?: ChatImageInput[],
     skillMentions?: ChatSkillMention[]
   ) => Promise<boolean>;
+  /** A member's session panel (the sessions view): to that member only. */
+  onSendToMember?: (request: ChatMemberSendRequest) => Promise<boolean>;
+  /** The chat's view as her server saved it, and a switch that failed. */
+  onChatViewSaved?: (saved: ChatViewState) => void;
+  onChatViewError?: (message: string) => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void | Promise<void>;

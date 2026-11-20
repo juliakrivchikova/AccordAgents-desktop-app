@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import type { CSSProperties } from "react";
 import { ArrowDown } from "lucide-react";
 
 import type {
@@ -10,6 +10,7 @@ import type {
   Conversation,
   RepoFileMention
 } from "../../../shared/types";
+import type { ChatThreadSummary } from "./chat-thread-data";
 import { activeRunSummaryForConversation } from "../../../shared/chatActiveRuns";
 import { Avatar } from "../avatar/avatar";
 import { LocalFileLinkContext, LocalFileOpenChooser } from "../content/local-file-link";
@@ -46,24 +47,24 @@ import { AttachmentPanelContext } from "../files/file-panel-context";
 import { ChatSidePanel, useChatSidePanel } from "./chat-side-panel";
 import { ChatConversationTimeline } from "./chat-conversation-timeline";
 import type { ChatConversationViewProps } from "./chat-conversation-types";
-import { ChatThreadPanel } from "./chat-thread-panel";
 import { useChatConversationViewport } from "./use-chat-conversation-viewport";
 import { useChatActivityDisclosure } from "./use-chat-activity-disclosure";
 import { useChatLocalFileOpen } from "./use-chat-local-file-open";
 import { useSubmittingIdSet } from "./use-submitting-id-set";
 import { useStableChatMessageActions } from "./use-stable-chat-message-actions";
 import { useChatPromptSuggestions } from "./use-chat-prompt-suggestions";
-import {
-  CHAT_SIDE_PANEL_MIN_WIDTH,
-  CHAT_THREAD_DEFAULT_WIDTH,
-  chatMainMinWidth,
-  chatSidePanelWidthLimits,
-  clampChatSidePanelWidth
-} from "../../lib/chat-split-sizing";
+import { useChatRightPanel, useChatRightPanelWidth } from "./use-chat-right-panel";
+import { useChatSessionsChrome, useChatSessionsView } from "./use-chat-sessions-view";
+import { useChatViewMode } from "./use-chat-view-mode";
+import { ChatViewHeaderContext } from "./chat-view-switch";
+import type { ChatPanelMessageContext } from "./chat-sessions-right-panel";
+import { ChatSessionsWaitingLine } from "./chat-sessions-timeline-row";
+import { ChatViewRightPanels } from "./chat-view-right-panels";
 
 export type { ChatMessageFocusRequest } from "./chat-conversation-types";
 
 const NO_CLOSED_ACCORDS: readonly string[] = [];
+const NO_THREADS = new Map<string, ChatThreadSummary>();
 
 export function ChatConversationView(props: ChatConversationViewProps): JSX.Element {
   const participants = useMemo(
@@ -102,8 +103,30 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     participantsById,
     props.participantStatusById
   ]);
-  const topLevelMessages = useMemo(() => chatTopLevelMessages(props.conversation), [props.conversation.messages]);
-  const threadSummaries = useMemo(() => chatThreadSummaryMap(props.conversation), [props.conversation.messages]);
+  const viewMode = useChatViewMode({
+    conversation: props.conversation,
+    defaultView: props.settings.defaultChatView,
+    onSaved: props.onChatViewSaved,
+    onError: props.onChatViewError
+  });
+  // The sessions view (docs/main-session.md): the main timeline holds the User
+  // and the main session; each other member's session is in the right panel.
+  const sessions = useChatSessionsView({
+    conversation: props.conversation,
+    view: viewMode.view,
+    participants,
+    participantStatusById: props.participantStatusById,
+    activeRunSummary
+  });
+  const sessionsMainMessages = sessions?.mainMessages;
+  const topLevelMessages = useMemo(
+    () => sessionsMainMessages ?? chatTopLevelMessages(props.conversation),
+    [props.conversation.messages, sessionsMainMessages]
+  );
+  const threadSummaries = useMemo(
+    () => (sessionsMainMessages ? NO_THREADS : chatThreadSummaryMap(props.conversation)),
+    [props.conversation.messages, sessionsMainMessages !== undefined]
+  );
   const inferredParticipantRequestsByTrigger = useMemo(() => chatInferredParticipantRequestBatchesByTrigger(props.conversation), [props.conversation.messages]);
   const continuedMentionRequestIds = useMemo(() => chatContinuedMentionRequestIds(props.conversation), [props.conversation.messages]);
   const contextUsageByParticipant = useMemo(() => chatContextUsageByParticipant(props.conversation), [props.conversation.metadata]);
@@ -131,12 +154,9 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   }, [artifactNotesKey, artifacts.context.byId]);
   const { docked: dockedAccord, accordLines } = useDockedAccord(props.conversation.messages, artifactNotesKey, participants,
     props.conversation.metadata.accordClosedLaunchIds ?? NO_CLOSED_ACCORDS);
-  const [selectedThreadRootId, setSelectedThreadRootId] = useState<string | undefined>();
+  const rightPanel = useChatRightPanel();
+  const { selectedThreadRootId, selectThread: setSelectedThreadRootId } = rightPanel;
   const [threadDrafts, setThreadDrafts] = useState<Record<string, string>>({});
-  const [threadWidth, setThreadWidth] = useState(CHAT_THREAD_DEFAULT_WIDTH);
-  // The width the User dragged to; shown clamped, so it returns with the room.
-  const requestedThreadWidthRef = useRef(CHAT_THREAD_DEFAULT_WIDTH);
-  const [isResizingThread, setIsResizingThread] = useState(false);
   const approvalSubmission = useSubmittingIdSet();
   const choiceSubmission = useSubmittingIdSet();
   const activityDisclosure = useChatActivityDisclosure(props.conversation.id);
@@ -168,7 +188,11 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     () => props.conversation.messages.some((message) => message.status === "pending" && message.role === "participant"),
     [props.conversation.messages]
   );
-  const thinkingRows = useMemo(() => chatThinkingRows(props.progress), [props.progress]);
+  const sessionsMainId = sessions?.mainSessionId;
+  const thinkingRows = useMemo(
+    () => chatThinkingRows(props.progress).filter((row) => !sessionsMainId || !row.participantId || row.participantId === sessionsMainId),
+    [props.progress, sessionsMainId]
+  );
   const liveProgressById = useMemo(() => liveMessageProgressById(props.progress), [props.progress]);
   const thinkingSignature = useMemo(
     () => thinkingRows.map((row) => `${row.key}:${row.activity ?? ""}:${row.activityEvents?.length ?? 0}:${row.updatedAt}`).join("|"),
@@ -179,7 +203,11 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     ? topLevelMessages.find((message) => message.id === selectedThreadRootId)
     : undefined;
   const selectedThreadSummary = selectedThreadRoot ? threadSummaries.get(selectedThreadRoot.id) : undefined;
-  const hasThread = Boolean(selectedThreadRoot);
+  const panel = rightPanel.panel;
+  const sessionsPanelOpen = Boolean(sessions) && (
+    panel?.kind === "members" || (panel?.kind === "member" && participantsById.has(panel.participantId))
+  );
+  const hasThread = Boolean(selectedThreadRoot) || sessionsPanelOpen;
   const visibleApprovalMessages = useMemo(
     () => [...topLevelMessages, ...(selectedThreadSummary?.replies ?? [])],
     [selectedThreadSummary?.replies, topLevelMessages]
@@ -197,6 +225,9 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     resolvedApprovals: resolvedTimelineApprovals,
     thinkingRows
   }), [props.conversation.messages, props.hasOlderMessages, props.isRunning, props.olderMessagesLoading, resolvedTimelineApprovals, thinkingRows, topLevelMessages]);
+  const sessionsChrome = useChatSessionsChrome({
+    sessions, viewMode, rightPanel, participantsById, messages: props.conversation.messages, closeArtifacts: artifacts.closePanel
+  });
   const viewport = useChatConversationViewport({
     conversationId: props.conversation.id,
     messages: props.conversation.messages,
@@ -214,6 +245,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     latestProgress,
     thinkingSignature,
     messageFocusRequest: props.messageFocusRequest,
+    openOutsideTimeline: sessionsChrome.openOutsideTimeline,
     onLoadOlderMessages: props.onLoadOlderMessages,
     onLoadMessagePageForMessage: props.onLoadMessagePageForMessage
   });
@@ -266,66 +298,18 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     );
   }
 
-  function startThreadResize(event: ReactPointerEvent<HTMLDivElement>): void {
-    const view = viewport.viewRef.current;
-    if (!view) {
-      return;
-    }
-    event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    setIsResizingThread(true);
-    const rect = view.getBoundingClientRect();
-    const limits = chatSidePanelWidthLimits(rect.width, {
-      reserveWidth: 1,
-      minWidth: CHAT_SIDE_PANEL_MIN_WIDTH,
-      mainMinWidth: chatMainMinWidth(view)
-    });
-
-    const move = (moveEvent: PointerEvent): void => {
-      requestedThreadWidthRef.current = clampChatSidePanelWidth(Math.round(rect.right - moveEvent.clientX), limits);
-      setThreadWidth(requestedThreadWidthRef.current);
-    };
-    const stop = (): void => {
-      setIsResizingThread(false);
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", stop);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", stop, { once: true });
-  }
-
-  useLayoutEffect(() => {
-    const view = viewport.viewRef.current;
-    if (!view || !selectedThreadRoot) {
-      return undefined;
-    }
-    const clampCurrentWidth = (): void => {
-      const limits = chatSidePanelWidthLimits(view.getBoundingClientRect().width, {
-        reserveWidth: 1,
-        minWidth: CHAT_SIDE_PANEL_MIN_WIDTH,
-        mainMinWidth: chatMainMinWidth(view)
-      });
-      setThreadWidth(clampChatSidePanelWidth(requestedThreadWidthRef.current, limits));
-    };
-    clampCurrentWidth();
-    const resizeObserver = new ResizeObserver(clampCurrentWidth);
-    resizeObserver.observe(view);
-    window.addEventListener("resize", clampCurrentWidth);
-    return () => {
-      resizeObserver.disconnect();
-      window.removeEventListener("resize", clampCurrentWidth);
-    };
-  }, [selectedThreadRoot, viewport.viewRef]);
+  const panelWidth = useChatRightPanelWidth(chatRoot, hasThread);
 
   useLayoutEffect(() => {
     // Reset before descendant focus effects consume a target for the newly mounted conversation.
-    setSelectedThreadRootId(undefined);
+    rightPanel.reset();
     setThreadDrafts({});
     approvalSubmission.resetSubmittingIds();
     choiceSubmission.resetSubmittingIds();
     localFileOpen.resetLocalFileChooser();
   }, [
     props.conversation.id,
+    rightPanel.reset,
     approvalSubmission.resetSubmittingIds,
     choiceSubmission.resetSubmittingIds,
     localFileOpen.resetLocalFileChooser
@@ -338,10 +322,10 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   }, [selectedThreadRootId, topLevelMessages]);
 
   useEffect(() => {
-    if (artifacts.panelOpen && selectedThreadRootId) {
-      setSelectedThreadRootId(undefined);
+    if (artifacts.panelOpen && panel) {
+      rightPanel.close();
     }
-  }, [artifacts.panelOpen, selectedThreadRootId]);
+  }, [artifacts.panelOpen, panel, rightPanel.close]);
 
   const hasInlineTopBar = Boolean(props.topBar);
   const showArtifactsPanel = artifacts.panelOpen && !hasThread;
@@ -349,6 +333,12 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   function openThread(messageId: string): void {
     artifacts.closePanel();
     setSelectedThreadRootId(messageId);
+  }
+
+  function stopRuns(runIds: readonly string[]): void {
+    for (const runId of runIds) {
+      props.onStopRun?.(runId);
+    }
   }
 
   // Stable across renders: the message rows are memoized, and a new handler on every
@@ -361,6 +351,26 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     []
   );
 
+  const panelMessageContext: ChatPanelMessageContext = {
+    activityDisclosure,
+    conversationId: props.conversation.id,
+    participants,
+    participantStatusById: props.participantStatusById,
+    busy: props.isRunning,
+    submittingChoiceIds: choiceSubmission.submittingIds,
+    submittingApprovalIds: approvalSubmission.submittingIds,
+    settings: props.settings,
+    contextUsageByParticipant,
+    sessionsByParticipant,
+    continuedMentionRequestIds,
+    inferredParticipantRequestsByTrigger,
+    liveProgressById,
+    ...chatMessageActions,
+    onStopRun: props.onStopRun ? chatMessageActions.onStopRun : undefined,
+    onDismissTurnFinishedNote: props.onDismissTurnFinishedNote ? chatMessageActions.onDismissTurnFinishedNote : undefined,
+    onRespondToAppToolApproval: stableAppToolApproval
+  };
+
   return (
     <MentionDirectoryContext.Provider value={mentionDirectory}>
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
@@ -370,10 +380,12 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
       <LocalFileLinkContext.Provider value={localFileOpen.localFileLinkContext}>
       <AttachmentPanelContext.Provider value={sidePanel.attachmentContext}>
         <div
-          className={`chat-view ${hasInlineTopBar ? "with-inline-topbar" : ""} ${hasThread ? "thread-open" : ""} ${showArtifactsPanel ? "artifacts-open" : ""} ${isResizingThread ? "resizing-thread" : ""}`}
+          className={`chat-view ${hasInlineTopBar ? "with-inline-topbar" : ""} ${hasThread ? "thread-open" : ""} ${showArtifactsPanel ? "artifacts-open" : ""} ${panelWidth.isResizing ? "resizing-thread" : ""} ${sessions ? "is-sessions-view" : ""}`}
           data-testid="chat-view"
+          data-chat-view={viewMode.view}
+          data-right-panel={panel?.kind}
           ref={viewport.viewRef}
-          style={{ "--chat-thread-width": `${threadWidth}px` } as CSSProperties}
+          style={{ "--chat-thread-width": `${panelWidth.width}px` } as CSSProperties}
           onClick={(event) => {
             // Message links (event.preventDefault) move the highlight; everything else
             // clicked outside the highlighted message dismisses it.
@@ -385,7 +397,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
             }
           }}
         >
-          {props.topBar}
+          <ChatViewHeaderContext.Provider value={sessionsChrome.header}>{props.topBar}</ChatViewHeaderContext.Provider>
           <div className="chat-main">
             <ChatConversationTimeline
               activityDisclosure={activityDisclosure}
@@ -414,6 +426,10 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               approvalsByMessageId={approvalPlacement.byMessageId}
               pendingApprovalRows={approvalPlacement.unanchored}
               rows={chatTimelineRows}
+              sessions={sessionsChrome.timeline}
+              footer={sessions && (
+                <ChatSessionsWaitingLine members={sessions.waitingOn} runIds={sessions.waitingRunIds} onStop={props.onStopRun ? stopRuns : undefined} />
+              )}
               selectedThreadRootId={selectedThreadRoot?.id}
               sessionsByParticipant={sessionsByParticipant}
               settings={props.settings}
@@ -467,42 +483,32 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               participantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
             />
           </div>
-          {selectedThreadRoot && <div className="thread-resizer" role="separator" aria-orientation="vertical" onPointerDown={startThreadResize} />}
-          {selectedThreadRoot && (
-            <ChatThreadPanel
-              activityDisclosure={activityDisclosure}
-              rootMessage={selectedThreadRoot}
-              replies={selectedThreadSummary?.replies ?? []}
-              replyCount={selectedThreadSummary?.countedReplies.length ?? 0}
-              participants={participants}
-              participantStatusById={props.participantStatusById}
-              conversationId={props.conversation.id}
-              repoPath={props.conversation.repoPath}
-              contextUsageByParticipant={contextUsageByParticipant}
-              sessionsByParticipant={sessionsByParticipant}
-              settings={props.settings}
-              draft={threadDrafts[selectedThreadRoot.id] ?? ""}
-              busy={props.isRunning}
-              submittingChoiceIds={choiceSubmission.submittingIds}
-              liveProgressById={liveProgressById}
-              onDraftChange={(value) => setThreadDrafts((current) => ({ ...current, [selectedThreadRoot.id]: value }))}
-              onSend={(repoFileMentions, imageAttachments, skillMentions, content) =>
-                sendThreadDraft(selectedThreadRoot, repoFileMentions, imageAttachments, skillMentions, content)}
-              onClose={() => setSelectedThreadRootId(undefined)}
-              onApproveMentions={chatMessageActions.onApproveMentions}
-              onRejectMentions={chatMessageActions.onRejectMentions}
-              onRespondToChoice={chatMessageActions.onRespondToChoice}
-              onToggleReaction={chatMessageActions.onToggleReaction}
-              onDismissTurnFinishedNote={props.onDismissTurnFinishedNote ? chatMessageActions.onDismissTurnFinishedNote : undefined}
-              onCompactParticipant={chatMessageActions.onCompactParticipant}
-              onStopRun={props.onStopRun ? chatMessageActions.onStopRun : undefined}
-              continuedMentionRequestIds={continuedMentionRequestIds}
-              inferredParticipantRequestsByTrigger={inferredParticipantRequestsByTrigger}
-              approvalsByMessageId={approvalPlacement.byMessageId}
-              submittingApprovalIds={approvalSubmission.submittingIds}
-              onRespondToAppToolApproval={handleAppToolApproval}
-            />
-          )}
+          <ChatViewRightPanels
+            shown={hasThread}
+            onStartResize={panelWidth.startResize}
+            context={panelMessageContext}
+            conversation={props.conversation}
+            thread={selectedThreadRoot ? {
+              root: selectedThreadRoot,
+              summary: selectedThreadSummary,
+              draft: threadDrafts[selectedThreadRoot.id] ?? "",
+              approvalsByMessageId: approvalPlacement.byMessageId,
+              onDraftChange: (value) => setThreadDrafts((current) => ({ ...current, [selectedThreadRoot.id]: value })),
+              onSend: (repoFileMentions, imageAttachments, skillMentions, content) =>
+                sendThreadDraft(selectedThreadRoot, repoFileMentions, imageAttachments, skillMentions, content),
+              onClose: rightPanel.close
+            } : undefined}
+            sessions={sessions && sessionsPanelOpen ? {
+              view: sessions,
+              rightPanel,
+              runIdsByParticipantId: activeRunSummary.runIdsByParticipantId,
+              hasOlderMessages: props.hasOlderMessages,
+              olderMessagesLoading: props.olderMessagesLoading,
+              onLoadOlderMessages: props.onLoadOlderMessages,
+              onSendToMember: props.onSendToMember ?? (async () => false),
+              onStopRuns: props.onStopRun ? stopRuns : undefined
+            } : undefined}
+          />
           {showArtifactsPanel && (
             <ChatSidePanel
               conversation={props.conversation}

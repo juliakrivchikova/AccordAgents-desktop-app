@@ -76,6 +76,9 @@ export interface SendChatMessageOptions extends ChatRunScopeOptions {
   skillMentions?: ChatSkillMention[];
   repoFileMentions?: RepoFileMention[];
   imageAttachments?: ChatImageInput[];
+  /** Exactly these members (a member's session panel); the main composer's
+   *  draft is not this message's. */
+  targetParticipantIds?: string[];
 }
 
 export interface StartChatOptions {
@@ -383,14 +386,17 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setError("Enter a chat message or attach an image.");
       return false;
     }
-    if (skillMentions.length > 0 && hasMultipleMentionedParticipants(content, state.conversation)) {
+    const targetParticipantIds = options.targetParticipantIds?.length ? options.targetParticipantIds : undefined;
+    // A thread or a member's panel keeps its own draft.
+    const ownsMainDraft = !options.chatThreadRootId && !targetParticipantIds;
+    if (skillMentions.length > 0 && !targetParticipantIds && hasMultipleMentionedParticipants(content, state.conversation)) {
       state.setError("A selected skill runs on a single member. Mention exactly one member, or remove the skill. Other members can be brought in by the running skill itself.");
       return false;
     }
     const runId = crypto.randomUUID();
     state.setError(undefined);
     state.setWarnings([]);
-    if (!options.chatThreadRootId) {
+    if (ownsMainDraft) {
       state.setChatMessageDraftForConversation(conversationId, "");
     }
     try {
@@ -403,7 +409,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         imageAttachments,
         threadId: options.threadId,
         parentMessageId: options.parentMessageId,
-        chatThreadRootId: options.chatThreadRootId
+        chatThreadRootId: options.chatThreadRootId,
+        ...(targetParticipantIds ? { targetParticipantIds } : {})
       });
       state.setConversation((current) => {
         if (!current || current.id !== result.conversation.id) {
@@ -421,7 +428,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       await refreshPersistedProviderPreference();
       return true;
     } catch (caught) {
-      if (!options.chatThreadRootId) {
+      if (ownsMainDraft) {
         state.setChatMessageDraftForConversation(conversationId, (current) => current || draftBeforeSend);
       }
       const message = errorText(caught);

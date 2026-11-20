@@ -32,3 +32,4 @@
 @import "./views/settings-roles.css" layer(components);
 @import "./views/settings-plugins.css" layer(components);
 @import "./views/icon-button.css" layer(components);
+@import "./views/chat-sessions.css" layer(components);

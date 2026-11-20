@@ -35,6 +35,9 @@ export function useChatConversationViewport(props: {
   latestProgress?: ReviewProgress;
   thinkingSignature: string;
   messageFocusRequest?: ChatMessageFocusRequest;
+  /** The sessions view: a loaded message that is not on the main timeline
+   *  opens where it lives (its member's session); true when it did. */
+  openOutsideTimeline?: (messageId: string) => boolean;
   onLoadOlderMessages: () => void;
   onLoadMessagePageForMessage: (messageId: string) => Promise<boolean>;
 }): {
@@ -362,6 +365,11 @@ export function useChatConversationViewport(props: {
       return true;
     }
 
+    if (props.openOutsideTimeline?.(messageId)) {
+      detachFromBottom();
+      scheduleFocusRenderedMessage(messageId);
+      return true;
+    }
     return false;
   }
 
