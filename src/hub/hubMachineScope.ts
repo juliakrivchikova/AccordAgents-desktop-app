@@ -40,8 +40,11 @@
  */
 
 import {
+  chatAgentModeWithin,
+  chatAgentPermissionsWithin,
   chatParticipantRequestPermissionExceeds,
   chatParticipantRequestPermissionRank,
+  effectiveChatAgentPermissionsForProvider,
   normalizeChatAgentMode,
   normalizeChatAgentPermissions,
   normalizeChatParticipantRequestPermission,
@@ -50,6 +53,7 @@ import {
 import { MAIN_SESSION_ROLE_ID } from "../shared/mainSession";
 import { APP_CHAT_REQUEST_PARTICIPANTS_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, APP_ROSTER_REQUEST_CHANGE_TOOL } from "../shared/appMcpToolContracts";
 import type { HubCard, HubUserApproval } from "../shared/hubOps";
+import { mainSessionParticipantId } from "../shared/mainSession";
 import type { HubMemberRules } from "../shared/hubProtocol";
 import type {
   ChatAgentMode,
@@ -176,11 +180,15 @@ function names(message: ChatMessage, member: ChatParticipant): boolean {
  *  names (its facilitator) leave to ask other members, once — named in the
  *  User's own message or another member's reply, as the chat shows them;
  *  never by the member's own reply, a hidden message or a line no one wrote
- *  as themselves (a machine writes those too). The message's id. */
+ *  as themselves (a machine writes those too). In a chat with a main session
+ *  only the User and the main session start an Accord (docs/main-session.md),
+ *  so another member's reply gives no leave. The message's id. */
 function accordNaming(conversation: Conversation, member: ChatParticipant, used: ReadonlySet<string>): string | undefined {
+  const mainSessionId = mainSessionParticipantId(conversation.metadata);
   return conversation.messages.find((message) => {
     if (message.role !== "user" && message.role !== "participant") return false;
     if (message.role === "participant" && message.participantId === member.id) return false;
+    if (message.role === "participant" && mainSessionId && message.participantId !== mainSessionId) return false;
     if (message.metadata?.hiddenFromTimeline === true) return false;
     if (used.has(accordGrantKey(message.id, member.id))) return false;
     const skills = (message.metadata as { skillMentions?: unknown } | undefined)?.skillMentions;
@@ -411,14 +419,11 @@ function approvedRemovals(item: Approved): string[] {
     .flatMap((operation) => operation?.type === "remove_participant_from_chat" && typeof operation.participantId === "string" ? [operation.participantId] : []);
 }
 
-/** Whether a member's permissions give it nothing beyond `allowed`. */
+/** Whether a member's permissions give it nothing beyond `allowed` (the
+ *  same rule the app holds a member the main session makes to,
+ *  clampChatAgentPermissions). */
 function permissionsWithin(actual: ChatAgentPermissions, allowed: ChatAgentPermissions): boolean {
-  if ((actual.repoRead && !allowed.repoRead) || (actual.workspaceWrite && !allowed.workspaceWrite) || (actual.webAccess && !allowed.webAccess)) return false;
-  if (actual.shell.enabled && !allowed.shell.enabled) return false;
-  const allowedRules = new Set(allowed.shell.rules.map((rule) => JSON.stringify(rule)));
-  if (actual.shell.rules.some((rule) => rule.action !== "deny" && !allowedRules.has(JSON.stringify(rule)))) return false;
-  if (actual.providerNative && JSON.stringify(actual.providerNative) !== JSON.stringify(allowed.providerNative)) return false;
-  return rank(actual.requestParticipants) <= rank(allowed.requestParticipants) && rank(actual.requestCompaction) <= rank(allowed.requestCompaction);
+  return chatAgentPermissionsWithin(actual, allowed);
 }
 
 /** Whether a member added is the one an approved addition adds: its name,
@@ -439,6 +444,8 @@ function isApprovedMember(member: ChatParticipant, approved: ApprovedMember, rul
 
 /** What a machine's member changes are held to, for one write. */
 interface MemberChanges {
+  /** The chat's main session, when it has one. */
+  mainSessionId?: string;
   machineMembers: ChatParticipant[];
   policies: ChatAppToolApprovalPolicy[];
   approved: Approved[];
@@ -458,7 +465,8 @@ function additionAllowed(member: ChatParticipant, changes: MemberChanges): boole
   const preset = member.participantConfigId ? rules?.presets[member.participantConfigId] : undefined;
   const escalates = manageRight(role, member.permissions).exceedsRoleDefault ||
     (preset !== undefined && chatParticipantRequestPermissionExceeds(manageRight(role, member.permissions).effective, manageRight(role, preset.permissions).effective));
-  if (!escalates && changes.machineMembers.some((requester) => managesWithoutCard(requester, rules, changes.policies))) return true;
+  if (!escalates && changes.machineMembers.some((requester) => managesWithoutCard(requester, rules, changes.policies) &&
+    (requester.id !== changes.mainSessionId || withinMainSession(member, requester, rules)))) return true;
   for (const item of changes.approved) {
     if (!changes.machineMembers.some((requester) => requester.id === item.card.participantId)) continue;
     const match = approvedMembers(item, rules).find((candidate) => !changes.claimed.has(candidate.claim) && isApprovedMember(member, candidate, rules));
@@ -469,6 +477,19 @@ function additionAllowed(member: ChatParticipant, changes: MemberChanges): boole
     }
   }
   return false;
+}
+
+/** A member the main session adds without a card has nothing beyond the
+ *  main session's own rights (the app's clampChatAgentPermissions): its mode,
+ *  what it may do in that mode, and its right to manage members. */
+function withinMainSession(member: ChatParticipant, main: ChatParticipant, rules: HubMemberRules | undefined): boolean {
+  const mainMode = normalizeChatAgentMode(main.agentMode);
+  const memberMode = normalizeChatAgentMode(member.agentMode);
+  if (!chatAgentModeWithin(memberMode, mainMode)) return false;
+  const ceiling = effectiveChatAgentPermissionsForProvider(main.kind, mainMode, normalizeChatAgentPermissions(main.permissions));
+  if (!chatAgentPermissionsWithin(effectiveChatAgentPermissionsForProvider(member.kind, memberMode, normalizeChatAgentPermissions(member.permissions)), ceiling)) return false;
+  return rank(manageRight(rules?.roles[member.roleConfigId], member.permissions).effective) <=
+    rank(manageRight(rules?.roles[main.roleConfigId], main.permissions).effective);
 }
 
 /** Whether the app would have taken this member out for one of the
@@ -553,6 +574,7 @@ export function scopeMachineConversationUpdate(conversation: Conversation, updat
   const used = context.used ?? new Set<string>();
   const beforePolicies = policiesOf(current.appToolApprovalPolicies);
   const changes: MemberChanges = {
+    mainSessionId: mainSessionParticipantId(current),
     machineMembers: ownBefore, policies: beforePolicies, approved: approvedRequests(context.approvals, used), rules: context.rules,
     claimed: new Set(), noted: new Set()
   };

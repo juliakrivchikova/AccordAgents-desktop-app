@@ -285,6 +285,7 @@ type FoldMessage = {
     serverRejected?: unknown;
     imageAttachments?: unknown[];
     repoFileMentions?: unknown[];
+    accordLaunchByMainSession?: unknown;
   };
 };
 
@@ -297,7 +298,7 @@ export function accordInputsOfMessages(messages: readonly FoldMessage[]): { laun
         key: message.id, content: message.content, createdAt: message.createdAt,
         accordLaunchMessageId: message.metadata.accordLaunchMessageId, accordLaunch: message.metadata.accordLaunch
       });
-    } else if (message.role === "user") {
+    } else if (message.role === "user" || message.role === "participant") {
       const card = accordLaunchCardForMessage(message);
       if (card) launches.push({ id: message.id, card, createdAt: message.createdAt });
     }

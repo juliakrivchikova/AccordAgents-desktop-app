@@ -70,9 +70,12 @@ export function accordLaunchTitleAndBody(subject: string): { title: string; body
 export function accordLaunchCardForMessage(message: {
   role: string;
   content: unknown;
-  metadata?: { imageAttachments?: unknown[]; repoFileMentions?: unknown[] };
+  metadata?: { imageAttachments?: unknown[]; repoFileMentions?: unknown[]; accordLaunchByMainSession?: unknown };
 }): AccordLaunchCard | undefined {
-  if (message.role !== "user" || (message.metadata?.imageAttachments?.length ?? 0) > 0 || (message.metadata?.repoFileMentions?.length ?? 0) > 0) {
+  // The User's launch, or the one the chat's main session started for her
+  // (app_chat_start_accord), which the app writes as the main session's.
+  const launcher = message.role === "user" || (message.role === "participant" && message.metadata?.accordLaunchByMainSession === true);
+  if (!launcher || (message.metadata?.imageAttachments?.length ?? 0) > 0 || (message.metadata?.repoFileMentions?.length ?? 0) > 0) {
     return undefined;
   }
   return parseAccordLaunchCard(message.content);

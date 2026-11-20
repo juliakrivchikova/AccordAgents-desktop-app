@@ -28,6 +28,8 @@ import {
   APP_CHAT_REACT_TOOL,
   APP_CHAT_SEND_MESSAGE_TOOL,
   APP_CHAT_SET_TITLE_TOOL,
+  APP_CHAT_DELEGATE_TASK_TOOL,
+  APP_CHAT_START_ACCORD_TOOL,
   APP_ARTIFACT_LIST_TOOL,
   APP_ARTIFACT_READ_TOOL,
   APP_ARTIFACT_DIFF_TOOL,
@@ -136,6 +138,8 @@ type AppChatParticipantRequestStatusHandler = (actor: AppMcpActor, request: unkn
 type AppChatReactHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatSendMessageHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppChatSetTitleHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppChatDelegateTaskHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppChatStartAccordHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppArtifactToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
 type AppScriptToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
 type AppMemoryToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
@@ -198,6 +202,8 @@ export class AppMcpService {
   private chatReactHandler?: AppChatReactHandler;
   private chatSendMessageHandler?: AppChatSendMessageHandler;
   private chatSetTitleHandler?: AppChatSetTitleHandler;
+  private chatDelegateTaskHandler?: AppChatDelegateTaskHandler;
+  private chatStartAccordHandler?: AppChatStartAccordHandler;
   private artifactToolHandler?: AppArtifactToolHandler;
   private scriptToolHandler?: AppScriptToolHandler;
   private memoryToolHandler?: AppMemoryToolHandler;
@@ -296,6 +302,14 @@ export class AppMcpService {
 
   setChatSetTitleHandler(handler: AppChatSetTitleHandler): void {
     this.chatSetTitleHandler = handler;
+  }
+
+  setChatDelegateTaskHandler(handler: AppChatDelegateTaskHandler): void {
+    this.chatDelegateTaskHandler = handler;
+  }
+
+  setChatStartAccordHandler(handler: AppChatStartAccordHandler): void {
+    this.chatStartAccordHandler = handler;
   }
 
   setArtifactToolHandler(handler: AppArtifactToolHandler): void {
@@ -682,7 +696,9 @@ export class AppMcpService {
       record.name !== APP_CHAT_EXPORT_ATTACHMENT_TOOL &&
       record.name !== APP_CHAT_REACT_TOOL &&
       record.name !== APP_CHAT_SEND_MESSAGE_TOOL &&
-      record.name !== APP_CHAT_SET_TITLE_TOOL
+      record.name !== APP_CHAT_SET_TITLE_TOOL &&
+      record.name !== APP_CHAT_DELEGATE_TASK_TOOL &&
+      record.name !== APP_CHAT_START_ACCORD_TOOL
     ) {
       throw new Error(`Unknown app tool: ${String(record.name ?? "")}.`);
     }
@@ -763,6 +779,24 @@ export class AppMcpService {
         throw new Error("Chat title setting is not available.");
       }
       return this.toolTextResult(await this.chatSetTitleHandler(actor, record.arguments));
+    }
+    if (record.name === APP_CHAT_DELEGATE_TASK_TOOL) {
+      if (!hasChatAppToolCapability(actor.capabilities, "participants.delegate")) {
+        throw new Error("Only the chat's main session can delegate tasks to new members.");
+      }
+      if (!this.chatDelegateTaskHandler) {
+        throw new Error("Task delegation is not available.");
+      }
+      return this.toolTextResult(await this.chatDelegateTaskHandler(actor, record.arguments));
+    }
+    if (record.name === APP_CHAT_START_ACCORD_TOOL) {
+      if (!hasChatAppToolCapability(actor.capabilities, "accord.start")) {
+        throw new Error("Only the chat's main session can start an Accord; ask it to.");
+      }
+      if (!this.chatStartAccordHandler) {
+        throw new Error("Starting an Accord is not available.");
+      }
+      return this.toolTextResult(await this.chatStartAccordHandler(actor, record.arguments));
     }
     if (record.name === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "participants.request")) {

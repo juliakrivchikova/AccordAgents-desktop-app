@@ -70,6 +70,21 @@ the desktop and on the phone (bundled through `mobileSharedRules.ts`).
   members, no @-parsing for addressees, no fallback.
 - `ChatParticipantSession.forkFrom?: { participantId, sessionId, kind }`: the
   member's first turn forks that session; cleared once it has its own id.
+  `ChatParticipantSession.forkedFromParticipantId` stays: both CLIs keep the
+  source's system/developer instructions in a fork (verified on Claude Code
+  2.1.329 and Codex 0.155.1), so the member is told who it is on its first
+  turn and reminded on later ones.
+- `ChatParticipantRequestBatch.delegation?: { start }`: the main session's
+  task to a member it made (`app_chat_delegate_task`); not held to the
+  one-request-per-turn limit.
+- `ChatMessageMetadata.accordLaunchByMainSession`: an Accord launch the main
+  session wrote (`app_chat_start_accord`), read as an Accord card like the
+  User's (`accordLaunchCard.ts`).
+- Rights: a member the main session makes gets
+  `clampChatAgentPermissions(requested, main's effective rights)`
+  (`agentPermissions.ts`); her server holds a machine's additions to the same
+  rule (`hubMachineScope.ts`), and an addition through the member tools that
+  is broader goes to a card.
 - Routing (`chatDeliveryPolicy.ts`): in a main-session chat a top-level
   message without an @mention goes to the main session (not the last
   speaker); in a thread the old thread rule holds.
