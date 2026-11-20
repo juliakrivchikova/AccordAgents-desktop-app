@@ -246,7 +246,7 @@ function ChatMessageElapsed(props: { startedAt: string; sentAt: string }): JSX.E
   return <span className="message-when is-elapsed" title={props.sentAt}>{formatWorkedDuration(elapsedSeconds * 1000)}</span>;
 }
 
-function useStreamingElapsedSeconds(startedAt: string): number {
+export function useStreamingElapsedSeconds(startedAt: string): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const handle = globalThis.setInterval(() => setNow(Date.now()), 1000);
