@@ -3811,7 +3811,10 @@
       // the shared rule has known it by).
       const lead = newChatLead(offer);
       const participants = shared.newChatParticipants({
-        assistant: lead, mainSession: lead, members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text, newId: createEventId
+        assistant: lead, mainSession: lead, members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text, newId: createEventId,
+        // Its rights follow the project as on the computer: it reads the
+        // project only when the chat has one.
+        project: newChatProject || ""
       });
       // The chat's main session, and the view it opens in: the one her
       // computer starts new chats in, else the sessions view.
