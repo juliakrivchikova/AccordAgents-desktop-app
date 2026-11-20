@@ -76,6 +76,16 @@ test("a member's posts during its turn show inside its reply on the phone, in or
     assert.match(running.own, /^Thinking/, "below them the reply is still thinking");
     assert.equal(running.last, true, "the reply is the chat's last row");
 
+    // The turn streams on: the live copy of the running reply replaces the
+    // row, and the posts stay in it, through the polls that follow.
+    await hub.progress(CONVERSATION, "run-taylor-turn", "Still checking the narrow layout", { participantLabel: "@taylor" });
+    await app.waitFor(`${row} && ${row}.querySelector(".message-copy > .message-content")?.textContent.includes("Still checking the narrow layout")`,
+      "the live text reaches the running reply");
+    await new Promise((resolve) => setTimeout(resolve, 3_500));
+    const streaming = await app.evaluate(shape);
+    assert.deepEqual(streaming.posts, posts.map((item) => item.content), "the posts are still in the running reply after the next polls");
+    assert.equal(streaming.status, "Running");
+
     // The turn ends: its final words come under the posts.
     await hub.updateMessages(CONVERSATION, [turn({ status: "done", content: "Fixed: the button no longer wraps." }, { interimPosts: posts })]);
     await app.waitFor(`${row} && ${row}.dataset.status === "Done"`, "the reply is finished");

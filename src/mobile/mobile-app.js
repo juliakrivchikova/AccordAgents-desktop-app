@@ -725,6 +725,19 @@
             ...(stored.accordLaunchByMainSession && !entry.accordLaunchByMainSession ? { accordLaunchByMainSession: true } : {}),
             ...(typeof stored.workedMs === "number" && typeof entry.workedMs !== "number" ? { workedMs: stored.workedMs } : {})
           };
+          // Nor one that holds fewer of the reply's posts (a live copy from a
+          // server before it carried them, a page read before the newest
+          // post): posts are only ever added, so the two sets are merged.
+          const posts = mergedInterimPosts(stored.interimPosts, entry.interimPosts);
+          if (posts.length > 0 && interimPostsSignature({ interimPosts: posts }) !== interimPostsSignature(entry)) {
+            entry = { ...entry, interimPosts: posts };
+          }
+          // A running reply's pictures are its posts' pictures: a copy
+          // without them does not take them off.
+          if (entry.status === "pending" && Array.isArray(stored.attachments) && stored.attachments.length > 0 &&
+            !(Array.isArray(entry.attachments) && entry.attachments.length > 0)) {
+            entry = { ...entry, attachments: stored.attachments };
+          }
         }
         if (stored && sameTimelineEntryContent(stored, entry) &&
           (stored.settledAt || "") === (entry.settledAt || "") &&
@@ -4883,6 +4896,23 @@
       return { id: post.id, content: post.content, createdAt: typeof post.createdAt === "string" ? post.createdAt : "" };
     });
     return posts.length > 0 ? { interimPosts: posts } : {};
+  }
+
+  // Two copies' posts of one reply, together: each post once (the newer
+  // copy's), oldest first, as the desktop merges them.
+  function mergedInterimPosts(older, newer) {
+    const byId = new Map();
+    const order = [];
+    for (const post of (Array.isArray(older) ? older : []).concat(Array.isArray(newer) ? newer : [])) {
+      if (!post || typeof post.id !== "string" || !post.id) continue;
+      if (!byId.has(post.id)) order.push(post.id);
+      byId.set(post.id, post);
+    }
+    return order.map(function (id, index) { return { post: byId.get(id), index: index }; })
+      .sort(function (left, right) {
+        return String(left.post.createdAt || "").localeCompare(String(right.post.createdAt || "")) || left.index - right.index;
+      })
+      .map(function (item) { return item.post; });
   }
 
   function interimPostsSignature(entry) {

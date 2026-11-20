@@ -5,6 +5,7 @@ import { machineWakeRequest, webCryptoMachineWake, type MachineWakeSubtleCrypto 
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "../shared/types";
 import type { HubNotice } from "../main/services/hubStorage";
 import type { StorageService } from "../main/services/storage";
+import { mobileInterimPosts, timelineAttachmentsFromMessage } from "../main/services/mobileTimeline";
 
 /**
  * What the hub works out for the phone, so that the phone needs no other
@@ -95,6 +96,11 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
       (message.participantLabel ? `${message.participantLabel} is running...` : "Running...");
     const mobileEventId = typeof message.metadata?.mobileEventId === "string" ? message.metadata.mobileEventId : undefined;
     const sourceMessageId = typeof message.metadata?.sourceMessageId === "string" && message.metadata.sourceMessageId ? message.metadata.sourceMessageId : undefined;
+    // What the member posted so far in this turn is part of the running
+    // reply (shared/interimPosts.ts), with the pictures they carry: a live
+    // copy without them took them off the phone's row until the next page.
+    const interimPosts = mobileInterimPosts(message);
+    const attachments = interimPosts.length > 0 ? timelineAttachmentsFromMessage(message) : [];
     events.push({
       id: message.id,
       role: "participant",
@@ -103,6 +109,8 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
       ...(message.participantId ? { participantId: message.participantId } : {}),
       ...(sourceMessageId ? { sourceMessageId } : {}),
       content,
+      ...(attachments.length > 0 ? { attachments } : {}),
+      ...(interimPosts.length > 0 ? { interimPosts } : {}),
       status: "pending",
       createdAt: message.createdAt,
       ...(runId ? { runId } : {}),

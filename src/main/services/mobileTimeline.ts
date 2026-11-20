@@ -4,6 +4,7 @@ import type {
   ChatParticipant,
   ChatParticipantRequestBatch,
   ChatParticipantRequestStatus,
+  ChatProviderKind,
   ChatTurnFinishedNoteMetadata,
   ChatViewMode,
   Conversation
@@ -20,6 +21,7 @@ import {
   chatParticipantRequestReplyRootMap
 } from "../../shared/chatParticipantRequestThreads";
 import type { MobileControlCard } from "../../shared/mobileControlCards";
+import { isChatProviderKind } from "../../shared/chatProviders";
 
 /**
  * What the phone reads of the chats, as the User's server answers it: the
@@ -211,6 +213,9 @@ export interface MobileTaskItem {
   replyMessageId?: string;
   /** Why it failed, its first line. */
   error?: string;
+  /** The member's provider when the task was given: its logo stays once the
+   *  member has left the chat. */
+  targetKind?: ChatProviderKind;
 }
 
 /** The members of one request the phone is told of at most. */
@@ -329,7 +334,7 @@ function pendingParticipantContent(participantLabel?: string): string {
   return participantLabel?.trim() ? `${participantLabel.trim()} is running...` : "Running...";
 }
 
-function timelineAttachmentsFromMessage(message: ChatMessage): MobileTimelineAttachment[] {
+export function timelineAttachmentsFromMessage(message: ChatMessage): MobileTimelineAttachment[] {
   const attachments = message.metadata?.imageAttachments;
   if (!Array.isArray(attachments)) {
     return [];
@@ -410,8 +415,9 @@ function timelineEventFromMessage(
 }
 
 /** A reply's posts as the phone draws them: the words and which of the
- *  reply's pictures each carries. */
-function mobileInterimPosts(message: ChatMessage): MobileInterimPost[] {
+ *  reply's pictures each carries. The live copy of a running reply carries
+ *  them too (hubPhoneState.ts liveTimelineEvents). */
+export function mobileInterimPosts(message: ChatMessage): MobileInterimPost[] {
   return chatInterimPostsOf(message).map((post) => ({
     id: post.id,
     content: post.content,
@@ -442,7 +448,8 @@ export function mobileTaskBatch(batch: ChatParticipantRequestBatch | undefined):
       createdAt: typeof item.createdAt === "string" ? item.createdAt : batch.createdAt,
       ...(typeof item.updatedAt === "string" && item.updatedAt ? { updatedAt: item.updatedAt } : {}),
       ...(typeof item.replyMessageId === "string" && item.replyMessageId ? { replyMessageId: item.replyMessageId } : {}),
-      ...(error ? { error } : {})
+      ...(error ? { error } : {}),
+      ...(isChatProviderKind((item as { targetKind?: unknown }).targetKind) ? { targetKind: (item as { targetKind: ChatProviderKind }).targetKind } : {})
     });
   }
   if (items.length === 0) return undefined;
