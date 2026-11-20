@@ -560,6 +560,10 @@ const CHAT_SELF_COMPACTION_COOLDOWN_MS = 5 * 60_000;
 const CHAT_ROSTER_CHANGE_MAX_OPERATIONS = 12;
 const CHAT_PARTICIPANT_REQUEST_MAX_ITEMS = 4;
 const PARTICIPANT_REQUEST_STOPPED_BY_USER = "Stopped by User.";
+/** What a resume of the main session's tasks of one turn reads of their
+ *  replies: each at most this long, all of them together at most the next. */
+export const TASK_REPLY_PROMPT_MAX_CHARS = 12_000;
+export const TASK_REPLIES_PROMPT_MAX_CHARS = 60_000;
 /** Why a request the app lost track of (a restart, a run gone) ended. */
 const PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION = "Request was interrupted before completion.";
 const CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN = 4;
@@ -17882,25 +17886,26 @@ export class ChatService {
       const fallbackSelection = resumedRenderCandidates === renderCandidates
         ? selection
         : this.selectPromptContextRecords(renderCandidates, policy);
-      block = this.promptContextBlock(scope, policy, selection.included, selection.omittedCount);
+      // The replies to the main session's tasks of one turn are read in a
+      // block of their own, each and all of them cut to fit
+      // (cappedTaskReplyRecords), the one in the scope's thread too.
+      const extraIds = new Set(extraMessageIds ?? []);
+      const outsideExtra = <T extends { message: ChatMessage }>(records: T[]): T[] =>
+        extraIds.size > 0 ? records.filter((record) => !extraIds.has(record.message.id)) : records;
+      block = this.promptContextBlock(scope, policy, outsideExtra(selection.included), selection.omittedCount);
       resumeFallbackBlock = this.promptContextBlock(
         scope,
         policy,
-        fallbackSelection.included,
+        outsideExtra(fallbackSelection.included),
         fallbackSelection.omittedCount
       );
-      if (extraMessageIds?.length) {
-        const extra = (included: ReadonlyArray<{ message: ChatMessage }>): string => {
-          const shown = new Set(included.map((record) => record.message.id));
-          const wanted = new Set(extraMessageIds);
-          const records = promptConversation.messages
-            .map((message, sequence) => ({ message, sequence }))
-            .filter((record) => wanted.has(record.message.id) && !shown.has(record.message.id) &&
-              record.message.id !== triggerMessage.id && this.isPromptContextMessage(record.message));
-          return this.promptContextBlock(scope, { mode: "all_unseen" }, records, 0, "Scope: the replies to the tasks you gave in one turn");
-        };
-        block = [block, extra(selection.included)].filter(Boolean).join("\n\n");
-        resumeFallbackBlock = [resumeFallbackBlock, extra(fallbackSelection.included)].filter(Boolean).join("\n\n");
+      if (extraIds.size > 0) {
+        const records = this.cappedTaskReplyRecords(promptConversation.messages
+          .map((message, sequence) => ({ message, sequence }))
+          .filter((record) => extraIds.has(record.message.id) && record.message.id !== triggerMessage.id && this.isPromptContextMessage(record.message)));
+        const extra = this.promptContextBlock(scope, { mode: "all_unseen" }, records, 0, "Scope: the replies to the tasks you gave in one turn");
+        block = [block, extra].filter(Boolean).join("\n\n");
+        resumeFallbackBlock = [resumeFallbackBlock, extra].filter(Boolean).join("\n\n");
       }
       if (advanceTo) {
         pointerAdvance = {
@@ -17919,6 +17924,28 @@ export class ChatService {
       }
     });
     return { block, resumeFallbackBlock, pointerAdvance };
+  }
+
+  /** The replies a resume of the main session's tasks of one turn reads, cut
+   *  so the prompt stays far from a CLI's argument limit (Antigravity takes
+   *  its prompt on the command line) and from flooding the context: each
+   *  reply to TASK_REPLY_PROMPT_MAX_CHARS, all of them together to
+   *  TASK_REPLIES_PROMPT_MAX_CHARS, a cut one saying where the rest is. */
+  private cappedTaskReplyRecords(records: Array<{ message: ChatMessage; sequence: number }>): Array<{ message: ChatMessage; sequence: number }> {
+    let budget = TASK_REPLIES_PROMPT_MAX_CHARS;
+    return records.map((record) => {
+      const text = chatMessageMemberText(record.message).trim();
+      const room = Math.max(0, Math.min(TASK_REPLY_PROMPT_MAX_CHARS, budget));
+      if (text.length <= room) {
+        budget -= text.length;
+        return record;
+      }
+      budget -= room;
+      const note = `…cut; read the full reply with app_chat_read_messages (message id ${record.message.id}).`;
+      const kept = text.slice(0, room).trimEnd();
+      const { interimPosts: _posts, ...metadata } = record.message.metadata ?? {};
+      return { ...record, message: { ...record.message, content: kept ? `${kept}\n\n${note}` : note, metadata } };
+    });
   }
 
   private registerInFlightPromptContext(

@@ -660,6 +660,42 @@ test("a task stopped by User and a task that failed still resume the main sessio
   assert.match(resumes[0]!.prompt, /Quick job done\./);
 });
 
+test("a combined resume cuts oversized replies: each to 12,000 characters, all to 60,000, each cut one saying where the rest is", async () => {
+  const main = mainSession("codex-cli", { model: undefined });
+  const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-thread")] });
+  const letters = "abcdef";
+  const { service, storage, runs } = testService({
+    conversation,
+    run: async (participant) => {
+      if (participant.id === main.id) return { participant, ok: true, content: "Noted.", durationMs: 1 };
+      const index = runs.filter((run) => run.participant.id !== main.id).length - 1;
+      return { participant, ok: true, content: `reply-${index}:` + letters[index]!.repeat(15_000), durationMs: 1 };
+    }
+  });
+  const turn = liveTurn(service, "turn-big");
+  const actor = mainActor(undefined, { turnSegmentId: "turn-big" });
+  for (const index of [0, 1, 2, 3, 4, 5]) {
+    const result = await service.delegateTaskFromTool(actor, { title: `Big ${index}`, task: `Write a long report ${index}.` });
+    assert.equal(result.ok, true, JSON.stringify(result));
+  }
+  turn.end();
+  await waitFor(() => delegationBatches(storage.current).length === 6 && delegationBatches(storage.current).every((batch) => Boolean(batch.autoResumeMessageId)), 6000);
+  const resumes = resumesOf(runs, main.id);
+  assert.equal(resumes.length, 1);
+  const prompt = resumes[0]!.prompt;
+  const replyIds = delegationBatches(storage.current).map((batch) => batch.items[0]!.replyMessageId!);
+  for (const id of replyIds) {
+    assert.ok(prompt.includes(`…cut; read the full reply with app_chat_read_messages (message id ${id}).`), `the cut reply ${id} says where the rest is`);
+  }
+  const kept = [...letters].map((letter) => (prompt.match(new RegExp(`${letter}{100,}`, "g")) ?? []).reduce((sum, run) => sum + run.length, 0));
+  assert.ok(kept.every((count) => count <= 12_000), `each reply at most 12,000 characters: ${kept.join(", ")}`);
+  assert.ok(kept.reduce((sum, count) => sum + count, 0) <= 60_000, "all of them at most 60,000");
+  assert.equal(kept.filter((count) => count === 0).length, 1, "the budget is spent before the last reply: only its note");
+  assert.ok(prompt.length < 80_000, `the prompt stays small: ${prompt.length}`);
+  // The stored replies are whole.
+  assert.ok(storage.current.messages.filter((message: ChatMessage) => replyIds.includes(message.id)).every((message: ChatMessage) => message.content.length > 15_000));
+});
+
 function restartedChat(statuses: Array<"answered" | "running">): Conversation {
   const main = mainSession("codex-cli", { model: undefined });
   const members = statuses.map((_status, index) => member(`m${index}`, `m${index}`));

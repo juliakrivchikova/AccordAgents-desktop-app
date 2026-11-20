@@ -151,7 +151,10 @@ the desktop and on the phone (bundled through `mobileSharedRules.ts`).
   of one `turnId` once: not while the turn runs (`liveTurnSegments`; its end
   looks again), not while one of them runs, then with one trigger listing
   each task and how it ended, and the other tasks' replies read as untrusted
-  context (`extraPromptContextMessageIds`); every batch gets the same
+  context (`extraPromptContextMessageIds`), each cut to 12,000 characters
+  and all to 60,000, a cut one naming its message for
+  `app_chat_read_messages` (`cappedTaskReplyRecords`; Antigravity takes
+  its prompt on the command line); every batch gets the same
   `autoResumeMessageId`. A task a restart ended
   (`markOrphanedParticipantRequestInterrupted`) makes the app look at its
   turn's tasks again; when the restart ended all of them the main session is
