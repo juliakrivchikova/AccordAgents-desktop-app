@@ -79,7 +79,9 @@ the desktop and on the phone (bundled through `mobileSharedRules.ts`).
 The weekly snapshot reports how many chats in each view had a User message
 that week (`chats_sessions_view_active`, `chats_classic_view_active`), so the
 User can see whether anyone still works in the classic view before it is
-removed. Team devices are marked as for every signal.
+removed. The snapshot goes at the first chance in an ISO week, so "that week"
+is the seven days before it is sent; the counts are bucketed like the
+snapshot's other counts. Team devices are marked as for every signal.
 
 ## Rollout
 

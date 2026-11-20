@@ -29,7 +29,7 @@ export { nativeGoalObjective, parseNativeGoalCommand } from "./nativeGoalCommand
 // A new chat from the phone, made as the computer's New chat makes it: its
 // members from what the computer prepared, its first system line and its
 // title (the User, 2026-10-29).
-export { newChatIntro, newChatMemberFitsProject, newChatParticipants, newChatPickedMembers, newChatTitle } from "./newChat";
+export { newChatIntro, newChatMemberFitsProject, newChatMetadata, newChatParticipants, newChatPickedMembers, newChatTitle } from "./newChat";
 // The list row of a chat the phone started, as the server will list it.
 export { mobileChatGroupLabel, mobileSnippet } from "./mobileChatRow";
 // An artifact note becomes a card on the timeline: the same reading of the

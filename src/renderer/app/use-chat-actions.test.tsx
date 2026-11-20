@@ -1,3 +1,4 @@
+import { newChatMemberPermissions } from "../../shared/agentPermissions";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SetStateAction } from "react";
@@ -220,8 +221,9 @@ test("a new chat is made with its main session first (ordinary member rights, it
   assert.equal(main?.participantConfigId, undefined, "no saved member is behind it");
   assert.equal(main?.permissions?.requestParticipants, "allow", "its role's rights, not the Assistant's");
   assert.equal(main?.permissions?.manageRolesParticipants, "allow");
-  assert.equal(main?.permissions?.shell.enabled, defaultChatAgentPermissions().shell.enabled);
-  assert.equal(main?.permissions?.repoRead, defaultChatAgentPermissions().repoRead);
+  // An ordinary member's rights for a chat without a project: no repo read.
+  assert.equal(main?.permissions?.shell.enabled, newChatMemberPermissions(false).shell.enabled);
+  assert.equal(main?.permissions?.repoRead, newChatMemberPermissions(false).repoRead);
   assert.equal(member?.participantConfigId, "member-codex");
   assert.equal(member?.model, "member-model");
   assert.equal(member?.reasoningEffort, "low");

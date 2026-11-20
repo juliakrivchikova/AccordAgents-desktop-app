@@ -143,7 +143,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     // Every new chat has its main session first, instead of the Chat
     // Assistant (docs/main-session.md).
     const participants = [
-      newChatMainSessionParticipantDraft(assistantProviderKind, state.settings.chatRoleConfigs, mainSessionRuntimeOverride),
+      newChatMainSessionParticipantDraft(assistantProviderKind, mainSessionRuntimeOverride, Boolean(state.repoPath.trim())),
       ...selectedOrMentionedChatParticipantDrafts(
         state.settings.chatParticipantConfigs,
         state.selectedChatParticipantConfigIds,

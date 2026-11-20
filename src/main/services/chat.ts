@@ -1,5 +1,5 @@
 import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelection } from "../../shared/cloudRunPreparation";
-import { canSwitchChatView, isChatViewMode } from "../../shared/mainSession";
+import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, isChatViewMode, isRoleOfferedForNewMembers, mainSessionMemberOf } from "../../shared/mainSession";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -212,6 +212,7 @@ import {
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
   effectiveChatAgentPermissionsForProvider,
   isChatShellPermissionPatternSafe,
+  newChatMemberPermissions,
   normalizeChatParticipantRequestPermission,
   normalizeChatAgentMode,
   normalizeChatAgentPermissions,
@@ -560,6 +561,17 @@ const PARTICIPANT_REQUEST_SCRUTINY_APPENDIX =
   "Review for blockers, incorrect assumptions, missing edge cases, or simpler alternatives. If none, reply with only `No objections.` Do not restate the proposal.";
 const CHAT_CONTEXT_READ_DEFAULT_LIMIT = 50;
 const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
+
+/** A new chat's requested members split into the New chat screen's main
+ *  session row (when the User changed it there) and everyone else. A chat
+ *  has one main session. */
+function splitMainSessionInput(items: ChatParticipantInput[]): { mainSession?: ChatParticipantInput; members: ChatParticipantInput[] } {
+  const mainSessions = items.filter((item) => item.roleConfigId === MAIN_SESSION_ROLE_ID);
+  if (mainSessions.length > 1) {
+    throw new Error("A chat has one main session.");
+  }
+  return { mainSession: mainSessions[0], members: items.filter((item) => item.roleConfigId !== MAIN_SESSION_ROLE_ID) };
+}
 
 /** The options shared with the phone and the User's server, so a draft
  *  is routed the same way wherever it is resolved. */
@@ -1631,7 +1643,7 @@ export class ChatService {
       const readyKinds = readyProviderKinds(agents, settings.providers);
       const cannotStart = this.newChatBlockedReason(agents, settings, assistantProviderKind);
       if (cannotStart || !assistantProviderKind) {
-        throw new Error(cannotStart ?? "Could not initialize an Assistant provider. Check General Settings and try again.");
+        throw new Error(cannotStart ?? "Could not initialize the main session's provider. Check General Settings and try again.");
       }
       const hasRequestedParticipants = request.participants.length > 0;
       const skipDefaultParticipants = request.skipDefaultParticipants === true;
@@ -1646,8 +1658,16 @@ export class ChatService {
             Boolean(requestedRepoPath)
           );
       this.assertParticipantProvidersReady(participantInputs, agents, settings.providers, settings.cliProviderHosts ?? []);
-      const requestedParticipants = await this.validateParticipants(participantInputs, [], true);
-      const participants = await this.ensureAdministratorParticipant(requestedParticipants, assistantProviderKind);
+      // Every new chat has its main session instead of the Chat Assistant
+      // (docs/main-session.md); the New chat screen's own row for it, when
+      // the User changed it there, is that main session.
+      const { mainSession: mainSessionInput, members: memberInputs } = splitMainSessionInput(participantInputs);
+      const requestedParticipants = await this.validateParticipants(memberInputs, [], true);
+      const participants = await this.ensureMainSessionParticipant(requestedParticipants, assistantProviderKind, {
+        repoPath: requestedRepoPath,
+        requested: mainSessionInput
+      });
+      const mainSession = mainSessionMemberOf(participants);
       signal?.throwIfAborted();
       conversation = {
         id: randomUUID(),
@@ -1666,7 +1686,11 @@ export class ChatService {
           participants,
           participantSessions: [],
           warnings: [],
-          running: false
+          running: false,
+          ...(mainSession ? {
+            mainSessionParticipantId: mainSession.id,
+            chatView: isChatViewMode(settings.defaultChatView) ? settings.defaultChatView : DEFAULT_CHAT_VIEW
+          } : {})
         }
       };
       this.rebuildLastMessagesByParticipant(conversation);
@@ -1717,10 +1741,11 @@ export class ChatService {
   /**
    * What the phone's New chat offers, as this computer's New chat screen
    * does (the User, 2026-10-29): its projects (the folders its chats are in,
-   * newest first), the folder a new chat starts in, the Chat Assistant and
-   * every saved member as this computer would add them, and why none could
-   * be started now. The phone puts the chat together from these
-   * (src/shared/newChat) and writes it to the User's server.
+   * newest first), the folder a new chat starts in, the main session and
+   * every saved member as this computer would add them, the view a new chat
+   * opens in, and why none could be started now. The phone puts the chat
+   * together from these (src/shared/newChat) and writes it to the User's
+   * server.
    */
   async newChatOptions(summaries: ConversationSummary[]): Promise<HubNewChatOptions | undefined> {
     const agents = await this.detectAgentsForReadiness("submit");
@@ -1728,18 +1753,20 @@ export class ChatService {
     const settings = await this.settings.ensureGenericChatParticipantSeeds(agents);
     const assistantKind = resolveAssistantProviderKind({ agents, providers: settings.providers, explicitKind: settings.assistantProviderKind });
     const unavailable = this.newChatBlockedReason(agents, settings, assistantKind);
-    // With no Assistant provider ready, the phone shows why, as this
-    // computer's New chat does, and starts nothing.
-    let assistant: ChatParticipant | undefined;
+    // With no provider ready for the main session, the phone shows why, as
+    // this computer's New chat does, and starts nothing.
+    let mainSession: ChatParticipant | undefined;
     try {
-      [assistant] = await this.ensureAdministratorParticipant([], assistantKind);
+      // As a chat in a project has it (most phone chats are); the phone's
+      // newChatParticipants takes repository reading away for a chat without one.
+      [mainSession] = await this.ensureMainSessionParticipant([], assistantKind, { hasProject: true });
     } catch (error) {
       if (!unavailable) throw error;
     }
-    if (!assistant && unavailable) {
-      assistant = { id: CHAT_ADMINISTRATOR_ROLE_ID, handle: CHAT_ADMINISTRATOR_HANDLE, roleConfigId: CHAT_ADMINISTRATOR_ROLE_ID, kind: settings.assistantProviderKind ?? "codex-cli" } as ChatParticipant;
+    if (!mainSession && unavailable) {
+      mainSession = { id: MAIN_SESSION_ROLE_ID, handle: MAIN_SESSION_HANDLE, roleConfigId: MAIN_SESSION_ROLE_ID, kind: settings.assistantProviderKind ?? "codex-cli" } as ChatParticipant;
     }
-    if (!assistant) return undefined;
+    if (!mainSession) return undefined;
     const usage = participantConfigUsage(summaries);
     const members: NewChatMemberOption[] = [];
     // A member on a machine runs there whoever starts the chat: the phone
@@ -1751,8 +1778,10 @@ export class ChatService {
     const installs = await Promise.resolve().then(() => this.settings.listMachineInstalls()).catch(() => []);
     const cloudInstanceId = settings.cloudRuns?.awsHandle?.instanceId;
     for (const config of settings.chatParticipantConfigs) {
-      // The Assistant's own presets are not offered (isChatAssistantParticipant).
-      if (config.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID || config.handle.trim().replace(/^@/, "").toLowerCase() === "admin") continue;
+      // The Assistant's own presets are not offered (isChatAssistantParticipant),
+      // nor one with the main session's role (a chat makes its own).
+      if (config.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID || config.roleConfigId === MAIN_SESSION_ROLE_ID ||
+        config.handle.trim().replace(/^@/, "").toLowerCase() === "admin") continue;
       // As the computer's New chat makes a saved member's draft
       // (chatParticipantConfigToDraft).
       const input: CreateChatConversationRequest["participants"][number] = {
@@ -1819,10 +1848,16 @@ export class ChatService {
     }
     const { projects, defaultProject } = newChatProjects(summaries, settings.lastRepoPath);
     const assistantNote = assistantSubstituteNote({ agents, providers: settings.providers, explicitKind: settings.assistantProviderKind });
+    // Named by its role, not a fresh id, so an unchanged offer is not
+    // published again. A phone from before reads `assistant`: it gets the
+    // main session there too, and so makes a main-session chat.
+    const offeredMainSession = { ...mainSession, id: MAIN_SESSION_ROLE_ID };
     return {
       projects,
       ...(defaultProject ? { defaultProject } : {}),
-      assistant: { ...assistant, id: CHAT_ADMINISTRATOR_ROLE_ID },
+      mainSession: offeredMainSession,
+      assistant: offeredMainSession,
+      ...(isChatViewMode(settings.defaultChatView) ? { defaultChatView: settings.defaultChatView } : {}),
       members,
       ...(unavailable ? { unavailable } : {}),
       ...(assistantNote ? { assistantNote } : {})
@@ -2424,6 +2459,9 @@ export class ChatService {
     const assistantId = participants.find((item) => item.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID)?.id;
     if (targets.some((target) => target.id === assistantId)) {
       throw new Error("Chat Assistant cannot be removed from the chat.");
+    }
+    if (targets.some((target) => this.isChatMainSession(conversation, target))) {
+      throw new Error("The main session cannot be removed from its chat.");
     }
     if (participants.length - targets.length < 1) {
       throw new Error("The last chat member cannot be removed.");
@@ -3967,27 +4005,36 @@ export class ChatService {
     assistantProviderKind?: ChatProviderKind;
     content?: string;
   }): Promise<UserSkillRunContext> {
-    const requestedParticipants = await this.validateParticipants(request.participants ?? [], [], true);
+    // The chat the New chat screen would make: its members and its main
+    // session (createConversation), which the first message goes to when it
+    // names nobody.
+    const { mainSession: mainSessionInput, members: memberInputs } = splitMainSessionInput(request.participants ?? []);
+    const requestedParticipants = await this.validateParticipants(memberInputs, [], true);
     const settings = request.assistantProviderKind ? undefined : await this.settings.getPublicSettings();
     const assistantProviderKind = request.assistantProviderKind
       ?? await this.defaultAdministratorProviderKind(settings?.providers ?? []).catch(() => undefined);
-    const participants = assistantProviderKind
-      ? await this.ensureAdministratorParticipant(requestedParticipants, assistantProviderKind)
+    const repoPath = request.repoPath?.trim() || undefined;
+    // A prediction: without a main session it is made for the members alone.
+    const participants = assistantProviderKind || mainSessionInput
+      ? await this.ensureMainSessionParticipant(requestedParticipants, assistantProviderKind, { repoPath, requested: mainSessionInput })
+        .catch(() => requestedParticipants)
       : requestedParticipants;
+    const mainSession = mainSessionMemberOf(participants);
     const conversation: Conversation = {
       id: "prospective-chat",
       title: "",
       kind: "chat",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      repoPath: request.repoPath?.trim() || undefined,
+      repoPath,
       messages: [],
       findings: [],
       metadata: {
         participants,
         participantSessions: [],
         warnings: [],
-        running: false
+        running: false,
+        ...(mainSession ? { mainSessionParticipantId: mainSession.id } : {})
       }
     };
     return this.userSkillRunContext(conversation, request.content ?? "");
@@ -4987,7 +5034,9 @@ export class ChatService {
         permissions: normalizeChatAgentPermissions(participant.permissions),
         manageRolesParticipants: this.manageRolesParticipantsResolutionForRole(roleById.get(participant.roleConfigId), participant.permissions)
       })),
-      roles: settings.chatRoleConfigs.map((role) => ({
+      // The roles a new member may be given: not the main session's or the
+      // Workflow Manager's (isRoleOfferedForNewMembers).
+      roles: settings.chatRoleConfigs.filter((role) => isRoleOfferedForNewMembers(role.id)).map((role) => ({
         id: role.id,
         label: role.label,
         version: role.version,
@@ -5039,7 +5088,7 @@ export class ChatService {
         ...this.rosterParticipantSummary(conversation, requester),
         appToolCapabilities: normalizeChatAppToolCapabilities(actor.capabilities)
       },
-      roles: settings.chatRoleConfigs.map((role) => ({
+      roles: settings.chatRoleConfigs.filter((role) => isRoleOfferedForNewMembers(role.id)).map((role) => ({
         id: role.id,
         label: role.label,
         version: role.version,
@@ -5087,7 +5136,7 @@ export class ChatService {
       participantChange: {
         supportedOperations: ["add_new_participant_to_chat", "add_existing_participant_to_chat", "remove_participant_from_chat"],
         savePolicy: "For add_new_participant_to_chat, saveAsPreset defaults to true. Set it to false only for a one-off chat member. Do not use archived roles for new members; archived roles are returned only so existing saved/current references can still be understood.",
-        removalPolicy: "remove_participant_from_chat takes a current member's participantId or handle and takes that member out of this chat only; its saved preset is kept. It can be combined with additions in one request (the answer then has `additions` and `removals`). Like an addition, it follows your Manage members setting: with allow it needs no User approval (status auto_approved: decided, made after your turn), with ask the User approves it on a card. A removal takes effect after your turn ends and no member is running. The Chat Assistant and the last member cannot be removed."
+        removalPolicy: "remove_participant_from_chat takes a current member's participantId or handle and takes that member out of this chat only; its saved preset is kept. It can be combined with additions in one request (the answer then has `additions` and `removals`). Like an addition, it follows your Manage members setting: with allow it needs no User approval (status auto_approved: decided, made after your turn), with ask the User approves it on a card. A removal takes effect after your turn ends and no member is running. The Chat Assistant, the main session and the last member cannot be removed."
       }
     };
   }
@@ -5634,6 +5683,9 @@ export class ChatService {
       // The member list's rules, no more: a member may remove itself too.
       if (member.id === assistantId) {
         throw new Error("Chat Assistant cannot be removed from the chat.");
+      }
+      if (this.isChatMainSession(conversation, member)) {
+        throw new Error("The main session cannot be removed from its chat.");
       }
       if (!operations.some((operation) => operation.participantId === member.id)) {
         operations.push({ type: "remove_participant_from_chat", participantId: member.id, handle: member.handle });
@@ -8257,7 +8309,11 @@ export class ChatService {
       };
       try {
         repoFileMentions = await this.validateRepoFileMentions(conversation, request.repoFileMentions, warnings, content);
-        dispatch = this.resolveDispatchTargetsForContent(conversation, content, replyContext);
+        // Written to chosen members (a member's session panel): exactly
+        // those, whatever @handles the text has, and nobody else.
+        dispatch = request.targetParticipantIds !== undefined && request.targetParticipantIds.length > 0
+          ? { targets: this.explicitMessageTargets(conversation, request.targetParticipantIds), unknownHandles: [] }
+          : this.resolveDispatchTargetsForContent(conversation, content, replyContext);
         skillValidation = await this.validateChatSkillMentionsForTargets(
           conversation,
           content,
@@ -10936,6 +10992,12 @@ export class ChatService {
     return classifiedAutoPreauthorizedAppMcpToolNames(toolNames);
   }
 
+  /** The chat's main session (shared/mainSession.ts): named by the chat, or
+   *  told by its role, which no other member is given. */
+  private isChatMainSession(conversation: Conversation, participant: Pick<ChatParticipant, "id" | "roleConfigId">): boolean {
+    return participant.roleConfigId === MAIN_SESSION_ROLE_ID || conversation.metadata.mainSessionParticipantId === participant.id;
+  }
+
   private isAdministratorSession(session: ChatParticipantSession): boolean {
     return session.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID;
   }
@@ -12999,7 +13061,8 @@ export class ChatService {
     items: CreateChatConversationRequest["participants"],
     existing: ChatParticipant[] = [],
     allowEmpty = false,
-    availableRoles?: ChatRoleConfig[]
+    availableRoles?: ChatRoleConfig[],
+    options: { mainSession?: boolean } = {}
   ): Promise<ChatParticipant[]> {
     if (items.length === 0 && existing.length === 0 && !allowEmpty) {
       throw new Error("Add at least one chat member.");
@@ -13029,6 +13092,11 @@ export class ChatService {
           throw new Error(`Deleted role "${archived.label}" cannot be used for a new member.`);
         }
         throw new Error(`Unknown role for @${handle}.`);
+      }
+      // A chat makes its one main session itself (ensureMainSessionParticipant);
+      // no other member is given that role.
+      if (role.id === MAIN_SESSION_ROLE_ID && options.mainSession !== true) {
+        throw new Error(`The "${role.label}" role cannot be given to @${handle}: a chat makes its own main session.`);
       }
       if (item.cloudRun && item.kind !== "codex-cli" && item.kind !== "claude-code") throw new Error("This provider does not support Cloud run.");
       const requestedRuleIds = new Set(this.normalizeBehaviorRuleIds(item.behaviorRuleIds));
@@ -13105,6 +13173,52 @@ export class ChatService {
       defaults.manageRolesParticipants = manageRolesParticipants;
     }
     return Object.keys(defaults).length > 0 ? defaults : undefined;
+  }
+
+  /**
+   * A new chat's main session (docs/main-session.md), first among its
+   * members: an ordinary working member, on the CLI Settings names for it
+   * (the provider the Chat Assistant had, resolved the same way), with the
+   * rights an ordinary member starts with in this chat. Its role lets it ask
+   * and add members without a card. The New chat screen's own row for it
+   * (`requested`, when the User changed it there) is used as given.
+   */
+  private async ensureMainSessionParticipant(
+    participants: ChatParticipant[],
+    preferredKind: ChatProviderKind | undefined,
+    options: { repoPath?: string; hasProject?: boolean; requested?: ChatParticipantInput } = {}
+  ): Promise<ChatParticipant[]> {
+    const existing = mainSessionMemberOf(participants);
+    if (existing) {
+      return [existing, ...participants.filter((participant) => participant !== existing)];
+    }
+    const settings = await this.settings.getPublicSettings();
+    const role = settings.chatRoleConfigs.find((candidate) => candidate.id === MAIN_SESSION_ROLE_ID);
+    if (!role) {
+      throw new Error("The main session's role is missing from Settings. Restart the app and try again.");
+    }
+    const requested = options.requested;
+    const handles = new Set(participants.map((participant) => participant.handle.toLowerCase()));
+    const handle = this.uniqueHandle(requested?.handle.trim().replace(/^@/, "") || MAIN_SESSION_HANDLE, handles);
+    const kind = (requested?.kind as ChatProviderKind | undefined)
+      ?? preferredKind
+      ?? participants[0]?.kind
+      ?? await this.defaultAdministratorProviderKind(settings.providers);
+    const hasProject = options.hasProject ?? Boolean(options.repoPath?.trim());
+    const [mainSession] = await this.validateParticipants([
+      {
+        ...(requested ?? {}),
+        // Never a saved member: each chat makes its own main session.
+        participantConfigId: undefined,
+        handle,
+        roleConfigId: role.id,
+        kind,
+        agentMode: requested?.agentMode ?? "default",
+        permissions: requested?.permissions
+          ?? this.normalizeParticipantPermissionsForRole(role, newChatMemberPermissions(hasProject), true)
+      }
+    ], participants, false, undefined, { mainSession: true });
+    return mainSession ? [mainSession, ...participants] : participants;
   }
 
   private async ensureAdministratorParticipant(
@@ -13369,6 +13483,24 @@ export class ChatService {
   private defaultAdministratorDispatchTarget(conversation: Conversation): ChatParticipant | undefined {
     const participants = this.chatParticipants(conversation);
     return participants.find((participant) => participant.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID);
+  }
+
+  /** The members a message names by id (SendChatMessageRequest
+   *  .targetParticipantIds), each once, in the chat's order. Every id must be
+   *  a member of the chat now. */
+  private explicitMessageTargets(conversation: Conversation, ids: unknown[]): ChatParticipant[] {
+    const participants = this.chatParticipants(conversation);
+    const wanted = new Set<string>();
+    for (const id of ids) {
+      if (typeof id !== "string" || !id.trim()) {
+        throw new Error("A message can be sent only to members of this chat.");
+      }
+      if (!participants.some((participant) => participant.id === id.trim())) {
+        throw new Error(`No member of this chat has id ${id.trim().slice(0, 80)}.`);
+      }
+      wanted.add(id.trim());
+    }
+    return participants.filter((participant) => wanted.has(participant.id));
   }
 
   private resolveDispatchTargetsForContent(

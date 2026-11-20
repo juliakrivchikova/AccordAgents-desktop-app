@@ -44,6 +44,14 @@ const SETTINGS: AppSettings = {
     { kind: "codex-cli", label: "Codex", enabled: true }
   ],
   chatRoleConfigs: [{
+    id: "main-session",
+    label: "Main session",
+    instructions: "Work on the user's requests.",
+    version: 1,
+    appToolCapabilities: [],
+    builtIn: true,
+    updatedAt: "2026-11-20T00:00:00.000Z"
+  }, {
     id: "administrator",
     label: "Chat Assistant",
     instructions: "Assist the user.",

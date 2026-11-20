@@ -12,6 +12,7 @@ import { chatParticipantDisplayName, chatParticipantReference } from "../convers
 import { avatarForChatParticipant, mapChatAvatarIdToKind } from "./chat-avatars";
 import { CHAT_AGENT_MODE_OPTIONS, chatAgentModeLabel, chatProviderOptionId, chatProviderOptionPatch, chatProviderOptions } from "./chat-participant-drafts";
 import { cliProviderHostDefaultModel, cliProviderHostForParticipant } from "../../../shared/cliProviderHosts";
+import { isRoleOfferedForNewMembers } from "../../../shared/mainSession";
 import {
   ChatParticipantAvatarField as ChatAppToolAvatarField,
   ChatParticipantInlineAutoWatchRow as ChatAppToolInlineAutoWatchRow,
@@ -150,7 +151,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
                 value={displayChatRoleLabel(role, participant.roleConfigId)}
                 current={participant.roleConfigId}
                 options={props.roles
-                  .filter((item) => !item.archivedAt || item.id === participant.roleConfigId)
+                  .filter((item) => (!item.archivedAt && isRoleOfferedForNewMembers(item.id)) || item.id === participant.roleConfigId)
                   .map((item) => ({ value: item.id, label: item.archivedAt ? `${displayChatRoleLabel(item)} (deleted)` : displayChatRoleLabel(item) }))}
                 searchable
                 searchPlaceholder="Filter roles"

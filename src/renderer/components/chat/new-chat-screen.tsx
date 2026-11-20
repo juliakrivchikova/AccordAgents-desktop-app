@@ -153,8 +153,8 @@ export function NewChatScreen(props: {
     });
   }, [assistantProviderKind, onSelectedParticipantRuntimeOverridesChange]);
   const mainSessionParticipant = useMemo(
-    () => assistantProviderKind ? newChatMainSessionParticipantConfig(assistantProviderKind, props.settings.chatRoleConfigs) : undefined,
-    [assistantProviderKind, props.settings.chatRoleConfigs]
+    () => assistantProviderKind ? newChatMainSessionParticipantConfig(assistantProviderKind, Boolean(props.repoPath.trim())) : undefined,
+    [assistantProviderKind, props.repoPath]
   );
   const savedParticipantOptions = useMemo(
     () => sortSavedParticipantOptionsByUsage(
@@ -185,7 +185,7 @@ export function NewChatScreen(props: {
       return drafts;
     }
     const mainSessionOverride = props.selectedParticipantRuntimeOverrides[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID];
-    return [newChatMainSessionParticipantDraft(assistantProviderKind, props.settings.chatRoleConfigs, mainSessionOverride), ...drafts];
+    return [newChatMainSessionParticipantDraft(assistantProviderKind, mainSessionOverride, Boolean(props.repoPath.trim())), ...drafts];
   }, [
     assistantProviderKind,
     props.settings.chatRoleConfigs,

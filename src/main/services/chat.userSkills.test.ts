@@ -24,6 +24,15 @@ const GENERIC_ROLE: ChatRoleConfig = {
   version: 1,
   updatedAt: NOW
 };
+/** The main session's built-in role, which every install has (settings.ts). */
+const MAIN_SESSION_ROLE: ChatRoleConfig = {
+  id: "main-session",
+  label: "Main session",
+  instructions: "Work on User's requests.",
+  version: 1,
+  participantDefaults: { requestParticipants: "allow", manageRolesParticipants: "allow" },
+  updatedAt: NOW
+};
 const WORKFLOW_MANAGER_ROLE: ChatRoleConfig = {
   id: "workflow-manager",
   label: "Workflow Manager",
@@ -301,7 +310,7 @@ test("Workflow Manager implementation requests do not auto-select implementation
   }
 });
 
-test("prospective skill context defaults to assistant instead of all participants", async () => {
+test("prospective skill context defaults to the main session instead of all participants", async () => {
   const { service } = testService({
     conversation: chatConversation([chatParticipant()]),
     userSkills: new UserSkillsService(),
@@ -629,7 +638,7 @@ function testService(options: {
       chatPromptContext: typeof DEFAULT_CHAT_PROMPT_CONTEXT;
     }> {
       return {
-        chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE],
+        chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE, MAIN_SESSION_ROLE],
         chatBehaviorRules: [],
         providers: [
           { kind: "codex-cli", enabled: true },
@@ -646,7 +655,7 @@ function testService(options: {
       assistantProviderKind: "codex-cli";
     }> {
       return {
-        chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE],
+        chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE, MAIN_SESSION_ROLE],
         chatBehaviorRules: [],
         providers: [
           { kind: "codex-cli", enabled: true },

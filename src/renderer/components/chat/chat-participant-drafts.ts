@@ -1,3 +1,4 @@
+import { MAIN_SESSION_ROLE_ID, WORKFLOW_MANAGER_ROLE_ID, isRoleOfferedForNewMembers } from "../../../shared/mainSession";
 import type {
   AgentHealth,
   AppSettings,
@@ -205,7 +206,7 @@ export function chatProviderSupportsCloudRun(kind: ChatProviderKind | undefined)
   return kind === "codex-cli" || kind === "claude-code";
 }
 
-export const WORKFLOW_MANAGER_ROLE_ID = "workflow-manager";
+export { WORKFLOW_MANAGER_ROLE_ID };
 
 export const CHAT_SHELL_ACTION_OPTIONS: Array<{ value: ChatShellPermissionAction; label: string }> = [
   { value: "allow", label: "Allow" },
@@ -219,7 +220,7 @@ export const CHAT_SHELL_MATCH_OPTIONS: Array<{ value: ChatShellPermissionMatch; 
 ];
 
 export function activeChatRoleConfigs(settings: Pick<AppSettings, "chatRoleConfigs">): ChatRoleConfig[] {
-  return settings.chatRoleConfigs.filter((role) => !role.archivedAt);
+  return settings.chatRoleConfigs.filter((role) => !role.archivedAt && isRoleOfferedForNewMembers(role.id));
 }
 
 export function defaultChatParticipantDraft(settings: AppSettings, existingHandles: Set<string> = new Set()): ChatParticipantDraft {
@@ -603,8 +604,8 @@ export function validateChatStartupDrafts(
   hosts: ReadonlyArray<CliProviderHost> = []
 ): string | undefined {
   if (drafts.length === 0) {
-    if (!roles.some((role) => role.id === "administrator")) {
-      return "Chat Assistant role is required to start an empty chat.";
+    if (!roles.some((role) => role.id === MAIN_SESSION_ROLE_ID)) {
+      return "The main session role is required to start a chat.";
     }
     if (readyProviderKinds(agents, providers).length === 0) {
       return NO_READY_CLI_MESSAGE;

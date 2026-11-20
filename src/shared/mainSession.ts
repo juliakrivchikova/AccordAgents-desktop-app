@@ -34,6 +34,29 @@ type ChatMetadataLike = Pick<ConversationMetadata, "mainSessionParticipantId" | 
   participants?: unknown;
 };
 
+/** The Workflow Manager's role. The main session took its place, so it is no
+ *  longer offered for new members; members that have it keep it. */
+export const WORKFLOW_MANAGER_ROLE_ID = "workflow-manager";
+
+/** Whether a user or an app tool may give a new member this role: not the
+ *  main session's own (a chat makes its one main session itself), and not
+ *  the Workflow Manager's (the User, 2026-11-20). A member or a saved member
+ *  that has one already keeps it. */
+export function isRoleOfferedForNewMembers(roleConfigId: string | undefined): boolean {
+  return roleConfigId !== MAIN_SESSION_ROLE_ID && roleConfigId !== WORKFLOW_MANAGER_ROLE_ID;
+}
+
+/** The main session among these members, told by its role (the phone and
+ *  the server know a chat's members, not always its metadata). With more
+ *  than one (never made by the app), the one the chat names wins. */
+export function mainSessionMemberOf<T extends { id: string; roleConfigId?: string }>(
+  participants: readonly T[],
+  namedId?: string
+): T | undefined {
+  const candidates = participants.filter((participant) => participant.roleConfigId === MAIN_SESSION_ROLE_ID);
+  return candidates.find((participant) => participant.id === namedId) ?? candidates[0];
+}
+
 export function isChatViewMode(value: unknown): value is ChatViewMode {
   return value === "classic" || value === "sessions";
 }

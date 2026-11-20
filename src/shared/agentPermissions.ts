@@ -29,6 +29,20 @@ export function defaultChatAgentPermissions(): ChatAgentPermissions {
   return cloneChatAgentPermissions(DEFAULT_CHAT_AGENT_PERMISSIONS);
 }
 
+/** What an ordinary member starts with in a new chat: the generic member the
+ *  app seeds for each CLI reads the chat's project when it has one (and is
+ *  given nothing else); it asks for anything more. The main session starts
+ *  the same way (docs/main-session.md). */
+export function newChatMemberPermissions(hasProject: boolean): ChatAgentPermissions {
+  return {
+    ...defaultChatAgentPermissions(),
+    repoRead: hasProject,
+    workspaceWrite: false,
+    webAccess: false,
+    shell: { enabled: false, rules: [] }
+  };
+}
+
 export function cloneChatAgentPermissions(permissions: ChatAgentPermissions): ChatAgentPermissions {
   const providerNative = cloneProviderNativePermissions(permissions.providerNative);
   const manageRolesParticipants = normalizeOptionalChatParticipantRequestPermission(permissions.manageRolesParticipants);

@@ -1,5 +1,6 @@
 import { normalizeAutoChatTitle, normalizeManualChatTitle } from "./chatTitles";
-import type { ChatParticipant, ChatParticipantConfig, ConversationSummary } from "./types";
+import { DEFAULT_CHAT_VIEW, MAIN_SESSION_ROLE_ID, isChatViewMode, mainSessionMemberOf } from "./mainSession";
+import type { ChatParticipant, ChatParticipantConfig, ChatViewMode, ConversationMetadata, ConversationSummary } from "./types";
 
 /**
  * How a new chat is made, the same on the computer and on the phone (the
@@ -158,16 +159,23 @@ export function newChatPickedMembers(input: { members: NewChatMemberOption[]; ch
 
 /**
  * A new chat's members, as the computer makes them: each member chosen, and
- * each saved member the first message names with an @, then the Chat
- * Assistant before them all. Only the first that watches the chat (the
- * Assistant counted last) keeps watching it. Every member gets a fresh id.
+ * each saved member the first message names with an @, then the chat's own
+ * member before them all: its main session (docs/main-session.md). A phone
+ * from before passes the offer's `assistant`, which the computer now fills
+ * with the main session too. Only the first that watches the chat (the
+ * chat's own member counted last) keeps watching it. Every member gets a
+ * fresh id; the first is the main session (newChatMetadata names it). Given
+ * the chat's project ("" for none), the main session reads it exactly when
+ * there is one, as the computer gives it (an ordinary member's start).
  */
 export function newChatParticipants(input: {
-  assistant: ChatParticipant;
+  mainSession?: ChatParticipant;
+  assistant?: ChatParticipant;
   members: NewChatMemberOption[];
   chosenConfigIds: string[];
   firstMessage: string;
   newId: () => string;
+  project?: string;
 }): ChatParticipant[] {
   const picked = newChatPickedMembers(input);
   let watching = false;
@@ -176,11 +184,29 @@ export function newChatParticipants(input: {
     if (autoWatch) watching = true;
     return { ...member.participant, ...(member.machineId ? { homeMachineId: member.machineId } : {}), id: input.newId(), autoWatch };
   });
+  const offered = input.mainSession ?? input.assistant;
+  if (!offered) return members;
+  const lead = offered.roleConfigId === MAIN_SESSION_ROLE_ID && input.project !== undefined && offered.permissions
+    ? { ...offered, permissions: { ...offered.permissions, repoRead: Boolean(normalizeProjectPath(input.project)) } }
+    : offered;
   const taken = new Set(members.map((member) => member.handle.toLowerCase()));
-  let handle = input.assistant.handle;
+  let handle = lead.handle;
   for (let suffix = 2; taken.has(handle.toLowerCase()); suffix += 1) {
     const suffixText = `-${suffix}`;
-    handle = `${input.assistant.handle.slice(0, 32 - suffixText.length)}${suffixText}`;
+    handle = `${lead.handle.slice(0, 32 - suffixText.length)}${suffixText}`;
   }
-  return [{ ...input.assistant, id: input.newId(), handle, autoWatch: input.assistant.autoWatch === true && !watching }, ...members];
+  return [{ ...lead, id: input.newId(), handle, autoWatch: lead.autoWatch === true && !watching }, ...members];
+}
+
+/** What a new chat's metadata says besides its members: which member is its
+ *  main session and the view it opens in (the computer's Settings → General
+ *  choice, HubNewChatOptions.defaultChatView). Nothing for a chat without a
+ *  main session (an offer from a computer from before). */
+export function newChatMetadata(
+  participants: ReadonlyArray<Pick<ChatParticipant, "id" | "roleConfigId">>,
+  defaultChatView?: ChatViewMode
+): Pick<ConversationMetadata, "mainSessionParticipantId" | "chatView"> {
+  const mainSession = mainSessionMemberOf(participants);
+  if (!mainSession) return {};
+  return { mainSessionParticipantId: mainSession.id, chatView: isChatViewMode(defaultChatView) ? defaultChatView : DEFAULT_CHAT_VIEW };
 }
