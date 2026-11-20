@@ -275,6 +275,13 @@ export function chatAgentPermissionsWithin(actual: ChatAgentPermissions, ceiling
   if (member.shell.rules.some((rule) => rule.action !== "deny" && !limitRules.has(shellRuleKey(rule)))) {
     return false;
   }
+  // A command the ceiling may not run stays forbidden: a member with a shell
+  // keeps every deny rule of the ceiling (clampChatAgentPermissions carries
+  // them), dropping one is a broader right.
+  const memberRules = new Set(member.shell.rules.map(shellRuleKey));
+  if (member.shell.enabled && limit.shell.rules.some((rule) => rule.action === "deny" && !memberRules.has(shellRuleKey(rule)))) {
+    return false;
+  }
   const limitTools = new Set(limit.providerNative?.["claude-code"]?.allowedTools ?? []);
   if ((member.providerNative?.["claude-code"]?.allowedTools ?? []).some((tool) => !limitTools.has(tool))) {
     return false;

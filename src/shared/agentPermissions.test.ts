@@ -135,3 +135,12 @@ test("within: a broader right, rule or tool is caught", () => {
   assert.equal(chatAgentPermissionsWithin(permissions({ providerNative: { "claude-code": { allowedTools: ["C"] } } }), parent), false);
   assert.equal(chatAgentPermissionsWithin(permissions({ requestParticipants: "allow" }), parent), false);
 });
+
+test("within: a member with a shell that drops a deny rule of the ceiling is broader", () => {
+  const parent = permissions({ shell: { enabled: true, rules: [{ action: "allow", match: "prefix", pattern: "git diff" }, { action: "deny", match: "prefix", pattern: "git push" }] } });
+  assert.equal(chatAgentPermissionsWithin(permissions({ shell: { enabled: true, rules: [{ action: "allow", match: "prefix", pattern: "git diff" }] } }), parent), false,
+    "git push would no longer be forbidden");
+  assert.equal(chatAgentPermissionsWithin(permissions({ shell: { enabled: true, rules: [{ action: "deny", match: "prefix", pattern: "git push" }] } }), parent), true);
+  assert.equal(chatAgentPermissionsWithin(permissions({ shell: { enabled: false, rules: [] } }), parent), true, "no shell at all: nothing to forbid");
+  assert.equal(chatAgentPermissionsWithin(clampChatAgentPermissions(permissions({ shell: { enabled: true, rules: [] } }), parent), parent), true, "a clamped member keeps them");
+});

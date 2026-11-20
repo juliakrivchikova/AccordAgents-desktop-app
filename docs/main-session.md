@@ -200,8 +200,9 @@ the desktop and on the phone (bundled through `mobileSharedRules.ts`).
   for new members (`isRoleOfferedForNewMembers`: not the Workflow
   Manager's). In a main-session chat every addition without a card, by any
   member through any member tool, has nothing beyond the rights of the
-  member adding it and of the main session (`additionsExceedMainSession`);
-  a broader one goes to a card. Such a member is marked
+  member adding it and of the main session (`additionsExceedMainSession`;
+  a member with a shell keeps every deny rule of theirs,
+  `chatAgentPermissionsWithin`); a broader one goes to a card. Such a member is marked
   `ChatParticipant.delegatedByParticipantId` (who added it; shared through
   the server with the member) and runs, asks, compacts and manages members
   no more broadly than the main session as it is at each turn
@@ -215,7 +216,10 @@ the desktop and on the phone (bundled through `mobileSharedRules.ts`).
   User's Mac, another machine), has nothing beyond the rights of a member
   there that may add it and of the main session as the server has them
   before the write, and says who added it; `delegatedByParticipantId` stays
-  as the server has it; the main session's `/accord` gives its facilitator
+  as the server has it, and a member so marked adds or removes members
+  without a card no more freely than the main session's right as the server
+  has it before the write; a member the User approved on a card is not
+  marked, whatever the machine wrote; the main session's `/accord` gives its facilitator
   no more leave to ask than the main session's own. A new chat names as its
   main session only a member with the main session's role, and moving a
   chat to the server keeps the main session the server has.

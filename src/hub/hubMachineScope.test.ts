@@ -575,6 +575,53 @@ test("in a chat with a main session every member's addition is held to its own r
   assert.equal(members(dropped).get("p-child")?.delegatedByParticipantId, "p-main");
 });
 
+test("a member the main session made manages members no more freely than the main session as the server has it", () => {
+  const child = {
+    id: "p-child", handle: "child", label: "Child", roleConfigId: "r", kind: "claude-code", homeMachineId: "machine-1", agentMode: "default",
+    delegatedByParticipantId: "p-main",
+    permissions: { repoRead: true, workspaceWrite: false, webAccess: false, requestParticipants: "allow", requestCompaction: "ask", manageRolesParticipants: "allow", shell: { enabled: false, rules: [] } }
+  };
+  const grand = {
+    id: "p-grand", handle: "grand", label: "Grand", roleConfigId: "r", kind: "claude-code", homeMachineId: "machine-1", agentMode: "default",
+    permissions: { repoRead: true, workspaceWrite: false, webAccess: false, requestParticipants: "ask", requestCompaction: "ask", shell: { enabled: false, rules: [] } }
+  };
+  // The User took the main session's right to manage members away; the child keeps "allow" stored.
+  const loweredMain = { ...mainOnMachine, homeMachineId: undefined, permissions: { ...mainOnMachine.permissions, manageRolesParticipants: "deny" } };
+  const chat = mainSessionChatWith([deskR, loweredMain, child]);
+  const added = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, loweredMain, child, grand] } }, "machine-1", { rules: mainRules });
+  assert.equal(members(added).has("p-grand"), false, "no addition without a card");
+  const removed = scopeMachineConversationUpdate(chat, { metadata: { participants: [loweredMain, child] } }, "machine-1", { rules: mainRules });
+  assert.equal(members(removed).has(deskR.id), true, "no removal without a card");
+  // While the main session may, so may its member.
+  const mainOnMac = { ...mainOnMachine, homeMachineId: undefined };
+  const allowed = scopeMachineConversationUpdate(mainSessionChatWith([deskR, mainOnMac, child]), { metadata: { participants: [deskR, mainOnMac, child, grand] } }, "machine-1", { rules: mainRules });
+  assert.equal(members(allowed).has("p-grand"), true);
+});
+
+test("an addition the User approved on a card is not marked as added by a member, whatever the machine wrote", () => {
+  const mainOnMac = { ...mainOnMachine, homeMachineId: undefined };
+  const asker = { ...boxR, permissions: { requestParticipants: "ask", manageRolesParticipants: "ask" } };
+  const request = { operations: [{ type: "add_new_participant_to_chat", participant: { handle: "helper", roleConfigId: "r", kind: "codex-cli" } }] };
+  const approval = approved("p-box", "app_participants_request_change", request);
+  const scoped = scopeMachineConversationUpdate(mainSessionChatWith([deskR, mainOnMac, asker]),
+    { metadata: { participants: [deskR, mainOnMac, asker, { ...added, delegatedByParticipantId: "p-box" }] } }, "machine-1", { rules: mainRules, approvals: [approval] });
+  assert.equal(members(scoped).has("p-new"), true, "added: she approved it");
+  assert.equal(members(scoped).get("p-new")?.delegatedByParticipantId, undefined, "hers, not held to a member's rights");
+  assert.ok(scoped.refused.includes("participants.p-new.delegatedBy"));
+});
+
+test("a member added without a card keeps every command its adder may not run forbidden", () => {
+  const shellMember = (rules: unknown[]) => ({
+    id: "p-sh", handle: "sh", label: "Sh", roleConfigId: "r", kind: "claude-code", homeMachineId: "machine-1", agentMode: "default",
+    permissions: { repoRead: true, workspaceWrite: true, webAccess: false, requestParticipants: "allow", requestCompaction: "ask", shell: { enabled: true, rules } }
+  });
+  const mainSelf = { ...mainOnMachine };
+  const add = (member: Record<string, unknown>) =>
+    members(scopeMachineConversationUpdate(mainSessionChatWith([deskR, mainSelf]), { metadata: { participants: [deskR, mainSelf, member] } }, "machine-1", { rules: mainRules })).has("p-sh");
+  assert.equal(add(shellMember([{ action: "allow", match: "prefix", pattern: "git diff" }])), false, "git push would be allowed again");
+  assert.equal(add(shellMember([{ action: "allow", match: "prefix", pattern: "git diff" }, { action: "deny", match: "prefix", pattern: "git push" }])), true);
+});
+
 test("the main session's `/accord` gives its facilitator no more leave to ask than the main session's own, as in the app", () => {
   const asking = { ...mainOnMachine, permissions: { ...mainOnMachine.permissions, requestParticipants: "ask" } };
   const denied = { ...deskR, permissions: { requestParticipants: "deny" } };

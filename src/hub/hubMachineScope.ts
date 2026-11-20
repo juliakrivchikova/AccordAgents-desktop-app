@@ -441,8 +441,16 @@ function isRosterPolicy(policy: ChatAppToolApprovalPolicy, member: ChatParticipa
  *  User's rules: its right to manage members (its role's, or its own), or her
  *  "Allow for this chat" on its roster requests (chat.ts
  *  matchingAppToolApprovalPolicy); never when it may not manage them at all. */
-function managesWithoutCard(member: ChatParticipant, rules: HubMemberRules | undefined, policies: ChatAppToolApprovalPolicy[]): boolean {
-  const right = manageRight(rules?.roles[member.roleConfigId], member.permissions).effective;
+function managesWithoutCard(member: ChatParticipant, rules: HubMemberRules | undefined, policies: ChatAppToolApprovalPolicy[], mainSession?: ChatParticipant): boolean {
+  let right = manageRight(rules?.roles[member.roleConfigId], member.permissions).effective;
+  // A member added without a card in a chat with a main session manages
+  // members no more freely than the main session as the server has it before
+  // this write (chat.ts requireParticipantManager): lowering the main
+  // session's right lowers its members' too, whatever they keep stored.
+  if (member.delegatedByParticipantId && mainSession && mainSession.id !== member.id) {
+    const mainRight = manageRight(rules?.roles[mainSession.roleConfigId], mainSession.permissions).effective;
+    if (rank(mainRight) < rank(right)) right = mainRight;
+  }
   if (right === "allow") return true;
   if (right === "deny") return false;
   return policies.some((policy) => isRosterPolicy(policy, member));
@@ -611,7 +619,7 @@ function additionAllowed(member: ChatParticipant, changes: MemberChanges): ChatP
   const escalates = manageRight(role, member.permissions).exceedsRoleDefault ||
     (preset !== undefined && chatParticipantRequestPermissionExceeds(manageRight(role, member.permissions).effective, manageRight(role, preset.permissions).effective));
   if (!escalates) {
-    const adders = changes.machineMembers.filter((requester) => managesWithoutCard(requester, rules, changes.policies) &&
+    const adders = changes.machineMembers.filter((requester) => managesWithoutCard(requester, rules, changes.policies, mainSession) &&
       (!mainSession || (withinMember(member, requester, rules) && withinMember(member, mainSession, rules))));
     // The member the machine names as the one that added it, when it is one.
     const named = adders.find((requester) => requester.id === member.delegatedByParticipantId);
@@ -649,7 +657,7 @@ function removalAllowed(member: ChatParticipant, changes: MemberChanges, mainSes
   // The Chat Assistant stays, as in the app, and so does the main session.
   if (member.roleConfigId === CHAT_ASSISTANT_ROLE_ID) return false;
   if (member.roleConfigId === MAIN_SESSION_ROLE_ID || member.id === mainSessionId) return false;
-  if (changes.machineMembers.some((requester) => managesWithoutCard(requester, changes.rules, changes.policies))) return true;
+  if (changes.machineMembers.some((requester) => managesWithoutCard(requester, changes.rules, changes.policies, changes.mainSession))) return true;
   const answer = changes.approved.find((item) => changes.machineMembers.some((requester) => requester.id === item.card.participantId) &&
     approvedRemovals(item).includes(member.id));
   if (answer) changes.noted.add(answer.key);
@@ -751,6 +759,12 @@ export function scopeMachineConversationUpdate(conversation: Conversation, updat
           // at each turn (docs/main-session.md).
           if (allowed !== "card" && changes.mainSession && added.delegatedByParticipantId !== allowed.id) {
             added = withDelegator(added, allowed.id);
+            refused.push(`participants.${participant.id}.delegatedBy`);
+          }
+          // One the User approved on a card is hers: not marked, whatever
+          // the machine wrote (as the app marks only additions without one).
+          if (allowed === "card" && added.delegatedByParticipantId !== undefined) {
+            added = withDelegator(added, undefined);
             refused.push(`participants.${participant.id}.delegatedBy`);
           }
           taken.push(added);
