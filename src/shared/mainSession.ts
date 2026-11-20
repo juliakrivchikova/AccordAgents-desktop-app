@@ -169,8 +169,9 @@ export function sessionsViewLane(message: ChatMessage, index: SessionsViewIndex)
   }
   if (message.role === "participant" && message.participantId) {
     if (message.participantId === mainId) {
-      const requester = index.requestReplyRequesterById.get(message.id);
-      if (requester && requester !== mainId && !index.autoResumeMessageIds.has(message.id)) {
+      if (index.autoResumeMessageIds.has(message.id)) return { kind: "main" };
+      const requester = index.requestReplyRequesterById.get(message.id) ?? answeredRequesterOf(message, index);
+      if (requester && requester !== mainId) {
         return { kind: "member", participantId: requester };
       }
       return { kind: "main" };
@@ -178,6 +179,19 @@ export function sessionsViewLane(message: ChatMessage, index: SessionsViewIndex)
     return { kind: "member", participantId: message.participantId };
   }
   return { kind: "main" };
+}
+
+/** The member whose request the main session answers with this message,
+ *  told by the request it answers (its source) rather than by the request's
+ *  reply id, which is set only when the turn ends: so the answer is in that
+ *  member's session from its first token, not on the main timeline first. */
+function answeredRequesterOf(message: ChatMessage, index: SessionsViewIndex): string | undefined {
+  const metadata = message.metadata as { sourceMessageId?: unknown; participantRequestBatchId?: unknown; participantRequest?: unknown } | undefined;
+  if (metadata?.participantRequest || typeof metadata?.sourceMessageId !== "string") return undefined;
+  const batch = index.requestBatchByMessageId.get(metadata.sourceMessageId);
+  if (!batch || batch.requesterParticipantId === index.mainSessionParticipantId) return undefined;
+  if (typeof metadata.participantRequestBatchId === "string" && metadata.participantRequestBatchId !== batch.id) return undefined;
+  return batch.items.some((item) => item.targetParticipantId === index.mainSessionParticipantId) ? batch.requesterParticipantId : undefined;
 }
 
 /** The tasks a request message gives, for its card: the main session's
@@ -240,4 +254,85 @@ export function membersMainSessionWaitsOn(messages: readonly ChatMessage[], inde
     }
   }
   return waiting;
+}
+
+/** Where each of the main session's tasks is shown on the main timeline of
+ *  the sessions view: inside the reply of the turn that gave it (its "Worked
+ *  for …" fold, or the reply's live activity while it runs), as in T3 Code.
+ *  A task and its turn's reply answer the same message (their source). A task
+ *  whose reply is not among these messages stays where it is. */
+export interface SessionsTaskPlacement {
+  /** The task messages shown inside each reply, by the reply's id. */
+  tasksByReplyId: Map<string, ChatMessage[]>;
+  /** The task messages shown inside a reply, not on their own. */
+  placedTaskIds: Set<string>;
+}
+
+export function sessionsTaskPlacement(mainMessages: readonly ChatMessage[], index: SessionsViewIndex): SessionsTaskPlacement {
+  const tasksByReplyId = new Map<string, ChatMessage[]>();
+  const placedTaskIds = new Set<string>();
+  const repliesBySource = new Map<string, ChatMessage[]>();
+  for (const message of mainMessages) {
+    if (message.role !== "participant" || message.participantId !== index.mainSessionParticipantId || message.metadata?.participantRequest) continue;
+    const source = message.metadata?.sourceMessageId;
+    if (typeof source !== "string" || !source) continue;
+    const replies = repliesBySource.get(source) ?? [];
+    replies.push(message);
+    repliesBySource.set(source, replies);
+  }
+  for (const message of mainMessages) {
+    if (!isMainSessionTaskMessage(message, index)) continue;
+    const source = message.metadata?.sourceMessageId ?? message.metadata?.participantRequest?.triggerMessageId;
+    const replies = typeof source === "string" ? repliesBySource.get(source) : undefined;
+    if (!replies?.length) continue;
+    // The reply its turn was writing when it gave the task (a turn's reply
+    // starts before its tool calls), else the first one after it.
+    const before = replies.filter((reply) => reply.createdAt <= message.createdAt);
+    const reply = before[before.length - 1] ?? replies[0]!;
+    const tasks = tasksByReplyId.get(reply.id) ?? [];
+    tasks.push(message);
+    tasksByReplyId.set(reply.id, tasks);
+    placedTaskIds.add(message.id);
+  }
+  return { tasksByReplyId, placedTaskIds };
+}
+
+/** A member that wrote in the chat, or was given a task in it, and is no
+ *  longer in it (the main session removes the members it made once their
+ *  work is done). Its session stays readable. */
+export interface SessionsFormerMember {
+  id: string;
+  handle: string;
+}
+
+export function sessionsFormerMembers(
+  messages: readonly ChatMessage[],
+  participants: readonly { id: string }[],
+  mainSessionId: string
+): SessionsFormerMember[] {
+  const current = new Set(participants.map((participant) => participant.id));
+  const former = new Map<string, SessionsFormerMember>();
+  const note = (id: string | undefined, handle: string | undefined): void => {
+    if (!id || id === mainSessionId || current.has(id)) return;
+    const clean = (handle ?? "").trim().replace(/^@/, "");
+    const known = former.get(id);
+    if (!known) former.set(id, { id, handle: clean });
+    else if (!known.handle && clean) known.handle = clean;
+  };
+  for (const message of messages) {
+    if (message.role === "participant") note(message.participantId, message.participantLabel);
+    for (const item of message.metadata?.participantRequest?.items ?? []) note(item.targetParticipantId, item.targetHandle);
+  }
+  return [...former.values()];
+}
+
+/** A User's message to the main session as the sessions view shows it: the
+ *  leading mention of the main session (the default addressee there) left
+ *  out. */
+export function withoutLeadingMention(content: string, handle: string | undefined): string {
+  const clean = (handle ?? "").trim().replace(/^@/, "");
+  if (!clean) return content;
+  const escaped = clean.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const stripped = content.replace(new RegExp(`^\\s*@${escaped}(?![\\w-])[\\s,:;]*`, "i"), "");
+  return stripped.trim() ? stripped : content;
 }

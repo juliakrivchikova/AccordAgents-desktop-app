@@ -7,7 +7,11 @@ import { isPendingReply, isWaitingChoice } from "./chatActiveRuns";
 import { stripChatControlBlocks } from "./chatControlBlocks";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import { sessionsViewLane, type SessionsViewIndex } from "./mainSession";
-import type { ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
+import { APP_PARTICIPANTS_REQUEST_CHANGE_TOOL } from "./appMcpToolContracts";
+import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
+
+/** The ordinary member's role: the sessions view names no role for it. */
+const GENERIC_MEMBER_ROLE_ID = "generic-participant";
 
 /** A task's or a member's state as the sessions view names it. */
 export type SessionsWorkStatus = "running" | "waiting" | "done" | "failed" | "stopped" | "idle";
@@ -26,19 +30,29 @@ export function isMemberWorking(status: ChatParticipantRosterStatus | undefined)
   return status === "running" || status === "compacting" || status === "background";
 }
 
+/** Whether the member's stopped or failed state is about this task: it comes
+ *  from the member's newest finished message, which may be the end of an
+ *  earlier turn while this task waits in its queue or its machine prepares.
+ *  Only a message written since the task was given speaks for it. */
+function endedSinceTask(item: Pick<ChatParticipantRequestItem, "createdAt">, memberFinishedAt: string | undefined): boolean {
+  return memberFinishedAt !== undefined && memberFinishedAt >= item.createdAt;
+}
+
 /** The state of one task the main session gave, from the task's own status
- *  and what its member is doing now. */
+ *  and what its member is doing now. `memberFinishedAt`: when the member's
+ *  newest finished message was written (sessionsMemberActivity). */
 export function sessionsTaskStatus(
-  item: Pick<ChatParticipantRequestItem, "status">,
-  memberStatus?: ChatParticipantRosterStatus
+  item: Pick<ChatParticipantRequestItem, "status" | "createdAt">,
+  memberStatus?: ChatParticipantRosterStatus,
+  memberFinishedAt?: string
 ): Exclude<SessionsWorkStatus, "idle"> {
   switch (item.status) {
     case "pending_approval":
       return "waiting";
     case "running":
       if (memberStatus === "pending") return "waiting";
-      if (memberStatus === "stopped") return "stopped";
-      if (memberStatus === "error") return "failed";
+      if (memberStatus === "stopped" && endedSinceTask(item, memberFinishedAt)) return "stopped";
+      if (memberStatus === "error" && endedSinceTask(item, memberFinishedAt)) return "failed";
       return "running";
     case "answered":
     case "resuming_requester":
@@ -54,16 +68,39 @@ export function sessionsTaskStatus(
 }
 
 /** A member's state in the members panel: what it does now, else how its
- *  latest task ended. */
+ *  latest task ended. A stopped or failed turn from before its latest task
+ *  was given does not hide that task. */
 export function sessionsMemberStatus(
   memberStatus: ChatParticipantRosterStatus | undefined,
-  task: Pick<ChatParticipantRequestItem, "status"> | undefined
+  task: Pick<ChatParticipantRequestItem, "status" | "createdAt"> | undefined,
+  memberFinishedAt?: string
 ): SessionsWorkStatus {
   if (memberStatus === "pending") return "waiting";
   if (isMemberWorking(memberStatus)) return "running";
-  if (memberStatus === "stopped") return "stopped";
-  if (memberStatus === "error") return "failed";
-  return task ? sessionsTaskStatus(task, memberStatus) : "idle";
+  const stale = task !== undefined && !endedSinceTask(task, memberFinishedAt);
+  if (memberStatus === "stopped" && !stale) return "stopped";
+  if (memberStatus === "error" && !stale) return "failed";
+  return task ? sessionsTaskStatus(task, memberStatus, memberFinishedAt) : "idle";
+}
+
+/** What every member's messages say about it, read in one pass per change
+ *  of the loaded chat: its reply in progress (newest) and when its newest
+ *  finished message was written. */
+export interface SessionsMemberActivity {
+  runningSince: ReadonlyMap<string, string>;
+  finishedAt: ReadonlyMap<string, string>;
+}
+
+export function sessionsMemberActivity(messages: readonly ChatMessage[]): SessionsMemberActivity {
+  const runningSince = new Map<string, string>();
+  const finishedAt = new Map<string, string>();
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.role !== "participant" || !message.participantId) continue;
+    const target = isPendingReply(message) ? runningSince : finishedAt;
+    if (!target.has(message.participantId)) target.set(message.participantId, message.createdAt);
+  }
+  return { runningSince, finishedAt };
 }
 
 /** The first line of a text worth showing in one row: control blocks (a
@@ -91,6 +128,75 @@ export function sessionsTaskReplyLine(
   const reply = item.replyMessageId ? messagesById.get(item.replyMessageId) : undefined;
   if (!reply || reply.status === "pending") return undefined;
   return firstTextLine(reply.content) || undefined;
+}
+
+/** A member's title in the sessions view (as in T3 Code): its current or
+ *  latest task's first line; its handle without "@" only while it has none. */
+export function sessionsMemberTitle(
+  member: { handle?: string } | undefined,
+  task?: Pick<ChatParticipantRequestItem, "prompt" | "targetHandle">
+): string {
+  return firstTextLine(task?.prompt, 80) || (member?.handle ?? task?.targetHandle ?? "").trim().replace(/^@/, "") || "Member";
+}
+
+/** The line under a member's title: its provider, model and role (the role
+ *  only when it is not the ordinary member's). */
+export function sessionsMemberDetail(parts: { provider?: string; model?: string; roleLabel?: string; roleConfigId?: string }): string {
+  const role = parts.roleConfigId && parts.roleConfigId !== GENERIC_MEMBER_ROLE_ID ? parts.roleLabel : undefined;
+  return [parts.provider, parts.model, role].map((part) => part?.trim()).filter(Boolean).join(" · ");
+}
+
+/** The line at the end of the main timeline while the main session waits. */
+export function sessionsWaitingText(titles: readonly string[]): string {
+  return `Waiting on ${titles.length} ${titles.length === 1 ? "member" : "members"}: ${titles.join(", ")}`;
+}
+
+/** The summary heading the delegations inside a reply's "Worked for …". */
+export function sessionsDelegationSummary(count: number): string {
+  return `Delegated ${count} ${count === 1 ? "task" : "tasks"}`;
+}
+
+/** One task of a request as the sessions view shows it: whom it went to, its
+ *  title, its state, since when it runs, how long it took and one line of
+ *  its result or error. Worked out once per change of the loaded chat. */
+export interface SessionsTaskEntry {
+  messageId: string;
+  item: ChatParticipantRequestItem;
+  title: string;
+  status: Exclude<SessionsWorkStatus, "idle">;
+  /** While it runs: when its member's work on it started. */
+  since?: string;
+  /** Once it ended: how long it took. */
+  durationMs?: number;
+  /** One line of the member's reply, or of why it failed. */
+  line?: string;
+}
+
+export function sessionsTaskEntries(
+  message: Pick<ChatMessage, "id">,
+  batch: Pick<ChatParticipantRequestBatch, "items">,
+  statusById: ReadonlyMap<string, ChatParticipantRosterStatus>,
+  activity: SessionsMemberActivity,
+  messagesById: ReadonlyMap<string, ChatMessage>
+): SessionsTaskEntry[] {
+  return batch.items.map((item) => {
+    const memberId = item.targetParticipantId;
+    const status = sessionsTaskStatus(item, statusById.get(memberId), activity.finishedAt.get(memberId));
+    const running = activity.runningSince.get(memberId);
+    const reply = item.replyMessageId ? messagesById.get(item.replyMessageId) : undefined;
+    const worked = typeof reply?.metadata?.workedMs === "number" && Number.isFinite(reply.metadata.workedMs) ? reply.metadata.workedMs : undefined;
+    const elapsed = item.updatedAt ? Date.parse(item.updatedAt) - Date.parse(item.createdAt) : NaN;
+    const line = status === "done" ? sessionsTaskReplyLine(item, messagesById) : status === "failed" ? firstTextLine(item.error) || undefined : undefined;
+    return {
+      messageId: message.id,
+      item,
+      title: sessionsMemberTitle(undefined, item),
+      status,
+      ...(status === "running" ? { since: running && running >= item.createdAt ? running : item.createdAt } : {}),
+      ...(status !== "running" && status !== "waiting" && (worked ?? elapsed) >= 0 ? { durationMs: worked ?? elapsed } : {}),
+      ...(line ? { line } : {})
+    };
+  });
 }
 
 /** When the member's work on a task started: its reply in progress (the turn
@@ -170,12 +276,13 @@ export function sessionsMemberRows(
   participants: readonly ChatParticipant[],
   mainSessionId: string,
   statusById: ReadonlyMap<string, ChatParticipantRosterStatus>,
-  tasks: ReadonlyMap<string, SessionsMemberTask>
+  tasks: ReadonlyMap<string, SessionsMemberTask>,
+  finishedAt?: ReadonlyMap<string, string>
 ): { current: SessionsMemberRow[]; previous: SessionsMemberRow[] } {
   const rows: SessionsMemberRow[] = participants.flatMap((participant) => {
     if (participant.id === mainSessionId) return [];
     const task = tasks.get(participant.id);
-    const status = sessionsMemberStatus(statusById.get(participant.id), task?.item);
+    const status = sessionsMemberStatus(statusById.get(participant.id), task?.item, finishedAt?.get(participant.id));
     return [{ participant, status, ...(task ? { task } : {}) }];
   });
   if (!rows.some((row) => row.status === "running" || row.status === "waiting")) {
@@ -191,4 +298,28 @@ export function sessionsTaskGroupLabel(statuses: readonly SessionsWorkStatus[]):
   const running = statuses.filter((status) => status === "running").length;
   const members = `${statuses.length} ${statuses.length === 1 ? "member" : "members"}`;
   return running > 0 ? `${members} · ${running} running` : members;
+}
+
+/** A former member's row (shared/mainSession.ts sessionsFormerMembers): how
+ *  its latest task ended; nothing while that task still says it runs. */
+export function sessionsFormerMemberStatus(task: Pick<ChatParticipantRequestItem, "status" | "createdAt"> | undefined): SessionsWorkStatus {
+  if (!task) return "idle";
+  const status = sessionsTaskStatus(task);
+  return status === "running" || status === "waiting" ? "idle" : status;
+}
+
+/** A member the main session added for a task, applied without a card (its
+ *  delegation, docs/main-session.md): the sessions view does not show the
+ *  "member added" card, the task already says it. A card that waits for the
+ *  User, or any other change, stays. */
+export function isMainSessionDelegationRosterCard(
+  approval: Pick<ChatAppToolApproval, "status" | "toolName" | "requesterParticipantId" | "request">,
+  mainSessionId: string
+): boolean {
+  if (approval.status !== "auto-applied" || approval.toolName !== APP_PARTICIPANTS_REQUEST_CHANGE_TOOL || approval.requesterParticipantId !== mainSessionId) {
+    return false;
+  }
+  const operations = (approval.request as { operations?: Array<{ type?: unknown }> } | undefined)?.operations;
+  return Array.isArray(operations) && operations.length > 0 &&
+    operations.every((operation) => operation?.type === "add_new_participant_to_chat" || operation?.type === "add_existing_participant_to_chat");
 }

@@ -7,19 +7,31 @@ import {
   isOtherMemberTurnFinishedNote,
   mainTimelineMessages,
   memberSessionMessages,
-  membersMainSessionWaitsOn
+  membersMainSessionWaitsOn,
+  sessionsFormerMembers,
+  sessionsTaskPlacement,
+  sessionsViewLane,
+  withoutLeadingMention
 } from "./mainSession";
 import {
   firstTextLine,
+  isMainSessionDelegationRosterCard,
   latestTaskByMember,
   memberRunningSince,
   openMemberCardMessages,
   sessionsMemberRows,
+  sessionsMemberActivity,
   sessionsMemberStatus,
   sessionsTaskGroupLabel,
   sessionsTaskReplyLine,
   sessionsTaskRunningSince,
-  sessionsTaskStatus
+  sessionsDelegationSummary,
+  sessionsFormerMemberStatus,
+  sessionsMemberDetail,
+  sessionsMemberTitle,
+  sessionsTaskEntries,
+  sessionsTaskStatus,
+  sessionsWaitingText
 } from "./mainSessionView";
 import type { ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
 
@@ -86,26 +98,46 @@ test("a member's open card stays on the main timeline; the main session waits on
 });
 
 test("a task's status follows its item and its member", () => {
-  assert.equal(sessionsTaskStatus({ status: "running" }, "running"), "running");
-  assert.equal(sessionsTaskStatus({ status: "running" }, "pending"), "waiting", "the member waits on the User's card");
-  assert.equal(sessionsTaskStatus({ status: "pending_approval" }), "waiting");
-  assert.equal(sessionsTaskStatus({ status: "answered" }), "done");
-  assert.equal(sessionsTaskStatus({ status: "resuming_requester" }), "done");
-  assert.equal(sessionsTaskStatus({ status: "completed" }), "done");
-  assert.equal(sessionsTaskStatus({ status: "failed" }), "failed");
-  assert.equal(sessionsTaskStatus({ status: "denied" }), "failed");
-  assert.equal(sessionsTaskStatus({ status: "interrupted" }), "stopped");
-  assert.equal(sessionsTaskStatus({ status: "running" }, "stopped"), "stopped");
-  assert.equal(sessionsTaskStatus({ status: "running" }, "error"), "failed");
+  const given = (status: ChatParticipantRequestItem["status"]) => ({ status, createdAt: at(10) });
+  assert.equal(sessionsTaskStatus(given("running"), "running"), "running");
+  assert.equal(sessionsTaskStatus(given("running"), "pending"), "waiting", "the member waits on the User's card");
+  assert.equal(sessionsTaskStatus(given("pending_approval")), "waiting");
+  assert.equal(sessionsTaskStatus(given("answered")), "done");
+  assert.equal(sessionsTaskStatus(given("resuming_requester")), "done");
+  assert.equal(sessionsTaskStatus(given("completed")), "done");
+  assert.equal(sessionsTaskStatus(given("failed")), "failed");
+  assert.equal(sessionsTaskStatus(given("denied")), "failed");
+  assert.equal(sessionsTaskStatus(given("interrupted")), "stopped");
+  assert.equal(sessionsTaskStatus(given("running"), "stopped", at(11)), "stopped", "its turn was stopped after it was given");
+  assert.equal(sessionsTaskStatus(given("running"), "error", at(10)), "failed");
+});
+
+test("a new task is not shown Stopped or Failed by the member's earlier turn while it waits in the queue", () => {
+  const task = { status: "running" as const, createdAt: at(10) };
+  assert.equal(sessionsTaskStatus(task, "stopped", at(5)), "running", "a stop from before the task was given");
+  assert.equal(sessionsTaskStatus(task, "error", at(9)), "running", "a failure from before the task was given");
+  assert.equal(sessionsTaskStatus(task, "stopped"), "running", "no finished message known");
+  assert.equal(sessionsMemberStatus("stopped", task, at(5)), "running", "the members panel too");
+  assert.equal(sessionsMemberStatus("error", task, at(9)), "running");
+  assert.equal(sessionsMemberStatus("stopped", task, at(12)), "stopped");
+  assert.equal(sessionsMemberStatus("stopped", undefined, at(5)), "stopped", "a member without a task keeps its state");
+  const messages = [
+    message("old-stop", "participant", 5, { participantId: "p-drew", status: "error", metadata: { terminalReason: "user-stopped" } }),
+    message("queued", "participant", 11, { participantId: "p-drew", status: "pending" })
+  ];
+  const activity = sessionsMemberActivity(messages);
+  assert.equal(activity.finishedAt.get("p-drew"), at(5));
+  assert.equal(activity.runningSince.get("p-drew"), at(11));
 });
 
 test("a member's status is what it does now, else how its latest task ended", () => {
-  assert.equal(sessionsMemberStatus("running", { status: "completed" }), "running");
+  const given = (status: ChatParticipantRequestItem["status"]) => ({ status, createdAt: at(10) });
+  assert.equal(sessionsMemberStatus("running", given("completed")), "running");
   assert.equal(sessionsMemberStatus("background", undefined), "running");
   assert.equal(sessionsMemberStatus("pending", undefined), "waiting");
-  assert.equal(sessionsMemberStatus("idle", { status: "completed" }), "done");
+  assert.equal(sessionsMemberStatus("idle", given("completed")), "done");
   assert.equal(sessionsMemberStatus(undefined, undefined), "idle");
-  assert.equal(sessionsMemberStatus("error", { status: "running" }), "failed");
+  assert.equal(sessionsMemberStatus("error", given("running"), at(12)), "failed");
 });
 
 test("the result line is the reply's first line without markdown or a choice block", () => {
@@ -177,4 +209,78 @@ test("a scheduled task's wake-up of one member is part of that member's session,
   const index = buildSessionsViewIndex(messages, "p-main");
   assert.deepEqual(mainTimelineMessages(messages, index).map((entry) => entry.id), ["script-main", "script-none"]);
   assert.deepEqual(memberSessionMessages(messages, "p-drew", index).map((entry) => entry.id), ["script-drew"]);
+});
+
+test("the main session's answer to a member's question is in that member's session from its first token", () => {
+  const question = message("drew-asks", "participant", 30, { participantId: "p-drew", metadata: { participantRequest: batch("b-ask", "p-drew", [item("p-main", "running", 30)]) } });
+  const streaming = message("main-answering", "participant", 31, {
+    participantId: "p-main", status: "pending", content: "Use the",
+    metadata: { sourceMessageId: "drew-asks", participantRequestBatchId: "b-ask", runId: "r1" }
+  });
+  const ownTurn = message("main-own", "participant", 32, { participantId: "p-main", metadata: { sourceMessageId: "ask", runId: "r2" } });
+  const messages = [...chat(), question, streaming, ownTurn];
+  const index = buildSessionsViewIndex(messages, "p-main");
+  assert.deepEqual(sessionsViewLane(streaming, index), { kind: "member", participantId: "p-drew" }, "no reply id yet: placed by the request it answers");
+  assert.deepEqual(sessionsViewLane(ownTurn, index), { kind: "main" });
+  assert.ok(memberSessionMessages(messages, "p-drew", index).some((entry) => entry.id === "main-answering"));
+  assert.ok(!mainTimelineMessages(messages, index).some((entry) => entry.id === "main-answering"));
+  const otherBatch = { ...streaming, id: "main-other", metadata: { ...streaming.metadata, participantRequestBatchId: "b-other" } };
+  assert.deepEqual(sessionsViewLane(otherBatch, index), { kind: "main" }, "a message of another request is not placed by this one");
+});
+
+test("the main session's tasks are shown inside the reply of the turn that gave them", () => {
+  const ask = message("ask-2", "user", 40, { metadata: { askedParticipantIds: ["p-main"] } });
+  const reply = message("reply-2", "participant", 41, { participantId: "p-main", status: "pending", content: "", metadata: { sourceMessageId: "ask-2", runId: "r" } });
+  const taskA = message("task-a", "participant", 42, { participantId: "p-main", metadata: { sourceMessageId: "ask-2", participantRequest: batch("ba", "p-main", [item("p-drew", "running", 42)]) } });
+  const taskB = message("task-b", "participant", 43, { participantId: "p-main", metadata: { sourceMessageId: "ask-2", participantRequest: batch("bb", "p-main", [item("p-gera", "running", 43)]) } });
+  const orphan = message("task-c", "participant", 44, { participantId: "p-main", metadata: { sourceMessageId: "elsewhere", participantRequest: batch("bc", "p-main", [item("p-taylor", "running", 44)]) } });
+  const messages = [ask, reply, taskA, taskB, orphan];
+  const index = buildSessionsViewIndex(messages, "p-main");
+  const placement = sessionsTaskPlacement(mainTimelineMessages(messages, index), index);
+  assert.deepEqual(placement.tasksByReplyId.get("reply-2")?.map((entry) => entry.id), ["task-a", "task-b"]);
+  assert.deepEqual([...placement.placedTaskIds], ["task-a", "task-b"]);
+  assert.ok(!placement.placedTaskIds.has("task-c"), "a task without its reply stays on its own");
+});
+
+test("a member no longer in the chat is a former member with a readable session", () => {
+  const messages = chat();
+  const current = participants.filter((entry) => entry.id !== "p-gera" && entry.id !== "p-drew");
+  assert.deepEqual(sessionsFormerMembers(messages, current, "p-main").map((entry) => [entry.id, entry.handle]), [["p-drew", "drew"], ["p-gera", "gera"]]);
+  assert.deepEqual(sessionsFormerMembers(messages, participants, "p-main"), []);
+  assert.equal(sessionsFormerMemberStatus(undefined), "idle");
+  assert.equal(sessionsFormerMemberStatus({ status: "answered", createdAt: at(1) }), "done");
+  assert.equal(sessionsFormerMemberStatus({ status: "running", createdAt: at(1) }), "idle", "a gone member is not shown running");
+});
+
+test("members are named by their task, not their handle", () => {
+  assert.equal(sessionsMemberTitle({ handle: "drew" }, { prompt: "## Fix the login\n\nmore", targetHandle: "drew" }), "Fix the login");
+  assert.equal(sessionsMemberTitle({ handle: "@drew" }), "drew");
+  assert.equal(sessionsMemberDetail({ provider: "Claude Code", model: "opus", roleLabel: "Member", roleConfigId: "generic-participant" }), "Claude Code · opus");
+  assert.equal(sessionsMemberDetail({ provider: "Codex CLI", roleLabel: "Reviewer", roleConfigId: "reviewer" }), "Codex CLI · Reviewer");
+  assert.equal(sessionsWaitingText(["Fix the login", "Check logout"]), "Waiting on 2 members: Fix the login, Check logout");
+  assert.equal(sessionsDelegationSummary(1), "Delegated 1 task");
+  assert.equal(sessionsDelegationSummary(3), "Delegated 3 tasks");
+  assert.equal(withoutLeadingMention("@main Reply to me", "main"), "Reply to me");
+  assert.equal(withoutLeadingMention("@mainframe is down", "main"), "@mainframe is down");
+  assert.equal(withoutLeadingMention("@main", "main"), "@main", "nothing left: the text stays");
+});
+
+test("a task entry carries its title, its state, its time and one line of its result", () => {
+  const messages = chat();
+  const byId = new Map(messages.map((entry) => [entry.id, entry]));
+  const tasks = messages[3]!;
+  const entries = sessionsTaskEntries(tasks, tasks.metadata!.participantRequest!, new Map([["p-drew", "running" as const]]), sessionsMemberActivity(messages), byId);
+  assert.deepEqual(entries.map((entry) => [entry.item.targetParticipantId, entry.title, entry.status, entry.since, entry.line]), [
+    ["p-drew", "Task for drew", "running", at(8), undefined],
+    ["p-gera", "Task for gera", "done", undefined, "Done: the token refresh is fixed"]
+  ]);
+  assert.equal(entries[1]!.durationMs, 0);
+});
+
+test("the member-added card of the main session's delegation is not shown; cards that need the User stay", () => {
+  const added = { status: "auto-applied" as const, toolName: "app_participants_request_change", requesterParticipantId: "p-main", request: { operations: [{ type: "add_new_participant_to_chat" }] } } as Parameters<typeof isMainSessionDelegationRosterCard>[0];
+  assert.equal(isMainSessionDelegationRosterCard(added, "p-main"), true);
+  assert.equal(isMainSessionDelegationRosterCard({ ...added, status: "pending" }, "p-main"), false, "waits for the User");
+  assert.equal(isMainSessionDelegationRosterCard({ ...added, requesterParticipantId: "p-drew" }, "p-main"), false, "another member's change");
+  assert.equal(isMainSessionDelegationRosterCard({ ...added, request: { operations: [{ type: "remove_participant_from_chat" }] } } as typeof added, "p-main"), false, "a removal");
 });
