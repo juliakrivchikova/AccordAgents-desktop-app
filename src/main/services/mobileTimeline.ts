@@ -160,6 +160,11 @@ export interface MobileTimelineEvent {
   /** A member's request to other members, as the sessions view's task card
    *  and the members list show it. */
   participantRequest?: MobileTaskBatch;
+  /** An Accord launch the chat's main session wrote (app_chat_start_accord):
+   *  read as an Accord card like the User's own (accordLaunchCard.ts). */
+  accordLaunchByMainSession?: true;
+  /** A member's finished turn: how long it worked (its "Worked for …"). */
+  workedMs?: number;
 }
 
 /**
@@ -185,6 +190,8 @@ export interface MobileTaskItem {
   prompt: string;
   status: ChatParticipantRequestStatus;
   createdAt: string;
+  /** When its status last changed: how long an ended task took. */
+  updatedAt?: string;
   replyMessageId?: string;
   /** Why it failed, its first line. */
   error?: string;
@@ -228,7 +235,7 @@ export function phoneActivityEvents(conversation: Conversation, now = Date.now()
     if (status === "done" && !(now - Date.parse(message.createdAt) <= PHONE_ACTIVITY_DONE_MS)) continue;
     if (status !== "pending" && status !== "done") continue;
     // Activity shows the text: no pictures, and no task card or addressees.
-    const { attachments: _attachments, participantRequest: _request, addressees: _addressees, ...event } =
+    const { attachments: _attachments, participantRequest: _request, addressees: _addressees, accordLaunchByMainSession: _launch, workedMs: _worked, ...event } =
       timelineEventFromMessage(message, message.id, conversation, threadRoots);
     const short = { ...event, content: event.content.slice(0, PHONE_ACTIVITY_CONTENT_CHARS) };
     // Messages are oldest first: a later one of the same run or member wins.
@@ -358,6 +365,9 @@ function timelineEventFromMessage(
     ...(message.role === "system" && message.metadata?.accordLaunch ? { accordLaunch: message.metadata.accordLaunch } : {}),
     ...(addressees.length ? { addressees } : {}),
     ...(request ? { participantRequest: request } : {}),
+    ...(message.role === "participant" && message.metadata?.accordLaunchByMainSession === true ? { accordLaunchByMainSession: true as const } : {}),
+    ...(message.role === "participant" && message.status !== "pending" && typeof message.metadata?.workedMs === "number" &&
+      Number.isFinite(message.metadata.workedMs) && message.metadata.workedMs >= 0 ? { workedMs: Math.round(message.metadata.workedMs) } : {}),
     // A scheduled script's message is not the User's: the phone has no script
     // author, so it shows as an author named after the script.
     role: message.role === "participant" || message.role === "script" ? "participant" : message.role === "system" ? "system" : "you",
@@ -397,6 +407,7 @@ export function mobileTaskBatch(batch: ChatParticipantRequestBatch | undefined):
       prompt: firstTextLine(typeof item.prompt === "string" ? item.prompt : "", PHONE_TASK_LINE_CHARS),
       status: item.status,
       createdAt: typeof item.createdAt === "string" ? item.createdAt : batch.createdAt,
+      ...(typeof item.updatedAt === "string" && item.updatedAt ? { updatedAt: item.updatedAt } : {}),
       ...(typeof item.replyMessageId === "string" && item.replyMessageId ? { replyMessageId: item.replyMessageId } : {}),
       ...(error ? { error } : {})
     });
