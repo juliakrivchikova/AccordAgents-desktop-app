@@ -74,7 +74,7 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
           <IconButton icon={X} label="Close members" tooltip="Close members" onClick={props.onClose} />
         </div>
       </header>
-      <div className="chat-thread-body chat-members-body">
+      <div className="chat-thread-body chat-members-body" data-testid="chat-members-body">
         {props.accord && props.onOpenAccord && (
           <ChatAccordRow launch={props.accord} testId="chat-members-accord" onOpen={() => props.onOpenAccord?.(props.accord!.launchId)} />
         )}

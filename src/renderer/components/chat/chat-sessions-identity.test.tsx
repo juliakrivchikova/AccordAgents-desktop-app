@@ -11,7 +11,10 @@ import type { ChatAppToolApproval } from "../../../shared/types";
 import { avatarForParticipant } from "../avatar/avatar";
 import { ChatAccordLaunchCard } from "./chat-accord-launch-card";
 import { ChatAppToolApprovalCard } from "./chat-app-tool-approval-card";
-import { ChatMemberMark, ChatSessionsPresentationContext, renderComposerMemberMark } from "./chat-member-mark";
+import { ChatMemberMark, ChatSessionsPresentationContext, renderComposerMemberMark, renderNewChatMemberMark } from "./chat-member-mark";
+import { SESSIONS_COMPOSER_PLACEHOLDER, memberModelChip, sessionsComposerProps } from "./chat-sessions-composer";
+import { ChatSessionsLinksContext, type ChatSessionsLinks } from "./chat-sessions-links";
+import { ChatTurnFinishedNote } from "./chat-turn-finished-note";
 import { DREW, MAIN, PARTICIPANTS, TAYLOR } from "./chat-sessions-fixtures.test";
 
 const textOf = (node: ReactTestInstance | string): string =>
@@ -103,4 +106,53 @@ test("approval cards on the main timeline show who asks by the provider's logo i
     assert.equal(classic.root.findAll(hasClass("chat-app-tool-approval-avatar")).length, 1, `${item.toolName}: the avatar, as before`);
     classic.unmount();
   }
+});
+
+test("the New chat screen shows the main session by its provider's logo, not an avatar picture; other members keep theirs", () => {
+  const main = renderIn(false, <>{renderNewChatMemberMark(MAIN)}</>);
+  assert.deepEqual(providerKinds(main.root), [MAIN.kind]);
+  assert.equal(avatars(main.root), 0);
+  main.unmount();
+  const member = renderIn(false, <>{renderNewChatMemberMark(DREW)}</>);
+  assert.deepEqual(providerKinds(member.root), []);
+  assert.ok(avatars(member.root) > 0, "its avatar");
+  member.unmount();
+});
+
+test("the sessions view's composer writes to the main session: no members to mention, its own placeholder, the main session's model chip", () => {
+  assert.deepEqual(sessionsComposerProps(undefined), {}, "the classic composer is as before");
+  const props = sessionsComposerProps(MAIN.id, (id) => <span data-testid="chip">{id}</span>);
+  assert.deepEqual(props.participants, []);
+  assert.equal(props.placeholder, SESSIONS_COMPOSER_PLACEHOLDER);
+  const chip = renderIn(true, <>{memberModelChip(PARTICIPANTS, MAIN.id)}</>);
+  assert.deepEqual(providerKinds(chip.root), [MAIN.kind]);
+  assert.match(textOf(chip.root), /Default model/);
+  chip.unmount();
+  const tuned = renderIn(true, <>{memberModelChip([{ ...MAIN, model: "Haiku 5.5", reasoningEffort: "low" }], MAIN.id)}</>);
+  assert.match(textOf(tuned.root), /Haiku 5\.5/);
+  assert.match(textOf(tuned.root), /Low/);
+  tuned.unmount();
+});
+
+test("a turn-finished note names the main session and members without handles in the sessions view", () => {
+  const links: ChatSessionsLinks = {
+    mainSessionId: MAIN.id, mainHandle: "main",
+    byHandle: new Map([["drew", { id: DREW.id, title: "Fix the logout" }]]), openMember: () => undefined
+  };
+  const note = (participant: typeof MAIN) => (
+    <ChatSessionsLinksContext.Provider value={links}>
+      <ChatTurnFinishedNote
+        message={{ id: "n", content: "Done", createdAt: "2026-11-20T10:00:00.000Z" }}
+        note={{ messageId: "r", participantId: participant.id, participantLabel: `@${participant.handle}` }}
+        participant={participant}
+      />
+    </ChatSessionsLinksContext.Provider>
+  );
+  const main = renderIn(true, note(MAIN));
+  assert.match(textOf(main.root), /Main session finished answering/);
+  main.unmount();
+  const drew = renderIn(true, note(DREW));
+  assert.match(textOf(drew.root), /Fix the logout finished answering/);
+  assert.doesNotMatch(textOf(drew.root), /@/);
+  drew.unmount();
 });

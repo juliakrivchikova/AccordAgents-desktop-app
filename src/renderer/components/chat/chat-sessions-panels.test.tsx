@@ -260,3 +260,32 @@ test("opened at a message, a member's session scrolls to it and marks it for a m
   assert.ok(target.classList.contains("message-focused"), "marked for a moment");
   act(() => renderer!.unmount());
 });
+
+test("the side panel lists the main session first with its settings; a member's session has its settings and its model chip in its composer", () => {
+  const messages = sessionsMessages();
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(
+      <TooltipProvider>
+        <ChatMembersPanel
+          main={{ participant: MAIN, detail: "Claude Code · opus", settings: <span data-testid="main-settings" /> }}
+          rows={sessionsMemberRows(PARTICIPANTS, MAIN.id, STATUSES, latestTaskByMember(messages))}
+          activity={sessionsMemberActivity(messages)} runIdsByParticipantId={new Map()} memberTitle={() => "A task"} memberDetail={() => ""}
+          onOpenMember={noop} onClose={noop}
+        />
+      </TooltipProvider>
+    );
+  });
+  const main = renderer!.root.find(byTestId("chat-members-main"));
+  assert.match(textOf(main), /Main session/);
+  assert.match(textOf(main), /Claude Code · opus/);
+  assert.equal(main.findAll(byTestId("main-settings")).length, 1, "its settings are reachable from the side panel");
+  assert.equal(renderer!.root.find(byTestId("chat-members-body")).findAll(byTestId("chat-members-row"))[0]?.props["data-participant-id"], DREW.id, "then the members");
+  act(() => renderer!.unmount());
+
+  const session = renderSession({ member: DREW, readOnly: false, settings: <span data-testid="drew-settings" />, chip: <span data-testid="drew-chip" /> });
+  assert.equal(session.root.findAll(byTestId("drew-settings")).length, 1, "a gear in its session's header");
+  const composer = session.root.find((node) => node.props?.testId === "chat-member-composer");
+  assert.equal(composer.props.footerChip.props["data-testid"], "drew-chip", "its model chip in its composer");
+  act(() => session.unmount());
+});

@@ -71,3 +71,15 @@ test("a message from the main composer names no targets", async () => {
   assert.equal("targetParticipantIds" in h.requests[0]!, false);
   h.renderer.unmount();
 });
+
+test("the sessions view's main composer writes to the main session by id, from its own draft", async () => {
+  let release!: () => void;
+  const h = harness(() => new Promise((_resolve, reject) => { release = () => reject(new Error("stop")); }));
+  let pending: Promise<boolean> | undefined;
+  act(() => { pending = h.actions().sendChatMessage({ content: "@drew please look", targetParticipantIds: ["p-main"], fromMainComposer: true }); });
+  assert.deepEqual(h.requests[0]!.targetParticipantIds, ["p-main"], "to the main session whatever the text names");
+  assert.equal(h.draft(), "", "the main composer's draft is this message's: cleared while it is sent");
+  await act(async () => { release(); await pending; });
+  assert.equal(h.draft(), "the main composer's own draft", "and given back when the send failed");
+  h.renderer.unmount();
+});
