@@ -566,6 +566,8 @@ export const TASK_REPLY_PROMPT_MAX_CHARS = 12_000;
 export const TASK_REPLIES_PROMPT_MAX_CHARS = 60_000;
 /** Why a request the app lost track of (a restart, a run gone) ended. */
 const PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION = "Request was interrupted before completion.";
+/** How the line that resumes a requester after its request starts. */
+const PARTICIPANT_REQUEST_AUTO_RESUME_PREFIX = "Auto-resumed";
 const CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN = 4;
 const CHAT_PARTICIPANT_REQUEST_RATE_WINDOW_MS = 60_000;
 const CHAT_PARTICIPANT_REQUEST_RATE_LIMIT = 8;
@@ -1203,6 +1205,9 @@ export class ChatService {
   private readonly delegatingTurns = new Map<string, { conversationId: string; requestMessageId: string }>();
   /** Groups of the main session's tasks being resumed now, by chat and turn. */
   private readonly delegationGroupResumes = new Set<string>();
+  /** Groups of the main session's tasks of a turn that ended before this
+   *  process started, looked at once (recoverDelegationGroupsOfEndedTurns). */
+  private readonly delegationGroupsRecovered = new Set<string>();
   private readonly permissionApprovalAutoResumes = new Set<string>();
   private readonly codexApprovalContinuations = new Set<string>();
   private readonly toolPermissionResolvers = new Map<string, Set<(decision: ToolPermissionDecision) => void>>();
@@ -1634,7 +1639,9 @@ export class ChatService {
       const orphanedCodexApprovalsExpired = this.expireOrphanedCodexApprovals(conversation);
       const orphanedSignInsExpired = this.expireOrphanedConnectorSignIns(conversation);
       const recoveredRunState = this.recoverStaleChatRun(conversation);
-      const interruptedRequests = this.markOrphanedParticipantRequestsInterrupted(conversation);
+      const orphanedRequestsInterrupted = this.markOrphanedParticipantRequestsInterrupted(conversation);
+      const delegationGroupsRecovered = this.recoverDelegationGroupsOfEndedTurns(conversation);
+      const interruptedRequests = orphanedRequestsInterrupted || delegationGroupsRecovered;
       const usageUpdates = nextUsage ? this.contextUsageUpdatesAfterRefresh(conversation, existingUsage, nextUsage) : undefined;
       // conversation.messages is full history here (refreshStoredChatState merged it).
       // Heal pointer maps left stale by the pre-fix index-ordering so roster jump targets
@@ -18922,9 +18929,72 @@ export class ChatService {
     // A task of the main session that a restart ended: the others of its turn
     // may have ended before, and nothing else would resume it now.
     if (nextBatch.delegation?.turnId) {
+      this.delegationGroupsRecovered.add(this.turnSegmentKey(conversation.id, nextBatch.delegation.turnId));
       this.scheduleDelegationGroupResume(conversation.id, message.id);
     }
     return true;
+  }
+
+  /**
+   * The main session's tasks of a turn that does not run here (any more): a
+   * restart ended that turn, or cut short the resume that answered it.
+   * Nothing in memory looks at them again then (liveTurnSegments and
+   * delegatingTurns are this process's), so the first read of the chat looks
+   * once per group whose requester runs here and whose tasks have all ended:
+   * the main session is resumed with every answer, as at its turn's end. A
+   * resume a restart cut short ("resuming_requester" with no resume going on
+   * here, which would hold every later look) is undone first and made again;
+   * a resume that was made and failed is not made again. Returns whether a
+   * request changed.
+   */
+  private recoverDelegationGroupsOfEndedTurns(conversation: Conversation): boolean {
+    const groups = new Map<string, ChatMessage[]>();
+    for (const message of conversation.messages) {
+      const batch = message.metadata?.participantRequest;
+      const turnId = batch?.delegation?.turnId;
+      if (!batch || !turnId || !batch.resumeRequester || batch.completedInToolCall || batch.autoResumeMessageId) continue;
+      const key = this.turnSegmentKey(conversation.id, turnId);
+      groups.set(key, [...(groups.get(key) ?? []), message]);
+    }
+    let changed = false;
+    for (const [key, messages] of groups) {
+      if (this.liveTurnSegments.has(key) || this.delegatingTurns.has(key) || this.delegationGroupResumes.has(key) ||
+        this.delegationGroupsRecovered.has(key)) continue;
+      if (messages.some((message) => this.participantRequestAutoResumes.has(message.id) || this.participantRequestRunners.has(message.id))) continue;
+      const batches = messages.map((message) => message.metadata!.participantRequest!);
+      // A task still at work looks again itself when it ends.
+      if (batches.some((batch) => this.participantRequestHasUnfinishedItems(batch))) continue;
+      const requester = this.chatParticipants(conversation).find((participant) => participant.id === batches[0]!.requesterParticipantId);
+      if (!requester || !this.ownsParticipant(requester)) continue;
+      const cutShort = batches.some((batch) => batch.status === "resuming_requester");
+      if (!cutShort && this.delegationGroupResumeWasMade(conversation, messages)) continue;
+      this.delegationGroupsRecovered.add(key);
+      if (cutShort) {
+        const now = new Date().toISOString();
+        for (const message of messages) {
+          this.updateParticipantRequestBatch(conversation, message.id, (current) => current.status === "resuming_requester"
+            ? { ...current, status: this.rollupParticipantRequestStatus(current.items), updatedAt: now }
+            : current);
+        }
+        changed = true;
+      }
+      void this.debugLogs.write("chat.participant-request.auto-resume.recovered", {
+        conversationId: conversation.id,
+        requestMessageIds: messages.map((message) => message.id),
+        cutShort
+      }).catch(() => undefined);
+      this.scheduleDelegationGroupResume(conversation.id, messages[0]!.id);
+    }
+    return changed;
+  }
+
+  /** Whether a resume of these tasks was already made (its trigger is in the
+   *  chat): one that failed is not made again on its own. */
+  private delegationGroupResumeWasMade(conversation: Conversation, messages: readonly ChatMessage[]): boolean {
+    const ids = new Set(messages.map((message) => message.id));
+    return conversation.messages.some((message) => message.role === "system" &&
+      typeof message.metadata?.sourceMessageId === "string" && ids.has(message.metadata.sourceMessageId) &&
+      message.content.startsWith(`${PARTICIPANT_REQUEST_AUTO_RESUME_PREFIX} @`));
   }
 
   private scheduleDelegationGroupResume(conversationId: string, requestMessageId: string): void {
@@ -22706,7 +22776,9 @@ export class ChatService {
     }
     const removedTombstonesApplied = this.applyRemovedChatMessageTombstones(conversation);
     const legacyAccordStateRemoved = this.clearLegacyAccordState(conversation);
-    if (this.recoverStaleChatRun(conversation) || removedTombstonesApplied || legacyAccordStateRemoved) {
+    const staleRunRecovered = this.recoverStaleChatRun(conversation);
+    const delegationGroupsRecovered = this.recoverDelegationGroupsOfEndedTurns(conversation);
+    if (staleRunRecovered || delegationGroupsRecovered || removedTombstonesApplied || legacyAccordStateRemoved) {
       if (legacyAccordStateRemoved) {
         conversation.updatedAt = new Date().toISOString();
       }
