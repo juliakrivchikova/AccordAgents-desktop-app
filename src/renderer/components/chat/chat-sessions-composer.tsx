@@ -2,7 +2,9 @@ import type { ReactNode } from "react";
 
 import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import type { ChatParticipant } from "../../../shared/types";
+import type { ChatComposerProps } from "./chat-composer";
 import { ChatProviderMark } from "./chat-member-mark";
+import { useMemberDefaultModelName } from "./chat-member-model-name";
 
 const NO_MENTIONS: ChatParticipant[] = [];
 
@@ -13,23 +15,41 @@ export const SESSIONS_COMPOSER_PLACEHOLDER = "Ask anything. / commands, # files"
  * The main composer in the sessions view (docs/main-session.md): it writes to
  * the main session whatever its text names, so it offers no members to
  * mention (commands and files stay), and it carries the main session's model
- * chip, as T3 Code's composer does. The classic view's composer is as before.
+ * chip, as T3 Code's composer does. It has no "N active runs" pill (the
+ * Waiting line and the side panel name and stop the members); while the main
+ * session itself runs, its send button stops that run when there is nothing
+ * to send. The classic view's composer is as before.
  */
 export function sessionsComposerProps(
   mainSessionId: string | undefined,
-  renderMemberChip?: (participantId: string) => ReactNode
-): { participants?: ChatParticipant[]; placeholder?: string; footerChip?: ReactNode } {
+  renderMemberChip?: (participantId: string) => ReactNode,
+  main?: { runIds: readonly string[]; onStopRun?: (runId: string) => void }
+): Partial<Pick<ChatComposerProps, "participants" | "placeholder" | "footerChip" | "activeRunCount" | "onStopAllRuns" | "stop">> {
   if (!mainSessionId) {
     return {};
   }
-  return { participants: NO_MENTIONS, placeholder: SESSIONS_COMPOSER_PLACEHOLDER, footerChip: renderMemberChip?.(mainSessionId) };
+  const runIds = main?.runIds ?? [];
+  const onStopRun = main?.onStopRun;
+  return {
+    participants: NO_MENTIONS,
+    placeholder: SESSIONS_COMPOSER_PLACEHOLDER,
+    footerChip: renderMemberChip?.(mainSessionId),
+    activeRunCount: 0,
+    onStopAllRuns: undefined,
+    stop: runIds.length > 0 && onStopRun
+      ? { label: "Stop the main session", onStop: () => runIds.forEach((runId) => onStopRun(runId)) }
+      : undefined
+  };
 }
 
 /** What a member's model chip says: its provider's logo, its model, its
- *  reasoning effort ("Haiku 5.5 · Low"). */
+ *  reasoning effort ("Haiku 5.5 · Low"). Without a model of its own, the one
+ *  its CLI runs on by default, else the CLI's name (memberDefaultModelName). */
 export function ChatMemberModelChipLabel(props: { participant: ChatParticipant; defaultModelLabel?: string }): JSX.Element {
   const { participant } = props;
-  const model = participant.model?.trim() || props.defaultModelLabel || "Default model";
+  const explicit = participant.model?.trim() || props.defaultModelLabel;
+  const cliDefault = useMemberDefaultModelName(participant, !explicit);
+  const model = explicit || cliDefault;
   const effort = participant.reasoningEffort ? chatReasoningEffortLabel(participant.reasoningEffort) : undefined;
   return (
     <span className="chat-model-chip-label" data-testid="chat-model-chip-label">

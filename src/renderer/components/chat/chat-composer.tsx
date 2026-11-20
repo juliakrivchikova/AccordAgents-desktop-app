@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useMemo, useRef } from "react";
-import { ArrowUp, ImagePlus, RefreshCw } from "lucide-react";
+import { ImagePlus } from "lucide-react";
 
 import { IconButton, ResizableTextarea } from "@/renderer/components/primitives";
 import { AccordMergeIcon } from "./accord-merge-icon";
@@ -21,6 +21,7 @@ import {
 import { renderSlashHighlightedDraft } from "./chat-composer-draft-highlights";
 import { ChatActiveRunPopover, type ChatActiveRunParticipantRow } from "./chat-active-run-popover";
 import { ChatComposerMenus } from "./chat-composer-menus";
+import { ChatComposerSendButton, type ChatComposerStop } from "./chat-composer-send-button";
 import {
   revokePendingImageUrls,
   useChatComposerImages
@@ -82,6 +83,9 @@ export interface ChatComposerProps {
   dictationSession?: string;
   /** The sessions view: the member's model chip, opening its settings. */
   footerChip?: React.ReactNode;
+  /** The sessions view: Stop for the main session's run, in the send
+   *  button's place while there is nothing to send. */
+  stop?: ChatComposerStop;
 }
 
 export function ChatComposer(props: ChatComposerProps): JSX.Element {
@@ -380,16 +384,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
               draft={props.draft}
               onDraftChange={props.onDraftChange}
             />
-            <button
-              type="button"
-              className="composer-send-button"
-              title="Send"
-              aria-label="Send message"
-              disabled={!canSend}
-              onClick={() => void sendDraft()}
-            >
-              {props.isRunning ? <RefreshCw size={17} className="spin" /> : <ArrowUp size={18} strokeWidth={2.4} />}
-            </button>
+            <ChatComposerSendButton canSend={canSend} isRunning={props.isRunning} onSend={() => void sendDraft()} stop={props.stop} />
           </div>
         </div>
       </div>

@@ -60,7 +60,16 @@ chat without a main session is always `classic`; its switch is disabled.
     (`targetParticipantIds=[main]`, `deliveryTargets=[main]` on the phone),
     offers no members to mention (`/` and `#` stay), and carries the main
     session's model chip, which opens its settings; a member's composer
-    the same for that member;
+    the same for that member. The chip names the member's own model, else
+    the one its CLI runs on by default (the CLI's model list: Claude Code's
+    initialize answer, Codex's model/list, `agy models`; an added
+    provider's vendor default), else the CLI ("Claude Code"), with the
+    effort after it (`memberDefaultModelName`; desktop only, the phone has
+    no chip). The main composer has no "N active runs" pill (the Waiting
+    line and the side panel name and stop the members); while the main
+    session itself runs and nothing is typed, its send button is Stop for
+    the main session's run, as in T3 Code and Claude (typing turns it
+    back into Send);
   - the main timeline holds the User's messages to the main session, the
     main session's messages, system lines and the cards the User must
     answer; the member-added cards of its delegations are not shown
@@ -73,6 +82,11 @@ chat without a main session is always `classic`; its switch is disabled.
     the task), marked for a moment. A task whose reply is not loaded is one
     such row of its own. While the main session waits there is a line
     "Waiting on N members: <tasks> · Stop";
+  - every finished reply says how long it worked T3 Code's quiet way,
+    on the main timeline and in a member's session: muted "Worked for 44s"
+    and a chevron, no pill; the chevron of a reply that gave tasks opens
+    them, of any other reply its full stream (the phone has none: there
+    the muted text alone); the classic view keeps its pill;
   - one icon at the top right opens the side panel (a running count on it,
     a dot while an Accord is open); the view switch is in the chat title's
     menu and the roster's popover is not shown. The side panel lists the
@@ -90,8 +104,9 @@ chat without a main session is always `classic`; its switch is disabled.
     on hover. A message still being written keeps "Running 12s" or "Queued";
   - a task's state is not taken from the member's earlier stopped or failed
     turn while the task waits (queued, a machine preparing);
-  - a turn-finished note about another member is not on the main timeline
-    (`isOtherMemberTurnFinishedNote`);
+  - no turn-finished note ("<X> finished answering"), the main session's
+    own included (`isSessionsHiddenTurnFinishedNote`); the classic view
+    keeps them;
   - the Accord: above the composer one quiet line (Accord · its name ·
     where it stands) that opens the whole card in the side panel; the
     classic view keeps the pinned card;

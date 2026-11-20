@@ -484,7 +484,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               } : undefined}
               onJumpToParticipantLastMessage={props.onJumpToParticipantLastMessage}
               placeholder="Message @name, /name, or #path..."
-              {...sessionsComposerProps(sessions?.mainSessionId, props.renderMemberChip)}
+              {...sessionsComposerProps(sessions?.mainSessionId, props.renderMemberChip,
+                { runIds: activeRunSummary.runIdsByParticipantId.get(sessions?.mainSessionId ?? "") ?? [], onStopRun: props.onStopRun })}
               status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
               testId="chat-main-composer"
               renderParticipantAvatar={renderComposerMemberMark}

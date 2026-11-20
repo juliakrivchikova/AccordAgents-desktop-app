@@ -7,15 +7,19 @@ import { act, create, type ReactTestInstance } from "react-test-renderer";
 import type { ReactElement } from "react";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
-import type { ChatAppToolApproval } from "../../../shared/types";
+import type { ChatAppToolApproval, ProviderModelCatalog } from "../../../shared/types";
 import { avatarForParticipant } from "../avatar/avatar";
 import { ChatAccordLaunchCard } from "./chat-accord-launch-card";
 import { ChatAppToolApprovalCard } from "./chat-app-tool-approval-card";
 import { ChatMemberMark, ChatSessionsPresentationContext, renderComposerMemberMark, renderNewChatMemberMark } from "./chat-member-mark";
+import { ChatComposerSendButton } from "./chat-composer-send-button";
+import { memberDefaultModelName, resetMemberModelCatalogs } from "./chat-member-model-name";
 import { SESSIONS_COMPOSER_PLACEHOLDER, memberModelChip, sessionsComposerProps } from "./chat-sessions-composer";
 import { ChatSessionsLinksContext, type ChatSessionsLinks } from "./chat-sessions-links";
 import { ChatTurnFinishedNote } from "./chat-turn-finished-note";
 import { DREW, MAIN, PARTICIPANTS, TAYLOR } from "./chat-sessions-fixtures.test";
+
+const NOW_ISO = "2026-11-21T10:00:00.000Z";
 
 const textOf = (node: ReactTestInstance | string): string =>
   typeof node === "string" ? node : node.children.map(textOf).join("");
@@ -126,12 +130,80 @@ test("the sessions view's composer writes to the main session: no members to men
   assert.equal(props.placeholder, SESSIONS_COMPOSER_PLACEHOLDER);
   const chip = renderIn(true, <>{memberModelChip(PARTICIPANTS, MAIN.id)}</>);
   assert.deepEqual(providerKinds(chip.root), [MAIN.kind]);
-  assert.match(textOf(chip.root), /Default model/);
+  assert.equal(textOf(chip.root), "Claude Code", "no model of its own and no list of its CLI's: the CLI's name, never 'Default model'");
   chip.unmount();
   const tuned = renderIn(true, <>{memberModelChip([{ ...MAIN, model: "Haiku 5.5", reasoningEffort: "low" }], MAIN.id)}</>);
   assert.match(textOf(tuned.root), /Haiku 5\.5/);
   assert.match(textOf(tuned.root), /Low/);
   tuned.unmount();
+});
+
+test("the sessions view's main composer has no active-runs pill, and its button stops the main session while it runs and nothing is typed", () => {
+  const stopped: string[] = [];
+  const idle = sessionsComposerProps(MAIN.id, undefined, { runIds: [], onStopRun: (runId) => stopped.push(runId) });
+  assert.equal(idle.activeRunCount, 0, "no 'N active runs' pill: the Waiting line and the side panel name the members");
+  assert.ok("onStopAllRuns" in idle && idle.onStopAllRuns === undefined);
+  assert.equal(idle.stop, undefined, "nothing to stop while the main session is idle");
+  const busy = sessionsComposerProps(MAIN.id, undefined, { runIds: ["run-main", "run-main-queued"], onStopRun: (runId) => stopped.push(runId) });
+  assert.equal(busy.stop?.label, "Stop the main session");
+  busy.stop?.onStop();
+  assert.deepEqual(stopped, ["run-main", "run-main-queued"], "the main session's runs only");
+
+  const button = (canSend: boolean) => renderIn(true, <ChatComposerSendButton canSend={canSend} isRunning={false} onSend={() => stopped.push("sent")} stop={busy.stop} />);
+  const empty = button(false);
+  const stop = empty.root.find((node) => node.type === "button");
+  assert.equal(stop.props["data-testid"], "chat-composer-stop");
+  assert.equal(stop.props["aria-label"], "Stop the main session");
+  assert.equal(stop.props.disabled, undefined, "enabled with nothing typed");
+  empty.unmount();
+  const typed = button(true);
+  const send = typed.root.find((node) => node.type === "button");
+  assert.equal(send.props["aria-label"], "Send message", "typing turns it back into Send");
+  act(() => send.props.onClick());
+  assert.equal(stopped.at(-1), "sent");
+  typed.unmount();
+  const classic = renderIn(false, <ChatComposerSendButton canSend={false} isRunning={false} onSend={() => undefined} />);
+  assert.equal(classic.root.find((node) => node.type === "button").props.disabled, true, "without a Stop, an empty draft is a disabled Send, as before");
+  classic.unmount();
+});
+
+test("a member without a model of its own: its chip names the model its CLI runs on by default, else the CLI", async () => {
+  const catalog = (models: ProviderModelCatalog["models"]): ProviderModelCatalog => ({ kind: "claude-code", models, authoritative: true, fetchedAt: NOW_ISO });
+  // The CLI's own default, by its label; Codex's repeated id left out; the app's provider setting is not what a member runs on.
+  assert.equal(memberDefaultModelName(MAIN, catalog([{ id: "opus", label: "Opus", recommended: true, source: "cli" }, { id: "haiku", label: "Haiku", source: "cli" }])), "Opus");
+  assert.equal(memberDefaultModelName({ ...MAIN, kind: "codex-cli" }, catalog([{ id: "gpt-5.5", label: "GPT-5.5 (gpt-5.5)", recommended: true, source: "cli" }])), "GPT-5.5");
+  assert.equal(memberDefaultModelName(MAIN, catalog([{ id: "my-model", label: "my-model", recommended: true, source: "configured" }])), "Claude Code");
+  assert.equal(memberDefaultModelName(MAIN, undefined), "Claude Code");
+  assert.equal(memberDefaultModelName({ ...TAYLOR, kind: "gemini-cli" }, undefined), "Antigravity");
+  // A member on an added provider: the vendor's default model.
+  assert.equal(memberDefaultModelName({ ...MAIN, hostVendor: "zai", hostLabel: "Z.ai" }, undefined), "GLM-5.3");
+
+  // The chip asks the CLI's list once and shows its default, with the effort after it.
+  resetMemberModelCatalogs();
+  const asked: string[] = [];
+  // The window the renderer tests run in, or one of its own.
+  const host = (typeof window === "undefined" ? undefined : window) as unknown as { consensus?: unknown } | undefined;
+  const target = host ?? {};
+  if (!host) Object.defineProperty(globalThis, "window", { value: target, configurable: true, writable: true });
+  const previous = target.consensus;
+  target.consensus = { listProviderModels: async (kind: string) => {
+    asked.push(kind);
+    return catalog([{ id: "opus", label: "Opus", recommended: true, source: "cli" }]);
+  } };
+  try {
+    const chip = renderIn(true, <>{memberModelChip([{ ...MAIN, reasoningEffort: "high" }], MAIN.id)}</>);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(textOf(chip.root), "OpusHigh");
+    chip.unmount();
+    const again = renderIn(true, <>{memberModelChip(PARTICIPANTS, MAIN.id)}</>);
+    assert.equal(textOf(again.root), "Opus", "known at once the next time");
+    again.unmount();
+    assert.deepEqual(asked, ["claude-code"], "asked once");
+  } finally {
+    target.consensus = previous;
+    if (!host) delete (globalThis as { window?: unknown }).window;
+    resetMemberModelCatalogs();
+  }
 });
 
 test("a turn-finished note names the main session and members without handles in the sessions view", () => {
