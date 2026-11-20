@@ -386,6 +386,11 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
     document.getElementById("composer-form").requestSubmit(); })()`);
   const classicSent = await waitForOp(hub, (op) => op.kind === "message.create" && op.message && op.message.content === "Classic question");
   assert.deepEqual(classicSent.message.metadata.deliveryTargets, [MAIN.id], "the main session takes a message that names nobody");
+  // The classic main composer keeps today's routing: an @handle is for that member.
+  await app.evaluate(`(() => { const input = document.getElementById("composer-input"); input.value = "@drew classic task"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.getElementById("composer-form").requestSubmit(); })()`);
+  const classicMention = await waitForOp(hub, (op) => op.kind === "message.create" && op.message && op.message.content === "@drew classic task");
+  assert.deepEqual(classicMention.message.metadata.deliveryTargets, [DREW.id], "a message to @drew in the classic view goes to drew, not the main session");
 
   // --- a chat made before main sessions ------------------------------------
   await app.evaluate(`document.getElementById("back-to-chats").click()`);
