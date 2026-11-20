@@ -103,7 +103,6 @@ export function useChatSessionsView(input: {
   }, [activeRunSummary, mainId, participantStatusById, participants, placement]);
 }
 
-
 /** What the sessions view gives the timeline's rows and the header (the
  *  task cards' context, the view switch, the members button), and the way a
  *  member's message reached from elsewhere opens its session. */
@@ -143,12 +142,15 @@ export function useChatSessionsChrome(input: {
   );
   const kind = rightPanel.panel?.kind;
   const inSessions = Boolean(sessions);
-  // A thread belongs to the classic view, the members to the sessions view.
+  const shownMemberId = rightPanel.panel?.kind === "member" ? rightPanel.panel.participantId : undefined;
+  const memberGone = shownMemberId !== undefined && !input.participantsById.has(shownMemberId);
+  // A thread belongs to the classic view, the members to the sessions view;
+  // a member's session closes once the member is no longer in the chat.
   useEffect(() => {
-    if (kind && (kind === "thread") === inSessions) {
+    if ((kind && (kind === "thread") === inSessions) || memberGone) {
       rightPanel.close();
     }
-  }, [kind, inSessions, rightPanel.close]);
+  }, [kind, inSessions, memberGone, rightPanel.close]);
   const membersOpen = kind === "members" || kind === "member";
   const runningCount = sessions?.runningMemberCount;
   const header = useMemo<ChatViewHeaderState>(() => ({
