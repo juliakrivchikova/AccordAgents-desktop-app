@@ -13,10 +13,12 @@ import {
   claudeModelProbeEnv,
   CliAgentRunner,
   CodexAppServerRunError,
+  parseClaudeInitializeModels,
   parseClaudeModelPickerOutput,
   probeClaudeModelsInFolder,
   resolveClaudeModelProbeCwd,
   resolveCodexCompactTimeoutMs,
+  runClaudeModelListProbe,
   runClaudeModelProbeInPty,
   runClaudeModelProbeWithExpect
 } from "./cliAgents";
@@ -546,6 +548,145 @@ test("Claude model probe environment suppresses prompt history and session persi
     PATH: "/usr/bin",
     CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1"
   });
+});
+
+// The shape Claude Code 2.1.321 answers an SDK initialize request with.
+const CLAUDE_INITIALIZE_MODELS = [
+  { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default (recommended)", description: "Opus 5.5 · Best for everyday, complex tasks" },
+  { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus 5.5", description: "For complex work and everyday tasks" },
+  { value: "fable", resolvedModel: "claude-fable-5-2", displayName: "Fable 5.2", description: "For your toughest challenges" },
+  { value: "sonnet", resolvedModel: "claude-sonnet-5-5", displayName: "Sonnet 5.5", description: "Most efficient for simpler tasks" },
+  { value: "haiku", resolvedModel: "claude-haiku-5-5", displayName: "Haiku 5.5", description: "Fastest for quick answers" },
+  { value: "claude-opus-4-8", resolvedModel: "claude-opus-4-8", displayName: "Opus 4.8", description: "Best for everyday, complex tasks" },
+  { value: "claude-haiku-4-5-20251001", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku 4.5" }
+];
+
+function fakeClaudeChild() {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const child = Object.assign(new EventEmitter(), {
+    stdin,
+    stdout,
+    stderr,
+    killed: false,
+    exitCode: null as number | null,
+    kill() {
+      this.killed = true;
+      return true;
+    }
+  });
+  return child;
+}
+
+test("Claude model list keeps the CLI's own names and order, without its Default row", () => {
+  const models = parseClaudeInitializeModels(CLAUDE_INITIALIZE_MODELS);
+  assert.deepEqual(models.map((model) => [model.id, model.label]), [
+    ["opus", "Opus 5.5"],
+    ["fable", "Fable 5.2"],
+    ["sonnet", "Sonnet 5.5"],
+    ["haiku", "Haiku 5.5"],
+    ["claude-opus-4-8", "Opus 4.8"],
+    ["claude-haiku-4-5-20251001", "Haiku 4.5"]
+  ]);
+  assert.deepEqual(models.filter((model) => model.recommended).map((model) => model.id), ["opus"]);
+  assert.equal(models[0].description, "For complex work and everyday tasks");
+  assert.equal(models.every((model) => model.source === "cli"), true);
+  assert.deepEqual(parseClaudeInitializeModels(undefined), []);
+  assert.deepEqual(parseClaudeInitializeModels([null, "opus", { displayName: "No value" }]), []);
+});
+
+test("Claude model list asks the CLI with one initialize request and no prompt", async () => {
+  const child = fakeClaudeChild();
+  let launch: { command: string; args: readonly string[]; options: Record<string, any> } | undefined;
+  const written: string[] = [];
+  child.stdin.on("data", (chunk) => {
+    written.push(String(chunk));
+    const request = JSON.parse(String(chunk));
+    queueMicrotask(() => {
+      child.stdout.write(`${JSON.stringify({ type: "system", subtype: "ui_invalidate" })}\n`);
+      child.stdout.write(`${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: "someone-else", response: { models: [] } } })}\n`);
+      const answer = JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: request.request_id, response: { commands: [], models: CLAUDE_INITIALIZE_MODELS } } });
+      // Split across chunks the way a large pipe write arrives.
+      child.stdout.write(answer.slice(0, 40));
+      child.stdout.write(`${answer.slice(40)}\n`);
+    });
+  });
+
+  const models = await runClaudeModelListProbe({
+    executable: "/tmp/claude-stub",
+    env: { PATH: "/usr/bin", CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1" },
+    cwd: "/tmp/trusted-repo",
+    timeoutMs: 1_000,
+    spawnClaude: ((command: string, args: readonly string[], options: Record<string, any>) => {
+      launch = { command, args, options };
+      return child;
+    }) as any
+  });
+
+  assert.deepEqual(models, CLAUDE_INITIALIZE_MODELS);
+  assert.equal(launch?.command, "/tmp/claude-stub");
+  assert.deepEqual(launch?.args, ["-p", "--safe-mode", "--no-chrome", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]);
+  assert.equal(launch?.options.cwd, "/tmp/trusted-repo");
+  assert.equal(launch?.options.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY, "1");
+  assert.equal("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE" in launch!.options.env, false);
+  assert.equal(written.length, 1);
+  assert.deepEqual(JSON.parse(written[0]).request, { subtype: "initialize" });
+  assert.equal(child.killed, true);
+});
+
+test("Claude model list fails plainly when the CLI exits, refuses, or stays silent", async () => {
+  const exiting = fakeClaudeChild();
+  const exited = runClaudeModelListProbe({
+    executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 1_000,
+    spawnClaude: (() => {
+      queueMicrotask(() => {
+        exiting.stderr.write("Not logged in");
+        setTimeout(() => { exiting.exitCode = 1; exiting.emit("close", 1); }, 5);
+      });
+      return exiting;
+    }) as any
+  });
+  await assert.rejects(exited, /exited with code 1 before listing its models: Not logged in/);
+
+  const refusing = fakeClaudeChild();
+  refusing.stdin.on("data", (chunk) => {
+    const request = JSON.parse(String(chunk));
+    queueMicrotask(() => refusing.stdout.write(`${JSON.stringify({ type: "control_response", response: { subtype: "error", request_id: request.request_id, error: "unknown request" } })}\n`));
+  });
+  await assert.rejects(runClaudeModelListProbe({
+    executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 1_000, spawnClaude: (() => refusing) as any
+  }), /did not list its models: unknown request/);
+  assert.equal(refusing.killed, true);
+
+  const silent = fakeClaudeChild();
+  await assert.rejects(runClaudeModelListProbe({
+    executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 20, spawnClaude: (() => silent) as any
+  }), /did not list its models in time/);
+  assert.equal(silent.killed, true);
+});
+
+test("Claude model catalog reads the /model picker only when the CLI does not list models on initialize", async () => {
+  const runner = makeRunner() as any;
+  let pickerReads = 0;
+  runner.runClaudeModelListProbe = async () => CLAUDE_INITIALIZE_MODELS;
+  runner.runClaudeModelProbe = async () => {
+    pickerReads += 1;
+    return "Select model 1. Default (recommended) ✔ Opus 4.8 2. Fable Fable 5 Enter to set · Esc to cancel";
+  };
+  const listed = await runner.listClaudeModelCatalog("2026-11-20T00:00:00.000Z");
+  assert.deepEqual(listed.models.map((model: { id: string }) => model.id), ["opus", "fable", "sonnet", "haiku", "claude-opus-4-8", "claude-haiku-4-5-20251001"]);
+  assert.equal(listed.authoritative, true);
+  assert.equal(pickerReads, 0);
+
+  runner.runClaudeModelListProbe = async () => { throw new Error("initialize unsupported"); };
+  const fromPicker = await runner.listClaudeModelCatalog("2026-11-20T00:00:00.000Z");
+  assert.deepEqual(fromPicker.models.map((model: { id: string }) => model.id), ["fable"]);
+  assert.equal(pickerReads, 1);
+
+  runner.runClaudeModelListProbe = async () => [];
+  await runner.listClaudeModelCatalog("2026-11-20T00:00:00.000Z");
+  assert.equal(pickerReads, 2);
 });
 
 test("Claude model discovery falls back when the saved repository directory no longer exists", async () => {

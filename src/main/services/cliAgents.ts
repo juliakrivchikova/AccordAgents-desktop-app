@@ -143,6 +143,10 @@ const MODEL_CATALOG_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_TIMEOUT_MS = 8_000;
 const CLAUDE_WINDOWS_MODEL_PROBE_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_MAX_OUTPUT_BYTES = 256 * 1024;
+const CLAUDE_MODEL_LIST_TIMEOUT_MS = 15_000;
+/** The initialize answer also lists every command and skill, so it is larger
+ *  than the picker screen. */
+const CLAUDE_MODEL_LIST_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 /** The app's own empty folder for the Windows model picker when no project
  *  folder is known or Claude Code does not trust it. Not the folder the app
  *  was started in: that is its install folder, which changes with every
@@ -1025,6 +1029,150 @@ async function prepareOwnProbeFolder(ownFolder: string): Promise<void> {
   }
 }
 
+/** Claude Code's own model list, as its `/model` picker shows it (including
+ *  "More models"), from the `models` field of its answer to an SDK
+ *  `initialize` request. "Default" is the inherited setting, so it is not a
+ *  model to pick; the model it resolves to is marked recommended. */
+export function parseClaudeInitializeModels(value: unknown): ProviderModel[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const records = value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
+  const text = (record: Record<string, unknown>, key: string): string | undefined => {
+    const field = record[key];
+    return typeof field === "string" && field.trim() ? field.trim() : undefined;
+  };
+  const defaultModel = records.find((record) => text(record, "value") === "default");
+  const recommendedModel = defaultModel ? text(defaultModel, "resolvedModel") : undefined;
+  let recommendedMarked = false;
+  const models: ProviderModel[] = [];
+  for (const record of records) {
+    const id = text(record, "value");
+    if (!id || id === "default") {
+      continue;
+    }
+    const recommended: boolean = !recommendedMarked && recommendedModel !== undefined && text(record, "resolvedModel") === recommendedModel;
+    recommendedMarked ||= recommended;
+    models.push({
+      id,
+      label: text(record, "displayName") ?? id,
+      description: text(record, "description"),
+      source: "cli",
+      recommended
+    });
+  }
+  return dedupeProviderModels(models);
+}
+
+/** Asks Claude Code for its models the way its SDK does: one `initialize`
+ *  control request in stream-json mode. No prompt is sent, so no model is
+ *  called and no session is written; resolves with the answer's `models`. */
+export function runClaudeModelListProbe({
+  executable,
+  env,
+  cwd,
+  spawnClaude = spawnCommand,
+  timeoutMs = CLAUDE_MODEL_LIST_TIMEOUT_MS,
+  maxOutputBytes = CLAUDE_MODEL_LIST_MAX_OUTPUT_BYTES
+}: {
+  executable: string;
+  env: NodeJS.ProcessEnv;
+  cwd: string;
+  spawnClaude?: typeof spawnCommand;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+}): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const requestId = `accordagents-models-${randomUUID()}`;
+    const child = spawnClaude(
+      executable,
+      ["-p", "--safe-mode", "--no-chrome", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"],
+      { cwd, env: claudeModelProbeEnv(env), stdio: ["pipe", "pipe", "pipe"] }
+    );
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    let pending = "";
+    let stderr = "";
+    let capturedBytes = 0;
+    let finished = false;
+    const finish = (error?: Error, models?: unknown): void => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      clearTimeout(timeout);
+      child.stdin?.end();
+      if (!child.killed && child.exitCode === null) {
+        child.kill("SIGTERM");
+      }
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(models);
+    };
+    const readLine = (line: string): void => {
+      let message: Record<string, unknown> | undefined;
+      try {
+        const parsed: unknown = JSON.parse(line);
+        message = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : undefined;
+      } catch {
+        return;
+      }
+      const response = message?.type === "control_response" && message.response && typeof message.response === "object"
+        ? message.response as Record<string, unknown>
+        : undefined;
+      if (!response || response.request_id !== requestId) {
+        return;
+      }
+      if (response.subtype !== "success") {
+        finish(new Error(`Claude Code did not list its models: ${typeof response.error === "string" ? response.error : "initialize failed"}.`));
+        return;
+      }
+      const body = response.response && typeof response.response === "object" ? response.response as Record<string, unknown> : {};
+      finish(undefined, body.models);
+    };
+    const timeout = setTimeout(() => {
+      finish(new Error(`Claude Code did not list its models in time${stderr.trim() ? `: ${stderr.trim().slice(0, MAX_CLI_ERROR_CHARS)}` : "."}`));
+    }, timeoutMs);
+    timeout.unref();
+    child.stdout?.on("data", (chunk: string | Buffer) => {
+      const value = String(chunk);
+      capturedBytes += Buffer.byteLength(value);
+      if (capturedBytes > maxOutputBytes) {
+        finish(new Error(`Claude Code's model list exceeded ${maxOutputBytes} bytes of output.`));
+        return;
+      }
+      pending += value;
+      let newline = pending.indexOf("\n");
+      while (newline >= 0 && !finished) {
+        const line = pending.slice(0, newline).trim();
+        pending = pending.slice(newline + 1);
+        if (line) {
+          readLine(line);
+        }
+        newline = pending.indexOf("\n");
+      }
+    });
+    child.stderr?.on("data", (chunk: string | Buffer) => {
+      if (stderr.length < MAX_CLI_ERROR_CHARS * 4) {
+        stderr += String(chunk);
+      }
+    });
+    child.stdin?.on("error", () => undefined);
+    child.once("error", (error) => finish(error));
+    // "close", not "exit": the answer may still be in the stdout pipe at exit.
+    child.once("close", (code) => {
+      if (pending.trim()) {
+        readLine(pending.trim());
+        pending = "";
+      }
+      finish(new Error(`Claude Code exited with code ${code ?? "unknown"} before listing its models${stderr.trim() ? `: ${stderr.trim().slice(0, MAX_CLI_ERROR_CHARS)}` : "."}`));
+    });
+    child.stdin?.write(`${JSON.stringify({ type: "control_request", request_id: requestId, request: { subtype: "initialize" } })}\n`);
+  });
+}
+
 export function runClaudeModelProbeWithExpect({
   executable,
   env,
@@ -1410,6 +1558,8 @@ export class CliAgentRunner {
   private runTimeoutMs = CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS;
   private readonly nativeProcessDbPath?: string;
   private readonly claudeModelProbeDir?: string;
+  /** Spawns Claude Code to ask for its model list; tests replace it. */
+  private claudeModelListSpawn: typeof spawnCommand = spawnCommand;
   private readonly warmAgentCreations = new Map<string, Promise<WarmAgentEntry>>();
   private readonly conversationShutdowns = new Map<string, Promise<void>>();
   private readonly conversationOperations = new Map<string, number>();
@@ -1972,8 +2122,16 @@ export class CliAgentRunner {
   }
 
   private async listClaudeModelCatalog(fetchedAt: string, probeCwd?: string): Promise<ProviderModelCatalog> {
-    const output = await this.runClaudeModelProbe(probeCwd);
-    const models = parseClaudeModelPickerOutput(output);
+    let models: ProviderModel[] = [];
+    try {
+      models = parseClaudeInitializeModels(await this.runClaudeModelListProbe(probeCwd));
+    } catch (error) {
+      await this.debugLogs?.write("cli.model-catalog.initialize-error", { message: error instanceof Error ? error.message : String(error) });
+    }
+    if (models.length === 0) {
+      // A Claude Code build that does not list models on initialize: read its /model picker.
+      models = parseClaudeModelPickerOutput(await this.runClaudeModelProbe(probeCwd));
+    }
     if (models.length === 0) {
       throw new Error("Claude model picker did not expose parseable model choices.");
     }
@@ -2003,6 +2161,17 @@ export class CliAgentRunner {
       });
     }
     return options;
+  }
+
+  private async runClaudeModelListProbe(probeCwd?: string): Promise<unknown> {
+    await ensureLoginShellEnvPrimed();
+    const env = commandEnvironment(undefined, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
+    return runClaudeModelListProbe({
+      executable: await resolveCommandPath("claude", env),
+      env,
+      cwd: await resolveClaudeModelProbeCwd(probeCwd, homedir()),
+      spawnClaude: this.claudeModelListSpawn
+    });
   }
 
   private async runClaudeModelProbe(probeCwd?: string): Promise<string> {

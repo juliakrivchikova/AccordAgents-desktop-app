@@ -22,7 +22,7 @@ import type {
   ChatRoleParticipantDefaults,
   ChatRosterChangeParticipantInput
 } from "../../../shared/types";
-import { useProviderModelCatalog, type ProviderModelCatalogHost } from "./use-provider-model-catalog";
+import { modelDetectionFailureText, useProviderModelCatalog, type ProviderModelCatalogHost } from "./use-provider-model-catalog";
 import { savedModelId } from "../../../shared/geminiModels";
 import { Avatar } from "../avatar/avatar";
 import { AvatarStudioDialog } from "../avatar/avatar-studio-dialog";
@@ -266,10 +266,17 @@ export function ChatParticipantInlineModelRow(props: {
   const [manual, setManual] = useState("");
   const value = savedModelId(props.kind, props.model);
   const host = props.host && props.host.cli === props.kind ? props.host : undefined;
-  const { catalog } = useProviderModelCatalog(props.kind, host);
+  const { catalog, loading, error } = useProviderModelCatalog(props.kind, host);
 
   const models = catalog?.models ?? [];
   const inheritedLabel = chatModelDefaultLabel(props.kind, host);
+  const selectedLabel = value ? models.find((item) => item.id === value)?.label ?? value : inheritedLabel;
+  // Without this the list is just the inherited setting until the CLI answers.
+  const listStatus = loading
+    ? "Detecting models…"
+    : error
+      ? "Model detection failed; enter a custom model id."
+      : modelDetectionFailureText(catalog) ?? (catalog && models.length === 0 ? "No models detected; enter a custom model id." : undefined);
 
   return (
     <ChatParticipantSpecRow label="Model">
@@ -284,7 +291,7 @@ export function ChatParticipantInlineModelRow(props: {
       >
         <PopoverTrigger asChild>
           <button type="button" className="chat-app-tool-inline-edit" aria-label="Change model">
-            <span>{value ?? inheritedLabel}</span>
+            <span>{selectedLabel}</span>
             <ChevronDown size={14} aria-hidden />
           </button>
         </PopoverTrigger>
@@ -315,6 +322,7 @@ export function ChatParticipantInlineModelRow(props: {
                 {item.id === value && <Check size={14} aria-hidden />}
               </button>
             ))}
+            {listStatus && <span className="chat-app-tool-inline-empty" role="status">{listStatus}</span>}
           </div>
           <form
             className="chat-app-tool-inline-manual"
