@@ -549,7 +549,11 @@
       // An urgent alert's card changes as the alert goes on (sent, calls, Got it).
       JSON.stringify(left.urgentAlert || null) === JSON.stringify(right.urgentAlert || null) &&
       (left.accordLaunchMessageId || "") === (right.accordLaunchMessageId || "") &&
-      JSON.stringify(left.accordLaunch || null) === JSON.stringify(right.accordLaunch || null);
+      JSON.stringify(left.accordLaunch || null) === JSON.stringify(right.accordLaunch || null) &&
+      // The sessions view places a message by whom it was for, and draws a
+      // request's card from where each task stands.
+      (left.addressees || []).join(",") === (right.addressees || []).join(",") &&
+      JSON.stringify(left.participantRequest || null) === JSON.stringify(right.participantRequest || null);
   }
 
   function sameMobileEvent(left, right) {
@@ -707,7 +711,11 @@
             ...(stored.sourceMessageId && !entry.sourceMessageId ? { sourceMessageId: stored.sourceMessageId } : {}),
             // A copy without turns (a page from before the server kept them)
             // does not undo what a later one said.
-            ...(Array.isArray(stored.turns) && !Array.isArray(entry.turns) ? { turns: stored.turns } : {})
+            ...(Array.isArray(stored.turns) && !Array.isArray(entry.turns) ? { turns: stored.turns } : {}),
+            // Nor one without the message's addressees or its tasks (live
+            // progress carries neither).
+            ...(Array.isArray(stored.addressees) && !Array.isArray(entry.addressees) ? { addressees: stored.addressees } : {}),
+            ...(stored.participantRequest && !entry.participantRequest ? { participantRequest: stored.participantRequest } : {})
           };
         }
         if (stored && sameTimelineEntryContent(stored, entry) &&
@@ -1311,6 +1319,12 @@
         running: chat.running === true,
         ...(chat.pinned === true ? { pinned: true, ...(typeof chat.pinnedAt === "string" ? { pinnedAt: chat.pinnedAt } : {}) } : {}),
         ...(chat.waitingChoice === true ? { waitingChoice: true } : {}),
+        // A chat with a main session, and the view it opens in (the desktop's
+        // switch, shared through her server like the pin).
+        ...(typeof chat.mainSessionParticipantId === "string" && chat.mainSessionParticipantId
+          ? { mainSessionParticipantId: chat.mainSessionParticipantId } : {}),
+        ...(chat.chatView === "sessions" || chat.chatView === "classic" ? { chatView: chat.chatView } : {}),
+        ...(chat.canSwitchView === true ? { canSwitchView: true } : {}),
         // The Accords folded into the chat, as her server records them over
         // the whole chat: their cards are not pinned here.
         ...(Array.isArray(chat.accordClosed) ? { accordClosed: chat.accordClosed.filter(function (id) {
@@ -2587,9 +2601,21 @@
     };
   }
 
+  /** A message written in a member's session goes to that member only:
+   *  exactly these members, no @ read for addressees, no fallback (the
+   *  desktop's targetParticipantIds). */
+  function explicitPhoneTargets(payload) {
+    const ids = payload && Array.isArray(payload.targetParticipantIds)
+      ? payload.targetParticipantIds.filter(function (id) { return typeof id === "string" && id; })
+      : [];
+    return ids.length ? Array.from(new Set(ids)) : undefined;
+  }
+
   /** The members a draft is for, by the desktop's own rules (bundled from
    *  src/shared/chatDeliveryPolicy.ts), over the chat as this phone holds it. */
   async function resolvePhoneDelivery(conversationId, payload) {
+    const explicit = explicitPhoneTargets(payload);
+    if (explicit) return { targets: explicit, unknownHandles: [], resolved: true, explicit: true };
     const shared = mobileSharedRules();
     const chat = loadChats().find(function (item) { return item.id === conversationId; });
     const members = chat && Array.isArray(chat.members) ? chat.members : [];
@@ -2619,7 +2645,11 @@
     });
     const threadRootId = payload && typeof payload.threadRootId === "string" ? payload.threadRootId : undefined;
     const result = shared.resolveChatDeliveryTargets({
-      conversation: { id: conversationId, messages: messages, metadata: { participants: participants } },
+      // The chat's main session takes what names nobody (docs/main-session.md).
+      conversation: { id: conversationId, messages: messages, metadata: {
+        participants: participants,
+        ...(chat && chat.mainSessionParticipantId ? { mainSessionParticipantId: chat.mainSessionParticipantId } : {})
+      } },
       participants: participants,
       content: String(payload && payload.content || ""),
       context: threadRootId ? { chatThreadRootId: threadRootId } : {},
@@ -2739,6 +2769,11 @@
       return payload.pinned === true
         ? { ...base, kind: "conversation.update", metadata: { pinned: true, pinnedAt: payload.pinnedAt } }
         : { ...base, kind: "conversation.update", removedMetadataKeys: ["pinned", "pinnedAt"] };
+    }
+    // The chat's view, switched here: every device shows it so (shared
+    // through her server like the pin).
+    if (entry.kind === "conversation.view") {
+      return { ...base, kind: "conversation.update", metadata: { chatView: payload.view } };
     }
     throw new Error("This phone cannot send a " + String(entry.kind || "change") + ".");
   }
@@ -3041,6 +3076,9 @@
     } else if (entry.kind === "conversation.pin") {
       const chat = loadChats().find(function (item) { return item.id === entry.conversationId; });
       text = (payload.pinned === true ? "Pin " : "Unpin ") + (chat && chat.title ? "“" + chat.title + "”" : "a chat");
+    } else if (entry.kind === "conversation.view") {
+      const chat = loadChats().find(function (item) { return item.id === entry.conversationId; });
+      text = "Show " + (chat && chat.title ? "“" + chat.title + "”" : "a chat") + " in the " + (payload.view === "classic" ? "Classic" : "Sessions") + " view";
     }
     return {
       entryId: entry.eventId,
@@ -3141,7 +3179,7 @@
     if (record.kind === "card.answer") return "Answer: ";
     if (record.kind === "message.system") return "Note ";
     if (record.kind === "conversation.create") return "New chat: ";
-    if (record.kind === "conversation.pin") return "";
+    if (record.kind === "conversation.pin" || record.kind === "conversation.view") return "";
     return "Message ";
   }
 
@@ -3517,12 +3555,33 @@
     avatar.className = "mobile-mention-avatar";
     const assistant = participant.roleConfigId === "administrator";
     paintAvatar(avatar, avatarForMember({ id: participant.id, handle: participant.handle, kind: participant.kind, avatarId: participant.avatarId,
-      displayName: assistant ? "Chat Assistant" : "@" + participant.handle, isAssistant: assistant }), undefined);
+      displayName: newChatMemberName(participant), isAssistant: assistant }), undefined);
     return avatar;
   }
 
+  const MAIN_SESSION_ROLE = "main-session";
+
+  /** The member every new chat starts with, first: its main session
+   *  (docs/main-session.md). A server whose computer has not updated yet
+   *  offers only its Chat Assistant, and that is what such a chat gets. */
+  function newChatLead(offer) {
+    return offer ? offer.mainSession || offer.assistant : undefined;
+  }
+
+  function isMainSessionMember(participant) {
+    return Boolean(participant) && participant.roleConfigId === MAIN_SESSION_ROLE;
+  }
+
   function newChatMemberName(participant) {
+    if (isMainSessionMember(participant)) return "Main session";
     return participant.roleConfigId === "administrator" ? "Chat Assistant" : "@" + participant.handle;
+  }
+
+  /** A member row's second line on New chat: its role and its CLI; the main
+   *  session's own name is its role, so its @ name stands there instead. */
+  function newChatMemberRoleLine(participant) {
+    const role = isMainSessionMember(participant) ? "@" + participant.handle : newChatOffer && newChatOffer.roles[participant.roleConfigId];
+    return [role, memberKindLabel(participant.kind)].filter(Boolean).join(" \u00b7 ");
   }
 
   function newChatProjectRow(project, chosen) {
@@ -3566,7 +3625,7 @@
     name.textContent = newChatMemberName(participant);
     const role = document.createElement("span");
     role.className = "members-sheet-role";
-    role.textContent = [newChatOffer && newChatOffer.roles[participant.roleConfigId], memberKindLabel(participant.kind)].filter(Boolean).join(" · ");
+    role.textContent = newChatMemberRoleLine(participant);
     const where = document.createElement("span");
     where.className = "members-sheet-location";
     const machineId = options.machineId || participant.homeMachineId;
@@ -3577,11 +3636,11 @@
     return row;
   }
 
-  /** The members the chat starts with: the Chat Assistant, then each one
+  /** The members the chat starts with: its main session, then each one
    *  chosen, in the order the list shows them. */
   function newChatChosenParticipants(offer) {
     if (!offer) return [];
-    return [offer.assistant].concat(newChatVisibleMembers(offer)
+    return [newChatLead(offer)].concat(newChatVisibleMembers(offer)
       .filter(function (member) { return newChatChosen.has(member.configId); })
       .map(function (member) { return member.participant; }));
   }
@@ -3604,7 +3663,7 @@
     if (list) {
       list.replaceChildren();
       if (offer) {
-        list.append(newChatMemberRow(offer.assistant, { chosen: true, locked: true }));
+        list.append(newChatMemberRow(newChatLead(offer), { chosen: true, locked: true }));
         for (const member of newChatVisibleMembers(offer)) {
           const unavailable = member.unavailable || member.machineUnavailable;
           const row = newChatMemberRow(member.participant, { chosen: newChatChosen.has(member.configId), unavailable: unavailable, machineId: member.machineId });
@@ -3748,9 +3807,17 @@
     let listed = false;
     try {
       const createdAt = nowIso();
+      // The main session leads, as on the computer (passed under both names
+      // the shared rule has known it by).
+      const lead = newChatLead(offer);
       const participants = shared.newChatParticipants({
-        assistant: offer.assistant, members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text, newId: createEventId
+        assistant: lead, mainSession: lead, members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text, newId: createEventId
       });
+      // The chat's main session, and the view it opens in: the one her
+      // computer starts new chats in, else the sessions view.
+      const mainSession = participants.find(isMainSessionMember);
+      const chatView = offer.defaultChatView === "classic" || offer.defaultChatView === "sessions" ? offer.defaultChatView : "sessions";
+      const sessionsFields = mainSession ? { mainSessionParticipantId: mainSession.id, chatView: chatView } : {};
       const repoPath = newChatProject || undefined;
       const title = shared.newChatTitle(text, attachments.length ? attachments[0].filename : undefined);
       // In the list at once, as the computer's sidebar shows a chat it made
@@ -3759,6 +3826,7 @@
       saveStartedChats([{
         id: conversationId, title: title, group: shared.mobileChatGroupLabel(repoPath), snippet: shared.mobileSnippet(text), who: "you:", updatedAt: createdAt,
         running: false, startedHere: true, deviceId: (loadPairing() || {}).deviceId,
+        ...(mainSession ? { ...sessionsFields, canSwitchView: true } : {}),
         participants: participants.map(function (participant) { return "@" + participant.handle; }).slice(0, 4),
         members: participants.map(function (participant) {
           const assistant = participant.roleConfigId === "administrator";
@@ -3771,7 +3839,8 @@
       }].concat(loadStartedChats()));
       const create = await createOutboxEvent({
         conversationId: conversationId, kind: "conversation.create", createdAt: createdAt,
-        payload: { conversation: { title: title, kind: "chat", createdAt: createdAt, ...(repoPath ? { repoPath: repoPath } : {}), metadata: { participants: participants } } }
+        payload: { conversation: { title: title, kind: "chat", createdAt: createdAt, ...(repoPath ? { repoPath: repoPath } : {}),
+          metadata: { participants: participants, ...sessionsFields } } }
       });
       const introId = createEventId();
       const intro = await createOutboxEvent({
@@ -3803,17 +3872,17 @@
     void sendNow();
   }
 
-  /** What an @ in the first message can name: the Chat Assistant and each
+  /** What an @ in the first message can name: the main session and each
    *  member this chat can have, as the computer's New chat lists them. */
   function newChatMentionMembers() {
     const offer = newChatOffer && newChatOffer.options;
     if (!offer) return [];
     const option = function (participant, configId) {
       return { handle: participant.handle, mentionHandle: participant.handle, displayName: newChatMemberName(participant),
-        roleLabel: [newChatOffer.roles[participant.roleConfigId], memberKindLabel(participant.kind)].filter(Boolean).join(" \u00b7 "),
+        roleLabel: newChatMemberRoleLine(participant),
         participant: participant, configId: configId };
     };
-    return [option(offer.assistant)].concat(newChatVisibleMembers(offer)
+    return [option(newChatLead(offer))].concat(newChatVisibleMembers(offer)
       .filter(function (member) { return !member.unavailable && !member.machineUnavailable; })
       .map(function (member) { return option(member.participant, member.configId); }));
   }
@@ -4553,6 +4622,9 @@
     }
     const focusRequest = { conversationId: conversationId, messageId: messageId };
     pendingMessageFocus = focusRequest;
+    // In the sessions view the reply can be in its member's session, which
+    // the next drawing opens on it.
+    if (lastSessionsState && lastSessionsState.conversationId === conversationId) void render();
     void revealEarlierFocusMessage(focusRequest).finally(function () {
       setTimeout(function () {
         if (pendingMessageFocus === focusRequest) pendingMessageFocus = undefined;
@@ -5086,6 +5158,39 @@
     return true;
   }
 
+  /** A member request as the server sent it (mobileTimeline.ts
+   *  MobileTaskBatch), only what is well formed. */
+  function taskBatchOfEvent(event) {
+    const batch = event && event.participantRequest;
+    if (!batch || typeof batch !== "object" || typeof batch.id !== "string" || typeof batch.requesterParticipantId !== "string" ||
+      !Array.isArray(batch.items)) {
+      return {};
+    }
+    const text = function (value) { return typeof value === "string" ? value : ""; };
+    const items = batch.items.filter(function (item) {
+      return item && typeof item.targetParticipantId === "string" && item.targetParticipantId && typeof item.status === "string";
+    }).slice(0, 24).map(function (item) {
+      return {
+        targetParticipantId: item.targetParticipantId,
+        targetHandle: text(item.targetHandle),
+        prompt: text(item.prompt),
+        status: item.status,
+        createdAt: text(item.createdAt),
+        ...(typeof item.replyMessageId === "string" && item.replyMessageId ? { replyMessageId: item.replyMessageId } : {}),
+        ...(typeof item.error === "string" && item.error ? { error: item.error } : {})
+      };
+    });
+    if (items.length === 0) return {};
+    return { participantRequest: {
+      id: batch.id,
+      requesterParticipantId: batch.requesterParticipantId,
+      requesterHandle: text(batch.requesterHandle),
+      resumeRequester: batch.resumeRequester !== false,
+      ...(typeof batch.autoResumeMessageId === "string" && batch.autoResumeMessageId ? { autoResumeMessageId: batch.autoResumeMessageId } : {}),
+      items: items
+    } };
+  }
+
   async function handleRelayTimelinePayload(payload, fallbackConversationId, options) {
     if (payload?.type !== "mobile.timeline.events" || !Array.isArray(payload.events)) {
       return 0;
@@ -5232,6 +5337,13 @@
         ...(role === "you" && Array.isArray(event.turns) ? { turns: event.turns.filter(function (turn) {
           return turn && typeof turn.participantId === "string" && typeof turn.runId === "string" && typeof turn.state === "string";
         }).map(function (turn) { return { participantId: turn.participantId, runId: turn.runId, state: turn.state }; }) } : {}),
+        // The User's message: the members it was for, which the sessions view
+        // places it by.
+        ...(role === "you" && Array.isArray(event.addressees) ? { addressees: event.addressees.filter(function (id) {
+          return typeof id === "string" && id;
+        }).slice(0, 16) } : {}),
+        // A member's request: its task card and the members list read it.
+        ...(role === "participant" ? taskBatchOfEvent(event) : {}),
         ...(settledAt ? { settledAt: settledAt } : {})
       }, openedAt ? { arrivedAt: openedAt } : undefined);
       if (written) {
@@ -6459,7 +6571,10 @@
     return SCROLL_BOTTOM_THRESHOLD_PX + composerHeight;
   }
   let lastScrolledConversationId;
+  // The screen last drawn over the chat (a thread, a member's session), and
+  // the view it was drawn in.
   let lastRenderedThreadRootId;
+  let lastRenderedView;
   let lastRowsFingerprint;
   // The chat's reading position while one of its messages is open on its own
   // screen; restored on the way back.
@@ -6536,10 +6651,12 @@
   // One way back at a time, as on the desktop: a thread goes back to its
   // chat, a chat goes back to the list. Both arrows side by side read as a
   // mistake, and the second one skipped a level.
-  function renderThreadHeader(openThreadRoot) {
+  function renderThreadHeader(openThreadRoot, memberSession) {
     const composerInput = document.getElementById("composer-input");
     if (composerInput) {
-      const placeholder = openThreadRoot ? "Add a reply..." : "Message the room...";
+      // A member's session writes to that member only, and says so.
+      const placeholder = memberSession ? "Message " + sessionsMemberName(memberSession) + "..."
+        : openThreadRoot ? "Add a reply..." : "Message the room...";
       if (composerInput.placeholder !== placeholder) {
         composerInput.placeholder = placeholder;
       }
@@ -6550,7 +6667,9 @@
     if (!back) {
       return;
     }
-    const shouldShow = Boolean(openThreadRoot);
+    const label = memberSession ? "Back to the main session" : "Back to the chat";
+    if (back.getAttribute("aria-label") !== label) back.setAttribute("aria-label", label);
+    const shouldShow = Boolean(openThreadRoot || memberSession);
     if (back.classList.contains("is-visible") !== shouldShow) {
       back.classList.toggle("is-visible", shouldShow);
     }
@@ -7638,6 +7757,7 @@
     closeMembersSheet();
     closeImageViewer();
     setOpenThreadRootId(undefined);
+    setOpenMemberSessionId(undefined);
     localStorage.removeItem(ACTIVE_CONVERSATION_KEY);
     dropCachedChatRows();
   }
@@ -8245,7 +8365,11 @@
     col.append(activityRowMain(row, stamp));
     element.append(activityRowAvatar(row.conversationId, row.handle), col);
     makeRowOpen(element, function () {
-      void openConversation(row.conversationId, { threadRootId: row.threadRootId });
+      // In the sessions view a member's reply is in its session, which opens
+      // on it (there are no threads to open).
+      const chat = loadChats().find(function (item) { return item.id === row.conversationId; });
+      void openConversation(row.conversationId, chatViewOf(chat) === "sessions" && row.messageId
+        ? { messageId: row.messageId } : { threadRootId: row.threadRootId });
     });
     // Swipe left to clear it from this phone's Activity, the way the desktop's
     // "Clear from activity" works there: local to the device (the User,
@@ -8800,6 +8924,9 @@
         // straight into a thread; everything else starts on the main list.
         setOpenThreadRootId(pendingThreadOpen && pendingThreadOpen.conversationId === activeId ? pendingThreadOpen.rootId : undefined);
         pendingThreadOpen = undefined;
+        setOpenMemberSessionId(undefined);
+        lastSessionsState = undefined;
+        if (pendingSessionsTarget && pendingSessionsTarget.conversationId !== activeId) pendingSessionsTarget = undefined;
         setOpenStreamRunId(undefined);
         renderStreamView([], connectionStatus);
       }
@@ -8898,13 +9025,25 @@
     // name set here and "Thread" set again after the reads below made the
     // heading flip on every update while a member wrote into the thread (the
     // User, 2026-09-24).
-    const heading = openThreadRootId() ? "Thread" : activeChat?.title || "AccordAgents";
+    // A member's session belongs to the sessions view, a thread to the
+    // classic one (the desktop closes either when the view changes).
+    const inSessionsView = chatViewOf(activeChat) === "sessions";
+    if (inSessionsView && openThreadRootId()) {
+      // A thread asked for (from Activity, say) is the message it stands
+      // for: its member's session opens once the rows are read.
+      pendingSessionsTarget = { conversationId: activeId, messageId: openThreadRootId() };
+      setOpenThreadRootId(undefined);
+    }
+    if (openMemberSessionId() && !openMemberSessionMember(activeChat)) setOpenMemberSessionId(undefined);
+    const memberSession = openMemberSessionMember(activeChat);
+    const heading = memberSession ? sessionsMemberName(memberSession) : openThreadRootId() ? "Thread" : activeChat?.title || "AccordAgents";
     if (title && title.textContent !== heading) {
       title.textContent = heading;
     }
     // The back arrows and the composer's placeholder go with the heading,
     // not after the reads.
-    renderThreadHeader(openThreadRootId());
+    renderThreadHeader(openThreadRootId(), memberSession);
+    renderChatViewSwitch(activeId, activeChat, Boolean(openThreadRootId() || memberSession));
     renderMembersButton(activeId, activeChat);
     // Looking at the chat is what reads it. A chat opened behind a locked
     // screen is not being looked at.
@@ -8980,6 +9119,10 @@
           })
           : undefined,
         status: refused ? "Refused" : notSent ? "Queued" : "Sent",
+        // Whom it is for, as this phone resolved it: the sessions view places
+        // it by that until the server's copy says the same.
+        ...(entry.hubDelivery && Array.isArray(entry.hubDelivery.targets) && entry.hubDelivery.targets.length
+          ? { addressees: entry.hubDelivery.targets } : {}),
         ...(refused ? { mark: MARK_REFUSED + ": " + (entry.lastError || "No reason was given.") } : {}),
         onItsWay: notSent,
         refused: refused,
@@ -9024,6 +9167,9 @@
         // What a Stop names the member's turn on the server by.
         ...(entry.participantId ? { participantId: entry.participantId } : {}),
         ...(entry.sourceMessageId ? { sourceMessageId: entry.sourceMessageId } : {}),
+        // What the sessions view places the row by and draws its task card from.
+        ...(Array.isArray(entry.addressees) && entry.addressees.length ? { addressees: entry.addressees } : {}),
+        ...(entry.participantRequest ? { participantRequest: entry.participantRequest } : {}),
         createdAt: entry.createdAt,
         threadRootId: entry.threadRootId,
         sourceId: entry.sourceId || entry.id,
@@ -9072,35 +9218,57 @@
       });
       if (allRefused && !renderAccordProgress.lines.has(launchId)) setAccordDockChoice("closedIntoChat", activeId, launchId, false);
     }
-    // The desktop pins it above the chat's own composer only, not a thread's.
-    renderAccordDock(activeId, openThreadRootId() ? null : renderAccordProgress.docked);
-    renderStreamView(rows, connectionStatus);
-    const openThread = openThreadRootId();
-    const grouped = groupRowsIntoThreads(rows, openThread);
-    rows = grouped.rows;
-    renderThreadHeader(openThread);
-    renderThreadReplyAction(openThread, rows.length);
-    renderLoadEarlier(activeId, openThread);
-    const previousThread = lastRenderedThreadRootId;
-    const sameChat = lastScrolledConversationId === activeId;
-    const openedConversation = !sameChat || openThread !== previousThread;
-    lastRenderedThreadRootId = openThread;
-    // Where the chat was being read when a message was opened on its own
-    // screen, for the way back: Slack's message screen returns to the same
-    // place, and landing at the latest message instead lost the User the
-    // spot she was reading in a chat of thousands of rows.
-    if (sameChat && openThread && !previousThread) {
-      const surface = threadSurface();
-      mainListScrollTop = surface ? surface.scrollTop : undefined;
-    } else if (!sameChat) {
-      mainListScrollTop = undefined;
-    }
     // A question stands under the message that asked it, as on the desktop:
     // in the thread when it was asked in a thread, and in its place in the
     // history when that is further up. Only what has no message, a
     // permission, waits at the end of the chat (the User, 2026-10-01: a
     // question asked in a thread stood at the bottom of the main chat).
     renderCardIndex = Object.assign(buildCardIndex(activeId), { revision: revision });
+    // The sessions view (docs/main-session.md): every message in its one
+    // place, by the desktop's rules, worked out from the rows drawn.
+    const sessions = sessionsStateFor(activeId, activeChat, rows);
+    lastSessionsState = sessions;
+    if (sessions) openSessionsTarget(sessions, activeId);
+    const sessionMember = sessions ? openMemberSessionMember(activeChat) : undefined;
+    if (!sessionMember && openMemberSessionId()) setOpenMemberSessionId(undefined);
+    // The desktop pins it above the chat's own composer only, not a thread's.
+    renderAccordDock(activeId, openThreadRootId() || sessionMember ? null : renderAccordProgress.docked);
+    renderStreamView(rows, connectionStatus);
+    const openThread = sessions ? undefined : openThreadRootId();
+    if (sessions) {
+      rows = sessionMember ? sessionsMemberSessionRows(sessions, sessionMember) : sessionsMainRows(sessions);
+    } else {
+      rows = groupRowsIntoThreads(rows, openThread).rows;
+    }
+    // The heading says whose session it is once the reads are in (a message
+    // opened from elsewhere may have opened or closed one).
+    const finalHeading = sessionMember ? sessionsMemberName(sessionMember) : openThread ? "Thread" : activeChat?.title || "AccordAgents";
+    if (title && title.textContent !== finalHeading) title.textContent = finalHeading;
+    renderThreadHeader(openThread, sessionMember);
+    renderChatViewSwitch(activeId, activeChat, Boolean(openThread || sessionMember));
+    renderMembersButton(activeId, activeChat);
+    renderMembersSheetIfOpen(activeChat);
+    renderThreadReplyAction(openThread, rows.length);
+    renderLoadEarlier(activeId, openThread);
+    // A thread or a member's session is a screen of its own over the chat.
+    const openScreen = openThread || (sessionMember ? "member\u0000" + sessionMember.id : undefined);
+    const view = sessions ? "sessions" : "classic";
+    const previousThread = lastRenderedThreadRootId;
+    const sameChat = lastScrolledConversationId === activeId;
+    const sameView = lastRenderedView === view;
+    const openedConversation = !sameChat || !sameView || openScreen !== previousThread;
+    lastRenderedThreadRootId = openScreen;
+    lastRenderedView = view;
+    // Where the chat was being read when a message was opened on its own
+    // screen, for the way back: Slack's message screen returns to the same
+    // place, and landing at the latest message instead lost the User the
+    // spot she was reading in a chat of thousands of rows.
+    if (sameChat && sameView && openScreen && !previousThread) {
+      const surface = threadSurface();
+      mainListScrollTop = surface ? surface.scrollTop : undefined;
+    } else if (!sameChat || !sameView) {
+      mainListScrollTop = undefined;
+    }
     // Approved changes still waiting come first: the last card, next to the
     // composer, is one that needs an answer.
     const tailCards = (renderCardIndex.waiting || []).concat(pendingControlCards(activeId).filter(function (card) {
@@ -9152,7 +9320,7 @@
       return;
     }
     if (openedConversation) {
-      if (sameChat && !openThread && previousThread && typeof mainListScrollTop === "number") {
+      if (sameChat && sameView && !openScreen && previousThread && typeof mainListScrollTop === "number") {
         // Back from a message's own screen: the same place, and the pill says
         // whether anything new waits below it.
         const surface = threadSurface();
@@ -9281,6 +9449,26 @@
       if (!row) {
         return;
       }
+      // The sessions view: a task card's row or "@x asks" opens that member's
+      // session; a Stop stops the members it names; a task opens to its text.
+      const memberOpen = event.target.closest("[data-open-member]");
+      if (memberOpen) {
+        openMemberSession(memberOpen.dataset.openMember);
+        return;
+      }
+      const membersStop = event.target.closest("[data-stop-members]");
+      if (membersStop) {
+        if (!membersStop.disabled) void stopMembersFromPhone(membersStop.dataset.stopMembers.split(",").filter(Boolean));
+        return;
+      }
+      const taskFold = event.target.closest("[data-task-fold]");
+      if (taskFold) {
+        const key = taskFold.dataset.taskFold;
+        if (openTaskFolds.has(key)) openTaskFolds.delete(key);
+        else openTaskFolds.add(key);
+        void render();
+        return;
+      }
       // An urgent alert's Got it (or its cross once it no longer waits): the
       // server closes it; a closed one folds, and a tap opens it again.
       const alertClose = event.target.closest("[data-urgent-alert-close]");
@@ -9331,7 +9519,9 @@
           return;
         }
         const threadRoot = row.dataset.threadRoot;
-        if (threadRoot && !openThreadRootId()) {
+        // The sessions view has no threads: every message has one place.
+        const sessionsView = Boolean(lastSessionsState && lastSessionsState.conversationId === selectedConversationId());
+        if (threadRoot && !openThreadRootId() && !sessionsView) {
           setOpenThreadRootId(threadRoot);
           void render();
         }
@@ -9387,11 +9577,17 @@
   }
 
   function messageRowSignature(entry) {
+    const sessionsView = entry.presentation === "sessions";
     return JSON.stringify({
       replyCount: entry.replyCount,
       author: entry.author,
       participantLabel: entry.participantLabel,
-      avatar: entry.author === "agent" && entry.identified !== false ? avatarSignature(rowAvatar(entry)) : undefined,
+      // The sessions view draws no avatars, and names an author only where
+      // one must be told apart (the main session in a member's session).
+      presentation: entry.presentation,
+      authorLabel: entry.authorLabel,
+      sessions: sessionsView ? sessionsSpecialSignature(entry) : undefined,
+      avatar: entry.author === "agent" && entry.identified !== false && !sessionsView ? avatarSignature(rowAvatar(entry)) : undefined,
       identified: entry.identified,
       scaffolding: entry.scaffolding,
       content: entry.content,
@@ -9408,7 +9604,7 @@
       runId: entry.runId,
       turn: entry.sourceMessageId ? entry.sourceMessageId + ":" + (entry.participantId || "") : undefined,
       stopRequested: entry.stopRequested,
-      accordAvatars: accordLaunchSignatureOf(entry),
+      accordAvatars: sessionsView ? undefined : accordLaunchSignatureOf(entry),
       noteProgress: noteProgressOf(entry),
       urgentAlert: entry.urgentAlert ? JSON.stringify(entry.urgentAlert) : undefined,
       accordLine: accordLineSignatureOf(entry)
@@ -9478,6 +9674,11 @@
           node.textContent = next;
         }
       }
+      // The sessions view's running times count the way the desktop's do.
+      for (const node of document.querySelectorAll(".sessions-elapsed")) {
+        const next = formatWorked(node.dataset.startedAt);
+        if (node.textContent !== next) node.textContent = next;
+      }
     }, 1000);
   }
 
@@ -9510,6 +9711,7 @@
   }
 
   function rowHandleText(entry) {
+    if (entry.presentation === "sessions") return entry.authorLabel || "";
     return entry.identified === false ? "" : (entry.participantLabel || "Agent");
   }
 
@@ -9522,7 +9724,9 @@
   }
 
   function applyRowIdentity(avatar, entry) {
-    if (entry.identified === false) {
+    // The sessions view shows nobody's avatar (docs/main-session.md): the
+    // slot is drawn empty and the view's style takes it out.
+    if (entry.identified === false || entry.presentation === "sessions") {
       if (avatar.dataset.avatarSignature !== "") {
         avatar.textContent = "";
         avatar.removeAttribute("style");
@@ -9824,14 +10028,19 @@
   function accordMemberElement(entry, handle) {
     const wrap = document.createElement("span");
     wrap.className = "accord-launch-member";
+    const name = document.createElement("span");
+    name.className = "accord-launch-handle";
+    name.textContent = "@" + handle;
+    // The sessions view shows names without avatars.
+    if (entry.presentation === "sessions") {
+      wrap.append(name);
+      return wrap;
+    }
     const avatar = document.createElement("span");
     avatar.className = "message-avatar accord-launch-avatar";
     avatar.setAttribute("aria-hidden", "true");
     const conversationId = entry.conversationId || selectedConversationId();
     paintAvatar(avatar, avatarForLabel(conversationMembers(conversationId), "@" + handle), conversationId);
-    const name = document.createElement("span");
-    name.className = "accord-launch-handle";
-    name.textContent = "@" + handle;
     wrap.append(avatar, name);
     return wrap;
   }
@@ -10385,6 +10594,8 @@
     item.dataset.rowSignature = messageRowSignature(entry);
     item.dataset.status = entry.status;
     item.dataset.author = entry.author;
+    item.classList.toggle("is-sessions", entry.presentation === "sessions");
+    if (entry.presentation === "sessions" && entry.participantId) item.dataset.participantId = entry.participantId;
     // Which message this row is, for the screen a tap opens. Rows with nothing
     // the desktop can thread from -- scaffolding, a message still queued on
     // this phone -- carry none, so a tap on them does nothing.
@@ -10399,6 +10610,11 @@
     if (entry.scaffolding) {
       item.dataset.scaffolding = "1";
       renderScaffoldingInto(item);
+      return item;
+    }
+    // The sessions view's own rows: a task card, the "Waiting on" line, a
+    // member's session head, its task, a member's choice still waiting.
+    if (entry.presentation === "sessions" && appendSessionsSpecial(item, entry)) {
       return item;
     }
     if (urgentAlertOfEntry(entry)) {
@@ -10849,6 +11065,22 @@
     if (item.dataset.author !== entry.author) {
       return false;
     }
+    // A sessions-view row of its own shape is drawn again whole; a message
+    // turning into one or out of one is a different shape too. A member's
+    // choice keeps its node while only its card changes, so a field being
+    // typed in keeps the keyboard.
+    if (item.dataset.sessionsKind === "choice" && entry.memberChoice && entry.presentation === "sessions") {
+      const copy = item.querySelector(".sessions-member-choice");
+      if (!copy) return false;
+      item.dataset.rowSignature = messageRowSignature(entry);
+      item.dataset.status = entry.status;
+      syncPendingCards(copy, entry);
+      return true;
+    }
+    if (item.dataset.sessionsKind || (entry.presentation === "sessions" && sessionsSpecialSignature(entry))) {
+      return false;
+    }
+    item.classList.toggle("is-sessions", entry.presentation === "sessions");
     // A note's card is drawn whole; a row turning into one, or out of one, is
     // a different shape, so the reconciler draws it again.
     if (item.dataset.artifactNote === "1" || artifactNoteCardForEntry(entry)) {
@@ -10979,6 +11211,652 @@
     });
   }
 
+  // --- the main session and the sessions view --------------------------------
+  // A chat with a main session (docs/main-session.md) is shown in one of two
+  // views, switched in the chat's header as on the desktop and shared through
+  // her server like the pin. In the sessions view the main timeline holds the
+  // User and the main session (its tasks as cards), every other member's
+  // whole session opens on its own screen, and the members sheet says who
+  // does what. Where each message goes is the desktop's own rule
+  // (shared/mainSession.ts and mainSessionView.ts, bundled into
+  // mobile-shared.js); the phone only draws it.
+
+  // The member whose session is open, for this visit of the chat (like the
+  // open thread).
+  const OPEN_MEMBER_SESSION_KEY = "accordagents.mobile.openMemberSessionId.v1";
+  const CHAT_VIEW_SWITCH_DISABLED_REASON = "This chat was made before main sessions, so it has the classic view only.";
+  /** A view this phone asked for, shown until the server's list says so (as a
+   *  pin is): kept while it waits to be sent, dropped when refused, and once
+   *  taken, kept this long at most for the list to catch up. */
+  const VIEW_OVERRIDE_TAKEN_MS = 60_000;
+  const viewOverrides = new Map();
+  // What the last drawing of the open chat worked out for its sessions view:
+  // the members sheet, the header's button and every Stop read it.
+  let lastSessionsState;
+  // Tasks opened to their whole text in a member's session, by row.
+  const openTaskFolds = new Set();
+  let membersPreviousOpen = false;
+
+  function sessionsRules() {
+    const shared = mobileSharedRules();
+    return shared && typeof shared.sessionsViewLane === "function" && typeof shared.chatViewFor === "function" &&
+      typeof shared.sessionsMemberRows === "function" ? shared : undefined;
+  }
+
+  /** The chat as the shared rules read it: its main session while that is
+   *  still a member, and its own view. */
+  function chatViewMetadata(chat) {
+    return {
+      mainSessionParticipantId: chat ? chat.mainSessionParticipantId : undefined,
+      chatView: chat ? chat.chatView : undefined,
+      participants: chat ? chatMembers(chat).map(function (member) { return { id: member.id }; }) : []
+    };
+  }
+
+  function chatCanSwitchView(chat) {
+    const shared = sessionsRules();
+    return Boolean(chat && shared && shared.canSwitchChatView(chatViewMetadata(chat)));
+  }
+
+  function chatViewOverride(chat) {
+    const override = viewOverrides.get(chat.id);
+    if (!override) return undefined;
+    const sent = override.eventId ? outboxStatusById.get(override.eventId) : undefined;
+    const status = sent && sent.status;
+    if (status === OUTBOX_SENT && !override.takenAt) override.takenAt = Date.now();
+    const settled = chat.chatView === override.view;
+    const refused = status === OUTBOX_REFUSED || status === OUTBOX_SUPERSEDED;
+    const stale = override.takenAt !== undefined && Date.now() - override.takenAt > VIEW_OVERRIDE_TAKEN_MS;
+    if (settled || refused || stale) {
+      viewOverrides.delete(chat.id);
+      return undefined;
+    }
+    return override;
+  }
+
+  /** The view the chat is shown in: the one just picked here while her
+   *  server takes it, else the chat's own. A chat without a main session is
+   *  always classic. */
+  function chatViewOf(chat) {
+    const shared = sessionsRules();
+    if (!chat || !shared || !shared.canSwitchChatView(chatViewMetadata(chat))) return "classic";
+    const override = chatViewOverride(chat);
+    return override ? override.view : shared.chatViewFor(chatViewMetadata(chat));
+  }
+
+  function openMemberSessionId() {
+    const value = sessionStorage.getItem(OPEN_MEMBER_SESSION_KEY);
+    return value && value !== "none" ? value : undefined;
+  }
+
+  function setOpenMemberSessionId(participantId) {
+    if (participantId) sessionStorage.setItem(OPEN_MEMBER_SESSION_KEY, participantId);
+    else sessionStorage.removeItem(OPEN_MEMBER_SESSION_KEY);
+  }
+
+  /** The member whose session is open in the open chat, when its view is
+   *  the sessions view and the member is still in it. */
+  function openMemberSessionMember(chat) {
+    const participantId = openMemberSessionId();
+    if (!participantId || !chat || chatViewOf(chat) !== "sessions" || participantId === chat.mainSessionParticipantId) return undefined;
+    return chatMembers(chat).find(function (member) { return member.id === participantId; });
+  }
+
+  // A message the chat was opened on (from Activity, a note, a link): in the
+  // sessions view, the member's session it is in opens, as on the desktop.
+  let pendingSessionsTarget;
+
+  function openSessionsTarget(state, conversationId) {
+    const shared = sessionsRules();
+    const focus = pendingMessageFocus && pendingMessageFocus.conversationId === conversationId ? pendingMessageFocus.messageId : undefined;
+    const thread = pendingSessionsTarget && pendingSessionsTarget.conversationId === conversationId ? pendingSessionsTarget.messageId : undefined;
+    for (const messageId of [focus, thread]) {
+      const message = messageId ? state.messagesById.get(messageId) : undefined;
+      if (!message) continue;
+      if (messageId === thread) pendingSessionsTarget = undefined;
+      const lane = shared.sessionsViewLane(message, state.index);
+      if (lane.kind === "member" && state.members.some(function (member) { return member.id === lane.participantId; })) {
+        if (openMemberSessionId() !== lane.participantId) setOpenMemberSessionId(lane.participantId);
+      } else if (messageId === focus && openMemberSessionId()) {
+        setOpenMemberSessionId(undefined);
+      }
+      return;
+    }
+  }
+
+  function openMemberSession(participantId) {
+    const chat = activeChatRecord();
+    if (!chat || chatViewOf(chat) !== "sessions" || !participantId) return;
+    if (!chatMembers(chat).some(function (member) { return member.id === participantId; })) return;
+    closeMembersSheet();
+    setOpenThreadRootId(undefined);
+    setOpenMemberSessionId(participantId);
+    void render();
+  }
+
+  /** The User's switch of the chat's view: shown at once, written for every
+   *  device through her server, back to what it was if the server refuses. */
+  async function setChatViewFromPhone(conversationId, view) {
+    const chat = loadChats().find(function (item) { return item.id === conversationId; });
+    if (!chat || (view !== "sessions" && view !== "classic") || !chatCanSwitchView(chat) || chatViewOf(chat) === view) return;
+    const override = { view: view };
+    viewOverrides.set(conversationId, override);
+    setOpenThreadRootId(undefined);
+    setOpenMemberSessionId(undefined);
+    closeMembersSheet();
+    void render();
+    try {
+      const entry = await createOutboxEvent({ conversationId: conversationId, kind: "conversation.view", payload: { view: view } })
+        .then(persistOutboundEvent);
+      override.eventId = entry.eventId;
+    } catch (error) {
+      viewOverrides.delete(conversationId);
+      void render();
+      recordRelayDebug({ event: "chat-view-not-queued", message: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    await sendNow();
+  }
+
+  /** A drawn row as the shared rules read a message: who wrote it, whom the
+   *  User's was for, its request, and whether a choice under it waits. */
+  function sessionsMessageOf(row) {
+    const role = row.author === "you" ? "user" : row.author === "agent" ? "participant" : "system";
+    const waitingChoice = role === "participant" && !row.scaffolding && pendingCardsForMessage(row).length > 0;
+    return {
+      id: row.sourceId || row.id,
+      role: role,
+      content: row.content || "",
+      createdAt: row.createdAt,
+      status: row.status === "Running" ? "pending" : row.status === "Error" ? "error" : "done",
+      ...(row.participantId ? { participantId: row.participantId } : {}),
+      metadata: {
+        ...(Array.isArray(row.addressees) && row.addressees.length ? { deliveryTargets: row.addressees } : {}),
+        ...(row.participantRequest ? { participantRequest: row.participantRequest } : {}),
+        ...(waitingChoice ? { pendingChoice: { status: "pending" } } : {})
+      }
+    };
+  }
+
+  /** The open chat's sessions view, worked out once per drawing from the
+   *  rows it draws; undefined when the chat is shown the classic way. */
+  function sessionsStateFor(conversationId, chat, rows) {
+    const shared = sessionsRules();
+    if (!shared || !chat || chatViewOf(chat) !== "sessions") return undefined;
+    const mainId = shared.mainSessionParticipantId(chatViewMetadata(chat));
+    if (!mainId) return undefined;
+    const messages = rows.map(sessionsMessageOf);
+    const index = shared.buildSessionsViewIndex(messages, mainId);
+    const members = chatMembers(chat);
+    // What each member does now, as far as this phone can see: answering
+    // (a reply or a turn still going), else waiting for the User (a choice
+    // of its waits under one of its messages).
+    const statusById = new Map();
+    const runsByMember = new Map();
+    rows.forEach(function (row, position) {
+      if (row.author !== "agent" || !row.participantId) return;
+      if (row.status === "Running") statusById.set(row.participantId, "running");
+      else if (messages[position].metadata.pendingChoice && !statusById.has(row.participantId)) statusById.set(row.participantId, "pending");
+      if (isCancellableMobileRow(row)) {
+        const runs = runsByMember.get(row.participantId) || [];
+        if (!runs.some(function (run) { return run.runId === row.runId; })) {
+          runs.push({ runId: row.runId, messageId: row.sourceMessageId, participantId: row.participantId, stopRequested: row.stopRequested === true });
+        }
+        runsByMember.set(row.participantId, runs);
+      }
+    });
+    const tasksByMember = shared.latestTaskByMember(messages);
+    const memberRows = shared.sessionsMemberRows(members, mainId, statusById, tasksByMember);
+    const mainStreaming = messages.some(function (message) {
+      return message.role === "participant" && message.status === "pending" && message.participantId === mainId;
+    });
+    const waitingIds = mainStreaming ? [] : shared.membersMainSessionWaitsOn(messages, index).filter(function (id) {
+      return members.some(function (member) { return member.id === id; });
+    });
+    return {
+      conversationId: conversationId, chat: chat, mainId: mainId, rows: rows, messages: messages, index: index, members: members,
+      statusById: statusById, runsByMember: runsByMember, tasksByMember: tasksByMember, memberRows: memberRows, waitingIds: waitingIds,
+      messagesById: new Map(messages.map(function (message) { return [message.id, message]; })),
+      runningCount: members.filter(function (member) {
+        return member.id !== mainId && shared.isMemberWorking(statusById.get(member.id));
+      }).length
+    };
+  }
+
+  function sessionsMemberName(member, fallback) {
+    return member ? member.displayName || "@" + member.handle : fallback || "A member";
+  }
+
+  /** When a member's work began, while it is running: its reply in
+   *  progress, else its latest task. */
+  function sessionsMemberSince(state, participantId) {
+    const shared = sessionsRules();
+    const running = shared.memberRunningSince(participantId, state.messages);
+    if (running) return running;
+    const task = state.tasksByMember.get(participantId);
+    return task ? shared.sessionsTaskRunningSince(task.item, state.messages) : undefined;
+  }
+
+  function sessionsCanStop(state, participantIds) {
+    return participantIds.some(function (id) {
+      return (state.runsByMember.get(id) || []).some(function (run) { return !run.stopRequested; });
+    });
+  }
+
+  function sessionsStopping(state, participantIds) {
+    const runs = participantIds.flatMap(function (id) { return state.runsByMember.get(id) || []; });
+    return runs.length > 0 && runs.every(function (run) { return run.stopRequested; });
+  }
+
+  /** The main session's request as its card: per member the task's first
+   *  line, its state, the time while it runs and one line of the result. */
+  function sessionsTaskCardOf(state, message) {
+    const shared = sessionsRules();
+    const batch = message.metadata.participantRequest;
+    const items = batch.items.map(function (item) {
+      const member = state.members.find(function (candidate) { return candidate.id === item.targetParticipantId; });
+      const status = shared.sessionsTaskStatus(item, state.statusById.get(item.targetParticipantId));
+      const result = status === "done" ? shared.sessionsTaskReplyLine(item, state.messagesById) : undefined;
+      const error = status === "failed" ? shared.firstTextLine(item.error) : "";
+      return {
+        participantId: item.targetParticipantId,
+        handle: "@" + String(member ? member.handle : item.targetHandle).replace(/^@/, ""),
+        provider: member ? memberKindLabel(member.kind) : "",
+        title: shared.firstTextLine(item.prompt) || "Task",
+        status: status,
+        line: result || error || "",
+        since: status === "running" ? shared.sessionsTaskRunningSince(item, state.messages) : undefined
+      };
+    });
+    return {
+      grouped: items.length > 1,
+      head: items.length > 1 ? shared.sessionsTaskGroupLabel(items.map(function (item) { return item.status; })) : "",
+      items: items
+    };
+  }
+
+  /** The rows of the main timeline: the User's messages to the main session,
+   *  the main session's (its requests as task cards), what has no member
+   *  (system lines), the members' choices still waiting for the User, and
+   *  the "Waiting on" line at the end. No avatars, no threads. */
+  function sessionsMainRows(state) {
+    const shared = sessionsRules();
+    const openCards = new Set(shared.openMemberCardMessages(state.messages, state.index).map(function (message) { return message.id; }));
+    const rows = [];
+    state.rows.forEach(function (row, position) {
+      const message = state.messages[position];
+      const base = { ...row, presentation: "sessions", replyCount: undefined };
+      if (openCards.has(message.id)) {
+        const member = state.members.find(function (candidate) { return candidate.id === row.participantId; });
+        rows.push({ ...base, memberChoice: { participantId: row.participantId, name: sessionsMemberName(member, row.participantLabel),
+          provider: member ? memberKindLabel(member.kind) : "" } });
+        return;
+      }
+      if (shared.sessionsViewLane(message, state.index).kind !== "main") return;
+      if (shared.isMainSessionTaskMessage(message, state.index)) {
+        rows.push({ ...base, taskCard: sessionsTaskCardOf(state, message) });
+        return;
+      }
+      rows.push(base);
+    });
+    if (state.waitingIds.length > 0) {
+      const names = state.waitingIds.map(function (id) {
+        return sessionsMemberName(state.members.find(function (member) { return member.id === id; }));
+      });
+      const count = names.length + " " + (names.length === 1 ? "member" : "members");
+      rows.push({
+        rowKey: "sessions-waiting", id: "sessions-waiting", conversationId: state.conversationId, author: "system", status: "Done", content: "",
+        createdAt: "￿", presentation: "sessions",
+        sessionsWaiting: {
+          text: "Waiting on " + count + ": " + names.join(", "), memberIds: state.waitingIds,
+          canStop: sessionsCanStop(state, state.waitingIds), stopping: sessionsStopping(state, state.waitingIds)
+        }
+      });
+    }
+    return rows;
+  }
+
+  /** One member's whole session: what it was asked (its task folded to one
+   *  line), its messages, the main session's answers to its questions and
+   *  the User's messages to it, under a line saying what it does now. */
+  function sessionsMemberSessionRows(state, member) {
+    const shared = sessionsRules();
+    const participantId = member.id;
+    const ids = new Set(shared.memberSessionMessages(state.messages, participantId, state.index).map(function (message) { return message.id; }));
+    const status = shared.sessionsMemberRows([member], state.mainId, state.statusById, state.tasksByMember);
+    const row = status.current[0] || status.previous[0];
+    const workStatus = row ? row.status : "idle";
+    const rows = [{
+      rowKey: "member-session-head\u0000" + participantId, id: "member-session-head", conversationId: state.conversationId, author: "system",
+      status: "Done", content: "", createdAt: "", presentation: "sessions",
+      memberHead: {
+        participantId: participantId,
+        provider: [memberKindLabel(member.kind), member.participant && member.participant.model].filter(Boolean).join(" · "),
+        location: memberLocationLabel(member),
+        status: workStatus,
+        since: workStatus === "running" ? sessionsMemberSince(state, participantId) : undefined,
+        canStop: sessionsCanStop(state, [participantId]),
+        stopping: sessionsStopping(state, [participantId])
+      }
+    }];
+    let shown = 0;
+    state.rows.forEach(function (drawn, position) {
+      const message = state.messages[position];
+      if (!ids.has(message.id)) return;
+      shown += 1;
+      const batch = message.metadata.participantRequest;
+      const task = batch && batch.requesterParticipantId !== participantId
+        ? batch.items.find(function (item) { return item.targetParticipantId === participantId; })
+        : undefined;
+      const base = { ...drawn, presentation: "sessions", replyCount: undefined };
+      if (task) {
+        const key = drawn.rowKey || drawn.id;
+        rows.push({ ...base, taskFold: {
+          label: batch.requesterParticipantId === state.mainId ? "Task from the main session" : "Task from @" + String(batch.requesterHandle).replace(/^@/, ""),
+          preview: shared.firstTextLine(task.prompt),
+          open: openTaskFolds.has(key)
+        } });
+        return;
+      }
+      rows.push(drawn.author === "agent" && drawn.participantId === state.mainId ? { ...base, authorLabel: "Main session" } : base);
+    });
+    if (shown === 0) {
+      rows.push({ rowKey: "member-session-empty", id: "member-session-empty", conversationId: state.conversationId, author: "system",
+        status: "Done", content: "", createdAt: "", presentation: "sessions", sessionsEmpty: "Nothing in this session yet." });
+    }
+    return rows;
+  }
+
+  /** Stops every running turn of these members, each named to the server as
+   *  a Stop from a row names it; one send for all of them. */
+  async function stopMembersFromPhone(participantIds) {
+    const conversationId = selectedConversationId();
+    const state = lastSessionsState;
+    if (!conversationId || !state || state.conversationId !== conversationId) return;
+    const runs = participantIds.flatMap(function (id) { return state.runsByMember.get(id) || []; }).filter(function (run) {
+      return !run.stopRequested && !stopRequestedRunIds.has(run.runId);
+    });
+    if (runs.length === 0) return;
+    for (const run of runs) stopRequestedRunIds.add(run.runId);
+    await render();
+    for (const run of runs) {
+      const turn = await turnOfRun(conversationId, run.runId, { messageId: run.messageId, participantId: run.participantId });
+      if (!turn) {
+        stopRequestedRunIds.delete(run.runId);
+        await recordSendFailure({
+          conversationId: conversationId, kind: "turn.stop", text: "Stop", cause: "phone",
+          reason: "This phone does not know which message this run answers, so it could not name it to your server."
+        });
+        continue;
+      }
+      await enqueueTurnStop({ conversationId: conversationId, runId: turn.runId, rowRunId: turn.rowRunId, messageId: turn.messageId, participantId: turn.participantId });
+    }
+    await sendNow();
+  }
+
+  /** A desktop-style running time: 12s, 3m 4s, 1h 2m. */
+  function formatWorked(startedAt) {
+    const started = Date.parse(startedAt || "");
+    const total = Number.isFinite(started) ? Math.max(0, Math.floor((Date.now() - started) / 1000)) : 0;
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    if (hours > 0) return hours + "h " + minutes + "m";
+    if (minutes > 0) return minutes + "m " + (total % 60) + "s";
+    return (total % 60) + "s";
+  }
+
+  function sessionsElapsedElement(since, className) {
+    const node = document.createElement("span");
+    node.className = "sessions-elapsed" + (className ? " " + className : "");
+    node.dataset.startedAt = since;
+    node.textContent = formatWorked(since);
+    return node;
+  }
+
+  function sessionsStatusElement(status) {
+    const shared = sessionsRules();
+    const node = document.createElement("span");
+    node.className = "sessions-status is-" + status;
+    node.dataset.workStatus = status;
+    const dot = document.createElement("span");
+    dot.className = "sessions-status-dot";
+    dot.setAttribute("aria-hidden", "true");
+    node.append(dot, document.createTextNode(shared ? shared.SESSIONS_WORK_STATUS_LABELS[status] || status : status));
+    return node;
+  }
+
+  function sessionsStopButton(participantIds, canStop, stopping, label, className) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "sessions-stop" + (className ? " " + className : "");
+    button.dataset.stopMembers = participantIds.join(",");
+    button.disabled = stopping || !canStop;
+    button.textContent = stopping ? "Stopping…" : "Stop";
+    if (label) button.setAttribute("aria-label", label);
+    return button;
+  }
+
+  /** The main session's request on the main timeline: a row per member it
+   *  gave a task, each opening that member's session. */
+  function sessionsTaskCardElement(card) {
+    const wrap = document.createElement("section");
+    wrap.className = "sessions-task-card" + (card.grouped ? " is-group" : "");
+    wrap.setAttribute("aria-label", card.grouped ? "Tasks from the main session" : "Task from the main session");
+    if (card.grouped) {
+      const head = document.createElement("div");
+      head.className = "sessions-task-card-head";
+      head.textContent = card.head;
+      wrap.append(head);
+    }
+    for (const item of card.items) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "sessions-task-row";
+      row.dataset.openMember = item.participantId;
+      row.dataset.taskStatus = item.status;
+      const main = document.createElement("span");
+      main.className = "sessions-task-main";
+      const line = document.createElement("span");
+      line.className = "sessions-task-line";
+      const handle = document.createElement("span");
+      handle.className = "sessions-task-handle";
+      handle.textContent = item.handle;
+      const title = document.createElement("span");
+      title.className = "sessions-task-title";
+      title.textContent = item.title;
+      line.append(handle, title);
+      main.append(line);
+      if (item.line) {
+        const result = document.createElement("span");
+        result.className = "sessions-task-result";
+        result.textContent = item.line;
+        main.append(result);
+      }
+      const state = document.createElement("span");
+      state.className = "sessions-task-state";
+      state.append(sessionsStatusElement(item.status));
+      if (item.since) state.append(sessionsElapsedElement(item.since));
+      row.append(main, state, lineIcon(["m9 18 6-6-6-6"], 15));
+      if (item.provider) row.setAttribute("aria-label", item.handle + " (" + item.provider + "): " + item.title);
+      wrap.append(row);
+    }
+    return wrap;
+  }
+
+  /** A member's choice still waiting for the User, on the main timeline:
+   *  who asks (opens its session) and the card itself. */
+  function sessionsChoiceElement(entry) {
+    const wrap = document.createElement("div");
+    wrap.className = "message-copy sessions-member-choice";
+    const from = document.createElement("button");
+    from.type = "button";
+    from.className = "sessions-choice-from";
+    from.dataset.openMember = entry.memberChoice.participantId || "";
+    from.append(document.createTextNode(entry.memberChoice.name + " asks"), lineIcon(["m9 18 6-6-6-6"], 14));
+    wrap.append(from);
+    syncPendingCards(wrap, entry);
+    return wrap;
+  }
+
+  function sessionsWaitingElement(waiting) {
+    const wrap = document.createElement("div");
+    wrap.className = "sessions-waiting";
+    wrap.setAttribute("role", "status");
+    const spinner = document.createElement("span");
+    spinner.className = "timeline-syncing-spinner";
+    spinner.setAttribute("aria-hidden", "true");
+    const text = document.createElement("span");
+    text.className = "sessions-waiting-text";
+    text.textContent = waiting.text;
+    wrap.append(spinner, text);
+    if (waiting.canStop || waiting.stopping) wrap.append(sessionsStopButton(waiting.memberIds, waiting.canStop, waiting.stopping, "Stop the members the main session waits on"));
+    return wrap;
+  }
+
+  function sessionsMemberHeadElement(head) {
+    const wrap = document.createElement("div");
+    wrap.className = "member-session-head";
+    const text = document.createElement("span");
+    text.className = "member-session-provider";
+    text.textContent = [head.provider, head.location].filter(Boolean).join(" · ");
+    const state = document.createElement("span");
+    state.className = "member-session-state";
+    state.append(sessionsStatusElement(head.status));
+    if (head.since) state.append(sessionsElapsedElement(head.since));
+    wrap.append(text, state);
+    if (head.canStop || head.stopping) wrap.append(sessionsStopButton([head.participantId], head.canStop, head.stopping, "Stop this member"));
+    return wrap;
+  }
+
+  function sessionsTaskFoldElement(entry) {
+    const fold = entry.taskFold;
+    const wrap = document.createElement("div");
+    wrap.className = "member-task" + (fold.open ? " is-open" : "");
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "member-task-toggle";
+    toggle.dataset.taskFold = entry.rowKey || entry.id;
+    toggle.setAttribute("aria-expanded", fold.open ? "true" : "false");
+    toggle.append(lineIcon([fold.open ? "m6 9 6 6 6-6" : "m9 18 6-6-6-6"], 14));
+    const label = document.createElement("span");
+    label.className = "member-task-label";
+    label.textContent = fold.label;
+    toggle.append(label);
+    if (!fold.open) {
+      const preview = document.createElement("span");
+      preview.className = "member-task-preview";
+      preview.textContent = fold.preview;
+      toggle.append(preview);
+    }
+    wrap.append(toggle);
+    if (fold.open) {
+      const body = document.createElement("div");
+      body.className = "member-task-body message-content";
+      renderMessageContentIfChanged(body, entry.content, "agent");
+      wrap.append(body);
+    }
+    return wrap;
+  }
+
+  /** What a row of the sessions view draws instead of a message, if anything. */
+  function sessionsSpecialSignature(entry) {
+    if (entry.taskCard) return "task:" + JSON.stringify(entry.taskCard);
+    if (entry.sessionsWaiting) return "waiting:" + JSON.stringify(entry.sessionsWaiting);
+    if (entry.memberHead) return "head:" + JSON.stringify(entry.memberHead);
+    if (entry.taskFold) return "fold:" + JSON.stringify(entry.taskFold);
+    if (entry.sessionsEmpty) return "empty:" + entry.sessionsEmpty;
+    if (entry.memberChoice) return "choice:" + JSON.stringify(entry.memberChoice);
+    return undefined;
+  }
+
+  /** Draws a sessions-view row that is not a plain message; false when the
+   *  row is a message. */
+  function appendSessionsSpecial(item, entry) {
+    if (entry.taskCard) {
+      item.dataset.sessionsKind = "task";
+      item.append(sessionsTaskCardElement(entry.taskCard));
+      return true;
+    }
+    if (entry.sessionsWaiting) {
+      item.dataset.sessionsKind = "waiting";
+      item.append(sessionsWaitingElement(entry.sessionsWaiting));
+      return true;
+    }
+    if (entry.memberHead) {
+      item.dataset.sessionsKind = "member-head";
+      item.append(sessionsMemberHeadElement(entry.memberHead));
+      return true;
+    }
+    if (entry.taskFold) {
+      item.dataset.sessionsKind = "task-fold";
+      item.append(sessionsTaskFoldElement(entry));
+      return true;
+    }
+    if (entry.sessionsEmpty) {
+      item.dataset.sessionsKind = "empty";
+      const empty = document.createElement("p");
+      empty.className = "member-session-empty";
+      empty.textContent = entry.sessionsEmpty;
+      item.append(empty);
+      return true;
+    }
+    if (entry.memberChoice) {
+      item.dataset.sessionsKind = "choice";
+      item.append(sessionsChoiceElement(entry));
+      return true;
+    }
+    return false;
+  }
+
+  /** The chat header's two views. A chat made before main sessions shows
+   *  the switch unavailable, and a tap says why. Off a chat's own screen (a
+   *  thread, a member's session) the header has room for its way back only. */
+  function renderChatViewSwitch(conversationId, chat, onSubscreen) {
+    const group = document.getElementById("chat-view-switch");
+    if (!group) return;
+    const shown = Boolean(conversationId) && !onSubscreen;
+    if (group.hidden === shown) group.hidden = !shown;
+    if (!shown) return;
+    const can = chatCanSwitchView(chat);
+    const view = chatViewOf(chat);
+    group.dataset.chatView = view;
+    group.classList.toggle("is-disabled", !can);
+    if (can) delete group.dataset.disabledReason;
+    else group.dataset.disabledReason = CHAT_VIEW_SWITCH_DISABLED_REASON;
+    group.title = can ? "" : CHAT_VIEW_SWITCH_DISABLED_REASON;
+    for (const option of group.querySelectorAll("[data-view]")) {
+      const pressed = option.dataset.view === view ? "true" : "false";
+      if (option.getAttribute("aria-pressed") !== pressed) option.setAttribute("aria-pressed", pressed);
+      option.setAttribute("aria-disabled", can ? "false" : "true");
+    }
+    syncHeaderSpacer();
+  }
+
+  function wireChatViewSwitch() {
+    const group = document.getElementById("chat-view-switch");
+    if (!group || group.dataset.wired === "1") return;
+    group.dataset.wired = "1";
+    let noteTimer;
+    group.addEventListener("click", function (event) {
+      const option = event.target instanceof Element ? event.target.closest("[data-view]") : null;
+      const conversationId = selectedConversationId();
+      if (!option || !conversationId) return;
+      const chat = activeChatRecord();
+      if (!chatCanSwitchView(chat)) {
+        // Unavailable, said where she tapped (a phone has no tooltip).
+        const note = document.getElementById("chat-view-note");
+        if (note) {
+          note.textContent = CHAT_VIEW_SWITCH_DISABLED_REASON;
+          note.hidden = false;
+          clearTimeout(noteTimer);
+          noteTimer = setTimeout(function () { note.hidden = true; }, 4000);
+        }
+        return;
+      }
+      void setChatViewFromPhone(conversationId, option.dataset.view);
+    });
+  }
+
   // --- members of the open chat ---------------------------------------------
   // Everything shown here is already on the phone: the chat list carries each
   // member's role and home machine. Nothing is asked of the desktop.
@@ -11081,7 +11959,8 @@
     if (!spacer) return;
     const sendLog = document.getElementById("send-log-button");
     const members = document.getElementById("chat-members-button");
-    spacer.hidden = Boolean(sendLog && !sendLog.hidden) || Boolean(members && !members.hidden);
+    const viewSwitch = document.getElementById("chat-view-switch");
+    spacer.hidden = Boolean(sendLog && !sendLog.hidden) || Boolean(members && !members.hidden) || Boolean(viewSwitch && !viewSwitch.hidden);
   }
 
   /** The header's way to the members, with how many there are, whenever a
@@ -11094,11 +11973,114 @@
     const shown = Boolean(conversationId);
     if (button.hidden === shown) button.hidden = !shown;
     const number = document.getElementById("chat-members-count");
-    const text = count > 0 ? String(count) : "";
+    // In the sessions view the button says how many members are at work, as
+    // the desktop's "Members (N running)" does.
+    const sessionsView = Boolean(chat) && chatViewOf(chat) === "sessions";
+    const state = sessionsView && lastSessionsState && lastSessionsState.conversationId === conversationId ? lastSessionsState : undefined;
+    const running = state ? state.runningCount : 0;
+    const text = sessionsView ? (running > 0 ? String(running) : "") : count > 0 ? String(count) : "";
     if (number && number.textContent !== text) number.textContent = text;
-    const label = count === 1 ? "Members: 1 member" : count > 0 ? "Members: " + count + " members" : "Members";
+    button.classList.toggle("is-running", sessionsView && running > 0);
+    button.dataset.view = sessionsView ? "sessions" : "classic";
+    const label = sessionsView ? (running > 0 ? "Members (" + running + " running)" : "Members")
+      : count === 1 ? "Members: 1 member" : count > 0 ? "Members: " + count + " members" : "Members";
     if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
     syncHeaderSpacer();
+  }
+
+  /** The sessions view's members list (the desktop's right panel): every
+   *  member but the main session, what each does, its task, how long it has
+   *  been at it and Stop, with Stop all; those that worked and ended under
+   *  Previous. A tap opens the member's whole session. */
+  function renderSessionsMembersSheet(state, list, title) {
+    const stopAll = document.getElementById("members-sheet-stop-all");
+    const rows = state.memberRows;
+    const all = rows.current.concat(rows.previous);
+    const ids = all.map(function (row) { return row.participant.id; });
+    const canStopAll = sessionsCanStop(state, ids);
+    const stoppingAll = sessionsStopping(state, ids);
+    if (stopAll) {
+      stopAll.hidden = !(canStopAll || stoppingAll);
+      stopAll.dataset.stopMembers = ids.join(",");
+      stopAll.disabled = !canStopAll;
+      stopAll.textContent = stoppingAll ? "Stopping…" : "Stop all";
+    }
+    const describe = function (row) {
+      const id = row.participant.id;
+      return {
+        id: id,
+        name: sessionsMemberName(row.participant),
+        role: row.participant.roleLabel || "",
+        provider: memberKindLabel(row.participant.kind),
+        location: memberLocationLabel(row.participant),
+        status: row.status,
+        task: row.task ? sessionsRules().firstTextLine(row.task.item.prompt) : "",
+        since: row.status === "running" ? sessionsMemberSince(state, id) : undefined,
+        canStop: sessionsCanStop(state, [id]),
+        stopping: sessionsStopping(state, [id])
+      };
+    };
+    const current = rows.current.map(describe);
+    const previous = rows.previous.map(describe);
+    const signature = JSON.stringify(["sessions", state.conversationId, current, previous, membersPreviousOpen]);
+    if (signature === lastMembersSheetSignature && list.childElementCount > 0) return;
+    lastMembersSheetSignature = signature;
+    if (title) title.textContent = "Members";
+    list.replaceChildren();
+    if (all.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "members-sheet-empty";
+      empty.textContent = "No other members yet. The main session adds members when it gives them a task.";
+      list.append(empty);
+      return;
+    }
+    const rowElement = function (row) {
+      const item = document.createElement("div");
+      item.className = "members-sheet-row sessions-member-row is-openable";
+      item.dataset.memberSession = row.id;
+      item.dataset.memberStatus = row.status;
+      item.setAttribute("role", "button");
+      item.tabIndex = 0;
+      const copy = document.createElement("span");
+      copy.className = "members-sheet-copy";
+      const nameLine = document.createElement("span");
+      nameLine.className = "members-sheet-name-line";
+      const name = document.createElement("strong");
+      name.textContent = row.name;
+      nameLine.append(name, sessionsStatusElement(row.status));
+      if (row.since) nameLine.append(sessionsElapsedElement(row.since, "members-sheet-elapsed"));
+      copy.append(nameLine);
+      if (row.task) {
+        const task = document.createElement("span");
+        task.className = "members-sheet-task";
+        task.textContent = row.task;
+        copy.append(task);
+      }
+      const where = document.createElement("span");
+      where.className = "members-sheet-location";
+      where.textContent = [row.role, row.provider, row.location].filter(Boolean).join(" · ");
+      copy.append(where);
+      item.append(copy);
+      if (row.canStop || row.stopping) item.append(sessionsStopButton([row.id], row.canStop, row.stopping, "Stop " + row.name, "members-sheet-stop"));
+      return item;
+    };
+    if (current.length > 0) for (const row of current) list.append(rowElement(row));
+    if (previous.length > 0) {
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "members-previous-toggle";
+      toggle.dataset.membersPrevious = "1";
+      toggle.setAttribute("aria-expanded", membersPreviousOpen ? "true" : "false");
+      toggle.append(lineIcon([membersPreviousOpen ? "m6 9 6 6 6-6" : "m9 18 6-6-6-6"], 14));
+      const label = document.createElement("span");
+      label.textContent = "Previous";
+      const count = document.createElement("span");
+      count.className = "members-previous-count";
+      count.textContent = String(previous.length);
+      toggle.append(label, count);
+      list.append(toggle);
+      if (membersPreviousOpen) for (const row of previous) list.append(rowElement(row));
+    }
   }
 
   function renderMembersSheet(chat) {
@@ -11116,8 +12098,16 @@
     if (!membersSheetOpen) {
       return;
     }
-    const members = chat ? selectedConversationMembers() : [];
     const conversationId = selectedConversationId();
+    const stopAll = document.getElementById("members-sheet-stop-all");
+    if (chat && chatViewOf(chat) === "sessions") {
+      // Drawn from the chat's last drawing; until it is in, the sheet keeps
+      // what it shows.
+      if (lastSessionsState && lastSessionsState.conversationId === conversationId) renderSessionsMembersSheet(lastSessionsState, list, title);
+      return;
+    }
+    if (stopAll) stopAll.hidden = true;
+    const members = chat ? selectedConversationMembers() : [];
     const targets = membersSheetTargets.conversationId === conversationId ? membersSheetTargets : undefined;
     // Redrawn only when what it shows changed: a member streaming redraws the
     // chat every second or so, and a row replaced under the finger loses the tap.
@@ -11237,8 +12227,31 @@
     close?.addEventListener("click", closeMembersSheet);
     // One handler on the list: rows are redrawn as members start and stop.
     document.getElementById("members-sheet-list")?.addEventListener("click", function (event) {
-      const row = event.target instanceof Element ? event.target.closest(".members-sheet-row.is-openable") : null;
+      const target = event.target instanceof Element ? event.target : null;
+      // The sessions view's list: Stop a member, show the members that
+      // ended, or open a member's session.
+      const stop = target ? target.closest("[data-stop-members]") : null;
+      if (stop) {
+        if (!stop.disabled) void stopMembersFromPhone(stop.dataset.stopMembers.split(",").filter(Boolean));
+        return;
+      }
+      if (target && target.closest("[data-members-previous]")) {
+        membersPreviousOpen = !membersPreviousOpen;
+        renderMembersSheet(activeChatRecord());
+        return;
+      }
+      const session = target ? target.closest("[data-member-session]") : null;
+      if (session) {
+        openMemberSession(session.dataset.memberSession);
+        return;
+      }
+      const row = target ? target.closest(".members-sheet-row.is-openable") : null;
       if (row && row.dataset.handle) openMemberMessage(row.dataset.handle);
+    });
+    document.getElementById("members-sheet-stop-all")?.addEventListener("click", function (event) {
+      const button = event.currentTarget;
+      if (button.disabled) return;
+      void stopMembersFromPhone(String(button.dataset.stopMembers || "").split(",").filter(Boolean));
     });
     sheet.addEventListener("click", function (event) {
       if (event.target instanceof Element && event.target.dataset.membersClose === "1") {
@@ -11686,6 +12699,7 @@
     wireChatSearch();
     wireHomeDock();
     wireMembersSheet();
+    wireChatViewSwitch();
     wireChatActionsSheet();
     wireSendLog();
     wireNewChat();
@@ -11725,6 +12739,8 @@
     if (backToTimeline) {
       backToTimeline.addEventListener("click", function () {
         setOpenThreadRootId(undefined);
+        setOpenMemberSessionId(undefined);
+        pendingSessionsTarget = undefined;
         void render();
       });
     }
@@ -12174,7 +13190,11 @@
         // timeline, where the User -- still looking at the thread -- could not
         // see her own message at all (the User, 2026-09-21).
         const threadRootId = openThreadRootId();
-        const carriesExtras = attachments.length > 0 || skillMentions.length > 0 || Boolean(threadRootId);
+        // Written in a member's session: to that member only, no fallback
+        // (the desktop's targetParticipantIds).
+        const sessionMember = openMemberSessionMember(activeChatRecord());
+        const targetParticipantIds = sessionMember ? [sessionMember.id] : undefined;
+        const carriesExtras = attachments.length > 0 || skillMentions.length > 0 || Boolean(threadRootId) || Boolean(targetParticipantIds);
         await enqueueMessage({
           content,
           conversationId,
@@ -12184,6 +13204,7 @@
               payload: {
                 content,
                 ...(threadRootId ? { threadRootId } : {}),
+                ...(targetParticipantIds ? { targetParticipantIds } : {}),
                 ...(attachments.length > 0 ? { attachments } : {}),
                 ...(skillMentions.length > 0 ? { skillMentions } : {})
               }
