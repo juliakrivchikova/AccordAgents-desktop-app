@@ -307,18 +307,47 @@ test("a finished message shows no member state, only its time among its hover co
   assert.equal(textOf(named.find(hasClass("message-meta"))), "Main session");
 });
 
-test("turn-finished notes: another member's is not on the main timeline; the main session's is, with its provider logo, no avatar", () => {
+test("every finished reply of the sessions view says how long it worked the quiet way: muted text and a chevron, no pill; the classic view keeps its pill", () => {
+  const sessions = sessionsOf(sessionsConversation())!;
+  const plain = chatMessage("main-plain", "participant", 10, { participantId: MAIN.id, participantLabel: "main", content: "Rome.", metadata: { workedMs: 44_000 } });
+  const quiet = renderSessionsRow(plain, sessions);
+  assert.equal(quiet.findAll(hasClass("chat-worked")).length, 0, "no bordered pill");
+  const fold = quiet.find((node) => node.props?.["data-testid"] === "chat-worked-fold");
+  assert.equal(textOf(fold), "Worked for 44s");
+  assert.equal(fold.findAll(hasClass("is-static")).length, 1, "nothing to unfold: the muted text alone");
+
+  // A reply with a full stream unfolds it.
+  const toggled: string[] = [];
+  const streamed = { ...plain, id: "main-streamed", metadata: { workedMs: 44_000, processingTranscript: { content: "Let me check the atlas first.\n\nRome." } } } as ChatMessage;
+  const withStream = renderSessionsRow(streamed, sessions, { activityDisclosure: { ...disclosure(), toggleProcessingTranscript: (id: string) => toggled.push(id) } });
+  const button = withStream.find((node) => node.props?.["data-testid"] === "chat-worked-fold").find((node) => node.type === "button");
+  assert.equal(button.props["aria-expanded"], false);
+  act(() => button.props.onClick());
+  assert.deepEqual(toggled, ["main-streamed"]);
+
+  // A member's reply in its session reads the same.
+  const memberReply = chatMessage("gera-done", "participant", 11, { participantId: GERA.id, participantLabel: "gera", content: "Fixed.", metadata: { workedMs: 3_000 } });
+  const member = renderSessionsRow(memberReply, sessions);
+  assert.equal(member.findAll(hasClass("chat-worked")).length, 0);
+  assert.equal(textOf(member.find((node) => node.props?.["data-testid"] === "chat-worked-fold")), "Worked for 3s");
+
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(<TooltipProvider><ChatMessageItem {...itemProps(plain)} /></TooltipProvider>);
+  });
+  assert.equal(textOf(renderer!.root.find(hasClass("chat-worked"))), "Worked for 44s", "the classic view's pill");
+  assert.equal(renderer!.root.findAll((node) => node.props?.["data-testid"] === "chat-worked-fold").length, 0);
+  act(() => renderer!.unmount());
+});
+
+test("turn-finished notes: none on the main timeline of the sessions view, the main session's own included; the classic view keeps them", () => {
   const note = (id: string, participantId: string, handle: string, minute: number): ChatMessage => chatMessage(id, "system", minute, {
     content: "Done: the token refresh is fixed",
     metadata: { appMessageSource: "app_turn_finished_note", turnFinishedNote: { messageId: "gera-reply", participantId, participantLabel: `@${handle}` } }
   } as Partial<ChatMessage>);
   const messages = [...sessionsMessages(), note("note-gera", GERA.id, "gera", 11), note("note-main", MAIN.id, "main", 12)];
   const sessions = sessionsOf(sessionsConversation({}, messages))!;
-  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "taylor-choice", "note-main"],
-    "gera's note belongs to gera's session, whose task row already says it is done");
-  const row = renderSessionsRow(messages.at(-1)!, sessions);
-  assert.equal(row.findAll(hasClass("chat-turn-finished-note")).length, 1);
-  assert.equal(row.findAll(hasClass("chat-turn-finished-note-avatar")).length, 0, "no avatar picture");
-  assert.deepEqual(row.findAll((node) => typeof node.type === "string" && node.props["data-provider-kind"] !== undefined)
-    .map((node) => node.props["data-provider-kind"]), ["claude-code"], "the main session's provider logo instead");
+  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "taylor-choice"],
+    "a member's task row says it is done; the main session's reply is the newest thing there");
+  assert.equal(sessionsOf(sessionsConversation({ chatView: "classic" }, messages), "classic"), undefined, "the classic view places nothing: its notes stay");
 });

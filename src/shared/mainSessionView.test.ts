@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   buildSessionsViewIndex,
   isMainSessionTaskMessage,
-  isOtherMemberTurnFinishedNote,
+  isSessionsHiddenTurnFinishedNote,
   mainTimelineMessages,
   memberSessionMessages,
   membersMainSessionWaitsOn,
@@ -185,17 +185,18 @@ test("with nobody running or waiting, the members panel lists every member direc
   assert.deepEqual(waiting.previous.map((row) => row.participant.handle), ["drew", "gera"]);
 });
 
-test("a turn-finished note about another member stays off the main timeline; the main session's own stays", () => {
+test("no turn-finished note is on the main timeline of the sessions view, the main session's own included", () => {
   const note = (id: string, participantId: string) => ({
     id, role: "system", content: "Done", createdAt: at(20), status: "done",
     metadata: { appMessageSource: "app_turn_finished_note", turnFinishedNote: { messageId: "gera-reply", participantId, participantLabel: "@x" } }
   }) as ChatMessage;
   const messages = [...chat(), note("note-gera", "p-gera"), note("note-main", "p-main")];
   const index = buildSessionsViewIndex(messages, "p-main");
-  assert.equal(isOtherMemberTurnFinishedNote(messages.at(-2)!, index), true);
-  assert.equal(isOtherMemberTurnFinishedNote(messages.at(-1)!, index), false);
+  assert.equal(isSessionsHiddenTurnFinishedNote(messages.at(-2)!), true);
+  assert.equal(isSessionsHiddenTurnFinishedNote(messages.at(-1)!), true);
+  assert.equal(isSessionsHiddenTurnFinishedNote(messages[0]!), false);
   const main = mainTimelineMessages(messages, index).map((entry) => entry.id);
-  assert.ok(main.includes("note-main") && !main.includes("note-gera"));
+  assert.ok(!main.includes("note-main") && !main.includes("note-gera"));
 });
 
 test("a task card with several members counts the running ones", () => {

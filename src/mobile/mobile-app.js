@@ -9708,6 +9708,7 @@
       // one must be told apart (the main session in a member's session).
       presentation: entry.presentation,
       authorLabel: entry.authorLabel,
+      worked: sessionsView ? entry.workedMs : undefined,
       sessions: sessionsView ? sessionsSpecialSignature(entry) : undefined,
       avatar: entry.author === "agent" && entry.identified !== false && !sessionsView ? avatarSignature(rowAvatar(entry)) : undefined,
       identified: entry.identified,
@@ -10895,9 +10896,11 @@
       syncMessageStopButton(meta, entry);
       // The tasks the main session's turn gave (T3 Code): inside its "Worked
       // for …" above the reply, or under the reply while it is still written.
+      // Any other finished reply of the sessions view says how long it worked
+      // the same quiet way.
       const delegations = entry.presentation === "sessions" && entry.delegations && !entry.delegations.standalone
-        ? sessionsDelegationsElement(entry.delegations) : undefined;
-      if (delegations && entry.delegations.live) copy.append(meta, content, delegations);
+        ? sessionsDelegationsElement(entry.delegations) : sessionsWorkedElement(entry);
+      if (delegations && entry.delegations && entry.delegations.live) copy.append(meta, content, delegations);
       else if (delegations) copy.append(meta, delegations, content);
       else copy.append(meta, content);
       // What the member posted during its turn sits inside the reply, above
@@ -12137,6 +12140,19 @@
     }
     row.append(lineIcon(["m9 18 6-6-6-6"], 14));
     return row;
+  }
+
+  /** "Worked for 44s" above a finished reply of the sessions view that gave
+   *  no tasks: muted text, as the fold of one that did. */
+  function sessionsWorkedElement(entry) {
+    if (entry.presentation !== "sessions" || entry.delegations || entry.status !== "Done" || typeof entry.workedMs !== "number") return undefined;
+    const wrap = document.createElement("div");
+    wrap.className = "sessions-worked is-plain";
+    const label = document.createElement("span");
+    label.className = "sessions-worked-label";
+    label.textContent = "Worked for " + formatWorkedMs(entry.workedMs);
+    wrap.append(label);
+    return wrap;
   }
 
   const HAMMER_ICON_PATHS = ["m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9", "m18 15 4-4", "m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"];

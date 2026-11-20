@@ -59,7 +59,7 @@ export {
 // task cards, the members list and the "Waiting on" line, by the desktop's
 // own rules.
 export {
-  MAIN_SESSION_ROLE_ID, buildSessionsViewIndex, canSwitchChatView, chatViewFor, isChatViewMode, isMainSessionTaskMessage, isOtherMemberTurnFinishedNote,
+  MAIN_SESSION_ROLE_ID, buildSessionsViewIndex, canSwitchChatView, chatViewFor, isChatViewMode, isMainSessionTaskMessage, isSessionsHiddenTurnFinishedNote,
   mainSessionMemberOf, mainSessionParticipantId, mainTimelineMessages, memberSessionMessages, membersMainSessionWaitsOn, sessionsFormerMembers,
   sessionsTaskPlacement, sessionsViewLane, withoutLeadingMention
 } from "./mainSession";

@@ -8,28 +8,39 @@ import { ChatElapsed } from "./chat-task-card";
 import { formatWorkedDuration } from "./chat-worked-row";
 
 /**
- * The main session's delegations in the sessions view, as T3 Code shows a
- * turn's sub-agents: inside its reply's "Worked for …" fold, one slim row per
- * task (the member's provider logo with a dot for its state, the task's
- * title, one line of its result, its time, a chevron into the member's
- * session at that task). While the reply is still being written the rows
- * show under it, open.
+ * Every finished reply's "Worked for …" in the sessions view, T3 Code's quiet
+ * way: muted text and a chevron, no pill. A main-session reply that gave tasks
+ * folds them, as T3 Code shows a turn's sub-agents: one slim row per task (the
+ * member's provider logo with a dot for its state, the task's title, one line
+ * of its result, its time, a chevron into the member's session at that task);
+ * while the reply is still being written the rows show under it, open. Any
+ * other reply's fold opens its full stream, when it has one; without either
+ * it is the muted text alone.
  */
 export const ChatWorkedFold = memo(function ChatWorkedFold(props: {
   workedMs?: number;
   entries: readonly SessionsTaskEntry[];
   participants?: readonly ChatParticipant[];
   onOpenTask?: (entry: SessionsTaskEntry) => void;
+  /** The reply's full stream, shown in place of its text while open. */
+  stream?: { open: boolean; toggle: () => void };
 }): JSX.Element {
-  const [open, setOpen] = useState(false);
+  const [tasksOpen, setTasksOpen] = useState(false);
   const label = props.workedMs !== undefined ? `Worked for ${formatWorkedDuration(props.workedMs)}` : "Worked";
+  const hasTasks = props.entries.length > 0;
+  const open = hasTasks ? tasksOpen : Boolean(props.stream?.open);
+  const toggle = hasTasks ? () => setTasksOpen((current) => !current) : props.stream?.toggle;
   return (
     <div className={`chat-worked-fold ${open ? "is-open" : ""}`} data-testid="chat-worked-fold">
-      <button type="button" className="chat-worked-fold-toggle" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
-        <span>{label}</span>
-        {open ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
-      </button>
-      {open && <ChatDelegationRows entries={props.entries} participants={props.participants} onOpenTask={props.onOpenTask} />}
+      {toggle ? (
+        <button type="button" className="chat-worked-fold-toggle" aria-expanded={open} onClick={toggle}>
+          <span>{label}</span>
+          {open ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
+        </button>
+      ) : (
+        <span className="chat-worked-fold-toggle is-static">{label}</span>
+      )}
+      {hasTasks && open && <ChatDelegationRows entries={props.entries} participants={props.participants} onOpenTask={props.onOpenTask} />}
     </div>
   );
 });

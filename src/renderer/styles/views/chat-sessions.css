@@ -787,6 +787,13 @@
   color: var(--app-text-strong);
 }
 
+/* A reply with nothing to unfold: the muted text alone. */
+.chat-worked-fold-toggle.is-static,
+.chat-worked-fold-toggle.is-static:hover {
+  color: var(--app-muted);
+  cursor: default;
+}
+
 .chat-delegations {
   display: grid;
   gap: 0;

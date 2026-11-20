@@ -225,18 +225,18 @@ export function memberSessionMessages(
   });
 }
 
-/** A note that another member finished answering: the reply it leads back
- *  to is in that member's session and its task card already says the task is
- *  done, so the sessions view shows it nowhere. The main session's own note
- *  stays on the main timeline. */
-export function isOtherMemberTurnFinishedNote(message: ChatMessage, index: SessionsViewIndex): boolean {
-  const note = turnFinishedNoteOf(message);
-  return Boolean(note) && note!.participantId !== index.mainSessionParticipantId;
+/** A note that a member finished answering ("<X> finished answering"): the
+ *  sessions view shows none, the main session's own included (the User,
+ *  2026-11-21): a member's task row already says it is done, and the main
+ *  session's reply is the newest thing on its timeline. The classic view
+ *  keeps them. */
+export function isSessionsHiddenTurnFinishedNote(message: Pick<ChatMessage, "role" | "metadata">): boolean {
+  return turnFinishedNoteOf(message) !== undefined;
 }
 
 /** The messages on the main timeline of the sessions view, in order. */
 export function mainTimelineMessages(messages: readonly ChatMessage[], index: SessionsViewIndex): ChatMessage[] {
-  return messages.filter((message) => sessionsViewLane(message, index).kind === "main" && !isOtherMemberTurnFinishedNote(message, index));
+  return messages.filter((message) => sessionsViewLane(message, index).kind === "main" && !isSessionsHiddenTurnFinishedNote(message));
 }
 
 /** The members the main session is waiting on: targets of its requests whose

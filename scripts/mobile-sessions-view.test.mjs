@@ -101,7 +101,14 @@ function sessionsChatMessages() {
     { id: "launch", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: launchPrompt("Pick the button colour", "drew, taylor"),
       status: "done", createdAt: at(2), metadata: { accordLaunchByMainSession: true } },
     { id: "n-1", role: "system", content: "@drew created draft collection [Button colour](#artifact:art-1) · Drafts 0/2", status: "done", createdAt: at(1.5),
-      metadata: { appMessageSource: "app_artifact_note", artifactEventId: "e-n-1", accordLaunchMessageId: "launch" } }
+      metadata: { appMessageSource: "app_artifact_note", artifactEventId: "e-n-1", accordLaunchMessageId: "launch" } },
+    // A quick question the main session answered itself, and its own
+    // turn-finished note: the sessions view shows no such note.
+    { id: "u3", role: "user", content: "Which city is the capital of Italy?", status: "done", createdAt: at(1.4), metadata: { deliveryTargets: [MAIN.id] } },
+    { id: "r3", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "Rome.", status: "done", createdAt: at(1.3),
+      metadata: { sourceMessageId: "u3", workedMs: 7_000 } },
+    { id: "main-note", role: "system", content: "Rome.", status: "done", createdAt: at(1.2),
+      metadata: { appMessageSource: "app_turn_finished_note", turnFinishedNote: { messageId: "r3", participantId: MAIN.id, participantLabel: "@main" } } }
   ];
 }
 
@@ -132,8 +139,15 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   await openChat(app, "conv-main");
   await app.waitFor(`document.querySelector('#message-list .message-row[data-sessions-kind="waiting"]') !== null && document.querySelector("#accord-dock .accord-strip") !== null`,
     "the Waiting line and the Accord's line");
-  assert.deepEqual(await app.evaluate(rowsSummary), ["you:u0", "agent:r0", "you:u1", "agent:r1", "agent:launch", "waiting:sessions-waiting"],
-    "the User and the main session only: no task cards, no member's message, no other member's note, no Accord document note");
+  assert.deepEqual(await app.evaluate(rowsSummary), ["you:u0", "agent:r0", "you:u1", "agent:r1", "agent:launch", "you:u3", "agent:r3", "waiting:sessions-waiting"],
+    "the User and the main session only: no task cards, no member's message, no turn-finished note (the main session's own neither), no Accord document note");
+  // A reply that gave no tasks says how long it worked the same quiet way as the fold: muted text, no pill.
+  assert.deepEqual(await app.evaluate(`(() => { const row = document.querySelector('#message-list .message-row[data-thread-root="r3"]');
+    const worked = row.querySelector(".sessions-worked");
+    return { worked: worked?.textContent, plain: worked?.classList.contains("is-plain"), toggle: row.querySelectorAll(".sessions-worked-toggle").length,
+      order: [...row.querySelector(".message-copy").children].map((node) => node.className.split(" ")[0]).slice(0, 3),
+      border: worked ? getComputedStyle(worked.querySelector(".sessions-worked-label")).borderTopWidth : "" }; })()`),
+  { worked: "Worked for 7s", plain: true, toggle: 0, order: ["message-meta", "sessions-worked", "message-content"], border: "0px" });
   // The header: no text buttons; the view is in the title's menu, the
   // members icon counts who works and has a dot for the open Accord.
   const header = await app.evaluate(`(() => ({

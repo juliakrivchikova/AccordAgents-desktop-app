@@ -82,6 +82,7 @@ export type ChatChoiceResponse = {
 // A cloud member's file links name files on its machine (see FileLinkAuthorContext).
 const CLOUD_AUTHOR = { cloud: true };
 const LOCAL_AUTHOR = { cloud: false };
+const NO_SESSIONS_WORK: readonly SessionsTaskEntry[] = [];
 
 export const ChatMessageItem = memo(function ChatMessageItem(props: {
   activityDisclosure: ChatActivityDisclosureState;
@@ -398,8 +399,10 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             authorLabel={props.authorLabel}
             inThread={props.inThread}
           />
-          {props.sessionsWork?.length && !isStreaming
-            ? <ChatWorkedFold workedMs={workedMs ?? undefined} entries={props.sessionsWork} participants={props.participants} onOpenTask={props.onOpenTask} />
+          {/* One quiet "Worked for …" for every reply of the sessions view. */}
+          {(props.sessionsWork?.length || (sessions && showWorkedRow)) && !isStreaming
+            ? <ChatWorkedFold workedMs={workedMs ?? undefined} entries={props.sessionsWork ?? NO_SESSIONS_WORK} participants={props.participants} onOpenTask={props.onOpenTask}
+                stream={hasProcessingTranscript ? { open: processingTranscriptOpen, toggle: () => props.activityDisclosure.toggleProcessingTranscript(message.id) } : undefined} />
             : showWorkedRow && <WorkedRow workedMs={workedMs} />}
           {/* Every rendering of the content (streaming, transcript, final) knows its author. */}
           <FileLinkAuthorContext.Provider value={participant?.cloudRun || participant?.homeMachineId ? CLOUD_AUTHOR : LOCAL_AUTHOR}>

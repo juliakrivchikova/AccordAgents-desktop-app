@@ -4,7 +4,7 @@ import type { ActiveChatRunSummary } from "../../../shared/chatActiveRuns";
 import { isPendingReply } from "../../../shared/chatActiveRuns";
 import {
   buildSessionsViewIndex,
-  isOtherMemberTurnFinishedNote,
+  isSessionsHiddenTurnFinishedNote,
   mainSessionParticipantId,
   membersMainSessionWaitsOn,
   sessionsFormerMembers,
@@ -119,7 +119,7 @@ export function useChatSessionsView(input: {
     const openCards = openMemberCardMessages(messages, index).filter(shown);
     const openCardMessageIds = new Set(openCards.map((message) => message.id));
     const lane = messages.filter((message) => openCardMessageIds.has(message.id) ||
-      (sessionsViewLane(message, index).kind === "main" && shown(message) && !isOtherMemberTurnFinishedNote(message, index)));
+      (sessionsViewLane(message, index).kind === "main" && shown(message) && !isSessionsHiddenTurnFinishedNote(message)));
     const tasks = sessionsTaskPlacement(lane, index);
     return {
       index,
