@@ -1,4 +1,4 @@
-const ASSET_VERSION = "2026-11-16-used-cards-one-line";
+const ASSET_VERSION = "2026-11-20-main-session-views";
 // Tied to the marker the documented deploy step bumps, so a new shell really
 // replaces the cached one rather than living beside it.
 const CACHE_NAME = `accordagents-mobile-shell-v73-${ASSET_VERSION}`;

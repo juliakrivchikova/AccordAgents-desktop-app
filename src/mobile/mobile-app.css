@@ -4024,6 +4024,11 @@ button.mobile-chat-group-title:active {
   background: var(--press);
 }
 
+/* The sessions view opens no thread from a message: no press on the row. */
+.message-row.is-sessions[data-thread-root]:active:not(:has(.control-card:active)) {
+  background: transparent;
+}
+
 .act-pill-primary:active {
   background: var(--fg);
 }
@@ -4300,4 +4305,398 @@ button.card-row:focus-visible {
 .accord-line.is-open .accord-dock-card {
   max-height: none;
   overflow: hidden;
+}
+
+/* --- The main session and the sessions view (docs/main-session.md) ------- */
+
+/* The chat's two views, in the header beside the members button. A chat made
+   before main sessions shows it unavailable. */
+.chat-view-switch {
+  flex-shrink: 0;
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--bd);
+  border-radius: 10px;
+  background: var(--s2);
+}
+
+.chat-view-switch[hidden] {
+  display: none;
+}
+
+.chat-view-switch-option {
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--mut);
+  font: 600 12px var(--sans);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.chat-view-switch-option[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--fg1);
+  box-shadow: 0 1px 2px rgba(22, 25, 31, 0.12);
+}
+
+.chat-view-switch.is-disabled .chat-view-switch-option {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.chat-view-switch-option:focus-visible {
+  outline: 2px solid var(--fg1);
+  outline-offset: 1px;
+}
+
+.chat-view-note {
+  margin: 8px 16px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--s2);
+  color: var(--fg);
+  font: 400 13px var(--sans);
+}
+
+.chat-view-note[hidden] {
+  display: none;
+}
+
+/* In the sessions view the button says how many members are at work. */
+.chat-members-button.is-running #chat-members-count::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: #24c17b;
+  vertical-align: 1px;
+}
+
+/* No avatars and no author names on the sessions view's timeline: the main
+   session's replies take the full width. */
+.message-row.is-sessions .message-avatar {
+  display: none;
+}
+
+.message-row.is-sessions .message-handle:empty {
+  display: none;
+}
+
+.sessions-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  font: 500 12px var(--sans);
+  color: var(--fg);
+}
+
+.sessions-status-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--mut);
+}
+
+.sessions-status.is-running .sessions-status-dot {
+  background: #24c17b;
+  box-shadow: 0 0 0 3px rgba(36, 193, 123, 0.14);
+}
+
+.sessions-status.is-waiting .sessions-status-dot {
+  background: var(--warn);
+}
+
+.sessions-status.is-done .sessions-status-dot {
+  background: var(--ok);
+}
+
+.sessions-status.is-failed .sessions-status-dot {
+  background: var(--danger);
+}
+
+.sessions-elapsed {
+  font: 400 12px var(--sans);
+  font-variant-numeric: tabular-nums;
+  color: var(--mut);
+}
+
+.sessions-stop {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--fg1);
+  font: 600 12px var(--sans);
+  cursor: pointer;
+}
+
+.sessions-stop:disabled {
+  color: var(--mut);
+}
+
+.sessions-stop[hidden] {
+  display: none;
+}
+
+/* A task the main session gave: a row per member, each opening its session. */
+.sessions-task-card {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--bd);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.sessions-task-card-head {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--bdf);
+  font: 600 12.5px var(--sans);
+  color: var(--mut);
+}
+
+.sessions-task-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.sessions-task-row + .sessions-task-row {
+  border-top: 1px solid var(--bdf);
+}
+
+.sessions-task-row:active {
+  background: var(--press);
+}
+
+.sessions-task-row > svg {
+  flex-shrink: 0;
+  color: var(--mut);
+}
+
+.sessions-task-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sessions-task-line {
+  min-width: 0;
+  display: flex;
+  gap: 6px;
+}
+
+.sessions-task-handle {
+  flex-shrink: 0;
+  font: 600 13px var(--mono);
+  color: var(--fg1);
+}
+
+.sessions-task-title,
+.sessions-task-result {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessions-task-title {
+  font: 400 14px var(--sans);
+  color: var(--fg1);
+}
+
+.sessions-task-result {
+  font: 400 13px var(--sans);
+  color: var(--mut);
+}
+
+.sessions-task-state {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+/* "Waiting on N members", at the end of the main timeline. */
+.sessions-waiting {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--s2);
+  font: 400 13.5px var(--sans);
+  color: var(--fg);
+}
+
+.sessions-waiting-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.sessions-waiting .timeline-syncing-spinner {
+  flex-shrink: 0;
+}
+
+/* A member's choice that still waits for the User, on the main timeline. */
+.sessions-member-choice {
+  flex: 1;
+  min-width: 0;
+}
+
+.sessions-choice-from {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg1);
+  font: 600 13px var(--sans);
+  cursor: pointer;
+}
+
+/* A member's session: what it does now, its task folded to one line. */
+.member-session-head {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--s2);
+}
+
+.member-session-provider {
+  flex: 1;
+  min-width: 0;
+  font: 400 13px var(--sans);
+  color: var(--fg);
+}
+
+.member-session-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.member-session-empty {
+  flex: 1;
+  margin: 0;
+  padding: 12px;
+  text-align: center;
+  font: 400 14px var(--sans);
+  color: var(--mut);
+}
+
+.member-task {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--bdf);
+  border-radius: 12px;
+  background: var(--note-card);
+}
+
+.member-task-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.member-task-toggle > svg {
+  flex-shrink: 0;
+}
+
+.member-task-label {
+  flex-shrink: 0;
+  font: 600 13px var(--sans);
+  color: var(--fg1);
+}
+
+.member-task-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 400 13px var(--sans);
+  color: var(--mut);
+}
+
+.member-task-body {
+  padding: 0 12px 10px;
+  font: 400 14.5px var(--sans);
+  line-height: 1.5;
+  color: var(--fg);
+}
+
+/* The members sheet in the sessions view. */
+.members-sheet-head {
+  gap: 10px;
+}
+
+.members-sheet-stop-all {
+  margin-left: auto;
+}
+
+.sessions-member-row .members-sheet-copy {
+  flex: 1;
+}
+
+.members-sheet-task {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 400 13.5px var(--sans);
+  color: var(--fg1);
+}
+
+.members-previous-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: 600 13.5px var(--sans);
+  cursor: pointer;
+}
+
+.members-previous-count {
+  font-weight: 500;
+  color: var(--mut);
 }

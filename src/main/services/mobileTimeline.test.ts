@@ -432,3 +432,111 @@ test("the phone lists the newest hundred chats and every pinned one however old,
   assert.equal(listed.at(-1), "chat-500", "the old pinned chat after the newest hundred");
   assert.ok(!listed.includes("chat-501") && !listed.includes("chat-502") && !listed.includes(`chat-${MOBILE_CHAT_LIST_LIMIT}`));
 });
+
+// The sessions view on the phone (docs/main-session.md): the main session's
+// requests become task cards and the User's messages are placed by whom they
+// were addressed to, so both travel, cut to what the phone shows.
+
+function requestConversation(prompt: string, itemCount: number): Conversation {
+  const items = Array.from({ length: itemCount }, (_, index) => ({
+    targetParticipantId: `m${index}`, targetHandle: `member${index}`, prompt, reason: "x".repeat(2_000),
+    status: index === 0 ? "answered" as const : index === 1 ? "failed" as const : "running" as const,
+    createdAt: "2026-11-20T10:00:00Z", updatedAt: "2026-11-20T10:01:00Z",
+    ...(index === 0 ? { replyMessageId: "reply-0" } : {}),
+    ...(index === 1 ? { error: "The CLI exited.\nStack trace follows" } : {})
+  }));
+  return {
+    id: "chat-main", kind: "chat", title: "Main", createdAt: "2026-11-20T10:00:00Z", updatedAt: "2026-11-20T10:02:00Z", findings: [],
+    metadata: { mainSessionParticipantId: "main", participants: [{ id: "main", handle: "main", kind: "claude-code", roleConfigId: "main-session" }] },
+    messages: [
+      { id: "ask", role: "user", content: "Do it", createdAt: "2026-11-20T09:59:00Z", status: "done", metadata: { deliveryTargets: ["main"], askedParticipantIds: ["main", "m0"] } },
+      { id: "to-member", role: "user", content: "Only you", createdAt: "2026-11-20T09:59:30Z", status: "done", metadata: { deliveryTargets: ["m0"] } },
+      {
+        id: "request", role: "participant", participantId: "main", participantLabel: "@main", content: items.map((item) => `@${item.targetHandle} ${prompt}`).join("\n"),
+        createdAt: "2026-11-20T10:00:00Z", status: "done",
+        metadata: { participantRequest: {
+          id: "batch-1", requesterParticipantId: "main", requesterHandle: "main", source: "tool", resumeRequester: true, status: "running",
+          depth: 1, createdAt: "2026-11-20T10:00:00Z", updatedAt: "2026-11-20T10:01:00Z", autoResumeMessageId: "resume", items
+        } }
+      }
+    ]
+  } as unknown as Conversation;
+}
+
+test("the main session's request travels as a small task batch: a line per task, no reasons", () => {
+  const prompt = `## Fix the **login** button\n${"Then explain everything in detail. ".repeat(400)}`;
+  const events = timelineEventsFromSnapshot(requestConversation(prompt, 3));
+  const request = events.find((event) => event.id === "request")?.participantRequest;
+  assert.ok(request, "the request carries its batch");
+  assert.deepEqual({ ...request, items: undefined }, {
+    id: "batch-1", requesterParticipantId: "main", requesterHandle: "main", resumeRequester: true, autoResumeMessageId: "resume", items: undefined
+  });
+  assert.deepEqual(request.items.map((item) => item.prompt), ["Fix the login button", "Fix the login button", "Fix the login button"],
+    "the task's first line, without markdown");
+  assert.equal(request.items[0].replyMessageId, "reply-0");
+  assert.equal(request.items[0].status, "answered");
+  assert.equal(request.items[1].error, "The CLI exited.", "an error's first line");
+  assert.equal(JSON.stringify(request).includes("xxxx"), false, "no reasons");
+  assert.equal(events.find((event) => event.id === "ask")?.participantRequest, undefined);
+});
+
+test("a task batch stays small however long the tasks and however many members", async () => {
+  const { PHONE_TASK_ITEMS_MAX, PHONE_TASK_LINE_CHARS } = await import("./mobileTimeline");
+  const prompt = "word ".repeat(20_000);
+  const request = timelineEventsFromSnapshot(requestConversation(prompt, 40)).find((event) => event.id === "request")?.participantRequest;
+  assert.equal(request?.items.length, PHONE_TASK_ITEMS_MAX, "a batch names at most this many members");
+  assert.ok(request!.items.every((item) => item.prompt.length <= PHONE_TASK_LINE_CHARS), "each line is cut");
+  // What the card adds to the message on the phone, whatever the tasks: well
+  // under a page's worth even for the largest batch.
+  assert.ok(JSON.stringify(request).length < PHONE_TASK_ITEMS_MAX * 400, `batch is ${JSON.stringify(request).length} bytes`);
+});
+
+test("the User's message says whom it was addressed to; members' and system messages do not", () => {
+  const events = timelineEventsFromSnapshot(requestConversation("Task", 1));
+  assert.deepEqual(events.find((event) => event.id === "ask")?.addressees, ["main", "m0"]);
+  assert.deepEqual(events.find((event) => event.id === "to-member")?.addressees, ["m0"]);
+  assert.equal(events.find((event) => event.id === "request")?.addressees, undefined);
+});
+
+test("Activity carries no task batch and no addressees", async () => {
+  const { phoneActivityEvents } = await import("./mobileTimeline");
+  const events = phoneActivityEvents(requestConversation("Task", 2), Date.parse("2026-11-20T11:00:00Z"));
+  const request = events.find((event) => event.id === "request");
+  assert.ok(request, "the request is a member's message Activity lists");
+  assert.equal(request.participantRequest, undefined);
+});
+
+test("a hidden request carrier carries no task batch", () => {
+  const conversation = requestConversation("Task", 1);
+  const request = conversation.messages[2]!;
+  request.metadata = { ...request.metadata, hiddenFromTimeline: true };
+  const event = timelineEventsFromSnapshot(conversation).find((item) => item.id === "request");
+  assert.equal(event?.hidden, true);
+  assert.equal(event?.participantRequest, undefined);
+});
+
+test("the phone's chat list says which chats have a main session and the view each opens in", async () => {
+  const { buildMobileChatList } = await import("./mobileChatCatalog");
+  const main = { id: "main", handle: "main", kind: "claude-code", roleConfigId: "main-session" };
+  const chats: Record<string, Conversation> = {
+    sessions: { ...requestConversation("Task", 1), id: "sessions" },
+    classic: { ...requestConversation("Task", 1), id: "classic", metadata: { mainSessionParticipantId: "main", chatView: "classic", participants: [main] } },
+    old: { ...requestConversation("Task", 1), id: "old", metadata: { participants: [{ id: "admin", handle: "admin", kind: "claude-code", roleConfigId: "administrator" }] } },
+    gone: { ...requestConversation("Task", 1), id: "gone", metadata: { mainSessionParticipantId: "main", chatView: "sessions", participants: [] } }
+  } as unknown as Record<string, Conversation>;
+  const store = {
+    listConversations: async () => Object.keys(chats).map((id) => ({ id, kind: "chat", title: id, createdAt: "2026-11-20T10:00:00Z", updatedAt: "2026-11-20T10:00:00Z" })),
+    openConversation: async (id: string) => ({ conversation: chats[id], messagePage: { hasMoreBefore: false } })
+  } as unknown as Parameters<typeof buildMobileChatList>[0];
+  const options = { roleLabels: new Map<string, string>(), machineNames: new Map<string, string>() };
+  const byId = new Map((await buildMobileChatList(store, options)).map((row) => [row.id, row]));
+  assert.deepEqual([byId.get("sessions")?.mainSessionParticipantId, byId.get("sessions")?.chatView, byId.get("sessions")?.canSwitchView], ["main", "sessions", true]);
+  assert.equal(byId.get("classic")?.chatView, "classic", "the chat's own view");
+  for (const id of ["old", "gone"]) {
+    const row = byId.get(id);
+    assert.deepEqual([row?.mainSessionParticipantId, row?.chatView, row?.canSwitchView], [undefined, undefined, undefined],
+      `${id}: one view only, and nothing travels for it`);
+  }
+  const fallback = new Map((await buildMobileChatList(store, { ...options, defaultChatView: "classic" })).map((row) => [row.id, row]));
+  assert.equal(fallback.get("sessions")?.chatView, "classic", "a chat without a view of its own opens in the default");
+});

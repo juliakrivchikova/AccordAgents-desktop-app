@@ -1,5 +1,15 @@
 import { URGENT_ALERT_SERVER_WRITER, type UrgentAlertView } from "../../shared/urgentAlerts";
-import type { ChatMessage, ChatParticipant, ChatTurnFinishedNoteMetadata, Conversation } from "../../shared/types";
+import type {
+  ChatMessage,
+  ChatParticipant,
+  ChatParticipantRequestBatch,
+  ChatParticipantRequestStatus,
+  ChatTurnFinishedNoteMetadata,
+  ChatViewMode,
+  Conversation
+} from "../../shared/types";
+import { chatMessageAddressees } from "../../shared/mainSession";
+import { firstTextLine } from "../../shared/mainSessionView";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
 import { accordClosedLaunchId, accordClosedLineTitle } from "../../shared/accordProgress";
@@ -42,6 +52,14 @@ export interface MobileChatListItem {
   pinnedAt?: string;
   /** A member's choice card in it waits for the User's answer. */
   waitingChoice?: boolean;
+  /** The chat's main session (docs/main-session.md), while it is a member:
+   *  only such a chat has two views. */
+  mainSessionParticipantId?: string;
+  /** The view the chat is shown in (shared/mainSession.ts chatViewFor), for
+   *  a chat with a main session; every other chat is classic. */
+  chatView?: ChatViewMode;
+  /** The chat's view switch works (a chat with a main session). */
+  canSwitchView?: true;
 }
 
 export interface MobileChatMember {
@@ -135,7 +153,49 @@ export interface MobileTimelineEvent {
   accordClosed?: { launchMessageId: string; title?: string };
   /** Who leads that Accord and who is in it (the card without its launch). */
   accordLaunch?: { facilitator: string; members: string[] };
+  /** The User's message: the members it was addressed to where it was
+   *  written (shared/mainSession.ts chatMessageAddressees), which the
+   *  sessions view places it by. */
+  addressees?: string[];
+  /** A member's request to other members, as the sessions view's task card
+   *  and the members list show it. */
+  participantRequest?: MobileTaskBatch;
 }
+
+/**
+ * A member request as the phone's sessions view needs it: who asked, and per
+ * member the task's first line, where it stands and which reply answered it.
+ * The whole task is the message's own text, which travels anyway; a reply's
+ * line is read from the reply the phone holds, as the desktop reads it.
+ */
+export interface MobileTaskBatch {
+  id: string;
+  requesterParticipantId: string;
+  requesterHandle: string;
+  /** False: the requester does not wait for the answers. */
+  resumeRequester: boolean;
+  autoResumeMessageId?: string;
+  items: MobileTaskItem[];
+}
+
+export interface MobileTaskItem {
+  targetParticipantId: string;
+  targetHandle: string;
+  /** The task's first line (PHONE_TASK_LINE_CHARS at most). */
+  prompt: string;
+  status: ChatParticipantRequestStatus;
+  createdAt: string;
+  replyMessageId?: string;
+  /** Why it failed, its first line. */
+  error?: string;
+}
+
+/** The members of one request the phone is told of at most. */
+export const PHONE_TASK_ITEMS_MAX = 24;
+/** A task's or an error's line as the phone gets it. */
+export const PHONE_TASK_LINE_CHARS = 160;
+/** The addressees of one message the phone is told of at most. */
+export const PHONE_ADDRESSEES_MAX = 16;
 
 export interface MobileTimelineTurn {
   participantId: string;
@@ -167,7 +227,9 @@ export function phoneActivityEvents(conversation: Conversation, now = Date.now()
     const status = message.status ?? "done";
     if (status === "done" && !(now - Date.parse(message.createdAt) <= PHONE_ACTIVITY_DONE_MS)) continue;
     if (status !== "pending" && status !== "done") continue;
-    const { attachments: _attachments, ...event } = timelineEventFromMessage(message, message.id, conversation, threadRoots);
+    // Activity shows the text: no pictures, and no task card or addressees.
+    const { attachments: _attachments, participantRequest: _request, addressees: _addressees, ...event } =
+      timelineEventFromMessage(message, message.id, conversation, threadRoots);
     const short = { ...event, content: event.content.slice(0, PHONE_ACTIVITY_CONTENT_CHARS) };
     // Messages are oldest first: a later one of the same run or member wins.
     const member = message.participantId ?? message.participantLabel ?? short.id;
@@ -277,6 +339,8 @@ function timelineEventFromMessage(
   const midTurn = message.role === "participant" && message.status === "done" &&
     message.metadata?.appMessageSource === APP_CHAT_SEND_MESSAGE_TOOL;
   const finishedNote = turnFinishedNoteOf(message);
+  const addressees = message.role === "user" ? chatMessageAddressees(message).slice(0, PHONE_ADDRESSEES_MAX) : [];
+  const request = message.role === "participant" && !hidden ? mobileTaskBatch(message.metadata?.participantRequest) : undefined;
   return {
     id: message.id,
     ...(threadRootId && threadRootId !== message.id ? { threadRootId } : {}),
@@ -292,6 +356,8 @@ function timelineEventFromMessage(
       ? { accordClosed: { launchMessageId: accordClosedLaunchId(message) as string, ...(accordClosedLineTitle(message) ? { title: accordClosedLineTitle(message) } : {}) } }
       : {}),
     ...(message.role === "system" && message.metadata?.accordLaunch ? { accordLaunch: message.metadata.accordLaunch } : {}),
+    ...(addressees.length ? { addressees } : {}),
+    ...(request ? { participantRequest: request } : {}),
     // A scheduled script's message is not the User's: the phone has no script
     // author, so it shows as an author named after the script.
     role: message.role === "participant" || message.role === "script" ? "participant" : message.role === "system" ? "system" : "you",
@@ -309,6 +375,40 @@ function timelineEventFromMessage(
     runId,
     messageId: message.id,
     ...(mobileEventId ? { mobileEventId } : {})
+  };
+}
+
+/** A request's batch, cut to what the task card and the members list show:
+ *  a line per task instead of the whole task (the message's text carries it
+ *  already), no reasons. A batch the phone cannot read is not sent. */
+export function mobileTaskBatch(batch: ChatParticipantRequestBatch | undefined): MobileTaskBatch | undefined {
+  if (!batch || typeof batch !== "object" || typeof batch.id !== "string" || typeof batch.requesterParticipantId !== "string" ||
+    !Array.isArray(batch.items)) {
+    return undefined;
+  }
+  const items: MobileTaskItem[] = [];
+  for (const item of batch.items) {
+    if (items.length >= PHONE_TASK_ITEMS_MAX) break;
+    if (!item || typeof item.targetParticipantId !== "string" || !item.targetParticipantId) continue;
+    const error = typeof item.error === "string" ? firstTextLine(item.error, PHONE_TASK_LINE_CHARS) : "";
+    items.push({
+      targetParticipantId: item.targetParticipantId,
+      targetHandle: typeof item.targetHandle === "string" ? item.targetHandle : "",
+      prompt: firstTextLine(typeof item.prompt === "string" ? item.prompt : "", PHONE_TASK_LINE_CHARS),
+      status: item.status,
+      createdAt: typeof item.createdAt === "string" ? item.createdAt : batch.createdAt,
+      ...(typeof item.replyMessageId === "string" && item.replyMessageId ? { replyMessageId: item.replyMessageId } : {}),
+      ...(error ? { error } : {})
+    });
+  }
+  if (items.length === 0) return undefined;
+  return {
+    id: batch.id,
+    requesterParticipantId: batch.requesterParticipantId,
+    requesterHandle: typeof batch.requesterHandle === "string" ? batch.requesterHandle : "",
+    resumeRequester: batch.resumeRequester !== false,
+    ...(typeof batch.autoResumeMessageId === "string" && batch.autoResumeMessageId ? { autoResumeMessageId: batch.autoResumeMessageId } : {}),
+    items
   };
 }
 
