@@ -10298,6 +10298,18 @@ export class ChatService {
         }
       }
       this.applyCliRunMetadata(session, result, participant, options.warnings);
+      if (forkSource && !result.ok && !signal?.aborted && /no conversation found|not found|does not exist|no rollout/i.test(result.error ?? "")) {
+        // The copy was never made (the source session could not be read):
+        // the id the CLI was given is no session, and the next turn tries
+        // the fork again instead of resuming nothing.
+        session.sessionId = "";
+        session.forkFrom = forkSource;
+        void this.debugLogs.write("chat.session.fork-failed", {
+          conversationId: conversation.id,
+          participantId: participant.id,
+          sourceParticipantId: forkSource.participantId
+        });
+      }
       if (!signal?.aborted) {
         this.consumeOneTimePermissionApprovals(conversation, participant, appliedOneTimePermissionApprovalIds);
       }
@@ -18691,7 +18703,19 @@ export class ChatService {
     if (!facilitator) {
       return;
     }
-    this.setParticipantRequestPermission(conversation, facilitator.id, "allow");
+    // The main session gives its facilitator leave to ask members only as far
+    // as it may ask them itself (as app_chat_start_accord does).
+    const mainSession = sourceMessage.role === "participant" && isMainSessionParticipant(conversation.metadata, sourceMessage.participantId)
+      ? participants.find((participant) => participant.id === sourceMessage.participantId)
+      : undefined;
+    const leave: ChatParticipantRequestPermission = mainSession
+      ? normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(mainSession.permissions).requestParticipants)
+      : "allow";
+    if (mainSession && chatParticipantRequestPermissionRank(normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(facilitator.permissions).requestParticipants)) >=
+      chatParticipantRequestPermissionRank(leave)) {
+      return;
+    }
+    this.setParticipantRequestPermission(conversation, facilitator.id, leave);
     void this.debugLogs.write("chat.accord.permission-enabled", {
       conversationId: conversation.id,
       facilitatorId: facilitator.id,

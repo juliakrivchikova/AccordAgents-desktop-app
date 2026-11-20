@@ -396,6 +396,27 @@ test("a fork starts from a copy of the main session's CLI session and then keeps
   assert.equal(mainSessionAfter.sessionId, "main-cli-session", "the main session's own session is untouched");
 });
 
+test("a fork the CLI could not make is tried again, not resumed from an id that is no session", async () => {
+  const main = mainSession("claude-code");
+  const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-cli-session")] });
+  const { service, storage, runs } = testService({
+    conversation,
+    run: async (participant, _prompt, runOptions) => {
+      if (participant.id === main.id) return { participant, ok: true, content: "Noted.", durationMs: 1 };
+      // Claude Code reports some id even when the source is gone.
+      runOptions.onSessionId?.("never-made");
+      return { participant, ok: false, content: "", error: "No conversation found with session ID: main-cli-session", durationMs: 1, sessionId: "never-made" };
+    }
+  });
+  const result = await service.delegateTaskFromTool(mainActor(), { task: "Continue.", start: "fork" });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  await waitFor(() => runs.some((run) => run.participant.id === result.participantId));
+  await waitFor(() => delegationBatches(storage.current)[0]?.items[0]?.status === "failed");
+  const session = (storage.current.metadata.participantSessions as ChatParticipantSession[]).find((item) => item.participantId === result.participantId)!;
+  assert.equal(session.sessionId, "");
+  assert.deepEqual(session.forkFrom, { participantId: main.id, sessionId: "main-cli-session", kind: "claude-code" });
+});
+
 test("a fork never takes the source's session id as its own", () => {
   const main = mainSession();
   const { service } = testService({ conversation: mainSessionChat([main]) });
@@ -574,4 +595,19 @@ test("in a main-session chat another member's '@x /accord' reply starts nothing;
   await (service as any).createImplicitParticipantRequestApproval(conversation, main, [fromMain]);
   assert.ok(conversation.messages.some((message) => message.metadata?.participantRequest?.requesterParticipantId === main.id));
   assert.equal(normalizeChatAgentPermissions(participantsOf(conversation).find((item) => item.id === other.id)!.permissions).requestParticipants, "allow");
+});
+
+test("the main session's inferred '@x /accord' gives its facilitator no more leave than its own", async () => {
+  const main = mainSession("codex-cli", { model: undefined, permissions: permissions({ requestParticipants: "ask" }) });
+  const other = member("other-id", "other", { permissions: permissions({ requestParticipants: "deny" }) });
+  const conversation = mainSessionChat([main, other]);
+  const { service } = testService({ conversation });
+  (service as any).startDeferredParticipantRequestRunners = () => undefined;
+  const fromMain: ChatMessage = {
+    id: "main-reply", role: "participant", participantId: main.id, participantLabel: "@main",
+    content: "@other /accord on the rollout plan.", createdAt: NOW, status: "done", metadata: { threadId: "user-message", runId: "main-run" }
+  };
+  conversation.messages.push(fromMain);
+  await (service as any).createImplicitParticipantRequestApproval(conversation, main, [fromMain]);
+  assert.equal(normalizeChatAgentPermissions(participantsOf(conversation).find((item) => item.id === other.id)!.permissions).requestParticipants, "ask");
 });
