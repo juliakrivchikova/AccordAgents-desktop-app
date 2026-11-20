@@ -73,6 +73,8 @@ export function firstTextLine(text: string | undefined, maxLength = 160): string
   for (const raw of lines) {
     const line = raw
       .replace(/^\s*(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, "")
+      // A markdown link or image shows its text only ("[the resolution](#artifact:…)").
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
       .replace(/\*\*|__|`/g, "")
       .trim();
     if (!line) continue;

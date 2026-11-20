@@ -115,6 +115,7 @@ test("the result line is the reply's first line without markdown or a choice blo
   assert.equal(sessionsTaskReplyLine({ replyMessageId: "drew-running" }, byId), undefined, "no line while the reply streams");
   assert.equal(sessionsTaskReplyLine({}, byId), undefined);
   assert.equal(firstTextLine("\n\n- **Bold** item `code`"), "Bold item code");
+  assert.equal(firstTextLine("Please review [the resolution](#artifact:3208efce) now"), "Please review the resolution now");
   assert.equal(firstTextLine("Pick one\n\nUser choice: Pick\nT: Pick\nQ: Which?\nO1: A\nO2: B\nR: O1"), "Pick one");
   assert.equal(firstTextLine("x".repeat(300), 10), "xxxxxxxxx…");
 });
