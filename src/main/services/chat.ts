@@ -1,5 +1,5 @@
 import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelection } from "../../shared/cloudRunPreparation";
-import { canSwitchChatView, isChatViewMode } from "../../shared/mainSession";
+import { canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, mainSessionParticipantId, MAIN_SESSION_ROLE_ID } from "../../shared/mainSession";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -2731,7 +2731,7 @@ export class ChatService {
     agentMode: ChatAgentMode,
     permissions: ChatAgentPermissions
   ): CliAgentRunOptions {
-    const appToolCapabilities = this.appToolCapabilitiesForRun(session, permissions);
+    const appToolCapabilities = this.appToolCapabilitiesForRun(conversation, participant, session, permissions);
     const appMcpToolNames = this.appMcpToolNames(appToolCapabilities);
     const appMcpToolInventoryKey = this.appMcpToolInventoryKey(appMcpToolNames);
     const appMcpClientGenerationId = this.appMcpClientGenerationId(conversation, participant, session, appMcpToolInventoryKey);
@@ -2779,7 +2779,7 @@ export class ChatService {
       extraReadableDirs: [workspacePath],
       // A resumed session keeps the role it started with; the prompt fallback
       // is never sent for it.
-      role: session.roleRuntime === "prompt-fallback" ? undefined : this.cliRoleOptions(participant, session, ""),
+      role: session.roleRuntime === "prompt-fallback" ? undefined : this.cliRoleOptions(participant, session, "", this.mainSessionHandleForMember(conversation, participant)),
       appMcp: appMcp
         ? {
             ...appMcp,
@@ -6411,7 +6411,8 @@ export class ChatService {
           appToolCapabilities: this.appToolCapabilitiesForRolePolicy(
             role?.appToolCapabilities,
             role?.participantDefaults,
-            normalizeChatAgentPermissions(participant.permissions)
+            normalizeChatAgentPermissions(participant.permissions),
+            isMainSessionParticipant(conversation.metadata, participant.id)
           ),
           kind: participant.kind,
           model: participant.model,
@@ -9493,7 +9494,7 @@ export class ChatService {
           moveNoteBlock
         })
       : undefined;
-    const role = usePromptRole ? undefined : this.cliRoleOptions(participant, session, promptFallbackPrompt);
+    const role = usePromptRole ? undefined : this.cliRoleOptions(participant, session, promptFallbackPrompt, this.mainSessionHandleForMember(conversation, participant));
     void this.debugLogs.write("chat.prompt.size", {
       conversationId: conversation.id,
       participantId: participant.id,
@@ -9570,7 +9571,7 @@ export class ChatService {
     // or scoped back to role config, native escalation silently denies every
     // un-pre-approved tool call. Keep it always-on (or give the bridge its own
     // capability) if you change this.
-    const appToolCapabilities = this.appToolCapabilitiesForRun(session, permissions);
+    const appToolCapabilities = this.appToolCapabilitiesForRun(conversation, participant, session, permissions);
     const appMcpToolNames = this.appMcpToolNames(appToolCapabilities);
     const appMcpToolInventoryKey = this.appMcpToolInventoryKey(appMcpToolNames);
     const appMcpClientGenerationId = this.appMcpClientGenerationId(conversation, participant, session, appMcpToolInventoryKey);
@@ -10398,7 +10399,7 @@ export class ChatService {
       staticEnvelope = [
         `You are @${participant.handle}. Continue the same chat session.`,
         `Role: ${session.roleLabel}.`,
-        this.promptFallbackStaticInstructions(participant, session),
+        this.promptFallbackStaticInstructions(participant, session, this.mainSessionHandleForMember(conversation, participant)),
         dynamicHeader,
         `App MCP is the source of truth for chat context. History files at ${historyMarkdownPath} and ${historyJsonPath} are debug-only fallbacks.`
       ].join("\n");
@@ -10709,19 +10710,42 @@ export class ChatService {
   private cliRoleOptions(
     participant: ChatParticipant,
     session: ChatParticipantSession,
-    promptFallbackPrompt: string
+    promptFallbackPrompt: string,
+    mainSessionHandle?: string
   ): CliAgentRoleOptions {
     return {
       name: this.roleRuntimeName(participant, session),
       description: `${session.roleLabel} participant @${participant.handle} in AccordAgents Chat.`,
-      instructions: this.nativeRoleInstructions(participant, session),
+      instructions: this.nativeRoleInstructions(participant, session, mainSessionHandle),
       promptFallbackPrompt
     };
   }
 
+  /** In a chat with a main session, its handle for every other member (they
+   *  ask it, not User: docs/main-session.md); undefined for the main session
+   *  itself and in a chat without one. */
+  private mainSessionHandleForMember(conversation: Conversation, participant: ChatParticipant): string | undefined {
+    const mainId = mainSessionParticipantId(conversation.metadata);
+    if (!mainId || mainId === participant.id) {
+      return undefined;
+    }
+    return this.chatParticipants(conversation).find((item) => item.id === mainId)?.handle;
+  }
+
+  /** What a member of a chat with a main session does instead of asking User. */
+  private mainSessionMemberRules(mainSessionHandle: string): string[] {
+    return [
+      `- This chat has a main session, @${mainSessionHandle}: it works with User and gives other members their tasks.`,
+      `- When you need a decision or information from User, ask @${mainSessionHandle} with \`app_chat_request_participants\` instead of asking User; it answers from what it knows of User's intent and asks User itself when it must.`,
+      `- Do not write a \`User choice:\` block unless @${mainSessionHandle} asked you to put a question to User.`,
+      `- Do not start an Accord; when one is needed, ask @${mainSessionHandle}.`
+    ];
+  }
+
   private nativeRoleInstructions(
     participant: ChatParticipant,
-    session: ChatParticipantSession
+    session: ChatParticipantSession,
+    mainSessionHandle?: string
   ): string {
     return [
       `You are @${participant.handle} in AccordAgents Chat.`,
@@ -10733,14 +10757,16 @@ export class ChatService {
       "",
       this.staticChatInstructions(
         session,
-        preservedRemoteExecution(participant.remoteExecution) !== "remote"
+        preservedRemoteExecution(participant.remoteExecution) !== "remote",
+        mainSessionHandle
       )
     ].join("\n");
   }
 
   private promptFallbackStaticInstructions(
     participant: ChatParticipant,
-    session: ChatParticipantSession
+    session: ChatParticipantSession,
+    mainSessionHandle?: string
   ): string {
     return [
       "Role instructions:",
@@ -10748,28 +10774,36 @@ export class ChatService {
       "",
       this.staticChatInstructions(
         session,
-        preservedRemoteExecution(participant.remoteExecution) !== "remote"
+        preservedRemoteExecution(participant.remoteExecution) !== "remote",
+        mainSessionHandle
       )
     ].join("\n");
   }
 
   private staticChatInstructions(
     session: ChatParticipantSession,
-    includeParticipantActivityTool = true
+    includeParticipantActivityTool = true,
+    /** Set for a member of a chat with a main session other than the main
+     *  session itself. */
+    mainSessionHandle?: string
   ): string {
     return [
       "Chat participant boundaries:",
       "- You are one participant in a multi-participant chat.",
       "- User is the human conversation owner, requirements authority, and clarification source. User messages appear as `User` in the transcript.",
-      "- Ask User directly when goals, requirements, preferences, acceptance criteria, or user intent are unclear.",
-      "- Do not ask another participant for user-owned clarification.",
+      ...(mainSessionHandle
+        ? this.mainSessionMemberRules(mainSessionHandle)
+        : [
+            "- Ask User directly when goals, requirements, preferences, acceptance criteria, or user intent are unclear.",
+            "- Do not ask another participant for user-owned clarification."
+          ]),
       // A member on a cloud machine: its files are not on User's computer, and
       // the app shows a path it writes as plain text that does not open
       // (decided by the User 2026-10-30, file panel design).
       ...(this.machineRuntime ? ["- You run on a cloud machine, not on User's computer. Files on this machine are not reachable by User: a file path you write will not open for them. To show User a file, publish it as an artifact or attach an image to a message."] : []),
       "",
       "App MCP policy:",
-      this.appToolPromptPolicy(session, includeParticipantActivityTool),
+      this.appToolPromptPolicy(session, includeParticipantActivityTool, mainSessionHandle),
       "",
       ...MEMBER_MEMORY_INSTRUCTIONS,
       "",
@@ -10783,7 +10817,7 @@ export class ChatService {
       "- When a participant request MCP call returns `pending_approval` or `running`, end your turn unless User explicitly asked you to continue without that answer or an active skill gives you work that does not need it. The app will return control to you when replies or errors arrive.",
       "- Do not repeatedly poll participant request status in the same turn. Use the status tool only to recover a previous request after a timeout, interruption, approval delay, or resumed session.",
       ...(session.participantKind === "claude-code" ? ["- Claude Code only: do not use provider-native interactive question, user-input, or structured-question tools to ask User to choose. In AccordAgents Chat, ask choices only by emitting the `User choice:` block format described below."] : []),
-      "- When User must pick one option before you can continue, include one dedicated `User choice:` block after your explanation. Format it as lines `T: short title`, `Q: question`, `O1: option label | optional description`, `O2: option label | optional description`, and optionally `R: O1`. Use at least two options. Ask at most one user choice in a message.",
+      `- ${mainSessionHandle ? `Only when @${mainSessionHandle} asked you to put a question to User and User` : "When User"} must pick one option before you can continue, include one dedicated \`User choice:\` block after your explanation. Format it as lines \`T: short title\`, \`Q: question\`, \`O1: option label | optional description\`, \`O2: option label | optional description\`, and optionally \`R: O1\`. Use at least two options. Ask at most one user choice in a message.`,
       "- The UI also lets User write a custom answer instead of choosing your suggestions. After User confirms, the app will send the selected option or custom answer back to you in this chat.",
       "- Answer in the active thread. Do not assume a mentioned participant has answered until their reply appears in the transcript.",
       "- Answer only in this chat message. Do not mention ExitPlanMode, plan files, tool availability, or recording/writing outside the chat unless User directly asks about those mechanics.",
@@ -10795,7 +10829,8 @@ export class ChatService {
 
   private appToolPromptPolicy(
     session: ChatParticipantSession,
-    includeParticipantActivityTool = true
+    includeParticipantActivityTool = true,
+    mainSessionHandle?: string
   ): string {
     const agentMode = normalizeChatAgentMode(session.participantAgentMode);
     const canRequestPermissions = this.canRequestPermissionChanges(session);
@@ -10837,6 +10872,9 @@ export class ChatService {
       "Send-message MCP tool: `app_chat_send_message` posts immediately and returns `messageId`; use only for mid-turn visibility, not normal replies. It can attach PNG/JPEG/WebP with `attachments: [{ \"kind\": \"image\", \"sourcePath\": \"path.png\" }]` from image paths inside the selected repository when repoRead is granted.",
       "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",
       "Participant request MCP tools: use `app_chat_request_participants` to ask participants; `app_chat_get_participant_request_status` recovers replies. JSON: `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }] }`.",
+      ...(mainSessionHandle
+        ? [`Questions for User go to the main session: \`{ "requests": [{ "target": "${mainSessionHandle}", "prompt": "Concrete question" }] }\`; its answer comes back to you in a fresh turn.`]
+        : []),
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
       "With the default `resumeRequester: true`, the call returns at once and replies arrive in a fresh auto-resumed requester turn, so end your turn as described above. Use `resumeRequester: false` (with an optional `timeoutMs` wait) only when you need completed replies inline in the same turn.",
       ...(session.participantKind === "claude-code"
@@ -10892,20 +10930,26 @@ export class ChatService {
   }
 
   private appToolCapabilitiesForRun(
+    conversation: Conversation,
+    participant: ChatParticipant,
     session: ChatParticipantSession,
     permissions: ChatAgentPermissions
   ): ChatAppToolCapability[] {
     return this.appToolCapabilitiesForRolePolicy(
       session.roleAppToolCapabilities,
       session.roleParticipantDefaults,
-      permissions
+      permissions,
+      isMainSessionParticipant(conversation.metadata, participant.id)
     );
   }
 
   private appToolCapabilitiesForRolePolicy(
     roleAppToolCapabilities: unknown,
     roleParticipantDefaults: ChatRoleParticipantDefaults | undefined,
-    permissions: ChatAgentPermissions
+    permissions: ChatAgentPermissions,
+    /** The chat's own main session (docs/main-session.md): only it delegates
+     *  tasks and starts Accords, whatever another member's role says. */
+    isMainSession: boolean
   ): ChatAppToolCapability[] {
     const requestParticipantsPermission = normalizeChatParticipantRequestPermission(permissions.requestParticipants);
     const requestCompactionPermission = normalizeChatParticipantRequestPermission(permissions.requestCompaction);
@@ -10914,7 +10958,8 @@ export class ChatService {
       permissions.manageRolesParticipants
     ).effective;
     const staticRoleAppToolCapabilities = normalizeChatAppToolCapabilities(roleAppToolCapabilities)
-      .filter((capability) => capability !== "participants.request" && capability !== "compaction.request" && capability !== "participants.manage");
+      .filter((capability) => capability !== "participants.request" && capability !== "compaction.request" && capability !== "participants.manage")
+      .filter((capability) => isMainSession || (capability !== "participants.delegate" && capability !== "accord.start"));
     return normalizeChatAppToolCapabilities([
       ...staticRoleAppToolCapabilities,
       "permissions.request",
