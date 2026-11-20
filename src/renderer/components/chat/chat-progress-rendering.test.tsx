@@ -152,7 +152,7 @@ function stableActionHandlers(label: string, calls: string[]): StableChatMessage
 
 test("a reply's pictures are the same arrays on every render while its posts and pictures are unchanged", async () => {
   const { chatReplyPictures } = await import("./chat-interim-posts");
-  const picture = (id: string) => ({ id, filename: `${id}.png`, mimeType: "image/png", sizeBytes: 1, width: 1, height: 1, storageKey: id, createdAt: "2026-11-21T10:00:00.000Z" });
+  const picture = (id: string) => ({ id, filename: `${id}.png`, mimeType: "image/png" as const, sizeBytes: 1, width: 1, height: 1, storageKey: id, createdAt: "2026-11-21T10:00:00.000Z" });
   const metadata = {
     imageAttachments: [picture("a"), picture("b")],
     interimPosts: [{ id: "post", content: "See this.", createdAt: "2026-11-21T10:00:01.000Z", attachmentIds: ["a"] }]
