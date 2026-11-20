@@ -17530,7 +17530,9 @@ export class ChatService {
         const participantRequestRootId = participantRequestVisibleRootId(conversation.messages, first);
         const trigger = this.message(
           "system",
-          group.length > 1
+          // The main session's tasks always come back as a list of each task
+          // and how it ended (stopped, failed, answered), one task too.
+          group.length > 1 || batch.delegation
             ? this.delegationGroupResumeText(conversation, requester, group)
             : [
                 `Auto-resumed @${requester.handle} after member request.`,
@@ -17650,11 +17652,14 @@ export class ChatService {
           return reply ? `failed${where}` : `failed: ${firstTextLine(item.error, 200) || "no reply"}`;
       }
     };
+    const one = items.length === 1;
     return [
       `Auto-resumed @${requester.handle} after member request.`,
-      `All ${items.length} tasks you gave in one turn have ended:`,
+      one ? "The task you gave has ended:" : `All ${items.length} tasks you gave in one turn have ended:`,
       ...items.map((item) => `- @${item.targetHandle} (task "${sessionsTaskTitle(item)}"): ${outcome(item)}`),
-      "Their replies and errors are in the context above. Continue from your requests using the available answers and errors."
+      one
+        ? "Its reply or error is in the context above. Continue from your request using it."
+        : "Their replies and errors are in the context above. Continue from your requests using the available answers and errors."
     ].join("\n");
   }
 

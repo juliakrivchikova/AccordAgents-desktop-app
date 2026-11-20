@@ -660,6 +660,32 @@ test("a task stopped by User and a task that failed still resume the main sessio
   assert.match(resumes[0]!.prompt, /Quick job done\./);
 });
 
+test("a lone task the User stopped resumes the main session with the task list too, the task shown as stopped", async () => {
+  const main = mainSession("codex-cli", { model: undefined });
+  const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-thread")] });
+  const held = heldRuns();
+  const { service, storage, runs } = testService({
+    conversation,
+    run: (participant, prompt, runOptions, signal) => participant.id === main.id
+      ? Promise.resolve({ participant, ok: true, content: "Noted.", durationMs: 1 })
+      : held.run(participant, prompt, runOptions, signal)
+  });
+  const turn = liveTurn(service, "turn-lone");
+  const lone = await service.delegateTaskFromTool(mainActor(undefined, { turnSegmentId: "turn-lone" }), { title: "Long job", task: "Run the long job." });
+  assert.equal(lone.ok, true, JSON.stringify(lone));
+  turn.end();
+  await waitFor(() => held.started(String(lone.participantId)));
+  const runId = () => storage.current.messages.find((message) => message.participantId === lone.participantId && message.status === "pending")?.metadata?.runId;
+  await waitFor(() => Boolean(runId()));
+  assert.equal(service.cancelRun(String(runId())), true);
+  await waitFor(() => Boolean(delegationBatches(storage.current)[0]?.autoResumeMessageId));
+  const resumes = resumesOf(runs, main.id);
+  assert.equal(resumes.length, 1);
+  assert.match(resumes[0]!.prompt, /The task you gave has ended:/);
+  assert.match(resumes[0]!.prompt, /- @\w[\w-]* \(task "Long job"\): stopped by User/);
+  assert.doesNotMatch(resumes[0]!.prompt, /Target replies\/errors are in the transcript above/, "not the generic line");
+});
+
 test("a combined resume cuts oversized replies: each to 12,000 characters, all to 60,000, each cut one saying where the rest is", async () => {
   const main = mainSession("codex-cli", { model: undefined });
   const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-thread")] });

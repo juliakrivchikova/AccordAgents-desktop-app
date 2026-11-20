@@ -170,7 +170,8 @@ the desktop and on the phone (bundled through `mobileSharedRules.ts`).
   turn ran on this device. `autoResumeParticipantRequest` resumes the tasks
   of one `turnId` once: not while the turn runs (`liveTurnSegments`; its end
   looks again), not while one of them runs, then with one trigger listing
-  each task and how it ended, and the other tasks' replies read as untrusted
+  each task and how it ended (a lone task too, a stopped one as "stopped by
+  User"; its row in the sessions view says "Stopped", muted), and the other tasks' replies read as untrusted
   context (`extraPromptContextMessageIds`), each cut to 12,000 characters
   and all to 60,000, a cut one naming its message for
   `app_chat_read_messages` (`cappedTaskReplyRecords`; Antigravity takes
@@ -178,7 +179,11 @@ the desktop and on the phone (bundled through `mobileSharedRules.ts`).
   `autoResumeMessageId`. A task a restart ended
   (`markOrphanedParticipantRequestInterrupted`) makes the app look at its
   turn's tasks again; when the restart ended all of them the main session is
-  not woken, as a lone task never was. On a cloud machine the same runs on
+  not woken, as a lone task never was. A turn that a restart ended while
+  its tasks were held, or whose resume a restart cut short, is looked at
+  once on the first read of the chat (`recoverDelegationGroupsOfEndedTurns`):
+  the main session is resumed with every answer; a resume that was made and
+  failed is not made again. On a cloud machine the same runs on
   the machine that runs the main session.
 - `ChatParticipantRequestBatch.delegation?: { start, turnId? }`: the main session's
   task to a member it made (`app_chat_delegate_task`); not held to the
