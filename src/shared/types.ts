@@ -976,12 +976,21 @@ export interface ChatParticipant {
   sessionHandoff?: import("./memberSessionMove").ChatSessionHandoff;
   skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
+  /** In a chat with a main session, the member that added this one without
+   *  a card (the main session delegating, or a member it made adding its
+   *  own): its rights and mode never go above the main session's as they are
+   *  at each turn (docs/main-session.md). Absent for members the User added
+   *  or approved herself. Set once, when the member is added. */
+  delegatedByParticipantId?: string;
 }
 
 export interface ChatSessionForkSource {
   participantId: string;
   sessionId: string;
   kind: ChatProviderKind;
+  /** Turns whose fork failed because the source session could not be read.
+   *  After the retry fails too, the member starts a clean session instead. */
+  failedAttempts?: number;
 }
 
 export interface ChatParticipantSession {

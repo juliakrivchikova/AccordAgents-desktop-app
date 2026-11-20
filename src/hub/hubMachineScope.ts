@@ -14,17 +14,22 @@
  *
  * - members that run elsewhere stay as the server has them (their
  *   permissions, mode, tools, home), except that `/accord` gives the member
- *   it names leave to ask other members;
+ *   it names leave to ask other members (the main session's, no more than
+ *   its own);
  * - a member that runs on the machine stays on it, keeps its role and its
- *   right to manage members, and gets leave to ask other members only as
- *   the app gives it: the User's "Allow for this chat" on its request, or
- *   `/accord` naming it;
+ *   right to manage members, gets leave to ask other members only as the app
+ *   gives it (the User's "Allow for this chat" on its request, or `/accord`
+ *   naming it), and gets no right or mode beyond what the server has for it
+ *   but what the User granted on its permission cards;
  * - a rule that lets a member act without a card ("Allow for this chat") is
  *   added only where the User answered so, for the machine's own members,
  *   and goes with a member removed;
  * - a member is added as the app adds one: by a member there that may manage
  *   members without a card under her rules (her computer publishes them,
- *   HubMemberRules), or as she approved it on a card;
+ *   HubMemberRules), or as she approved it on a card; in a chat with a main
+ *   session, one added without a card has nothing beyond the rights of the
+ *   member that added it and of the main session, as the server has them
+ *   before the write, wherever it runs;
  * - the chat's project folder and other shared fields are not the machine's
  *   to change; its title only as the app names a new chat (once, by the
  *   member that answers first).
@@ -48,10 +53,17 @@ import {
   normalizeChatAgentMode,
   normalizeChatAgentPermissions,
   normalizeChatParticipantRequestPermission,
+  normalizeChatShellPermissionRules,
+  normalizeProviderNativeAllowedTools,
   resolveChatManageRolesParticipantsPermission
 } from "../shared/agentPermissions";
 import { MAIN_SESSION_ROLE_ID } from "../shared/mainSession";
-import { APP_CHAT_REQUEST_PARTICIPANTS_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, APP_ROSTER_REQUEST_CHANGE_TOOL } from "../shared/appMcpToolContracts";
+import {
+  APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
+  APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
+  APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
+  APP_ROSTER_REQUEST_CHANGE_TOOL
+} from "../shared/appMcpToolContracts";
 import type { HubCard, HubUserApproval } from "../shared/hubOps";
 import { mainSessionParticipantId } from "../shared/mainSession";
 import type { HubMemberRules } from "../shared/hubProtocol";
@@ -176,57 +188,81 @@ function names(message: ChatMessage, member: ChatParticipant): boolean {
   return Array.isArray(targets) && targets.includes(member.id);
 }
 
+/** Leave to ask other members an `/accord` or an approval gives: the most
+ *  it gives, and how the server notes it used. */
+interface Leave {
+  cap: ChatParticipantRequestPermission;
+  key: string;
+}
+
 /** `/accord` naming the member, not used yet: the app gives the member it
  *  names (its facilitator) leave to ask other members, once — named in the
  *  User's own message or another member's reply, as the chat shows them;
  *  never by the member's own reply, a hidden message or a line no one wrote
  *  as themselves (a machine writes those too). In a chat with a main session
  *  only the User and the main session start an Accord (docs/main-session.md),
- *  so another member's reply gives no leave. The message's id. */
-function accordNaming(conversation: Conversation, member: ChatParticipant, used: ReadonlySet<string>): string | undefined {
+ *  so another member's reply gives no leave, and the main session's gives no
+ *  more than its own (as the app's startAccord does), as the server has it.
+ *  The one that gives the most. */
+function accordNaming(conversation: Conversation, member: ChatParticipant, used: ReadonlySet<string>): Leave | undefined {
   const mainSessionId = mainSessionParticipantId(conversation.metadata);
-  return conversation.messages.find((message) => {
-    if (message.role !== "user" && message.role !== "participant") return false;
-    if (message.role === "participant" && message.participantId === member.id) return false;
-    if (message.role === "participant" && mainSessionId && message.participantId !== mainSessionId) return false;
-    if (message.metadata?.hiddenFromTimeline === true) return false;
-    if (used.has(accordGrantKey(message.id, member.id))) return false;
+  const mainSession = mainSessionId ? participantsOf(conversation.metadata?.participants).find((item) => item.id === mainSessionId) : undefined;
+  let best: Leave | undefined;
+  for (const message of conversation.messages) {
+    if (message.role !== "user" && message.role !== "participant") continue;
+    if (message.role === "participant" && message.participantId === member.id) continue;
+    if (message.role === "participant" && mainSessionId && message.participantId !== mainSessionId) continue;
+    if (message.metadata?.hiddenFromTimeline === true) continue;
+    if (used.has(accordGrantKey(message.id, member.id))) continue;
     const skills = (message.metadata as { skillMentions?: unknown } | undefined)?.skillMentions;
     const accord = ACCORD.test(withoutCode(message.content ?? "")) ||
       (Array.isArray(skills) && skills.some((skill) => (skill as { frontmatterName?: unknown } | undefined)?.frontmatterName === "accord"));
-    return accord && names(message, member);
-  })?.id;
+    if (!accord || !names(message, member)) continue;
+    const byMainSession = message.role === "participant" && Boolean(mainSessionId) && message.participantId === mainSessionId;
+    if (byMainSession && !mainSession) continue;
+    const cap: ChatParticipantRequestPermission = byMainSession ? requestRight(mainSession!) : "allow";
+    if (!best || rank(cap) > rank(best.cap)) best = { cap, key: accordGrantKey(message.id, member.id) };
+  }
+  return best;
 }
 
-/** Whether the app would have given this member leave to ask other members:
- *  the User's "Allow for this chat" on a request it made (a request inferred
- *  from its reply only ever gets a one-time approval), or `/accord` naming
- *  it. What gave it is noted in `noted`, so it gives it once. */
-function leaveGiven(conversation: Conversation, member: ChatParticipant, approved: Approved[], used: ReadonlySet<string>, noted: Set<string>): boolean {
+/** The leave to ask other members the app would have given this member: the
+ *  User's "Allow for this chat" on a request it made (a request inferred from
+ *  its reply only ever gets a one-time approval), or `/accord` naming it. */
+function leaveGiven(conversation: Conversation, member: ChatParticipant, approved: Approved[], used: ReadonlySet<string>): Leave | undefined {
   const answer = approved.find((item) => item.scope === "chat" && item.approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL &&
     item.card.participantId === member.id && item.request.source !== "inferred");
-  if (answer) {
-    noted.add(answer.key);
-    return true;
-  }
-  const accord = accordNaming(conversation, member, used);
-  if (accord) noted.add(accordGrantKey(accord, member.id));
-  return Boolean(accord);
+  if (answer) return { cap: "allow", key: answer.key };
+  return accordNaming(conversation, member, used);
 }
 
 function requestRight(participant: Pick<ChatParticipant, "permissions">): ChatParticipantRequestPermission {
   return normalizeChatParticipantRequestPermission(permissionsOf(participant).requestParticipants);
 }
 
+function lowerRight(left: ChatParticipantRequestPermission, right: ChatParticipantRequestPermission): ChatParticipantRequestPermission {
+  return rank(left) <= rank(right) ? left : right;
+}
+
+function withRequestRight(member: ChatParticipant, right: ChatParticipantRequestPermission | undefined): ChatParticipant {
+  const permissions = { ...permissionsOf(member) };
+  if (right === undefined) delete permissions.requestParticipants;
+  else permissions.requestParticipants = right;
+  return { ...member, permissions: permissions as unknown as ChatParticipant["permissions"] };
+}
+
 /** The member with its leave to ask other members as the server has it,
- *  unless the app would have given it the leave the machine asks for. */
-function keepRequestRight(next: ChatParticipant, current: ChatParticipant, given: () => boolean): ChatParticipant {
-  if (!chatParticipantRequestPermissionExceeds(requestRight(next), requestRight(current)) || given()) return next;
-  const permissions = { ...permissionsOf(next) };
-  const had = permissionsOf(current).requestParticipants;
-  if (had === undefined) delete permissions.requestParticipants;
-  else permissions.requestParticipants = had;
-  return { ...next, permissions: permissions as unknown as ChatParticipant["permissions"] };
+ *  raised only as far as the app would have raised it; what gave it is noted
+ *  in `noted`, so it gives it once. */
+function keepRequestRight(next: ChatParticipant, current: ChatParticipant, given: () => Leave | undefined, noted: Set<string>): ChatParticipant {
+  const asked = requestRight(next);
+  const had = requestRight(current);
+  if (!chatParticipantRequestPermissionExceeds(asked, had)) return next;
+  const leave = given();
+  const allowed = leave ? lowerRight(asked, leave.cap) : had;
+  if (rank(allowed) > rank(had)) noted.add(leave!.key);
+  if (allowed === asked) return next;
+  return withRequestRight(next, rank(allowed) > rank(had) ? allowed : permissionsOf(current).requestParticipants as ChatParticipantRequestPermission | undefined);
 }
 
 // --- its own members ----------------------------------------------------------
@@ -248,12 +284,14 @@ function keepHome(next: ChatParticipant, current: ChatParticipant): ChatParticip
 }
 
 /** A member keeps the role and the right to manage members the User gave it:
- *  the app never changes either on a machine. */
+ *  the app never changes either on a machine. Nor which member added it
+ *  without a card (what holds it to the main session's rights). */
 function keepRole(next: ChatParticipant, current: ChatParticipant): ChatParticipant {
   // Its name too: the app never renames a member on a machine, and a name
   // taken from another member would speak for that one.
   const named = next.handle === current.handle ? next : { ...next, handle: current.handle };
-  const kept = named.roleConfigId === current.roleConfigId ? named : { ...named, roleConfigId: current.roleConfigId };
+  const roled = named.roleConfigId === current.roleConfigId ? named : { ...named, roleConfigId: current.roleConfigId };
+  const kept = roled.delegatedByParticipantId === current.delegatedByParticipantId ? roled : withDelegator(roled, current.delegatedByParticipantId);
   const had = permissionsOf(current).manageRolesParticipants;
   if (permissionsOf(next).manageRolesParticipants === had) return kept;
   const permissions = { ...permissionsOf(next) };
@@ -262,17 +300,120 @@ function keepRole(next: ChatParticipant, current: ChatParticipant): ChatParticip
   return { ...kept, permissions: permissions as unknown as ChatParticipant["permissions"] };
 }
 
-/** A member that runs elsewhere, as the server has it; given leave to ask
- *  other members when `/accord` names it (and only that). */
-function keepElsewhere(conversation: Conversation, next: ChatParticipant, current: ChatParticipant, used: ReadonlySet<string>, noted: Set<string>): ChatParticipant {
-  if (requestRight(next) === "allow" && requestRight(current) !== "allow") {
-    const accord = accordNaming(conversation, current, used);
-    if (accord) {
-      noted.add(accordGrantKey(accord, current.id));
-      return { ...current, permissions: { ...permissionsOf(current), requestParticipants: "allow" } as unknown as ChatParticipant["permissions"] };
-    }
+function withDelegator(member: ChatParticipant, delegatorId: string | undefined): ChatParticipant {
+  const { delegatedByParticipantId: _delegator, ...rest } = member;
+  return delegatorId === undefined ? rest : { ...rest, delegatedByParticipantId: delegatorId };
+}
+
+const MODE_RANK: Record<ChatAgentMode, number> = { plan: 0, default: 1, auto: 2 };
+
+function shellRuleKey(rule: { action: string; match: string; pattern: string }): string {
+  return `${rule.action}\0${rule.match}\0${rule.pattern}`;
+}
+
+/** What a permission change she approved for the chat adds (chat.ts
+ *  applyPermissionChangeToPermissions). */
+function withGrant(permissions: ChatAgentPermissions, request: Record<string, unknown>): ChatAgentPermissions {
+  if (request.kind === "shellRules") {
+    const rules = normalizeChatShellPermissionRules(request.rules);
+    const seen = new Set(permissions.shell.rules.map(shellRuleKey));
+    return { ...permissions, shell: { enabled: true, rules: [...permissions.shell.rules, ...rules.filter((rule) => !seen.has(shellRuleKey(rule)))] } };
   }
-  return current;
+  if (request.kind === "providerNative") {
+    const tools = [...new Set([...(permissions.providerNative?.["claude-code"]?.allowedTools ?? []), ...normalizeProviderNativeAllowedTools(request.allowedTools)])];
+    return tools.length ? { ...permissions, providerNative: { "claude-code": { allowedTools: tools } } } : permissions;
+  }
+  if (request.kind === "portable" || Array.isArray(request.permissions)) {
+    const granted = Array.isArray(request.permissions) ? request.permissions : [];
+    return {
+      ...permissions,
+      repoRead: permissions.repoRead || granted.includes("repoRead"),
+      workspaceWrite: permissions.workspaceWrite || granted.includes("workspaceWrite"),
+      webAccess: permissions.webAccess || granted.includes("webAccess")
+    };
+  }
+  return permissions;
+}
+
+/** What of `wanted` goes beyond `had` (leave to ask and managing members
+ *  aside: keepRequestRight and keepRole hold those). A deny rule taken away
+ *  goes beyond too. */
+function rightsBeyond(wanted: ChatAgentPermissions, had: ChatAgentPermissions): boolean {
+  if ((wanted.repoRead && !had.repoRead) || (wanted.workspaceWrite && !had.workspaceWrite) || (wanted.webAccess && !had.webAccess)) return true;
+  if (wanted.shell.enabled && !had.shell.enabled) return true;
+  const hadRules = new Set(had.shell.rules.map(shellRuleKey));
+  if (wanted.shell.rules.some((rule) => rule.action !== "deny" && !hadRules.has(shellRuleKey(rule)))) return true;
+  const wantedRules = new Set(wanted.shell.rules.map(shellRuleKey));
+  if (had.shell.rules.some((rule) => rule.action === "deny" && !wantedRules.has(shellRuleKey(rule)))) return true;
+  const hadTools = new Set(had.providerNative?.["claude-code"]?.allowedTools ?? []);
+  if ((wanted.providerNative?.["claude-code"]?.allowedTools ?? []).some((tool) => !hadTools.has(tool))) return true;
+  return rank(normalizeChatParticipantRequestPermission(wanted.requestCompaction)) > rank(normalizeChatParticipantRequestPermission(had.requestCompaction));
+}
+
+/** `wanted`, with nothing beyond `ceiling`: what goes beyond it is taken
+ *  back to what `had` (the server's) has. */
+function rightsWithin(wanted: ChatAgentPermissions, ceiling: ChatAgentPermissions): Partial<ChatAgentPermissions> {
+  const ceilingRules = new Set(ceiling.shell.rules.map(shellRuleKey));
+  const kept = wanted.shell.rules.filter((rule) => rule.action === "deny" || ceilingRules.has(shellRuleKey(rule)));
+  const keptKeys = new Set(kept.map(shellRuleKey));
+  const rules = [...kept, ...ceiling.shell.rules.filter((rule) => rule.action === "deny" && !keptKeys.has(shellRuleKey(rule)))];
+  const ceilingTools = new Set(ceiling.providerNative?.["claude-code"]?.allowedTools ?? []);
+  const tools = (wanted.providerNative?.["claude-code"]?.allowedTools ?? []).filter((tool) => ceilingTools.has(tool));
+  const compaction = normalizeChatParticipantRequestPermission(wanted.requestCompaction);
+  const compactionCeiling = normalizeChatParticipantRequestPermission(ceiling.requestCompaction);
+  return {
+    repoRead: wanted.repoRead && ceiling.repoRead,
+    workspaceWrite: wanted.workspaceWrite && ceiling.workspaceWrite,
+    webAccess: wanted.webAccess && ceiling.webAccess,
+    requestCompaction: lowerRight(compaction, compactionCeiling),
+    shell: { enabled: wanted.shell.enabled && ceiling.shell.enabled, rules },
+    providerNative: tools.length ? { "claude-code": { allowedTools: tools } } : undefined
+  };
+}
+
+/** Its own member's mode and rights, never beyond what the server has for
+ *  it (what the User set) but for what she granted it for the chat on its
+ *  permission cards (app_permissions_request_change): the app on a machine
+ *  raises neither otherwise, and a write around it could raise them and then
+ *  add members as broad (docs/main-session.md). Less is always fine. A grant
+ *  this write uses is noted, so it gives its change once. */
+function keepRights(next: ChatParticipant, current: ChatParticipant, approved: Approved[], noted: Set<string>): ChatParticipant {
+  let kept = next;
+  if (MODE_RANK[normalizeChatAgentMode(next.agentMode)] > MODE_RANK[normalizeChatAgentMode(current.agentMode)]) {
+    const { agentMode: _mode, ...rest } = kept;
+    kept = current.agentMode === undefined ? rest : { ...rest, agentMode: current.agentMode };
+  }
+  const had = normalizeChatAgentPermissions(current.permissions);
+  const wanted = normalizeChatAgentPermissions(next.permissions);
+  if (!rightsBeyond(wanted, had)) return kept;
+  const grants = approved.filter((item) => item.scope === "chat" && item.approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
+    item.card.participantId === current.id);
+  let ceiling = had;
+  for (const grant of grants) {
+    const raised = withGrant(ceiling, grant.request);
+    // Noted only when this write takes something it gives.
+    if (rightsBeyond(raised, ceiling) && rightsBeyond(normalizeChatAgentPermissions({ ...rightsWithin(wanted, raised) }), ceiling)) noted.add(grant.key);
+    ceiling = raised;
+  }
+  if (!rightsBeyond(wanted, ceiling)) return kept;
+  const within = rightsWithin(wanted, ceiling);
+  const permissions: Record<string, unknown> = { ...permissionsOf(next), ...within };
+  if (!within.providerNative) delete permissions.providerNative;
+  return { ...kept, permissions: permissions as unknown as ChatParticipant["permissions"] };
+}
+
+/** A member that runs elsewhere, as the server has it; given leave to ask
+ *  other members when `/accord` names it (and only that, as far as it
+ *  gives). */
+function keepElsewhere(conversation: Conversation, next: ChatParticipant, current: ChatParticipant, used: ReadonlySet<string>, noted: Set<string>): ChatParticipant {
+  const had = requestRight(current);
+  if (!chatParticipantRequestPermissionExceeds(requestRight(next), had)) return current;
+  const accord = accordNaming(conversation, current, used);
+  if (!accord) return current;
+  const allowed = lowerRight(requestRight(next), accord.cap);
+  if (rank(allowed) <= rank(had)) return current;
+  noted.add(accord.key);
+  return withRequestRight(current, allowed);
 }
 
 // --- members it adds and removes ----------------------------------------------
@@ -444,8 +585,9 @@ function isApprovedMember(member: ChatParticipant, approved: ApprovedMember, rul
 
 /** What a machine's member changes are held to, for one write. */
 interface MemberChanges {
-  /** The chat's main session, when it has one. */
-  mainSessionId?: string;
+  /** The chat's main session as the server has it before this write, when
+   *  the chat has one (wherever it runs): what this write may not raise. */
+  mainSession?: ChatParticipant;
   machineMembers: ChatParticipant[];
   policies: ChatAppToolApprovalPolicy[];
   approved: Approved[];
@@ -456,33 +598,41 @@ interface MemberChanges {
 }
 
 /** Whether the app would have added this member for one of the machine's
- *  members: one that may change members without a card (unless the new
- *  member would manage members beyond its role), or the User's approval of
- *  this very addition — one member for each she approved. */
-function additionAllowed(member: ChatParticipant, changes: MemberChanges): boolean {
-  const { rules } = changes;
+ *  members, and how: one that may change members without a card (unless the
+ *  new member would manage members beyond its role) — in a chat with a main
+ *  session, with nothing beyond its own rights and the main session's, as
+ *  the server has them before this write, wherever the new member runs —
+ *  or the User's approval of this very addition, one member for each she
+ *  approved ("card"). */
+function additionAllowed(member: ChatParticipant, changes: MemberChanges): ChatParticipant | "card" | undefined {
+  const { rules, mainSession } = changes;
   const role = rules?.roles[member.roleConfigId];
   const preset = member.participantConfigId ? rules?.presets[member.participantConfigId] : undefined;
   const escalates = manageRight(role, member.permissions).exceedsRoleDefault ||
     (preset !== undefined && chatParticipantRequestPermissionExceeds(manageRight(role, member.permissions).effective, manageRight(role, preset.permissions).effective));
-  if (!escalates && changes.machineMembers.some((requester) => managesWithoutCard(requester, rules, changes.policies) &&
-    (requester.id !== changes.mainSessionId || withinMainSession(member, requester, rules)))) return true;
+  if (!escalates) {
+    const adders = changes.machineMembers.filter((requester) => managesWithoutCard(requester, rules, changes.policies) &&
+      (!mainSession || (withinMember(member, requester, rules) && withinMember(member, mainSession, rules))));
+    // The member the machine names as the one that added it, when it is one.
+    const named = adders.find((requester) => requester.id === member.delegatedByParticipantId);
+    if (named ?? adders[0]) return named ?? adders[0];
+  }
   for (const item of changes.approved) {
     if (!changes.machineMembers.some((requester) => requester.id === item.card.participantId)) continue;
     const match = approvedMembers(item, rules).find((candidate) => !changes.claimed.has(candidate.claim) && isApprovedMember(member, candidate, rules));
     if (match) {
       changes.claimed.add(match.claim);
       changes.noted.add(item.key);
-      return true;
+      return "card";
     }
   }
-  return false;
+  return undefined;
 }
 
-/** A member the main session adds without a card has nothing beyond the
- *  main session's own rights (the app's clampChatAgentPermissions): its mode,
- *  what it may do in that mode, and its right to manage members. */
-function withinMainSession(member: ChatParticipant, main: ChatParticipant, rules: HubMemberRules | undefined): boolean {
+/** Whether a member added without a card has nothing beyond `main`'s rights
+ *  (the app's clampChatAgentPermissions and additionsExceedMainSession): its
+ *  mode, what it may do in that mode, and its right to manage members. */
+function withinMember(member: ChatParticipant, main: ChatParticipant, rules: HubMemberRules | undefined): boolean {
   const mainMode = normalizeChatAgentMode(main.agentMode);
   const memberMode = normalizeChatAgentMode(member.agentMode);
   if (!chatAgentModeWithin(memberMode, mainMode)) return false;
@@ -573,8 +723,10 @@ export function scopeMachineConversationUpdate(conversation: Conversation, updat
   // User took the right back) does not count.
   const used = context.used ?? new Set<string>();
   const beforePolicies = policiesOf(current.appToolApprovalPolicies);
+  const mainSessionId = mainSessionParticipantId(current);
   const changes: MemberChanges = {
-    mainSessionId: mainSessionParticipantId(current),
+    // As the server has it: a raise in this same write does not count.
+    mainSession: mainSessionId ? beforeById.get(mainSessionId) : undefined,
     machineMembers: ownBefore, policies: beforePolicies, approved: approvedRequests(context.approvals, used), rules: context.rules,
     claimed: new Set(), noted: new Set()
   };
@@ -588,11 +740,19 @@ export function scopeMachineConversationUpdate(conversation: Conversation, updat
       if (!existing) {
         // A name another member has would speak for that one.
         const clash = [...beforeById.values(), ...taken].some((other) => other.id !== participant.id && handleKey(other.handle) === handleKey(participant.handle));
-        if (!clash && additionAllowed(participant, changes)) {
+        const allowed = clash ? undefined : additionAllowed(participant, changes);
+        if (allowed) {
           // A member a machine adds brings no session with it: only the
           // computer hands a member its session, when it moves it.
-          const added = withoutHandoff(participant);
+          let added = withoutHandoff(participant);
           if (added !== participant) refused.push(`participants.${participant.id}.sessionHandoff`);
+          // One added without a card in a chat with a main session says who
+          // added it, so every device holds it to the main session's rights
+          // at each turn (docs/main-session.md).
+          if (allowed !== "card" && changes.mainSession && added.delegatedByParticipantId !== allowed.id) {
+            added = withDelegator(added, allowed.id);
+            refused.push(`participants.${participant.id}.delegatedBy`);
+          }
           taken.push(added);
           return [added];
         }
@@ -600,7 +760,8 @@ export function scopeMachineConversationUpdate(conversation: Conversation, updat
         return [];
       }
       if (runsOnMachine(existing, machineId)) {
-        const kept = keepRequestRight(keepRole(keepHome(participant, existing), existing), existing, () => leaveGiven(conversation, existing, changes.approved, used, changes.noted));
+        const kept = keepRequestRight(keepRole(keepHome(keepRights(participant, existing, changes.approved, changes.noted), existing), existing), existing,
+          () => leaveGiven(conversation, existing, changes.approved, used), changes.noted);
         if (JSON.stringify(kept) !== JSON.stringify(participant)) refused.push(`participants.${participant.id}.rights`);
         return [kept];
       }
@@ -675,7 +836,7 @@ export function machineMayAsk(conversation: Conversation, machineId: string | un
   const requester = members.find((member) => member.id === message.participantId);
   const target = members.find((member) => member.id === targetId);
   if (!requester || !target || !runsOnMachine(requester, machineId)) return false;
-  if (requestRight(requester) === "allow") return true;
+  if (askRight(conversation, requester) === "allow") return true;
   const handle = handleKey(target.handle);
   // Her approval runs the member it names once, as in the app.
   const answer = (approvals ?? []).find((card) => {
@@ -699,7 +860,17 @@ export function machineMayAsk(conversation: Conversation, machineId: string | un
  *  has no leave to ask of its own). */
 export function askNeedsApproval(conversation: Conversation, message: ChatMessage): boolean {
   const requester = participantsOf(conversation.metadata?.participants).find((member) => member.id === message.participantId);
-  return !requester || requestRight(requester) !== "allow";
+  return !requester || askRight(conversation, requester) !== "allow";
+}
+
+/** A member's leave to ask other members as the app holds it at its turn: a
+ *  member added without a card in a chat with a main session has no more
+ *  than the main session has now (chat.ts delegatedMemberCeiling). */
+function askRight(conversation: Conversation, member: ChatParticipant): ChatParticipantRequestPermission {
+  const own = requestRight(member);
+  const mainId = member.delegatedByParticipantId ? mainSessionParticipantId(conversation.metadata) : undefined;
+  const main = mainId && mainId !== member.id ? participantsOf(conversation.metadata?.participants).find((item) => item.id === mainId) : undefined;
+  return main ? lowerRight(own, requestRight(main)) : own;
 }
 
 /** The message an approval is about (a member request's, or a mention's),
@@ -715,7 +886,8 @@ export function approvedMessageId(card: HubCard): string | undefined {
 }
 
 /** What of an approved card the server keeps to hold a machine to: member
- *  requests, member changes and mentions as she saw them; for a tool
+ *  requests, member changes and mentions as she saw them; a right she
+ *  granted a member for the chat; for a tool
  *  permission she allowed for the chat, only which tool (its input, a file's
  *  content say, is not needed); nothing else. */
 export function keptApproval(card: HubCard): HubCard | undefined {
@@ -725,6 +897,9 @@ export function keptApproval(card: HubCard): HubCard | undefined {
   if (!approval || typeof approval !== "object") return undefined;
   if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL || memberChangeTool(approval.toolName)) return card;
   if ((card.answer as { scope?: unknown } | undefined)?.scope !== "chat") return undefined;
+  // A right she granted for the chat: what it grants, so the machine may
+  // write it into its member's rights once (keepRights).
+  if (approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL) return card;
   const tool = (approval.request as { toolName?: unknown } | undefined)?.toolName;
   const { draftOverride: _draft, ...answer } = (card.answer ?? {}) as Record<string, unknown>;
   return {

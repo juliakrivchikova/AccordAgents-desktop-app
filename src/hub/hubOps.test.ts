@@ -189,6 +189,36 @@ test("a phone from before starts a chat with the main session it was offered wit
     "an Assistant chat from an older computer's offer stays one");
 });
 
+test("a chat's main session is a member with the main session's role, named when it is made; a move to the server keeps it", async (t) => {
+  const h = await hub(t);
+  const main = { id: "p-main", handle: "main", roleConfigId: "main-session", kind: "claude-code" };
+  const page = async (chat: string) => (await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`)).body.conversation.metadata;
+  // A name for an ordinary member is not taken.
+  const plain = id("chat");
+  await h.write(h.phone, { opId: id("op"), kind: "conversation.create", conversationId: plain,
+    conversation: { title: "Plans", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: members, mainSessionParticipantId: "p-desk" } } });
+  assert.equal((await page(plain)).mainSessionParticipantId, undefined);
+  // Nor a member that is not there; the one with the role is named instead.
+  const chat = id("chat");
+  await h.write(h.phone, { opId: id("op"), kind: "conversation.create", conversationId: chat,
+    conversation: { title: "Plans", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: [main, ...members], mainSessionParticipantId: "p-ghost" } } });
+  assert.equal((await page(chat)).mainSessionParticipantId, main.id);
+
+  // The computer moving the chat again cannot rename or drop it.
+  const fields = (mainSessionParticipantId?: string) => ({ title: "Moved", kind: "chat" as const, createdAt: new Date().toISOString(),
+    metadata: { participants: [main, ...members], ...(mainSessionParticipantId ? { mainSessionParticipantId } : {}) } });
+  assert.equal((await h.write(h.owner, { opId: id("op"), kind: "chat.import", conversationId: chat, conversation: fields("p-desk"), messages: [] })).body.results[0].status, "accepted");
+  assert.equal((await page(chat)).mainSessionParticipantId, main.id);
+  await h.write(h.owner, { opId: id("op"), kind: "chat.import", conversationId: chat, conversation: fields(), messages: [] });
+  assert.equal((await page(chat)).mainSessionParticipantId, main.id);
+  // A chat from before stays one; a new chat moved names only a real main session.
+  await h.write(h.owner, { opId: id("op"), kind: "chat.import", conversationId: plain, conversation: { ...fields("p-desk"), metadata: { participants: members, mainSessionParticipantId: "p-desk" } }, messages: [] });
+  assert.equal((await page(plain)).mainSessionParticipantId, undefined);
+  const moved = id("chat");
+  await h.write(h.owner, { opId: id("op"), kind: "chat.import", conversationId: moved, conversation: { ...fields("p-desk") }, messages: [] });
+  assert.equal((await page(moved)).mainSessionParticipantId, main.id);
+});
+
 test("every device may change the chat's own fields; only a member's home writes the member's messages", async (t) => {
   const h = await hub(t);
   const chat = id("chat");
