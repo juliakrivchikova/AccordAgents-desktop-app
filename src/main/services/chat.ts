@@ -1,4 +1,5 @@
 import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelection } from "../../shared/cloudRunPreparation";
+import { canSwitchChatView, isChatViewMode } from "../../shared/mainSession";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -153,6 +154,7 @@ import type {
   RenameChatConversationRequest,
   SetChatArchivedRequest,
   SetChatPinnedRequest,
+  SetChatViewRequest,
   RespondToChatAppToolApprovalRequest,
   RespondToChatChoiceRequest,
   RespondToChatMentionsRequest,
@@ -1972,6 +1974,31 @@ export class ChatService {
         delete nextMetadata.pinnedAt;
       }
       conversation.metadata = nextMetadata;
+      await this.saveConversation(conversation);
+      return conversation;
+    });
+  }
+
+  /** The User's switch of the chat's view (shared/mainSession.ts): shared
+   *  through her server like the pin. A chat without a main session has one
+   *  view only. */
+  async setChatView(request: SetChatViewRequest): Promise<Conversation | undefined> {
+    if (!isChatViewMode(request.view)) {
+      throw new Error("Unknown chat view.");
+    }
+    await this.waitForQueuedSave(request.conversationId);
+    const conversation = await this.storage.getConversation(request.conversationId);
+    if (!conversation) {
+      return undefined;
+    }
+    if (conversation.kind !== "chat" || !canSwitchChatView(conversation.metadata)) {
+      throw new Error("This chat has one view only.");
+    }
+    return this.withChatMutation(conversation, async () => {
+      if (conversation.metadata.chatView === request.view) {
+        return conversation;
+      }
+      conversation.metadata = { ...conversation.metadata, chatView: request.view };
       await this.saveConversation(conversation);
       return conversation;
     });

@@ -1,4 +1,5 @@
 import { URGENT_ALERT_USER_ACTIONS, type UrgentAlertUserRequest, type UrgentAlertSettingsView } from "../shared/urgentAlerts";
+import { chatViewFor } from "../shared/mainSession";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -66,6 +67,8 @@ import type {
   RenameChatConversationRequest,
   SetChatArchivedRequest,
   SetChatPinnedRequest,
+  SetChatViewRequest,
+  ChatViewState,
   ChatPinState,
   RepoFileSearchRequest,
   RespondToChatAppToolApprovalRequest,
@@ -2622,6 +2625,10 @@ function registerIpc(): void {
     const pinned = saved.metadata.pinned === true;
     const pinnedAt = typeof saved.metadata.pinnedAt === "string" ? saved.metadata.pinnedAt : undefined;
     return { conversationId: saved.id, pinned, ...(pinned && pinnedAt ? { pinnedAt } : {}) };
+  });
+  ipcMain.handle("chat:set-view", async (_event, request: SetChatViewRequest): Promise<ChatViewState | undefined> => {
+    const saved = await chatService.setChatView(request);
+    return saved ? { conversationId: saved.id, view: chatViewFor(saved.metadata) } : undefined;
   });
   ipcMain.handle("chat:delete", async (_event, request: DeleteChatConversationRequest) => {
     return chatService.deleteConversation(request);

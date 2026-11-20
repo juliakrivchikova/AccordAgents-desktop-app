@@ -1998,6 +1998,17 @@ export interface SetChatArchivedRequest {
   onlyIfEmpty?: boolean;
 }
 
+export interface SetChatViewRequest {
+  conversationId: string;
+  view: ChatViewMode;
+}
+
+/** A chat's view as saved (shared/mainSession.ts). */
+export interface ChatViewState {
+  conversationId: string;
+  view: ChatViewMode;
+}
+
 export interface SetChatPinnedRequest {
   conversationId: string;
   pinned: boolean;
@@ -3456,6 +3467,7 @@ export interface AppBridge {
   renameChatConversation(request: RenameChatConversationRequest): Promise<Conversation | undefined>;
   setChatArchived(request: SetChatArchivedRequest): Promise<Conversation | undefined>;
   setChatPinned(request: SetChatPinnedRequest): Promise<ChatPinState | undefined>;
+  setChatView(request: SetChatViewRequest): Promise<ChatViewState | undefined>;
   deleteChatConversation(request: DeleteChatConversationRequest): Promise<boolean>;
   startChatAccord(request: StartChatAccordRequest): Promise<StartChatAccordResult>;
   dismissConversationWarnings(request: DismissConversationWarningsRequest): Promise<Conversation | undefined>;
