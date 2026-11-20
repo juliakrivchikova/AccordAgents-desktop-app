@@ -17,6 +17,11 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   `--resume <id> --fork-session`, Codex app-server `thread/fork`). Antigravity
   has no fork, and a fork cannot cross providers or devices: the tool refuses
   it and the main session starts a clean member with a full brief instead.
+- **The tasks of one turn come back as one turn.** The main session is
+  resumed once for all the tasks it gave in one turn: when that turn is over
+  and every one of them has ended (answered, failed or stopped), with every
+  answer in that one resume (the User saw it resumed once per member and
+  said so). A task given after its turn ended comes back on its own.
 - **A member never gets broader rights than the main session** (repo, edits,
   web, shell and its rules, mode, member requests, member management).
 - **No limit** on how many members run at once; every member is listed and
@@ -126,7 +131,18 @@ the desktop and on the phone (bundled through `mobileSharedRules.ts`).
   …"), and the failed reply the main session reads says it too.
 - `ChatParticipantRequestItem.title?`: the main session's short title for
   its task (`app_chat_delegate_task`'s `title`, at most 80 characters).
-- `ChatParticipantRequestBatch.delegation?: { start }`: the main session's
+- `ChatParticipantRequestBatch.delegation.turnId?`: the main-session turn (its `turnSegmentId`) that gave the task while that
+  turn ran on this device. `autoResumeParticipantRequest` resumes the tasks
+  of one `turnId` once: not while the turn runs (`liveTurnSegments`; its end
+  looks again), not while one of them runs, then with one trigger listing
+  each task and how it ended, and the other tasks' replies read as untrusted
+  context (`extraPromptContextMessageIds`); every batch gets the same
+  `autoResumeMessageId`. A task a restart ended
+  (`markOrphanedParticipantRequestInterrupted`) makes the app look at its
+  turn's tasks again; when the restart ended all of them the main session is
+  not woken, as a lone task never was. On a cloud machine the same runs on
+  the machine that runs the main session.
+- `ChatParticipantRequestBatch.delegation?: { start, turnId? }`: the main session's
   task to a member it made (`app_chat_delegate_task`); not held to the
   one-request-per-turn limit. Delegations and a member's requests to the
   main session alone are not held to (nor counted toward) the per-message

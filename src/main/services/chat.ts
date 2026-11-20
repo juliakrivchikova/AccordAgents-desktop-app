@@ -1,6 +1,6 @@
 import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelection } from "../../shared/cloudRunPreparation";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
-import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, shortenAtWord } from "../../shared/mainSessionView";
+import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -560,6 +560,8 @@ const CHAT_SELF_COMPACTION_COOLDOWN_MS = 5 * 60_000;
 const CHAT_ROSTER_CHANGE_MAX_OPERATIONS = 12;
 const CHAT_PARTICIPANT_REQUEST_MAX_ITEMS = 4;
 const PARTICIPANT_REQUEST_STOPPED_BY_USER = "Stopped by User.";
+/** Why a request the app lost track of (a restart, a run gone) ended. */
+const PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION = "Request was interrupted before completion.";
 const CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN = 4;
 const CHAT_PARTICIPANT_REQUEST_RATE_WINDOW_MS = 60_000;
 const CHAT_PARTICIPANT_REQUEST_RATE_LIMIT = 8;
@@ -1189,6 +1191,14 @@ export class ChatService {
   private readonly executorLeaseHolds = new Map<string, number>();
   private readonly participantRequestRunners = new Map<string, Promise<ParticipantRequestRunResult>>();
   private readonly participantRequestAutoResumes = new Set<string>();
+  /** Members' turns running here, by chat and turn (turnSegmentId): the main
+   *  session's tasks of one turn resume it once that turn is over. */
+  private readonly liveTurnSegments = new Set<string>();
+  /** A turn of the main session that gave tasks, by chat and turn: one of
+   *  its task requests, looked at again when the turn ends. */
+  private readonly delegatingTurns = new Map<string, { conversationId: string; requestMessageId: string }>();
+  /** Groups of the main session's tasks being resumed now, by chat and turn. */
+  private readonly delegationGroupResumes = new Set<string>();
   private readonly permissionApprovalAutoResumes = new Set<string>();
   private readonly codexApprovalContinuations = new Set<string>();
   private readonly toolPermissionResolvers = new Map<string, Set<(decision: ToolPermissionDecision) => void>>();
@@ -5018,6 +5028,12 @@ export class ChatService {
       return this.delegationRefusal("limit", `max depth (${maxDepth}) reached`);
     }
 
+    // The tasks of one main-session turn resume it once, when that turn is
+    // over and all of them have ended (autoResumeParticipantRequest). Only a
+    // turn running here now: a task given after it (a CLI still at work in
+    // the background) is resumed on its own, as any other request.
+    const liveTurnKey = actor.turnSegmentId ? this.turnSegmentKey(conversation.id, actor.turnSegmentId) : undefined;
+    const delegationTurnId = liveTurnKey && this.liveTurnSegments.has(liveTurnKey) ? actor.turnSegmentId : undefined;
     let added!: { child: ChatParticipant; requestMessage: ChatMessage; batch: ChatParticipantRequestBatch };
     let refusal: Record<string, unknown> | undefined;
     await this.saveChatChange(conversation, async () => {
@@ -5107,7 +5123,7 @@ export class ChatService {
         createdAt: now,
         updatedAt: now,
         triggerMessageId: actor.triggerMessageId,
-        delegation: { start },
+        delegation: { start, ...(delegationTurnId ? { turnId: delegationTurnId } : {}) },
         items
       };
       const requestMessage = this.message(
@@ -5149,9 +5165,14 @@ export class ChatService {
       start,
       requestMessageId: added.requestMessage.id
     });
+    // While its turn runs, the main session may give more tasks: they are
+    // all looked at again when the turn ends.
+    if (delegationTurnId && liveTurnKey && this.liveTurnSegments.has(liveTurnKey) && !this.delegatingTurns.has(liveTurnKey)) {
+      this.delegatingTurns.set(liveTurnKey, { conversationId: conversation.id, requestMessageId: added.requestMessage.id });
+    }
     // The member's turn runs as its own run, here or on its machine; its
-    // answer comes back to the main session in a fresh turn, as any request
-    // answered later does.
+    // answer comes back to the main session in a fresh turn, with the other
+    // tasks of the same turn (autoResumeParticipantRequest).
     const requesterProgress = actor.runId ? this.runProgressCallbacks.get(actor.runId) : undefined;
     const runner = this.startParticipantRequestRunner(conversation.id, added.requestMessage.id, added.batch.depth, requesterProgress);
     this.resumeRequesterWhenRunnerSettles(conversation.id, added.requestMessage.id, runner, requesterProgress);
@@ -10197,6 +10218,8 @@ export class ChatService {
       promptConversation?: Conversation;
       workspacePath?: string;
       promptContextScope?: ChatPromptContextScope;
+      /** Messages outside the scope this turn reads too (preparePromptContextForRun). */
+      extraPromptContextMessageIds?: readonly string[];
       participantRequestDepth?: number;
       participantRequestBatchId?: string;
       chainRootId?: string;
@@ -10251,7 +10274,8 @@ export class ChatService {
       promptTriggerMessage,
       options.promptContextScope ?? this.promptContextScopeForTrigger(promptTriggerMessage),
       isResumingSession,
-      sharedClaudeTurn ? undefined : runId
+      sharedClaudeTurn ? undefined : runId,
+      options.extraPromptContextMessageIds
     );
     const agentMode = this.agentModeForSession(session, participant);
     // A once-only approval is used by one turn: one that another turn of the
@@ -17384,16 +17408,30 @@ export class ChatService {
     return this.participantRequestHasUnfinishedItems(updatedBatch) ? undefined : requestMessageId;
   }
 
-  private async autoResumeParticipantRequest(conversationId: string, requestMessageId: string, progress?: ProgressCallback): Promise<void> {
+  /** `groupCheck`: a look at the main session's tasks of one turn after
+   *  their turn ended or a restart ended one of them; it goes ahead while a
+   *  look at the same request is under way (the tasks' own guard, under the
+   *  chat's run lock, keeps it to one resume). */
+  private async autoResumeParticipantRequest(
+    conversationId: string,
+    requestMessageId: string,
+    progress?: ProgressCallback,
+    options: { groupCheck?: boolean } = {}
+  ): Promise<void> {
     const resumeProgress = progress ?? this.onReviewProgress;
-    if (this.participantRequestAutoResumes.has(requestMessageId)) {
+    const ownsEntry = !this.participantRequestAutoResumes.has(requestMessageId);
+    if (!ownsEntry && !options.groupCheck) {
       void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "already-auto-resuming");
       return;
     }
-    this.participantRequestAutoResumes.add(requestMessageId);
+    if (ownsEntry) this.participantRequestAutoResumes.add(requestMessageId);
     let backgroundStarted = false;
+    let claimedGroupKey: string | undefined;
     try {
       const ingest = await this.withChatRunLock(conversationId, async () => {
+        // Read as saved: a task of the same turn that ended a moment ago
+        // must be seen ended.
+        await this.waitForQueuedSave(conversationId);
         const conversation = await this.requireChat(conversationId);
         const requestMessage = conversation.messages.find((message) => message.id === requestMessageId);
         const batch = requestMessage?.metadata?.participantRequest;
@@ -17409,16 +17447,42 @@ export class ChatService {
           void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "completed-in-tool-call", batch);
           return;
         }
+        if (!ownsEntry && !batch.delegation?.turnId) {
+          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "already-auto-resuming", batch);
+          return;
+        }
+        // The main session's tasks of one turn resume it once, when the turn
+        // is over and all of them have ended; any other request on its own.
         if (batch.autoResumeMessageId) {
           void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "already-auto-resumed", batch);
           return;
         }
-        if (this.participantRequestHasUnfinishedItems(batch)) {
-          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "unfinished-items", batch);
+        const group = this.delegationTurnGroup(conversation, requestMessage, batch);
+        const groupKey = batch.delegation?.turnId ? this.turnSegmentKey(conversationId, batch.delegation.turnId) : undefined;
+        if (groupKey && (this.delegationGroupResumes.has(groupKey) || (group.length > 1 && group.some((entry) => entry.batch.status === "resuming_requester")))) {
+          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "already-auto-resuming", batch);
           return;
         }
-        if (batch.items.length > 0 && batch.items.every((item) => item.status === "denied")) {
+        if (groupKey && this.liveTurnSegments.has(groupKey)) {
+          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "delegating-turn-running", batch);
+          return;
+        }
+        const unfinished = group.find((entry) => this.participantRequestHasUnfinishedItems(entry.batch));
+        if (unfinished) {
+          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId,
+            unfinished.message.id === requestMessageId ? "unfinished-items" : "waiting-for-tasks-of-the-same-turn", batch);
+          return;
+        }
+        const items = group.flatMap((entry) => entry.batch.items);
+        if (items.length > 0 && items.every((item) => item.status === "denied")) {
           void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "all-items-denied", batch);
+          return;
+        }
+        // Tasks that only a restart ended (markOrphanedParticipantRequestInterrupted)
+        // do not wake the main session, as a lone task never did.
+        if (batch.delegation && items.length > 0 &&
+          items.every((item) => item.status === "interrupted" && item.error === PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION)) {
+          void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "all-items-interrupted-before-completion", batch);
           return;
         }
         const requester = this.chatParticipants(conversation).find((participant) => participant.id === batch.requesterParticipantId);
@@ -17427,31 +17491,60 @@ export class ChatService {
             requester ? "requester-owned-elsewhere" : "requester-missing", batch);
           return;
         }
+        if (groupKey) {
+          this.delegationGroupResumes.add(groupKey);
+          claimedGroupKey = groupKey;
+        }
         const now = new Date().toISOString();
-        this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
-          ...current,
-          status: "resuming_requester",
-          updatedAt: now
-        }));
-        const participantRequestRootId = participantRequestVisibleRootId(conversation.messages, requestMessage);
+        for (const entry of group) {
+          this.updateParticipantRequestBatch(conversation, entry.message.id, (current) => ({
+            ...current,
+            status: "resuming_requester",
+            updatedAt: now
+          }));
+        }
+        const first = group[0]!.message;
+        const participantRequestRootId = participantRequestVisibleRootId(conversation.messages, first);
         const trigger = this.message(
           "system",
-          [
-            `Auto-resumed @${requester.handle} after member request.`,
-            "Target replies/errors are in the transcript above. Continue from your request using the available answers and errors."
-          ].join("\n"),
+          group.length > 1
+            ? this.delegationGroupResumeText(conversation, requester, group)
+            : [
+                `Auto-resumed @${requester.handle} after member request.`,
+                "Target replies/errors are in the transcript above. Continue from your request using the available answers and errors."
+              ].join("\n"),
           undefined,
           {
-            threadId: requestMessage.metadata?.threadId ?? requestMessage.id,
-            parentMessageId: requestMessage.id,
+            threadId: first.metadata?.threadId ?? first.id,
+            parentMessageId: first.id,
             chatThreadRootId: participantRequestRootId,
-            sourceMessageId: requestMessage.id
+            sourceMessageId: first.id
           }
         );
         conversation.messages.push(trigger);
         const resumeRunId = randomUUID();
         await this.beginChatRun(conversation, resumeRunId, [requester.id]);
-        return { conversation, requestMessageId, batch, requester, trigger, resumeRunId };
+        // The replies of the other tasks are not in the first one's thread:
+        // the turn reads them as well.
+        const extraPromptContextMessageIds = group.length > 1
+          ? group.flatMap((entry) => entry.batch.items.flatMap((item) => item.replyMessageId ? [item.replyMessageId] : []))
+          : undefined;
+        if (group.length > 1) {
+          void this.debugLogs.write("chat.participant-request.auto-resume.group", {
+            conversationId,
+            requestMessageIds: group.map((entry) => entry.message.id),
+            turnId: batch.delegation?.turnId
+          });
+        }
+        return {
+          conversation,
+          requestMessageIds: group.map((entry) => entry.message.id),
+          batch: group[0]!.batch,
+          requester,
+          trigger,
+          resumeRunId,
+          extraPromptContextMessageIds
+        };
       });
 
       if (!ingest) {
@@ -17460,12 +17553,13 @@ export class ChatService {
       backgroundStarted = true;
       void this.runParticipantRequestAutoResumeFlow(
         ingest.conversation,
-        ingest.requestMessageId,
+        ingest.requestMessageIds,
         ingest.batch,
         ingest.requester,
         ingest.trigger,
         ingest.resumeRunId,
-        resumeProgress
+        resumeProgress,
+        ingest.extraPromptContextMessageIds
       )
         .catch((error) => {
           void this.debugLogs.write("chat.participant-request.auto-resume.error", {
@@ -17475,13 +17569,70 @@ export class ChatService {
           });
         })
         .finally(() => {
-          this.participantRequestAutoResumes.delete(requestMessageId);
+          if (ownsEntry) this.participantRequestAutoResumes.delete(requestMessageId);
+          if (claimedGroupKey) this.delegationGroupResumes.delete(claimedGroupKey);
         });
     } finally {
       if (!backgroundStarted) {
-        this.participantRequestAutoResumes.delete(requestMessageId);
+        if (ownsEntry) this.participantRequestAutoResumes.delete(requestMessageId);
+        if (claimedGroupKey) this.delegationGroupResumes.delete(claimedGroupKey);
       }
     }
+  }
+
+  /** The requests one auto-resume answers, in chat order: the main
+   *  session's tasks given in the same turn as this one (each a request of
+   *  its own, app_chat_delegate_task), else this request alone. */
+  private delegationTurnGroup(
+    conversation: Conversation,
+    requestMessage: ChatMessage,
+    batch: ChatParticipantRequestBatch
+  ): Array<{ message: ChatMessage; batch: ChatParticipantRequestBatch }> {
+    const turnId = batch.delegation?.turnId;
+    if (!turnId) {
+      return [{ message: requestMessage, batch }];
+    }
+    const group = conversation.messages.flatMap((message) => {
+      const candidate = message.metadata?.participantRequest;
+      return candidate?.delegation?.turnId === turnId && candidate.requesterParticipantId === batch.requesterParticipantId &&
+        candidate.resumeRequester && !candidate.completedInToolCall && !candidate.autoResumeMessageId
+        ? [{ message, batch: candidate }]
+        : [];
+    });
+    return group.length > 0 ? group : [{ message: requestMessage, batch }];
+  }
+
+  /** The line that resumes the main session after all the tasks of one turn
+   *  ended: each task, whom it went to and how it ended. The replies come
+   *  with the turn as untrusted context (extraPromptContextMessageIds). */
+  private delegationGroupResumeText(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    group: Array<{ message: ChatMessage; batch: ChatParticipantRequestBatch }>
+  ): string {
+    const items = group.flatMap((entry) => entry.batch.items);
+    const outcome = (item: ChatParticipantRequestItem): string => {
+      const reply = item.replyMessageId ? conversation.messages.find((message) => message.id === item.replyMessageId) : undefined;
+      const where = item.replyMessageId ? ` (message ${item.replyMessageId})` : "";
+      switch (item.status) {
+        case "answered":
+        case "completed":
+          return `answered${where}`;
+        case "denied":
+          return "denied";
+        case "interrupted":
+          return item.error === PARTICIPANT_REQUEST_STOPPED_BY_USER ? `stopped by User${where}` : `interrupted${where}`;
+        default:
+          // A reply carries its own error; without one, the app's reason.
+          return reply ? `failed${where}` : `failed: ${firstTextLine(item.error, 200) || "no reply"}`;
+      }
+    };
+    return [
+      `Auto-resumed @${requester.handle} after member request.`,
+      `All ${items.length} tasks you gave in one turn have ended:`,
+      ...items.map((item) => `- @${item.targetHandle} (task "${sessionsTaskTitle(item)}"): ${outcome(item)}`),
+      "Their replies and errors are in the context above. Continue from your requests using the available answers and errors."
+    ].join("\n");
   }
 
   private async logParticipantRequestAutoResumeSkipped(
@@ -17500,12 +17651,13 @@ export class ChatService {
 
   private async runParticipantRequestAutoResumeFlow(
     conversation: Conversation,
-    requestMessageId: string,
+    requestMessageIds: readonly string[],
     batch: ChatParticipantRequestBatch,
     requester: ChatParticipant,
     trigger: ChatMessage,
     resumeRunId: string,
-    progress?: ProgressCallback
+    progress?: ProgressCallback,
+    extraPromptContextMessageIds?: readonly string[]
   ): Promise<void> {
     try {
       const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, progress, {
@@ -17513,16 +17665,19 @@ export class ChatService {
         warnings: [],
         participantRequestDepth: this.participantRequestBatchRequesterDepth(batch),
         participantRequestBatchId: batch.id,
-        chainRootId: batch.chainRootId
+        chainRootId: batch.chainRootId,
+        ...(extraPromptContextMessageIds?.length ? { extraPromptContextMessageIds } : {})
       });
       const participantRequestsToRun = await this.withChatMutation(conversation, async () => {
         const toRun = await this.appendParticipantTurnMessages(conversation, requester, messages);
-        this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
-          ...current,
-          status: "completed",
-          autoResumeMessageId: messages[0]?.id,
-          updatedAt: new Date().toISOString()
-        }));
+        for (const requestMessageId of requestMessageIds) {
+          this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
+            ...current,
+            status: "completed",
+            autoResumeMessageId: messages[0]?.id,
+            updatedAt: new Date().toISOString()
+          }));
+        }
         conversation.updatedAt = new Date().toISOString();
         this.queueSnapshot(conversation);
         return toRun;
@@ -17530,14 +17685,15 @@ export class ChatService {
       this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
       await this.ensureHistoryFiles(conversation);
     } catch (error) {
-      this.markParticipantRequestAutoResumeFailed(conversation, requestMessageId, error);
+      for (const requestMessageId of requestMessageIds) {
+        this.markParticipantRequestAutoResumeFailed(conversation, requestMessageId, error);
+      }
       this.emitChatRunFailure(resumeRunId, progress, error);
       throw error;
     } finally {
       await this.endChatRun(conversation, resumeRunId);
     }
   }
-
   private async runParticipantTurnSerialized(
     conversation: Conversation,
     participant: ChatParticipant,
@@ -17551,6 +17707,8 @@ export class ChatService {
       promptConversation?: Conversation;
       workspacePath?: string;
       promptContextScope?: ChatPromptContextScope;
+      /** Messages outside the scope this turn reads too (preparePromptContextForRun). */
+      extraPromptContextMessageIds?: readonly string[];
       participantRequestDepth?: number;
       participantRequestBatchId?: string;
       chainRootId?: string;
@@ -17561,6 +17719,8 @@ export class ChatService {
     }
   ): Promise<ChatMessage[]> {
     const turnSegmentId = randomUUID();
+    const liveTurnKey = this.turnSegmentKey(conversation.id, turnSegmentId);
+    this.liveTurnSegments.add(liveTurnKey);
     const reservation = options.turnReservation ?? this.reserveParticipantTurn(conversation.id, participant.id, this.participantTurnMode(participant, triggerMessage));
     let turnController: { signal: AbortSignal; cleanup: () => void } | undefined;
     // Whether the turn this run took on the server was ended there.
@@ -17652,7 +17812,29 @@ export class ChatService {
       // first), and stopped or failed before it ran: ended there too, never
       // left taken with every device showing it busy.
       if (!serverTurnEnded) await this.endServerTurnNotRun(runId, stopped);
+      this.liveTurnSegments.delete(liveTurnKey);
+      this.resumeDelegationsOfEndedTurn(liveTurnKey);
     }
+  }
+
+  private turnSegmentKey(conversationId: string, turnSegmentId: string): string {
+    return `${conversationId}\u0000${turnSegmentId}`;
+  }
+
+  /** The main session's turn that gave tasks is over: once all of them have
+   *  ended it is resumed now, with every answer (autoResumeParticipantRequest
+   *  waits for the rest otherwise). */
+  private resumeDelegationsOfEndedTurn(liveTurnKey: string): void {
+    const delegating = this.delegatingTurns.get(liveTurnKey);
+    if (!delegating) return;
+    this.delegatingTurns.delete(liveTurnKey);
+    void this.autoResumeParticipantRequest(delegating.conversationId, delegating.requestMessageId, this.onReviewProgress, { groupCheck: true }).catch((error) => {
+      void this.debugLogs.write("chat.participant-request.auto-resume.error", {
+        conversationId: delegating.conversationId,
+        requestMessageId: delegating.requestMessageId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+    });
   }
 
   private async endServerTurnNotRun(runId: string, stopped: boolean): Promise<void> {
@@ -17670,7 +17852,11 @@ export class ChatService {
     triggerMessage: ChatMessage,
     scope: ChatPromptContextScope,
     isResumingSession: boolean,
-    runId?: string
+    runId?: string,
+    /** Messages outside the scope the turn must read as well (the replies to
+     *  the main session's tasks of one turn, resumed together), as untrusted
+     *  context like the scope's own. */
+    extraMessageIds?: readonly string[]
   ): Promise<PreparedPromptContext> {
     const settings = await this.settings.getPublicSettings();
     const policy = scope.type === "thread"
@@ -17703,6 +17889,19 @@ export class ChatService {
         fallbackSelection.included,
         fallbackSelection.omittedCount
       );
+      if (extraMessageIds?.length) {
+        const extra = (included: ReadonlyArray<{ message: ChatMessage }>): string => {
+          const shown = new Set(included.map((record) => record.message.id));
+          const wanted = new Set(extraMessageIds);
+          const records = promptConversation.messages
+            .map((message, sequence) => ({ message, sequence }))
+            .filter((record) => wanted.has(record.message.id) && !shown.has(record.message.id) &&
+              record.message.id !== triggerMessage.id && this.isPromptContextMessage(record.message));
+          return this.promptContextBlock(scope, { mode: "all_unseen" }, records, 0, "Scope: the replies to the tasks you gave in one turn");
+        };
+        block = [block, extra(selection.included)].filter(Boolean).join("\n\n");
+        resumeFallbackBlock = [resumeFallbackBlock, extra(fallbackSelection.included)].filter(Boolean).join("\n\n");
+      }
       if (advanceTo) {
         pointerAdvance = {
           scope,
@@ -17876,14 +18075,15 @@ export class ChatService {
     scope: ChatPromptContextScope,
     policy: ChatPromptContextScopeSettings,
     records: Array<{ message: ChatMessage; sequence: number }>,
-    omittedCount: number
+    omittedCount: number,
+    scopeLabel?: string
   ): string {
     if (records.length === 0 && omittedCount === 0) {
       return "";
     }
-    const scopeLine = scope.type === "thread"
+    const scopeLine = scopeLabel ?? (scope.type === "thread"
       ? `Scope: thread ${scope.threadRootId}`
-      : "Scope: main timeline";
+      : "Scope: main timeline");
     const policyLine = policy.mode === "all_unseen"
       ? "Policy: all unseen messages since your last prompt in this scope"
       : policy.mode === "latest_unseen"
@@ -18661,7 +18861,8 @@ export class ChatService {
     if (
       canInterruptRunning &&
       options.ignoreLocalRequestLocks !== true &&
-      (this.participantRequestRunners.has(message.id) || this.participantRequestAutoResumes.has(message.id))
+      (this.participantRequestRunners.has(message.id) || this.participantRequestAutoResumes.has(message.id) ||
+        (batch.delegation?.turnId !== undefined && this.delegationGroupResumes.has(this.turnSegmentKey(conversation.id, batch.delegation.turnId))))
     ) {
       return false;
     }
@@ -18673,7 +18874,7 @@ export class ChatService {
       return false;
     }
     const now = new Date().toISOString();
-    const reason = "Request was interrupted before completion.";
+    const reason = PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION;
     const nextBatch = this.terminalParticipantRequestBatch(
       batch,
       "interrupted",
@@ -18691,7 +18892,25 @@ export class ChatService {
       ...message.metadata,
       participantRequest: nextBatch
     };
+    // A task of the main session that a restart ended: the others of its turn
+    // may have ended before, and nothing else would resume it now.
+    if (nextBatch.delegation?.turnId) {
+      this.scheduleDelegationGroupResume(conversation.id, message.id);
+    }
     return true;
+  }
+
+  private scheduleDelegationGroupResume(conversationId: string, requestMessageId: string): void {
+    const timer = setTimeout(() => {
+      void this.autoResumeParticipantRequest(conversationId, requestMessageId, this.onReviewProgress, { groupCheck: true }).catch((error) => {
+        void this.debugLogs.write("chat.participant-request.auto-resume.error", {
+          conversationId,
+          requestMessageId,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
+    }, 0);
+    timer.unref?.();
   }
 
   private pendingParticipantRequestApprovalTargetIds(

@@ -52,7 +52,9 @@ export function chatParticipantRequestReplyRootMap(conversation: Pick<Conversati
       continue;
     }
     const rootId = participantRequestVisibleRootId(conversation.messages, message);
-    if (batch.autoResumeMessageId) {
+    // The main session's tasks of one turn share one resume: it stays in the
+    // first task's thread, where its trigger is.
+    if (batch.autoResumeMessageId && !roots.has(batch.autoResumeMessageId)) {
       roots.set(batch.autoResumeMessageId, rootId);
     }
     for (const item of batch.items) {

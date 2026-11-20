@@ -1337,8 +1337,10 @@ export interface ChatParticipantRequestBatch {
   autoResumeMessageId?: string;
   /** The main session's task to a member it made for it
    *  (app_chat_delegate_task): how the member started. Such a request is not
-   *  held to the one-request-per-turn limit of app_chat_request_participants. */
-  delegation?: { start: "clean" | "fork" };
+   *  held to the one-request-per-turn limit of app_chat_request_participants.
+   *  `turnId`: the main-session turn that gave it; the tasks of one turn
+   *  resume the main session once, when all of them have ended. */
+  delegation?: { start: "clean" | "fork"; turnId?: string };
   items: ChatParticipantRequestItem[];
   error?: string;
 }

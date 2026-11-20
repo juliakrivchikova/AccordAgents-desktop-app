@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { ChatService } from "./chat";
 import { accordLaunchCardForMessage } from "../../shared/accordLaunchCard";
+import { chatParticipantRequestReplyRootMap } from "../../shared/chatParticipantRequestThreads";
 import { normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES, CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT, CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT } from "../../shared/chatParticipantRequests";
@@ -133,7 +134,7 @@ type RunCall = { participant: ParticipantConfig; prompt: string; options: any };
 
 function testService(options: {
   conversation: Conversation;
-  run?: (participant: ParticipantConfig, prompt: string, options: any) => Promise<any>;
+  run?: (participant: ParticipantConfig, prompt: string, options: any, signal?: AbortSignal) => Promise<any>;
   userSkills?: unknown;
 }) {
   const tempRoot = path.join(tmpdir(), "accordagents-main-session-test");
@@ -194,10 +195,10 @@ function testService(options: {
   const runs: RunCall[] = [];
   const cliRunner = {
     async detectAgents() { return []; },
-    async run(participant: ParticipantConfig, prompt: string, _repoPath: unknown, _diffMode: unknown, _kind: unknown, _signal: unknown, runOptions: any) {
+    async run(participant: ParticipantConfig, prompt: string, _repoPath: unknown, _diffMode: unknown, _kind: unknown, signal: AbortSignal | undefined, runOptions: any) {
       runs.push({ participant, prompt, options: runOptions });
       return options.run
-        ? options.run(participant, prompt, runOptions)
+        ? options.run(participant, prompt, runOptions, signal)
         : { participant, ok: true, content: `Done by ${participant.id}.`, durationMs: 1 };
     }
   };
@@ -305,7 +306,7 @@ test("the main session adds a member without a card, within its own rights, and 
   const [batch] = delegationBatches(storage.current);
   assert.equal(batch.requesterParticipantId, main.id);
   assert.equal(batch.resumeRequester, true);
-  assert.deepEqual(batch.delegation, { start: "clean" });
+  assert.deepEqual(batch.delegation, { start: "clean" }, "given outside a turn running here: resumed on its own");
   assert.equal(batch.items[0].targetParticipantId, child.id);
   assert.equal(batch.items[0].prompt, "Review src/app.ts and report the bugs you find.");
   assert.equal(batch.items[0].title, "Review app.ts", "the task's short title, kept on its item");
@@ -520,25 +521,218 @@ test("a fork never takes the source's session id as its own", () => {
   assert.equal(session.forkFrom, undefined);
 });
 
-test("several delegations in one main-session turn each run, and each answer resumes the main session", async () => {
+// --- one resume for the tasks of one turn ---------------------------------------
+
+/** A main-session turn running here, as runParticipantTurnSerialized marks it. */
+function liveTurn(service: unknown, turnSegmentId: string): { end: () => void } {
+  const internals = service as any;
+  const key = `conversation-1\u0000${turnSegmentId}`;
+  internals.liveTurnSegments.add(key);
+  return {
+    end: () => {
+      internals.liveTurnSegments.delete(key);
+      internals.resumeDelegationsOfEndedTurn(key);
+    }
+  };
+}
+
+/** A member run the test finishes when it says so (or that ends when stopped). */
+function heldRuns() {
+  const releases = new Map<string, (result: { ok: boolean; content?: string; error?: string }) => void>();
+  const run = (participant: ParticipantConfig, _prompt: string, _options: any, signal?: AbortSignal) =>
+    new Promise<any>((resolve) => {
+      const finish = (result: { ok: boolean; content?: string; error?: string }) =>
+        resolve({ participant, durationMs: 1, content: "", ...result });
+      releases.set(participant.id, finish);
+      signal?.addEventListener("abort", () => finish({ ok: false, error: "Chat run cancelled." }), { once: true });
+    });
+  return { run, release: (id: string, result: { ok: boolean; content?: string; error?: string }) => releases.get(id)?.(result), started: (id: string) => releases.has(id) };
+}
+
+const resumesOf = (runs: RunCall[], mainId: string) => runs.filter((run) => run.participant.id === mainId && run.prompt.includes("Auto-resumed @main"));
+
+test("the tasks of one main-session turn resume it once, after the turn and the last task, with every answer", async () => {
   const main = mainSession("codex-cli", { model: undefined });
   const worker = member("worker-id", "worker");
   const conversation = mainSessionChat([main, worker], { participantSessions: [sessionRecord(main, "main-thread")] });
-  const { service, storage, runs } = testService({ conversation });
+  const held = heldRuns();
+  const { service, storage, runs, debugEvents } = testService({
+    conversation,
+    run: (participant, prompt, runOptions, signal) => participant.id === main.id || participant.id === worker.id
+      ? Promise.resolve({ participant, ok: true, content: `Done by ${participant.id}.`, durationMs: 1 })
+      : held.run(participant, prompt, runOptions, signal)
+  });
+  const turn = liveTurn(service, "turn-1");
+  const actor = mainActor(undefined, { turnSegmentId: "turn-1" });
 
-  const first = await service.delegateTaskFromTool(mainActor(), { task: "Write the tests." });
-  const second = await service.delegateTaskFromTool(mainActor(), { task: "Update the docs.", roleConfigId: REVIEWER_ROLE.id });
+  const first = await service.delegateTaskFromTool(actor, { title: "Write tests", task: "Write the tests." });
+  const second = await service.delegateTaskFromTool(actor, { title: "Update docs", task: "Update the docs.", roleConfigId: REVIEWER_ROLE.id });
   assert.equal(first.ok, true, JSON.stringify(first));
   assert.equal(second.ok, true, JSON.stringify(second));
   assert.equal(first.handle, "@codex");
   assert.equal(second.handle, "@code-reviewer");
-  // An ordinary request in the same turn is not blocked by the delegations.
-  const asked = await service.requestParticipantsFromTool(mainActor(), { requests: [{ target: "worker", prompt: "Check the build." }] });
+  assert.deepEqual(delegationBatches(storage.current).map((batch) => batch.delegation), [{ start: "clean", turnId: "turn-1" }, { start: "clean", turnId: "turn-1" }]);
+  // An ordinary request in the same turn is not held by the tasks: it resumes the main session on its own.
+  const asked = await service.requestParticipantsFromTool(actor, { requests: [{ target: "worker", prompt: "Check the build." }] });
   assert.equal(asked.ok, true, JSON.stringify(asked));
 
-  await waitFor(() => [first.participantId, second.participantId, worker.id].every((id) => runs.some((run) => run.participant.id === id)));
-  await waitFor(() => runs.filter((run) => run.participant.id === main.id && run.prompt.includes("Auto-resumed @main")).length === 3, 4000);
-  await waitFor(() => delegationBatches(storage.current).length === 2 && delegationBatches(storage.current).every((batch) => Boolean(batch.autoResumeMessageId)));
+  await waitFor(() => held.started(String(first.participantId)) && held.started(String(second.participantId)));
+  // The first task ends while the turn still runs, the second after it.
+  held.release(String(first.participantId), { ok: true, content: "Tests written." });
+  await waitFor(() => delegationBatches(storage.current)[0]?.items[0]?.status === "answered");
+  turn.end();
+  await waitFor(() => debugEvents.some((event) => event.event === "chat.participant-request.auto-resume.skipped" && event.payload.reason === "waiting-for-tasks-of-the-same-turn"));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(resumesOf(runs, main.id).filter((run) => run.prompt.includes("tasks you gave")).length, 0, "not while a task of the turn still runs");
+
+  held.release(String(second.participantId), { ok: true, content: "Docs updated." });
+  await waitFor(() => delegationBatches(storage.current).every((batch) => Boolean(batch.autoResumeMessageId)));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const resumes = resumesOf(runs, main.id).filter((run) => run.prompt.includes("tasks you gave"));
+  assert.equal(resumes.length, 1, "one resume for both tasks");
+  assert.match(resumes[0]!.prompt, /All 2 tasks you gave in one turn have ended:/);
+  assert.match(resumes[0]!.prompt, /- @codex \(task "Write tests"\): answered/);
+  assert.match(resumes[0]!.prompt, /- @code-reviewer \(task "Update docs"\): answered/);
+  assert.match(resumes[0]!.prompt, /Tests written\./, "the first task's reply");
+  assert.match(resumes[0]!.prompt, /Docs updated\./, "and the second's");
+  assert.equal((resumes[0]!.prompt.match(/Tests written\./g) ?? []).length, 1, "each reply once");
+  const [one, two] = delegationBatches(storage.current);
+  assert.equal(one!.autoResumeMessageId, two!.autoResumeMessageId, "both answered by the same reply");
+  // In the classic view that reply is in the first task's thread, on every device.
+  const firstRequest = storage.current.messages.find((message: ChatMessage) => message.metadata?.participantRequest?.id === one!.id)!;
+  assert.equal(chatParticipantRequestReplyRootMap(storage.current).get(one!.autoResumeMessageId!), firstRequest.id);
+  assert.equal(storage.current.messages.find((message: ChatMessage) => message.id === one!.autoResumeMessageId)?.metadata?.chatThreadRootId, firstRequest.id);
+  assert.deepEqual(delegationBatches(storage.current).map((batch) => batch.status), ["completed", "completed"]);
+  // The ordinary request resumed it on its own.
+  await waitFor(() => resumesOf(runs, main.id).length === 2);
+  assert.deepEqual(debugEvents.filter((item) => item.event.endsWith(".error")), []);
+});
+
+test("tasks that all end while their turn still runs resume the main session once, when the turn ends", async () => {
+  const main = mainSession("codex-cli", { model: undefined });
+  const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-thread")] });
+  const { service, storage, runs, debugEvents } = testService({ conversation });
+  const turn = liveTurn(service, "turn-2");
+  const actor = mainActor(undefined, { turnSegmentId: "turn-2" });
+  await service.delegateTaskFromTool(actor, { title: "One", task: "Do one." });
+  await service.delegateTaskFromTool(actor, { title: "Two", task: "Do two." });
+  await waitFor(() => delegationBatches(storage.current).every((batch) => batch.items[0]?.status === "answered"));
+  await waitFor(() => debugEvents.filter((event) => event.payload.reason === "delegating-turn-running").length >= 2);
+  assert.equal(resumesOf(runs, main.id).length, 0, "the turn still runs");
+  turn.end();
+  await waitFor(() => delegationBatches(storage.current).every((batch) => Boolean(batch.autoResumeMessageId)));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(resumesOf(runs, main.id).length, 1);
+});
+
+test("a task stopped by User and a task that failed still resume the main session once, with how each ended", async () => {
+  const main = mainSession("codex-cli", { model: undefined });
+  const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-thread")] });
+  const held = heldRuns();
+  const { service, storage, runs } = testService({
+    conversation,
+    run: (participant, prompt, runOptions, signal) => participant.id === main.id
+      ? Promise.resolve({ participant, ok: true, content: "Noted.", durationMs: 1 })
+      : held.run(participant, prompt, runOptions, signal)
+  });
+  const turn = liveTurn(service, "turn-3");
+  const actor = mainActor(undefined, { turnSegmentId: "turn-3" });
+  const stopped = await service.delegateTaskFromTool(actor, { title: "Long job", task: "Run the long job." });
+  const failing = await service.delegateTaskFromTool(actor, { title: "Broken job", task: "Run the broken job." });
+  const ok = await service.delegateTaskFromTool(actor, { title: "Quick job", task: "Run the quick job." });
+  turn.end();
+  await waitFor(() => [stopped, failing, ok].every((result) => held.started(String(result.participantId))));
+  held.release(String(failing.participantId), { ok: false, error: "Model not found: gpt-unknown" });
+  held.release(String(ok.participantId), { ok: true, content: "Quick job done." });
+  // Stop on one member: its own run only.
+  const runId = () => storage.current.messages.find((message) => message.participantId === stopped.participantId && message.status === "pending")?.metadata?.runId;
+  await waitFor(() => Boolean(runId()));
+  assert.equal(service.cancelRun(String(runId())), true);
+  await waitFor(() => delegationBatches(storage.current).every((batch) => Boolean(batch.autoResumeMessageId)));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const resumes = resumesOf(runs, main.id);
+  assert.equal(resumes.length, 1);
+  const statuses = delegationBatches(storage.current).map((batch) => batch.items[0]!.status);
+  assert.deepEqual(statuses, ["interrupted", "failed", "answered"]);
+  assert.match(resumes[0]!.prompt, /\(task "Long job"\): stopped by User/);
+  assert.match(resumes[0]!.prompt, /\(task "Broken job"\): failed/);
+  assert.match(resumes[0]!.prompt, /\(task "Quick job"\): answered/);
+  assert.match(resumes[0]!.prompt, /Quick job done\./);
+});
+
+function restartedChat(statuses: Array<"answered" | "running">): Conversation {
+  const main = mainSession("codex-cli", { model: undefined });
+  const members = statuses.map((_status, index) => member(`m${index}`, `m${index}`));
+  const conversation = mainSessionChat([main, ...members], { participantSessions: [sessionRecord(main, "main-thread")] });
+  statuses.forEach((status, index) => {
+    const replyId = `reply-${index}`;
+    conversation.messages.push({
+      id: `request-${index}`, role: "participant", participantId: main.id, participantLabel: "@main", content: `@m${index} Task ${index}`, createdAt: NOW, status: "done",
+      metadata: { sourceMessageId: "user-message", threadId: "user-message", participantRequest: {
+        id: `batch-${index}`, requesterParticipantId: main.id, requesterHandle: "main", source: "mcp", resumeRequester: true, status, depth: 1, requesterDepth: 0,
+        chainRootId: "user-message", createdAt: NOW, updatedAt: NOW, triggerMessageId: "user-message", delegation: { start: "clean", turnId: "turn-old" },
+        items: [{ targetParticipantId: `m${index}`, targetHandle: `m${index}`, prompt: `Task ${index}`, title: `Task ${index}`, status, createdAt: NOW, updatedAt: NOW,
+          ...(status === "answered" ? { replyMessageId: replyId } : {}) }]
+      } }
+    } as ChatMessage);
+    if (status === "answered") {
+      conversation.messages.push({ id: replyId, role: "participant", participantId: `m${index}`, participantLabel: `@m${index}`, content: `Answer ${index}.`, createdAt: NOW, status: "done",
+        metadata: { sourceMessageId: `request-${index}`, chatThreadRootId: `request-${index}` } } as ChatMessage);
+    }
+  });
+  return conversation;
+}
+
+test("after a restart a task that was still running ends, and the main session gets the answers its turn's other tasks gave, once", async () => {
+  const { service, storage, runs } = testService({ conversation: restartedChat(["answered", "running", "answered"]) });
+  // The first read after the restart finds no run for the second task.
+  await (service as any).requireChat("conversation-1");
+  await waitFor(() => delegationBatches(storage.current).every((batch) => Boolean(batch.autoResumeMessageId)));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const resumes = resumesOf(runs, "main-id");
+  assert.equal(resumes.length, 1);
+  assert.match(resumes[0]!.prompt, /\(task "Task 1"\): interrupted/);
+  assert.match(resumes[0]!.prompt, /Answer 0\./);
+  assert.match(resumes[0]!.prompt, /Answer 2\./);
+});
+
+test("after a restart that ended every task of a turn, the main session is not woken, as a lone task never was", async () => {
+  const { service, storage, runs, debugEvents } = testService({ conversation: restartedChat(["running", "running"]) });
+  await (service as any).requireChat("conversation-1");
+  await waitFor(() => delegationBatches(storage.current).every((batch) => batch.items[0]?.status === "interrupted"));
+  await waitFor(() => debugEvents.some((event) => event.payload.reason === "all-items-interrupted-before-completion"));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(resumesOf(runs, "main-id").length, 0);
+});
+
+test("a task given after its turn ended (a CLI still at work in the background) resumes the main session on its own", async () => {
+  const main = mainSession("codex-cli", { model: undefined });
+  const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-thread")] });
+  const { service, storage, runs } = testService({ conversation });
+  const late = await service.delegateTaskFromTool(mainActor(undefined, { turnSegmentId: "turn-over" }), { title: "Late", task: "Do it later." });
+  assert.equal(late.ok, true, JSON.stringify(late));
+  assert.deepEqual(delegationBatches(storage.current)[0]!.delegation, { start: "clean" }, "no turn to wait for");
+  await waitFor(() => Boolean(delegationBatches(storage.current)[0]?.autoResumeMessageId));
+  assert.equal(resumesOf(runs, main.id).length, 1);
+});
+
+test("a cloud machine's main session: the tasks of its turn resume it once, on the machine", async () => {
+  const main = mainSession("codex-cli", { model: undefined, homeMachineId: "machine-1" });
+  const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-thread")] });
+  const { service, storage, runs } = testService({ conversation });
+  service.setHostMachineId("machine-1");
+  const turn = liveTurn(service, "turn-m");
+  const actor = mainActor(undefined, { turnSegmentId: "turn-m" });
+  const a = await service.delegateTaskFromTool(actor, { title: "Machine A", task: "Do A." });
+  const b = await service.delegateTaskFromTool(actor, { title: "Machine B", task: "Do B." });
+  assert.equal(a.ok, true, JSON.stringify(a));
+  assert.equal(b.ok, true, JSON.stringify(b));
+  const children = participantsOf(storage.current).filter((participant) => participant.id !== main.id);
+  assert.ok(children.every((child) => child.homeMachineId === "machine-1"), "its members run on its machine");
+  turn.end();
+  await waitFor(() => delegationBatches(storage.current).every((batch) => Boolean(batch.autoResumeMessageId)));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(resumesOf(runs, main.id).length, 1);
 });
 
 test("a member the main session gives no permissions inherits its rights, and member management stays off", async () => {
