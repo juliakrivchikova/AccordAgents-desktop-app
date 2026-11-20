@@ -22,7 +22,7 @@ import type {
   ChatRoleParticipantDefaults,
   ChatRosterChangeParticipantInput
 } from "../../../shared/types";
-import { useProviderModelCatalog, type ProviderModelCatalogHost } from "./use-provider-model-catalog";
+import { modelCatalogStatus, useProviderModelCatalog, type ProviderModelCatalogHost } from "./use-provider-model-catalog";
 import { savedModelId } from "../../../shared/geminiModels";
 import { Avatar } from "../avatar/avatar";
 import { AvatarStudioDialog } from "../avatar/avatar-studio-dialog";
@@ -266,10 +266,12 @@ export function ChatParticipantInlineModelRow(props: {
   const [manual, setManual] = useState("");
   const value = savedModelId(props.kind, props.model);
   const host = props.host && props.host.cli === props.kind ? props.host : undefined;
-  const { catalog } = useProviderModelCatalog(props.kind, host);
+  const { catalog, loading, error } = useProviderModelCatalog(props.kind, host);
 
   const models = catalog?.models ?? [];
   const inheritedLabel = chatModelDefaultLabel(props.kind, host);
+  // Without this the list is just the inherited setting until the CLI answers.
+  const listStatus = modelCatalogStatus(catalog, loading, error);
 
   return (
     <ChatParticipantSpecRow label="Model">
@@ -315,6 +317,7 @@ export function ChatParticipantInlineModelRow(props: {
                 {item.id === value && <Check size={14} aria-hidden />}
               </button>
             ))}
+            {listStatus && <span className="chat-app-tool-inline-empty" role="status">{listStatus}</span>}
           </div>
           <form
             className="chat-app-tool-inline-manual"
