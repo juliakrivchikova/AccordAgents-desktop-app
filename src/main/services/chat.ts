@@ -76,6 +76,7 @@ import type {
   ChatImageAttachment,
   ChatImageInput,
   ChatImageMimeType,
+  ChatInterimPost,
   ChatLastMessageByParticipant,
   ChatMessage,
   ChatMessageMetadata,
@@ -180,6 +181,15 @@ import { isAutoWatchStableMessage, isChatMessageHiddenFromTimeline } from "../..
 import { accordLaunchCardForMessage } from "../../shared/accordLaunchCard";
 import type { ArtifactNoteLinks } from "./artifactClient";
 import { turnFinishedNoteFor } from "../../shared/turnFinishedNote";
+import {
+  CHAT_INTERIM_POSTS_MAX,
+  CHAT_INTERIM_POSTS_MAX_CHARS,
+  chatInterimPostAttachmentIds,
+  chatInterimPostsCharCount,
+  chatInterimPostsOf,
+  chatMessageMemberText,
+  withInterimPostsFrom
+} from "../../shared/interimPosts";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
 import { accordClosedLaunchId, accordClosedLaunchIds, accordClosedLine, recordClosedAccords } from "../../shared/accordProgress";
 import { isMachineCompactionLine } from "../../shared/machineLink";
@@ -1206,6 +1216,9 @@ export class ChatService {
   private readonly chatMutationQueues = new Map<string, Promise<void>>();
   private readonly appSendMessageCountsByRun = new Map<string, number>();
   private readonly appSendMessageImageBytesByRun = new Map<string, number>();
+  /** Where each live run's streamed text and activity stand now, so a post
+   *  made during the turn is placed in order with them (interimPosts.ts). */
+  private readonly liveRunPositions = new Map<string, () => { contentLength: number; activitySequence: number }>();
   private readonly runProgressCallbacks = new Map<string, ProgressCallback>();
   private readonly autoWatchEvaluationTimers = new Map<string, NodeJS.Timeout>();
   private readonly autoWatchEvaluations = new Set<string>();
@@ -7289,7 +7302,7 @@ export class ChatService {
         );
       }
     }
-    let created: { id: string; sequence: number; threadId?: string } | undefined;
+    let created: { id: string; sequence: number; threadId?: string; postId?: string } | undefined;
     let participantRequestsToRun: Array<{
       requestMessageId: string;
       depth: number;
@@ -7339,6 +7352,38 @@ export class ChatService {
         };
         const threadId = resolveVisibleThreadId(request.threadId)
           ?? actor.triggerThreadId ?? parentMessageId ?? chatThreadRootId;
+        // During the member's own turn, in the turn's own place, the post is
+        // part of its running reply (interimPosts.ts), as text a CLI writes
+        // between its tool calls is part of its answer.
+        const reply = this.runningReplyForPost(conversation, actor, request);
+        if (reply) {
+          const position = actor.runId ? this.liveRunPositions.get(actor.runId)?.() : undefined;
+          const post: ChatInterimPost = {
+            id: randomUUID(),
+            content: request.content,
+            createdAt: new Date().toISOString(),
+            ...(position ? { afterContentLength: position.contentLength, afterActivitySequence: position.activitySequence } : {}),
+            ...(preparedImages.attachments.length > 0 ? { attachmentIds: preparedImages.attachments.map((attachment) => attachment.id) } : {})
+          };
+          const replyMetadata: ChatMessageMetadata = reply.message.metadata ?? {};
+          reply.message.metadata = {
+            ...replyMetadata,
+            interimPosts: [...chatInterimPostsOf(reply.message), post],
+            ...(preparedImages.attachments.length > 0
+              ? { imageAttachments: [...(replyMetadata.imageAttachments ?? []), ...preparedImages.attachments] }
+              : {})
+          };
+          // The reply is the post's message now: readable (and reactable) by
+          // the same run, as a posted message was.
+          if (typeof actor.snapshotMaxSequence === "number" && reply.sequence > actor.snapshotMaxSequence) {
+            actor.snapshotMaxSequence = reply.sequence;
+          }
+          participantRequestsToRun = await this.inferParticipantRequestsFromInterimPost(conversation, requester, reply.message, post, actor);
+          conversation.updatedAt = new Date().toISOString();
+          this.queueSnapshot(conversation);
+          created = { id: reply.message.id, sequence: reply.sequence, threadId: reply.message.metadata?.threadId, postId: post.id };
+          return;
+        }
         const message: ChatMessage = {
           id: randomUUID(),
           role: "participant",
@@ -7416,8 +7461,97 @@ export class ChatService {
       messageId: created.id,
       sequence: created.sequence,
       threadId: created.threadId,
+      // In the running reply: messageId is that reply's, postId this post's.
+      ...(created.postId ? { postId: created.postId, postedInto: "running-reply" } : {}),
       ...(preparedImages.summaries.length > 0 ? { imageAttachments: preparedImages.summaries } : {})
     };
+  }
+
+  /**
+   * The actor's running reply a post goes into: its turn's pending reply in
+   * this chat, when the post is for the turn's own place (no other thread,
+   * parent or thread root asked for) and is not an Accord's resolution, which
+   * others react to as a message of its own. None when the turn has ended
+   * (a post that arrives after it is a message, as before), and none when
+   * the reply's posts are full (interimPosts.ts caps): the post is a message
+   * then.
+   */
+  private runningReplyForPost(
+    conversation: Conversation,
+    actor: ChatAppMcpActor,
+    request: { content: string; threadId?: string; parentMessageId?: string; chatThreadRootId?: string; accordResolution?: ChatAccordResolutionMetadata }
+  ): { message: ChatMessage; sequence: number } | undefined {
+    const runId = actor.runId;
+    if (!runId || request.accordResolution) {
+      return undefined;
+    }
+    const pendingMessageId = this.chatRunMeta.get(runId)?.pendingMessageId;
+    let sequence = -1;
+    for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+      const message = conversation.messages[index];
+      if (message.role !== "participant" || message.status !== "pending" || message.participantId !== actor.participantId ||
+        message.metadata?.runId !== runId || message.metadata?.serverPlaceholder) {
+        continue;
+      }
+      if (sequence < 0) sequence = index;
+      if (!pendingMessageId || message.id === pendingMessageId) {
+        sequence = index;
+        break;
+      }
+    }
+    if (sequence < 0) {
+      return undefined;
+    }
+    const message = conversation.messages[sequence];
+    const samePlace = (requested: string | undefined, own: string | undefined) => !requested || requested === own;
+    if (!samePlace(request.threadId, message.metadata?.threadId) ||
+      !samePlace(request.parentMessageId, message.metadata?.parentMessageId) ||
+      !samePlace(request.chatThreadRootId, message.metadata?.chatThreadRootId)) {
+      return undefined;
+    }
+    const posts = chatInterimPostsOf(message);
+    if (posts.length >= CHAT_INTERIM_POSTS_MAX || chatInterimPostsCharCount(posts) + request.content.length > CHAT_INTERIM_POSTS_MAX_CHARS) {
+      return undefined;
+    }
+    return { message, sequence };
+  }
+
+  /** A post's @mentions ask the members it names, as a posted message's do:
+   *  inferred from the post's words, filed under the reply it is part of. */
+  private async inferParticipantRequestsFromInterimPost(
+    conversation: Conversation,
+    requester: ChatParticipant,
+    reply: ChatMessage,
+    post: ChatInterimPost,
+    actor: ChatAppMcpActor
+  ): Promise<Array<{ requestMessageId: string; depth: number; source: ChatParticipantRequestBatch["source"] }>> {
+    const source: ChatMessage = {
+      ...reply,
+      content: post.content,
+      status: "done",
+      metadata: {
+        ...reply.metadata,
+        appMessageSource: APP_CHAT_SEND_MESSAGE_TOOL,
+        turnSegmentId: actor.turnSegmentId ?? reply.metadata?.turnSegmentId
+      }
+    };
+    try {
+      return await this.createImplicitParticipantRequestApproval(conversation, requester, [source]);
+    } catch (error) {
+      this.addConversationWarning(
+        conversation,
+        `Participant mentions in @${requester.handle}'s message were not triggered because inferred-request processing failed.`
+      );
+      void this.debugLogs.write("chat.participant-request.inferred-tool-error", {
+        conversationId: conversation.id,
+        messageId: reply.id,
+        postId: post.id,
+        requesterParticipantId: requester.id,
+        requesterHandle: requester.handle,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return [];
+    }
   }
 
   // Resolve the artifact-system member identity ("user" | participant handle)
@@ -11674,7 +11808,7 @@ export class ChatService {
       "App MCP tools: use the connected `accord_agents` MCP server for app-managed requests. Do not try to change app state by editing files, shelling out, or asking User in prose when an app MCP tool exists.",
       `Read-only chat MCP tools: ${readOnlyChatTools.map((tool) => `\`${tool}\``).join(", ")}. Prefer them over history files for roster, authoritative member activity, thread, messages, and screenshots.`,
       "Reaction MCP tool: `app_chat_react` adds or toggles an emoji reaction on a specific message. To react, call it with the message `id` from `app_chat_read_messages` and an allowed emoji.",
-      "Send-message MCP tool: `app_chat_send_message` posts immediately and returns `messageId`; use only for mid-turn visibility, not normal replies. It can attach PNG/JPEG/WebP with `attachments: [{ \"kind\": \"image\", \"sourcePath\": \"path.png\" }]` from image paths inside the selected repository when repoRead is granted.",
+      "Send-message MCP tool: `app_chat_send_message` posts immediately into your current reply; use only for mid-turn visibility, not normal replies. It can attach PNG/JPEG/WebP with `attachments: [{ \"kind\": \"image\", \"sourcePath\": \"path.png\" }]` from image paths inside the selected repository when repoRead is granted.",
       "If a message lists attached images, call `app_chat_read_attachment` with the attachment ID before reasoning about visual details.",
       "Participant request MCP tools: use `app_chat_request_participants` to ask participants; `app_chat_get_participant_request_status` recovers replies. JSON: `{ \"requests\": [{ \"target\": \"codex\", \"prompt\": \"Concrete question\", \"reason\": \"Optional reason\" }] }`.",
       ...(mainSessionHandle
@@ -12781,6 +12915,7 @@ export class ChatService {
       !storedMetadata?.activityEvents &&
       !storedMetadata?.processingTranscript &&
       !storedMetadata?.remoteRunStatus &&
+      !storedMetadata?.interimPosts?.length &&
       storedMetadata?.serverSeq === undefined &&
       !storedMetadata?.serverTurns &&
       !storedMetadata?.serverRejected &&
@@ -12842,7 +12977,10 @@ export class ChatService {
     if (storedMetadata?.remoteRunStatus && !currentMetadata?.remoteRunStatus) {
       merged.remoteRunStatus = cloneJsonValue(storedMetadata.remoteRunStatus);
     }
-    return Object.keys(merged).length > 0 ? merged : undefined;
+    // Posts written into a running reply (the post's own save) while a turn
+    // held an older copy of it: the turn's copy takes them, never drops them.
+    const withPosts = withInterimPostsFrom(merged, storedMetadata) ?? merged;
+    return Object.keys(withPosts).length > 0 ? withPosts : undefined;
   }
 
   private mergeStoredPendingMentions(
@@ -15560,13 +15698,16 @@ export class ChatService {
         continue;
       }
       const priorSource = messageById.get(batch.triggerMessageId);
-      if (priorSource?.metadata?.appMessageSource !== APP_CHAT_SEND_MESSAGE_TOOL) {
+      // Asked already from this very reply: by a post during its turn, which
+      // is part of the reply (interimPosts.ts).
+      const fromSameReply = batch.triggerMessageId === sourceMessage.id;
+      if (!fromSameReply && priorSource?.metadata?.appMessageSource !== APP_CHAT_SEND_MESSAGE_TOOL) {
         continue;
       }
-      const matchesRun = !sourceIsToolPosted && Boolean(runId) && priorSource.metadata?.runId === runId;
-      const matchesScope = sourceIsToolPosted
-        ? priorSource.metadata?.turnSegmentId === turnSegmentId
-        : matchesRun;
+      const matchesRun = !sourceIsToolPosted && Boolean(runId) && priorSource?.metadata?.runId === runId;
+      const matchesScope = fromSameReply || (sourceIsToolPosted
+        ? priorSource?.metadata?.turnSegmentId === turnSegmentId
+        : matchesRun);
       if (!matchesScope) {
         continue;
       }
@@ -16880,7 +17021,7 @@ export class ChatService {
         replies.push({
           targetHandle: target.handle,
           messageId: reply?.id,
-          content: reply?.content,
+          content: reply ? chatMessageMemberText(reply) : undefined,
           error: reply?.status === "error" ? reply.content : undefined
         });
       } catch (error) {
@@ -18173,7 +18314,7 @@ export class ChatService {
           reason: item.reason,
           status: item.status,
           replyMessageId: includeReplies ? item.replyMessageId : undefined,
-          reply: includeReplies ? reply?.content : undefined,
+          reply: includeReplies && reply ? chatMessageMemberText(reply) : undefined,
           error: item.error
         };
       })
@@ -20228,7 +20369,7 @@ export class ChatService {
         message.metadata?.parentMessageId ? `Parent message ID: ${message.metadata.parentMessageId}` : "",
         message.metadata?.chatThreadRootId ? `Chat thread root ID: ${message.metadata.chatThreadRootId}` : "",
         "",
-        message.content.trim() || (this.imageAttachments(message).length > 0 ? "(image-only message)" : ""),
+        chatMessageMemberText(message).trim() || (this.imageAttachments(message).length > 0 ? "(image-only message)" : ""),
         this.skillMentionsMarkdown(message),
         this.repoFileMentionsMarkdown(message),
         this.imageAttachmentsMarkdown(message),
@@ -20243,7 +20384,7 @@ export class ChatService {
   }
 
   private formatMessage(message: ChatMessage, includeRepoFileMentions = true, includeSkillMentions = true): string {
-    const content = message.content.trim() || (this.imageAttachments(message).length > 0 ? "(image-only message)" : "");
+    const content = chatMessageMemberText(message).trim() || (this.imageAttachments(message).length > 0 ? "(image-only message)" : "");
     return [
       `[${message.createdAt}] ${this.messageAuthor(message)}`,
       content,
@@ -21111,11 +21252,16 @@ export class ChatService {
     alreadyPut: (blobHash: string) => boolean
   ): Promise<void> {
     for (const op of ops) {
-      const messages = op.kind === "message.create" ? [op.message] : op.kind === "chat.import" ? op.messages : [];
+      const messages = op.kind === "message.create" || op.kind === "message.update" ? [op.message] : op.kind === "chat.import" ? op.messages : [];
       for (const message of messages) {
         const attachments = message.metadata?.imageAttachments;
         if (!Array.isArray(attachments)) continue;
+        // An update brings only the pictures of posts made into a running
+        // reply during its turn (interimPosts.ts); a message's own pictures
+        // went up with it when it was written.
+        const posted = op.kind === "message.update" ? chatInterimPostAttachmentIds(message) : undefined;
         for (const attachment of attachments) {
+          if (posted && !posted.has(attachment?.id)) continue;
           const reference = attachment?.hubBlob;
           if (!isDeviceEventBlobReference(reference) || alreadyPut(reference.blobHash) || typeof attachment.storageKey !== "string") continue;
           let bytes: Buffer;
@@ -21503,9 +21649,11 @@ export class ChatService {
 
   private chatMessageForTool(message: ChatMessage, sequence: number): Record<string, unknown> {
     const attachments = this.imageAttachments(message);
+    const interimPosts = chatInterimPostsOf(message);
     const metadata = message.metadata
       ? {
           ...message.metadata,
+          interimPosts: undefined,
           skillMentions: this.chatSkillMentions(message),
           imageAttachments: attachments.length > 0 ? attachments.map((attachment) => this.chatImageAttachmentForTool(attachment)) : undefined
         }
@@ -21517,6 +21665,11 @@ export class ChatService {
       author: this.messageAuthor(message),
       participantId: message.participantId,
       participantLabel: message.participantLabel,
+      // What the member posted during this reply's turn, before its final
+      // content (which is empty while the turn still runs).
+      ...(interimPosts.length > 0
+        ? { interimPosts: interimPosts.map((post) => ({ id: post.id, content: post.content, createdAt: post.createdAt, ...(post.attachmentIds?.length ? { attachmentIds: post.attachmentIds } : {}) })) }
+        : {}),
       content: message.content,
       createdAt: message.createdAt,
       status: message.status,
@@ -22464,7 +22617,8 @@ export class ChatService {
       return false;
     }
     const reactions = this.mergeChatMessageReactions(existing.metadata?.reactions, message.metadata?.reactions);
-    const metadata: ChatMessage["metadata"] = { ...message.metadata };
+    // The posts the turn made into the reply it replaces stay in it.
+    const metadata: ChatMessage["metadata"] = { ...withInterimPostsFrom(message.metadata, existing.metadata) };
     delete metadata.staleRunRecovery;
     if (reactions) {
       metadata.reactions = reactions;
@@ -25602,6 +25756,11 @@ export class ChatService {
     let lastFlush = 0;
     let pendingTimer: NodeJS.Timeout | undefined;
     let dirty = false;
+    const position = (): { contentLength: number; activitySequence: number } => ({
+      contentLength: cumulative.length,
+      activitySequence: activity.sequence
+    });
+    this.liveRunPositions.set(runId, position);
 
     const flush = (): void => {
       if (pendingTimer) {
@@ -25699,6 +25858,9 @@ export class ChatService {
       // live rendering; the machine channel must not lose the last short burst.
       flush();
       finished = true;
+      if (this.liveRunPositions.get(runId) === position) {
+        this.liveRunPositions.delete(runId);
+      }
       if (!progress) {
         return;
       }

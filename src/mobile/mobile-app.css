@@ -1531,6 +1531,15 @@ button.mobile-chat-group-title:active {
   white-space: normal;
 }
 
+/* What a member posted during its turn, inside its reply above its final
+   words: the same text, one block after another, as in the CLI. */
+.message-interim-posts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 .message-content.markdown-text p,
 .message-content.markdown-text ul,
 .message-content.markdown-text ol,

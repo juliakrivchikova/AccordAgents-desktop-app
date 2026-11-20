@@ -1616,6 +1616,22 @@ export interface ChatServerCardMark {
   machineName: string;
 }
 
+/** What a member wrote during its turn with app_chat_send_message, kept in
+ *  its running reply (shared/interimPosts.ts): shown inside the reply, in
+ *  order, like the text a CLI writes between its tool calls. */
+export interface ChatInterimPost {
+  id: string;
+  content: string;
+  createdAt: string;
+  /** Where the turn's streamed text stood when it was posted (its length),
+   *  and the newest activity of the turn then, so a running reply shows the
+   *  post in order with them. */
+  afterContentLength?: number;
+  afterActivitySequence?: number;
+  /** Its pictures, among the reply's imageAttachments. */
+  attachmentIds?: string[];
+}
+
 /** The reply a turn-finished note points at, and the member who wrote it. */
 export interface ChatTurnFinishedNoteMetadata {
   messageId: string;
@@ -1738,6 +1754,8 @@ export interface ChatMessageMetadata {
    *  member's reply it points at, which had other messages below it when the
    *  turn ended. */
   turnFinishedNote?: ChatTurnFinishedNoteMetadata;
+  /** A member's reply: what it posted during its turn, oldest first. */
+  interimPosts?: ChatInterimPost[];
   activityEvents?: ChatAgentActivityEvent[];
   processingTranscript?: ChatProcessingTranscript;
   remoteRunStatus?: ChatRemoteRunStatus;

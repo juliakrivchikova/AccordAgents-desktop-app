@@ -303,6 +303,36 @@ test("a member's posts during its turn are marked, and a turn that ends empty st
   assert.equal(events.answer?.hidden, undefined);
 });
 
+test("a reply's posts during its turn travel inside it to the phone, and a reply whose words all went out as posts still shows", async () => {
+  const { phoneActivityEvents } = await import("./mobileTimeline");
+  const member = { participantId: "taylor", participantLabel: "@taylor" };
+  const posts = [
+    { id: "post-1", content: "Found the cause.", createdAt: "2026-11-20T10:00:01Z", afterContentLength: 4, afterActivitySequence: 2 },
+    { id: "post-2", content: "Here it is.", createdAt: "2026-11-20T10:00:02Z", attachmentIds: ["pic"] }
+  ];
+  const conversation: Conversation = {
+    id: "posts-chat", kind: "chat", title: "Posts", createdAt: "2026-11-20T10:00:00Z", updatedAt: "2026-11-20T10:00:03Z", findings: [], metadata: {},
+    messages: [
+      { id: "running", role: "participant", ...member, content: "", status: "pending", createdAt: "2026-11-20T10:00:00Z",
+        metadata: { runId: "run-1", interimPosts: posts } },
+      { id: "posts-only", role: "participant", ...member, content: "", status: "done", createdAt: "2026-11-20T10:00:00Z",
+        metadata: { runId: "run-2", interimPosts: [posts[0]] } }
+    ]
+  };
+  const events = Object.fromEntries(timelineEventsFromSnapshot(conversation).map((event) => [event.id, event]));
+  assert.deepEqual(events.running?.interimPosts, [
+    { id: "post-1", content: "Found the cause.", createdAt: "2026-11-20T10:00:01Z" },
+    { id: "post-2", content: "Here it is.", createdAt: "2026-11-20T10:00:02Z", attachmentIds: ["pic"] }
+  ], "the words and their pictures, nothing about the stream");
+  assert.equal(events.running?.status, "pending");
+  assert.equal(events.running?.content, "@taylor is running...");
+  assert.equal(events["posts-only"]?.hidden, undefined, "not an empty turn: its posts are its words");
+  assert.equal(events["posts-only"]?.interimPosts?.length, 1);
+  const activity = phoneActivityEvents(conversation, Date.parse("2026-11-20T10:05:00Z"));
+  assert.ok(activity.length > 0);
+  assert.ok(activity.every((event) => !("interimPosts" in event)), "Activity carries no posts: the chat's page does");
+});
+
 test("a turn in progress travels to the phone's Activity however many newer replies there are", async () => {
   const { phoneActivityEvents, PHONE_ACTIVITY_PER_CHAT } = await import("./mobileTimeline");
   const now = Date.parse("2026-11-01T08:00:00.000Z");
