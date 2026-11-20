@@ -9,7 +9,7 @@ import { ChatMessageItem } from "./chat-message-item";
 import { ChatSessionsPresentationContext } from "./chat-member-mark";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { ChatSessionsTimelineRow, ChatSessionsWaitingLine } from "./chat-sessions-timeline-row";
-import { ChatTaskCard } from "./chat-task-card";
+import { ChatSessionsLinksContext, type ChatSessionsLinks } from "./chat-sessions-links";
 import { useChatSessionsView, type ChatSessionsView } from "./use-chat-sessions-view";
 import {
   DREW,
@@ -18,8 +18,6 @@ import {
   PARTICIPANTS,
   TAYLOR,
   chatMessage,
-  requestBatch,
-  requestItem,
   sessionsConversation,
   sessionsMessages,
   disclosure
@@ -67,23 +65,28 @@ function itemProps(message: ChatMessage, extra: Partial<Parameters<typeof ChatMe
   };
 }
 
-function renderRow(message: ChatMessage, sessions: ChatSessionsView, opened: string[] = [], messages = sessionsMessages()): ReactTestInstance {
+function renderRow(message: ChatMessage, sessions: ChatSessionsView, opened: string[] = []): ReactTestInstance {
   let renderer: ReturnType<typeof create> | undefined;
+  const open = (id: string, focus?: string): void => { opened.push(focus ? `${id}@${focus}` : id); };
   act(() => {
     renderer = create(
       <TooltipProvider>
-        <ChatSessionsTimelineRow itemProps={itemProps(message)} context={{ sessions, messages, onOpenMember: (id) => opened.push(id) }} />
+        <ChatSessionsTimelineRow
+          itemProps={itemProps(message)}
+          context={{ sessions, onOpenMember: open, onOpenTask: (entry) => open(entry.item.targetParticipantId, entry.item.replyMessageId ?? entry.messageId) }}
+        />
       </TooltipProvider>
     );
   });
   return renderer!.root;
 }
 
-test("the main timeline holds the User and the main session, the task card and an open member card; members' replies are in their sessions", () => {
+test("the main timeline holds the User and the main session and an open member card; tasks are inside their turn's reply; members' replies are in their sessions", () => {
   const sessions = sessionsOf(sessionsConversation());
   assert.ok(sessions);
-  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "tasks", "taylor-choice"],
-    "the intro system line stays hidden; drew's question, the main session's answer to it, gera's reply and the User's message to drew are not here");
+  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "taylor-choice"],
+    "the intro system line stays hidden; the task message is not a card; drew's question, the main session's answer to it, gera's reply and the User's message to drew are not here");
+  assert.deepEqual(sessions.workByReplyId.get("main-1")?.map((entry) => [entry.item.targetParticipantId, entry.status]), [[DREW.id, "running"], [GERA.id, "done"]]);
   assert.deepEqual(sessions.waitingOn.map((participant) => participant.handle), ["drew"]);
   assert.deepEqual(sessions.waitingRunIds, ["run-drew"]);
   assert.equal(sessions.runningMemberCount, 1);
@@ -91,7 +94,7 @@ test("the main timeline holds the User and the main session, the task card and a
   assert.deepEqual(sessions.memberRows.previous.map((row) => row.participant.handle), ["gera"]);
 });
 
-test("rows of the main timeline: no avatar, author or thread controls; the User's message is a bubble; the request is a task card", () => {
+test("rows of the main timeline: no avatar, author or thread controls; the User's message is a bubble; the turn's tasks are in its Worked fold", () => {
   const sessions = sessionsOf(sessionsConversation())!;
   const messages = sessionsMessages();
   const byId = new Map(messages.map((message) => [message.id, message]));
@@ -103,26 +106,87 @@ test("rows of the main timeline: no avatar, author or thread controls; the User'
   assert.equal(userArticle.props["data-presentation"], "sessions");
   assert.equal(user.findAll(hasClass("message-avatar")).length, 0, "no avatar");
 
-  const reply = renderRow(byId.get("main-1")!, sessions);
+  const opened: string[] = [];
+  const reply = renderRow(byId.get("main-1")!, sessions, opened);
   assert.equal(reply.findAll(hasClass("message-avatar")).length, 0);
   assert.equal(reply.findAll((node) => node.type === "strong").length, 0, "no author name");
   assert.equal(reply.findAll(hasClass("message-provider")).length, 0, "no provider label");
   assert.equal(reply.findAll((node) => node.props?.label === "Reply in thread").length, 0, "no thread controls");
   assert.match(textOf(reply), /On it, giving the parts to two members\./);
-
-  const opened: string[] = [];
-  const card = renderRow(byId.get("tasks")!, sessions, opened);
-  assert.equal(card.findAll((node) => node.props?.["data-testid"] === "chat-task-card").length, 1);
-  assert.equal(card.findAll((node) => node.type === "article").length, 0, "the request is not drawn as a message");
-  const rows = card.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-task-card-row");
+  const fold = reply.find((node) => node.props?.["data-testid"] === "chat-worked-fold");
+  assert.equal(textOf(fold), "Worked for 54s", "folded: only how long it worked");
+  act(() => fold.find((node) => node.type === "button").props.onClick());
+  assert.match(textOf(reply.find(hasClass("chat-delegations-summary"))), /Delegated 2 tasks/);
+  const rows = reply.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-delegation-row");
   assert.deepEqual(rows.map((row) => [row.props["data-participant-id"], row.props["data-task-status"]]), [[DREW.id, "running"], [GERA.id, "done"]]);
+  assert.equal(textOf(rows[0]!.find(hasClass("chat-delegation-title"))), "Task for drew: fix the drew part", "the task is the member's title");
+  assert.equal(textOf(rows[1]!.find(hasClass("chat-delegation-line"))), "Done: the token refresh is fixed");
+  assert.equal(rows[0]!.findAll(hasClass("chat-delegation-elapsed")).length, 1, "a running task counts its time");
+  assert.equal(rows[0]!.findAll((node) => node.props?.["data-provider-kind"] === DREW.kind).length, 1, "its provider's logo");
+  assert.equal(rows[0]!.findAll(hasClass("chat-delegation-dot")).length, 1, "with a dot for its state");
   act(() => rows[1]!.props.onClick());
-  assert.deepEqual(opened, [GERA.id], "a row opens its member's session");
+  act(() => rows[0]!.props.onClick());
+  assert.deepEqual(opened, [`${GERA.id}@gera-reply`, `${DREW.id}@tasks`], "a row opens its member's session at its reply, else at the task");
+  assert.equal(reply.findAll((node) => node.props?.["data-testid"] === "chat-task-card").length, 0, "no task card");
 
   const choice = renderRow(byId.get("taylor-choice")!, sessions, opened);
   assert.equal(choice.findAll((node) => node.props?.["data-testid"] === "chat-sessions-member-choice").length, 1);
-  assert.match(textOf(choice), /@taylor asks/);
+  assert.match(textOf(choice), /taylor asks/);
+  assert.doesNotMatch(textOf(choice), /@taylor/, "no handle in the sessions view");
   assert.match(textOf(choice), /Which database\?/);
+});
+
+test("while the main session's reply is being written, its turn's tasks show under it, open", () => {
+  const messages = sessionsMessages().map((message) => message.id === "main-1" ? { ...message, status: "pending" as const, content: "" } : message);
+  const sessions = sessionsOf(sessionsConversation({}, messages))!;
+  const row = renderRow(messages.find((message) => message.id === "main-1")!, sessions);
+  assert.equal(row.findAll((node) => node.props?.["data-testid"] === "chat-worked-fold").length, 0);
+  assert.equal(row.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-delegation-row").length, 2);
+});
+
+test("a task whose reply is not loaded is one slim row of its own", () => {
+  const messages = sessionsMessages().filter((message) => message.id !== "main-1");
+  const sessions = sessionsOf(sessionsConversation({}, messages))!;
+  assert.ok(sessions.mainMessages.some((message) => message.id === "tasks"));
+  const row = renderRow(messages.find((message) => message.id === "tasks")!, sessions);
+  assert.equal(row.findAll((node) => node.props?.["data-testid"] === "chat-sessions-task").length, 1);
+  assert.equal(row.findAll(hasClass("chat-delegations-summary")).length, 0);
+  assert.equal(row.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-delegation-row").length, 2);
+});
+
+test("a member's mention in a message is a chip with its logo and task that opens its session; other mentions are plain names; no @ anywhere", () => {
+  const sessions = sessionsOf(sessionsConversation())!;
+  const opened: string[] = [];
+  const links: ChatSessionsLinks = {
+    mainSessionId: MAIN.id,
+    mainHandle: "main",
+    byHandle: new Map([["gera", { id: GERA.id, title: "Fix the token refresh", kind: GERA.kind, focusMessageId: "gera-reply" }]]),
+    openMember: (id, focus) => opened.push(`${id}@${focus}`)
+  };
+  const prose = chatMessage("main-2", "participant", 12, { participantId: MAIN.id, content: "Asked @gera (a copy) and @nobody; @main will report." });
+  const bubble = chatMessage("ask-2", "user", 13, { content: "@main Reply to me", metadata: { askedParticipantIds: [MAIN.id] } });
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(
+      <TooltipProvider>
+        <ChatSessionsLinksContext.Provider value={links}>
+          <ChatSessionsTimelineRow itemProps={itemProps(prose)} context={{ sessions, onOpenMember: noop, onOpenTask: noop }} />
+          <ChatSessionsTimelineRow itemProps={itemProps(bubble)} context={{ sessions, onOpenMember: noop, onOpenTask: noop }} />
+        </ChatSessionsLinksContext.Provider>
+      </TooltipProvider>
+    );
+  });
+  const root = renderer!.root;
+  const chip = root.find((node) => node.type === "button" && node.props["data-testid"] === "chat-member-chip");
+  assert.equal(textOf(chip), "Fix the token refresh");
+  assert.equal(chip.findAll((node) => node.props?.["data-provider-kind"] === GERA.kind).length, 1);
+  act(() => chip.props.onClick({ preventDefault: noop }));
+  assert.deepEqual(opened, [`${GERA.id}@gera-reply`]);
+  const articles = root.findAll((node) => node.type === "article");
+  assert.match(textOf(articles[0]!), /Asked Fix the token refresh \(a copy\) and nobody; main will report\./);
+  assert.equal(textOf(articles[1]!.find(hasClass("message-content"))), "Reply to me", "the leading mention of the main session is left out");
+  assert.doesNotMatch(textOf(root), /@/);
+  assert.equal(root.findAll(hasClass("chat-mention")).length, 0, "no highlighted mention");
 });
 
 test("a member's open mention approval stays on the main timeline as its message, named, with the card", () => {
@@ -134,63 +198,28 @@ test("a member's open mention approval stays on the main timeline as its message
   });
   const messages = [...sessionsMessages(), mention];
   const sessions = sessionsOf(sessionsConversation({}, messages))!;
-  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "tasks", "taylor-choice", "gera-mention"]);
-  const row = renderRow(mention, sessions, [], messages);
+  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "taylor-choice", "gera-mention"]);
+  const row = renderRow(mention, sessions);
   const article = row.find((node) => node.type === "article");
   assert.equal(article.props["data-presentation"], "sessions");
-  assert.equal(textOf(row.findAll((node) => node.type === "strong")[0]!), "@gera", "who asks is named");
+  assert.equal(textOf(row.findAll((node) => node.type === "strong")[0]!), "Task for gera: fix the gera part", "who asks is named by its task");
   assert.match(textOf(row), /Do you want to ask @taylor\?/);
 });
 
-test("a task card shows each task's state, the time while it runs and one line of the result", () => {
-  const items = [
-    requestItem(DREW, "running", 3),
-    requestItem(GERA, "answered", 3, { replyMessageId: "gera-reply" }),
-    requestItem(TAYLOR, "running", 3),
-    requestItem({ ...GERA, id: "p-fail", handle: "fail" }, "failed", 3, { error: "The CLI exited with code 1." }),
-    requestItem({ ...GERA, id: "p-stop", handle: "stop" }, "interrupted", 3)
-  ];
-  const message = chatMessage("tasks", "participant", 3, { participantId: MAIN.id, metadata: { participantRequest: requestBatch("b1", MAIN, items) } });
-  const messages = sessionsMessages();
-  let renderer: ReturnType<typeof create> | undefined;
-  act(() => {
-    renderer = create(
-      <ChatTaskCard
-        message={message}
-        batch={message.metadata!.participantRequest!}
-        participants={PARTICIPANTS}
-        participantStatusById={STATUSES}
-        messages={messages}
-        messagesById={new Map(messages.map((entry) => [entry.id, entry]))}
-        onOpenMember={noop}
-      />
-    );
-  });
-  const root = renderer!.root;
-  assert.equal(textOf(root.find(hasClass("chat-task-card-head"))), "5 members · 1 running");
-  const rows = root.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-task-card-row");
-  const state = rows.map((row) => [textOf(row.find(hasClass("chat-task-card-handle"))), textOf(row.find(hasClass("chat-work-status")))]);
-  assert.deepEqual(state, [["@drew", "Running"], ["@gera", "Done"], ["@taylor", "Waiting for you"], ["@fail", "Failed"], ["@stop", "Stopped"]]);
-  assert.equal(rows[0]!.findAll(hasClass("chat-task-card-elapsed")).length, 1, "a running task counts its time");
-  assert.equal(rows[1]!.findAll(hasClass("chat-task-card-elapsed")).length, 0);
-  assert.equal(textOf(rows[0]!.find(hasClass("chat-task-card-title"))), "Task for drew: fix the drew part");
-  assert.equal(textOf(rows[1]!.find(hasClass("chat-task-card-result"))), "Done: the token refresh is fixed");
-  assert.equal(textOf(rows[3]!.find(hasClass("chat-task-card-result"))), "The CLI exited with code 1.");
-  act(() => renderer!.unmount());
-});
-
-test("the waiting line names the members the main session waits on, and Stop stops their runs", () => {
+test("the waiting line names the tasks the main session waits on, and Stop stops their runs", () => {
+  const sessions = sessionsOf(sessionsConversation())!;
+  assert.equal(sessions.waitingText, "Waiting on 1 member: Task for drew: fix the drew part");
   const stopped: Array<readonly string[]> = [];
   let renderer: ReturnType<typeof create> | undefined;
   act(() => {
-    renderer = create(<ChatSessionsWaitingLine members={[DREW, GERA]} runIds={["run-drew"]} onStop={(runIds) => stopped.push(runIds)} />);
+    renderer = create(<ChatSessionsWaitingLine members={[DREW, GERA]} text="Waiting on 2 members: Fix A, Fix B" runIds={["run-drew"]} onStop={(runIds) => stopped.push(runIds)} />);
   });
-  assert.match(textOf(renderer!.root), /Waiting on 2 members: @drew, @gera/);
+  assert.match(textOf(renderer!.root), /Waiting on 2 members: Fix A, Fix B/);
   act(() => renderer!.root.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-sessions-waiting-stop")[0]!.props.onClick());
   assert.deepEqual(stopped, [["run-drew"]]);
-  act(() => renderer!.update(<ChatSessionsWaitingLine members={[DREW]} runIds={[]} onStop={noop} />));
+  act(() => renderer!.update(<ChatSessionsWaitingLine members={[DREW]} text="Waiting" runIds={[]} onStop={noop} />));
   assert.equal(renderer!.root.findAll((node) => node.props?.["data-testid"] === "chat-sessions-waiting-stop").length, 0, "nothing to stop without a run");
-  act(() => renderer!.update(<ChatSessionsWaitingLine members={[]} runIds={[]} onStop={noop} />));
+  act(() => renderer!.update(<ChatSessionsWaitingLine members={[]} text="" runIds={[]} onStop={noop} />));
   assert.equal(renderer!.toJSON(), null);
 });
 
@@ -222,7 +251,7 @@ function renderSessionsRow(message: ChatMessage, sessions: ChatSessionsView, ext
     renderer = create(
       <TooltipProvider>
         <ChatSessionsPresentationContext.Provider value>
-          <ChatSessionsTimelineRow itemProps={itemProps(message, extra)} context={{ sessions, messages: sessionsMessages(), onOpenMember: noop }} />
+          <ChatSessionsTimelineRow itemProps={itemProps(message, extra)} context={{ sessions, onOpenMember: noop, onOpenTask: noop }} />
         </ChatSessionsPresentationContext.Provider>
       </TooltipProvider>
     );
@@ -269,8 +298,8 @@ test("turn-finished notes: another member's is not on the main timeline; the mai
   } as Partial<ChatMessage>);
   const messages = [...sessionsMessages(), note("note-gera", GERA.id, "gera", 11), note("note-main", MAIN.id, "main", 12)];
   const sessions = sessionsOf(sessionsConversation({}, messages))!;
-  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "tasks", "taylor-choice", "note-main"],
-    "gera's note belongs to gera's session, whose task card already says it is done");
+  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "taylor-choice", "note-main"],
+    "gera's note belongs to gera's session, whose task row already says it is done");
   const row = renderSessionsRow(messages.at(-1)!, sessions);
   assert.equal(row.findAll(hasClass("chat-turn-finished-note")).length, 1);
   assert.equal(row.findAll(hasClass("chat-turn-finished-note-avatar")).length, 0, "no avatar picture");

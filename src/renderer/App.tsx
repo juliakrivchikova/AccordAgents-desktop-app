@@ -28,13 +28,13 @@ import { ChatAccordLauncherDialog } from "./components/chat/chat-accord-launcher
 import { NewChatScreen } from "./components/chat/new-chat-screen";
 import { ChatSearchModal } from "./components/search/chat-search-modal";
 import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
-import { ChatViewHeaderControls } from "./components/chat/chat-view-switch";
+import { ChatClassicOnly, ChatViewHeaderControls } from "./components/chat/chat-view-switch";
+import { memberModelChip } from "./components/chat/chat-sessions-composer";
+import { renderNewChatMemberMark } from "./components/chat/chat-member-mark";
 import { chatViewFor } from "../shared/mainSession";
 import { chatRoleLabel } from "./components/chat/chat-conversation-data";
-import { avatarForChatParticipant } from "./components/chat/chat-avatars";
 import { defaultChatParticipantDraft } from "./components/chat/chat-participant-drafts";
 import type { DraftPluginMention } from "./components/chat/chat-composer-draft-utils";
-import { Avatar } from "./components/avatar/avatar";
 import { isChatAssistantParticipant } from "./components/conversation/conversation-display";
 import { useAppState } from "./app/app-state";
 import { useConversationActions } from "./app/use-conversation-actions";
@@ -295,6 +295,36 @@ function App(): JSX.Element {
       tooltip="Terminal (Ctrl+`)"
     />
   );
+  // The chat's members and their settings: the roster in the classic view's
+  // header; in the sessions view one member's settings, from its session or
+  // its model chip in a composer.
+  const rosterMenu = (memberId?: string, trigger?: React.ReactNode): JSX.Element | null => view.activeChatConversation ? (
+    <ChatParticipantMenu
+      participants={view.activeChatParticipants}
+      participantHasRunById={view.participantHasRunById}
+      settings={state.settings}
+      agents={state.agents}
+      draft={state.chatMessageDraft}
+      addParticipantDraft={state.chatAddParticipantDraft ?? defaultChatParticipantDraft(state.settings)}
+      busyParticipantIds={view.busyParticipantIds}
+      participantStatusById={view.participantStatusById}
+      participantWatchers={view.activeChatConversation.metadata.participantWatchers}
+      onDraftChange={state.setChatMessageDraft}
+      onAddParticipantDraftChange={state.setChatAddParticipantDraft}
+      onAddParticipant={() => void chatActions.addChatParticipant()}
+      onAddSavedParticipant={(participant) => void chatActions.addSavedChatParticipant(participant)}
+      onUpdateParticipantRuntime={(participantId, patch) => chatActions.updateChatParticipantRuntime(participantId, patch)}
+      onCompactParticipant={(participantId) => void chatActions.compactChatParticipant(participantId)}
+      onRestartParticipant={(participantId, stopBackgroundTasks) => chatActions.restartChatParticipant(participantId, stopBackgroundTasks)}
+      onStopRestart={(runId) => void window.consensus.cancelReview(runId)}
+      restartingById={restartingMembers(state.progressLog)}
+      onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
+      onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
+      onManageInSettings={() => openSettingsSection("participants")}
+      memberId={memberId}
+      trigger={trigger}
+    />
+  ) : null;
   const topBarActions = isNewChatScreen ? terminalToggle : (
     <>
       {/* The open chat's view switch and members button (its chat view provides them). */}
@@ -317,29 +347,8 @@ function App(): JSX.Element {
             onClick={() => (artifacts.panelOpen && !artifacts.fileTarget ? artifacts.closePanel() : artifacts.openPanel())}
             tooltip="Artifacts — durable shared documents (plans, QA cases, decisions) with versions and sign-off"
           />
-          <ChatParticipantMenu
-            participants={view.activeChatParticipants}
-            participantHasRunById={view.participantHasRunById}
-            settings={state.settings}
-            agents={state.agents}
-            draft={state.chatMessageDraft}
-            addParticipantDraft={state.chatAddParticipantDraft ?? defaultChatParticipantDraft(state.settings)}
-            busyParticipantIds={view.busyParticipantIds}
-            participantStatusById={view.participantStatusById}
-            participantWatchers={view.activeChatConversation.metadata.participantWatchers}
-            onDraftChange={state.setChatMessageDraft}
-            onAddParticipantDraftChange={state.setChatAddParticipantDraft}
-            onAddParticipant={() => void chatActions.addChatParticipant()}
-            onAddSavedParticipant={(participant) => void chatActions.addSavedChatParticipant(participant)}
-            onUpdateParticipantRuntime={(participantId, patch) => chatActions.updateChatParticipantRuntime(participantId, patch)}
-            onCompactParticipant={(participantId) => void chatActions.compactChatParticipant(participantId)}
-            onRestartParticipant={(participantId, stopBackgroundTasks) => chatActions.restartChatParticipant(participantId, stopBackgroundTasks)}
-            onStopRestart={(runId) => void window.consensus.cancelReview(runId)}
-            restartingById={restartingMembers(state.progressLog)}
-            onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
-            onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
-            onManageInSettings={() => openSettingsSection("participants")}
-          />
+          {/* The sessions view has one side panel instead (its own control). */}
+          <ChatClassicOnly>{rosterMenu()}</ChatClassicOnly>
         </>
       )}
     </>
@@ -380,6 +389,8 @@ function App(): JSX.Element {
       openingConversationDescription={openingConversationDescription}
       accordDisabledReason={accordDisabledReason}
       onOpenAccord={() => setAccordDialogOpen(true)}
+      renderMemberSettings={(participantId) => rosterMenu(participantId)}
+      renderMemberChip={(participantId) => rosterMenu(participantId, memberModelChip(view.activeChatParticipants, participantId))}
       topBar={chatUsesInlineTopBar ? chatTopBar : activityTopBar}
       artifacts={artifacts}
     />
@@ -598,7 +609,7 @@ function App(): JSX.Element {
                 prefillPrompt={newChatPrefill?.prompt}
                 prefillRequestKey={newChatPrefill?.key}
                 busy={state.busy}
-                renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}
+                renderParticipantAvatar={renderNewChatMemberMark}
                 participantRoleLabel={(participant) => chatRoleLabel(state.settings.chatRoleConfigs, participant)}
                 onPromptChange={state.setQuestion}
                 onPendingImagesChange={state.setNewChatPendingImages}

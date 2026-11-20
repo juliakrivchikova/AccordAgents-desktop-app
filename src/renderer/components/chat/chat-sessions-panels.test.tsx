@@ -4,7 +4,7 @@ import { act, create, type ReactTestInstance } from "react-test-renderer";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { buildSessionsViewIndex, memberSessionMessages } from "../../../shared/mainSession";
-import { latestTaskByMember, sessionsMemberRows } from "../../../shared/mainSessionView";
+import { latestTaskByMember, sessionsMemberActivity, sessionsMemberRows, sessionsMemberTitle } from "../../../shared/mainSessionView";
 import type { AppSettings, ChatMessage } from "../../../shared/types";
 import { ChatMembersPanel } from "./chat-members-panel";
 import { ChatMemberSessionPanel, type ChatMemberSendRequest } from "./chat-member-session-panel";
@@ -39,9 +39,11 @@ test("the members panel lists every member but the main session, ended ones unde
       <TooltipProvider>
         <ChatMembersPanel
           rows={rows}
-          messages={messages}
+          formerRows={[{ member: { id: "p-gone", handle: "gone" }, title: "Old task", status: "done" }]}
+          activity={sessionsMemberActivity(messages)}
           runIdsByParticipantId={new Map([[DREW.id, ["run-drew"]]])}
-          roleLabel={() => "Generic Member"}
+          memberTitle={(id) => sessionsMemberTitle(PARTICIPANTS.find((member) => member.id === id), latestTaskByMember(messages).get(id)?.item)}
+          memberDetail={(member) => member.kind === "codex-cli" ? "Codex CLI · gpt-5" : "Claude Code"}
           onOpenMember={(id) => opened.push(id)}
           onStopRuns={(runIds) => stopped.push(runIds)}
           onClose={noop}
@@ -54,8 +56,10 @@ test("the members panel lists every member but the main session, ended ones unde
   assert.deepEqual(memberRows().map((row) => [row.props["data-participant-id"], row.props["data-member-status"]]), [[DREW.id, "running"], [TAYLOR.id, "waiting"]],
     "the main session is not listed; gera's task is done, so it waits under Previous");
   const drew = memberRows()[0]!;
-  assert.match(textOf(drew), /@drew/);
-  assert.match(textOf(drew), /Task for drew: fix the drew part/);
+  assert.equal(textOf(drew.find((node) => node.type === "strong")), "Task for drew: fix the drew part", "named by its task");
+  assert.match(textOf(drew), /Codex CLI · gpt-5/, "its provider and model under it");
+  assert.doesNotMatch(textOf(root), /@/, "no handles");
+  assert.equal(drew.findAll((node) => node.props?.["data-provider-kind"] === DREW.kind).length, 1, "its provider's logo");
   assert.match(textOf(drew), /Running/);
   assert.equal(drew.findAll((node) => typeof node.type === "string" && typeof node.props.className === "string" && node.props.className.includes("chat-members-row-elapsed")).length, 1);
   assert.equal(memberRows()[1]!.findAll(byTestId("chat-members-row-stop")).length, 0, "nothing to stop for a member that runs nothing");
@@ -72,6 +76,15 @@ test("the members panel lists every member but the main session, ended ones unde
   act(() => previous.findAll((node) => node.type === "button")[0]!.props.onClick());
   assert.deepEqual(memberRows().map((row) => row.props["data-participant-id"]), [DREW.id, TAYLOR.id, GERA.id]);
   assert.match(textOf(memberRows()[2]!), /Done/);
+
+  const removed = root.find(byTestId("chat-members-removed"));
+  assert.match(textOf(removed), /Removed1/, "a member no longer in the chat, folded");
+  act(() => removed.findAll((node) => node.type === "button")[0]!.props.onClick());
+  const gone = memberRows().find((row) => row.props["data-participant-id"] === "p-gone")!;
+  assert.match(textOf(gone), /Old task/);
+  assert.equal(gone.findAll(byTestId("chat-members-row-stop")).length, 0, "read-only: no Stop");
+  act(() => gone.findAll((node) => node.type === "button" && node.props.className === "chat-members-row-main")[0]!.props.onClick());
+  assert.deepEqual(opened, [DREW.id, "p-gone"], "its session opens");
   act(() => renderer!.unmount());
 });
 
@@ -86,7 +99,7 @@ test("with nobody running or waiting, the members panel lists every member as it
   act(() => {
     renderer = create(
       <TooltipProvider>
-        <ChatMembersPanel rows={rows} messages={messages} runIdsByParticipantId={new Map()} roleLabel={() => ""} onOpenMember={noop} onClose={noop} />
+        <ChatMembersPanel rows={rows} activity={sessionsMemberActivity(messages)} runIdsByParticipantId={new Map()} memberTitle={() => "A task"} memberDetail={() => ""} onOpenMember={noop} onClose={noop} />
       </TooltipProvider>
     );
   });
@@ -122,15 +135,16 @@ test("a member's session shows its task folded to one line, its messages without
     renderer = create(
       <TooltipProvider>
         <ChatMemberSessionPanel
-          participant={DREW}
+          member={DREW}
+          title="Task for drew: fix the drew part"
+          detail="Codex CLI"
+          readOnly={false}
           mainSessionId={MAIN.id}
           status="running"
           runIds={["run-drew"]}
           messages={session}
-          allMessages={messages}
           messageProps={messageProps}
-          participants={PARTICIPANTS}
-          settings={SETTINGS}
+          appSettings={SETTINGS}
           conversationId="chat-sessions"
           draft="Also check the logout button"
           busy={false}
@@ -163,7 +177,8 @@ test("a member's session shows its task folded to one line, its messages without
   assert.match(textOf(articles[1]!), /Main session/, "the main session's answer says who wrote it");
 
   const composer = root.find((node) => node.props?.testId === "chat-member-composer");
-  assert.equal(composer.props.placeholder, "Message @drew...");
+  assert.equal(composer.props.placeholder, "Message Task for drew: fix the drew part...");
+  assert.deepEqual(composer.props.participants, [], "no members to mention: it writes to this one");
   let result: boolean | undefined;
   await act(async () => { result = await composer.props.onSend([{ path: "src/logout.ts" }], [], [], undefined); });
   assert.equal(result, true);
@@ -175,5 +190,73 @@ test("a member's session shows its task folded to one line, its messages without
     targetParticipantIds: [DREW.id]
   }], "no @ needed: the message goes to this member only");
   assert.deepEqual(drafts, [""], "the panel's draft is cleared once sent");
+  act(() => renderer!.unmount());
+});
+
+function renderSession(extra: Partial<Parameters<typeof ChatMemberSessionPanel>[0]>): ReturnType<typeof create> {
+  const messages = sessionsMessages();
+  const index = buildSessionsViewIndex(messages, MAIN.id);
+  const messageProps = (message: ChatMessage) => ({
+    activityDisclosure: disclosure(), message, conversationId: "chat-sessions", participants: PARTICIPANTS, participantStatusById: STATUSES, busy: false,
+    onApproveMentions: noop, onRejectMentions: noop, onRespondToChoice: noop, onToggleReaction: noop
+  });
+  const sharedNode = document.createElement("textarea");
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(
+      <TooltipProvider>
+        <ChatMemberSessionPanel
+          member={{ id: GERA.id }} title="Task for gera" detail="No longer in this chat" readOnly mainSessionId={MAIN.id} status="done"
+          runIds={["run-gera"]} messages={memberSessionMessages(messages, GERA.id, index)} messageProps={messageProps} appSettings={SETTINGS}
+          conversationId="chat-sessions" draft="" busy={false} hasOlderMessages={false} olderMessagesLoading={false} onLoadOlderMessages={noop}
+          onDraftChange={noop} onSend={async () => true} onStopRuns={noop} onBack={noop} onClose={noop}
+          {...extra}
+        />
+      </TooltipProvider>,
+      { createNodeMock: () => sharedNode }
+    );
+  });
+  return renderer!;
+}
+
+test("a former member's session is read-only: no composer, no Stop, a line saying it left", () => {
+  const renderer = renderSession({});
+  const root = renderer.root;
+  assert.equal(root.findAll((node) => node.props?.testId === "chat-member-composer").length, 0);
+  assert.equal(root.findAll(byTestId("chat-member-session-stop")).length, 0);
+  assert.match(textOf(root.find(byTestId("chat-member-session-gone"))), /no longer in the chat/);
+  assert.deepEqual(root.findAll((node) => node.type === "article").map((article) => article.props["data-message-id"]), ["gera-reply"], "its session stays readable");
+  act(() => renderer.unmount());
+});
+
+test("opened at a message, a member's session scrolls to it and marks it for a moment", () => {
+  const host = document.createElement("div");
+  const target = document.createElement("article");
+  target.dataset.messageId = "gera-reply";
+  host.append(target);
+  let scrolled = false;
+  target.scrollIntoView = () => { scrolled = true; };
+  const body = { querySelector: (selector: string) => (selector.includes("gera-reply") ? target : null), scrollTop: 0, scrollHeight: 10 };
+  const shared = document.createElement("div");
+  const messages = sessionsMessages();
+  const index = buildSessionsViewIndex(messages, MAIN.id);
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(
+      <TooltipProvider>
+        <ChatMemberSessionPanel
+          member={{ id: GERA.id }} title="Task for gera" detail="" readOnly focus={{ messageId: "gera-reply", nonce: 1 }} mainSessionId={MAIN.id} status="done"
+          runIds={[]} messages={memberSessionMessages(messages, GERA.id, index)} messageProps={(message) => ({
+            activityDisclosure: disclosure(), message, conversationId: "chat-sessions", participants: PARTICIPANTS, participantStatusById: STATUSES, busy: false,
+            onApproveMentions: noop, onRejectMentions: noop, onRespondToChoice: noop, onToggleReaction: noop
+          })} appSettings={SETTINGS} conversationId="chat-sessions" draft="" busy={false} hasOlderMessages={false} olderMessagesLoading={false}
+          onLoadOlderMessages={noop} onDraftChange={noop} onSend={async () => true} onBack={noop} onClose={noop}
+        />
+      </TooltipProvider>,
+      { createNodeMock: (element) => (typeof element.props?.className === "string" && element.props.className.includes("chat-member-session-body") ? body : shared) }
+    );
+  });
+  assert.equal(scrolled, true, "scrolled to the task's reply");
+  assert.ok(target.classList.contains("message-focused"), "marked for a moment");
   act(() => renderer!.unmount());
 });

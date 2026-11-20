@@ -14,6 +14,7 @@ import {
 } from "./accord-dock-store";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatMemberMark } from "./chat-member-mark";
+import { useChatSessionsLinks } from "./chat-sessions-links";
 
 // The chat's newest Accord, pinned above the composer (the User, 2026-11-08):
 // where it stands, with every member's draft and signature, the current
@@ -51,6 +52,21 @@ function MemberMark(props: { handle: string; participants?: ChatParticipant[] })
   return <ChatMemberMark className="chat-accord-progress-avatar" markClassName="is-chip" avatar={avatar} member={participant} tooltip={null} />;
 }
 
+/** A member's name on an Accord's card: its handle, or in the sessions view
+ *  (no handles there) its task's title, the main session by that name. */
+function useMemberName(): (handle: string) => string {
+  const links = useChatSessionsLinks();
+  return (handle) => {
+    const key = handle.replace(/^@/, "").toLowerCase();
+    if (!links) return `@${handle.replace(/^@/, "")}`;
+    return key === links.mainHandle?.toLowerCase() ? "Main session" : links.byHandle.get(key)?.title ?? handle.replace(/^@/, "");
+  };
+}
+
+function MemberName(props: { handle: string }): JSX.Element {
+  return <span>{useMemberName()(props.handle)}</span>;
+}
+
 function Stage(props: { stage: AccordStage; participants?: ChatParticipant[] }): JSX.Element {
   const { stage } = props;
   return (
@@ -69,7 +85,7 @@ function Stage(props: { stage: AccordStage; participants?: ChatParticipant[] }):
                 <span aria-hidden="true" className="chat-accord-progress-avatar-slot">
                   <MemberMark handle={member.handle} participants={props.participants} />
                 </span>
-                <span>@{member.handle}</span>
+                <MemberName handle={member.handle} />
                 {member.given && <Check className="chat-accord-progress-member-check" size={12} strokeWidth={3} aria-label="done" />}
               </span>
             ))}
@@ -162,6 +178,7 @@ export function ChatAccordCard(props: {
 
 function AccordHeading(props: { launch: DockedAccord; title: string; folded: boolean }): JSX.Element {
   const { card, progress } = props.launch;
+  const name = useMemberName();
   return (
     <>
       <span className="chat-accord-dock-icon" aria-hidden="true">
@@ -172,7 +189,7 @@ function AccordHeading(props: { launch: DockedAccord; title: string; folded: boo
         {!props.folded && (
           <span className="chat-accord-dock-meta">
             <span className="chat-accord-dock-kind">Accord</span>
-            {` · led by @${card.facilitator} · with ${card.members.map((handle) => `@${handle}`).join(", ")}`}
+            {` · led by ${name(card.facilitator)} · with ${card.members.map(name).join(", ")}`}
           </span>
         )}
       </span>

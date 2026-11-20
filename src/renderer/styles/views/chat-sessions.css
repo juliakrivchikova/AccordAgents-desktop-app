@@ -55,7 +55,10 @@
 
 .chat-view-switch-option:focus-visible,
 .chat-members-button:focus-visible,
-.chat-task-card-row:focus-visible,
+.chat-delegation-row:focus-visible,
+.chat-worked-fold-toggle:focus-visible,
+.chat-member-chip:focus-visible,
+.chat-model-chip:focus-visible,
 .chat-members-row-main:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
@@ -333,100 +336,10 @@
 
 /* Task cards */
 
-.chat-task-card {
-  display: grid;
-  width: min(100%, 640px);
-  margin: 2px 0 18px;
-  overflow: hidden;
-  border: 1px solid var(--app-border);
-  border-radius: var(--radius-card);
-  background: var(--app-surface);
-}
-
-.chat-task-card-head {
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--app-border);
-  color: var(--app-muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.chat-task-card-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 10px 12px;
-  border: 0;
-  background: transparent;
-  color: var(--app-text);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.chat-task-card-row + .chat-task-card-row {
-  border-top: 1px solid var(--app-border);
-}
-
-.chat-task-card-row:hover {
-  background: var(--app-surface-hover);
-}
-
-.chat-task-card-main {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.chat-task-card-line {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
-}
-
-.chat-task-card-handle {
-  flex: 0 0 auto;
-  color: var(--app-text-strong);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.chat-task-card-title,
-.chat-task-card-result {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chat-task-card-title {
-  color: var(--app-text);
-  font-size: 13px;
-}
-
-.chat-task-card-result {
-  color: var(--app-muted);
-  font-size: 12px;
-}
-
-.chat-task-card-state {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.chat-task-card-elapsed,
 .chat-members-row-elapsed {
   color: var(--app-muted);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
-}
-
-.chat-task-card-chevron {
-  color: var(--app-muted);
 }
 
 /* A member's open choice card and the "Waiting on" line */
@@ -743,4 +656,335 @@
 
 .chat-accord-dock-toggle.is-static {
   cursor: default;
+}
+
+/* ---- The sessions view, the Claude desktop way (docs/main-session.md) ---- */
+
+/* One reading column: the main timeline's rows, the waiting line, the Accord
+   line and the composer share one centered width, which re-centers as the
+   side panel opens and closes and narrows with the window. */
+.chat-view.is-sessions-view {
+  --chat-reading-width: 768px;
+  --chat-reading-inset: max(0px, calc((100% - var(--chat-reading-width)) / 2));
+}
+
+.chat-view.is-sessions-view .chat-main .virtual-timeline-item,
+.chat-view.is-sessions-view .chat-main > .chat-composer,
+.chat-view.is-sessions-view .chat-main .chat-accord-dock-wrap {
+  padding-inline: max(28px, var(--chat-reading-inset));
+}
+
+.chat-view.is-sessions-view .chat-main .chat-sessions-waiting {
+  margin-inline: max(28px, var(--chat-reading-inset));
+}
+
+.chat-view.is-sessions-view .chat-main .virtual-timeline-item > .message.chat-message {
+  padding-inline: 0;
+}
+
+/* The header: no text buttons; one icon opens the side panel. */
+.chat-view-header-controls.is-sessions {
+  gap: 0;
+}
+
+.chat-side-panel-toggle {
+  position: relative;
+  display: inline-flex;
+}
+
+.chat-side-panel-badge {
+  position: absolute;
+  top: 0;
+  right: 0;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--app-accent);
+  color: var(--app-surface);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.chat-side-panel-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--app-accent);
+  pointer-events: none;
+}
+
+.chat-title-menu {
+  display: grid;
+  min-width: 180px;
+  padding: 4px;
+}
+
+.chat-title-menu-label {
+  padding: 6px 8px 4px;
+  color: var(--app-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.chat-title-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-title-menu-item:hover:not(:disabled) {
+  background: var(--app-surface-hover);
+}
+
+.chat-title-menu-item:disabled {
+  color: var(--app-muted);
+  cursor: default;
+}
+
+.chat-title-menu-check {
+  margin-left: auto;
+  color: var(--app-text-strong);
+}
+
+/* "Worked for 54s ›" and the tasks of the turn inside it (T3 Code). */
+.chat-worked-fold {
+  display: grid;
+  gap: 2px;
+  margin: 0 0 6px;
+}
+
+.chat-worked-fold-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--app-muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chat-worked-fold-toggle:hover {
+  color: var(--app-text-strong);
+}
+
+.chat-delegations {
+  display: grid;
+  gap: 0;
+  margin: 2px 0 4px;
+}
+
+.chat-delegations-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  color: var(--app-muted);
+  font-size: 12.5px;
+}
+
+.chat-delegation-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 5px 6px;
+  margin-inline: -6px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-delegation-row:hover {
+  background: var(--app-surface-hover);
+}
+
+.chat-delegation-mark {
+  position: relative;
+  display: inline-flex;
+}
+
+.chat-delegation-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--app-surface);
+  border-radius: 50%;
+  background: var(--app-muted);
+}
+
+.chat-delegation-dot.is-running {
+  background: var(--app-accent);
+}
+
+.chat-delegation-dot.is-done {
+  background: var(--app-success);
+}
+
+.chat-delegation-dot.is-failed {
+  background: var(--app-danger);
+}
+
+.chat-delegation-dot.is-waiting {
+  background: var(--app-warning);
+}
+
+.chat-delegation-text {
+  display: grid;
+  min-width: 0;
+}
+
+.chat-delegation-title,
+.chat-delegation-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-delegation-title {
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.chat-delegation-line {
+  color: var(--app-muted);
+  font-size: 12.5px;
+}
+
+.chat-delegation-time {
+  color: var(--app-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-delegation-chevron {
+  color: var(--app-muted);
+}
+
+.chat-sessions-task {
+  margin: 0 0 8px;
+}
+
+/* A member's mention: its logo and its task, opening its session. */
+.chat-member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 0 6px 0 3px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+  font: inherit;
+  vertical-align: baseline;
+  cursor: pointer;
+}
+
+.chat-member-chip > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The model chip in a sessions-view composer. */
+.chat-model-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--app-text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.chat-model-chip:hover {
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+.chat-model-chip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.chat-model-chip-effort {
+  color: var(--app-muted);
+}
+
+/* The main session first in the side panel; a former member's session. */
+.chat-members-row.is-main .chat-members-row-main {
+  cursor: default;
+}
+
+.chat-member-session-gone {
+  margin: 0;
+  padding: 10px 16px 14px;
+  color: var(--app-muted);
+  font-size: 12.5px;
+}
+
+/* The Accord above the composer: a quiet line, no box. */
+.chat-view.is-sessions-view .chat-accord-strip .chat-accord-row {
+  min-height: 26px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+}
+
+.chat-view.is-sessions-view .chat-accord-strip .chat-accord-row:hover {
+  background: transparent;
+  color: var(--app-text-strong);
+}
+
+.chat-view.is-sessions-view .chat-accord-strip .chat-accord-row-kind,
+.chat-view.is-sessions-view .chat-accord-strip .chat-accord-row-title {
+  flex: none;
+  color: inherit;
+  font-weight: 500;
+}
+
+.chat-view.is-sessions-view .chat-accord-strip .chat-accord-row-title {
+  flex: 0 1 auto;
+}
+
+/* Mid-chat lines without boxes. */
+.chat-view.is-sessions-view .chat-sessions-waiting {
+  font-size: 12.5px;
 }

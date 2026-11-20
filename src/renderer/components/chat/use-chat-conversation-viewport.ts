@@ -99,7 +99,11 @@ export function useChatConversationViewport(props: {
   // While the User is turning the wheel the view does not snap back to the bottom.
   const chatVirtualItems = useAnchoredVirtualItems(chatVirtualizer, timelineRef, () => stickToBottomRef.current && !hasRecentUserScrollIntent());
   // A jump to a message is not interrupted by older pages arriving under it.
-  const requestOlderMessages = useOlderMessagesTopUp(timelineRef, { ...props, loadedMessageCount: props.messages.length }, () => !viewRef.current?.hasAttribute("data-focus-navigating"));
+  // The sessions view's main timeline (it alone opens messages outside it)
+  // shows few of the loaded messages: it stops after two pages added none.
+  const requestOlderMessages = useOlderMessagesTopUp(timelineRef, {
+    ...props, loadedMessageCount: props.messages.length, visibleRowCount: props.topLevelMessages.length, maxBarrenLoads: props.openOutsideTimeline ? 2 : undefined
+  }, () => !viewRef.current?.hasAttribute("data-focus-navigating"));
   const focusNavigation = useChatFocusNavigation({
     viewRef,
     renderedMessageElement,

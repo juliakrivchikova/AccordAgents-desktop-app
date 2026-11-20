@@ -58,6 +58,8 @@ import { useChatViewMode } from "./use-chat-view-mode";
 import { ChatViewHeaderContext } from "./chat-view-switch";
 import type { ChatPanelMessageContext } from "./chat-sessions-right-panel";
 import { ChatSessionsWaitingLine } from "./chat-sessions-timeline-row";
+import { ChatSessionsLinksContext, useStableMap } from "./chat-sessions-links";
+import { sessionsComposerProps } from "./chat-sessions-composer";
 import { ChatViewRightPanels } from "./chat-view-right-panels";
 
 export type { ChatMessageFocusRequest } from "./chat-conversation-types";
@@ -66,6 +68,7 @@ const NO_CLOSED_ACCORDS: readonly string[] = [];
 const NO_THREADS = new Map<string, ChatThreadSummary>();
 
 export function ChatConversationView(props: ChatConversationViewProps): JSX.Element {
+  const participantStatusById = useStableMap(props.participantStatusById);
   const participants = useMemo(
     () => chatParticipants(props.conversation),
     [props.conversation.metadata.participants]
@@ -94,13 +97,13 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   const participantsById = useMemo(() => new Map(participants.map((participant) => [participant.id, participant])), [participants]);
   const activeRunParticipantRows = useMemo(() => activeRunSummary.participantIds.flatMap((participantId) => {
     const participant = participantsById.get(participantId);
-    const status = props.participantStatusById.get(participantId);
+    const status = participantStatusById.get(participantId);
     const runIds = activeRunSummary.runIdsByParticipantId.get(participantId) ?? [];
     return participant && status && status !== "idle" && runIds.length > 0 ? [{ participant, runIds, status }] : [];
   }), [
     activeRunSummary,
     participantsById,
-    props.participantStatusById
+    participantStatusById
   ]);
   const viewMode = useChatViewMode({
     conversation: props.conversation,
@@ -114,7 +117,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     conversation: props.conversation,
     view: viewMode.view,
     participants,
-    participantStatusById: props.participantStatusById,
+    participantStatusById: participantStatusById,
     activeRunSummary
   });
   const sessionsMainMessages = sessions?.mainMessages;
@@ -204,7 +207,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   const selectedThreadSummary = selectedThreadRoot ? threadSummaries.get(selectedThreadRoot.id) : undefined;
   const panel = rightPanel.panel;
   const sessionsPanelOpen = Boolean(sessions) && (
-    panel?.kind === "members" || panel?.kind === "accord" || (panel?.kind === "member" && participantsById.has(panel.participantId))
+    panel?.kind === "members" || panel?.kind === "accord" ||
+    (panel?.kind === "member" && (participantsById.has(panel.participantId) || sessions?.isFormerMember(panel.participantId) === true))
   );
   const hasThread = Boolean(selectedThreadRoot) || sessionsPanelOpen;
   const visibleApprovalMessages = useMemo(
@@ -221,11 +225,11 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     isRunning: props.isRunning,
     loadedMessages: props.conversation.messages,
     topLevelMessages,
-    resolvedApprovals: resolvedTimelineApprovals,
+    resolvedApprovals: sessions ? resolvedTimelineApprovals.filter((approval) => !sessions.hidesApproval(approval)) : resolvedTimelineApprovals,
     thinkingRows
-  }), [props.conversation.messages, props.hasOlderMessages, props.isRunning, props.olderMessagesLoading, resolvedTimelineApprovals, thinkingRows, topLevelMessages]);
+  }), [props.conversation.messages, props.hasOlderMessages, props.isRunning, props.olderMessagesLoading, resolvedTimelineApprovals, sessions, thinkingRows, topLevelMessages]);
   const sessionsChrome = useChatSessionsChrome({
-    sessions, viewMode, rightPanel, participantsById, messages: props.conversation.messages, closeArtifacts: artifacts.closePanel
+    sessions, viewMode, rightPanel, participantsById, closeArtifacts: artifacts.closePanel, accordOpen: Boolean(dockedAccord)
   });
   const viewport = useChatConversationViewport({
     conversationId: props.conversation.id,
@@ -257,7 +261,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     content?: string
   ): Promise<boolean> {
     promptSuggestions.dismiss();
-    const sent = await props.onSend(repoFileMentions, imageAttachments, skillMentions, content);
+    // The sessions view's composer writes to the main session, whatever it names.
+    const sent = await props.onSend(repoFileMentions, imageAttachments, skillMentions, content, sessions ? [sessions.mainSessionId] : undefined);
     if (sent) {
       viewport.scrollToChatBottom();
     } else {
@@ -354,7 +359,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     activityDisclosure,
     conversationId: props.conversation.id,
     participants,
-    participantStatusById: props.participantStatusById,
+    participantStatusById: participantStatusById,
     busy: props.isRunning,
     submittingChoiceIds: choiceSubmission.submittingIds,
     submittingApprovalIds: approvalSubmission.submittingIds,
@@ -371,7 +376,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   };
 
   return (
-    <ChatSessionsPresentationContext.Provider value={Boolean(sessions)}>
+    <ChatSessionsPresentationContext.Provider value={Boolean(sessions)}><ChatSessionsLinksContext.Provider value={sessionsChrome.links}>
     <MentionDirectoryContext.Provider value={mentionDirectory}>
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
       <ArtifactsContext.Provider value={artifacts.context}>
@@ -421,14 +426,14 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               onStopRun={props.onStopRun ? chatMessageActions.onStopRun : undefined}
               onToggleReaction={chatMessageActions.onToggleReaction}
               onDismissTurnFinishedNote={props.onDismissTurnFinishedNote ? chatMessageActions.onDismissTurnFinishedNote : undefined}
-              participantStatusById={props.participantStatusById}
+              participantStatusById={participantStatusById}
               participants={participants}
               approvalsByMessageId={approvalPlacement.byMessageId}
               pendingApprovalRows={approvalPlacement.unanchored}
               rows={chatTimelineRows}
               sessions={sessionsChrome.timeline}
               footer={sessions && (
-                <ChatSessionsWaitingLine members={sessions.waitingOn} runIds={sessions.waitingRunIds} onStop={props.onStopRun ? stopRuns : undefined} />
+                <ChatSessionsWaitingLine members={sessions.waitingOn} text={sessions.waitingText} runIds={sessions.waitingRunIds} onStop={props.onStopRun ? stopRuns : undefined} />
               )}
               selectedThreadRootId={selectedThreadRoot?.id}
               sessionsByParticipant={sessionsByParticipant}
@@ -479,6 +484,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               } : undefined}
               onJumpToParticipantLastMessage={props.onJumpToParticipantLastMessage}
               placeholder="Message @name, /name, or #path..."
+              {...sessionsComposerProps(sessions?.mainSessionId, props.renderMemberChip)}
               status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
               testId="chat-main-composer"
               renderParticipantAvatar={renderComposerMemberMark}
@@ -508,6 +514,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               olderMessagesLoading: props.olderMessagesLoading,
               onLoadOlderMessages: props.onLoadOlderMessages,
               onSendToMember: props.onSendToMember ?? (async () => false),
+              renderMemberSettings: props.renderMemberSettings,
+              renderMemberChip: props.renderMemberChip,
               onStopRuns: props.onStopRun ? stopRuns : undefined,
               latestAccord,
               onOpenAccord: sessionsChrome.openAccord ?? rightPanel.openAccord
@@ -536,7 +544,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
       </ArtifactsContext.Provider>
     </MessageLinkContext.Provider>
     </MentionDirectoryContext.Provider>
-    </ChatSessionsPresentationContext.Provider>
+    </ChatSessionsLinksContext.Provider></ChatSessionsPresentationContext.Provider>
   );
 }
 

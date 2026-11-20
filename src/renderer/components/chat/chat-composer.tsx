@@ -80,6 +80,8 @@ export interface ChatComposerProps {
   /** What a dictation belongs to (a chat, or a thread in it); changing it
    *  drops a dictation in progress. Defaults to the chat. */
   dictationSession?: string;
+  /** The sessions view: the member's model chip, opening its settings. */
+  footerChip?: React.ReactNode;
 }
 
 export function ChatComposer(props: ChatComposerProps): JSX.Element {
@@ -352,12 +354,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
             {suggestions.offered && (
               <span className="chat-composer-hint" data-testid="chat-composer-suggestion-hint">
                 <kbd>Tab</kbd> to use
-                {suggestions.count > 1 && (
-                  <>
-                    <em>·</em>
-                    <kbd>↑</kbd><kbd>↓</kbd> {suggestions.position} of {suggestions.count}
-                  </>
-                )}
+                {suggestions.count > 1 && <><em>·</em><kbd>↑</kbd><kbd>↓</kbd> {suggestions.position} of {suggestions.count}</>}
               </span>
             )}
             {props.onOpenAccord && (
@@ -376,6 +373,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
                 <TooltipContent side="top">{accordTooltip}</TooltipContent>
               </Tooltip>
             )}
+            {props.footerChip}
             <SpeechToTextButton
               session={props.dictationSession ?? props.conversationId}
               getTextarea={() => rootRef.current?.querySelector("textarea") ?? null}

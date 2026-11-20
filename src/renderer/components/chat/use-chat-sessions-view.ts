@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useMemo, useRef } from "react";
 
 import type { ActiveChatRunSummary } from "../../../shared/chatActiveRuns";
 import { isPendingReply } from "../../../shared/chatActiveRuns";
@@ -7,44 +7,97 @@ import {
   isOtherMemberTurnFinishedNote,
   mainSessionParticipantId,
   membersMainSessionWaitsOn,
+  sessionsFormerMembers,
+  sessionsTaskPlacement,
   sessionsViewLane,
+  type SessionsFormerMember,
   type SessionsViewIndex,
   type SessionsViewLane
 } from "../../../shared/mainSession";
 import {
+  isMainSessionDelegationRosterCard,
   isMemberWorking,
   latestTaskByMember,
   openMemberCardMessages,
+  sessionsFormerMemberStatus,
+  sessionsMemberActivity,
   sessionsMemberRows,
+  sessionsMemberTitle,
+  sessionsTaskEntries,
+  sessionsWaitingText,
+  type SessionsMemberActivity,
   type SessionsMemberRow,
-  type SessionsMemberTask
+  type SessionsMemberTask,
+  type SessionsTaskEntry,
+  type SessionsWorkStatus
 } from "../../../shared/mainSessionView";
-import type { ChatMessage, ChatParticipant, ChatViewMode, Conversation } from "../../../shared/types";
+import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ChatViewMode, Conversation } from "../../../shared/types";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
-import type { ChatSessionsTimelineContext } from "./chat-sessions-timeline-row";
-import type { ChatViewHeaderState } from "./chat-view-switch";
-import type { ChatRightPanelState } from "./use-chat-right-panel";
-import type { ChatViewModeState } from "./use-chat-view-mode";
 import { isChatMessageHiddenInChat } from "./chat-thread-data";
+
+export { useChatSessionsChrome } from "./use-chat-sessions-chrome";
+
+/** A member no longer in the chat, listed read-only under "Removed". */
+export interface SessionsFormerRow {
+  member: SessionsFormerMember;
+  title: string;
+  status: SessionsWorkStatus;
+  task?: SessionsMemberTask;
+}
 
 /** Everything the sessions view shows, worked out once per change of the
  *  loaded chat (docs/main-session.md, shared/mainSession.ts). */
 export interface ChatSessionsView {
   mainSessionId: string;
   index: SessionsViewIndex;
-  /** The main timeline's messages: the User and the main session, its task
-   *  requests (drawn as task cards) and members' choice cards still open. */
+  /** The main timeline's messages: the User and the main session, and
+   *  members' choice cards still open. The main session's tasks are inside
+   *  the replies of the turns that gave them (workByReplyId); a task whose
+   *  reply is not loaded is here on its own. */
   mainMessages: ChatMessage[];
   /** Members' messages on the main timeline only for their open card. */
   openCardMessageIds: ReadonlySet<string>;
   messagesById: ReadonlyMap<string, ChatMessage>;
   tasksByMember: ReadonlyMap<string, SessionsMemberTask>;
+  activity: SessionsMemberActivity;
+  /** Each request message's tasks, by the message's id. */
+  taskEntriesByMessageId: ReadonlyMap<string, readonly SessionsTaskEntry[]>;
+  /** The tasks shown inside a reply of the main session, by the reply's id. */
+  workByReplyId: ReadonlyMap<string, readonly SessionsTaskEntry[]>;
   memberRows: { current: SessionsMemberRow[]; previous: SessionsMemberRow[] };
+  formerRows: SessionsFormerRow[];
   runningMemberCount: number;
   /** "Waiting on N members", while the main session is not answering. */
   waitingOn: ChatParticipant[];
+  waitingText: string;
   waitingRunIds: string[];
+  /** A member's (or former member's) title: its latest task's first line. */
+  memberTitle: (participantId: string) => string;
+  isFormerMember: (participantId: string) => boolean;
   laneOf: (message: ChatMessage) => SessionsViewLane;
+  /** A card the sessions view does not show: the member a delegation added. */
+  hidesApproval: (approval: ChatAppToolApproval) => boolean;
+}
+
+const NO_ENTRIES: readonly SessionsTaskEntry[] = [];
+
+/** Keeps each value's identity while its signature is the same, so a row
+ *  drawn from it is not drawn again on every update of the chat. */
+function useSignatureCache<T>(): (key: string, signature: string, value: () => T) => T {
+  const cache = useRef(new Map<string, { signature: string; value: T }>());
+  return (key, signature, value) => {
+    const known = cache.current.get(key);
+    if (known && known.signature === signature) return known.value;
+    const next = value();
+    cache.current.set(key, { signature, value: next });
+    return next;
+  };
+}
+
+function entriesSignature(entries: readonly SessionsTaskEntry[]): string {
+  return entries.map((entry) =>
+    [entry.messageId, entry.item.targetParticipantId, entry.item.replyMessageId, entry.title, entry.status, entry.since, entry.durationMs, entry.line].join("\u0001")
+  ).join("\u0002");
 }
 
 export function useChatSessionsView(input: {
@@ -56,6 +109,7 @@ export function useChatSessionsView(input: {
 }): ChatSessionsView | undefined {
   const { conversation, view, participants, participantStatusById, activeRunSummary } = input;
   const mainId = view === "sessions" ? mainSessionParticipantId(conversation.metadata) : undefined;
+  const cached = useSignatureCache<readonly SessionsTaskEntry[]>();
 
   const placement = useMemo(() => {
     if (!mainId) return undefined;
@@ -64,22 +118,47 @@ export function useChatSessionsView(input: {
     const shown = (message: ChatMessage): boolean => !isChatMessageHiddenInChat(conversation, message);
     const openCards = openMemberCardMessages(messages, index).filter(shown);
     const openCardMessageIds = new Set(openCards.map((message) => message.id));
-    const mainMessages = messages.filter((message) => openCardMessageIds.has(message.id) ||
+    const lane = messages.filter((message) => openCardMessageIds.has(message.id) ||
       (sessionsViewLane(message, index).kind === "main" && shown(message) && !isOtherMemberTurnFinishedNote(message, index)));
+    const tasks = sessionsTaskPlacement(lane, index);
     return {
       index,
-      mainMessages,
+      mainMessages: lane.filter((message) => !tasks.placedTaskIds.has(message.id)),
+      tasks,
       openCardMessageIds,
       messagesById: new Map(messages.map((message) => [message.id, message])),
       tasksByMember: latestTaskByMember(messages),
+      activity: sessionsMemberActivity(messages),
       waitingIds: membersMainSessionWaitsOn(messages, index),
-      mainStreaming: messages.some((message) => isPendingReply(message) && message.participantId === mainId)
+      mainStreaming: messages.some((message) => isPendingReply(message) && message.participantId === mainId),
+      requestMessages: messages.filter((message) => message.metadata?.participantRequest)
     };
   }, [conversation.messages, mainId]);
+
+  const former = useMemo(
+    () => (mainId ? sessionsFormerMembers(conversation.messages, participants, mainId) : []),
+    [conversation.messages, mainId, participants]
+  );
 
   return useMemo(() => {
     if (!mainId || !placement) return undefined;
     const byId = new Map(participants.map((participant) => [participant.id, participant]));
+    const formerById = new Map(former.map((member) => [member.id, member]));
+    const memberTitle = (participantId: string): string => {
+      const task = placement.tasksByMember.get(participantId)?.item;
+      return sessionsMemberTitle(byId.get(participantId) ?? formerById.get(participantId), task);
+    };
+    const taskEntriesByMessageId = new Map<string, readonly SessionsTaskEntry[]>();
+    for (const message of placement.requestMessages) {
+      const batch = message.metadata!.participantRequest!;
+      const entries = sessionsTaskEntries(message, batch, participantStatusById, placement.activity, placement.messagesById);
+      taskEntriesByMessageId.set(message.id, cached(message.id, entriesSignature(entries), () => entries));
+    }
+    const workByReplyId = new Map<string, readonly SessionsTaskEntry[]>();
+    for (const [replyId, tasks] of placement.tasks.tasksByReplyId) {
+      const entries = tasks.flatMap((task) => taskEntriesByMessageId.get(task.id) ?? NO_ENTRIES);
+      workByReplyId.set(replyId, cached(`reply:${replyId}`, entriesSignature(entries), () => entries));
+    }
     const waitingOn = placement.mainStreaming
       ? []
       : placement.waitingIds.flatMap((id) => {
@@ -94,98 +173,23 @@ export function useChatSessionsView(input: {
       openCardMessageIds: placement.openCardMessageIds,
       messagesById: placement.messagesById,
       tasksByMember: placement.tasksByMember,
-      memberRows: sessionsMemberRows(participants, mainId, participantStatusById, placement.tasksByMember),
+      activity: placement.activity,
+      taskEntriesByMessageId,
+      workByReplyId,
+      memberRows: sessionsMemberRows(participants, mainId, participantStatusById, placement.tasksByMember, placement.activity.finishedAt),
+      formerRows: former.map((member) => {
+        const task = placement.tasksByMember.get(member.id);
+        return { member, title: memberTitle(member.id), status: sessionsFormerMemberStatus(task?.item), ...(task ? { task } : {}) };
+      }),
       runningMemberCount: participants.filter((participant) =>
         participant.id !== mainId && isMemberWorking(participantStatusById.get(participant.id))).length,
       waitingOn,
+      waitingText: sessionsWaitingText(waitingOn.map((participant) => memberTitle(participant.id))),
       waitingRunIds: waitingOn.flatMap((participant) => activeRunSummary.runIdsByParticipantId.get(participant.id) ?? []),
-      laneOf: (message: ChatMessage) => sessionsViewLane(message, index)
+      memberTitle,
+      isFormerMember: (participantId: string) => formerById.has(participantId),
+      laneOf: (message: ChatMessage) => sessionsViewLane(message, index),
+      hidesApproval: (approval: ChatAppToolApproval) => isMainSessionDelegationRosterCard(approval, mainId)
     };
-  }, [activeRunSummary, mainId, participantStatusById, participants, placement]);
-}
-
-/** What the sessions view gives the timeline's rows and the header (the
- *  task cards' context, the view switch, the members button), and the way a
- *  member's message reached from elsewhere opens its session. */
-export function useChatSessionsChrome(input: {
-  sessions: ChatSessionsView | undefined;
-  viewMode: ChatViewModeState;
-  rightPanel: ChatRightPanelState;
-  messages: readonly ChatMessage[];
-  participantsById: ReadonlyMap<string, ChatParticipant>;
-  closeArtifacts: () => void;
-}): {
-  timeline?: ChatSessionsTimelineContext;
-  header: ChatViewHeaderState;
-  openOutsideTimeline?: (messageId: string) => boolean;
-  /** The sessions view: an Accord opens in the right panel (again: closes). */
-  openAccord?: (launchId: string) => void;
-} {
-  const { sessions, viewMode, rightPanel, messages } = input;
-  const latest = useRef(input);
-  latest.current = input;
-  const openMember = useCallback((participantId: string) => {
-    latest.current.closeArtifacts();
-    latest.current.rightPanel.openMember(participantId);
-  }, []);
-  const openAccord = useCallback((launchId: string) => {
-    const { rightPanel: panel, closeArtifacts } = latest.current;
-    if (panel.panel?.kind === "accord" && panel.panel.launchId === launchId) {
-      panel.close();
-      return;
-    }
-    closeArtifacts();
-    panel.openAccord(launchId);
-  }, []);
-  // Search, Activity or a link reaching a member's message: its session opens.
-  const openOutsideTimeline = useCallback((messageId: string): boolean => {
-    const current = latest.current.sessions;
-    const message = current?.messagesById.get(messageId);
-    const lane = message ? current?.laneOf(message) : undefined;
-    if (lane?.kind !== "member" || !latest.current.participantsById.has(lane.participantId)) {
-      return false;
-    }
-    openMember(lane.participantId);
-    return true;
-  }, [openMember]);
-  const timeline = useMemo<ChatSessionsTimelineContext | undefined>(
-    () => (sessions ? { sessions, messages, onOpenMember: openMember } : undefined),
-    [sessions, messages, openMember]
-  );
-  const kind = rightPanel.panel?.kind;
-  const inSessions = Boolean(sessions);
-  const shownMemberId = rightPanel.panel?.kind === "member" ? rightPanel.panel.participantId : undefined;
-  const memberGone = shownMemberId !== undefined && !input.participantsById.has(shownMemberId);
-  // A thread belongs to the classic view, the members to the sessions view;
-  // a member's session closes once the member is no longer in the chat.
-  useEffect(() => {
-    if ((kind && (kind === "thread") === inSessions) || memberGone) {
-      rightPanel.close();
-    }
-  }, [kind, inSessions, memberGone, rightPanel.close]);
-  const membersOpen = kind === "members" || kind === "member";
-  const runningCount = sessions?.runningMemberCount;
-  const header = useMemo<ChatViewHeaderState>(() => ({
-    view: viewMode.view,
-    canSwitch: viewMode.canSwitch,
-    onChangeView: viewMode.setView,
-    members: runningCount === undefined ? undefined : {
-      runningCount,
-      open: membersOpen,
-      onToggle: () => {
-        if (membersOpen) {
-          rightPanel.close();
-          return;
-        }
-        latest.current.closeArtifacts();
-        rightPanel.openMembers();
-      }
-    }
-  }), [viewMode.view, viewMode.canSwitch, viewMode.setView, runningCount, membersOpen, rightPanel.close, rightPanel.openMembers]);
-  return {
-    timeline,
-    header,
-    openOutsideTimeline: inSessions ? openOutsideTimeline : undefined,
-    openAccord: inSessions ? openAccord : undefined
-  };
+  }, [activeRunSummary, former, mainId, participantStatusById, participants, placement]);
 }

@@ -58,12 +58,14 @@ export function sessionsMessages(): ChatMessage[] {
   return [
     chatMessage("intro", "system", 0, { content: "Chat started." }),
     chatMessage("ask", "user", 1, { content: "Fix the login bug", metadata: { askedParticipantIds: [MAIN.id] } }),
-    chatMessage("main-1", "participant", 2, { participantId: MAIN.id, participantLabel: "main", content: "On it, giving the parts to two members." }),
+    chatMessage("main-1", "participant", 2, {
+      participantId: MAIN.id, participantLabel: "main", content: "On it, giving the parts to two members.", metadata: { sourceMessageId: "ask", runId: "run-main", workedMs: 54_000 }
+    }),
     chatMessage("tasks", "participant", 3, {
       participantId: MAIN.id,
       participantLabel: "main",
       content: "@drew Task\n@gera Task",
-      metadata: { participantRequest: requestBatch("b1", MAIN, [requestItem(DREW, "running", 3), requestItem(GERA, "answered", 3, { replyMessageId: "gera-reply" })]) }
+      metadata: { sourceMessageId: "ask", participantRequest: requestBatch("b1", MAIN, [requestItem(DREW, "running", 3), requestItem(GERA, "answered", 3, { replyMessageId: "gera-reply" })]) }
     }),
     chatMessage("drew-question", "participant", 4, {
       participantId: DREW.id,

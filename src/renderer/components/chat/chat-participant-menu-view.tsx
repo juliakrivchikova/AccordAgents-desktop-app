@@ -1,7 +1,7 @@
 import type { MemberRestartInProgress } from "../../../shared/memberRestart";
 import { memberSessionMoves } from "../../../shared/memberSessionMove";
 import React, { useState } from "react";
-import { ChevronLeft, ChevronRight, Plus, Users } from "lucide-react";
+import { ChevronLeft, ChevronRight, Plus, Settings2, Users } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { IconButton } from "../primitives";
@@ -55,6 +55,10 @@ export interface ChatParticipantMenuViewProps {
   onRemoveParticipant: (participantId: string) => void;
   onJumpToParticipantLastMessage: (participantId: string) => void;
   onManageInSettings: () => void;
+  /** One member's settings only (the sessions view, from its session or its
+   *  model chip), opened by this trigger (a gear by default). */
+  memberId?: string;
+  trigger?: React.ReactNode;
 }
 
 export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JSX.Element {
@@ -105,15 +109,53 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
     return undefined;
   }
 
+  function renderRosterRow(participant: ChatParticipant, expanded: boolean): JSX.Element {
+    return (
+      <ChatParticipantRosterRow
+        key={participant.id}
+        defaultExpanded={expanded}
+        participant={participant}
+        removeDisabledReason={participantRemoveDisabledReason(participant)}
+        busy={memberWorking(participant)}
+        status={props.participantStatusById.get(participant.id) ?? "idle"}
+        autoWatchDisabledReason={
+          activeWatcher && activeWatcher.id !== participant.id
+            ? "Only one member can watch a chat. Turn off the current watcher first."
+            : undefined
+        }
+        autoWatchPausedReason={props.participantWatchers?.[participant.id]?.pausedReason}
+        roleParticipantDefaults={props.participantRoleDefaults(participant)}
+        renderParticipantAvatar={props.renderParticipantAvatar}
+        participantRoleLabel={props.participantRoleLabel}
+        participantRoleArchived={props.participantRoleArchived}
+        runLocationLocked={props.participantHasRunById.get(participant.id) === true && !memberSessionMoves(participant)}
+        runLocationMoves={props.participantHasRunById.get(participant.id) === true && memberSessionMoves(participant)}
+        onInsertMention={insertParticipantMention}
+        onJumpToLastMessage={jumpToParticipantLastMessage}
+        onUpdateParticipantRuntime={props.onUpdateParticipantRuntime}
+        onCompactParticipant={props.onCompactParticipant}
+        onRestartParticipant={props.onRestartParticipant}
+        onStopRestart={props.onStopRestart}
+        restartStatus={props.restartingById?.get(participant.id)}
+        onRemoveParticipant={props.onRemoveParticipant}
+      />
+    );
+  }
+
+  const only = props.memberId ? props.participants.filter((participant) => participant.id === props.memberId) : undefined;
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
-        <IconButton
-          label={participantCountLabel}
-          icon={Users}
-          tooltip="Members"
-          data-testid="chat-participants-trigger"
-        />
+        {only ? props.trigger ?? (
+          <IconButton label="Member settings" icon={Settings2} tooltip="Settings" data-testid="chat-member-settings-trigger" />
+        ) : (
+          <IconButton
+            label={participantCountLabel}
+            icon={Users}
+            tooltip="Members"
+            data-testid="chat-participants-trigger"
+          />
+        )}
       </PopoverTrigger>
       <PopoverContent
         align="end"
@@ -121,7 +163,11 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
         data-testid="chat-participants-popover"
         className="chat-participant-popover w-[min(640px,calc(100vw-32px))] max-h-[min(720px,calc(100vh-96px))] overflow-auto p-2"
       >
-        {view === "create" ? (
+        {only ? (
+          <div className="chat-participant-popover-list" data-testid="chat-member-settings">
+            {only.map((participant) => renderRosterRow(participant, true))}
+          </div>
+        ) : view === "create" ? (
           <div className="chat-participant-create">
             <div className="chat-participant-create-head">
               <IconButton size="xs" label="Back to members" icon={ChevronLeft} onClick={() => setView("roster")} />
@@ -149,35 +195,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
         ) : (
           <>
             <div className="chat-participant-popover-list">
-              {props.participants.map((participant) => (
-                <ChatParticipantRosterRow
-                  key={participant.id}
-                  participant={participant}
-                  removeDisabledReason={participantRemoveDisabledReason(participant)}
-                  busy={memberWorking(participant)}
-                  status={props.participantStatusById.get(participant.id) ?? "idle"}
-                  autoWatchDisabledReason={
-                    activeWatcher && activeWatcher.id !== participant.id
-                      ? "Only one member can watch a chat. Turn off the current watcher first."
-                      : undefined
-                  }
-                  autoWatchPausedReason={props.participantWatchers?.[participant.id]?.pausedReason}
-                  roleParticipantDefaults={props.participantRoleDefaults(participant)}
-                  renderParticipantAvatar={props.renderParticipantAvatar}
-                  participantRoleLabel={props.participantRoleLabel}
-                  participantRoleArchived={props.participantRoleArchived}
-                  runLocationLocked={props.participantHasRunById.get(participant.id) === true && !memberSessionMoves(participant)}
-                  runLocationMoves={props.participantHasRunById.get(participant.id) === true && memberSessionMoves(participant)}
-                  onInsertMention={insertParticipantMention}
-                  onJumpToLastMessage={jumpToParticipantLastMessage}
-                  onUpdateParticipantRuntime={props.onUpdateParticipantRuntime}
-                  onCompactParticipant={props.onCompactParticipant}
-                  onRestartParticipant={props.onRestartParticipant}
-                  onStopRestart={props.onStopRestart}
-                  restartStatus={props.restartingById?.get(participant.id)}
-                  onRemoveParticipant={props.onRemoveParticipant}
-                />
-              ))}
+              {props.participants.map((participant) => renderRosterRow(participant, false))}
             </div>
             <button
               type="button"

@@ -6,8 +6,11 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ChatViewMode, ChatViewState, Conversation, SetChatViewRequest } from "../../../shared/types";
 import {
   CHAT_VIEW_SWITCH_DISABLED_REASON,
+  ChatClassicOnly,
   ChatViewHeaderContext,
   ChatViewHeaderControls,
+  ChatViewMenuItems,
+  ChatViewTitleMenu,
   type ChatViewHeaderState
 } from "./chat-view-switch";
 import { useChatViewMode, type ChatViewModeState } from "./use-chat-view-mode";
@@ -20,13 +23,16 @@ const byTestId = (id: string) => (node: ReactTestInstance): boolean => typeof no
 
 function renderHeader(state: ChatViewHeaderState | undefined): ReturnType<typeof create> {
   let renderer: ReturnType<typeof create> | undefined;
+  // One DOM node for every ref: the icon button's tooltip anchors to it.
+  const node = document.createElement("button");
   act(() => {
     renderer = create(
       <TooltipProvider>
         <ChatViewHeaderContext.Provider value={state}>
           <ChatViewHeaderControls />
         </ChatViewHeaderContext.Provider>
-      </TooltipProvider>
+      </TooltipProvider>,
+      { createNodeMock: () => node }
     );
   });
   return renderer!;
@@ -51,30 +57,66 @@ test("outside a chat view the header shows no view controls", () => {
   act(() => renderer.unmount());
 });
 
-test("a main-session chat switches its view from the header and, in the sessions view, opens its members", () => {
+test("the classic view keeps its switch in the header", () => {
+  const changes: ChatViewMode[] = [];
+  const renderer = renderHeader({ view: "classic", canSwitch: true, onChangeView: (view) => changes.push(view) });
+  const root = renderer.root;
+  const group = root.find(byTestId("chat-view-switch"));
+  assert.equal(group.props["data-disabled-reason"], undefined);
+  act(() => root.find(byTestId("chat-view-switch-sessions")).props.onClick());
+  assert.deepEqual(changes, ["sessions"]);
+  assert.deepEqual(group.findAll((node) => node.type === "button").map((button) => button.props["aria-label"]), ["Sessions", "Classic"]);
+  act(() => renderer.unmount());
+});
+
+test("the sessions view's header has no text buttons: one icon toggles its side panel, with how many run; the view switch is in the title's menu", () => {
   const changes: ChatViewMode[] = [];
   let toggles = 0;
-  const renderer = renderHeader({
+  const state: ChatViewHeaderState = {
     view: "sessions",
     canSwitch: true,
     onChangeView: (view) => changes.push(view),
     members: { runningCount: 2, open: false, onToggle: () => { toggles += 1; } }
-  });
+  };
+  const renderer = renderHeader(state);
   const root = renderer.root;
-  const group = root.find(byTestId("chat-view-switch"));
-  assert.equal(group.props["data-disabled-reason"], undefined);
-  act(() => root.find(byTestId("chat-view-switch-classic")).props.onClick());
-  assert.deepEqual(changes, ["classic"]);
-  const members = root.find(byTestId("chat-members-button"));
-  assert.equal(members.props["aria-label"], "Members (2 running)");
-  assert.equal(textOf(members.find((node) => node.props?.className === "chat-members-button-label")), "Members (2 running)");
-  // A narrow header shows the icon and how many run instead (chat-sessions.css).
-  assert.equal(textOf(members.find((node) => node.props?.className === "chat-members-button-count")), "2");
-  assert.deepEqual(group.findAll((node) => node.type === "button").map((button) => button.props["aria-label"]), ["Sessions", "Classic"],
-    "the switch keeps its names when only its icons show");
-  act(() => members.props.onClick());
+  assert.equal(root.findAll(byTestId("chat-view-switch")).length, 0, "no switch among the header's actions");
+  const toggle = root.find((node) => node.type === "button" && node.props["data-testid"] === "chat-members-button");
+  assert.equal(toggle.props["aria-label"], "Side panel (2 running)");
+  assert.equal(textOf(root.find(byTestId("chat-side-panel-badge"))), "2");
+  assert.equal(textOf(toggle), "", "an icon, no text");
+  act(() => toggle.props.onClick({ defaultPrevented: false, preventDefault: noop }));
   assert.equal(toggles, 1);
   act(() => renderer.unmount());
+
+  const quiet = renderHeader({ ...state, members: { runningCount: 0, accordOpen: true, open: true, onToggle: noop } });
+  assert.equal(quiet.root.findAll(byTestId("chat-side-panel-badge")).length, 0);
+  assert.equal(quiet.root.findAll(byTestId("chat-side-panel-dot")).length, 1, "an open Accord puts a dot on it");
+  act(() => quiet.unmount());
+
+  const anchor = document.createElement("button");
+  let menu: ReturnType<typeof create> | undefined;
+  act(() => {
+    menu = create(
+      <TooltipProvider>
+        <ChatViewHeaderContext.Provider value={state}>
+          <ChatViewTitleMenu />
+          <ChatClassicOnly><span data-testid="roster" /></ChatClassicOnly>
+        </ChatViewHeaderContext.Provider>
+      </TooltipProvider>,
+      { createNodeMock: () => anchor }
+    );
+  });
+  assert.equal(menu!.root.findAll(byTestId("roster")).length, 0, "the roster's popover is not in the sessions view");
+  assert.equal(menu!.root.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-title-menu").length, 1, "a chevron by the title");
+  act(() => menu!.unmount());
+  // What the menu holds (it opens in a portal).
+  let items: ReturnType<typeof create> | undefined;
+  act(() => { items = create(<ChatViewMenuItems state={state} />); });
+  assert.equal(items!.root.find(byTestId("chat-view-switch-sessions")).props["aria-checked"], true);
+  act(() => items!.root.find(byTestId("chat-view-switch-classic")).props.onClick());
+  assert.deepEqual(changes, ["classic"]);
+  act(() => items!.unmount());
 });
 
 function viewModeHarness(conversation: Conversation, calls: SetChatViewRequest[], answer: (request: SetChatViewRequest) => Promise<ChatViewState | undefined>) {

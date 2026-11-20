@@ -49,11 +49,13 @@ export function ChatParticipantRosterRow(props: {
   /** Its restart has not ended (also after this row closed and opened again). */
   restartStatus?: MemberRestartInProgress;
   onRemoveParticipant: (participantId: string) => void;
+  /** Opened at its settings (one member's settings, the sessions view). */
+  defaultExpanded?: boolean;
 }): JSX.Element {
   const displayName = chatParticipantDisplayName(props.participant);
   const roleLabel = props.participantRoleLabel(props.participant);
   const roleArchived = props.participantRoleArchived(props.participant);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(props.defaultExpanded === true);
   const compactDisabled = !canCompactParticipant(props.status);
   const backgroundTasks = useContext(ChatBackgroundTasksContext).get(props.participant.id) ?? [];
   const [confirmingRestart, setConfirmingRestart] = useState(false);

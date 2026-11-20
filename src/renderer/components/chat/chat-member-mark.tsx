@@ -1,5 +1,6 @@
 import { createContext, useContext } from "react";
 
+import { MAIN_SESSION_ROLE_ID } from "../../../shared/mainSession";
 import type { ChatParticipant, ChatProviderKind } from "../../../shared/types";
 import { Avatar } from "../avatar/avatar";
 import { avatarForChatParticipant, type AvatarSpec } from "./chat-avatars";
@@ -60,4 +61,12 @@ export function ChatMemberMark(props: {
 /** A member's mark in a composer's member lists (@ suggestions, what runs). */
 export function renderComposerMemberMark(participant: ChatParticipant): JSX.Element {
   return <ChatMemberMark className="mini-avatar" markClassName="is-mini" avatar={avatarForChatParticipant(participant)} member={participant} />;
+}
+
+/** A member's mark on the New chat screen: the main session has no avatar
+ *  picture, its provider's logo is its mark (as in the sessions view). */
+export function renderNewChatMemberMark(participant: ChatParticipant): JSX.Element {
+  return participant.roleConfigId === MAIN_SESSION_ROLE_ID
+    ? <ChatProviderMark member={participant} className="is-mini" />
+    : <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />;
 }
