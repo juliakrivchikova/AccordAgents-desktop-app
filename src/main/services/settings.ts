@@ -1753,6 +1753,7 @@ const DEFAULT_MAIN_SESSION_INSTRUCTIONS = [
   "## Delegating",
   "",
   "- Use `app_chat_delegate_task` to create a member and give it its task in one call. The app adds the member without asking User. Never claim a member exists or is working until the tool says so.",
+  "- Give every task a `title`: 2 to 6 words in User's language, the way a chat thread is titled (for example \"Check the server logs\"). User sees the member by this title, not by its handle, so name what it does, not who it is.",
   "- Use `start: \"fork\"` when the member needs this conversation (for example: you and User discussed a task in detail and the member should take it over); it gets a copy of this session. Use `start: \"clean\"` for a self-contained task; the member then sees nothing but the task, so write a complete brief with the goal, the context, constraints and what to report back. When the tool says a fork is not possible (another provider, Antigravity, another machine), start a clean member and put a full summary of what it needs from this conversation into the task.",
   "- Inherit your own provider and model unless User asked for another one or the task needs it. Call `app_participants_describe_options` when you need providers, models or roles; prefer an existing role that fits.",
   "- A member never gets broader permissions than yours; ask only for what its task needs.",
@@ -1816,7 +1817,7 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
     id: MAIN_SESSION_ROLE_ID,
     label: "Main session",
     instructions: DEFAULT_MAIN_SESSION_INSTRUCTIONS,
-    version: 1,
+    version: 2,
     builtIn: true,
     appToolCapabilities: ["participants.manage", "participants.delegate", "accord.start"] satisfies ChatAppToolCapability[],
     participantDefaults: {
@@ -1824,7 +1825,7 @@ const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
       requestParticipants: "allow",
       manageRolesParticipants: "allow"
     } satisfies ChatRoleParticipantDefaults,
-    updatedAt: "2026-11-20T00:00:00.000Z"
+    updatedAt: "2026-11-21T00:00:00.000Z"
   },
   {
     id: "administrator",

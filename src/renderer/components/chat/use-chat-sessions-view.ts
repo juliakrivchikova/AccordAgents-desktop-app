@@ -71,7 +71,7 @@ export interface ChatSessionsView {
   waitingOn: ChatParticipant[];
   waitingText: string;
   waitingRunIds: string[];
-  /** A member's (or former member's) title: its latest task's first line. */
+  /** A member's (or former member's) title: its latest task's short title. */
   memberTitle: (participantId: string) => string;
   isFormerMember: (participantId: string) => boolean;
   laneOf: (message: ChatMessage) => SessionsViewLane;

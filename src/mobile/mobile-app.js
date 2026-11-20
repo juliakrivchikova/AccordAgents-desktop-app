@@ -5238,6 +5238,8 @@
         targetParticipantId: item.targetParticipantId,
         targetHandle: text(item.targetHandle),
         prompt: text(item.prompt),
+        // Its short title, as the desktop names the member by it.
+        ...(typeof item.title === "string" && item.title ? { title: item.title } : {}),
         status: item.status,
         createdAt: text(item.createdAt),
         ...(typeof item.updatedAt === "string" && item.updatedAt ? { updatedAt: item.updatedAt } : {}),
@@ -11759,7 +11761,7 @@
   }
 
   /** A member as the sessions view names it (T3 Code's way): its current or
-   *  latest task's first line; no handle. */
+   *  latest task's short title (shared sessionsTaskTitle); no handle. */
   function sessionsMemberTitleOf(state, memberOrId) {
     const shared = sessionsRules();
     const id = typeof memberOrId === "string" ? memberOrId : memberOrId && memberOrId.id;

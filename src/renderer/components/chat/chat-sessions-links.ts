@@ -10,7 +10,7 @@ import type { ChatProviderKind } from "../../../shared/types";
  */
 export interface ChatSessionsMemberLink {
   id: string;
-  /** Its current or latest task's first line (sessionsMemberTitle). */
+  /** Its current or latest task's short title (sessionsMemberTitle). */
   title: string;
   kind?: ChatProviderKind;
   hostLabel?: string;

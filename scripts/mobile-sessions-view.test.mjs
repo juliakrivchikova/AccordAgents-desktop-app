@@ -82,8 +82,9 @@ function sessionsChatMessages() {
       metadata: { sourceMessageId: "u1", workedMs: 54_000 } },
     request("req", "u1", 28, [
       item(DREW.id, "drew", "Restyle the login button\nUse the new tokens.", "running", 28),
-      item(TAYLOR.id, "taylor", "Run the login tests", "answered", 28, { replyMessageId: "taylor-reply", doneAt: 5 }),
-      item(SAM.id, "sam", "Check the server logs", "running", 28)
+      // The main session titled this one; the others are named by their task's first sentence.
+      item(TAYLOR.id, "taylor", "Run the login tests", "answered", 28, { replyMessageId: "taylor-reply", doneAt: 5, title: "Login tests" }),
+      item(SAM.id, "sam", "Check the server logs for every failed login since Monday and group them by reason. Report the counts.", "running", 28)
     ]),
     { id: "taylor-reply", role: "participant", participantId: TAYLOR.id, participantLabel: "@taylor", content: "All 42 login tests pass.\nDetails below.", status: "done", createdAt: at(6),
       metadata: { sourceMessageId: "req" } },
@@ -150,8 +151,9 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
       chips: [...row.querySelectorAll(".sessions-member-chip")].map((chip) => [chip.dataset.openMember, chip.querySelector(".provider-logo").dataset.providerKind, chip.textContent]),
       worked: row.querySelector(".sessions-worked-toggle")?.textContent, open: row.querySelectorAll(".sessions-delegation").length,
       order: [...row.querySelector(".message-copy").children].map((node) => node.className.split(" ")[0]) }; })()`);
-  assert.equal(reply.text, "I split this: Restyle the login button restyles it, Run the login tests tests it and Check the server logs reads the logs. Ask main or nobody.");
-  assert.deepEqual(reply.chips, [["p-drew", "claude-code", "Restyle the login button"], ["p-taylor", "codex-cli", "Run the login tests"], ["p-sam", "gemini-cli", "Check the server logs"]]);
+  assert.equal(reply.text, "I split this: Restyle the login button restyles it, Login tests tests it and Check the server logs for every failed… reads the logs. Ask main or nobody.");
+  assert.deepEqual(reply.chips, [["p-drew", "claude-code", "Restyle the login button"], ["p-taylor", "codex-cli", "Login tests"], ["p-sam", "gemini-cli", "Check the server logs for every failed…"]],
+    "short titles: the main session's, else the task's first sentence cut at a word");
   assert.equal(reply.worked, "Worked for 54s", "the turn's work, folded");
   assert.equal(reply.open, 0, "folded once the reply is finished");
   assert.deepEqual(reply.order.slice(0, 3), ["message-meta", "sessions-worked", "message-content"], "the fold comes before the reply's text");
@@ -173,18 +175,18 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   assert.equal(fold.summary, "Delegated 3 tasks");
   assert.deepEqual(fold.rows.map((row) => [row.member, row.status, row.focus, row.logo, row.dot, row.title, row.result]), [
     ["p-drew", "running", "drew-run", "claude-code", "sessions-logo-dot is-running", "Restyle the login button", ""],
-    ["p-taylor", "done", "taylor-reply", "codex-cli", "sessions-logo-dot is-done", "Run the login tests", "All 42 login tests pass."],
-    ["p-sam", "running", "sam-run", "gemini-cli", "sessions-logo-dot is-running", "Check the server logs", ""]
+    ["p-taylor", "done", "taylor-reply", "codex-cli", "sessions-logo-dot is-done", "Login tests", "All 42 login tests pass."],
+    ["p-sam", "running", "sam-run", "gemini-cli", "sessions-logo-dot is-running", "Check the server logs for every failed…", ""]
   ]);
   assert.match(fold.rows[0].time, /^\d+m \d+s$/, "a running task counts up");
   assert.equal(fold.rows[1].time, "23m 0s", "an ended task says how long it took");
   // The Waiting line names the tasks, and stops them.
-  assert.equal(await app.evaluate(`document.querySelector(".sessions-waiting-text").textContent`), "Waiting on 2 members: Restyle the login button, Check the server logs");
+  assert.equal(await app.evaluate(`document.querySelector(".sessions-waiting-text").textContent`), "Waiting on 2 members: Restyle the login button, Check the server logs for every failed…");
   assert.equal(await app.evaluate(`document.querySelector(".sessions-waiting .sessions-stop").disabled`), false, "the Waiting line has Stop, though one of them has written nothing yet");
 
   // --- a delegation row opens the member's session at its message ----------
   await app.evaluate(`document.querySelector('#message-list .sessions-delegation[data-open-member="p-taylor"]').click()`);
-  await app.waitFor(`${title} === "Run the login tests" && document.querySelector('#message-list .message-row.message-focused[data-thread-root="taylor-reply"]') !== null`,
+  await app.waitFor(`${title} === "Login tests" && document.querySelector('#message-list .message-row.message-focused[data-thread-root="taylor-reply"]') !== null`,
     "taylor's session, at its reply");
   assert.deepEqual(await app.evaluate(rowsSummary), ["member-head:member-session-head\u0000p-taylor", "task-fold:req", "agent:taylor-reply"]);
   await app.evaluate(`document.getElementById("back-to-timeline").click()`);
@@ -226,7 +228,7 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   assert.equal(sheet.stopAll, true);
   assert.deepEqual(sheet.main, ["Main session", "claude-code"], "the main session first");
   assert.match(sheet.accord, /^AccordButton colour · Drafts/, "the chat's Accord, by its document");
-  assert.deepEqual(sheet.rows, [["p-drew", "running", "Restyle the login button", "claude-code", true], ["p-sam", "running", "Check the server logs", "gemini-cli", true]],
+  assert.deepEqual(sheet.rows, [["p-drew", "running", "Restyle the login button", "claude-code", true], ["p-sam", "running", "Check the server logs for every failed…", "gemini-cli", true]],
     "the members at work, by task, with Stop; the one that ended under Previous");
   assert.deepEqual(sheet.groups, ["Previous1", "Removed1"]);
   assert.equal(sheet.handles, false, "no handles in the panel");
@@ -307,7 +309,7 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   await app.waitFor(`[...document.querySelectorAll("#activity-list .act-row")].some((row) => row.innerText.includes("All 42 login tests pass"))`, "taylor's reply in Activity");
   await sleep(700);
   await app.evaluate(`[...document.querySelectorAll("#activity-list .act-row")].find((row) => row.innerText.includes("All 42 login tests pass")).click()`);
-  await app.waitFor(`${title} === "Run the login tests" && document.querySelector('#message-list .message-row[data-thread-root="taylor-reply"]') !== null`,
+  await app.waitFor(`${title} === "Login tests" && document.querySelector('#message-list .message-row[data-thread-root="taylor-reply"]') !== null`,
     "taylor's session, from Activity");
   await app.evaluate(`document.getElementById("back-to-timeline").click()`);
   await app.waitFor(mainShown, "back");

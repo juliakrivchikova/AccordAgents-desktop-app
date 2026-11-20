@@ -9,7 +9,7 @@ import type {
   Conversation
 } from "../../shared/types";
 import { chatMessageAddressees } from "../../shared/mainSession";
-import { firstTextLine } from "../../shared/mainSessionView";
+import { firstTextLine, sessionsTaskTitle } from "../../shared/mainSessionView";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
 import { chatInterimPostsOf } from "../../shared/interimPosts";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
@@ -200,6 +200,10 @@ export interface MobileTaskItem {
   targetHandle: string;
   /** The task's first line (PHONE_TASK_LINE_CHARS at most). */
   prompt: string;
+  /** The task's short title (shared/mainSessionView.ts sessionsTaskTitle):
+   *  the main session's, else made from the whole task as the desktop makes
+   *  it. */
+  title: string;
   status: ChatParticipantRequestStatus;
   createdAt: string;
   /** When its status last changed: how long an ended task took. */
@@ -433,6 +437,7 @@ export function mobileTaskBatch(batch: ChatParticipantRequestBatch | undefined):
       targetParticipantId: item.targetParticipantId,
       targetHandle: typeof item.targetHandle === "string" ? item.targetHandle : "",
       prompt: firstTextLine(typeof item.prompt === "string" ? item.prompt : "", PHONE_TASK_LINE_CHARS),
+      title: sessionsTaskTitle(item),
       status: item.status,
       createdAt: typeof item.createdAt === "string" ? item.createdAt : batch.createdAt,
       ...(typeof item.updatedAt === "string" && item.updatedAt ? { updatedAt: item.updatedAt } : {}),

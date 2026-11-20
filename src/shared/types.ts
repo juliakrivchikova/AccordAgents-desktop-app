@@ -1308,6 +1308,10 @@ export interface ChatParticipantRequestItem {
   targetParticipantId: string;
   targetHandle: string;
   prompt: string;
+  /** The main session's short title for its task (app_chat_delegate_task),
+   *  as T3 Code titles a thread: the sessions view names the member by it.
+   *  Without one the task's first sentence stands in (sessionsTaskTitle). */
+  title?: string;
   reason?: string;
   status: ChatParticipantRequestStatus;
   replyMessageId?: string;

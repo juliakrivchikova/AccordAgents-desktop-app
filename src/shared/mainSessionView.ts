@@ -130,13 +130,42 @@ export function sessionsTaskReplyLine(
   return firstTextLine(reply.content) || undefined;
 }
 
+/** The longest a task's title made from its text runs, "…" included. */
+export const SESSIONS_TASK_TITLE_MAX_CHARS = 40;
+/** The longest a title the main session gave is kept. */
+export const SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS = 80;
+
+/** A text cut at a word boundary to `max` characters at most, "…" included
+ *  when it was cut. */
+export function shortenAtWord(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const room = text.slice(0, Math.max(1, max - 1));
+  const space = room.lastIndexOf(" ");
+  const cut = (space > 0 ? room.slice(0, space) : room).replace(/[\s,;:.!?—–-]+$/u, "");
+  return `${cut || room}…`;
+}
+
+/** A task's short title, as T3 Code titles a thread ("Спросить у Claude, как
+ *  дела"): the one the main session gave it (app_chat_delegate_task), else
+ *  the task's first sentence without its full stop, cut at a word to
+ *  SESSIONS_TASK_TITLE_MAX_CHARS. Empty for a task without text. */
+export function sessionsTaskTitle(item: Pick<ChatParticipantRequestItem, "prompt"> & { title?: unknown }): string {
+  const given = typeof item.title === "string" ? item.title.replace(/\s+/g, " ").trim() : "";
+  if (given) return shortenAtWord(given, SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS);
+  const line = firstTextLine(typeof item.prompt === "string" ? item.prompt : "", Number.MAX_SAFE_INTEGER);
+  const sentence = /^.+?[.!?…](?=\s|$)/u.exec(line)?.[0] ?? line;
+  const plain = sentence.replace(/[\s.,;:]+$/u, "") || sentence;
+  return shortenAtWord(plain, SESSIONS_TASK_TITLE_MAX_CHARS);
+}
+
 /** A member's title in the sessions view (as in T3 Code): its current or
- *  latest task's first line; its handle without "@" only while it has none. */
+ *  latest task's title (sessionsTaskTitle); its handle without "@" only
+ *  while it has none. */
 export function sessionsMemberTitle(
   member: { handle?: string } | undefined,
-  task?: Pick<ChatParticipantRequestItem, "prompt" | "targetHandle">
+  task?: Pick<ChatParticipantRequestItem, "prompt" | "targetHandle"> & { title?: unknown }
 ): string {
-  return firstTextLine(task?.prompt, 80) || (member?.handle ?? task?.targetHandle ?? "").trim().replace(/^@/, "") || "Member";
+  return (task ? sessionsTaskTitle(task) : "") || (member?.handle ?? task?.targetHandle ?? "").trim().replace(/^@/, "") || "Member";
 }
 
 /** The line under a member's title: its provider, model and role (the role

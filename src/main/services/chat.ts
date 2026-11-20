@@ -1,5 +1,6 @@
 import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelection } from "../../shared/cloudRunPreparation";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
+import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, shortenAtWord } from "../../shared/mainSessionView";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -748,6 +749,8 @@ interface ChatChoiceDraft {
  *  (app_chat_delegate_task). */
 interface ChatTaskDelegationInput {
   task: string;
+  /** Its short title (sessionsTaskTitle), as given. */
+  title?: string;
   start?: "clean" | "fork";
   handle?: string;
   roleConfigId?: string;
@@ -5085,6 +5088,7 @@ export class ChatService {
         targetParticipantId: child.id,
         targetHandle: child.handle,
         prompt: input.task,
+        ...(input.title ? { title: input.title } : {}),
         reason: input.reason,
         status: "running",
         createdAt: now,
@@ -5195,8 +5199,10 @@ export class ChatService {
     }
     const permissions = record.permissions ? record.permissions as Record<string, unknown> : undefined;
     const text = (value: unknown): string | undefined => typeof value === "string" ? value.trim() || undefined : undefined;
+    const title = typeof record.title === "string" ? record.title.replace(/\s+/g, " ").trim() : "";
     return {
       task,
+      ...(title ? { title: shortenAtWord(title, SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS) } : {}),
       ...(record.start === "fork" || record.start === "clean" ? { start: record.start } : {}),
       ...(handle ? { handle } : {}),
       ...(text(record.roleConfigId) ? { roleConfigId: text(record.roleConfigId) } : {}),

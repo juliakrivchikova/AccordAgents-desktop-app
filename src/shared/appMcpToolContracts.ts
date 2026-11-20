@@ -2678,6 +2678,10 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
         "type": "object",
         "additionalProperties": false,
         "properties": {
+          "title": {
+            "type": "string",
+            "description": "A short title for the task, 2 to 6 words in User's language, the way a chat thread is titled (for example \"Check the server logs\"). User sees the member by this title, not by its handle."
+          },
           "task": {
             "type": "string",
             "description": "The member's task: everything it needs to do the work and what to report back."
@@ -2759,7 +2763,7 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
             "description": "Optional one line on why this member is needed."
           }
         },
-        "required": ["task"]
+        "required": ["title", "task"]
       },
       "annotations": {
         "readOnlyHint": false,

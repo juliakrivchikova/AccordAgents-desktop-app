@@ -39,8 +39,11 @@ chat without a main session is always `classic`; its switch is disabled.
 - `classic`: today's timeline: avatars, every member's reply on it.
 - `sessions` (like T3 Code / Claude desktop):
   - no avatars, author names or handles anywhere: a member is its
-    provider's logo tile and its current or latest task's first line
-    (`sessionsMemberTitle`), with provider, model and a non-generic role
+    provider's logo tile and its current or latest task's short title, as
+    T3 Code titles a thread: the 2–6 word `title` the main session gives
+    the task in `app_chat_delegate_task`, else the task's first sentence cut
+    at a word to 40 characters (`sessionsTaskTitle`, `sessionsMemberTitle`;
+    the phone gets it with the task), with provider, model and a non-generic role
     under it (`sessionsMemberDetail`); a mention of a member in a message
     is a chip (logo + task) that opens its session, a mention of the main
     session or of nobody is its plain name, and a leading mention of the
@@ -121,6 +124,8 @@ the desktop and on the phone (bundled through `mobileSharedRules.ts`).
   clean member (fork and its chat-context pointer dropped). Either way the
   chat gets a warning ("@x could not start from a copy of @main's session,
   …"), and the failed reply the main session reads says it too.
+- `ChatParticipantRequestItem.title?`: the main session's short title for
+  its task (`app_chat_delegate_task`'s `title`, at most 80 characters).
 - `ChatParticipantRequestBatch.delegation?: { start }`: the main session's
   task to a member it made (`app_chat_delegate_task`); not held to the
   one-request-per-turn limit. Delegations and a member's requests to the

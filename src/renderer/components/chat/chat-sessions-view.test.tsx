@@ -223,6 +223,22 @@ test("the waiting line names the tasks the main session waits on, and Stop stops
   assert.equal(renderer!.toJSON(), null);
 });
 
+test("a task the main session titled is named by its short title in its row, the Waiting line and the member's title; an untitled one by its first sentence", () => {
+  const messages = sessionsMessages().map((message) => {
+    const batch = message.metadata?.participantRequest;
+    if (message.id !== "tasks" || !batch) return message;
+    const items = batch.items.map((item) => item.targetParticipantId === DREW.id
+      ? { ...item, title: "Login button", prompt: "Restyle the login button with the new tokens. Keep the old colour." }
+      : { ...item, prompt: "Назови столицу Италии. Ответь ровно одним словом, без пояснений и пунктуации." });
+    return { ...message, metadata: { ...message.metadata, participantRequest: { ...batch, items } } };
+  });
+  const sessions = sessionsOf(sessionsConversation({}, messages))!;
+  assert.equal(sessions.memberTitle(DREW.id), "Login button");
+  assert.equal(sessions.memberTitle(GERA.id), "Назови столицу Италии", "not the whole task");
+  assert.equal(sessions.waitingText, "Waiting on 1 member: Login button");
+  assert.deepEqual(sessions.workByReplyId.get("main-1")?.map((entry) => entry.title), ["Login button", "Назови столицу Италии"]);
+});
+
 test("the classic view is untouched: an old chat and a chat shown classic get no sessions placement, and messages keep avatar, author and threads", () => {
   const old = sessionsConversation({ mainSessionParticipantId: undefined, chatView: "sessions" });
   assert.equal(sessionsOf(old), undefined, "a chat made before the main session is always classic");

@@ -510,6 +510,14 @@ test("the main session's request travels as a small task batch: a line per task,
   assert.equal(events.find((event) => event.id === "ask")?.participantRequest, undefined);
 });
 
+test("a task travels with its short title: the main session's, else the desktop's from the whole task", () => {
+  const conversation = requestConversation("Назови столицу Италии. Ответь ровно одним словом, без пояснений и пунктуации.", 2);
+  const batch = conversation.messages[2]!.metadata!.participantRequest!;
+  batch.items[1] = { ...batch.items[1]!, title: "Столица Италии" };
+  const request = timelineEventsFromSnapshot(conversation).find((event) => event.id === "request")?.participantRequest;
+  assert.deepEqual(request?.items.map((item) => item.title), ["Назови столицу Италии", "Столица Италии"]);
+});
+
 test("a task batch stays small however long the tasks and however many members", async () => {
   const { PHONE_TASK_ITEMS_MAX, PHONE_TASK_LINE_CHARS } = await import("./mobileTimeline");
   const prompt = "word ".repeat(20_000);

@@ -266,6 +266,7 @@ test("the main session adds a member without a card, within its own rights, and 
   const { service, storage, runs, debugEvents } = testService({ conversation });
 
   const result = await service.delegateTaskFromTool(mainActor(), {
+    title: "  Review   app.ts ",
     task: "Review src/app.ts and report the bugs you find.",
     // Asks for more than the main session has: web access and Auto.
     agentMode: "auto",
@@ -307,6 +308,7 @@ test("the main session adds a member without a card, within its own rights, and 
   assert.deepEqual(batch.delegation, { start: "clean" });
   assert.equal(batch.items[0].targetParticipantId, child.id);
   assert.equal(batch.items[0].prompt, "Review src/app.ts and report the bugs you find.");
+  assert.equal(batch.items[0].title, "Review app.ts", "the task's short title, kept on its item");
   assert.equal(result.requestId, batch.id);
 
   // The member runs its task, then the main session gets its answer in a fresh turn.

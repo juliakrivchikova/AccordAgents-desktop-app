@@ -31,6 +31,8 @@ import {
   sessionsMemberTitle,
   sessionsTaskEntries,
   sessionsTaskStatus,
+  sessionsTaskTitle,
+  shortenAtWord,
   sessionsWaitingText
 } from "./mainSessionView";
 import type { ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
@@ -263,6 +265,29 @@ test("members are named by their task, not their handle", () => {
   assert.equal(withoutLeadingMention("@main Reply to me", "main"), "Reply to me");
   assert.equal(withoutLeadingMention("@mainframe is down", "main"), "@mainframe is down");
   assert.equal(withoutLeadingMention("@main", "main"), "@main", "nothing left: the text stays");
+});
+
+test("a task is named by its short title: the main session's, else its first sentence cut at a word", () => {
+  const task = "Назови столицу Италии. Ответь ровно одним словом, без пояснений и пунктуации.";
+  // The main session's own title wins, its whitespace tidied.
+  assert.equal(sessionsTaskTitle({ prompt: task, title: "  Столица\n Италии " }), "Столица Италии");
+  assert.equal(sessionsMemberTitle({ handle: "claude" }, { prompt: task, targetHandle: "claude", title: "Столица Италии" }), "Столица Италии");
+  // Without one: the first sentence, without its full stop.
+  assert.equal(sessionsTaskTitle({ prompt: task }), "Назови столицу Италии");
+  assert.equal(sessionsTaskTitle({ prompt: "Which database did User pick? Answer in one word." }), "Which database did User pick?");
+  assert.equal(sessionsTaskTitle({ prompt: "Review src/app.ts and report the bugs" }), "Review src/app.ts and report the bugs", "a dot inside a word ends no sentence");
+  // A long sentence is cut at a word, 40 characters with its "…".
+  const long = sessionsTaskTitle({ prompt: "Check the server logs for every failed login attempt since Monday and group them by reason." });
+  assert.equal(long, "Check the server logs for every failed…");
+  assert.ok(long.length <= 40);
+  assert.equal(sessionsTaskTitle({ prompt: "## Fix the **login** button\nwith the new tokens" }), "Fix the login button", "markdown left out");
+  assert.equal(sessionsTaskTitle({ prompt: "" }), "");
+  assert.equal(sessionsMemberTitle({ handle: "@drew" }, { prompt: "", targetHandle: "drew" }), "drew", "a task without text leaves the handle");
+  // One word longer than the room is cut inside it.
+  assert.equal(shortenAtWord("x".repeat(60), 40), `${"x".repeat(39)}…`);
+  assert.equal(shortenAtWord("Short enough", 40), "Short enough");
+  // A given title is kept to 80 characters.
+  assert.ok(sessionsTaskTitle({ prompt: "x", title: "word ".repeat(40) }).length <= 80);
 });
 
 test("a task entry carries its title, its state, its time and one line of its result", () => {
