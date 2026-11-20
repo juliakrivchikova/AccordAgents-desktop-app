@@ -880,7 +880,7 @@ export interface PluginListResult {
 
 export type ChatRoleRuntime = "claude-agent" | "codex-developer-instructions" | "prompt-fallback";
 
-export type ChatAppToolCapability = "participants.manage" | "participants.request" | "compaction.request" | "permissions.request" | "scripts.request";
+export type ChatAppToolCapability = "participants.manage" | "participants.request" | "compaction.request" | "permissions.request" | "scripts.request" | "participants.delegate" | "accord.start";
 
 export type ChatReactionActorKind = "user" | "participant";
 

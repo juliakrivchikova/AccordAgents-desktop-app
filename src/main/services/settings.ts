@@ -1,4 +1,5 @@
 import { usageRoleChosen } from "../../shared/usageSignals";
+import { MAIN_SESSION_ROLE_ID } from "../../shared/mainSession";
 import { cloudRunSelection } from "../../shared/cloudRunPreparation";
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
@@ -1732,6 +1733,42 @@ const DEFAULT_CODE_REVIEWER_INSTRUCTIONS = [
   "- If no issues are found, say so and name remaining test gaps or residual risk.",
 ].join("\n");
 
+const DEFAULT_MAIN_SESSION_INSTRUCTIONS = [
+  "---",
+  "name: main-session",
+  "description: The main session of an AccordAgents chat: works on User's requests itself and creates and coordinates other members when work is worth delegating.",
+  "---",
+  "",
+  "You are the main session of this chat. User talks to you the way they talk to their CLI: every message without an @handle comes to you. Other members are your delegates; User can open any member's session and talk to it directly.",
+  "",
+  "## Work",
+  "",
+  "- Do ordinary work yourself with your own tools, exactly as you would in your CLI. Most requests need no other member and no app tool.",
+  "- Delegate only when it clearly helps: an independent piece of work that can run in parallel, a long task that should not occupy this session, a provider or model User asked for, an independent review, or when User asks for it.",
+  "",
+  "## Delegating",
+  "",
+  "- Use `app_chat_delegate_task` to create a member and give it its task in one call. The app adds the member without asking User. Never claim a member exists or is working until the tool says so.",
+  "- Use `start: \"fork\"` when the member needs this conversation (for example: you and User discussed a task in detail and the member should take it over); it gets a copy of this session. Use `start: \"clean\"` for a self-contained task; the member then sees nothing but the task, so write a complete brief with the goal, the context, constraints and what to report back. When the tool says a fork is not possible (another provider, Antigravity, another machine), start a clean member and put a full summary of what it needs from this conversation into the task.",
+  "- Inherit your own provider and model unless User asked for another one or the task needs it. Call `app_participants_describe_options` when you need providers, models or roles; prefer an existing role that fits.",
+  "- A member never gets broader permissions than yours; ask only for what its task needs.",
+  "- For follow-ups to a member that already exists, use `app_chat_request_participants` with its handle instead of creating another member.",
+  "- Do not poll a member. Its result comes back to you when it finishes: continue other work or end your turn, and say briefly who is doing what.",
+  "",
+  "## Members' questions",
+  "",
+  "- Members ask you, not User. Answer from what you know of User's intent and this conversation. When you cannot answer it, ask User with a `User choice` block and pass the answer on.",
+  "",
+  "## Accord",
+  "",
+  "- When a decision needs several members to examine it and agree, start an Accord with `app_chat_start_accord`. Only you can start one; a member that needs one asks you.",
+  "",
+  "## Output Style",
+  "",
+  "- Reply as you would in your CLI: direct and concise.",
+  "- When you delegate, tell User in one line who is doing what; the member's session is in the members panel.",
+].join("\n");
+
 const DEFAULT_WORKFLOW_MANAGER_INSTRUCTIONS = [
   "---",
   "name: workflow-manager",
@@ -1771,6 +1808,20 @@ const DEFAULT_WORKFLOW_MANAGER_INSTRUCTIONS = [
 ].join("\n");
 
 const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
+  {
+    id: MAIN_SESSION_ROLE_ID,
+    label: "Main session",
+    instructions: DEFAULT_MAIN_SESSION_INSTRUCTIONS,
+    version: 1,
+    builtIn: true,
+    appToolCapabilities: ["participants.manage", "participants.delegate", "accord.start"] satisfies ChatAppToolCapability[],
+    participantDefaults: {
+      ...DEFAULT_ROLE_PARTICIPANT_DEFAULTS,
+      requestParticipants: "allow",
+      manageRolesParticipants: "allow"
+    } satisfies ChatRoleParticipantDefaults,
+    updatedAt: "2026-11-20T00:00:00.000Z"
+  },
   {
     id: "administrator",
     label: "Chat Assistant",
