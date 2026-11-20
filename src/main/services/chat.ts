@@ -103,6 +103,7 @@ import type {
   ChatParticipantRequestStatus,
   ChatParticipantCompactionState,
   ChatParticipantSession,
+  ChatSessionForkSource,
   ChatPromptContextParticipantPointers,
   ChatPromptContextPointerAdvance,
   ChatPromptContextPointerEntry,
@@ -213,6 +214,7 @@ import {
   CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
   chatAgentModeWithin,
+  chatAgentPermissionsEqual,
   chatAgentPermissionsWithin,
   chatParticipantRequestPermissionRank,
   clampChatAgentMode,
@@ -248,7 +250,7 @@ import {
 } from "../../shared/chatDeliveryPolicy";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
-import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
+import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, isForkSourceMissingError, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
@@ -2676,7 +2678,7 @@ export class ChatService {
       }
       const workspacePath = await this.ensureHistoryFiles(conversation);
       const agentMode = this.agentModeForSession(session, participant);
-      const permissions = normalizeChatAgentPermissions(participant.permissions);
+      const permissions = normalizeChatAgentPermissions(this.participantForRun(conversation, participant).permissions);
       session.participantPermissions = permissions;
       const runPath = this.runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions);
       const baseCliParticipant = this.cliParticipantForSession(participant, session);
@@ -4083,7 +4085,7 @@ export class ChatService {
         "auto-applied"
       );
       const applied = await this.saveChatChange(conversation, () => {
-        const added = this.applyPreparedRosterChange(conversation, prepared);
+        const added = this.markAddedWithoutCard(conversation, this.applyPreparedRosterChange(conversation, prepared), requester.id);
         approval.appliedParticipantIds = added.map((participant) => participant.id);
         approval.updatedAt = new Date().toISOString();
         this.upsertAppToolApproval(conversation, approval);
@@ -4933,8 +4935,10 @@ export class ChatService {
     }
     const settings = await this.settings.getPublicSettings();
     const roleConfigId = input.roleConfigId ?? GENERIC_PARTICIPANT_ROLE_ID;
-    if (roleConfigId === MAIN_SESSION_ROLE_ID || roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID) {
-      return this.delegationRefusal("invalid_role", "A member you give a task to cannot have the main session or Chat Assistant role.");
+    // Only the roles offered for new members (not the Workflow Manager's,
+    // which manages members by default: the main session took its place).
+    if (roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID || !isRoleOfferedForNewMembers(roleConfigId)) {
+      return this.delegationRefusal("invalid_role", "A member you give a task to cannot have the main session, Chat Assistant or Workflow Manager role.");
     }
     const role = settings.chatRoleConfigs.find((item) => item.id === roleConfigId && !item.archivedAt);
     if (!role) {
@@ -5012,12 +5016,9 @@ export class ChatService {
         refusal = this.delegationRefusal("fork_unavailable", "Your CLI session has no id yet to copy.");
         return;
       }
+      // No limit on how many tasks the main session gives for one User
+      // message (the User, 2026-11-20): only the depth limit above holds.
       const chainRootId = actor.chainRootId ?? actor.triggerMessageId ?? randomUUID();
-      const chainBatches = this.participantRequestBatches(conversation).filter((batch) => this.participantRequestBatchChainRootId(batch) === chainRootId);
-      if (chainBatches.length >= CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES) {
-        refusal = this.delegationRefusal("limit", `member request chain limit (${CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES}) reached`);
-        return;
-      }
       const handles = new Set(this.chatParticipants(conversation).map((participant) => participant.handle.toLowerCase()));
       const [validated] = await this.validateParticipants(
         [{ ...item, handle: this.uniqueHandle(baseHandle, handles) }],
@@ -5043,12 +5044,12 @@ export class ChatService {
         reason: input.reason,
         operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: memberInput }]
       };
-      const [child] = this.applyPreparedRosterChange(conversation, {
+      const [child] = this.markAddedWithoutCard(conversation, this.applyPreparedRosterChange(conversation, {
         request: { reason: input.reason, operations: [{ type: "add", participant: memberInput }] },
         participants: [validated],
         summary,
         managementEscalation: false
-      });
+      }), callerNow.id);
       const approval = this.newAppToolApproval(conversation, callerNow, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, "participants.manage", request, summary, "auto-applied");
       approval.approvalScope = "chat";
       approval.appliedParticipantIds = [child.id];
@@ -5338,26 +5339,104 @@ export class ChatService {
     }
   }
 
-  /** A member the main session adds without a card gets nothing beyond the
-   *  main session's own rights (docs/main-session.md); one that would is put
-   *  to User on a card instead, as her server holds a machine's additions
-   *  (hub/hubMachineScope.ts). */
+  /** Members a member added without a card in a chat with a main session
+   *  say who added them, so every device holds them to the main session's
+   *  rights at each turn (participantForRun). Members the User added or
+   *  approved herself say nothing. The members as the chat has them now. */
+  private markAddedWithoutCard(conversation: Conversation, added: ChatParticipant[], requesterId: string): ChatParticipant[] {
+    if (added.length === 0 || !isMainSessionChat(conversation.metadata)) {
+      return added;
+    }
+    const ids = new Set(added.map((participant) => participant.id));
+    const marked = new Map<string, ChatParticipant>();
+    const participants = this.chatParticipants(conversation).map((participant) => {
+      if (!ids.has(participant.id) || participant.id === requesterId || isMainSessionParticipant(conversation.metadata, participant.id)) {
+        return participant;
+      }
+      const next = { ...participant, delegatedByParticipantId: requesterId };
+      marked.set(participant.id, next);
+      return next;
+    });
+    conversation.metadata = { ...conversation.metadata, participants };
+    return added.map((participant) => marked.get(participant.id) ?? participant);
+  }
+
+  /** What a member added without a card in a chat with a main session may
+   *  have at its turn: the main session's mode and effective rights as they
+   *  are now (docs/main-session.md), so lowering the main session lowers
+   *  them too. Undefined for every other member. */
+  private delegatedMemberCeiling(conversation: Conversation, participant: ChatParticipant): { mode: ChatAgentMode; permissions: ChatAgentPermissions; mainSession: ChatParticipant } | undefined {
+    if (!participant.delegatedByParticipantId) {
+      return undefined;
+    }
+    const mainId = mainSessionParticipantId(conversation.metadata);
+    if (!mainId || mainId === participant.id) {
+      return undefined;
+    }
+    const mainSession = this.chatParticipants(conversation).find((item) => item.id === mainId);
+    if (!mainSession) {
+      return undefined;
+    }
+    const mode = normalizeChatAgentMode(mainSession.agentMode);
+    return { mode, permissions: effectiveChatAgentPermissionsForProvider(mainSession.kind, mode, normalizeChatAgentPermissions(mainSession.permissions)), mainSession };
+  }
+
+  /** The member as it runs this turn: one added without a card in a chat
+   *  with a main session never above the main session's mode and rights as
+   *  they are now (its right to manage members is held where it adds one,
+   *  requireParticipantManager); every other member as it is. Never saved. */
+  private participantForRun(conversation: Conversation, participant: ChatParticipant): ChatParticipant {
+    const ceiling = this.delegatedMemberCeiling(conversation, participant);
+    if (!ceiling) {
+      return participant;
+    }
+    const own = normalizeChatAgentPermissions(participant.permissions);
+    const { manageRolesParticipants: _manage, ...clamped } = clampChatAgentPermissions(own, ceiling.permissions);
+    const permissions: ChatAgentPermissions = own.manageRolesParticipants ? { ...clamped, manageRolesParticipants: own.manageRolesParticipants } : clamped;
+    const agentMode = clampChatAgentMode(participant.agentMode, ceiling.mode);
+    if (agentMode === normalizeChatAgentMode(participant.agentMode) && chatAgentPermissionsEqual(permissions, own)) {
+      return participant;
+    }
+    return { ...participant, agentMode, permissions };
+  }
+
+  /** In a chat with a main session, a member any member adds without a card
+   *  gets nothing beyond the rights of the member adding it and of the main
+   *  session (docs/main-session.md): one that would is put to User on a card
+   *  instead, as her server holds a machine's additions
+   *  (hub/hubMachineScope.ts). The main session's rights as they are now. */
   private async additionsExceedMainSession(conversation: Conversation, requester: ChatParticipant, additions: ChatParticipant[]): Promise<boolean> {
-    if (!isMainSessionParticipant(conversation.metadata, requester.id)) {
+    const mainId = mainSessionParticipantId(conversation.metadata);
+    const mainSession = mainId ? this.chatParticipants(conversation).find((participant) => participant.id === mainId) : undefined;
+    if (!mainSession) {
       return false;
     }
-    const mainMode = normalizeChatAgentMode(requester.agentMode);
-    const ceiling = effectiveChatAgentPermissionsForProvider(requester.kind, mainMode, normalizeChatAgentPermissions(requester.permissions));
-    const mainManage = chatParticipantRequestPermissionRank(await this.manageRolesParticipantsPermissionForParticipant(requester));
+    const ceilings = requester.id === mainSession.id ? [mainSession] : [requester, mainSession];
+    for (const ceilingMember of ceilings) {
+      if (await this.additionsExceedMember(ceilingMember, additions)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Whether any of these members would have more than `ceilingMember`
+   *  really has (the rights it may delegate, clampChatAgentPermissions): its
+   *  mode, what it may do in that mode (as it runs now), and its right to
+   *  manage members. */
+  private async additionsExceedMember(ceilingMember: ChatParticipant, additions: ChatParticipant[]): Promise<boolean> {
+    const ceilingMode = normalizeChatAgentMode(ceilingMember.agentMode);
+    const ceiling = effectiveChatAgentPermissionsForProvider(ceilingMember.kind, ceilingMode, normalizeChatAgentPermissions(ceilingMember.permissions));
+    const ceilingManage = chatParticipantRequestPermissionRank(await this.manageRolesParticipantsPermissionForParticipant(ceilingMember));
     for (const member of additions) {
       const memberMode = normalizeChatAgentMode(member.agentMode);
-      if (!chatAgentModeWithin(memberMode, mainMode)) {
+      if (!chatAgentModeWithin(memberMode, ceilingMode)) {
         return true;
       }
       if (!chatAgentPermissionsWithin(effectiveChatAgentPermissionsForProvider(member.kind, memberMode, normalizeChatAgentPermissions(member.permissions)), ceiling)) {
         return true;
       }
-      if (chatParticipantRequestPermissionRank(await this.manageRolesParticipantsPermissionForParticipant(member)) > mainManage) {
+      if (chatParticipantRequestPermissionRank(await this.manageRolesParticipantsPermissionForParticipant(member)) > ceilingManage) {
         return true;
       }
     }
@@ -5375,7 +5454,7 @@ export class ChatService {
       return { ok: false, status: "rejected", error: "This member is not allowed to request context compaction." };
     }
     const permission = normalizeChatParticipantRequestPermission(
-      normalizeChatAgentPermissions(requester.permissions).requestCompaction
+      normalizeChatAgentPermissions(this.participantForRun(conversation, requester).permissions).requestCompaction
     );
     if (permission === "deny") {
       return { ok: false, status: "rejected", error: `Context compaction requests are disabled for @${requester.handle}.` };
@@ -5391,7 +5470,7 @@ export class ChatService {
       }
       compactingRequester = requesterNow;
       const permissionNow = normalizeChatParticipantRequestPermission(
-        normalizeChatAgentPermissions(requesterNow.permissions).requestCompaction
+        normalizeChatAgentPermissions(this.participantForRun(conversation, requesterNow).permissions).requestCompaction
       );
       if (permissionNow === "deny") {
         return { ok: false, status: "rejected", error: `Context compaction requests are disabled for @${requesterNow.handle}.` };
@@ -5947,6 +6026,7 @@ export class ChatService {
         !await this.additionsExceedMainSession(conversation, requester, prepared.participant.participants)) {
         const { applied, approval } = await this.saveChatChange(conversation, async () => {
           const applied = await this.applyPreparedRoleParticipantChange(conversation, prepared);
+          applied.participants = this.markAddedWithoutCard(conversation, applied.participants, requester.id);
           const approval: ChatAppToolApproval = {
             ...pendingRoleApproval.approval,
             toolName: APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
@@ -6008,7 +6088,7 @@ export class ChatService {
         "auto-applied"
       );
       const applied = await this.saveChatChange(conversation, async () => {
-        const added = await this.applyPreparedParticipantChange(conversation, prepared);
+        const added = this.markAddedWithoutCard(conversation, await this.applyPreparedParticipantChange(conversation, prepared), requester.id);
         approval.appliedParticipantIds = added.map((participant) => participant.id);
         approval.updatedAt = new Date().toISOString();
         this.upsertAppToolApproval(conversation, approval);
@@ -6743,9 +6823,11 @@ export class ChatService {
       try {
         if (problem) throw new Error(problem);
         let prepared: { managementEscalation: boolean };
+        let additions: ChatParticipant[];
         if (this.isRoleParticipantChangeRequest(queued.request)) {
           const role = await this.prepareRoleParticipantChange(conversation, this.normalizeRoleParticipantChangeRequest(queued.request));
           prepared = role;
+          additions = role.participant.participants;
           apply = async () => {
             const applied = await this.applyPreparedRoleParticipantChange(conversation, role);
             return { participants: applied.participants, summary: applied.summary, request: applied.request, label: "role and member request" };
@@ -6753,6 +6835,7 @@ export class ChatService {
         } else if (this.isParticipantChangeRequest(queued.request)) {
           const participant = await this.prepareParticipantChange(conversation, this.normalizeParticipantChangeRequest(queued.request));
           prepared = participant;
+          additions = participant.participants;
           apply = async () => ({
             participants: await this.applyPreparedParticipantChange(conversation, participant),
             summary: participant.summary,
@@ -6762,6 +6845,7 @@ export class ChatService {
         } else {
           const roster = await this.prepareRosterChange(conversation, this.normalizeRosterChangeRequest(queued.request));
           prepared = roster;
+          additions = roster.participants;
           apply = async () => ({ participants: this.applyPreparedRosterChange(conversation, roster), summary: roster.summary, label: "app tool request" });
         }
         handles = this.memberAdditionTargets(queued.request).flatMap((target) => target.handle ? [target.handle] : []);
@@ -6772,7 +6856,8 @@ export class ChatService {
           const manage = await this.manageRolesParticipantsPermissionForParticipant(requester);
           const policy = queued.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL &&
             this.matchingAppToolApprovalPolicy(conversation, requester, APP_ROSTER_REQUEST_CHANGE_TOOL, "participants.manage");
-          if ((manage !== "allow" && !policy) || prepared.managementEscalation) {
+          if ((manage !== "allow" && !policy) || prepared.managementEscalation ||
+            await this.additionsExceedMainSession(conversation, requester, additions)) {
             throw new Error(`@${requester.handle} may not make this change without your approval; it can ask again.`);
           }
         }
@@ -6797,6 +6882,9 @@ export class ChatService {
           const clash = handles.find((handle) => taken.has(handle.replace(/^@/, "").toLowerCase()));
           if (clash) throw new Error(`@${clash.replace(/^@/, "")} is already in this chat.`);
           const applied = await apply();
+          if (current.status === "auto-applied") {
+            this.markAddedWithoutCard(conversation, applied.participants, current.requesterParticipantId);
+          }
           this.upsertAppToolApproval(conversation, {
             ...decided,
             ...(applied.request ? { request: applied.request } : {}),
@@ -10076,14 +10164,18 @@ export class ChatService {
       memoryIndexBlock,
       moveNoteBlock
     });
+    // A fork whose source session is gone starts clean from this prompt
+    // (the CLI's resume-miss fallback): it is still told who it is, with its
+    // role's instructions, as the fork would have been.
     const resumeFallbackPrompt = isResumingSession
       ? this.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
-          includeRoleInstructions: usePromptRole || includeRefreshedRoleInstructions,
+          includeRoleInstructions: usePromptRole || includeRefreshedRoleInstructions || Boolean(forkSource),
           agentMode,
           permissions,
           promptContextBlock: preparedPromptContext.resumeFallbackBlock,
           memoryIndexBlock,
-          moveNoteBlock
+          moveNoteBlock,
+          ...(forkSource ? { identityNoteBlock: this.forkStartedCleanIdentityNote(conversation, participant, session) } : {})
         })
       : undefined;
     const role = usePromptRole ? undefined : this.cliRoleOptions(participant, session, promptFallbackPrompt, this.mainSessionHandleForMember(conversation, participant));
@@ -10360,17 +10452,50 @@ export class ChatService {
           }
         }
       }
-      this.applyCliRunMetadata(session, result, participant, options.warnings);
-      if (forkSource && !result.ok && !signal?.aborted && /no conversation found|not found|does not exist|no rollout/i.test(result.error ?? "")) {
+      // The CLI could not copy the source session and started the member
+      // clean from the saved chat context instead (Claude Code's resume-miss
+      // fallback): it is a member of its own from now on, and the chat says so.
+      const forkStartedClean = forkSource && result.sessionRestarted
+        ? this.forkStartedCleanWarning(conversation, participant, forkSource, "now")
+        : undefined;
+      this.applyCliRunMetadata(session, result, participant, options.warnings, forkStartedClean);
+      if (forkStartedClean) {
+        delete session.forkFrom;
+        delete session.forkedFromParticipantId;
+        // In the chat, whoever asked for the turn (a member's request keeps
+        // no run warnings of its own).
+        this.addConversationWarning(conversation, forkStartedClean);
+        void this.debugLogs.write("chat.session.fork-started-clean", {
+          conversationId: conversation.id,
+          participantId: participant.id,
+          sourceParticipantId: forkSource!.participantId
+        });
+      } else if (forkSource && !result.ok && !signal?.aborted && isForkSourceMissingError(result.error)) {
         // The copy was never made (the source session could not be read):
-        // the id the CLI was given is no session, and the next turn tries
-        // the fork again instead of resuming nothing.
+        // the id the CLI was given is no session. The next turn tries the
+        // fork once more; when that fails too, the member starts clean.
         session.sessionId = "";
-        session.forkFrom = forkSource;
+        const failedAttempts = (forkSource.failedAttempts ?? 0) + 1;
+        if (failedAttempts < 2) {
+          session.forkFrom = { ...forkSource, failedAttempts };
+        } else {
+          delete session.forkFrom;
+          delete session.forkedFromParticipantId;
+          // Its chat context started where the source's did; a clean
+          // session has seen none of it.
+          this.forgetPromptContextPointers(conversation, participant.id);
+          const warning = this.forkStartedCleanWarning(conversation, participant, forkSource, "next");
+          options.warnings.push(warning);
+          this.addConversationWarning(conversation, warning);
+          // The member that gave the task reads it in this failed reply.
+          result = { ...result, content: [result.content.trim(), warning].filter(Boolean).join("\n\n") };
+        }
         void this.debugLogs.write("chat.session.fork-failed", {
           conversationId: conversation.id,
           participantId: participant.id,
-          sourceParticipantId: forkSource.participantId
+          sourceParticipantId: forkSource.participantId,
+          failedAttempts,
+          startsClean: failedAttempts >= 2
         });
       }
       if (!signal?.aborted) {
@@ -10980,7 +11105,7 @@ export class ChatService {
     triggerMessage: ChatMessage,
     workspacePath: string,
     continuation: boolean,
-    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string; memoryIndexBlock?: string; moveNoteBlock?: string }
+    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string; memoryIndexBlock?: string; moveNoteBlock?: string; identityNoteBlock?: string }
   ): string {
     return this.buildPromptParts(conversation, participant, session, triggerMessage, workspacePath, continuation, options).prompt;
   }
@@ -11348,6 +11473,45 @@ export class ChatService {
     ].join("\n");
   }
 
+  /** What a member made as a fork is told when the CLI could not copy the
+   *  source session and starts it clean from the saved chat context: who it
+   *  is and what it does, as the fork would have been told, without saying
+   *  it knows what the source knew. Its role's instructions come with it. */
+  private forkStartedCleanIdentityNote(conversation: Conversation, participant: ChatParticipant, session: ChatParticipantSession): string {
+    const sourceId = session.forkFrom?.participantId ?? session.forkedFromParticipantId;
+    const source = sourceId ? this.chatParticipants(conversation).find((item) => item.id === sourceId) : undefined;
+    const sourceName = source ? `@${source.handle}'s` : "the main session's";
+    const mainSessionHandle = this.mainSessionHandleForMember(conversation, participant);
+    return [
+      `You were to start from a copy of ${sourceName} session, but it could not be copied: you start a new session with the chat context below. Read the chat through the app's chat tools for anything earlier you need.`,
+      `- You are @${participant.handle}, role: ${session.roleLabel}. You are not the main session.`,
+      "- Do only the task in the triggering message below and report the result in your reply; it goes back to the member that gave you the task.",
+      "- Do not create members or give work to other members unless your task says so.",
+      ...(mainSessionHandle ? this.mainSessionMemberRules(mainSessionHandle) : [])
+    ].join("\n");
+  }
+
+  /** The chat's word that a fork could not copy its source's session and
+   *  started (or starts at its next turn) a clean session. */
+  private forkStartedCleanWarning(conversation: Conversation, participant: ChatParticipant, forkSource: ChatSessionForkSource, when: "now" | "next"): string {
+    const source = this.chatParticipants(conversation).find((item) => item.id === forkSource.participantId);
+    const sourceName = source ? `@${source.handle}'s` : "the main session's";
+    return when === "now"
+      ? `@${participant.handle} could not start from a copy of ${sourceName} session, so it started a clean session from the saved chat context.`
+      : `@${participant.handle} could not start from a copy of ${sourceName} session, so its next turn starts a clean session.`;
+  }
+
+  /** The member's chat context starts over: its next turn is given the chat
+   *  as a new session's first turn is. */
+  private forgetPromptContextPointers(conversation: Conversation, participantId: string): void {
+    const pointers = this.normalizedPromptContextPointers(conversation.metadata.promptContextPointers);
+    if (!pointers[participantId]) {
+      return;
+    }
+    delete pointers[participantId];
+    conversation.metadata = { ...conversation.metadata, promptContextPointers: pointers };
+  }
+
   private cliRoleOptions(
     participant: ChatParticipant,
     session: ChatParticipantSession,
@@ -11695,7 +11859,9 @@ export class ChatService {
     session: ChatParticipantSession,
     result: ParticipantRunResult,
     participant: ChatParticipant,
-    warnings: string[]
+    warnings: string[],
+    /** What the chat says instead when the session was started anew. */
+    restartWarning?: string
   ): void {
     if (this.isKnownRoleRuntime(result.roleRuntime)) {
       session.roleRuntime = result.roleRuntime;
@@ -11713,7 +11879,7 @@ export class ChatService {
       delete session.forkFrom;
     }
     if (result.sessionRestarted) {
-      const warning = `@${participant.handle}: previous CLI session was unavailable, so a new session was started from saved chat context.`;
+      const warning = restartWarning ?? `@${participant.handle}: previous CLI session was unavailable, so a new session was started from saved chat context.`;
       if (!warnings.includes(warning)) {
         warnings.push(warning);
       }
@@ -11758,9 +11924,12 @@ export class ChatService {
     });
   }
 
-  private async sessionForParticipant(conversation: Conversation, participant: ChatParticipant): Promise<ChatParticipantSessionState> {
+  private async sessionForParticipant(conversation: Conversation, member: ChatParticipant): Promise<ChatParticipantSessionState> {
     // A session it was handed when it moved here is taken first.
-    await this.takeSessionHandoff(conversation, participant);
+    await this.takeSessionHandoff(conversation, member);
+    // Its launch settings as it runs this turn (a member the main session
+    // made never above the main session's).
+    const participant = this.participantForRun(conversation, member);
     const existing = this.chatSessions(conversation).find((session) => session.participantId === participant.id);
     const runtimeConfigVersion = this.runtimeConfigVersionFor(participant);
     if (existing) {
@@ -14256,7 +14425,16 @@ export class ChatService {
     if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
       throw new Error("The issued app-tool token does not grant member management.");
     }
-    const manageRolesParticipants = await this.manageRolesParticipantsPermissionForParticipant(requester);
+    let manageRolesParticipants = await this.manageRolesParticipantsPermissionForParticipant(requester);
+    // A member the main session made manages members no more freely than
+    // the main session can now.
+    const ceiling = this.delegatedMemberCeiling(conversation, requester);
+    if (ceiling) {
+      const mainManage = await this.manageRolesParticipantsPermissionForParticipant(ceiling.mainSession);
+      if (chatParticipantRequestPermissionRank(mainManage) < chatParticipantRequestPermissionRank(manageRolesParticipants)) {
+        manageRolesParticipants = mainManage;
+      }
+    }
     if (manageRolesParticipants === "deny") {
       throw new Error("This participant's role is not allowed to manage roles or participants.");
     }
@@ -16205,7 +16383,14 @@ export class ChatService {
     const depth = requesterDepth + 1;
     const chainRootId = actor.chainRootId ?? actor.triggerMessageId ?? batchId;
     const maxDepth = await this.chatParticipantRequestMaxDepth();
-    const limitError = this.participantRequestLimitError(conversation, requester, actor, depth, maxDepth, chainRootId);
+    // A member asking the main session (and only it) is not held to the
+    // chain limit: members ask the main session, not User, as often as they
+    // need (docs/main-session.md).
+    const mainId = mainSessionParticipantId(conversation.metadata);
+    const chatMembers = this.chatParticipants(conversation);
+    const asksMainSessionOnly = Boolean(mainId) && requester.id !== mainId &&
+      normalized.requests.every((request) => this.participantForMentionHandle(chatMembers, request.target)?.id === mainId);
+    const limitError = this.participantRequestLimitError(conversation, requester, actor, depth, maxDepth, chainRootId, asksMainSessionOnly);
     if (limitError) {
       throw new Error(limitError);
     }
@@ -16215,7 +16400,7 @@ export class ChatService {
         throw new Error(`Member request prompt for @${request.target} exceeds ${promptMaxChars} characters; it is rejected, not truncated.`);
       }
     }
-    const permission = normalizeChatAgentPermissions(requester.permissions).requestParticipants;
+    const permission = normalizeChatAgentPermissions(this.participantForRun(conversation, requester).permissions).requestParticipants;
     if (permission === "deny") {
       throw new Error(`Member requests are disabled for @${requester.handle}.`);
     }
@@ -16309,13 +16494,19 @@ export class ChatService {
     actor: ChatAppMcpActor,
     depth: number,
     maxDepth: number,
-    chainRootId: string
+    chainRootId: string,
+    asksMainSessionOnly = false
   ): string | undefined {
     if (depth > maxDepth) {
       return `max depth (${maxDepth}) reached`;
     }
-    const chainBatches = this.participantRequestBatches(conversation).filter((batch) =>
-      this.participantRequestBatchChainRootId(batch) === chainRootId
+    // The main session's tasks and members' questions to it neither meet
+    // nor count toward the chain limit (the User decided no limit on
+    // members, 2026-11-20); the depth limit above and the rate limit below
+    // still stop a loop.
+    const mainId = mainSessionParticipantId(conversation.metadata);
+    const chainBatches = asksMainSessionOnly ? [] : this.participantRequestBatches(conversation).filter((batch) =>
+      this.participantRequestBatchChainRootId(batch) === chainRootId && !this.isMainSessionTaskOrQuestion(batch, mainId)
     );
     if (chainBatches.length >= CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES) {
       return `member request chain limit (${CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES}) reached`;
@@ -16343,6 +16534,16 @@ export class ChatService {
       return `member request rate limit (${CHAT_PARTICIPANT_REQUEST_RATE_LIMIT}/minute) reached`;
     }
     return undefined;
+  }
+
+  /** A task the main session gave a member it made, or a member's question
+   *  to the main session alone. */
+  private isMainSessionTaskOrQuestion(batch: ChatParticipantRequestBatch, mainId: string | undefined): boolean {
+    if (batch.delegation) {
+      return true;
+    }
+    return Boolean(mainId) && batch.requesterParticipantId !== mainId && batch.items.length > 0 &&
+      batch.items.every((item) => item.targetParticipantId === mainId);
   }
 
   private async chatParticipantRequestMaxDepth(): Promise<number> {
@@ -18432,7 +18633,9 @@ export class ChatService {
     oneTimeApprovals: ChatAppToolApproval[] = this.oneTimePermissionApprovalsForParticipant(conversation, participant),
     appliedOneTimeApprovalIds?: string[]
   ): ChatAgentPermissions {
-    let permissions = normalizeChatAgentPermissions(participant.permissions);
+    // Held to the main session's rights first; what the User granted once
+    // for this turn is hers to give.
+    let permissions = normalizeChatAgentPermissions(this.participantForRun(conversation, participant).permissions);
     for (const approval of oneTimeApprovals) {
       if (!this.isPermissionChangeRequest(approval.request)) {
         continue;

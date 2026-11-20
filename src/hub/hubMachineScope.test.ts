@@ -450,3 +450,160 @@ test("in a chat with a main session only the User and the main session start an 
   scoped = scopeMachineConversationUpdate(mainSessionChatWith([deskR, mainOnMachine, helperOnMachine], [fromUser]), { metadata: { participants: [leave, mainOnMachine, helperOnMachine] } }, "machine-1", { rules: mainRules });
   assert.equal((members(scoped).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants, "allow");
 });
+
+// --- what a machine may not raise (review of the main session, 2026-11-20) ------
+
+/** The chat after the server took this machine's write. */
+function afterWrite(conversation: Conversation, scoped: ReturnType<typeof scopeMachineConversationUpdate>): Conversation {
+  return { ...conversation, metadata: { ...conversation.metadata, ...(scoped.update.metadata ?? {}) } } as Conversation;
+}
+
+const raisedMain = {
+  ...mainOnMachine, agentMode: "auto",
+  permissions: { ...mainOnMachine.permissions, webAccess: true, shell: { enabled: true, rules: [{ action: "allow", match: "prefix", pattern: "rm" }] } }
+};
+/** A member that runs on the User's Mac, as broad as the raised main session. */
+const broadOnMac = {
+  id: "p-mac", handle: "mac", label: "Mac", roleConfigId: "r", kind: "claude-code", agentMode: "auto",
+  permissions: { ...raisedMain.permissions, manageRolesParticipants: "deny" }
+};
+
+test("a machine cannot raise its own main session's rights or mode, then add a member as broad on the User's Mac", () => {
+  // The probe: write 1 raises the main session to Auto with web and shell...
+  const chat = mainSessionChatWith([deskR, mainOnMachine]);
+  const first = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, raisedMain] } }, "machine-1", { rules: mainRules });
+  const kept = members(first).get("p-main")!;
+  const keptPermissions = kept.permissions as { webAccess: boolean; shell: { enabled: boolean; rules: Array<{ action: string; pattern: string }> } };
+  assert.equal(kept.agentMode, "default", "the main session keeps the mode the User set");
+  assert.equal(keptPermissions.webAccess, false, "and no web");
+  assert.deepEqual(keptPermissions.shell.rules.map((rule) => `${rule.action} ${rule.pattern}`), ["deny git push"], "no command it was not given; its deny rule stays");
+  assert.ok(first.refused.includes("participants.p-main.rights"));
+  // ...write 2 adds a member with the same rights that runs on her Mac.
+  const stored = afterWrite(chat, first);
+  const second = scopeMachineConversationUpdate(stored, { metadata: { participants: [deskR, raisedMain, broadOnMac] } }, "machine-1", { rules: mainRules });
+  assert.equal(members(second).has("p-mac"), false, "refused: nothing beyond the main session's rights as the server has them");
+  assert.ok(second.refused.includes("participants.p-mac.added"));
+
+  // Both in one write: the addition is held to the main session as it was before it.
+  const together = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, raisedMain, broadOnMac] } }, "machine-1", { rules: mainRules });
+  assert.equal(members(together).has("p-mac"), false);
+  assert.equal(members(together).get("p-main")?.agentMode, "default");
+});
+
+test("a cloud main session adds a member on the User's Mac or another machine within its rights, without a card", () => {
+  const chat = mainSessionChatWith([deskR, mainOnMachine]);
+  const onMac = {
+    id: "p-mac", handle: "mac", label: "Mac", roleConfigId: "r", kind: "claude-code", agentMode: "default",
+    permissions: { repoRead: true, workspaceWrite: true, webAccess: false, requestParticipants: "allow", requestCompaction: "ask", manageRolesParticipants: "deny",
+      shell: { enabled: true, rules: [{ action: "allow", match: "prefix", pattern: "git diff" }, { action: "deny", match: "prefix", pattern: "git push" }] } }
+  };
+  const scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, mainOnMachine, onMac, { ...onMac, id: "p-other", handle: "other", homeMachineId: "machine-2" }] } }, "machine-1", { rules: mainRules });
+  assert.equal(members(scoped).has("p-mac"), true, "runs on her Mac");
+  assert.equal(members(scoped).has("p-other"), true, "runs on another machine");
+  // It says the main session added it, so every device holds it to the main
+  // session's rights at each turn.
+  assert.equal(members(scoped).get("p-mac")?.delegatedByParticipantId, "p-main");
+});
+
+test("its own member's rights rise only by what the User granted it for the chat, once", () => {
+  const chat = mainSessionChatWith([deskR, mainOnMachine]);
+  const withWeb = { ...mainOnMachine, permissions: { ...mainOnMachine.permissions, webAccess: true } };
+  let scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, withWeb] } }, "machine-1", { rules: mainRules });
+  assert.equal((members(scoped).get("p-main")?.permissions as Record<string, unknown>).webAccess, false);
+  // She granted web access for the chat on its card: the machine writes it.
+  const grant = approved("p-main", "app_permissions_request_change", { kind: "portable", permissions: ["webAccess"] }, { approve: true, scope: "chat" });
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, withWeb] } }, "machine-1", { rules: mainRules, approvals: [grant] });
+  assert.equal((members(scoped).get("p-main")?.permissions as Record<string, unknown>).webAccess, true);
+  assert.deepEqual(scoped.refused, []);
+  assert.ok(scoped.used.includes(approvalGrantKey(grant.answerOpId!)), "noted, so it gives its change once");
+  // Granted once, or already used: nothing.
+  const once = approved("p-main", "app_permissions_request_change", { kind: "portable", permissions: ["webAccess"] }, { approve: true, scope: "once" });
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, withWeb] } }, "machine-1", { rules: mainRules, approvals: [once] });
+  assert.equal((members(scoped).get("p-main")?.permissions as Record<string, unknown>).webAccess, false);
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, withWeb] } }, "machine-1",
+    { rules: mainRules, approvals: [grant], used: new Set([approvalGrantKey(grant.answerOpId!)]) });
+  assert.equal((members(scoped).get("p-main")?.permissions as Record<string, unknown>).webAccess, false);
+  // A grant gives what it grants, not the rest of what the write asks for.
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, { ...withWeb, agentMode: "auto", permissions: { ...withWeb.permissions, shell: { enabled: true, rules: [] } } }] } }, "machine-1",
+    { rules: mainRules, approvals: [grant] });
+  const kept = members(scoped).get("p-main")!;
+  assert.equal(kept.agentMode, "default");
+  assert.equal((kept.permissions as Record<string, unknown>).webAccess, true);
+  assert.deepEqual((kept.permissions as { shell: unknown }).shell, { enabled: true, rules: [{ action: "deny", match: "prefix", pattern: "git push" }] },
+    "its deny rule stays, and nothing it was not given");
+  // Less is always fine, and so is what does not change rights.
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, { ...mainOnMachine, agentMode: "plan", model: "sonnet", permissions: { ...mainOnMachine.permissions, workspaceWrite: false } }] } }, "machine-1", { rules: mainRules });
+  assert.deepEqual(scoped.refused, []);
+  assert.equal(members(scoped).get("p-main")?.agentMode, "plan");
+  // An old copy written after she lowered the mode does not raise it back.
+  const lowered = mainSessionChatWith([deskR, { ...mainOnMachine, agentMode: "plan" }]);
+  scoped = scopeMachineConversationUpdate(lowered, { metadata: { participants: [deskR, mainOnMachine] } }, "machine-1", { rules: mainRules });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "plan");
+});
+
+test("in a chat with a main session every member's addition is held to its own rights and the main session's", () => {
+  // A member the main session made, that may add members (its task said so).
+  const child = {
+    id: "p-child", handle: "child", label: "Child", roleConfigId: "r", kind: "claude-code", homeMachineId: "machine-1", agentMode: "default",
+    delegatedByParticipantId: "p-main",
+    permissions: { repoRead: true, workspaceWrite: false, webAccess: false, requestParticipants: "allow", requestCompaction: "ask", manageRolesParticipants: "allow", shell: { enabled: false, rules: [] } }
+  };
+  // The main session runs on the User's Mac: the child is the only member
+  // on the machine that may add one.
+  const mainOnMac = { ...mainOnMachine, homeMachineId: undefined };
+  const chat = mainSessionChatWith([deskR, mainOnMac, child]);
+  const grandchild = (permissions: Record<string, unknown>, agentMode = "default") => ({
+    id: "p-grand", handle: "grand", label: "Grand", roleConfigId: "r", kind: "claude-code", homeMachineId: "machine-1", agentMode,
+    permissions: { repoRead: true, workspaceWrite: false, webAccess: false, requestParticipants: "ask", requestCompaction: "ask", shell: { enabled: false, rules: [] }, ...permissions }
+  });
+  const add = (member: Record<string, unknown>) => scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, mainOnMac, child, member] } }, "machine-1", { rules: mainRules });
+  // A child that manages members adds one as broad as the main session but
+  // broader than itself: refused.
+  assert.equal(members(add(grandchild({ workspaceWrite: true }))).has("p-grand"), false, "edits its adder does not have");
+  assert.equal(members(add(grandchild({}, "auto"))).has("p-grand"), false, "a mode above both");
+  const within = add(grandchild({}));
+  assert.equal(members(within).has("p-grand"), true, "within both: no card");
+  assert.equal(members(within).get("p-grand")?.delegatedByParticipantId, "p-child", "it says who added it");
+  // The main session lowered to plan: nothing with edits or shell, even from a broader adder.
+  const planningMain = { ...mainOnMac, agentMode: "plan" };
+  const broadChild = { ...child, permissions: { ...child.permissions, workspaceWrite: true } };
+  const planning = mainSessionChatWith([deskR, planningMain, broadChild]);
+  const scoped = scopeMachineConversationUpdate(planning, { metadata: { participants: [deskR, planningMain, broadChild, grandchild({ workspaceWrite: true })] } }, "machine-1", { rules: mainRules });
+  assert.equal(members(scoped).has("p-grand"), false);
+  // A member keeps who added it: the machine can neither drop nor change it.
+  const dropped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, mainOnMac, { ...child, delegatedByParticipantId: undefined }] } }, "machine-1", { rules: mainRules });
+  assert.equal(members(dropped).get("p-child")?.delegatedByParticipantId, "p-main");
+});
+
+test("the main session's `/accord` gives its facilitator no more leave to ask than the main session's own, as in the app", () => {
+  const asking = { ...mainOnMachine, permissions: { ...mainOnMachine.permissions, requestParticipants: "ask" } };
+  const denied = { ...deskR, permissions: { requestParticipants: "deny" } };
+  const helperOnMachine = { ...boxR, id: "p-helper", handle: "helper", permissions: { requestParticipants: "deny" } };
+  const fromMain = { id: "m-acc", role: "participant", participantId: "p-main", content: "/accord @desk please run it with @helper", createdAt: "t" };
+  const chat = mainSessionChatWith([denied, asking, helperOnMachine], [fromMain]);
+  // A facilitator elsewhere: "ask", never "allow".
+  let scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [{ ...denied, permissions: { requestParticipants: "allow" } }, asking, helperOnMachine] } }, "machine-1", { rules: mainRules });
+  assert.equal((members(scoped).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants, "ask");
+  // Its own facilitator likewise.
+  const naming = { ...fromMain, content: "/accord @helper please run it" };
+  scoped = scopeMachineConversationUpdate(mainSessionChatWith([denied, asking, helperOnMachine], [naming]),
+    { metadata: { participants: [denied, asking, { ...helperOnMachine, permissions: { requestParticipants: "allow" } }] } }, "machine-1", { rules: mainRules });
+  assert.equal((members(scoped).get("p-helper")?.permissions as Record<string, unknown>).requestParticipants, "ask");
+  // The User's own `/accord` still gives full leave.
+  const fromUser = { id: "m-user", role: "user", content: "@desk /accord with @helper", createdAt: "t" };
+  scoped = scopeMachineConversationUpdate(mainSessionChatWith([denied, asking, helperOnMachine], [fromUser]),
+    { metadata: { participants: [{ ...denied, permissions: { requestParticipants: "allow" } }, asking, helperOnMachine] } }, "machine-1", { rules: mainRules });
+  assert.equal((members(scoped).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants, "allow");
+});
+
+test("a member the main session made asks others no more freely than the main session can now", () => {
+  const lowered = { ...mainOnMachine, permissions: { ...mainOnMachine.permissions, requestParticipants: "ask" } };
+  const child = { ...boxR, id: "p-child", handle: "child", delegatedByParticipantId: "p-main", permissions: { requestParticipants: "allow" } };
+  const message = { id: "m-req", role: "participant", participantId: "p-child", content: "", createdAt: "t" } as unknown as ChatMessage;
+  const chat = mainSessionChatWith([deskR, lowered, child], [message]);
+  assert.equal(machineMayAsk(chat, "machine-1", message, "p-desk", [], hashOf("")), false);
+  assert.equal(machineMayAsk(mainSessionChatWith([deskR, mainOnMachine, child], [message]), "machine-1", message, "p-desk", [], hashOf("")), true);
+  // One the User added herself keeps its own leave.
+  const own = { ...child, delegatedByParticipantId: undefined };
+  assert.equal(machineMayAsk(mainSessionChatWith([deskR, lowered, own], [message]), "machine-1", message, "p-desk", [], hashOf("")), true);
+});

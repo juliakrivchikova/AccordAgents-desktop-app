@@ -316,6 +316,14 @@ export function antigravityInteractivePermissionPrompt(transcript: string): bool
   return transcript.includes("Requesting permission for:") && transcript.includes("Do you want to proceed?");
 }
 
+/** Whether a run failed because the session a fork copies could not be read:
+ *  only the CLIs' own words for a missing session (Claude Code "No
+ *  conversation found with session ID", Codex "no rollout found for thread
+ *  id"), never another "not found" (a model, a file, a tool). */
+export function isForkSourceMissingError(text: string | undefined): boolean {
+  return /no conversation found|no rollout found for thread id/i.test(text ?? "");
+}
+
 export interface CliAgentRunOptions {
   persistSession?: boolean;
   sessionId?: string;
@@ -5931,8 +5939,9 @@ export class CliAgentRunner {
         };
       }
       // The session it resumes or forks is gone: a new one from the saved
-      // chat context, as the warning that follows says.
-      if ((options.sessionId || options.forkFromSessionId) && this.isResumeMiss(error)) {
+      // chat context, as the warning that follows says. A fork only when its
+      // source is gone (not for any other "not found").
+      if (options.sessionId ? this.isResumeMiss(error) : Boolean(options.forkFromSessionId) && isForkSourceMissingError(this.errorText(error))) {
         const restarted = await this.runClaudeOneShot(participant, options.resumeFallbackPrompt ?? prompt, repoPath, kind, signal, {
           persistSession: options.persistSession,
           extraReadableDirs: options.extraReadableDirs,

@@ -636,7 +636,14 @@ export class HubOps {
       : { id: op.conversationId, title: "", kind: "chat", createdAt: acceptedAt, updatedAt: acceptedAt, messages: [], findings: [],
         metadata: { participantSessions: [], warnings: [], running: false } as unknown as Conversation["metadata"] };
     if (op.conversation) {
-      const fields = conversationFields(op.conversation);
+      // A chat's main session is named when it is made and never changed: a
+      // chat the server has keeps its own; a new one names only a member
+      // with the main session's role.
+      const fields = loaded ? conversationFields(op.conversation) : withMainSessionNamed(conversationFields(op.conversation));
+      if (loaded) {
+        if (loaded.metadata.mainSessionParticipantId !== undefined) fields.metadata.mainSessionParticipantId = loaded.metadata.mainSessionParticipantId;
+        else delete fields.metadata.mainSessionParticipantId;
+      }
       conversation.title = fields.title;
       conversation.createdAt = fields.createdAt;
       if (fields.repoPath) conversation.repoPath = fields.repoPath; else delete conversation.repoPath;
@@ -947,18 +954,21 @@ function sharedMetadata(metadata: Record<string, unknown>): Record<string, unkno
   return shared;
 }
 
-/** A new chat names its main session. A phone from before sends the main
- *  session the computer offered it (HubNewChatOptions.assistant) among the
- *  members without naming it: it is told by its role, which only a main
- *  session has, so that chat is a main-session chat on every device too. */
+/** A new chat names its main session: only a member with the main
+ *  session's role (a name for any other member is not taken). A phone from
+ *  before sends the main session the computer offered it
+ *  (HubNewChatOptions.assistant) among the members without naming it: it is
+ *  told by its role, which only a main session has, so that chat is a
+ *  main-session chat on every device too. */
 function withMainSessionNamed(fields: HubConversationFields): HubConversationFields {
-  if (fields.metadata.mainSessionParticipantId !== undefined) return fields;
   const participants = Array.isArray(fields.metadata.participants)
     ? (fields.metadata.participants as unknown[]).filter((item): item is { id: string; roleConfigId?: string } =>
       Boolean(item) && typeof item === "object" && typeof (item as { id?: unknown }).id === "string")
     : [];
-  const mainSession = mainSessionMemberOf(participants);
-  return mainSession ? { ...fields, metadata: { ...fields.metadata, mainSessionParticipantId: mainSession.id } } : fields;
+  const named = fields.metadata.mainSessionParticipantId;
+  const mainSession = mainSessionMemberOf(participants, typeof named === "string" ? named : undefined);
+  const { mainSessionParticipantId: _named, ...metadata } = fields.metadata;
+  return { ...fields, metadata: mainSession ? { ...metadata, mainSessionParticipantId: mainSession.id } : metadata };
 }
 
 function conversationFields(fields: HubConversationFields): HubConversationFields {

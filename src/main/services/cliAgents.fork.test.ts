@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { CliAgentRunner } from "./cliAgents";
+import { CliAgentRunner, isForkSourceMissingError } from "./cliAgents";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 
 // A member made as a fork of the main session's CLI session
@@ -168,4 +168,12 @@ test("codex: a fork answered with the source's own id is refused, so the member 
   assert.equal(result.ok, false);
   assert.equal(sessionIds.includes("parent-thread"), false);
   assert.equal(methods.some((item) => item.method === "turn/start"), false);
+});
+
+test("a fork's source is missing only by the CLIs' own words for it, not by any other \"not found\"", () => {
+  assert.equal(isForkSourceMissingError("No conversation found with session ID: 8c1f0a6e-5c1b-4a8e-9f00-1b2c3d4e5f60"), true);
+  assert.equal(isForkSourceMissingError("thread/fork failed: no rollout found for thread id 019a-parent"), true);
+  for (const other of ["Model not found: gpt-unknown", "File not found: src/app.ts", "MCP server not found", "session does not exist yet", undefined]) {
+    assert.equal(isForkSourceMissingError(other), false, String(other));
+  }
 });

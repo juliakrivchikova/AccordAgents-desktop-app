@@ -187,12 +187,16 @@ How far it is built, so the two are not confused:
   members that run elsewhere stay as they are, except the leave to ask other
   members `/accord` gives the member it names; a machine's own members stay
   on it with the role and the right to manage members the User gave them,
-  and get leave to ask other members only from her "Allow for this chat" or
-  `/accord`; a rule to act without a card is added only where she answered
-  so; a member is added only by a member there that may manage members
-  without a card under her rules (her computer publishes her roles and saved
-  members to the server, `PUT /v1/member-rules`) or as she approved it on a
-  card — the member she saw, with no right beyond it — and taken out the same
+  get leave to ask other members only from her "Allow for this chat" or
+  `/accord`, and no mode or right beyond what she set but what she granted
+  them for the chat on their cards; a rule to act without a card is added
+  only where she answered so; a member is added only by a member there that
+  may manage members without a card under her rules (her computer publishes
+  her roles and saved members to the server, `PUT /v1/member-rules`) — in a
+  chat with a main session with nothing beyond its own rights and the main
+  session's as the server has them, wherever the new member runs — or as
+  she approved it on a card — the member she saw, with no right beyond it —
+  and taken out the same
   way (never the Chat Assistant or the last member); what she approved gives
   its lasting change once, and a later answer to the same card replaces it; a
   machine asks a member elsewhere only with its member's leave to ask or her
