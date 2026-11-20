@@ -294,6 +294,21 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   await app.evaluate(`document.getElementById("back-to-timeline").click()`);
   await app.waitFor(mainShown, "back");
   assert.equal(await app.evaluate(`document.querySelector('#message-list .message-row[data-thread-root="main-answer"]') === null`), true, "not on the main timeline while it is written");
+  // The main session itself runs: with nothing typed, the main composer's
+  // button is its Stop (as on the desktop, T3 Code and Claude); typing makes
+  // it Send again.
+  const sendMode = `document.getElementById("send-button").dataset.mode`;
+  const typeIn = (text) => app.evaluate(`(() => { const input = document.getElementById("composer-input"); input.value = ${JSON.stringify(text)};
+    input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await app.waitFor(`${sendMode} === "stop"`, "the composer's Stop");
+  assert.equal(await app.evaluate(`document.getElementById("send-button").getAttribute("aria-label")`), "Stop the main session");
+  await typeIn("one more thing");
+  assert.equal(await app.evaluate(sendMode), "send", "typing turns it back into Send");
+  await typeIn("");
+  assert.equal(await app.evaluate(sendMode), "stop");
+  await app.evaluate(`document.getElementById("send-button").dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true }))`);
+  const stopMain = await waitForOp(hub, (op) => op.kind === "turn.stop" && op.participantId === MAIN.id);
+  assert.equal(stopMain.messageId, "drew-q", "the main session's run, named by the message it answers");
   await app.evaluate(`document.querySelector('#message-list .sessions-member-chip[data-open-member="p-drew"]').click()`);
   await app.waitFor(`${title} === "Restyle the login button"`, "drew's session again");
   // A task's end its request message has not been read again for: its reply says it.

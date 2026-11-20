@@ -8008,6 +8008,51 @@
     keepingReaderAtLatest(applyDock);
   }
 
+  // The sessions view's main timeline the composer last drew its button for.
+  let composerStopState;
+
+  /** The sessions view's main composer, as the desktop's: while the main
+   *  session itself runs and nothing is written, its send button stops that
+   *  run (T3 Code's and Claude's Stop); writing turns it back into Send.
+   *  Members are stopped from the Waiting line and the panel. */
+  function syncComposerStop(state) {
+    composerStopState = state;
+    const button = document.getElementById("send-button");
+    const input = document.getElementById("composer-input");
+    if (!button || !input) return;
+    const empty = !input.value.trim() && pendingAttachments.length === 0;
+    const ids = state && state.mainId ? [state.mainId] : [];
+    const canStop = ids.length > 0 && sessionsCanStop(state, ids);
+    const stopping = ids.length > 0 && !canStop && sessionsStopping(state, ids);
+    const mode = empty && canStop ? "stop" : empty && stopping ? "stopping" : "send";
+    if ((button.dataset.mode || "send") === mode) return;
+    button.dataset.mode = mode;
+    button.classList.toggle("is-stop", mode !== "send");
+    button.type = mode === "send" ? "submit" : "button";
+    button.disabled = mode === "stopping";
+    button.setAttribute("aria-label", mode === "send" ? "Send message" : mode === "stop" ? "Stop the main session" : "Stopping the main session");
+    if (mode === "send") {
+      const icon = lineIcon(["M12 19V5M5 12l7-7 7 7"], 19);
+      icon.setAttribute("stroke-width", "2.1");
+      button.replaceChildren(icon);
+    } else {
+      const icon = document.createElementNS(SVG_NS, "svg");
+      icon.setAttribute("width", "14");
+      icon.setAttribute("height", "14");
+      icon.setAttribute("viewBox", "0 0 14 14");
+      icon.setAttribute("aria-hidden", "true");
+      const square = document.createElementNS(SVG_NS, "rect");
+      square.setAttribute("x", "1.5");
+      square.setAttribute("y", "1.5");
+      square.setAttribute("width", "11");
+      square.setAttribute("height", "11");
+      square.setAttribute("rx", "2");
+      square.setAttribute("fill", "currentColor");
+      icon.append(square);
+      button.replaceChildren(icon);
+    }
+  }
+
   function lineIcon(paths, size) {
     const svg = document.createElementNS(SVG_NS, "svg");
     svg.setAttribute("width", String(size || 20));
@@ -9359,6 +9404,7 @@
     const finalHeading = sessionMember ? sessionsMemberName(sessionMember) : accordScreen ? "Accord" : openThread ? "Thread" : activeChat?.title || "AccordAgents";
     if (title && title.textContent !== finalHeading) title.textContent = finalHeading;
     renderThreadHeader(openThread, sessionMember, Boolean(accordScreen));
+    syncComposerStop(sessions && !sessionMember && !accordScreen ? sessions : undefined);
     renderChatViewSwitch(activeId, activeChat, Boolean(openThread || sessionMember || accordScreen));
     renderMembersButton(activeId, activeChat);
     renderMembersSheetIfOpen(activeChat);
@@ -13860,11 +13906,18 @@
         afterTapLands(updateComposerShape);
       });
       input.addEventListener("input", updateComposerShape);
+      input.addEventListener("input", function () { syncComposerStop(composerStopState); });
       updateComposerShape();
       const sendButton = document.getElementById("send-button");
       if (sendButton) {
         sendButton.addEventListener("pointerup", function (event) {
           event.preventDefault();
+          // Nothing written while the main session runs: Stop, not Send.
+          if (sendButton.dataset.mode === "stop" && composerStopState) {
+            void stopMembersFromPhone([composerStopState.mainId]);
+            return;
+          }
+          if (sendButton.dataset.mode === "stopping") return;
           void sendComposer();
         });
       }
