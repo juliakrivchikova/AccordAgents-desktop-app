@@ -5100,6 +5100,12 @@ button.card-row:focus-visible {
   color: var(--mut);
 }
 
+/* A stopped task's line ("Stopped"): quieter than a result. */
+.sessions-delegation-result.is-muted {
+  font-style: italic;
+  opacity: 0.8;
+}
+
 .sessions-delegation-time {
   flex-shrink: 0;
   font: 400 12px var(--sans);

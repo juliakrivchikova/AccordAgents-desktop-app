@@ -5260,6 +5260,10 @@
 
   /** A member request as the server sent it (mobileTimeline.ts
    *  MobileTaskBatch), only what is well formed. */
+  function isProviderKind(value) {
+    return value === "codex-cli" || value === "claude-code" || value === "gemini-cli";
+  }
+
   function taskBatchOfEvent(event) {
     const batch = event && event.participantRequest;
     if (!batch || typeof batch !== "object" || typeof batch.id !== "string" || typeof batch.requesterParticipantId !== "string" ||
@@ -5280,7 +5284,10 @@
         createdAt: text(item.createdAt),
         ...(typeof item.updatedAt === "string" && item.updatedAt ? { updatedAt: item.updatedAt } : {}),
         ...(typeof item.replyMessageId === "string" && item.replyMessageId ? { replyMessageId: item.replyMessageId } : {}),
-        ...(typeof item.error === "string" && item.error ? { error: item.error } : {})
+        ...(typeof item.error === "string" && item.error ? { error: item.error } : {}),
+        // The member's provider when the task was given: its logo once it
+        // has left the chat.
+        ...(isProviderKind(item.targetKind) ? { targetKind: item.targetKind } : {})
       };
     });
     if (items.length === 0) return {};
@@ -5978,9 +5985,18 @@
     while ((match = pattern.exec(source)) !== null) {
       appendPlainText(parent, source.slice(cursor, match.index));
       if (match[2] !== undefined) {
-        const code = document.createElement("code");
-        code.textContent = match[2];
-        parent.append(code);
+        // The sessions view names members by their task, never by handle: a
+        // member's handle set as code is still its chip, and a known handle
+        // inside longer code reads as its title. Other @words stay as typed.
+        const scope = sessionsMentionScope;
+        const handleOnly = scope ? match[2].trim().match(/^@([A-Za-z0-9][A-Za-z0-9_-]*)$/) : null;
+        if (handleOnly && sessionsKnownHandle(scope, handleOnly[1])) {
+          appendSessionsMentions(parent, "@" + handleOnly[1], scope);
+        } else {
+          const code = document.createElement("code");
+          code.textContent = scope ? sessionsCodeHandles(match[2], scope) : match[2];
+          parent.append(code);
+        }
       } else if (match[3] !== undefined) {
         const strong = document.createElement("strong");
         appendPlainText(strong, match[3]);
@@ -9797,6 +9813,10 @@
       scaffolding: entry.scaffolding,
       content: entry.content,
       interimPosts: interimPostsSignature(entry) || undefined,
+      // The sessions view draws a mention as its member's chip (logo and
+      // task title): a row that mentions someone is drawn again when who
+      // they are changes, or its chip keeps an old title.
+      mentions: sessionsView && sessionsMentionScope && entryMentionsSomeone(entry) ? sessionsMentionScope.key : undefined,
       answered: answeredCardsForMessage(entry).map(function (card) {
         return card.id + ":" + (card.outcome || "") + ":" + (card.decidedAt || "");
       }),
@@ -9815,6 +9835,12 @@
       urgentAlert: entry.urgentAlert ? JSON.stringify(entry.urgentAlert) : undefined,
       accordLine: accordLineSignatureOf(entry)
     });
+  }
+
+  function entryMentionsSomeone(entry) {
+    return String(entry.content || "").indexOf("@") >= 0 || (Array.isArray(entry.interimPosts) && entry.interimPosts.some(function (post) {
+      return String(post && post.content || "").indexOf("@") >= 0;
+    }));
   }
 
   function accordLaunchSignatureOf(entry) {
@@ -10900,6 +10926,8 @@
     item.dataset.status = entry.status;
     item.dataset.author = entry.author;
     item.classList.toggle("is-sessions", entry.presentation === "sessions");
+    // The view it was drawn for: a view switch draws every row again.
+    if (entry.presentation) item.dataset.presentation = entry.presentation;
     if (entry.presentation === "sessions" && entry.participantId) item.dataset.participantId = entry.participantId;
     // Which message this row is, for the screen a tap opens. Rows with nothing
     // the desktop can thread from -- scaffolding, a message still queued on
@@ -10982,6 +11010,7 @@
       // the same quiet way.
       const delegations = entry.presentation === "sessions" && entry.delegations && !entry.delegations.standalone
         ? sessionsDelegationsElement(entry.delegations) : sessionsWorkedElement(entry);
+      if (delegations) delegations.dataset.workedSignature = sessionsWorkedSignature(entry);
       if (delegations && entry.delegations && entry.delegations.live) copy.append(meta, content, delegations);
       else if (delegations) copy.append(meta, delegations, content);
       else copy.append(meta, content);
@@ -11381,6 +11410,11 @@
     if (item.dataset.author !== entry.author) {
       return false;
     }
+    // Drawn for the other view (Sessions <-> Classic): its shape differs
+    // (folds, "Worked for", avatars), so it is drawn again whole.
+    if ((item.dataset.presentation || "") !== (entry.presentation || "")) {
+      return false;
+    }
     // A sessions-view row of its own shape is drawn again whole; a message
     // turning into one or out of one is a different shape too. A member's
     // choice keeps its node while only its card changes, so a field being
@@ -11393,7 +11427,10 @@
       syncPendingCards(copy, entry);
       return true;
     }
-    if (item.dataset.sessionsKind || (entry.presentation === "sessions" && sessionsSpecialSignature(entry))) {
+    // The tasks a reply's turn gave are drawn with the reply and kept in
+    // step in place (a running main reply streams under them).
+    const inlineDelegations = entry.presentation === "sessions" && entry.delegations && !entry.delegations.standalone;
+    if (item.dataset.sessionsKind || (entry.presentation === "sessions" && sessionsSpecialSignature(entry) && !inlineDelegations)) {
       return false;
     }
     item.classList.toggle("is-sessions", entry.presentation === "sessions");
@@ -11461,6 +11498,9 @@
         renderMessageContentIfChanged(content, entry.content, entry.author);
       }
       if (content.parentElement) syncInterimPosts(content.parentElement, content, entry);
+      // Its "Worked for …" (and the tasks its turn gave): a reply that
+      // finished on screen gets it as a new row has it.
+      if (content.parentElement) syncSessionsWorked(content.parentElement, meta, content, entry);
       renderAttachmentsInto(attachmentsNodeFor(content.parentElement || item), entry);
       // A question answered while its row is on screen keeps its card there.
       syncAnsweredCards(content.parentElement || item, entry);
@@ -11629,10 +11669,15 @@
   }
 
   /** A member that has left the chat, as its session reads it: its handle
-   *  from its messages and tasks; the phone keeps no more of it. */
+   *  from its messages and tasks, and its provider from the tasks it was
+   *  given (shared sessionsFormerMembers), so its logo stays. */
   function formerMemberRecord(former) {
     return { id: former.id, handle: former.handle || "member", mentionHandle: former.handle || "", displayName: former.handle || "member",
-      roleLabel: "", kind: "", former: true };
+      roleLabel: "", kind: formerMemberKind(former), former: true };
+  }
+
+  function formerMemberKind(former) {
+    return former && isProviderKind(former.kind) ? former.kind : "";
   }
 
   /** The member whose session is open in the open chat, in the sessions
@@ -11861,13 +11906,19 @@
    *  it is not the ordinary member's. */
   function sessionsMemberDetailOf(member) {
     const shared = sessionsRules();
-    if (!member || member.former) return member && member.former ? "Removed from the chat" : "";
+    if (!member || member.former) return member && member.former ? sessionsRemovedMemberDetail() : "";
     return shared.sessionsMemberDetail({
       provider: memberKindLabel(member.kind),
       model: member.participant && typeof member.participant.model === "string" ? member.participant.model : undefined,
       roleLabel: member.roleLabel,
       roleConfigId: member.roleConfigId
     });
+  }
+
+  /** A removed member's line, worded once for the desktop and the phone. */
+  function sessionsRemovedMemberDetail() {
+    const shared = sessionsRules();
+    return shared && typeof shared.SESSIONS_REMOVED_MEMBER_DETAIL === "string" ? shared.SESSIONS_REMOVED_MEMBER_DETAIL : "Removed from the chat";
   }
 
   function sessionsMemberName(member, fallback) {
@@ -11927,6 +11978,15 @@
   /** Each task of the main session's request as a delegation row draws it:
    *  the member's provider, the task's title, its state with its time and
    *  one line of its result, and the message the row opens at. */
+  /** A member's provider in the sessions view: a member's own, else that of
+   *  a member who has left the chat, kept from the tasks it was given. */
+  function sessionsKindOf(state, participantId) {
+    const member = state.members.find(function (candidate) { return candidate.id === participantId; });
+    if (member) return member.kind || "";
+    const former = state.formerMembers.find(function (candidate) { return candidate.id === participantId; });
+    return formerMemberKind(former);
+  }
+
   function sessionsDelegationsOf(state, message) {
     const shared = sessionsRules();
     const batch = message.metadata.participantRequest;
@@ -11935,10 +11995,12 @@
       const member = state.members.find(function (candidate) { return candidate.id === entry.item.targetParticipantId; });
       return {
         participantId: entry.item.targetParticipantId,
-        kind: member ? member.kind : "",
+        kind: member ? member.kind : sessionsKindOf(state, entry.item.targetParticipantId) || (isProviderKind(entry.item.targetKind) ? entry.item.targetKind : ""),
         title: entry.title,
         status: entry.status,
         line: entry.line || "",
+        // A stopped task's line says so, muted (shared sessionsTaskEntries).
+        ...(entry.lineMuted ? { lineMuted: true } : {}),
         since: entry.since,
         durationMs: entry.durationMs,
         focus: sessionsTaskFocus(state, message.id, entry.item)
@@ -12208,7 +12270,7 @@
     main.append(title);
     if (view.line) {
       const result = document.createElement("span");
-      result.className = "sessions-delegation-result";
+      result.className = "sessions-delegation-result" + (view.lineMuted ? " is-muted" : "");
       result.textContent = view.line;
       main.append(result);
     }
@@ -12222,6 +12284,46 @@
     }
     row.append(lineIcon(["m9 18 6-6-6-6"], 14));
     return row;
+  }
+
+  /** What a reply's "Worked for …" shows, to tell whether to draw it again;
+   *  empty when it shows none. */
+  function sessionsWorkedSignature(entry) {
+    if (entry.presentation !== "sessions") return "";
+    if (entry.delegations && !entry.delegations.standalone) return "delegations:" + JSON.stringify(entry.delegations);
+    return !entry.delegations && entry.status === "Done" && typeof entry.workedMs === "number" ? "worked:" + entry.workedMs : "";
+  }
+
+  /** A row updated in place keeps its "Worked for …" and its turn's tasks
+   *  in step: added when the reply finishes on screen, redrawn when they
+   *  change, where a new row puts them (above the reply's words, or under
+   *  them while it is written), gone when it shows none. */
+  function syncSessionsWorked(copy, meta, content, entry) {
+    const existing = Array.from(copy.children).find(function (child) {
+      return child.classList.contains("sessions-worked") || child.classList.contains("sessions-delegations");
+    });
+    const signature = sessionsWorkedSignature(entry);
+    if (!signature) {
+      existing?.remove();
+      return;
+    }
+    let node = existing;
+    if (!node || node.dataset.workedSignature !== signature) {
+      node = entry.delegations ? sessionsDelegationsElement(entry.delegations) : sessionsWorkedElement(entry);
+      if (!node) {
+        existing?.remove();
+        return;
+      }
+      node.dataset.workedSignature = signature;
+      existing?.remove();
+    }
+    if (entry.delegations && entry.delegations.live) {
+      if (content.nextSibling !== node) content.after(node);
+    } else if (meta.parentElement === copy) {
+      if (meta.nextSibling !== node) meta.after(node);
+    } else if (copy.firstChild !== node) {
+      copy.prepend(node);
+    }
   }
 
   /** "Worked for 44s" above a finished reply of the sessions view that gave
@@ -12424,6 +12526,22 @@
   /** A mention in a message, in the sessions view: a member is a link chip
    *  (its logo and task) that opens its session; anyone else (the main
    *  session, a handle nobody has) is plain text without "@". */
+  function sessionsKnownHandle(scope, handle) {
+    const key = String(handle || "").replace(/^@/, "").toLowerCase();
+    return Boolean(key) && (scope.byHandle.has(key) || key === String(scope.mainHandle || "").replace(/^@/, ""));
+  }
+
+  /** Code that holds a member's handle among other text: the handle as the
+   *  view names that member (its task's title; the main session's plain
+   *  name). Handles of nobody in the chat (`@types/node`) stay. */
+  function sessionsCodeHandles(text, scope) {
+    return String(text || "").replace(/(^|[^A-Za-z0-9_@./-])@([A-Za-z0-9][A-Za-z0-9_-]*)(?![A-Za-z0-9_/-])/g, function (whole, before, handle) {
+      if (!sessionsKnownHandle(scope, handle)) return whole;
+      const member = scope.byHandle.get(handle.toLowerCase());
+      return before + (member ? member.title : handle);
+    });
+  }
+
   function appendSessionsMentions(parent, text, scope) {
     const pattern = /(^|[^A-Za-z0-9_@./-])@([A-Za-z0-9][A-Za-z0-9_-]*)/g;
     let cursor = 0;
@@ -12726,7 +12844,7 @@
     const previous = rows.previous.map(describe);
     const removed = state.formerMembers.map(function (former) {
       const task = state.tasksByMember.get(former.id);
-      return { id: former.id, kind: "", name: sessionsMemberTitleOf(state, former.id), detail: "Removed from the chat",
+      return { id: former.id, kind: formerMemberKind(former), name: sessionsMemberTitleOf(state, former.id), detail: sessionsRemovedMemberDetail(),
         status: shared.sessionsFormerMemberStatus(task ? task.item : undefined), former: true };
     });
     const main = state.mainMember;
