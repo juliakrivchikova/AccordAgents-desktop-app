@@ -179,8 +179,8 @@ import { AppSkillsService } from "./services/appSkills";
 import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { CRASH_REPORTS_ACTIVE_ARG, crashReportingActive, sendUsageSignal, startCrashReporting, stopCrashReporting } from "./services/crashReporting";
-import { UsageMilestones, usageFeatureHistoryFrom, usageHistoryFrom, usageProfileUsedBefore } from "./services/usageMilestones";
-import { usageCustomRoleCount, usageLocale, usageMultiRoleChat, usageOs, usageRoleChosen, usageWeeklySnapshot } from "../shared/usageSignals";
+import { UsageMilestones, usageActiveChatViews, usageFeatureHistoryFrom, usageHistoryFrom, usageProfileUsedBefore } from "./services/usageMilestones";
+import { USAGE_ACTIVE_CHAT_WINDOW_MS, usageCustomRoleCount, usageLocale, usageMultiRoleChat, usageOs, usageRoleChosen, usageWeeklySnapshot } from "../shared/usageSignals";
 import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "./services/crashReportPreferences";
 import { readTeamDevice } from "./services/teamDevice";
 import { isServerUpdateLoaderWindow, openServerUpdateLoader, updateServerBeforeOpening } from "./services/serverUpdateLoader";
@@ -533,8 +533,14 @@ const usageMilestones = crashReportingStart.active
       });
     },
     readWeeklySnapshot: async (week) => {
-      const [chats, settings] = await Promise.all([storageService.listChatMemberProviders(), settingsService.getPublicSettings()]);
-      return usageWeeklySnapshot(week, chats, usageCustomRoleCount(settings.chatRoleConfigs));
+      // Chats in use the seven days before, by their view (docs/main-session.md).
+      const activeSince = new Date(Date.now() - USAGE_ACTIVE_CHAT_WINDOW_MS).toISOString();
+      const [chats, settings, activeChats] = await Promise.all([
+        storageService.listChatMemberProviders(),
+        settingsService.getPublicSettings(),
+        storageService.listChatViewsWithUserMessagesSince(activeSince)
+      ]);
+      return usageWeeklySnapshot(week, chats, usageCustomRoleCount(settings.chatRoleConfigs), usageActiveChatViews(activeChats, settings.defaultChatView));
     },
     readDocuments: (since, plainSince) => artifactStore.multiSignerDocumentStatus(since, plainSince),
     log: (event, payload) => {

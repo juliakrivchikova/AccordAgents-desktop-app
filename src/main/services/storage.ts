@@ -717,6 +717,42 @@ export class StorageService {
     return [...chats.values()];
   }
 
+  /** The chats with a User message written since `since` (the weekly usage
+   *  snapshot), each with what decides the view it is shown in
+   *  (shared/mainSession.ts chatViewFor): its main session, whether that is
+   *  still a member, and its view. One query over the chat rows; a message's
+   *  body is looked at only for rows written since then. */
+  async listChatViewsWithUserMessagesSince(since: string): Promise<Array<{ mainSessionParticipantId?: string; chatView?: string }>> {
+    await this.init();
+    const rows = await this.queryJson<{ mainId?: unknown; isMember?: unknown; view?: unknown }>(
+      `select json_extract(c.body, '$.metadata.mainSessionParticipantId') as mainId,
+              exists (
+                select 1 from json_each(
+                  case when json_type(c.body, '$.metadata.participants') = 'array' then c.body else '{"metadata":{"participants":[]}}' end,
+                  '$.metadata.participants'
+                ) p
+                where json_extract(p.value, '$.id') = json_extract(c.body, '$.metadata.mainSessionParticipantId')
+              ) as isMember,
+              json_extract(c.body, '$.metadata.chatView') as view
+       from (
+         select id, coalesce(nullif(body_json, ''), payload_json) as body
+         from conversations
+         where kind = 'chat' and json_valid(coalesce(nullif(body_json, ''), payload_json))
+       ) c
+       where exists (
+         select 1 from conversation_messages m
+         where m.conversation_id = c.id
+           and m.created_at >= ${sqlString(since)}
+           and json_valid(m.payload_json)
+           and json_extract(m.payload_json, '$.role') = 'user'
+       );`
+    );
+    return rows.map((row) => ({
+      ...(typeof row.mainId === "string" && row.mainId && row.isMember === 1 ? { mainSessionParticipantId: row.mainId } : {}),
+      ...(typeof row.view === "string" ? { chatView: row.view } : {})
+    }));
+  }
+
   /** The messages whose choice still waits for the User, in the given chats:
    *  what the phone's chat list carries so a phone can drop a card the
    *  desktop no longer waits on. One query over the listed chats' rows (their
