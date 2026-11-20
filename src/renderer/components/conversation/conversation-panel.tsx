@@ -26,6 +26,9 @@ export interface ConversationPanelProps {
   openingConversationDescription: string;
   accordDisabledReason?: string;
   onOpenAccord: () => void;
+  /** The sessions view: a member's settings, and its model chip. */
+  renderMemberSettings?: (participantId: string) => React.ReactNode;
+  renderMemberChip?: (participantId: string) => React.ReactNode;
   topBar?: React.ReactNode;
   artifacts: ArtifactsState;
 }
@@ -41,6 +44,8 @@ export function ConversationPanel({
   openingConversationDescription,
   accordDisabledReason,
   onOpenAccord,
+  renderMemberSettings,
+  renderMemberChip,
   topBar,
   artifacts
 }: ConversationPanelProps): JSX.Element | null {
@@ -79,8 +84,8 @@ export function ConversationPanel({
           onLoadOlderMessages={() => void conversationActions.loadOlderConversationMessages()}
           onLoadMessagePageForMessage={conversationActions.loadConversationMessagePageForMessage}
           messageFocusRequest={state.chatMessageFocusRequest}
-          onSend={(repoFileMentions, imageAttachments, skillMentions, content) =>
-            chatActions.sendChatMessage({ content, repoFileMentions, imageAttachments, skillMentions })}
+          onSend={(repoFileMentions, imageAttachments, skillMentions, content, targetParticipantIds) =>
+            chatActions.sendChatMessage({ content, repoFileMentions, imageAttachments, skillMentions, targetParticipantIds, fromMainComposer: true })}
           onSendToMember={(request) => chatActions.sendChatMessage(request)}
           onChatViewSaved={(saved) => state.setConversation((current) => current?.id === saved.conversationId
             ? { ...current, metadata: { ...current.metadata, chatView: saved.view } }
@@ -88,6 +93,8 @@ export function ConversationPanel({
           onChatViewError={state.setError}
           accordDisabledReason={accordDisabledReason}
           onOpenAccord={onOpenAccord}
+          renderMemberSettings={renderMemberSettings}
+          renderMemberChip={renderMemberChip}
           onSendThread={(rootMessage, content, repoFileMentions, imageAttachments, skillMentions) => chatActions.sendChatMessage({
             content,
             skillMentions,

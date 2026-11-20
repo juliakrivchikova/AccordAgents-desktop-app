@@ -76,9 +76,11 @@ export interface SendChatMessageOptions extends ChatRunScopeOptions {
   skillMentions?: ChatSkillMention[];
   repoFileMentions?: RepoFileMention[];
   imageAttachments?: ChatImageInput[];
-  /** Exactly these members (a member's session panel); the main composer's
-   *  draft is not this message's. */
+  /** Exactly these members (a member's session panel, or the sessions
+   *  view's main composer to the main session). */
   targetParticipantIds?: string[];
+  /** Sent from the main composer: its draft is this message's. */
+  fromMainComposer?: boolean;
 }
 
 export interface StartChatOptions {
@@ -387,8 +389,9 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       return false;
     }
     const targetParticipantIds = options.targetParticipantIds?.length ? options.targetParticipantIds : undefined;
-    // A thread or a member's panel keeps its own draft.
-    const ownsMainDraft = !options.chatThreadRootId && !targetParticipantIds;
+    // A thread or a member's panel keeps its own draft; the sessions view's
+    // main composer writes to the main session from the main draft.
+    const ownsMainDraft = !options.chatThreadRootId && (!targetParticipantIds || options.fromMainComposer === true);
     if (skillMentions.length > 0 && !targetParticipantIds && hasMultipleMentionedParticipants(content, state.conversation)) {
       state.setError("A selected skill runs on a single member. Mention exactly one member, or remove the skill. Other members can be brought in by the running skill itself.");
       return false;

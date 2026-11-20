@@ -60,6 +60,9 @@ import { CHAT_ASSISTANT_ROLE_ID, authorForMessage, chatParticipantReference } fr
 import { IconButton, StatusBadge } from "../primitives";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 import { WorkedRow } from "./chat-worked-row";
+import { ChatDelegationRows, ChatWorkedFold } from "./chat-delegation-fold";
+import { mainSessionMemberOf, withoutLeadingMention } from "../../../shared/mainSession";
+import type { SessionsTaskEntry } from "../../../shared/mainSessionView";
 import { ChatAppToolApprovalList } from "./chat-app-tool-approvals";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
@@ -98,6 +101,10 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
    *  member's session). */
   presentation?: "sessions";
   authorLabel?: string;
+  /** The sessions view: the main session's tasks of this turn, shown in its
+   *  "Worked for …" fold (under the reply while it is being written). */
+  sessionsWork?: readonly SessionsTaskEntry[];
+  onOpenTask?: (entry: SessionsTaskEntry) => void;
   replyCount?: number;
   replyPreviewMessages?: Conversation["messages"];
   latestReplyAt?: string;
@@ -159,7 +166,11 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   const author = authorForMessage(message, "chat");
   const isStreaming = message.status === "pending" && message.role === "participant";
   const rawDisplayContent = chatDisplayContent(message, author);
-  const displayContent = rawDisplayContent;
+  // The sessions view writes to the main session by default: its leading
+  // mention in the User's message is left out.
+  const displayContent = props.presentation === "sessions" && message.role === "user"
+    ? withoutLeadingMention(rawDisplayContent, mainSessionMemberOf(props.participants ?? [])?.handle)
+    : rawDisplayContent;
   const streamedRemoteRunStatus = props.liveProgress?.remoteRunStatus ?? message.metadata?.remoteRunStatus;
   const streamedContent = remoteRunStreamingContent({
     isStreaming,
@@ -387,7 +398,9 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             authorLabel={props.authorLabel}
             inThread={props.inThread}
           />
-          {showWorkedRow && <WorkedRow workedMs={workedMs} />}
+          {props.sessionsWork?.length && !isStreaming
+            ? <ChatWorkedFold workedMs={workedMs ?? undefined} entries={props.sessionsWork} participants={props.participants} onOpenTask={props.onOpenTask} />
+            : showWorkedRow && <WorkedRow workedMs={workedMs} />}
           {/* Every rendering of the content (streaming, transcript, final) knows its author. */}
           <FileLinkAuthorContext.Provider value={participant?.cloudRun || participant?.homeMachineId ? CLOUD_AUTHOR : LOCAL_AUTHOR}>
           <div className="message-content">
@@ -422,6 +435,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               </>
             )}
           </div>
+          {isStreaming && props.sessionsWork?.length ? <ChatDelegationRows entries={props.sessionsWork} participants={props.participants} onOpenTask={props.onOpenTask} /> : null}
           </FileLinkAuthorContext.Provider>
           {props.appToolApprovals && props.appToolApprovals.length > 0 && props.onRespondToAppToolApproval && (
             <div className="chat-message-embedded-approvals">

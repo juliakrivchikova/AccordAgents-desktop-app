@@ -536,6 +536,23 @@ test("Activity carries no task batch and no addressees", async () => {
   assert.equal(request.participantRequest, undefined);
 });
 
+test("an Accord the main session started travels as one, with how long a turn worked and when each task last changed", () => {
+  const conversation = requestConversation("Task", 1);
+  conversation.messages.push(
+    { id: "launch", role: "participant", participantId: "main", participantLabel: "@main", content: "Accord: Ship it", createdAt: "2026-11-20T10:03:00Z", status: "done",
+      metadata: { accordLaunchByMainSession: true, workedMs: 54_321.4 } },
+    { id: "member-launch", role: "participant", participantId: "m0", participantLabel: "@member0", content: "Accord: no", createdAt: "2026-11-20T10:04:00Z", status: "pending",
+      metadata: { workedMs: 10 } }
+  );
+  const events = timelineEventsFromSnapshot(conversation);
+  const launch = events.find((event) => event.id === "launch");
+  assert.equal(launch?.accordLaunchByMainSession, true);
+  assert.equal(launch?.workedMs, 54_321);
+  assert.equal(events.find((event) => event.id === "member-launch")?.workedMs, undefined, "a turn still going has no worked time yet");
+  assert.equal(events.find((event) => event.id === "ask")?.accordLaunchByMainSession, undefined);
+  assert.equal(events.find((event) => event.id === "request")?.participantRequest?.items[0]?.updatedAt, "2026-11-20T10:01:00Z");
+});
+
 test("a hidden request carrier carries no task batch", () => {
   const conversation = requestConversation("Task", 1);
   const request = conversation.messages[2]!;

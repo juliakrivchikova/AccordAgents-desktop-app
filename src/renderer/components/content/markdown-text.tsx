@@ -11,6 +11,8 @@ import { FileLink } from "./local-file-link";
 import { MentionDirectoryContext, ParticipantHoverCard, profileHandleLabel, useHoverCard } from "./participant-hover-card";
 import { ArtifactsContext } from "../artifacts/artifacts-context";
 import { artifactSummaryStatusLabel } from "../../../shared/artifacts";
+import { useChatSessionsLinks, type ChatSessionsLinks } from "../chat/chat-sessions-links";
+import { ProviderIcon } from "../chat/provider-icon";
 
 // A clickable reference to another chat message. Authors write `[label](#msg:<id>)` (or a bare
 // `#msg:<id>`); we render a link that scrolls the referenced message into view and flashes it.
@@ -20,7 +22,37 @@ export type MessageFocusHandler = (messageId: string) => boolean | void;
 
 export const MessageLinkContext = createContext<MessageFocusHandler | undefined>(undefined);
 
+// The sessions view has no handles (docs/main-session.md): a member is a chip
+// with its provider's logo and its task's title that opens its session; any
+// other mention is its plain name.
+function SessionsMention({ handle, links }: { handle: string; links: ChatSessionsLinks }): JSX.Element {
+  const member = links.byHandle.get(handle.toLowerCase());
+  if (!member) {
+    return <span className="chat-mention-plain">{handle}</span>;
+  }
+  return (
+    <button
+      type="button"
+      className="chat-member-chip"
+      data-testid="chat-member-chip"
+      data-participant-id={member.id}
+      onClick={(event) => {
+        event.preventDefault();
+        links.openMember(member.id, member.focusMessageId);
+      }}
+    >
+      {member.kind && <ProviderIcon className="chat-provider-icon is-chip" kind={member.kind} label={member.title} />}
+      <span>{member.title}</span>
+    </button>
+  );
+}
+
 function Mention({ handle }: { handle: string }): JSX.Element {
+  const links = useChatSessionsLinks();
+  return links ? <SessionsMention handle={handle} links={links} /> : <DirectoryMention handle={handle} />;
+}
+
+function DirectoryMention({ handle }: { handle: string }): JSX.Element {
   const directory = useContext(MentionDirectoryContext);
   const profile = directory?.get(handle.toLowerCase());
   const { open, setOpen, openCard, scheduleClose } = useHoverCard();

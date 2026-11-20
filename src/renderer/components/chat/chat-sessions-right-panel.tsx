@@ -1,8 +1,8 @@
-import { useContext, useMemo, type ComponentProps } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, type ComponentProps, type ReactNode } from "react";
 
 import type { DockedAccord } from "../../../shared/accordProgress";
 import { memberSessionMessages } from "../../../shared/mainSession";
-import { sessionsMemberStatus } from "../../../shared/mainSessionView";
+import { sessionsMemberDetail, sessionsMemberStatus } from "../../../shared/mainSessionView";
 import type {
   AgentContextUsage,
   AgentRunProgress,
@@ -18,7 +18,7 @@ import { ChatAccordPanel } from "./chat-accord-panel";
 import { contextUsageForMessage, sessionIdForMessage } from "./chat-message-metadata";
 import { ChatMembersPanel } from "./chat-members-panel";
 import { ChatMemberSessionPanel, type ChatMemberSendRequest } from "./chat-member-session-panel";
-import { chatRoleLabel } from "./chat-mention-directory";
+import { chatRoleLabel, participantProviderLabel } from "./chat-mention-directory";
 import type { ChatMessageItem } from "./chat-message-item";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { isChatMessageHiddenInChat } from "./chat-thread-data";
@@ -59,6 +59,31 @@ export function panelMessageProps(context: ChatPanelMessageContext, message: Cha
   };
 }
 
+/** "Load older" in a member's session: a page of the chat may hold nothing
+ *  of this member, so pages are loaded until one adds a message of it or the
+ *  chat's start is reached, a few at most. */
+const MEMBER_OLDER_PAGES_MAX = 6;
+
+export function useLoadOlderUntilMember(count: number, hasOlder: boolean, loading: boolean, load: () => void): () => void {
+  const run = useRef<{ from: number; pages: number } | undefined>();
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  useEffect(() => {
+    const current = run.current;
+    if (!current || loading) return;
+    if (count > current.from || !hasOlder || current.pages >= MEMBER_OLDER_PAGES_MAX) {
+      run.current = undefined;
+      return;
+    }
+    current.pages += 1;
+    loadRef.current();
+  }, [count, hasOlder, loading]);
+  return useCallback(() => {
+    run.current = { from: count, pages: 1 };
+    loadRef.current();
+  }, [count]);
+}
+
 /** The sessions view's right panel: the members list, one member's session,
  *  or an Accord. */
 export function ChatSessionsRightPanel(props: {
@@ -77,6 +102,11 @@ export function ChatSessionsRightPanel(props: {
   onLoadOlderMessages: () => void;
   onSendToMember: (request: ChatMemberSendRequest) => Promise<boolean>;
   onStopRuns?: (runIds: readonly string[]) => void;
+  /** A member's settings (model, effort, mode, rights, where it runs, remove),
+   *  opened from its session's header. */
+  renderMemberSettings?: (participantId: string) => ReactNode;
+  /** Its model chip in its session's composer. */
+  renderMemberChip?: (participantId: string) => ReactNode;
 }): JSX.Element | null {
   const { rightPanel, sessions, conversation, messageContext } = props;
   const settings = messageContext.settings;
@@ -84,12 +114,21 @@ export function ChatSessionsRightPanel(props: {
   const panel = rightPanel.panel;
   const memberId = panel?.kind === "member" ? panel.participantId : undefined;
   const participant = memberId ? props.participants.find((candidate) => candidate.id === memberId) : undefined;
+  const former = memberId && !participant ? sessions.formerRows.find((row) => row.member.id === memberId) : undefined;
   const messages = useMemo(
     () => memberId
       ? memberSessionMessages(conversation.messages, memberId, sessions.index).filter((message) => !isChatMessageHiddenInChat(conversation, message))
       : [],
     [conversation.messages, memberId, sessions.index]
   );
+  const ownCount = useMemo(() => messages.filter((message) => message.participantId === memberId).length, [messages, memberId]);
+  const loadOlder = useLoadOlderUntilMember(ownCount, props.hasOlderMessages, props.olderMessagesLoading, props.onLoadOlderMessages);
+  const memberDetail = (member: ChatParticipant): string => sessionsMemberDetail({
+    provider: participantProviderLabel(member.kind, member.hostLabel),
+    model: member.model,
+    roleLabel: chatRoleLabel(settings.chatRoleConfigs, member),
+    roleConfigId: member.roleConfigId
+  });
   if (panel?.kind === "accord") {
     const latest = props.latestAccord;
     return (
@@ -103,43 +142,56 @@ export function ChatSessionsRightPanel(props: {
     );
   }
   if (panel?.kind === "members") {
+    const main = props.participants.find((candidate) => candidate.id === sessions.mainSessionId);
     return (
       <ChatMembersPanel
         accord={props.latestAccord}
         onOpenAccord={props.onOpenAccord}
+        main={main ? { participant: main, detail: memberDetail(main), settings: props.renderMemberSettings?.(main.id) } : undefined}
         rows={sessions.memberRows}
-        messages={conversation.messages}
+        formerRows={sessions.formerRows}
+        activity={sessions.activity}
         runIdsByParticipantId={props.runIdsByParticipantId}
-        roleLabel={(item) => chatRoleLabel(settings.chatRoleConfigs, item)}
+        memberTitle={sessions.memberTitle}
+        memberDetail={memberDetail}
         onOpenMember={rightPanel.openMember}
         onStopRuns={props.onStopRuns}
         onClose={rightPanel.close}
       />
     );
   }
-  if (!participant) {
+  if (!memberId || (!participant && !former)) {
     return null;
   }
+  const task = sessions.tasksByMember.get(memberId)?.item;
+  const status = former
+    ? former.status
+    : sessionsMemberStatus(props.participantStatusById.get(memberId), task, sessions.activity.finishedAt.get(memberId));
   return (
     <ChatMemberSessionPanel
-      key={participant.id}
-      participant={participant}
+      key={memberId}
+      member={participant ? { id: participant.id, kind: participant.kind, hostLabel: participant.hostLabel } : { id: memberId }}
+      title={sessions.memberTitle(memberId)}
+      detail={participant ? memberDetail(participant) : "No longer in this chat"}
+      readOnly={!participant}
+      settings={participant ? props.renderMemberSettings?.(participant.id) : undefined}
+      chip={participant ? props.renderMemberChip?.(participant.id) : undefined}
+      focus={panel?.kind === "member" ? panel.focus : undefined}
       mainSessionId={sessions.mainSessionId}
-      status={sessionsMemberStatus(props.participantStatusById.get(participant.id), sessions.tasksByMember.get(participant.id)?.item)}
-      runIds={props.runIdsByParticipantId.get(participant.id) ?? []}
+      status={status}
+      runningSince={sessions.activity.runningSince.get(memberId) ?? task?.createdAt}
+      runIds={props.runIdsByParticipantId.get(memberId) ?? []}
       messages={messages}
-      allMessages={conversation.messages}
       messageProps={(message) => panelMessageProps(messageContext, message)}
-      participants={props.participants}
-      settings={settings}
+      appSettings={settings}
       conversationId={conversation.id}
       repoPath={conversation.repoPath}
-      draft={rightPanel.memberDrafts[participant.id] ?? ""}
+      draft={rightPanel.memberDrafts[memberId] ?? ""}
       busy={messageContext.busy}
       hasOlderMessages={props.hasOlderMessages}
       olderMessagesLoading={props.olderMessagesLoading}
-      onLoadOlderMessages={props.onLoadOlderMessages}
-      onDraftChange={(value) => rightPanel.setMemberDraft(participant.id, value)}
+      onLoadOlderMessages={loadOlder}
+      onDraftChange={(value) => rightPanel.setMemberDraft(memberId, value)}
       onSend={props.onSendToMember}
       onStopRuns={props.onStopRuns}
       onBack={rightPanel.openMembers}

@@ -1,4 +1,4 @@
-import type { PointerEvent as ReactPointerEvent } from "react";
+import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 
 import type { DockedAccord } from "../../../shared/accordProgress";
 import type { ChatAppToolApproval, ChatImageInput, ChatSkillMention, Conversation, RepoFileMention } from "../../../shared/types";
@@ -41,6 +41,8 @@ export function ChatViewRightPanels(props: {
     onStopRuns?: (runIds: readonly string[]) => void;
     latestAccord?: DockedAccord;
     onOpenAccord: (launchId: string) => void;
+    renderMemberSettings?: (participantId: string) => ReactNode;
+    renderMemberChip?: (participantId: string) => ReactNode;
   };
 }): JSX.Element {
   const { context, thread, sessions } = props;
@@ -97,6 +99,8 @@ export function ChatViewRightPanels(props: {
           onStopRuns={sessions.onStopRuns}
           latestAccord={sessions.latestAccord}
           onOpenAccord={sessions.onOpenAccord}
+          renderMemberSettings={sessions.renderMemberSettings}
+          renderMemberChip={sessions.renderMemberChip}
         />
       )}
     </>

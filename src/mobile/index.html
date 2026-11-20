@@ -101,7 +101,16 @@
             <button id="chat-members-toggle" class="mobile-title" type="button" aria-haspopup="dialog" aria-controls="members-sheet" aria-expanded="false">
               <span id="chat-title" class="mobile-title-name" role="heading" aria-level="1">AccordAgents</span>
               <span id="connection-state" class="mobile-title-state"></span>
+              <!-- The sessions view keeps its header quiet: the chat's view is
+                   chosen in a menu under the title (docs/main-session.md). -->
+              <span id="chat-title-chevron" class="mobile-title-chevron" aria-hidden="true" hidden><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m6 9 6 6 6-6"></path>
+              </svg></span>
             </button>
+            <div id="chat-title-menu" class="chat-title-menu" role="menu" aria-label="Chat view" hidden>
+              <button type="button" class="chat-title-menu-item" role="menuitemradio" data-title-view="sessions" aria-checked="false">View: Sessions</button>
+              <button type="button" class="chat-title-menu-item" role="menuitemradio" data-title-view="classic" aria-checked="false">View: Classic</button>
+            </div>
             <!-- The chat's two views (docs/main-session.md): only a chat with a
                  main session has both; any other shows the switch unavailable. -->
             <div id="chat-view-switch" class="chat-view-switch" role="group" aria-label="Chat view" hidden>
@@ -130,6 +139,7 @@
                   <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
                 </svg>
                 <span id="chat-members-count" aria-hidden="true"></span>
+                <span id="chat-members-dot" class="chat-members-dot" aria-hidden="true" hidden></span>
               </span>
             </button>
           </header>

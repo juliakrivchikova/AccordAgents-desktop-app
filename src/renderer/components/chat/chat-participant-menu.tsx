@@ -1,3 +1,4 @@
+import type React from "react";
 import type { MemberRestartInProgress } from "../../../shared/memberRestart";
 import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import type {
@@ -60,6 +61,9 @@ export function ChatParticipantMenu(props: {
   onRemoveParticipant: (participantId: string) => void;
   onJumpToParticipantLastMessage: (participantId: string) => void;
   onManageInSettings: () => void;
+  /** One member's settings only, opened by this trigger (a gear by default). */
+  memberId?: string;
+  trigger?: React.ReactNode;
 }): JSX.Element {
   const existingHandles = new Set(props.participants.map((participant) => participant.handle.toLowerCase()));
   const addDraft = normalizedChatDrafts([props.addParticipantDraft]);
@@ -122,6 +126,8 @@ export function ChatParticipantMenu(props: {
       onRemoveParticipant={props.onRemoveParticipant}
       onJumpToParticipantLastMessage={props.onJumpToParticipantLastMessage}
       onManageInSettings={props.onManageInSettings}
+      memberId={props.memberId}
+      trigger={props.trigger}
     />
   );
 }

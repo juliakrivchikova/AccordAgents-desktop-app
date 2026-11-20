@@ -17,7 +17,7 @@ import {
 export type ChatRightPanel =
   | { kind: "thread"; rootId: string }
   | { kind: "members" }
-  | { kind: "member"; participantId: string }
+  | { kind: "member"; participantId: string; focus?: { messageId: string; nonce: number } }
   | { kind: "accord"; launchId: string };
 
 export interface ChatRightPanelState {
@@ -25,7 +25,8 @@ export interface ChatRightPanelState {
   selectedThreadRootId?: string;
   selectThread: (rootId: string | undefined) => void;
   openMembers: () => void;
-  openMember: (participantId: string) => void;
+  /** Opens a member's session, at a message of it when one is named. */
+  openMember: (participantId: string, focusMessageId?: string) => void;
   openAccord: (launchId: string) => void;
   close: () => void;
   /** A member panel's composer draft, per member. */
@@ -41,7 +42,11 @@ export function useChatRightPanel(): ChatRightPanelState {
     setPanel(rootId ? { kind: "thread", rootId } : undefined);
   }, []);
   const openMembers = useCallback(() => setPanel({ kind: "members" }), []);
-  const openMember = useCallback((participantId: string) => setPanel({ kind: "member", participantId }), []);
+  const focusNonce = useRef(0);
+  const openMember = useCallback((participantId: string, focusMessageId?: string) => {
+    focusNonce.current += 1;
+    setPanel({ kind: "member", participantId, ...(focusMessageId ? { focus: { messageId: focusMessageId, nonce: focusNonce.current } } : {}) });
+  }, []);
   const openAccord = useCallback((launchId: string) => setPanel({ kind: "accord", launchId }), []);
   const close = useCallback(() => setPanel(undefined), []);
   const setMemberDraft = useCallback((participantId: string, value: string) => {

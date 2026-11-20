@@ -38,36 +38,59 @@ chat without a main session is always `classic`; its switch is disabled.
 
 - `classic`: today's timeline: avatars, every member's reply on it.
 - `sessions` (like T3 Code / Claude desktop):
-  - no avatars or author names on the main timeline; the User's messages are
-    right-aligned bubbles, the main session's replies full width, its work
-    folded into "Worked for …";
-  - the main timeline holds the User's messages to the main session, the main
-    session's messages, system lines and the cards the User must answer
-    (approvals, a member's choice card that is still open);
-  - each task the main session gave is a **task card** (member, status, one
-    line of result; click opens the member's session), and while the main
-    session waits there is a line "Waiting on N members … Stop";
-  - the **right panel** lists the chat's members (provider, current task,
-    status running / waiting for you / done / error, elapsed time, Stop) with
-    Stop all; clicking a member opens its **whole session** in the same panel
-    (Back to the list) with a composer that writes to that member only
-    (`SendChatMessageRequest.targetParticipantIds`);
-  - no threads UI: every message has one place (`sessionsViewLane`);
-  - no avatar pictures anywhere in the chat: a member's only mark is its
-    provider's logo tile, as in Settings → Local CLI setup (task cards,
-    member rows, Accord cards, turn-finished notes, approval cards, the
-    roster and @ lists, hover cards; `ChatMemberMark`);
-  - a finished message shows no member state (the member's state now says
-    nothing about it); its time is with its controls on hover. A message
-    still being written keeps "Running 12s" or "Queued";
+  - no avatars, author names or handles anywhere: a member is its
+    provider's logo tile and its current or latest task's first line
+    (`sessionsMemberTitle`), with provider, model and a non-generic role
+    under it (`sessionsMemberDetail`); a mention of a member in a message
+    is a chip (logo + task) that opens its session, a mention of the main
+    session or of nobody is its plain name, and a leading mention of the
+    main session is left out of the User's bubble (`withoutLeadingMention`);
+  - one reading column (`--chat-reading-width`, 768px) holds the main
+    timeline and the composer; the User's messages are right-aligned
+    bubbles, the main session's replies full width;
+  - the main composer always writes to the main session
+    (`targetParticipantIds=[main]`, `deliveryTargets=[main]` on the phone),
+    offers no members to mention (`/` and `#` stay), and carries the main
+    session's model chip, which opens its settings; a member's composer
+    the same for that member;
+  - the main timeline holds the User's messages to the main session, the
+    main session's messages, system lines and the cards the User must
+    answer; the member-added cards of its delegations are not shown
+    (`isMainSessionDelegationRosterCard`);
+  - the main session's tasks are not cards: each is a row inside the
+    "Worked for …" fold of the reply of the turn that gave it
+    (`sessionsTaskPlacement`, by the message both answer; under the reply
+    while it is being written): logo with a state dot, task title, one line
+    of result, time; a row opens the member's session at its reply (else
+    the task), marked for a moment. A task whose reply is not loaded is one
+    such row of its own. While the main session waits there is a line
+    "Waiting on N members: <tasks> · Stop";
+  - one icon at the top right opens the side panel (a running count on it,
+    a dot while an Accord is open); the view switch is in the chat title's
+    menu and the roster's popover is not shown. The side panel lists the
+    chat's latest Accord, the main session (its settings), the members
+    (provider, task, status, elapsed time, Stop) with Stop all; while some
+    member runs or waits for the User the ended ones are under "Previous";
+    members no longer in the chat are under "Removed"
+    (`sessionsFormerMembers`). A member opens its **whole session** in the
+    same panel (Back to the list) with its settings (gear) and a composer
+    that writes to it only; a removed member's session is read-only;
+  - no threads UI: every message has one place (`sessionsViewLane`); the
+    main session's answer to a member's question is in that member's
+    session from its first token (placed by the request it answers);
+  - a finished message shows no member state; its time is with its controls
+    on hover. A message still being written keeps "Running 12s" or "Queued";
+  - a task's state is not taken from the member's earlier stopped or failed
+    turn while the task waits (queued, a machine preparing);
   - a turn-finished note about another member is not on the main timeline
-    (`isOtherMemberTurnFinishedNote`): its task card already says it is done;
-  - the members panel lists the chat's latest Accord first; while some
-    member runs or waits for the User, the ones that ended are under
-    "Previous", and with nobody at work every member is listed as it is;
-  - the Accord: above the composer one line (Accord · its name · where it
-    stands) that opens the whole card in the right panel; the classic view
-    keeps the pinned card.
+    (`isOtherMemberTurnFinishedNote`);
+  - the Accord: above the composer one quiet line (Accord · its name ·
+    where it stands) that opens the whole card in the side panel; the
+    classic view keeps the pinned card;
+  - pages: the main timeline stops loading older pages by itself after two
+    pages that added nothing to it ("Load older messages" goes on); "Load
+    older" in a member's session goes on until a message of that member
+    arrives or the chat's start, six pages at most.
 
 The placement rules are in `src/shared/mainSession.ts` and are the same on
 the desktop and on the phone (bundled through `mobileSharedRules.ts`).

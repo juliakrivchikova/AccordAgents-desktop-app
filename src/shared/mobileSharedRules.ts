@@ -59,10 +59,16 @@ export {
 // task cards, the members list and the "Waiting on" line, by the desktop's
 // own rules.
 export {
-  MAIN_SESSION_ROLE_ID, buildSessionsViewIndex, canSwitchChatView, chatViewFor, isChatViewMode, isMainSessionTaskMessage, mainSessionParticipantId,
-  memberSessionMessages, membersMainSessionWaitsOn, sessionsViewLane
+  MAIN_SESSION_ROLE_ID, buildSessionsViewIndex, canSwitchChatView, chatViewFor, isChatViewMode, isMainSessionTaskMessage, isOtherMemberTurnFinishedNote,
+  mainSessionMemberOf, mainSessionParticipantId, mainTimelineMessages, memberSessionMessages, membersMainSessionWaitsOn, sessionsFormerMembers,
+  sessionsTaskPlacement, sessionsViewLane, withoutLeadingMention
 } from "./mainSession";
 export {
-  SESSIONS_WORK_STATUS_LABELS, firstTextLine, isMemberWorking, latestTaskByMember, memberRunningSince, openMemberCardMessages, sessionsMemberRows,
-  sessionsTaskGroupLabel, sessionsTaskReplyLine, sessionsTaskRunningSince, sessionsTaskStatus
+  SESSIONS_WORK_STATUS_LABELS, firstTextLine, isMainSessionDelegationRosterCard, isMemberWorking, latestTaskByMember, memberRunningSince,
+  openMemberCardMessages, sessionsDelegationSummary, sessionsFormerMemberStatus, sessionsMemberActivity, sessionsMemberDetail, sessionsMemberRows,
+  sessionsMemberStatus, sessionsMemberTitle, sessionsTaskEntries, sessionsTaskGroupLabel, sessionsTaskReplyLine, sessionsTaskRunningSince,
+  sessionsTaskStatus, sessionsWaitingText
 } from "./mainSessionView";
+// Which message is an Accord launch card: the User's own launch, and the
+// main session's (accordLaunchByMainSession), by the desktop's rule.
+export { accordLaunchCardForMessage } from "./accordLaunchCard";

@@ -1,18 +1,18 @@
 /**
  * The main session and the chat's two views on the phone (docs/main-session.md),
- * driven through the real PWA in a browser against a real hub:
- *  - a chat with a main session opens in the sessions view: the main timeline
- *    holds the User and the main session only, without avatars; each task the
- *    main session gave is a card (member, task, state, time, one line of the
- *    result) and the line "Waiting on N members" says whom it waits on;
- *  - a task card's row opens that member's whole session, whose composer
- *    writes to that member only (deliveryTargets = [member], no fallback);
- *  - the members sheet lists each member's state, task and Stop;
- *  - the header's switch writes the chat's view through the server, and the
- *    classic view is today's timeline; a chat without a main session has the
- *    classic view only, and the switch says why;
- *  - New chat leads with the main session (never the Assistant), and the
- *    chat it makes says which member that is and the view it opens in.
+ * driven through the real PWA in a browser against a real hub. The sessions
+ * view is T3 Code's: the main timeline holds the User and the main session;
+ * the tasks a turn gave are rows inside its reply's "Worked for …" fold
+ * (provider logo with a status dot, task, one line of result, time), and a
+ * row or a member's chip in the text opens that member's session at the
+ * message it refers to; members are named by their task with their provider's
+ * logo, never by handle or avatar; one icon opens one panel (main session,
+ * Accord, members, Previous, Removed); a removed member's session reads only;
+ * Stop reaches a member that has written nothing yet; the Accord is one quiet
+ * line that opens its own screen; the main composer writes to the main
+ * session whatever it says; the view is picked in the title's menu. The
+ * classic view is today's timeline, and a chat without a main session has the
+ * classic view only. New chat leads with the main session, with its logo.
  *
  * Desktop Chrome, not the installed phone: supporting evidence for the phone
  * check, not a stand-in for it.
@@ -36,36 +36,75 @@ for (const key of ["mainSessionParticipantId", "chatView"]) {
 const MAIN = member("main", { id: "p-main", roleConfigId: "main-session" });
 const DREW = member("drew", { id: "p-drew" });
 const TAYLOR = member("taylor", { id: "p-taylor", kind: "codex-cli" });
+const SAM = member("sam", { id: "p-sam", kind: "gemini-cli" });
+// A member the main session made for a task and removed once it was done.
+const OLGA_ID = "p-olga";
 const at = (minutesAgo) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
 
 const visible = (selector) => `(() => { const node = document.querySelector(${JSON.stringify(selector)}); return Boolean(node && !node.hidden && node.offsetParent !== null); })()`;
 const rowsSummary = `[...document.querySelectorAll("#message-list > .message-row")].map((row) =>
   (row.dataset.sessionsKind || row.dataset.author) + ":" + (row.dataset.threadRoot || row.dataset.rowKey))`;
+const title = `document.getElementById("chat-title").textContent`;
+// The main timeline is drawn again (the heading changes before the rows do).
+const mainShown = `(document.getElementById("chat-title").textContent === "Login page" && document.querySelector('#message-list .message-row[data-thread-root="r1"]') !== null)`;
+
+const launchPrompt = (subject, members) => [
+  "@main /accord", "", "Subject:", subject, "",
+  `Selected accord members: ${members}.`,
+  "Run the accord skill for exactly those selected members and this subject. Use app_chat_request_participants for those members only. The app has enabled request-members permission for you in this chat; the user can revoke it from your member controls."
+].join("\n");
+
+const item = (target, handle, prompt, status, minutes, extra = {}) => ({
+  targetParticipantId: target, targetHandle: handle, prompt, status, createdAt: at(minutes), updatedAt: at(extra.doneAt ?? minutes), ...extra
+});
+const request = (id, source, minutes, items) => ({
+  id, role: "participant", participantId: MAIN.id, participantLabel: "@main", status: "done", createdAt: at(minutes),
+  content: items.map((entry) => `@${entry.targetHandle} ${entry.prompt}`).join("\n"),
+  metadata: { sourceMessageId: source, participantRequest: {
+    id: `batch-${id}`, requesterParticipantId: MAIN.id, requesterHandle: "main", source: "mcp", resumeRequester: true, status: "running",
+    depth: 1, createdAt: at(minutes), updatedAt: at(minutes), triggerMessageId: source, items
+  } }
+});
 
 function sessionsChatMessages() {
   return [
-    { id: "u1", role: "user", content: "Fix the login page", status: "done", createdAt: at(30), metadata: { deliveryTargets: [MAIN.id] } },
-    { id: "r1", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "I'll split this between two members.", status: "done", createdAt: at(29) },
-    {
-      id: "req", role: "participant", participantId: MAIN.id, participantLabel: "@main", status: "done", createdAt: at(28),
-      content: "@drew Restyle the login button\nUse the new tokens.\n@taylor Run the login tests",
-      metadata: { participantRequest: {
-        id: "batch-1", requesterParticipantId: MAIN.id, requesterHandle: "main", source: "tool", resumeRequester: true, status: "running",
-        depth: 1, createdAt: at(28), updatedAt: at(5),
-        items: [
-          { targetParticipantId: DREW.id, targetHandle: "drew", prompt: "Restyle the login button\nUse the new tokens.", status: "running", createdAt: at(28), updatedAt: at(28) },
-          { targetParticipantId: TAYLOR.id, targetHandle: "taylor", prompt: "Run the login tests", status: "answered", replyMessageId: "taylor-reply", createdAt: at(28), updatedAt: at(5) }
-        ]
-      } }
-    },
-    { id: "taylor-reply", role: "participant", participantId: TAYLOR.id, participantLabel: "@taylor", content: "All 42 login tests pass.\nDetails below.", status: "done", createdAt: at(6) },
+    // An earlier turn: a task to a member that has left the chat since.
+    { id: "u0", role: "user", content: "Look at the old report", status: "done", createdAt: at(50), metadata: { deliveryTargets: [MAIN.id] } },
+    { id: "r0", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "I asked a member to read it.", status: "done", createdAt: at(49.5),
+      metadata: { sourceMessageId: "u0", workedMs: 20_000 } },
+    request("req-old", "u0", 49, [item(OLGA_ID, "olga", "Summarise the old report", "answered", 49, { replyMessageId: "olga-reply", doneAt: 48 })]),
+    { id: "olga-reply", role: "participant", participantId: OLGA_ID, participantLabel: "@olga", content: "The old report is about logins.", status: "done", createdAt: at(48),
+      metadata: { sourceMessageId: "req-old" } },
+    // This turn: three tasks, one done, two still going.
+    { id: "u1", role: "user", content: "@main Fix the login page", status: "done", createdAt: at(30), metadata: { deliveryTargets: [MAIN.id] } },
+    { id: "r1", role: "participant", participantId: MAIN.id, participantLabel: "@main",
+      content: "I split this: @drew restyles it, @taylor tests it and @sam reads the logs. Ask @main or @nobody.", status: "done", createdAt: at(29.5),
+      metadata: { sourceMessageId: "u1", workedMs: 54_000 } },
+    request("req", "u1", 28, [
+      item(DREW.id, "drew", "Restyle the login button\nUse the new tokens.", "running", 28),
+      item(TAYLOR.id, "taylor", "Run the login tests", "answered", 28, { replyMessageId: "taylor-reply", doneAt: 5 }),
+      item(SAM.id, "sam", "Check the server logs", "running", 28)
+    ]),
+    { id: "taylor-reply", role: "participant", participantId: TAYLOR.id, participantLabel: "@taylor", content: "All 42 login tests pass.\nDetails below.", status: "done", createdAt: at(6),
+      metadata: { sourceMessageId: "req" } },
+    // Another member's turn-finished note: its task already says it is done.
+    { id: "taylor-note", role: "system", content: "All 42 login tests pass.", status: "done", createdAt: at(5.5),
+      metadata: { appMessageSource: "app_turn_finished_note", turnFinishedNote: { messageId: "taylor-reply", participantId: TAYLOR.id, participantLabel: "@taylor" } } },
     { id: "u2", role: "user", content: "Drew, keep the old colour for now", status: "done", createdAt: at(4), metadata: { deliveryTargets: [DREW.id] } },
     { id: "drew-run", role: "participant", participantId: DREW.id, participantLabel: "@drew", content: "Looking at the button styles", status: "pending", createdAt: at(3),
-      metadata: { runId: "run-drew", sourceMessageId: "req" } }
+      metadata: { runId: "run-drew", sourceMessageId: "req" } },
+    // A member at work with nothing written yet: still stoppable.
+    { id: "sam-run", role: "participant", participantId: SAM.id, participantLabel: "@sam", content: "", status: "pending", createdAt: at(2.5),
+      metadata: { runId: "run-sam", sourceMessageId: "req" } },
+    // An Accord the main session started, and its document's first step.
+    { id: "launch", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: launchPrompt("Pick the button colour", "drew, taylor"),
+      status: "done", createdAt: at(2), metadata: { accordLaunchByMainSession: true } },
+    { id: "n-1", role: "system", content: "@drew created draft collection [Button colour](#artifact:art-1) · Drafts 0/2", status: "done", createdAt: at(1.5),
+      metadata: { appMessageSource: "app_artifact_note", artifactEventId: "e-n-1", accordLaunchMessageId: "launch" } }
   ];
 }
 
-test("the sessions view: main timeline, task card, a member's session that writes to it only, the members sheet, and the switch", { timeout: 180_000 }, async (t) => {
+test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, chips not handles, one panel, Stop without text, removed members, the Accord's line", { timeout: 240_000 }, async (t) => {
   const hub = await startMobileHub();
   const site = await serveMobileShell({ port: 8391, hubOrigins: [hub.base] });
   const profile = await tempProfile("aa-mobile-sessions-");
@@ -79,7 +118,7 @@ test("the sessions view: main timeline, task card, a member's session that write
     await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   });
   await hub.createChat("conv-main", {
-    title: "Login page", participants: [MAIN, DREW, TAYLOR], createdAt: at(31),
+    title: "Login page", participants: [MAIN, DREW, TAYLOR, SAM], createdAt: at(51),
     metadata: { mainSessionParticipantId: MAIN.id, chatView: "sessions" }, messages: sessionsChatMessages()
   });
   await hub.createChat("conv-old", { title: "Before main sessions", participants: [member("admin", { id: "p-admin", roleConfigId: "administrator" }), DREW],
@@ -90,104 +129,176 @@ test("the sessions view: main timeline, task card, a member's session that write
 
   // --- the main timeline ---------------------------------------------------
   await openChat(app, "conv-main");
-  await app.waitFor(`document.querySelectorAll('#message-list .message-row[data-sessions-kind="task"]').length === 1`, "the task card");
-  assert.equal(await app.evaluate(visible("#chat-view-switch")), true, "the switch is in the header");
-  assert.deepEqual(await app.evaluate(`[...document.querySelectorAll("#chat-view-switch [data-view]")].map((node) => node.dataset.view + ":" + node.getAttribute("aria-pressed") + ":" + node.getAttribute("aria-disabled"))`),
-    ["sessions:true:false", "classic:false:false"]);
-  await app.waitFor(`document.querySelector('#message-list .message-row[data-sessions-kind="waiting"]') !== null`, "the Waiting on line");
-  const main = await app.evaluate(rowsSummary);
-  assert.deepEqual(main, ["you:u1", "agent:r1", "task:req", "waiting:sessions-waiting"],
-    "the User's message to the main session, its reply, its task card and the Waiting line; no member's message, and not the User's message to a member");
-  const looks = await app.evaluate(`(() => {
-    const reply = document.querySelector('#message-list .message-row[data-thread-root="r1"]');
-    const avatar = reply.querySelector(".message-avatar");
-    const you = document.querySelector('#message-list .message-row[data-thread-root="u1"]');
-    return { avatar: avatar ? getComputedStyle(avatar).display : "none", handle: reply.querySelector(".message-handle").textContent,
-      yourSide: getComputedStyle(you).justifyContent, chips: document.querySelectorAll("#message-list .thread-chip").length,
-      replyWidth: Math.round(reply.querySelector(".message-copy").getBoundingClientRect().width), listWidth: Math.round(document.getElementById("message-list").getBoundingClientRect().width) };
-  })()`);
-  assert.equal(looks.avatar, "none", "no avatar");
-  assert.equal(looks.handle, "", "no author name");
-  assert.equal(looks.yourSide, "flex-end", "the User's message stays on the right");
-  assert.equal(looks.chips, 0, "no threads");
-  assert.ok(looks.listWidth - looks.replyWidth <= 2, `the main session's reply takes the whole width: ${JSON.stringify(looks)}`);
-  const card = await app.evaluate(`(() => { const card = document.querySelector('#message-list .message-row[data-sessions-kind="task"]');
-    return { head: card.querySelector(".sessions-task-card-head")?.textContent,
-      rows: [...card.querySelectorAll(".sessions-task-row")].map((row) => ({ member: row.dataset.openMember, status: row.dataset.taskStatus,
-        text: row.querySelector(".sessions-task-handle").textContent + " " + row.querySelector(".sessions-task-title").textContent,
-        result: row.querySelector(".sessions-task-result")?.textContent || "", label: row.querySelector(".sessions-status").textContent,
-        elapsed: row.querySelector(".sessions-elapsed")?.textContent || "" })) }; })()`);
-  assert.equal(card.head, "2 members · 1 running");
-  assert.deepEqual(card.rows.map((row) => [row.member, row.status, row.text, row.result, row.label]), [
-    ["p-drew", "running", "@drew Restyle the login button", "", "Running"],
-    ["p-taylor", "done", "@taylor Run the login tests", "All 42 login tests pass.", "Done"]
+  await app.waitFor(`document.querySelector('#message-list .message-row[data-sessions-kind="waiting"]') !== null && document.querySelector("#accord-dock .accord-strip") !== null`,
+    "the Waiting line and the Accord's line");
+  assert.deepEqual(await app.evaluate(rowsSummary), ["you:u0", "agent:r0", "you:u1", "agent:r1", "agent:launch", "waiting:sessions-waiting"],
+    "the User and the main session only: no task cards, no member's message, no other member's note, no Accord document note");
+  // The header: no text buttons; the view is in the title's menu, the
+  // members icon counts who works and has a dot for the open Accord.
+  const header = await app.evaluate(`(() => ({
+    switch: ${visible("#chat-view-switch")}, chevron: ${visible("#chat-title-chevron")},
+    label: document.getElementById("chat-members-button").getAttribute("aria-label"), count: document.getElementById("chat-members-count").textContent,
+    dot: ${visible("#chat-members-dot")}
+  }))()`);
+  assert.deepEqual(header, { switch: false, chevron: true, label: "Members (2 running)", count: "2", dot: true });
+  // The User's message to the main session reads without its @main.
+  assert.equal(await app.evaluate(`document.querySelector('#message-list .message-row[data-thread-root="u1"] .message-content').textContent.trim()`), "Fix the login page");
+  // Members are chips with their provider's logo and their task; the main
+  // session and an unknown handle are plain words. No "@" anywhere.
+  const reply = await app.evaluate(`(() => { const row = document.querySelector('#message-list .message-row[data-thread-root="r1"]');
+    return { text: row.querySelector(".message-content").textContent.replace(/\\s+/g, " ").trim(),
+      chips: [...row.querySelectorAll(".sessions-member-chip")].map((chip) => [chip.dataset.openMember, chip.querySelector(".provider-logo").dataset.providerKind, chip.textContent]),
+      worked: row.querySelector(".sessions-worked-toggle")?.textContent, open: row.querySelectorAll(".sessions-delegation").length,
+      order: [...row.querySelector(".message-copy").children].map((node) => node.className.split(" ")[0]) }; })()`);
+  assert.equal(reply.text, "I split this: Restyle the login button restyles it, Run the login tests tests it and Check the server logs reads the logs. Ask main or nobody.");
+  assert.deepEqual(reply.chips, [["p-drew", "claude-code", "Restyle the login button"], ["p-taylor", "codex-cli", "Run the login tests"], ["p-sam", "gemini-cli", "Check the server logs"]]);
+  assert.equal(reply.worked, "Worked for 54s", "the turn's work, folded");
+  assert.equal(reply.open, 0, "folded once the reply is finished");
+  assert.deepEqual(reply.order.slice(0, 3), ["message-meta", "sessions-worked", "message-content"], "the fold comes before the reply's text");
+  assert.equal(await app.evaluate(`/@[A-Za-z]/.test(document.getElementById("message-list").innerText)`), false, "no handle on the main timeline");
+  // No avatar picture anywhere in the view.
+  assert.equal(await app.evaluate(`[...document.querySelectorAll("#message-list .message-avatar, #message-list .avatar-icon, #message-list img")].filter((node) => node.offsetParent !== null).length`), 0);
+  // The logo pictures are served as pictures.
+  assert.deepEqual(await app.evaluate(`Promise.all(["./assets/providers/claude.png", "./assets/providers/antigravity.png"].map((url) => fetch(url).then((response) => response.status + " " + response.headers.get("content-type"))))`),
+    ["200 image/png", "200 image/png"]);
+  // Open the fold: a summary line, then a row per task.
+  await app.evaluate(`document.querySelector('#message-list .message-row[data-thread-root="r1"] .sessions-worked-toggle').click()`);
+  await app.waitFor(`document.querySelectorAll('#message-list .message-row[data-thread-root="r1"] .sessions-delegation').length === 3`, "the turn's tasks");
+  const fold = await app.evaluate(`(() => { const row = document.querySelector('#message-list .message-row[data-thread-root="r1"]');
+    return { summary: row.querySelector(".sessions-worked-summary").textContent, rows: [...row.querySelectorAll(".sessions-delegation")].map((node) => ({
+      member: node.dataset.openMember, status: node.dataset.taskStatus, focus: node.dataset.focusMessage,
+      logo: node.querySelector(".sessions-logo .provider-logo").dataset.providerKind, dot: node.querySelector(".sessions-logo-dot").className,
+      title: node.querySelector(".sessions-delegation-title").textContent, result: node.querySelector(".sessions-delegation-result")?.textContent || "",
+      time: node.querySelector(".sessions-delegation-time")?.textContent || "" })) }; })()`);
+  assert.equal(fold.summary, "Delegated 3 tasks");
+  assert.deepEqual(fold.rows.map((row) => [row.member, row.status, row.focus, row.logo, row.dot, row.title, row.result]), [
+    ["p-drew", "running", "drew-run", "claude-code", "sessions-logo-dot is-running", "Restyle the login button", ""],
+    ["p-taylor", "done", "taylor-reply", "codex-cli", "sessions-logo-dot is-done", "Run the login tests", "All 42 login tests pass."],
+    ["p-sam", "running", "sam-run", "gemini-cli", "sessions-logo-dot is-running", "Check the server logs", ""]
   ]);
-  assert.match(card.rows[0].elapsed, /^\d+m \d+s$/, "the time a running task has taken, as the desktop counts it");
-  assert.equal(card.rows[1].elapsed, "");
-  assert.match(await app.evaluate(`document.querySelector(".sessions-waiting-text").textContent`), /^Waiting on 1 member: @drew$/);
-  assert.equal(await app.evaluate(`document.querySelector(".sessions-waiting .sessions-stop").disabled`), false, "the Waiting line has Stop");
-  // The header's button counts the members at work.
-  assert.equal(await app.evaluate(`document.getElementById("chat-members-button").getAttribute("aria-label")`), "Members (1 running)");
-  assert.equal(await app.evaluate(`document.getElementById("chat-members-count").textContent`), "1");
+  assert.match(fold.rows[0].time, /^\d+m \d+s$/, "a running task counts up");
+  assert.equal(fold.rows[1].time, "23m 0s", "an ended task says how long it took");
+  // The Waiting line names the tasks, and stops them.
+  assert.equal(await app.evaluate(`document.querySelector(".sessions-waiting-text").textContent`), "Waiting on 2 members: Restyle the login button, Check the server logs");
+  assert.equal(await app.evaluate(`document.querySelector(".sessions-waiting .sessions-stop").disabled`), false, "the Waiting line has Stop, though one of them has written nothing yet");
 
-  // --- a member's session --------------------------------------------------
-  await app.evaluate(`document.querySelector('.sessions-task-row[data-open-member="p-drew"]').click()`);
-  await app.waitFor(`document.getElementById("chat-title").textContent === "@drew" && document.querySelector('#message-list .message-row[data-sessions-kind="member-head"]') !== null`,
-    "drew's session");
-  assert.equal(await app.evaluate(visible("#back-to-timeline")), true, "the way back");
-  assert.equal(await app.evaluate(visible("#chat-view-switch")), false, "a session's header has room for its way back");
-  assert.equal(await app.evaluate(`document.getElementById("composer-input").placeholder`), "Message @drew...");
-  assert.deepEqual(await app.evaluate(rowsSummary), ["member-head:member-session-head\u0000p-drew", "task-fold:req", "you:u2", "agent:drew-run"],
-    "its task folded to one line, the User's message to it, and its own reply");
-  assert.deepEqual(await app.evaluate(`(() => { const fold = document.querySelector(".member-task"); return [fold.querySelector(".member-task-label").textContent,
-    fold.querySelector(".member-task-preview").textContent, document.querySelector(".member-session-head .sessions-status").textContent]; })()`),
-  ["Task from the main session", "Restyle the login button", "Running"]);
-  // The task opens to its whole text.
-  await app.evaluate(`document.querySelector(".member-task-toggle").click()`);
-  await app.waitFor(`(document.querySelector(".member-task-body")?.textContent || "").includes("@taylor Run the login tests")`, "the task's whole text");
+  // --- a delegation row opens the member's session at its message ----------
+  await app.evaluate(`document.querySelector('#message-list .sessions-delegation[data-open-member="p-taylor"]').click()`);
+  await app.waitFor(`${title} === "Run the login tests" && document.querySelector('#message-list .message-row.message-focused[data-thread-root="taylor-reply"]') !== null`,
+    "taylor's session, at its reply");
+  assert.deepEqual(await app.evaluate(rowsSummary), ["member-head:member-session-head\u0000p-taylor", "task-fold:req", "agent:taylor-reply"]);
+  await app.evaluate(`document.getElementById("back-to-timeline").click()`);
+  await app.waitFor(mainShown, "back");
 
-  // A message written here goes to drew only.
+  // --- a chip opens its member's session: drew, which writes to drew only --
+  await app.evaluate(`document.querySelector('#message-list .sessions-member-chip[data-open-member="p-drew"]').click()`);
+  await app.waitFor(`${title} === "Restyle the login button" && document.querySelector('#message-list .message-row.message-focused[data-thread-root="drew-run"]') !== null`,
+    "drew's session, at its reply in progress");
+  assert.equal(await app.evaluate(visible("#back-to-timeline")), true);
+  assert.equal(await app.evaluate(`document.getElementById("composer-input").placeholder`), "Message this member...");
+  assert.equal(await app.evaluate(visible("#mention-button")), false, "no @ to type in the sessions view");
+  assert.deepEqual(await app.evaluate(rowsSummary), ["member-head:member-session-head\u0000p-drew", "task-fold:req", "you:u2", "agent:drew-run"]);
+  const head = await app.evaluate(`(() => { const head = document.querySelector(".member-session-head");
+    return [head.querySelector(".provider-logo").dataset.providerKind, head.querySelector(".member-session-provider").textContent, head.querySelector(".sessions-status").textContent,
+      document.querySelector(".member-task-label").textContent, document.querySelector(".member-task-preview").textContent]; })()`);
+  assert.deepEqual(head, ["claude-code", "Claude Code · Software Engineer · Local · desktop", "Running", "Task from the main session", "Restyle the login button"]);
   await app.evaluate(`(() => { const input = document.getElementById("composer-input"); input.value = "Please also check dark mode"; input.dispatchEvent(new Event("input", { bubbles: true }));
     document.getElementById("composer-form").requestSubmit(); })()`);
-  await app.waitFor(`[...document.querySelectorAll('#message-list .message-row[data-author="you"]')].some((row) => row.textContent.includes("Please also check dark mode"))`,
-    "the message stays in drew's session");
-  const sent = await waitForOp(hub, (op) => op.kind === "message.create" && op.message && op.message.content === "Please also check dark mode");
-  assert.deepEqual(sent.message.metadata.deliveryTargets, [DREW.id], "to that member only");
-  assert.equal(sent.message.metadata.chatThreadRootId, undefined, "not in a thread");
-
-  // Back to the main timeline: the message to drew is not on it.
+  const toDrew = await waitForOp(hub, (op) => op.kind === "message.create" && op.message && op.message.content === "Please also check dark mode");
+  assert.deepEqual(toDrew.message.metadata.deliveryTargets, [DREW.id], "to that member only");
   await app.evaluate(`document.getElementById("back-to-timeline").click()`);
-  await app.waitFor(`document.getElementById("chat-title").textContent === "Login page" && document.querySelector('#message-list .message-row[data-sessions-kind="task"]') !== null`,
-    "the main timeline again");
-  assert.equal(await app.evaluate(`document.getElementById("message-list").textContent.includes("Please also check dark mode")`), false);
+  await app.waitFor(mainShown, "back");
 
-  // --- the members sheet ---------------------------------------------------
+  // --- the one panel: main session, Accord, members, Removed ---------------
   await app.evaluate(`document.getElementById("chat-members-button").click()`);
-  await app.waitFor(`${visible("#members-sheet")} && document.querySelectorAll("#members-sheet-list .sessions-member-row").length === 1`, "the members list");
+  await app.waitFor(`${visible("#members-sheet")} && document.querySelectorAll("#members-sheet-list .sessions-member-row").length >= 3`, "the panel");
   const sheet = await app.evaluate(`(() => ({
     title: document.getElementById("members-sheet-title").textContent,
     stopAll: !document.getElementById("members-sheet-stop-all").hidden,
-    rows: [...document.querySelectorAll("#members-sheet-list .sessions-member-row")].map((row) => [row.dataset.memberSession, row.dataset.memberStatus,
-      row.querySelector(".members-sheet-task")?.textContent, Boolean(row.querySelector(".sessions-stop")), Boolean(row.querySelector(".sessions-elapsed"))]),
-    previous: document.querySelector("#members-sheet-list .members-previous-toggle")?.textContent
+    main: [document.querySelector(".sessions-main-row strong").textContent, document.querySelector(".sessions-main-row .provider-logo").dataset.providerKind],
+    accord: document.querySelector(".sessions-accord-row")?.textContent || "",
+    rows: [...document.querySelectorAll("#members-sheet-list .sessions-member-row:not(.sessions-main-row)")].map((row) => [row.dataset.memberSession, row.dataset.memberStatus,
+      row.querySelector(".members-sheet-task").textContent, row.querySelector(".provider-logo").dataset.providerKind, Boolean(row.querySelector(".sessions-stop"))]),
+    groups: [...document.querySelectorAll("#members-sheet-list .members-previous-toggle")].map((node) => node.textContent),
+    handles: /@[A-Za-z]/.test(document.getElementById("members-sheet-list").innerText)
   }))()`);
-  assert.deepEqual(sheet, {
-    title: "Members", stopAll: true, rows: [["p-drew", "running", "Restyle the login button", true, true]], previous: "Previous1"
-  }, "drew at work with its task, time and Stop; taylor, done, under Previous; never the main session");
-  await app.evaluate(`document.querySelector("#members-sheet-list .members-previous-toggle").click()`);
-  await app.waitFor(`document.querySelectorAll("#members-sheet-list .sessions-member-row").length === 2`, "Previous opened");
-  assert.deepEqual(await app.evaluate(`[...document.querySelectorAll("#members-sheet-list .sessions-member-row")].map((row) => row.dataset.memberSession + ":" + row.dataset.memberStatus)`),
-    ["p-drew:running", "p-taylor:done"]);
-  // Stop on drew's row names drew's turn to the server.
-  await app.evaluate(`document.querySelector('#members-sheet-list .sessions-member-row[data-member-session="p-drew"] .sessions-stop').click()`);
-  const stop = await waitForOp(hub, (op) => op.kind === "turn.stop");
-  assert.deepEqual([stop.participantId, stop.messageId], [DREW.id, "req"], "the Stop names drew's turn");
-  // A tap on taylor opens its session.
-  await app.evaluate(`document.querySelector('#members-sheet-list .sessions-member-row[data-member-session="p-taylor"]').click()`);
-  await app.waitFor(`document.getElementById("chat-title").textContent === "@taylor" && !${visible("#members-sheet")}`, "taylor's session from the list");
-  assert.deepEqual(await app.evaluate(rowsSummary), ["member-head:member-session-head\u0000p-taylor", "task-fold:req", "agent:taylor-reply"]);
+  assert.equal(sheet.title, "Chat");
+  assert.equal(sheet.stopAll, true);
+  assert.deepEqual(sheet.main, ["Main session", "claude-code"], "the main session first");
+  assert.match(sheet.accord, /^AccordButton colour · Drafts/, "the chat's Accord, by its document");
+  assert.deepEqual(sheet.rows, [["p-drew", "running", "Restyle the login button", "claude-code", true], ["p-sam", "running", "Check the server logs", "gemini-cli", true]],
+    "the members at work, by task, with Stop; the one that ended under Previous");
+  assert.deepEqual(sheet.groups, ["Previous1", "Removed1"]);
+  assert.equal(sheet.handles, false, "no handles in the panel");
+  // Stop on sam, which has written nothing yet, names its turn.
+  await app.evaluate(`document.querySelector('#members-sheet-list .sessions-member-row[data-member-session="p-sam"] .sessions-stop').click()`);
+  const stopSam = await waitForOp(hub, (op) => op.kind === "turn.stop" && op.participantId === SAM.id);
+  assert.deepEqual([stopSam.messageId, stopSam.runId], ["req", "turn-run-sam"], "the Stop names sam's turn by its run");
+  // A removed member's session reads, and writes nothing.
+  await app.evaluate(`document.querySelector('#members-sheet-list [data-members-removed]').click()`);
+  await app.waitFor(`document.querySelector('#members-sheet-list .sessions-member-row.is-former[data-member-session="${OLGA_ID}"]') !== null`, "Removed opened");
+  assert.equal(await app.evaluate(`document.querySelector('#members-sheet-list .is-former .members-sheet-task').textContent`), "Summarise the old report");
+  await app.evaluate(`document.querySelector('#members-sheet-list .is-former').click()`);
+  await app.waitFor(`${title} === "Summarise the old report" && document.querySelector('#message-list .message-row[data-thread-root="olga-reply"]') !== null`, "the removed member's session");
+  const former = await app.evaluate(`({ composer: getComputedStyle(document.getElementById("composer-form")).display, stop: document.querySelectorAll("#message-list .sessions-stop").length,
+    rows: ${rowsSummary}, detail: document.querySelector(".member-session-provider").textContent })`);
+  assert.deepEqual(former, { composer: "none", stop: 0, rows: ["member-head:member-session-head\u0000p-olga", "task-fold:req-old", "agent:olga-reply"], detail: "Removed from the chat" });
   await app.evaluate(`document.getElementById("back-to-timeline").click()`);
-  await app.waitFor(`document.getElementById("chat-title").textContent === "Login page"`, "back");
+  await app.waitFor(`${mainShown} && getComputedStyle(document.getElementById("composer-form")).display !== "none"`, "back, with the composer");
+
+  // --- the Accord: a quiet line, its own screen ----------------------------
+  const strip = await app.evaluate(`document.querySelector("#accord-dock .accord-strip").textContent`);
+  assert.match(strip, /^Button colour · Drafts/);
+  assert.equal(await app.evaluate(`document.querySelector("#accord-dock .accord-dock-card") === null`), true, "no framed card in the sessions view");
+  await app.evaluate(`document.querySelector("#accord-dock .accord-strip").click()`);
+  await app.waitFor(`${title} === "Accord" && document.querySelector('#message-list .sessions-accord-screen .accord-dock-card') !== null`, "the Accord's screen");
+  assert.equal(await app.evaluate(`/@[A-Za-z]/.test(document.querySelector(".sessions-accord-screen").innerText)`), false, "its members by their tasks");
+  await app.evaluate(`document.getElementById("back-to-timeline").click()`);
+  await app.waitFor(mainShown, "back");
+
+  // --- the main composer writes to the main session, whatever it says ------
+  for (const text of ["Plain question", "@drew do this too"]) {
+    await app.evaluate(`(() => { const input = document.getElementById("composer-input"); input.value = ${JSON.stringify(text)}; input.dispatchEvent(new Event("input", { bubbles: true }));
+      document.getElementById("composer-form").requestSubmit(); })()`);
+    const sent = await waitForOp(hub, (op) => op.kind === "message.create" && op.message && op.message.content === text);
+    assert.deepEqual(sent.message.metadata.deliveryTargets, [MAIN.id], `"${text}" goes to the main session`);
+  }
+  assert.equal(await app.evaluate(`document.getElementById("composer-input").placeholder`), "Ask anything");
+
+  // --- the main session's answer to a member is in that member's session ---
+  await hub.addMessages("conv-main", [
+    { id: "drew-q", role: "participant", participantId: DREW.id, participantLabel: "@drew", content: "@main which shade?", status: "done", createdAt: at(1),
+      metadata: { participantRequest: { id: "batch-q", requesterParticipantId: DREW.id, requesterHandle: "drew", source: "mcp", resumeRequester: true, status: "running",
+        depth: 1, createdAt: at(1), updatedAt: at(1), items: [item(MAIN.id, "main", "Which shade?", "running", 1)] } } },
+    { id: "main-answer", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "Use the", status: "pending", createdAt: at(0.5),
+      metadata: { runId: "run-answer", sourceMessageId: "drew-q" } }
+  ]);
+  await app.evaluate(`document.querySelector('#message-list .sessions-member-chip[data-open-member="p-drew"]').click()`);
+  await app.waitFor(`${title} === "Restyle the login button" && document.querySelector('#message-list .message-row[data-thread-root="main-answer"]') !== null`, "in drew's session");
+  await app.evaluate(`document.getElementById("back-to-timeline").click()`);
+  await app.waitFor(mainShown, "back");
+  assert.equal(await app.evaluate(`document.querySelector('#message-list .message-row[data-thread-root="main-answer"]') === null`), true, "not on the main timeline while it is written");
+  await app.evaluate(`document.querySelector('#message-list .sessions-member-chip[data-open-member="p-drew"]').click()`);
+  await app.waitFor(`${title} === "Restyle the login button"`, "drew's session again");
+  // A task's end its request message has not been read again for: its reply says it.
+  await hub.rewriteMessage("conv-main", { id: "drew-run", role: "participant", participantId: DREW.id, participantLabel: "@drew", content: "Restyled the button.", status: "done", createdAt: at(3),
+    metadata: { runId: "run-drew", sourceMessageId: "req" } });
+  await app.evaluate(`document.getElementById("back-to-timeline").click()`);
+  await app.waitFor(mainShown, "back");
+  await app.evaluate(`document.querySelector('#message-list .message-row[data-thread-root="r1"] .sessions-delegation') || document.querySelector('#message-list .message-row[data-thread-root="r1"] .sessions-worked-toggle').click()`);
+  await app.waitFor(`document.querySelector('#message-list .sessions-delegation[data-open-member="p-drew"]')?.dataset.taskStatus === "done"`, "drew's task is done");
+  assert.equal(await app.evaluate(`document.querySelector('#message-list .sessions-delegation[data-open-member="p-drew"] .sessions-delegation-result').textContent`), "Restyled the button.");
+
+  // --- a member's question waits on the main timeline, named by its task ----
+  const asking = { id: "drew-asks", role: "participant", participantId: DREW.id, participantLabel: "@drew", content: "Which shade of blue?", status: "done", createdAt: at(0.2),
+    metadata: { pendingChoice: { id: "choice-shade", title: "Shade", question: "Which shade of blue?", status: "pending", askedAt: at(0.2),
+      options: [{ id: "a", label: "Navy" }, { id: "b", label: "Sky" }] } } };
+  await hub.writeMessage("conv-main", asking);
+  await hub.raiseChoice("conv-main", asking);
+  await app.waitFor(`(() => { const row = document.querySelector('#message-list .message-row[data-sessions-kind="choice"]');
+    return Boolean(row && row.querySelector(".sessions-choice-from").textContent === "Restyle the login button asks" &&
+      row.querySelector('.sessions-choice-from .provider-logo[data-provider-kind="claude-code"]') && row.querySelector('.control-card[data-card-id="choice-shade"]')); })()`,
+  "drew's question with its card, on the main timeline, by its task and logo");
 
   // --- a member's reply reached from Activity opens its session -------------
   await app.evaluate(`document.querySelector('[data-home-tab="activity"]').click()`);
@@ -196,63 +307,39 @@ test("the sessions view: main timeline, task card, a member's session that write
   await app.waitFor(`[...document.querySelectorAll("#activity-list .act-row")].some((row) => row.innerText.includes("All 42 login tests pass"))`, "taylor's reply in Activity");
   await sleep(700);
   await app.evaluate(`[...document.querySelectorAll("#activity-list .act-row")].find((row) => row.innerText.includes("All 42 login tests pass")).click()`);
-  await app.waitFor(`document.getElementById("chat-title").textContent === "@taylor" && document.querySelector('#message-list .message-row[data-thread-root="taylor-reply"]') !== null`,
+  await app.waitFor(`${title} === "Run the login tests" && document.querySelector('#message-list .message-row[data-thread-root="taylor-reply"]') !== null`,
     "taylor's session, from Activity");
   await app.evaluate(`document.getElementById("back-to-timeline").click()`);
-  await app.waitFor(`document.getElementById("chat-title").textContent === "Login page"`, "back to the main timeline");
+  await app.waitFor(mainShown, "back");
 
-  // --- a member's question stays on the main timeline while it waits --------
-  const asking = { id: "drew-asks", role: "participant", participantId: DREW.id, participantLabel: "@drew", content: "Which shade of blue?", status: "done", createdAt: at(1),
-    metadata: { pendingChoice: { id: "choice-shade", title: "Shade", question: "Which shade of blue?", status: "pending", askedAt: at(1),
-      options: [{ id: "a", label: "Navy" }, { id: "b", label: "Sky" }] } } };
-  await hub.writeMessage("conv-main", asking);
-  await hub.raiseChoice("conv-main", asking);
-  await app.waitFor(`(() => { const row = document.querySelector('#message-list .message-row[data-sessions-kind="choice"]');
-    return Boolean(row && row.querySelector(".sessions-choice-from").textContent === "@drew asks" && row.querySelector('.control-card[data-card-id="choice-shade"]')); })()`,
-  "drew's question with its card, on the main timeline");
-  assert.equal(await app.evaluate(`document.querySelector('.message-row[data-thread-root="drew-asks"] .message-avatar') === null || getComputedStyle(document.querySelector('.message-row[data-thread-root="drew-asks"] .message-avatar')).display === "none"`), true);
-  // "@drew asks" opens drew's session, where the question is too.
-  await app.evaluate(`document.querySelector(".sessions-choice-from").click()`);
-  await app.waitFor(`document.getElementById("chat-title").textContent === "@drew" && document.querySelector('#message-list .message-row[data-thread-root="drew-asks"] .control-card') !== null`,
-    "drew's session, with its question");
-  await app.evaluate(`document.getElementById("back-to-timeline").click()`);
-  await app.waitFor(`document.getElementById("chat-title").textContent === "Login page"`, "back to the main timeline");
-
-  // --- the switch ----------------------------------------------------------
-  await app.evaluate(`document.querySelector('#chat-view-switch [data-view="classic"]').click()`);
+  // --- the title's menu switches the view -----------------------------------
+  await app.evaluate(`document.getElementById("chat-members-toggle").click()`);
+  await app.waitFor(visible("#chat-title-menu"), "the title's menu");
+  assert.deepEqual(await app.evaluate(`[...document.querySelectorAll("#chat-title-menu [data-title-view]")].map((node) => node.textContent + ":" + node.getAttribute("aria-checked"))`),
+    ["View: Sessions:true", "View: Classic:false"]);
+  await app.evaluate(`document.querySelector('#chat-title-menu [data-title-view="classic"]').click()`);
   await app.waitFor(`document.querySelectorAll("#message-list .message-row.is-sessions").length === 0 && document.querySelector('#message-list .message-row[data-thread-root="req"]') !== null`,
     "the classic timeline");
   const update = await waitForOp(hub, (op) => op.kind === "conversation.update" && op.metadata && op.metadata.chatView === "classic");
   assert.deepEqual(update.metadata, { chatView: "classic" }, "the view, written through her server");
-  for (let tries = 0; tries < 50 && (await hub.storage.getConversation("conv-main")).metadata.chatView !== "classic"; tries += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  assert.equal((await hub.storage.getConversation("conv-main")).metadata.chatView, "classic", "the server keeps it for every device");
   const classic = await app.evaluate(`(() => ({
-    pressed: document.querySelector('#chat-view-switch [data-view="classic"]').getAttribute("aria-pressed"),
+    switch: ${visible("#chat-view-switch")}, pressed: document.querySelector('#chat-view-switch [data-view="classic"]').getAttribute("aria-pressed"),
     avatars: [...document.querySelectorAll('#message-list .message-row[data-author="agent"] .message-avatar')].filter((node) => getComputedStyle(node).display !== "none").length,
     handles: [...document.querySelectorAll('#message-list .message-row[data-author="agent"] .message-handle')].map((node) => node.textContent),
-    waiting: document.querySelector('#message-list .message-row[data-sessions-kind="waiting"]') !== null,
+    note: document.querySelector('#message-list .message-row[data-finished-note="1"]') !== null,
     button: document.getElementById("chat-members-button").getAttribute("aria-label")
   }))()`);
+  assert.equal(classic.switch, true, "the classic view keeps its switch");
   assert.equal(classic.pressed, "true");
   assert.ok(classic.avatars >= 2, `avatars are back: ${JSON.stringify(classic)}`);
   assert.ok(classic.handles.includes("@main") && classic.handles.includes("@drew"), `authors are back: ${JSON.stringify(classic.handles)}`);
-  assert.equal(classic.waiting, false);
-  assert.equal(classic.button, "Members: 3 members", "the classic members button");
-  // The server's list says classic now: the view stays after the list is read again.
-  await app.evaluate(`document.getElementById("back-to-chats").click()`);
-  await openChat(app, "conv-main");
-  await app.waitFor(`document.querySelector('#chat-view-switch [data-view="classic"]').getAttribute("aria-pressed") === "true" &&
-    document.querySelectorAll("#message-list .message-row.is-sessions").length === 0`, "still classic once opened again");
-  // A refusal puts the view back.
-  hub.setGate(async (request) => request.method === "POST" && request.path === "/v3/ops" && (request.ops || []).some((op) => op.kind === "conversation.update")
-    ? { status: 200, body: { ok: true, results: request.ops.map((op) => ({ opId: op.opId, status: "rejected", reason: "QA: not now" })) } }
-    : undefined);
-  await app.evaluate(`document.querySelector('#chat-view-switch [data-view="sessions"]').click()`);
-  await app.waitFor(`document.querySelector('#chat-view-switch [data-view="classic"]').getAttribute("aria-pressed") === "true" &&
-    document.querySelectorAll("#message-list .message-row.is-sessions").length === 0`, "the refused switch went back", 20_000);
-  hub.setGate(undefined);
+  assert.equal(classic.note, true, "the turn-finished note is back");
+  assert.equal(classic.button, "Members: 4 members", "the classic members button");
+  // A message without an addressee goes to the main session here too.
+  await app.evaluate(`(() => { const input = document.getElementById("composer-input"); input.value = "Classic question"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.getElementById("composer-form").requestSubmit(); })()`);
+  const classicSent = await waitForOp(hub, (op) => op.kind === "message.create" && op.message && op.message.content === "Classic question");
+  assert.deepEqual(classicSent.message.metadata.deliveryTargets, [MAIN.id], "the main session takes a message that names nobody");
 
   // --- a chat made before main sessions ------------------------------------
   await app.evaluate(`document.getElementById("back-to-chats").click()`);
@@ -260,17 +347,11 @@ test("the sessions view: main timeline, task card, a member's session that write
   await app.waitFor(`document.querySelector('#message-list .message-row[data-thread-root="o2"]') !== null`, "the old chat");
   const old = await app.evaluate(`(() => ({
     group: document.getElementById("chat-view-switch").classList.contains("is-disabled"),
-    reason: document.getElementById("chat-view-switch").dataset.disabledReason,
-    pressed: [...document.querySelectorAll("#chat-view-switch [data-view]")].map((node) => node.dataset.view + ":" + node.getAttribute("aria-pressed")),
+    chevron: ${visible("#chat-title-chevron")},
     sessionsRows: document.querySelectorAll("#message-list .message-row.is-sessions").length,
     avatar: getComputedStyle(document.querySelector('#message-list .message-row[data-thread-root="o2"] .message-avatar')).display
   }))()`);
-  assert.deepEqual(old, { group: true, reason: "This chat was made before main sessions, so it has the classic view only.",
-    pressed: ["sessions:false", "classic:true"], sessionsRows: 0, avatar: "flex" });
-  const opsBefore = hub.opsRequests.length;
-  await app.evaluate(`document.querySelector('#chat-view-switch [data-view="sessions"]').click()`);
-  await app.waitFor(`${visible("#chat-view-note")} && document.getElementById("chat-view-note").textContent.includes("classic view only")`, "says why");
-  assert.equal(hub.opsRequests.slice(opsBefore).some((request) => request.ops.some((op) => op.kind === "conversation.update")), false, "nothing is written");
+  assert.deepEqual(old, { group: true, chevron: false, sessionsRows: 0, avatar: "flex" });
 });
 
 test("New chat on the phone leads with the main session, and the chat it makes has it", { timeout: 120_000 }, async (t) => {
@@ -304,6 +385,9 @@ test("New chat on the phone leads with the main session, and the chat it makes h
       pressed: row.getAttribute("aria-pressed"), text: document.getElementById("new-chat-members").textContent,
       label: document.getElementById("new-chat-members-button").getAttribute("aria-label") }; })()`);
   assert.deepEqual([lead.name, lead.line, lead.locked, lead.pressed], ["Main session", "@main · Claude Code", "true", "true"], "the locked first row");
+  assert.deepEqual(await app.evaluate(`(() => { const row = document.querySelector("#new-chat-members .new-chat-member");
+    return [row.querySelector(".provider-logo")?.dataset.providerKind ?? null, row.querySelector(".mobile-mention-avatar") === null]; })()`),
+  ["claude-code", true], "the main session shows its provider's logo, not an avatar picture");
   assert.equal(/Assistant/.test(lead.text), false, "nothing says Assistant");
   assert.equal(lead.label, "Members: Main session");
 
@@ -316,9 +400,13 @@ test("New chat on the phone leads with the main session, and the chat it makes h
   assert.equal(participants[0].id, made.id, "first");
   assert.equal(create.conversation.metadata.mainSessionParticipantId, made.id, "the chat says which member is its main session");
   assert.equal(create.conversation.metadata.chatView, "sessions", "and opens in the sessions view");
+  // Its first message names nobody: it goes to the main session (a member
+  // list without roles once sent it to nobody, and nobody ran).
+  const first = await waitForOp(hub, (op) => op.kind === "message.create" && op.message && op.message.content === "Plan the release");
+  assert.deepEqual(first.message.metadata.deliveryTargets, [made.id], "the first message goes to the main session");
   // The chat opens in the sessions view at once.
   await app.waitFor(`document.getElementById("timeline-screen").classList.contains("is-active") &&
-    document.querySelector('#chat-view-switch [data-view="sessions"]').getAttribute("aria-pressed") === "true"`, "the new chat in the sessions view");
+    document.querySelector('#chat-title-menu [data-title-view="sessions"]').getAttribute("aria-checked") === "true"`, "the new chat in the sessions view");
 });
 
 /** The phone's operation the hub was sent that matches, once it is there. */

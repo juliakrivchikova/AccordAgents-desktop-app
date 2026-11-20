@@ -4709,3 +4709,428 @@ button.card-row:focus-visible {
   font-weight: 500;
   color: var(--mut);
 }
+
+/* --- The sessions view, T3 Code's way (docs/main-session.md) ------------- */
+
+:root {
+  --provider-claude-bg: var(--brand-anthropic);
+  --provider-tile-bg: var(--s2);
+  --provider-tile-bd: var(--bdf);
+  --provider-codex-top: #b1a7ff;
+  --provider-codex-mid: #7a9dff;
+  --provider-codex-bottom: var(--brand-codex);
+  --sessions-running: #24c17b;
+}
+
+/* A member's mark: its provider's logo tile, never an avatar picture. */
+.provider-logo {
+  position: relative;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--provider-tile-bg);
+  box-shadow: inset 0 0 0 1px var(--provider-tile-bd);
+}
+
+.provider-logo[data-provider-kind="claude-code"] {
+  background: var(--provider-claude-bg);
+  box-shadow: none;
+}
+
+.provider-logo svg,
+.provider-logo-mark {
+  display: block;
+  width: 15px;
+  height: 15px;
+}
+
+.provider-logo-mark.is-claude {
+  background: url("./assets/providers/claude.png") center / contain no-repeat;
+}
+
+.provider-logo-mark.is-antigravity {
+  background: url("./assets/providers/antigravity.png") center / contain no-repeat;
+}
+
+.provider-codex-stop.is-top { stop-color: var(--provider-codex-top); }
+.provider-codex-stop.is-mid { stop-color: var(--provider-codex-mid); }
+.provider-codex-stop.is-bottom { stop-color: var(--provider-codex-bottom); }
+
+.provider-logo.is-chip {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+}
+
+.provider-logo.is-chip svg,
+.provider-logo.is-chip .provider-logo-mark {
+  width: 11px;
+  height: 11px;
+}
+
+.provider-logo.is-small {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+}
+
+.provider-logo.is-small svg,
+.provider-logo.is-small .provider-logo-mark {
+  width: 12px;
+  height: 12px;
+}
+
+.provider-logo.is-mini,
+.provider-logo.is-note {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+.provider-logo.is-mini svg,
+.provider-logo.is-mini .provider-logo-mark,
+.provider-logo.is-note svg,
+.provider-logo.is-note .provider-logo-mark {
+  width: 18px;
+  height: 18px;
+}
+
+/* The header in the sessions view: the title's menu holds the view; the
+   members icon carries a count and a dot instead of words. */
+.mobile-chat-header {
+  position: relative;
+}
+
+.mobile-title.has-menu .mobile-title-name {
+  display: inline-block;
+  max-width: calc(100% - 20px);
+  vertical-align: middle;
+}
+
+.mobile-title-chevron {
+  display: inline-flex;
+  vertical-align: middle;
+  margin-left: 4px;
+  color: var(--mut);
+}
+
+.mobile-title-chevron[hidden] {
+  display: none;
+}
+
+.chat-title-menu {
+  position: absolute;
+  top: calc(100% - 6px);
+  left: 56px;
+  z-index: 30;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--menu-shadow);
+}
+
+.chat-title-menu[hidden] {
+  display: none;
+}
+
+.chat-title-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg1);
+  font: 500 14.5px var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-title-menu-item::before {
+  content: "";
+  width: 14px;
+  flex-shrink: 0;
+}
+
+.chat-title-menu-item[aria-checked="true"]::before {
+  content: "\2713";
+  color: var(--acc);
+}
+
+.chat-title-menu-item:active {
+  background: var(--press);
+}
+
+.chat-members-button[data-view="sessions"] .chat-members-pill {
+  position: relative;
+  padding: 0 9px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.chat-members-button[data-view="sessions"] #chat-members-count:not(:empty) {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--sessions-running);
+  color: var(--surface-fg);
+  font: 700 10.5px/16px var(--sans);
+  text-align: center;
+}
+
+.chat-members-button[data-view="sessions"].is-running #chat-members-count::before {
+  display: none;
+}
+
+.chat-members-dot {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--acc);
+}
+
+.chat-members-dot[hidden] {
+  display: none;
+}
+
+/* The Accord in the sessions view: one quiet line above the composer. */
+.accord-dock.is-strip {
+  padding: 4px 16px 0;
+}
+
+.accord-strip {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--mut);
+  font: 400 13px var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+
+.accord-strip-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.accord-strip-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.sessions-accord-screen {
+  flex: 1;
+  min-width: 0;
+}
+
+/* A member that left the chat, or the Accord's screen: nothing to write. */
+#timeline-screen.is-read-only .composer {
+  display: none;
+}
+
+/* A member mentioned in a message: a link chip with its logo and task. */
+.sessions-member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  margin: 0 1px;
+  padding: 1px 6px 1px 2px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--s2);
+  color: var(--fg1);
+  font: inherit;
+  vertical-align: baseline;
+  cursor: pointer;
+}
+
+.sessions-member-chip > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The tasks a main-session turn gave: its "Worked for …" fold. */
+.sessions-worked {
+  margin: 2px 0 6px;
+}
+
+.sessions-worked.is-live {
+  margin: 6px 0 2px;
+}
+
+.sessions-worked-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--mut);
+  font: 400 13px var(--sans);
+  cursor: pointer;
+}
+
+.sessions-worked-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.sessions-worked-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0 4px;
+  color: var(--mut);
+  font: 400 13px var(--sans);
+}
+
+.sessions-delegations {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sessions-delegation {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.sessions-delegation:active {
+  background: var(--press);
+}
+
+.sessions-delegation > svg {
+  flex-shrink: 0;
+  color: var(--mut);
+}
+
+.sessions-logo {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+}
+
+.sessions-logo-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--surface);
+  background: var(--mut);
+}
+
+.sessions-logo-dot.is-done { background: var(--ok); }
+.sessions-logo-dot.is-failed { background: var(--danger); }
+.sessions-logo-dot.is-stopped { background: var(--mut); }
+.sessions-logo-dot.is-waiting { background: var(--warn); }
+.sessions-logo-dot.is-running { background: var(--acc); }
+
+.sessions-delegation-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sessions-delegation-title,
+.sessions-delegation-result {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessions-delegation-title {
+  font: 600 14px var(--sans);
+  color: var(--fg1);
+}
+
+.sessions-delegation-result {
+  font: 400 13px var(--sans);
+  color: var(--mut);
+}
+
+.sessions-delegation-time {
+  flex-shrink: 0;
+  font: 400 12px var(--sans);
+  font-variant-numeric: tabular-nums;
+  color: var(--mut);
+}
+
+/* The sessions view keeps the main timeline unboxed: quiet lines, muted. */
+.message-row.is-sessions .sessions-waiting {
+  padding: 4px 0;
+  background: transparent;
+  color: var(--mut);
+}
+
+.sessions-choice-from .provider-logo {
+  margin-right: 2px;
+}
+
+.member-session-head {
+  background: transparent;
+  padding: 4px 0;
+}
+
+/* The one panel in the sessions view: main session, Accord, members. */
+.members-sheet-section {
+  padding: 10px 8px 4px;
+  font: 600 12px var(--sans);
+  color: var(--mut);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sessions-member-row,
+.sessions-main-row,
+.sessions-accord-row {
+  gap: 10px;
+}
+
+.sessions-member-row.is-former {
+  opacity: 0.75;
+}
