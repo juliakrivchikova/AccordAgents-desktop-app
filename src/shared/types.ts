@@ -3404,6 +3404,7 @@ export interface AppBridge {
   deleteCliProviderHost(id: string): Promise<AppSettings>;
   getSettings(): Promise<AppSettings>;
   setAssistantProviderKind(kind: ChatProviderKind): Promise<AppSettings>;
+  setDefaultChatView(view: ChatViewMode): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;
   archiveChatRoleConfig(id: string): Promise<AppSettings>;

@@ -31,6 +31,7 @@ import type {
   AgentHealth,
   ChatBehaviorRuleConfigUpdate,
   ChatProviderKind,
+  ChatViewMode,
   ChatPromptContextSettings,
   ChatSearchRequest,
   ChatSavedPromptConfigUpdate,
@@ -2354,6 +2355,8 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:set-assistant-provider", (_event, kind: ChatProviderKind) =>
     settingsService.setAssistantProviderKind(kind));
+  ipcMain.handle("settings:set-default-chat-view", (_event, view: ChatViewMode) =>
+    settingsService.setDefaultChatView(view));
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));
   ipcMain.handle("settings:archive-chat-role", (_event, id: string) => settingsService.archiveChatRoleConfig(id));
   ipcMain.handle("settings:save-chat-behavior-rule", (_event, update: ChatBehaviorRuleConfigUpdate) => settingsService.saveChatBehaviorRuleConfig(update));
