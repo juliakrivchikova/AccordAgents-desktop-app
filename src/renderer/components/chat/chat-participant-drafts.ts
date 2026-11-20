@@ -21,10 +21,12 @@ import {
   effectiveChatAgentPermissions,
   effectiveChatAgentPermissionsForProvider,
   isChatShellPermissionPatternSafe,
+  newChatMemberPermissions,
   normalizeChatAgentMode,
   normalizeChatAgentPermissions,
   normalizeChatRoleManagementPermission
 } from "../../../shared/agentPermissions";
+import { MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, WORKFLOW_MANAGER_ROLE_ID, isRoleOfferedForNewMembers } from "../../../shared/mainSession";
 import { normalizeChatReasoningEffort } from "../../../shared/reasoningEffort";
 import { chatProviderKind, preferredChatProviderSetting } from "../../../shared/chatProviders";
 import {
@@ -48,8 +50,6 @@ import {
   isGeneratedChatHandle
 } from "./chat-participant-draft-handles";
 import {
-  CHAT_ASSISTANT_HANDLE,
-  CHAT_ASSISTANT_ROLE_ID,
   isChatAssistantHandle,
   isChatAssistantParticipant
 } from "../conversation/conversation-display";
@@ -80,28 +80,24 @@ export type ChatParticipantRuntimeOverride = Partial<Pick<
   "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch"
 >>;
 
+/** The New chat screen's own row: the member every new chat gets, its main
+ *  session (docs/main-session.md); the id keeps its runtime overrides. */
 export const NEW_CHAT_ASSISTANT_PARTICIPANT_ID = "__new-chat-assistant__";
 
-export function newChatAssistantParticipantConfig(kind: ChatProviderKind): ChatParticipantConfig {
+/** The new chat's main session as the screen shows it: an ordinary member
+ *  on the CLI Settings names for it, with the rights an ordinary member
+ *  starts with in the chat (reading its project when it has one), asking
+ *  members without a card as its role does. The app makes the same one when
+ *  the row is left as it is (ChatService.ensureMainSessionParticipant). */
+export function newChatAssistantParticipantConfig(kind: ChatProviderKind, hasProject = true): ChatParticipantConfig {
   return {
     id: NEW_CHAT_ASSISTANT_PARTICIPANT_ID,
-    handle: CHAT_ASSISTANT_HANDLE,
-    roleConfigId: CHAT_ASSISTANT_ROLE_ID,
+    handle: MAIN_SESSION_HANDLE,
+    roleConfigId: MAIN_SESSION_ROLE_ID,
     behaviorRuleIds: [],
     kind,
     agentMode: "default",
-    permissions: {
-      ...defaultChatAgentPermissions(),
-      repoRead: false,
-      workspaceWrite: false,
-      webAccess: false,
-      requestParticipants: "ask",
-      requestCompaction: "ask",
-      shell: {
-        enabled: false,
-        rules: []
-      }
-    },
+    permissions: { ...newChatMemberPermissions(hasProject), requestParticipants: "allow" },
     remoteExecution: "local",
     updatedAt: ""
   };
@@ -113,10 +109,11 @@ export function hasChatParticipantRuntimeOverride(override: ChatParticipantRunti
 
 export function newChatAssistantParticipantDraft(
   kind: ChatProviderKind,
-  runtimeOverride: ChatParticipantRuntimeOverride | undefined
+  runtimeOverride: ChatParticipantRuntimeOverride | undefined,
+  hasProject = true
 ): ChatParticipantDraft {
   return chatParticipantConfigToDraftWithRuntimeOverrides(
-    newChatAssistantParticipantConfig(kind),
+    newChatAssistantParticipantConfig(kind, hasProject),
     runtimeOverride ? { [NEW_CHAT_ASSISTANT_PARTICIPANT_ID]: runtimeOverride } : {}
   );
 }
@@ -248,7 +245,7 @@ export function chatProviderSupportsCloudRun(kind: ChatProviderKind | undefined)
   return kind === "codex-cli" || kind === "claude-code";
 }
 
-export const WORKFLOW_MANAGER_ROLE_ID = "workflow-manager";
+export { WORKFLOW_MANAGER_ROLE_ID };
 
 export const CHAT_SHELL_ACTION_OPTIONS: Array<{ value: ChatShellPermissionAction; label: string }> = [
   { value: "allow", label: "Allow" },
@@ -261,8 +258,10 @@ export const CHAT_SHELL_MATCH_OPTIONS: Array<{ value: ChatShellPermissionMatch; 
   { value: "prefix", label: "Prefix" }
 ];
 
+/** The roles a new member can be given: not deleted, and not the main
+ *  session's or the Workflow Manager's (isRoleOfferedForNewMembers). */
 export function activeChatRoleConfigs(settings: Pick<AppSettings, "chatRoleConfigs">): ChatRoleConfig[] {
-  return settings.chatRoleConfigs.filter((role) => !role.archivedAt);
+  return settings.chatRoleConfigs.filter((role) => !role.archivedAt && isRoleOfferedForNewMembers(role.id));
 }
 
 export function defaultChatParticipantDraft(settings: AppSettings, existingHandles: Set<string> = new Set()): ChatParticipantDraft {
@@ -646,8 +645,8 @@ export function validateChatStartupDrafts(
   hosts: ReadonlyArray<CliProviderHost> = []
 ): string | undefined {
   if (drafts.length === 0) {
-    if (!roles.some((role) => role.id === "administrator")) {
-      return "Chat Assistant role is required to start an empty chat.";
+    if (!roles.some((role) => role.id === MAIN_SESSION_ROLE_ID)) {
+      return "The main session role is required to start a chat.";
     }
     if (readyProviderKinds(agents, providers).length === 0) {
       return NO_READY_CLI_MESSAGE;

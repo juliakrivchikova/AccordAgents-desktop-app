@@ -141,7 +141,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       : undefined;
     const participants = [
       ...(hasChatParticipantRuntimeOverride(assistantRuntimeOverride)
-        ? [newChatAssistantParticipantDraft(assistantProviderKind, assistantRuntimeOverride)]
+        ? [newChatAssistantParticipantDraft(assistantProviderKind, assistantRuntimeOverride, Boolean(state.repoPath.trim()))]
         : []),
       ...selectedOrMentionedChatParticipantDrafts(
         state.settings.chatParticipantConfigs,

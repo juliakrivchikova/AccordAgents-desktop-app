@@ -44,6 +44,14 @@ const SETTINGS: AppSettings = {
     { kind: "codex-cli", label: "Codex", enabled: true }
   ],
   chatRoleConfigs: [{
+    id: "main-session",
+    label: "Main session",
+    instructions: "Work on the user's requests.",
+    version: 1,
+    appToolCapabilities: [],
+    builtIn: true,
+    updatedAt: "2026-11-20T00:00:00.000Z"
+  }, {
     id: "administrator",
     label: "Chat Assistant",
     instructions: "Assist the user.",
@@ -92,7 +100,7 @@ test("a saved Assistant CLI that is not ready gives way to a ready one, says so 
   assert.equal(renderer.root.findAllByProps({ "data-testid": "new-chat-provider-unavailable" }).length, 0);
   assert.equal(
     textOf(renderer.root.findByProps({ "data-testid": "new-chat-assistant-note" })),
-    "The Assistant uses Codex in this chat: Claude Code, your saved choice, needs sign-in."
+    "The main session uses Codex in this chat: Claude Code, your saved choice, needs sign-in."
   );
   const start = renderer.root.findByProps({ "data-testid": "new-chat-start" });
   assert.equal(start.props.disabled, false);

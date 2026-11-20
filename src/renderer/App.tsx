@@ -489,6 +489,7 @@ function App(): JSX.Element {
           agents={state.agents}
           updateProvider={settingsActions.updateProvider}
           setAssistantProviderKind={settingsActions.setAssistantProviderKind}
+          setDefaultChatView={settingsActions.setDefaultChatView}
           saveChatRoleConfig={settingsActions.saveChatRoleConfig}
           archiveChatRoleConfig={settingsActions.archiveChatRoleConfig}
           saveChatBehaviorRuleConfig={settingsActions.saveChatBehaviorRuleConfig}

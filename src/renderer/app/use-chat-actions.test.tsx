@@ -212,11 +212,13 @@ test("New Chat runtime overrides are sent for edited Assistant and selected save
   assert.equal(error, "stop after create request");
   assert.equal(createRequest?.skipDefaultParticipants, false);
   assert.equal(createRequest?.participants.length, 2);
-  const [assistant, member] = createRequest?.participants ?? [];
-  assert.equal(assistant?.handle, "assistant");
-  assert.equal(assistant?.roleConfigId, "administrator");
-  assert.equal(assistant?.model, "assistant-model");
-  assert.equal(assistant?.reasoningEffort, "high");
+  const [mainSession, member] = createRequest?.participants ?? [];
+  assert.equal(mainSession?.handle, "main");
+  assert.equal(mainSession?.roleConfigId, "main-session");
+  assert.equal(mainSession?.model, "assistant-model");
+  assert.equal(mainSession?.reasoningEffort, "high");
+  assert.equal(mainSession?.permissions?.repoRead, false, "a chat without a project: nothing to read");
+  assert.equal(mainSession?.permissions?.requestParticipants, "allow");
   assert.equal(member?.participantConfigId, "member-codex");
   assert.equal(member?.model, "member-model");
   assert.equal(member?.reasoningEffort, "low");
@@ -405,6 +407,14 @@ function settings(): AppSettings {
     },
     providers: [{ kind: "claude-code", label: "Claude Code", enabled: true }],
     chatRoleConfigs: [{
+      id: "main-session",
+      label: "Main session",
+      instructions: "Work on the user's requests.",
+      version: 1,
+      appToolCapabilities: [],
+      builtIn: true,
+      updatedAt: "2026-11-20T00:00:00.000Z"
+    }, {
       id: "administrator",
       label: "Chat Assistant",
       instructions: "Assist the user.",

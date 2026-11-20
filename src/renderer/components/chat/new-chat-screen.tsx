@@ -152,9 +152,10 @@ export function NewChatScreen(props: {
       return rest;
     });
   }, [assistantProviderKind, onSelectedParticipantRuntimeOverridesChange]);
+  const hasProject = Boolean(props.repoPath.trim());
   const assistantParticipant = useMemo(
-    () => assistantProviderKind ? newChatAssistantParticipantConfig(assistantProviderKind) : undefined,
-    [assistantProviderKind]
+    () => assistantProviderKind ? newChatAssistantParticipantConfig(assistantProviderKind, hasProject) : undefined,
+    [assistantProviderKind, hasProject]
   );
   const savedParticipantOptions = useMemo(
     () => sortSavedParticipantOptionsByUsage(
@@ -184,9 +185,10 @@ export function NewChatScreen(props: {
     if (!assistantProviderKind || !hasChatParticipantRuntimeOverride(assistantRuntimeOverride)) {
       return drafts;
     }
-    return [newChatAssistantParticipantDraft(assistantProviderKind, assistantRuntimeOverride), ...drafts];
+    return [newChatAssistantParticipantDraft(assistantProviderKind, assistantRuntimeOverride, hasProject), ...drafts];
   }, [
     assistantProviderKind,
+    hasProject,
     props.prompt,
     props.selectedParticipantIds,
     props.selectedParticipantRuntimeOverrides,
