@@ -426,7 +426,9 @@ test("a chat pinned on the computer is pinned on every device through the server
 
 test("a chat's view switched on the computer reaches the server and every device as a change of the chat, and keeps its time everywhere", async (t) => {
   const base = localChat("chat-view");
-  const h = await linked(t, { ...base, metadata: { ...base.metadata, mainSessionParticipantId: desk.id, chatView: "sessions" } });
+  // The server names as a chat's main session only a member with its role.
+  const main = { ...desk, roleConfigId: "main-session" };
+  const h = await linked(t, { ...base, metadata: { ...base.metadata, participants: [main, remote], mainSessionParticipantId: desk.id, chatView: "sessions" } });
   const server0 = await until(() => h.page("chat-view"), (page) => page.conversation?.metadata?.chatView === "sessions");
   assert.equal(server0.conversation.metadata.mainSessionParticipantId, desk.id, "the main session is the chat's own, shared");
   const before = (await h.desktopStorage.getConversation("chat-view"))!.updatedAt;

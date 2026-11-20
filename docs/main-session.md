@@ -88,18 +88,50 @@ the desktop and on the phone (bundled through `mobileSharedRules.ts`).
   `ChatParticipantSession.forkedFromParticipantId` stays: both CLIs keep the
   source's system/developer instructions in a fork (verified on Claude Code
   2.1.329 and Codex 0.155.1), so the member is told who it is on its first
-  turn and reminded on later ones.
+  turn and reminded on later ones. When the source session is gone (only
+  the CLIs' own words: Claude Code "No conversation found", Codex "no
+  rollout found for thread id", `isForkSourceMissingError`): Claude Code's
+  one-shot start falls back to a clean session at once, from a prompt that
+  still carries the member's identity note and its role's instructions;
+  otherwise the next turn tries the fork once more
+  (`forkFrom.failedAttempts`), and when that fails too the member becomes a
+  clean member (fork and its chat-context pointer dropped). Either way the
+  chat gets a warning ("@x could not start from a copy of @main's session,
+  …"), and the failed reply the main session reads says it too.
 - `ChatParticipantRequestBatch.delegation?: { start }`: the main session's
   task to a member it made (`app_chat_delegate_task`); not held to the
-  one-request-per-turn limit.
+  one-request-per-turn limit. Delegations and a member's requests to the
+  main session alone are not held to (nor counted toward) the per-message
+  chain limit (`CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES`; the User: no
+  limit on members); the depth and rate limits still hold.
 - `ChatMessageMetadata.accordLaunchByMainSession`: an Accord launch the main
   session wrote (`app_chat_start_accord`), read as an Accord card like the
   User's (`accordLaunchCard.ts`).
 - Rights: a member the main session makes gets
   `clampChatAgentPermissions(requested, main's effective rights)`
-  (`agentPermissions.ts`); her server holds a machine's additions to the same
-  rule (`hubMachineScope.ts`), and an addition through the member tools that
-  is broader goes to a card.
+  (`agentPermissions.ts`). `app_chat_delegate_task` takes only roles offered
+  for new members (`isRoleOfferedForNewMembers`: not the Workflow
+  Manager's). In a main-session chat every addition without a card, by any
+  member through any member tool, has nothing beyond the rights of the
+  member adding it and of the main session (`additionsExceedMainSession`);
+  a broader one goes to a card. Such a member is marked
+  `ChatParticipant.delegatedByParticipantId` (who added it; shared through
+  the server with the member) and runs, asks, compacts and manages members
+  no more broadly than the main session as it is at each turn
+  (`participantForRun`, `requireParticipantManager`), so lowering the main
+  session lowers it; its own settings stay. Members the User added or
+  approved herself are not marked.
+- Her server (`hubMachineScope.ts`) holds a machine to the same: a
+  machine's own member keeps the mode and rights the server has for it,
+  raised only by a permission the User granted it for the chat on its card
+  (once); a member a machine adds without a card, wherever it runs (the
+  User's Mac, another machine), has nothing beyond the rights of a member
+  there that may add it and of the main session as the server has them
+  before the write, and says who added it; `delegatedByParticipantId` stays
+  as the server has it; the main session's `/accord` gives its facilitator
+  no more leave to ask than the main session's own. A new chat names as its
+  main session only a member with the main session's role, and moving a
+  chat to the server keeps the main session the server has.
 - Routing (`chatDeliveryPolicy.ts`): in a main-session chat a top-level
   message without an @mention goes to the main session (not the last
   speaker); in a thread the old thread rule holds.

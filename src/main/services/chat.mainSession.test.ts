@@ -6,7 +6,7 @@ import { ChatService } from "./chat";
 import { accordLaunchCardForMessage } from "../../shared/accordLaunchCard";
 import { normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
-import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT, CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT } from "../../shared/chatParticipantRequests";
+import { CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES, CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT, CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT } from "../../shared/chatParticipantRequests";
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
 import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
 import type {
@@ -44,6 +44,15 @@ const GENERIC_ROLE: ChatRoleConfig = {
   instructions: "Answer directly.",
   version: 1,
   builtIn: true,
+  updatedAt: NOW
+};
+const WORKFLOW_ROLE: ChatRoleConfig = {
+  id: "workflow-manager",
+  label: "Workflow Manager",
+  instructions: "Run the workflow.",
+  version: 1,
+  builtIn: true,
+  participantDefaults: { manageRolesParticipants: "allow" },
   updatedAt: NOW
 };
 const REVIEWER_ROLE: ChatRoleConfig = {
@@ -164,7 +173,7 @@ function testService(options: {
       { kind: "claude-code", label: "Claude Code", enabled: true },
       { kind: "gemini-cli", label: "Antigravity", enabled: true }
     ],
-    chatRoleConfigs: clone([MAIN_ROLE, GENERIC_ROLE, REVIEWER_ROLE]),
+    chatRoleConfigs: clone([MAIN_ROLE, GENERIC_ROLE, REVIEWER_ROLE, WORKFLOW_ROLE]),
     chatBehaviorRules: [],
     chatSavedPrompts: [],
     chatParticipantConfigs: [],
@@ -219,7 +228,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
-  throw new Error("Timed out waiting for condition.");
+  throw new Error(`Timed out waiting for condition: ${predicate.toString().slice(0, 200)}`);
 }
 
 function participantsOf(conversation: Conversation): ChatParticipant[] {
@@ -396,25 +405,102 @@ test("a fork starts from a copy of the main session's CLI session and then keeps
   assert.equal(mainSessionAfter.sessionId, "main-cli-session", "the main session's own session is untouched");
 });
 
-test("a fork the CLI could not make is tried again, not resumed from an id that is no session", async () => {
+test("a fork the CLI could not make is tried once more, then the member starts clean and the chat says so", async () => {
+  for (const [kind, error] of [
+    ["claude-code", "No conversation found with session ID: main-cli-session"],
+    ["codex-cli", "no rollout found for thread id main-cli-session"]
+  ] as const) {
+    const main = mainSession(kind, kind === "codex-cli" ? { model: undefined } : {});
+    const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-cli-session")] });
+    const { service, storage, runs } = testService({
+      conversation,
+      run: async (participant, _prompt, runOptions) => {
+        if (participant.id === main.id) return { participant, ok: true, content: "Noted.", durationMs: 1 };
+        if (!runOptions.forkFromSessionId) {
+          runOptions.onSessionId?.("clean-session");
+          return { participant, ok: true, content: "Done clean.", durationMs: 1, sessionId: "clean-session" };
+        }
+        // Claude Code reports some id even when the source is gone.
+        runOptions.onSessionId?.("never-made");
+        return { participant, ok: false, content: "", error, durationMs: 1, sessionId: "never-made" };
+      }
+    });
+    const result = await service.delegateTaskFromTool(mainActor(), { task: "Continue.", start: "fork" });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    const childId = String(result.participantId);
+    const sessionOf = () => (storage.current.metadata.participantSessions as ChatParticipantSession[]).find((item) => item.participantId === childId)!;
+    const childRuns = () => runs.filter((run) => run.participant.id === childId);
+    await waitFor(() => delegationBatches(storage.current)[0]?.items[0]?.status === "failed");
+    await waitFor(() => sessionOf().forkFrom?.failedAttempts === 1);
+    // The first failure: tried again at the next turn, never resumed from an id that is no session.
+    assert.equal(sessionOf().sessionId, "", kind);
+    assert.deepEqual(sessionOf().forkFrom, { participantId: main.id, sessionId: "main-cli-session", kind, failedAttempts: 1 }, kind);
+
+    const ask = async (prompt: string) => {
+      const asked = await service.requestParticipantsFromTool(mainActor(undefined, { triggerMessageId: `trigger-${prompt}` }), { requests: [{ target: String(result.handle), prompt }] });
+      assert.equal(asked.ok, true, JSON.stringify(asked));
+    };
+    await ask("Try again.");
+    await waitFor(() => childRuns().length === 2);
+    await waitFor(() => sessionOf().forkFrom === undefined);
+    assert.equal(childRuns()[1].options.forkFromSessionId, "main-cli-session", `${kind}: the retry forks again`);
+    // The retry failed too: it is a member of its own now, and the chat says so.
+    assert.equal(sessionOf().forkedFromParticipantId, undefined, kind);
+    await waitFor(() => ((storage.current.metadata.warnings ?? []) as string[]).some((warning) => warning.includes("could not start from a copy of @main's session")));
+    assert.ok((storage.current.metadata.warnings as string[]).includes(`@${String(result.handle).slice(1)} could not start from a copy of @main's session, so its next turn starts a clean session.`), kind);
+
+    await ask("Once more, clean.");
+    await waitFor(() => childRuns().length === 3);
+    assert.equal(childRuns()[2].options.forkFromSessionId, undefined, `${kind}: no fork any more`);
+    assert.doesNotMatch(childRuns()[2].prompt, /You were forked from/, kind);
+    await waitFor(() => sessionOf().sessionId === "clean-session");
+  }
+});
+
+test("a failure that is not a missing source does not count as a failed fork", async () => {
+  const main = mainSession("codex-cli", { model: undefined });
+  const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-cli-session")] });
+  const { service, storage } = testService({
+    conversation,
+    run: async (participant) => participant.id === main.id
+      ? { participant, ok: true, content: "Noted.", durationMs: 1 }
+      : { participant, ok: false, content: "", error: "Model not found: gpt-unknown", durationMs: 1 }
+  });
+  const result = await service.delegateTaskFromTool(mainActor(), { task: "Continue.", start: "fork" });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  await waitFor(() => delegationBatches(storage.current)[0]?.items[0]?.status === "failed");
+  const session = (storage.current.metadata.participantSessions as ChatParticipantSession[]).find((item) => item.participantId === result.participantId)!;
+  assert.deepEqual(session.forkFrom, { participantId: main.id, sessionId: "main-cli-session", kind: "codex-cli" }, "still a fork, no failed attempt counted");
+});
+
+test("a fork the CLI starts clean (its source is gone) is still told who it is, with its role, and the chat says it started clean", async () => {
   const main = mainSession("claude-code");
   const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-cli-session")] });
   const { service, storage, runs } = testService({
     conversation,
     run: async (participant, _prompt, runOptions) => {
       if (participant.id === main.id) return { participant, ok: true, content: "Noted.", durationMs: 1 };
-      // Claude Code reports some id even when the source is gone.
-      runOptions.onSessionId?.("never-made");
-      return { participant, ok: false, content: "", error: "No conversation found with session ID: main-cli-session", durationMs: 1, sessionId: "never-made" };
+      // The CLI's resume-miss fallback: a new session from resumeFallbackPrompt.
+      runOptions.onSessionId?.("fallback-session");
+      return { participant, ok: true, content: "Done.", durationMs: 1, sessionId: "fallback-session", sessionRestarted: true };
     }
   });
-  const result = await service.delegateTaskFromTool(mainActor(), { task: "Continue.", start: "fork" });
+  const result = await service.delegateTaskFromTool(mainActor(), { task: "Continue the refactor.", start: "fork", handle: "refactor" });
   assert.equal(result.ok, true, JSON.stringify(result));
   await waitFor(() => runs.some((run) => run.participant.id === result.participantId));
-  await waitFor(() => delegationBatches(storage.current)[0]?.items[0]?.status === "failed");
+  const fallback = String(runs.find((run) => run.participant.id === result.participantId)!.options.resumeFallbackPrompt);
+  assert.match(fallback, /^You were to start from a copy of @main's session, but it could not be copied/);
+  assert.match(fallback, /You are @refactor, role: Generic Member\. You are not the main session\./);
+  assert.match(fallback, /Do only the task in the triggering message/);
+  assert.match(fallback, /Answer directly\./, "its role's instructions");
+  assert.match(fallback, /Continue the refactor\./, "and its task");
+
+  await waitFor(() => (storage.current.metadata.participantSessions as ChatParticipantSession[]).find((item) => item.participantId === result.participantId)?.sessionId === "fallback-session");
   const session = (storage.current.metadata.participantSessions as ChatParticipantSession[]).find((item) => item.participantId === result.participantId)!;
-  assert.equal(session.sessionId, "");
-  assert.deepEqual(session.forkFrom, { participantId: main.id, sessionId: "main-cli-session", kind: "claude-code" });
+  assert.equal(session.forkFrom, undefined);
+  assert.equal(session.forkedFromParticipantId, undefined, "not reminded later that it is a fork");
+  await waitFor(() => ((storage.current.metadata.warnings ?? []) as string[]).length > 0);
+  assert.deepEqual(storage.current.metadata.warnings, ["@refactor could not start from a copy of @main's session, so it started a clean session from the saved chat context."]);
 });
 
 test("a fork never takes the source's session id as its own", () => {
@@ -466,10 +552,10 @@ test("a member the main session gives no permissions inherits its rights, and me
   assert.equal(granted.manageRolesParticipants, "deny");
 });
 
-test("delegation refuses the main session and Chat Assistant roles", async () => {
+test("delegation refuses the main session, Chat Assistant and Workflow Manager roles", async () => {
   const main = mainSession();
   const { service } = testService({ conversation: mainSessionChat([main]) });
-  for (const roleConfigId of ["main-session", "administrator"]) {
+  for (const roleConfigId of ["main-session", "administrator", "workflow-manager"]) {
     const result = await service.delegateTaskFromTool(mainActor(), { task: "T", roleConfigId });
     assert.equal(result.ok, false);
     assert.equal(result.code, "invalid_role");
@@ -610,4 +696,160 @@ test("the main session's inferred '@x /accord' gives its facilitator no more lea
   conversation.messages.push(fromMain);
   await (service as any).createImplicitParticipantRequestApproval(conversation, main, [fromMain]);
   assert.equal(normalizeChatAgentPermissions(participantsOf(conversation).find((item) => item.id === other.id)!.permissions).requestParticipants, "ask");
+});
+
+// --- review of 2026-11-20: rights one level down, the chain limit, scheduled tasks
+
+/** A member the main session made that may add members (its task said so). */
+function delegatedManager(patch: Partial<ChatParticipant> = {}): ChatParticipant {
+  return member("child-id", "child", {
+    kind: "claude-code",
+    delegatedByParticipantId: "main-id",
+    permissions: permissions({ requestParticipants: "allow", manageRolesParticipants: "allow" }),
+    ...patch
+  });
+}
+
+function childActor(capabilities: string[] = ["participants.manage", "participants.request"], patch: Record<string, unknown> = {}): any {
+  return { ...mainActor(capabilities, patch), participantId: "child-id", roleConfigId: GENERIC_ROLE.id, participantRequestDepth: 1, ...patch };
+}
+
+test("in a main-session chat a member's additions are held to its own rights and the main session's, or go to a card", async () => {
+  const main = mainSession();
+  const child = delegatedManager();
+  const { service, storage } = testService({ conversation: mainSessionChat([main, child]) });
+  const add = (handle: string, patch: Partial<ChatAgentPermissions>, agentMode: ChatParticipant["agentMode"] = "default") =>
+    service.requestParticipantChangeFromTool(childActor(), {
+      operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle, roleConfigId: GENERIC_ROLE.id, kind: "claude-code", agentMode, permissions: permissions(patch) } }]
+    });
+  // As broad as the main session (edits) but broader than the child: a card.
+  assert.equal((await add("writer", { workspaceWrite: true })).status, "pending_user_approval");
+  // Broader than both (web): a card.
+  assert.equal((await add("web", { webAccess: true })).status, "pending_user_approval");
+  assert.equal((await add("auto", {}, "auto")).status, "pending_user_approval");
+  // Within both: no card, and it says who added it.
+  const within = await add("reader", {});
+  assert.equal(within.status, "auto_applied", JSON.stringify(within));
+  const reader = participantsOf(storage.current).find((participant) => participant.handle === "reader")!;
+  assert.equal(reader.delegatedByParticipantId, child.id);
+  // The main session's own additions without a card say so too; ones the User adds say nothing.
+  const fromMain = await service.requestParticipantChangeFromTool(mainActor(["participants.manage"]), {
+    operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "helper", roleConfigId: GENERIC_ROLE.id, kind: "codex-cli", permissions: permissions() } }]
+  });
+  assert.equal(fromMain.status, "auto_applied");
+  assert.equal(participantsOf(storage.current).find((participant) => participant.handle === "helper")!.delegatedByParticipantId, main.id);
+});
+
+test("the main session's task gives its member who added it, and that member runs no broader than the main session as it is now", async () => {
+  const main = mainSession("claude-code", { agentMode: "auto", permissions: permissions({ workspaceWrite: true, webAccess: true, requestParticipants: "allow" }) });
+  const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "s")] });
+  const { service, storage, runs } = testService({ conversation });
+  const result = await service.delegateTaskFromTool(mainActor(), { task: "Check the docs online.", agentMode: "auto", permissions: { webAccess: true, workspaceWrite: true } });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const child = participantsOf(storage.current).find((participant) => participant.id === result.participantId)!;
+  assert.equal(child.delegatedByParticipantId, main.id);
+  assert.equal(child.agentMode, "auto");
+  await waitFor(() => runs.some((run) => run.participant.id === child.id));
+  assert.equal(runs.find((run) => run.participant.id === child.id)!.options.agentMode, "auto", "as broad as the main session while it is");
+
+  // The User lowers the main session to Plan with no web: its member's next
+  // turn runs in Plan with no web, though its own settings are unchanged.
+  const lowered = participantsOf(storage.current).map((participant) => participant.id === main.id
+    ? { ...participant, agentMode: "plan" as const, permissions: permissions({ workspaceWrite: true, webAccess: false, requestParticipants: "allow" }) }
+    : participant);
+  storage.current = { ...storage.current, metadata: { ...storage.current.metadata, participants: lowered } };
+  const asked = await service.requestParticipantsFromTool(mainActor(undefined, { triggerMessageId: "second-trigger" }), { requests: [{ target: child.handle, prompt: "Again." }] });
+  assert.equal(asked.ok, true, JSON.stringify(asked));
+  await waitFor(() => runs.filter((run) => run.participant.id === child.id).length === 2);
+  const second = runs.filter((run) => run.participant.id === child.id)[1];
+  assert.equal(second.options.agentMode, "plan");
+  assert.equal(normalizeChatAgentPermissions(second.options.permissions).webAccess, false);
+  assert.equal(normalizeChatAgentPermissions(second.options.permissions).workspaceWrite, false, "plan mode has no edits");
+  const stored = participantsOf(storage.current).find((participant) => participant.id === child.id)!;
+  assert.equal(stored.agentMode, "auto", "its own settings are kept: raising the main session again gives them back");
+
+  // It asks others no more freely than the main session can now, and a
+  // member the User added herself is not held to the main session's.
+  const own = member("own-id", "own", { kind: "claude-code", agentMode: "auto", permissions: permissions({ webAccess: true, requestParticipants: "allow" }) });
+  const internals = service as any;
+  const asking = participantsOf(storage.current).map((participant) => participant.id === main.id
+    ? { ...participant, permissions: permissions({ requestParticipants: "ask" }) }
+    : participant);
+  const chatNow = { ...storage.current, metadata: { ...storage.current.metadata, participants: [...asking, own] } };
+  assert.equal(normalizeChatAgentPermissions(internals.participantForRun(chatNow, stored).permissions).requestParticipants, "ask");
+  assert.equal(internals.participantForRun(chatNow, stored).agentMode, "plan");
+  assert.equal(internals.participantForRun(chatNow, own), own);
+});
+
+test("a member the main session made manages members no more freely than the main session can now", async () => {
+  const main = mainSession("claude-code", { permissions: permissions({ workspaceWrite: true, requestParticipants: "allow", manageRolesParticipants: "ask" }) });
+  const child = delegatedManager();
+  const { service } = testService({ conversation: mainSessionChat([main, child]) });
+  const result = await service.requestParticipantChangeFromTool(childActor(), {
+    operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "reader", roleConfigId: GENERIC_ROLE.id, kind: "claude-code", permissions: permissions() } }]
+  });
+  assert.equal(result.status, "pending_user_approval");
+});
+
+test("the main session's tasks and members' questions to it are not held to the chain limit; other requests still are", async () => {
+  const main = mainSession("codex-cli", { model: undefined });
+  const child = delegatedManager({ kind: "codex-cli" });
+  const other = member("other-id", "other");
+  const conversation = mainSessionChat([main, child, other], { participantSessions: [sessionRecord(main, "s")] });
+  // The chain already holds as many requests as the limit allows.
+  for (let index = 0; index < CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES; index += 1) {
+    conversation.messages.push({
+      id: `request-${index}`, role: "participant", participantId: other.id, participantLabel: "@other", content: "Request", createdAt: NOW, status: "done",
+      metadata: { participantRequest: {
+        id: `batch-${index}`, requesterParticipantId: other.id, requesterHandle: other.handle, source: "mcp", resumeRequester: false, status: "completed",
+        depth: 1, requesterDepth: 0, chainRootId: "user-message", createdAt: "2026-11-20T11:00:00.000Z", updatedAt: NOW, items: []
+      } }
+    } as ChatMessage);
+  }
+  const { service } = testService({ conversation });
+  (service as any).startDeferredParticipantRequestRunners = () => undefined;
+  const delegated = await service.delegateTaskFromTool(mainActor(), { task: "Write the tests." });
+  assert.equal(delegated.ok, true, JSON.stringify(delegated));
+  const question = await service.requestParticipantsFromTool(childActor(undefined, { triggerMessageId: "child-turn", chainRootId: "user-message" }), {
+    requests: [{ target: "main", prompt: "Which database did User pick?" }]
+  });
+  assert.equal(question.ok, true, JSON.stringify(question));
+  const toOther = await service.requestParticipantsFromTool(childActor(undefined, { triggerMessageId: "child-turn-2", chainRootId: "user-message" }), {
+    requests: [{ target: "other", prompt: "Review this." }]
+  });
+  assert.equal(toOther.ok, false);
+  assert.match(JSON.stringify(toOther), /member request chain limit/);
+});
+
+test("a member the main session made proposes a scheduled task on the normal card, as any member does", async () => {
+  const main = mainSession();
+  const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "s")] });
+  const { service, storage } = testService({ conversation });
+  (service as any).startDeferredParticipantRequestRunners = () => undefined;
+  const delegated = await service.delegateTaskFromTool(mainActor(), { task: "Watch the build every minute." });
+  assert.equal(delegated.ok, true, JSON.stringify(delegated));
+  const childId = String(delegated.participantId);
+  const request = {
+    kind: "script-change", op: "create", scriptId: "script-0000-build", revisionId: "rev-00000001", contentHash: "h",
+    name: "Build watcher", description: "d", hostId: "desktop", hostLabel: "This Mac", runtime: "node", entry: "w.mjs",
+    schedule: { kind: "interval", everySeconds: 60 }, scheduleText: "Every minute", timeoutSeconds: 300,
+    secretNames: [], permissions: { chatIds: [conversation.id], participantIds: [childId], maxWakeupsPerHour: 6 },
+    chatLabels: {}, participantLabels: {}, fileCount: 1, totalBytes: 10
+  };
+  const calls: string[] = [];
+  service.setScriptHost({
+    proposeChange: async () => ({ kind: "approval", request: request as any, summary: "Add the scheduled task \"Build watcher\"", missingSecretNames: [] }),
+    attachApproval: async () => { calls.push("attach"); },
+    assertApprovable: async () => undefined,
+    applyApproved: async () => { calls.push("apply"); return "Added the scheduled task \"Build watcher\"."; },
+    rejectPending: async () => { calls.push("reject"); },
+    listForAgent: async () => [],
+    runs: async () => []
+  } as any);
+  const result = await service.scriptToolFromApp(childActor([], { participantId: childId }), "app_scripts_request_change", { op: "create" });
+  assert.equal(result.status, "pending_user_approval", JSON.stringify(result));
+  const pending = (storage.current.metadata.pendingAppToolApprovals as Array<{ id: string; status: string; requesterParticipantId: string }>).find((item) => item.id === result.approvalId)!;
+  assert.equal(pending.status, "pending", "User approves it on its card");
+  assert.equal(pending.requesterParticipantId, childId);
+  assert.deepEqual(calls, ["attach"]);
 });
