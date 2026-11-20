@@ -306,6 +306,21 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   assert.equal(await app.evaluate(sendMode), "send", "typing turns it back into Send");
   await typeIn("");
   assert.equal(await app.evaluate(sendMode), "stop");
+  // A picture is something to send too: picking one with nothing typed
+  // turns Stop into Send, and taking it off brings Stop back.
+  await app.evaluate(`(() => {
+    const bytes = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+    const picked = new DataTransfer();
+    picked.items.add(new File([bytes], "dot.png", { type: "image/png" }));
+    const input = document.getElementById("composer-image-input");
+    input.files = picked.files;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  })()`);
+  await app.waitFor(`document.querySelectorAll("#composer-attachments .composer-attachment-chip").length === 1`, "the picture waits in the composer");
+  assert.equal(await app.evaluate(sendMode), "send", "a picked picture turns Stop into Send");
+  await app.evaluate(`document.querySelector("#composer-attachments .composer-attachment-remove").click()`);
+  await app.waitFor(`document.querySelectorAll("#composer-attachments .composer-attachment-chip").length === 0`, "the picture is taken off");
+  assert.equal(await app.evaluate(sendMode), "stop", "with nothing left to send, Stop again");
   await app.evaluate(`document.getElementById("send-button").dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true }))`);
   const stopMain = await waitForOp(hub, (op) => op.kind === "turn.stop" && op.participantId === MAIN.id);
   assert.equal(stopMain.messageId, "drew-q", "the main session's run, named by the message it answers");

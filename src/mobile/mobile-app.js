@@ -1842,6 +1842,9 @@
   // still be tens of megapixels — so this is deliberately conservative.
   const MOBILE_UPLOAD_MAX_SOURCE_BYTES = 12 * 1024 * 1024;
   let pendingAttachments = [];
+  // Pictures being read and resized after a pick: the draft is not empty
+  // while they are on their way (the composer's Stop waits for them).
+  let attachmentsPreparing = 0;
 
   function readFileAsBase64(file) {
     return new Promise(function (resolve, reject) {
@@ -2002,6 +2005,9 @@
   }
 
   function renderPendingAttachments() {
+    // A picture is something to send: the main composer's Stop turns back
+    // into Send, and Stop returns once the last picture is taken off.
+    syncComposerStop(composerStopState);
     const strip = document.getElementById("composer-attachments");
     if (!strip) {
       return;
@@ -8050,7 +8056,7 @@
     const button = document.getElementById("send-button");
     const input = document.getElementById("composer-input");
     if (!button || !input) return;
-    const empty = !input.value.trim() && pendingAttachments.length === 0;
+    const empty = !input.value.trim() && pendingAttachments.length === 0 && attachmentsPreparing === 0;
     const ids = state && state.mainId ? [state.mainId] : [];
     const canStop = ids.length > 0 && sessionsCanStop(state, ids);
     const stopping = ids.length > 0 && !canStop && sessionsStopping(state, ids);
@@ -13854,7 +13860,14 @@
           imageInput.click();
         });
         imageInput.addEventListener("change", async function () {
-          const rejected = await addPendingAttachments(imageInput.files);
+          attachmentsPreparing += 1;
+          syncComposerStop(composerStopState);
+          let rejected = [];
+          try {
+            rejected = await addPendingAttachments(imageInput.files);
+          } finally {
+            attachmentsPreparing -= 1;
+          }
           // Clearing lets the same file be picked again after removing it.
           imageInput.value = "";
           renderPendingAttachments();
