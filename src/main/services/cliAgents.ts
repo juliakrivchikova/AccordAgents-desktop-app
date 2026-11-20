@@ -319,6 +319,14 @@ export function antigravityInteractivePermissionPrompt(transcript: string): bool
 export interface CliAgentRunOptions {
   persistSession?: boolean;
   sessionId?: string;
+  /** A member made as a fork of another member's session (the main session
+   *  delegating with start "fork"): with no sessionId of its own yet, its
+   *  first turn starts from a copy of this session through the CLI's own
+   *  fork (Claude `--resume <id> --fork-session`, Codex `thread/fork`) and
+   *  reports the copy's new id. Both CLIs keep the source's system and
+   *  developer instructions in the copy (verified on Claude Code 2.1.329 and
+   *  Codex 0.155.1), so the caller tells the member who it is in the prompt. */
+  forkFromSessionId?: string;
   compactInstructions?: string;
   clearCompactPrompt?: boolean;
   extraReadableDirs?: string[];
@@ -3647,6 +3655,21 @@ export class CliAgentRunner {
       if (threadId && threadLoaded) {
         return threadId;
       }
+      if (!threadId && options.forkFromSessionId) {
+        // A member made as a fork of another member's thread: its own thread
+        // starts as a copy (Codex 0.155.1 forks a thread another process is
+        // still running a turn on). Never the source's id: the member must
+        // not write to the session it was copied from.
+        const result = await sendRequest("thread/fork", this.codexAppServerThreadForkParams(options.forkFromSessionId, participant, repoPath, kind, options), timeoutMs) as CodexAppServerThreadStartResult;
+        const forkedThreadId = result.thread?.id ?? result.thread?.sessionId;
+        if (!forkedThreadId || forkedThreadId === options.forkFromSessionId) {
+          throw new Error("codex app-server did not return a thread id for the fork");
+        }
+        threadId = forkedThreadId;
+        threadLoaded = true;
+        activeModel = result.model ?? activeModel;
+        return forkedThreadId;
+      }
       if (threadId) {
         if (options.sessionId && threadId === options.sessionId) {
           const result = await sendRequest("thread/resume", this.codexAppServerThreadResumeParams(options.sessionId, participant, repoPath, kind, options), timeoutMs) as CodexAppServerThreadStartResult;
@@ -4526,6 +4549,20 @@ export class CliAgentRunner {
       developerInstructions: options.role?.instructions ?? null,
       excludeTurns: true,
       persistExtendedHistory: false
+    };
+  }
+
+  /** thread/fork: the copy gets this member's own settings, as a resume does. */
+  private codexAppServerThreadForkParams(
+    sourceThreadId: string,
+    participant: ParticipantConfig,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    options: CliAgentRunOptions
+  ): Record<string, unknown> {
+    return {
+      ...this.codexAppServerThreadResumeParams(sourceThreadId, participant, repoPath, kind, options),
+      ephemeral: !options.persistSession
     };
   }
 
@@ -5839,7 +5876,7 @@ export class CliAgentRunner {
         content,
         durationMs: Date.now() - startedAt,
         sessionId,
-        roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined,
+        roleRuntime: options.role && !options.sessionId && !options.forkFromSessionId ? "claude-agent" : undefined,
         contextUsage:
           (streamState
             ? buildAgentContextUsage({
@@ -5861,7 +5898,7 @@ export class CliAgentRunner {
           Date.now() - startedAt
         );
       }
-      if (options.role && !options.sessionId && this.isClaudeAgentFlagUnsupported(error)) {
+      if (options.role && !options.sessionId && !options.forkFromSessionId && this.isClaudeAgentFlagUnsupported(error)) {
         const fallback = await this.runClaudeOneShot(
           participant,
           options.role.promptFallbackPrompt,
@@ -5893,7 +5930,9 @@ export class CliAgentRunner {
           ]
         };
       }
-      if (options.sessionId && this.isResumeMiss(error)) {
+      // The session it resumes or forks is gone: a new one from the saved
+      // chat context, as the warning that follows says.
+      if ((options.sessionId || options.forkFromSessionId) && this.isResumeMiss(error)) {
         const restarted = await this.runClaudeOneShot(participant, options.resumeFallbackPrompt ?? prompt, repoPath, kind, signal, {
           persistSession: options.persistSession,
           extraReadableDirs: options.extraReadableDirs,
@@ -5958,7 +5997,7 @@ export class CliAgentRunner {
             onMessageWritten: warm.onMessageWritten,
             onPromptSuggestion: warm.onPromptSuggestion,
             allowEmptyContent: options.allowEmptyContent,
-            roleRuntime: options.role && !options.sessionId ? "claude-agent" : undefined
+            roleRuntime: options.role && !options.sessionId && !options.forkFromSessionId ? "claude-agent" : undefined
           }),
           participant,
           options
@@ -6620,6 +6659,14 @@ export class CliAgentRunner {
     }
     if (options.sessionId) {
       args.push("--resume", options.sessionId);
+    } else if (options.forkFromSessionId) {
+      // The copy is a new session with the id given here (Claude Code
+      // 2.1.329 reports it on every event); the source session is not
+      // written to.
+      args.push("--resume", options.forkFromSessionId, "--fork-session");
+      if (newSessionId) {
+        args.push("--session-id", newSessionId);
+      }
     } else if (newSessionId) {
       args.push("--session-id", newSessionId);
     }
@@ -6633,7 +6680,9 @@ export class CliAgentRunner {
     if (reasoningEffort) {
       args.push("--effort", reasoningEffort);
     }
-    if (options.role && !options.sessionId) {
+    // A resumed or forked session keeps the agent it started with: Claude
+    // Code does not apply --agent to it.
+    if (options.role && !options.sessionId && !options.forkFromSessionId) {
       args.push("--agents", this.claudeAgentsJson(options.role), "--agent", options.role.name);
     }
     args.push(...this.claudeMcpArgs(kind, options));
@@ -8524,7 +8573,7 @@ export class CliAgentRunner {
       permissionMode: toolConfig.permissionMode,
       cwd: repoPath ?? null,
       transport,
-      sessionKind: options.sessionId ? "resume" : "cold",
+      sessionKind: options.sessionId ? "resume" : options.forkFromSessionId ? "fork" : "cold",
       argv: this.redactedClaudeArgs(args),
       allowedTools: {
         count: allowedTools.length,
