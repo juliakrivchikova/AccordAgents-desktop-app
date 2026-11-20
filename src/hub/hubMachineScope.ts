@@ -47,6 +47,7 @@ import {
   normalizeChatParticipantRequestPermission,
   resolveChatManageRolesParticipantsPermission
 } from "../shared/agentPermissions";
+import { MAIN_SESSION_ROLE_ID } from "../shared/mainSession";
 import { APP_CHAT_REQUEST_PARTICIPANTS_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, APP_ROSTER_REQUEST_CHANGE_TOOL } from "../shared/appMcpToolContracts";
 import type { HubCard, HubUserApproval } from "../shared/hubOps";
 import type { HubMemberRules } from "../shared/hubProtocol";
@@ -473,9 +474,10 @@ function additionAllowed(member: ChatParticipant, changes: MemberChanges): boole
 /** Whether the app would have taken this member out for one of the
  *  machine's members: one that may change members without a card, or the
  *  User's approval of its removal. */
-function removalAllowed(member: ChatParticipant, changes: MemberChanges): boolean {
-  // The Chat Assistant stays, as in the app.
+function removalAllowed(member: ChatParticipant, changes: MemberChanges, mainSessionId: unknown): boolean {
+  // The Chat Assistant stays, as in the app, and so does the main session.
   if (member.roleConfigId === CHAT_ASSISTANT_ROLE_ID) return false;
+  if (member.roleConfigId === MAIN_SESSION_ROLE_ID || member.id === mainSessionId) return false;
   if (changes.machineMembers.some((requester) => managesWithoutCard(requester, changes.rules, changes.policies))) return true;
   const answer = changes.approved.find((item) => changes.machineMembers.some((requester) => requester.id === item.card.participantId) &&
     approvedRemovals(item).includes(member.id));
@@ -587,7 +589,7 @@ export function scopeMachineConversationUpdate(conversation: Conversation, updat
     // A member left out (taken out, or missing from an old copy) goes only
     // as the app takes one out; otherwise it stays.
     for (const participant of before) {
-      if (proposedIds.has(participant.id) || removalAllowed(participant, changes)) continue;
+      if (proposedIds.has(participant.id) || removalAllowed(participant, changes, current.mainSessionParticipantId)) continue;
       refused.push(`participants.${participant.id}.removed`);
       members.push(participant);
     }

@@ -424,6 +424,23 @@ test("a chat pinned on the computer is pinned on every device through the server
   assert.equal(unpinned!.updatedAt, machineBefore);
 });
 
+test("a chat's view switched on the computer reaches the server and every device as a change of the chat, and keeps its time everywhere", async (t) => {
+  const base = localChat("chat-view");
+  const h = await linked(t, { ...base, metadata: { ...base.metadata, mainSessionParticipantId: desk.id, chatView: "sessions" } });
+  const server0 = await until(() => h.page("chat-view"), (page) => page.conversation?.metadata?.chatView === "sessions");
+  assert.equal(server0.conversation.metadata.mainSessionParticipantId, desk.id, "the main session is the chat's own, shared");
+  const before = (await h.desktopStorage.getConversation("chat-view"))!.updatedAt;
+  const machineBefore = (await until(() => h.machineStorage.getConversation("chat-view"), (chat) => chat?.metadata.chatView === "sessions"))!.updatedAt;
+  await h.desktopChat.setChatView({ conversationId: "chat-view", view: "classic" });
+  const server = await until(() => h.page("chat-view"), (page) => page.conversation?.metadata?.chatView === "classic");
+  assert.equal(server.conversation.updatedAt, before, "the server keeps the chat's time");
+  const machine = await until(() => h.machineStorage.getConversation("chat-view"), (chat) => chat?.metadata.chatView === "classic");
+  assert.equal(machine!.updatedAt, machineBefore, "a device that receives the view keeps the chat's time");
+  assert.equal(machine!.metadata.mainSessionParticipantId, desk.id);
+  const listed = (await h.desktopStorage.listConversations()).find((summary) => summary.id === "chat-view");
+  assert.equal(listed?.updatedAt, before, "the computer's own list keeps its time too");
+});
+
 test("an unpin made while a member's turn holds an older copy of the chat stays unpinned, here and on the server", async (t) => {
   const h = await linked(t, localChat("chat-pin-run"));
   await h.desktopChat.setPinned({ conversationId: "chat-pin-run", pinned: true });

@@ -11,6 +11,7 @@ import type { HubDevice, HubMemberRules } from "../shared/hubProtocol";
 import { HUB_CARD_ANSWERED_FIRST } from "../shared/hubCards";
 import { TURN_FINISHED_NOTE_SOURCE, turnFinishedNoteOf } from "../shared/turnFinishedNoteSource";
 import { ACCORD_CLOSED_SOURCE, accordClosedLaunchId, recordClosedAccords } from "../shared/accordProgress";
+import { isChatViewMode, mainSessionMemberOf } from "../shared/mainSession";
 import {
   HUB_CHAT_PAGE_MESSAGES,
   HUB_FEED_PAGE_BYTES,
@@ -265,7 +266,7 @@ export class HubOps {
       // A phone paired for one chat starts no other.
       if (device.role === "phone" && device.scope?.scope !== "device") return reject(opId, "This phone was paired for one chat, so it does not start new ones.");
       if (await this.load(op.conversationId)) return reject(opId, "This chat already exists.");
-      const fields = conversationFields(op.conversation);
+      const fields = withMainSessionNamed(conversationFields(op.conversation));
       const conversation: Conversation = {
         id: op.conversationId,
         title: fields.title,
@@ -319,7 +320,13 @@ export class HubOps {
           usedGrants = scoped.used;
         }
         const metadata = sharedMetadata(asked.metadata ?? {});
-        const removed = (asked.removedMetadataKeys ?? []).filter((key) => (SHARED_CONVERSATION_METADATA_KEYS as readonly string[]).includes(key));
+        // A chat's main session is named when the chat is made and never
+        // changed (shared/mainSession.ts): nor given to a chat from before.
+        if (metadata.mainSessionParticipantId !== undefined && metadata.mainSessionParticipantId !== loaded.metadata.mainSessionParticipantId) {
+          delete metadata.mainSessionParticipantId;
+        }
+        const removed = (asked.removedMetadataKeys ?? []).filter((key) => (SHARED_CONVERSATION_METADATA_KEYS as readonly string[]).includes(key) &&
+          key !== "mainSessionParticipantId");
         if (asked.title !== undefined) conversation.title = asked.title;
         if (asked.repoPath === null) delete conversation.repoPath;
         else if (asked.repoPath !== undefined) conversation.repoPath = asked.repoPath;
@@ -928,7 +935,30 @@ function sharedMetadata(metadata: Record<string, unknown>): Record<string, unkno
   if (shared.pinnedAt !== undefined && !(typeof shared.pinnedAt === "string" && shared.pinnedAt.length <= 64 && Number.isFinite(Date.parse(shared.pinnedAt)))) {
     delete shared.pinnedAt;
   }
+  // The main session is a member's id, and the view one of the two views
+  // (shared/mainSession.ts); anything else reaches no device.
+  if (shared.mainSessionParticipantId !== undefined && !(typeof shared.mainSessionParticipantId === "string" &&
+    shared.mainSessionParticipantId.length > 0 && shared.mainSessionParticipantId.length <= 128)) {
+    delete shared.mainSessionParticipantId;
+  }
+  if (shared.chatView !== undefined && !isChatViewMode(shared.chatView)) {
+    delete shared.chatView;
+  }
   return shared;
+}
+
+/** A new chat names its main session. A phone from before sends the main
+ *  session the computer offered it (HubNewChatOptions.assistant) among the
+ *  members without naming it: it is told by its role, which only a main
+ *  session has, so that chat is a main-session chat on every device too. */
+function withMainSessionNamed(fields: HubConversationFields): HubConversationFields {
+  if (fields.metadata.mainSessionParticipantId !== undefined) return fields;
+  const participants = Array.isArray(fields.metadata.participants)
+    ? (fields.metadata.participants as unknown[]).filter((item): item is { id: string; roleConfigId?: string } =>
+      Boolean(item) && typeof item === "object" && typeof (item as { id?: unknown }).id === "string")
+    : [];
+  const mainSession = mainSessionMemberOf(participants);
+  return mainSession ? { ...fields, metadata: { ...fields.metadata, mainSessionParticipantId: mainSession.id } } : fields;
 }
 
 function conversationFields(fields: HubConversationFields): HubConversationFields {

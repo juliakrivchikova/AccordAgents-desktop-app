@@ -364,6 +364,14 @@ test("a machine's member keeps its name; no member takes another's, the Chat Ass
   assert.ok(members(scoped).has("p-assistant"), "the Chat Assistant stays");
   scoped = scopeMachineConversationUpdate(chatWith([deskR, lead]), { metadata: { participants: [] } }, "machine-1", { rules });
   assert.deepEqual([...members(scoped).keys()].sort(), ["p-box", "p-desk"], "the last member stays");
+  // The main session stays too, as in the app (docs/main-session.md).
+  const main = { id: "p-main", handle: "main", label: "Main", roleConfigId: "main-session" };
+  const mainChat = chatWith([main, deskR, lead]);
+  mainChat.metadata.mainSessionParticipantId = main.id;
+  scoped = scopeMachineConversationUpdate(mainChat, { metadata: { participants: [deskR, lead] } }, "machine-1", { rules });
+  assert.ok(members(scoped).has("p-main"), "the main session stays");
+  assert.ok(scoped.refused.includes("participants.p-main.removed"));
+  assert.equal(members(scoped).has("p-desk"), true);
 });
 
 test("a machine never writes the session a member is handed when it moves, for its own members or others", () => {
