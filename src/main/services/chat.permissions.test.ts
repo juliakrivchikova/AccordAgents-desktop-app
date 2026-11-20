@@ -48,6 +48,7 @@ import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
 import { preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
 import { MAIN_SESSION_ROLE_ID } from "../../shared/mainSession";
+import { CHAT_INTERIM_POSTS_MAX_CHARS } from "../../shared/interimPosts";
 import type {
   AgentHealth,
   ReviewProgress,
@@ -9435,6 +9436,207 @@ test("app_chat_send_message publishes a participant message and lets the author 
   });
   assert.equal(reacted.status, "added");
   assert.equal(storage.current.messages[1].metadata.reactions["✅"][0].actorLabel, "@codex");
+});
+
+/** A member's turn in progress: its reply, still running, under the User's
+ *  message (the run's pending bubble). */
+function runningReply(participant: ChatParticipant, patch: Partial<ChatMessage> = {}): ChatMessage {
+  return {
+    id: "reply-1",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "",
+    createdAt: NOW,
+    status: "pending",
+    ...patch,
+    metadata: {
+      threadId: "user-message",
+      parentMessageId: "user-message",
+      sourceMessageId: "user-message",
+      runId: "turn-run-1",
+      turnSegmentId: "turn-segment-1",
+      participantRequestDepth: 0,
+      ...patch.metadata
+    }
+  };
+}
+
+/** The turn the running reply belongs to, live in this process. */
+function liveTurn(service: ChatService, participant: ChatParticipant): void {
+  (service as any).registerTargetRun("turn-run-1", new AbortController(), {
+    conversationId: "conversation-1", participantId: participant.id, participantHandle: participant.handle
+  });
+  (service as any).setTargetRunPendingMessageId("turn-run-1", "reply-1");
+}
+
+function turnActor(participant: ChatParticipant, patch: Record<string, unknown> = {}): any {
+  return {
+    ...participantRequestActor(participant),
+    capabilities: [],
+    runId: "turn-run-1",
+    turnSegmentId: "turn-segment-1",
+    ...patch
+  };
+}
+
+test("a post during the member's own running turn goes into its running reply, in order, and the reply stays the last message", async () => {
+  const participant = chatParticipant("codex-cli");
+  const reader = chatParticipant("claude-code");
+  const conversation = chatConversation([participant, reader]);
+  conversation.messages.push(runningReply(participant));
+  const { service, storage } = testService({ conversation });
+  liveTurn(service, participant);
+  const actor = turnActor(participant);
+
+  const first = await service.sendChatMessageFromTool(actor, { content: "Found the cause." });
+  const second = await service.sendChatMessageFromTool(actor, { content: "Fixing it now." });
+
+  assert.equal(storage.current.messages.length, 2, "no message of its own: the reply is still the last one");
+  assert.deepEqual([first.messageId, second.messageId], ["reply-1", "reply-1"], "the reply's id comes back");
+  assert.equal(first.sequence, 1);
+  assert.equal(first.postedInto, "running-reply");
+  assert.equal(typeof first.postId, "string");
+  assert.notEqual(first.postId, second.postId);
+  const reply = storage.current.messages[1] as ChatMessage;
+  assert.equal(reply.status, "pending", "the turn goes on");
+  assert.deepEqual(reply.metadata?.interimPosts?.map((post) => [post.id, post.content]), [
+    [first.postId, "Found the cause."],
+    [second.postId, "Fixing it now."]
+  ]);
+  assert.equal(actor.snapshotMaxSequence, 1, "the same run can read its reply now, as it read a posted message");
+
+  // Two posts at once both land, oldest first.
+  await Promise.all([
+    service.sendChatMessageFromTool(actor, { content: "Third." }),
+    service.sendChatMessageFromTool(actor, { content: "Fourth." })
+  ]);
+  const posts = (storage.current.messages[1] as ChatMessage).metadata?.interimPosts ?? [];
+  assert.equal(posts.length, 4);
+  assert.deepEqual(posts.slice(2).map((post) => post.content).sort(), ["Fourth.", "Third."]);
+  assert.deepEqual(posts.map((post) => post.createdAt), [...posts.map((post) => post.createdAt)].sort(), "in the order they were made");
+
+  // Another member reads them as part of the running reply.
+  const read = await service.readChatMessagesForTool({ ...turnActor(reader), runId: "reader-run", snapshotMaxSequence: undefined }, { limit: 10 });
+  const seen = (read.messages as Array<{ id: string; content: string; interimPosts?: Array<{ content: string }>; metadata?: Record<string, unknown> }>)
+    .find((message) => message.id === "reply-1");
+  assert.deepEqual(seen?.interimPosts?.map((post) => post.content).slice(0, 2), ["Found the cause.", "Fixing it now."]);
+  assert.equal(seen?.content, "", "its final words are not written yet");
+  assert.equal(seen?.metadata?.interimPosts, undefined, "said once, not again inside the metadata");
+});
+
+test("posts that are messages of their own stay so: an Accord resolution, another thread or parent, no turn running, a turn already ended", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  conversation.messages.push(
+    { id: "other-root", role: "user", content: "Another question.", createdAt: NOW, status: "done" },
+    runningReply(participant)
+  );
+  const { service, storage } = testService({ conversation });
+  liveTurn(service, participant);
+  const actor = turnActor(participant, { snapshotMaxSequence: 1 });
+  const separate = async (request: Record<string, unknown>, who = actor): Promise<ChatMessage> => {
+    const sent = await service.sendChatMessageFromTool(who, request);
+    assert.notEqual(sent.messageId, "reply-1", JSON.stringify(request));
+    assert.equal(sent.postId, undefined);
+    const message = storage.current.messages.find((item: ChatMessage) => item.id === sent.messageId) as ChatMessage;
+    assert.equal(message.metadata?.appMessageSource, "app_chat_send_message");
+    return message;
+  };
+
+  const resolution = await separate({ content: "Resolution v1.", accordResolution: { version: 1 } });
+  assert.equal(resolution.metadata?.accordResolution?.version, 1);
+  await separate({ content: "In the other thread.", threadId: "other-root" });
+  await separate({ content: "Under the other message.", parentMessageId: "other-root" });
+  await separate({ content: "Rooted elsewhere.", chatThreadRootId: "other-root" });
+  await separate({ content: "From a run that is not this reply's." }, turnActor(participant, { runId: "finished-run", snapshotMaxSequence: 1 }));
+  await separate({ content: "From no run at all." }, turnActor(participant, { runId: undefined, snapshotMaxSequence: 1 }));
+
+  // The same place, named explicitly, is still the reply's.
+  const same = await service.sendChatMessageFromTool(actor, { content: "Same place.", threadId: "user-message", parentMessageId: "user-message" });
+  assert.equal(same.messageId, "reply-1");
+
+  // The turn ended before the post arrived: a message of its own.
+  const ended = storage.current.messages.find((item: ChatMessage) => item.id === "reply-1") as ChatMessage;
+  ended.status = "done";
+  ended.content = "All done.";
+  await separate({ content: "Late post." });
+  assert.deepEqual(ended.metadata?.interimPosts?.map((post) => post.content), ["Same place."]);
+});
+
+test("a reply's posts stop at the cap: the post that would pass it is a message of its own", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  conversation.messages.push(runningReply(participant));
+  const { service, storage } = testService({ conversation });
+  liveTurn(service, participant);
+  const actor = turnActor(participant);
+  await service.sendChatMessageFromTool(actor, { content: "x".repeat(CHAT_INTERIM_POSTS_MAX_CHARS - 10) });
+  const over = await service.sendChatMessageFromTool(actor, { content: "This one is twenty+." });
+  assert.notEqual(over.messageId, "reply-1");
+  assert.equal(storage.current.messages.at(-1).content, "This one is twenty+.");
+  assert.equal((storage.current.messages.find((item: ChatMessage) => item.id === "reply-1") as ChatMessage).metadata?.interimPosts?.length, 1);
+});
+
+for (const ending of ["done", "error", "stopped"] as const) {
+  test(`a reply whose turn ends ${ending} keeps the posts made during it, though the turn held a copy of the reply without them`, async () => {
+    const participant = chatParticipant("codex-cli");
+    const conversation = chatConversation([participant]);
+    conversation.messages.push(runningReply(participant));
+    const { service, storage } = testService({ conversation });
+    liveTurn(service, participant);
+    // The turn's own copy of the chat, read when the turn began.
+    const turnCopy = clone(storage.current) as Conversation;
+    const turnReply = turnCopy.messages[1];
+    await service.sendChatMessageFromTool(turnActor(participant), { content: "Found the cause." });
+    await service.sendChatMessageFromTool(turnActor(participant), { content: "Fixing it now." });
+    if (ending === "done") {
+      turnReply.status = "done";
+      turnReply.content = "Fixed: the button fits.";
+      await (service as any).finalizePendingParticipantMessage(turnCopy, participant, turnReply);
+    } else if (ending === "error") {
+      turnReply.status = "error";
+      turnReply.content = "@codex: the CLI exited.";
+      await (service as any).finalizePendingParticipantMessage(turnCopy, participant, turnReply);
+    } else {
+      turnReply.status = "error";
+      turnReply.content = "Stopped.";
+      turnReply.metadata = { ...turnReply.metadata, terminalReason: "user-stopped" };
+      await (service as any).discardStoppedTargetRun(turnCopy, "turn-run-1", participant, "reply-1");
+    }
+    const reply = storage.current.messages.find((item: ChatMessage) => item.id === "reply-1") as ChatMessage;
+    assert.equal(reply.status, ending === "done" ? "done" : "error");
+    assert.deepEqual(reply.metadata?.interimPosts?.map((post) => post.content), ["Found the cause.", "Fixing it now."]);
+    assert.equal(storage.current.messages.filter((item: ChatMessage) => item.metadata?.appMessageSource === "app_turn_finished_note").length, 0,
+      "nothing came below the reply: no note");
+    // A copy that saw neither the posts nor the end (another flow's) cannot take them back.
+    const stale = clone(conversation) as Conversation;
+    await (service as any).withChatMutation(stale, async () => {
+      (service as any).queueSnapshot(stale);
+    });
+    await (service as any).waitForQueuedSave("conversation-1");
+    assert.equal((storage.current.messages.find((item: ChatMessage) => item.id === "reply-1") as ChatMessage).metadata?.interimPosts?.length, 2);
+  });
+}
+
+test("a post's mention asks that member once; the reply's final words naming it again do not ask again", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "ask" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  conversation.messages.push(runningReply(requester));
+  const { service, storage } = testService({ conversation });
+  liveTurn(service, requester);
+  const turnCopy = clone(storage.current) as Conversation;
+  await service.sendChatMessageFromTool(turnActor(requester, { capabilities: ["participants.request"] }), { content: "@drew please review X." });
+  const asked = inferredRequestMessages(storage.current);
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].metadata?.participantRequest?.triggerMessageId, "reply-1", "filed under the reply the post is part of");
+  completeParticipantRequest(asked[0]);
+  const turnReply = turnCopy.messages[1];
+  turnReply.status = "done";
+  turnReply.content = "I asked @drew to review X.";
+  await (service as any).finalizePendingParticipantMessage(turnCopy, requester, turnReply);
+  assert.equal(inferredRequestMessages(storage.current).length, 1, "asked once");
 });
 
 test("app_chat_send_message infers one runnable request per mentioned target", async () => {

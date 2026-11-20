@@ -11,6 +11,7 @@ import type {
 import { chatMessageAddressees } from "../../shared/mainSession";
 import { firstTextLine } from "../../shared/mainSessionView";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
+import { chatInterimPostsOf } from "../../shared/interimPosts";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
 import { accordClosedLaunchId, accordClosedLineTitle } from "../../shared/accordProgress";
 import {
@@ -160,6 +161,17 @@ export interface MobileTimelineEvent {
   /** A member's request to other members, as the sessions view's task card
    *  and the members list show it. */
   participantRequest?: MobileTaskBatch;
+  /** A member's reply: what it posted during its turn, shown inside the
+   *  reply above its final text (shared/interimPosts.ts). Their pictures are
+   *  among the reply's attachments. */
+  interimPosts?: MobileInterimPost[];
+}
+
+export interface MobileInterimPost {
+  id: string;
+  content: string;
+  createdAt: string;
+  attachmentIds?: string[];
 }
 
 /**
@@ -227,8 +239,9 @@ export function phoneActivityEvents(conversation: Conversation, now = Date.now()
     const status = message.status ?? "done";
     if (status === "done" && !(now - Date.parse(message.createdAt) <= PHONE_ACTIVITY_DONE_MS)) continue;
     if (status !== "pending" && status !== "done") continue;
-    // Activity shows the text: no pictures, and no task card or addressees.
-    const { attachments: _attachments, participantRequest: _request, addressees: _addressees, ...event } =
+    // Activity shows the text: no pictures, no task card or addressees, and
+    // no posts made during the turn (the chat's page carries them).
+    const { attachments: _attachments, participantRequest: _request, addressees: _addressees, interimPosts: _posts, ...event } =
       timelineEventFromMessage(message, message.id, conversation, threadRoots);
     const short = { ...event, content: event.content.slice(0, PHONE_ACTIVITY_CONTENT_CHARS) };
     // Messages are oldest first: a later one of the same run or member wins.
@@ -263,7 +276,7 @@ export function timelineEventsFromSnapshot(conversation: Conversation, limit = 4
  *  caption is still a message. Both must survive a timeline reload. */
 function messageIsVisibleOnPhone(message: ChatMessage): boolean {
   return Boolean(message.content.trim()) || timelineAttachmentsFromMessage(message).length > 0 ||
-    (message.role === "participant" && message.status === "pending");
+    (message.role === "participant" && (message.status === "pending" || chatInterimPostsOf(message).length > 0));
 }
 
 /** What the desktop keeps off its timeline — internal system triggers such as
@@ -289,7 +302,8 @@ function isEmptyFinishedTurn(message: ChatMessage): boolean {
   return message.role === "participant" && message.status !== "pending" &&
     typeof message.metadata?.runId === "string" && Boolean(message.metadata.runId) &&
     message.metadata?.appMessageSource !== APP_CHAT_SEND_MESSAGE_TOOL &&
-    !message.content.trim() && timelineAttachmentsFromMessage(message).length === 0;
+    !message.content.trim() && timelineAttachmentsFromMessage(message).length === 0 &&
+    chatInterimPostsOf(message).length === 0;
 }
 
 function messageTravelsToPhone(conversation: Pick<Conversation, "messages">, message: ChatMessage): boolean {
@@ -341,6 +355,7 @@ function timelineEventFromMessage(
   const finishedNote = turnFinishedNoteOf(message);
   const addressees = message.role === "user" ? chatMessageAddressees(message).slice(0, PHONE_ADDRESSEES_MAX) : [];
   const request = message.role === "participant" && !hidden ? mobileTaskBatch(message.metadata?.participantRequest) : undefined;
+  const interimPosts = message.role === "participant" && !hidden ? mobileInterimPosts(message) : [];
   return {
     id: message.id,
     ...(threadRootId && threadRootId !== message.id ? { threadRootId } : {}),
@@ -370,12 +385,24 @@ function timelineEventFromMessage(
       ? message.content
       : pendingParticipantContent(message.participantLabel),
     ...(attachments.length > 0 ? { attachments } : {}),
+    ...(interimPosts.length > 0 ? { interimPosts } : {}),
     status: message.status ?? "done",
     createdAt: message.createdAt,
     runId,
     messageId: message.id,
     ...(mobileEventId ? { mobileEventId } : {})
   };
+}
+
+/** A reply's posts as the phone draws them: the words and which of the
+ *  reply's pictures each carries. */
+function mobileInterimPosts(message: ChatMessage): MobileInterimPost[] {
+  return chatInterimPostsOf(message).map((post) => ({
+    id: post.id,
+    content: post.content,
+    createdAt: post.createdAt,
+    ...(post.attachmentIds?.length ? { attachmentIds: [...post.attachmentIds] } : {})
+  }));
 }
 
 /** A request's batch, cut to what the task card and the members list show:

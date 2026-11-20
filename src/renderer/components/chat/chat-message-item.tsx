@@ -30,7 +30,6 @@ import {
 } from "../../../shared/remoteRunStreaming";
 import {
   chatDisplayContent,
-  chatMessageImageAttachments,
   chatMessageRepoFileMentions,
   chatMessageSkillMentions,
   formatChatReplyDate,
@@ -48,7 +47,8 @@ import { turnFinishedNoteOf } from "../../../shared/turnFinishedNoteSource";
 import { ChatChoiceCard } from "./chat-choice-card";
 import { chatMessageCards } from "./chat-server-card";
 import { ChatImageAttachmentStrip } from "./chat-image-attachments";
-import { ChatExpandedProcessingTranscript, StreamingMessageContent } from "./chat-streaming";
+import { ChatExpandedProcessingTranscript } from "./chat-streaming";
+import { ChatInterimPostList, StreamingContentWithInterimPosts, chatReplyPictures } from "./chat-interim-posts";
 import { ChatMessageHoverWhen, ChatMessageMeta } from "./chat-message-meta";
 import { ChatMessageReactionList } from "./chat-message-reactions";
 import { chatReplyPreviewAvatars } from "./chat-reply-preview";
@@ -195,7 +195,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   ];
   const skillMentions = chatMessageSkillMentions(message);
   const repoFileMentions = chatMessageRepoFileMentions(message);
-  const imageAttachments = chatMessageImageAttachments(message);
+  const { posts: interimPosts, all: allImageAttachments, own: imageAttachments } = chatReplyPictures(message);
   const allPendingIds = pending.map((mention) => mention.targetParticipantId);
   const processingTranscript = message.metadata?.processingTranscript;
   const activityEvents = message.metadata?.activityEvents ?? [];
@@ -392,15 +392,19 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           <FileLinkAuthorContext.Provider value={participant?.cloudRun || participant?.homeMachineId ? CLOUD_AUTHOR : LOCAL_AUTHOR}>
           <div className="message-content">
             {isStreaming ? (
-              <StreamingMessageContent
+              <StreamingContentWithInterimPosts
                 activityDisclosure={props.activityDisclosure}
                 content={streamedContent}
                 activity={streamedActivity}
                 activityEvents={streamedActivityEvents}
                 statusLabel={streamedRemoteRunStatus?.label}
+                conversationId={props.conversationId}
+                posts={interimPosts}
+                attachments={allImageAttachments}
               />
             ) : (
               <>
+                <ChatInterimPostList conversationId={props.conversationId} posts={interimPosts} attachments={allImageAttachments} />
                 {hasProcessingTranscript && processingTranscriptOpen && processingTranscriptView ? (
                   <ChatExpandedProcessingTranscript
                     activityDisclosure={props.activityDisclosure}

@@ -538,6 +538,8 @@
     return left.content === right.content &&
       left.status === right.status &&
       left.createdAt === right.createdAt &&
+      // What a member posted during its turn, inside its reply.
+      interimPostsSignature(left) === interimPostsSignature(right) &&
       (left.participantLabel || "") === (right.participantLabel || "") &&
       (left.threadRootId || "") === (right.threadRootId || "") &&
       (left.runId || "") === (right.runId || "") &&
@@ -4854,6 +4856,49 @@
     return saveChats(payload.chats);
   }
 
+  // What a member posted during its turn is part of its reply (the desktop's
+  // shared/interimPosts.ts): shown inside the reply, above its final words.
+  // Their pictures are among the reply's own.
+  function interimPostsOfEvent(event) {
+    if (!event || !Array.isArray(event.interimPosts)) return {};
+    const posts = event.interimPosts.filter(function (post) {
+      return post && typeof post.id === "string" && post.id && typeof post.content === "string";
+    }).map(function (post) {
+      return { id: post.id, content: post.content, createdAt: typeof post.createdAt === "string" ? post.createdAt : "" };
+    });
+    return posts.length > 0 ? { interimPosts: posts } : {};
+  }
+
+  function interimPostsSignature(entry) {
+    return entry && Array.isArray(entry.interimPosts)
+      ? entry.interimPosts.map(function (post) { return post.id; }).join(",")
+      : "";
+  }
+
+  function syncInterimPosts(copy, content, entry) {
+    const posts = Array.isArray(entry.interimPosts) ? entry.interimPosts : [];
+    let node = Array.from(copy.children).find(function (child) { return child.classList.contains("message-interim-posts"); });
+    if (posts.length === 0) {
+      node?.remove();
+      return;
+    }
+    if (!node) {
+      node = document.createElement("div");
+      node.className = "message-interim-posts";
+    }
+    if (node.nextSibling !== content) copy.insertBefore(node, content);
+    const signature = interimPostsSignature(entry);
+    if (node.dataset.signature === signature) return;
+    node.dataset.signature = signature;
+    node.textContent = "";
+    for (const post of posts) {
+      const item = document.createElement("div");
+      item.className = "message-content message-interim-post";
+      renderMessageContentIfChanged(item, post.content, entry.author);
+      node.append(item);
+    }
+  }
+
   function timelineAttachmentsFromEvent(event) {
     if (!event || !Array.isArray(event.attachments)) {
       return [];
@@ -5232,12 +5277,14 @@
       const id = typeof event.id === "string" && event.id.trim() ? event.id : createEventId();
       const content = typeof event.content === "string" ? event.content.trim() : "";
       const attachments = timelineAttachmentsFromEvent(event);
+      const interimPosts = event.role === "participant" ? interimPostsOfEvent(event) : {};
       // A picture with no caption is still a message. Requiring text dropped it.
       if (!content && attachments.length === 0) {
         // A turn that ended with nothing to say travels hidden and empty: it
         // still ends its run below, and no bubble is stored for it.
         const endsRunUnseen = event.hidden === true && (event.status === "done" || event.status === "error");
-        if (!endsRunUnseen) {
+        // A reply whose words all went out as posts during its turn shows them.
+        if (!endsRunUnseen && !interimPosts.interimPosts) {
           continue;
         }
       }
@@ -5347,6 +5394,7 @@
         }).slice(0, 16) } : {}),
         // A member's request: its task card and the members list read it.
         ...(role === "participant" ? taskBatchOfEvent(event) : {}),
+        ...interimPosts,
         ...(settledAt ? { settledAt: settledAt } : {})
       }, openedAt ? { arrivedAt: openedAt } : undefined);
       if (written) {
@@ -9173,6 +9221,7 @@
         // What the sessions view places the row by and draws its task card from.
         ...(Array.isArray(entry.addressees) && entry.addressees.length ? { addressees: entry.addressees } : {}),
         ...(entry.participantRequest ? { participantRequest: entry.participantRequest } : {}),
+        ...(Array.isArray(entry.interimPosts) && entry.interimPosts.length ? { interimPosts: entry.interimPosts } : {}),
         createdAt: entry.createdAt,
         threadRootId: entry.threadRootId,
         sourceId: entry.sourceId || entry.id,
@@ -9594,6 +9643,7 @@
       identified: entry.identified,
       scaffolding: entry.scaffolding,
       content: entry.content,
+      interimPosts: interimPostsSignature(entry) || undefined,
       answered: answeredCardsForMessage(entry).map(function (card) {
         return card.id + ":" + (card.outcome || "") + ":" + (card.decidedAt || "");
       }),
@@ -10675,6 +10725,7 @@
       meta.append(handle, status);
       syncMessageStopButton(meta, entry);
       copy.append(meta, content);
+      syncInterimPosts(copy, content, entry);
       renderAttachmentsInto(attachmentsNodeFor(copy), entry);
       syncAnsweredCards(copy, entry);
       syncPendingCards(copy, entry);
@@ -11124,7 +11175,8 @@
       const avatar = item.querySelector(".message-avatar");
       const handle = item.querySelector(".message-handle");
       const status = item.querySelector(".message-status");
-      const content = item.querySelector(".message-content");
+      // The reply's own words, not one of its posts above them.
+      const content = item.querySelector(".message-copy > .message-content:not(.message-interim-post)");
       if (!avatar || !handle || !status || !content) {
         return false;
       }
@@ -11136,7 +11188,17 @@
         return false;
       }
       syncMessageStopButton(meta, entry);
-      renderMessageContentIfChanged(content, entry.content, entry.author);
+      // A running row drawn again in place (its posts came) keeps "Thinking"
+      // as a new row draws it, not the placeholder sentence.
+      if (isThinkingEntry(entry)) {
+        delete content.dataset.markdownRaw;
+        delete content.dataset.markdownSource;
+        renderThinkingInto(content, entry);
+      } else {
+        delete content.dataset.thinking;
+        renderMessageContentIfChanged(content, entry.content, entry.author);
+      }
+      if (content.parentElement) syncInterimPosts(content.parentElement, content, entry);
       renderAttachmentsInto(attachmentsNodeFor(content.parentElement || item), entry);
       // A question answered while its row is on screen keeps its card there.
       syncAnsweredCards(content.parentElement || item, entry);
