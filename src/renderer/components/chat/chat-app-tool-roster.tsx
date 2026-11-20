@@ -1,9 +1,9 @@
 import { ShieldCheck } from "lucide-react";
 import type { ChatAppToolApproval, ChatRoleConfig, ChatRosterChangeOperation, ChatRosterChangeParticipantInput } from "../../../shared/types";
-import { Avatar } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { ChatMemberMark } from "./chat-member-mark";
 import { participantProviderLabel } from "./chat-conversation-data";
 import { rosterPermissionGrantLabels } from "./chat-participant-config-panel";
 import { displayChatRoleLabel } from "./chat-role-labels";
@@ -43,7 +43,7 @@ export function ChatAppToolRosterOperation({ operation, roles }: { operation: Ch
 
   return (
     <div className="chat-app-tool-roster-participant">
-      <Avatar className="chat-app-tool-roster-avatar" spec={avatar} />
+      <ChatMemberMark className="chat-app-tool-roster-avatar" markClassName="is-large" avatar={avatar} member={participant} />
       <div className="chat-app-tool-roster-participant-info">
         <strong>{label}</strong>
         <span>{details.join(" · ")}</span>

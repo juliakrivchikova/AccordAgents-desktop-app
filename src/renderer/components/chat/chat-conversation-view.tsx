@@ -12,14 +12,13 @@ import type {
 } from "../../../shared/types";
 import type { ChatThreadSummary } from "./chat-thread-data";
 import { activeRunSummaryForConversation } from "../../../shared/chatActiveRuns";
-import { Avatar } from "../avatar/avatar";
 import { LocalFileLinkContext, LocalFileOpenChooser } from "../content/local-file-link";
 import { MessageLinkContext } from "../content/markdown-text";
 import { MentionDirectoryContext } from "../content/participant-hover-card";
 import { RunStatusLine } from "../conversation/timeline-primitives";
 import { IconButton } from "../primitives";
-import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatComposer } from "./chat-composer";
+import { ChatSessionsPresentationContext, renderComposerMemberMark } from "./chat-member-mark";
 import {
   buildChatTimelineRows,
   chatAppToolApprovals,
@@ -152,7 +151,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
       return summary ? { signers: summary.approval.requiredSigners.length, drafters: summary.requiredDraftCount || undefined } : undefined;
     });
   }, [artifactNotesKey, artifacts.context.byId]);
-  const { docked: dockedAccord, accordLines } = useDockedAccord(props.conversation.messages, artifactNotesKey, participants,
+  const { docked: dockedAccord, latest: latestAccord, accordLines } = useDockedAccord(props.conversation.messages, artifactNotesKey, participants,
     props.conversation.metadata.accordClosedLaunchIds ?? NO_CLOSED_ACCORDS);
   const rightPanel = useChatRightPanel();
   const { selectedThreadRootId, selectThread: setSelectedThreadRootId } = rightPanel;
@@ -205,7 +204,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   const selectedThreadSummary = selectedThreadRoot ? threadSummaries.get(selectedThreadRoot.id) : undefined;
   const panel = rightPanel.panel;
   const sessionsPanelOpen = Boolean(sessions) && (
-    panel?.kind === "members" || (panel?.kind === "member" && participantsById.has(panel.participantId))
+    panel?.kind === "members" || panel?.kind === "accord" || (panel?.kind === "member" && participantsById.has(panel.participantId))
   );
   const hasThread = Boolean(selectedThreadRoot) || sessionsPanelOpen;
   const visibleApprovalMessages = useMemo(
@@ -372,6 +371,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   };
 
   return (
+    <ChatSessionsPresentationContext.Provider value={Boolean(sessions)}>
     <MentionDirectoryContext.Provider value={mentionDirectory}>
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
       <ArtifactsContext.Provider value={artifacts.context}>
@@ -445,6 +445,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               conversationId={props.conversation.id}
               participants={participants}
               keepAtLatest={() => { if (viewport.isStuckToBottom) viewport.scrollToChatBottom(); }}
+              onOpenInPanel={sessionsChrome.openAccord}
+              panelLaunchId={panel?.kind === "accord" ? panel.launchId : undefined}
             >
               {!viewport.isStuckToBottom && topLevelMessages.length > 0 && (
                 <IconButton className="chat-jump-to-latest" floating label="Jump to latest" icon={ArrowDown} onClick={viewport.scrollToChatBottom} />
@@ -479,7 +481,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               placeholder="Message @name, /name, or #path..."
               status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
               testId="chat-main-composer"
-              renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}
+              renderParticipantAvatar={renderComposerMemberMark}
               participantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
             />
           </div>
@@ -506,7 +508,9 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               olderMessagesLoading: props.olderMessagesLoading,
               onLoadOlderMessages: props.onLoadOlderMessages,
               onSendToMember: props.onSendToMember ?? (async () => false),
-              onStopRuns: props.onStopRun ? stopRuns : undefined
+              onStopRuns: props.onStopRun ? stopRuns : undefined,
+              latestAccord,
+              onOpenAccord: sessionsChrome.openAccord ?? rightPanel.openAccord
             } : undefined}
           />
           {showArtifactsPanel && (
@@ -532,6 +536,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
       </ArtifactsContext.Provider>
     </MessageLinkContext.Provider>
     </MentionDirectoryContext.Provider>
+    </ChatSessionsPresentationContext.Provider>
   );
 }
 

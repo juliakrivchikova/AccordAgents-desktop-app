@@ -4,6 +4,7 @@ import type { ActiveChatRunSummary } from "../../../shared/chatActiveRuns";
 import { isPendingReply } from "../../../shared/chatActiveRuns";
 import {
   buildSessionsViewIndex,
+  isOtherMemberTurnFinishedNote,
   mainSessionParticipantId,
   membersMainSessionWaitsOn,
   sessionsViewLane,
@@ -63,8 +64,8 @@ export function useChatSessionsView(input: {
     const shown = (message: ChatMessage): boolean => !isChatMessageHiddenInChat(conversation, message);
     const openCards = openMemberCardMessages(messages, index).filter(shown);
     const openCardMessageIds = new Set(openCards.map((message) => message.id));
-    const mainMessages = messages.filter((message) =>
-      openCardMessageIds.has(message.id) || (sessionsViewLane(message, index).kind === "main" && shown(message)));
+    const mainMessages = messages.filter((message) => openCardMessageIds.has(message.id) ||
+      (sessionsViewLane(message, index).kind === "main" && shown(message) && !isOtherMemberTurnFinishedNote(message, index)));
     return {
       index,
       mainMessages,
@@ -117,6 +118,8 @@ export function useChatSessionsChrome(input: {
   timeline?: ChatSessionsTimelineContext;
   header: ChatViewHeaderState;
   openOutsideTimeline?: (messageId: string) => boolean;
+  /** The sessions view: an Accord opens in the right panel (again: closes). */
+  openAccord?: (launchId: string) => void;
 } {
   const { sessions, viewMode, rightPanel, messages } = input;
   const latest = useRef(input);
@@ -124,6 +127,15 @@ export function useChatSessionsChrome(input: {
   const openMember = useCallback((participantId: string) => {
     latest.current.closeArtifacts();
     latest.current.rightPanel.openMember(participantId);
+  }, []);
+  const openAccord = useCallback((launchId: string) => {
+    const { rightPanel: panel, closeArtifacts } = latest.current;
+    if (panel.panel?.kind === "accord" && panel.panel.launchId === launchId) {
+      panel.close();
+      return;
+    }
+    closeArtifacts();
+    panel.openAccord(launchId);
   }, []);
   // Search, Activity or a link reaching a member's message: its session opens.
   const openOutsideTimeline = useCallback((messageId: string): boolean => {
@@ -170,5 +182,10 @@ export function useChatSessionsChrome(input: {
       }
     }
   }), [viewMode.view, viewMode.canSwitch, viewMode.setView, runningCount, membersOpen, rightPanel.close, rightPanel.openMembers]);
-  return { timeline, header, openOutsideTimeline: inSessions ? openOutsideTimeline : undefined };
+  return {
+    timeline,
+    header,
+    openOutsideTimeline: inSessions ? openOutsideTimeline : undefined,
+    openAccord: inSessions ? openAccord : undefined
+  };
 }

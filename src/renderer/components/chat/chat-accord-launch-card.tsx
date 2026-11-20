@@ -1,9 +1,10 @@
 import { Fragment } from "react";
 import type { ChatParticipant } from "../../../shared/types";
 import { accordLaunchCardForMessage, accordLaunchTitleAndBody, type AccordLaunchCard } from "../../../shared/accordLaunchCard";
-import { Avatar, avatarForParticipant } from "../avatar/avatar";
+import { avatarForParticipant } from "../avatar/avatar";
 import { AccordMergeIcon } from "./accord-merge-icon";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { ChatMemberMark } from "./chat-member-mark";
 
 // Read the same way by the desktop, the phone and the main process.
 export { accordLaunchCardForMessage };
@@ -16,9 +17,10 @@ function AccordMember(props: { handle: string; participants?: ChatParticipant[] 
   const avatar = participant ? avatarForChatParticipant(participant, label) : avatarForParticipant(label);
   return (
     <span className="chat-accord-launch-member">
-      {/* The handle beside it names the member; the picture is not read out again. */}
+      {/* The handle beside it names the member; the picture is not read out
+          again. The sessions view shows the provider's logo instead. */}
       <span aria-hidden="true" className="chat-accord-launch-avatar-slot">
-        <Avatar className="chat-accord-launch-avatar" spec={avatar} tooltip={null} />
+        <ChatMemberMark className="chat-accord-launch-avatar" markClassName="is-chip" avatar={avatar} member={participant} tooltip={null} />
       </span>
       <span className="chat-mention">{label}</span>
     </span>

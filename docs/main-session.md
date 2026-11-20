@@ -52,7 +52,22 @@ chat without a main session is always `classic`; its switch is disabled.
     Stop all; clicking a member opens its **whole session** in the same panel
     (Back to the list) with a composer that writes to that member only
     (`SendChatMessageRequest.targetParticipantIds`);
-  - no threads UI: every message has one place (`sessionsViewLane`).
+  - no threads UI: every message has one place (`sessionsViewLane`);
+  - no avatar pictures anywhere in the chat: a member's only mark is its
+    provider's logo tile, as in Settings → Local CLI setup (task cards,
+    member rows, Accord cards, turn-finished notes, approval cards, the
+    roster and @ lists, hover cards; `ChatMemberMark`);
+  - a finished message shows no member state (the member's state now says
+    nothing about it); its time is with its controls on hover. A message
+    still being written keeps "Running 12s" or "Queued";
+  - a turn-finished note about another member is not on the main timeline
+    (`isOtherMemberTurnFinishedNote`): its task card already says it is done;
+  - the members panel lists the chat's latest Accord first; while some
+    member runs or waits for the User, the ones that ended are under
+    "Previous", and with nobody at work every member is listed as it is;
+  - the Accord: above the composer one line (Accord · its name · where it
+    stands) that opens the whole card in the right panel; the classic view
+    keeps the pinned card.
 
 The placement rules are in `src/shared/mainSession.ts` and are the same on
 the desktop and on the phone (bundled through `mobileSharedRules.ts`).

@@ -29,6 +29,7 @@ import { NewChatScreen } from "./components/chat/new-chat-screen";
 import { ChatSearchModal } from "./components/search/chat-search-modal";
 import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
 import { ChatViewHeaderControls } from "./components/chat/chat-view-switch";
+import { chatViewFor } from "../shared/mainSession";
 import { chatRoleLabel } from "./components/chat/chat-conversation-data";
 import { avatarForChatParticipant } from "./components/chat/chat-avatars";
 import { defaultChatParticipantDraft } from "./components/chat/chat-participant-drafts";
@@ -482,6 +483,7 @@ function App(): JSX.Element {
           participantRoleLabel={(participant) => chatRoleLabel(state.settings.chatRoleConfigs, participant)}
           onOpenChange={setAccordDialogOpen}
           onStart={chatActions.startChatAccord}
+          sessions={chatViewFor(view.activeChatConversation.metadata, state.settings.defaultChatView) === "sessions"}
         />
       )}
 

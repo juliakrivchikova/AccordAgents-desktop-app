@@ -14,6 +14,7 @@ import {
   avatarForChatParticipant
 } from "./chat-avatars";
 import { chatRoleLabel } from "./chat-conversation-data";
+import { ChatMemberMark } from "./chat-member-mark";
 import { ChatParticipantDraftRow } from "./chat-participant-draft-row";
 import { ChatParticipantMenuView } from "./chat-participant-menu-view";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
@@ -85,8 +86,12 @@ export function ChatParticipantMenu(props: {
       participantWatchers={props.participantWatchers}
       savedParticipants={savedParticipants}
       hasSavedParticipantConfigs={props.settings.chatParticipantConfigs.length > 0}
-      renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant, chatParticipantDisplayName(participant))} />}
-      renderSavedParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}
+      renderParticipantAvatar={(participant) => (
+        <ChatMemberMark className="mini-avatar" markClassName="is-mini" avatar={avatarForChatParticipant(participant, chatParticipantDisplayName(participant))} member={participant} />
+      )}
+      renderSavedParticipantAvatar={(participant) => (
+        <ChatMemberMark className="mini-avatar" markClassName="is-mini" avatar={avatarForChatParticipant(participant)} member={participant} />
+      )}
       participantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
       participantRoleArchived={(participant) => Boolean(
         props.settings.chatRoleConfigs.find((role) => role.id === participant.roleConfigId)?.archivedAt

@@ -11,13 +11,14 @@ import {
 
 /**
  * What the chat's right panel shows besides artifacts and files: a thread
- * (the classic view), or in the sessions view the members list or one
- * member's whole session (docs/main-session.md).
+ * (the classic view), or in the sessions view the members list, one
+ * member's whole session or an Accord (docs/main-session.md).
  */
 export type ChatRightPanel =
   | { kind: "thread"; rootId: string }
   | { kind: "members" }
-  | { kind: "member"; participantId: string };
+  | { kind: "member"; participantId: string }
+  | { kind: "accord"; launchId: string };
 
 export interface ChatRightPanelState {
   panel?: ChatRightPanel;
@@ -25,6 +26,7 @@ export interface ChatRightPanelState {
   selectThread: (rootId: string | undefined) => void;
   openMembers: () => void;
   openMember: (participantId: string) => void;
+  openAccord: (launchId: string) => void;
   close: () => void;
   /** A member panel's composer draft, per member. */
   memberDrafts: Readonly<Record<string, string>>;
@@ -40,6 +42,7 @@ export function useChatRightPanel(): ChatRightPanelState {
   }, []);
   const openMembers = useCallback(() => setPanel({ kind: "members" }), []);
   const openMember = useCallback((participantId: string) => setPanel({ kind: "member", participantId }), []);
+  const openAccord = useCallback((launchId: string) => setPanel({ kind: "accord", launchId }), []);
   const close = useCallback(() => setPanel(undefined), []);
   const setMemberDraft = useCallback((participantId: string, value: string) => {
     setMemberDrafts((current) => ({ ...current, [participantId]: value }));
@@ -54,6 +57,7 @@ export function useChatRightPanel(): ChatRightPanelState {
     selectThread,
     openMembers,
     openMember,
+    openAccord,
     close,
     memberDrafts,
     setMemberDraft,

@@ -75,6 +75,29 @@ test("the members panel lists every member but the main session, ended ones unde
   act(() => renderer!.unmount());
 });
 
+test("with nobody running or waiting, the members panel lists every member as it is, no folded Previous", () => {
+  const messages = sessionsMessages();
+  const idle = new Map<string, ChatParticipantRosterStatus>([[DREW.id, "idle"], [GERA.id, "idle"], [TAYLOR.id, "idle"]]);
+  // Every task answered: nobody works, nobody waits.
+  const tasks = new Map([...latestTaskByMember(messages)].map(([id, task]) => [id, { ...task, item: { ...task.item, status: "answered" as const } }]));
+  const rows = sessionsMemberRows(PARTICIPANTS, MAIN.id, idle, tasks);
+  assert.deepEqual(rows.previous, []);
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(
+      <TooltipProvider>
+        <ChatMembersPanel rows={rows} messages={messages} runIdsByParticipantId={new Map()} roleLabel={() => ""} onOpenMember={noop} onClose={noop} />
+      </TooltipProvider>
+    );
+  });
+  const root = renderer!.root;
+  assert.equal(root.findAll(byTestId("chat-members-previous")).length, 0);
+  assert.deepEqual(root.findAll(byTestId("chat-members-row")).map((row) => [row.props["data-participant-id"], row.props["data-member-status"]]),
+    [[DREW.id, "done"], [GERA.id, "done"], [TAYLOR.id, "idle"]],
+    "the finished ones listed directly, in the chat's order, with the one that never had a task");
+  act(() => renderer!.unmount());
+});
+
 test("a member's session shows its task folded to one line, its messages without avatars, and its composer writes to that member only", async () => {
   const messages = sessionsMessages();
   const index = buildSessionsViewIndex(messages, MAIN.id);

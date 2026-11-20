@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildSessionsViewIndex, isMainSessionTaskMessage, mainTimelineMessages, memberSessionMessages, membersMainSessionWaitsOn } from "./mainSession";
+import {
+  buildSessionsViewIndex,
+  isMainSessionTaskMessage,
+  isOtherMemberTurnFinishedNote,
+  mainTimelineMessages,
+  memberSessionMessages,
+  membersMainSessionWaitsOn
+} from "./mainSession";
 import {
   firstTextLine,
   latestTaskByMember,
@@ -129,6 +136,31 @@ test("the members panel lists every member but the main session; ended ones unde
   const rows = sessionsMemberRows(participants, "p-main", statuses, tasks);
   assert.deepEqual(rows.current.map((row) => [row.participant.handle, row.status]), [["drew", "running"], ["taylor", "idle"]]);
   assert.deepEqual(rows.previous.map((row) => [row.participant.handle, row.status]), [["gera", "done"]]);
+});
+
+test("with nobody running or waiting, the members panel lists every member directly: no Previous group", () => {
+  const messages = chat();
+  const answered = new Map([...latestTaskByMember(messages)].map(([id, task]) => [id, { ...task, item: { ...task.item, status: "answered" as const } }]));
+  const rows = sessionsMemberRows(participants, "p-main", new Map(), answered);
+  assert.deepEqual(rows.current.map((row) => [row.participant.handle, row.status]), [["drew", "done"], ["gera", "done"], ["taylor", "idle"]]);
+  assert.deepEqual(rows.previous, []);
+  // One member waiting for the User is enough for the grouping to return.
+  const waiting = sessionsMemberRows(participants, "p-main", new Map([["p-taylor", "pending" as const]]), answered);
+  assert.deepEqual(waiting.current.map((row) => row.participant.handle), ["taylor"]);
+  assert.deepEqual(waiting.previous.map((row) => row.participant.handle), ["drew", "gera"]);
+});
+
+test("a turn-finished note about another member stays off the main timeline; the main session's own stays", () => {
+  const note = (id: string, participantId: string) => ({
+    id, role: "system", content: "Done", createdAt: at(20), status: "done",
+    metadata: { appMessageSource: "app_turn_finished_note", turnFinishedNote: { messageId: "gera-reply", participantId, participantLabel: "@x" } }
+  }) as ChatMessage;
+  const messages = [...chat(), note("note-gera", "p-gera"), note("note-main", "p-main")];
+  const index = buildSessionsViewIndex(messages, "p-main");
+  assert.equal(isOtherMemberTurnFinishedNote(messages.at(-2)!, index), true);
+  assert.equal(isOtherMemberTurnFinishedNote(messages.at(-1)!, index), false);
+  const main = mainTimelineMessages(messages, index).map((entry) => entry.id);
+  assert.ok(main.includes("note-main") && !main.includes("note-gera"));
 });
 
 test("a task card with several members counts the running ones", () => {

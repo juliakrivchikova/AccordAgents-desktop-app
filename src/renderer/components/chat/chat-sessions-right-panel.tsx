@@ -1,5 +1,6 @@
-import { useMemo, type ComponentProps } from "react";
+import { useContext, useMemo, type ComponentProps } from "react";
 
+import type { DockedAccord } from "../../../shared/accordProgress";
 import { memberSessionMessages } from "../../../shared/mainSession";
 import { sessionsMemberStatus } from "../../../shared/mainSessionView";
 import type {
@@ -12,6 +13,8 @@ import type {
   ChatParticipantSession,
   Conversation
 } from "../../../shared/types";
+import { AccordLinesContext } from "./chat-accord-closed-line";
+import { ChatAccordPanel } from "./chat-accord-panel";
 import { contextUsageForMessage, sessionIdForMessage } from "./chat-message-metadata";
 import { ChatMembersPanel } from "./chat-members-panel";
 import { ChatMemberSessionPanel, type ChatMemberSendRequest } from "./chat-member-session-panel";
@@ -56,10 +59,14 @@ export function panelMessageProps(context: ChatPanelMessageContext, message: Cha
   };
 }
 
-/** The sessions view's right panel: the members list, or one member's session. */
+/** The sessions view's right panel: the members list, one member's session,
+ *  or an Accord. */
 export function ChatSessionsRightPanel(props: {
   rightPanel: ChatRightPanelState;
   sessions: ChatSessionsView;
+  /** The chat's latest Accord (open, else the newest closed one). */
+  latestAccord?: DockedAccord;
+  onOpenAccord: (launchId: string) => void;
   conversation: Conversation;
   participants: ChatParticipant[];
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
@@ -73,6 +80,7 @@ export function ChatSessionsRightPanel(props: {
 }): JSX.Element | null {
   const { rightPanel, sessions, conversation, messageContext } = props;
   const settings = messageContext.settings;
+  const accordLines = useContext(AccordLinesContext);
   const panel = rightPanel.panel;
   const memberId = panel?.kind === "member" ? panel.participantId : undefined;
   const participant = memberId ? props.participants.find((candidate) => candidate.id === memberId) : undefined;
@@ -82,9 +90,23 @@ export function ChatSessionsRightPanel(props: {
       : [],
     [conversation.messages, memberId, sessions.index]
   );
+  if (panel?.kind === "accord") {
+    const latest = props.latestAccord;
+    return (
+      <ChatAccordPanel
+        launchId={panel.launchId}
+        accord={latest?.launchId === panel.launchId ? latest : accordLines?.accordOf(panel.launchId)}
+        participants={props.participants}
+        onBack={rightPanel.openMembers}
+        onClose={rightPanel.close}
+      />
+    );
+  }
   if (panel?.kind === "members") {
     return (
       <ChatMembersPanel
+        accord={props.latestAccord}
+        onOpenAccord={props.onOpenAccord}
         rows={sessions.memberRows}
         messages={conversation.messages}
         runIdsByParticipantId={props.runIdsByParticipantId}

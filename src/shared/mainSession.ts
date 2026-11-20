@@ -24,6 +24,7 @@ import type {
   ChatViewMode,
   ConversationMetadata
 } from "./types";
+import { turnFinishedNoteOf } from "./turnFinishedNoteSource";
 
 export const MAIN_SESSION_ROLE_ID = "main-session";
 export const MAIN_SESSION_HANDLE = "main";
@@ -207,9 +208,18 @@ export function memberSessionMessages(
   });
 }
 
+/** A note that another member finished answering: the reply it leads back
+ *  to is in that member's session and its task card already says the task is
+ *  done, so the sessions view shows it nowhere. The main session's own note
+ *  stays on the main timeline. */
+export function isOtherMemberTurnFinishedNote(message: ChatMessage, index: SessionsViewIndex): boolean {
+  const note = turnFinishedNoteOf(message);
+  return Boolean(note) && note!.participantId !== index.mainSessionParticipantId;
+}
+
 /** The messages on the main timeline of the sessions view, in order. */
 export function mainTimelineMessages(messages: readonly ChatMessage[], index: SessionsViewIndex): ChatMessage[] {
-  return messages.filter((message) => sessionsViewLane(message, index).kind === "main");
+  return messages.filter((message) => sessionsViewLane(message, index).kind === "main" && !isOtherMemberTurnFinishedNote(message, index));
 }
 
 /** The members the main session is waiting on: targets of its requests whose

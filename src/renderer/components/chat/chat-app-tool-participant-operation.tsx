@@ -7,9 +7,10 @@ import {
 } from "../../../shared/agentPermissions";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import type { ChatAgentMode, ChatExistingParticipantOverrides, ChatParticipantChangeRequest, ChatParticipantConfig, ChatRoleConfig, ChatRosterChangeParticipantInput, CliProviderHost } from "../../../shared/types";
-import { Avatar, avatarForParticipant } from "../avatar/avatar";
+import { avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { avatarForChatParticipant, mapChatAvatarIdToKind } from "./chat-avatars";
+import { ChatMemberMark } from "./chat-member-mark";
 import { CHAT_AGENT_MODE_OPTIONS, chatAgentModeLabel, chatProviderOptionId, chatProviderOptionPatch, chatProviderOptions } from "./chat-participant-drafts";
 import { cliProviderHostDefaultModel, cliProviderHostForParticipant } from "../../../shared/cliProviderHosts";
 import { isRoleOfferedForNewMembers } from "../../../shared/mainSession";
@@ -98,7 +99,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
           return (
             <div className="chat-app-tool-review-block is-participant-review" key={`${operation.type}-${operation.participantConfigId}`}>
               <div className="chat-app-tool-review-participant-head">
-                <Avatar className="chat-app-tool-review-avatar" spec={savedAvatar} />
+                <ChatMemberMark className="chat-app-tool-review-avatar" markClassName="is-large" avatar={savedAvatar} member={savedParticipant} />
                 <div>
                   <strong>{savedParticipant ? chatParticipantReference(savedParticipant.handle) : operation.participantConfigId}</strong>
                   <span>{displayChatRoleLabel(savedRole, savedParticipant?.roleConfigId ?? "Saved member preset")}</span>

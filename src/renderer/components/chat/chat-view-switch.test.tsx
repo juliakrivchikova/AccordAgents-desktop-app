@@ -66,7 +66,12 @@ test("a main-session chat switches its view from the header and, in the sessions
   act(() => root.find(byTestId("chat-view-switch-classic")).props.onClick());
   assert.deepEqual(changes, ["classic"]);
   const members = root.find(byTestId("chat-members-button"));
-  assert.equal(textOf(members), "Members (2 running)");
+  assert.equal(members.props["aria-label"], "Members (2 running)");
+  assert.equal(textOf(members.find((node) => node.props?.className === "chat-members-button-label")), "Members (2 running)");
+  // A narrow header shows the icon and how many run instead (chat-sessions.css).
+  assert.equal(textOf(members.find((node) => node.props?.className === "chat-members-button-count")), "2");
+  assert.deepEqual(group.findAll((node) => node.type === "button").map((button) => button.props["aria-label"]), ["Sessions", "Classic"],
+    "the switch keeps its names when only its icons show");
   act(() => members.props.onClick());
   assert.equal(toggles, 1);
   act(() => renderer.unmount());

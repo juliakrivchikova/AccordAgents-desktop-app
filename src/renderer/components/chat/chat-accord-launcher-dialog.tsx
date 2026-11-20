@@ -15,9 +15,9 @@ import {
   readAccordLauncherPreferences
 } from "../../app/storage";
 import { AppSelect, FormRow } from "../primitives";
-import { Avatar } from "../avatar/avatar";
 import { chatParticipantDisplayName, isChatAssistantParticipant } from "../conversation/conversation-display";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { ChatMemberMark, ChatSessionsPresentationContext } from "./chat-member-mark";
 import { AccordMergeIcon } from "./accord-merge-icon";
 import { providerLabel } from "./chat-conversation-data";
 
@@ -34,6 +34,8 @@ export function ChatAccordLauncherDialog(props: {
   participantRoleLabel: (participant: ChatParticipant) => string;
   onOpenChange: (open: boolean) => void;
   onStart: (payload: ChatAccordLauncherPayload) => Promise<boolean>;
+  /** Opened from a chat shown in the sessions view: members by provider logo. */
+  sessions?: boolean;
 }): JSX.Element {
   const participants = React.useMemo(
     () => props.participants.filter((participant) => !isChatAssistantParticipant(participant)),
@@ -122,6 +124,7 @@ export function ChatAccordLauncherDialog(props: {
   };
 
   return (
+    <ChatSessionsPresentationContext.Provider value={props.sessions === true}>
     <Dialog open={props.open} onOpenChange={(open) => {
       if (!saving) {
         props.onOpenChange(open);
@@ -186,7 +189,7 @@ export function ChatAccordLauncherDialog(props: {
                 return {
                   value: participant.id,
                   label: displayName,
-                  icon: <Avatar className="chat-accord-select-avatar" spec={avatarForChatParticipant(participant, displayName)} tooltip={null} />
+                  icon: <ChatMemberMark className="chat-accord-select-avatar" markClassName="is-mini" avatar={avatarForChatParticipant(participant, displayName)} member={participant} tooltip={null} />
                 };
               })}
               placeholder="Choose who leads"
@@ -215,7 +218,7 @@ export function ChatAccordLauncherDialog(props: {
                     <span className="chat-accord-target-check" aria-hidden="true">
                       <Check size={12} strokeWidth={3.4} />
                     </span>
-                    <Avatar className="chat-accord-target-avatar" spec={avatarForChatParticipant(participant, displayName)} tooltip={null} />
+                    <ChatMemberMark className="chat-accord-target-avatar" markClassName="is-mini" avatar={avatarForChatParticipant(participant, displayName)} member={participant} tooltip={null} />
                     <span className="chat-accord-target-title" title={props.participantRoleLabel(participant)}>
                       <strong>{displayName}</strong>
                       <span>- {providerLabel(participant.kind)}</span>
@@ -243,6 +246,7 @@ export function ChatAccordLauncherDialog(props: {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    </ChatSessionsPresentationContext.Provider>
   );
 }
 

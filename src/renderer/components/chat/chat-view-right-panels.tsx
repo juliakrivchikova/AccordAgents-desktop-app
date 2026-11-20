@@ -1,5 +1,6 @@
 import type { PointerEvent as ReactPointerEvent } from "react";
 
+import type { DockedAccord } from "../../../shared/accordProgress";
 import type { ChatAppToolApproval, ChatImageInput, ChatSkillMention, Conversation, RepoFileMention } from "../../../shared/types";
 import type { ChatMemberSendRequest } from "./chat-member-session-panel";
 import { ChatSessionsRightPanel, type ChatPanelMessageContext } from "./chat-sessions-right-panel";
@@ -12,8 +13,8 @@ type ChatMessage = Conversation["messages"][number];
 
 /**
  * The chat's right panel beside the timeline, with its resizer: a thread in
- * the classic view; the members list or one member's session in the
- * sessions view. Artifacts and files share the place (ChatSidePanel).
+ * the classic view; the members list, one member's session or an Accord in
+ * the sessions view. Artifacts and files share the place (ChatSidePanel).
  */
 export function ChatViewRightPanels(props: {
   shown: boolean;
@@ -38,6 +39,8 @@ export function ChatViewRightPanels(props: {
     onLoadOlderMessages: () => void;
     onSendToMember: (request: ChatMemberSendRequest) => Promise<boolean>;
     onStopRuns?: (runIds: readonly string[]) => void;
+    latestAccord?: DockedAccord;
+    onOpenAccord: (launchId: string) => void;
   };
 }): JSX.Element {
   const { context, thread, sessions } = props;
@@ -92,6 +95,8 @@ export function ChatViewRightPanels(props: {
           onLoadOlderMessages={sessions.onLoadOlderMessages}
           onSendToMember={sessions.onSendToMember}
           onStopRuns={sessions.onStopRuns}
+          latestAccord={sessions.latestAccord}
+          onOpenAccord={sessions.onOpenAccord}
         />
       )}
     </>

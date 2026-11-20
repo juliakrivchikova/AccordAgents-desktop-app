@@ -7,6 +7,7 @@ import type { AgentContextUsage } from "../../../shared/types";
 import { formatContextUsageLabel } from "../../../shared/agentContext";
 import { Avatar } from "../avatar/avatar";
 import type { AvatarSpec } from "../chat/chat-avatars";
+import { ChatMemberMark, type ChatMemberProvider } from "../chat/chat-member-mark";
 import { IconButton } from "../primitives";
 
 // One detail line shown in a participant hover card.
@@ -24,6 +25,8 @@ export interface ParticipantProfile {
   rows: ParticipantDetailRow[];
   sessionId?: string;
   avatar?: AvatarSpec;
+  /** Its provider, the member's only mark in the sessions view. */
+  provider?: ChatMemberProvider;
 }
 
 export interface ParticipantCompactContext {
@@ -113,7 +116,9 @@ export function ParticipantHoverCard(props: {
   return (
     <>
       <div className="chat-mention-card-head">
-        {profile.avatar && <Avatar className="chat-mention-card-avatar" spec={profile.avatar} tooltip={null} />}
+        {profile.avatar && (
+          <ChatMemberMark className="chat-mention-card-avatar" markClassName="is-large" avatar={profile.avatar} member={profile.provider} tooltip={null} />
+        )}
         <div className="chat-mention-card-handle">{profileHandleLabel(profile.handle)}</div>
         {profile.participantId && props.onCompactParticipant && (
           <IconButton

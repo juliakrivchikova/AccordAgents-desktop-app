@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { activeRunSummaryForConversation } from "../../../shared/chatActiveRuns";
 import type { ChatMessage, ChatViewMode, Conversation } from "../../../shared/types";
 import { ChatMessageItem } from "./chat-message-item";
+import { ChatSessionsPresentationContext } from "./chat-member-mark";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { ChatSessionsTimelineRow, ChatSessionsWaitingLine } from "./chat-sessions-timeline-row";
 import { ChatTaskCard } from "./chat-task-card";
@@ -208,7 +209,71 @@ test("the classic view is untouched: an old chat and a chat shown classic get no
   assert.ok(root.findAll(hasClass("message-avatar")).length > 0, "the avatar is there");
   assert.equal(textOf(root.findAll((node) => node.type === "strong")[0]!), "main");
   assert.equal(root.findAll(hasClass("message-provider")).length, 1);
+  assert.equal(root.findAll(hasClass("chat-rt-status")).length, 1, "the member's state, as before");
+  assert.equal(root.findAll((node) => node.props?.["data-testid"] === "chat-message-hover-when").length, 0);
   assert.match(textOf(root.find(hasClass("chat-thread-pill"))), /2 replies/);
   assert.equal(root.findAll((node) => node.props?.label === "Reply in thread").length > 0, true);
   act(() => renderer!.unmount());
+});
+
+function renderSessionsRow(message: ChatMessage, sessions: ChatSessionsView, extra: Partial<Parameters<typeof ChatMessageItem>[0]> = {}): ReactTestInstance {
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(
+      <TooltipProvider>
+        <ChatSessionsPresentationContext.Provider value>
+          <ChatSessionsTimelineRow itemProps={itemProps(message, extra)} context={{ sessions, messages: sessionsMessages(), onOpenMember: noop }} />
+        </ChatSessionsPresentationContext.Provider>
+      </TooltipProvider>
+    );
+  });
+  return renderer!.root;
+}
+
+const hoverWhen = (root: ReactTestInstance): ReactTestInstance[] =>
+  root.findAll((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-message-hover-when");
+
+test("a finished message shows no member state, only its time among its hover controls; one still being written keeps its live line", () => {
+  const sessions = sessionsOf(sessionsConversation())!;
+  const reply = chatMessage("main-1", "participant", 2, { participantId: MAIN.id, participantLabel: "main", content: "On it." });
+  // The main session works on a new turn now: its earlier reply must not say so.
+  const busy = new Map<string, ChatParticipantRosterStatus>([...STATUSES, [MAIN.id, "running"]]);
+  for (const statuses of [busy, STATUSES]) {
+    const root = renderSessionsRow(reply, sessions, { participantStatusById: statuses });
+    assert.equal(root.findAll(hasClass("chat-rt-status")).length, 0, "no Running or Idle above a finished reply");
+    assert.equal(root.findAll(hasClass("message-meta")).length, 0, "no meta line at all");
+    assert.equal(hoverWhen(root).length, 1, "its time is with the controls shown on hover");
+    assert.ok(root.find(hasClass("message-actions")).findAll(hasClass("message-when")).length === 1);
+  }
+
+  const streaming = chatMessage("main-2", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-main" } });
+  const live = renderSessionsRow(streaming, sessions);
+  assert.equal(textOf(live.find(hasClass("chat-rt-status"))), "Running");
+  assert.equal(live.findAll(hasClass("is-elapsed")).length, 1, "the time it has been running");
+  assert.equal(hoverWhen(live).length, 0);
+
+  const queued = chatMessage("main-3", "participant", 13, {
+    participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-main-2", queuedBehind: { handle: "drew" } }
+  } as Partial<ChatMessage>);
+  assert.equal(textOf(renderSessionsRow(queued, sessions).find(hasClass("chat-rt-status"))), "Queued");
+
+  // In a member's session the main session's answer keeps its name only.
+  const named = renderSessionsRow(reply, sessions, { authorLabel: "Main session" } as Partial<Parameters<typeof ChatMessageItem>[0]>);
+  assert.equal(textOf(named.find(hasClass("message-meta"))), "Main session");
+});
+
+test("turn-finished notes: another member's is not on the main timeline; the main session's is, with its provider logo, no avatar", () => {
+  const note = (id: string, participantId: string, handle: string, minute: number): ChatMessage => chatMessage(id, "system", minute, {
+    content: "Done: the token refresh is fixed",
+    metadata: { appMessageSource: "app_turn_finished_note", turnFinishedNote: { messageId: "gera-reply", participantId, participantLabel: `@${handle}` } }
+  } as Partial<ChatMessage>);
+  const messages = [...sessionsMessages(), note("note-gera", GERA.id, "gera", 11), note("note-main", MAIN.id, "main", 12)];
+  const sessions = sessionsOf(sessionsConversation({}, messages))!;
+  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "tasks", "taylor-choice", "note-main"],
+    "gera's note belongs to gera's session, whose task card already says it is done");
+  const row = renderSessionsRow(messages.at(-1)!, sessions);
+  assert.equal(row.findAll(hasClass("chat-turn-finished-note")).length, 1);
+  assert.equal(row.findAll(hasClass("chat-turn-finished-note-avatar")).length, 0, "no avatar picture");
+  assert.deepEqual(row.findAll((node) => typeof node.type === "string" && node.props["data-provider-kind"] !== undefined)
+    .map((node) => node.props["data-provider-kind"]), ["claude-code"], "the main session's provider logo instead");
 });

@@ -34,7 +34,6 @@ import {
   chatMessageRepoFileMentions,
   chatMessageSkillMentions,
   formatChatReplyDate,
-  participantProviderLabel,
   participantRequestStatusLabel,
   providerLabel
 } from "./chat-conversation-data";
@@ -49,7 +48,8 @@ import { turnFinishedNoteOf } from "../../../shared/turnFinishedNoteSource";
 import { ChatChoiceCard } from "./chat-choice-card";
 import { chatMessageCards } from "./chat-server-card";
 import { ChatImageAttachmentStrip } from "./chat-image-attachments";
-import { ChatExpandedProcessingTranscript, ChatMessageWhen, StreamingMessageContent } from "./chat-streaming";
+import { ChatExpandedProcessingTranscript, StreamingMessageContent } from "./chat-streaming";
+import { ChatMessageHoverWhen, ChatMessageMeta } from "./chat-message-meta";
 import { ChatMessageReactionList } from "./chat-message-reactions";
 import { chatReplyPreviewAvatars } from "./chat-reply-preview";
 import { Avatar, avatarForMessage } from "../avatar/avatar";
@@ -58,7 +58,7 @@ import { FileLinkAuthorContext } from "../files/file-panel-context";
 import { AgentAvatarWithDetails, type ParticipantCompactContext, type ParticipantCompactHandler } from "../content/participant-hover-card";
 import { CHAT_ASSISTANT_ROLE_ID, authorForMessage, chatParticipantReference } from "../conversation/conversation-display";
 import { IconButton, StatusBadge } from "../primitives";
-import { RosterStatusIndicator, type ChatParticipantRosterStatus } from "./chat-participant-menu";
+import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 import { WorkedRow } from "./chat-worked-row";
 import { ChatAppToolApprovalList } from "./chat-app-tool-approvals";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
@@ -340,6 +340,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
         )}
         <div className="message-body">
           <div className="message-actions">
+            {sessions && !isStreaming && <ChatMessageHoverWhen createdAt={message.createdAt} />}
             {isStreaming && message.metadata?.runId && props.onStopRun && (
               <IconButton
                 className="message-action-stop"
@@ -374,30 +375,18 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             )}
             {reactAndReplyActions}
           </div>
-          <div className="message-meta">
-            {!sessions ? <strong>{author}</strong> : props.authorLabel ? <strong>{props.authorLabel}</strong> : null}
-            {!sessions && participant && message.role === "participant" && (
-              <span className="message-provider">{participantProviderLabel(participant.kind, participant.hostLabel)}</span>
-            )}
-            {message.role === "participant" && (
-              queuedBehind ? (
-                <span className="chat-rt-status is-queued" title="Status: Queued">
-                  <span className="chat-rt-status-dot" />
-                  Queued
-                </span>
-              ) : (
-                <RosterStatusIndicator
-                  status={participantStatus}
-                  runningRemotely={participant?.remoteExecution === "remote"}
-                  participantId={message.participantId}
-                />
-              )
-            )}
-            <ChatMessageWhen createdAt={message.createdAt} runningSince={isStreaming ? streamingStartedAt : undefined} />
-            {!props.inThread && message.metadata?.parentMessageId && message.role === "user" && (
-              <StatusBadge tone="neutral">reply</StatusBadge>
-            )}
-          </div>
+          <ChatMessageMeta
+            message={message}
+            author={author}
+            participant={participant}
+            participantStatus={participantStatus}
+            queued={Boolean(queuedBehind)}
+            isStreaming={isStreaming}
+            streamingStartedAt={streamingStartedAt}
+            sessions={sessions}
+            authorLabel={props.authorLabel}
+            inThread={props.inThread}
+          />
           {showWorkedRow && <WorkedRow workedMs={workedMs} />}
           {/* Every rendering of the content (streaming, transcript, final) knows its author. */}
           <FileLinkAuthorContext.Provider value={participant?.cloudRun || participant?.homeMachineId ? CLOUD_AUTHOR : LOCAL_AUTHOR}>

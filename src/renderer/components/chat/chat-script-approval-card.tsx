@@ -3,9 +3,10 @@ import { CalendarClock, Check, ChevronDown, ChevronRight, KeyRound, ShieldAlert 
 
 import type { ChatAppToolApproval, ChatAppToolApprovalScope, ChatParticipant } from "../../../shared/types";
 import type { ChatScriptChangeRequest, ScriptRevisionContent } from "../../../shared/scripts";
-import { Avatar, avatarForParticipant } from "../avatar/avatar";
+import { avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { ChatMemberMark } from "./chat-member-mark";
 import { formatChatTime } from "./chat-format";
 import { ChatAppToolReviewFooter } from "./chat-app-tool-approval-review";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
@@ -128,7 +129,7 @@ export function ChatScriptApprovalCard(props: {
     return (
       <section className="chat-app-tool-approval-card is-compact-result" aria-label={title}
         data-app-tool-approval-id={approval.id} tabIndex={-1}>
-        <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+        <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
         <div className="chat-app-tool-approval-body">
           <strong>{queuedDecision.approve ? "Approval saved" : "Refusal saved"}</strong>
           <p>Waiting for machine {queuedDecision.machineName} to confirm the decision.</p>
@@ -158,7 +159,7 @@ export function ChatScriptApprovalCard(props: {
       data-app-tool-approval-id={approval.id}
       tabIndex={-1}
     >
-      <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+      <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
       <div className="chat-app-tool-approval-body">
         <div className="chat-app-tool-approval-meta">
           <strong>{requesterLabel}</strong>

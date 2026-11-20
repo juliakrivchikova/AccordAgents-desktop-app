@@ -159,26 +159,29 @@ export interface SessionsMemberRow {
   task?: SessionsMemberTask;
 }
 
-/** The members panel: every member but the main session; those that worked
- *  and ended (their latest task done, failed or stopped, nothing running)
- *  under "Previous". */
+/** The members panel: every member but the main session; while some member
+ *  is running or waits for the User, those that worked and ended (their
+ *  latest task done, failed or stopped) under "Previous". With nobody at
+ *  work, every member is listed as it is, so the panel is never a lone
+ *  folded group. */
 export function sessionsMemberRows(
   participants: readonly ChatParticipant[],
   mainSessionId: string,
   statusById: ReadonlyMap<string, ChatParticipantRosterStatus>,
   tasks: ReadonlyMap<string, SessionsMemberTask>
 ): { current: SessionsMemberRow[]; previous: SessionsMemberRow[] } {
-  const current: SessionsMemberRow[] = [];
-  const previous: SessionsMemberRow[] = [];
-  for (const participant of participants) {
-    if (participant.id === mainSessionId) continue;
+  const rows: SessionsMemberRow[] = participants.flatMap((participant) => {
+    if (participant.id === mainSessionId) return [];
     const task = tasks.get(participant.id);
     const status = sessionsMemberStatus(statusById.get(participant.id), task?.item);
-    const row = { participant, status, ...(task ? { task } : {}) };
-    const finished = Boolean(task) && (status === "done" || status === "failed" || status === "stopped");
-    (finished ? previous : current).push(row);
+    return [{ participant, status, ...(task ? { task } : {}) }];
+  });
+  if (!rows.some((row) => row.status === "running" || row.status === "waiting")) {
+    return { current: rows, previous: [] };
   }
-  return { current, previous };
+  const finished = (row: SessionsMemberRow): boolean =>
+    Boolean(row.task) && (row.status === "done" || row.status === "failed" || row.status === "stopped");
+  return { current: rows.filter((row) => !finished(row)), previous: rows.filter(finished) };
 }
 
 /** "N members · K running" for a task card with several members. */

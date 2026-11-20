@@ -3,13 +3,12 @@ import { ArrowLeft, ChevronDown, ChevronRight, X } from "lucide-react";
 
 import { firstTextLine, memberRunningSince, type SessionsWorkStatus } from "../../../shared/mainSessionView";
 import type { AppSettings, ChatImageInput, ChatMessage, ChatParticipant, ChatSkillMention, RepoFileMention } from "../../../shared/types";
-import { Avatar } from "../avatar/avatar";
 import { MarkdownText } from "../content/markdown-text";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { TimelineLoadMoreRow } from "../conversation/timeline-primitives";
 import { IconButton } from "../primitives";
-import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatComposer } from "./chat-composer";
+import { renderComposerMemberMark } from "./chat-member-mark";
 import { chatRoleLabel, participantProviderLabel } from "./chat-mention-directory";
 import { ChatMessageItem } from "./chat-message-item";
 import { ChatElapsed, ChatWorkStatusLabel } from "./chat-task-card";
@@ -151,7 +150,7 @@ export function ChatMemberSessionPanel(props: {
         isRunning={props.busy}
         placeholder={`Message ${name}...`}
         testId="chat-member-composer"
-        renderParticipantAvatar={(item) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(item)} />}
+        renderParticipantAvatar={renderComposerMemberMark}
         participantRoleLabel={(item) => chatRoleLabel(props.settings.chatRoleConfigs, item)}
       />
     </section>

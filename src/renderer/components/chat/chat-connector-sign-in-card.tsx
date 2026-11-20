@@ -4,9 +4,10 @@ import { PlugZap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { ChatAppToolApproval, ChatConnectorSignInRequest, ChatParticipant } from "../../../shared/types";
 import { connectorSignInHost } from "../../../shared/connectorSignIn";
-import { Avatar, avatarForParticipant } from "../avatar/avatar";
+import { avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { ChatMemberMark } from "./chat-member-mark";
 import { formatChatTime } from "./chat-format";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
 
@@ -82,7 +83,7 @@ export function ChatConnectorSignInCard(props: {
     return (
       <section className="chat-app-tool-approval-card is-compact-result" aria-label={title}
         data-app-tool-approval-id={approval.id} tabIndex={-1}>
-        <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+        <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
         <div className="chat-app-tool-approval-body">
           <strong>{queuedDecision.approve ? (request.action === "sign-in" ? "Done" : "Reconnect") : "Not now"}</strong>
           <p>Waiting for machine {queuedDecision.machineName} to confirm.</p>
@@ -104,7 +105,7 @@ export function ChatConnectorSignInCard(props: {
       data-app-tool-approval-id={approval.id}
       tabIndex={-1}
     >
-      <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+      <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
       <div className="chat-app-tool-approval-body">
         <div className="chat-app-tool-approval-meta">
           <strong>{requesterLabel}</strong>

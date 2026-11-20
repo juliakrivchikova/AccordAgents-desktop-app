@@ -30,6 +30,8 @@ await build({
     "renderer/components/chat/chat-timeline-topup.test.tsx",
     "renderer/components/chat/chat-sessions-view.test.tsx",
     "renderer/components/chat/chat-sessions-panels.test.tsx",
+    "renderer/components/chat/chat-sessions-identity.test.tsx",
+    "renderer/components/chat/chat-sessions-accord.test.tsx",
     "renderer/components/chat/chat-view-switch.test.tsx",
     "shared/mainSessionView.test.ts",
     "renderer/lib/chat-split-sizing.test.ts",

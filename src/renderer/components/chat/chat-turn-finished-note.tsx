@@ -1,9 +1,10 @@
 import { X } from "lucide-react";
 import type { ChatMessage, ChatParticipant, ChatTurnFinishedNoteMetadata } from "../../../shared/types";
-import { Avatar, avatarForParticipant } from "../avatar/avatar";
+import { avatarForParticipant } from "../avatar/avatar";
 import { useFocusChatMessage } from "../content/markdown-text";
 import { IconButton } from "../primitives";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { ChatMemberMark } from "./chat-member-mark";
 import { ChatMessageWhen } from "./chat-streaming";
 
 // A member finished answering while its reply had other messages below it:
@@ -34,9 +35,10 @@ export function ChatTurnFinishedNote(props: {
             focusMessage(note.messageId);
           }}
         >
-          {/* The title says who: the avatar is not read out a second time. */}
+          {/* The title says who: the avatar (in the sessions view, the
+              provider's logo) is not read out a second time. */}
           <span aria-hidden="true" className="chat-turn-finished-note-avatar-slot">
-            <Avatar className="chat-turn-finished-note-avatar" spec={avatar} tooltip={null} />
+            <ChatMemberMark className="chat-turn-finished-note-avatar" markClassName="is-large" avatar={avatar} member={participant} tooltip={null} />
           </span>
           <span className="chat-turn-finished-note-text">
             <span className="chat-turn-finished-note-title">

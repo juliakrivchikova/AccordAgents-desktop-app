@@ -1,14 +1,15 @@
 import { createContext, useContext } from "react";
-import { Users } from "lucide-react";
+import { MessagesSquare, PanelRight, Users, type LucideIcon } from "lucide-react";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ChatViewMode } from "../../../shared/types";
 
 export const CHAT_VIEW_SWITCH_DISABLED_REASON = "This chat was made before main sessions, so it has the classic view only.";
 
-const VIEW_OPTIONS: ReadonlyArray<{ view: ChatViewMode; label: string }> = [
-  { view: "sessions", label: "Sessions" },
-  { view: "classic", label: "Classic" }
+// The icon stands in for the label when the header is narrow (chat-sessions.css).
+const VIEW_OPTIONS: ReadonlyArray<{ view: ChatViewMode; label: string; icon: LucideIcon }> = [
+  { view: "sessions", label: "Sessions", icon: PanelRight },
+  { view: "classic", label: "Classic", icon: MessagesSquare }
 ];
 
 /** The chat's two views (docs/main-session.md), switched from the header. */
@@ -35,10 +36,13 @@ export function ChatViewSwitch(props: {
           data-view={option.view}
           data-testid={`chat-view-switch-${option.view}`}
           aria-pressed={props.view === option.view}
+          aria-label={option.label}
+          title={option.label}
           disabled={!props.canSwitch}
           onClick={() => props.onChange(option.view)}
         >
-          {option.label}
+          <option.icon className="chat-view-switch-icon" size={14} aria-hidden />
+          <span className="chat-view-switch-label">{option.label}</span>
         </button>
       ))}
     </div>
@@ -89,10 +93,16 @@ export function ChatViewHeaderControls(): JSX.Element | null {
           data-testid="chat-members-button"
           data-running-count={state.members.runningCount}
           aria-pressed={state.members.open}
+          aria-label={chatMembersButtonLabel(state.members.runningCount)}
+          title={chatMembersButtonLabel(state.members.runningCount)}
           onClick={state.members.onToggle}
         >
           <Users size={14} aria-hidden />
-          <span>{chatMembersButtonLabel(state.members.runningCount)}</span>
+          <span className="chat-members-button-label" aria-hidden>{chatMembersButtonLabel(state.members.runningCount)}</span>
+          {/* In a narrow header the button is its icon and how many run. */}
+          {state.members.runningCount > 0 && (
+            <span className="chat-members-button-count" aria-hidden>{state.members.runningCount}</span>
+          )}
         </button>
       )}
       <ChatViewSwitch view={state.view} canSwitch={state.canSwitch} onChange={state.onChangeView} />

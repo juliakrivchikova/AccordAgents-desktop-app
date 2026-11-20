@@ -47,7 +47,8 @@ export function chatMentionDirectory(
       handle: chatParticipantDisplayName(participant),
       rows,
       sessionId: sessions.get(participant.id)?.sessionId,
-      avatar: avatarForChatParticipant(participant)
+      avatar: avatarForChatParticipant(participant),
+      provider: { kind: participant.kind, hostLabel: participant.hostLabel }
     });
   }
   return directory;
