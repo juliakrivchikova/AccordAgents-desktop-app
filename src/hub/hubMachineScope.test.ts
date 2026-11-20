@@ -389,3 +389,56 @@ test("a member a machine adds comes without a session handed to it", () => {
   const member = (scoped.update.metadata?.participants as Array<{ id: string; sessionHandoff?: unknown }>)?.find((item) => item.id === "p-new");
   if (member) assert.equal(member.sessionHandoff, undefined);
 });
+
+// --- a chat with a main session (docs/main-session.md) ---------------------------
+
+const mainRules: HubMemberRules = { ...rules, roles: { ...rules.roles, "main-session": { manageRolesParticipants: "allow", requestParticipants: "allow" } } };
+const mainOnMachine = {
+  id: "p-main", handle: "main", label: "Main", roleConfigId: "main-session", kind: "claude-code", homeMachineId: "machine-1", agentMode: "default",
+  permissions: {
+    repoRead: true, workspaceWrite: true, webAccess: false, requestParticipants: "allow", requestCompaction: "ask",
+    shell: { enabled: true, rules: [{ action: "allow", match: "prefix", pattern: "git diff" }, { action: "deny", match: "prefix", pattern: "git push" }] }
+  }
+};
+function mainSessionChatWith(participants: unknown[], messages: unknown[] = []): Conversation {
+  return { id: "c", title: "", kind: "chat", createdAt: "t", updatedAt: "t", messages, findings: [], metadata: { participants, mainSessionParticipantId: "p-main" } } as unknown as Conversation;
+}
+
+test("the main session on a machine adds the member it gives a task to without a card, never one broader than itself", () => {
+  // What the app adds for app_chat_delegate_task: the main session's rights,
+  // clamped, on its machine, not managing members.
+  const delegated = {
+    id: "p-child", handle: "claude", label: "Claude", roleConfigId: "r", kind: "claude-code", homeMachineId: "machine-1", agentMode: "default",
+    permissions: {
+      repoRead: true, workspaceWrite: true, webAccess: false, requestParticipants: "allow", requestCompaction: "ask", manageRolesParticipants: "deny",
+      shell: { enabled: true, rules: [{ action: "allow", match: "prefix", pattern: "git diff" }, { action: "deny", match: "prefix", pattern: "git push" }] }
+    }
+  };
+  const add = (member: Record<string, unknown>) =>
+    members(scopeMachineConversationUpdate(mainSessionChatWith([deskR, mainOnMachine]), { metadata: { participants: [deskR, mainOnMachine, member] } }, "machine-1", { rules: mainRules })).has(member.id as string);
+  assert.equal(add(delegated), true, "as the app adds it");
+  assert.equal(add({ ...delegated, permissions: { ...delegated.permissions, webAccess: true } }), false, "web the main session does not have");
+  assert.equal(add({ ...delegated, agentMode: "auto" }), false, "a mode above the main session's");
+  assert.equal(add({ ...delegated, permissions: { ...delegated.permissions, shell: { enabled: true, rules: [{ action: "allow", match: "prefix", pattern: "rm" }] } } }), false, "a command the main session may not run");
+  assert.equal(add({ ...delegated, permissions: { ...delegated.permissions, workspaceWrite: false, shell: { enabled: false, rules: [] } } }), true, "less is fine");
+  // In plan mode the main session has no edits: neither may its member.
+  const planning = { ...mainOnMachine, agentMode: "plan" };
+  assert.equal(members(scopeMachineConversationUpdate(mainSessionChatWith([deskR, planning]), { metadata: { participants: [deskR, planning, delegated] } }, "machine-1", { rules: mainRules })).has("p-child"), false);
+  // A chat without a main session keeps the rule it had for a manager there.
+  const plainChat = chatWith([deskR, mainOnMachine]);
+  assert.equal(members(scopeMachineConversationUpdate(plainChat, { metadata: { participants: [deskR, mainOnMachine, { ...delegated, permissions: { ...delegated.permissions, webAccess: true } }] } }, "machine-1", { rules: mainRules })).has("p-child"), true);
+});
+
+test("in a chat with a main session only the User and the main session start an Accord", () => {
+  const helperOnMachine = { ...boxR, id: "p-helper", handle: "helper" };
+  const leave = { ...deskR, permissions: { ...deskR.permissions, requestParticipants: "allow" } };
+  const fromMember = { id: "m-acc", role: "participant", participantId: "p-helper", content: "/accord @desk please run it", createdAt: "t" };
+  let scoped = scopeMachineConversationUpdate(mainSessionChatWith([deskR, mainOnMachine, helperOnMachine], [fromMember]), { metadata: { participants: [leave, mainOnMachine, helperOnMachine] } }, "machine-1", { rules: mainRules });
+  assert.deepEqual(members(scoped).get("p-desk"), deskR, "another member's /accord gives no leave");
+  const fromMain = { ...fromMember, participantId: "p-main" };
+  scoped = scopeMachineConversationUpdate(mainSessionChatWith([deskR, mainOnMachine, helperOnMachine], [fromMain]), { metadata: { participants: [leave, mainOnMachine, helperOnMachine] } }, "machine-1", { rules: mainRules });
+  assert.equal((members(scoped).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants, "allow");
+  const fromUser = { id: "m-user", role: "user", content: "@desk /accord with @helper", createdAt: "t" };
+  scoped = scopeMachineConversationUpdate(mainSessionChatWith([deskR, mainOnMachine, helperOnMachine], [fromUser]), { metadata: { participants: [leave, mainOnMachine, helperOnMachine] } }, "machine-1", { rules: mainRules });
+  assert.equal((members(scoped).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants, "allow");
+});
