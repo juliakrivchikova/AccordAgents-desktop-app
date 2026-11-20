@@ -597,6 +597,9 @@ export interface AppSettings {
   chatCustomAvatars: CustomAvatarSummary[];
   chatParticipantSeedState?: ChatParticipantSeedState;
   assistantProviderKind?: ChatProviderKind;
+  /** The view a new chat opens in (Settings → General); the chat's own
+   *  switch changes it afterwards. Unset means "sessions". */
+  defaultChatView?: ChatViewMode;
   lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
@@ -656,6 +659,13 @@ export interface ChatBehaviorRuleSnapshot {
 }
 
 export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code" | "gemini-cli">;
+
+/** How a chat with a main session is shown (shared/mainSession.ts): "classic"
+ *  is the timeline with avatars where every member's reply is on it;
+ *  "sessions" shows only the main session on the timeline and each member's
+ *  session in the right panel. A view only: the chat works the same in both.
+ *  A chat made before the main session existed is always "classic". */
+export type ChatViewMode = "classic" | "sessions";
 
 /** Which local CLI an added provider runs through. */
 export type CliProviderHostCli = Extract<ChatProviderKind, "claude-code" | "codex-cli" | "gemini-cli">;
@@ -968,9 +978,21 @@ export interface ChatParticipant {
   autoWatch?: boolean;
 }
 
+export interface ChatSessionForkSource {
+  participantId: string;
+  sessionId: string;
+  kind: ChatProviderKind;
+}
+
 export interface ChatParticipantSession {
   participantId: string;
   sessionId: string;
+  /** The member was made as a fork of another member's session (the main
+   *  session delegating with start "fork"): its first turn starts from a copy
+   *  of that session instead of an empty one, through the CLI's own fork
+   *  (Claude --resume <id> --fork-session, Codex thread/fork). Cleared once
+   *  the fork has its own sessionId. */
+  forkFrom?: ChatSessionForkSource;
   executionSessionId?: string;
   roleConfigId: string;
   roleConfigVersion: number;
@@ -2021,6 +2043,10 @@ export interface SendChatMessageRequest {
   threadId?: string;
   parentMessageId?: string;
   chatThreadRootId?: string;
+  /** Exactly these members get the message (a member's session panel):
+   *  the @handles in its text are not read for addressees, and there is no
+   *  fallback to the main session or the last speaker. */
+  targetParticipantIds?: string[];
 }
 
 export interface ToggleChatReactionRequest {
@@ -2614,6 +2640,13 @@ export interface ChatPromptSuggestionsUpdate {
 }
 
 export type ConversationMetadata = Record<string, unknown> & {
+  /** The chat's main session (shared/mainSession.ts): the member every
+   *  message without an addressee goes to. Set when the chat is made and
+   *  never changed; a chat without it is an Assistant chat from before. */
+  mainSessionParticipantId?: string;
+  /** The chat's view, switched by the User any number of times and shared
+   *  through her server like the pin. Read it through chatViewFor(). */
+  chatView?: ChatViewMode;
   /** This device's own record of the Accords folded into the chat (a line
    *  her server took), worked out from the whole chat, not the loaded page:
    *  their cards are not pinned (accordProgress.ts). Never shared. */
