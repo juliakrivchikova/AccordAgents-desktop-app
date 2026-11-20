@@ -128,6 +128,8 @@ import type {
   ChatRosterCurrentParticipant,
   ChatRoleRuntime,
   ChatRosterChangeRequest,
+  ChatRosterChangeParticipantInput,
+  ChatReasoningEffort,
   ChatShellPermissionRule,
   ChatSkillMention,
   ChatToolPermissionRequest,
@@ -210,6 +212,11 @@ import {
 import {
   CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
+  chatAgentModeWithin,
+  chatAgentPermissionsWithin,
+  chatParticipantRequestPermissionRank,
+  clampChatAgentMode,
+  clampChatAgentPermissions,
   effectiveChatAgentPermissionsForProvider,
   isChatShellPermissionPatternSafe,
   normalizeChatParticipantRequestPermission,
@@ -711,6 +718,23 @@ interface ChatChoiceDraft {
   question?: string;
   recommendedOptionId?: string;
   options: ChatChoiceOption[];
+}
+
+/** What the main session asks for when it gives a new member a task
+ *  (app_chat_delegate_task). */
+interface ChatTaskDelegationInput {
+  task: string;
+  start?: "clean" | "fork";
+  handle?: string;
+  roleConfigId?: string;
+  kind?: ChatProviderKind;
+  model?: string;
+  reasoningEffort?: ChatReasoningEffort;
+  agentMode?: ChatAgentMode;
+  /** The rights asked for, as given: what is left out is the main
+   *  session's own. */
+  permissions?: Record<string, unknown>;
+  reason?: string;
 }
 
 interface PreparedRosterChange {
@@ -4000,7 +4024,8 @@ export class ChatService {
 
     const prepared = await this.prepareRosterChange(conversation, this.normalizeRosterChangeRequest(rawRequest));
     const policy = this.matchingAppToolApprovalPolicy(conversation, requester, APP_ROSTER_REQUEST_CHANGE_TOOL, "participants.manage");
-    if ((manageRolesParticipants === "allow" || policy) && !prepared.managementEscalation) {
+    if ((manageRolesParticipants === "allow" || policy) && !prepared.managementEscalation &&
+      !await this.additionsExceedMainSession(conversation, requester, prepared.participants)) {
       const approval = this.newAppToolApproval(
         conversation,
         requester,
@@ -4826,6 +4851,472 @@ export class ChatService {
     return this.participantRequestToolResult(latest, prepared.requestMessage.id, finished);
   }
 
+  /**
+   * The main session gives a new member a task (app_chat_delegate_task,
+   * docs/main-session.md): the member is added without a card, with nothing
+   * beyond the main session's own rights, on the main session's provider,
+   * model, mode and machine unless it names others, and its task is asked of
+   * it at once as a request from the main session, whose answer comes back in
+   * a fresh main-session turn. "fork" starts the member from a copy of the
+   * main session's CLI session; where the CLI cannot do that the call says so
+   * (fork_unavailable) and nothing is added.
+   */
+  async delegateTaskFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+    await this.waitForQueuedSave(actor.conversationId);
+    const conversation = await this.requireChat(actor.conversationId);
+    const caller = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+    if (!caller) {
+      throw new Error("The requesting member is no longer in this chat.");
+    }
+    this.assertOwnsParticipant(caller);
+    if (!hasChatAppToolCapability(actor.capabilities, "participants.delegate") || !isMainSessionParticipant(conversation.metadata, caller.id)) {
+      return this.delegationRefusal("not_main_session", "Only the chat's main session gives tasks to new members. Ask the main session with app_chat_request_participants.");
+    }
+    let input: ChatTaskDelegationInput;
+    try {
+      input = this.normalizeTaskDelegation(rawRequest, await this.chatParticipantRequestPromptMaxChars());
+    } catch (error) {
+      return this.delegationRefusal("invalid_request", error instanceof Error ? error.message : String(error));
+    }
+    const manage = await this.manageRolesParticipantsPermissionForParticipant(caller);
+    if (manage !== "allow") {
+      return this.delegationRefusal("not_allowed", manage === "ask"
+        ? `User asked to approve the members @${caller.handle} adds. Add it with app_participants_request_change (User approves it on a card), then give it the task with app_chat_request_participants.`
+        : `User turned off adding members for @${caller.handle}.`);
+    }
+    const settings = await this.settings.getPublicSettings();
+    const roleConfigId = input.roleConfigId ?? GENERIC_PARTICIPANT_ROLE_ID;
+    if (roleConfigId === MAIN_SESSION_ROLE_ID || roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID) {
+      return this.delegationRefusal("invalid_role", "A member you give a task to cannot have the main session or Chat Assistant role.");
+    }
+    const role = settings.chatRoleConfigs.find((item) => item.id === roleConfigId && !item.archivedAt);
+    if (!role) {
+      return this.delegationRefusal("invalid_role", `No role ${roleConfigId}. Call app_participants_describe_options for the roles.`);
+    }
+
+    // What the main session really has now is the ceiling (its mode's
+    // effective rights, its own right to manage members).
+    const callerMode = normalizeChatAgentMode(caller.agentMode);
+    const ceiling: ChatAgentPermissions = {
+      ...effectiveChatAgentPermissionsForProvider(caller.kind, callerMode, normalizeChatAgentPermissions(caller.permissions)),
+      manageRolesParticipants: manage
+    };
+    const kind = input.kind ?? caller.kind;
+    const sameProvider = kind === caller.kind;
+    const agentMode = clampChatAgentMode(input.agentMode ?? callerMode, callerMode);
+    const permissions = clampChatAgentPermissions(this.delegationRequestedPermissions(input.permissions, ceiling), ceiling);
+    if (this.participantManagementChangeEscalates(role, permissions)) {
+      return this.delegationRefusal("not_allowed", `Managing members beyond what the ${role.label} role gives needs User's approval. Ask User, or add the member with app_participants_request_change.`);
+    }
+
+    const start = input.start ?? "clean";
+    const callerSession = this.chatSessions(conversation).find((session) => session.participantId === caller.id);
+    if (start === "fork") {
+      const unavailable = this.forkUnavailableReason(caller, callerSession, kind, sameProvider ? caller.hostId : undefined);
+      if (unavailable) {
+        return this.delegationRefusal("fork_unavailable", unavailable);
+      }
+      // The CLI session is kept for the folder it runs in: the copy runs in
+      // the same one.
+      permissions.repoRead = ceiling.repoRead;
+    }
+
+    const baseHandle = input.handle ?? this.delegatedMemberHandleBase(role, kind);
+    const item: ChatParticipantInput = {
+      handle: this.uniqueHandle(baseHandle, new Set(this.chatParticipants(conversation).map((participant) => participant.handle.toLowerCase()))),
+      roleConfigId: role.id,
+      kind,
+      model: input.model ?? (sameProvider ? caller.model : undefined),
+      reasoningEffort: normalizeChatReasoningEffort(input.reasoningEffort ?? (sameProvider ? caller.reasoningEffort : undefined), kind),
+      hostId: sameProvider ? caller.hostId : undefined,
+      agentMode,
+      permissions,
+      // Where the main session runs: a cloud main session's members run on
+      // the same machine.
+      remoteExecution: preservedRemoteExecution(caller.remoteExecution),
+      homeMachineId: caller.homeMachineId,
+      cloudRun: caller.cloudRun
+    };
+    try {
+      const agents = await this.detectAgentsForReadiness();
+      this.assertParticipantProvidersReady([item], agents, settings.providers ?? [], settings.cliProviderHosts ?? []);
+    } catch (error) {
+      return this.delegationRefusal("provider_unavailable", error instanceof Error ? error.message : String(error));
+    }
+
+    const requesterDepth = actor.participantRequestDepth ?? 0;
+    const depth = requesterDepth + 1;
+    const maxDepth = await this.chatParticipantRequestMaxDepth();
+    if (depth > maxDepth) {
+      return this.delegationRefusal("limit", `max depth (${maxDepth}) reached`);
+    }
+
+    let added!: { child: ChatParticipant; requestMessage: ChatMessage; batch: ChatParticipantRequestBatch };
+    let refusal: Record<string, unknown> | undefined;
+    await this.saveChatChange(conversation, async () => {
+      // The chat as saved now: a member added meanwhile keeps its name, and
+      // the main session's session is the one it has now.
+      const callerNow = this.chatParticipants(conversation).find((participant) => participant.id === caller.id);
+      if (!callerNow) {
+        throw new Error("The requesting member is no longer in this chat.");
+      }
+      const sessionNow = this.chatSessions(conversation).find((session) => session.participantId === caller.id);
+      if (start === "fork" && !sessionNow?.sessionId?.trim()) {
+        refusal = this.delegationRefusal("fork_unavailable", "Your CLI session has no id yet to copy.");
+        return;
+      }
+      const chainRootId = actor.chainRootId ?? actor.triggerMessageId ?? randomUUID();
+      const chainBatches = this.participantRequestBatches(conversation).filter((batch) => this.participantRequestBatchChainRootId(batch) === chainRootId);
+      if (chainBatches.length >= CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES) {
+        refusal = this.delegationRefusal("limit", `member request chain limit (${CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES}) reached`);
+        return;
+      }
+      const handles = new Set(this.chatParticipants(conversation).map((participant) => participant.handle.toLowerCase()));
+      const [validated] = await this.validateParticipants(
+        [{ ...item, handle: this.uniqueHandle(baseHandle, handles) }],
+        this.chatParticipants(conversation),
+        false,
+        settings.chatRoleConfigs.filter((candidate) => !candidate.archivedAt)
+      );
+      const summary = `Add @${validated.handle}`;
+      const memberInput: ChatRosterChangeParticipantInput = {
+        handle: validated.handle,
+        roleConfigId: validated.roleConfigId,
+        kind: validated.kind,
+        model: validated.model,
+        reasoningEffort: validated.reasoningEffort,
+        hostId: validated.hostId,
+        agentMode: validated.agentMode,
+        permissions: validated.permissions,
+        remoteExecution: preservedRemoteExecution(validated.remoteExecution)
+      };
+      // Recorded as the member change the main session made under its
+      // Manage members "allow", one-off (not saved as a preset).
+      const request: ChatParticipantChangeRequest = {
+        reason: input.reason,
+        operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: memberInput }]
+      };
+      const [child] = this.applyPreparedRosterChange(conversation, {
+        request: { reason: input.reason, operations: [{ type: "add", participant: memberInput }] },
+        participants: [validated],
+        summary,
+        managementEscalation: false
+      });
+      const approval = this.newAppToolApproval(conversation, callerNow, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, "participants.manage", request, summary, "auto-applied");
+      approval.approvalScope = "chat";
+      approval.appliedParticipantIds = [child.id];
+      this.upsertAppToolApproval(conversation, approval);
+      conversation.messages.push(this.message("system", `Auto-applied member request from @${callerNow.handle}: ${summary}.`, undefined, {
+        threadId: "system"
+      }));
+
+      const session = await this.newSessionForParticipant(child);
+      if (start === "fork" && sessionNow) {
+        session.forkFrom = { participantId: callerNow.id, sessionId: sessionNow.sessionId, kind: child.kind };
+        session.forkedFromParticipantId = callerNow.id;
+        this.copyPromptContextPointersForFork(conversation, callerNow.id, child.id);
+      }
+      this.upsertSession(conversation, session);
+
+      const now = new Date().toISOString();
+      const batchId = randomUUID();
+      const items: ChatParticipantRequestItem[] = [{
+        targetParticipantId: child.id,
+        targetHandle: child.handle,
+        prompt: input.task,
+        reason: input.reason,
+        status: "running",
+        createdAt: now,
+        updatedAt: now
+      }];
+      const batch: ChatParticipantRequestBatch = {
+        id: batchId,
+        requesterParticipantId: callerNow.id,
+        requesterHandle: callerNow.handle,
+        source: "mcp",
+        resumeRequester: true,
+        status: "running",
+        depth,
+        requesterDepth,
+        chainRootId,
+        createdAt: now,
+        updatedAt: now,
+        triggerMessageId: actor.triggerMessageId,
+        delegation: { start },
+        items
+      };
+      const requestMessage = this.message(
+        "participant",
+        this.formatParticipantRequestMessage(callerNow.handle, items),
+        { id: callerNow.id, kind: callerNow.kind, label: `@${callerNow.handle}`, model: callerNow.model },
+        {
+          threadId: actor.triggerThreadId ?? actor.triggerMessageId ?? batchId,
+          parentMessageId: actor.triggerMessageId,
+          sourceMessageId: actor.triggerMessageId,
+          participantRequest: batch
+        }
+      );
+      this.recordPreparedParticipantRequest(conversation, callerNow, {
+        request: {
+          requests: [{ target: child.handle, prompt: input.task, reason: input.reason }],
+          resumeRequester: true,
+          source: "mcp",
+          requestMessageId: requestMessage.id,
+          batchId
+        },
+        requester: callerNow,
+        targets: [child],
+        batch,
+        requestMessage,
+        summary: this.participantRequestSummary(callerNow.handle, [child.handle]),
+        timeoutMs: CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS
+      }, actor);
+      added = { child, requestMessage, batch };
+    });
+    if (refusal) {
+      return refusal;
+    }
+    void this.debugLogs.write("chat.main-session.delegated", {
+      conversationId: conversation.id,
+      requesterParticipantId: caller.id,
+      participantId: added.child.id,
+      kind: added.child.kind,
+      start,
+      requestMessageId: added.requestMessage.id
+    });
+    // The member's turn runs as its own run, here or on its machine; its
+    // answer comes back to the main session in a fresh turn, as any request
+    // answered later does.
+    const requesterProgress = actor.runId ? this.runProgressCallbacks.get(actor.runId) : undefined;
+    const runner = this.startParticipantRequestRunner(conversation.id, added.requestMessage.id, added.batch.depth, requesterProgress);
+    this.resumeRequesterWhenRunnerSettles(conversation.id, added.requestMessage.id, runner, requesterProgress);
+    return {
+      ok: true,
+      participantId: added.child.id,
+      handle: `@${added.child.handle}`,
+      requestId: added.batch.id,
+      requestMessageId: added.requestMessage.id,
+      status: "running",
+      start,
+      forked: start === "fork"
+    };
+  }
+
+  private delegationRefusal(code: string, reason: string): Record<string, unknown> {
+    return { ok: false, code, reason };
+  }
+
+  private normalizeTaskDelegation(raw: unknown, promptMaxChars: number): ChatTaskDelegationInput {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error("The delegation must be an object.");
+    }
+    const record = raw as Record<string, unknown>;
+    const task = typeof record.task === "string" ? record.task.trim() : "";
+    if (!task) {
+      throw new Error("The delegation needs a task.");
+    }
+    if (task.length > promptMaxChars) {
+      throw new Error(`The task exceeds ${promptMaxChars} characters; it is rejected, not truncated.`);
+    }
+    if (record.start !== undefined && record.start !== "clean" && record.start !== "fork") {
+      throw new Error("start is \"clean\" or \"fork\".");
+    }
+    const handle = typeof record.handle === "string" ? record.handle.trim().replace(/^@/, "") : "";
+    if (handle && !HANDLE_PATTERN.test(handle)) {
+      throw new Error("Member names may use letters, numbers, underscores, and hyphens only (at most 32).");
+    }
+    const kind = record.kind;
+    if (kind !== undefined && kind !== "claude-code" && kind !== "codex-cli" && kind !== "gemini-cli") {
+      throw new Error("kind is claude-code, codex-cli or gemini-cli.");
+    }
+    if (record.permissions !== undefined && record.permissions !== null && (typeof record.permissions !== "object" || Array.isArray(record.permissions))) {
+      throw new Error("permissions must be an object.");
+    }
+    const permissions = record.permissions ? record.permissions as Record<string, unknown> : undefined;
+    const text = (value: unknown): string | undefined => typeof value === "string" ? value.trim() || undefined : undefined;
+    return {
+      task,
+      ...(record.start === "fork" || record.start === "clean" ? { start: record.start } : {}),
+      ...(handle ? { handle } : {}),
+      ...(text(record.roleConfigId) ? { roleConfigId: text(record.roleConfigId) } : {}),
+      ...(kind ? { kind: kind as ChatProviderKind } : {}),
+      ...(text(record.model) ? { model: text(record.model) } : {}),
+      ...(text(record.reasoningEffort) ? { reasoningEffort: text(record.reasoningEffort) as ChatReasoningEffort } : {}),
+      ...(record.agentMode === "plan" || record.agentMode === "default" || record.agentMode === "auto" ? { agentMode: record.agentMode } : {}),
+      ...(permissions ? { permissions } : {}),
+      ...(text(record.reason) ? { reason: text(record.reason)!.slice(0, 500) } : {})
+    };
+  }
+
+  /** The rights the main session asks for its member: what it names, and
+   *  its own for the rest; leave to ask members "allow" unless it names one
+   *  (it may always ask the main session, as far as the main session itself
+   *  may ask), and managing members only when named. Clamped afterwards. */
+  private delegationRequestedPermissions(given: Record<string, unknown> | undefined, ceiling: ChatAgentPermissions): ChatAgentPermissions {
+    const { manageRolesParticipants: _ownManage, ...inherited } = ceiling;
+    const merged: Record<string, unknown> = { ...inherited, requestParticipants: "allow" };
+    if (given) {
+      for (const key of ["repoRead", "workspaceWrite", "webAccess"] as const) {
+        if (typeof given[key] === "boolean") merged[key] = given[key];
+      }
+      for (const key of ["requestParticipants", "requestCompaction", "manageRolesParticipants"] as const) {
+        const value = normalizeOptionalChatParticipantRequestPermission(given[key]);
+        if (value) merged[key] = value;
+      }
+      if (given.shell && typeof given.shell === "object" && !Array.isArray(given.shell)) {
+        const shell = given.shell as { enabled?: unknown; rules?: unknown };
+        merged.shell = {
+          enabled: typeof shell.enabled === "boolean" ? shell.enabled : inherited.shell.enabled,
+          rules: Array.isArray(shell.rules) ? shell.rules : inherited.shell.rules
+        };
+      }
+      if ("providerNative" in given) merged.providerNative = given.providerNative;
+    }
+    return normalizeChatAgentPermissions(merged);
+  }
+
+  /** Why the main session's CLI session cannot be copied for this member, or
+   *  undefined when it can: only by the same CLI (Claude Code or Codex; not
+   *  Antigravity, which has no fork), through the same provider, on the same
+   *  device, from a session that has an id. */
+  private forkUnavailableReason(
+    caller: ChatParticipant,
+    callerSession: ChatParticipantSession | undefined,
+    kind: ChatProviderKind,
+    hostId: string | undefined
+  ): string | undefined {
+    const ownLabel = cliProviderMetadata(caller.kind).label;
+    if (caller.kind === "gemini-cli") {
+      return "Antigravity has no session fork. Start a clean member and put what it needs from this conversation into the task.";
+    }
+    if (kind !== caller.kind) {
+      return `A fork copies your own ${ownLabel} session, so it cannot run on ${cliProviderMetadata(kind).label}. Start a clean member and put what it needs from this conversation into the task.`;
+    }
+    if ((hostId ?? undefined) !== (caller.hostId ?? undefined)) {
+      return "A fork copies your own session, so it runs through your own provider. Start a clean member and put what it needs from this conversation into the task.";
+    }
+    if (!this.ownsParticipant(caller)) {
+      return "Your session is on another machine. Start a clean member and put what it needs from this conversation into the task.";
+    }
+    if (!callerSession?.sessionId?.trim()) {
+      return "Your CLI session has no id yet to copy. Start a clean member and put what it needs from this conversation into the task.";
+    }
+    return undefined;
+  }
+
+  /** A delegated member's name when the main session gives none: its role's
+   *  (code-reviewer), or its CLI's for the generic role. */
+  private delegatedMemberHandleBase(role: ChatRoleConfig, kind: ChatProviderKind): string {
+    if (role.id === GENERIC_PARTICIPANT_ROLE_ID) {
+      return kind === "codex-cli" ? "codex" : kind === "gemini-cli" ? "gemini" : "claude";
+    }
+    const slug = role.label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24);
+    return slug || "member";
+  }
+
+  /** A fork already holds what its source's session had seen: its chat
+   *  context starts where the source's does (the turn the source is running
+   *  included), not at the start of the chat. */
+  private copyPromptContextPointersForFork(conversation: Conversation, sourceId: string, forkId: string): void {
+    const pointers = this.normalizedPromptContextPointers(conversation.metadata.promptContextPointers);
+    const source = pointers[sourceId];
+    if (source) {
+      pointers[forkId] = JSON.parse(JSON.stringify(source)) as ChatPromptContextParticipantPointers;
+    }
+    const timeline: ChatPromptContextScope = { type: "timeline" };
+    const inFlight = this.inFlightPromptContextFloor(this.inFlightPromptContextKey(conversation.id, sourceId, timeline));
+    const committed = pointers[forkId] ? this.promptContextPointerForScope(pointers[forkId], timeline) : undefined;
+    if (inFlight && !this.promptContextPointerAtOrAfter(committed, inFlight)) {
+      this.setPromptContextPointerForScope(pointers, forkId, timeline, inFlight);
+    }
+    if (pointers[forkId]) {
+      conversation.metadata = { ...conversation.metadata, promptContextPointers: pointers };
+    }
+  }
+
+  /**
+   * The main session starts an Accord (app_chat_start_accord,
+   * docs/main-session.md): the same launch as the User's, written as the
+   * main session's message. The facilitator defaults to the main session.
+   */
+  async startAccordFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+    await this.waitForQueuedSave(actor.conversationId);
+    const conversation = await this.requireChat(actor.conversationId);
+    const caller = this.chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
+    if (!caller) {
+      throw new Error("The requesting member is no longer in this chat.");
+    }
+    this.assertOwnsParticipant(caller);
+    if (!hasChatAppToolCapability(actor.capabilities, "accord.start") || !isMainSessionParticipant(conversation.metadata, caller.id)) {
+      return this.delegationRefusal("not_main_session", "Only the chat's main session starts an Accord. Ask the main session for one.");
+    }
+    const record = rawRequest && typeof rawRequest === "object" && !Array.isArray(rawRequest) ? rawRequest as Record<string, unknown> : {};
+    const subject = typeof record.subject === "string" ? record.subject.trim() : "";
+    const targets = Array.isArray(record.targets) ? record.targets.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+    if (!subject || targets.length === 0) {
+      return this.delegationRefusal("invalid_request", "An Accord needs a subject and at least one member in targets.");
+    }
+    const participants = this.chatParticipants(conversation);
+    const resolve = (handle: string): ChatParticipant | undefined => this.participantForMentionHandle(participants, handle.trim().replace(/^@/, ""));
+    const facilitator = typeof record.facilitator === "string" && record.facilitator.trim() ? resolve(record.facilitator) : caller;
+    if (!facilitator) {
+      return this.delegationRefusal("invalid_request", `No member named ${String(record.facilitator)}.`);
+    }
+    const members: ChatParticipant[] = [];
+    for (const handle of targets) {
+      const member = resolve(handle);
+      if (!member) {
+        return this.delegationRefusal("invalid_request", `No member named @${handle.trim().replace(/^@/, "")}.`);
+      }
+      if (!members.some((item) => item.id === member.id)) {
+        members.push(member);
+      }
+    }
+    try {
+      const started = await this.startAccord({
+        conversationId: conversation.id,
+        facilitatorParticipantId: facilitator.id,
+        targetParticipantIds: members.map((member) => member.id),
+        subject
+      }, undefined, this.onReviewProgress, randomUUID(), { author: caller });
+      return {
+        ok: true,
+        status: "started",
+        launchMessageId: started.sourceMessageId,
+        facilitator: `@${facilitator.handle}`,
+        members: members.map((member) => `@${member.handle}`)
+      };
+    } catch (error) {
+      return this.delegationRefusal("not_started", error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /** A member the main session adds without a card gets nothing beyond the
+   *  main session's own rights (docs/main-session.md); one that would is put
+   *  to User on a card instead, as her server holds a machine's additions
+   *  (hub/hubMachineScope.ts). */
+  private async additionsExceedMainSession(conversation: Conversation, requester: ChatParticipant, additions: ChatParticipant[]): Promise<boolean> {
+    if (!isMainSessionParticipant(conversation.metadata, requester.id)) {
+      return false;
+    }
+    const mainMode = normalizeChatAgentMode(requester.agentMode);
+    const ceiling = effectiveChatAgentPermissionsForProvider(requester.kind, mainMode, normalizeChatAgentPermissions(requester.permissions));
+    const mainManage = chatParticipantRequestPermissionRank(await this.manageRolesParticipantsPermissionForParticipant(requester));
+    for (const member of additions) {
+      const memberMode = normalizeChatAgentMode(member.agentMode);
+      if (!chatAgentModeWithin(memberMode, mainMode)) {
+        return true;
+      }
+      if (!chatAgentPermissionsWithin(effectiveChatAgentPermissionsForProvider(member.kind, memberMode, normalizeChatAgentPermissions(member.permissions)), ceiling)) {
+        return true;
+      }
+      if (chatParticipantRequestPermissionRank(await this.manageRolesParticipantsPermissionForParticipant(member)) > mainManage) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   async requestSelfCompactionFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
     await this.waitForQueuedSave(actor.conversationId);
     const conversation = await this.requireChat(actor.conversationId);
@@ -5396,7 +5887,8 @@ export class ChatService {
         roleRequest: pendingRoleApproval.roleRequest,
         participantRequest: request
       });
-      if (manageRolesParticipants === "allow" && !prepared.managementEscalation) {
+      if (manageRolesParticipants === "allow" && !prepared.managementEscalation &&
+        !await this.additionsExceedMainSession(conversation, requester, prepared.participant.participants)) {
         const { applied, approval } = await this.saveChatChange(conversation, async () => {
           const applied = await this.applyPreparedRoleParticipantChange(conversation, prepared);
           const approval: ChatAppToolApproval = {
@@ -5448,7 +5940,8 @@ export class ChatService {
     }
 
     const prepared = await this.prepareParticipantChange(conversation, request);
-    if (manageRolesParticipants === "allow" && !prepared.managementEscalation) {
+    if (manageRolesParticipants === "allow" && !prepared.managementEscalation &&
+      !await this.additionsExceedMainSession(conversation, requester, prepared.participants)) {
       const approval = this.newAppToolApproval(
         conversation,
         requester,
@@ -8092,7 +8585,11 @@ export class ChatService {
     request: StartChatAccordRequest,
     signal?: AbortSignal,
     progress?: ProgressCallback,
-    runId: string = randomUUID()
+    runId: string = randomUUID(),
+    /** The chat's main session starting it (app_chat_start_accord): the
+     *  launch is its message, and the facilitator's leave to ask members is
+     *  never more than the main session's own. */
+    options: { author?: ChatParticipant } = {}
   ): Promise<StartChatAccordResult> {
     const warnings: string[] = [];
     const ingest = await this.withChatRunLock(request.conversationId, async () => {
@@ -8136,16 +8633,39 @@ export class ChatService {
         }
         const content = this.accordStartMessageContent(facilitator, selectedTargets, subject);
         const accordSkill = await this.resolveAccordSkillMention(conversation, facilitator, content);
-        const updatedFacilitator = this.setParticipantRequestPermission(conversation, facilitator.id, "allow") ?? facilitator;
-        const userMessage = this.message("user", content, undefined, {
+        // The main session gives its facilitator leave to ask the members
+        // only as far as it may ask them itself.
+        const author = options.author
+          ? participants.find((participant) => participant.id === options.author!.id)
+          : undefined;
+        if (options.author && !author) {
+          throw new Error("The member starting the Accord is no longer in this chat.");
+        }
+        const leave: ChatParticipantRequestPermission = author
+          ? normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(author.permissions).requestParticipants)
+          : "allow";
+        const facilitatorLeave = normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(facilitator.permissions).requestParticipants);
+        // A right the facilitator already has is not taken away.
+        const updatedFacilitator = author && chatParticipantRequestPermissionRank(facilitatorLeave) >= chatParticipantRequestPermissionRank(leave)
+          ? facilitator
+          : this.setParticipantRequestPermission(conversation, facilitator.id, leave) ?? facilitator;
+        const metadata: ChatMessageMetadata = {
           threadId: randomUUID(),
           skillMentions: [accordSkill],
           // The facilitator is asked by this device, not by the server.
-          askedParticipantIds: [facilitator.id]
-        });
+          askedParticipantIds: [facilitator.id],
+          ...(author ? { accordLaunchByMainSession: true } : {})
+        };
+        const userMessage = author
+          ? this.message("participant", content, { id: author.id, kind: author.kind, label: `@${author.handle}`, model: author.model }, metadata)
+          : this.message("user", content, undefined, metadata);
         userMessage.metadata = { ...userMessage.metadata, threadId: userMessage.id };
         conversation.messages.push(userMessage);
-        this.promptSuggestions.userMessageSent(conversation.id);
+        if (author) {
+          this.recordLastMessageByParticipant(conversation, userMessage);
+        } else {
+          this.promptSuggestions.userMessageSent(conversation.id);
+        }
         this.advanceAutoWatchCursorForDirectTargets(conversation, [updatedFacilitator], userMessage);
         conversation.updatedAt = nowIso;
         await this.saveConversation(conversation);
@@ -9415,7 +9935,14 @@ export class ChatService {
         }
       : sourcePromptConversation;
     const workspacePath = options.workspacePath ?? await this.ensureHistoryFiles(promptConversation);
-    const isResumingSession = Boolean(session.sessionId);
+    // A member made as a fork of another's session starts from a copy of it
+    // (Claude Code and Codex only): the copy already holds the conversation,
+    // so its first turn is prompted as a resumed one.
+    const forkSource = !session.sessionId?.trim() && session.forkFrom?.sessionId && session.forkFrom.kind === participant.kind &&
+      (participant.kind === "claude-code" || participant.kind === "codex-cli")
+      ? session.forkFrom
+      : undefined;
+    const isResumingSession = Boolean(session.sessionId) || Boolean(forkSource);
     // Members' memory: the list of notes goes with a session's first turn,
     // with instructions sent again, and after the context was compacted. It
     // is asked now, while the rest of the turn is prepared (it never fails).
@@ -9467,13 +9994,15 @@ export class ChatService {
       : undefined;
     const carriedMoveNote = moveNoteBlock && moveNoteKey ? moveNoteKey : undefined;
     if (carriedMoveNote) this.moveNotesInFlight.add(carriedMoveNote);
+    const identityNoteBlock = this.forkedMemberIdentityNote(conversation, participant, session, Boolean(forkSource));
     const primary = this.buildPromptParts(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: primaryIncludeRoleInstructions,
       agentMode,
       permissions,
       promptContextBlock: preparedPromptContext.block,
       memoryIndexBlock,
-      moveNoteBlock
+      moveNoteBlock,
+      identityNoteBlock
     });
     const prompt = primary.prompt;
     const promptFallbackPrompt = this.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
@@ -9698,6 +10227,7 @@ export class ChatService {
       let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
         persistSession: true,
         sessionId: session.sessionId,
+        ...(forkSource ? { forkFromSessionId: forkSource.sessionId } : {}),
         extraReadableDirs: [workspacePath],
         resumeFallbackPrompt,
         role,
@@ -10387,7 +10917,7 @@ export class ChatService {
     triggerMessage: ChatMessage,
     workspacePath: string,
     continuation: boolean,
-    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string; memoryIndexBlock?: string; moveNoteBlock?: string }
+    options: { includeRoleInstructions: boolean; agentMode: ChatAgentMode; permissions: ChatAgentPermissions; promptContextBlock?: string; memoryIndexBlock?: string; moveNoteBlock?: string; identityNoteBlock?: string }
   ): { prompt: string; sections: ChatPromptSectionSizes } {
     const canRequestPermissions = this.canRequestPermissionChanges(session);
     const dynamicHeader = this.participantDynamicHeader(conversation, participant, session, options);
@@ -10443,6 +10973,7 @@ export class ChatService {
     ].join("\n\n");
 
     const orderedBlocks = [
+      options.identityNoteBlock ?? "",
       staticEnvelope || dynamicHeader,
       options.moveNoteBlock ?? "",
       promptContextBlock,
@@ -10705,6 +11236,41 @@ export class ChatService {
     return content.includes("Skill complete:") ||
       content.includes("Skill paused at required user gate:") ||
       content.includes("Skill blocked:");
+  }
+
+  /**
+   * What a member made as a fork of another member's session is told before
+   * its task: both CLIs keep the source's system and developer instructions
+   * in a fork (Claude Code 2.1.329, Codex 0.155.1), so the copy would
+   * otherwise go on as the main session. The first turn gets the whole note
+   * with its role's instructions; every later turn a short reminder.
+   */
+  private forkedMemberIdentityNote(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    session: ChatParticipantSession,
+    firstTurn: boolean
+  ): string | undefined {
+    const sourceId = session.forkFrom?.participantId ?? session.forkedFromParticipantId;
+    if (!sourceId || (!firstTurn && !session.forkedFromParticipantId)) {
+      return undefined;
+    }
+    const source = this.chatParticipants(conversation).find((item) => item.id === sourceId);
+    const sourceName = source ? `@${source.handle}` : "the main session";
+    const mainSessionHandle = this.mainSessionHandleForMember(conversation, participant);
+    if (!firstTurn) {
+      return `Reminder: you are @${participant.handle} (role: ${session.roleLabel}), a member forked from ${sourceName}'s session; you are not the main session and the main session's instructions do not apply to you.`;
+    }
+    return [
+      `You were forked from ${sourceName}'s session: you keep everything it knew, but from now on you are a different member of this chat.`,
+      `- You are @${participant.handle}, role: ${session.roleLabel}. You are not the main session; the instructions this session started with for ${sourceName} no longer apply to you.`,
+      "- Do only the task in the triggering message below and report the result in your reply; it goes back to the member that gave you the task.",
+      "- Do not create members or give work to other members unless your task says so.",
+      ...(mainSessionHandle ? this.mainSessionMemberRules(mainSessionHandle) : []),
+      "",
+      "Your role instructions:",
+      session.roleInstructions
+    ].join("\n");
   }
 
   private cliRoleOptions(
@@ -11061,8 +11627,9 @@ export class ChatService {
         participantHandle: participant.handle,
         appMcpClientGeneration: session.appMcpClientGeneration
       });
-    } else if (result.sessionId) {
+    } else if (result.sessionId && !(session.forkFrom && result.sessionId === session.forkFrom.sessionId)) {
       session.sessionId = result.sessionId;
+      delete session.forkFrom;
     }
     if (result.sessionRestarted) {
       const warning = `@${participant.handle}: previous CLI session was unavailable, so a new session was started from saved chat context.`;
@@ -11084,8 +11651,18 @@ export class ChatService {
     if (!nextSessionId || session.sessionId === nextSessionId) {
       return;
     }
+    if (session.forkFrom && nextSessionId === session.forkFrom.sessionId) {
+      // A fork's copy has an id of its own; the source's is never its.
+      void this.debugLogs.write("chat.session.fork-source-id-refused", {
+        conversationId: conversation.id,
+        participantId: session.participantId
+      });
+      return;
+    }
     const now = new Date().toISOString();
     session.sessionId = nextSessionId;
+    // The fork is made: from now on the member resumes its own session.
+    delete session.forkFrom;
     session.updatedAt = now;
     void this.withChatMutation(conversation, async () => {
       this.upsertSession(conversation, session);
@@ -14417,6 +14994,19 @@ export class ChatService {
       if (inferred.length === 0) {
         continue;
       }
+      // In a chat with a main session only it starts an Accord
+      // (docs/main-session.md); another member's "@x /accord" starts nothing.
+      if (this.hasStandaloneAccordSkillToken(sourceMessage.content) && isMainSessionChat(conversation.metadata) &&
+        !isMainSessionParticipant(conversation.metadata, participant.id)) {
+        this.addConversationWarning(conversation, `@${participant.handle} cannot start an Accord in this chat; only the main session starts one.`);
+        void this.debugLogs.write("chat.accord.inferred-refused", {
+          conversationId: conversation.id,
+          messageId: sourceMessage.id,
+          requesterParticipantId: participant.id,
+          targets: inferred.map((item) => item.targetHandle)
+        });
+        continue;
+      }
       const suppression = this.inferredParticipantRequestSuppression(
         conversation,
         participant,
@@ -15579,11 +16169,15 @@ export class ChatService {
     if (chainBatches.length >= CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES) {
       return `member request chain limit (${CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES}) reached`;
     }
+    // The main session's tasks to members it made (app_chat_delegate_task)
+    // are not member requests in this sense: it may give any number of them
+    // in one turn and still ask a member something.
     const sameTurnMcpBatches = actor.triggerMessageId
       ? this.participantRequestBatches(conversation).filter((batch) =>
           batch.requesterParticipantId === requester.id &&
           batch.triggerMessageId === actor.triggerMessageId &&
-          batch.source === "mcp"
+          batch.source === "mcp" &&
+          !batch.delegation
         )
       : [];
     if (sameTurnMcpBatches.some((batch) => this.participantRequestHasUnfinishedItems(batch))) {
@@ -15593,7 +16187,7 @@ export class ChatService {
       return `member request turn limit (${CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN}) reached`;
     }
     const threshold = Date.now() - CHAT_PARTICIPANT_REQUEST_RATE_WINDOW_MS;
-    const recent = this.participantRequestBatches(conversation).filter((batch) => Date.parse(batch.createdAt) >= threshold);
+    const recent = this.participantRequestBatches(conversation).filter((batch) => !batch.delegation && Date.parse(batch.createdAt) >= threshold);
     if (recent.length >= CHAT_PARTICIPANT_REQUEST_RATE_LIMIT) {
       return `member request rate limit (${CHAT_PARTICIPANT_REQUEST_RATE_LIMIT}/minute) reached`;
     }

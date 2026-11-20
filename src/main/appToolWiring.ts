@@ -75,6 +75,8 @@ export function wireChatAppToolHandlers(appMcpService: AppMcpService, chatServic
   appMcpService.setChatReactHandler((actor, request) => chatService.reactToMessageFromTool(actor, request));
   appMcpService.setChatSendMessageHandler((actor, request) => chatService.sendChatMessageFromTool(actor, request));
   appMcpService.setChatSetTitleHandler((actor, request) => chatService.setChatTitleFromTool(actor, request));
+  appMcpService.setChatDelegateTaskHandler((actor, request) => chatService.delegateTaskFromTool(actor, request));
+  appMcpService.setChatStartAccordHandler((actor, request) => chatService.startAccordFromTool(actor, request));
   appMcpService.setScriptToolHandler((actor, toolName, request) => chatService.scriptToolFromApp(actor, toolName, request));
 }
 

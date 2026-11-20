@@ -993,6 +993,10 @@ export interface ChatParticipantSession {
    *  (Claude --resume <id> --fork-session, Codex thread/fork). Cleared once
    *  the fork has its own sessionId. */
   forkFrom?: ChatSessionForkSource;
+  /** The member whose session this one was forked from. Kept after the fork
+   *  has its own id: both CLIs keep the source's system and developer
+   *  instructions in a fork, so each turn reminds the member who it is. */
+  forkedFromParticipantId?: string;
   executionSessionId?: string;
   roleConfigId: string;
   roleConfigVersion: number;
@@ -1318,6 +1322,10 @@ export interface ChatParticipantRequestBatch {
   triggerMessageId?: string;
   completedInToolCall?: boolean;
   autoResumeMessageId?: string;
+  /** The main session's task to a member it made for it
+   *  (app_chat_delegate_task): how the member started. Such a request is not
+   *  held to the one-request-per-turn limit of app_chat_request_participants. */
+  delegation?: { start: "clean" | "fork" };
   items: ChatParticipantRequestItem[];
   error?: string;
 }
@@ -1607,6 +1615,10 @@ export interface ChatTurnFinishedNoteMetadata {
 }
 
 export interface ChatMessageMetadata {
+  /** The launch of an Accord the chat's main session started
+   *  (app_chat_start_accord, docs/main-session.md): written as its message,
+   *  read as an Accord card like the User's own launch (accordLaunchCard.ts). */
+  accordLaunchByMainSession?: boolean;
   /** An urgent alert a member raised (shared/urgentAlerts.ts): the User's
    *  server writes this message and keeps the alert's state in it. */
   urgentAlert?: UrgentAlertView;
