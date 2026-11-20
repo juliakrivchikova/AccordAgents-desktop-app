@@ -141,8 +141,11 @@ export function splitLiveContentAtInterimPosts(
   let start = 0;
   for (const post of posts) {
     const end = Math.max(start, Math.min(content.length, Math.max(0, post.afterContentLength ?? 0)));
-    const before = remaining.filter((event) => activityBeforePost(event, end, post));
-    remaining = remaining.filter((event) => !before.includes(event));
+    const before: ChatAgentActivityEvent[] = [];
+    const after: ChatAgentActivityEvent[] = [];
+    // One pass per post (a long stream has thousands of events).
+    for (const event of remaining) (activityBeforePost(event, end, post) ? before : after).push(event);
+    remaining = after;
     parts.push({ content: content.slice(start, end), activityEvents: before.map((event) => shifted(event, start)), post });
     start = end;
   }

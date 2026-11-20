@@ -149,3 +149,20 @@ function stableActionHandlers(label: string, calls: string[]): StableChatMessage
     }
   };
 }
+
+test("a reply's pictures are the same arrays on every render while its posts and pictures are unchanged", async () => {
+  const { chatReplyPictures } = await import("./chat-interim-posts");
+  const picture = (id: string) => ({ id, filename: `${id}.png`, mimeType: "image/png", sizeBytes: 1, width: 1, height: 1, storageKey: id, createdAt: "2026-11-21T10:00:00.000Z" });
+  const metadata = {
+    imageAttachments: [picture("a"), picture("b")],
+    interimPosts: [{ id: "post", content: "See this.", createdAt: "2026-11-21T10:00:01.000Z", attachmentIds: ["a"] }]
+  };
+  const message = { id: "r", role: "participant" as const, content: "Writing", createdAt: "2026-11-21T10:00:00.000Z", status: "pending" as const, metadata };
+  const first = chatReplyPictures(message);
+  const next = chatReplyPictures({ ...message, content: "Writing more" });
+  assert.equal(next.all, first.all, "a new token does not make new picture arrays");
+  assert.equal(next.own, first.own);
+  assert.deepEqual(first.own.map((attachment) => attachment.id), ["b"], "a post's picture is shown with the post");
+  const morePosts = chatReplyPictures({ ...message, metadata: { ...metadata, interimPosts: [...metadata.interimPosts, { id: "p2", content: "And this.", createdAt: "2026-11-21T10:00:02.000Z", attachmentIds: ["b"] }] } });
+  assert.deepEqual(morePosts.own, [], "a new post is read again");
+});

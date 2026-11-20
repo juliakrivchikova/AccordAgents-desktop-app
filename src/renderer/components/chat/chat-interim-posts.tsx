@@ -8,13 +8,29 @@ import { chatMessageImageAttachments } from "./chat-message-metadata";
 import { chatInterimPostAttachmentIds, chatInterimPostsOf, splitLiveContentAtInterimPosts } from "../../../shared/interimPosts";
 import type { ChatAgentActivityEvent, ChatImageAttachment, ChatInterimPost, ChatMessage } from "../../../shared/types";
 
+type ReplyPictures = { posts: ChatInterimPost[]; all: ChatImageAttachment[]; own: ChatImageAttachment[] };
+
+const NO_PICTURES: ChatImageAttachment[] = [];
+/** By the stored pictures list, while the posts are the same list too: the
+ *  same arrays on every render of an unchanged reply (a streaming reply
+ *  renders on every token, and its picture strips are memoized). */
+const replyPicturesCache = new WeakMap<object, { posts: ChatInterimPost[]; pictures: ReplyPictures }>();
+
 /** A reply's posts during its turn and its pictures: all of them, and those
  *  that are its own (a post's pictures are shown with that post). */
-export function chatReplyPictures(message: ChatMessage): { posts: ChatInterimPost[]; all: ChatImageAttachment[]; own: ChatImageAttachment[] } {
+export function chatReplyPictures(message: ChatMessage): ReplyPictures {
   const posts = chatInterimPostsOf(message);
+  const stored = message.metadata?.imageAttachments;
+  if (!Array.isArray(stored) || stored.length === 0) {
+    return { posts, all: NO_PICTURES, own: NO_PICTURES };
+  }
+  const cached = replyPicturesCache.get(stored);
+  if (cached && cached.posts === posts) return cached.pictures;
   const all = chatMessageImageAttachments(message);
   const posted = posts.length > 0 ? chatInterimPostAttachmentIds(message) : undefined;
-  return { posts, all, own: posted?.size ? all.filter((attachment) => !posted.has(attachment.id)) : all };
+  const pictures = { posts, all, own: posted?.size ? all.filter((attachment) => !posted.has(attachment.id)) : all };
+  replyPicturesCache.set(stored, { posts, pictures });
+  return pictures;
 }
 
 /**
