@@ -34,6 +34,26 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
 - **The Chat Assistant and the Workflow Manager role are not in new chats.**
   Chats made before stay exactly as they are (with their Assistant).
 
+## Posts during a turn (every chat)
+
+Decided by the User (2026-11-20, in her own classic, Assistant-era chat):
+what a member posts with `app_chat_send_message` during its own turn, in its
+turn's own place, lives inside that turn's reply (`metadata.interimPosts`,
+`shared/interimPosts.ts`), shown in order above its final answer, like the
+text a CLI writes between its tool calls. This holds in **every chat**, with
+or without a main session, in both views. Posts stay messages of their own
+when they are an Accord resolution (`accordResolution`), go to another thread
+or parent, or arrive after the turn ended (or once the reply's posts are
+full).
+
+- The tool returns the reply's `messageId` with the post's own `postId`
+  (`postedInto: "running-reply"`) and says that `app_chat_react` with that
+  id reacts to the whole reply.
+- A member whose turn starts while the poster still runs reads the posts
+  made since it last read, as one finished message under the poster's
+  handle (`pendingReplyPostsForPromptContext`); they never move its context
+  pointer, so the reply itself is read once it is done.
+
 ## The two views (a view only)
 
 Switched per chat by the User any number of times (the chat header), shared

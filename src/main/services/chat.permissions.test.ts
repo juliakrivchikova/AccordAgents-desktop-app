@@ -9525,6 +9525,29 @@ test("a post during the member's own running turn goes into its running reply, i
   assert.equal(seen?.metadata?.interimPosts, undefined, "said once, not again inside the metadata");
 });
 
+test("a member whose turn starts while another is still running reads that member's posts, as finished words with its handle, without passing its running reply", async () => {
+  const participant = chatParticipant("codex-cli");
+  const reader = chatParticipant("claude-code");
+  const conversation = chatConversation([participant, reader]);
+  conversation.messages.push(runningReply(participant));
+  const { service, storage } = testService({ conversation });
+  liveTurn(service, participant);
+  const posted = await service.sendChatMessageFromTool(turnActor(participant), { content: "Found the cause: the token expires early." });
+  assert.equal(posted.postedInto, "running-reply");
+  assert.equal(typeof posted.postId, "string", "the post keeps its own id");
+  assert.match(String(posted.note), /app_chat_react with it reacts to your whole reply/);
+
+  // The User asks the other member while the first one still runs.
+  const ask: ChatMessage = { id: "ask-reader", role: "user", content: "@claude what do you think?", createdAt: new Date(Date.now() + 1000).toISOString(), status: "done" };
+  storage.current.messages.push(ask);
+  const current = clone(storage.current) as Conversation;
+  const internals = service as any;
+  const prepared = await internals.preparePromptContextForRun(current, current, reader, ask, { type: "timeline" }, false);
+  assert.match(prepared.block, /Found the cause: the token expires early\./, "the post is in its context");
+  assert.match(prepared.block, new RegExp(`\\] @${participant.handle}\\n`), "under the poster's handle");
+  assert.equal(prepared.pointerAdvance?.entry.messageId, "ask-reader", "the running reply is not passed by its posts");
+});
+
 test("posts that are messages of their own stay so: an Accord resolution, another thread or parent, no turn running, a turn already ended", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);

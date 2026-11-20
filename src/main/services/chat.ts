@@ -568,6 +568,10 @@ export const TASK_REPLIES_PROMPT_MAX_CHARS = 60_000;
 const PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION = "Request was interrupted before completion.";
 /** How the line that resumes a requester after its request starts. */
 const PARTICIPANT_REQUEST_AUTO_RESUME_PREFIX = "Auto-resumed";
+
+/** A message a turn reads as chat context; `interimPostsOnly`: the posts of
+ *  a reply still being written (pendingReplyPostsForPromptContext). */
+type PromptContextRecord = { message: ChatMessage; sequence: number; interimPostsOnly?: true };
 const CHAT_PARTICIPANT_REQUEST_MAX_BATCHES_PER_TURN = 4;
 const CHAT_PARTICIPANT_REQUEST_RATE_WINDOW_MS = 60_000;
 const CHAT_PARTICIPANT_REQUEST_RATE_LIMIT = 8;
@@ -5114,6 +5118,7 @@ export class ChatService {
       const items: ChatParticipantRequestItem[] = [{
         targetParticipantId: child.id,
         targetHandle: child.handle,
+        targetKind: child.kind,
         prompt: input.task,
         ...(input.title ? { title: input.title } : {}),
         reason: input.reason,
@@ -7500,7 +7505,13 @@ export class ChatService {
       sequence: created.sequence,
       threadId: created.threadId,
       // In the running reply: messageId is that reply's, postId this post's.
-      ...(created.postId ? { postId: created.postId, postedInto: "running-reply" } : {}),
+      ...(created.postId
+        ? {
+            postId: created.postId,
+            postedInto: "running-reply",
+            note: "Posted inside your running reply: messageId is that reply's, so app_chat_react with it reacts to your whole reply, not to this post alone."
+          }
+        : {}),
       ...(preparedImages.summaries.length > 0 ? { imageAttachments: preparedImages.summaries } : {})
     };
   }
@@ -16614,6 +16625,7 @@ export class ChatService {
       return {
         targetParticipantId: target.id,
         targetHandle: target.handle,
+        targetKind: target.kind,
         prompt: request?.prompt ?? "",
         reason: request?.reason,
         status: requestStatus,
@@ -17888,7 +17900,8 @@ export class ChatService {
       const resumedRenderCandidates = isResumingSession
         ? renderCandidates.filter((record) => !this.isParticipantOwnPromptContextMessage(record.message, participant.id))
         : renderCandidates;
-      const advanceTo = records[records.length - 1];
+      // A running reply's posts are read, never passed: the reply is read once done.
+      const advanceTo = [...records].reverse().find((record) => !record.interimPostsOnly);
       const selection = this.selectPromptContextRecords(resumedRenderCandidates, policy);
       const fallbackSelection = resumedRenderCandidates === renderCandidates
         ? selection
@@ -18151,27 +18164,60 @@ export class ChatService {
     scope: ChatPromptContextScope,
     pointer: ChatPromptContextPointerEntry | undefined,
     triggerMessageId: string
-  ): Array<{ message: ChatMessage; sequence: number }> {
+  ): PromptContextRecord[] {
     const pointerIndex = pointer ? messages.findIndex((message) => message.id === pointer.messageId) : -1;
     const pointerTime = pointerIndex < 0 ? this.lastMessageTimestamp(pointer?.createdAt) : undefined;
+    const postsSince = pointerIndex >= 0 ? this.lastMessageTimestamp(messages[pointerIndex]!.createdAt) : pointerTime;
     return messages
       .map((message, sequence) => ({ message, sequence }))
-      .filter((record) => {
+      .flatMap((record): PromptContextRecord[] => {
         if (!this.messageBelongsToPromptContextScope(record.message, scope)) {
-          return false;
+          return [];
         }
         if (record.message.id !== triggerMessageId && !this.isPromptContextMessage(record.message)) {
-          return false;
+          const posts = this.pendingReplyPostsForPromptContext(record.message, postsSince);
+          return posts ? [{ message: posts, sequence: record.sequence, interimPostsOnly: true }] : [];
         }
         if (pointerIndex >= 0) {
-          return record.sequence > pointerIndex;
+          return record.sequence > pointerIndex ? [record] : [];
         }
         if (pointerTime !== undefined) {
           const messageTime = this.lastMessageTimestamp(record.message.createdAt);
-          return messageTime === undefined || messageTime > pointerTime;
+          return messageTime === undefined || messageTime > pointerTime ? [record] : [];
         }
-        return true;
+        return [record];
       });
+  }
+
+  /**
+   * What another member posted during its turn that is still running: its
+   * reply is not read until it is finished, but its posts are, as they were
+   * when each post was a message of its own (they live inside the reply now,
+   * interimPosts.ts). The posts made after `since`, as one finished message
+   * of the poster's with only their pictures. They never move the reader's
+   * pointer (the reply itself is read once it is done).
+   */
+  private pendingReplyPostsForPromptContext(message: ChatMessage, since: number | undefined): ChatMessage | undefined {
+    if (message.role !== "participant" || message.status !== "pending" || isChatMessageHiddenFromTimeline(message)) {
+      return undefined;
+    }
+    const posts = chatInterimPostsOf(message).filter((post) => {
+      const at = this.lastMessageTimestamp(post.createdAt);
+      return since === undefined || at === undefined || at > since;
+    });
+    if (posts.length === 0) {
+      return undefined;
+    }
+    const { interimPosts: _posts, imageAttachments, ...metadata } = message.metadata ?? {};
+    const pictureIds = new Set(posts.flatMap((post) => post.attachmentIds ?? []));
+    const pictures = (imageAttachments ?? []).filter((attachment) => pictureIds.has(attachment.id));
+    return {
+      ...message,
+      status: "done",
+      content: posts.map((post) => post.content.trim()).filter(Boolean).join("\n\n"),
+      createdAt: posts[posts.length - 1]!.createdAt,
+      metadata: { ...metadata, ...(pictures.length > 0 ? { imageAttachments: pictures } : {}) }
+    };
   }
 
   private promptContextScopeForTrigger(message: ChatMessage): ChatPromptContextScope {
