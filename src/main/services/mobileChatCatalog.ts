@@ -1,4 +1,5 @@
-import type { ChatMessage, ChatParticipant, Conversation, ConversationSummary } from "../../shared/types";
+import type { ChatMessage, ChatParticipant, ChatViewMode, Conversation, ConversationSummary } from "../../shared/types";
+import { chatViewFor, mainSessionParticipantId } from "../../shared/mainSession";
 import { chatMessageHiddenFromTimeline } from "../../shared/chatParticipantRequestThreads";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
 import { accordClosedLaunchId } from "../../shared/accordProgress";
@@ -46,6 +47,9 @@ export interface MobileChatListOptions {
    *  can be all posts and replies that came after a turn started: without
    *  this the turn looked over to the phone while it was still going. */
   pendingMessagesFor?: (conversationId: string) => Promise<ChatMessage[] | undefined>;
+  /** The view a chat with a main session opens in when it has none of its
+   *  own (the computer's Settings → General); the shared default otherwise. */
+  defaultChatView?: ChatViewMode;
 }
 
 /** The chats the phone lists: the newest ones, and every pinned one however
@@ -83,6 +87,9 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
     const members = mobileChatMembers(conversation);
     const pendingCards = options.pendingCardsFor?.(summary.id, conversation);
     const activity = runState ? phoneActivityEvents(runState) : [];
+    // A chat with a main session has two views; its own (or the default)
+    // travels so the phone opens it as the desktop does.
+    const mainId = conversation ? mainSessionParticipantId(conversation.metadata) : undefined;
     items.push({
       id: summary.id,
       title: summary.title || "Chat",
@@ -102,6 +109,9 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
       // read whole, else the chat's messages do.
       ...((pendingCards ? pendingCards.some((card) => card.kind === "choice") : summary.waitingChoice === true) ? { waitingChoice: true } : {}),
       ...(activity.length ? { activity } : {}),
+      ...(mainId && conversation
+        ? { mainSessionParticipantId: mainId, chatView: chatViewFor(conversation.metadata, options.defaultChatView), canSwitchView: true as const }
+        : {}),
       members: members.map((participant) => ({
         id: participant.id,
         handle: participant.handle,
