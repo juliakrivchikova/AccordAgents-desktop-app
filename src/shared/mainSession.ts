@@ -158,7 +158,10 @@ export type SessionsViewLane =
  */
 export function sessionsViewLane(message: ChatMessage, index: SessionsViewIndex): SessionsViewLane {
   const mainId = index.mainSessionParticipantId;
-  if (message.role === "user") {
+  // A scheduled task's post wakes the members it names (askedParticipantIds),
+  // the way a User's message addresses them: a wake-up of one member only is
+  // part of that member's session.
+  if (message.role === "user" || message.role === "script") {
     const others = chatMessageAddressees(message).filter((id) => id !== mainId);
     const addressedMain = chatMessageAddressees(message).includes(mainId);
     if (!addressedMain && others.length > 0) return { kind: "member", participantId: others[0]! };

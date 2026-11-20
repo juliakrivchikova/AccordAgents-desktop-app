@@ -5772,7 +5772,14 @@ export class ChatService {
         message.participantLabel = input.scriptName;
         // Each wake-up starts its own thread, so one alert burst and the
         // investigation it starts stay together.
-        message.metadata = { ...message.metadata, threadId: message.id };
+        message.metadata = {
+          ...message.metadata,
+          threadId: message.id,
+          // Whom it wakes, as a User's message records its addressees: the
+          // sessions view puts a wake-up of a member into that member's
+          // session (shared/mainSession.ts).
+          ...(targets.length > 0 ? { askedParticipantIds: (targets as ChatParticipant[]).map((target) => target.id) } : {})
+        };
         conversation.messages.push(message);
         conversation.updatedAt = new Date().toISOString();
         await this.saveConversation(conversation);

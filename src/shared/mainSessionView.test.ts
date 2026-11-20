@@ -168,3 +168,13 @@ test("a task card with several members counts the running ones", () => {
   assert.equal(sessionsTaskGroupLabel(["running", "done", "running"]), "3 members · 2 running");
   assert.equal(sessionsTaskGroupLabel(["done", "failed"]), "2 members");
 });
+
+test("a scheduled task's wake-up of one member is part of that member's session, a wake-up of the main session stays on the timeline", () => {
+  const wakeDrew = message("script-drew", "script", 50, { metadata: { askedParticipantIds: ["p-drew"] } as ChatMessage["metadata"] });
+  const wakeMain = message("script-main", "script", 51, { metadata: { askedParticipantIds: ["p-main"] } as ChatMessage["metadata"] });
+  const quiet = message("script-none", "script", 52);
+  const messages = [wakeDrew, wakeMain, quiet];
+  const index = buildSessionsViewIndex(messages, "p-main");
+  assert.deepEqual(mainTimelineMessages(messages, index).map((entry) => entry.id), ["script-main", "script-none"]);
+  assert.deepEqual(memberSessionMessages(messages, "p-drew", index).map((entry) => entry.id), ["script-drew"]);
+});
