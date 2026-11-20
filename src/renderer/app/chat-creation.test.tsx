@@ -69,7 +69,9 @@ async function harness() {
   await act(async () => {
     state.setSettings({ ...DEFAULT_SETTINGS, assistantProviderKind: "codex-cli",
       chatRoleConfigs: [{ id: "administrator", label: "Chat Assistant", instructions: "Assist the user.",
-        version: 1, builtIn: true, updatedAt: "2026-09-13T00:00:00.000Z" }],
+        version: 1, builtIn: true, updatedAt: "2026-09-13T00:00:00.000Z" },
+      { id: "main-session", label: "Main session", instructions: "Work on the User's requests.",
+        version: 1, builtIn: true, updatedAt: "2026-11-20T00:00:00.000Z" }],
       providers: [{ kind: "codex-cli", label: "Codex", enabled: true }] });
     state.setAgents([{ kind: "codex-cli", label: "Codex", installed: true, detection: "detected",
       runnable: "ready", authentication: "ready", lastCheckedAt: new Date().toISOString() }]);

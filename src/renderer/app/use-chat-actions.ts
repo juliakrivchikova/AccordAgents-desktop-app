@@ -19,15 +19,13 @@ import {
   activeChatRoleConfigs,
   chatParticipantConfigToDraft,
   defaultChatParticipantDraft,
-  hasChatParticipantRuntimeOverride,
-  NEW_CHAT_ASSISTANT_PARTICIPANT_ID,
-  newChatAssistantParticipantDraft,
   normalizedChatDrafts,
   selectedOrMentionedChatParticipantDrafts,
   validateChatCliAgents,
   validateChatParticipantDrafts,
   validateChatStartupDrafts
 } from "../components/chat/chat-participant-drafts";
+import { NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID, newChatMainSessionParticipantDraft } from "../components/chat/chat-main-session-draft";
 import {
   errorText,
   mergeProgressIntoConversation
@@ -118,7 +116,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       providers: state.settings.providers,
       explicitKind: state.settings.assistantProviderKind
     });
-    // The Assistant's CLI the screen showed: settings made for it in the
+    // The main session's CLI the screen showed: settings made for it in the
     // member list do not carry over to another one.
     const shownAssistantKind = resolveProvider(state.agents);
     let agents = state.agents;
@@ -132,17 +130,17 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
     const assistantProviderKind = resolveProvider(agents);
     if (!assistantProviderKind) {
-      // The saved Assistant CLI gives way to any ready one: none is ready.
+      // The saved CLI gives way to any ready one: none is ready.
       state.setError(NO_READY_CLI_MESSAGE);
       return false;
     }
-    const assistantRuntimeOverride = assistantProviderKind === shownAssistantKind
-      ? state.selectedChatParticipantRuntimeOverrides[NEW_CHAT_ASSISTANT_PARTICIPANT_ID]
+    const mainSessionRuntimeOverride = assistantProviderKind === shownAssistantKind
+      ? state.selectedChatParticipantRuntimeOverrides[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]
       : undefined;
+    // Every new chat has its main session first, instead of the Chat
+    // Assistant (docs/main-session.md).
     const participants = [
-      ...(hasChatParticipantRuntimeOverride(assistantRuntimeOverride)
-        ? [newChatAssistantParticipantDraft(assistantProviderKind, assistantRuntimeOverride)]
-        : []),
+      newChatMainSessionParticipantDraft(assistantProviderKind, state.settings.chatRoleConfigs, mainSessionRuntimeOverride),
       ...selectedOrMentionedChatParticipantDrafts(
         state.settings.chatParticipantConfigs,
         state.selectedChatParticipantConfigIds,

@@ -48,8 +48,6 @@ import {
   isGeneratedChatHandle
 } from "./chat-participant-draft-handles";
 import {
-  CHAT_ASSISTANT_HANDLE,
-  CHAT_ASSISTANT_ROLE_ID,
   isChatAssistantHandle,
   isChatAssistantParticipant
 } from "../conversation/conversation-display";
@@ -79,47 +77,6 @@ export type ChatParticipantRuntimeOverride = Partial<Pick<
   ChatParticipantDraft,
   "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch"
 >>;
-
-export const NEW_CHAT_ASSISTANT_PARTICIPANT_ID = "__new-chat-assistant__";
-
-export function newChatAssistantParticipantConfig(kind: ChatProviderKind): ChatParticipantConfig {
-  return {
-    id: NEW_CHAT_ASSISTANT_PARTICIPANT_ID,
-    handle: CHAT_ASSISTANT_HANDLE,
-    roleConfigId: CHAT_ASSISTANT_ROLE_ID,
-    behaviorRuleIds: [],
-    kind,
-    agentMode: "default",
-    permissions: {
-      ...defaultChatAgentPermissions(),
-      repoRead: false,
-      workspaceWrite: false,
-      webAccess: false,
-      requestParticipants: "ask",
-      requestCompaction: "ask",
-      shell: {
-        enabled: false,
-        rules: []
-      }
-    },
-    remoteExecution: "local",
-    updatedAt: ""
-  };
-}
-
-export function hasChatParticipantRuntimeOverride(override: ChatParticipantRuntimeOverride | undefined): boolean {
-  return Boolean(override && Object.keys(override).length > 0);
-}
-
-export function newChatAssistantParticipantDraft(
-  kind: ChatProviderKind,
-  runtimeOverride: ChatParticipantRuntimeOverride | undefined
-): ChatParticipantDraft {
-  return chatParticipantConfigToDraftWithRuntimeOverrides(
-    newChatAssistantParticipantConfig(kind),
-    runtimeOverride ? { [NEW_CHAT_ASSISTANT_PARTICIPANT_ID]: runtimeOverride } : {}
-  );
-}
 
 export interface AddableSavedParticipantConfig {
   config: ChatParticipantConfig;
@@ -547,7 +504,7 @@ function isAutoWatchLockedRole(roleConfigId: string): boolean {
   return roleConfigId === WORKFLOW_MANAGER_ROLE_ID;
 }
 
-function defaultChatParticipantPermissionsForRole(
+export function defaultChatParticipantPermissionsForRole(
   settings: Pick<AppSettings, "chatRoleConfigs">,
   roleConfigId: string,
   permissions = defaultChatAgentPermissions()
@@ -628,7 +585,7 @@ export function validateChatParticipantDrafts(
   return undefined;
 }
 
-function chatParticipantConfigToDraftWithRuntimeOverrides(
+export function chatParticipantConfigToDraftWithRuntimeOverrides(
   participant: ChatParticipantConfig,
   runtimeOverridesByConfigId: Record<string, ChatParticipantRuntimeOverride>
 ): ChatParticipantDraft {

@@ -51,6 +51,15 @@ const SETTINGS: AppSettings = {
     appToolCapabilities: [],
     builtIn: true,
     updatedAt: "2026-07-13T00:00:00.000Z"
+  }, {
+    id: "main-session",
+    label: "Main session",
+    instructions: "Work on the User's requests.",
+    version: 1,
+    appToolCapabilities: ["participants.manage", "participants.delegate", "accord.start"],
+    builtIn: true,
+    participantDefaults: { requestParticipants: "allow", manageRolesParticipants: "allow" },
+    updatedAt: "2026-11-20T00:00:00.000Z"
   }],
   chatBehaviorRules: [],
   chatSavedPrompts: [],
@@ -79,7 +88,7 @@ test("saved Assistant provider hides the provider choice", () => {
   renderer.unmount();
 });
 
-test("a saved Assistant CLI that is not ready gives way to a ready one, says so under the composer, and send stays open", async () => {
+test("a saved CLI that is not ready gives way to a ready one, says so under the composer naming the main session, and send stays open", async () => {
   installWindowBridge();
   let startCalls = 0;
   const renderer = create(<NewChatScreen
@@ -92,7 +101,7 @@ test("a saved Assistant CLI that is not ready gives way to a ready one, says so 
   assert.equal(renderer.root.findAllByProps({ "data-testid": "new-chat-provider-unavailable" }).length, 0);
   assert.equal(
     textOf(renderer.root.findByProps({ "data-testid": "new-chat-assistant-note" })),
-    "The Assistant uses Codex in this chat: Claude Code, your saved choice, needs sign-in."
+    "The main session uses Codex in this chat: Claude Code, your saved choice, needs sign-in."
   );
   const start = renderer.root.findByProps({ "data-testid": "new-chat-start" });
   assert.equal(start.props.disabled, false);
@@ -102,15 +111,15 @@ test("a saved Assistant CLI that is not ready gives way to a ready one, says so 
   renderer.unmount();
 });
 
-test("settings made for the Assistant on one CLI are dropped when it moves to another", async () => {
+test("settings made for the main session on one CLI are dropped when it moves to another", async () => {
   installWindowBridge();
-  let overrides: Record<string, unknown> = { "__new-chat-assistant__": { model: "opus" }, "saved-member": { model: "keep" } };
+  let overrides: Record<string, unknown> = { "__new-chat-main-session__": { model: "opus" }, "saved-member": { model: "keep" } };
   const onSelectedParticipantRuntimeOverridesChange = (next: unknown) => {
     overrides = typeof next === "function" ? (next as (current: typeof overrides) => typeof overrides)(overrides) : next as typeof overrides;
   };
   const settings = { ...SETTINGS, assistantProviderKind: "claude-code" as const };
   const renderer = create(<NewChatScreen {...baseProps(readyAgents(), { settings, onSelectedParticipantRuntimeOverridesChange })} />);
-  assert.deepEqual(Object.keys(overrides), ["__new-chat-assistant__", "saved-member"], "nothing dropped while the CLI stays");
+  assert.deepEqual(Object.keys(overrides), ["__new-chat-main-session__", "saved-member"], "nothing dropped while the CLI stays");
   await act(async () => {
     renderer.update(<NewChatScreen {...baseProps([readyAgent("codex-cli"), { ...readyAgent("claude-code"), authentication: "required" }], { settings, onSelectedParticipantRuntimeOverridesChange })} />);
   });
