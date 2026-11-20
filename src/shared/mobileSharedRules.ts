@@ -54,3 +54,15 @@ export {
 export {
   HUB_ALERTS_PATH, urgentAlertAwaitsGotIt, urgentAlertCountdown, urgentAlertFailureText, urgentAlertOutcome, urgentAlertStatus
 } from "./urgentAlerts";
+// The main session and the chat's two views (docs/main-session.md): which
+// view a chat opens in, where each message lives in the sessions view, the
+// task cards, the members list and the "Waiting on" line, by the desktop's
+// own rules.
+export {
+  MAIN_SESSION_ROLE_ID, buildSessionsViewIndex, canSwitchChatView, chatViewFor, isChatViewMode, isMainSessionTaskMessage, mainSessionParticipantId,
+  memberSessionMessages, membersMainSessionWaitsOn, sessionsViewLane
+} from "./mainSession";
+export {
+  SESSIONS_WORK_STATUS_LABELS, firstTextLine, isMemberWorking, latestTaskByMember, memberRunningSince, openMemberCardMessages, sessionsMemberRows,
+  sessionsTaskGroupLabel, sessionsTaskReplyLine, sessionsTaskRunningSince, sessionsTaskStatus
+} from "./mainSessionView";
