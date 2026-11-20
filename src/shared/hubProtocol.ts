@@ -8,7 +8,7 @@
  * only devices on its roster, which the desktop that set it up keeps.
  */
 
-import type { ChatAgentMode, ChatAgentPermissions, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind, ChatSkillMention } from "./types";
+import type { ChatAgentMode, ChatAgentPermissions, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind, ChatSkillMention, ChatViewMode } from "./types";
 import type { NewChatMemberOption } from "./newChat";
 import type { MachineProgressFrame } from "./machineProgress";
 import { stableJson } from "./stableJson";
@@ -298,14 +298,23 @@ export interface HubNewChatOptions {
   projects: Array<{ path: string; label: string }>;
   /** The folder a new chat starts in; none: without a folder. */
   defaultProject?: string;
-  /** The Chat Assistant every new chat has. */
+  /** The main session every new chat has (docs/main-session.md); the phone
+   *  puts it first (newChatParticipants) and names it in the chat's metadata
+   *  (newChatMetadata). */
+  mainSession?: ChatParticipant;
+  /** The same main session, under the name a phone from before reads, so an
+   *  old phone also makes a main-session chat (it was the Chat Assistant). */
   assistant: ChatParticipant;
+  /** The view a new chat opens in, as Settings → General on the computer
+   *  says; unset: sessions. */
+  defaultChatView?: ChatViewMode;
   /** The saved members, as the computer would add each. */
   members: NewChatMemberOption[];
   /** Why no chat can be started now, in the computer's words. */
   unavailable?: string;
-  /** When the Assistant runs on another CLI than the one saved in Settings
-   *  (that one is not ready), the line the computer's New chat shows. */
+  /** When the main session runs on another CLI than the one saved in
+   *  Settings (that one is not ready), the line the computer's New chat
+   *  shows. */
   assistantNote?: string;
 }
 

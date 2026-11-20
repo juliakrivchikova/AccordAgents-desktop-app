@@ -94,11 +94,11 @@ test("assistant resolution uses Codex, Claude, then Antigravity without using di
       providers: PROVIDERS.map((provider) => provider.kind === "claude-code" ? { ...provider, enabled: false } : provider),
       explicitKind: "claude-code"
     }) ?? "",
-    /^The Assistant uses Codex in this chat: Claude Code, your saved choice, is turned off\.$/
+    /^The main session uses Codex in this chat: Claude Code, your saved choice, is turned off\.$/
   );
   const failed = readyAgents(["codex-cli"]).concat({ ...readyAgents(["claude-code"])[0], runnable: "failed" });
   assert.match(assistantSubstituteNote({ agents: failed, providers: PROVIDERS, explicitKind: "claude-code" }) ?? "", /Claude Code, your saved choice, is not ready\.$/);
-  assert.match(assistantSubstituteNote({ agents: readyAgents(["codex-cli"]), providers: PROVIDERS, explicitKind: "claude-code" }) ?? "", /^The Assistant uses Codex in this chat: Claude Code, your saved choice, is (not installed|not ready)\.$/);
+  assert.match(assistantSubstituteNote({ agents: readyAgents(["codex-cli"]), providers: PROVIDERS, explicitKind: "claude-code" }) ?? "", /^The main session uses Codex in this chat: Claude Code, your saved choice, is (not installed|not ready)\.$/);
   assert.equal(resolveAssistantProviderKind({ agents: readyAgents(["claude-code"]), providers: PROVIDERS }), "claude-code");
   assert.equal(resolveAssistantProviderKind({
     agents,
