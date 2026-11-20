@@ -22,7 +22,7 @@ import type {
   ChatRoleParticipantDefaults,
   ChatRosterChangeParticipantInput
 } from "../../../shared/types";
-import { modelDetectionFailureText, useProviderModelCatalog, type ProviderModelCatalogHost } from "./use-provider-model-catalog";
+import { modelCatalogStatus, useProviderModelCatalog, type ProviderModelCatalogHost } from "./use-provider-model-catalog";
 import { savedModelId } from "../../../shared/geminiModels";
 import { Avatar } from "../avatar/avatar";
 import { AvatarStudioDialog } from "../avatar/avatar-studio-dialog";
@@ -270,13 +270,8 @@ export function ChatParticipantInlineModelRow(props: {
 
   const models = catalog?.models ?? [];
   const inheritedLabel = chatModelDefaultLabel(props.kind, host);
-  const selectedLabel = value ? models.find((item) => item.id === value)?.label ?? value : inheritedLabel;
   // Without this the list is just the inherited setting until the CLI answers.
-  const listStatus = loading
-    ? "Detecting models…"
-    : error
-      ? "Model detection failed; enter a custom model id."
-      : modelDetectionFailureText(catalog) ?? (catalog && models.length === 0 ? "No models detected; enter a custom model id." : undefined);
+  const listStatus = modelCatalogStatus(catalog, loading, error);
 
   return (
     <ChatParticipantSpecRow label="Model">
@@ -291,7 +286,7 @@ export function ChatParticipantInlineModelRow(props: {
       >
         <PopoverTrigger asChild>
           <button type="button" className="chat-app-tool-inline-edit" aria-label="Change model">
-            <span>{selectedLabel}</span>
+            <span>{value ?? inheritedLabel}</span>
             <ChevronDown size={14} aria-hidden />
           </button>
         </PopoverTrigger>

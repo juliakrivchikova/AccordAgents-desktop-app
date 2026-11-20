@@ -11,6 +11,7 @@ import { NativeProcessRegistry } from "./nativeProcessRegistry";
 import {
   ClaudeFolderNotTrustedError,
   claudeModelProbeEnv,
+  ClaudeModelListTimeoutError,
   CliAgentRunner,
   CodexAppServerRunError,
   parseClaudeInitializeModels,
@@ -565,18 +566,37 @@ function fakeClaudeChild() {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
+  const signals: string[] = [];
   const child = Object.assign(new EventEmitter(), {
     stdin,
     stdout,
     stderr,
+    signals,
     killed: false,
     exitCode: null as number | null,
-    kill() {
+    signalCode: null as string | null,
+    kill(signal: string) {
+      signals.push(signal);
       this.killed = true;
       return true;
     }
   });
   return child;
+}
+
+/** Answers the initialize request it reads on stdin with `answer`. */
+function answerInitialize(child: ReturnType<typeof fakeClaudeChild>, answer: Record<string, unknown>, options: { trailingNewline?: boolean } = {}): void {
+  child.stdin.on("data", (chunk) => {
+    const request = JSON.parse(String(chunk));
+    queueMicrotask(() => {
+      const line = JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: request.request_id, response: answer } });
+      child.stdout.write(options.trailingNewline === false ? line : `${line}\n`);
+    });
+  });
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 test("Claude model list keeps the CLI's own names and order, without its Default row", () => {
@@ -596,7 +616,24 @@ test("Claude model list keeps the CLI's own names and order, without its Default
   assert.deepEqual(parseClaudeInitializeModels([null, "opus", { displayName: "No value" }]), []);
 });
 
-test("Claude model list asks the CLI with one initialize request and no prompt", async () => {
+test("Claude model list marks one recommended model at most, names a model by its id when unnamed, and drops repeats", () => {
+  const twoForDefault = parseClaudeInitializeModels([
+    { value: "default", resolvedModel: "claude-opus-5-5" },
+    { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus 5.5" },
+    { value: "claude-opus-5-5", resolvedModel: "claude-opus-5-5", displayName: "Opus 5.5 (pinned)" },
+    { value: "claude-sonnet-5" },
+    { value: "claude-sonnet-5", displayName: "Sonnet 5 again" }
+  ]);
+  assert.deepEqual(twoForDefault.map((model) => [model.id, model.label, model.recommended]), [
+    ["opus", "Opus 5.5", true],
+    ["claude-opus-5-5", "Opus 5.5 (pinned)", false],
+    ["claude-sonnet-5", "claude-sonnet-5", false]
+  ]);
+  const noDefault = parseClaudeInitializeModels([{ value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus" }]);
+  assert.equal(noDefault[0].recommended, false);
+});
+
+test("Claude model list asks the CLI with one initialize request and no prompt, outside any project", async () => {
   const child = fakeClaudeChild();
   let launch: { command: string; args: readonly string[]; options: Record<string, any> } | undefined;
   const written: string[] = [];
@@ -604,6 +641,7 @@ test("Claude model list asks the CLI with one initialize request and no prompt",
     written.push(String(chunk));
     const request = JSON.parse(String(chunk));
     queueMicrotask(() => {
+      child.stdout.write("Warning: not JSON\n");
       child.stdout.write(`${JSON.stringify({ type: "system", subtype: "ui_invalidate" })}\n`);
       child.stdout.write(`${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: "someone-else", response: { models: [] } } })}\n`);
       const answer = JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: request.request_id, response: { commands: [], models: CLAUDE_INITIALIZE_MODELS } } });
@@ -612,11 +650,13 @@ test("Claude model list asks the CLI with one initialize request and no prompt",
       child.stdout.write(`${answer.slice(40)}\n`);
     });
   });
+  let stdinEnded = false;
+  child.stdin.on("finish", () => { stdinEnded = true; });
 
-  const models = await runClaudeModelListProbe({
+  const answer = await runClaudeModelListProbe({
     executable: "/tmp/claude-stub",
     env: { PATH: "/usr/bin", CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: "1" },
-    cwd: "/tmp/trusted-repo",
+    cwd: "/tmp/home",
     timeoutMs: 1_000,
     spawnClaude: ((command: string, args: readonly string[], options: Record<string, any>) => {
       launch = { command, args, options };
@@ -624,18 +664,54 @@ test("Claude model list asks the CLI with one initialize request and no prompt",
     }) as any
   });
 
-  assert.deepEqual(models, CLAUDE_INITIALIZE_MODELS);
+  assert.deepEqual(answer.models, CLAUDE_INITIALIZE_MODELS);
   assert.equal(launch?.command, "/tmp/claude-stub");
   assert.deepEqual(launch?.args, ["-p", "--safe-mode", "--no-chrome", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]);
-  assert.equal(launch?.options.cwd, "/tmp/trusted-repo");
+  assert.equal(launch?.options.cwd, "/tmp/home");
+  assert.equal(launch?.options.windowsHide, true);
+  assert.equal(launch?.options.detached, process.platform !== "win32");
   assert.equal(launch?.options.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY, "1");
   assert.equal("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE" in launch!.options.env, false);
   assert.equal(written.length, 1);
   assert.deepEqual(JSON.parse(written[0]).request, { subtype: "initialize" });
-  assert.equal(child.killed, true);
+  await wait(5);
+  assert.equal(stdinEnded, true);
 });
 
-test("Claude model list fails plainly when the CLI exits, refuses, or stays silent", async () => {
+test("Claude model list lets the CLI exit by itself, then stops it and its children", async () => {
+  const polite = fakeClaudeChild();
+  answerInitialize(polite, { models: CLAUDE_INITIALIZE_MODELS });
+  polite.stdin.on("finish", () => { polite.exitCode = 0; polite.emit("close", 0); });
+  await runClaudeModelListProbe({
+    executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 1_000, exitGraceMs: 10, killGraceMs: 10,
+    spawnClaude: (() => polite) as any
+  });
+  await wait(40);
+  assert.deepEqual(polite.signals, []);
+
+  const stubborn = fakeClaudeChild();
+  answerInitialize(stubborn, { models: CLAUDE_INITIALIZE_MODELS });
+  await runClaudeModelListProbe({
+    executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 1_000, exitGraceMs: 10, killGraceMs: 10,
+    spawnClaude: (() => stubborn) as any
+  });
+  assert.deepEqual(stubborn.signals, []);
+  await wait(60);
+  assert.deepEqual(stubborn.signals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("Claude model list reads an answer the CLI ends without a newline", async () => {
+  const child = fakeClaudeChild();
+  answerInitialize(child, { models: CLAUDE_INITIALIZE_MODELS }, { trailingNewline: false });
+  child.stdin.on("finish", () => undefined);
+  setTimeout(() => { child.exitCode = 0; child.emit("close", 0); }, 20);
+  const answer = await runClaudeModelListProbe({
+    executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 1_000, spawnClaude: (() => child) as any
+  });
+  assert.deepEqual(answer.models, CLAUDE_INITIALIZE_MODELS);
+});
+
+test("Claude model list fails plainly when the CLI exits, refuses, stays silent, floods, or cannot start", async () => {
   const exiting = fakeClaudeChild();
   const exited = runClaudeModelListProbe({
     executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 1_000,
@@ -657,19 +733,31 @@ test("Claude model list fails plainly when the CLI exits, refuses, or stays sile
   await assert.rejects(runClaudeModelListProbe({
     executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 1_000, spawnClaude: (() => refusing) as any
   }), /did not list its models: unknown request/);
-  assert.equal(refusing.killed, true);
 
   const silent = fakeClaudeChild();
   await assert.rejects(runClaudeModelListProbe({
-    executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 20, spawnClaude: (() => silent) as any
-  }), /did not list its models in time/);
-  assert.equal(silent.killed, true);
+    executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 20, exitGraceMs: 5, killGraceMs: 5, spawnClaude: (() => silent) as any
+  }), (error: unknown) => error instanceof ClaudeModelListTimeoutError);
+  await wait(40);
+  assert.deepEqual(silent.signals, ["SIGTERM", "SIGKILL"]);
+
+  const flooding = fakeClaudeChild();
+  flooding.stdin.on("data", () => queueMicrotask(() => flooding.stdout.write("x".repeat(64))));
+  await assert.rejects(runClaudeModelListProbe({
+    executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 1_000, maxOutputBytes: 16, spawnClaude: (() => flooding) as any
+  }), /exceeded 16 bytes/);
+
+  const missing = fakeClaudeChild();
+  queueMicrotask(() => missing.emit("error", Object.assign(new Error("spawn claude ENOENT"), { code: "ENOENT" })));
+  await assert.rejects(runClaudeModelListProbe({
+    executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 1_000, spawnClaude: (() => missing) as any
+  }), /ENOENT/);
 });
 
-test("Claude model catalog reads the /model picker only when the CLI does not list models on initialize", async () => {
+test("Claude model catalog reads the /model picker only when the CLI answered without models", async () => {
   const runner = makeRunner() as any;
   let pickerReads = 0;
-  runner.runClaudeModelListProbe = async () => CLAUDE_INITIALIZE_MODELS;
+  runner.requestClaudeInitializeAnswer = async () => ({ models: CLAUDE_INITIALIZE_MODELS });
   runner.runClaudeModelProbe = async () => {
     pickerReads += 1;
     return "Select model 1. Default (recommended) ✔ Opus 4.8 2. Fable Fable 5 Enter to set · Esc to cancel";
@@ -679,14 +767,46 @@ test("Claude model catalog reads the /model picker only when the CLI does not li
   assert.equal(listed.authoritative, true);
   assert.equal(pickerReads, 0);
 
-  runner.runClaudeModelListProbe = async () => { throw new Error("initialize unsupported"); };
+  runner.requestClaudeInitializeAnswer = async () => { throw new Error("initialize unsupported"); };
   const fromPicker = await runner.listClaudeModelCatalog("2026-11-20T00:00:00.000Z");
   assert.deepEqual(fromPicker.models.map((model: { id: string }) => model.id), ["fable"]);
   assert.equal(pickerReads, 1);
 
-  runner.runClaudeModelListProbe = async () => [];
+  runner.requestClaudeInitializeAnswer = async () => ({ models: [] });
   await runner.listClaudeModelCatalog("2026-11-20T00:00:00.000Z");
   assert.equal(pickerReads, 2);
+
+  // A CLI that did not answer in time is not asked again through its picker.
+  runner.requestClaudeInitializeAnswer = async () => { throw new ClaudeModelListTimeoutError(""); };
+  await assert.rejects(runner.listClaudeModelCatalog("2026-11-20T00:00:00.000Z"), ClaudeModelListTimeoutError);
+  assert.equal(pickerReads, 2);
+
+  // Both reads empty: the error names the initialize failure, not only the picker.
+  runner.requestClaudeInitializeAnswer = async () => { throw new Error("Claude Code exited with code 1 before listing its models: boom"); };
+  runner.runClaudeModelProbe = async () => "nothing here";
+  await assert.rejects(runner.listClaudeModelCatalog("2026-11-20T00:00:00.000Z"), /did not list any models\. Claude Code exited with code 1 before listing its models: boom/);
+});
+
+test("A signed-out Claude Code model list is shown but read again next time", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("the Windows catalog path keeps its own exact-catalog rules");
+    return;
+  }
+  const runner = makeRunner() as any;
+  let reads = 0;
+  let account: Record<string, unknown> = { tokenSource: "none", apiProvider: "firstParty" };
+  runner.requestClaudeInitializeAnswer = async () => {
+    reads += 1;
+    return { account, models: [{ value: "default", resolvedModel: "opus" }, { value: "opus", resolvedModel: "opus", displayName: "Opus" }] };
+  };
+  const signedOut = await runner.listModelCatalog("claude-code");
+  assert.deepEqual(signedOut.models.map((model: { id: string }) => model.id), ["opus"]);
+  assert.equal(signedOut.authoritative, false);
+  account = { subscriptionType: "Claude Ultra", apiProvider: "firstParty" };
+  const signedIn = await runner.listModelCatalog("claude-code");
+  assert.equal(signedIn.authoritative, true);
+  await runner.listModelCatalog("claude-code");
+  assert.equal(reads, 2);
 });
 
 test("Claude model discovery falls back when the saved repository directory no longer exists", async () => {

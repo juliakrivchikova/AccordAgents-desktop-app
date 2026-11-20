@@ -143,7 +143,11 @@ const MODEL_CATALOG_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_TIMEOUT_MS = 8_000;
 const CLAUDE_WINDOWS_MODEL_PROBE_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_MAX_OUTPUT_BYTES = 256 * 1024;
-const CLAUDE_MODEL_LIST_TIMEOUT_MS = 15_000;
+const CLAUDE_MODEL_LIST_TIMEOUT_MS = 12_000;
+/** How long the CLI gets to exit by itself after its stdin closes (it takes
+ *  under a second), and then after a polite stop, before it is killed. */
+const CLAUDE_MODEL_LIST_EXIT_GRACE_MS = 3_000;
+const CLAUDE_MODEL_LIST_KILL_GRACE_MS = 1_500;
 /** The initialize answer also lists every command and skill, so it is larger
  *  than the picker screen. */
 const CLAUDE_MODEL_LIST_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
@@ -1064,16 +1068,28 @@ export function parseClaudeInitializeModels(value: unknown): ProviderModel[] {
   return dedupeProviderModels(models);
 }
 
+export class ClaudeModelListTimeoutError extends Error {
+  constructor(detail: string) {
+    super(`Claude Code did not list its models in time${detail ? `: ${detail}` : "."}`);
+    this.name = "ClaudeModelListTimeoutError";
+  }
+}
+
 /** Asks Claude Code for its models the way its SDK does: one `initialize`
  *  control request in stream-json mode. No prompt is sent, so no model is
- *  called and no session is written; resolves with the answer's `models`. */
+ *  called and no session is written. Resolves with the whole answer (its
+ *  `models` and `account`). Once answered, stdin is closed so the CLI exits on
+ *  its own; a CLI still running after a grace period is stopped with its
+ *  children. */
 export function runClaudeModelListProbe({
   executable,
   env,
   cwd,
   spawnClaude = spawnCommand,
   timeoutMs = CLAUDE_MODEL_LIST_TIMEOUT_MS,
-  maxOutputBytes = CLAUDE_MODEL_LIST_MAX_OUTPUT_BYTES
+  maxOutputBytes = CLAUDE_MODEL_LIST_MAX_OUTPUT_BYTES,
+  exitGraceMs = CLAUDE_MODEL_LIST_EXIT_GRACE_MS,
+  killGraceMs = CLAUDE_MODEL_LIST_KILL_GRACE_MS
 }: {
   executable: string;
   env: NodeJS.ProcessEnv;
@@ -1081,13 +1097,22 @@ export function runClaudeModelListProbe({
   spawnClaude?: typeof spawnCommand;
   timeoutMs?: number;
   maxOutputBytes?: number;
-}): Promise<unknown> {
+  exitGraceMs?: number;
+  killGraceMs?: number;
+}): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const requestId = `accordagents-models-${randomUUID()}`;
     const child = spawnClaude(
       executable,
       ["-p", "--safe-mode", "--no-chrome", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"],
-      { cwd, env: claudeModelProbeEnv(env), stdio: ["pipe", "pipe", "pipe"] }
+      {
+        cwd,
+        env: claudeModelProbeEnv(env),
+        stdio: ["pipe", "pipe", "pipe"],
+        // Its own process group, so a stop reaches what it started; no console window on Windows.
+        detached: process.platform !== "win32",
+        windowsHide: true
+      }
     );
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
@@ -1095,22 +1120,40 @@ export function runClaudeModelListProbe({
     let stderr = "";
     let capturedBytes = 0;
     let finished = false;
-    const finish = (error?: Error, models?: unknown): void => {
+    const running = (): boolean => child.exitCode === null && child.signalCode === null;
+    const retire = (): void => {
+      child.stdin?.end();
+      if (!running()) {
+        return;
+      }
+      const stop = setTimeout(() => {
+        if (!running()) {
+          return;
+        }
+        terminateProcess(child, "SIGTERM", true);
+        const kill = setTimeout(() => {
+          if (running()) {
+            terminateProcess(child, "SIGKILL", true);
+          }
+        }, killGraceMs);
+        kill.unref();
+      }, exitGraceMs);
+      stop.unref();
+    };
+    const finish = (error?: Error, answer?: Record<string, unknown>): void => {
       if (finished) {
         return;
       }
       finished = true;
       clearTimeout(timeout);
-      child.stdin?.end();
-      if (!child.killed && child.exitCode === null) {
-        child.kill("SIGTERM");
-      }
+      retire();
       if (error) {
         reject(error);
         return;
       }
-      resolve(models);
+      resolve(answer ?? {});
     };
+    const stderrDetail = (): string => stderr.trim().slice(0, MAX_CLI_ERROR_CHARS);
     const readLine = (line: string): void => {
       let message: Record<string, unknown> | undefined;
       try {
@@ -1129,12 +1172,9 @@ export function runClaudeModelListProbe({
         finish(new Error(`Claude Code did not list its models: ${typeof response.error === "string" ? response.error : "initialize failed"}.`));
         return;
       }
-      const body = response.response && typeof response.response === "object" ? response.response as Record<string, unknown> : {};
-      finish(undefined, body.models);
+      finish(undefined, response.response && typeof response.response === "object" ? response.response as Record<string, unknown> : {});
     };
-    const timeout = setTimeout(() => {
-      finish(new Error(`Claude Code did not list its models in time${stderr.trim() ? `: ${stderr.trim().slice(0, MAX_CLI_ERROR_CHARS)}` : "."}`));
-    }, timeoutMs);
+    const timeout = setTimeout(() => finish(new ClaudeModelListTimeoutError(stderrDetail())), timeoutMs);
     timeout.unref();
     child.stdout?.on("data", (chunk: string | Buffer) => {
       const value = String(chunk);
@@ -1167,7 +1207,8 @@ export function runClaudeModelListProbe({
         readLine(pending.trim());
         pending = "";
       }
-      finish(new Error(`Claude Code exited with code ${code ?? "unknown"} before listing its models${stderr.trim() ? `: ${stderr.trim().slice(0, MAX_CLI_ERROR_CHARS)}` : "."}`));
+      const detail = stderrDetail();
+      finish(new Error(`Claude Code exited with code ${code ?? "unknown"} before listing its models${detail ? `: ${detail}` : "."}`));
     });
     child.stdin?.write(`${JSON.stringify({ type: "control_request", request_id: requestId, request: { subtype: "initialize" } })}\n`);
   });
@@ -1558,8 +1599,6 @@ export class CliAgentRunner {
   private runTimeoutMs = CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS;
   private readonly nativeProcessDbPath?: string;
   private readonly claudeModelProbeDir?: string;
-  /** Spawns Claude Code to ask for its model list; tests replace it. */
-  private claudeModelListSpawn: typeof spawnCommand = spawnCommand;
   private readonly warmAgentCreations = new Map<string, Promise<WarmAgentEntry>>();
   private readonly conversationShutdowns = new Map<string, Promise<void>>();
   private readonly conversationOperations = new Map<string, number>();
@@ -1656,10 +1695,13 @@ export class CliAgentRunner {
         ...catalog,
         models: this.dedupeModels(catalog.models)
       };
-      this.modelCatalogs.set(kind, {
-        catalog: normalized,
-        expiresAt: Date.now() + MODEL_CATALOG_CACHE_MS
-      });
+      // A signed-out Claude Code list is provisional (see listClaudeModelCatalog).
+      if (!(kind === "claude-code" && !catalog.authoritative)) {
+        this.modelCatalogs.set(kind, {
+          catalog: normalized,
+          expiresAt: Date.now() + MODEL_CATALOG_CACHE_MS
+        });
+      }
       return normalized;
     })();
     if (!currentRequest) {
@@ -2123,22 +2165,35 @@ export class CliAgentRunner {
 
   private async listClaudeModelCatalog(fetchedAt: string, probeCwd?: string): Promise<ProviderModelCatalog> {
     let models: ProviderModel[] = [];
+    let signedOut = false;
+    let listError: unknown;
     try {
-      models = parseClaudeInitializeModels(await this.runClaudeModelListProbe(probeCwd));
+      const answer = await this.requestClaudeInitializeAnswer();
+      models = parseClaudeInitializeModels(answer.models);
+      const account = answer.account && typeof answer.account === "object" ? answer.account as Record<string, unknown> : undefined;
+      signedOut = account?.tokenSource === "none";
     } catch (error) {
+      listError = error;
       await this.debugLogs?.write("cli.model-catalog.initialize-error", { message: error instanceof Error ? error.message : String(error) });
+      // The /model picker runs the same CLI; one that did not answer in time will not open it either.
+      if (error instanceof ClaudeModelListTimeoutError) {
+        throw error;
+      }
     }
     if (models.length === 0) {
       // A Claude Code build that does not list models on initialize: read its /model picker.
       models = parseClaudeModelPickerOutput(await this.runClaudeModelProbe(probeCwd));
     }
     if (models.length === 0) {
-      throw new Error("Claude model picker did not expose parseable model choices.");
+      const reason = listError instanceof Error ? ` ${listError.message}` : "";
+      throw new Error(`Claude Code did not list any models.${reason}`);
     }
     return {
       kind: "claude-code",
       models,
-      authoritative: true,
+      // Signed out, Claude Code lists only its generic models: show them, but
+      // read again next time so signing in brings the account's own list.
+      authoritative: !signedOut,
       fetchedAt
     };
   }
@@ -2163,14 +2218,16 @@ export class CliAgentRunner {
     return options;
   }
 
-  private async runClaudeModelListProbe(probeCwd?: string): Promise<unknown> {
+  /** Always in the home folder, never a project folder: without the trust
+   *  question `claude -p` would run that project's own settings commands
+   *  (an `apiKeyHelper`, say) just because a Model menu was opened. */
+  private async requestClaudeInitializeAnswer(): Promise<Record<string, unknown>> {
     await ensureLoginShellEnvPrimed();
     const env = commandEnvironment(undefined, CLAUDE_CODE_COMMAND_ENV_OPTIONS);
     return runClaudeModelListProbe({
       executable: await resolveCommandPath("claude", env),
       env,
-      cwd: await resolveClaudeModelProbeCwd(probeCwd, homedir()),
-      spawnClaude: this.claudeModelListSpawn
+      cwd: homedir()
     });
   }
 
