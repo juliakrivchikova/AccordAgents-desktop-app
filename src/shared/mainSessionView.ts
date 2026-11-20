@@ -197,9 +197,15 @@ export interface SessionsTaskEntry {
   since?: string;
   /** Once it ended: how long it took. */
   durationMs?: number;
-  /** One line of the member's reply, or of why it failed. */
+  /** One line of the member's reply, or of why it failed; "Stopped" for a
+   *  stopped task. */
   line?: string;
+  /** The line is a state, not words of the member (shown muted). */
+  lineMuted?: true;
 }
+
+/** The sessions view's words for a member no longer in the chat. */
+export const SESSIONS_REMOVED_MEMBER_DETAIL = "Removed from the chat";
 
 export function sessionsTaskEntries(
   message: Pick<ChatMessage, "id">,
@@ -215,7 +221,9 @@ export function sessionsTaskEntries(
     const reply = item.replyMessageId ? messagesById.get(item.replyMessageId) : undefined;
     const worked = typeof reply?.metadata?.workedMs === "number" && Number.isFinite(reply.metadata.workedMs) ? reply.metadata.workedMs : undefined;
     const elapsed = item.updatedAt ? Date.parse(item.updatedAt) - Date.parse(item.createdAt) : NaN;
-    const line = status === "done" ? sessionsTaskReplyLine(item, messagesById) : status === "failed" ? firstTextLine(item.error) || undefined : undefined;
+    const line = status === "done" ? sessionsTaskReplyLine(item, messagesById)
+      : status === "failed" ? firstTextLine(item.error) || undefined
+        : status === "stopped" ? SESSIONS_WORK_STATUS_LABELS.stopped : undefined;
     return {
       messageId: message.id,
       item,
@@ -223,7 +231,8 @@ export function sessionsTaskEntries(
       status,
       ...(status === "running" ? { since: running && running >= item.createdAt ? running : item.createdAt } : {}),
       ...(status !== "running" && status !== "waiting" && (worked ?? elapsed) >= 0 ? { durationMs: worked ?? elapsed } : {}),
-      ...(line ? { line } : {})
+      ...(line ? { line } : {}),
+      ...(status === "stopped" ? { lineMuted: true as const } : {})
     };
   });
 }

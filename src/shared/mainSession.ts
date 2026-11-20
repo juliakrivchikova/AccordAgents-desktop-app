@@ -21,6 +21,7 @@ import type {
   ChatMessage,
   ChatParticipant,
   ChatParticipantRequestBatch,
+  ChatProviderKind,
   ChatViewMode,
   ConversationMetadata
 } from "./types";
@@ -303,6 +304,9 @@ export function sessionsTaskPlacement(mainMessages: readonly ChatMessage[], inde
 export interface SessionsFormerMember {
   id: string;
   handle: string;
+  /** Its provider as its newest task named it (targetKind), so its logo
+   *  stays once it is gone. */
+  kind?: ChatProviderKind;
 }
 
 export function sessionsFormerMembers(
@@ -312,18 +316,28 @@ export function sessionsFormerMembers(
 ): SessionsFormerMember[] {
   const current = new Set(participants.map((participant) => participant.id));
   const former = new Map<string, SessionsFormerMember>();
-  const note = (id: string | undefined, handle: string | undefined): void => {
+  const note = (id: string | undefined, handle: string | undefined, kind?: ChatProviderKind): void => {
     if (!id || id === mainSessionId || current.has(id)) return;
     const clean = (handle ?? "").trim().replace(/^@/, "");
     const known = former.get(id);
-    if (!known) former.set(id, { id, handle: clean });
-    else if (!known.handle && clean) known.handle = clean;
+    if (!known) former.set(id, { id, handle: clean, ...(kind ? { kind } : {}) });
+    else {
+      if (!known.handle && clean) known.handle = clean;
+      // Messages are oldest first: the newest task's provider wins.
+      if (kind) known.kind = kind;
+    }
   };
   for (const message of messages) {
     if (message.role === "participant") note(message.participantId, message.participantLabel);
-    for (const item of message.metadata?.participantRequest?.items ?? []) note(item.targetParticipantId, item.targetHandle);
+    for (const item of message.metadata?.participantRequest?.items ?? []) {
+      note(item.targetParticipantId, item.targetHandle, isProviderKind(item.targetKind) ? item.targetKind : undefined);
+    }
   }
   return [...former.values()];
+}
+
+function isProviderKind(value: unknown): value is ChatProviderKind {
+  return value === "codex-cli" || value === "claude-code" || value === "gemini-cli";
 }
 
 /** A User's message to the main session as the sessions view shows it: the

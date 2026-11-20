@@ -75,16 +75,17 @@ export function useChatSessionsChrome(input: {
   const links = useMemo<ChatSessionsLinks | undefined>(() => {
     if (!sessions) return undefined;
     const byHandle = new Map<string, ChatSessionsMemberLink>();
-    const add = (id: string, handle: string, member?: ChatParticipant): void => {
+    const add = (id: string, handle: string, member?: Pick<ChatParticipant, "kind" | "hostLabel">): void => {
       const task = sessions.tasksByMember.get(id);
       byHandle.set(handle.replace(/^@/, "").toLowerCase(), {
         id,
         title: sessions.memberTitle(id),
-        ...(member ? { kind: member.kind, hostLabel: member.hostLabel } : {}),
+        ...(member?.kind ? { kind: member.kind, ...(member.hostLabel ? { hostLabel: member.hostLabel } : {}) } : {}),
         ...(task ? { focusMessageId: task.item.replyMessageId ?? task.messageId } : {})
       });
     };
-    for (const row of sessions.formerRows) add(row.member.id, row.member.handle);
+    // A removed member keeps the logo its tasks named (sessionsFormerMembers).
+    for (const row of sessions.formerRows) add(row.member.id, row.member.handle, row.member.kind ? { kind: row.member.kind } : undefined);
     for (const member of input.participantsById.values()) {
       if (member.id !== sessions.mainSessionId) add(member.id, member.handle, member);
     }

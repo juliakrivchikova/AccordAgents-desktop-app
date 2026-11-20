@@ -64,7 +64,7 @@ export {
   sessionsTaskPlacement, sessionsViewLane, withoutLeadingMention
 } from "./mainSession";
 export {
-  SESSIONS_WORK_STATUS_LABELS, firstTextLine, isMainSessionDelegationRosterCard, isMemberWorking, latestTaskByMember, memberRunningSince,
+  SESSIONS_REMOVED_MEMBER_DETAIL, SESSIONS_WORK_STATUS_LABELS, firstTextLine, isMainSessionDelegationRosterCard, isMemberWorking, latestTaskByMember, memberRunningSince,
   openMemberCardMessages, sessionsDelegationSummary, sessionsFormerMemberStatus, sessionsMemberActivity, sessionsMemberDetail, sessionsMemberRows,
   sessionsMemberStatus, sessionsMemberTitle, sessionsTaskEntries, sessionsTaskGroupLabel, sessionsTaskReplyLine, sessionsTaskRunningSince,
   sessionsTaskStatus, sessionsWaitingText

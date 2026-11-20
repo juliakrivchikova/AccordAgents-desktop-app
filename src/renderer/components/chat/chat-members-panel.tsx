@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, X } from "lucide-react";
 
 import type { DockedAccord } from "../../../shared/accordProgress";
-import type { SessionsMemberActivity, SessionsMemberRow } from "../../../shared/mainSessionView";
+import { SESSIONS_REMOVED_MEMBER_DETAIL, type SessionsMemberActivity, type SessionsMemberRow } from "../../../shared/mainSessionView";
 import type { ChatParticipant } from "../../../shared/types";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "../primitives";
@@ -105,9 +105,9 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
               key={row.member.id}
               id={row.member.id}
               status={row.status}
-              mark={<span className="chat-provider-icon" aria-hidden="true" />}
+              mark={row.member.kind ? <ChatProviderMark member={{ kind: row.member.kind }} /> : <span className="chat-provider-icon" aria-hidden="true" />}
               title={row.title}
-              detail="No longer in this chat"
+              detail={SESSIONS_REMOVED_MEMBER_DETAIL}
               onOpen={() => props.onOpenMember(row.member.id)}
             />
           ))}

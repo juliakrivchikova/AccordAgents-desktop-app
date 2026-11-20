@@ -47,6 +47,30 @@ function SessionsMention({ handle, links }: { handle: string; links: ChatSession
   );
 }
 
+const CODE_HANDLE_RE = /(^|[^A-Za-z0-9_])@([A-Za-z0-9][A-Za-z0-9_-]{0,31})(?![A-Za-z0-9_-])/g;
+
+/** Inline code. In the sessions view a member's handle in it is not shown
+ *  either (no handles there): a span that is only a handle is the member's
+ *  chip, a handle among other words its title. */
+function InlineCode({ text }: { text: string }): JSX.Element {
+  const links = useChatSessionsLinks();
+  if (!links) {
+    return <code>{text}</code>;
+  }
+  const whole = text.trim().match(/^@([A-Za-z0-9][A-Za-z0-9_-]{0,31})$/);
+  if (whole && links.byHandle.has(whole[1]!.toLowerCase())) {
+    return <SessionsMention handle={whole[1]!} links={links} />;
+  }
+  const mainHandle = links.mainHandle?.replace(/^@/, "").toLowerCase();
+  const named = text.replace(CODE_HANDLE_RE, (match, before: string, handle: string) => {
+    const key = handle.toLowerCase();
+    if (key === mainHandle) return `${before}${handle}`;
+    const member = links.byHandle.get(key);
+    return member ? `${before}${member.title}` : match;
+  });
+  return <code>{named}</code>;
+}
+
 function Mention({ handle }: { handle: string }): JSX.Element {
   const links = useChatSessionsLinks();
   return links ? <SessionsMention handle={handle} links={links} /> : <DirectoryMention handle={handle} />;
@@ -323,7 +347,7 @@ function renderInlineNode(node: MarkdownInlineNode, key: string): ReactNode {
         />
       );
     }
-    return <code key={key}>{node.text}</code>;
+    return <InlineCode key={key} text={node.text} />;
   }
   if (node.type === "command") {
     return <span key={key} className="chat-command-token">/{node.command}</span>;

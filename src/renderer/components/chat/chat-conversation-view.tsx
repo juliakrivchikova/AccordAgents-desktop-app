@@ -59,7 +59,7 @@ import { ChatViewHeaderContext } from "./chat-view-switch";
 import type { ChatPanelMessageContext } from "./chat-sessions-right-panel";
 import { ChatSessionsWaitingLine } from "./chat-sessions-timeline-row";
 import { ChatSessionsLinksContext, useStableMap } from "./chat-sessions-links";
-import { sessionsComposerProps } from "./chat-sessions-composer";
+import { mainComposerTargetIds, sessionsComposerProps } from "./chat-sessions-composer";
 import { ChatViewRightPanels } from "./chat-view-right-panels";
 
 export type { ChatMessageFocusRequest } from "./chat-conversation-types";
@@ -262,7 +262,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   ): Promise<boolean> {
     promptSuggestions.dismiss();
     // The sessions view's composer writes to the main session, whatever it names.
-    const sent = await props.onSend(repoFileMentions, imageAttachments, skillMentions, content, sessions ? [sessions.mainSessionId] : undefined);
+    const sent = await props.onSend(repoFileMentions, imageAttachments, skillMentions, content, mainComposerTargetIds(sessions?.mainSessionId));
     if (sent) {
       viewport.scrollToChatBottom();
     } else {

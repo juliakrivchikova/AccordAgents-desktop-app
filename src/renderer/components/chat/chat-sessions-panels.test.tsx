@@ -39,7 +39,7 @@ test("the members panel lists every member but the main session, ended ones unde
       <TooltipProvider>
         <ChatMembersPanel
           rows={rows}
-          formerRows={[{ member: { id: "p-gone", handle: "gone" }, title: "Old task", status: "done" }]}
+          formerRows={[{ member: { id: "p-gone", handle: "gone", kind: "gemini-cli" }, title: "Old task", status: "done" }]}
           activity={sessionsMemberActivity(messages)}
           runIdsByParticipantId={new Map([[DREW.id, ["run-drew"]]])}
           memberTitle={(id) => sessionsMemberTitle(PARTICIPANTS.find((member) => member.id === id), latestTaskByMember(messages).get(id)?.item)}
@@ -82,6 +82,8 @@ test("the members panel lists every member but the main session, ended ones unde
   act(() => removed.findAll((node) => node.type === "button")[0]!.props.onClick());
   const gone = memberRows().find((row) => row.props["data-participant-id"] === "p-gone")!;
   assert.match(textOf(gone), /Old task/);
+  assert.match(textOf(gone), /Removed from the chat/, "the same words as the phone");
+  assert.equal(gone.findAll((node) => node.props?.["data-provider-kind"] === "gemini-cli").length, 1, "it keeps the logo its task named");
   assert.equal(gone.findAll(byTestId("chat-members-row-stop")).length, 0, "read-only: no Stop");
   act(() => gone.findAll((node) => node.type === "button" && node.props.className === "chat-members-row-main")[0]!.props.onClick());
   assert.deepEqual(opened, [DREW.id, "p-gone"], "its session opens");
@@ -224,8 +226,15 @@ test("a former member's session is read-only: no composer, no Stop, a line sayin
   const root = renderer.root;
   assert.equal(root.findAll((node) => node.props?.testId === "chat-member-composer").length, 0);
   assert.equal(root.findAll(byTestId("chat-member-session-stop")).length, 0);
-  assert.match(textOf(root.find(byTestId("chat-member-session-gone"))), /no longer in the chat/);
+  assert.match(textOf(root.find(byTestId("chat-member-session-gone"))), /Removed from the chat/);
   assert.deepEqual(root.findAll((node) => node.type === "article").map((article) => article.props["data-message-id"]), ["gera-reply"], "its session stays readable");
+  act(() => renderer.unmount());
+});
+
+test("a former member's session head keeps the provider logo its task named", () => {
+  const renderer = renderSession({ member: { id: GERA.id, kind: "gemini-cli" } });
+  const head = renderer.root.find((node) => typeof node.type === "string" && typeof node.props.className === "string" && node.props.className.includes("chat-member-session-head"));
+  assert.equal(head.findAll((node) => node.props?.["data-provider-kind"] === "gemini-cli").length, 1);
   act(() => renderer.unmount());
 });
 

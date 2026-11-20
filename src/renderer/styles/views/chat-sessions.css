@@ -886,6 +886,11 @@
   font-size: 12.5px;
 }
 
+/* A state ("Stopped"), not the member's words. */
+.chat-delegation-line.is-muted {
+  color: var(--app-muted-subtle);
+}
+
 .chat-delegation-time {
   color: var(--app-muted);
   font-size: 11.5px;

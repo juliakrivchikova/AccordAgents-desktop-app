@@ -10,17 +10,20 @@ export interface ChatComposerStop {
 
 /**
  * The composer's round button. It sends the draft; while `stop` is given and
- * the draft has nothing to send, it stops that run instead, as T3 Code's and
- * Claude's composers do. Typing turns it back into Send, so a message can
- * still go to a member at work (its CLI takes it as it would).
+ * the draft is empty (no text, no picture, none still loading), it stops that
+ * run instead, as T3 Code's and Claude's composers do. Typing or adding a
+ * picture turns it back into Send (disabled while a picture loads), so a
+ * message can still go to a member at work (its CLI takes it as it would).
  */
 export function ChatComposerSendButton(props: {
   canSend: boolean;
+  /** Nothing in the draft at all: no text, no pictures (loading included). */
+  draftEmpty: boolean;
   isRunning: boolean;
   onSend: () => void;
   stop?: ChatComposerStop;
 }): JSX.Element {
-  if (props.stop && !props.canSend) {
+  if (props.stop && props.draftEmpty) {
     return (
       <button
         type="button"

@@ -14,7 +14,8 @@ import { ChatAppToolApprovalCard } from "./chat-app-tool-approval-card";
 import { ChatMemberMark, ChatSessionsPresentationContext, renderComposerMemberMark, renderNewChatMemberMark } from "./chat-member-mark";
 import { ChatComposerSendButton } from "./chat-composer-send-button";
 import { memberDefaultModelName, resetMemberModelCatalogs } from "./chat-member-model-name";
-import { SESSIONS_COMPOSER_PLACEHOLDER, memberModelChip, sessionsComposerProps } from "./chat-sessions-composer";
+import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
+import { SESSIONS_COMPOSER_PLACEHOLDER, mainComposerTargetIds, memberModelChip, sessionsComposerProps } from "./chat-sessions-composer";
 import { ChatSessionsLinksContext, type ChatSessionsLinks } from "./chat-sessions-links";
 import { ChatTurnFinishedNote } from "./chat-turn-finished-note";
 import { DREW, MAIN, PARTICIPANTS, TAYLOR } from "./chat-sessions-fixtures.test";
@@ -149,7 +150,8 @@ test("the sessions view's main composer has no active-runs pill, and its button 
   busy.stop?.onStop();
   assert.deepEqual(stopped, ["run-main", "run-main-queued"], "the main session's runs only");
 
-  const button = (canSend: boolean) => renderIn(true, <ChatComposerSendButton canSend={canSend} isRunning={false} onSend={() => stopped.push("sent")} stop={busy.stop} />);
+  const button = (canSend: boolean, draftEmpty = !canSend) =>
+    renderIn(true, <ChatComposerSendButton canSend={canSend} draftEmpty={draftEmpty} isRunning={false} onSend={() => stopped.push("sent")} stop={busy.stop} />);
   const empty = button(false);
   const stop = empty.root.find((node) => node.type === "button");
   assert.equal(stop.props["data-testid"], "chat-composer-stop");
@@ -162,9 +164,46 @@ test("the sessions view's main composer has no active-runs pill, and its button 
   act(() => send.props.onClick());
   assert.equal(stopped.at(-1), "sent");
   typed.unmount();
-  const classic = renderIn(false, <ChatComposerSendButton canSend={false} isRunning={false} onSend={() => undefined} />);
+  // A picture still loading (nothing sendable yet) is not an empty draft: a disabled Send, not Stop.
+  const loading = button(false, false);
+  const waiting = loading.root.find((node) => node.type === "button");
+  assert.equal(waiting.props["aria-label"], "Send message", "a picture still loading keeps Send");
+  assert.equal(waiting.props.disabled, true);
+  loading.unmount();
+  const classic = renderIn(false, <ChatComposerSendButton canSend={false} draftEmpty isRunning={false} onSend={() => undefined} />);
   assert.equal(classic.root.find((node) => node.type === "button").props.disabled, true, "without a Stop, an empty draft is a disabled Send, as before");
   classic.unmount();
+});
+
+test("a member's settings card names it by its task in the sessions view, the main session as Main session; the classic view keeps the handle", () => {
+  const links: ChatSessionsLinks = {
+    mainSessionId: MAIN.id, mainHandle: "main",
+    byHandle: new Map([["drew", { id: DREW.id, title: "Fix the logout" }]]), openMember: () => undefined
+  };
+  const row = (participant: typeof MAIN) => (
+    <ChatParticipantRosterRow
+      participant={participant} removeDisabledReason={undefined} busy={false} status="idle" runLocationLocked={false}
+      renderParticipantAvatar={() => null} participantRoleLabel={() => "Member"} participantRoleArchived={() => false}
+      onInsertMention={() => undefined} onJumpToLastMessage={() => undefined} onUpdateParticipantRuntime={() => undefined}
+      onCompactParticipant={() => undefined} onRestartParticipant={async () => true} onStopRestart={() => undefined} onRemoveParticipant={() => undefined}
+    />
+  );
+  const name = (root: ReactTestInstance) => textOf(root.find(hasClass("chat-participant-name")));
+  const drew = renderIn(true, <ChatSessionsLinksContext.Provider value={links}>{row(DREW)}</ChatSessionsLinksContext.Provider>);
+  assert.equal(name(drew.root), "Fix the logout");
+  drew.unmount();
+  const main = renderIn(true, <ChatSessionsLinksContext.Provider value={links}>{row(MAIN)}</ChatSessionsLinksContext.Provider>);
+  assert.equal(name(main.root), "Main session");
+  main.unmount();
+  const classic = renderIn(false, row(DREW));
+  assert.match(name(classic.root), /drew/);
+  classic.unmount();
+});
+
+test("only the sessions view's main composer fixes its addressee; the classic one keeps today's routing", () => {
+  assert.deepEqual(mainComposerTargetIds(MAIN.id), [MAIN.id], "sessions view: the main session, whatever the text names");
+  assert.equal(mainComposerTargetIds(undefined), undefined, "classic view: no fixed target, so an @handle addresses that member");
+  assert.deepEqual(sessionsComposerProps(undefined), {}, "and the classic composer is as before");
 });
 
 test("a member without a model of its own: its chip names the model its CLI runs on by default, else the CLI", async () => {

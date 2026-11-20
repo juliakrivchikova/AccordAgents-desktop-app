@@ -1307,6 +1307,9 @@ export type ChatParticipantRequestStatus =
 export interface ChatParticipantRequestItem {
   targetParticipantId: string;
   targetHandle: string;
+  /** The target's provider when it was asked: a member removed later keeps
+   *  its logo in the sessions view (sessionsFormerMembers). */
+  targetKind?: ChatProviderKind;
   prompt: string;
   /** The main session's short title for its task (app_chat_delegate_task),
    *  as T3 Code titles a thread: the sessions view names the member by it.

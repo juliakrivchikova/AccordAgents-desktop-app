@@ -255,6 +255,28 @@ test("a member no longer in the chat is a former member with a readable session"
   assert.equal(sessionsFormerMemberStatus({ status: "running", createdAt: at(1) }), "idle", "a gone member is not shown running");
 });
 
+test("a former member keeps the provider its newest task named, so its logo stays", () => {
+  const messages = chat().map((message) => {
+    const batch = message.metadata?.participantRequest;
+    if (!batch) return message;
+    return { ...message, metadata: { ...message.metadata, participantRequest: { ...batch, items: batch.items.map((item) =>
+      item.targetParticipantId === "p-gera" ? { ...item, targetKind: "gemini-cli" as const } : item) } } };
+  });
+  const current = participants.filter((entry) => entry.id !== "p-gera" && entry.id !== "p-drew");
+  assert.deepEqual(sessionsFormerMembers(messages, current, "p-main").map((entry) => [entry.id, entry.kind]), [["p-drew", undefined], ["p-gera", "gemini-cli"]],
+    "a task given before the provider was recorded leaves it unknown");
+});
+
+test("a stopped task's row says Stopped, muted", () => {
+  const messages = chat();
+  const byId = new Map(messages.map((entry) => [entry.id, entry]));
+  const tasks = messages[3]!;
+  const batch = tasks.metadata!.participantRequest!;
+  const stopped = { ...batch, items: batch.items.map((item) => ({ ...item, status: "interrupted" as const, error: "Stopped by User." })) };
+  const entries = sessionsTaskEntries(tasks, stopped, new Map(), sessionsMemberActivity(messages), byId);
+  assert.deepEqual(entries.map((entry) => [entry.status, entry.line, entry.lineMuted]), [["stopped", "Stopped", true], ["stopped", "Stopped", true]]);
+});
+
 test("members are named by their task, not their handle", () => {
   assert.equal(sessionsMemberTitle({ handle: "drew" }, { prompt: "## Fix the login\n\nmore", targetHandle: "drew" }), "Fix the login");
   assert.equal(sessionsMemberTitle({ handle: "@drew" }), "drew");

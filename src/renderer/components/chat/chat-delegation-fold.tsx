@@ -90,12 +90,14 @@ function ChatDelegationRow(props: {
       onClick={() => props.onOpen?.(entry)}
     >
       <span className="chat-delegation-mark">
-        {participant ? <ChatProviderMark member={participant} /> : <span className="chat-provider-icon" aria-hidden="true" />}
+        {participant
+          ? <ChatProviderMark member={participant} />
+          : entry.item.targetKind ? <ChatProviderMark member={{ kind: entry.item.targetKind }} /> : <span className="chat-provider-icon" aria-hidden="true" />}
         <span className={`chat-delegation-dot is-${entry.status}`} aria-hidden="true" />
       </span>
       <span className="chat-delegation-text">
         <strong className="chat-delegation-title">{entry.title}</strong>
-        {entry.line && <span className="chat-delegation-line">{entry.line}</span>}
+        {entry.line && <span className={entry.lineMuted ? "chat-delegation-line is-muted" : "chat-delegation-line"}>{entry.line}</span>}
       </span>
       <span className="chat-delegation-time">
         {entry.since

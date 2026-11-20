@@ -2,7 +2,7 @@ import { useCallback, useContext, useEffect, useMemo, useRef, type ComponentProp
 
 import type { DockedAccord } from "../../../shared/accordProgress";
 import { memberSessionMessages } from "../../../shared/mainSession";
-import { sessionsMemberDetail, sessionsMemberStatus } from "../../../shared/mainSessionView";
+import { SESSIONS_REMOVED_MEMBER_DETAIL, sessionsMemberDetail, sessionsMemberStatus } from "../../../shared/mainSessionView";
 import type {
   AgentContextUsage,
   AgentRunProgress,
@@ -170,9 +170,11 @@ export function ChatSessionsRightPanel(props: {
   return (
     <ChatMemberSessionPanel
       key={memberId}
-      member={participant ? { id: participant.id, kind: participant.kind, hostLabel: participant.hostLabel } : { id: memberId }}
+      member={participant
+        ? { id: participant.id, kind: participant.kind, hostLabel: participant.hostLabel }
+        : { id: memberId, ...(former?.member.kind ? { kind: former.member.kind } : {}) }}
       title={sessions.memberTitle(memberId)}
-      detail={participant ? memberDetail(participant) : "No longer in this chat"}
+      detail={participant ? memberDetail(participant) : SESSIONS_REMOVED_MEMBER_DETAIL}
       readOnly={!participant}
       settings={participant ? props.renderMemberSettings?.(participant.id) : undefined}
       chip={participant ? props.renderMemberChip?.(participant.id) : undefined}

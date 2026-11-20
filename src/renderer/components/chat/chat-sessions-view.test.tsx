@@ -5,6 +5,7 @@ import { act, create, type ReactTestInstance } from "react-test-renderer";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { activeRunSummaryForConversation } from "../../../shared/chatActiveRuns";
 import type { ChatMessage, ChatViewMode, Conversation } from "../../../shared/types";
+import { ChatDelegationRows } from "./chat-delegation-fold";
 import { ChatMessageItem } from "./chat-message-item";
 import { ChatSessionsPresentationContext } from "./chat-member-mark";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
@@ -136,6 +137,23 @@ test("rows of the main timeline: no avatar, author or thread controls; the User'
   assert.match(textOf(choice), /Which database\?/);
 });
 
+test("a removed member's task row keeps its provider logo; a stopped task's line is a muted Stopped", () => {
+  const entry = {
+    messageId: "tasks", title: "Old task", status: "stopped" as const, line: "Stopped", lineMuted: true as const,
+    item: { targetParticipantId: "p-removed", targetHandle: "removed", targetKind: "gemini-cli" as const, prompt: "Old task", status: "interrupted" as const, createdAt: "2026-11-20T10:00:00.000Z", updatedAt: "2026-11-20T10:01:00.000Z" }
+  };
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(<TooltipProvider><ChatDelegationRows entries={[entry]} participants={[]} /></TooltipProvider>);
+  });
+  const row = renderer!.root.find((node) => node.type === "button" && node.props["data-testid"] === "chat-delegation-row");
+  assert.equal(row.findAll((node) => node.props?.["data-provider-kind"] === "gemini-cli").length, 1, "the logo its task named");
+  const line = row.find(hasClass("chat-delegation-line"));
+  assert.equal(textOf(line), "Stopped");
+  assert.match(line.props.className, /\bis-muted\b/);
+  act(() => renderer!.unmount());
+});
+
 test("while the main session's reply is being written, its turn's tasks show under it, open", () => {
   const messages = sessionsMessages().map((message) => message.id === "main-1" ? { ...message, status: "pending" as const, content: "" } : message);
   const sessions = sessionsOf(sessionsConversation({}, messages))!;
@@ -163,7 +181,7 @@ test("a member's mention in a message is a chip with its logo and task that open
     byHandle: new Map([["gera", { id: GERA.id, title: "Fix the token refresh", kind: GERA.kind, focusMessageId: "gera-reply" }]]),
     openMember: (id, focus) => opened.push(`${id}@${focus}`)
   };
-  const prose = chatMessage("main-2", "participant", 12, { participantId: MAIN.id, content: "Asked @gera (a copy) and @nobody; @main will report." });
+  const prose = chatMessage("main-2", "participant", 12, { participantId: MAIN.id, content: "Asked @gera (a copy) and @nobody; @main will report. See `@gera`, `ask @gera now` and `@main`." });
   const bubble = chatMessage("ask-2", "user", 13, { content: "@main Reply to me", metadata: { askedParticipantIds: [MAIN.id] } });
   let renderer: ReturnType<typeof create> | undefined;
   act(() => {
@@ -177,8 +195,11 @@ test("a member's mention in a message is a chip with its logo and task that open
     );
   });
   const root = renderer!.root;
-  const chip = root.find((node) => node.type === "button" && node.props["data-testid"] === "chat-member-chip");
+  const chips = root.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-member-chip");
+  assert.equal(chips.length, 2, "a handle alone in inline code is a chip too");
+  const chip = chips[0]!;
   assert.equal(textOf(chip), "Fix the token refresh");
+  assert.deepEqual(root.findAll((node) => node.type === "code").map(textOf), ["ask Fix the token refresh now", "main"], "a handle among other code is its title, the main session's its plain name");
   assert.equal(chip.findAll((node) => node.props?.["data-provider-kind"] === GERA.kind).length, 1);
   act(() => chip.props.onClick({ preventDefault: noop }));
   assert.deepEqual(opened, [`${GERA.id}@gera-reply`]);

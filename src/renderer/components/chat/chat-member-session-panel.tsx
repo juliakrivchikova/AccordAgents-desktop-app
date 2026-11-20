@@ -1,7 +1,7 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { ArrowLeft, ChevronDown, ChevronRight, X } from "lucide-react";
 
-import { firstTextLine, type SessionsWorkStatus } from "../../../shared/mainSessionView";
+import { SESSIONS_REMOVED_MEMBER_DETAIL, firstTextLine, type SessionsWorkStatus } from "../../../shared/mainSessionView";
 import type { AppSettings, ChatImageInput, ChatMessage, ChatParticipant, ChatSkillMention, RepoFileMention } from "../../../shared/types";
 import { MarkdownText } from "../content/markdown-text";
 import { TimelineLoadMoreRow } from "../conversation/timeline-primitives";
@@ -168,7 +168,7 @@ export function ChatMemberSessionPanel(props: {
         })}
       </div>
       {props.readOnly ? (
-        <p className="chat-member-session-gone" data-testid="chat-member-session-gone">This member is no longer in the chat. Its session stays here to read.</p>
+        <p className="chat-member-session-gone" data-testid="chat-member-session-gone">{SESSIONS_REMOVED_MEMBER_DETAIL}. Its session stays here to read.</p>
       ) : (
         <ChatComposer
           className="chat-thread-composer chat-member-composer"

@@ -122,6 +122,9 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     images.readyImages.length > 0 ||
     mentions.selectedSkillMentions.length > 0
   );
+  // Stop takes the button's place only for a truly empty draft: a picture
+  // still loading is something to send.
+  const draftEmpty = !props.draft.trim() && images.pendingImages.length === 0 && mentions.selectedSkillMentions.length === 0;
   const hasLeadingPluginToken = draftStartsWithPluginMention(props.draft, mentions.selectedPluginMentions);
   const accordTooltip = props.accordDisabledReason ?? "Start an Accord: reach agreement among chat members";
   const activeRunCount = props.activeRunCount ?? 0;
@@ -384,7 +387,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
               draft={props.draft}
               onDraftChange={props.onDraftChange}
             />
-            <ChatComposerSendButton canSend={canSend} isRunning={props.isRunning} onSend={() => void sendDraft()} stop={props.stop} />
+            <ChatComposerSendButton canSend={canSend} draftEmpty={draftEmpty} isRunning={props.isRunning} onSend={() => void sendDraft()} stop={props.stop} />
           </div>
         </div>
       </div>
