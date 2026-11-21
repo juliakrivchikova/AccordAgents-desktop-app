@@ -2744,8 +2744,19 @@ button.mobile-chat-group-title:active {
   cursor: pointer;
 }
 
-.members-sheet-row.is-openable:active {
+/* Not a press on the member's fork action: that opens its item, not the member. */
+.members-sheet-row.is-openable:active:not(:has(.members-sheet-fork-toggle:active)) {
   background: var(--press);
+}
+
+/* What a tap on a classic member opens: its picture and words, beside its
+   fork action. */
+.members-sheet-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .members-sheet-name-line {

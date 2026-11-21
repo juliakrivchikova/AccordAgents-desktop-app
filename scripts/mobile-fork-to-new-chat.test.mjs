@@ -382,6 +382,38 @@ test("in the classic view the phone forks a member from a small action on its ro
   await rewriteForkAnswers(app, "undefined");
   assert.equal(hub.opsRequests.flatMap((request) => request.ops || []).some((op) => op.kind === "conversation.create"), false, "nothing made yet");
 
+  // The item closes with the sheet: reopened, no member's item is open.
+  await openSheetFork(app, "p-gera");
+  await app.evaluate(`document.getElementById("members-sheet-close").click()`);
+  await app.waitFor(`!(${visible("#members-sheet")})`, "the sheet closed");
+  await app.evaluate(`document.getElementById("chat-members-toggle").click()`);
+  await app.waitFor(`${visible("#members-sheet")} && document.querySelectorAll("#members-sheet-list [data-member-fork]").length === 3`, "the sheet again");
+  assert.equal(await app.evaluate(`document.getElementById("members-sheet-fork")`), null);
+  assert.deepEqual(await app.evaluate(`[...document.querySelectorAll("#members-sheet-list [data-member-fork]")].map((button) => button.getAttribute("aria-expanded"))`), ["false", "false", "false"]);
+  // A member's row is no button around its fork action: what it opens is beside it.
+  assert.equal(await app.evaluate(`document.querySelector("#members-sheet-list [data-member-fork]").closest('[role="button"]')`), null);
+
+  // The chat drawn again under the open item (a new message): it keeps its answer.
+  assert.equal((await openSheetFork(app, "p-assistant")).disabled, "false");
+  await hub.addMessages("conv-old", [{ id: "u-later", role: "user", content: "Anything else?", status: "done", createdAt: new Date().toISOString(), metadata: { deliveryTargets: [ASSISTANT.id] } }]);
+  await app.waitFor(`[...document.querySelectorAll("#message-list .message-row")].some((row) => row.textContent.includes("Anything else?"))`, "the new message");
+  assert.deepEqual(await app.evaluate(sheetFork), { under: "p-assistant", disabled: "false", label: "Fork to new chat",
+    detail: "A new chat whose main session starts from a copy of this session", open: ["p-assistant"] });
+
+  // The phone cannot write its queue: nothing is queued or listed, and the item says why.
+  await app.evaluate(`(() => { const real = IDBObjectStore.prototype.put; IDBObjectStore.prototype.put = function () {
+      if (this.name !== "outbox") return real.apply(this, arguments);
+      IDBObjectStore.prototype.put = real;
+      throw new Error("QA: the phone's storage is full");
+    };
+    document.getElementById("members-sheet-fork").click(); })()`);
+  await app.waitFor(`document.getElementById("members-sheet-fork-detail").textContent === "Could not start the chat: QA: the phone's storage is full"`, "the failure, in the item");
+  assert.equal(await app.evaluate(visible("#members-sheet")), true);
+  assert.equal(await app.evaluate(`localStorage.getItem("accordagents.mobile.startedChats.v1")`), null, "nothing left in the list");
+  assert.equal(hub.opsRequests.flatMap((request) => request.ops || []).some((op) => op.kind === "conversation.create"), false);
+  await app.evaluate(`${sheetRow("p-assistant")}.querySelector("[data-member-fork]").click()`);
+  await app.waitFor(`document.getElementById("members-sheet-fork") === null`, "the item closed");
+
   // The Assistant, forked: the same chat the title's menu makes.
   const ready = await openSheetFork(app, "p-assistant");
   assert.deepEqual({ disabled: ready.disabled, detail: ready.detail }, { disabled: "false", detail: "A new chat whose main session starts from a copy of this session" });

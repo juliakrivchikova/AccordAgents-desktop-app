@@ -13269,6 +13269,7 @@
     const shared = mobileSharedRules();
     if (forkStarting || !shared) return;
     forkStarting = true;
+    const startedFor = forkMenu && forkMenu.plan === plan ? forkMenu.key : undefined;
     renderForkItems();
     const conversationId = createEventId();
     let listed = false;
@@ -13309,7 +13310,7 @@
     } catch (error) {
       if (listed) forgetStartedChat(conversationId);
       forkStarting = false;
-      if (forkMenu) forkMenu = { ...forkMenu, reason: "Could not start the chat: " + (error && error.message ? error.message : String(error)), plan: undefined };
+      if (forkMenu && forkMenu.key === startedFor) forkMenu = { ...forkMenu, reason: "Could not start the chat: " + (error && error.message ? error.message : String(error)), plan: undefined };
       renderForkItems();
       return;
     }
@@ -13656,6 +13657,8 @@
     const conversationId = selectedConversationId();
     const stopAll = document.getElementById("members-sheet-stop-all");
     if (chat && chatViewOf(chat) === "sessions") {
+      // The classic view's fork item does not stay open across a switch.
+      membersSheetForkId = undefined;
       // Drawn from the chat's last drawing; until it is in, the sheet keeps
       // what it shows.
       if (lastSessionsState && lastSessionsState.conversationId === conversationId) renderSessionsMembersSheet(lastSessionsState, list, title);
@@ -13666,7 +13669,9 @@
     const targets = membersSheetTargets.conversationId === conversationId ? membersSheetTargets : undefined;
     // Redrawn only when what it shows changed: a member streaming redraws the
     // chat every second or so, and a row replaced under the finger loses the tap.
-    const forkable = forkOffered();
+    // Members known only by handle (a chat listed without its members) are
+    // not offered: the server finds a member by its id.
+    const forkable = forkOffered() && Boolean(chat) && Array.isArray(chat.members) && chat.members.length > 0;
     const signature = JSON.stringify([conversationId, forkable, members.map(function (member) {
       return [member.id, member.handle, member.displayName, member.roleLabel, member.kind, memberLocationLabel(member), member.avatarId || "",
         Boolean(targets && targets.running.has(memberHandleKey(member.handle))), Boolean(memberSheetTarget(member)), membersSheetForkId === member.id];
@@ -13721,11 +13726,17 @@
       location.className = "members-sheet-location";
       location.textContent = memberLocationLabel(member);
       copy.append(nameLine, role, location);
-      row.append(avatar, copy);
+      // What a tap opens (its last message) is its own element beside the
+      // fork action: a button inside a role=button would be out of a screen
+      // reader's reach. A tap anywhere else on the row opens it too.
+      const open = document.createElement("span");
+      open.className = "members-sheet-open";
+      open.append(avatar, copy);
+      row.append(open);
       if (memberSheetTarget(member)) {
         row.classList.add("is-openable");
-        row.setAttribute("role", "button");
-        row.tabIndex = 0;
+        open.setAttribute("role", "button");
+        open.tabIndex = 0;
       }
       // Fork to new chat: a small action on the member, as on the computer's
       // roster card. A tap opens its item under the member (what it makes,
@@ -13744,7 +13755,7 @@
     button.type = "button";
     button.className = "mobile-icon-button is-muted members-sheet-fork-toggle";
     button.dataset.memberFork = member.id;
-    button.setAttribute("aria-label", "Fork to new chat: " + member.displayName);
+    button.setAttribute("aria-label", mobileSharedRules().FORK_TO_NEW_CHAT_LABEL + ": " + member.displayName);
     button.setAttribute("aria-expanded", open ? "true" : "false");
     if (open) button.setAttribute("aria-controls", "members-sheet-fork");
     button.append(lineIcon(FORK_ICON_PATHS, 18));
@@ -13768,6 +13779,7 @@
     const detail = document.createElement("span");
     detail.id = "members-sheet-fork-detail";
     detail.className = "chat-title-menu-detail";
+    detail.setAttribute("aria-live", "polite");
     copy.append(label, detail);
     button.append(copy);
     return button;
@@ -13784,13 +13796,20 @@
    *  again from the server, whatever it said before; a second tap closes it. */
   function toggleMembersSheetFork(participantId) {
     const chat = activeChatRecord();
-    if (!chat || !participantId) return;
+    // While a fork is being made its item says so; another opens after.
+    if (!chat || !participantId || forkStarting) return;
+    const focused = document.activeElement instanceof Element && document.activeElement.closest("[data-member-fork]") !== null;
     membersSheetForkId = membersSheetForkId === participantId ? undefined : participantId;
     if (membersSheetForkId) {
       forkMenu = undefined;
       void readForkPlan(chat, membersSheetForkId);
     }
     renderMembersSheet(chat);
+    // The list is drawn again: the toggle tapped keeps the focus, and the
+    // item it opened is brought into view on a long list.
+    const toggle = [...document.querySelectorAll("#members-sheet-list [data-member-fork]")].find(function (button) { return button.dataset.memberFork === participantId; });
+    if (focused && toggle) toggle.focus();
+    if (membersSheetForkId) document.getElementById("members-sheet-fork")?.scrollIntoView({ block: "nearest" });
   }
 
   function renderMembersSheetIfOpen(chat) {
