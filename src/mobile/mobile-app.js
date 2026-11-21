@@ -12540,7 +12540,7 @@
     const source = String(text || "");
     const shared = mobileSharedRules();
     if (!scope || !shared || typeof shared.sessionsMentionPieces !== "function") return source ? [{ text: source }] : [];
-    return shared.sessionsMentionPieces(source, function (handle) { return scope.byHandle.has(handle); });
+    return shared.sessionsMentionPieces(source, function (handle) { return scope.byHandle.has(handle); }, function (handle) { return handle === scope.mainHandle; });
   }
 
   /** A member's chip: its provider's logo and its task, opening its session. */

@@ -54,7 +54,7 @@ function SessionsMention({ handle, links }: { handle: string; links: ChatSession
  *  written. */
 function InlineCode({ text }: { text: string }): JSX.Element {
   const links = useChatSessionsLinks();
-  const pieces = links ? sessionsMentionPieces(text, (handle) => links.byHandle.has(handle)) : [];
+  const pieces = links ? sessionsMentionPieces(text, (handle) => links.byHandle.has(handle), (handle) => handle === links.mainHandle?.toLowerCase()) : [];
   if (!links || !pieces.some((piece) => piece.handle !== undefined)) {
     return <code>{text}</code>;
   }
@@ -80,7 +80,7 @@ function withSessionsMentions(nodes: MarkdownInlineNode[], links: ChatSessionsLi
   let run = "";
   const flush = (): void => {
     if (!run) return;
-    for (const piece of sessionsMentionPieces(run, (handle) => links.byHandle.has(handle))) {
+    for (const piece of sessionsMentionPieces(run, (handle) => links.byHandle.has(handle), (handle) => handle === links.mainHandle?.toLowerCase())) {
       result.push(piece.handle !== undefined ? { type: "mention", handle: piece.handle } : { type: "text", text: piece.text });
     }
     run = "";

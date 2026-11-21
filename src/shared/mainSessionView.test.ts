@@ -341,6 +341,9 @@ test("a member's handle is its chip only as an exact @handle of a current or for
   assert.deepEqual(pieces("Asked @gera and @Drew-2, then @main and @nobody."), [
     { text: "Asked " }, { handle: "gera" }, { text: " and " }, { handle: "Drew-2" }, { text: ", then @main and @nobody." }
   ], "members by their handle in any case; the main session and nobody as written");
+  assert.deepEqual(sessionsMentionPieces("@main ping @gera", isMember, (key) => key === "main"), [
+    { text: "main" }, { text: " ping " }, { handle: "gera" }
+  ], "the main session's handle is a plain word without its @ (the sessions view has no handles)");
   assert.deepEqual(pieces("@gera"), [{ handle: "gera" }]);
   assert.deepEqual(pieces("ask @gera now"), [{ text: "ask " }, { handle: "gera" }, { text: " now" }]);
   assert.deepEqual(pieces("(@gera), @gera: @gera."), [{ text: "(" }, { handle: "gera" }, { text: "), " }, { handle: "gera" }, { text: ": " }, { handle: "gera" }, { text: "." }]);

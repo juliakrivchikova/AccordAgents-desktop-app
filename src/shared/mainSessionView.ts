@@ -375,10 +375,15 @@ export type SessionsMentionPiece = { text: string; handle?: undefined } | { hand
  * exact `@handle` of a member of the chat or a former one (`isMember`, given
  * the handle in lower case) is that member's chip: at most 32 characters, not
  * part of a longer word, an e-mail address, a path or a package name such as
- * `@types/node`. Everything else, the main session's handle and handles of
- * nobody included, stays as written.
+ * `@types/node`. The main session's handle (`isMainSession`) is shown as a
+ * plain word without its "@" (the sessions view has no handles, the User,
+ * 2026-11-20). Everything else, handles of nobody included, stays as written.
  */
-export function sessionsMentionPieces(text: string, isMember: (handle: string) => boolean): SessionsMentionPiece[] {
+export function sessionsMentionPieces(
+  text: string,
+  isMember: (handle: string) => boolean,
+  isMainSession: (handle: string) => boolean = () => false
+): SessionsMentionPiece[] {
   const source = typeof text === "string" ? text : "";
   const pattern = /(^|[^A-Za-z0-9_@./\\-])@([A-Za-z0-9][A-Za-z0-9_-]*)(?![A-Za-z0-9_\-/])/g;
   const pieces: SessionsMentionPiece[] = [];
@@ -386,10 +391,12 @@ export function sessionsMentionPieces(text: string, isMember: (handle: string) =
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(source)) !== null) {
     const handle = match[2]!;
-    if (handle.length > SESSIONS_MENTION_HANDLE_MAX_CHARS || !isMember(handle.toLowerCase())) continue;
+    if (handle.length > SESSIONS_MENTION_HANDLE_MAX_CHARS) continue;
+    const main = isMainSession(handle.toLowerCase());
+    if (!main && !isMember(handle.toLowerCase())) continue;
     const start = match.index + match[1]!.length;
     if (start > cursor) pieces.push({ text: source.slice(cursor, start) });
-    pieces.push({ handle });
+    pieces.push(main ? { text: handle } : { handle });
     cursor = start + 1 + handle.length;
   }
   if (cursor < source.length) pieces.push({ text: source.slice(cursor) });
