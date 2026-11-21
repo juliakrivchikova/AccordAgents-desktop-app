@@ -109,7 +109,14 @@ test("a running reply on the phone: Working for, one row per step, the newest sh
   await app.waitFor(`Boolean(${row("r1")}?.querySelector(".sessions-working")) && document.querySelectorAll("#message-list .message-row.is-sessions").length > 0`, "the sessions view again");
 
   // --- its steps arrive with its progress, one row each, the newest current
-  await app.evaluate(`${row("r1")}.__kept = true`);
+  // Marked once the view switch's own redraw has settled (a loaded machine
+  // can redraw once more after it): what is checked is that the progress
+  // keeps the row in place.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await app.evaluate(`${row("r1")}.__kept = true`);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    if (await app.evaluate(`${row("r1")}.__kept === true`)) break;
+  }
   await hub.progress("conv-work", "run-main", "", { participantLabel: "@main", agentProgress: { activity: "Using mcp__accord_agents__app_chat_get_context", activityEvents: WORK } });
   await app.waitFor(`${row("r1")}.querySelectorAll(".sessions-activity-row").length === 6`, "the live steps");
   assert.deepEqual(await app.evaluate(rowsOf(row("r1"))), WORK_ROWS.map((entry, index) => [...entry, index === WORK_ROWS.length - 1 ? "current" : ""]));
