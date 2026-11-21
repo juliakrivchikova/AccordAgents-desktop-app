@@ -297,7 +297,8 @@ chat as that chat's main session, with everything it knew
   words, the member as it runs (`memberAsItRunsNow`), and makes the main
   session with `forkedMainSessionFor` (the computer's own result, checked by
   a test), then queues `conversation.create` and the intro line like its New
-  chat and opens the chat at once. A server or computer from before says it
+  chat and opens the chat at once (unless she left the chat while it was
+  made: below). A server or computer from before says it
   must update. "Ran" for a member on a machine is one rule everywhere
   (`isFinishedMemberReply`: a finished reply, an error too; never one still
   being written nor a placeholder shown for a turn elsewhere), and the
@@ -321,6 +322,17 @@ chat as that chat's main session, with everything it knew
   machine none (`forkReadiness`, `CliReadinessService.refreshKinds`). When
   the check still takes a moment (reading the computer's environment first),
   a "Forking to a new chat…" notice shows after 150 ms until the chat is made.
+  When she has gone to another chat or screen by the time it is made (a
+  chat opened from the sidebar, search, Activity or a notice; New chat;
+  Activity; Settings), that stays on screen and keeps the keyboard: the new
+  chat is listed and a notice says "Forked to a new chat: <title>" with Open
+  (`stillHere` in `forkChatParticipantToNewChat`; told by what the latest
+  open request was for, `openConversationTargetRef`, since Back from Activity
+  and a click on the open chat count as requests too); a refusal is then a
+  notice too, not the error banner of the chat she opened. On the phone,
+  where the tap waits on her server for up to 4 s, the same: gone from the
+  chat, she stays where she is and the new chat is in her list
+  (`stillInForkedChat`; the phone has no notices).
 - Its first turn (on the device it runs on) reads the member's session from
   the member's chat there (`startFromForkOrigin`; only that chat's session
   records) and forks it as a delegated fork does (`forkFrom` with the source

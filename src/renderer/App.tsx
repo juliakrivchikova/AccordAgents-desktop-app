@@ -109,6 +109,14 @@ function App(): JSX.Element {
 
   const navigation = useAppNavigation(state, conversationActions);
   useFileEditLifecycle({ conversationId: state.conversation?.id, artifacts, openChat: navigation.openChat });
+  // Fork to new chat: a fork made after she went to another chat or screen
+  // is opened from its notice as the sidebar opens a chat, as navigation
+  // stands when she clicks it.
+  const openChatRef = React.useRef(navigation.openChat);
+  openChatRef.current = navigation.openChat;
+  const forkToNewChat = (participantId: string): void => {
+    void chatActions.forkChatParticipantToNewChat(participantId, { openChat: (conversationId) => openChatRef.current(conversationId) });
+  };
   const { openSettingsSection } = navigation;
   const urgentAlertActions = React.useMemo(() => ({
     openAlertSettings: () => openSettingsSection("alerts"),
@@ -329,7 +337,7 @@ function App(): JSX.Element {
       onStopRestart={(runId) => void window.consensus.cancelReview(runId)}
       restartingById={restartingMembers(state.progressLog)}
       onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
-      onForkToNewChat={(participantId) => void chatActions.forkChatParticipantToNewChat(participantId)}
+      onForkToNewChat={forkToNewChat}
       forkToNewChatReason={forkToNewChatReason}
       onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
       onManageInSettings={() => openSettingsSection("participants")}
@@ -360,7 +368,7 @@ function App(): JSX.Element {
         restartStatus={restartingMembers(state.progressLog).get(memberId)}
         onRemove={isMain ? undefined : () => void chatActions.removeChatParticipant(memberId)}
         removeDisabledReason={view.busyParticipantIds.has(memberId) ? "busy" : undefined}
-        onForkToNewChat={() => void chatActions.forkChatParticipantToNewChat(memberId)}
+        onForkToNewChat={() => forkToNewChat(memberId)}
         forkToNewChatDisabledReason={forkToNewChatReason(participant)}
       />
     );

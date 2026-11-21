@@ -171,6 +171,7 @@ export function useConversationActions(state: AppState): ConversationActions {
     const previous = state.conversation;
     const requestId = state.openConversationRequestRef.current + 1;
     state.openConversationRequestRef.current = requestId;
+    state.openConversationTargetRef.current = id;
     state.setError(undefined);
     if (state.conversation?.id !== id) {
       state.setWarnings([]);
@@ -661,6 +662,7 @@ export function useConversationActions(state: AppState): ConversationActions {
     // A chat still loading (for example the Activity detail) must not land on
     // top of what replaces it once its load finishes.
     state.openConversationRequestRef.current += 1;
+    state.openConversationTargetRef.current = undefined;
     state.setOpeningConversationId(undefined);
     state.setConversation(undefined);
     state.setMessagePage(undefined);

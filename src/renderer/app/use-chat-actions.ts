@@ -46,6 +46,7 @@ import { newChatTitle } from "../../shared/newChat";
 import { persistLastViewedAt } from "./storage";
 import { requestComposerFocus, takeComposerFocusRequest } from "./composer-focus-request";
 import { laterLoadingNotice } from "./later-loading-notice";
+import { toast } from "sonner";
 import { cleanIpcError } from "../lib/ipc-error";
 import { serializeComposerDraft } from "../components/chat/chat-composer-draft-utils";
 import { revokePendingImageUrls } from "../components/chat/use-chat-composer-images";
@@ -55,6 +56,12 @@ import {
   NO_READY_CLI_MESSAGE,
   resolveAssistantProviderKind
 } from "../../shared/cliReadiness";
+
+export interface ForkToNewChatOptions {
+  /** Opens a chat as the sidebar does, from the notice of a fork made after
+   *  she went to another chat or screen. */
+  openChat?: (conversationId: string) => void;
+}
 
 export interface ChatActions {
   startChat: (options?: StartChatOptions) => Promise<boolean>;
@@ -74,7 +81,7 @@ export interface ChatActions {
   compactChatParticipant: (participantId: string, options?: ChatRunScopeOptions) => Promise<boolean>;
   restartChatParticipant: (participantId: string, stopBackgroundTasks?: boolean) => Promise<boolean>;
   /** Fork to new chat: a new chat whose main session is a copy of this member. */
-  forkChatParticipantToNewChat: (participantId: string) => Promise<boolean>;
+  forkChatParticipantToNewChat: (participantId: string, options?: ForkToNewChatOptions) => Promise<boolean>;
   startChatAccord: (options: StartChatAccordOptions) => Promise<boolean>;
   respondToChatAppToolApproval: (
     approvalId: string,
@@ -679,14 +686,27 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
    * Fork to new chat (src/shared/forkToNewChat.ts): makes a new chat whose
    * main session is a copy of this member of the open chat, opens it, and
    * hands its empty composer the keyboard; the first message sent there
-   * makes the fork. Made through the same path as every new chat.
+   * makes the fork. Made through the same path as every new chat. Making it
+   * can take a moment: when she has gone to another chat or screen by then,
+   * that stays on screen with the keyboard; the new chat is listed and a
+   * notice says it is ready, with a way to open it.
    */
-  async function forkChatParticipantToNewChat(participantId: string): Promise<boolean> {
+  async function forkChatParticipantToNewChat(participantId: string, options: ForkToNewChatOptions = {}): Promise<boolean> {
     if (!state.conversation || state.conversation.kind !== "chat") return false;
     const conversationId = state.conversation.id;
     if (state.startingChatRef.current) return false;
     state.startingChatRef.current = true;
     state.setError(undefined);
+    // Still on the chat she forked from, on the same screen: no other chat
+    // opened since (from the sidebar, search, Activity or a notice), not New
+    // chat, Activity or Settings. Back from Activity and a click on the open
+    // chat count as open requests too, so the latest request is told by
+    // what it was for, never by the count alone.
+    const railViewAtClick = state.railViewRef.current;
+    const openRequestAtClick = state.openConversationRequestRef.current;
+    const stillHere = (): boolean =>
+      state.railViewRef.current === railViewAtClick &&
+      (state.openConversationRequestRef.current === openRequestAtClick || state.openConversationTargetRef.current === conversationId);
     // Checking its CLI can take a moment: said at once, gone once it is made.
     const notice = laterLoadingNotice("Forking to a new chat…");
     try {
@@ -698,8 +718,16 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       });
       notice.end();
       const created = result.conversation;
-      requestComposerFocus(created.id);
       state.setSummaries((current) => upsertConversationSummary(current, created));
+      if (!stillHere()) {
+        const openChat = options.openChat;
+        toast.success(`Forked to a new chat: ${created.title}`, openChat ? {
+          action: { label: "Open", onClick: () => { requestComposerFocus(created.id); openChat(created.id); } }
+        } : undefined);
+        await conversationActions.refreshConversations().catch(() => undefined);
+        return true;
+      }
+      requestComposerFocus(created.id);
       state.setRailView("chats");
       const openRequest = state.openConversationRequestRef.current + 1;
       await conversationActions.openConversation(created.id);
@@ -709,7 +737,11 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       await conversationActions.refreshConversations().catch(() => undefined);
       return true;
     } catch (caught) {
-      state.setError(cleanIpcError(caught));
+      // Said where she is: in the chat she forked from, or by a notice once
+      // she has gone elsewhere (an error banner there would be about a chat
+      // she is not looking at).
+      if (stillHere()) state.setError(cleanIpcError(caught));
+      else toast.error(cleanIpcError(caught));
       return false;
     } finally {
       notice.end();

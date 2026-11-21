@@ -154,6 +154,11 @@ export interface AppState {
   setUnreadConversationIds: StateSetter<Set<string>>;
   progressLogRef: React.MutableRefObject<ReviewProgress[]>;
   openConversationRequestRef: React.MutableRefObject<number>;
+  // The chat the latest open request is for (undefined: a request that took
+  // the chat off screen), set with each new openConversationRequestRef. The
+  // count alone does not say she opened another chat: Back from Activity
+  // and a click on the chat already open count too.
+  openConversationTargetRef: React.MutableRefObject<string | undefined>;
   chatMessageFocusNonceRef: React.MutableRefObject<number>;
   activityRefreshRequestRef: React.MutableRefObject<number>;
   summaryRefreshRequestRef: React.MutableRefObject<number>;
@@ -263,6 +268,7 @@ export function useAppState(): AppState {
   const [unreadConversationIds, setUnreadConversationIds] = useState<Set<string>>(new Set());
   const progressLogRef = useRef<ReviewProgress[]>([]);
   const openConversationRequestRef = useRef(0);
+  const openConversationTargetRef = useRef<string | undefined>();
   const chatMessageFocusNonceRef = useRef(0);
   const activityRefreshRequestRef = useRef(0);
   const summaryRefreshRequestRef = useRef(0);
@@ -316,7 +322,7 @@ export function useAppState(): AppState {
     setChatComposerSkillMentions, chatComposerPluginMentions, setChatComposerPluginMentions, chatComposerFileMentions,
     setChatComposerFileMentions, clearChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
-    setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef,
+    setUnreadConversationIds, progressLogRef, openConversationRequestRef, openConversationTargetRef, chatMessageFocusNonceRef,
     activityRefreshRequestRef, summaryRefreshRequestRef, agentRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,
     lastViewedAtRef, startingChatRef, chatCreationRef, railViewRef, chatBeforeActivityRef, previewLoadedAtRef
   };

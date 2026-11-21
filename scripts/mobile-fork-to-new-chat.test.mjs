@@ -454,3 +454,91 @@ test("in the classic view the phone forks a member from a small action on its ro
   const source = await hub.storage.getConversation("conv-old");
   assert.equal(source?.metadata.participants.length, 3, "the member and its chat are not touched");
 });
+
+// --- she leaves before the fork is made -----------------------------------
+// Making the chat waits on her server (the reply the copy ends with, up to
+// 4 s): a chat or screen she opened meanwhile stays on screen with its
+// keyboard, and the new chat is in her list. Staying, it opens (above).
+test("a fork made after she opened another chat or went back to her chats leaves her there, the new chat in her list", { timeout: 180_000 }, async (t) => {
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: 8413, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-fork-left-");
+  const chrome = launchChrome({ port: 9563, profile, url: `${site.origin}/` });
+  let app;
+  t.after(async () => {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  await hub.createChat("conv-main", {
+    title: "Login page", repoPath: "/Users/u/site", participants: [MAIN], createdAt: at(31),
+    metadata: { mainSessionParticipantId: MAIN.id, chatView: "sessions" }, messages: chatMessages().slice(0, 2)
+  });
+  await hub.createChat("conv-other", {
+    title: "Other work", repoPath: "/Users/u/site", participants: [MAIN], createdAt: at(32),
+    metadata: { mainSessionParticipantId: MAIN.id, chatView: "sessions" },
+    messages: [{ id: "o1", role: "user", content: "Something else", status: "done", createdAt: at(32), metadata: { deliveryTargets: [MAIN.id] } }]
+  });
+  const published = await hub.call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(),
+    roles: { "software-engineer": "Engineer", "main-session": "Main session" }, prompts: [], skills: [], avatars: {},
+    newChat: { projects: [{ path: "/Users/u/site", label: "site" }], defaultProject: "/Users/u/site", mainSession: OFFERED_MAIN, assistant: OFFERED_MAIN,
+      defaultChatView: "sessions", members: [], fork: FORK_OFFER } } });
+  assert.equal(published.ok, true);
+  app = await attachApp({ port: 9563 });
+  await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+  const creates = () => hub.opsRequests.flatMap((request) => request.ops || []).filter((op) => op.kind === "conversation.create");
+  const onScreen = `({ open: document.getElementById("timeline-screen").classList.contains("is-active") ? document.getElementById("message-list").dataset.conversationId : undefined,
+    chats: document.getElementById("chats-screen").classList.contains("is-active"), title: document.getElementById("chat-title").textContent,
+    keyboard: document.activeElement ? document.activeElement.id : "", menu: !document.getElementById("chat-title-menu").hidden })`;
+  const listed = (conversationId) => `Boolean(document.querySelector('.mobile-chat-row[data-conversation-id=${JSON.stringify(conversationId)}]'))`;
+
+  /** Taps Fork for the main session of "Login page" with her server slow to
+   *  answer the read at the tap, then does `leave` before it is made. */
+  async function forkAndLeave(leave) {
+    await openChat(app, "conv-main");
+    await app.waitFor(mainShown, "the main timeline");
+    assert.equal((await openForkMenu(app)).disabled, "false");
+    const before = creates().length;
+    await app.evaluate(`(() => { const real = window.__realFetch || window.fetch; window.__realFetch = real;
+      window.fetch = async function (input, init) {
+        if (String(input && input.url || input).indexOf("/v1/phone/new-chat") >= 0) await new Promise((resolve) => setTimeout(resolve, 2500));
+        return real.call(window, input, init);
+      }; })()`);
+    await app.evaluate(`document.getElementById("chat-title-fork").click()`);
+    await app.waitFor(`document.getElementById("chat-title-fork-detail").textContent === "Starting the new chat…"`, "the fork on its way");
+    await app.evaluate(`document.getElementById("back-to-chats").click()`);
+    await app.waitFor(`document.getElementById("chats-screen").classList.contains("is-active")`, "her chats");
+    await leave();
+    const end = Date.now() + 15_000;
+    while (creates().length === before && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 100));
+    const create = creates()[before];
+    assert.ok(create, "the fork was made");
+    assert.equal(create.conversation.title, "Login page (fork)");
+    await app.evaluate(`window.fetch = window.__realFetch`);
+    await app.waitFor(listed(create.conversationId), "the new chat in her list");
+    // Long enough for a late opening to have shown.
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    return create;
+  }
+
+  // She opened another chat and started typing there.
+  await forkAndLeave(async () => {
+    await openChat(app, "conv-other");
+    await app.evaluate(`document.getElementById("composer-input").focus()`);
+  });
+  assert.deepEqual(await app.evaluate(onScreen), { open: "conv-other", chats: false, title: "Other work", keyboard: "composer-input", menu: false },
+    "the chat she opened stays, with its keyboard");
+
+  // She went back to her chats and stays there.
+  await app.evaluate(`document.getElementById("back-to-chats").click()`);
+  await app.waitFor(`document.getElementById("chats-screen").classList.contains("is-active")`, "her chats");
+  const second = await forkAndLeave(async () => undefined);
+  const shown = await app.evaluate(onScreen);
+  assert.deepEqual({ open: shown.open, chats: shown.chats, menu: shown.menu }, { open: undefined, chats: true, menu: false }, "her chats stay");
+  assert.notEqual(shown.keyboard, "composer-input");
+  // It opens from the list as any chat does.
+  await openChat(app, second.conversationId);
+  assert.equal(await app.evaluate(title), "Login page (fork)");
+});

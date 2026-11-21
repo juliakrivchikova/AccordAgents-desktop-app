@@ -13336,7 +13336,14 @@
       return;
     }
     forkStarting = false;
-    forkMenu = undefined;
+    if (!forkMenu || forkMenu.key === startedFor) forkMenu = undefined;
+    // Making it waits on her server (up to FORK_SEEN_READ_TIMEOUT_MS): gone
+    // to another chat or screen by then, she stays there, keyboard and all;
+    // the new chat is in her list.
+    if (!stillInForkedChat(plan.source.conversationId)) {
+      void sendNow();
+      return;
+    }
     chatTitleMenuOpen = false;
     // The new chat, open at once with its composer ready, as on the computer.
     leaveOpenChat();
@@ -13344,6 +13351,13 @@
     await openConversation(conversationId);
     document.getElementById("composer-input")?.focus();
     void sendNow();
+  }
+
+  /** Whether the chat she forked from is still what is on screen: open, on
+   *  its timeline (a thread or member of it too), with New chat not over it. */
+  function stillInForkedChat(sourceConversationId) {
+    const newChat = document.getElementById("new-chat-screen");
+    return selectedConversationId() === sourceConversationId && screenOnShow() === "timeline" && !(newChat && !newChat.hidden);
   }
 
   function wireChatTitleMenu() {
