@@ -1043,6 +1043,10 @@ export interface ChatMessageSessionCut {
 export interface ChatSessionForkCut {
   /** The CLI's own point: the copy ends there. */
   at?: string;
+  /** The session that point is in, when it is not the member's session now
+   *  (its session changed after the reply): that one is copied, when it is
+   *  still on this device. */
+  sessionId?: string;
   /** The reply's finish on the clock of the device that ran it: the copy ends
    *  with the last turn that finished by then. */
   finishedBy?: string;

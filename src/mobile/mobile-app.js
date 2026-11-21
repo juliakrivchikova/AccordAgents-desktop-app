@@ -13163,6 +13163,9 @@
   // member in the classic view's members sheet (renderMembersSheetFork).
 
   const FORK_SERVER_OUTDATED = "Your server does not fork chats from the phone yet. It will once AccordAgents on your computer has updated.";
+  // How long a tap on Fork waits for her server to say which reply the copy
+  // ends with before it goes by what the item read when it opened.
+  const FORK_SEEN_READ_TIMEOUT_MS = 4000;
   const FORK_COMPUTER_OUTDATED = "Your computer does not fork chats from the phone yet. Update AccordAgents on your computer.";
   // What the item says for the member it was last opened for:
   // { key, status: "checking" | "ready", reason?, plan? }.
@@ -13260,6 +13263,19 @@
     return reason ? { reason: reason } : { plan: { source: source, running: running, offer: offer, machines: answer.machines || {} } };
   }
 
+  /** The member's last reply that ended a turn, read again from her server
+   *  when she taps Fork; what the item read when it opened if that fails. */
+  async function forkSeenAtTap(plan) {
+    try {
+      const answer = await serverPhoneGet("/v1/phone/new-chat", { forkOf: plan.source.conversationId, participantId: plan.running.id }, { timeoutMs: FORK_SEEN_READ_TIMEOUT_MS });
+      const fresh = answer && answer.fork;
+      if (fresh && fresh.member) return fresh.seen || undefined;
+    } catch (error) {
+      // Out of reach: the read from when the item opened.
+    }
+    return plan.source.seen || undefined;
+  }
+
   /** Makes the new chat on the server as the computer makes it ("<chat>
    *  (fork)", the member's project, the computer's view for a new chat, one
    *  main session on the member's provider, model, effort, access and place,
@@ -13274,13 +13290,16 @@
     const conversationId = createEventId();
     let listed = false;
     try {
+      // The copy ends with the member's last reply that ended a turn as her
+      // server has it now, at the tap (the User, 2026-11-21: "When you tap
+      // Fork"): a reply that finished while the item was open counts. Out of
+      // reach, what it read when the item opened.
+      const seen = await forkSeenAtTap(plan);
       const createdAt = nowIso();
       const offer = plan.offer;
-      // The copy ends with the member's last reply that ended a turn, as her
-      // server read it when the item opened: what the User saw.
       const mainSession = shared.forkedMainSessionFor({
         mainSession: offer.mainSession || offer.assistant, basePermissions: offer.fork.basePermissions, member: plan.running,
-        source: { id: plan.source.conversationId, title: plan.source.title }, seen: plan.source.seen || undefined, id: createEventId()
+        source: { id: plan.source.conversationId, title: plan.source.title }, seen: seen, id: createEventId()
       });
       const title = shared.forkedChatTitle(plan.source.title);
       const repoPath = plan.source.repoPath || undefined;

@@ -73,8 +73,9 @@ async function claudeProjectsWithTranscript(sessionId: string, extraLines: strin
   return projects;
 }
 
-/** runClaude with its turn recorded instead of run: what the fork asks of the CLI. */
+/** runClaude with its turn recorded instead of run: what the fork asks of the CLI, and what it said at once. */
 async function claudeForkTurns(projects: string, forkCut: Record<string, unknown>, answers: Array<Record<string, unknown>> = []) {
+  const said: string[] = [];
   const runner = new CliAgentRunner() as any;
   runner.claudeProjectsDirectory = async () => projects;
   const turns: any[] = [];
@@ -83,8 +84,8 @@ async function claudeForkTurns(projects: string, forkCut: Record<string, unknown
     return { participant, ok: true, content: "ok", sessionId: "child-session", ...(answers[turns.length - 1] ?? {}) };
   };
   const result = await runner.runClaude({ id: "main", kind: "claude-code", label: "@main" }, "Go on.", "/repo", "chat", undefined,
-    { persistSession: true, forkFromSessionId: "parent-session", forkCut });
-  return { result, turns };
+    { persistSession: true, forkFromSessionId: "parent-session", forkCut, onForkCutMissed: (reason: string) => said.push(`${turns.length}:${reason}`) });
+  return { result, turns, said };
 }
 
 test("claude: the fork reads the source's transcript and ends the copy at the reply's assistant message", async () => {
@@ -98,8 +99,9 @@ test("claude: the fork reads the source's transcript and ends the copy at the re
     const byTime = await claudeForkTurns(projects, { finishedBy: "2026-11-21T16:23:43.000Z" });
     assert.equal(byTime.turns[0].forkResumeAt, "a1", "an older reply, by its finish");
     const nothingAfter = await claudeForkTurns(projects, { at: "a2" });
-    assert.equal(nothingAfter.turns[0].forkResumeAt, undefined, "nothing came after it: the fork is as it was");
+    assert.equal(nothingAfter.turns[0].forkResumeAt, "a2", "nothing came after it: all of it, and a turn the member starts meanwhile stays out");
     assert.equal(nothingAfter.result.forkCutMissed, undefined);
+    assert.deepEqual(nothingAfter.said, []);
   } finally {
     await rm(projects, { recursive: true, force: true });
   }
@@ -112,6 +114,7 @@ test("claude: a point the CLI cannot keep copies the whole session and says why"
     const afterCompaction = await claudeForkTurns(compacted, { at: "a1" });
     assert.equal(afterCompaction.turns[0].forkResumeAt, undefined);
     assert.equal(afterCompaction.result.forkCutMissed, "its session was compacted after that reply");
+    assert.deepEqual(afterCompaction.said, ["0:its session was compacted after that reply"], "said before the turn runs");
     const noTranscript = await claudeForkTurns(empty, { at: "a1" });
     assert.equal(noTranscript.turns[0].forkResumeAt, undefined);
     assert.equal(noTranscript.result.forkCutMissed, "its session file could not be read here");
@@ -122,6 +125,7 @@ test("claude: a point the CLI cannot keep copies the whole session and says why"
       assert.deepEqual(refused.turns.map((turn) => turn.forkResumeAt), ["a1", undefined]);
       assert.equal(refused.result.ok, true);
       assert.equal(refused.result.forkCutMissed, "that reply is not in its session here");
+      assert.deepEqual(refused.said, ["1:that reply is not in its session here"], "said before the whole copy runs");
       // A Claude Code without the flag: the same, said so.
       const unsupported = await claudeForkTurns(projects, { at: "a1" }, [{ ok: false, content: "", error: "error: unknown option '--resume-session-at'" }]);
       assert.deepEqual(unsupported.turns.map((turn) => turn.forkResumeAt), ["a1", undefined]);
@@ -136,6 +140,20 @@ test("claude: a point the CLI cannot keep copies the whole session and says why"
   } finally {
     await rm(compacted, { recursive: true, force: true });
     await rm(empty, { recursive: true, force: true });
+  }
+});
+
+test("claude: when the member's session changed after the reply, the session that reply was in is copied up to it; gone, the member's own, said", async () => {
+  const projects = await claudeProjectsWithTranscript("earlier-session");
+  try {
+    const earlier = await claudeForkTurns(projects, { at: "a1", sessionId: "earlier-session" });
+    assert.deepEqual([earlier.turns[0].forkFromSessionId, earlier.turns[0].forkResumeAt], ["earlier-session", "a1"], "what she saw");
+    assert.deepEqual(earlier.said, []);
+    const gone = await claudeForkTurns(projects, { at: "a1", sessionId: "lost-session" });
+    assert.deepEqual([gone.turns[0].forkFromSessionId, gone.turns[0].forkResumeAt], ["parent-session", undefined]);
+    assert.deepEqual(gone.said, ["0:its session changed after its last reply, and that session is not here"]);
+  } finally {
+    await rm(projects, { recursive: true, force: true });
   }
 });
 
@@ -215,6 +233,10 @@ rl.on("line", (line) => {
     return;
   }
   if (message.method === "thread/fork") {
+    if (message.params.threadId === "lost-thread") {
+      send({ id: message.id, error: { code: -32600, message: "no rollout found for thread id lost-thread" } });
+      return;
+    }
     if (message.params.lastTurnId && !sourceTurns.some((turn) => turn.id === message.params.lastTurnId)) {
       send({ id: message.id, error: { code: -32600, message: "turn not found: " + message.params.lastTurnId } });
       return;
@@ -316,7 +338,8 @@ test("codex: a reply from before its turn was recorded is matched to the last tu
   assert.equal(latest.methods.find((item) => item.method === "thread/fork")!.params.lastTurnId, "01a1feed-46a3-71b1-91a2-bdb954f85164", "the running turn is left out");
   const finished = SOURCE_TURNS.slice(1);
   const whole = await runForkedCodexTurn("child-thread", { forkCut: { finishedBy: "2026-11-21T16:25:28.000Z" }, sourceTurns: finished });
-  assert.equal(whole.methods.find((item) => item.method === "thread/fork")!.params.lastTurnId, undefined, "nothing came after it: the fork is as it was");
+  assert.equal(whole.methods.find((item) => item.method === "thread/fork")!.params.lastTurnId, "01a1feed-46a3-71b1-91a2-bdb954f85164",
+    "nothing came after it: all of it, and a turn the member starts meanwhile stays out");
   assert.equal(whole.result.forkCutMissed, undefined);
 });
 
@@ -333,6 +356,20 @@ test("codex: a turn Codex does not know copies the whole thread and says why; so
   const before = await runForkedCodexTurn("child-thread", { forkCut: { finishedBy: "2026-11-21T16:00:00.000Z" }, sourceTurns: SOURCE_TURNS });
   assert.equal(before.methods.find((item) => item.method === "thread/fork")!.params.lastTurnId, undefined);
   assert.equal(before.result.forkCutMissed, "none of its session's turns here ended by that reply");
+});
+
+test("codex: when the member's thread changed after the reply, the thread that reply was in is forked through it; gone, the member's own, said", async () => {
+  const turn = "01a1feed-3311-7760-8525-235aaa841192";
+  const earlier = await runForkedCodexTurn("child-thread", { forkCut: { at: turn, sessionId: "earlier-thread" }, sourceTurns: SOURCE_TURNS });
+  assert.equal(earlier.result.ok, true, JSON.stringify(earlier.result));
+  assert.deepEqual(earlier.methods.filter((item) => item.method === "thread/fork").map((item) => [item.params.threadId, item.params.lastTurnId ?? null]),
+    [["earlier-thread", turn]], "what she saw");
+  assert.equal(earlier.result.forkCutMissed, undefined);
+  const gone = await runForkedCodexTurn("child-thread", { forkCut: { at: turn, sessionId: "lost-thread" }, sourceTurns: SOURCE_TURNS });
+  assert.equal(gone.result.ok, true, JSON.stringify(gone.result));
+  assert.deepEqual(gone.methods.filter((item) => item.method === "thread/fork").map((item) => [item.params.threadId, item.params.lastTurnId ?? null]),
+    [["lost-thread", turn], ["parent-thread", null]]);
+  assert.equal(gone.result.forkCutMissed, "its session changed after its last reply, and that session is not here");
 });
 
 test("codex: a fork answered with the source's own id is refused, so the member never writes to it", async () => {

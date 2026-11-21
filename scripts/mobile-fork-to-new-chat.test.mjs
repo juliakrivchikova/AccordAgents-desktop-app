@@ -426,6 +426,11 @@ test("in the classic view the phone forks a member from a small action on its ro
   // The Assistant, forked: the same chat the title's menu makes.
   const ready = await openSheetFork(app, "p-assistant");
   assert.deepEqual({ disabled: ready.disabled, detail: ready.detail }, { disabled: "false", detail: "A new chat whose main session starts from a copy of this session" });
+  // The Assistant finishes another reply while the item is open: the copy
+  // ends with what she sees when she taps, so with this one.
+  const later = { id: "a2", role: "participant", participantId: ASSISTANT.id, participantLabel: "@assistant", content: "Summed up again.", status: "done", createdAt: at(1),
+    metadata: { sourceMessageId: "u1", workedMs: 2_000, sessionCut: { sessionId: "s-assistant", at: "019a-turn-2" } } };
+  await hub.addMessages("conv-old", [later]);
   await app.evaluate(`document.getElementById("members-sheet-fork").click()`);
   const create = await waitForOp(hub, (op) => op.kind === "conversation.create");
   assert.equal(create.conversation.title, "Old notes (fork)");
@@ -436,9 +441,10 @@ test("in the classic view the phone forks a member from a small action on its ro
     { mainSessionParticipantId: forked.id, chatView: "sessions" });
   assert.deepEqual({ handle: forked.handle, roleConfigId: forked.roleConfigId, kind: forked.kind, model: forked.model, reasoningEffort: forked.reasoningEffort, agentMode: forked.agentMode },
     { handle: "main", roleConfigId: "main-session", kind: "codex-cli", model: "gpt-5.5", reasoningEffort: "medium", agentMode: "default" });
-  const summed = (await hub.storage.getConversation("conv-old"))?.messages.find((message) => message.id === "a1");
+  const summedAgain = (await hub.storage.getConversation("conv-old"))?.messages.find((message) => message.id === "a2");
   assert.deepEqual(forked.forkOrigin, { conversationId: "conv-old", participantId: ASSISTANT.id, handle: "assistant", conversationTitle: "Old notes", kind: "codex-cli",
-    seen: { messageId: "a1", finishedAt: new Date(Date.parse(summed.createdAt) + 5_000).toISOString() } });
+    seen: { messageId: "a2", sessionCut: { sessionId: "s-assistant", at: "019a-turn-2" }, finishedAt: new Date(Date.parse(summedAgain.createdAt) + 2_000).toISOString() } },
+  "read again at the tap: the reply that finished while the item was open");
   const intro = await waitForOp(hub, (op) => op.kind === "message.create" && op.conversationId === create.conversationId && op.message.role === "system");
   assert.equal(intro.message.content, "Chat started.\nMembers:\n- User\n- @main");
   // Open at once, the members sheet gone with the chat it was over.

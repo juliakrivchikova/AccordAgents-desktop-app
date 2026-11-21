@@ -200,13 +200,16 @@ export function lastMemberTurnEnd(messages: ReadonlyArray<ForkReplyView>, partic
 /**
  * Where the copy of the member's session ends, read on the device that holds
  * it (`sessionId`: the member's session there): at the CLI's own point its
- * reply recorded, by the reply's finish for a reply from before that, and
- * nowhere (the whole session, said in the chat) when neither can be named.
+ * reply recorded (in the session that reply was in), by the reply's finish
+ * for a reply from before that, and nowhere (the whole session, said in the
+ * chat) when neither can be named.
  */
 export function forkCutFor(seen: ChatForkSeenReply | undefined, sessionId: string): ChatSessionForkCut {
-  if (!seen) return { unknown: "it had no finished reply when you tapped Fork" };
+  if (!seen) return { unknown: "the app found no reply of it that ended a turn" };
   if (seen.sessionCut) {
-    return seen.sessionCut.sessionId === sessionId ? { at: seen.sessionCut.at } : { unknown: "its session changed after its last reply" };
+    // Its session changed after that reply (a session lost and started
+    // again): the one the reply was in is what she saw.
+    return seen.sessionCut.sessionId === sessionId ? { at: seen.sessionCut.at } : { at: seen.sessionCut.at, sessionId: seen.sessionCut.sessionId };
   }
   if (seen.finishedAt) return { finishedBy: seen.finishedAt };
   return { unknown: "its last reply does not say where it ended in its session" };

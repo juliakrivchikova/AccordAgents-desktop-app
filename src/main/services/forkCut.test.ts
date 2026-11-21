@@ -39,16 +39,16 @@ test("claude: the copy ends at the reply's recorded assistant message when the m
   assert.deepEqual(claudeForkCut(twoTurns().join("\n"), { at: "a1" }), { kind: "cut", at: "a1" });
 });
 
-test("claude: nothing of the conversation after that message: the whole session, exactly as before", () => {
-  assert.deepEqual(claudeForkCut(twoTurns().join("\n"), { at: "a2" }), { kind: "whole" });
+test("claude: nothing of the conversation after that message: the point is given all the same (the copy is all of it, and a turn started meanwhile stays out)", () => {
+  assert.deepEqual(claudeForkCut(twoTurns().join("\n"), { at: "a2" }), { kind: "cut", at: "a2" });
   // Trailing bookkeeping (attachments, costs) is not the conversation.
-  assert.deepEqual(claudeForkCut([...twoTurns(), attachment("x3", "2026-11-21T16:23:50.000Z")].join("\n"), { at: "a2" }), { kind: "whole" });
+  assert.deepEqual(claudeForkCut([...twoTurns(), attachment("x3", "2026-11-21T16:23:50.000Z")].join("\n"), { at: "a2" }), { kind: "cut", at: "a2" });
 });
 
 test("claude: a reply from before the point was recorded is matched by its finish on the same clock", () => {
   // The first reply finished just after a1 was written; the second turn started later.
   assert.deepEqual(claudeForkCut(twoTurns().join("\n"), { finishedBy: "2026-11-21T16:23:42.700Z" }), { kind: "cut", at: "a1" });
-  assert.deepEqual(claudeForkCut(twoTurns().join("\n"), { finishedBy: "2026-11-21T16:23:50.000Z" }), { kind: "whole" });
+  assert.deepEqual(claudeForkCut(twoTurns().join("\n"), { finishedBy: "2026-11-21T16:23:50.000Z" }), { kind: "cut", at: "a2" });
   assert.deepEqual(claudeForkCut(twoTurns().join("\n"), { finishedBy: "2026-11-21T16:23:40.000Z" }), { kind: "missed", reason: FORK_CUT_NO_TURN_BY_THEN });
 });
 
@@ -69,7 +69,7 @@ test("claude: a point not in the session here, or nothing to go by, is said, nev
 
 test("claude: a subagent's messages are not the conversation's", () => {
   const withSubagent = [...twoTurns(), assistant("sub", "2026-11-21T16:24:00.000Z", "sub work", { isSidechain: true })];
-  assert.deepEqual(claudeForkCut(withSubagent.join("\n"), { at: "a2" }), { kind: "whole" });
+  assert.deepEqual(claudeForkCut(withSubagent.join("\n"), { at: "a2" }), { kind: "cut", at: "a2" });
   assert.deepEqual(claudeForkCut(withSubagent.join("\n"), { at: "sub" }), { kind: "missed", reason: FORK_CUT_NOT_IN_SESSION });
 });
 
@@ -95,7 +95,7 @@ test("codex: a reply from before its turn was recorded ends with the last turn t
   ];
   // The first reply was written at 16:25:25.409, between turn 1's end and turn 2's start.
   assert.deepEqual(codexForkCut(turns, "2026-11-21T16:25:25.409Z", true), { kind: "cut", at: TURN_1 });
-  assert.deepEqual(codexForkCut(turns, "2026-11-21T16:25:27.900Z", true), { kind: "whole" }, "the newest: nothing after it");
+  assert.deepEqual(codexForkCut(turns, "2026-11-21T16:25:27.900Z", true), { kind: "cut", at: TURN_2 }, "the newest: given all the same, so a turn started meanwhile stays out");
   assert.deepEqual(codexForkCut(turns, "2026-11-21T16:25:00.000Z", true), { kind: "missed", reason: FORK_CUT_NO_TURN_BY_THEN });
   assert.equal(codexForkCut(turns, "2026-11-21T16:25:00.000Z", false), undefined, "older turns may still be listed");
 });

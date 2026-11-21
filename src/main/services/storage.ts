@@ -1134,10 +1134,20 @@ export class StorageService {
           and coalesce(json_extract(payload_json, '$.status'), '') <> 'pending'
           and coalesce(json_extract(payload_json, '$.metadata.serverPlaceholder'), 0) <> 1
           and (json_type(payload_json, '$.metadata.workedMs') in ('integer', 'real')
-            or json_type(payload_json, '$.metadata.sessionCut') = 'object')
-        order by sequence desc limit 1;`
+            or (json_type(payload_json, '$.metadata.sessionCut.sessionId') = 'text'
+              and json_type(payload_json, '$.metadata.sessionCut.at') = 'text'))
+        order by sequence desc limit 20;`
     );
-    const row = rows[0];
+    // The first that ends a turn by the shared rule (the query narrows to
+    // the same, but a cut it cannot use is skipped, as on the phone's view).
+    for (const row of rows) {
+      const seen = this.lastTurnEndRow(row, participantId);
+      if (seen) return seen;
+    }
+    return undefined;
+  }
+
+  private lastTurnEndRow(row: { id: string; createdAt?: string; turnStartedAt?: string; workedMs?: number; sessionCut?: string }, participantId: string): ChatForkSeenReply | undefined {
     if (!row || typeof row.id !== "string") return undefined;
     let sessionCut: unknown;
     try {

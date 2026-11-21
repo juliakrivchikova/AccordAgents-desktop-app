@@ -1886,6 +1886,11 @@ export class ChatService {
       if (!member) {
         throw new Error("That member is no longer in its chat.");
       }
+      // What the User sees of the member now (the User, 2026-11-21: the
+      // copy is what she saw when she tapped Fork): its last reply that
+      // ended a turn; the copy ends with that turn. Read first, before the
+      // checks below take their time.
+      const seen = await this.forkSeenReply(source, member.id);
       const agents = await this.detectAgentsForReadiness("submit");
       signal?.throwIfAborted();
       const settings = await this.settings.getPublicSettings();
@@ -1924,10 +1929,6 @@ export class ChatService {
       if (!created) {
         throw new Error("Could not make the new chat's main session.");
       }
-      // What the User sees of the member now (the User, 2026-11-21: the
-      // copy is what she saw when she tapped Fork): its last reply that
-      // ended a turn; the copy ends with that turn.
-      const seen = await this.forkSeenReply(source, member.id);
       const mainSession: ChatParticipant = { ...created, forkOrigin: forkOriginFor(source, member, seen) };
       signal?.throwIfAborted();
       const now = new Date().toISOString();
@@ -10977,7 +10978,7 @@ export class ChatService {
       let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
         persistSession: true,
         sessionId: session.sessionId,
-        ...(forkSource ? { forkFromSessionId: forkSource.sessionId, ...this.forkCutRunOption(forkSource) } : {}),
+        ...(forkSource ? { forkFromSessionId: forkSource.sessionId, ...this.forkCutRunOption(conversation, participant, forkSource) } : {}),
         extraReadableDirs: [workspacePath],
         resumeFallbackPrompt,
         role,
@@ -11061,11 +11062,12 @@ export class ChatService {
         this.addConversationWarning(conversation, sessionState.forkOriginUnavailable);
       }
       // Its copy was made whole although it was to end where the User
-      // tapped Fork: the chat says why, once.
-      const forkCutWarning = forkSource && !forkStartedClean ? this.forkCutMissedWarning(participant, forkSource, session, result) : undefined;
-      if (forkCutWarning && !options.warnings.includes(forkCutWarning)) {
-        options.warnings.push(forkCutWarning);
-        this.addConversationWarning(conversation, forkCutWarning);
+      // tapped Fork: a line in the chat says why, once. A line, not a chat
+      // warning: warnings stay on the device that raised them, and the
+      // copy may run on a cloud machine, or have been asked from the phone.
+      const forkCutNote = forkSource && !forkStartedClean ? this.forkCutMissedNote(participant, forkSource, session, result) : undefined;
+      if (forkCutNote) {
+        this.postChatNoticeLine(conversation, forkCutNote);
       }
       if (forkStartedClean) {
         delete session.forkFrom;
@@ -12749,26 +12751,52 @@ export class ChatService {
   }
 
   /** Where a fork's copy ends, for the CLI (Fork to new chat): the point its
-   *  reply recorded, or the reply's finish; none for a delegated fork, or when
-   *  no point could be named (the whole session, said after the turn). */
-  private forkCutRunOption(forkSource: ChatSessionForkSource): { forkCut?: { at?: string; finishedBy?: string } } {
+   *  reply recorded (and the session it is in), or the reply's finish; none
+   *  for a delegated fork. When no point can be named, or the CLI cannot
+   *  stop there, a line in the chat says so at once, before the turn runs
+   *  (it may last hours, and the app may stop during it). */
+  private forkCutRunOption(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    forkSource: ChatSessionForkSource
+  ): { forkCut?: { at?: string; sessionId?: string; finishedBy?: string }; onForkCutMissed?: (reason: string) => void } {
     const cut = forkSource.cut;
-    if (cut?.at) return { forkCut: { at: cut.at } };
-    if (cut?.finishedBy) return { forkCut: { finishedBy: cut.finishedBy } };
-    return {};
+    if (!cut) return {};
+    const note = (reason: string): void => {
+      const text = this.forkCutNoteText(participant, reason);
+      if (text) this.postChatNoticeLine(conversation, text);
+    };
+    if (cut.unknown) {
+      note(cut.unknown);
+      return {};
+    }
+    const forkCut = cut.at
+      ? { at: cut.at, ...(cut.sessionId ? { sessionId: cut.sessionId } : {}) }
+      : cut.finishedBy ? { finishedBy: cut.finishedBy } : undefined;
+    return forkCut ? { forkCut, onForkCutMissed: note } : {};
+  }
+
+  /** The line: "@main's copy of @x's session may include what @x did after
+   *  you tapped Fork: <why>." Short enough for any chat's notices whatever
+   *  the source chat's title (the new chat is named after it). */
+  private forkCutNoteText(participant: ChatParticipant, reason: string): string | undefined {
+    const origin = participant.forkOrigin;
+    return origin ? `@${participant.handle}'s copy of @${origin.handle}'s session may include what @${origin.handle} did after you tapped Fork: ${reason}.` : undefined;
   }
 
   /** The chat's word when a forked main session's copy holds the member's
    *  whole session although it was to end with the reply the User saw last:
    *  only once the copy was made (not when it started clean instead). */
-  private forkCutMissedWarning(
+  private forkCutMissedNote(
     participant: ChatParticipant,
     forkSource: ChatSessionForkSource,
     session: ChatParticipantSession,
     result: Pick<ParticipantRunResult, "forkCutMissed" | "error">
   ): string | undefined {
     const origin = participant.forkOrigin;
-    const reason = forkSource.cut?.unknown ?? result.forkCutMissed;
+    // Said at once through onForkCutMissed; this is the safety net for a
+    // runner that only reported it with the turn (the line is written once).
+    const reason = result.forkCutMissed;
     // The copy has its own id now, and it is not a fork that could not read
     // its source (that one is made again, or starts clean, and says so).
     const copied = Boolean(session.sessionId?.trim()) && session.sessionId !== forkSource.sessionId && !session.forkFrom &&
@@ -12780,9 +12808,22 @@ export class ChatService {
       sourceParticipantId: origin.participantId,
       reason
     });
-    // Short enough for the chat's notices (DEFAULT_NOTICE_CHARS) whatever
-    // the source chat's title: the new chat is named after it.
-    return `@${participant.handle}'s copy of @${origin.handle}'s session may include what @${origin.handle} did after you tapped Fork: ${reason}.`;
+    return this.forkCutNoteText(participant, reason);
+  }
+
+  /** A line in the chat that every device shows (it goes to her server
+   *  with the chat), written outside the turn's own save. */
+  private postChatNoticeLine(conversation: Conversation, text: string): void {
+    void this.withChatMutation(conversation, async () => {
+      if (conversation.messages.some((message) => message.role === "system" && message.content === text)) return;
+      conversation.messages.push(this.message("system", text, undefined, { threadId: "system" }));
+      this.queueSnapshot(conversation);
+    }).catch((error) => {
+      void this.debugLogs.write("chat.notice-line.persist-failed", {
+        conversationId: conversation.id,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
   }
 
   /** A reply that ended a turn records where its CLI session stood then

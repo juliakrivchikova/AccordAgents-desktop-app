@@ -1,3 +1,6 @@
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
+
 // Fork to new chat (src/shared/forkToNewChat.ts): the copy of a member's CLI
 // session ends with the turn of the reply the User saw last when she tapped
 // Fork (the User, 2026-11-21: "When you tap Fork — Like the CLI: the copy is
@@ -17,15 +20,16 @@
  *  clock for a reply from before that point was recorded. */
 export interface ForkCutRequest {
   at?: string;
+  /** The session `at` is in, when it is not the one the fork would copy. */
+  sessionId?: string;
   finishedBy?: string;
 }
 
-/** What the fork does: copy up to `at`; copy all of it (nothing came after
- *  the reply, as before); or copy all of it and say why it could not stop
- *  there. */
+/** What the fork does: copy up to `at` (with nothing after it yet, that is
+ *  all of it, and a turn the member starts meanwhile stays out); or copy all
+ *  of it and say why it could not stop there. */
 export type ForkCutDecision =
   | { kind: "cut"; at: string }
-  | { kind: "whole" }
   | { kind: "missed"; reason: string };
 
 /** The CLI refused the point the copy was to end at: Claude Code's words
@@ -41,6 +45,7 @@ export const FORK_CUT_COMPACTED = "its session was compacted after that reply";
 export const FORK_CUT_TRANSCRIPT_UNREADABLE = "its session file could not be read here";
 export const FORK_CUT_TURNS_UNLISTED = "Codex could not list its session's turns";
 export const FORK_CUT_UNSUPPORTED = "this Claude Code cannot end a copy at a reply";
+export const FORK_CUT_SESSION_GONE = "its session changed after its last reply, and that session is not here";
 
 /** Claude Code does not know `--resume-session-at` (a hidden flag: a later
  *  version may drop it). */
@@ -48,34 +53,42 @@ export function isForkCutUnsupportedError(text: string | undefined): boolean {
   return /unknown option '?--resume-session-at/i.test(text ?? "");
 }
 
-interface TranscriptRow {
+/** A row of a Claude Code transcript the cut reads: the conversation's own
+ *  user and assistant messages (not a subagent's) and its compactions. */
+export interface ClaudeTranscriptRow {
   kind: "assistant" | "user" | "compact";
   uuid?: string;
   at: number;
 }
 
-/** The rows of a Claude Code transcript the cut reads, in file order: the
- *  conversation's own user and assistant messages (not a subagent's) and its
- *  compactions. */
-function claudeTranscriptRows(transcript: string): TranscriptRow[] {
-  const rows: TranscriptRow[] = [];
-  for (const line of transcript.split("\n")) {
-    // Only lines that can be one of these are parsed: a long session is tens
-    // of megabytes.
-    if (!line.includes("\"type\":\"assistant\"") && !line.includes("\"type\":\"user\"") && !line.includes("compact_boundary")) continue;
-    let entry: Record<string, unknown>;
-    try {
-      entry = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    if (!entry || typeof entry !== "object" || entry.isSidechain === true) continue;
-    const at = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
-    if (entry.type === "system" && entry.subtype === "compact_boundary") {
-      rows.push({ kind: "compact", at });
-    } else if (entry.type === "assistant" || entry.type === "user") {
-      rows.push({ kind: entry.type, ...(typeof entry.uuid === "string" ? { uuid: entry.uuid } : {}), at });
-    }
+/** One transcript line as the cut reads it; undefined for every other line. */
+function claudeTranscriptRow(line: string): ClaudeTranscriptRow | undefined {
+  // Only lines that can be one of these are parsed.
+  if (!line.includes("\"type\":\"assistant\"") && !line.includes("\"type\":\"user\"") && !line.includes("compact_boundary")) return undefined;
+  let entry: Record<string, unknown>;
+  try {
+    entry = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+  if (!entry || typeof entry !== "object" || entry.isSidechain === true) return undefined;
+  const at = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+  if (entry.type === "system" && entry.subtype === "compact_boundary") return { kind: "compact", at };
+  if (entry.type === "assistant" || entry.type === "user") {
+    return { kind: entry.type, ...(typeof entry.uuid === "string" ? { uuid: entry.uuid } : {}), at };
+  }
+  return undefined;
+}
+
+/** The rows of a transcript file, read a line at a time: a long session is
+ *  over a hundred megabytes, and this runs in the app's main process, so it
+ *  is neither held whole nor parsed in one go. */
+export async function readClaudeTranscriptRows(file: string): Promise<ClaudeTranscriptRow[]> {
+  const rows: ClaudeTranscriptRow[] = [];
+  const lines = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+  for await (const line of lines) {
+    const row = claudeTranscriptRow(line);
+    if (row) rows.push(row);
   }
   return rows;
 }
@@ -83,14 +96,15 @@ function claudeTranscriptRows(transcript: string): TranscriptRow[] {
 /**
  * Where a Claude Code fork stops, read from the source session's transcript:
  * at the reply's last assistant message (recorded, or the last one written by
- * the reply's finish); all of it when nothing of the conversation follows
- * that message; all of it, said, when the message is not there or a
+ * the reply's finish); all of it, said, when the message is not there or a
  * compaction came after it (the CLI does not load a message before one).
  */
-export function claudeForkCut(transcript: string, request: ForkCutRequest): ForkCutDecision {
+export function claudeForkCut(transcript: string | ReadonlyArray<ClaudeTranscriptRow>, request: ForkCutRequest): ForkCutDecision {
   const finishedBy = request.finishedBy ? Date.parse(request.finishedBy) : Number.NaN;
   if (!request.at && !Number.isFinite(finishedBy)) return { kind: "missed", reason: FORK_CUT_NO_TURN_BY_THEN };
-  const rows = claudeTranscriptRows(transcript);
+  const rows = typeof transcript === "string"
+    ? transcript.split("\n").map(claudeTranscriptRow).filter((row): row is ClaudeTranscriptRow => Boolean(row))
+    : transcript;
   let index = -1;
   if (request.at) {
     index = rows.findIndex((row) => row.kind === "assistant" && row.uuid === request.at);
@@ -104,9 +118,9 @@ export function claudeForkCut(transcript: string, request: ForkCutRequest): Fork
     }
   }
   if (index < 0) return { kind: "missed", reason: request.at ? FORK_CUT_NOT_IN_SESSION : FORK_CUT_NO_TURN_BY_THEN };
-  const after = rows.slice(index + 1);
-  if (after.length === 0) return { kind: "whole" };
-  if (after.some((row) => row.kind === "compact")) return { kind: "missed", reason: FORK_CUT_COMPACTED };
+  if (rows.slice(index + 1).some((row) => row.kind === "compact")) return { kind: "missed", reason: FORK_CUT_COMPACTED };
+  // With nothing after it yet the point is given all the same: a turn the
+  // member starts before the CLI reads the session stays out of the copy.
   return { kind: "cut", at: rows[index]!.uuid! };
 }
 
@@ -140,15 +154,14 @@ function codexTurnEndedBy(turn: CodexTurnSummary, finishedBy: number): boolean {
 /**
  * Where a Codex fork of a reply from before the turn id was recorded stops,
  * from the thread's turns, newest first: the last turn that ended by the
- * reply's finish; all of it when that is the newest; undefined when the
- * turns given do not reach it (the caller reads more); said when none ended
- * by then.
+ * reply's finish (the newest too: a turn started meanwhile stays out);
+ * undefined when the turns given do not reach it (the caller reads more);
+ * said when none ended by then.
  */
 export function codexForkCut(turnsNewestFirst: ReadonlyArray<CodexTurnSummary>, finishedBy: string, complete: boolean): ForkCutDecision | undefined {
   const finish = Date.parse(finishedBy);
   if (!Number.isFinite(finish)) return { kind: "missed", reason: FORK_CUT_NO_TURN_BY_THEN };
   const index = turnsNewestFirst.findIndex((turn) => codexTurnEndedBy(turn, finish));
-  if (index === 0) return { kind: "whole" };
-  if (index > 0) return { kind: "cut", at: turnsNewestFirst[index]!.id };
+  if (index >= 0) return { kind: "cut", at: turnsNewestFirst[index]!.id };
   return complete ? { kind: "missed", reason: FORK_CUT_NO_TURN_BY_THEN } : undefined;
 }

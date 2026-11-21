@@ -5,7 +5,7 @@ import { constants, type Dirent } from "node:fs";
 import { access, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { claudeProjectsDir, findClaudeTranscript } from "./memberSessionFiles";
 import {
-  claudeForkCut, codexForkCut, FORK_CUT_NOT_IN_SESSION, FORK_CUT_TRANSCRIPT_UNREADABLE, FORK_CUT_TURNS_UNLISTED, FORK_CUT_UNSUPPORTED, isForkCutMissingError,
+  claudeForkCut, codexForkCut, FORK_CUT_NOT_IN_SESSION, FORK_CUT_SESSION_GONE, readClaudeTranscriptRows, FORK_CUT_TRANSCRIPT_UNREADABLE, FORK_CUT_TURNS_UNLISTED, FORK_CUT_UNSUPPORTED, isForkCutMissingError,
   isForkCutUnsupportedError
 } from "./forkCut";
 import type { CodexTurnSummary, ForkCutDecision, ForkCutRequest } from "./forkCut";
@@ -367,6 +367,10 @@ export interface CliAgentRunOptions {
   /** Claude Code: the assistant message the fork's copy ends at, read from
    *  forkCut (runClaude); not set by callers. */
   forkResumeAt?: string;
+  /** Called as soon as a fork asked to end at a point (forkCut) is to copy
+   *  the whole session instead, with why: before the turn runs, so the chat
+   *  says it even if the app stops during the turn. */
+  onForkCutMissed?: (reason: string) => void;
   compactInstructions?: string;
   clearCompactPrompt?: boolean;
   extraReadableDirs?: string[];
@@ -3711,6 +3715,10 @@ export class CliAgentRunner {
      *  ended by the reply's finish, read from the thread's turns newest
      *  first; undefined for all of it (nothing came after, or no point can
      *  be named: forkCutMissed says why). */
+    const missedCut = (reason: string): void => {
+      forkCutMissed = reason;
+      options.onForkCutMissed?.(reason);
+    };
     const codexForkLastTurnId = async (sourceThreadId: string, timeoutMs?: number): Promise<string | undefined> => {
       const cut = options.forkCut;
       if (!cut) return undefined;
@@ -3752,7 +3760,7 @@ export class CliAgentRunner {
         decision: resolved.kind,
         ...(resolved.kind === "missed" ? { reason: resolved.reason } : {})
       });
-      if (resolved.kind === "missed") forkCutMissed = resolved.reason;
+      if (resolved.kind === "missed") missedCut(resolved.reason);
       return resolved.kind === "cut" ? resolved.at : undefined;
     };
 
@@ -3770,17 +3778,21 @@ export class CliAgentRunner {
         forkCutMissed = undefined;
         const forkParams = this.codexAppServerThreadForkParams(sourceThreadId, participant, repoPath, kind, options);
         // Fork to new chat: only through the turn of the reply the User saw
-        // last (Codex 0.155.1 `lastTurnId`, inclusive).
+        // last (Codex 0.155.1 `lastTurnId`, inclusive), in the thread that
+        // reply was in (the member's own now, unless it changed after it).
         const lastTurnId = await codexForkLastTurnId(sourceThreadId, timeoutMs);
+        const replyThreadId = lastTurnId && options.forkCut?.sessionId?.trim() ? options.forkCut.sessionId.trim() : sourceThreadId;
         let result: CodexAppServerThreadStartResult;
         try {
-          result = await sendRequest("thread/fork", lastTurnId ? { ...forkParams, lastTurnId } : forkParams, timeoutMs) as CodexAppServerThreadStartResult;
+          result = await sendRequest("thread/fork", lastTurnId ? { ...forkParams, threadId: replyThreadId, lastTurnId } : forkParams, timeoutMs) as CodexAppServerThreadStartResult;
         } catch (error) {
-          if (!lastTurnId || !isForkCutMissingError(this.errorText(error))) throw error;
-          // Codex does not know that turn: the whole thread, and the chat
-          // says so.
-          void this.writeDebugLog("cli-agent-codex-fork-cut-refused", { participantId: participant.id });
-          forkCutMissed = FORK_CUT_NOT_IN_SESSION;
+          const text = this.errorText(error);
+          const earlierGone = replyThreadId !== sourceThreadId && (isForkSourceMissingError(text) || /thread not (?:found|loaded)/i.test(text));
+          if (!lastTurnId || (!earlierGone && !isForkCutMissingError(text))) throw error;
+          // Codex does not know that turn, or the thread it was in is gone:
+          // the whole of the member's thread, and the chat says so.
+          void this.writeDebugLog("cli-agent-codex-fork-cut-refused", { participantId: participant.id, earlierGone });
+          missedCut(earlierGone ? FORK_CUT_SESSION_GONE : FORK_CUT_NOT_IN_SESSION);
           result = await sendRequest("thread/fork", forkParams, timeoutMs) as CodexAppServerThreadStartResult;
         }
         const forkedThreadId = result.thread?.id ?? result.thread?.sessionId;
@@ -5761,41 +5773,49 @@ export class CliAgentRunner {
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
-    const { forkCut, ...rest } = options;
+    const { forkCut, onForkCutMissed, ...rest } = options;
     if (!forkCut || !options.forkFromSessionId || options.sessionId) {
       return this.runClaudeTurn(participant, prompt, repoPath, kind, signal, rest);
     }
-    // Fork to new chat: the copy ends with the reply the User saw last.
-    const cut = await this.claudeForkCutFor(options.forkFromSessionId, forkCut);
+    // Fork to new chat: the copy ends with the reply the User saw last, in
+    // the session that reply was in (the member's own now, unless its
+    // session changed after it).
+    const member = options.forkFromSessionId;
+    const replySession = forkCut.sessionId?.trim() || member;
+    const cut = await this.claudeForkCutFor(replySession, forkCut, replySession !== member);
     void this.writeDebugLog("cli-agent-claude-fork-cut", {
       participantId: participant.id,
       decision: cut.kind,
+      otherSession: replySession !== member,
       ...(cut.kind === "missed" ? { reason: cut.reason } : {})
     });
-    if (cut.kind !== "cut") {
+    // The whole of the member's session, said in the chat at once (before a
+    // turn that may last hours, and an app that may stop during it).
+    const whole = async (reason: string): Promise<ParticipantRunResult> => {
+      onForkCutMissed?.(reason);
       const result = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, rest);
-      return cut.kind === "missed" ? { ...result, forkCutMissed: cut.reason } : result;
-    }
-    const result = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, { ...rest, forkResumeAt: cut.at });
+      return { ...result, forkCutMissed: reason };
+    };
+    if (cut.kind === "missed") return whole(cut.reason);
+    const result = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, { ...rest, forkFromSessionId: replySession, forkResumeAt: cut.at });
     const unsupported = isForkCutUnsupportedError(result.error);
     if (result.ok || signal?.aborted || (!unsupported && !isForkCutMissingError(result.error))) {
       return result;
     }
     // The CLI did not load that message (one its transcript holds on a branch
-    // it does not follow), or no longer knows the flag: the whole session,
-    // and the chat says so.
+    // it does not follow), or no longer knows the flag.
     void this.writeDebugLog("cli-agent-claude-fork-cut-refused", { participantId: participant.id, unsupported });
-    const whole = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, rest);
-    return { ...whole, forkCutMissed: unsupported ? FORK_CUT_UNSUPPORTED : FORK_CUT_NOT_IN_SESSION };
+    return whole(unsupported ? FORK_CUT_UNSUPPORTED : FORK_CUT_NOT_IN_SESSION);
   }
 
   /** Where a Claude Code fork of `sessionId` ends, read from its transcript
-   *  on this device (forkCut.ts). */
-  private async claudeForkCutFor(sessionId: string, request: ForkCutRequest): Promise<ForkCutDecision> {
+   *  on this device (forkCut.ts); `earlier`: the session the member's reply
+   *  was in, not its own now. */
+  private async claudeForkCutFor(sessionId: string, request: ForkCutRequest, earlier: boolean): Promise<ForkCutDecision> {
     try {
       const file = await findClaudeTranscript(await this.claudeProjectsDirectory(), sessionId);
-      if (!file) return { kind: "missed", reason: FORK_CUT_TRANSCRIPT_UNREADABLE };
-      return claudeForkCut(await readFile(file, "utf8"), request);
+      if (!file) return { kind: "missed", reason: earlier ? FORK_CUT_SESSION_GONE : FORK_CUT_TRANSCRIPT_UNREADABLE };
+      return claudeForkCut(await readClaudeTranscriptRows(file), request);
     } catch {
       return { kind: "missed", reason: FORK_CUT_TRANSCRIPT_UNREADABLE };
     }

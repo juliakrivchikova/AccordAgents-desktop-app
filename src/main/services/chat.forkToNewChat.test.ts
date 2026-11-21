@@ -656,32 +656,55 @@ test("the copy ends with the reply the User saw when she tapped Fork: what the m
   const reply = storage.store.get(id)!.messages.find((message) => message.participantId === mainId && message.role === "participant")!;
   assert.deepEqual(reply.metadata?.sessionCut, { sessionId: "fork-own-session", at: "fork-assistant-1" }, "its own reply records where its copy stands");
   assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], [], "nothing to say: the copy is what she saw");
+  assert.equal(storage.store.get(id)!.messages.some((message) => /may include what/.test(message.content)), false);
 });
 
-test("when the point cannot be named the whole session is copied and the chat says so once the copy is made, never a clean start", async () => {
-  const cases: Array<[string, Record<string, unknown>, Record<string, unknown>, string]> = [
-    ["its session changed after the reply", { sessionCut: { sessionId: "older-session", at: "assistant-uuid-1" } }, {}, "its session changed after its last reply"],
-    ["the CLI could not keep the point", { sessionCut: { sessionId: "src-cli-session", at: "assistant-uuid-1" } },
-      { forkCutMissed: "its session was compacted after that reply" }, "its session was compacted after that reply"]
+test("when the point cannot be named the whole session is copied and a line in the chat says so while the turn still runs, never a clean start", async () => {
+  const unplaced = oldChat([ASSISTANT, REVIEWER]);
+  unplaced.messages = [unplaced.messages[0]!, { ...unplaced.messages[1]!, metadata: undefined }];
+  const compacted = "its session was compacted after that reply";
+  const cases: Array<[string, Conversation, string | undefined, string]> = [
+    ["no reply that ended a turn", unplaced, undefined, "the app found no reply of it that ended a turn"],
+    ["the CLI could not keep the point", chatWithLaterWork({ sessionCut: { sessionId: "src-cli-session", at: "assistant-uuid-1" } }), compacted, compacted]
   ];
-  for (const [label, replyMetadata, answer, reason] of cases) {
+  for (const [label, source, cliReason, reason] of cases) {
+    const note = `@main's copy of @reviewer's session may include what @reviewer did after you tapped Fork: ${reason}.`;
+    let id = "";
+    const lines = () => (storage.store.get(id)?.messages ?? []).filter((message) => message.role === "system" && message.content === note);
+    let linesWhileRunning = -1;
     const { service, storage, runs } = testService({
-      conversations: [chatWithLaterWork(replyMetadata)],
+      conversations: [source],
       run: async (participant, _prompt, runOptions) => {
+        if (cliReason) runOptions.onForkCutMissed?.(cliReason);
         runOptions.onSessionId?.("fork-own-session");
-        return { participant, ok: true, content: "On it.", durationMs: 1, sessionId: "fork-own-session", ...answer };
+        // Said before the turn ends: it may last hours, and the app may stop during it.
+        await waitFor(() => lines().length === 1);
+        linesWhileRunning = lines().length;
+        return { participant, ok: true, content: "On it.", durationMs: 1, sessionId: "fork-own-session", ...(cliReason ? { forkCutMissed: cliReason } : {}) };
       }
     });
-    const { id } = await forkAndSend(service, storage);
+    const created = await service.createConversation({ participants: [], forkOf: { conversationId: "old-chat", participantId: REVIEWER.id } });
+    id = created.conversation.id;
+    const mainId = String(created.conversation.metadata.mainSessionParticipantId);
+    await service.sendMessage({ conversationId: id, runId: `run-${label}`, content: "Go on.", targetParticipantIds: [mainId] });
+    await waitFor(() => (storage.store.get(id)?.messages ?? []).some((message) => message.participantId === mainId && message.status !== "pending"));
     assert.equal(runs[0]!.options.forkFromSessionId, "src-cli-session", `${label}: still a copy`);
-    const warning = `@main's copy of @reviewer's session may include what @reviewer did after you tapped Fork: ${reason}.`;
-    await waitFor(() => ((storage.store.get(id)?.metadata.warnings ?? []) as string[]).includes(warning));
-    assert.deepEqual(storage.store.get(id)!.metadata.warnings, [warning], label);
+    assert.equal(linesWhileRunning, 1, `${label}: in the chat while the turn ran`);
+    // A line in the chat, which her server carries to the phone and from a
+    // cloud machine; not a warning, which stays on the device that ran it.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(lines().length, 1, `${label}: once`);
+    assert.equal(lines()[0]!.metadata?.threadId, "system", label);
+    assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], [], label);
+    if (!cliReason) assert.equal(runs[0]!.options.forkCut, undefined, `${label}: no point asked`);
   }
-  // No cut was asked when there was nothing to name it by.
-  const { service, storage, runs } = testService({ conversations: [chatWithLaterWork({ sessionCut: { sessionId: "older-session", at: "x" } })] });
+});
+
+test("when the member's session changed after the reply she saw, the session that reply was in is copied up to it", async () => {
+  const { service, storage, runs } = testService({ conversations: [chatWithLaterWork({ sessionCut: { sessionId: "older-session", at: "assistant-uuid-1" } })] });
   await forkAndSend(service, storage);
-  assert.equal(runs[0]!.options.forkCut, undefined);
+  assert.equal(runs[0]!.options.forkFromSessionId, "src-cli-session", "the member's session, as the fallback");
+  assert.deepEqual(runs[0]!.options.forkCut, { at: "assistant-uuid-1", sessionId: "older-session" });
 });
 
 test("a fork whose source is gone says only that, not that its copy may hold more", async () => {
@@ -694,7 +717,7 @@ test("a fork whose source is gone says only that, not that its copy may hold mor
   });
   const { id, mainId } = await forkAndSend(service, storage);
   await waitFor(() => sessionsOf(storage.store.get(id)).find((item) => item.participantId === mainId)?.forkFrom?.failedAttempts === 1);
-  assert.equal(((storage.store.get(id)?.metadata.warnings ?? []) as string[]).some((warning) => /may include what/.test(warning)), false);
+  assert.equal((storage.store.get(id)?.messages ?? []).some((message) => /may include what/.test(message.content)), false);
 });
 
 test("a reply that ends a turn records where its CLI session stood; one whose CLI did not say records nothing", async () => {
@@ -731,10 +754,11 @@ test("the reply the User saw: a finished reply that ended a turn, its point or i
   assert.deepEqual(forkSeenReplyOf(reply({ metadata: { workedMs: 1_000, sessionCut: { sessionId: "s", at: "a", extra: 1 } as never } })),
     { messageId: "r", sessionCut: { sessionId: "s", at: "a" }, finishedAt: "2026-11-21T12:00:01.000Z" });
   assert.deepEqual(forkCutFor({ messageId: "r", sessionCut: { sessionId: "s", at: "a" }, finishedAt: REPLY_FINISHED }, "s"), { at: "a" });
-  assert.deepEqual(forkCutFor({ messageId: "r", sessionCut: { sessionId: "old", at: "a" }, finishedAt: REPLY_FINISHED }, "s"), { unknown: "its session changed after its last reply" });
+  assert.deepEqual(forkCutFor({ messageId: "r", sessionCut: { sessionId: "old", at: "a" }, finishedAt: REPLY_FINISHED }, "s"), { at: "a", sessionId: "old" },
+    "the session the reply was in, when the member's changed after it");
   assert.deepEqual(forkCutFor({ messageId: "r", finishedAt: REPLY_FINISHED }, "s"), { finishedBy: REPLY_FINISHED });
   assert.deepEqual(forkCutFor({ messageId: "r" }, "s"), { unknown: "its last reply does not say where it ended in its session" });
-  assert.deepEqual(forkCutFor(undefined, "s"), { unknown: "it had no finished reply when you tapped Fork" });
+  assert.deepEqual(forkCutFor(undefined, "s"), { unknown: "the app found no reply of it that ended a turn" });
 });
 
 test("her server and the computer read the reply the User saw by the same rule", async () => {

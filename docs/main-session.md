@@ -345,32 +345,48 @@ chat as that chat's main session, with everything it knew
     which only a turn's end sets; never a post, a request or an Accord
     launch written during a turn, so a turn still running at the tap is
     left out with what it posted). The computer and her server read it by
-    the same query (`StorageService.conversationLastTurnEnd`); the phone
-    takes her server's (`HubPhoneForkSource.seen`), read when the item
-    opened, and writes the same field through `forkedMainSessionFor`.
+    the same query (`StorageService.conversationLastTurnEnd`); the computer
+    reads it first, before its checks. The phone takes her server's
+    (`HubPhoneForkSource.seen`), read again when she taps (a reply that
+    finished while the item was open counts; out of reach within 4 s, the
+    read from when the item opened), and writes the same field through
+    `forkedMainSessionFor`.
   - At the first turn the device that holds the session names the point
-    (`forkCutFor`): the recorded one when the reply's session is the one
-    copied; for a reply from before `sessionCut`, by time on the clock of
+    (`forkCutFor`): the recorded one, in the session the reply was in (when
+    the member's session changed after the reply, that earlier session is
+    copied up to it, if it is still on that device); for a reply from
+    before `sessionCut`, by time on the clock of
     the device that ran it (`finishedAt`, its turn's start plus `workedMs`):
     Claude Code, its last assistant message written by then; Codex, its last
     finished turn that started before then (Codex's turn ids are UUIDv7),
     or, for an id that does not say, completed by then to the second.
   - Claude Code forks with `--resume <member's session> --fork-session
     --resume-session-at <uuid> --session-id <new>`, after reading the
-    transcript (`claudeForkCut`): nothing of the conversation after the
-    point, no flag (the copy is as it was before this rule); a compaction
-    after it, no point (the CLI does not load a message before a later
-    compaction and refuses it). Codex forks with `thread/fork` `lastTurnId`
-    (inclusive; a later compaction does not stop it), reading the thread's
-    turns newest first (`thread/turns/list`, no items) for a reply from
-    before. Antigravity has no fork.
-  - When no point can be named (no such reply, the session changed after
-    it, it is not in the session on that device, Claude Code compacted the
-    session after it, Codex could not list the turns, the CLI refused the
-    point), the whole session is copied, as before this rule, and once the
-    copy is made the chat says so: "@main's copy of @x's session may include
-    what @x did after you tapped Fork: <why>." Never a clean start: the copy
-    keeps what she saw, the warning says what may be more.
+    transcript a line at a time (`claudeForkCut`; her longest, 113 MB,
+    reads in about 0.4 s with no pause of the app over 12 ms); a compaction
+    after the point, no point (the CLI does not load a message before a
+    later compaction and refuses it). Codex forks with `thread/fork`
+    `lastTurnId` (inclusive; a later compaction does not stop it), reading
+    the thread's turns newest first (`thread/turns/list`, no items) for a
+    reply from before. The point is given even when nothing follows it yet:
+    the copy is then all of it, as before this rule, and a turn the member
+    starts while the copy is made stays out. A point on a tool call whose
+    result never came (a stopped turn) is fine: Claude Code fills it in as
+    missing (checked). Antigravity has no fork.
+  - When no point can be named (no reply that ended a turn, it is not in
+    the session on that device, the earlier session it was in is gone,
+    Claude Code compacted the session after it, Codex could not list the
+    turns, the CLI refused the point or does not know the flag), the whole of the
+    member's session is copied, as before this rule, and a line in the chat
+    says so as soon as that is decided, before the turn runs (it may last
+    hours, and the app may stop during it): "@main's copy of @x's session
+    may include what @x did after you tapped Fork: <why>." A line, not a
+    chat warning: a warning stays on the device that raised it, and the
+    copy may run on a cloud machine or have been asked from the phone; the
+    line reaches every device through her server. Never a clean start: the
+    copy keeps what she saw, the line says what may be more. One case says
+    more than is so: a compaction after her last reply but before the tap
+    (nothing else happened) gives the line too.
   - Checked 2026-11-21 on throwaway sessions: Claude Code 2.1.329 forked at
     the first of two turns ("remember APPLE", "remember BANANA") answers
     APPLE only, in one-shot and in stream-json (warm) mode, the source
@@ -378,6 +394,11 @@ chat as that chat's main session, with everything it knew
     refused ("No message found with message.uuid of: …"). Codex 0.155.1
     `thread/fork` with `lastTurnId` of the first turn answers APPLE, also
     after a later compaction; an unknown turn is refused ("turn not found").
+    Through the app's own runner (`CliAgentRunner.run` with `forkCut`) on
+    the same sessions: the recorded point and the reply's finish both give
+    APPLE for Claude Code and Codex; an unknown point gives "APPLE and
+    BANANA" and the reason. A Claude Code fork at a tool call with no
+    result answers that the result is missing.
 - Claude Code 2.1.329 forks a session from another folder as well as from
   its own (checked 2026-11-21); the new chat keeps the member's project so
   the copy works in the folder it knew.
