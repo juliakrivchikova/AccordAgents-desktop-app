@@ -59,6 +59,10 @@ export function ChatParticipantMenu(props: {
   /** Members whose restart has not ended. */
   restartingById?: ReadonlyMap<string, MemberRestartInProgress>;
   onRemoveParticipant: (participantId: string) => void;
+  /** Fork to new chat: a new chat whose main session is a copy of the member. */
+  onForkToNewChat?: (participantId: string) => void;
+  /** Why a member cannot be forked to a new chat now. */
+  forkToNewChatReason?: (participant: ChatParticipant) => string | undefined;
   onJumpToParticipantLastMessage: (participantId: string) => void;
   onManageInSettings: () => void;
   /** One member's settings only, opened by this trigger (a gear by default). */
@@ -124,6 +128,8 @@ export function ChatParticipantMenu(props: {
       onStopRestart={props.onStopRestart}
       restartingById={props.restartingById}
       onRemoveParticipant={props.onRemoveParticipant}
+      onForkToNewChat={props.onForkToNewChat}
+      forkToNewChatReason={props.forkToNewChatReason}
       onJumpToParticipantLastMessage={props.onJumpToParticipantLastMessage}
       onManageInSettings={props.onManageInSettings}
       memberId={props.memberId}

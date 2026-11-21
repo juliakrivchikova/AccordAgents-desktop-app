@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { startRendererCrashReporting } from "./app/crash-reporting";
 import type {
   ChatActivityItem,
+  ChatParticipant,
   ChatSkillMention,
   Conversation,
   PluginCatalogItem,
@@ -31,6 +32,7 @@ import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
 import { ChatClassicOnly, ChatViewHeaderControls } from "./components/chat/chat-view-switch";
 import { memberModelChip } from "./components/chat/chat-sessions-composer";
 import { ChatMemberModelAccess } from "./components/chat/chat-member-model-access";
+import { forkToNewChatReasonFor, useMachineForkSupport } from "./components/chat/use-fork-to-new-chat";
 import { memberSessionMoves } from "../shared/memberSessionMove";
 import { renderNewChatMemberMark } from "./components/chat/chat-member-mark";
 import { chatViewFor, mainSessionParticipantId } from "../shared/mainSession";
@@ -86,6 +88,7 @@ function App(): JSX.Element {
     conversationActions.refreshActivity
   );
   const view = useAppViewModel(state);
+  const machineForkSupport = useMachineForkSupport();
   const artifacts = useArtifacts(state.conversation?.id);
   // A new terminal opens in the project of the chat in view, or of the new
   // chat being set up; with neither, in the home folder.
@@ -297,6 +300,11 @@ function App(): JSX.Element {
       tooltip="Terminal (Ctrl+`)"
     />
   );
+  // Fork to new chat (src/shared/forkToNewChat.ts): why a member of the open
+  // chat cannot be copied into a new chat's main session now.
+  const forkToNewChatReason = (participant: ChatParticipant): string | undefined => view.activeChatConversation
+    ? forkToNewChatReasonFor(participant, view.activeChatConversation, state.agents, state.settings, machineForkSupport)
+    : "Open its chat first.";
   // The chat's members and their settings: the roster in the classic view's
   // header; in the sessions view one member's settings, from its session or
   // its model chip in a composer.
@@ -321,6 +329,8 @@ function App(): JSX.Element {
       onStopRestart={(runId) => void window.consensus.cancelReview(runId)}
       restartingById={restartingMembers(state.progressLog)}
       onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
+      onForkToNewChat={(participantId) => void chatActions.forkChatParticipantToNewChat(participantId)}
+      forkToNewChatReason={forkToNewChatReason}
       onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
       onManageInSettings={() => openSettingsSection("participants")}
       memberId={memberId}
@@ -350,6 +360,8 @@ function App(): JSX.Element {
         restartStatus={restartingMembers(state.progressLog).get(memberId)}
         onRemove={isMain ? undefined : () => void chatActions.removeChatParticipant(memberId)}
         removeDisabledReason={view.busyParticipantIds.has(memberId) ? "busy" : undefined}
+        onForkToNewChat={() => void chatActions.forkChatParticipantToNewChat(memberId)}
+        forkToNewChatDisabledReason={forkToNewChatReason(participant)}
       />
     );
   };

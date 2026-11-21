@@ -5,7 +5,10 @@ import { act, create, type ReactTestInstance } from "react-test-renderer";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { buildSessionsViewIndex, memberSessionMessages } from "../../../shared/mainSession";
 import { latestTaskByMember, sessionsMemberActivity, sessionsMemberRows, sessionsMemberTitle } from "../../../shared/mainSessionView";
-import type { AppSettings, ChatMessage } from "../../../shared/types";
+import type { AppSettings, ChatMessage, Conversation } from "../../../shared/types";
+import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL } from "../../../shared/forkToNewChat";
+import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
+import { forkToNewChatReasonFor, machineForkSupportFrom } from "./use-fork-to-new-chat";
 import { ChatMembersPanel } from "./chat-members-panel";
 import { ChatModelAccessPanel, type ChatModelAccessPatch } from "./chat-model-access-picker";
 import { memberSettingsActions } from "./chat-member-model-access";
@@ -517,4 +520,81 @@ test("a member's settings send only what was chosen, so a second quick choice ne
   const reset = runtimePatchFields({ reasoningEffort: undefined, homeMachineId: undefined });
   assert.deepEqual(Object.keys(reset).sort(), ["homeMachineId", "reasoningEffort"], "a key given without a value is a reset, and is sent");
   assert.equal(Object.prototype.hasOwnProperty.call(runtimePatchFields({ model: "x" }), "permissions"), false);
+});
+
+// --- Fork to new chat (src/shared/forkToNewChat.ts) ------------------------------
+
+test("Fork to new chat sits in a member's … menu (the main session's chip too), disabled with its reason when it cannot be made", () => {
+  const forked: string[] = [];
+  let closed = 0;
+  const base = { participant: { id: DREW.id, kind: DREW.kind }, backgroundTaskCount: 0, status: "idle" as const, onRestart: noop,
+    onForkToNewChat: () => { forked.push(DREW.id); }, close: () => { closed += 1; } };
+  const offered = memberSettingsActions({ ...base, onRemove: noop });
+  assert.deepEqual(offered.map((action) => action.label), ["Restart", FORK_TO_NEW_CHAT_LABEL, "Remove from chat"]);
+  const fork = offered[1]!;
+  assert.equal(fork.disabled, false);
+  assert.equal(fork.detail, FORK_TO_NEW_CHAT_DETAIL, "what it makes, under it");
+  fork.onSelect();
+  assert.deepEqual(forked, [DREW.id]);
+  assert.equal(closed, 1, "the settings close: the new chat opens");
+  // The main session's chip: no Remove, still Fork.
+  assert.deepEqual(memberSettingsActions({ ...base, participant: { id: MAIN.id, kind: MAIN.kind } }).map((action) => action.label), ["Restart", FORK_TO_NEW_CHAT_LABEL]);
+  // Antigravity: nothing to restart, and the fork disabled with why.
+  const agy = memberSettingsActions({ ...base, participant: { id: TAYLOR.id, kind: TAYLOR.kind }, forkToNewChatDisabledReason: "Antigravity has no session fork." });
+  assert.equal(agy.length, 1);
+  assert.equal(agy[0]!.label, FORK_TO_NEW_CHAT_LABEL);
+  assert.equal(agy[0]!.disabled, true);
+  assert.equal(agy[0]!.detail, "Antigravity has no session fork.", "the reason in its place");
+  assert.deepEqual(memberSettingsActions({ ...base, onForkToNewChat: undefined }).map((action) => action.label), ["Restart"], "only where it is wired");
+});
+
+test("the classic roster card has Fork to new chat next to Restart, disabled with its reason", () => {
+  const forked: string[] = [];
+  const card = (reason: string | undefined) => (
+    <TooltipProvider>
+      <ChatParticipantRosterRow
+        participant={DREW} removeDisabledReason={undefined} busy={false} status="idle" runLocationLocked={false}
+        renderParticipantAvatar={() => null} participantRoleLabel={() => "Member"} participantRoleArchived={() => false}
+        onInsertMention={noop} onJumpToLastMessage={noop} onUpdateParticipantRuntime={noop}
+        onCompactParticipant={noop} onRestartParticipant={async () => true} onStopRestart={noop} onRemoveParticipant={noop}
+        onForkToNewChat={(id) => forked.push(id)} forkToNewChatDisabledReason={reason}
+      />
+    </TooltipProvider>
+  );
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => { renderer = create(card(undefined)); });
+  const button = () => renderer!.root.find((node) => node.type === "button" && node.props["data-testid"] === "chat-participant-fork");
+  assert.match(String(button().props["aria-label"]), /^Fork to new chat: /);
+  assert.equal(button().props.disabled, false);
+  act(() => button().props.onClick(click));
+  assert.deepEqual(forked, [DREW.id]);
+  act(() => renderer!.update(card("It has not run yet, so it has no session to copy.")));
+  assert.equal(button().props.disabled, true);
+  assert.ok(renderer!.root.findAll((node) => typeof node.props?.children === "string" && node.props.children === "Fork to new chat. It has not run yet, so it has no session to copy.").length > 0,
+    "its tooltip says why");
+  act(() => renderer!.unmount());
+});
+
+test("the menus' reasons come from the chat as the desktop has it: its session, its machine's program, its CLI here", () => {
+  const conversation = (metadata: Record<string, unknown>) => ({ metadata, messages: [] }) as unknown as Conversation;
+  const ran = conversation({ participantSessions: [{ participantId: DREW.id, sessionId: "s-1" }] });
+  const settings = { providers: [], cliProviderHosts: [] };
+  assert.equal(forkToNewChatReasonFor(DREW, ran, [], settings, new Map()), undefined);
+  assert.match(String(forkToNewChatReasonFor(DREW, conversation({ participantSessions: [] }), [], settings, new Map())), /has not run yet/);
+  assert.match(String(forkToNewChatReasonFor(TAYLOR, ran, [], settings, new Map())), /Antigravity/);
+  assert.match(String(forkToNewChatReasonFor(DREW, ran, [{ kind: "codex-cli", label: "Codex CLI", installed: false }], settings, new Map())), /Codex/,
+    "its CLI not ready here");
+  const boxed = { ...DREW, homeMachineId: "m-1" };
+  const answered = conversation({ lastMessageByParticipant: { [DREW.id]: { messageId: "r", sequence: 1 } } });
+  const support = machineForkSupportFrom({
+    machines: [{ id: "m-1", name: "Box", deviceId: "d", pairingKey: "k", createdAt: "t" }, { id: "m-2", name: "Old", deviceId: "d2", pairingKey: "k2", createdAt: "t" }],
+    status: [
+      { machineId: "m-1", name: "Box", connected: true, lastHello: { forkToNewChatSupported: true } as never },
+      { machineId: "m-2", name: "Old", connected: false, lastHello: { sessionMoveSupported: true } as never }
+    ]
+  });
+  assert.equal(forkToNewChatReasonFor(boxed, answered, [{ kind: "codex-cli", label: "Codex CLI", installed: false }], settings, support), undefined,
+    "a machine's member runs on that machine's CLI");
+  assert.match(String(forkToNewChatReasonFor({ ...boxed, homeMachineId: "m-2" }, answered, [], settings, support)), /older program/);
+  assert.match(String(forkToNewChatReasonFor({ ...boxed, homeMachineId: "m-3" }, answered, [], settings, support)), /has not connected/);
 });

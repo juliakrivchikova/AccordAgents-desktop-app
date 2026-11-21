@@ -44,6 +44,7 @@ import type { ConversationActions } from "./use-conversation-actions";
 import { upsertConversationSummary, withPinnedState } from "./conversation-summaries";
 import { newChatTitle } from "../../shared/newChat";
 import { persistLastViewedAt } from "./storage";
+import { requestComposerFocus } from "./composer-focus-request";
 import { cleanIpcError } from "../lib/ipc-error";
 import { serializeComposerDraft } from "../components/chat/chat-composer-draft-utils";
 import { revokePendingImageUrls } from "../components/chat/use-chat-composer-images";
@@ -71,6 +72,8 @@ export interface ChatActions {
   removeChatParticipant: (participantId: string) => Promise<void>;
   compactChatParticipant: (participantId: string, options?: ChatRunScopeOptions) => Promise<boolean>;
   restartChatParticipant: (participantId: string, stopBackgroundTasks?: boolean) => Promise<boolean>;
+  /** Fork to new chat: a new chat whose main session is a copy of this member. */
+  forkChatParticipantToNewChat: (participantId: string) => Promise<boolean>;
   startChatAccord: (options: StartChatAccordOptions) => Promise<boolean>;
   respondToChatAppToolApproval: (
     approvalId: string,
@@ -671,6 +674,40 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
   }
 
+  /**
+   * Fork to new chat (src/shared/forkToNewChat.ts): makes a new chat whose
+   * main session is a copy of this member of the open chat, opens it, and
+   * hands its empty composer the keyboard; the first message sent there
+   * makes the fork. Made through the same path as every new chat.
+   */
+  async function forkChatParticipantToNewChat(participantId: string): Promise<boolean> {
+    if (!state.conversation || state.conversation.kind !== "chat") return false;
+    const conversationId = state.conversation.id;
+    if (state.startingChatRef.current) return false;
+    state.startingChatRef.current = true;
+    state.setError(undefined);
+    try {
+      const result = await window.consensus.createChatConversation({
+        runId: crypto.randomUUID(),
+        participants: [],
+        skipDefaultParticipants: true,
+        forkOf: { conversationId, participantId }
+      });
+      const created = result.conversation;
+      requestComposerFocus(created.id);
+      state.setSummaries((current) => upsertConversationSummary(current, created));
+      state.setRailView("chats");
+      await conversationActions.openConversation(created.id);
+      await conversationActions.refreshConversations().catch(() => undefined);
+      return true;
+    } catch (caught) {
+      state.setError(cleanIpcError(caught));
+      return false;
+    } finally {
+      state.startingChatRef.current = false;
+    }
+  }
+
   async function startChatAccord(options: StartChatAccordOptions): Promise<boolean> {
     if (!state.conversation || state.conversation.kind !== "chat") return false;
     state.setError(undefined);
@@ -781,7 +818,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
   return {
     startChat, renameChatConversation, setChatArchived, setChatPinned, deleteChatConversation, sendChatMessage, respondToChatMentions,
     toggleChatReaction, dismissTurnFinishedNote, respondToChatChoice, addChatParticipant, addSavedChatParticipant,
-    updateChatParticipantRuntime, removeChatParticipant, compactChatParticipant, restartChatParticipant, startChatAccord, respondToChatAppToolApproval
+    updateChatParticipantRuntime, removeChatParticipant, compactChatParticipant, restartChatParticipant, forkChatParticipantToNewChat, startChatAccord,
+    respondToChatAppToolApproval
   };
 }
 

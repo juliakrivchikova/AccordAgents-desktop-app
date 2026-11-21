@@ -575,6 +575,27 @@ export class StorageService {
     return { kind: row.kind, ...(row.repoPath ? { repoPath: row.repoPath } : {}), participants };
   }
 
+  /** A chat's member session records (this device's own), without its
+   *  messages: a main session made by Fork to new chat reads the session of
+   *  the member it copies from that member's chat, which can be thousands of
+   *  messages long. `undefined` when no such chat is stored. */
+  async conversationParticipantSessions(id: string): Promise<unknown[] | undefined> {
+    await this.init();
+    const rows = await this.queryJson<{ kind: string; sessionsJson: string | null }>(
+      `select kind,
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participantSessions') as sessionsJson
+       from conversations where id = ${sqlString(id)};`
+    );
+    const row = rows[0];
+    if (!row || row.kind !== "chat") return undefined;
+    try {
+      const parsed = row.sessionsJson ? JSON.parse(row.sessionsJson) as unknown : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
   /** The titles of the chats named (those this device still has). */
   async conversationTitles(ids: readonly string[]): Promise<Record<string, string>> {
     if (!ids.length) return {};

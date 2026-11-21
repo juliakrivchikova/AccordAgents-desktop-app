@@ -95,6 +95,11 @@ export interface MachineHelloBody {
    *  "session.export"; absent before that existed, when the handoff would be
    *  ignored and the export turn taken as an ordinary turn of the member. */
   sessionMoveSupported?: boolean;
+  /** This runtime starts a chat's main session from a copy of one of its
+   *  members' sessions in another chat (ChatParticipant.forkOrigin, Fork to
+   *  new chat); absent before that existed, when that main session would
+   *  start clean without a word. */
+  forkToNewChatSupported?: boolean;
   /** An enabled scheduled script keeps this machine from stopping when idle.
    *  Not a run: the desktop's update gate does not wait on it. */
   keepAwake?: boolean;

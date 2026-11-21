@@ -625,6 +625,7 @@ export class MachineHostService {
       ...(typeof this.options.autoStopEnabled?.() === "boolean" ? { autoStopEnabled: this.options.autoStopEnabled() } : {}),
       memberRestartSupported: true,
       sessionMoveSupported: true,
+      forkToNewChatSupported: true,
       ...(this.options.scripts ? {
         scriptsSupported: true,
         keepAwake: this.options.scripts.keepsHostAwake(),

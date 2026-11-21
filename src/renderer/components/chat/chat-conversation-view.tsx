@@ -489,6 +489,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
                 { runIds: activeRunSummary.runIdsByParticipantId.get(sessions?.mainSessionId ?? "") ?? [], onStopRun: props.onStopRun })}
               status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
               testId="chat-main-composer"
+              takesFocusRequests
               renderParticipantAvatar={renderComposerMemberMark}
               participantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
             />

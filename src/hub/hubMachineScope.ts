@@ -81,9 +81,10 @@ import type {
 
 type Update = { title?: string; repoPath?: string | null; metadata?: Record<string, unknown>; removedMetadataKeys?: string[] };
 
-/** Where a member runs: what decides which device takes its turns, and the
- *  session it is handed when it moves (only the computer writes either). */
-const HOME_FIELDS = ["homeMachineId", "cloudRun", "remoteExecution", "sessionHandoff"] as const;
+/** Where a member runs: what decides which device takes its turns, the
+ *  session it is handed when it moves, and the member of another chat a
+ *  forked main session copies (only the computer writes any of them). */
+const HOME_FIELDS = ["homeMachineId", "cloudRun", "remoteExecution", "sessionHandoff", "forkOrigin"] as const;
 
 export interface MachineScopedUpdate {
   update: Update;
@@ -269,8 +270,8 @@ function keepRequestRight(next: ChatParticipant, current: ChatParticipant, given
 // --- its own members ----------------------------------------------------------
 
 function withoutHandoff(member: ChatParticipant): ChatParticipant {
-  if (!("sessionHandoff" in member)) return member;
-  const { sessionHandoff: _handoff, ...rest } = member;
+  if (!("sessionHandoff" in member) && !("forkOrigin" in member)) return member;
+  const { sessionHandoff: _handoff, forkOrigin: _origin, ...rest } = member;
   return rest;
 }
 
@@ -779,8 +780,9 @@ export function scopeMachineConversationUpdate(conversation: Conversation, updat
         const clash = [...beforeById.values(), ...taken].some((other) => other.id !== participant.id && handleKey(other.handle) === handleKey(participant.handle));
         const allowed = clash ? undefined : additionAllowed(participant, changes);
         if (allowed) {
-          // A member a machine adds brings no session with it: only the
-          // computer hands a member its session, when it moves it.
+          // A member a machine adds brings no session with it, nor a copy
+          // of another chat's member: only the computer hands a member its
+          // session, when it moves it or forks a member to a new chat.
           let added = withoutHandoff(participant);
           if (added !== participant) refused.push(`participants.${participant.id}.sessionHandoff`);
           // One added without a card in a chat with a main session says who

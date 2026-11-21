@@ -2,6 +2,7 @@ import { useCallback, useContext, useState, type ReactNode } from "react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { canRestartParticipant, memberProcessRestartable } from "../../../shared/chatParticipantStatus";
+import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL } from "../../../shared/forkToNewChat";
 import type { MemberRestartInProgress } from "../../../shared/memberRestart";
 import type { ChatParticipant } from "../../../shared/types";
 import { ChatModelAccessPanel, type ChatModelAccessAction, type ChatModelAccessPatch } from "./chat-model-access-picker";
@@ -41,6 +42,10 @@ export function ChatMemberModelAccess(props: {
   onRemove?: () => void;
   /** Why it cannot be removed now. */
   removeDisabledReason?: string;
+  /** Makes a new chat whose main session is a copy of it (Fork to new chat). */
+  onForkToNewChat?: () => void;
+  /** Why it cannot be forked to a new chat now. */
+  forkToNewChatDisabledReason?: string;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
   const { participant, onUpdate } = props;
@@ -57,6 +62,8 @@ export function ChatMemberModelAccess(props: {
     onStopRestart: props.onStopRestart,
     onRemove: props.onRemove,
     removeDisabledReason: props.removeDisabledReason,
+    onForkToNewChat: props.onForkToNewChat,
+    forkToNewChatDisabledReason: props.forkToNewChatDisabledReason,
     close: () => setOpen(false)
   });
   return (
@@ -82,7 +89,8 @@ export function ChatMemberModelAccess(props: {
 
 /** The … menu of a member's settings: Restart (as the classic roster has
  *  it: not for Antigravity, which starts a process per message; only while
- *  it is idle; naming the background work it stops), and Remove. */
+ *  it is idle; naming the background work it stops), Fork to new chat
+ *  (disabled with its reason when it cannot be made), and Remove. */
 export function memberSettingsActions(input: {
   participant: Pick<ChatParticipant, "id" | "kind">;
   status?: ChatParticipantRosterStatus;
@@ -92,6 +100,8 @@ export function memberSettingsActions(input: {
   onStopRestart?: (runId: string) => void;
   onRemove?: () => void;
   removeDisabledReason?: string;
+  onForkToNewChat?: () => void;
+  forkToNewChatDisabledReason?: string;
   close: () => void;
 }): ChatModelAccessAction[] {
   const actions: ChatModelAccessAction[] = [];
@@ -121,6 +131,18 @@ export function memberSettingsActions(input: {
         }
       });
     }
+  }
+  if (input.onForkToNewChat) {
+    const reason = input.forkToNewChatDisabledReason;
+    actions.push({
+      label: FORK_TO_NEW_CHAT_LABEL,
+      detail: reason ?? FORK_TO_NEW_CHAT_DETAIL,
+      disabled: Boolean(reason),
+      onSelect: () => {
+        input.close();
+        input.onForkToNewChat?.();
+      }
+    });
   }
   if (input.onRemove) {
     actions.push({

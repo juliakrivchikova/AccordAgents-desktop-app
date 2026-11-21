@@ -433,6 +433,27 @@ test("a member a machine adds comes without a session handed to it", () => {
   if (member) assert.equal(member.sessionHandoff, undefined);
 });
 
+test("a machine never writes the member of another chat a forked main session copies, for its own members, others or ones it adds", () => {
+  // Fork to new chat (src/shared/forkToNewChat.ts): only the computer names it.
+  const origin = { conversationId: "c-old", participantId: "p-old", handle: "old", conversationTitle: "Old", kind: "claude-code" };
+  const forked = chat();
+  forked.metadata.participants = [desk, { ...box, forkOrigin: origin }] as never;
+  const kept = scopeMachineConversationUpdate(forked, { metadata: { participants: [desk, box] } }, "machine-1");
+  assert.deepEqual((kept.update.metadata?.participants as Array<{ id: string; forkOrigin?: unknown }>)?.find((member) => member.id === "p-box")?.forkOrigin, origin,
+    "its own member keeps what the computer wrote");
+  const other = { ...origin, conversationId: "c-secret", participantId: "p-secret" };
+  const written = scopeMachineConversationUpdate(chat(), { metadata: { participants: [{ ...desk, forkOrigin: other }, { ...box, forkOrigin: other }] } }, "machine-1");
+  const members = (written.update.metadata?.participants ?? [desk, box]) as Array<{ id: string; forkOrigin?: unknown }>;
+  assert.ok(members.every((member) => member.forkOrigin === undefined), "nor one it makes up");
+  const manager = { ...box, permissions: { manageRolesParticipants: "allow" } };
+  const managed = chat();
+  managed.metadata.participants = [desk, manager];
+  const added = { id: "p-new", handle: "new", label: "New", roleConfigId: "r", kind: "claude-code", forkOrigin: other };
+  const scoped = scopeMachineConversationUpdate(managed, { metadata: { participants: [desk, manager, added] } }, "machine-1");
+  const member = (scoped.update.metadata?.participants as Array<{ id: string; forkOrigin?: unknown }>)?.find((item) => item.id === "p-new");
+  if (member) assert.equal(member.forkOrigin, undefined, "a member it adds copies nobody");
+});
+
 // --- a chat with a main session (docs/main-session.md) ---------------------------
 
 const mainRules: HubMemberRules = { ...rules, roles: { ...rules.roles, "main-session": { manageRolesParticipants: "allow", requestParticipants: "allow" } } };

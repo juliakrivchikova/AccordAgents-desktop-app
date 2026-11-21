@@ -992,12 +992,32 @@ export interface ChatParticipant {
    *  at each turn (docs/main-session.md). Absent for members the User added
    *  or approved herself. Set once, when the member is added. */
   delegatedByParticipantId?: string;
+  /** The main session of a chat made by Fork to new chat (src/shared/
+   *  forkToNewChat.ts): the member of another chat whose CLI session it
+   *  starts from. Written once, by the computer, when the chat is made; the
+   *  device the main session runs on copies that member's session (which it
+   *  holds: a fork never crosses devices) at its first turn. */
+  forkOrigin?: ChatParticipantForkOrigin;
+}
+
+/** Where a forked main session comes from: a member of another chat. */
+export interface ChatParticipantForkOrigin {
+  conversationId: string;
+  participantId: string;
+  /** Its handle and its chat's title when it was forked, for the note the
+   *  main session is given and the chat's warnings. */
+  handle: string;
+  conversationTitle: string;
+  kind: ChatProviderKind;
 }
 
 export interface ChatSessionForkSource {
   participantId: string;
   sessionId: string;
   kind: ChatProviderKind;
+  /** The chat the source member is in, when it is not this one (Fork to new
+   *  chat): the copy becomes this chat's main session. */
+  conversationId?: string;
   /** Turns whose fork failed because the source session could not be read.
    *  After the retry fails too, the member starts a clean session instead. */
   failedAttempts?: number;
@@ -2006,6 +2026,15 @@ export interface CreateChatConversationRequest {
   repoPath?: string;
   skipDefaultParticipants?: boolean;
   participants: ChatParticipantInput[];
+  /** Fork to new chat (src/shared/forkToNewChat.ts): the chat is made with
+   *  one main session, a copy of this member's CLI session, in its chat's
+   *  project; the title, folder and members given are not used. */
+  forkOf?: ChatForkToNewChatSource;
+}
+
+export interface ChatForkToNewChatSource {
+  conversationId: string;
+  participantId: string;
 }
 
 export interface AddChatParticipantRequest {

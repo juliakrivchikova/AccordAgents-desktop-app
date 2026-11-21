@@ -264,6 +264,46 @@ A new chat opens in the view Settings → General names (`newChatViewFor`).
 The placement rules are in `src/shared/mainSession.ts` and are the same on
 the desktop and on the phone (bundled through `mobileSharedRules.ts`).
 
+## Fork to new chat
+
+The User, 2026-11-21 ("форкнуть любого участника в качестве оркестратора
+нового чата"): any member of any chat (a main session, a member it made, a
+member of a chat from before with its Assistant) can be copied into a new
+chat as that chat's main session, with everything it knew
+(`src/shared/forkToNewChat.ts`).
+
+- Offered as "Fork to new chat" in a member's … menu in the sessions view
+  (its settings from its session's gear, and the main session's composer
+  chip) and as a fork button on its card in the classic roster. Disabled,
+  with the reason, for Antigravity (no fork), a member that never ran (no
+  session), one waiting for a machine, one on a machine whose program is
+  older (Upgrade runtime) or has never greeted this computer, and one on this
+  computer whose CLI is not ready. The phone has no member menus, so it has
+  no such item.
+- The new chat is made through the same path as every new chat
+  (`createConversation` with `forkOf`, saved and so put on the User's server):
+  titled "<chat> (fork)" until its first reply names it, in the member's
+  project, in Settings → General's view, with one member: its main session on
+  the member's provider, model, effort, access (its CLI's mode and what it
+  may read, edit, run and reach, as it runs now) and place (this computer or
+  the same machine: a fork never crosses devices), with the main session's
+  role and its say over members, marked `ChatParticipant.forkOrigin`
+  (written only by the computer; her server keeps a machine from writing
+  it). The chat opens at once with its composer focused; the member and its
+  chat are not touched.
+- Its first turn (on the device it runs on) reads the member's session from
+  the member's chat there (`startFromForkOrigin`; only that chat's session
+  records) and forks it as a delegated fork does (`forkFrom` with the source
+  chat's id). It is told it is the new chat's main session, not a member,
+  with the main session's role instructions, and reminded on later turns. A
+  main session that already answered never becomes a copy again. When the
+  member's session is not on that device, it starts clean and the chat says
+  so; when the CLI cannot copy it, the fork's two-strike fallback holds.
+- Claude Code 2.1.329 forks a session from another folder as well as from
+  its own (checked 2026-11-21); the new chat keeps the member's project so
+  the copy works in the folder it knew.
+- A machine says it can do this in its hello (`forkToNewChatSupported`).
+
 ## Contract (src/shared)
 
 - `MAIN_SESSION_ROLE_ID = "main-session"`, handle base `main`.
