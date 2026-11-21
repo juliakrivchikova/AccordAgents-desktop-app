@@ -22,6 +22,7 @@ import type {
   ChatMessage,
   ChatParticipant,
   ChatParticipantSession,
+  ChatProviderKind,
   ChatRoleConfig,
   Conversation,
   ParticipantConfig
@@ -201,8 +202,11 @@ function testService(options: {
     async saveChatParticipantConfig() { return publicSettings(); }
   };
   const runs: RunCall[] = [];
+  // Which CLIs a readiness check covered: every CLI, or only these.
+  const readinessChecks: Array<"all" | ChatProviderKind[]> = [];
   const cliRunner = {
-    async detectAgents() { return options.agents ?? []; },
+    async detectAgents() { readinessChecks.push("all"); return options.agents ?? []; },
+    async detectAgentKinds(kinds: ChatProviderKind[]) { readinessChecks.push([...kinds]); return options.agents ?? []; },
     async run(participant: ParticipantConfig, prompt: string, _repoPath: unknown, _diffMode: unknown, _kind: unknown, _signal: AbortSignal | undefined, runOptions: any) {
       runs.push({ participant, prompt, options: runOptions });
       return options.run
@@ -213,7 +217,7 @@ function testService(options: {
   const debugLogs = { async write() {} };
   const service = new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never);
   (service as any).ensureHistoryFiles = async () => tempRoot;
-  return { service, storage, runs };
+  return { service, storage, runs, readinessChecks };
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
@@ -418,6 +422,26 @@ test("a fork to a new chat is refused, with its reason, for Antigravity, a membe
     );
     assert.equal(storage.store.size, 1, `${label}: no chat made`);
   }
+});
+
+test("a fork checks only the CLI its main session will run on: the member's own here, none for a member on a machine, never every CLI", async () => {
+  const codexMember: ChatParticipant = { ...REVIEWER, kind: "codex-cli", model: undefined, reasoningEffort: undefined };
+  const local = oldChat([ASSISTANT, codexMember]);
+  const here = testService({ conversations: [local] });
+  await here.service.createConversation({ participants: [], forkOf: { conversationId: local.id, participantId: codexMember.id } });
+  assert.deepEqual(here.readinessChecks, [["codex-cli"]], "its own CLI, not Antigravity's slow check too");
+
+  const boxed: ChatParticipant = { ...REVIEWER, homeMachineId: "m-1" };
+  const remote = oldChat([ASSISTANT, boxed], { participantSessions: [], lastMessageByParticipant: { [boxed.id]: { messageId: "old-reply", sequence: 1 } } });
+  const there = testService({ conversations: [remote] });
+  there.service.setMachineForkToNewChatSupport(() => "supported");
+  await there.service.createConversation({ participants: [], forkOf: { conversationId: remote.id, participantId: boxed.id } });
+  assert.deepEqual(there.readinessChecks, [], "its machine's CLI runs it: nothing to check on this computer");
+
+  const agy = oldChat([ASSISTANT, { ...REVIEWER, kind: "gemini-cli" }]);
+  const refused = testService({ conversations: [agy] });
+  await assert.rejects(refused.service.createConversation({ participants: [], forkOf: { conversationId: agy.id, participantId: REVIEWER.id } }), /Antigravity has no session fork/);
+  assert.deepEqual(refused.readinessChecks, [], "refused before any check");
 });
 
 test("a member on a cloud machine is forked to a new chat whose main session runs on that same machine", async () => {

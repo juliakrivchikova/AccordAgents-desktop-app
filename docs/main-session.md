@@ -315,7 +315,12 @@ chat as that chat's main session, with everything it knew
   role and its say over members, marked `ChatParticipant.forkOrigin`
   (written only by the computer; her server keeps a machine from writing
   it). The chat opens at once with its composer focused; the member and its
-  chat are not touched.
+  chat are not touched. Making it checks only the CLI its main session runs
+  on: a member on this computer has its own CLI checked (a check less than
+  30 s old reused, otherwise that CLI alone, never every CLI); a member on a
+  machine none (`forkReadiness`, `CliReadinessService.refreshKinds`). When
+  the check still takes a moment (reading the computer's environment first),
+  a "Forking to a new chat…" notice shows after 150 ms until the chat is made.
 - Its first turn (on the device it runs on) reads the member's session from
   the member's chat there (`startFromForkOrigin`; only that chat's session
   records) and forks it as a delegated fork does (`forkFrom` with the source

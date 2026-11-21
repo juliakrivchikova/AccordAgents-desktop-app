@@ -33,6 +33,16 @@ interface InFlightReadiness {
   promise: Promise<AgentHealth[]>;
 }
 
+interface InFlightProbe {
+  generation: number;
+  promise: Promise<AgentHealth>;
+}
+
+/** The environment a set of probes runs in, read once for them. */
+type ProbeEnvironment =
+  | { ok: true; env: NodeJS.ProcessEnv; checkedAt: string }
+  | { ok: false; checkedAt: string };
+
 export interface AuthClassification {
   authentication: AgentAuthenticationState;
   diagnosticCode?: AgentReadinessDiagnosticCode;
@@ -60,6 +70,9 @@ export class CliReadinessService {
   private generation = 1;
   private stableSnapshot: AgentHealth[] = [];
   private inFlight?: InFlightReadiness;
+  /** Each CLI's probe while it runs, alone or in a batch: whoever needs that
+   *  CLI waits for this one instead of starting another. */
+  private readonly probesInFlight = new Map<ChatProviderKind, InFlightProbe>();
 
   private readonly dependencies: CliReadinessDependencies;
 
@@ -121,25 +134,91 @@ export class CliReadinessService {
     return promise;
   }
 
+  /**
+   * The readiness of these CLIs only (Fork to new chat needs its member's
+   * own): each one's last result while it is fresh, otherwise its probe
+   * alone, or its probe in a batch already running, never the slowest CLI's.
+   * The others stay as the snapshot has them. Without a snapshot of every
+   * CLI yet, the whole batch runs, so callers always get every CLI.
+   */
+  async refreshKinds(kinds: readonly ChatProviderKind[], request: AgentDetectionRequest = {}): Promise<AgentHealth[]> {
+    const known = new Map(this.stableSnapshot.map((health) => [health.kind, health]));
+    if (!CLI_PROVIDER_DISPLAY_ORDER.every((kind) => known.has(kind))) {
+      return this.refresh(request);
+    }
+    const due = [...new Set(kinds)].filter((kind) => request.force || isAgentSnapshotStale([known.get(kind)!]));
+    if (due.length === 0) {
+      return this.currentSnapshot();
+    }
+    const generation = this.generation;
+    const trigger = request.trigger ?? "service";
+    let environment: Promise<ProbeEnvironment> | undefined;
+    await Promise.all(due.map(async (kind) => {
+      const running = this.probesInFlight.get(kind);
+      if (running?.generation === generation) {
+        return running.promise;
+      }
+      environment ??= this.probeEnvironment();
+      const ready = await environment;
+      // A failed shared prerequisite keeps the last result (sharedFailureSnapshot).
+      return ready.ok ? this.probeKind(kind, generation, trigger, ready) : undefined;
+    }));
+    return this.currentSnapshot();
+  }
+
   private async runBatch(generation: number, trigger: NonNullable<AgentDetectionRequest["trigger"]>): Promise<AgentHealth[]> {
+    const environment = await this.probeEnvironment();
+    if (!environment.ok) {
+      return this.sharedFailureSnapshot(environment.checkedAt, generation);
+    }
+    return Promise.all(CLI_PROVIDER_DISPLAY_ORDER.map((kind) => this.probeKind(kind, generation, trigger, environment)));
+  }
+
+  private async probeEnvironment(): Promise<ProbeEnvironment> {
     const environment = await this.dependencies.refreshEnvironment();
     const checkedAt = this.dependencies.now().toISOString();
     if (!environment.ok) {
-      return this.sharedFailureSnapshot(checkedAt, generation);
+      return { ok: false, checkedAt };
     }
     let manualEnvironment: NodeJS.ProcessEnv;
     try {
       manualEnvironment = await this.dependencies.manualEnvironment();
     } catch {
-      return this.sharedFailureSnapshot(checkedAt, generation);
+      return { ok: false, checkedAt };
     }
-    const effectiveEnvironment = {
-      ...environment.env,
-      ...manualEnvironment
-    };
-    return Promise.all(CLI_PROVIDER_DISPLAY_ORDER.map((kind) =>
-      this.probeProvider(CLI_PROVIDER_SETUP[kind], effectiveEnvironment, checkedAt, generation, trigger)
-    ));
+    return { ok: true, env: { ...environment.env, ...manualEnvironment }, checkedAt };
+  }
+
+  /** One CLI's probe in this generation: the one running, or a new one. Its
+   *  result enters the snapshot as soon as it lands (while its generation is
+   *  current), so a caller that needs only this CLI never waits for the rest
+   *  of a batch. */
+  private probeKind(
+    kind: ChatProviderKind,
+    generation: number,
+    trigger: NonNullable<AgentDetectionRequest["trigger"]>,
+    environment: Extract<ProbeEnvironment, { ok: true }>
+  ): Promise<AgentHealth> {
+    const running = this.probesInFlight.get(kind);
+    if (running?.generation === generation) {
+      return running.promise;
+    }
+    const promise = this.probeProvider(CLI_PROVIDER_SETUP[kind], environment.env, environment.checkedAt, generation, trigger)
+      .then((health) => {
+        if (generation === this.generation) {
+          this.stableSnapshot = this.stableSnapshot.some((entry) => entry.kind === kind)
+            ? this.stableSnapshot.map((entry) => entry.kind === kind ? health : entry)
+            : this.stableSnapshot;
+        }
+        return health;
+      })
+      .finally(() => {
+        if (this.probesInFlight.get(kind)?.promise === promise) {
+          this.probesInFlight.delete(kind);
+        }
+      });
+    this.probesInFlight.set(kind, { generation, promise });
+    return promise;
   }
 
   private async probeProvider(

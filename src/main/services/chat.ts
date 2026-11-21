@@ -1891,10 +1891,10 @@ export class ChatService {
       // ended a turn; the copy ends with that turn. Read first, before the
       // checks below take their time.
       const seen = await this.forkSeenReply(source, member.id);
-      const agents = await this.detectAgentsForReadiness("submit");
+      const running = this.participantForRun(source, member);
+      const agents = await this.forkReadiness(running);
       signal?.throwIfAborted();
       const settings = await this.settings.getPublicSettings();
-      const running = this.participantForRun(source, member);
       const refusal = this.forkToNewChatRefusal(source, running, agents, settings);
       if (refusal) {
         throw new Error(`@${member.handle} cannot be forked to a new chat: ${refusal}`);
@@ -1977,6 +1977,25 @@ export class ChatService {
         error: error instanceof Error ? error.message : String(error)
       }).catch(() => undefined);
       throw error;
+    }
+  }
+
+  /**
+   * The CLI readiness a fork is judged by: only what its main session will
+   * run on. A member on this computer needs its own CLI here (its fresh
+   * result reused, else that CLI alone checked); a member on a machine runs
+   * on that machine's CLI, and Antigravity or a member with no place to run
+   * is refused without any (forkToNewChatUnavailableReason). So Fork opens at
+   * once instead of waiting for every CLI's check.
+   */
+  private async forkReadiness(running: ChatParticipant): Promise<AgentHealth[]> {
+    if (chatParticipantHome(running).kind !== "this-machine" || (running.kind !== "claude-code" && running.kind !== "codex-cli")) {
+      return [];
+    }
+    try {
+      return await this.cliRunner.detectAgentKinds([running.kind], { trigger: "submit" });
+    } catch {
+      throw new Error("Could not verify CLI readiness. Check again and retry.");
     }
   }
 

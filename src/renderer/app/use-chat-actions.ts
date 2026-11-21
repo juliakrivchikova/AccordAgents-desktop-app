@@ -45,6 +45,7 @@ import { upsertConversationSummary, withPinnedState } from "./conversation-summa
 import { newChatTitle } from "../../shared/newChat";
 import { persistLastViewedAt } from "./storage";
 import { requestComposerFocus } from "./composer-focus-request";
+import { FORK_NOTICE_DELAY_MS, laterLoadingNotice } from "./later-loading-notice";
 import { cleanIpcError } from "../lib/ipc-error";
 import { serializeComposerDraft } from "../components/chat/chat-composer-draft-utils";
 import { revokePendingImageUrls } from "../components/chat/use-chat-composer-images";
@@ -686,6 +687,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     if (state.startingChatRef.current) return false;
     state.startingChatRef.current = true;
     state.setError(undefined);
+    // Checking its CLI can take a moment: said at once, gone once it is made.
+    const notice = laterLoadingNotice("Forking to a new chat…", FORK_NOTICE_DELAY_MS);
     try {
       const result = await window.consensus.createChatConversation({
         runId: crypto.randomUUID(),
@@ -693,6 +696,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         skipDefaultParticipants: true,
         forkOf: { conversationId, participantId }
       });
+      notice.end();
       const created = result.conversation;
       requestComposerFocus(created.id);
       state.setSummaries((current) => upsertConversationSummary(current, created));
@@ -704,6 +708,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setError(cleanIpcError(caught));
       return false;
     } finally {
+      notice.end();
       state.startingChatRef.current = false;
     }
   }

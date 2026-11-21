@@ -1725,6 +1725,18 @@ export class CliAgentRunner {
     return agents;
   }
 
+  /** Readiness with only these CLIs checked (each one's fresh result reused,
+   *  CliReadinessService.refreshKinds); every CLI is in the result. */
+  async detectAgentKinds(kinds: readonly ChatProviderKind[], request?: AgentDetectionRequest): Promise<AgentHealth[]> {
+    const agents = await this.readiness.refreshKinds(kinds, request);
+    try {
+      this.agentsDetected?.(agents);
+    } catch {
+      // An observer never changes what the caller gets.
+    }
+    return agents;
+  }
+
   /** Told every result of `detectAgents` (the computer's usage signals). */
   setAgentsDetectedObserver(observer: ((agents: AgentHealth[]) => void) | undefined): void {
     this.agentsDetected = observer;

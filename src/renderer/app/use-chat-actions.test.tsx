@@ -3,11 +3,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { SetStateAction } from "react";
 import { act, create } from "react-test-renderer";
+import { toast } from "sonner";
 
 import type { AgentHealth, AppSettings, ChatParticipantInput } from "../../shared/types";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 import type { AppState } from "./app-state";
 import { newChatProviderChangedRefusal, useChatActions, type ChatActions } from "./use-chat-actions";
+import { FORK_NOTICE_DELAY_MS } from "./later-loading-notice";
+import { takeComposerFocusRequest } from "./composer-focus-request";
 import type { ConversationActions } from "./use-conversation-actions";
 
 test("a saved CLI that is not ready gives way to a ready one; with none ready the chat is not created", async () => {
@@ -488,6 +491,63 @@ test("existing chat send clears immediately and restores the composer draft on f
 
   assert.equal(sent, false);
   assert.equal(draft, "new text typed while sending", "a failed send must not overwrite a newer draft");
+  renderer.unmount();
+});
+
+test("Fork to new chat says it is on its way when making the chat takes a moment, and takes that away once it opens or fails", async () => {
+  // sonner removes a dismissed toast on the next frame.
+  (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame ??= (callback: () => void) => setTimeout(callback, 0);
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const shown = () => toast.getToasts().filter((item) => "title" in item && item.title === "Forking to a new chat…").length;
+  let makeChat: () => Promise<unknown> = async () => ({ conversation: { id: "fork-1" }, warnings: [] });
+  (globalThis as any).window = { consensus: { createChatConversation: () => makeChat() } };
+  let error: string | undefined;
+  const opened: string[] = [];
+  const state = {
+    conversation: { id: "source", kind: "chat", metadata: { participants: [] }, messages: [] },
+    startingChatRef: { current: false },
+    setError: (value: string | undefined) => { error = value; },
+    setSummaries: () => undefined,
+    setRailView: () => undefined
+  } as unknown as AppState;
+  let actions: ChatActions | undefined;
+  function Harness(): null {
+    actions = useChatActions(state, {
+      openConversation: async (id: string) => { opened.push(id); },
+      refreshConversations: async () => undefined
+    } as unknown as ConversationActions);
+    return null;
+  }
+  const renderer = create(<Harness />);
+
+  // At once: nothing flashes by; the new chat's composer is asked to take the keyboard.
+  await act(async () => { assert.equal(await actions!.forkChatParticipantToNewChat("member"), true); });
+  await sleep(FORK_NOTICE_DELAY_MS + 50);
+  assert.equal(shown(), 0, "a fork that opens at once says nothing");
+  assert.deepEqual(opened, ["fork-1"]);
+  assert.equal(takeComposerFocusRequest("fork-1"), true);
+
+  // A moment: said while it waits, gone once the chat is made.
+  makeChat = async () => { await sleep(FORK_NOTICE_DELAY_MS + 150); return { conversation: { id: "fork-2" }, warnings: [] }; };
+  let forked: Promise<boolean> | undefined;
+  act(() => { forked = actions!.forkChatParticipantToNewChat("member"); });
+  await sleep(FORK_NOTICE_DELAY_MS + 50);
+  assert.equal(shown(), 1, "said while the chat is being made");
+  await act(async () => { assert.equal(await forked, true); });
+  await sleep(20);
+  assert.equal(shown(), 0, "gone once it is made");
+  assert.deepEqual(opened, ["fork-1", "fork-2"]);
+
+  // Refused after a moment: the notice goes, the reason stays in the chat's error.
+  makeChat = async () => { await sleep(FORK_NOTICE_DELAY_MS + 150); throw new Error("@member cannot be forked to a new chat: Codex CLI requires sign-in."); };
+  act(() => { forked = actions!.forkChatParticipantToNewChat("member"); });
+  await sleep(FORK_NOTICE_DELAY_MS + 50);
+  assert.equal(shown(), 1);
+  await act(async () => { assert.equal(await forked, false); });
+  await sleep(20);
+  assert.equal(shown(), 0, "gone when it was refused");
+  assert.match(String(error), /cannot be forked to a new chat/);
+  assert.deepEqual(opened, ["fork-1", "fork-2"], "nothing opened");
   renderer.unmount();
 });
 
