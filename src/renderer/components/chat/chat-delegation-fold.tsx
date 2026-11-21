@@ -3,7 +3,7 @@ import { ChevronDown, ChevronRight, Hammer } from "lucide-react";
 
 import { SESSIONS_WORK_STATUS_LABELS, sessionsDelegationSummary, type SessionsTaskEntry } from "../../../shared/mainSessionView";
 import type { ChatParticipant } from "../../../shared/types";
-import { ChatProviderMark } from "./chat-member-mark";
+import { ChatProviderMark, ChatProviderMarkSlot } from "./chat-member-mark";
 import { ChatElapsed } from "./chat-task-card";
 import { formatWorkedDuration } from "./chat-worked-row";
 
@@ -92,7 +92,7 @@ function ChatDelegationRow(props: {
       <span className="chat-delegation-mark">
         {participant
           ? <ChatProviderMark member={participant} />
-          : entry.item.targetKind ? <ChatProviderMark member={{ kind: entry.item.targetKind }} /> : <span className="chat-provider-icon" aria-hidden="true" />}
+          : entry.item.targetKind ? <ChatProviderMark member={{ kind: entry.item.targetKind }} /> : <ChatProviderMarkSlot />}
         <span className={`chat-delegation-dot is-${entry.status}`} aria-hidden="true" />
       </span>
       <span className="chat-delegation-text">

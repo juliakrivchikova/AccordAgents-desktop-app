@@ -3587,7 +3587,7 @@
   function newChatAvatar(participant) {
     // The main session has no avatar picture: its mark is its provider's
     // logo, as in the sessions view a new chat opens in (and on the desktop).
-    if (isMainSessionMember(participant)) return providerLogoElement(participant.kind, "is-mini");
+    if (isMainSessionMember(participant)) return providerLogoElement(participant.kind, "is-mini", { tile: true });
     const avatar = document.createElement("span");
     avatar.className = "mobile-mention-avatar";
     const assistant = participant.roleConfigId === "administrator";
@@ -12209,9 +12209,13 @@
   /** A member's provider logo tile (no avatar picture anywhere in the
    *  sessions view); an empty tile for a member whose provider is not known
    *  (one that left the chat). */
-  function providerLogoElement(kind, className) {
+  /** A member's provider mark. In the sessions view the bare glyph (Claude's
+   *  orange asterisk, Codex's glyph, Antigravity's "A") sized to the text
+   *  beside it, as T3 Code shows it (the User, 2026-11-21); `options.tile`
+   *  puts it on its logo tile (the classic New chat's main session row). */
+  function providerLogoElement(kind, className, options) {
     const tile = document.createElement("span");
-    tile.className = "provider-logo" + (className ? " " + className : "");
+    tile.className = "provider-logo" + (className ? " " + className : "") + (options && options.tile ? "" : " is-bare");
     tile.dataset.providerKind = kind || "unknown";
     const label = memberKindLabel(kind);
     if (label) {

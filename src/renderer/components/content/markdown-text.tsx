@@ -43,7 +43,7 @@ function SessionsMention({ handle, links }: { handle: string; links: ChatSession
         links.openMember(member.id, member.focusMessageId);
       }}
     >
-      {member.kind && <ProviderIcon className="chat-provider-icon is-chip" kind={member.kind} label={member.title} />}
+      {member.kind && <ProviderIcon className="chat-provider-icon is-chip" kind={member.kind} label={member.title} bare />}
       <span>{member.title}</span>
     </button>
   );

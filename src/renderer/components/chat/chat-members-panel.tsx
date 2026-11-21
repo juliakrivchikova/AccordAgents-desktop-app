@@ -7,7 +7,7 @@ import type { ChatParticipant } from "../../../shared/types";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "../primitives";
 import { ChatAccordRow } from "./chat-accord-dock";
-import { ChatProviderMark } from "./chat-member-mark";
+import { ChatProviderMark, ChatProviderMarkSlot } from "./chat-member-mark";
 import { ChatElapsed, ChatWorkStatusLabel } from "./chat-task-card";
 import type { SessionsFormerRow } from "./use-chat-sessions-view";
 
@@ -105,7 +105,7 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
               key={row.member.id}
               id={row.member.id}
               status={row.status}
-              mark={row.member.kind ? <ChatProviderMark member={{ kind: row.member.kind }} /> : <span className="chat-provider-icon" aria-hidden="true" />}
+              mark={row.member.kind ? <ChatProviderMark member={{ kind: row.member.kind }} /> : <ChatProviderMarkSlot />}
               title={row.title}
               detail={SESSIONS_REMOVED_MEMBER_DETAIL}
               onOpen={() => props.onOpenMember(row.member.id)}

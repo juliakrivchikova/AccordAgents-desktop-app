@@ -276,6 +276,49 @@
   background: url("../../assets/antigravity-logo.png") center / contain no-repeat;
 }
 
+/* The bare glyph (the sessions view, T3 Code's way): no tile, no rounded
+   square, sized to the text line. Claude's asterisk is its own orange; the
+   white asterisk of the tile is used as its shape. */
+.chat-provider-icon.is-bare {
+  width: 15px;
+  height: 15px;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.chat-provider-icon.is-bare[data-provider-kind="claude-code"] {
+  background: none;
+}
+
+.chat-provider-icon.is-bare svg,
+.chat-provider-icon.is-bare .provider-mark-claude,
+.chat-provider-icon.is-bare .provider-mark-antigravity {
+  width: 100%;
+  height: 100%;
+}
+
+.chat-provider-icon.is-bare.is-chip {
+  width: 13px;
+  height: 13px;
+}
+
+.chat-provider-icon.is-bare.is-mini {
+  width: 14px;
+  height: 14px;
+}
+
+.chat-provider-icon.is-bare.is-large {
+  width: 18px;
+  height: 18px;
+}
+
+.chat-provider-icon.is-bare .provider-mark-claude {
+  background: var(--brand-anthropic);
+  -webkit-mask: url("../../assets/claude-avatar.png") center / contain no-repeat;
+  mask: url("../../assets/claude-avatar.png") center / contain no-repeat;
+}
+
 /* Task status (task cards, members panel) */
 
 .chat-work-status {
@@ -837,10 +880,10 @@
 
 .chat-delegation-dot {
   position: absolute;
-  right: -2px;
-  bottom: -2px;
-  width: 8px;
-  height: 8px;
+  right: -3px;
+  bottom: -3px;
+  width: 7px;
+  height: 7px;
   border: 1.5px solid var(--app-surface);
   border-radius: 50%;
   background: var(--app-muted);

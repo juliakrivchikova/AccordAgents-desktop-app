@@ -1,5 +1,5 @@
 // The sessions view has no avatar pictures: a member's only mark there is its
-// provider's logo tile (the User, 2026-11-20). The classic view keeps every
+// provider's bare logo glyph (the User, 2026-11-20/21). The classic view keeps every
 // avatar.
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -43,7 +43,7 @@ function renderIn(sessions: boolean, element: ReactElement): { root: ReactTestIn
   return { root: renderer!.root, unmount: () => act(() => renderer!.unmount()) };
 }
 
-test("a member's mark: its avatar in the classic view; its provider's logo tile in the sessions view, nothing for a member no longer known", () => {
+test("a member's mark: its avatar in the classic view; its provider's bare glyph in the sessions view, nothing for a member no longer known", () => {
   const avatar = avatarForParticipant("@drew", DREW.id);
   const classic = renderIn(false, <ChatMemberMark className="mini-avatar" avatar={avatar} member={DREW} />);
   assert.equal(classic.root.findAll(hasClass("mini-avatar")).length, 1);
@@ -56,6 +56,8 @@ test("a member's mark: its avatar in the classic view; its provider's logo tile 
   assert.equal(mark.props["data-provider-kind"], "codex-cli");
   assert.equal(mark.props["aria-label"], "Codex CLI");
   assert.ok(mark.props.className.split(" ").includes("is-mini"));
+  assert.ok(mark.props.className.split(" ").includes("is-bare"), "the glyph alone, no tile behind it");
+  assert.equal(mark.props["data-variant"], "bare");
   sessions.unmount();
 
   const gone = renderIn(true, <ChatMemberMark className="mini-avatar" avatar={avatar} />);
