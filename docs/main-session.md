@@ -217,6 +217,21 @@ chat without a main session is always `classic`; its switch is disabled.
   - no turn-finished note ("<X> finished answering"), the main session's
     own included (`isSessionsHiddenTurnFinishedNote`); the classic view
     keeps them;
+  - what the app itself writes names nobody by handle (the User,
+    2026-11-21: "so that I never see this crap '@main' anywhere in the
+    UI"): the notices, a failed or stopped reply's own lines, the cards
+    (approvals, choices, removals, sign-ins, scheduled tasks), the status
+    line, task rows, Accord and document notes, reactions, Activity rows and,
+    on the phone, its cards, alerts, stream view and chat list name a member
+    by its task's title (in quotes inside a sentence) and the main session by
+    nothing: a sentence about it loses its subject ("Stopped before it
+    returned a response.", "The copy may include what was done after you
+    tapped Fork: …"), a "who" line shows no name, a list leaves it out. The
+    words are stored as members read them and worded when shown, by one rule
+    on the desktop and the phone (`sessionsViewText`, `sessionsViewReplyText`,
+    `sessionsViewSummaryText` in `src/shared/sessionsViewText.ts`), so the
+    classic view keeps every handle; what a member wrote, a tool's request
+    (a command) and anything quoted stay as written;
   - the Accord: above the composer one quiet line (Accord · its name ·
     where it stands) that opens the whole card in the side panel; the
     classic view keeps the pinned card;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { cliFailureNoticeText } from "./warnings";
-import { sessionsViewLabel, sessionsViewNames, sessionsViewNamesOf, sessionsViewText } from "./sessionsViewText";
+import { sessionsViewLabel, sessionsViewNames, sessionsViewNamesOf, sessionsViewReplyText, sessionsViewSummaryText, sessionsViewText } from "./sessionsViewText";
 import type { ChatMessage, ChatParticipant } from "./types";
 
 const NAMES = sessionsViewNames("main", [["drew", "Fix the logout"], ["gone", "Check the docs"]]);
@@ -83,7 +83,7 @@ test("app-made texts in a sessions-view chat name no handle: the main session by
     const shown = sessionsViewText(text, NAMES);
     assert.doesNotMatch(shown, HANDLE, `${text}\n→ ${shown}`);
     assert.doesNotMatch(shown, /\bmain\b/i, `no "main" label: ${shown}`);
-    assert.doesNotMatch(shown, /[-]/, "no marks left");
+    assert.doesNotMatch(shown, /[\uE000-\uE002]/, "no marks left");
     if (text.includes("@drew")) assert.match(shown, /“Fix the logout”/, `the member by its task: ${shown}`);
   }
 });
@@ -172,4 +172,37 @@ test("a chat's names: only in the sessions view, members by their latest task, f
   assert.equal(names.titleOf("@GONE"), "Docs check");
   assert.equal(sessionsViewNamesOf({ ...chat, metadata: { ...chat.metadata, chatView: "classic" } }), undefined);
   assert.equal(sessionsViewNamesOf({ ...chat, metadata: { participants: [main, drew] } } as never), undefined, "a chat without a main session is classic");
+});
+
+test("a failed or stopped reply: only the app's own paragraphs lose their handles; what the member wrote stays its own", () => {
+  const streamed = "Plan: I'll ask @drew to run the tests and tell @main.";
+  assert.equal(sessionsViewReplyText("@main stopped before it returned a response.", "main", NAMES), "Stopped before it returned a response.");
+  assert.equal(
+    sessionsViewReplyText(`${streamed}\n\nStop not confirmed for @main: the machine did not confirm the run is gone.`, "@main", NAMES),
+    `${streamed}\n\nStop not confirmed: the machine did not confirm the run is gone.`
+  );
+  assert.equal(
+    sessionsViewReplyText(`@drew cannot start on this computer: Codex is not signed in.\n\n${streamed}`, "drew", NAMES),
+    `“Fix the logout” cannot start on this computer: Codex is not signed in.\n\n${streamed}`
+  );
+  assert.equal(sessionsViewReplyText(streamed, "main", NAMES), streamed, "a member's words alone are never rewritten");
+  assert.equal(sessionsViewReplyText("@main stopped by user.", "main", undefined), "@main stopped by user.", "classic: as written");
+});
+
+test("an approval's summary: who asks and whom it names lose their handles; a tool's request and quoted words stay exactly as written", () => {
+  assert.equal(sessionsViewSummaryText("Grant @drew file edits", NAMES), "Grant “Fix the logout” file edits");
+  assert.equal(sessionsViewSummaryText("Remove @gone from this chat", NAMES), "Remove “Check the docs” from this chat");
+  assert.equal(sessionsViewSummaryText("Use Bash: git log @main..HEAD && echo @drew", NAMES), "Use Bash: git log @main..HEAD && echo @drew");
+  assert.equal(sessionsViewSummaryText("Grant @drew shell allow prefix \"npm publish --tag @main\"", NAMES), "Grant “Fix the logout” shell allow prefix \"npm publish --tag @main\"");
+  assert.equal(sessionsViewText("Run `echo @drew` for @drew", NAMES), "Run `echo @drew` for “Fix the logout”", "code stays as written");
+});
+
+test("the main session in a list of names is left out of it; a title naming someone and stray marks never bring a handle or a mark back", () => {
+  assert.equal(sessionsViewText("@main, @drew", NAMES), "“Fix the logout”");
+  assert.equal(sessionsViewText("Waiting for @drew and @main to finish.", NAMES), "Waiting for “Fix the logout” to finish.");
+  const titled = sessionsViewNames("main", [["gera", "Ask @drew to check the docs"]]);
+  assert.equal(sessionsViewText("@gera stopped by user.", titled), "“Ask drew to check the docs” stopped by user.");
+  assert.equal(sessionsViewText("\uE000 stray \uE001mark\uE002: @drew stopped by user.", NAMES), " stray mark: “Fix the logout” stopped by user.");
+  assert.equal(sessionsViewLabel(undefined, NAMES), "");
+  assert.equal(sessionsViewLabel(42 as unknown as string, NAMES), "");
 });

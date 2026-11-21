@@ -59,7 +59,7 @@ import { useChatViewMode } from "./use-chat-view-mode";
 import { ChatViewHeaderContext } from "./chat-view-switch";
 import type { ChatPanelMessageContext } from "./chat-sessions-right-panel";
 import { ChatSessionsWaitingLine } from "./chat-sessions-timeline-row";
-import { ChatSessionsLinksContext, useStableMap } from "./chat-sessions-links";
+import { ChatSessionsLinksContext, ChatSessionsNamesContext, useStableMap, useStableSessionsViewNames } from "./chat-sessions-links";
 import { mainComposerTargetIds, sessionsComposerProps } from "./chat-sessions-composer";
 import { ChatViewRightPanels } from "./chat-view-right-panels";
 
@@ -232,6 +232,9 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   const sessionsChrome = useChatSessionsChrome({
     sessions, viewMode, rightPanel, participantsById, closeArtifacts: artifacts.closePanel, accordOpen: Boolean(dockedAccord)
   });
+  // The names the app's own words use in the sessions view, the same object
+  // while no name changes (rows that read them are not drawn again per token).
+  const sessionsNames = useStableSessionsViewNames(sessionsChrome.links);
   const viewport = useChatConversationViewport({
     conversationId: props.conversation.id,
     messages: props.conversation.messages,
@@ -377,7 +380,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   };
 
   return (
-    <ChatSessionsPresentationContext.Provider value={Boolean(sessions)}><ChatSessionsLinksContext.Provider value={sessionsChrome.links}>
+    <ChatSessionsPresentationContext.Provider value={Boolean(sessions)}><ChatSessionsLinksContext.Provider value={sessionsChrome.links}><ChatSessionsNamesContext.Provider value={sessionsNames}>
     <MentionDirectoryContext.Provider value={mentionDirectory}>
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
       <ArtifactsContext.Provider value={artifacts.context}>
@@ -547,7 +550,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
       </ArtifactsContext.Provider>
     </MessageLinkContext.Provider>
     </MentionDirectoryContext.Provider>
-    </ChatSessionsLinksContext.Provider></ChatSessionsPresentationContext.Provider>
+    </ChatSessionsNamesContext.Provider></ChatSessionsLinksContext.Provider></ChatSessionsPresentationContext.Provider>
   );
 }
 

@@ -101,6 +101,12 @@ function App(): JSX.Element {
     0
   );
   const [accordDialogOpen, setAccordDialogOpen] = React.useState(false);
+  // The Accord dialog's names in the sessions view, read while it is open.
+  const accordChat = view.activeChatConversation;
+  const accordDialogNames = React.useMemo(
+    () => (accordDialogOpen && accordChat ? sessionsViewNamesOf(accordChat, state.settings.defaultChatView) : undefined),
+    [accordDialogOpen, accordChat?.messages, accordChat?.metadata, state.settings.defaultChatView]
+  );
   const [newChatPrefill, setNewChatPrefill] = React.useState<{
     key: number;
     prompt: string;
@@ -545,7 +551,7 @@ function App(): JSX.Element {
           onOpenChange={setAccordDialogOpen}
           onStart={chatActions.startChatAccord}
           sessions={chatViewFor(view.activeChatConversation.metadata, state.settings.defaultChatView) === "sessions"}
-          sessionsNames={accordDialogOpen ? sessionsViewNamesOf(view.activeChatConversation, state.settings.defaultChatView) : undefined}
+          sessionsNames={accordDialogNames}
         />
       )}
 

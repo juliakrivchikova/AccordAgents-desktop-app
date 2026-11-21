@@ -708,7 +708,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     // A refusal said by a notice once she has gone elsewhere is worded by the
     // chat she forked from (its sessions view names nobody by handle).
     const source = state.conversation?.id === conversationId ? state.conversation : undefined;
-    const sourceNames = source ? sessionsViewNamesOf(source, state.settings.defaultChatView) : undefined;
+    const defaultChatView = state.settings?.defaultChatView;
     const stillHere = (): boolean =>
       state.railViewRef.current === railViewAtClick &&
       (state.openConversationRequestRef.current === openRequestAtClick || state.openConversationTargetRef.current === conversationId);
@@ -728,7 +728,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       // she has gone elsewhere (an error banner there would be about a chat
       // she is not looking at).
       if (stillHere()) state.setError(cleanIpcError(caught));
-      else toast.error(sessionsViewText(cleanIpcError(caught), sourceNames));
+      else toast.error(sessionsViewText(cleanIpcError(caught), source ? sessionsViewNamesOf(source, defaultChatView) : undefined));
       return false;
     } finally {
       notice.end();

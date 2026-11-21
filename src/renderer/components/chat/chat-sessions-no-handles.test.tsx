@@ -20,7 +20,10 @@ import { ChatArtifactNoteCard } from "./chat-artifact-note-card";
 import { ChatChoiceCard } from "./chat-choice-card";
 import { ChatMessageItem } from "./chat-message-item";
 import { ChatSessionsPresentationContext } from "./chat-member-mark";
-import { ChatSessionsLinksContext, type ChatSessionsLinks } from "./chat-sessions-links";
+import { ChatSessionsLinksContext, ChatSessionsNamesContext, sessionsViewNamesFromLinks, type ChatSessionsLinks } from "./chat-sessions-links";
+import { chatDisplayContent } from "./chat-display-content";
+import { ChatUsedApprovalLine } from "./chat-used-card-row";
+import { Terminal } from "lucide-react";
 import { DREW, MAIN, PARTICIPANTS, chatMessage, disclosure, sessionsConversation } from "./chat-sessions-fixtures.test";
 
 const HANDLES = /(^|[^A-Za-z0-9_@./-])@(main|drew|gera|taylor)\b/i;
@@ -64,7 +67,9 @@ function render(sessions: boolean, element: ReactElement): { text: string; unmou
     renderer = create(
       <TooltipProvider>
         <ChatSessionsPresentationContext.Provider value={sessions}>
-          <ChatSessionsLinksContext.Provider value={sessions ? LINKS : undefined}>{element}</ChatSessionsLinksContext.Provider>
+          <ChatSessionsLinksContext.Provider value={sessions ? LINKS : undefined}>
+            <ChatSessionsNamesContext.Provider value={sessions ? sessionsViewNamesFromLinks(LINKS) : undefined}>{element}</ChatSessionsNamesContext.Provider>
+          </ChatSessionsLinksContext.Provider>
         </ChatSessionsPresentationContext.Provider>
       </TooltipProvider>
     );
@@ -225,4 +230,36 @@ test("Activity rows of a sessions-view chat name the main session by nothing and
   const classic = buildChatActivityItems({ ...withApproval, metadata: { ...withApproval.metadata, chatView: "classic" } } as Conversation, { now: "2026-11-20T11:00:00.000Z" });
   assert.ok(classic.some((item) => /@drew/.test(item.title)), "classic: by handle");
   assert.ok(classic.every((item) => item.participant?.displayName === undefined));
+});
+
+test("a failed reply keeps what the member wrote; a used card keeps its command; a request to the main session shows its question alone", () => {
+  const streamed = chatMessage("main-partial", "participant", 21, {
+    participantId: MAIN.id, participantLabel: "@main", status: "error",
+    content: "I'll ask @drew to run it.\n\nStop not confirmed for @main: the machine did not confirm the run is gone."
+  });
+  const partial = render(true, <ChatMessageItem {...itemProps(streamed)} presentation="sessions" />);
+  assert.match(partial.text, /Stop not confirmed: the machine did not confirm the run is gone\./, "the app's note without a name");
+  assert.doesNotMatch(partial.text, /“Fix the logout”/, "the member's own words are not reworded (its mention stays a chip)");
+  partial.unmount();
+
+  const line = (preview: string, appPreview?: boolean) => render(true, (
+    <ChatUsedApprovalLine approval={approval(MAIN, { toolName: "codex_auto_review_approval", status: "approved" })} kind="Codex" icon={Terminal}
+      preview={preview} ended="Allowed" appPreview={appPreview} />
+  ));
+  const command = line("Run git log @main..HEAD");
+  assert.match(command.text, /Run git log @main\.\.HEAD/, "a command is shown exactly as written");
+  command.unmount();
+  const removal = line("Remove @gera from this chat", true);
+  assert.match(removal.text, /Remove “Check the docs” from this chat/, "the app's words about members are worded for the view");
+  removal.unmount();
+
+  const request = (source: "mcp" | "inferred", targets: Array<typeof MAIN>): ChatMessage => chatMessage(`req-${source}-${targets.length}`, "participant", 22, {
+    participantId: DREW.id, participantLabel: "@drew",
+    metadata: { participantRequest: { id: "b", requesterParticipantId: DREW.id, requesterHandle: "drew", source, resumeRequester: true, status: "running", depth: 1,
+      createdAt: AT, updatedAt: AT, items: targets.map((target) => ({ targetParticipantId: target.id, targetHandle: target.handle, prompt: "Which colour?", status: "running", createdAt: AT })) } } as never
+  });
+  assert.equal(chatDisplayContent(request("mcp", [MAIN]), "@drew", "main"), "Which colour?");
+  assert.equal(chatDisplayContent(request("inferred", [MAIN]), "@drew", "main"), "Asked for input.");
+  assert.equal(chatDisplayContent(request("inferred", [MAIN, DREW]), "@drew", "main"), "Asked @drew for input.");
+  assert.equal(chatDisplayContent(request("mcp", [MAIN]), "@drew"), "@main Which colour?", "classic: as before");
 });

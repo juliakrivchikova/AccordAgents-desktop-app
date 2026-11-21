@@ -126,6 +126,7 @@ export function ChatAppToolReviewResult(props: {
       kind={props.participantChange || props.combinedRequest ? "Member change" : "Role change"}
       icon={props.participantChange || props.combinedRequest ? UserPlus : Sparkles}
       preview={reviewResultPreview(props.approval, props.roleRequest, props.participantChange)}
+      appPreview
       ended={summary.title}
       detail={props.approval.error ? `${summary.detail.replace(/\.$/, "")}: ${props.approval.error}` : summary.detail}
     />

@@ -16,7 +16,7 @@ import { ChatComposerSendButton } from "./chat-composer-send-button";
 import { memberDefaultModelName, resetMemberModelCatalogs } from "./chat-member-model-name";
 import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
 import { SESSIONS_COMPOSER_PLACEHOLDER, mainComposerTargetIds, memberModelChip, sessionsComposerProps } from "./chat-sessions-composer";
-import { ChatSessionsLinksContext, type ChatSessionsLinks } from "./chat-sessions-links";
+import { ChatSessionsLinksContext, ChatSessionsNamesContext, sessionsViewNamesFromLinks, type ChatSessionsLinks } from "./chat-sessions-links";
 import { ChatTurnFinishedNote } from "./chat-turn-finished-note";
 import { DREW, MAIN, PARTICIPANTS, TAYLOR } from "./chat-sessions-fixtures.test";
 
@@ -77,7 +77,11 @@ test("an Accord's launch card names its members by their task with the provider'
     mainSessionId: MAIN.id, mainHandle: "main",
     byHandle: new Map([["drew", { id: DREW.id, title: "Fix the logout" }]]), openMember: () => undefined
   };
-  const sessions = renderIn(true, <ChatSessionsLinksContext.Provider value={links}><ChatAccordLaunchCard card={card} participants={PARTICIPANTS} /></ChatSessionsLinksContext.Provider>);
+  const sessions = renderIn(true, (
+    <ChatSessionsLinksContext.Provider value={links}>
+      <ChatSessionsNamesContext.Provider value={sessionsViewNamesFromLinks(links)}><ChatAccordLaunchCard card={card} participants={PARTICIPANTS} /></ChatSessionsNamesContext.Provider>
+    </ChatSessionsLinksContext.Provider>
+  ));
   assert.equal(sessions.root.findAll(hasClass("chat-accord-launch-avatar")).length, 0, "no avatar pictures");
   assert.deepEqual(providerKinds(sessions.root), [MAIN.kind, DREW.kind], "led by the main session (Claude), with drew's task (Codex); gone has no mark");
   assert.match(textOf(sessions.root), /Accordled by with Fix the logout, gone/);

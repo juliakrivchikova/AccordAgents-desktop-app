@@ -3,7 +3,8 @@ import type { LucideIcon } from "lucide-react";
 import type { ChatAppToolApproval } from "../../../shared/types";
 import { chatParticipantReference } from "../conversation/conversation-display";
 import { formatChatTime } from "./chat-format";
-import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
+import { useSessionsViewLabel, useSessionsViewNames, useSessionsViewText } from "./chat-sessions-links";
+import { sessionsViewSummaryText } from "../../../shared/sessionsViewText";
 
 /**
  * A used approval card in one line, like a folded urgent alert or choice (the
@@ -26,12 +27,17 @@ export function ChatUsedApprovalLine(props: {
   withoutTime?: boolean;
   /** More than the line says: why it ended so. */
   detail?: string;
+  /** The preview is the app's words about members ("Remove @gera from this
+   *  chat"), worded without handles in the sessions view; otherwise (a
+   *  command, a task's name) it is shown exactly as written. */
+  appPreview?: boolean;
 }): JSX.Element {
   // The sessions view names who asked by its task, the main session by
   // nothing, and what the card was about without handles.
   const appText = useSessionsViewText();
+  const names = useSessionsViewNames();
   const requester = useSessionsViewLabel()(chatParticipantReference(props.approval.requesterHandle));
-  const preview = appText(props.preview);
+  const preview = props.appPreview ? sessionsViewSummaryText(props.preview, names) : props.preview;
   const detail = props.detail ? appText(props.detail) : undefined;
   const when = props.withoutTime ? "" : formatChatTime(props.approval.updatedAt);
   const outcome = `${requester ? `${requester} · ` : ""}${appText(props.ended)}${when ? ` ${when}` : ""}`;

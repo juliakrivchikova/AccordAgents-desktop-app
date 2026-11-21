@@ -1,5 +1,5 @@
 import { activeRunSummaryForConversation } from "./chatActiveRuns";
-import { sessionsViewLabel, sessionsViewNamesOf, sessionsViewText } from "./sessionsViewText";
+import { sessionsViewLabel, sessionsViewNamesOf, sessionsViewSummaryText, sessionsViewText } from "./sessionsViewText";
 import type {
   ChatActivityItem,
   ChatActivityParticipantSummary,
@@ -78,6 +78,7 @@ export function buildChatActivityItems(
   // (shared/sessionsViewText.ts): the app's words are worded for it here.
   const names = sessionsViewNamesOf(conversation);
   const appText = (text: string): string => sessionsViewText(text, names);
+  const summaryText = (text: string): string => sessionsViewSummaryText(text, names);
   const participants = sessionsViewParticipants(participantSummaries(conversation), names);
   const items: ChatActivityItem[] = [];
   const nowMs = timeValue(options.now ?? new Date());
@@ -85,7 +86,7 @@ export function buildChatActivityItems(
   const recentCutoffMs = nowMs - recentWindowDays * 24 * 60 * 60 * 1000;
   const lastViewedMs = timeValue(options.lastViewedAt);
 
-  items.push(...pendingApprovalItems(conversation, participants, appText));
+  items.push(...pendingApprovalItems(conversation, participants, appText, summaryText));
   for (const message of conversation.messages) {
     items.push(...pendingMessageItems(conversation, message, participants, appText));
   }
@@ -349,7 +350,8 @@ export function limitChatActivityItems(items: ChatActivityItem[], limit?: number
 function pendingApprovalItems(
   conversation: Conversation,
   participants: Map<string, ChatActivityParticipantSummary>,
-  appText: (text: string) => string
+  appText: (text: string) => string,
+  summaryText: (text: string) => string
 ): ChatActivityItem[] {
   const approvals = chatAppToolApprovals(conversation.metadata.pendingAppToolApprovals);
   return approvals.flatMap((approval) => {
@@ -373,7 +375,7 @@ function pendingApprovalItems(
       status: "pending" as const,
       kind: "approval" as const,
       title: participant ? appText(`@${participant.handle} needs approval`) : "Approval required",
-      preview: previewText(targetMessage?.content) || appText(approval.summary) || approval.toolName || "A tool request is waiting for approval.",
+      preview: previewText(targetMessage?.content) || summaryText(approval.summary) || approval.toolName || "A tool request is waiting for approval.",
       createdAt: approval.createdAt,
       updatedAt: approval.updatedAt,
       participant,

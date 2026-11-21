@@ -107,6 +107,6 @@ export function ChatAppToolMemberRemovalResult(props: {
 }): JSX.Element {
   const summary = memberRemovalResultSummary(props.approval, props.request);
   return (
-    <ChatUsedApprovalLine approval={props.approval} kind="Member removal" icon={UserMinus} preview={props.approval.summary} ended={summary.title} detail={summary.detail} />
+    <ChatUsedApprovalLine approval={props.approval} kind="Member removal" icon={UserMinus} preview={props.approval.summary} appPreview ended={summary.title} detail={summary.detail} />
   );
 }

@@ -65,7 +65,8 @@ import { ChatSessionsFinishedActivity, ChatSessionsRunningReply, sessionsReplyHa
 import { mainSessionMemberOf, withoutLeadingMention } from "../../../shared/mainSession";
 import type { SessionsTaskEntry } from "../../../shared/mainSessionView";
 import { ChatAppToolApprovalList } from "./chat-app-tool-approvals";
-import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
+import { useSessionsViewLabel, useSessionsViewNames, useSessionsViewText } from "./chat-sessions-links";
+import { sessionsViewReplyText } from "../../../shared/sessionsViewText";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
 declare global {
@@ -143,6 +144,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   const [copied, setCopied] = useState(false);
   const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
   // In the sessions view what the app wrote names nobody by handle.
+  const sessionsNames = useSessionsViewNames();
   const appText = useSessionsViewText();
   const nameOf = useSessionsViewLabel();
   const urgentAlert = urgentAlertOfMessage(message);
@@ -175,11 +177,12 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   const rawDisplayContent = chatDisplayContent(message, author, mainSessionHandle);
   // The sessions view writes to the main session by default: its leading
   // mention in the User's message is left out. A failed or stopped reply's
-  // text is the app's (the CLI's failure), so it names nobody by handle.
+  // own paragraphs of the app (its failure, its stop) name nobody by handle;
+  // what the member wrote before stays its own words.
   const displayContent = props.presentation === "sessions" && message.role === "user"
     ? withoutLeadingMention(rawDisplayContent, mainSessionHandle)
     : message.role === "participant" && message.status === "error"
-      ? appText(rawDisplayContent)
+      ? sessionsViewReplyText(rawDisplayContent, message.participantLabel ?? props.participants?.find((item) => item.id === message.participantId)?.handle, sessionsNames)
       : rawDisplayContent;
   const streamedRemoteRunStatus = props.liveProgress?.remoteRunStatus ?? message.metadata?.remoteRunStatus;
   const streamedContent = remoteRunStreamingContent({

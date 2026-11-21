@@ -41,9 +41,27 @@ export function sessionsViewNamesFromLinks(links: ChatSessionsLinks | undefined)
   return sessionsViewNames(links.mainHandle, [...links.byHandle].map(([handle, member]) => [handle, member.title] as const));
 }
 
+/** The names, the same object while no member's handle or title changed: the
+ *  rows that read them are drawn again only when a name changes, not on every
+ *  update of the chat (its links are made anew on each). */
+export function useStableSessionsViewNames(links: ChatSessionsLinks | undefined): SessionsViewNames | undefined {
+  const signature = links
+    ? JSON.stringify([links.mainHandle ?? "", [...links.byHandle].map(([handle, member]) => [handle, member.title])])
+    : "";
+  // The signature stands for the links' names: the memo keeps one object
+  // while it is the same.
+  const latest = useRef(links);
+  latest.current = links;
+  return useMemo(() => sessionsViewNamesFromLinks(latest.current), [signature]);
+}
+
+/** How the sessions view names members, for the app's own words; absent in
+ *  the classic view. Separate from the links so a row that only words text is
+ *  not drawn again whenever the links are made anew. */
+export const ChatSessionsNamesContext = createContext<SessionsViewNames | undefined>(undefined);
+
 export function useSessionsViewNames(): SessionsViewNames | undefined {
-  const links = useChatSessionsLinks();
-  return useMemo(() => sessionsViewNamesFromLinks(links), [links]);
+  return useContext(ChatSessionsNamesContext);
 }
 
 const asWritten = (text: string): string => text;

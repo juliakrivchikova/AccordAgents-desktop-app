@@ -42,7 +42,12 @@ function chatMessages() {
     { id: "r2", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "@main stopped before it returned a response.", status: "error", createdAt: at(9),
       metadata: { sourceMessageId: "u2" } },
     { id: "note", role: "system", content: "@main revised [Login plan](#artifact:art-1) · v3", status: "done", createdAt: at(8),
-      metadata: { appMessageSource: "app_artifact_note", artifactEventId: "e-note" } }
+      metadata: { appMessageSource: "app_artifact_note", artifactEventId: "e-note" } },
+    // An Accord the main session started, with the member.
+    { id: "launch", role: "participant", participantId: MAIN.id, participantLabel: "@main", status: "done", createdAt: at(7),
+      content: ["@main /accord", "", "Subject:", "Pick the button colour", "", "Selected accord members: drew.",
+        "Run the accord skill for exactly those selected members and this subject."].join("\n"),
+      metadata: { accordLaunchByMainSession: true } }
   ];
 }
 
@@ -55,9 +60,9 @@ const permission = (conversationId, requester, id) => ({
 
 test("a sessions-view chat names nobody by handle on the phone (failed replies, task rows, cards, notes, Activity); a classic chat keeps its handles", { timeout: 240_000 }, async (t) => {
   const hub = await startMobileHub();
-  const site = await serveMobileShell({ port: 8397, hubOrigins: [hub.base] });
+  const site = await serveMobileShell({ port: 8402, hubOrigins: [hub.base] });
   const profile = await tempProfile("aa-mobile-nohandles-");
-  const chrome = launchChrome({ port: 9547, profile, url: `${site.origin}/` });
+  const chrome = launchChrome({ port: 9552, profile, url: `${site.origin}/` });
   let app;
   t.after(async () => {
     app?.close();
@@ -73,7 +78,9 @@ test("a sessions-view chat names nobody by handle on the phone (failed replies, 
   await hub.raiseApproval("conv-sessions", permission("conv-sessions", MAIN, "card-main"), { participantId: MAIN.id });
   await hub.raiseApproval("conv-sessions", permission("conv-sessions", DREW, "card-drew"), { participantId: DREW.id });
   await hub.raiseApproval("conv-classic", permission("conv-classic", MAIN, "card-classic"), { participantId: MAIN.id });
-  app = await attachApp({ port: 9547 });
+  // A tool's request names someone in its command: shown exactly as written.
+  await hub.raiseApproval("conv-sessions", { ...permission("conv-sessions", MAIN, "card-cmd"), summary: "Use Bash: echo @drew" }, { participantId: MAIN.id });
+  app = await attachApp({ port: 9552 });
   await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
 
   // --- the sessions view ---------------------------------------------------
@@ -84,8 +91,9 @@ test("a sessions-view chat names nobody by handle on the phone (failed replies, 
     const row = document.querySelector('#message-list .message-row[data-thread-root="r2"]');
     const card = document.querySelector('[data-card-id="card-main"]');
     return { failed: row.querySelector(".message-content").textContent.trim(), card: card.innerText, who: card.querySelector(".control-card-who")?.textContent ?? "",
-      note: document.querySelector(".artifact-note-title")?.textContent ?? "", list: document.getElementById("message-list").innerText,
-      labels: [...document.querySelectorAll("#message-list [title], #message-list [aria-label]")].map((node) => (node.getAttribute("title") || "") + " " + (node.getAttribute("aria-label") || "")).join("\\n") };
+      note: document.querySelector(".artifact-note-title")?.textContent ?? "",
+      list: (() => { const copy = document.getElementById("message-list").cloneNode(true); copy.querySelectorAll('[data-card-id="card-cmd"]').forEach((node) => node.remove()); document.body.append(copy); const text = copy.innerText; copy.remove(); return text; })(),
+      labels: [...document.querySelectorAll("#message-list [title], #message-list [aria-label]")].filter((node) => !node.closest('[data-card-id="card-cmd"]')).map((node) => (node.getAttribute("title") || "") + " " + (node.getAttribute("aria-label") || "")).join("\\n") };
   })()`);
   assert.equal(shown.failed, "Stopped before it returned a response.", "the main session's failure without a name");
   assert.equal(shown.who, "", "the main session's card names nobody");
@@ -94,22 +102,24 @@ test("a sessions-view chat names nobody by handle on the phone (failed replies, 
   assert.doesNotMatch(shown.list, HANDLES, shown.list);
   assert.doesNotMatch(shown.labels, HANDLES, shown.labels);
   assert.doesNotMatch(shown.list, /Main session/, "no label for the main session");
+  assert.doesNotMatch(shown.list, /led by main|the main session/, "the Accord names the main session by nothing");
+  await app.waitFor(`document.querySelector('[data-card-id="card-cmd"]') !== null`, "the tool request's card");
+  assert.match(await app.evaluate(`document.querySelector('[data-card-id="card-cmd"] .control-card-title').textContent`), /^Use Bash: echo @drew$/,
+    "a command on a card is never reworded");
   // The task's failure in its row inside the reply's Worked fold, the member by its task.
   await app.evaluate(`document.querySelector('#message-list .message-row[data-thread-root="r1"] .sessions-worked-toggle')?.click()`);
   await app.waitFor(`document.querySelector('#message-list .sessions-delegation .sessions-delegation-result') !== null`, "the failed task's row");
   const task = await app.evaluate(`document.querySelector('#message-list .sessions-delegation .sessions-delegation-result').textContent`);
   assert.equal(task, "“Restyle the button” run failed before a response was produced: “Restyle the button” belongs to another machine; no local session was started.");
-  const drewCard = await app.evaluate(`(() => { const card = document.querySelector('[data-card-id="card-drew"]'); return card ? { text: card.innerText, who: card.querySelector(".control-card-who")?.textContent ?? "" } : null; })()`);
-  if (drewCard) {
-    assert.equal(drewCard.who, "Restyle the button", "a member's card by its task");
-    assert.doesNotMatch(drewCard.text, HANDLES, drewCard.text);
-  }
+  await app.waitFor(`document.querySelector('[data-card-id="card-drew"] .control-card-who')?.textContent === "Restyle the button"`, "the member's card, by its task");
+  const drewCard = await app.evaluate(`document.querySelector('[data-card-id="card-drew"]').innerText`);
+  assert.doesNotMatch(drewCard, HANDLES, drewCard);
   // Activity: the main session by nothing, a member by its task.
   await app.evaluate(`document.getElementById("timeline-back")?.click()`);
   await app.waitFor(`(() => { const dock = document.getElementById("home-dock"); return Boolean(dock && !dock.hidden); })()`, "the bottom bar");
   await app.evaluate(`document.querySelector('[data-home-tab="activity"]').click()`);
   await app.evaluate(`document.querySelector('[data-activity-tab="pending"]')?.click()`);
-  await app.waitFor(`document.querySelectorAll("#activity-list .act-row[data-card-id]").length >= 3`, "the Pending list");
+  await app.waitFor(`document.querySelectorAll("#activity-list .act-row[data-card-id]").length >= 4`, "the Pending list");
   const rows = await app.evaluate(`[...document.querySelectorAll("#activity-list .act-row")].map((row) => ({ card: row.dataset.cardId || "", text: row.innerText.replace(/\\s+/g, " ").trim() }))`);
   t.diagnostic(`pending rows: ${JSON.stringify(rows)}`);
   const sessionsRows = rows.filter((row) => row.card === "card-main" || row.card === "card-drew");

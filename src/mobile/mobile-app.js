@@ -6561,12 +6561,6 @@
     }, 700);
   }
 
-  /** The chat list's subtitle is the desktop's 84-character cut of the last
-   *  message with its line breaks already collapsed, so the line-based rule
-   *  cannot find the block inside it: what follows the marker on that one line
-   *  is protocol, and the User should read the sentence before it instead. Her
-   *  own messages and the app's are left exactly as they are, as the desktop
-   *  leaves them. */
   /** Who wrote a chat's newest message, before its snippet: a chat shown in
    *  the sessions view names no member there (no handles in that view, and a
    *  member's task is not known without the chat's messages). */
@@ -6576,6 +6570,12 @@
     return chatViewOf(chat) === "sessions" ? "" : who;
   }
 
+  /** The chat list's subtitle is the desktop's 84-character cut of the last
+   *  message with its line breaks already collapsed, so the line-based rule
+   *  cannot find the block inside it: what follows the marker on that one line
+   *  is protocol, and the User should read the sentence before it instead. Her
+   *  own messages and the app's are left exactly as they are, as the desktop
+   *  leaves them. */
   function snippetDisplayText(chat) {
     const snippet = typeof chat.snippet === "string" ? chat.snippet : "";
     const who = typeof chat.who === "string" ? chat.who.trim().toLowerCase() : "";
@@ -7981,8 +7981,9 @@
 
   /** Who raised a card, beside its title: the member's handle, except in a
    *  sessions-view chat, where no handle is shown (docs/main-session.md): the
-   *  main session reads "Main session", a member its task's title. The label
-   *  is cut with an ellipsis rather than pushed off the screen. */
+   *  main session gets no who line, a member its task's title (its handle as
+   *  a plain word while this phone has no task for it). The label is cut
+   *  with an ellipsis rather than pushed off the screen. */
   function appendCardWho(head, card) {
     const requester = cardRequesterLabel(card);
     if (!requester && !card.machineName) return;
@@ -8015,6 +8016,19 @@
   function sessionsViewNamesFor(conversationId) {
     const shared = sessionsRules();
     if (!shared || typeof shared.sessionsViewNames !== "function" || !conversationId) return undefined;
+    const open = lastSessionsState && lastSessionsState.conversationId === conversationId ? lastSessionsState : undefined;
+    // Worked out once per chat list and drawing of the open chat, not per
+    // label: Activity and a chat's cards ask for every row.
+    const known = sessionsNamesCache.get(conversationId);
+    if (known && cachedChatList && known.list === cachedChatList && known.state === open) return known.names;
+    const names = sessionsViewNamesUncached(shared, conversationId);
+    if (cachedChatList) sessionsNamesCache.set(conversationId, { list: cachedChatList, state: open, names: names });
+    return names;
+  }
+
+  const sessionsNamesCache = new Map();
+
+  function sessionsViewNamesUncached(shared, conversationId) {
     const chat = loadChats().find(function (item) { return item.id === conversationId; });
     if (!chat || chatViewOf(chat) !== "sessions") return undefined;
     const members = chatMembers(chat);
@@ -8036,9 +8050,19 @@
   }
 
   /** A card's words as the chat's view shows them: a permission card's are
-   *  the app's (sessionsViewTextFor); a choice's are its member's own. */
-  function cardAppText(card, text) {
-    return card && card.kind !== "choice" ? sessionsViewTextFor(card.conversationId, text) : text;
+   *  the app's (sessionsViewTextFor), its title and summary the approval's
+   *  summary, whose tool request (a command, a reason) stays exactly as
+   *  written (sessionsViewSummaryText); a choice's are its member's own. */
+  function cardAppText(card, text, summary) {
+    if (!card || card.kind === "choice") return text;
+    return summary ? sessionsViewSummaryTextFor(card.conversationId, text) : sessionsViewTextFor(card.conversationId, text);
+  }
+
+  function sessionsViewSummaryTextFor(conversationId, text) {
+    if (typeof text !== "string" || text.indexOf("@") < 0) return text;
+    const shared = sessionsRules();
+    const names = sessionsViewNamesFor(conversationId);
+    return names && typeof shared.sessionsViewSummaryText === "function" ? shared.sessionsViewSummaryText(text, names) : text;
   }
 
   /** Text the app wrote (a card's title, options, outcome; a failure; a
@@ -8073,7 +8097,7 @@
     head.className = "control-card-head";
     const title = document.createElement("span");
     title.className = "control-card-title";
-    title.textContent = cardAppText(card, card.title) || (card.kind === "permission" ? "Permission request" : "Choice");
+    title.textContent = cardAppText(card, card.title, true) || (card.kind === "permission" ? "Permission request" : "Choice");
     head.append(title);
     appendCardWho(head, card);
     wrap.append(head);
@@ -8081,7 +8105,7 @@
     if (card.summary) {
       const summary = document.createElement("p");
       summary.className = "control-card-summary";
-      summary.textContent = cardAppText(card, card.summary);
+      summary.textContent = cardAppText(card, card.summary, true);
       wrap.append(summary);
     }
 
@@ -8734,7 +8758,7 @@
     for (const node of stamp) top.append(node);
     const preview = document.createElement("span");
     preview.className = "act-preview" + (row.kind === "permission" ? " act-preview-full" : "");
-    preview.textContent = (row.kind === "permission" ? sessionsViewTextFor(row.conversationId, row.preview) : row.preview) || (row.kind === "run" ? "Thinking…" : "");
+    preview.textContent = (row.kind === "permission" ? sessionsViewSummaryTextFor(row.conversationId, row.preview) : row.preview) || (row.kind === "run" ? "Thinking…" : "");
     main.append(top, preview);
     return main;
   }
@@ -10692,11 +10716,15 @@
     const name = document.createElement("span");
     name.className = "accord-launch-handle";
     name.textContent = "@" + handle;
-    // The sessions view names a member by its logo and task, no avatar or handle.
+    // The sessions view names a member by its logo and task, no avatar or
+    // handle; the main session by its logo alone, as on the desktop.
     if (entry.presentation === "sessions") {
       const member = sessionsMemberByHandle(handle);
-      name.textContent = member ? member.title : handle;
-      wrap.append(providerLogoElement(member ? member.kind : "", "is-chip"), name);
+      const main = sessionsMentionScope && String(handle).toLowerCase() === sessionsMentionScope.mainHandle;
+      const mainKind = main && lastSessionsState && lastSessionsState.mainMember ? lastSessionsState.mainMember.kind : "";
+      name.textContent = member ? member.title : main ? "" : handle;
+      wrap.append(providerLogoElement(member ? member.kind : mainKind || "", "is-chip"));
+      if (name.textContent) wrap.append(name);
       return wrap;
     }
     const avatar = document.createElement("span");
@@ -10961,14 +10989,16 @@
       const kind = document.createElement("span");
       kind.className = "accord-dock-kind";
       kind.textContent = "Accord";
-      // The sessions view names members by their tasks, not their handles.
+      // The sessions view names members by their tasks, not their handles,
+      // and the main session by nothing (left out, as on the desktop).
       const named = function (handle) {
         if (!sessionsMentionScope) return "@" + handle;
         const member = sessionsMemberByHandle(handle);
-        return member ? member.title : String(handle).toLowerCase() === sessionsMentionScope.mainHandle ? "the main session" : handle;
+        return member ? member.title : String(handle).toLowerCase() === sessionsMentionScope.mainHandle ? "" : handle;
       };
-      meta.append(kind, document.createTextNode(" · led by " + named(docked.card.facilitator) + " · with " +
-        docked.card.members.map(named).join(", ")));
+      const lead = named(docked.card.facilitator);
+      const others = docked.card.members.map(named).filter(Boolean);
+      meta.append(kind, document.createTextNode((lead ? " · led by " + lead : "") + (others.length ? " · with " + others.join(", ") : "")));
       heading.append(meta);
     }
     const status = document.createElement("span");
@@ -11763,14 +11793,14 @@
     const title = document.createElement("span");
     title.className = "control-card-title";
     // Headed as the live card is, now that a permission folds as well.
-    title.textContent = cardAppText(card, card.title) || (card.kind === "permission" ? "Permission request" : "Choice");
+    title.textContent = cardAppText(card, card.title, true) || (card.kind === "permission" ? "Permission request" : "Choice");
     head.append(title);
     appendCardWho(head, card);
     wrap.append(head);
     if (card.summary) {
       const summary = document.createElement("p");
       summary.className = "control-card-summary";
-      summary.textContent = cardAppText(card, card.summary);
+      summary.textContent = cardAppText(card, card.summary, true);
       wrap.append(summary);
     }
     const state = document.createElement("p");
@@ -11952,12 +11982,12 @@
    *  names nobody by handle in them; a member's own words stay its own. */
   function entryShownContent(entry) {
     const content = entry.content;
-    if (!sessionsMentionScope || entry.author !== "agent" || (entry.status !== "error" && entry.status !== "Error") || typeof content !== "string" || content.indexOf("@") < 0) return content;
+    const names = lastSessionsState && lastSessionsState.viewNames;
+    if (!names || entry.author !== "agent" || (entry.status !== "error" && entry.status !== "Error") || typeof content !== "string" || content.indexOf("@") < 0) return content;
     const shared = sessionsRules();
-    if (!shared || typeof shared.sessionsViewText !== "function") return content;
-    const scope = sessionsMentionScope;
-    const titles = [...scope.byHandle].map(function (pair) { return [pair[0], pair[1].title]; });
-    return shared.sessionsViewText(content, shared.sessionsViewNames(scope.mainHandle, titles));
+    if (!shared || typeof shared.sessionsViewReplyText !== "function") return content;
+    const author = entry.participantLabel || (lastSessionsState.members.find(function (member) { return member.id === entry.participantId; }) || {}).handle;
+    return shared.sessionsViewReplyText(content, author, names);
   }
 
   // Nodes are consumed, not looked up by key. The old sweep asked "is this
@@ -12328,6 +12358,10 @@
       }
     };
     state.mentions = sessionsMentionsOf(state);
+    // How the app's own words name members here (shared sessionsViewText).
+    state.viewNames = typeof shared.sessionsViewNames === "function"
+      ? shared.sessionsViewNames(state.mainHandle, [...state.mentions.byHandle].map(function (pair) { return [pair[0], pair[1].title]; }))
+      : undefined;
     return state;
   }
 
@@ -12432,7 +12466,7 @@
     const shared = sessionsRules();
     const batch = message.metadata.participantRequest;
     if (!batch) return [];
-    const names = typeof shared.sessionsViewNames === "function" ? shared.sessionsViewNames(state.mainHandle, [...state.mentions.byHandle].map(function (pair) { return [pair[0], pair[1].title]; })) : undefined;
+    const names = state.viewNames;
     const appText = function (text) { return names ? shared.sessionsViewText(text, names) : text; };
     return shared.sessionsTaskEntries(message, batch, state.statusById, state.activity, state.messagesById, appText).map(function (entry) {
       const member = state.members.find(function (candidate) { return candidate.id === entry.item.targetParticipantId; });
