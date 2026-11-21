@@ -128,16 +128,34 @@
   z-index: 1;
 }
 
+/* Opens leftward from the … at the settings' top right, so it stays inside
+   their 320px card: never wider than the card, each item's label on its own
+   line with its muted line (what it does, or why not) wrapping under it. */
 .chat-model-access-menu {
   position: absolute;
   top: calc(100% + 4px);
   right: 0;
+  width: max-content;
   min-width: 170px;
+  max-width: 280px;
   padding: 4px;
   border: 1px solid var(--app-border);
   border-radius: var(--radius-card);
   background: var(--popover);
   box-shadow: var(--shadow-lg);
+}
+
+.chat-model-access-menu .chat-model-access-row {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+
+.chat-model-access-menu .chat-model-access-row-label,
+.chat-model-access-menu .chat-model-access-row-detail {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .chat-model-access .chat-run-location,
