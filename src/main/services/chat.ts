@@ -8830,7 +8830,8 @@ export class ChatService {
             sourceMessageId: controlMessage.id,
             approvedContinuation: true,
             runId: resumeRunId,
-            queuedBehind: turnReservation.queued ? { handle: participant.handle } : undefined
+            queuedBehind: turnReservation.queued ? { handle: participant.handle } : undefined,
+            turnQueued: turnReservation.queued ? true : undefined
           },
           "pending"
         );
@@ -10076,7 +10077,8 @@ export class ChatService {
             chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
             sourceMessageId: triggerMessage.id,
             runId: targetRunId,
-            queuedBehind: turnReservation.queued ? { handle: participant.handle } : undefined
+            queuedBehind: turnReservation.queued ? { handle: participant.handle } : undefined,
+            turnQueued: turnReservation.queued ? true : undefined
           },
           "pending"
         );
@@ -10305,8 +10307,8 @@ export class ChatService {
             // jump aimed at a message that no longer exists (a silent no-op). Repair from the
             // remaining full history (refreshStoredChatState already merged it here).
             this.repairLastMessagePointerAfterRemoval(conversation, pendingMessageId);
-          } else if (pending.metadata?.queuedBehind) {
-            const { queuedBehind: _queuedBehind, ...metadata } = pending.metadata;
+          } else if (pending.metadata?.queuedBehind || pending.metadata?.turnQueued) {
+            const { queuedBehind: _queuedBehind, turnQueued: _turnQueued, ...metadata } = pending.metadata;
             conversation.messages[idx] = {
               ...pending,
               metadata
@@ -10525,7 +10527,8 @@ export class ChatService {
           participantRequestDepth: options.participantRequestDepth ?? 0,
           participantRequestBatchId: options.participantRequestBatchId,
           participantRequestChainRootId: options.chainRootId,
-          queuedBehind: options.queuedBehindHandle ? { handle: options.queuedBehindHandle } : undefined
+          queuedBehind: options.queuedBehindHandle ? { handle: options.queuedBehindHandle } : undefined,
+          turnQueued: options.queuedBehindHandle ? true : undefined
         },
         "pending"
       );
@@ -10670,18 +10673,11 @@ export class ChatService {
         this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, message);
         return [pendingMessage];
       }
-      // A member's first turn here, on a provider chosen elsewhere (a chat the
-      // phone made from an offer this computer published earlier): its CLI is
-      // checked first, and one that is not ready says so instead of failing
-      // as the CLI would.
-      const notReady = !session.sessionId && !forkSource ? await this.firstTurnProviderProblem(participant) : undefined;
-      if (notReady) {
-        pendingMessage.status = "error";
-        pendingMessage.content = notReady;
-        options.warnings.push(notReady);
-        this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, notReady);
-        return [pendingMessage];
-      }
+      // A member's first turn here, on a provider perhaps chosen elsewhere (a
+      // chat the phone made from an offer this computer published earlier):
+      // the run still decides (readiness can be stale), and a first turn that
+      // fails on a CLI that is not ready here says so (firstTurnProviderProblem).
+      const firstTurnHere = !session.sessionId && !forkSource;
       executionLease = this.acquireParticipantExecutorLease(conversation, participant, session, "desktop");
       pendingMessage.metadata = {
         ...pendingMessage.metadata,
@@ -10825,6 +10821,11 @@ export class ChatService {
       } else {
         pendingMessage.status = result.ok ? "done" : "error";
       }
+      const notReady = !signal?.aborted && !result.ok && firstTurnHere ? await this.firstTurnProviderProblem(participant) : undefined;
+      if (notReady) {
+        pendingMessage.content = pendingMessage.content.trim() ? `${notReady}\n\n${pendingMessage.content}` : notReady;
+        options.warnings.push(notReady);
+      }
       if (!signal?.aborted && !result.ok) {
         this.markPendingAppToolApprovalsForRunTerminal(
           conversation,
@@ -10835,7 +10836,9 @@ export class ChatService {
       if (!signal?.aborted && !result.ok && result.error) {
         options.warnings.push(`@${participant.handle}: ${result.error}`);
       }
-      const workedMs = Date.parse(now) - Date.parse(pendingMessage.createdAt);
+      // Worked from its own turn's start: a reply that waited in the queue
+      // does not count the wait (turnStartedAt).
+      const workedMs = Date.parse(now) - Date.parse(pendingMessage.metadata?.turnStartedAt ?? pendingMessage.createdAt);
       if (Number.isFinite(workedMs) && workedMs >= 0) {
         pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
       }
@@ -11278,11 +11281,12 @@ export class ChatService {
           ? { participantRequestChainRootId: inferenceContext.chainRootId }
           : {})
       };
-      if (metadata.queuedBehind) {
+      if (metadata.queuedBehind || metadata.turnQueued) {
         // It waited behind the member's turn before it: its own turn starts now.
         metadata.turnStartedAt = new Date().toISOString();
       }
       delete metadata.queuedBehind;
+      delete metadata.turnQueued;
       pendingMessage.metadata = Object.keys(metadata).length > 0 ? metadata : undefined;
       if (existingIndex >= 0) {
         conversation.messages[existingIndex] = pendingMessage;
@@ -11314,6 +11318,7 @@ export class ChatService {
       }
       const metadata: ChatMessageMetadata = { ...pendingMessage.metadata };
       delete metadata.queuedBehind;
+      delete metadata.turnQueued;
       pendingMessage.metadata = Object.keys(metadata).length > 0 ? metadata : undefined;
       pendingMessage.status = "error";
       if (!pendingMessage.content.trim()) {
@@ -13093,6 +13098,8 @@ export class ChatService {
       !storedMetadata?.pendingChoice &&
       !storedMetadata?.participantRequest &&
       !storedMetadata?.queuedBehind &&
+      !storedMetadata?.turnQueued &&
+      !storedMetadata?.turnStartedAt &&
       !storedMetadata?.activityEvents &&
       !storedMetadata?.processingTranscript &&
       !storedMetadata?.remoteRunStatus &&
@@ -13149,6 +13156,10 @@ export class ChatService {
     } else {
       delete merged.queuedBehind;
     }
+    // Its shared word and its own turn's start follow the same stored truth.
+    if (storedMetadata?.turnQueued) merged.turnQueued = true;
+    else delete merged.turnQueued;
+    if (storedMetadata?.turnStartedAt) merged.turnStartedAt = storedMetadata.turnStartedAt;
     if (storedMetadata?.activityEvents?.length && !currentMetadata?.activityEvents?.length) {
       merged.activityEvents = cloneJsonValue(storedMetadata.activityEvents);
     }
@@ -14588,14 +14599,14 @@ export class ChatService {
     return false;
   }
 
-  /** Why a member cannot take its first turn on this computer now: its CLI
-   *  (or added provider) is not ready, in the words New chat uses. Undefined
-   *  when it is ready, or when readiness cannot be told (the run then says
-   *  what went wrong itself). */
+  /** Why a member's failed first turn on this computer failed, when its CLI
+   *  (or added provider) is not ready here (checked afresh), in the words New
+   *  chat uses. Undefined when it is ready, or when readiness cannot be told
+   *  (the run's own error then says what went wrong). */
   private async firstTurnProviderProblem(participant: ChatParticipant): Promise<string | undefined> {
     let agents: AgentHealth[];
     try {
-      agents = await this.cliRunner.detectAgents();
+      agents = await this.cliRunner.detectAgents({ trigger: "submit" });
     } catch {
       return undefined;
     }

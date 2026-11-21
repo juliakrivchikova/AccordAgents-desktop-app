@@ -499,13 +499,15 @@ test("a queued running reply reaches the phone as queued, and a machine's run wi
   const { opId, write } = await seedChat(h, machine);
   const { client } = await pairPhone(h);
   const queued: ChatMessage = { id: "bubble-queued", role: "participant", participantId: localMember.id, participantLabel: "@mac", content: "",
-    createdAt: new Date(Date.now() - 60_000).toISOString(), status: "pending", metadata: { runId: "run-queued", queuedBehind: { handle: "mac" } } as ChatMessage["metadata"] };
+    // What a device sends of its queue: the shared word (queuedBehind stays on the device).
+    createdAt: new Date(Date.now() - 60_000).toISOString(), status: "pending", metadata: { runId: "run-queued", queuedBehind: { handle: "mac" }, turnQueued: true } as ChatMessage["metadata"] };
   const startedAt = new Date(Date.now() - 5_000).toISOString();
   const remote: ChatMessage = { id: "bubble-remote", role: "participant", participantId: machineMember.id, participantLabel: "@box", content: "",
     createdAt: new Date(Date.now() - 90_000).toISOString(), status: "pending",
     metadata: { runId: "run-remote", remoteRunStatus: { phase: "waiting-for-response", label: "Working", startedAt, updatedAt: startedAt } } as ChatMessage["metadata"] };
   await write(h.owner, { opId: opId(), kind: "message.create", conversationId: "chat-1", message: queued });
-  await write(h.owner, { opId: opId(), kind: "message.create", conversationId: "chat-1", message: remote });
+  // A machine member's reply is written by its machine.
+  await write(machine, { opId: opId(), kind: "message.create", conversationId: "chat-1", message: remote });
   const live = await client.getJson<{ events: Array<{ id: string; queued?: boolean; startedAt?: string }> }>("/v1/phone/progress", { conversationId: "chat-1" });
   const byId = new Map(live.events.map((event) => [event.id, event]));
   assert.equal(byId.get("bubble-queued")?.queued, true, "waiting behind the member's turn before it");

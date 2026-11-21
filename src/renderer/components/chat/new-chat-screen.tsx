@@ -189,7 +189,15 @@ export function NewChatScreen(props: {
   // where it runs) was for the one before and is dropped, as the classic
   // New chat always did; another provider's model never reaches a CLI.
   const mainProviderKey = mainProvider ? mainSessionProviderKey(mainProvider) : undefined;
-  const { onSelectedParticipantRuntimeOverridesChange, onMainSessionOverrideForChange, mainSessionOverrideFor } = props;
+  const { onSelectedParticipantRuntimeOverridesChange } = props;
+  // Kept by App so it holds between visits; a screen given no keeper keeps
+  // it itself while it is open.
+  const ownOverrideFor = useRef<string | undefined>();
+  const mainSessionOverrideFor = props.onMainSessionOverrideForChange ? props.mainSessionOverrideFor : ownOverrideFor.current;
+  const onMainSessionOverrideForChange = useMemo(
+    () => props.onMainSessionOverrideForChange ?? ((key: string | undefined) => { ownOverrideFor.current = key; }),
+    [props.onMainSessionOverrideForChange]
+  );
   const overrideForOtherProvider = mainSessionOverrideForOtherProvider(mainSessionOverrideFor, mainProviderKey);
   useEffect(() => {
     if (!mainProviderKey || mainSessionOverrideFor === mainProviderKey) return;

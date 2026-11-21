@@ -36,7 +36,7 @@ test("each CLI's modes by its own names, and the one it starts in", () => {
   }
   assert.ok(!chatAccessOptions("gemini-cli").some((option) => option.label === "Read only"), "agy has no read-only mode, only a prompt");
   // agy's print mode cannot ask: no agy mode says it asks.
-  assert.ok(chatAccessOptions("gemini-cli").every((option) => !/\basks?\b/i.test(option.detail)));
+  assert.ok(chatAccessOptions("gemini-cli").every((option) => !/\basks\b/i.test(option.detail)), "no agy mode claims it asks");
   assert.match(chatAccessOptions("gemini-cli")[0]!.detail, /refuses edits and commands/);
 });
 

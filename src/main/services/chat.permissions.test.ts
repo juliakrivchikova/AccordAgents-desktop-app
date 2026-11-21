@@ -4568,6 +4568,8 @@ test("same participant sends show queued bubble and serialize provider runs", as
       promoted.metadata?.queuedBehind === undefined;
   });
   const promoted = storage.current.messages.find((message: Conversation["messages"][number]) => message.id === queuedMessage?.id);
+  assert.equal(queuedMessage?.metadata?.turnQueued, true, "queued, in words the User's server keeps (queuedBehind stays on the device)");
+  assert.equal(promoted?.metadata?.turnQueued, undefined, "no longer queued once its turn began");
   assert.ok(promoted?.metadata?.turnStartedAt, "its own turn's start is stamped, so Working for does not count the wait");
   assert.ok(Date.parse(promoted!.metadata!.turnStartedAt!) >= Date.parse(promoted!.createdAt));
 
@@ -15809,7 +15811,7 @@ test("the effort's Default really resets: an effort sent as none is the CLI's ow
   assert.equal((storage.current.metadata.participants as ChatParticipant[])[0]?.model, undefined, "the model's Default (\"\") resets the model");
 });
 
-test("a member's first turn on a CLI that is not ready on this computer says so in the reply instead of failing as the CLI would (a chat the phone made)", async () => {
+test("a member's first turn that fails on a CLI that is not ready on this computer says why in the reply (a chat the phone made); the run still decides", async () => {
   const runs: unknown[] = [];
   const claude = chatParticipant("claude-code");
   const conversation = chatConversation([claude]);
@@ -15819,14 +15821,14 @@ test("a member's first turn on a CLI that is not ready on this computer says so 
       { kind: "codex-cli", label: "Codex CLI", installed: true, detection: "detected", runnable: "ready", authentication: "ready" },
       { kind: "claude-code", label: "Claude Code", installed: true, detection: "detected", runnable: "ready", authentication: "required" }
     ],
-    run: async (participant: ParticipantConfig) => { runs.push(participant); return { participant, ok: true, content: "ok", durationMs: 1 }; }
+    run: async (participant: ParticipantConfig) => { runs.push(participant); return { participant, ok: false, content: "", error: "Not logged in", durationMs: 1 }; }
   });
   (service as any).ensureHistoryFiles = async () => tempRoot;
   await service.sendMessage({ conversationId: conversation.id, runId: "run-first", content: "@drew hello" });
   await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.participantId === claude.id && message.status === "error"));
   const reply = storage.current.messages.find((message: ChatMessage) => message.participantId === claude.id)!;
   assert.equal(reply.content, "@drew cannot start on this computer: Claude Code requires sign-in. Fix it in Settings → Local CLI setup, or start the chat on another provider.");
-  assert.deepEqual(runs, [], "the CLI is not started");
+  assert.equal(runs.length, 1, "the CLI was tried: readiness can be stale, the run decides");
 });
 
 test("the phone's New chat offer never waits for a model list: a hanging one is read in the background and the offer is published again once it has it", { timeout: 10_000 }, async () => {

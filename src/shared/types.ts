@@ -1754,6 +1754,10 @@ export interface ChatMessageMetadata {
   memberMoveCancelled?: { participantId: string; runId: string };
   workedMs?: number;
   queuedBehind?: { handle: string };
+  /** The reply waits behind its member's turn before it: the shared word
+   *  of `queuedBehind` (which stays on the device), so the phone shows it
+   *  queued, with no clock. */
+  turnQueued?: true;
   /** When a reply that waited behind its member's turn before it began its
    *  own turn: its "Working for …" counts from here, not from when it was
    *  queued (desktop and phone). */
