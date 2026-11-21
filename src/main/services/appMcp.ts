@@ -115,7 +115,7 @@ type AppRoleOptionsHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppParticipantChangeHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppParticipantOptionsHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppPermissionChangeHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppToolPermissionHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppToolPermissionHandler = (actor: AppMcpActor, request: unknown, signal?: AbortSignal) => Promise<unknown>;
 /** A tool call that waits for the User: given a signal that aborts when the
  *  member's CLI gives up on the call. */
 type AppWaitingToolHandler = (actor: AppMcpActor, request: unknown, signal?: AbortSignal) => Promise<unknown>;
@@ -709,7 +709,7 @@ export class AppMcpService {
       if (!this.toolPermissionHandler) {
         throw new Error("Tool permission handling is not available.");
       }
-      return this.toolTextResult(await this.toolPermissionHandler(actor, record.arguments));
+      return this.toolTextResult(await this.toolPermissionHandler(actor, record.arguments, signal));
     }
     if (record.name === APP_CONNECTOR_SIGN_IN_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
@@ -1091,12 +1091,14 @@ export class AppMcpService {
     };
   }
 
-  /** A call of a tool that waits for the User (a sign-in card). */
+  /** A call of a tool that waits for the User (a sign-in card, Claude
+   *  Code's permission prompt). */
   private isWaitingToolCall(payload: unknown): boolean {
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
     const request = payload as JsonRpcRequest;
     const params = request.params && typeof request.params === "object" ? request.params as { name?: unknown } : undefined;
-    return request.method === "tools/call" && request.id !== undefined && params?.name === APP_CONNECTOR_SIGN_IN_TOOL;
+    return request.method === "tools/call" && request.id !== undefined &&
+      (params?.name === APP_CONNECTOR_SIGN_IN_TOOL || params?.name === APP_TOOL_PERMISSION_TOOL);
   }
 
   /** Answers a waiting tool call as an event stream (MCP Streamable HTTP):

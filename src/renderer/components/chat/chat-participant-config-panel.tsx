@@ -24,6 +24,7 @@ import type {
 } from "../../../shared/types";
 import { modelCatalogStatus, useProviderModelCatalog, type ProviderModelCatalogHost } from "./use-provider-model-catalog";
 import { savedModelId } from "../../../shared/geminiModels";
+import { withClassicChatPermissions } from "../../../shared/chatAccessModes";
 import { Avatar } from "../avatar/avatar";
 import { AvatarStudioDialog } from "../avatar/avatar-studio-dialog";
 import { useCustomAvatarLibrary } from "../avatar/custom-avatars";
@@ -350,10 +351,11 @@ export function ChatParticipantInlinePermissionsRow(props: {
     checked: boolean;
     next: (value: boolean) => ChatAgentPermissions;
   }> = [
-    { key: "repoRead", label: "repo read", checked: permissions.repoRead, next: (value) => ({ ...permissions, repoRead: value }) },
-    { key: "workspaceWrite", label: "file editing", checked: permissions.workspaceWrite, next: (value) => ({ ...permissions, workspaceWrite: value }) },
-    { key: "webAccess", label: "web access", checked: permissions.webAccess, next: (value) => ({ ...permissions, webAccess: value }) },
-    { key: "shell", label: "shell access", checked: permissions.shell.enabled, next: (value) => ({ ...permissions, shell: { ...permissions.shell, enabled: value } }) }
+    // Classic toggles mean what they say: a CLI mode chosen in the picker ends.
+    { key: "repoRead", label: "repo read", checked: permissions.repoRead, next: (value) => withClassicChatPermissions(permissions, { repoRead: value }) },
+    { key: "workspaceWrite", label: "file editing", checked: permissions.workspaceWrite, next: (value) => withClassicChatPermissions(permissions, { workspaceWrite: value }) },
+    { key: "webAccess", label: "web access", checked: permissions.webAccess, next: (value) => withClassicChatPermissions(permissions, { webAccess: value }) },
+    { key: "shell", label: "shell access", checked: permissions.shell.enabled, next: (value) => withClassicChatPermissions(permissions, { shell: { ...permissions.shell, enabled: value } }) }
   ];
   return (
     <ChatParticipantSpecRow label="Permissions">

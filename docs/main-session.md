@@ -126,7 +126,13 @@ chat without a main session is always `classic`; its switch is disabled.
       mode reads and plans. No agy mode is called Read only.
     A main session starts in its CLI's own default: Claude Code's Default,
     Codex's Default, agy's Default. Settings from the classic controls are
-    no mode: the picker marks none and says so. Its … menu has Restart
+    no mode: the picker marks none and says so, and a classic toggle (Read
+    Files, Edit Files, Run Shell, Access Web) ends a mode chosen in the
+    picker (`withClassicChatPermissions`), so what it turns off is refused,
+    not asked about. A member held to a main session without the CLI's own
+    mode loses its own mode too; an Antigravity member then runs Default with
+    no edits (`--sandbox`), never with its confirmations skipped
+    (`clampChatAgentAccess`). Its … menu has Restart
     (picks up changed connectors, idle only, naming background work it
     stops; not Antigravity) and, for a member, Remove from chat. Its
     provider stays the one it was made with. No name, status,

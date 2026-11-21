@@ -52,6 +52,7 @@ import { useChatLocalFileOpen } from "./use-chat-local-file-open";
 import { useSubmittingIdSet } from "./use-submitting-id-set";
 import { useStableChatMessageActions } from "./use-stable-chat-message-actions";
 import { useChatPromptSuggestions } from "./use-chat-prompt-suggestions";
+import { sessionsComposerSuggestions } from "./use-chat-composer-suggestions";
 import { useChatRightPanel, useChatRightPanelWidth } from "./use-chat-right-panel";
 import { useChatSessionsChrome, useChatSessionsView } from "./use-chat-sessions-view";
 import { useChatViewMode } from "./use-chat-view-mode";
@@ -464,7 +465,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               repoPath={props.conversation.repoPath}
               draft={props.draft}
               picks={props.composerPicks}
-              suggestions={promptSuggestions.suggestions}
+              suggestions={sessionsComposerSuggestions(promptSuggestions.suggestions, sessions?.mainSessionId)}
               onDraftChange={props.onDraftChange}
               onSend={sendDraft}
               accordDisabledReason={props.accordDisabledReason}

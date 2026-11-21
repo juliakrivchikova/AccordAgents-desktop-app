@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { APP_SCRIPTS_REQUEST_CHANGE_TOOL, APP_TOOL_PERMISSION_TOOL } from "../../shared/appMcpToolContracts";
+import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL, APP_SCRIPTS_REQUEST_CHANGE_TOOL, APP_TOOL_PERMISSION_TOOL } from "../../shared/appMcpToolContracts";
 import { choiceCardId, mentionCardId, type HubMentionCardPayload } from "../../shared/hubCards";
 import type { HubCard, HubFeedResponse, HubOp } from "../../shared/hubOps";
 import { buildChatActivityItems } from "../../shared/chatActivity";
@@ -215,6 +215,23 @@ function toolApproval(id: string, requester: ChatParticipant, conversationId: st
   } as unknown as ChatAppToolApproval;
 }
 
+/** A permission change the member asked for (web access): its answer still
+ *  applies after its computer restarted, unlike a tool permission, whose
+ *  answer goes to a call that ended with it. */
+function grantApproval(id: string, requester: ChatParticipant, conversationId: string): ChatAppToolApproval {
+  return {
+    id, conversationId, requesterParticipantId: requester.id, requesterHandle: requester.handle, requesterRoleConfigId: requester.roleConfigId,
+    toolName: APP_PERMISSIONS_REQUEST_CHANGE_TOOL, capability: "permissions.request", status: "pending",
+    request: { kind: "portable", permissions: ["webAccess"], reason: "To read the docs." }, summary: "Grant @taylor web access", createdAt: at, updatedAt: at
+  } as unknown as ChatAppToolApproval;
+}
+
+/** Claude Code's call waiting on this permission card in the member's
+ *  process (requestToolPermissionFromTool), as while its member runs: an
+ *  answer to a card no call waits on is not applied, it expires. */
+const callWaitsOn = (service: ChatService, approvalId: string) =>
+  (service as unknown as { noteToolPermissionWaiter(id: string, change: 1): void }).noteToolPermissionWaiter(approvalId, 1);
+
 function scriptApproval(id: string, conversationId: string): ChatAppToolApproval {
   return {
     id, conversationId, requesterParticipantId: desk.id, requesterHandle: desk.handle, requesterRoleConfigId: desk.roleConfigId,
@@ -234,10 +251,13 @@ const approvalOf = async (storage: StorageService, conversationId: string, appro
   ((await storage.getConversation(conversationId))?.metadata.pendingAppToolApprovals as ChatAppToolApproval[] | undefined)?.find((item) => item.id === approvalId);
 const allowedLines = async (storage: StorageService, conversationId: string) =>
   (await storage.getConversation(conversationId))?.messages.filter((message) => message.role === "system" && message.content.startsWith("Allowed @taylor to use Bash")).length ?? 0;
+const grantedLines = async (storage: StorageService, conversationId: string) =>
+  (await storage.getConversation(conversationId))?.messages.filter((message) => message.role === "system" && message.content.startsWith("Granted @taylor web access")).length ?? 0;
 
-async function linkedDesktop(t: test.TestContext, conversation: Conversation) {
+async function linkedDesktop(t: test.TestContext, conversation: Conversation, beforeLink?: (h: Awaited<ReturnType<typeof setup>>) => void) {
   const h = await setup(t);
   await save(h.desktopChat, conversation);
+  beforeLink?.(h);
   await h.desktopLink.start();
   await until(() => h.call<{ messages?: unknown[] }>(h.desktopIdentity, "GET", `/v3/chat?conversationId=${conversation.id}`), (page) => Boolean(page.messages?.length));
   return h;
@@ -245,7 +265,8 @@ async function linkedDesktop(t: test.TestContext, conversation: Conversation) {
 
 test("a desktop member's approval is raised on the server, answered from the phone and applied once on the desktop; a second answer is refused", async (t) => {
   const approvalId = randomUUID();
-  const h = await linkedDesktop(t, chat("cards-a", { pendingAppToolApprovals: [toolApproval(approvalId, desk, "cards-a")] } as never));
+  const h = await linkedDesktop(t, chat("cards-a", { pendingAppToolApprovals: [toolApproval(approvalId, desk, "cards-a")] } as never),
+    (setupH) => callWaitsOn(setupH.desktopChat, approvalId));
   const raised = await until(() => h.card(approvalId), (item) => item?.state === "pending");
   assert.equal(raised!.raisedBy, h.desktopIdentity.originId, "raised by the device its member runs on");
   assert.equal(raised!.cardKind, "permission");
@@ -276,7 +297,7 @@ test("a desktop member's approval is raised on the server, answered from the pho
 test("an answer given while the member's computer was off is applied once when it starts again; one that crossed its point of no return is not repeated", async (t) => {
   const first = randomUUID();
   const second = randomUUID();
-  const h = await linkedDesktop(t, chat("cards-b", { pendingAppToolApprovals: [toolApproval(first, desk, "cards-b"), toolApproval(second, desk, "cards-b")] } as never));
+  const h = await linkedDesktop(t, chat("cards-b", { pendingAppToolApprovals: [grantApproval(first, desk, "cards-b"), grantApproval(second, desk, "cards-b")] } as never));
   await until(() => Promise.all([h.card(first), h.card(second)]), (cards) => cards.every((item) => item?.state === "pending"));
   // The computer stops; the User answers both on the phone meanwhile.
   await h.desktopLink.stop();
@@ -302,12 +323,32 @@ test("an answer given while the member's computer was off is applied once when i
   const stuck = await approvalOf(h.desktopStorage, "cards-b", second);
   assert.equal(stuck?.status, "cancelled", "closed, never asked again");
   assert.match(stuck?.error ?? "", /not repeated/);
-  assert.equal(await allowedLines(h.desktopStorage, "cards-b"), 1, "only the first was applied, once");
+  assert.equal(await grantedLines(h.desktopStorage, "cards-b"), 1, "only the first was applied, once");
   // Started again: nothing more.
   await restarted.resumeServerCards();
   await new Promise((resolve) => setTimeout(resolve, 300));
-  assert.equal(await allowedLines(h.desktopStorage, "cards-b"), 1);
+  assert.equal(await grantedLines(h.desktopStorage, "cards-b"), 1);
   assert.deepEqual((await h.call<{ cards: HubCard[] }>(h.desktopIdentity, "GET", "/v3/cards?conversationId=cards-b")).cards, [], "nothing left open");
+});
+
+test("a tool permission card whose call ended with the computer is expired when it starts again; an answer given meanwhile is not applied", async (t) => {
+  const approvalId = randomUUID();
+  const h = await linkedDesktop(t, chat("cards-tp", { pendingAppToolApprovals: [toolApproval(approvalId, desk, "cards-tp")] } as never),
+    (setupH) => callWaitsOn(setupH.desktopChat, approvalId));
+  await until(() => h.card(approvalId), (item) => item?.state === "pending");
+  await h.desktopLink.stop();
+  assert.equal((await h.phoneAnswers("cards-tp", approvalId, { approve: true })).result.status, "accepted");
+  // A new process: Claude Code's call that waited on the card is gone.
+  const restarted = chatService(h.desktopStorage, [], "desktop");
+  const restartedAppliers = appliers(h.desktopStorage, restarted, h.desktopIdentity.originId, "desktop-2");
+  restarted.setCardAppliers(async () => restartedAppliers);
+  const link = h.link(h.desktopStorage, restarted, h.desktopEvents, "desktop-2", true);
+  h.links.push(link);
+  await link.start();
+  await until(() => h.card(approvalId), (item) => item?.state === "settled");
+  const after = await approvalOf(h.desktopStorage, "cards-tp", approvalId);
+  assert.equal(after?.status, "expired", "said as expired, never as allowed");
+  assert.equal(await allowedLines(h.desktopStorage, "cards-tp"), 0, "nothing was allowed into a call that ended");
 });
 
 test("the phone's approval of a script that installs code is refused, the card asked again with why; the desktop's approval applies it once", async (t) => {
@@ -396,6 +437,7 @@ test("a machine member's approval is shown on the desktop as its card, answered 
   await until(() => h.machineStorage.getConversation("cards-e"), (item) => Boolean(item));
   const machineCopy = (await h.machineStorage.getConversation("cards-e"))!;
   machineCopy.metadata = { ...machineCopy.metadata, pendingAppToolApprovals: [toolApproval(approvalId, remote, "cards-e")] } as Conversation["metadata"];
+  callWaitsOn(h.machineChat, approvalId);
   await save(h.machineChat, machineCopy);
   await until(() => h.card(approvalId), (item) => item?.state === "pending" && item.raisedBy === h.machineIdentity.originId);
   // The desktop shows the machine member's card as its own kind of card.

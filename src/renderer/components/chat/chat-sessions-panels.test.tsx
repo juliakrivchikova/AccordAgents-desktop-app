@@ -11,6 +11,9 @@ import { ChatModelAccessPanel, type ChatModelAccessPatch } from "./chat-model-ac
 import { memberSettingsActions } from "./chat-member-model-access";
 import { runtimePatchFields } from "../../app/use-chat-actions";
 import { defaultChatAgentPermissions } from "../../../shared/agentPermissions";
+import { applyChatAccessOptionById } from "../../../shared/chatAccessModes";
+import { ParticipantRuntimeControls } from "./chat-participant-runtime-controls";
+import type { ChatParticipant } from "../../../shared/types";
 import { ChatMemberSessionPanel, type ChatMemberSendRequest } from "./chat-member-session-panel";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { DREW, GERA, MAIN, PARTICIPANTS, TAYLOR, sessionsMessages, disclosure } from "./chat-sessions-fixtures.test";
@@ -415,6 +418,36 @@ test("the picker saves only an explicit choice: an effort the model lacks reads 
 
 test("access set in the classic controls is not passed off as one of the CLI's modes", async () => {
   const view = await renderPicker({ ...DREW, agentMode: "default", permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true } }, () => undefined);
+  try {
+    assert.equal(view.root.findAll(byTestId("chat-model-access-mode")).filter((row) => row.props["aria-checked"]).length, 0, "no mode marked");
+    assert.match(textOf(view.root.find(byTestId("chat-model-access-custom"))), /Custom access/);
+  } finally {
+    view.done();
+  }
+});
+
+test("after a CLI mode was chosen in the picker, a classic toggle ends it: what is off is refused again, and the picker says Custom access", async () => {
+  const accept = applyChatAccessOptionById("claude-code", "acceptEdits", { ...defaultChatAgentPermissions(), shell: { enabled: true, rules: [] }, webAccess: true });
+  const member = { ...TAYLOR, kind: "claude-code", agentMode: accept.agentMode, permissions: accept.permissions } as ChatParticipant;
+  const patches: Array<Partial<ChatParticipant>> = [];
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(<TooltipProvider><ParticipantRuntimeControls participant={member} disabled={false} runLocationLocked={false}
+      onUpdate={(_id, patch) => { patches.push(patch); }} /></TooltipProvider>);
+  });
+  try {
+    for (const label of ["Run Shell", "Edit Files", "Access Web"]) {
+      const chip = renderer!.root.findAll((node) => node.type === "button" && typeof node.props.className === "string" &&
+        node.props.className.includes("chat-rt-perm-chip") && textOf(node) === label)[0]!;
+      act(() => chip.props.onClick());
+      const saved = patches.at(-1)!.permissions!;
+      assert.equal(saved.cliApprovals, undefined, `${label} off: Claude Code no longer asks and gets approved`);
+    }
+    assert.equal(patches.at(-1)!.permissions!.webAccess, false);
+  } finally {
+    act(() => renderer!.unmount());
+  }
+  const view = await renderPicker({ ...member, permissions: patches.at(-1)!.permissions! }, () => undefined);
   try {
     assert.equal(view.root.findAll(byTestId("chat-model-access-mode")).filter((row) => row.props["aria-checked"]).length, 0, "no mode marked");
     assert.match(textOf(view.root.find(byTestId("chat-model-access-custom"))), /Custom access/);

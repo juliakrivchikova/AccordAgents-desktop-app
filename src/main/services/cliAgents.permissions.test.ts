@@ -9,6 +9,7 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import { NativeProcessRegistry } from "./nativeProcessRegistry";
 import {
+  CLAUDE_APP_MCP_TOOL_TIMEOUT_MS,
   ClaudeFolderNotTrustedError,
   claudeModelProbeEnv,
   ClaudeModelListTimeoutError,
@@ -28,6 +29,7 @@ import type { CodexServerRequestDelivery } from "./codexApprovals";
 import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
 import type { ParticipantRunResult } from "./providers";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
+import { APP_TOOL_PERMISSION_WAIT_MS } from "../../shared/appMcpToolContracts";
 
 // Claude Code's own config on this computer (Claude in Chrome, for one) must
 // not decide these tests: an empty config folder is a fresh Claude Code.
@@ -2638,6 +2640,12 @@ test("claude chat MCP config is additive and does not pass strict or closed tool
   const parsed = JSON.parse(mcpArgs[1]);
   assert.equal(parsed.mcpServers.accord_agents.type, "http");
   assert.equal(parsed.mcpServers.accord_agents.url, "http://127.0.0.1:1/mcp");
+  // Claude Code waits for the User's answer on a permission card as long as
+  // the card waits (its default gave up after 60 s), for the app's server
+  // only: the User's own MCP servers keep Claude Code's defaults.
+  assert.equal(parsed.mcpServers.accord_agents.timeout, APP_TOOL_PERMISSION_WAIT_MS + 60_000);
+  assert.equal(CLAUDE_APP_MCP_TOOL_TIMEOUT_MS > APP_TOOL_PERMISSION_WAIT_MS, true, "the app answers first");
+  assert.equal(Object.keys(runner.agentRunEnv(options) ?? {}).includes("MCP_TOOL_TIMEOUT"), false);
 });
 
 test("claude default chat delegates unmatched tool approvals to app_tool_permission", () => {

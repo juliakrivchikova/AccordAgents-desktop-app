@@ -262,6 +262,35 @@ export function clampChatAgentPermissions(
 }
 
 /**
+ * A member's mode and rights held to a ceiling's (clampChatAgentMode and
+ * clampChatAgentPermissions), for the CLI it runs on. The ceiling never
+ * turns a restricting mode into a broader one: Antigravity in its own mode
+ * (`cliApprovals`, agy's `--mode`) is held back by that mode, while without
+ * it the app's mapping skips every agy confirmation once edits are granted
+ * or in Auto (geminiExec.ts geminiPermissionArgs). So when the ceiling takes
+ * its own mode away, it runs the most restrictive way instead: Default with
+ * no edits (agy's `--sandbox`, read-only), never with confirmations skipped.
+ * Claude Code and Codex without their own mode refuse what is not granted
+ * instead of asking, which is already narrower.
+ */
+export function clampChatAgentAccess(
+  kind: ChatProviderKind | undefined,
+  requested: { agentMode?: ChatAgentMode; permissions: ChatAgentPermissions },
+  ceiling: { agentMode?: ChatAgentMode; permissions: ChatAgentPermissions }
+): { agentMode: ChatAgentMode; permissions: ChatAgentPermissions } {
+  const agentMode = clampChatAgentMode(requested.agentMode, ceiling.agentMode);
+  const permissions = clampChatAgentPermissions(requested.permissions, ceiling.permissions);
+  const ownModeTaken = normalizeChatAgentPermissions(requested.permissions).cliApprovals === true && !permissions.cliApprovals;
+  if (kind !== "gemini-cli" || !ownModeTaken) {
+    return { agentMode, permissions };
+  }
+  return {
+    agentMode: agentMode === "plan" ? "plan" : "default",
+    permissions: { ...permissions, workspaceWrite: false }
+  };
+}
+
+/**
  * Whether a member's permissions give it nothing beyond `ceiling` (managing
  * members aside: it depends on the member's role, so callers check it with
  * resolveChatManageRolesParticipantsPermission). What clampChatAgentPermissions

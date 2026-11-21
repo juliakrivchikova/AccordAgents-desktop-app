@@ -70,6 +70,7 @@ import type {
   ChatRoleConfig,
   ChatRoleConfigUpdate,
   ChatSkillMention,
+  ChatToolPermissionRequest,
   CliProviderHost,
   Conversation,
   ParticipantConfig,
@@ -1158,6 +1159,163 @@ test("tool permission chat approval reuses policy for the same participant and t
   );
   assert.equal(toolApprovals.length, 1);
   assert.equal(((storage.current.metadata.appToolApprovalPolicies ?? []) as ChatAppToolApprovalPolicy[])[0].targetToolName, "mcp__atlassian__search");
+});
+
+function toolPermissionActor(participant: ChatParticipant, conversation: Conversation, runId = "run-42") {
+  return {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const],
+    agentMode: "default" as const,
+    runId,
+    triggerMessageId: "user-message"
+  };
+}
+
+async function pendingToolPermission(storage: { current: Conversation }, toolName: string): Promise<ChatAppToolApproval> {
+  await waitFor(() => ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+    .some((approval) => approval.toolName === APP_TOOL_PERMISSION_TOOL && approval.status === "pending" &&
+      (approval.request as { toolName?: string }).toolName === toolName));
+  return ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+    .filter((approval) => (approval.request as { toolName?: string }).toolName === toolName)
+    .find((approval) => approval.status === "pending")!;
+}
+
+test("a permission card whose Claude Code call ended (it stopped waiting) is expired, and an answer to it does nothing", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const abandoned = new AbortController();
+  const pending = service.requestToolPermissionFromTool(toolPermissionActor(participant, conversation), {
+    tool_name: "Bash", input: { command: "date > /tmp/stamp.txt" }, tool_use_id: "toolu_1"
+  }, abandoned.signal);
+  const card = await pendingToolPermission(storage, "Bash");
+  abandoned.abort();
+  const result = await pending;
+  assert.equal(result.behavior, "deny");
+  const expired = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((item) => item.id === card.id)!;
+  assert.equal(expired.status, "expired", "not shown as waiting, and not as the User's denial");
+  assert.match(expired.error ?? "", /stopped waiting/);
+  await assert.rejects(
+    service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true, scope: "once" }),
+    /already been answered/
+  );
+});
+
+test("an answer to a permission card no call waits on any more (the app restarted) expires it instead of doing nothing", async () => {
+  const participant = chatParticipant("claude-code");
+  const orphan: ChatAppToolApproval = {
+    id: "orphan-1", conversationId: "conversation-1", requesterParticipantId: participant.id, requesterHandle: participant.handle,
+    requesterRoleConfigId: participant.roleConfigId, toolName: APP_TOOL_PERMISSION_TOOL, capability: "permissions.request",
+    request: { kind: "toolPermission", agentMode: "default", toolName: "Bash", toolInput: { command: "ls" } },
+    summary: "Use Bash", status: "pending", createdAt: NOW, updatedAt: NOW,
+    resumeContext: { runId: "old-run", triggerMessageId: "user-message" }
+  } as ChatAppToolApproval;
+  const conversation = chatConversation([participant], { pendingAppToolApprovals: [orphan] });
+  const { service, storage } = testService({ conversation });
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: orphan.id, approve: true, scope: "once" });
+  const after = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((item) => item.id === orphan.id)!;
+  assert.equal(after.status, "expired");
+  assert.match(after.error ?? "", /Nothing is waiting for this answer/);
+});
+
+test("Allow for this chat on a Bash card covers the command prefixes, as Claude Code's \"don't ask again\" does: another command still asks", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = toolPermissionActor(participant, conversation);
+  const first = service.requestToolPermissionFromTool(actor, {
+    tool_name: "Bash", input: { command: "mkdir -p /tmp/aa && git status" }, tool_use_id: "toolu_a"
+  });
+  const card = await pendingToolPermission(storage, "Bash");
+  assert.deepEqual((card.request as ChatToolPermissionRequest).chatScope, { kind: "commands", prefixes: ["mkdir", "git status"] });
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true, scope: "chat" });
+  assert.equal((await first).behavior, "allow");
+  const rules = (storage.current.metadata.appToolApprovalPolicies ?? []) as ChatAppToolApprovalPolicy[];
+  assert.deepEqual(rules.map((rule) => [rule.targetToolName, rule.targetToolScope]), [["Bash", { kind: "commands", prefixes: ["mkdir", "git status"] }]]);
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.content === `Allowed @${participant.handle} to run mkdir and git status commands for this chat.`));
+
+  // The same prefixes: unasked.
+  const again = await service.requestToolPermissionFromTool({ ...actor, runId: "run-43" }, {
+    tool_name: "Bash", input: { command: "mkdir /tmp/bb" }, tool_use_id: "toolu_b"
+  });
+  assert.equal(again.behavior, "allow");
+  // Another command: a card, not a free pass for every command.
+  const abandoned = new AbortController();
+  const other = service.requestToolPermissionFromTool({ ...actor, runId: "run-44" }, {
+    tool_name: "Bash", input: { command: "rm -rf /tmp/aa" }, tool_use_id: "toolu_c"
+  }, abandoned.signal);
+  const asked = await pendingToolPermission(storage, "Bash");
+  assert.notEqual(asked.id, card.id);
+  abandoned.abort();
+  await other;
+
+  // WebFetch: the domain.
+  const fetch = service.requestToolPermissionFromTool({ ...actor, runId: "run-45" }, {
+    tool_name: "WebFetch", input: { url: "https://docs.example.com/a" }, tool_use_id: "toolu_d"
+  });
+  const fetchCard = await pendingToolPermission(storage, "WebFetch");
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: fetchCard.id, approve: true, scope: "chat" });
+  await fetch;
+  assert.equal((await service.requestToolPermissionFromTool({ ...actor, runId: "run-46" }, {
+    tool_name: "WebFetch", input: { url: "https://docs.example.com/b" }, tool_use_id: "toolu_e"
+  })).behavior, "allow");
+  const otherSite = new AbortController();
+  const elsewhere = service.requestToolPermissionFromTool({ ...actor, runId: "run-47" }, {
+    tool_name: "WebFetch", input: { url: "https://example.org/" }, tool_use_id: "toolu_f"
+  }, otherSite.signal);
+  assert.notEqual((await pendingToolPermission(storage, "WebFetch")).id, fetchCard.id, "another domain asks");
+  otherSite.abort();
+  await elsewhere;
+});
+
+test("a rule for edits in a folder does not cover a link in it that leads out of it", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "aa-edit-scope-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const inside = path.join(root, "work");
+  const outside = path.join(root, "elsewhere");
+  await mkdir(inside, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await symlink(outside, path.join(inside, "out"));
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = toolPermissionActor(participant, conversation);
+  const first = service.requestToolPermissionFromTool(actor, { tool_name: "Write", input: { file_path: path.join(inside, "a.txt"), content: "x" }, tool_use_id: "toolu_w1" });
+  const card = await pendingToolPermission(storage, "Write");
+  assert.deepEqual((card.request as ChatToolPermissionRequest).chatScope, { kind: "folder", path: inside });
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true, scope: "chat" });
+  await first;
+  assert.equal((await service.requestToolPermissionFromTool({ ...actor, runId: "run-e2" }, {
+    tool_name: "Edit", input: { file_path: path.join(inside, "b.txt"), old_string: "a", new_string: "b" }, tool_use_id: "toolu_w2"
+  })).behavior, "allow", "another edit in the folder");
+  const abandoned = new AbortController();
+  const viaLink = service.requestToolPermissionFromTool({ ...actor, runId: "run-e3" }, {
+    tool_name: "Write", input: { file_path: path.join(inside, "out", "c.txt"), content: "x" }, tool_use_id: "toolu_w3"
+  }, abandoned.signal);
+  assert.notEqual((await pendingToolPermission(storage, "Write")).id, card.id, "asked: it lands outside the folder");
+  abandoned.abort();
+  await viaLink;
+});
+
+test("a Bash card the app cannot scope is allowed once even when answered for the chat; a rule kept from before still covers its tool", async () => {
+  const participant = chatParticipant("claude-code");
+  const legacy: ChatAppToolApprovalPolicy = {
+    id: "legacy", participantId: participant.id, roleConfigId: participant.roleConfigId, toolName: APP_TOOL_PERMISSION_TOOL,
+    capability: "permissions.request", targetToolName: "WebSearch", scope: "chat", createdAt: NOW, updatedAt: NOW
+  };
+  const conversation = chatConversation([participant], { appToolApprovalPolicies: [legacy] });
+  const { service, storage } = testService({ conversation });
+  const actor = toolPermissionActor(participant, conversation);
+  const opaque = service.requestToolPermissionFromTool(actor, { tool_name: "Bash", input: { command: "echo $(whoami)" }, tool_use_id: "toolu_x" });
+  const card = await pendingToolPermission(storage, "Bash");
+  assert.equal((card.request as ChatToolPermissionRequest).chatScope, undefined);
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true, scope: "chat" });
+  assert.equal((await opaque).behavior, "allow");
+  assert.equal(((storage.current.metadata.appToolApprovalPolicies ?? []) as ChatAppToolApprovalPolicy[]).length, 1, "no rule for the whole of Bash");
+  assert.equal((await service.requestToolPermissionFromTool({ ...actor, runId: "run-9" }, { tool_name: "WebSearch", input: { query: "x" } })).behavior, "allow");
 });
 
 test("Claude Auto tool permission approvals are per occurrence and never reuse chat policy", async () => {

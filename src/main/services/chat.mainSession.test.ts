@@ -6,6 +6,8 @@ import { ChatService } from "./chat";
 import { accordLaunchCardForMessage } from "../../shared/accordLaunchCard";
 import { chatParticipantRequestReplyRootMap } from "../../shared/chatParticipantRequestThreads";
 import { normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { applyChatAccessOptionById } from "../../shared/chatAccessModes";
+import { buildGeminiExecInvocation } from "./geminiExec";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES, CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT, CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT } from "../../shared/chatParticipantRequests";
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
@@ -1190,6 +1192,26 @@ test("the main session's task gives its member who added it, and that member run
   assert.equal(normalizeChatAgentPermissions(internals.participantForRun(chatNow, stored).permissions).requestParticipants, "ask");
   assert.equal(internals.participantForRun(chatNow, stored).agentMode, "plan");
   assert.equal(internals.participantForRun(chatNow, own), own);
+});
+
+test("an Antigravity member in agy's own Accept edits or Auto, under a main session set from the classic controls, never runs with every confirmation skipped", () => {
+  // The main session from the classic controls: edits on, no CLI mode.
+  const main = mainSession("claude-code", { permissions: permissions({ workspaceWrite: true, requestParticipants: "allow" }) });
+  const { service } = testService({ conversation: mainSessionChat([main]) });
+  for (const id of ["accept-edits", "auto"]) {
+    const own = applyChatAccessOptionById("gemini-cli", id, permissions({ workspaceWrite: true }));
+    const agy = member(`agy-${id}`, `agy${id.length}`, { kind: "gemini-cli", delegatedByParticipantId: main.id, agentMode: own.agentMode, permissions: own.permissions });
+    const chat = mainSessionChat([main, agy]);
+    const run = (service as any).participantForRun(chat, agy) as ChatParticipant;
+    const invocation = buildGeminiExecInvocation({
+      participant: { ...agy, label: agy.handle } as never, prompt: "Go.", repoPath: "/work/app", kind: "chat",
+      options: { agentMode: run.agentMode, permissions: run.permissions }
+    } as never);
+    assert.ok(!invocation.args.includes("--dangerously-skip-permissions"), `${id}: ${invocation.args.join(" ")}`);
+    assert.ok(invocation.args.includes("--sandbox"), `${id}: the most restrictive run`);
+    // Its own settings are kept for when the main session has the mode again.
+    assert.equal(normalizeChatAgentPermissions(agy.permissions).cliApprovals, true);
+  }
 });
 
 test("a member the main session made manages members no more freely than the main session can now", async () => {

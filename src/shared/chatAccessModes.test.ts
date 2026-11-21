@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   chatAgentPermissionsWithin,
+  clampChatAgentAccess,
   clampChatAgentPermissions,
   cloneChatAgentPermissions,
   defaultChatAgentPermissions,
@@ -16,7 +17,8 @@ import {
   applyChatAccessOptionById,
   chatAccessOptions,
   defaultChatAccessOption,
-  selectedChatAccessOption
+  selectedChatAccessOption,
+  withClassicChatPermissions
 } from "./chatAccessModes";
 import { newChatMainSessionFor } from "./newChat";
 import { chatPermissionPromptLines, chatPermissionSummaryLine } from "./permissionPrompt";
@@ -101,4 +103,36 @@ test("the phone's main session is made in the mode its chip chose, else its CLI'
   const elsewhere = newChatMainSessionFor(offered, providers, { kind: "codex-cli", homeMachineId: "m-box" });
   assert.equal(elsewhere.homeMachineId, "m-box");
   assert.equal(newChatMainSessionFor(offered, providers, undefined), offered, "no choice: the offer as it is");
+});
+
+test("a ceiling without the CLI's own mode never turns Antigravity's restricting mode into skipped confirmations", () => {
+  // The main session set from the classic controls: edits on, no CLI mode.
+  const classicMain = { agentMode: "default" as const, permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true } };
+  for (const id of ["accept-edits", "auto"]) {
+    const agy = applyChatAccessOptionById("gemini-cli", id, defaultChatAgentPermissions());
+    const held = clampChatAgentAccess("gemini-cli", agy, id === "auto" ? { ...classicMain, agentMode: "auto" } : classicMain);
+    assert.equal(held.permissions.cliApprovals, undefined, `${id}: the ceiling has no CLI mode to give`);
+    assert.equal(held.permissions.workspaceWrite, false, `${id}: no edits, so agy runs --sandbox, not --dangerously-skip-permissions`);
+    assert.equal(held.agentMode, "default", `${id}: not Auto, which skips every confirmation without its own mode`);
+  }
+  // Plan stays plan; a ceiling with the mode keeps it; Claude Code and Codex
+  // simply refuse what is not granted.
+  const plan = clampChatAgentAccess("gemini-cli", applyChatAccessOptionById("gemini-cli", "plan", defaultChatAgentPermissions()), classicMain);
+  assert.equal(plan.agentMode, "plan");
+  const ownMain = applyChatAccessOptionById("claude-code", "acceptEdits", defaultChatAgentPermissions());
+  const kept = clampChatAgentAccess("gemini-cli", applyChatAccessOptionById("gemini-cli", "accept-edits", defaultChatAgentPermissions()), ownMain);
+  assert.deepEqual([kept.agentMode, kept.permissions.workspaceWrite, kept.permissions.cliApprovals], ["default", true, true], "agy's Accept edits under Claude's");
+  const claude = clampChatAgentAccess("claude-code", applyChatAccessOptionById("claude-code", "acceptEdits", defaultChatAgentPermissions()), classicMain);
+  assert.deepEqual([claude.permissions.workspaceWrite, claude.permissions.cliApprovals], [true, undefined]);
+});
+
+test("the classic toggles end a CLI mode chosen in the picker: what is off is refused, and the picker says Custom access", () => {
+  const accept = applyChatAccessOptionById("claude-code", "acceptEdits", { ...defaultChatAgentPermissions(), webAccess: false });
+  assert.equal(selectedChatAccessOption("claude-code", accept.agentMode, accept.permissions)?.id, "acceptEdits");
+  for (const patch of [{ shell: { enabled: false, rules: [] } }, { workspaceWrite: false }, { webAccess: false }]) {
+    const classic = withClassicChatPermissions(accept.permissions, patch);
+    assert.equal(classic.cliApprovals, undefined, `${JSON.stringify(patch)}: no CLI mode left to ask the User for what is off`);
+    assert.equal(selectedChatAccessOption("claude-code", accept.agentMode, classic), undefined, "the picker marks no mode (Custom access)");
+  }
+  assert.equal(withClassicChatPermissions(accept.permissions, { webAccess: true }).webAccess, true, "the toggle itself applies");
 });

@@ -103,6 +103,7 @@ import {
   parseGeminiTranscriptActivity
 } from "./geminiExec";
 import type { ParticipantRunResult } from "./providers";
+import { APP_TOOL_PERMISSION_WAIT_MS } from "../../shared/appMcpToolContracts";
 
 const MAX_CLI_ERROR_CHARS = 500;
 const MAX_CLI_ERROR_LINES = 8;
@@ -207,6 +208,17 @@ const GEMINI_MCP_PROXY_ARG = "--accordagents-gemini-mcp-proxy";
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 const APP_TOOL_PERMISSION_TOOL = "app_tool_permission";
 const APP_TOOL_PERMISSION_MCP_TOOL = `mcp__accord_agents__${APP_TOOL_PERMISSION_TOOL}`;
+/**
+ * How long Claude Code waits on a call of the app's tools (the app MCP
+ * server's own `timeout`, ms). Its default gives up on Claude Code's
+ * permission prompt after 60 s (an HTTP server's answer) while the User's
+ * card waits APP_TOOL_PERMISSION_WAIT_MS: then her answer reached nobody
+ * (Claude Code 2.1.329). It is a hard limit per call, so it is the app's
+ * wait and a minute more: the app answers first (it denies at the end of its
+ * wait). Set for this server only, never MCP_TOOL_TIMEOUT, which would
+ * change the User's own MCP servers too.
+ */
+export const CLAUDE_APP_MCP_TOOL_TIMEOUT_MS = APP_TOOL_PERMISSION_WAIT_MS + 60_000;
 const ANTIGRAVITY_GOAL_ENV = "ACCORD_AGENTS_NATIVE_GOAL_PROMPT";
 const ANTIGRAVITY_GOAL_ARG_COUNT_ENV = "ACCORD_AGENTS_NATIVE_GOAL_ARG_COUNT";
 const ANTIGRAVITY_GOAL_ARG_ENV_PREFIX = "ACCORD_AGENTS_NATIVE_GOAL_ARG_";
@@ -8544,7 +8556,8 @@ export class CliAgentRunner {
           url: appMcp.url,
           headers: {
             Authorization: `Bearer ${appMcp.token}`
-          }
+          },
+          timeout: CLAUDE_APP_MCP_TOOL_TIMEOUT_MS
         }
       }
     });

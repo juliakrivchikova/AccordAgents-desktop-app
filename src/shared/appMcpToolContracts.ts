@@ -80,6 +80,10 @@ export const APP_ROLES_REQUEST_CHANGE_TOOL = "app_roles_request_change";
 export const APP_ROSTER_DESCRIBE_OPTIONS_TOOL = "app_roster_describe_options";
 export const APP_ROSTER_REQUEST_CHANGE_TOOL = "app_roster_request_change";
 export const APP_TOOL_PERMISSION_TOOL = "app_tool_permission";
+/** How long a member's permission card waits for the User (Claude Code's
+ *  permission prompt): the app denies it after that, and the CLI is told to
+ *  wait at least as long for the app's answer (cliAgents claudeMcpConfigJson). */
+export const APP_TOOL_PERMISSION_WAIT_MS = 30 * 60_000;
 export const APP_SCRIPTS_REQUEST_CHANGE_TOOL = "app_scripts_request_change";
 export const APP_SCRIPTS_LIST_TOOL = "app_scripts_list";
 export const APP_SCRIPTS_READ_RUNS_TOOL = "app_scripts_read_runs";

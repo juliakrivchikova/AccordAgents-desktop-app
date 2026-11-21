@@ -178,16 +178,42 @@ test("an approved addition adds the member the User saw: its name, role, place, 
 });
 
 test("a rule to act without a card is the User's answer, for the machine's own member", () => {
-  const rule = { id: "pol-new", participantId: "p-box", roleConfigId: "r", toolName: "app_tool_permission", capability: "tools", targetToolName: "Bash", scope: "chat", createdAt: "t", updatedAt: "t" };
+  const mkdir = { kind: "commands", prefixes: ["mkdir"] };
+  const rule = { id: "pol-new", participantId: "p-box", roleConfigId: "r", toolName: "app_tool_permission", capability: "tools", targetToolName: "Bash", targetToolScope: mkdir, scope: "chat", createdAt: "t", updatedAt: "t" };
   let scoped = scopeMachineConversationUpdate(chatWith([deskR, boxR]), { metadata: { appToolApprovalPolicies: [rule] } }, "machine-1", { rules });
   assert.deepEqual(scoped.update.metadata?.appToolApprovalPolicies, []);
   assert.ok(scoped.refused.includes("appToolApprovalPolicies.pol-new"));
-  const answer = approved("p-box", "app_tool_permission", { toolName: "Bash" }, { approve: true, scope: "chat" });
+  const answer = approved("p-box", "app_tool_permission", { toolName: "Bash", chatScope: mkdir }, { approve: true, scope: "chat" });
   scoped = scopeMachineConversationUpdate(chatWith([deskR, boxR]), { metadata: { appToolApprovalPolicies: [rule] } }, "machine-1", { rules, approvals: [answer] });
   assert.deepEqual((scoped.update.metadata?.appToolApprovalPolicies as Array<{ id: string }>).map((item) => item.id), ["pol-new"]);
-  const once = approved("p-box", "app_tool_permission", { toolName: "Bash" }, { approve: true, scope: "once" });
+  const once = approved("p-box", "app_tool_permission", { toolName: "Bash", chatScope: mkdir }, { approve: true, scope: "once" });
   scoped = scopeMachineConversationUpdate(chatWith([deskR, boxR]), { metadata: { appToolApprovalPolicies: [rule] } }, "machine-1", { rules, approvals: [once] });
   assert.deepEqual(scoped.update.metadata?.appToolApprovalPolicies, []);
+  // Scoped as the card she answered, as Claude Code scopes "don't ask
+  // again": never the whole of Bash, never another prefix.
+  const { targetToolScope: _scope, ...wholeBash } = rule;
+  for (const [name, forged] of [["whole tool", wholeBash], ["another prefix", { ...rule, targetToolScope: { kind: "commands", prefixes: ["rm"] } }]] as const) {
+    scoped = scopeMachineConversationUpdate(chatWith([deskR, boxR]), { metadata: { appToolApprovalPolicies: [forged] } }, "machine-1", { rules, approvals: [answer] });
+    assert.deepEqual(scoped.update.metadata?.appToolApprovalPolicies, [], name);
+  }
+  // A tool whose answer is not scoped (an MCP tool): the rule is for the tool.
+  const mcp = { ...wholeBash, id: "pol-mcp", targetToolName: "mcp__atlassian__search" };
+  const mcpAnswer = approved("p-box", "app_tool_permission", { toolName: "mcp__atlassian__search" }, { approve: true, scope: "chat" });
+  scoped = scopeMachineConversationUpdate(chatWith([deskR, boxR]), { metadata: { appToolApprovalPolicies: [mcp] } }, "machine-1", { rules, approvals: [mcpAnswer] });
+  assert.deepEqual((scoped.update.metadata?.appToolApprovalPolicies as Array<{ id: string }>).map((item) => item.id), ["pol-mcp"]);
+});
+
+test("running in its CLI's own mode (asking the User for what it is not granted) is a right the server counts, as the app does", () => {
+  const own = { ...boxR, permissions: { ...boxR.permissions, cliApprovals: true } };
+  // The machine gives its member its CLI's mode on its own: taken back.
+  let scoped = scopeMachineConversationUpdate(chatWith([deskR, boxR]), { metadata: { participants: [deskR, own] } }, "machine-1", { rules });
+  assert.equal((members(scoped).get("p-box")?.permissions as Record<string, unknown>).cliApprovals, undefined);
+  assert.ok(scoped.refused.includes("participants.p-box.rights"));
+  // The server has it (the User chose the mode): it stays, and dropping it is less.
+  scoped = scopeMachineConversationUpdate(chatWith([deskR, own]), { metadata: { participants: [deskR, own] } }, "machine-1", { rules });
+  assert.equal((members(scoped).get("p-box")?.permissions as Record<string, unknown>).cliApprovals, true);
+  scoped = scopeMachineConversationUpdate(chatWith([deskR, own]), { metadata: { participants: [deskR, boxR] } }, "machine-1", { rules });
+  assert.deepEqual(scoped.refused, []);
 });
 
 test("a machine names a new chat once, as the app does from the member that answers first", () => {

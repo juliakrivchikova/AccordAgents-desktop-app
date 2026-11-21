@@ -92,6 +92,18 @@ export function selectedChatAccessOption(
   return options.find((option) => option.agentMode === "default" && option.workspaceWrite === normalized.workspaceWrite);
 }
 
+/** Rights set from the classic controls (Read Files, Edit Files, Run Shell,
+ *  Access Web): the classic meaning wins, so the member leaves its CLI's own
+ *  mode (`cliApprovals`) and what is off is refused, never asked about; the
+ *  picker then shows "Custom access". */
+export function withClassicChatPermissions(
+  permissions: ChatAgentPermissions | undefined,
+  patch: Partial<ChatAgentPermissions>
+): ChatAgentPermissions {
+  const { cliApprovals: _ownMode, ...classic } = { ...normalizeChatAgentPermissions(permissions), ...patch };
+  return classic;
+}
+
 /** The mode and rights a member gets with this option: its CLI's own mode
  *  (`cliApprovals`) and, for the ordinary mode, the file-edit right; every
  *  other right (reading, shell and its rules, web, asking and managing

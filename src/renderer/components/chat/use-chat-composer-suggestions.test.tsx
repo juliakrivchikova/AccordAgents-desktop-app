@@ -4,6 +4,7 @@ import { act, create } from "react-test-renderer";
 
 import {
   chatComposerSuggestionText,
+  sessionsComposerSuggestions,
   useChatComposerSuggestions,
   type ChatComposerSuggestion,
   type ChatComposerSuggestionsState
@@ -63,4 +64,14 @@ test("an empty composer offers the newest suggestion, addressed to its member; T
   act(() => { renderer.update(<Harness suggestions={[]} draft="" />); });
   assert.equal(current().offered, undefined);
   renderer.unmount();
+});
+
+test("in the sessions view the main composer offers the main session's own suggestion without its handle, and no other member's", () => {
+  const main: ChatComposerSuggestion = { participantId: "p-main", handle: "main", text: "Повтори команду" };
+  const offered = sessionsComposerSuggestions([main, taylor], "p-main");
+  assert.deepEqual(offered.map((suggestion) => chatComposerSuggestionText(suggestion)), ["Повтори команду"]);
+  // One the CLI wrote with the handle (the User wrote "@main …" last time).
+  assert.equal(chatComposerSuggestionText(sessionsComposerSuggestions([{ ...main, text: "@main Повтори команду" }], "p-main")[0]!), "Повтори команду");
+  // The classic view: as before.
+  assert.deepEqual(sessionsComposerSuggestions([main, taylor], undefined).map((suggestion) => chatComposerSuggestionText(suggestion)), ["@main Повтори команду", "@taylor run the tests"]);
 });

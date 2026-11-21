@@ -3,6 +3,7 @@ import type { ChatScriptChangeRequest } from "./scripts";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import type { DeviceEventBlobReference } from "./deviceEventBlobs";
 import type { UrgentAlertView } from "./urgentAlerts";
+import type { ChatToolPermissionScope } from "./toolPermissionScope";
 import type {
   CreateMachineRequest,
   CreateMachineResult,
@@ -1266,6 +1267,10 @@ export interface ChatToolPermissionRequest {
   reason?: string;
   toolName: string;
   toolInput?: unknown;
+  /** What "for this chat" covers, as Claude Code scopes its "don't ask
+   *  again" (src/shared/toolPermissionScope.ts): set when the card is
+   *  raised. A scoped tool's card without one offers no "for this chat". */
+  chatScope?: ChatToolPermissionScope;
 }
 
 /** A member asks the User to sign in to (or reconnect) an MCP server its task
@@ -1592,6 +1597,10 @@ export interface ChatAppToolApprovalPolicy {
   capability: ChatAppToolCapability;
   targetParticipantId?: string;
   targetToolName?: string;
+  /** For a tool permission rule: what of the tool it covers (a command
+   *  prefix, a domain, a folder; ChatToolPermissionRequest.chatScope). A rule
+   *  without one covers the whole tool. */
+  targetToolScope?: ChatToolPermissionScope;
   scope: "chat";
   createdAt: string;
   updatedAt: string;
