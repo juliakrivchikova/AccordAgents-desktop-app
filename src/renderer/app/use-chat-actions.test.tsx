@@ -510,6 +510,8 @@ test("Fork to new chat says it is on its way when making the chat takes a moment
     openConversationRequestRef: { current: 0 },
     openConversationTargetRef: { current: "source" },
     railViewRef: { current: "chats" },
+    lastViewedAtRef: { current: {} },
+    setUnreadConversationIds: () => undefined,
     setError: (value: string | undefined) => { error = value; },
     setSummaries: () => undefined,
     setRailView: () => undefined
