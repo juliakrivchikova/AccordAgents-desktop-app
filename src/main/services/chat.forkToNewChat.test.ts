@@ -211,9 +211,19 @@ function testService(options: {
     }
   };
   const debugLogs = { async write() {} };
-  const service = new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never);
-  (service as any).ensureHistoryFiles = async () => tempRoot;
-  return { service, storage, runs };
+  const make = () => {
+    const made = new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never);
+    (made as any).ensureHistoryFiles = async () => tempRoot;
+    return made;
+  };
+  const service = make();
+  /** The app again after a quit (or a machine's runtime after a restart):
+   *  a new service over the same storage. */
+  const restart = (run?: (participant: ParticipantConfig, prompt: string, options: any) => Promise<any>) => {
+    if (run) options.run = run;
+    return make();
+  };
+  return { service, storage, runs, restart };
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
@@ -223,6 +233,68 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error(`Timed out waiting for condition: ${predicate.toString().slice(0, 200)}`);
+}
+
+/** The chat's lines with this text (system messages every device shows). */
+function linesOf(conversation: Conversation | undefined, text: string): ChatMessage[] {
+  return (conversation?.messages ?? []).filter((message) => message.role === "system" && message.content === text);
+}
+
+/** A fork's notice is a line in the chat, once, never a chat warning (a
+ *  warning stays on the device that raised it). */
+async function assertLineOnce(storage: { store: Map<string, Conversation> }, id: string, text: string, label = text): Promise<void> {
+  await waitFor(() => linesOf(storage.store.get(id), text).length > 0);
+  // Saves still queued land first.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const lines = linesOf(storage.store.get(id), text);
+  assert.equal(lines.length, 1, `${label}: once`);
+  assert.equal(lines[0]!.metadata?.threadId, "system", label);
+  const warnings = (storage.store.get(id)?.metadata.warnings ?? []) as string[];
+  assert.equal(warnings.some((warning) => warning.includes("could not start from a copy") || warning.includes("may include what")), false,
+    `${label}: not a chat warning (${JSON.stringify(warnings)})`);
+}
+
+/** The chat as a cloud machine's runtime has it, its main session homed on
+ *  that machine, and its turn run there as the server asks it
+ *  (startServerTurn → runParticipantBatch). */
+async function runOnMachine(service: ChatService, storage: { store: Map<string, Conversation> }, id: string, mainId: string, content: string, runId = `run-${content}`) {
+  const stored = storage.store.get(id)!;
+  const message: ChatMessage = { id: `user-${runId}`, role: "user", content, createdAt: new Date().toISOString(), status: "done" };
+  stored.messages.push(message);
+  storage.store.set(id, stored);
+  const chat = await (service as any).requireChat(id) as Conversation;
+  const participant = participantsOf(chat).find((item) => item.id === mainId)!;
+  const warnings: string[] = [];
+  await (service as any).runParticipantBatch(chat, [participant], message, runId, undefined, undefined, warnings, { targetRunIds: new Map([[participant.id, runId]]) });
+  return warnings;
+}
+
+/** A chat made by Fork to new chat on the computer, as a machine reads it
+ *  from the server: its main session runs on machine m-1. */
+function forkedOnMachine(source: Conversation, sourceMember: ChatParticipant): Conversation {
+  return {
+    id: "new-chat",
+    title: "Old chat (fork)",
+    kind: "chat",
+    createdAt: NOW,
+    updatedAt: NOW,
+    repoPath: "/projects/app",
+    messages: [],
+    findings: [],
+    metadata: {
+      participants: [{ id: "main-id", handle: "main", roleConfigId: MAIN_ROLE.id, kind: sourceMember.kind, homeMachineId: "m-1", agentMode: "default", permissions: permissions(),
+        forkOrigin: { conversationId: source.id, participantId: sourceMember.id, handle: sourceMember.handle, conversationTitle: source.title, kind: sourceMember.kind,
+          seen: { messageId: "old-reply", finishedAt: REPLY_FINISHED } } }],
+      participantSessions: [],
+      mainSessionParticipantId: "main-id"
+    }
+  } as Conversation;
+}
+
+function asMachine(service: ChatService): ChatService {
+  (service as any).machineRuntime = true;
+  (service as any).hostMachineId = "m-1";
+  return service;
 }
 
 function sessionsOf(conversation: Conversation | undefined): ChatParticipantSession[] {
@@ -334,18 +406,89 @@ test("a main session that already answered never becomes a copy again, even afte
   assert.doesNotMatch(runs[1]!.prompt, /You were forked from/);
 });
 
-test("when the member's session is not on this computer any more, the main session starts clean and the chat says so", async () => {
+const NOT_ON_COMPUTER = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\": that session is not on your computer, so it starts a clean session.";
+
+test("when the member's session is not on this computer any more, the main session starts clean and a line in the chat says so before its turn runs", async () => {
   const source = oldChat([ASSISTANT, REVIEWER]);
-  const { service, storage, runs } = testService({ conversations: [source] });
+  let id = "";
+  let linesWhileRunning = -1;
+  const { service, storage, runs } = testService({
+    conversations: [source],
+    run: async (participant, _prompt, runOptions) => {
+      // Said before the turn ends: it may last hours, and the app may stop during it.
+      await waitFor(() => linesOf(storage.store.get(id), NOT_ON_COMPUTER).length === 1);
+      linesWhileRunning = 1;
+      runOptions.onSessionId?.("clean-session");
+      return { participant, ok: true, content: "Hello.", durationMs: 1, sessionId: "clean-session" };
+    }
+  });
   const created = await service.createConversation({ participants: [], forkOf: { conversationId: source.id, participantId: REVIEWER.id } });
+  id = created.conversation.id;
   storage.store.delete(source.id);
   const mainId = String(created.conversation.metadata.mainSessionParticipantId);
-  await service.sendMessage({ conversationId: created.conversation.id, runId: "run-gone", content: "Hello.", targetParticipantIds: [mainId] });
-  await waitFor(() => runs.length === 1);
+  await service.sendMessage({ conversationId: id, runId: "run-gone", content: "Hello.", targetParticipantIds: [mainId] });
+  await waitFor(() => (storage.store.get(id)?.messages ?? []).some((message) => message.participantId === mainId && message.status === "done"));
   assert.equal(runs[0]!.options.forkFromSessionId, undefined);
-  await waitFor(() => ((storage.store.get(created.conversation.id)?.metadata.warnings ?? []) as string[]).length > 0);
-  assert.deepEqual(storage.store.get(created.conversation.id)!.metadata.warnings,
-    ["@main could not start from a copy of @reviewer's session in the chat \"Old chat\": that session is not on this computer, so it started a clean session."]);
+  assert.equal(linesWhileRunning, 1, "in the chat while the turn ran");
+  await assertLineOnce(storage, id, NOT_ON_COMPUTER);
+  assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], []);
+  // Its later turns say nothing more.
+  await service.sendMessage({ conversationId: id, runId: "run-next", content: "Next.", targetParticipantIds: [mainId] });
+  await waitFor(() => runs.length === 2);
+  await assertLineOnce(storage, id, NOT_ON_COMPUTER, "after a later turn");
+});
+
+test("a first turn cut short by a quit, run again after the restart, says its line once", async () => {
+  const source = oldChat([ASSISTANT, REVIEWER]);
+  let release!: () => void;
+  const { service, storage, runs, restart } = testService({
+    conversations: [source],
+    // The app quits during the first turn: it never ends, nor gets a session id.
+    run: () => new Promise((resolve) => { release = () => resolve({ ok: false, content: "", error: "Chat run cancelled.", durationMs: 1 }); })
+  });
+  const created = await service.createConversation({ participants: [], forkOf: { conversationId: source.id, participantId: REVIEWER.id } });
+  const id = created.conversation.id;
+  storage.store.delete(source.id);
+  const mainId = String(created.conversation.metadata.mainSessionParticipantId);
+  await service.sendMessage({ conversationId: id, runId: "run-first", content: "Hello.", targetParticipantIds: [mainId] });
+  await waitFor(() => runs.length === 1 && linesOf(storage.store.get(id), NOT_ON_COMPUTER).length === 1);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // After the restart its reply is no reply yet (cut short), and the turn runs again.
+  const stored = storage.store.get(id)!;
+  stored.messages = stored.messages.filter((message) => message.participantId !== mainId);
+  storage.store.set(id, stored);
+  const again = restart(async (participant, _prompt, runOptions) => {
+    runOptions.onSessionId?.("clean-session");
+    return { participant, ok: true, content: "Hello.", durationMs: 1, sessionId: "clean-session" };
+  });
+  await again.sendMessage({ conversationId: id, runId: "run-again", content: "Hello again.", targetParticipantIds: [mainId] });
+  await waitFor(() => runs.length === 2);
+  await waitFor(() => (storage.store.get(id)?.messages ?? []).some((message) => message.participantId === mainId && message.status === "done"));
+  await assertLineOnce(storage, id, NOT_ON_COMPUTER, "after the restart");
+  release();
+});
+
+test("on a cloud machine: the member's session not there, the line names the machine and goes in the chat, not the machine's warnings; once on redelivery", async () => {
+  const source = oldChat([ASSISTANT, { ...REVIEWER, homeMachineId: "m-1" }]);
+  const forked = forkedOnMachine(source, REVIEWER);
+  const { service, storage, runs, restart } = testService({
+    conversations: [forked],
+    run: async (participant) => ({ participant, ok: false, content: "", error: "Chat run cancelled.", durationMs: 1 })
+  });
+  asMachine(service);
+  const text = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\": that session is not on the cloud machine @main runs on, so it starts a clean session.";
+  const warnings = await runOnMachine(service, storage, forked.id, "main-id", "Hello.");
+  assert.equal(runs[0]!.options.forkFromSessionId, undefined);
+  await assertLineOnce(storage, forked.id, text);
+  assert.equal(warnings.includes(text), false, "not in the turn's warnings either");
+  // The server hands the turn over again after the machine restarted (its reply never written).
+  const stored = storage.store.get(forked.id)!;
+  stored.messages = stored.messages.filter((message) => message.participantId !== "main-id");
+  storage.store.set(forked.id, stored);
+  const again = asMachine(restart());
+  await runOnMachine(again, storage, forked.id, "main-id", "Hello.", "run-Hello.-redelivered");
+  assert.equal(runs.length, 2);
+  await assertLineOnce(storage, forked.id, text, "redelivered");
 });
 
 test("a fork the CLI cannot make (its source session gone) uses the two-strike fallback: tried once more, then a clean session, and the chat says so", async () => {
@@ -366,12 +509,15 @@ test("a fork the CLI cannot make (its source session gone) uses the two-strike f
   await waitFor(() => runs.length === 2 && sessionOf()?.forkFrom === undefined);
   assert.equal(runs[1]!.options.forkFromSessionId, "src-cli-session", "the retry forks again");
   assert.deepEqual(runs[1]!.options.forkCut, { finishedBy: REPLY_FINISHED });
-  // The failed turn's own error is a warning too, as for any turn User asked.
-  const warning = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so its next turn starts a clean session.";
-  await waitFor(() => ((storage.store.get(id)?.metadata.warnings ?? []) as string[]).includes(warning));
+  const notice = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so its next turn starts a clean session.";
+  await assertLineOnce(storage, id, notice);
+  // The User asked it, and reads the line: its failed reply does not say it twice.
+  const replies = storage.store.get(id)!.messages.filter((message) => message.participantId === mainId);
+  assert.equal(replies.some((message) => message.content.includes("could not start from a copy")), false);
   await service.sendMessage({ conversationId: id, runId: "run-clean", content: "Clean now.", targetParticipantIds: [mainId] });
   await waitFor(() => runs.length === 3);
   assert.equal(runs[2]!.options.forkFromSessionId, undefined);
+  await assertLineOnce(storage, id, notice, "after its clean turn");
 });
 
 test("Claude Code starting the copy clean (its source gone) still tells it it is the new chat's main session, with its role", async () => {
@@ -388,9 +534,45 @@ test("Claude Code starting the copy clean (its source gone) still tells it it is
   assert.match(fallback, /^You were to start from a copy of @reviewer's session in the chat "Old chat", but it could not be copied/);
   assert.match(fallback, /You are @main, role: Main session: the main session of this chat\./);
   assert.match(fallback, /You are the main session\./, "its role's instructions");
-  await waitFor(() => ((storage.store.get(id)?.metadata.warnings ?? []) as string[]).length > 0);
-  assert.deepEqual(storage.store.get(id)!.metadata.warnings,
-    ["@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so it started a clean session from the saved chat context."]);
+  await assertLineOnce(storage, id, "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so it started a clean session from the saved chat context.");
+  assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], [], "nor the CLI's own restart warning");
+});
+
+test("on a cloud machine: a copy the CLI started clean, and the two-strike fallback, are lines in the chat", async () => {
+  const source = oldChat([ASSISTANT, { ...REVIEWER, homeMachineId: "m-1" }]);
+  const startedClean = forkedOnMachine(source, REVIEWER);
+  {
+    const { service, storage } = testService({
+      conversations: [source, startedClean],
+      run: async (participant, _prompt, runOptions) => {
+        runOptions.onSessionId?.("fallback-session");
+        return { participant, ok: true, content: "Done.", durationMs: 1, sessionId: "fallback-session", sessionRestarted: true };
+      }
+    });
+    const warnings = await runOnMachine(asMachine(service), storage, startedClean.id, "main-id", "Go on.");
+    const text = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so it started a clean session from the saved chat context.";
+    await assertLineOnce(storage, startedClean.id, text);
+    assert.deepEqual(warnings, [], "nothing left for the machine's own warnings");
+  }
+  {
+    const codexReviewer: ChatParticipant = { ...REVIEWER, kind: "codex-cli", model: undefined, reasoningEffort: undefined, homeMachineId: "m-1" };
+    const codexSource = oldChat([ASSISTANT, codexReviewer], { participantSessions: [sessionRecord(codexReviewer, "src-cli-session")] });
+    const forked = forkedOnMachine(codexSource, codexReviewer);
+    const { service, storage, runs } = testService({
+      conversations: [codexSource, forked],
+      run: async (participant, _prompt, runOptions) => runOptions.forkFromSessionId
+        ? { participant, ok: false, content: "", error: "no rollout found for thread id src-cli-session", durationMs: 1 }
+        : { participant, ok: true, content: "Clean.", durationMs: 1, sessionId: "clean-session" }
+    });
+    asMachine(service);
+    // The first failure keeps the reply as it is; the second is the line.
+    await runOnMachine(service, storage, forked.id, "main-id", "Go on.");
+    await waitFor(() => sessionsOf(storage.store.get(forked.id)).find((item) => item.participantId === "main-id")?.forkFrom?.failedAttempts === 1);
+    // A reply that failed counts as an answer: the retry is a later turn of the same session record.
+    await runOnMachine(service, storage, forked.id, "main-id", "Try again.");
+    assert.equal(runs.length, 2);
+    await assertLineOnce(storage, forked.id, "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so its next turn starts a clean session.");
+  }
 });
 
 test("a fork to a new chat is refused, with its reason, for Antigravity, a member that never ran, one waiting for a machine, an outdated or unseen machine, and a CLI not ready here", async () => {

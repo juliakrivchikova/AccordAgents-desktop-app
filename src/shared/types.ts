@@ -1005,7 +1005,7 @@ export interface ChatParticipantForkOrigin {
   conversationId: string;
   participantId: string;
   /** Its handle and its chat's title when it was forked, for the note the
-   *  main session is given and the chat's warnings. */
+   *  main session is given and the chat's lines about its copy. */
   handle: string;
   conversationTitle: string;
   kind: ChatProviderKind;

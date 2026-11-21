@@ -304,7 +304,7 @@ chat as that chat's main session, with everything it knew
   server reads its copy of the chat by it. One narrow difference: the phone
   cannot see a member's session record, so it applies that rule to a member
   on the computer too; one whose session was dropped since is offered, and
-  its fork starts clean with the chat's warning.
+  its fork starts clean with the chat's line saying so.
 - The new chat is made through the same path as every new chat
   (`createConversation` with `forkOf`, saved and so put on the User's server):
   titled "<chat> (fork)" until its first reply names it, in the member's
@@ -324,8 +324,20 @@ chat as that chat's main session, with everything it knew
   main session that already answered never becomes a copy again. A member
   that moved to that device and whose session still waits on her server is
   taken first, as its own next turn would take it. When the member's session
-  is not on that device, it starts clean and the chat says so; when the CLI
-  cannot copy it, the fork's two-strike fallback holds. The member's chat is
+  is not on that device, it starts clean and a line in the chat says so
+  before its turn runs ("@main could not start from a copy of @x's session
+  in the chat "T": that session is not on your computer / the cloud machine
+  @main runs on, so it starts a clean session."); when the CLI cannot copy
+  it, the fork's two-strike fallback holds, said the same way. Every notice
+  of a fork (this one, a clean start, the two-strike fallback, the "may
+  include" line below; a delegated fork's too) is a line in the chat
+  (`postChatNoticeLine`, a system message on the "system" thread), never a
+  chat warning: a warning stays on the device that raised it, so a fork run
+  on a cloud machine, or asked from the phone, would say nothing to the
+  computer or the phone. The line goes to her server with the chat and is
+  shown on every device; the device that runs the turn writes it once (the
+  same words are not written twice, so a turn run again after a restart or
+  handed over again by her server says nothing more). The member's chat is
   read without its messages (its metadata and newest messages).
 - The copy is what she saw when she tapped Fork. The User, 2026-11-21, on
   her card "When should a fork copy the member?": "When you tap Fork — Like
@@ -365,7 +377,14 @@ chat as that chat's main session, with everything it knew
     transcript a line at a time (`claudeForkCut`; her longest, 113 MB,
     reads in about 0.4 s with no pause of the app over 12 ms); a compaction
     after the point, no point (the CLI does not load a message before a
-    later compaction and refuses it). Codex forks with `thread/fork`
+    later compaction and refuses it), unless nothing but compactions came
+    after it (their boundaries, summaries and the `/compact` command's own
+    lines) and the last of them kept it as it was
+    (`compactMetadata.preservedMessages`, which holds the last message
+    before a `/compact`): the CLI loads that message after the compaction's
+    summary, so the point is given and the copy is what she saw, compacted,
+    with no line; refused after all, the whole session and the line, which
+    names the compaction. Codex forks with `thread/fork`
     `lastTurnId` (inclusive; a later compaction does not stop it), reading
     the thread's turns newest first (`thread/turns/list`, no items) for a
     reply from before. The point is given even when nothing follows it yet:
@@ -384,9 +403,8 @@ chat as that chat's main session, with everything it knew
     chat warning: a warning stays on the device that raised it, and the
     copy may run on a cloud machine or have been asked from the phone; the
     line reaches every device through her server. Never a clean start: the
-    copy keeps what she saw, the line says what may be more. One case says
-    more than is so: a compaction after her last reply but before the tap
-    (nothing else happened) gives the line too.
+    copy keeps what she saw, the line says what may be more. A compaction
+    after her last reply that kept it (above) gives no line.
   - Checked 2026-11-21 on throwaway sessions: Claude Code 2.1.329 forked at
     the first of two turns ("remember APPLE", "remember BANANA") answers
     APPLE only, in one-shot and in stream-json (warm) mode, the source
@@ -398,7 +416,11 @@ chat as that chat's main session, with everything it knew
     the same sessions: the recorded point and the reply's finish both give
     APPLE for Claude Code and Codex; an unknown point gives "APPLE and
     BANANA" and the reason. A Claude Code fork at a tool call with no
-    result answers that the result is missing.
+    result answers that the result is missing. Claude Code 2.1.329 forked
+    at the last assistant message before a `/compact` (which that
+    compaction kept) answers both words from the compacted session: its
+    copy is the compaction's summary, that message and the new prompt, the
+    `/compact` lines after it dropped.
 - Claude Code 2.1.329 forks a session from another folder as well as from
   its own (checked 2026-11-21); the new chat keeps the member's project so
   the copy works in the folder it knew.
@@ -433,9 +455,11 @@ chat as that chat's main session, with everything it knew
   still carries the member's identity note and its role's instructions;
   otherwise the next turn tries the fork once more
   (`forkFrom.failedAttempts`), and when that fails too the member becomes a
-  clean member (fork and its chat-context pointer dropped). Either way the
-  chat gets a warning ("@x could not start from a copy of @main's session,
-  …"), and the failed reply the main session reads says it too.
+  clean member (fork and its chat-context pointer dropped). Either way a
+  line in the chat says so ("@x could not start from a copy of @main's
+  session, …"; `postChatNoticeLine`, never a chat warning), and the failed
+  reply the main session reads says it too (a forked main session's own
+  failed reply does not: the User asked it and reads the line).
 - `ChatParticipantRequestItem.title?`: the main session's short title for
   its task (`app_chat_delegate_task`'s `title`, at most 80 characters).
 - `ChatParticipantRequestBatch.delegation.turnId?`: the main-session turn (its `turnSegmentId`) that gave the task while that

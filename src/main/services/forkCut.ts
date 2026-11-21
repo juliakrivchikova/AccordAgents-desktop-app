@@ -10,7 +10,9 @@ import { createInterface } from "node:readline";
 // - Claude Code 2.1.329 `--resume <id> --fork-session --resume-session-at
 //   <uuid>` keeps the session up to and including that assistant message;
 //   it refuses ("No message found with message.uuid of: …") a message before
-//   a later compaction, which it does not load.
+//   a later compaction, which it does not load, unless that compaction kept
+//   the message as it was (its `compactMetadata.preservedMessages`): then
+//   the copy is the compaction's summary and the kept messages up to it.
 // - Codex 0.155.1 app-server `thread/fork` with `lastTurnId` keeps the
 //   thread through that turn (before a later compaction too); an unknown turn
 //   is refused ("turn not found: …").
@@ -29,7 +31,8 @@ export interface ForkCutRequest {
  *  all of it, and a turn the member starts meanwhile stays out); or copy all
  *  of it and say why it could not stop there. */
 export type ForkCutDecision =
-  | { kind: "cut"; at: string }
+  /** `afterCompaction`: the point is one a later compaction kept. */
+  | { kind: "cut"; at: string; afterCompaction?: boolean }
   | { kind: "missed"; reason: string };
 
 /** The CLI refused the point the copy was to end at: Claude Code's words
@@ -59,6 +62,47 @@ export interface ClaudeTranscriptRow {
   kind: "assistant" | "user" | "compact";
   uuid?: string;
   at: number;
+  /** A user row a compaction writes, not the member's work: the summary,
+   *  and the `/compact` command's own lines (the local-command caveat, the
+   *  command, its output). */
+  compaction?: "summary" | "caveat" | "command" | "output";
+  /** A compaction's: the messages before it that it kept as they were. */
+  kept?: string[];
+}
+
+/** The text of a user row, when it is text. */
+function userRowText(message: unknown): string {
+  const content = message && typeof message === "object" ? (message as { content?: unknown }).content : undefined;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content) && content.length === 1 && content[0] && typeof content[0] === "object" && typeof (content[0] as { text?: unknown }).text === "string") {
+    return (content[0] as { text: string }).text;
+  }
+  return "";
+}
+
+/** What a user row is to a compaction (as Claude Code 2.1.280-2.1.329 write
+ *  them, the app's `/compact` and her own alike). */
+function compactionRowOf(entry: Record<string, unknown>): ClaudeTranscriptRow["compaction"] {
+  if (entry.isCompactSummary === true) return "summary";
+  const text = userRowText(entry.message).trimStart();
+  if (entry.isMeta === true && text.startsWith("<local-command-caveat>")) return "caveat";
+  if (/^<command-name>\/compact<\/command-name>/.test(text)) return "command";
+  if (text.startsWith("<local-command-stdout>")) return "output";
+  return undefined;
+}
+
+/** The messages a compaction kept as they were (Claude Code loads them
+ *  after it). */
+function compactionKept(entry: Record<string, unknown>): string[] | undefined {
+  const metadata = entry.compactMetadata;
+  const preserved = metadata && typeof metadata === "object" ? (metadata as { preservedMessages?: unknown }).preservedMessages : undefined;
+  if (!preserved || typeof preserved !== "object") return undefined;
+  const ids = new Set<string>();
+  for (const key of ["uuids", "allUuids"]) {
+    const list = (preserved as Record<string, unknown>)[key];
+    if (Array.isArray(list)) for (const id of list) if (typeof id === "string" && id) ids.add(id);
+  }
+  return ids.size ? [...ids] : undefined;
 }
 
 /** One transcript line as the cut reads it; undefined for every other line. */
@@ -73,9 +117,13 @@ function claudeTranscriptRow(line: string): ClaudeTranscriptRow | undefined {
   }
   if (!entry || typeof entry !== "object" || entry.isSidechain === true) return undefined;
   const at = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
-  if (entry.type === "system" && entry.subtype === "compact_boundary") return { kind: "compact", at };
+  if (entry.type === "system" && entry.subtype === "compact_boundary") {
+    const kept = compactionKept(entry);
+    return { kind: "compact", at, ...(kept ? { kept } : {}) };
+  }
   if (entry.type === "assistant" || entry.type === "user") {
-    return { kind: entry.type, ...(typeof entry.uuid === "string" ? { uuid: entry.uuid } : {}), at };
+    const compaction = entry.type === "user" ? compactionRowOf(entry) : undefined;
+    return { kind: entry.type, ...(typeof entry.uuid === "string" ? { uuid: entry.uuid } : {}), at, ...(compaction ? { compaction } : {}) };
   }
   return undefined;
 }
@@ -93,11 +141,34 @@ export async function readClaudeTranscriptRows(file: string): Promise<ClaudeTran
   return rows;
 }
 
+/** Rows between the point and a later compaction that are only
+ *  compactions: their boundaries, summaries and `/compact` lines (an output
+ *  only right after its command). Anything else is the member's work. */
+function onlyCompactions(rows: ReadonlyArray<ClaudeTranscriptRow>): boolean {
+  let command = false;
+  for (const row of rows) {
+    if (row.kind === "compact" || row.compaction === "summary" || row.compaction === "caveat") continue;
+    if (row.compaction === "command") {
+      command = true;
+      continue;
+    }
+    if (row.compaction === "output" && command) {
+      command = false;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
 /**
  * Where a Claude Code fork stops, read from the source session's transcript:
  * at the reply's last assistant message (recorded, or the last one written by
  * the reply's finish); all of it, said, when the message is not there or a
- * compaction came after it (the CLI does not load a message before one).
+ * compaction came after it (the CLI does not load a message before one),
+ * unless nothing but compactions came after the message and the last of them
+ * kept it as it was: then the CLI loads it, and the copy is that
+ * compaction's summary of what came before and the message itself.
  */
 export function claudeForkCut(transcript: string | ReadonlyArray<ClaudeTranscriptRow>, request: ForkCutRequest): ForkCutDecision {
   const finishedBy = request.finishedBy ? Date.parse(request.finishedBy) : Number.NaN;
@@ -118,7 +189,19 @@ export function claudeForkCut(transcript: string | ReadonlyArray<ClaudeTranscrip
     }
   }
   if (index < 0) return { kind: "missed", reason: request.at ? FORK_CUT_NOT_IN_SESSION : FORK_CUT_NO_TURN_BY_THEN };
-  if (rows.slice(index + 1).some((row) => row.kind === "compact")) return { kind: "missed", reason: FORK_CUT_COMPACTED };
+  const after = rows.slice(index + 1);
+  let lastCompaction = -1;
+  for (let candidate = after.length - 1; candidate >= 0; candidate -= 1) {
+    if (after[candidate]!.kind === "compact") {
+      lastCompaction = candidate;
+      break;
+    }
+  }
+  if (lastCompaction >= 0) {
+    const at = rows[index]!.uuid!;
+    const kept = after[lastCompaction]!.kept?.includes(at) && onlyCompactions(after.slice(0, lastCompaction));
+    return kept ? { kind: "cut", at, afterCompaction: true } : { kind: "missed", reason: FORK_CUT_COMPACTED };
+  }
   // With nothing after it yet the point is given all the same: a turn the
   // member starts before the CLI reads the session stays out of the copy.
   return { kind: "cut", at: rows[index]!.uuid! };

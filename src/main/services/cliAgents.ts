@@ -5,7 +5,7 @@ import { constants, type Dirent } from "node:fs";
 import { access, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { claudeProjectsDir, findClaudeTranscript } from "./memberSessionFiles";
 import {
-  claudeForkCut, codexForkCut, FORK_CUT_NOT_IN_SESSION, FORK_CUT_SESSION_GONE, readClaudeTranscriptRows, FORK_CUT_TRANSCRIPT_UNREADABLE, FORK_CUT_TURNS_UNLISTED, FORK_CUT_UNSUPPORTED, isForkCutMissingError,
+  claudeForkCut, codexForkCut, FORK_CUT_COMPACTED, FORK_CUT_NOT_IN_SESSION, FORK_CUT_SESSION_GONE, readClaudeTranscriptRows, FORK_CUT_TRANSCRIPT_UNREADABLE, FORK_CUT_TURNS_UNLISTED, FORK_CUT_UNSUPPORTED, isForkCutMissingError,
   isForkCutUnsupportedError
 } from "./forkCut";
 import type { CodexTurnSummary, ForkCutDecision, ForkCutRequest } from "./forkCut";
@@ -5787,7 +5787,7 @@ export class CliAgentRunner {
       participantId: participant.id,
       decision: cut.kind,
       otherSession: replySession !== member,
-      ...(cut.kind === "missed" ? { reason: cut.reason } : {})
+      ...(cut.kind === "missed" ? { reason: cut.reason } : cut.afterCompaction ? { afterCompaction: true } : {})
     });
     // The whole of the member's session, said in the chat at once (before a
     // turn that may last hours, and an app that may stop during it).
@@ -5803,9 +5803,10 @@ export class CliAgentRunner {
       return result;
     }
     // The CLI did not load that message (one its transcript holds on a branch
-    // it does not follow), or no longer knows the flag.
-    void this.writeDebugLog("cli-agent-claude-fork-cut-refused", { participantId: participant.id, unsupported });
-    return whole(unsupported ? FORK_CUT_UNSUPPORTED : FORK_CUT_NOT_IN_SESSION);
+    // it does not follow, or one a later compaction kept that this CLI does
+    // not load after all), or no longer knows the flag.
+    void this.writeDebugLog("cli-agent-claude-fork-cut-refused", { participantId: participant.id, unsupported, afterCompaction: Boolean(cut.afterCompaction) });
+    return whole(unsupported ? FORK_CUT_UNSUPPORTED : cut.afterCompaction ? FORK_CUT_COMPACTED : FORK_CUT_NOT_IN_SESSION);
   }
 
   /** Where a Claude Code fork of `sessionId` ends, read from its transcript

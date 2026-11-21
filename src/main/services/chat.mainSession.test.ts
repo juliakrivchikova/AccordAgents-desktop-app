@@ -449,16 +449,25 @@ test("a fork the CLI could not make is tried once more, then the member starts c
     await waitFor(() => childRuns().length === 2);
     await waitFor(() => sessionOf().forkFrom === undefined);
     assert.equal(childRuns()[1].options.forkFromSessionId, "main-cli-session", `${kind}: the retry forks again`);
-    // The retry failed too: it is a member of its own now, and the chat says so.
+    // The retry failed too: it is a member of its own now, and a line in the
+    // chat says so (every device shows it; a warning stays on one).
     assert.equal(sessionOf().forkedFromParticipantId, undefined, kind);
-    await waitFor(() => ((storage.current.metadata.warnings ?? []) as string[]).some((warning) => warning.includes("could not start from a copy of @main's session")));
-    assert.ok((storage.current.metadata.warnings as string[]).includes(`@${String(result.handle).slice(1)} could not start from a copy of @main's session, so its next turn starts a clean session.`), kind);
+    const notice = `@${String(result.handle).slice(1)} could not start from a copy of @main's session, so its next turn starts a clean session.`;
+    const lines = () => storage.current.messages.filter((message: ChatMessage) => message.role === "system" && message.content === notice);
+    await waitFor(() => lines().length > 0);
+    assert.equal(lines()[0].metadata?.threadId, "system", kind);
+    assert.equal(((storage.current.metadata.warnings ?? []) as string[]).some((warning) => warning.includes("could not start from a copy")), false, `${kind}: not a chat warning`);
+    // The main session that gave the task reads it in the failed reply.
+    const failedReplies = storage.current.messages.filter((message: ChatMessage) => message.participantId === childId && message.status === "error");
+    assert.ok(failedReplies.some((message: ChatMessage) => message.content.includes(notice)), kind);
 
     await ask("Once more, clean.");
     await waitFor(() => childRuns().length === 3);
     assert.equal(childRuns()[2].options.forkFromSessionId, undefined, `${kind}: no fork any more`);
     assert.doesNotMatch(childRuns()[2].prompt, /You were forked from/, kind);
     await waitFor(() => sessionOf().sessionId === "clean-session");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(lines().length, 1, `${kind}: once`);
   }
 });
 
@@ -504,8 +513,11 @@ test("a fork the CLI starts clean (its source is gone) is still told who it is, 
   const session = (storage.current.metadata.participantSessions as ChatParticipantSession[]).find((item) => item.participantId === result.participantId)!;
   assert.equal(session.forkFrom, undefined);
   assert.equal(session.forkedFromParticipantId, undefined, "not reminded later that it is a fork");
-  await waitFor(() => ((storage.current.metadata.warnings ?? []) as string[]).length > 0);
-  assert.deepEqual(storage.current.metadata.warnings, ["@refactor could not start from a copy of @main's session, so it started a clean session from the saved chat context."]);
+  const notice = "@refactor could not start from a copy of @main's session, so it started a clean session from the saved chat context.";
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.role === "system" && message.content === notice));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(storage.current.messages.filter((message: ChatMessage) => message.role === "system" && message.content === notice).length, 1, "once");
+  assert.deepEqual(storage.current.metadata.warnings ?? [], [], "a line, not a chat warning, nor the CLI's own restart warning");
 });
 
 test("a fork never takes the source's session id as its own", () => {

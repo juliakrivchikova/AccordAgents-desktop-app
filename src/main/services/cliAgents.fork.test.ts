@@ -143,6 +143,26 @@ test("claude: a point the CLI cannot keep copies the whole session and says why"
   }
 });
 
+test("claude: a reply a later compaction kept is the point, with no word; refused after all, the whole session and the compaction said", async () => {
+  const kept = JSON.stringify({ type: "system", subtype: "compact_boundary", uuid: "c1", timestamp: "2026-11-21T16:30:00.000Z",
+    compactMetadata: { trigger: "manual", preservedMessages: { uuids: ["a2"], allUuids: ["a2"] } } });
+  const summary = JSON.stringify({ isSidechain: false, type: "user", uuid: "s1", timestamp: "2026-11-21T16:30:00.100Z", isCompactSummary: true,
+    message: { role: "user", content: "This session is being continued from a previous conversation…" } });
+  const projects = await claudeProjectsWithTranscript("parent-session", [kept, summary]);
+  try {
+    const cut = await claudeForkTurns(projects, { at: "a2" });
+    assert.equal(cut.turns[0].forkResumeAt, "a2");
+    assert.equal(cut.result.forkCutMissed, undefined);
+    assert.deepEqual(cut.said, []);
+    const refused = await claudeForkTurns(projects, { at: "a2" }, [{ ok: false, content: "", error: "claude warm process exited with code 1: No message found with message.uuid of: a2" }]);
+    assert.deepEqual(refused.turns.map((turn) => turn.forkResumeAt), ["a2", undefined]);
+    assert.equal(refused.result.forkCutMissed, "its session was compacted after that reply");
+    assert.deepEqual(refused.said, ["1:its session was compacted after that reply"]);
+  } finally {
+    await rm(projects, { recursive: true, force: true });
+  }
+});
+
 test("claude: when the member's session changed after the reply, the session that reply was in is copied up to it; gone, the member's own, said", async () => {
   const projects = await claudeProjectsWithTranscript("earlier-session");
   try {

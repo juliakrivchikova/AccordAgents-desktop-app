@@ -447,7 +447,8 @@ interface ChatParticipantSessionState {
   session: ChatParticipantSession;
   instructionsRefreshed: boolean;
   /** A main session made by Fork to new chat whose member's session is not
-   *  on this device: it starts clean, and the chat says so. */
+   *  on this device: it starts clean, and a line in the chat says so when
+   *  its turn runs (postChatNoticeLine). */
   forkOriginUnavailable?: string;
 }
 
@@ -10975,6 +10976,12 @@ export class ChatService {
       if (options.writeGate) {
         await this.waitForEarlierClaudeMessages(options.writeGate, signal);
       }
+      // A main session made by Fork to new chat whose member's session is
+      // not here starts clean: a line in the chat says so before the turn
+      // runs, as the fork's other notices are said (postChatNoticeLine).
+      if (sessionState.forkOriginUnavailable) {
+        this.postChatNoticeLine(conversation, sessionState.forkOriginUnavailable);
+      }
       let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
         persistSession: true,
         sessionId: session.sessionId,
@@ -11051,20 +11058,15 @@ export class ChatService {
       // The CLI could not copy the source session and started the member
       // clean from the saved chat context instead (Claude Code's resume-miss
       // fallback): it is a member of its own from now on, and the chat says so.
+      // A fork's notices are lines in the chat, never chat warnings: a
+      // warning stays on the device that raised it, and a fork may run on a
+      // cloud machine, or have been asked from the phone (postChatNoticeLine).
       const forkStartedClean = forkSource && result.sessionRestarted
-        ? this.forkStartedCleanWarning(conversation, participant, forkSource, "now")
+        ? this.forkStartedCleanNotice(conversation, participant, forkSource, "now")
         : undefined;
-      this.applyCliRunMetadata(session, result, participant, options.warnings, forkStartedClean);
-      // A main session made by Fork to new chat whose member's session is
-      // not here started clean: the chat says so, once.
-      if (sessionState.forkOriginUnavailable && !options.warnings.includes(sessionState.forkOriginUnavailable)) {
-        options.warnings.push(sessionState.forkOriginUnavailable);
-        this.addConversationWarning(conversation, sessionState.forkOriginUnavailable);
-      }
+      this.applyCliRunMetadata(session, result, participant, options.warnings, Boolean(forkStartedClean));
       // Its copy was made whole although it was to end where the User
-      // tapped Fork: a line in the chat says why, once. A line, not a chat
-      // warning: warnings stay on the device that raised them, and the
-      // copy may run on a cloud machine, or have been asked from the phone.
+      // tapped Fork: a line in the chat says why, once.
       const forkCutNote = forkSource && !forkStartedClean ? this.forkCutMissedNote(participant, forkSource, session, result) : undefined;
       if (forkCutNote) {
         this.postChatNoticeLine(conversation, forkCutNote);
@@ -11072,9 +11074,8 @@ export class ChatService {
       if (forkStartedClean) {
         delete session.forkFrom;
         delete session.forkedFromParticipantId;
-        // In the chat, whoever asked for the turn (a member's request keeps
-        // no run warnings of its own).
-        this.addConversationWarning(conversation, forkStartedClean);
+        // In the chat, whoever asked for the turn.
+        this.postChatNoticeLine(conversation, forkStartedClean);
         void this.debugLogs.write("chat.session.fork-started-clean", {
           conversationId: conversation.id,
           participantId: participant.id,
@@ -11094,11 +11095,14 @@ export class ChatService {
           // Its chat context started where the source's did; a clean
           // session has seen none of it.
           this.forgetPromptContextPointers(conversation, participant.id);
-          const warning = this.forkStartedCleanWarning(conversation, participant, forkSource, "next");
-          options.warnings.push(warning);
-          this.addConversationWarning(conversation, warning);
-          // The member that gave the task reads it in this failed reply.
-          result = { ...result, content: [result.content.trim(), warning].filter(Boolean).join("\n\n") };
+          const notice = this.forkStartedCleanNotice(conversation, participant, forkSource, "next");
+          this.postChatNoticeLine(conversation, notice);
+          // The member that gave the task reads it in this failed reply (a
+          // main session made by Fork to new chat was asked by the User,
+          // who reads the line: its reply does not say it twice).
+          if (!this.otherChatForkOrigin(conversation, participant, forkSource.participantId)) {
+            result = { ...result, content: [result.content.trim(), notice].filter(Boolean).join("\n\n") };
+          }
         }
         void this.debugLogs.write("chat.session.fork-failed", {
           conversationId: conversation.id,
@@ -12164,9 +12168,9 @@ export class ChatService {
     ].join("\n");
   }
 
-  /** The chat's word that a fork could not copy its source's session and
+  /** The chat's line that a fork could not copy its source's session and
    *  started (or starts at its next turn) a clean session. */
-  private forkStartedCleanWarning(conversation: Conversation, participant: ChatParticipant, forkSource: ChatSessionForkSource, when: "now" | "next"): string {
+  private forkStartedCleanNotice(conversation: Conversation, participant: ChatParticipant, forkSource: ChatSessionForkSource, when: "now" | "next"): string {
     const origin = this.otherChatForkOrigin(conversation, participant, forkSource.participantId);
     const source = origin ? undefined : this.chatParticipants(conversation).find((item) => item.id === forkSource.participantId);
     const sessionName = origin ? this.forkOriginSessionName(origin) : `${source ? `@${source.handle}'s` : "the main session's"} session`;
@@ -12534,8 +12538,9 @@ export class ChatService {
     result: ParticipantRunResult,
     participant: ChatParticipant,
     warnings: string[],
-    /** What the chat says instead when the session was started anew. */
-    restartWarning?: string
+    /** The chat says it another way when the session was started anew (a
+     *  fork's line): no warning then. */
+    restartSaid = false
   ): void {
     if (this.isKnownRoleRuntime(result.roleRuntime)) {
       session.roleRuntime = result.roleRuntime;
@@ -12552,8 +12557,8 @@ export class ChatService {
       session.sessionId = result.sessionId;
       delete session.forkFrom;
     }
-    if (result.sessionRestarted) {
-      const warning = restartWarning ?? `@${participant.handle}: previous CLI session was unavailable, so a new session was started from saved chat context.`;
+    if (result.sessionRestarted && !restartSaid) {
+      const warning = `@${participant.handle}: previous CLI session was unavailable, so a new session was started from saved chat context.`;
       if (!warnings.includes(warning)) {
         warnings.push(warning);
       }
@@ -12639,7 +12644,8 @@ export class ChatService {
    * (a move) never becomes a copy again; the record is kept at once, so a
    * first turn cut short still forks at the next. When the member's session
    * is not here (its chat deleted, the member moved), the main session starts
-   * clean and this returns the chat's warning.
+   * clean and this returns the chat's line about it (said when its turn
+   * runs, so a compaction asked first does not say it).
    */
   private async startFromForkOrigin(conversation: Conversation, participant: ChatParticipant, session: ChatParticipantSession): Promise<string | undefined> {
     const origin = participant.forkOrigin;
@@ -12668,7 +12674,9 @@ export class ChatService {
         sourceChatHere: Boolean(sourceSessions),
         forkable
       });
-      return `@${participant.handle} could not start from a copy of ${this.forkOriginSessionName(origin)}: that session is not on this ${this.machineRuntime ? "machine" : "computer"}, so it started a clean session.`;
+      // Read on every device (a line in the chat): the place is named, not "this".
+      const place = this.machineRuntime ? `the cloud machine @${participant.handle} runs on` : "your computer";
+      return `@${participant.handle} could not start from a copy of ${this.forkOriginSessionName(origin)}: that session is not on ${place}, so it starts a clean session.`;
     }
     // The copy ends with the turn of the reply the User saw last, at the
     // point that reply recorded in this session, or by its finish.
