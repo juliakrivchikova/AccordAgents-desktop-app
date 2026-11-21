@@ -672,6 +672,39 @@ test("when the clean start cannot start either, the copy was not what failed: th
   assert.ok(((storage.store.get(id)!.metadata.warnings ?? []) as string[]).some((warning) => /unknown option/.test(warning)), "the real error is said");
 });
 
+test("a clean start that reported no session at all did not start either; a retry that says the source is gone keeps the member clean", async () => {
+  const codexReviewer: ChatParticipant = { ...REVIEWER, kind: "codex-cli", model: undefined, reasoningEffort: undefined };
+  const source = oldChat([ASSISTANT, codexReviewer], { participantSessions: [sessionRecord(codexReviewer, "src-cli-session")] });
+  for (const [label, retryError] of [
+    ["thread/start failed after an unknown copy failure", "failed to read rollout: unexpected end of file"],
+    ["the retry says the source is gone", "no rollout found for thread id src-cli-session"]
+  ] as const) {
+    const { service, storage, runs } = testService({
+      conversations: [source],
+      run: async (participant, _prompt, runOptions) => {
+        if (runOptions.forkFromSessionId) {
+          const error = runs.length === 1 ? "failed to read rollout: unexpected end of file" : retryError;
+          return { participant, ok: false, content: "", error, durationMs: 1, forkCopyFailed: true };
+        }
+        // Codex could not start a thread: nothing reported a session.
+        return { participant, ok: false, content: "Codex failed before it returned a response.", error: "thread/start failed: invalid config", durationMs: 1 };
+      }
+    });
+    const { id, mainId } = await forkAndSend(service, storage);
+    await service.settleChatSaves();
+    assert.equal(runs.length, 3, label);
+    const session = sessionsOf(storage.store.get(id)).find((item) => item.participantId === mainId)!;
+    const notices = storage.store.get(id)!.messages.filter((message) => message.id.startsWith("fork-notice-")).map((message) => message.content);
+    if (retryError.startsWith("no rollout")) {
+      assert.equal(session.forkFrom, undefined, `${label}: its source is gone, it stays clean`);
+      assert.deepEqual(notices, ["@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so this turn started a clean session."], label);
+    } else {
+      assert.equal(session.forkFrom?.sessionId, "src-cli-session", `${label}: still a fork`);
+      assert.deepEqual(notices, [], label);
+    }
+  }
+});
+
 test("two messages sent at once: when the other one made the member's session meanwhile, this one goes into it, never a second clean session", async () => {
   const codexReviewer: ChatParticipant = { ...REVIEWER, kind: "codex-cli", model: undefined, reasoningEffort: undefined };
   const source = oldChat([ASSISTANT, codexReviewer], { participantSessions: [sessionRecord(codexReviewer, "src-cli-session")] });

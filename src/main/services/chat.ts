@@ -11123,6 +11123,8 @@ export class ChatService {
           progressSink.beginAttempt();
           result = await runCli();
         } else if (this.forkCopyFailed(result, signal)) {
+          // The retry may be the one that says the source is gone.
+          const gone = sourceGone || isForkSourceMissingError(result.error);
           const copyFailure = result;
           const forkedFromParticipantId = session.forkedFromParticipantId;
           delete session.forkFrom;
@@ -11132,18 +11134,22 @@ export class ChatService {
             conversationId: conversation.id,
             participantId: participant.id,
             sourceParticipantId: forkSource.participantId,
-            sourceGone
+            sourceGone: gone
           });
           // Said before the clean turn runs (it may last hours, and the app
           // may stop during it) when the CLI said the copy cannot be made.
-          if (sourceGone) this.postForkNotice(conversation, participant, "started-clean", this.forkStartedCleanNotice(conversation, participant, forkSource, "turn"));
+          if (gone) this.postForkNotice(conversation, participant, "started-clean", this.forkStartedCleanNotice(conversation, participant, forkSource, "turn"));
+          const reportedBeforeClean = reportedHere;
           progressSink.beginAttempt();
           result = await runCli(true);
-          if (!result.ok && !signal?.aborted && result.sessionNotStarted) {
-            // The clean session could not start either: the id it was given
-            // is no session, and its next turn must not resume it.
+          // No session started: the CLI exited before it took the message,
+          // or nothing reported a session at all (a thread that could not
+          // be started, a process that could not be had).
+          if (!result.ok && !signal?.aborted && (result.sessionNotStarted === true || reportedHere === reportedBeforeClean)) {
+            // The id the clean session was given is no session, and its next
+            // turn must not resume it.
             forgetOwnId();
-            if (!sourceGone) {
+            if (!gone) {
               // Nor was the copy what failed: the member stays a fork, its
               // next turn makes the copy, and the reply says what went wrong.
               session.forkFrom = forkSource;

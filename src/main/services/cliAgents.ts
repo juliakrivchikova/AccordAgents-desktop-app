@@ -5865,11 +5865,6 @@ export class CliAgentRunner {
     return whole(unsupported ? FORK_CUT_UNSUPPORTED : cut.afterCompaction ? FORK_CUT_COMPACTED : FORK_CUT_NOT_IN_SESSION);
   }
 
-  /** Where a Claude Code fork of `sessionId` ends, read from its transcript
-   *  on this device (forkCut.ts); `sessionId` other than `memberSessionId`:
-   *  the session the member's reply was in, not its own now. "gone": the
-   *  member's own session is not on this device either, so there is nothing
-   *  to copy. */
   /** Whether the member's session is on this device for Claude Code to copy. */
   private async claudeForkSourceHere(sessionId: string): Promise<boolean> {
     try {
@@ -5879,6 +5874,11 @@ export class CliAgentRunner {
     }
   }
 
+  /** Where a Claude Code fork of `sessionId` ends, read from its transcript
+   *  on this device (forkCut.ts); `sessionId` other than `memberSessionId`:
+   *  the session the member's reply was in, not its own now. "gone": the
+   *  member's own session is not on this device either, so there is nothing
+   *  to copy. */
   private async claudeForkCutFor(sessionId: string, request: ForkCutRequest, memberSessionId: string): Promise<ForkCutDecision | { kind: "gone"; reason: string }> {
     const earlier = sessionId !== memberSessionId;
     try {
