@@ -2,6 +2,7 @@ import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_pr
 import path from "node:path";
 import { readFileSync, readdirSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
+import { performance } from "node:perf_hooks";
 
 type KillableProcess = Pick<ChildProcess, "pid" | "kill">;
 type TrackedProcess = KillableProcess & Pick<ChildProcess, "exitCode" | "signalCode" | "killed">;
@@ -23,12 +24,15 @@ const POSIX_PS_PATH = "/bin/ps";
 const POSIX_PS_ARGS = ["-axo", "pid=,ppid=,pgid=,stat=,lstart="];
 const POSIX_PS_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 const POSIX_PS_TIMEOUT_MS = 1_000;
-// Only a hung `ps` reaches this; it normally answers in tens of milliseconds,
-// a few hundred on a loaded machine.
-const POSIX_PS_ASYNC_TIMEOUT_MS = 5_000;
+// A `ps` that printed nothing new for this long while the event loop was
+// live is treated as hung; it normally answers in tens of milliseconds.
+const POSIX_PS_ASYNC_TIMEOUT_MS = 2_000;
+// However long a stalled loop or a slow but progressing `ps` keeps a read
+// alive, it ends by then. Three owner samples stay inside the app's 35 s
+// native start window.
+const PROCESS_TABLE_MAX_MS = 8_000;
 const PROCESS_TABLE_STALL_MS = 100;
-const PROCESS_TABLE_STALL_WINDOW_MS = 1_000;
-const PROCESS_TABLE_STALL_REARMS = 3;
+const PROCESS_TABLE_RECHECK_MS = 1_000;
 
 function parsePosixProcessTable(output: string): Map<number, PosixProcessRow> {
   const rows = new Map<number, PosixProcessRow>();
@@ -88,67 +92,88 @@ export function readPosixProcessTableAsync(): Promise<Map<number, PosixProcessRo
 /** Runs a `ps`-shaped command and parses its table, or returns undefined.
  *  A table is accepted only when the command exited cleanly and its whole
  *  output was read: a partial table would report live processes as gone.
- *  The deadline tolerates a stalled event loop. Electron's main thread can
- *  hold the loop for over a second while the app starts (the packaged native
- *  supervisor runs there), and a plain timer then comes due before the
- *  output that is already waiting is read; execFile's timeout killed the
- *  finished `ps` and reported an empty table as a success. Exported for tests. */
-export function readProcessTableOutput(
+ *
+ *  The deadline counts the command's silence, not wall time. Electron's main
+ *  thread holds the event loop for hundreds of milliseconds, sometimes over a
+ *  second, while the app starts, and the packaged native supervisor runs
+ *  there. During such a stall `ps` blocks on a full stdout pipe (8 KB per
+ *  loop turn in Electron), so a wall-clock timer came due mid-output and
+ *  killed it: execFile then reported an empty table as a success. A deadline
+ *  that fired late, or after output kept arriving, is checked again after
+ *  another live window; PROCESS_TABLE_MAX_MS bounds the whole read.
+ *  Exported for tests. */
+export async function readProcessTableOutput(
   command: string,
   args: string[],
-  timeoutMs: number
+  timeoutMs: number,
+  maxMs = PROCESS_TABLE_MAX_MS
 ): Promise<Map<number, PosixProcessRow> | undefined> {
+  const output = await readCommandOutput(command, args, { timeoutMs, maxMs, env: { ...process.env, LC_ALL: "C", TZ: "UTC" } });
+  return output === undefined ? undefined : parsePosixProcessTable(output);
+}
+
+/** A short command's whole stdout, or undefined when it failed, overflowed
+ *  or stayed silent past its deadline on a live event loop (see
+ *  readProcessTableOutput for why the deadline must survive a stalled loop). */
+export function readCommandOutput(
+  command: string,
+  args: string[],
+  options: { timeoutMs: number; maxMs?: number; maxBytes?: number; env?: NodeJS.ProcessEnv }
+): Promise<string | undefined> {
+  const { timeoutMs, maxMs = PROCESS_TABLE_MAX_MS, maxBytes = POSIX_PS_MAX_BUFFER_BYTES, env = process.env } = options;
   return new Promise((resolve) => {
     let child: ChildProcess;
     try {
-      child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, LC_ALL: "C", TZ: "UTC" } });
+      child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"], env });
     } catch {
       resolve(undefined);
       return;
     }
+    const startedAt = performance.now();
     const chunks: Buffer[] = [];
     let bytes = 0;
+    let bytesAtCheck = 0;
     let ended = false;
     let exit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
-    let stalls = 0;
-    const finish = (rows: Map<number, PosixProcessRow> | undefined): void => {
-      if (settled) return;
+    const finish = (output: string | undefined): boolean => {
+      if (settled) return false;
       settled = true;
       clearTimeout(timer);
-      resolve(rows);
+      resolve(output);
+      return true;
     };
     const abandon = (): void => {
-      if (settled) return;
+      // Settled first: kill() can emit "error" synchronously, which lands here.
+      if (!finish(undefined)) return;
       try { child.kill("SIGKILL"); } catch { /* it already exited */ }
       child.stdout?.destroy();
-      finish(undefined);
     };
     const complete = (): void => {
       if (!ended || !exit) return;
-      finish(exit.code === 0 && exit.signal === null ? parsePosixProcessTable(Buffer.concat(chunks).toString("utf8")) : undefined);
+      finish(exit.code === 0 && exit.signal === null ? Buffer.concat(chunks).toString("utf8") : undefined);
     };
     child.stdout?.on("data", (chunk: Buffer) => {
       bytes += chunk.length;
-      if (bytes > POSIX_PS_MAX_BUFFER_BYTES) { abandon(); return; }
+      if (bytes > maxBytes) { abandon(); return; }
       chunks.push(chunk);
     });
     child.stdout?.on("end", () => { ended = true; complete(); });
     child.stdout?.on("error", abandon);
     child.on("error", abandon);
     child.on("exit", (code, signal) => { exit = { code, signal }; complete(); });
-    // Timers run before I/O in each loop turn, so a deadline found overdue
-    // after a stall first lets the waiting output be read (the I/O phase runs
-    // before setImmediate). A deadline that fired late measured the stall, not
-    // the command: it gets a short live window again, a bounded number of times.
     const arm = (ms: number): void => {
-      const due = Date.now() + ms;
+      const due = performance.now() + ms;
+      // setImmediate: output that is already waiting is read before the check.
       timer = setTimeout(() => setImmediate(() => {
         if (settled) return;
-        if (Date.now() - due > PROCESS_TABLE_STALL_MS && stalls < PROCESS_TABLE_STALL_REARMS) {
-          stalls += 1;
-          arm(Math.min(timeoutMs, PROCESS_TABLE_STALL_WINDOW_MS));
+        const now = performance.now();
+        const stalled = now - due > PROCESS_TABLE_STALL_MS;
+        const progressed = bytes > bytesAtCheck;
+        bytesAtCheck = bytes;
+        if ((stalled || progressed) && now - startedAt < maxMs) {
+          arm(Math.min(timeoutMs, PROCESS_TABLE_RECHECK_MS, Math.max(1, maxMs - (now - startedAt))));
           return;
         }
         abandon();
@@ -156,6 +181,31 @@ export function readProcessTableOutput(
     };
     arm(timeoutMs);
   });
+}
+
+/** The process reading the table and the process that started it both exist
+ *  while it runs, so a sample that cannot show both was not read (`ps` failed,
+ *  hung or overflowed): sample again, fresh, a bounded number of times. The
+ *  parent is the one that started us; once it is gone (we were reparented)
+ *  there is no owner to record. Identities come from the same reader as every
+ *  later liveness check, so they stay comparable. */
+export async function captureProcessAndParent(
+  readTable: (fresh: boolean) => Promise<Map<number, PosixProcessRow> | undefined>,
+  self: { pid: number; ppid: number } = process,
+  attempts = 3,
+  retryMs = 250
+): Promise<{ self: CapturedPosixProcess; parent: CapturedPosixProcess } | undefined> {
+  const parentPid = self.ppid;
+  if (parentPid <= 1) return undefined;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, retryMs * attempt));
+    if (self.ppid !== parentPid) return undefined;
+    const rows = await readTable(attempt > 0);
+    const own = capturePosixProcessIdentity(self.pid, () => rows);
+    const parent = capturePosixProcessIdentity(parentPid, () => rows);
+    if (own && parent && rows?.get(self.pid)?.ppid === parentPid) return { self: own, parent };
+  }
+  return undefined;
 }
 
 /** /proc starttime is measured since boot, not against wall time (kernel
