@@ -169,7 +169,7 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
       worked: row.querySelector(".sessions-worked-toggle")?.textContent, open: row.querySelectorAll(".sessions-delegation").length,
       order: [...row.querySelector(".message-copy").children].map((node) => node.className.split(" ")[0]) }; })()`);
   assert.equal(reply.text, "I split this: Restyle the login button restyles it, Login tests tests it and Check the server logs for every failed… reads the logs. " +
-    "Ask @main or @nobody. See Restyle the login button, ask Login tests now, npm i @types/node and @main; mail me@drew.dev, @drew/pkg or Summarise the old report.");
+    "Ask main or @nobody. See Restyle the login button, ask Login tests now, npm i @types/node and @main; mail me@drew.dev, @drew/pkg or Summarise the old report.");
   assert.deepEqual(reply.chips, [["p-drew", "claude-code", "Restyle the login button"], ["p-taylor", "codex-cli", "Login tests"], ["p-sam", "gemini-cli", "Check the server logs for every failed…"],
     ["p-drew", "claude-code", "Restyle the login button"], ["p-taylor", "codex-cli", "Login tests"], [OLGA_ID, "unknown", "Summarise the old report"]],
     "short titles: the main session's, else the task's first sentence cut at a word; in code too, and a removed member's");

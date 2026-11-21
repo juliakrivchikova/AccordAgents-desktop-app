@@ -212,7 +212,7 @@ test("only a current or former member's exact @handle is its chip, in prose and 
   assert.deepEqual(opened, [`${GERA.id}@gera-reply`]);
   const articles = root.findAll((node) => node.type === "article");
   const text = textOf(articles[0]!);
-  assert.match(text, /Asked Fix the token refresh \(a copy\), Read the old report and @nobody; @main will report\./, "the main session and nobody as written");
+  assert.match(text, /Asked Fix the token refresh \(a copy\), Read the old report and @nobody; main will report\./, "the main session as a plain word, nobody as written");
   assert.match(text, /mail me@gera\.dev or @gera\/pkg\./, "an address and a package name as written");
   assert.equal(textOf(articles[1]!.find(hasClass("message-content"))), "Reply to me", "the leading mention of the main session is left out");
   assert.doesNotMatch(text.replace("me@gera.dev", "").replace("@gera/pkg", ""), /@gera|@olga/, "no member's handle");
