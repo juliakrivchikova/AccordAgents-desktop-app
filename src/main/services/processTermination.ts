@@ -1,4 +1,4 @@
-import { execFile, execFileSync, spawnSync, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { readFileSync, readdirSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
@@ -23,6 +23,12 @@ const POSIX_PS_PATH = "/bin/ps";
 const POSIX_PS_ARGS = ["-axo", "pid=,ppid=,pgid=,stat=,lstart="];
 const POSIX_PS_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 const POSIX_PS_TIMEOUT_MS = 1_000;
+// Only a hung `ps` reaches this; it normally answers in tens of milliseconds,
+// a few hundred on a loaded machine.
+const POSIX_PS_ASYNC_TIMEOUT_MS = 5_000;
+const PROCESS_TABLE_STALL_MS = 100;
+const PROCESS_TABLE_STALL_WINDOW_MS = 1_000;
+const PROCESS_TABLE_STALL_REARMS = 3;
 
 function parsePosixProcessTable(output: string): Map<number, PosixProcessRow> {
   const rows = new Map<number, PosixProcessRow>();
@@ -76,15 +82,79 @@ export function readPosixProcessTableAsync(): Promise<Map<number, PosixProcessRo
     return Promise.resolve(new Map());
   }
   if (process.platform === "linux") return readLinuxProcessTable();
+  return readProcessTableOutput(POSIX_PS_PATH, POSIX_PS_ARGS, POSIX_PS_ASYNC_TIMEOUT_MS);
+}
+
+/** Runs a `ps`-shaped command and parses its table, or returns undefined.
+ *  A table is accepted only when the command exited cleanly and its whole
+ *  output was read: a partial table would report live processes as gone.
+ *  The deadline tolerates a stalled event loop. Electron's main thread can
+ *  hold the loop for over a second while the app starts (the packaged native
+ *  supervisor runs there), and a plain timer then comes due before the
+ *  output that is already waiting is read; execFile's timeout killed the
+ *  finished `ps` and reported an empty table as a success. Exported for tests. */
+export function readProcessTableOutput(
+  command: string,
+  args: string[],
+  timeoutMs: number
+): Promise<Map<number, PosixProcessRow> | undefined> {
   return new Promise((resolve) => {
-    execFile(POSIX_PS_PATH, POSIX_PS_ARGS, {
-      encoding: "utf8",
-      maxBuffer: POSIX_PS_MAX_BUFFER_BYTES,
-      timeout: POSIX_PS_TIMEOUT_MS,
-      env: { ...process.env, LC_ALL: "C", TZ: "UTC" }
-    }, (error, stdout) => {
-      resolve(error ? undefined : parsePosixProcessTable(stdout));
+    let child: ChildProcess;
+    try {
+      child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, LC_ALL: "C", TZ: "UTC" } });
+    } catch {
+      resolve(undefined);
+      return;
+    }
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    let ended = false;
+    let exit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    let stalls = 0;
+    const finish = (rows: Map<number, PosixProcessRow> | undefined): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(rows);
+    };
+    const abandon = (): void => {
+      if (settled) return;
+      try { child.kill("SIGKILL"); } catch { /* it already exited */ }
+      child.stdout?.destroy();
+      finish(undefined);
+    };
+    const complete = (): void => {
+      if (!ended || !exit) return;
+      finish(exit.code === 0 && exit.signal === null ? parsePosixProcessTable(Buffer.concat(chunks).toString("utf8")) : undefined);
+    };
+    child.stdout?.on("data", (chunk: Buffer) => {
+      bytes += chunk.length;
+      if (bytes > POSIX_PS_MAX_BUFFER_BYTES) { abandon(); return; }
+      chunks.push(chunk);
     });
+    child.stdout?.on("end", () => { ended = true; complete(); });
+    child.stdout?.on("error", abandon);
+    child.on("error", abandon);
+    child.on("exit", (code, signal) => { exit = { code, signal }; complete(); });
+    // Timers run before I/O in each loop turn, so a deadline found overdue
+    // after a stall first lets the waiting output be read (the I/O phase runs
+    // before setImmediate). A deadline that fired late measured the stall, not
+    // the command: it gets a short live window again, a bounded number of times.
+    const arm = (ms: number): void => {
+      const due = Date.now() + ms;
+      timer = setTimeout(() => setImmediate(() => {
+        if (settled) return;
+        if (Date.now() - due > PROCESS_TABLE_STALL_MS && stalls < PROCESS_TABLE_STALL_REARMS) {
+          stalls += 1;
+          arm(Math.min(timeoutMs, PROCESS_TABLE_STALL_WINDOW_MS));
+          return;
+        }
+        abandon();
+      }), ms);
+    };
+    arm(timeoutMs);
   });
 }
 

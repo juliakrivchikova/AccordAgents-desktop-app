@@ -8,7 +8,8 @@ import { createHash } from "node:crypto";
 import { nativeHostIdentity, verifiedNativeHostReboot } from "./nativeHostIdentity";
 import { confirmNativeProcessClosed, spawnNativeProcess } from "./nativeProcess";
 import { leaseProcessesGone, NativeProcessRegistry } from "./nativeProcessRegistry";
-import { hasLiveCapturedPosixProcesses, readPosixProcessTableAsync, terminateCapturedPosixProcesses } from "./processTermination";
+import { hasLiveCapturedPosixProcesses, readPosixProcessTableAsync, terminateCapturedPosixProcesses, type PosixProcessRow } from "./processTermination";
+import { captureSupervisorOwner } from "./nativeProcessSupervisor";
 
 test("independent controllers initialize one process registry while admitting different sessions", { skip: process.platform === "win32" }, async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accord-native-registry-race-"));
@@ -369,3 +370,17 @@ function sql(dbPath: string, input: string): Promise<void> {
     child.stdin!.end(input);
   });
 }
+
+test("the guardian samples its owner again when a process table comes back without it", async () => {
+  const row = (pid: number, ppid: number): PosixProcessRow => ({ pid, ppid, pgid: pid, state: "S", startedAt: `start-${pid}` });
+  const tables: Array<Map<number, PosixProcessRow> | undefined> = [new Map(), undefined, new Map([[700, row(700, 600)], [600, row(600, 1)]])];
+  const fresh: boolean[] = [];
+  const owner = await captureSupervisorOwner(async (isFresh) => { fresh.push(isFresh); return tables.shift(); }, { pid: 700, ppid: 600 }, 3, 1);
+  assert.deepEqual(owner, { supervisor: { pid: 700, startedAt: "start-700" }, parent: { pid: 600, startedAt: "start-600" } });
+  assert.deepEqual(fresh, [false, true, true], "retries never reuse the shared sample");
+
+  let reads = 0;
+  const missingParent = new Map([[700, row(700, 600)]]);
+  assert.equal(await captureSupervisorOwner(async () => { reads += 1; return missingParent; }, { pid: 700, ppid: 600 }, 3, 1), undefined);
+  assert.equal(reads, 3, "a guardian that cannot see its owner gives up after a bounded number of samples");
+});

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   capturePosixDescendantsFromTable,
   hasLiveCapturedPosixProcesses,
+  readProcessTableOutput,
   terminateCapturedPosixProcesses,
   terminateProcess,
   terminateProcessTreeIfRunning,
@@ -161,4 +162,30 @@ test("Linux process identities use kernel start ticks and boot identity, never w
   assert.equal(row.startedAt, `linux:${boot}:123456789`);
   assert.notEqual(parseLinuxProcessStat(`45 (name) ${fields.join(" ")}`, "22222222-2222-2222-2222-222222222222").startedAt, row.startedAt);
   assert.throws(() => parseLinuxProcessStat("45 broken", boot));
+});
+
+const PS_ROW = "printf '   42     1    42 Ss   Sat Nov 21 13:08:51 2026    \\n'";
+function blockEventLoop(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+test("a process table read survives an event-loop stall longer than its deadline", { skip: process.platform === "win32" }, async () => {
+  // Electron's main thread can hold the loop past the deadline while the
+  // packaged native supervisor starts; the finished output must still count.
+  const reading = readProcessTableOutput("/bin/sh", ["-c", PS_ROW], 100);
+  blockEventLoop(600);
+  const rows = await reading;
+  assert.deepEqual(rows?.get(42), { pid: 42, ppid: 1, pgid: 42, state: "Ss", startedAt: "Sat Nov 21 13:08:51 2026" });
+});
+
+test("a table command still running at its deadline yields no table, never the part it printed", { skip: process.platform === "win32" }, async () => {
+  const startedAt = Date.now();
+  const rows = await readProcessTableOutput("/bin/sh", ["-c", `${PS_ROW}; exec sleep 5`], 200);
+  assert.equal(rows, undefined);
+  assert.ok(Date.now() - startedAt < 3_000, "the hung command was abandoned at its deadline");
+});
+
+test("a table command that fails yields no table, even with rows on stdout", { skip: process.platform === "win32" }, async () => {
+  assert.equal(await readProcessTableOutput("/bin/sh", ["-c", `${PS_ROW}; exit 1`], 1_000), undefined);
+  assert.equal(await readProcessTableOutput("/nonexistent/accord-ps", [], 1_000), undefined);
 });

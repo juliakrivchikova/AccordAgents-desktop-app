@@ -47,10 +47,9 @@ export /** How long a guardian keeps trying to release its power hold after clos
 const MAINTENANCE_RELEASE_RETRY_MS = 30_000;
 
 async function supervise(config: NativeSupervisorStart, io: SessionIO): Promise<void> {
-  const rows = await processTable();
-  const supervisor = capturePosixProcessIdentity(process.pid, () => rows);
-  const parent = capturePosixProcessIdentity(process.ppid, () => rows);
-  if (!supervisor || !parent || !process.connected) throw new Error("The native supervisor cannot establish its process owner.");
+  const owner = await captureSupervisorOwner(processTable);
+  if (!owner || !process.connected) throw new Error("The native supervisor cannot establish its process owner.");
+  const { supervisor, parent } = owner;
   await mkdir(path.dirname(config.dbPath), { recursive: true, mode: 0o700 });
   const registry = new NativeProcessRegistry(config.dbPath, config.sqliteExecutable);
   await registry.init();
@@ -217,6 +216,27 @@ async function supervise(config: NativeSupervisorStart, io: SessionIO): Promise<
     }
     await delay(stopping ? 50 : 250);
   }
+}
+
+/** This guardian and the app that started it both exist while it starts, so
+ *  a sample missing either was not a complete table (a `ps` cut short on a
+ *  busy machine): sample again, fresh, a bounded number of times before
+ *  refusing to own a provider. Identities come from the same table reader as
+ *  every later liveness check, so they stay comparable. */
+export async function captureSupervisorOwner(
+  readTable: (fresh: boolean) => Promise<Map<number, PosixProcessRow> | undefined>,
+  self: { pid: number; ppid: number } = process,
+  attempts = 3,
+  retryMs = 250
+): Promise<{ supervisor: CapturedPosixProcess; parent: CapturedPosixProcess } | undefined> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) await delay(retryMs * attempt);
+    const rows = await readTable(attempt > 0);
+    const supervisor = capturePosixProcessIdentity(self.pid, () => rows);
+    const parent = capturePosixProcessIdentity(self.ppid, () => rows);
+    if (supervisor && parent) return { supervisor, parent };
+  }
+  return undefined;
 }
 
 async function awaitPreviousSupervisor(registry: NativeProcessRegistry, scope: string, host?: NativeHostIdentity): Promise<void> {
