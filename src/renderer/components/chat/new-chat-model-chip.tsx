@@ -25,7 +25,8 @@ export function NewChatModelChip(props: {
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
   const rootRef = useCloseOnOutside<HTMLDivElement>(open, close);
-  const maxHeight = useNewChatMenuMaxHeight(rootRef, open);
+  // It opens right above the chip, so all of it fits below the top bar.
+  const maxHeight = useNewChatMenuMaxHeight(rootRef, open, 0);
   const { draft, provider } = props;
   const member: ChatParticipant = {
     id: NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID,

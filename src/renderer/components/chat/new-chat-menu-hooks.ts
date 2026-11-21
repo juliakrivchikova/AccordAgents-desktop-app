@@ -24,7 +24,14 @@ export function useCloseOnOutside<T extends HTMLElement>(open: boolean, onClose:
   return ref;
 }
 
-export function useNewChatMenuMaxHeight<T extends HTMLElement>(rootRef: RefObject<T>, open: boolean): number | undefined {
+/** The tallest a New chat menu can be and still fit above its button. The
+ *  members menu overlaps its button by NEW_CHAT_PARTICIPANT_MENU_OVERLAP; a
+ *  menu that opens right above its button (the model chip's) passes 0. */
+export function useNewChatMenuMaxHeight<T extends HTMLElement>(
+  rootRef: RefObject<T>,
+  open: boolean,
+  overlap: number = NEW_CHAT_PARTICIPANT_MENU_OVERLAP
+): number | undefined {
   const [maxHeight, setMaxHeight] = useState<number | undefined>();
 
   useLayoutEffect(() => {
@@ -38,7 +45,7 @@ export function useNewChatMenuMaxHeight<T extends HTMLElement>(rootRef: RefObjec
       if (!rect) return;
       const topbarBottom = document.querySelector<HTMLElement>("[data-shell='topbar']")?.getBoundingClientRect().bottom ?? 0;
       const safeTop = Math.max(NEW_CHAT_MENU_VIEWPORT_MARGIN, topbarBottom + NEW_CHAT_MENU_VIEWPORT_MARGIN);
-      setMaxHeight(Math.max(0, Math.floor(rect.top - NEW_CHAT_MENU_OFFSET + NEW_CHAT_PARTICIPANT_MENU_OVERLAP - safeTop)));
+      setMaxHeight(Math.max(0, Math.floor(rect.top - NEW_CHAT_MENU_OFFSET + overlap - safeTop)));
     }
 
     updateMaxHeight();
@@ -48,7 +55,7 @@ export function useNewChatMenuMaxHeight<T extends HTMLElement>(rootRef: RefObjec
       window.removeEventListener("resize", updateMaxHeight);
       window.removeEventListener("scroll", updateMaxHeight, true);
     };
-  }, [open, rootRef]);
+  }, [open, rootRef, overlap]);
 
   return maxHeight;
 }
