@@ -172,16 +172,21 @@ test("a task whose reply is not loaded is one slim row of its own", () => {
   assert.equal(row.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-delegation-row").length, 2);
 });
 
-test("a member's mention in a message is a chip with its logo and task that opens its session; other mentions are plain names; no @ anywhere", () => {
+test("only a current or former member's exact @handle is its chip, in prose and in code; everything else stays as written", () => {
   const sessions = sessionsOf(sessionsConversation())!;
   const opened: string[] = [];
   const links: ChatSessionsLinks = {
     mainSessionId: MAIN.id,
     mainHandle: "main",
-    byHandle: new Map([["gera", { id: GERA.id, title: "Fix the token refresh", kind: GERA.kind, focusMessageId: "gera-reply" }]]),
+    byHandle: new Map([
+      ["gera", { id: GERA.id, title: "Fix the token refresh", kind: GERA.kind, focusMessageId: "gera-reply" }],
+      // A removed member keeps its chip.
+      ["olga", { id: "p-olga", title: "Read the old report", kind: "codex-cli" }]
+    ]),
     openMember: (id, focus) => opened.push(`${id}@${focus}`)
   };
-  const prose = chatMessage("main-2", "participant", 12, { participantId: MAIN.id, content: "Asked @gera (a copy) and @nobody; @main will report. See `@gera`, `ask @gera now` and `@main`." });
+  const prose = chatMessage("main-2", "participant", 12, { participantId: MAIN.id,
+    content: "Asked @gera (a copy), @olga and @nobody; @main will report. See `@gera`, `ask @gera now`, `npm i @types/node` and `@main`; mail me@gera.dev or @gera/pkg." });
   const bubble = chatMessage("ask-2", "user", 13, { content: "@main Reply to me", metadata: { askedParticipantIds: [MAIN.id] } });
   let renderer: ReturnType<typeof create> | undefined;
   act(() => {
@@ -196,17 +201,21 @@ test("a member's mention in a message is a chip with its logo and task that open
   });
   const root = renderer!.root;
   const chips = root.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-member-chip");
-  assert.equal(chips.length, 2, "a handle alone in inline code is a chip too");
+  assert.deepEqual(chips.map((chip) => [chip.props["data-participant-id"], textOf(chip)]), [
+    [GERA.id, "Fix the token refresh"], ["p-olga", "Read the old report"], [GERA.id, "Fix the token refresh"], [GERA.id, "Fix the token refresh"]
+  ], "in prose, a handle alone in code, a handle among other code");
   const chip = chips[0]!;
-  assert.equal(textOf(chip), "Fix the token refresh");
-  assert.deepEqual(root.findAll((node) => node.type === "code").map(textOf), ["ask Fix the token refresh now", "main"], "a handle among other code is its title, the main session's its plain name");
+  assert.deepEqual(root.findAll((node) => node.type === "code").map(textOf), ["ask ", " now", "npm i @types/node", "@main"],
+    "code around a member's chip and every other code as written");
   assert.equal(chip.findAll((node) => node.props?.["data-provider-kind"] === GERA.kind).length, 1);
   act(() => chip.props.onClick({ preventDefault: noop }));
   assert.deepEqual(opened, [`${GERA.id}@gera-reply`]);
   const articles = root.findAll((node) => node.type === "article");
-  assert.match(textOf(articles[0]!), /Asked Fix the token refresh \(a copy\) and nobody; main will report\./);
+  const text = textOf(articles[0]!);
+  assert.match(text, /Asked Fix the token refresh \(a copy\), Read the old report and @nobody; @main will report\./, "the main session and nobody as written");
+  assert.match(text, /mail me@gera\.dev or @gera\/pkg\./, "an address and a package name as written");
   assert.equal(textOf(articles[1]!.find(hasClass("message-content"))), "Reply to me", "the leading mention of the main session is left out");
-  assert.doesNotMatch(textOf(root), /@/);
+  assert.doesNotMatch(text.replace("me@gera.dev", "").replace("@gera/pkg", ""), /@gera|@olga/, "no member's handle");
   assert.equal(root.findAll(hasClass("chat-mention")).length, 0, "no highlighted mention");
 });
 

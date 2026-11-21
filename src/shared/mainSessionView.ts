@@ -361,3 +361,37 @@ export function isMainSessionDelegationRosterCard(
   return Array.isArray(operations) && operations.length > 0 &&
     operations.every((operation) => operation?.type === "add_new_participant_to_chat" || operation?.type === "add_existing_participant_to_chat");
 }
+
+/** The longest handle a member can have. */
+export const SESSIONS_MENTION_HANDLE_MAX_CHARS = 32;
+
+/** A piece of text as the sessions view shows it: as written, or a member's
+ *  `@handle` (as written, without the "@"), shown as that member's chip. */
+export type SessionsMentionPiece = { text: string; handle?: undefined } | { handle: string; text?: undefined };
+
+/**
+ * A member's handle in a message, in the sessions view (docs/main-session.md):
+ * one rule for the desktop and the phone, inside code and outside it. Only an
+ * exact `@handle` of a member of the chat or a former one (`isMember`, given
+ * the handle in lower case) is that member's chip: at most 32 characters, not
+ * part of a longer word, an e-mail address, a path or a package name such as
+ * `@types/node`. Everything else, the main session's handle and handles of
+ * nobody included, stays as written.
+ */
+export function sessionsMentionPieces(text: string, isMember: (handle: string) => boolean): SessionsMentionPiece[] {
+  const source = typeof text === "string" ? text : "";
+  const pattern = /(^|[^A-Za-z0-9_@./\\-])@([A-Za-z0-9][A-Za-z0-9_-]*)(?![A-Za-z0-9_\-/])/g;
+  const pieces: SessionsMentionPiece[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(source)) !== null) {
+    const handle = match[2]!;
+    if (handle.length > SESSIONS_MENTION_HANDLE_MAX_CHARS || !isMember(handle.toLowerCase())) continue;
+    const start = match.index + match[1]!.length;
+    if (start > cursor) pieces.push({ text: source.slice(cursor, start) });
+    pieces.push({ handle });
+    cursor = start + 1 + handle.length;
+  }
+  if (cursor < source.length) pieces.push({ text: source.slice(cursor) });
+  return pieces;
+}

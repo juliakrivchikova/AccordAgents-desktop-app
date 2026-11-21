@@ -5985,17 +5985,26 @@
     while ((match = pattern.exec(source)) !== null) {
       appendPlainText(parent, source.slice(cursor, match.index));
       if (match[2] !== undefined) {
-        // The sessions view names members by their task, never by handle: a
-        // member's handle set as code is still its chip, and a known handle
-        // inside longer code reads as its title. Other @words stay as typed.
-        const scope = sessionsMentionScope;
-        const handleOnly = scope ? match[2].trim().match(/^@([A-Za-z0-9][A-Za-z0-9_-]*)$/) : null;
-        if (handleOnly && sessionsKnownHandle(scope, handleOnly[1])) {
-          appendSessionsMentions(parent, "@" + handleOnly[1], scope);
-        } else {
+        // In the sessions view a member's handle in code is its chip, between
+        // the code around it; the rest of the code stays as written (the
+        // desktop's rule, sessionsMentionPieces).
+        const pieces = sessionsMentionPiecesOf(match[2], sessionsMentionScope);
+        if (!pieces.some(function (piece) { return piece.handle !== undefined; })) {
           const code = document.createElement("code");
-          code.textContent = scope ? sessionsCodeHandles(match[2], scope) : match[2];
+          code.textContent = match[2];
           parent.append(code);
+        } else {
+          pieces.forEach(function (piece) {
+            if (piece.handle !== undefined) {
+              parent.append(sessionsMemberChip(piece.handle, sessionsMentionScope));
+            } else if (piece.text.trim()) {
+              const code = document.createElement("code");
+              code.textContent = piece.text;
+              parent.append(code);
+            } else {
+              parent.append(document.createTextNode(piece.text));
+            }
+          });
         }
       } else if (match[3] !== undefined) {
         const strong = document.createElement("strong");
@@ -12523,49 +12532,36 @@
     return false;
   }
 
-  /** A mention in a message, in the sessions view: a member is a link chip
-   *  (its logo and task) that opens its session; anyone else (the main
-   *  session, a handle nobody has) is plain text without "@". */
-  function sessionsKnownHandle(scope, handle) {
-    const key = String(handle || "").replace(/^@/, "").toLowerCase();
-    return Boolean(key) && (scope.byHandle.has(key) || key === String(scope.mainHandle || "").replace(/^@/, ""));
+  /** Which `@handle` in a message is a member's chip in the sessions view,
+   *  in prose and in code: the desktop's own rule (sessionsMentionPieces),
+   *  an exact handle of a member or a former one; everything else, the main
+   *  session's handle and handles of nobody included, stays as written. */
+  function sessionsMentionPiecesOf(text, scope) {
+    const source = String(text || "");
+    const shared = mobileSharedRules();
+    if (!scope || !shared || typeof shared.sessionsMentionPieces !== "function") return source ? [{ text: source }] : [];
+    return shared.sessionsMentionPieces(source, function (handle) { return scope.byHandle.has(handle); });
   }
 
-  /** Code that holds a member's handle among other text: the handle as the
-   *  view names that member (its task's title; the main session's plain
-   *  name). Handles of nobody in the chat (`@types/node`) stay. */
-  function sessionsCodeHandles(text, scope) {
-    return String(text || "").replace(/(^|[^A-Za-z0-9_@./-])@([A-Za-z0-9][A-Za-z0-9_-]*)(?![A-Za-z0-9_/-])/g, function (whole, before, handle) {
-      if (!sessionsKnownHandle(scope, handle)) return whole;
-      const member = scope.byHandle.get(handle.toLowerCase());
-      return before + (member ? member.title : handle);
-    });
+  /** A member's chip: its provider's logo and its task, opening its session. */
+  function sessionsMemberChip(handle, scope) {
+    const member = scope && scope.byHandle.get(String(handle).toLowerCase());
+    if (!member) return document.createTextNode("@" + handle);
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "sessions-member-chip";
+    chip.dataset.openMember = member.id;
+    if (member.focus) chip.dataset.focusMessage = member.focus;
+    const title = document.createElement("span");
+    title.textContent = member.title;
+    chip.append(providerLogoElement(member.kind, "is-chip"), title);
+    return chip;
   }
 
   function appendSessionsMentions(parent, text, scope) {
-    const pattern = /(^|[^A-Za-z0-9_@./-])@([A-Za-z0-9][A-Za-z0-9_-]*)/g;
-    let cursor = 0;
-    let match;
-    while ((match = pattern.exec(text)) !== null) {
-      const start = match.index + match[1].length;
-      if (start > cursor) parent.append(document.createTextNode(text.slice(cursor, start)));
-      const member = scope.byHandle.get(match[2].toLowerCase());
-      if (member) {
-        const chip = document.createElement("button");
-        chip.type = "button";
-        chip.className = "sessions-member-chip";
-        chip.dataset.openMember = member.id;
-        if (member.focus) chip.dataset.focusMessage = member.focus;
-        const title = document.createElement("span");
-        title.textContent = member.title;
-        chip.append(providerLogoElement(member.kind, "is-chip"), title);
-        parent.append(chip);
-      } else {
-        parent.append(document.createTextNode(match[2]));
-      }
-      cursor = start + 1 + match[2].length;
-    }
-    if (cursor < text.length) parent.append(document.createTextNode(text.slice(cursor)));
+    sessionsMentionPiecesOf(text, scope).forEach(function (piece) {
+      parent.append(piece.handle !== undefined ? sessionsMemberChip(piece.handle, scope) : document.createTextNode(piece.text));
+    });
   }
 
   /** The chat header's two views. A chat made before main sessions shows

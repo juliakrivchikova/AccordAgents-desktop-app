@@ -69,6 +69,9 @@ export {
   sessionsMemberStatus, sessionsMemberTitle, sessionsTaskEntries, sessionsTaskGroupLabel, sessionsTaskReplyLine, sessionsTaskRunningSince,
   sessionsTaskStatus, sessionsWaitingText
 } from "./mainSessionView";
+// A member's handle in a message, in code and outside it: which `@handle`
+// is the member's chip and what stays as written, by the desktop's rule.
+export { sessionsMentionPieces } from "./mainSessionView";
 // Which message is an Accord launch card: the User's own launch, and the
 // main session's (accordLaunchByMainSession), by the desktop's rule.
 export { accordLaunchCardForMessage } from "./accordLaunchCard";

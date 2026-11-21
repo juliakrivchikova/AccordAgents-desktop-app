@@ -1856,6 +1856,10 @@ export interface ChatPromptContextPointerEntry {
   messageId: string;
   sequence: number;
   createdAt?: string;
+  /** The newest post of a reply still being written that the member has
+   *  read (pendingReplyPostsForPromptContext), when newer than the message
+   *  above: its next turn reads only posts made after it. */
+  postsReadThrough?: string;
 }
 
 export type ChatPromptContextPointerScope =

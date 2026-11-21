@@ -33,6 +33,7 @@ import {
   sessionsTaskStatus,
   sessionsTaskTitle,
   shortenAtWord,
+  sessionsMentionPieces,
   sessionsWaitingText
 } from "./mainSessionView";
 import type { ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
@@ -331,4 +332,31 @@ test("the member-added card of the main session's delegation is not shown; cards
   assert.equal(isMainSessionDelegationRosterCard({ ...added, status: "pending" }, "p-main"), false, "waits for the User");
   assert.equal(isMainSessionDelegationRosterCard({ ...added, requesterParticipantId: "p-drew" }, "p-main"), false, "another member's change");
   assert.equal(isMainSessionDelegationRosterCard({ ...added, request: { operations: [{ type: "remove_participant_from_chat" }] } } as typeof added, "p-main"), false, "a removal");
+});
+
+test("a member's handle is its chip only as an exact @handle of a current or former member; everything else stays as written", () => {
+  const members = new Set(["gera", "drew-2"]);
+  const isMember = (key: string): boolean => members.has(key);
+  const pieces = (text: string) => sessionsMentionPieces(text, isMember);
+  assert.deepEqual(pieces("Asked @gera and @Drew-2, then @main and @nobody."), [
+    { text: "Asked " }, { handle: "gera" }, { text: " and " }, { handle: "Drew-2" }, { text: ", then @main and @nobody." }
+  ], "members by their handle in any case; the main session and nobody as written");
+  assert.deepEqual(pieces("@gera"), [{ handle: "gera" }]);
+  assert.deepEqual(pieces("ask @gera now"), [{ text: "ask " }, { handle: "gera" }, { text: " now" }]);
+  assert.deepEqual(pieces("(@gera), @gera: @gera."), [{ text: "(" }, { handle: "gera" }, { text: "), " }, { handle: "gera" }, { text: ": " }, { handle: "gera" }, { text: "." }]);
+  for (const asWritten of [
+    "npm i @gera/node", // a package name
+    "node_modules/@gera", // a path
+    "mail me at me@gera", // an e-mail address
+    "@@gera", "x.@gera", "a-@gera",
+    "@gera_x and @gerah", // a longer word
+    "@gera-", // a longer handle
+    `@${"g".repeat(33)}` // longer than a handle
+  ]) {
+    assert.deepEqual(pieces(asWritten), [{ text: asWritten }], asWritten);
+  }
+  members.add("g".repeat(32));
+  assert.deepEqual(pieces(`@${"g".repeat(32)}`), [{ handle: "g".repeat(32) }], "a 32-character handle is one");
+  assert.deepEqual(pieces(`@${"g".repeat(33)}`), [{ text: `@${"g".repeat(33)}` }], "33 is not");
+  assert.deepEqual(pieces(""), []);
 });

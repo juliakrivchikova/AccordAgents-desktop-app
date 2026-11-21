@@ -50,9 +50,16 @@ full).
   (`postedInto: "running-reply"`) and says that `app_chat_react` with that
   id reacts to the whole reply.
 - A member whose turn starts while the poster still runs reads the posts
-  made since it last read, as one finished message under the poster's
-  handle (`pendingReplyPostsForPromptContext`); they never move its context
-  pointer, so the reply itself is read once it is done.
+  made since the newest post it already read (`postsReadThrough` on its
+  context pointer), as one finished message under the poster's handle
+  (`pendingReplyPostsForPromptContext`). The posts never move its context
+  pointer to the reply, but the finished reply stays where the poster's
+  turn began: a later turn of the reader reads it only if the reader's
+  pointer is still before that place. When the pointer has already moved
+  past it (the reader read a finished message written after the poster's
+  turn began, such as the question it was asked), the finished reply is not
+  read automatically; the reader saw only the posts, and reads the reply
+  with `app_chat_read_messages`.
 
 ## The two views (a view only)
 
@@ -69,10 +76,15 @@ chat without a main session is always `classic`; its switch is disabled.
     the task in `app_chat_delegate_task`, else the task's first sentence cut
     at a word to 40 characters (`sessionsTaskTitle`, `sessionsMemberTitle`;
     the phone gets it with the task), with provider, model and a non-generic role
-    under it (`sessionsMemberDetail`); a mention of a member in a message
-    is a chip (logo + task) that opens its session, a mention of the main
-    session or of nobody is its plain name, and a leading mention of the
-    main session is left out of the User's bubble (`withoutLeadingMention`);
+    under it (`sessionsMemberDetail`); in a message, in prose and in code
+    alike, only an exact `@handle` of a member or a former member (at most
+    32 characters, not part of a longer word, an e-mail address, a path or
+    a package name such as `@types/node`) is a chip (logo + task) that
+    opens its session, one rule on the desktop and the phone
+    (`sessionsMentionPieces`); everything else, the main session's handle
+    and handles of nobody included, stays as written, and a leading
+    mention of the main session is left out of the User's bubble
+    (`withoutLeadingMention`);
   - one reading column (`--chat-reading-width`, 768px) holds the main
     timeline and the composer; the User's messages are right-aligned
     bubbles, the main session's replies full width;

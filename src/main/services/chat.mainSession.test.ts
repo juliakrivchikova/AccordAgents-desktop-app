@@ -722,23 +722,27 @@ test("a combined resume cuts oversized replies: each to 12,000 characters, all t
   assert.ok(storage.current.messages.filter((message: ChatMessage) => replyIds.includes(message.id)).every((message: ChatMessage) => message.content.length > 15_000));
 });
 
-function restartedChat(statuses: Array<"answered" | "running">): Conversation {
+/** A chat whose main session gave tasks in one turn ("turn-old") before the
+ *  app restarted; `at`: when the tasks were given and the answered ones
+ *  answered (a few minutes ago by default, so a restart may still resume). */
+function restartedChat(statuses: Array<"answered" | "running">, at = new Date(Date.now() - 5 * 60_000).toISOString()): Conversation {
   const main = mainSession("codex-cli", { model: undefined });
   const members = statuses.map((_status, index) => member(`m${index}`, `m${index}`));
   const conversation = mainSessionChat([main, ...members], { participantSessions: [sessionRecord(main, "main-thread")] });
+  conversation.messages[0]!.createdAt = at;
   statuses.forEach((status, index) => {
     const replyId = `reply-${index}`;
     conversation.messages.push({
-      id: `request-${index}`, role: "participant", participantId: main.id, participantLabel: "@main", content: `@m${index} Task ${index}`, createdAt: NOW, status: "done",
+      id: `request-${index}`, role: "participant", participantId: main.id, participantLabel: "@main", content: `@m${index} Task ${index}`, createdAt: at, status: "done",
       metadata: { sourceMessageId: "user-message", threadId: "user-message", participantRequest: {
         id: `batch-${index}`, requesterParticipantId: main.id, requesterHandle: "main", source: "mcp", resumeRequester: true, status, depth: 1, requesterDepth: 0,
-        chainRootId: "user-message", createdAt: NOW, updatedAt: NOW, triggerMessageId: "user-message", delegation: { start: "clean", turnId: "turn-old" },
-        items: [{ targetParticipantId: `m${index}`, targetHandle: `m${index}`, prompt: `Task ${index}`, title: `Task ${index}`, status, createdAt: NOW, updatedAt: NOW,
+        chainRootId: "user-message", createdAt: at, updatedAt: at, triggerMessageId: "user-message", delegation: { start: "clean", turnId: "turn-old" },
+        items: [{ targetParticipantId: `m${index}`, targetHandle: `m${index}`, prompt: `Task ${index}`, title: `Task ${index}`, status, createdAt: at, updatedAt: at,
           ...(status === "answered" ? { replyMessageId: replyId } : {}) }]
       } }
     } as ChatMessage);
     if (status === "answered") {
-      conversation.messages.push({ id: replyId, role: "participant", participantId: `m${index}`, participantLabel: `@m${index}`, content: `Answer ${index}.`, createdAt: NOW, status: "done",
+      conversation.messages.push({ id: replyId, role: "participant", participantId: `m${index}`, participantLabel: `@m${index}`, content: `Answer ${index}.`, createdAt: at, status: "done",
         metadata: { sourceMessageId: `request-${index}`, chatThreadRootId: `request-${index}` } } as ChatMessage);
     }
   });
@@ -786,13 +790,28 @@ test("after a restart while the main session's turn ran, its tasks that had all 
   assert.equal(resumesOf(runs, "main-id").length, 1);
 });
 
-test("a combined resume a restart cut short is made again instead of holding every later look", async () => {
+test("a combined resume a restart cut short after it began is not made again: its tasks are settled and stop holding later looks", async () => {
   const conversation = restartedChat(["answered", "answered"]);
   for (const message of conversation.messages) {
     if (message.metadata?.participantRequest) message.metadata.participantRequest.status = "resuming_requester";
   }
+  // Its resume line was written: the resume turn ran, and may have done its work.
   conversation.messages.push({ id: "cut-trigger", role: "system", content: "Auto-resumed @main after member request.\nAll 2 tasks you gave in one turn have ended:",
-    createdAt: NOW, status: "done", metadata: { sourceMessageId: "request-0", parentMessageId: "request-0", threadId: "user-message" } } as ChatMessage);
+    createdAt: new Date(Date.now() - 4 * 60_000).toISOString(), status: "done", metadata: { sourceMessageId: "request-0", parentMessageId: "request-0", threadId: "user-message" } } as ChatMessage);
+  const { service, storage, runs, debugEvents } = testService({ conversation });
+  await (service as any).requireChat("conversation-1");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(resumesOf(runs, "main-id").length, 0, "the resume turn is not replayed");
+  assert.deepEqual(delegationBatches(storage.current).map((batch) => batch.status), ["answered", "answered"], "settled: no longer resuming");
+  assert.equal(debugEvents.some((event) => event.event === "chat.participant-request.auto-resume.recovered"), false);
+  assert.ok(debugEvents.some((event) => event.event === "chat.participant-request.auto-resume.settled" && event.payload.reason === "resume-already-made"));
+});
+
+test("a combined resume a restart lost before its resume line was written is made, once", async () => {
+  const conversation = restartedChat(["answered", "answered"]);
+  for (const message of conversation.messages) {
+    if (message.metadata?.participantRequest) message.metadata.participantRequest.status = "resuming_requester";
+  }
   const { service, storage, runs } = testService({ conversation });
   await (service as any).requireChat("conversation-1");
   await waitFor(() => delegationBatches(storage.current).every((batch) => Boolean(batch.autoResumeMessageId)));
@@ -802,6 +821,74 @@ test("a combined resume a restart cut short is made again instead of holding eve
   assert.match(resumes[0]!.prompt, /Answer 0\./);
   assert.match(resumes[0]!.prompt, /Answer 1\./);
   assert.deepEqual(delegationBatches(storage.current).map((batch) => batch.status), ["completed", "completed"]);
+});
+
+test("tasks that ended more than a day before the restart do not wake the main session; they are settled quietly", async () => {
+  const { service, storage, runs, debugEvents } = testService({ conversation: restartedChat(["answered", "answered"], new Date(Date.now() - 25 * 60 * 60_000).toISOString()) });
+  await (service as any).requireChat("conversation-1");
+  await service.hydrateContextUsage(clone(storage.current));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(resumesOf(runs, "main-id").length, 0);
+  assert.ok(debugEvents.some((event) => event.event === "chat.participant-request.auto-resume.settled" && event.payload.reason === "too-old"));
+  assert.equal(storage.current.messages.filter((message: ChatMessage) => message.role === "system").length, 0, "no resume line either");
+});
+
+test("a task a restart ended a day after its turn does not wake the main session with the others' answers", async () => {
+  const { service, runs, debugEvents } = testService({ conversation: restartedChat(["answered", "running"], new Date(Date.now() - 25 * 60 * 60_000).toISOString()) });
+  await (service as any).requireChat("conversation-1");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(resumesOf(runs, "main-id").length, 0);
+  assert.ok(debugEvents.some((event) => event.event === "chat.participant-request.auto-resume.settled" && event.payload.reason === "too-old"));
+});
+
+test("after the User wrote again, a restart does not wake the main session with the tasks that ended before", async () => {
+  const conversation = restartedChat(["answered", "answered"]);
+  conversation.messages.push({ id: "user-later", role: "user", content: "Never mind, do something else.", createdAt: new Date(Date.now() - 60_000).toISOString(), status: "done" } as ChatMessage);
+  const { service, runs, debugEvents } = testService({ conversation });
+  await (service as any).requireChat("conversation-1");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(resumesOf(runs, "main-id").length, 0);
+  assert.ok(debugEvents.some((event) => event.event === "chat.participant-request.auto-resume.settled" && event.payload.reason === "moved-on"));
+});
+
+test("after a later turn of the main session, a restart does not wake it with the tasks that ended before", async () => {
+  const conversation = restartedChat(["answered", "answered"]);
+  // A turn of its own after the tasks ended (another member asked it), not the turn that gave them.
+  conversation.messages.push({ id: "main-later", role: "participant", participantId: "main-id", participantLabel: "@main", content: "Already merged both answers.",
+    createdAt: new Date(Date.now() - 60_000).toISOString(), status: "done", metadata: { turnSegmentId: "turn-later" } } as ChatMessage);
+  const { service, runs, debugEvents } = testService({ conversation });
+  await (service as any).requireChat("conversation-1");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(resumesOf(runs, "main-id").length, 0);
+  assert.ok(debugEvents.some((event) => event.event === "chat.participant-request.auto-resume.settled" && event.payload.reason === "moved-on"));
+});
+
+test("the turn that gave the tasks writing after they ended still lets a restart resume the main session", async () => {
+  const conversation = restartedChat(["answered", "answered"]);
+  // A post of the turn that gave the tasks, after they answered: still that turn.
+  conversation.messages.push({ id: "main-post", role: "participant", participantId: "main-id", participantLabel: "@main", content: "Both answered; merging.",
+    createdAt: new Date(Date.now() - 60_000).toISOString(), status: "done", metadata: { turnSegmentId: "turn-old" } } as ChatMessage);
+  const { service, storage, runs } = testService({ conversation });
+  await (service as any).requireChat("conversation-1");
+  await waitFor(() => delegationBatches(storage.current).every((batch) => Boolean(batch.autoResumeMessageId)));
+  assert.equal(resumesOf(runs, "main-id").length, 1);
+});
+
+test("a restart looks at a chat's ended tasks once, not on every read of the chat", async () => {
+  const conversation = restartedChat(["answered", "answered"]);
+  for (const message of conversation.messages) {
+    if (message.metadata?.participantRequest) message.metadata.participantRequest.status = "failed";
+  }
+  conversation.messages.push({ id: "failed-trigger", role: "system", content: "Auto-resumed @main after member request.",
+    createdAt: new Date(Date.now() - 4 * 60_000).toISOString(), status: "done", metadata: { sourceMessageId: "request-0", parentMessageId: "request-0", threadId: "user-message" } } as ChatMessage);
+  const { service, storage } = testService({ conversation });
+  const internals = service as any;
+  let looks = 0;
+  const original = internals.delegationGroupResumeWasMade.bind(service);
+  internals.delegationGroupResumeWasMade = (...args: unknown[]) => { looks += 1; return original(...args); };
+  for (let index = 0; index < 3; index += 1) await internals.requireChat("conversation-1");
+  await service.hydrateContextUsage(clone(storage.current));
+  assert.equal(looks, 1);
 });
 
 test("a combined resume that was made and failed is not made again by a restart", async () => {

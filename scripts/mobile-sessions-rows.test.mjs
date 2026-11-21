@@ -6,7 +6,8 @@
  * other view; a running main reply that gave tasks keeps its node and its
  * task rows while it streams; a mention chip follows its member's new task
  * title; a removed member keeps its provider's logo everywhere; a member's
- * handle set as code is still its chip; a stopped task's line is muted.
+ * handle in code is still its chip, the rest of the code as written; a
+ * stopped task's line is muted.
  *
  * Desktop Chrome, not the installed phone: supporting evidence for the phone
  * check, not a stand-in for it.
@@ -99,9 +100,9 @@ test("sessions rows on the phone stay in step: Worked for, view switch, streamin
   const r0 = await app.evaluate(`(() => { const node = ${row("r0")}.querySelector(".message-content");
     return { chips: [...node.querySelectorAll(".sessions-member-chip")].map((chip) => [chip.dataset.openMember, chip.querySelector(".provider-logo").dataset.providerKind, chip.textContent]),
       code: [...node.querySelectorAll("code")].map((code) => code.textContent) }; })()`);
-  assert.deepEqual(r0.chips, [[OLGA_ID, "codex-cli", "Old report"], ["p-drew", "claude-code", "Restyle button"]],
-    "a removed member's chip keeps its logo; a handle set as code is still its member's chip");
-  assert.deepEqual(r0.code, ["npm i @types/node", "ping Restyle button now"], "other @words in code stay; a member's handle in longer code reads as its title");
+  assert.deepEqual(r0.chips, [[OLGA_ID, "codex-cli", "Old report"], ["p-drew", "claude-code", "Restyle button"], ["p-drew", "claude-code", "Restyle button"]],
+    "a removed member's chip keeps its logo; a member's handle in code, alone or among other code, is its chip");
+  assert.deepEqual(r0.code, ["npm i @types/node", "ping ", " now"], "other @words in code stay as written; code around a member's chip too");
 
   // --- a running main reply with task rows keeps its node while it streams --
   await app.evaluate(`(() => { const node = ${row("r1")}; node.__kept = true; node.querySelector(".sessions-delegation").__kept = true; })()`);

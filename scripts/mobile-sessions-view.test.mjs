@@ -78,7 +78,8 @@ function sessionsChatMessages() {
     // This turn: three tasks, one done, two still going.
     { id: "u1", role: "user", content: "@main Fix the login page", status: "done", createdAt: at(30), metadata: { deliveryTargets: [MAIN.id] } },
     { id: "r1", role: "participant", participantId: MAIN.id, participantLabel: "@main",
-      content: "I split this: @drew restyles it, @taylor tests it and @sam reads the logs. Ask @main or @nobody.", status: "done", createdAt: at(29.5),
+      content: "I split this: @drew restyles it, @taylor tests it and @sam reads the logs. Ask @main or @nobody. See `@drew`, `ask @taylor now`, `npm i @types/node` and `@main`; mail me@drew.dev, @drew/pkg or @olga.",
+      status: "done", createdAt: at(29.5),
       metadata: { sourceMessageId: "u1", workedMs: 54_000 } },
     request("req", "u1", 28, [
       item(DREW.id, "drew", "Restyle the login button\nUse the new tokens.", "running", 28),
@@ -158,20 +159,25 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   assert.deepEqual(header, { switch: false, chevron: true, label: "Members (2 running)", count: "2", dot: true });
   // The User's message to the main session reads without its @main.
   assert.equal(await app.evaluate(`document.querySelector('#message-list .message-row[data-thread-root="u1"] .message-content').textContent.trim()`), "Fix the login page");
-  // Members are chips with their provider's logo and their task; the main
-  // session and an unknown handle are plain words. No "@" anywhere.
+  // Only a current or former member's exact @handle is its chip (its
+  // provider's logo and its task), in prose and in code, by the desktop's
+  // rule; everything else stays as written.
   const reply = await app.evaluate(`(() => { const row = document.querySelector('#message-list .message-row[data-thread-root="r1"]');
     return { text: row.querySelector(".message-content").textContent.replace(/\\s+/g, " ").trim(),
+      code: [...row.querySelectorAll(".message-content code")].map((node) => node.textContent),
       chips: [...row.querySelectorAll(".sessions-member-chip")].map((chip) => [chip.dataset.openMember, chip.querySelector(".provider-logo").dataset.providerKind, chip.textContent]),
       worked: row.querySelector(".sessions-worked-toggle")?.textContent, open: row.querySelectorAll(".sessions-delegation").length,
       order: [...row.querySelector(".message-copy").children].map((node) => node.className.split(" ")[0]) }; })()`);
-  assert.equal(reply.text, "I split this: Restyle the login button restyles it, Login tests tests it and Check the server logs for every failed… reads the logs. Ask main or nobody.");
-  assert.deepEqual(reply.chips, [["p-drew", "claude-code", "Restyle the login button"], ["p-taylor", "codex-cli", "Login tests"], ["p-sam", "gemini-cli", "Check the server logs for every failed…"]],
-    "short titles: the main session's, else the task's first sentence cut at a word");
+  assert.equal(reply.text, "I split this: Restyle the login button restyles it, Login tests tests it and Check the server logs for every failed… reads the logs. " +
+    "Ask @main or @nobody. See Restyle the login button, ask Login tests now, npm i @types/node and @main; mail me@drew.dev, @drew/pkg or Summarise the old report.");
+  assert.deepEqual(reply.chips, [["p-drew", "claude-code", "Restyle the login button"], ["p-taylor", "codex-cli", "Login tests"], ["p-sam", "gemini-cli", "Check the server logs for every failed…"],
+    ["p-drew", "claude-code", "Restyle the login button"], ["p-taylor", "codex-cli", "Login tests"], [OLGA_ID, "unknown", "Summarise the old report"]],
+    "short titles: the main session's, else the task's first sentence cut at a word; in code too, and a removed member's");
+  assert.deepEqual(reply.code, ["ask ", " now", "npm i @types/node", "@main"], "code around a member's chip, and every other code as written");
   assert.equal(reply.worked, "Worked for 54s", "the turn's work, folded");
   assert.equal(reply.open, 0, "folded once the reply is finished");
   assert.deepEqual(reply.order.slice(0, 3), ["message-meta", "sessions-worked", "message-content"], "the fold comes before the reply's text");
-  assert.equal(await app.evaluate(`/@[A-Za-z]/.test(document.getElementById("message-list").innerText)`), false, "no handle on the main timeline");
+  assert.equal(await app.evaluate(`/@(drew|taylor|sam|olga)\\b(?![./])/.test(document.getElementById("message-list").innerText)`), false, "no member's handle on the main timeline");
   // No avatar picture anywhere in the view.
   assert.equal(await app.evaluate(`[...document.querySelectorAll("#message-list .message-avatar, #message-list .avatar-icon, #message-list img")].filter((node) => node.offsetParent !== null).length`), 0);
   // The logo pictures are served as pictures.

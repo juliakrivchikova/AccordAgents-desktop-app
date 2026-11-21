@@ -9548,6 +9548,32 @@ test("a member whose turn starts while another is still running reads that membe
   assert.equal(prepared.pointerAdvance?.entry.messageId, "ask-reader", "the running reply is not passed by its posts");
 });
 
+test("posts a member read when its turn started are not read again by its next turn, though made after the question that turn answered", async () => {
+  const participant = chatParticipant("codex-cli");
+  const reader = chatParticipant("claude-code");
+  const conversation = chatConversation([participant, reader]);
+  conversation.messages.push(runningReply(participant));
+  // The User asks the other member first; its turn starts later, after a post.
+  const ask: ChatMessage = { id: "ask-reader", role: "user", content: "@claude what do you think?", createdAt: new Date(Date.now() - 10_000).toISOString(), status: "done" };
+  conversation.messages.push(ask);
+  const { service, storage } = testService({ conversation });
+  liveTurn(service, participant);
+  await service.sendChatMessageFromTool(turnActor(participant), { content: "First finding." });
+  const internals = service as any;
+  let current = clone(storage.current) as Conversation;
+  const first = await internals.preparePromptContextForRun(current, current, reader, ask, { type: "timeline" }, false);
+  assert.match(first.block, /First finding\./, "its turn reads the post made before it started");
+  internals.commitPromptContextPointerAdvance(storage.current, reader.id, first.pointerAdvance);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await service.sendChatMessageFromTool(turnActor(participant), { content: "Second finding." });
+  const again: ChatMessage = { id: "ask-reader-2", role: "user", content: "@claude and now?", createdAt: new Date(Date.now() + 1000).toISOString(), status: "done" };
+  storage.current.messages.push(again);
+  current = clone(storage.current) as Conversation;
+  const second = await internals.preparePromptContextForRun(current, current, reader, again, { type: "timeline" }, false);
+  assert.match(second.block, /Second finding\./, "a later post is read");
+  assert.doesNotMatch(second.block, /First finding\./, "a post already read is not read again");
+});
+
 test("posts that are messages of their own stay so: an Accord resolution, another thread or parent, no turn running, a turn already ended", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);

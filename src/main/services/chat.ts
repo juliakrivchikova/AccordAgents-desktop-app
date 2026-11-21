@@ -568,6 +568,9 @@ export const TASK_REPLIES_PROMPT_MAX_CHARS = 60_000;
 const PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION = "Request was interrupted before completion.";
 /** How the line that resumes a requester after its request starts. */
 const PARTICIPANT_REQUEST_AUTO_RESUME_PREFIX = "Auto-resumed";
+/** How long after the last of the main session's tasks of a turn ended a
+ *  restart may still resume it with them (delegationGroupRecoveryVerdict). */
+const DELEGATION_GROUP_RECOVERY_MAX_AGE_MS = 24 * 60 * 60_000;
 
 /** A message a turn reads as chat context; `interimPostsOnly`: the posts of
  *  a reply still being written (pendingReplyPostsForPromptContext). */
@@ -1212,6 +1215,9 @@ export class ChatService {
   /** Groups of the main session's tasks of a turn that ended before this
    *  process started, looked at once (recoverDelegationGroupsOfEndedTurns). */
   private readonly delegationGroupsRecovered = new Set<string>();
+  /** Chats whose ended turns' tasks were looked at since this process
+   *  started: the look is made at a chat's first read, not on every read. */
+  private readonly delegationRecoveryLookedChats = new Set<string>();
   private readonly permissionApprovalAutoResumes = new Set<string>();
   private readonly codexApprovalContinuations = new Set<string>();
   private readonly toolPermissionResolvers = new Map<string, Set<(decision: ToolPermissionDecision) => void>>();
@@ -17905,7 +17911,8 @@ export class ChatService {
       const resumedRenderCandidates = isResumingSession
         ? renderCandidates.filter((record) => !this.isParticipantOwnPromptContextMessage(record.message, participant.id))
         : renderCandidates;
-      // A running reply's posts are read, never passed: the reply is read once done.
+      // A running reply's posts are read but never passed: the pointer stops
+      // before the reply unless a finished message after it is read too.
       const advanceTo = [...records].reverse().find((record) => !record.interimPostsOnly);
       const selection = this.selectPromptContextRecords(resumedRenderCandidates, policy);
       const fallbackSelection = resumedRenderCandidates === renderCandidates
@@ -17933,6 +17940,12 @@ export class ChatService {
         resumeFallbackBlock = [resumeFallbackBlock, extra].filter(Boolean).join("\n\n");
       }
       if (advanceTo) {
+        // The newest post this turn read (or an earlier turn did): the next
+        // turn reads only posts made after it.
+        const postsReadThrough = this.newestPostsReadThrough(
+          advanceTo.message.createdAt,
+          [pointer?.postsReadThrough, ...records.flatMap((record) => record.interimPostsOnly ? [record.message.createdAt] : [])]
+        );
         pointerAdvance = {
           scope,
           entry: {
@@ -17940,7 +17953,8 @@ export class ChatService {
             sequence: advanceTo.sequence,
             ...(typeof advanceTo.message.createdAt === "string" && advanceTo.message.createdAt.trim()
               ? { createdAt: advanceTo.message.createdAt }
-              : {})
+              : {}),
+            ...(postsReadThrough ? { postsReadThrough } : {})
           }
         };
         if (runId) {
@@ -18098,14 +18112,31 @@ export class ChatService {
     const pointers = this.normalizedPromptContextPointers(conversation.metadata.promptContextPointers);
     const participantPointers = pointers[participantId] ?? {};
     const current = this.promptContextPointerForScope(participantPointers, advance.scope);
-    if (this.promptContextPointerAtOrAfter(current, advance.entry)) {
+    // The pointer that stays keeps the newest post either turn read.
+    const kept = this.promptContextPointerAtOrAfter(current, advance.entry) ? current! : advance.entry;
+    const postsReadThrough = this.newestPostsReadThrough(kept.createdAt, [current?.postsReadThrough, advance.entry.postsReadThrough]);
+    const { postsReadThrough: _previous, ...keptWithoutPosts } = kept;
+    const next: ChatPromptContextPointerEntry = postsReadThrough ? { ...keptWithoutPosts, postsReadThrough } : keptWithoutPosts;
+    if (kept === current && next.postsReadThrough === current.postsReadThrough) {
       return;
     }
-    this.setPromptContextPointerForScope(pointers, participantId, advance.scope, advance.entry);
+    this.setPromptContextPointerForScope(pointers, participantId, advance.scope, next);
     conversation.metadata = {
       ...conversation.metadata,
       promptContextPointers: pointers
     };
+  }
+
+  /** The newest of these post times, when it is newer than the pointer's
+   *  message (posts older than that are not read again anyway). */
+  private newestPostsReadThrough(pointerCreatedAt: string | undefined, candidates: Array<string | undefined>): string | undefined {
+    let newest: { value: string; time: number } | undefined;
+    for (const value of candidates) {
+      const time = this.lastMessageTimestamp(value);
+      if (time !== undefined && (!newest || time > newest.time)) newest = { value: value!, time };
+    }
+    const pointerTime = this.lastMessageTimestamp(pointerCreatedAt);
+    return newest && (pointerTime === undefined || newest.time > pointerTime) ? newest.value : undefined;
   }
 
   private promptContextPointerAtOrAfter(
@@ -18172,7 +18203,13 @@ export class ChatService {
   ): PromptContextRecord[] {
     const pointerIndex = pointer ? messages.findIndex((message) => message.id === pointer.messageId) : -1;
     const pointerTime = pointerIndex < 0 ? this.lastMessageTimestamp(pointer?.createdAt) : undefined;
-    const postsSince = pointerIndex >= 0 ? this.lastMessageTimestamp(messages[pointerIndex]!.createdAt) : pointerTime;
+    // Posts are read from where the member read them up to, not from the
+    // message it last answered: its turn started later and read those made
+    // in between already.
+    const postsSince = this.latestTimestamp(
+      pointerIndex >= 0 ? this.lastMessageTimestamp(messages[pointerIndex]!.createdAt) : pointerTime,
+      this.lastMessageTimestamp(pointer?.postsReadThrough)
+    );
     return messages
       .map((message, sequence) => ({ message, sequence }))
       .flatMap((record): PromptContextRecord[] => {
@@ -18200,7 +18237,10 @@ export class ChatService {
    * when each post was a message of its own (they live inside the reply now,
    * interimPosts.ts). The posts made after `since`, as one finished message
    * of the poster's with only their pictures. They never move the reader's
-   * pointer (the reply itself is read once it is done).
+   * pointer to the reply; the pointer keeps the newest post read
+   * (postsReadThrough). The finished reply stays where its turn began, so
+   * the reader's later turn reads it only while its pointer is still before
+   * it; once the pointer has passed that place, only the posts were read.
    */
   private pendingReplyPostsForPromptContext(message: ChatMessage, since: number | undefined): ChatMessage | undefined {
     if (message.role !== "participant" || message.status !== "pending" || isChatMessageHiddenFromTimeline(message)) {
@@ -18336,14 +18376,17 @@ export class ChatService {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
       return undefined;
     }
-    const record = raw as { messageId?: unknown; sequence?: unknown; createdAt?: unknown };
+    const record = raw as { messageId?: unknown; sequence?: unknown; createdAt?: unknown; postsReadThrough?: unknown };
     if (typeof record.messageId !== "string" || !record.messageId.trim() || typeof record.sequence !== "number" || !Number.isFinite(record.sequence)) {
       return undefined;
     }
     return {
       messageId: record.messageId,
       sequence: Math.max(0, Math.floor(record.sequence)),
-      ...(typeof record.createdAt === "string" && record.createdAt.trim() ? { createdAt: record.createdAt } : {})
+      ...(typeof record.createdAt === "string" && record.createdAt.trim() ? { createdAt: record.createdAt } : {}),
+      ...(typeof record.postsReadThrough === "string" && this.lastMessageTimestamp(record.postsReadThrough) !== undefined
+        ? { postsReadThrough: record.postsReadThrough }
+        : {})
     };
   }
 
@@ -18978,10 +19021,23 @@ export class ChatService {
       participantRequest: nextBatch
     };
     // A task of the main session that a restart ended: the others of its turn
-    // may have ended before, and nothing else would resume it now.
-    if (nextBatch.delegation?.turnId) {
-      this.delegationGroupsRecovered.add(this.turnSegmentKey(conversation.id, nextBatch.delegation.turnId));
-      this.scheduleDelegationGroupResume(conversation.id, message.id);
+    // may have ended before, and nothing else would resume it now. Before the
+    // chat's first look since the app started, that look (right after this,
+    // recoverDelegationGroupsOfEndedTurns) weighs its whole turn; after it,
+    // the task's turn is weighed here once its last task has ended.
+    const turnId = nextBatch.delegation?.turnId;
+    if (turnId && this.delegationRecoveryLookedChats.has(conversation.id)) {
+      const key = this.turnSegmentKey(conversation.id, turnId);
+      const group = this.delegationTurnGroup(conversation, message, nextBatch);
+      if (!this.delegationGroupsRecovered.has(key) && !group.some((entry) => this.participantRequestHasUnfinishedItems(entry.batch))) {
+        this.delegationGroupsRecovered.add(key);
+        const verdict = this.delegationGroupRecoveryVerdict(conversation, turnId, group.map((entry) => entry.message));
+        if (verdict === "resume") {
+          this.scheduleDelegationGroupResume(conversation.id, message.id);
+        } else {
+          this.logDelegationGroupSettled(conversation.id, group.map((entry) => entry.message.id), verdict, false);
+        }
+      }
     }
     return true;
   }
@@ -18990,25 +19046,33 @@ export class ChatService {
    * The main session's tasks of a turn that does not run here (any more): a
    * restart ended that turn, or cut short the resume that answered it.
    * Nothing in memory looks at them again then (liveTurnSegments and
-   * delegatingTurns are this process's), so the first read of the chat looks
-   * once per group whose requester runs here and whose tasks have all ended:
-   * the main session is resumed with every answer, as at its turn's end. A
-   * resume a restart cut short ("resuming_requester" with no resume going on
-   * here, which would hold every later look) is undone first and made again;
-   * a resume that was made and failed is not made again. Returns whether a
-   * request changed.
+   * delegatingTurns are this process's), so the first read of the chat after
+   * the app started looks once per group whose requester runs here and whose
+   * tasks have all ended. The main session is resumed with every answer, as
+   * at its turn's end, only while nothing has gone on since
+   * (delegationGroupRecoveryVerdict): no resume of them was begun, nobody
+   * wrote to it after them, and they ended within a day. Any other group is
+   * settled quietly; a resume a restart cut short ("resuming_requester" with
+   * no resume going on here, which would hold every later look) stops
+   * holding either way. Returns whether a request changed.
    */
   private recoverDelegationGroupsOfEndedTurns(conversation: Conversation): boolean {
-    const groups = new Map<string, ChatMessage[]>();
+    // A machine that does not know yet which machine it is cannot tell whose
+    // main session runs here: it looks once it does.
+    if (this.delegationRecoveryLookedChats.has(conversation.id) || (this.machineRuntime && !this.hostMachineId)) return false;
+    this.delegationRecoveryLookedChats.add(conversation.id);
+    const groups = new Map<string, { turnId: string; messages: ChatMessage[] }>();
     for (const message of conversation.messages) {
       const batch = message.metadata?.participantRequest;
       const turnId = batch?.delegation?.turnId;
       if (!batch || !turnId || !batch.resumeRequester || batch.completedInToolCall || batch.autoResumeMessageId) continue;
       const key = this.turnSegmentKey(conversation.id, turnId);
-      groups.set(key, [...(groups.get(key) ?? []), message]);
+      const group = groups.get(key) ?? { turnId, messages: [] };
+      group.messages.push(message);
+      groups.set(key, group);
     }
     let changed = false;
-    for (const [key, messages] of groups) {
+    for (const [key, { turnId, messages }] of groups) {
       if (this.liveTurnSegments.has(key) || this.delegatingTurns.has(key) || this.delegationGroupResumes.has(key) ||
         this.delegationGroupsRecovered.has(key)) continue;
       if (messages.some((message) => this.participantRequestAutoResumes.has(message.id) || this.participantRequestRunners.has(message.id))) continue;
@@ -19017,9 +19081,8 @@ export class ChatService {
       if (batches.some((batch) => this.participantRequestHasUnfinishedItems(batch))) continue;
       const requester = this.chatParticipants(conversation).find((participant) => participant.id === batches[0]!.requesterParticipantId);
       if (!requester || !this.ownsParticipant(requester)) continue;
-      const cutShort = batches.some((batch) => batch.status === "resuming_requester");
-      if (!cutShort && this.delegationGroupResumeWasMade(conversation, messages)) continue;
       this.delegationGroupsRecovered.add(key);
+      const cutShort = batches.some((batch) => batch.status === "resuming_requester");
       if (cutShort) {
         const now = new Date().toISOString();
         for (const message of messages) {
@@ -19029,6 +19092,11 @@ export class ChatService {
         }
         changed = true;
       }
+      const verdict = this.delegationGroupRecoveryVerdict(conversation, turnId, messages);
+      if (verdict !== "resume") {
+        this.logDelegationGroupSettled(conversation.id, messages.map((message) => message.id), verdict, cutShort);
+        continue;
+      }
       void this.debugLogs.write("chat.participant-request.auto-resume.recovered", {
         conversationId: conversation.id,
         requestMessageIds: messages.map((message) => message.id),
@@ -19037,6 +19105,50 @@ export class ChatService {
       this.scheduleDelegationGroupResume(conversation.id, messages[0]!.id);
     }
     return changed;
+  }
+
+  /**
+   * Whether a restart may still resume the main session with the tasks of
+   * one of its turns, all ended: only when no resume of them was begun (a
+   * resume line written may have done its work already), nothing was
+   * written to the chat after they ended by the User or by another turn of
+   * the main session, and the last of them ended within a day. A task the
+   * restart itself ended counts as ended when it was given: when it really
+   * stopped is not known, and a resume nobody expects any more is worse than
+   * none.
+   */
+  private delegationGroupRecoveryVerdict(
+    conversation: Conversation,
+    turnId: string,
+    messages: readonly ChatMessage[]
+  ): "resume" | "resume-already-made" | "moved-on" | "too-old" {
+    const batches = messages.flatMap((message) => message.metadata?.participantRequest ? [message.metadata.participantRequest] : []);
+    if (batches.some((batch) => batch.autoResumeMessageId) || this.delegationGroupResumeWasMade(conversation, messages)) {
+      return "resume-already-made";
+    }
+    const endedAt = Math.max(...batches.flatMap((batch) => batch.items.map((item) => Date.parse(
+      item.status === "interrupted" && item.error === PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION ? item.createdAt : item.updatedAt
+    ))).filter(Number.isFinite));
+    if (!Number.isFinite(endedAt) || Date.now() - endedAt > DELEGATION_GROUP_RECOVERY_MAX_AGE_MS) {
+      return "too-old";
+    }
+    const requesterId = batches[0]?.requesterParticipantId;
+    const ownIds = new Set(messages.map((message) => message.id));
+    const movedOn = conversation.messages.some((message) => {
+      if (ownIds.has(message.id) || !(Date.parse(message.createdAt) > endedAt)) return false;
+      return message.role === "user" ||
+        (message.role === "participant" && message.participantId === requesterId && message.metadata?.turnSegmentId !== turnId);
+    });
+    return movedOn ? "moved-on" : "resume";
+  }
+
+  private logDelegationGroupSettled(conversationId: string, requestMessageIds: string[], reason: string, cutShort: boolean): void {
+    void this.debugLogs.write("chat.participant-request.auto-resume.settled", {
+      conversationId,
+      requestMessageIds,
+      reason,
+      cutShort
+    }).catch(() => undefined);
   }
 
   /** Whether a resume of these tasks was already made (its trigger is in the
@@ -23133,6 +23245,11 @@ export class ChatService {
     }
     const parsed = Date.parse(value);
     return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  private latestTimestamp(...values: Array<number | undefined>): number | undefined {
+    const known = values.filter((value): value is number => value !== undefined);
+    return known.length > 0 ? Math.max(...known) : undefined;
   }
 
   private normalizedLastMessageByParticipant(raw: unknown): ChatLastMessageByParticipant {
