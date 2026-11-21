@@ -1400,11 +1400,13 @@
     });
     if (stillStarted.length !== started.length) saveStartedChats(stillStarted);
     // A chat she started here stays hers until it holds something she did
-    // not make: a member at work, a question for her, a line not hers.
+    // not make: a member at work, a question for her, a line not hers. One
+    // her server no longer lists (and that is not still on its way) goes.
     const ownIds = loadStoredStringArray(OWN_CHATS_KEY);
     const stillOwn = ownIds.filter(function (id) {
       const listed = normalized.find(function (chat) { return chat.id === id; });
-      return !listed || (listed.running !== true && listed.waitingChoice !== true && (!listed.who || listed.who === "you:"));
+      if (!listed) return started.some(function (chat) { return chat.id === id; });
+      return listed.running !== true && listed.waitingChoice !== true && (!listed.who || listed.who === "you:");
     });
     if (stillOwn.length !== ownIds.length) saveStoredStringArray(OWN_CHATS_KEY, stillOwn);
     // Same rule as the desktop sidebar: a chat that moved while it was not the

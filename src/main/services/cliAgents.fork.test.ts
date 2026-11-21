@@ -204,6 +204,24 @@ test("claude: a member's session that is not on this device at all is not said t
   }
 });
 
+test("claude: a copy whose point cannot be named says why before the turn when the member's session is here, and nothing when it is not", async () => {
+  const projects = await claudeProjectsWithTranscript("parent-session");
+  const empty = await mkdtemp(path.join(tmpdir(), "aa-claude-projects-empty-"));
+  try {
+    const here = await claudeForkTurns(projects, { unknown: "the app found no reply of it that ended a turn" });
+    assert.deepEqual(here.said, ["0:the app found no reply of it that ended a turn"]);
+    assert.equal(here.turns[0].forkResumeAt, undefined);
+    assert.equal(here.result.forkCutMissed, "the app found no reply of it that ended a turn");
+    const gone = await claudeForkTurns(empty, { unknown: "the app found no reply of it that ended a turn" },
+      [{ ok: false, content: "", error: "claude warm process exited with code 1: No conversation found with session ID: parent-session", forkCopyFailed: true }]);
+    assert.deepEqual(gone.said, []);
+    assert.equal(gone.result.forkCutMissed, undefined);
+  } finally {
+    await rm(projects, { recursive: true, force: true });
+    await rm(empty, { recursive: true, force: true });
+  }
+});
+
 /** A Claude Code that runs on stream-json as 2.1.330 does when it forks:
  *  `--resume <source> --fork-session` of a session it cannot load prints
  *  "No conversation found" and exits before it reads a message. */
@@ -227,7 +245,11 @@ if (source === "crashing-session") {
 }
 const input = readline.createInterface({ input: process.stdin });
 input.on("close", () => process.exit(0));
+let lines = 0;
 input.on("line", () => {
+  lines += 1;
+  // A second message into a copy that already started: the process dies.
+  if (source === "dies-on-second" && lines === 2) process.exit(1);
   send({ type: "system", subtype: "init", session_id: sessionId });
   if (source === "failing-turn") {
     process.stderr.write("API Error: overloaded\\n");
@@ -276,6 +298,24 @@ test("claude: a fork whose live process exits before it takes the message report
     assert.equal(copied.ok, true, JSON.stringify(copied));
     assert.equal(copied.content, "Copied.");
     assert.equal(copied.forkCopyFailed, undefined);
+    assert.equal(gone.sessionNotStarted, true);
+    // Two messages sent at once share the process: the first made the copy;
+    // the second, lost when the process died, is no failed copy.
+    const shared = new CliAgentRunner() as any;
+    shared.nativeProcessDbPath = path.join(dir, "native-shared.sqlite3");
+    shared.providerExecutableForRun = async () => claudePath;
+    try {
+      const options = { persistSession: true, forkFromSessionId: "dies-on-second", agentMode: "default", permissions: defaultChatAgentPermissions(),
+        warm: { conversationId: "chat", participantId: "child-shared", contextKey: "child-context", idleTimeoutMs: 60_000 } };
+      const first = await shared.run({ id: "child", kind: "claude-code", label: "@child" }, "First.", dir, undefined, "chat", undefined, options);
+      assert.equal(first.ok, true, JSON.stringify(first));
+      const second = await shared.run({ id: "child", kind: "claude-code", label: "@child" }, "Second.", dir, undefined, "chat", undefined, options);
+      assert.equal(second.ok, false);
+      assert.equal(second.forkCopyFailed, undefined, "the copy was made by the first");
+      assert.equal(second.sessionNotStarted, undefined);
+    } finally {
+      await shared.shutdownWarmAgents();
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -523,6 +563,16 @@ test("codex: a fork whose copy Codex did not make says so (forkCopyFailed), and 
   const made = await runForkedCodexTurn("child-thread", { forkCut: { at: "01a1feed-0000-7000-8000-00000000dead" }, sourceTurns: SOURCE_TURNS, said: madeSaid });
   assert.equal(made.result.ok, true);
   assert.deepEqual(madeSaid, ["that reply is not in its session"]);
+  // No point named: said once the copy is made; not at all when the thread is gone.
+  const unknownSaid: string[] = [];
+  const unknown = await runForkedCodexTurn("child-thread", { forkCut: { unknown: "the app found no reply of it that ended a turn" }, said: unknownSaid });
+  assert.equal(unknown.result.ok, true);
+  assert.deepEqual(unknownSaid, ["the app found no reply of it that ended a turn"]);
+  assert.equal(unknown.methods.find((item) => item.method === "thread/fork")!.params.lastTurnId, undefined);
+  const lostSaid: string[] = [];
+  const lost = await runForkedCodexTurn("child-thread", { source: "lost-thread", forkCut: { unknown: "the app found no reply of it that ended a turn" }, said: lostSaid });
+  assert.equal(lost.result.forkCopyFailed, true);
+  assert.deepEqual(lostSaid, []);
   // A turn that fails after the copy was made is the turn's own.
   const failed = await runForkedCodexTurn("child-thread", { failTurns: true });
   assert.equal(failed.result.ok, false);

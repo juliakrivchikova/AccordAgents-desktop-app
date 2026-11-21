@@ -566,6 +566,9 @@ interface WarmAgentEntry {
   /** Claude only: no reply is waiting, running or about to start on its own;
    *  background tasks may still be running. */
   isReplyIdle?: () => boolean;
+  /** Claude only: whether the CLI ever started a step in this process (it
+   *  loaded its session, or made a fork's copy). */
+  everStartedStep?: () => boolean;
   /** Claude only: settles once no reply is waiting, running or about to
    *  start on its own (or the process is gone); background tasks may still
    *  be running. */
@@ -678,6 +681,8 @@ interface ClaudeWarmReply {
 interface ClaudeWarmProcessState {
   /** Unsettled replies in the order they were submitted or started. */
   replies: ClaudeWarmReply[];
+  /** Set at the first step this process starts. */
+  everStartedStep?: boolean;
   /** The reply receiving the running model step's output. */
   active?: ClaudeWarmReply;
   /** True from a step's start (`system/init`, a command `started`, or any of
@@ -3745,6 +3750,10 @@ export class CliAgentRunner {
     const codexForkLastTurnId = async (sourceThreadId: string, timeoutMs?: number): Promise<string | undefined> => {
       const cut = options.forkCut;
       if (!cut) return undefined;
+      if (cut.unknown) {
+        missedCut(cut.unknown);
+        return undefined;
+      }
       if (cut.at) return cut.at;
       if (!cut.finishedBy) return undefined;
       let decision: ForkCutDecision | undefined;
@@ -5819,7 +5828,9 @@ export class CliAgentRunner {
     // session changed after it).
     const member = options.forkFromSessionId;
     const replySession = forkCut.sessionId?.trim() || member;
-    const cut = await this.claudeForkCutFor(replySession, forkCut, member);
+    const cut = forkCut.unknown
+      ? await this.claudeForkSourceHere(member) ? { kind: "missed" as const, reason: forkCut.unknown } : { kind: "gone" as const, reason: forkCut.unknown }
+      : await this.claudeForkCutFor(replySession, forkCut, member);
     void this.writeDebugLog("cli-agent-claude-fork-cut", {
       participantId: participant.id,
       decision: cut.kind,
@@ -5859,6 +5870,15 @@ export class CliAgentRunner {
    *  the session the member's reply was in, not its own now. "gone": the
    *  member's own session is not on this device either, so there is nothing
    *  to copy. */
+  /** Whether the member's session is on this device for Claude Code to copy. */
+  private async claudeForkSourceHere(sessionId: string): Promise<boolean> {
+    try {
+      return Boolean(await findClaudeTranscript(await this.claudeProjectsDirectory(), sessionId));
+    } catch {
+      return true;
+    }
+  }
+
   private async claudeForkCutFor(sessionId: string, request: ForkCutRequest, memberSessionId: string): Promise<ForkCutDecision | { kind: "gone"; reason: string }> {
     const earlier = sessionId !== memberSessionId;
     try {
@@ -6313,12 +6333,17 @@ export class CliAgentRunner {
           conversationId: warm.conversationId,
           error: this.errorText(error)
         });
-        // A fork whose CLI exited before it took the message: the copy was
-        // never made (Claude Code exits at once when it cannot load the
-        // session it forks). A process that never started is not that.
-        const forkCopyFailed = Boolean(options.forkFromSessionId) && !options.sessionId && !replyStarted &&
+        // A new session (a fork's copy, or a clean one) whose CLI exited
+        // before it started any step: no session was made (Claude Code exits
+        // at once when it cannot load the session it forks), although the
+        // id it was given has been reported. A process that never started is
+        // not that; nor is one that took another message first (two sent at
+        // once share the process: that one made the session).
+        const notStarted = !options.sessionId && !replyStarted && claudeEntry.everStartedStep?.() !== true &&
           typeof claudeEntry.process.exitCode === "number";
-        return forkCopyFailed ? { ...this.failed(participant, error), forkCopyFailed: true } : this.failed(participant, error);
+        return notStarted
+          ? { ...this.failed(participant, error), sessionNotStarted: true, ...(options.forkFromSessionId ? { forkCopyFailed: true } : {}) }
+          : this.failed(participant, error);
       }
     });
   }
@@ -6757,6 +6782,7 @@ export class CliAgentRunner {
       whenIdle: (signal?: AbortSignal) => waitUntil(isIdle, signal),
       whenReplyIdle: (signal?: AbortSignal) => waitUntil(isReplyIdle, signal),
       isReplyIdle,
+      everStartedStep: () => state.everStartedStep === true,
       capturedBackgroundProcesses: () => Array.from(capturedBackgroundProcesses.values()),
       refreshCapturedBackgroundProcesses: captureBackgroundProcesses,
       contextUsage: async (signal?: AbortSignal) => {
@@ -7147,6 +7173,7 @@ export class CliAgentRunner {
    *  with none the CLI started this step on its own. */
   private startClaudeWarmStep(state: ClaudeWarmProcessState, participant: ParticipantConfig, hooks: ClaudeWarmProcessHooks): void {
     state.stepActive = true;
+    state.everStartedStep = true;
     state.promptSuggestionTarget = undefined;
     if (state.active && !state.active.settled) {
       return;

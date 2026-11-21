@@ -25,6 +25,9 @@ export interface ForkCutRequest {
   /** The session `at` is in, when it is not the one the fork would copy. */
   sessionId?: string;
   finishedBy?: string;
+  /** No point can be named (forkCutFor): the whole session is copied, and
+   *  the runner says why once it knows there is a copy to make. */
+  unknown?: string;
 }
 
 /** What the fork does: copy up to `at` (with nothing after it yet, that is

@@ -23,6 +23,10 @@ export interface ParticipantRunResult {
    *  member's own exists. Whether the CLI said why in its own words (the
    *  source is gone) is isForkSourceMissingError(error). */
   forkCopyFailed?: boolean;
+  /** A run that was to start a new session (a fork's copy, or a clean one)
+   *  failed before the CLI took the message: no session was made, although
+   *  the id it was given may have been reported. */
+  sessionNotStarted?: boolean;
 }
 
 export class ProviderRunner {

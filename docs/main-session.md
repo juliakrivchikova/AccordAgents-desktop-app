@@ -493,13 +493,18 @@ chat as that chat's main session, with everything it knew
   `thread/fork` failed: `ParticipantRunResult.forkCopyFailed`) is tried once
   more in that turn, then the turn starts clean. A failure that is not the
   copy's (a Stop, a project folder gone, a turn that failed after the copy
-  was made) never does. Either way the member is a clean member from then
-  on (fork dropped) and the chat says so, once ("@x could not start from a
-  copy of @main's session, so this turn started a clean session.";
-  `postForkNotice`, above). When the clean start fails too, its chat-context
-  pointer is dropped as well and the failed reply the main session reads
-  says it (a forked main session's own failed reply does not: the User
-  asked it, and the notice is hers).
+  was made, a second message whose process already made the copy) never
+  does. Either way the member is a clean member from then on (fork dropped)
+  and the chat says so, once ("@x could not start from a copy of @main's
+  session, so this turn started a clean session."; `postForkNotice`, above;
+  said before the clean turn runs when the CLI said the source is gone).
+  When the clean start fails too, its chat-context pointer is dropped as
+  well, the id its session was given is not kept when the CLI never took
+  the message, and the failed reply the main session reads says it (a
+  forked main session's own failed reply does not: the User asked it, and
+  the notice is hers). When the clean session cannot start either after an
+  unknown failure, the copy was not the cause: the member stays a fork, its
+  next turn makes the copy, and nothing says it started clean.
 - `ChatParticipantRequestItem.title?`: the main session's short title for
   its task (`app_chat_delegate_task`'s `title`, at most 80 characters).
 - `ChatParticipantRequestBatch.delegation.turnId?`: the main-session turn (its `turnSegmentId`) that gave the task while that

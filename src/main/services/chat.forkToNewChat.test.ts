@@ -616,6 +616,62 @@ test("a copy that failed for another reason is tried once more in the same turn,
   }
 });
 
+test("the clean start is said before it runs when the source is gone; a clean start that cannot start either leaves no session id to resume", async () => {
+  const codexReviewer: ChatParticipant = { ...REVIEWER, kind: "codex-cli", model: undefined, reasoningEffort: undefined };
+  const source = oldChat([ASSISTANT, codexReviewer], { participantSessions: [sessionRecord(codexReviewer, "src-cli-session")] });
+  const notice = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so this turn started a clean session.";
+  let id = "";
+  let lineWhileClean = -1;
+  let said: string[] = [];
+  const { service, storage, runs } = testService({
+    conversations: [source],
+    run: async (participant, _prompt, runOptions) => {
+      if (runOptions.forkFromSessionId) return { participant, ok: false, content: "", error: "no rollout found for thread id src-cli-session", durationMs: 1, forkCopyFailed: true };
+      // The clean session is given an id and reported before the CLI exits without taking the message.
+      lineWhileClean = said.filter((text) => text === notice).length;
+      runOptions.onSessionId?.("never-written");
+      return { participant, ok: false, content: "@main stopped before it returned a response.", error: "claude warm process exited with code 1", durationMs: 1, sessionNotStarted: true };
+    }
+  });
+  said = spyForkNotices(service);
+  const created = await service.createConversation({ participants: [], forkOf: { conversationId: "old-chat", participantId: REVIEWER.id } });
+  id = created.conversation.id;
+  const mainId = String(created.conversation.metadata.mainSessionParticipantId);
+  await service.sendMessage({ conversationId: id, runId: "run-gone", content: "Go on.", targetParticipantIds: [mainId] });
+  await waitFor(() => (storage.store.get(id)?.messages ?? []).some((message) => message.participantId === mainId && message.status !== "pending"));
+  await service.settleChatSaves();
+  assert.ok(lineWhileClean >= 1, "said before the clean turn ran");
+  await assertLineOnce(storage, id, notice, "once", [service]);
+  const session = sessionsOf(storage.store.get(id)).find((item) => item.participantId === mainId)!;
+  assert.equal(session.sessionId, "", "the id the clean session was given is no session: not resumed next");
+  assert.equal(session.forkFrom, undefined, "its source is gone: it stays clean");
+  assert.equal(runs.length, 2);
+});
+
+test("when the clean start cannot start either, the copy was not what failed: the member stays a fork and nothing says it started clean", async () => {
+  const codexReviewer: ChatParticipant = { ...REVIEWER, kind: "codex-cli", model: undefined, reasoningEffort: undefined };
+  const source = oldChat([ASSISTANT, codexReviewer], { participantSessions: [sessionRecord(codexReviewer, "src-cli-session")] });
+  const { service, storage, runs } = testService({
+    conversations: [source],
+    run: async (participant, _prompt, runOptions) => {
+      runOptions.onSessionId?.(runOptions.forkFromSessionId ? "copy-never-written" : "clean-never-written");
+      return { participant, ok: false, content: "@main stopped before it returned a response.", error: "error: unknown option '--some-flag'", durationMs: 1,
+        sessionNotStarted: true, ...(runOptions.forkFromSessionId ? { forkCopyFailed: true } : {}) };
+    }
+  });
+  const { id, mainId } = await forkAndSend(service, storage);
+  await service.settleChatSaves();
+  assert.deepEqual(runs.map((run) => run.options.forkFromSessionId ?? null), ["src-cli-session", "src-cli-session", null], "tried, tried again, then a clean start that could not start");
+  const session = sessionsOf(storage.store.get(id)).find((item) => item.participantId === mainId)!;
+  assert.equal(session.sessionId, "");
+  assert.equal(session.forkFrom?.sessionId, "src-cli-session", "its next turn makes the copy");
+  assert.equal(session.forkedFromParticipantId, REVIEWER.id);
+  assert.equal(storage.store.get(id)!.messages.some((message) => message.id.startsWith("fork-notice-")), false, "nothing says it started clean");
+  const reply = storage.store.get(id)!.messages.find((message) => message.participantId === mainId && message.role === "participant")!;
+  assert.equal(reply.status, "error");
+  assert.ok(((storage.store.get(id)!.metadata.warnings ?? []) as string[]).some((warning) => /unknown option/.test(warning)), "the real error is said");
+});
+
 test("two messages sent at once: when the other one made the member's session meanwhile, this one goes into it, never a second clean session", async () => {
   const codexReviewer: ChatParticipant = { ...REVIEWER, kind: "codex-cli", model: undefined, reasoningEffort: undefined };
   const source = oldChat([ASSISTANT, codexReviewer], { participantSessions: [sessionRecord(codexReviewer, "src-cli-session")] });
@@ -1035,7 +1091,9 @@ test("when the point cannot be named the whole session is copied and a line in t
     const { service, storage, runs } = testService({
       conversations: [source],
       run: async (participant, _prompt, runOptions) => {
-        if (cliReason) runOptions.onForkCutMissed?.(cliReason);
+        // The runner says why once it knows there is a copy to make.
+        const why = cliReason ?? runOptions.forkCut?.unknown;
+        if (why) runOptions.onForkCutMissed?.(why);
         runOptions.onSessionId?.("fork-own-session");
         // Said before the turn ends: it may last hours, and the app may stop during it.
         await waitFor(() => lines().length === 1);
@@ -1054,7 +1112,7 @@ test("when the point cannot be named the whole session is copied and a line in t
     // cloud machine, and the warning the device that ran it shows.
     await assertLineOnce(storage, id, note, label, [service]);
     assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], [note], label);
-    if (!cliReason) assert.equal(runs[0]!.options.forkCut, undefined, `${label}: no point asked`);
+    if (!cliReason) assert.deepEqual(runs[0]!.options.forkCut, { unknown: reason }, `${label}: no point asked, the reason given`);
   }
 });
 
