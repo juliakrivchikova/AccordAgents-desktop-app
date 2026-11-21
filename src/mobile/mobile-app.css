@@ -1777,6 +1777,12 @@ button.mobile-chat-group-title:active {
   font: 600 16px var(--mono);
 }
 
+/* The tool's display rule above beats the browser's own [hidden] rule; a
+   hidden tool (the @ button in the sessions view) is really gone. */
+.composer .composer-tool[hidden] {
+  display: none;
+}
+
 .composer .composer-tool:active {
   background: var(--press);
 }
