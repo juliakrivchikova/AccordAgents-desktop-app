@@ -7,6 +7,7 @@ import { ChatMemberMark } from "./chat-member-mark";
 import { participantProviderLabel } from "./chat-conversation-data";
 import { rosterPermissionGrantLabels } from "./chat-participant-config-panel";
 import { displayChatRoleLabel } from "./chat-role-labels";
+import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
 
 export function rosterApprovalQuestion(approval: ChatAppToolApproval, added: ChatRosterChangeOperation[]): string {
   const requester = chatParticipantReference(approval.requesterHandle);
@@ -14,10 +15,16 @@ export function rosterApprovalQuestion(approval: ChatAppToolApproval, added: Cha
 }
 
 export function RosterApprovalTitle({ requesterHandle, added }: { requesterHandle: string; added: ChatRosterChangeOperation[] }): JSX.Element {
+  const appText = useSessionsViewText();
+  const requester = useSessionsViewLabel()(chatParticipantReference(requesterHandle));
+  const rest = `wants to add ${added.length === 1 ? "a member" : "members"} to this chat`;
+  // The sessions view names the main session by nothing: the sentence has
+  // no subject then.
+  if (!requester) return <>{appText(`@${requesterHandle.replace(/^@/, "")} ${rest}`)}</>;
   return (
     <>
-      <span className="chat-app-tool-approval-title-handle">{chatParticipantReference(requesterHandle)}</span>{" "}
-      wants to add {added.length === 1 ? "a member" : "members"} to this chat
+      <span className="chat-app-tool-approval-title-handle">{requester}</span>{" "}
+      {rest}
     </>
   );
 }
@@ -25,6 +32,7 @@ export function RosterApprovalTitle({ requesterHandle, added }: { requesterHandl
 export function ChatAppToolRosterOperation({ operation, roles }: { operation: ChatRosterChangeOperation; roles: ChatRoleConfig[] }): JSX.Element {
   const participant = operation.participant;
   const label = chatParticipantDisplayName(participant);
+  const shownLabel = useSessionsViewLabel()(label);
   const details = [
     participantProviderLabel(participant.kind),
     participant.model,
@@ -45,7 +53,7 @@ export function ChatAppToolRosterOperation({ operation, roles }: { operation: Ch
     <div className="chat-app-tool-roster-participant">
       <ChatMemberMark className="chat-app-tool-roster-avatar" markClassName="is-large" avatar={avatar} member={participant} />
       <div className="chat-app-tool-roster-participant-info">
-        <strong>{label}</strong>
+        <strong>{shownLabel}</strong>
         <span>{details.join(" · ")}</span>
       </div>
     </div>

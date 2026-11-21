@@ -3,6 +3,7 @@ import type { LucideIcon } from "lucide-react";
 import type { ChatAppToolApproval } from "../../../shared/types";
 import { chatParticipantReference } from "../conversation/conversation-display";
 import { formatChatTime } from "./chat-format";
+import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
 
 /**
  * A used approval card in one line, like a folded urgent alert or choice (the
@@ -26,19 +27,25 @@ export function ChatUsedApprovalLine(props: {
   /** More than the line says: why it ended so. */
   detail?: string;
 }): JSX.Element {
+  // The sessions view names who asked by its task, the main session by
+  // nothing, and what the card was about without handles.
+  const appText = useSessionsViewText();
+  const requester = useSessionsViewLabel()(chatParticipantReference(props.approval.requesterHandle));
+  const preview = appText(props.preview);
+  const detail = props.detail ? appText(props.detail) : undefined;
   const when = props.withoutTime ? "" : formatChatTime(props.approval.updatedAt);
-  const outcome = `${chatParticipantReference(props.approval.requesterHandle)} · ${props.ended}${when ? ` ${when}` : ""}`;
+  const outcome = `${requester ? `${requester} · ` : ""}${appText(props.ended)}${when ? ` ${when}` : ""}`;
   const Icon = props.icon;
   return (
     <section
       className={`chat-used-approval is-${props.approval.status}`}
-      aria-label={[props.kind, `${props.preview}: ${outcome}`, props.detail].filter(Boolean).join(". ")}
+      aria-label={[props.kind, `${preview}: ${outcome}`, detail].filter(Boolean).join(". ")}
       data-app-tool-approval-id={props.approval.id}
       tabIndex={-1}
     >
-      <div className="chat-card-row" title={[props.preview, outcome, props.detail].filter(Boolean).join("\n")}>
+      <div className="chat-card-row" title={[preview, outcome, detail].filter(Boolean).join("\n")}>
         <Icon className="chat-card-row-icon" size={14} aria-hidden="true" />
-        <span className="chat-card-row-preview">{props.preview}</span>
+        <span className="chat-card-row-preview">{preview}</span>
         <span className="chat-card-row-outcome">{outcome}</span>
       </div>
     </section>

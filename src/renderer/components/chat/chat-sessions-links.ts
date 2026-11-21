@@ -1,5 +1,6 @@
-import { createContext, useContext, useRef } from "react";
+import { createContext, useContext, useMemo, useRef } from "react";
 
+import { sessionsViewLabel, sessionsViewNames, sessionsViewText, type SessionsViewNames } from "../../../shared/sessionsViewText";
 import type { ChatProviderKind } from "../../../shared/types";
 
 /**
@@ -32,6 +33,34 @@ export const ChatSessionsLinksContext = createContext<ChatSessionsLinks | undefi
 
 export function useChatSessionsLinks(): ChatSessionsLinks | undefined {
   return useContext(ChatSessionsLinksContext);
+}
+
+/** The sessions view's names (shared/sessionsViewText.ts), from its links. */
+export function sessionsViewNamesFromLinks(links: ChatSessionsLinks | undefined): SessionsViewNames | undefined {
+  if (!links) return undefined;
+  return sessionsViewNames(links.mainHandle, [...links.byHandle].map(([handle, member]) => [handle, member.title] as const));
+}
+
+export function useSessionsViewNames(): SessionsViewNames | undefined {
+  const links = useChatSessionsLinks();
+  return useMemo(() => sessionsViewNamesFromLinks(links), [links]);
+}
+
+const asWritten = (text: string): string => text;
+
+/** Text the app wrote, as this chat's view shows it: in the sessions view
+ *  without handles (sessionsViewText), elsewhere as written. */
+export function useSessionsViewText(): (text: string) => string {
+  const names = useSessionsViewNames();
+  return useMemo(() => (names ? (text: string) => sessionsViewText(text, names) : asWritten), [names]);
+}
+
+/** Who a label names, as this chat's view shows it: in the sessions view the
+ *  main session by nothing ("") and a member by its task's title; elsewhere
+ *  the label as given. */
+export function useSessionsViewLabel(): (label: string) => string {
+  const names = useSessionsViewNames();
+  return useMemo(() => (names ? (label: string) => (label.trim().startsWith("@") ? sessionsViewLabel(label, names) : label) : asWritten), [names]);
 }
 
 /** The same map as long as its entries are the same: the roster's states are

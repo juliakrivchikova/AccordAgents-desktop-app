@@ -1,4 +1,5 @@
 import { activeRunSummaryForConversation } from "./chatActiveRuns";
+import { sessionsViewLabel, sessionsViewNamesOf, sessionsViewText } from "./sessionsViewText";
 import type {
   ChatActivityItem,
   ChatActivityParticipantSummary,
@@ -73,16 +74,20 @@ export function buildChatActivityItems(
     return [];
   }
 
-  const participants = participantSummaries(conversation);
+  // A chat shown in the sessions view names nobody by handle in its rows
+  // (shared/sessionsViewText.ts): the app's words are worded for it here.
+  const names = sessionsViewNamesOf(conversation);
+  const appText = (text: string): string => sessionsViewText(text, names);
+  const participants = sessionsViewParticipants(participantSummaries(conversation), names);
   const items: ChatActivityItem[] = [];
   const nowMs = timeValue(options.now ?? new Date());
   const recentWindowDays = normalizePositiveNumber(options.recentWindowDays, DEFAULT_CHAT_ACTIVITY_RECENT_WINDOW_DAYS);
   const recentCutoffMs = nowMs - recentWindowDays * 24 * 60 * 60 * 1000;
   const lastViewedMs = timeValue(options.lastViewedAt);
 
-  items.push(...pendingApprovalItems(conversation, participants));
+  items.push(...pendingApprovalItems(conversation, participants, appText));
   for (const message of conversation.messages) {
-    items.push(...pendingMessageItems(conversation, message, participants));
+    items.push(...pendingMessageItems(conversation, message, participants, appText));
   }
 
   const runningRunIds = new Set<string>();
@@ -103,7 +108,7 @@ export function buildChatActivityItems(
       repoPath: conversation.repoPath,
       status: "running",
       kind: "run",
-      title: participant ? `@${participant.handle} is running` : "Run in progress",
+      title: participant ? appText(`@${participant.handle} is running`) : "Run in progress",
       preview: previewText(message?.content) || "A member run is in progress.",
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -141,7 +146,7 @@ export function buildChatActivityItems(
       status: "recent",
       ...(lastViewedMs > 0 && updatedMs <= lastViewedMs ? { read: true } : {}),
       kind: "message",
-      title: participant ? `@${participant.handle} recently finished` : "Recent activity",
+      title: participant ? appText(`@${participant.handle} recently finished`) : "Recent activity",
       preview: previewText(message.content) || "A member posted an update.",
       createdAt: message.createdAt,
       updatedAt,
@@ -154,7 +159,13 @@ export function buildChatActivityItems(
     });
   }
 
-  const retained = options.preferences ? applyChatActivityItemPreferences(items, options.preferences) : items;
+  // A member no longer in the chat is named from its messages: by its task too.
+  const named = names
+    ? items.map((item) => item.participant && item.participant.displayName === undefined
+      ? { ...item, participant: { ...item.participant, displayName: sessionsViewLabel(item.participant.handle, names) } }
+      : item)
+    : items;
+  const retained = options.preferences ? applyChatActivityItemPreferences(named, options.preferences) : named;
   return sortChatActivityItems(dedupeChatActivityItems(retained));
 }
 
@@ -337,7 +348,8 @@ export function limitChatActivityItems(items: ChatActivityItem[], limit?: number
 
 function pendingApprovalItems(
   conversation: Conversation,
-  participants: Map<string, ChatActivityParticipantSummary>
+  participants: Map<string, ChatActivityParticipantSummary>,
+  appText: (text: string) => string
 ): ChatActivityItem[] {
   const approvals = chatAppToolApprovals(conversation.metadata.pendingAppToolApprovals);
   return approvals.flatMap((approval) => {
@@ -360,8 +372,8 @@ function pendingApprovalItems(
       repoPath: conversation.repoPath,
       status: "pending" as const,
       kind: "approval" as const,
-      title: participant ? `@${participant.handle} needs approval` : "Approval required",
-      preview: previewText(targetMessage?.content) || approval.summary || approval.toolName || "A tool request is waiting for approval.",
+      title: participant ? appText(`@${participant.handle} needs approval`) : "Approval required",
+      preview: previewText(targetMessage?.content) || appText(approval.summary) || approval.toolName || "A tool request is waiting for approval.",
       createdAt: approval.createdAt,
       updatedAt: approval.updatedAt,
       participant,
@@ -435,7 +447,8 @@ function isVisibleTimelineMessage(message: ChatMessage): boolean {
 function pendingMessageItems(
   conversation: Conversation,
   message: ChatMessage,
-  participants: Map<string, ChatActivityParticipantSummary>
+  participants: Map<string, ChatActivityParticipantSummary>,
+  appText: (text: string) => string
 ): ChatActivityItem[] {
   const items: ChatActivityItem[] = [];
   const targetMessage = isVisibleTimelineMessage(message)
@@ -488,7 +501,7 @@ function pendingMessageItems(
       status: "pending",
       kind: "mention",
       title: "Mention approval required",
-      preview: previewText(targetMessage.content) || pendingMentions.map((mention) => `@${mention.targetHandle}`).join(", "),
+      preview: previewText(targetMessage.content) || appText(pendingMentions.map((mention) => `@${mention.targetHandle}`).join(", ")),
       createdAt: message.createdAt,
       updatedAt,
       participant,
@@ -508,7 +521,7 @@ function pendingMessageItems(
       status: "pending",
       kind: "participant-request",
       title: "Member request approval required",
-      preview: previewText(targetMessage.content) || participantRequestPreview(message),
+      preview: previewText(targetMessage.content) || appText(participantRequestPreview(message)),
       createdAt: message.createdAt,
       updatedAt,
       participant,
@@ -652,6 +665,16 @@ function newerTimestamp(left: string | undefined, right: string | undefined): st
   if (leftMs <= 0) return rightMs > 0 ? right : undefined;
   if (rightMs <= 0) return left;
   return rightMs > leftMs ? right : left;
+}
+
+/** In the sessions view each member's row names it by its task and the main
+ *  session by nothing (`displayName` ""). */
+function sessionsViewParticipants(
+  participants: Map<string, ChatActivityParticipantSummary>,
+  names: ReturnType<typeof sessionsViewNamesOf>
+): Map<string, ChatActivityParticipantSummary> {
+  if (!names) return participants;
+  return new Map([...participants].map(([id, participant]) => [id, { ...participant, displayName: sessionsViewLabel(participant.handle, names) }]));
 }
 
 function participantSummaries(conversation: Conversation): Map<string, ChatActivityParticipantSummary> {

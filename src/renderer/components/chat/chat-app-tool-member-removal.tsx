@@ -8,6 +8,7 @@ import type {
 } from "../../../shared/types";
 import { chatParticipantReference } from "../conversation/conversation-display";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
+import { useSessionsViewText } from "./chat-sessions-links";
 
 /** "@a", "@a and @b", "@a, @b, and @c". */
 function handleList(operations: ChatParticipantRemoveOperation[]): string {
@@ -53,9 +54,10 @@ export function ChatAppToolMemberRemovalOperation(props: {
   approval: ChatAppToolApproval;
   request: ChatParticipantRemovalRequest;
 }): JSX.Element {
+  const appText = useSessionsViewText();
   return (
     <div className="chat-app-tool-roster-list">
-      <div className="chat-app-tool-approval-reason">{memberRemovalConsequence(props.approval, props.request)}</div>
+      <div className="chat-app-tool-approval-reason">{appText(memberRemovalConsequence(props.approval, props.request))}</div>
     </div>
   );
 }

@@ -31,6 +31,7 @@ import { ChatSearchModal } from "./components/search/chat-search-modal";
 import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
 import { ChatClassicOnly, ChatViewHeaderControls } from "./components/chat/chat-view-switch";
 import { memberModelChip } from "./components/chat/chat-sessions-composer";
+import { sessionsViewNamesOf } from "../shared/sessionsViewText";
 import { ChatMemberModelAccess } from "./components/chat/chat-member-model-access";
 import { forkToNewChatReasonFor, useMachineForkSupport } from "./components/chat/use-fork-to-new-chat";
 import { memberSessionMoves } from "../shared/memberSessionMove";
@@ -514,6 +515,7 @@ function App(): JSX.Element {
         error={state.error}
         warnings={view.visibleWarnings}
         warningScope={view.warningScope}
+        noticeText={view.noticeText}
         conversationId={state.conversation?.id}
         setError={(value) => state.setError(value)}
         setWarnings={state.setWarnings}
@@ -543,6 +545,7 @@ function App(): JSX.Element {
           onOpenChange={setAccordDialogOpen}
           onStart={chatActions.startChatAccord}
           sessions={chatViewFor(view.activeChatConversation.metadata, state.settings.defaultChatView) === "sessions"}
+          sessionsNames={accordDialogOpen ? sessionsViewNamesOf(view.activeChatConversation, state.settings.defaultChatView) : undefined}
         />
       )}
 

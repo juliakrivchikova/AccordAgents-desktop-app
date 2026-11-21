@@ -8,6 +8,7 @@ import { CHAT_REACTION_EMOJIS } from "../../../shared/chatReactions";
 import { ArtifactsContext } from "../artifacts/artifacts-context";
 import { ChatMessageReactionList } from "./chat-message-reactions";
 import { ChatMessageWhen } from "./chat-streaming";
+import { useSessionsViewLabel } from "./chat-sessions-links";
 
 /** The card for a message that is an artifact note; anything else keeps the message row. */
 export function artifactNoteCardForMessage(message: Pick<ChatMessage, "role" | "content" | "metadata">): ArtifactNoteCard | undefined {
@@ -30,6 +31,7 @@ function ArtifactNoteMarks(props: { progress: ArtifactNoteProgress }): JSX.Eleme
   const Icon = progress.kind === "drafts" ? FileText : BadgeCheck;
   const noun = progress.kind === "drafts" ? "Draft" : "Signature";
   const slots = Array.from({ length: progress.total }, (_, index) => progress.done[index]);
+  const nameOf = useSessionsViewLabel();
   const summary = progress.kind === "drafts"
     ? `Drafts ${progress.done.length} of ${progress.total}`
     : `Signed ${progress.done.length} of ${progress.total}`;
@@ -38,7 +40,7 @@ function ArtifactNoteMarks(props: { progress: ArtifactNoteProgress }): JSX.Eleme
       {slots.map((actor, index) => {
         const given = actor !== undefined;
         const state = given ? (progress.complete ? "is-complete" : "is-given") : "";
-        const who = given && actor ? artifactNoteActorLabel(actor) : undefined;
+        const who = given && actor ? nameOf(artifactNoteActorLabel(actor)) || undefined : undefined;
         return (
           <span
             className={`chat-artifact-note-mark ${state}`}
@@ -70,6 +72,10 @@ export function ChatArtifactNoteCard(props: {
   const name = summary?.name ?? card.label;
   const actorClass = card.actor === ARTIFACT_USER_MEMBER ? "chat-artifact-note-actor" : "chat-artifact-note-actor chat-mention";
   const versionTag = versionTagOf(card);
+  // The sessions view names a member by its task and the main session by
+  // nothing: "Revised v3" then.
+  const actorName = useSessionsViewLabel()(artifactNoteActorLabel(card.actor));
+  const verb = artifactNoteVerb(card.action);
   const details = versionTag ? card.details.filter((detail) => detail !== versionTag) : card.details;
   const reactions = CHAT_REACTION_EMOJIS
     .map((emoji) => ({ emoji, reactors: message.metadata?.reactions?.[emoji] ?? [] }))
@@ -87,7 +93,7 @@ export function ChatArtifactNoteCard(props: {
         </span>
         <span className="chat-artifact-note-text">
           <span className="chat-artifact-note-title">
-            <span className={actorClass}>{artifactNoteActorLabel(card.actor)}</span> {artifactNoteVerb(card.action)}
+            {actorName ? <><span className={actorClass}>{actorName}</span> {verb}</> : `${verb.charAt(0).toUpperCase()}${verb.slice(1)}`}
             {versionTag && <span className="chat-artifact-note-version">{versionTag}</span>}
             {details.map((detail) => <span key={detail}>{` · ${detail}`}</span>)}
           </span>

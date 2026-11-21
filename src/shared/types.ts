@@ -2994,6 +2994,10 @@ export type ChatActivityKind =
 export interface ChatActivityParticipantSummary {
   id: string;
   handle: string;
+  /** How the chat's view names it, when that is not its handle: in the
+   *  sessions view a member's task title, "" for the main session (named by
+   *  nothing there). */
+  displayName?: string;
   kind: ChatProviderKind;
   roleConfigId?: string;
   avatarId?: string;

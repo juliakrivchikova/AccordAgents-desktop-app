@@ -14,7 +14,7 @@ import {
 } from "./accord-dock-store";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatMemberMark } from "./chat-member-mark";
-import { useChatSessionsLinks } from "./chat-sessions-links";
+import { useChatSessionsLinks, useSessionsViewText } from "./chat-sessions-links";
 
 // The chat's newest Accord, pinned above the composer (the User, 2026-11-08):
 // where it stands, with every member's draft and signature, the current
@@ -53,28 +53,31 @@ function MemberMark(props: { handle: string; participants?: ChatParticipant[] })
 }
 
 /** A member's name on an Accord's card: its handle, or in the sessions view
- *  (no handles there) its task's title, the main session by that name. */
+ *  (no handles there) its task's title; the main session is named by
+ *  nothing there ("": its logo alone). */
 function useMemberName(): (handle: string) => string {
   const links = useChatSessionsLinks();
   return (handle) => {
     const key = handle.replace(/^@/, "").toLowerCase();
     if (!links) return `@${handle.replace(/^@/, "")}`;
-    return key === links.mainHandle?.toLowerCase() ? "Main session" : links.byHandle.get(key)?.title ?? handle.replace(/^@/, "");
+    return key === links.mainHandle?.toLowerCase() ? "" : links.byHandle.get(key)?.title ?? handle.replace(/^@/, "");
   };
 }
 
-function MemberName(props: { handle: string }): JSX.Element {
-  return <span>{useMemberName()(props.handle)}</span>;
+function MemberName(props: { handle: string }): JSX.Element | null {
+  const name = useMemberName()(props.handle);
+  return name ? <span>{name}</span> : null;
 }
 
 function Stage(props: { stage: AccordStage; participants?: ChatParticipant[] }): JSX.Element {
   const { stage } = props;
+  const detail = useSessionsViewText()(stage.detail ?? "");
   return (
     <li className={`chat-accord-progress-stage is-${stage.state}`}>
       <StageMark state={stage.state} />
       <span className="chat-accord-progress-stage-text">
         <span className="chat-accord-progress-label">{stage.label}</span>
-        {stage.detail && <span className="chat-accord-progress-detail">{stage.detail}</span>}
+        {detail && <span className="chat-accord-progress-detail">{detail}</span>}
         {stage.members.length > 0 && (
           <span className="chat-accord-progress-members">
             {stage.members.map((member) => (
@@ -122,6 +125,7 @@ export function ChatAccordCard(props: {
   const title = accordDisplayTitle(artifacts, progress);
   const { version } = progress;
   const folded = props.folded;
+  const appText = useSessionsViewText();
   return (
     <section
       className={`chat-accord-dock${progress.reached ? " is-reached" : ""}${folded ? " is-folded" : ""}`}
@@ -157,7 +161,7 @@ export function ChatAccordCard(props: {
           {version && (
             <div className="chat-accord-progress-note">
               <span className="chat-accord-progress-note-text">
-                <span className="chat-accord-progress-note-head">{accordProgressNoteHead(version)}</span>
+                <span className="chat-accord-progress-note-head">{appText(accordProgressNoteHead(version))}</span>
                 {version.note && <span className="chat-accord-progress-note-body">{version.note}</span>}
               </span>
               <button
@@ -176,6 +180,13 @@ export function ChatAccordCard(props: {
   );
 }
 
+/** " · led by X · with Y, Z": a member named by nothing (the main session in
+ *  the sessions view) is left out. */
+function accordHeadingMeta(lead: string, members: readonly string[]): string {
+  const named = members.filter(Boolean);
+  return `${lead ? ` · led by ${lead}` : ""}${named.length > 0 ? ` · with ${named.join(", ")}` : ""}`;
+}
+
 function AccordHeading(props: { launch: DockedAccord; title: string; folded: boolean }): JSX.Element {
   const { card, progress } = props.launch;
   const name = useMemberName();
@@ -189,7 +200,7 @@ function AccordHeading(props: { launch: DockedAccord; title: string; folded: boo
         {!props.folded && (
           <span className="chat-accord-dock-meta">
             <span className="chat-accord-dock-kind">Accord</span>
-            {` · led by ${name(card.facilitator)} · with ${card.members.map(name).join(", ")}`}
+            {accordHeadingMeta(name(card.facilitator), card.members.map(name))}
           </span>
         )}
       </span>

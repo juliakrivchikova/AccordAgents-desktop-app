@@ -42,6 +42,8 @@
     "src/renderer/app/use-app-navigation.test.ts",
     "src/renderer/app/activity-timeline-anchor.test.ts",
     "src/renderer/app/app-notices.test.tsx",
+    "src/renderer/components/chat/chat-sessions-no-handles.test.tsx",
+    "src/shared/sessionsViewText.test.ts",
     "src/preload/global.d.ts"
   ],
   "exclude": []

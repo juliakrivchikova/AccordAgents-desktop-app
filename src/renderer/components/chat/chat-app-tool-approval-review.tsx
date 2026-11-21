@@ -20,6 +20,7 @@ import { chatToolPermissionAllowsChatScope } from "./chat-app-tool-data";
 import { chatToolPermissionScopeOptionLabel } from "../../../shared/toolPermissionScope";
 import { reviewResultPreview } from "./chat-app-tool-review-preview";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
+import { useSessionsViewText } from "./chat-sessions-links";
 
 export function roleReviewChipLabel(request: ChatRoleChangeRequest): string {
   if (request.operations.length !== 1) {
@@ -90,6 +91,7 @@ export function approvalReason(
 }
 
 export function ChatAppToolReviewStatus({ approval }: { approval: ChatAppToolApproval }): JSX.Element {
+  const appText = useSessionsViewText();
   const label = approval.memberAdditionQueuedAt
     ? "Approved, waiting to be applied"
     : approval.status === "approved"
@@ -105,7 +107,7 @@ export function ChatAppToolReviewStatus({ approval }: { approval: ChatAppToolApp
             : "Pending";
   return (
     <div className={`chat-app-tool-review-status is-${approval.status}`}>
-      {label}{approval.error ? `: ${approval.error}` : ""}
+      {label}{approval.error ? `: ${appText(approval.error)}` : ""}
     </div>
   );
 }

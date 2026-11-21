@@ -6567,6 +6567,15 @@
    *  is protocol, and the User should read the sentence before it instead. Her
    *  own messages and the app's are left exactly as they are, as the desktop
    *  leaves them. */
+  /** Who wrote a chat's newest message, before its snippet: a chat shown in
+   *  the sessions view names no member there (no handles in that view, and a
+   *  member's task is not known without the chat's messages). */
+  function chatRowWho(chat) {
+    const who = typeof chat.who === "string" ? chat.who : "";
+    if (!who || /^(you|system):$/i.test(who.trim())) return who;
+    return chatViewOf(chat) === "sessions" ? "" : who;
+  }
+
   function snippetDisplayText(chat) {
     const snippet = typeof chat.snippet === "string" ? chat.snippet : "";
     const who = typeof chat.who === "string" ? chat.who.trim().toLowerCase() : "";
@@ -6825,9 +6834,9 @@
     }
     const snippet = document.createElement("div");
     snippet.className = "mobile-chat-snippet";
-    if (chat.who) {
+    if (chatRowWho(chat)) {
       const who = document.createElement("b");
-      who.textContent = chat.who;
+      who.textContent = chatRowWho(chat);
       snippet.append(who);
     }
     const snippetText = document.createElement("span");
@@ -7985,19 +7994,60 @@
   }
 
   function cardRequesterLabel(card) {
-    const label = card.requesterLabel;
-    if (!label) return label;
-    const chat = loadChats().find(function (item) { return item.id === card.conversationId; });
-    if (!chat || chatViewOf(chat) !== "sessions") return label;
-    const handle = String(label).replace(/^@/, "").toLowerCase();
-    const member = chatMembers(chat).find(function (item) {
-      return String(item.mentionHandle || item.handle || "").replace(/^@/, "").toLowerCase() === handle;
+    // The main session is named by nothing; a member by its task's title, or
+    // its handle as a plain word while this phone has no task for it.
+    return sessionsViewLabelFor(card.conversationId, card.requesterLabel);
+  }
+
+  /** A "who" label as the chat's view shows it: a handle ("@drew") becomes
+   *  the member's task's title in the sessions view, "" for the main
+   *  session; any other label ("Chat Assistant", "A member") stays. */
+  function sessionsViewLabelFor(conversationId, label) {
+    if (typeof label !== "string" || !/^\s*@/.test(label)) return label;
+    const names = sessionsViewNamesFor(conversationId);
+    return names ? sessionsRules().sessionsViewLabel(label, names) : label;
+  }
+
+  /** How a chat shown in the sessions view names its members (the shared
+   *  sessionsViewText rule, one with the desktop): the main session by
+   *  nothing, a member by its task's title (by its handle as a plain word
+   *  while this phone has no task for it). Undefined in the classic view. */
+  function sessionsViewNamesFor(conversationId) {
+    const shared = sessionsRules();
+    if (!shared || typeof shared.sessionsViewNames !== "function" || !conversationId) return undefined;
+    const chat = loadChats().find(function (item) { return item.id === conversationId; });
+    if (!chat || chatViewOf(chat) !== "sessions") return undefined;
+    const members = chatMembers(chat);
+    const mainId = shared.mainSessionParticipantId(chatViewMetadata(chat));
+    const main = members.find(function (member) { return member.id === mainId; }) ||
+      members.find(function (member) { return member.roleConfigId === MAIN_SESSION_ROLE; });
+    const state = lastSessionsState && lastSessionsState.conversationId === conversationId ? lastSessionsState : undefined;
+    const titles = [];
+    if (state) {
+      state.formerMembers.forEach(function (former) { if (former.handle) titles.push([former.handle, sessionsMemberTitleOf(state, former.id)]); });
+    }
+    members.forEach(function (member) {
+      if (member === main || !member.handle) return;
+      const title = state ? sessionsMemberTitleOf(state, member) : String(member.handle).replace(/^@/, "");
+      titles.push([member.handle, title]);
+      if (member.mentionHandle && member.mentionHandle !== member.handle) titles.push([member.mentionHandle, title]);
     });
-    if (member && (member.id === chat.mainSessionParticipantId || member.roleConfigId === MAIN_SESSION_ROLE)) return "Main session";
-    const state = lastSessionsState && lastSessionsState.conversationId === card.conversationId ? lastSessionsState : undefined;
-    if (member && state) return sessionsMemberTitleOf(state, member.id);
-    // A member this phone has no task for yet: its handle as a plain word.
-    return handle || label;
+    return shared.sessionsViewNames(main ? main.mentionHandle || main.handle : undefined, titles);
+  }
+
+  /** A card's words as the chat's view shows them: a permission card's are
+   *  the app's (sessionsViewTextFor); a choice's are its member's own. */
+  function cardAppText(card, text) {
+    return card && card.kind !== "choice" ? sessionsViewTextFor(card.conversationId, text) : text;
+  }
+
+  /** Text the app wrote (a card's title, options, outcome; a failure; a
+   *  status), as the chat's view shows it: without handles in the sessions
+   *  view, as written in the classic view. */
+  function sessionsViewTextFor(conversationId, text) {
+    if (typeof text !== "string" || text.indexOf("@") < 0) return text;
+    const names = sessionsViewNamesFor(conversationId);
+    return names ? sessionsRules().sessionsViewText(text, names) : text;
   }
 
   function controlCardElement(card) {
@@ -8023,7 +8073,7 @@
     head.className = "control-card-head";
     const title = document.createElement("span");
     title.className = "control-card-title";
-    title.textContent = card.title || (card.kind === "permission" ? "Permission request" : "Choice");
+    title.textContent = cardAppText(card, card.title) || (card.kind === "permission" ? "Permission request" : "Choice");
     head.append(title);
     appendCardWho(head, card);
     wrap.append(head);
@@ -8031,7 +8081,7 @@
     if (card.summary) {
       const summary = document.createElement("p");
       summary.className = "control-card-summary";
-      summary.textContent = card.summary;
+      summary.textContent = cardAppText(card, card.summary);
       wrap.append(summary);
     }
 
@@ -8059,7 +8109,7 @@
       button.type = "button";
       button.className = "control-card-option";
       button.dataset.optionId = option.id;
-      button.textContent = option.label || option.id;
+      button.textContent = cardAppText(card, option.label) || option.id;
       button.disabled = sent;
       button.addEventListener("click", function () {
         void answerControlCard(card, { optionId: option.id });
@@ -8643,6 +8693,12 @@
     return avatarForLabel(conversationMembers(conversationId), handle || "Agent");
   }
 
+  /** Who an Activity row is about, as its chat's view names it: its handle,
+   *  or in the sessions view a member's task ("" for the main session). */
+  function activityRowWho(row) {
+    return sessionsViewLabelFor(row.conversationId, row.handle);
+  }
+
   function activityRowAvatar(conversationId, handle) {
     const avatar = document.createElement("span");
     avatar.className = "mobile-chat-avatar act-avatar";
@@ -8662,9 +8718,11 @@
     title.className = "act-chat-title";
     title.textContent = row.chatTitle;
     // "by @drew · Office Mac": who asks, and where it would run. A machine is
-    // never named as the author.
-    const byText = row.handle
-      ? " by " + [row.handle, row.machineName].filter(Boolean).join(" · ")
+    // never named as the author. A chat in the sessions view names a member
+    // by its task and the main session by nothing.
+    const who = activityRowWho(row);
+    const byText = who
+      ? " by " + [who, row.machineName].filter(Boolean).join(" · ")
       : row.machineName ? " · " + row.machineName : "";
     if (byText) {
       const by = document.createElement("span");
@@ -8676,7 +8734,7 @@
     for (const node of stamp) top.append(node);
     const preview = document.createElement("span");
     preview.className = "act-preview" + (row.kind === "permission" ? " act-preview-full" : "");
-    preview.textContent = row.preview || (row.kind === "run" ? "Thinking…" : "");
+    preview.textContent = (row.kind === "permission" ? sessionsViewTextFor(row.conversationId, row.preview) : row.preview) || (row.kind === "run" ? "Thinking…" : "");
     main.append(top, preview);
     return main;
   }
@@ -8991,7 +9049,7 @@
       stop.className = "act-stop";
       stop.dataset.runId = row.runId;
       stop.disabled = stopping;
-      stop.setAttribute("aria-label", stopping ? "Stopping" : "Stop " + (row.handle || "this run"));
+      stop.setAttribute("aria-label", stopping ? "Stopping" : "Stop " + (activityRowWho(row) || "this run"));
       const ring = document.createElement("span");
       ring.className = "act-stop-ring";
       const square = document.createElement("span");
@@ -9165,7 +9223,7 @@
     const titleNode = document.getElementById("activity-item-title");
     const subNode = document.getElementById("activity-item-sub");
     if (titleNode) titleNode.textContent = row.chatTitle;
-    if (subNode) subNode.textContent = "Waiting for you" + (row.handle ? " · asked by " + row.handle : "");
+    if (subNode) subNode.textContent = "Waiting for you" + (activityRowWho(row) ? " · asked by " + activityRowWho(row) : "");
     view.hidden = false;
     view.dataset.conversationId = row.conversationId;
     const signature = JSON.stringify([card, isCardLocked(card.id), cardSentText(card.id), controlCardAnswering.has(card.id), controlCardErrors.get(card.id) || ""]);
@@ -9184,7 +9242,7 @@
       head.append(activityRowAvatar(row.conversationId, source.participantLabel || row.handle));
       const who = document.createElement("span");
       who.className = "message-handle";
-      who.textContent = source.participantLabel || row.handle || "";
+      who.textContent = activityRowWho({ conversationId: row.conversationId, handle: source.participantLabel || row.handle }) || "";
       const when = document.createElement("span");
       when.className = "message-status";
       when.textContent = formatClockTime(source.createdAt);
@@ -9926,14 +9984,18 @@
       return;
     }
     view.hidden = false;
-    label.textContent = row.participantLabel || "Agent";
+    // The open chat's view names the member (sessions: by its task; the main
+    // session by nothing).
+    const streamChatId = row.conversationId || (lastSessionsState && lastSessionsState.conversationId);
+    const streamWho = sessionsViewLabelFor(streamChatId, row.participantLabel);
+    label.textContent = streamWho || (row.participantLabel ? "" : "Agent");
     stop.hidden = !isCancellableMobileRow(row);
     stop.disabled = row.stopRequested === true;
     stop.dataset.runId = row.runId || "";
     stop.dataset.turnMessageId = row.sourceMessageId || "";
     stop.dataset.participantId = row.participantId || "";
     stop.textContent = row.stopRequested ? "Stopping…" : "Stop";
-    stop.setAttribute("aria-label", "Stop response from " + (row.participantLabel || "Agent"));
+    stop.setAttribute("aria-label", streamWho || !row.participantLabel ? "Stop response from " + (streamWho || "Agent") : "Stop response");
     // (e) When the run finishes the view stays and shows the finished answer;
     // leaving is the reader's decision, not ours.
     state.textContent = row.status === "Running"
@@ -10505,8 +10567,13 @@
     title.className = "artifact-note-title";
     const actor = document.createElement("span");
     actor.className = card.actor === "user" ? "artifact-note-actor" : "artifact-note-actor is-member";
-    actor.textContent = shared.artifactNoteActorLabel(card.actor);
-    title.append(actor, document.createTextNode(" " + shared.artifactNoteVerb(card.action)));
+    // The sessions view names a member by its task and the main session by
+    // nothing ("Revised v3").
+    const actorName = sessionsViewLabelFor(entry.conversationId, shared.artifactNoteActorLabel(card.actor));
+    const verb = shared.artifactNoteVerb(card.action);
+    actor.textContent = actorName;
+    if (actorName) title.append(actor, document.createTextNode(" " + verb));
+    else title.append(document.createTextNode(verb.charAt(0).toUpperCase() + verb.slice(1)));
     const version = card.action === "published" || card.action === "revised"
       ? card.details.find(function (detail) { return /^v\d+$/.test(detail); })
       : undefined;
@@ -10700,10 +10767,11 @@
     name.className = "accord-progress-label";
     name.textContent = stage.label;
     text.append(name);
-    if (stage.detail) {
+    const detail = sessionsViewTextFor(entry && entry.conversationId, stage.detail);
+    if (detail) {
       const line = document.createElement("span");
       line.className = "accord-progress-detail";
-      line.textContent = stage.detail;
+      line.textContent = detail;
       text.append(line);
     }
     if (stage.members.length > 0) {
@@ -10932,7 +11000,7 @@
       note.className = "accord-progress-note";
       const noteHead = document.createElement("span");
       noteHead.className = "accord-progress-note-head";
-      noteHead.textContent = shared.accordProgressNoteHead(version);
+      noteHead.textContent = sessionsViewTextFor(entry && entry.conversationId, shared.accordProgressNoteHead(version));
       note.append(noteHead);
       if (version.note) {
         const body = document.createElement("span");
@@ -10986,7 +11054,10 @@
     const alert = urgentAlertOfEntry(entry);
     const shared = mobileSharedRules();
     const awaiting = Boolean(shared && typeof shared.urgentAlertAwaitsGotIt === "function" && shared.urgentAlertAwaitsGotIt(alert));
-    const label = entry.participantLabel || "A member";
+    // The sessions view names a member by its task and the main session by
+    // nothing (its line then says only when).
+    const rawLabel = entry.participantLabel || "A member";
+    const label = sessionsViewLabelFor(entry.conversationId, rawLabel);
     const wrap = document.createElement("div");
     wrap.className = "urgent-alert-card";
     if (alert.closedAt && !awaiting && !expandedUrgentAlerts.has(alert.id)) {
@@ -11013,7 +11084,7 @@
       end.textContent = outcome.short || outcome.text;
       const who = document.createElement("span");
       who.className = "sr-only";
-      who.textContent = " from " + label + ": " + outcome.text;
+      who.textContent = (label ? " from " + label : "") + ": " + outcome.text;
       const chevron = lineIcon(URGENT_ALERT_CHEVRON_PATHS, 14);
       chevron.classList.add("urgent-alert-folded-chevron");
       end.setAttribute("aria-hidden", "true");
@@ -11024,7 +11095,7 @@
     const panel = document.createElement("div");
     panel.className = "urgent-alert-panel";
     panel.setAttribute("role", "group");
-    panel.setAttribute("aria-label", "Urgent alert from " + label);
+    panel.setAttribute("aria-label", label ? "Urgent alert from " + label : "Urgent alert");
     const head = document.createElement("div");
     head.className = "urgent-alert-head";
     const headTitle = document.createElement("span");
@@ -11050,12 +11121,12 @@
     const from = document.createElement("div");
     from.className = "urgent-alert-from";
     const when = formatClockTime(entry.createdAt);
-    from.textContent = label + (when ? " · " + when : "");
+    from.textContent = [label, when].filter(Boolean).join(" · ");
     const text = document.createElement("div");
     text.className = "urgent-alert-text";
     text.textContent = entry.content || "";
     panel.append(head, from, text);
-    const status = shared && typeof shared.urgentAlertStatus === "function" ? shared.urgentAlertStatus(alert, label, Date.now()) : undefined;
+    const status = shared && typeof shared.urgentAlertStatus === "function" ? shared.urgentAlertStatus(alert, rawLabel, Date.now()) : undefined;
     if (status) {
       const band = document.createElement("div");
       band.className = "urgent-alert-status is-" + status.tone;
@@ -11079,7 +11150,7 @@
       if (status.detail) {
         const detail = document.createElement("div");
         detail.className = "urgent-alert-status-detail";
-        detail.textContent = status.detail;
+        detail.textContent = sessionsViewTextFor(entry.conversationId, status.detail);
         words.append(detail);
       }
       // A failed Got it holds while the alert still waits for one (a call
@@ -11356,7 +11427,7 @@
       } else if (isThinkingEntry(entry)) {
         renderThinkingInto(content, entry);
       } else {
-        renderMessageContentIfChanged(content, entry.content, entry.author);
+        renderMessageContentIfChanged(content, entryShownContent(entry), entry.author);
       }
       meta.append(handle, status);
       syncMessageStopButton(meta, entry);
@@ -11668,7 +11739,7 @@
    *  urgent alert (the User, 2026-11-16) -- what was asked, then who asked
    *  and how it ended. It opens nothing. */
   function answeredCardElement(card) {
-    const outcome = card.outcome || "Answered";
+    const outcome = cardAppText(card, card.outcome) || "Answered";
     const when = card.decidedAt ? formatClockTime(card.decidedAt) : "";
     const row = cardRowElement("article", lineIcon(CHOICE_ROW_PATHS, 14), card.title || "Choice",
       [cardRequesterLabel(card), outcome + (when ? " " + when : "")].filter(Boolean).join(" · "), false);
@@ -11692,18 +11763,19 @@
     const title = document.createElement("span");
     title.className = "control-card-title";
     // Headed as the live card is, now that a permission folds as well.
-    title.textContent = card.title || (card.kind === "permission" ? "Permission request" : "Choice");
+    title.textContent = cardAppText(card, card.title) || (card.kind === "permission" ? "Permission request" : "Choice");
     head.append(title);
     appendCardWho(head, card);
     wrap.append(head);
     if (card.summary) {
       const summary = document.createElement("p");
       summary.className = "control-card-summary";
-      summary.textContent = card.summary;
+      summary.textContent = cardAppText(card, card.summary);
       wrap.append(summary);
     }
     const state = document.createElement("p");
     state.className = "control-card-state";
+    outcome = cardAppText(card, outcome);
     state.textContent = outcome === "Cancelled" || outcome === "Expired" ? outcome : outcome ? label + outcome : "";
     state.hidden = !state.textContent;
     wrap.append(state);
@@ -11847,7 +11919,7 @@
         renderThinkingInto(content, entry);
       } else {
         delete content.dataset.thinking;
-        renderMessageContentIfChanged(content, isSessionsRunningEntry(entry) ? sessionsRunningText(entry) : entry.content, entry.author);
+        renderMessageContentIfChanged(content, isSessionsRunningEntry(entry) ? sessionsRunningText(entry) : entryShownContent(entry), entry.author);
       }
       if (content.parentElement) syncInterimPosts(content.parentElement, content, entry);
       if (content.parentElement) syncSessionsWorking(content.parentElement, meta, entry);
@@ -11869,10 +11941,23 @@
     item.classList.toggle("is-on-its-way", Boolean(entry.onItsWay));
     item.classList.toggle("is-refused", Boolean(entry.refused));
     status.textContent = messageStatusLabel(entry);
-    renderMessageContentIfChanged(content, entry.content, entry.author);
+    renderMessageContentIfChanged(content, entryShownContent(entry), entry.author);
     renderAttachmentsInto(attachmentsNodeFor(content.parentElement || item), entry);
     syncThreadChip(item, entry);
     return true;
+  }
+
+  /** A row's text as the open chat's view shows it: a failed or stopped
+   *  reply's words are the app's (the CLI's failure), so the sessions view
+   *  names nobody by handle in them; a member's own words stay its own. */
+  function entryShownContent(entry) {
+    const content = entry.content;
+    if (!sessionsMentionScope || entry.author !== "agent" || (entry.status !== "error" && entry.status !== "Error") || typeof content !== "string" || content.indexOf("@") < 0) return content;
+    const shared = sessionsRules();
+    if (!shared || typeof shared.sessionsViewText !== "function") return content;
+    const scope = sessionsMentionScope;
+    const titles = [...scope.byHandle].map(function (pair) { return [pair[0], pair[1].title]; });
+    return shared.sessionsViewText(content, shared.sessionsViewNames(scope.mainHandle, titles));
   }
 
   // Nodes are consumed, not looked up by key. The old sweep asked "is this
@@ -12347,7 +12432,9 @@
     const shared = sessionsRules();
     const batch = message.metadata.participantRequest;
     if (!batch) return [];
-    return shared.sessionsTaskEntries(message, batch, state.statusById, state.activity, state.messagesById).map(function (entry) {
+    const names = typeof shared.sessionsViewNames === "function" ? shared.sessionsViewNames(state.mainHandle, [...state.mentions.byHandle].map(function (pair) { return [pair[0], pair[1].title]; })) : undefined;
+    const appText = function (text) { return names ? shared.sessionsViewText(text, names) : text; };
+    return shared.sessionsTaskEntries(message, batch, state.statusById, state.activity, state.messagesById, appText).map(function (entry) {
       const member = state.members.find(function (candidate) { return candidate.id === entry.item.targetParticipantId; });
       return {
         participantId: entry.item.targetParticipantId,

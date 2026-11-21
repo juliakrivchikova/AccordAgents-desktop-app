@@ -328,10 +328,14 @@ function ActivityRow({
           <span className="activity-row-topline">
             <span
               className="activity-row-title"
-              title={`${activityActorHandle(item)} post in ${item.conversationTitle}`}
+              title={activityActorHandle(item) ? `${activityActorHandle(item)} post in ${item.conversationTitle}` : item.conversationTitle}
             >
-              <span className="activity-row-author">{activityActorHandle(item)}</span>
-              <span className="activity-row-context">post in</span>
+              {activityActorHandle(item) && (
+                <>
+                  <span className="activity-row-author">{activityActorHandle(item)}</span>
+                  <span className="activity-row-context">post in</span>
+                </>
+              )}
               <span className="activity-row-chat">{item.conversationTitle}</span>
             </span>
             {collapsedUpdateCount(item) > 1 ? (
@@ -362,13 +366,16 @@ function collapsedUpdateCount(item: ChatActivityItem): number {
   return typeof count === "number" && Number.isFinite(count) && count > 1 ? Math.floor(count) : 1;
 }
 
+/** Who the row is about: its handle, or how the chat's view names it (in the
+ *  sessions view a member's task, "" for the main session). */
 function activityActorHandle(item: ChatActivityItem): string {
+  if (item.participant?.displayName !== undefined) return item.participant.displayName;
   const handle = item.participant?.handle.trim().replace(/^@+/, "");
   return handle ? `@${handle}` : "Activity";
 }
 
 function avatarForActivityParticipant(participant: ChatActivityParticipantSummary) {
-  return avatarForChatParticipant(participant, chatParticipantDisplayName(participant));
+  return avatarForChatParticipant(participant, participant.displayName ?? chatParticipantDisplayName(participant));
 }
 
 function relativeTime(value: string): string {

@@ -65,6 +65,7 @@ import { ChatSessionsFinishedActivity, ChatSessionsRunningReply, sessionsReplyHa
 import { mainSessionMemberOf, withoutLeadingMention } from "../../../shared/mainSession";
 import type { SessionsTaskEntry } from "../../../shared/mainSessionView";
 import { ChatAppToolApprovalList } from "./chat-app-tool-approvals";
+import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
 declare global {
@@ -141,6 +142,9 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   }
   const [copied, setCopied] = useState(false);
   const [reactionPickerOpen, setReactionPickerOpen] = useState(false);
+  // In the sessions view what the app wrote names nobody by handle.
+  const appText = useSessionsViewText();
+  const nameOf = useSessionsViewLabel();
   const urgentAlert = urgentAlertOfMessage(message);
   if (urgentAlert) {
     return <ChatUrgentAlertCard message={message} alert={urgentAlert} participant={props.participants?.find((item) => item.id === message.participantId)} />;
@@ -167,12 +171,16 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   const processingTranscriptOpen = props.activityDisclosure.expandedProcessingTranscriptMessageIds.has(message.id);
   const author = authorForMessage(message, "chat");
   const isStreaming = message.status === "pending" && message.role === "participant";
-  const rawDisplayContent = chatDisplayContent(message, author);
+  const mainSessionHandle = props.presentation === "sessions" ? mainSessionMemberOf(props.participants ?? [])?.handle : undefined;
+  const rawDisplayContent = chatDisplayContent(message, author, mainSessionHandle);
   // The sessions view writes to the main session by default: its leading
-  // mention in the User's message is left out.
+  // mention in the User's message is left out. A failed or stopped reply's
+  // text is the app's (the CLI's failure), so it names nobody by handle.
   const displayContent = props.presentation === "sessions" && message.role === "user"
-    ? withoutLeadingMention(rawDisplayContent, mainSessionMemberOf(props.participants ?? [])?.handle)
-    : rawDisplayContent;
+    ? withoutLeadingMention(rawDisplayContent, mainSessionHandle)
+    : message.role === "participant" && message.status === "error"
+      ? appText(rawDisplayContent)
+      : rawDisplayContent;
   const streamedRemoteRunStatus = props.liveProgress?.remoteRunStatus ?? message.metadata?.remoteRunStatus;
   const streamedContent = remoteRunStreamingContent({
     isStreaming,
@@ -233,18 +241,19 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
     pending.length === 0 &&
     !props.hasContinuationReply;
   const pendingMentionTargetLabel = pending.length === 1 ? chatParticipantReference(pending[0].targetHandle) : `${pending.length} members`;
-  const approvePendingLabel = continuationRequested
+  const approvePendingLabel = appText(continuationRequested
     ? `Ask ${pendingMentionTargetLabel}, then return to ${author}`
     : pending.length === 1
       ? `Ask ${pendingMentionTargetLabel}`
-      : "Ask all mentioned members";
+      : "Ask all mentioned members");
   const pendingMentionList = pending.map((mention) => chatParticipantReference(mention.targetHandle)).join(", ");
-  const mentionApprovalTitle = pending.length === 1
+  const mentionApprovalTitle = appText(pending.length === 1
     ? `Do you want to ask ${pendingMentionTargetLabel}?`
-    : `Do you want to ask ${pending.length} mentioned members?`;
-  const mentionApprovalDescription = continuationRequested
+    : `Do you want to ask ${pending.length} mentioned members?`);
+  const mentionApprovalDescription = appText(continuationRequested
     ? `${author} will continue after ${pendingMentionTargetLabel} replies.`
-    : `This message mentions ${pendingMentionList}.`;
+    : `This message mentions ${pendingMentionList}.`);
+  const authorName = nameOf(author);
   const avatar = avatarForMessage(message, author, participant);
   const replyCount = props.replyCount ?? 0;
   const replyPreviewAvatars = chatReplyPreviewAvatars(props.replyPreviewMessages, props.participants);
@@ -494,7 +503,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           )}
           {queuedBehind && (
             <div className="chat-queued-badge">
-              <span>Queued — waiting for @{queuedBehind.handle} to finish</span>
+              <span>{appText(`Queued — waiting for @${queuedBehind.handle} to finish`)}</span>
             </div>
           )}
           {isStreaming && message.metadata?.cloudRunPreparation && !stopPending && (
@@ -533,17 +542,17 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           {participantRequests.map((request) => (
             <div className={`chat-approval-note ${participantRequestNoteClass(request)}`} key={request.id}>
               {isNegativeParticipantRequestStatus(request.status) && <AlertTriangle size={14} aria-hidden />}
-              <span>{participantRequestStatusLabel(request)}</span>
+              <span>{appText(participantRequestStatusLabel(request))}</span>
               {request.source === "inferred" && <StatusBadge tone="neutral">inferred request</StatusBadge>}
             </div>
           ))}
           {approved.length > 0 && (
             <div className="chat-approval-note">
-              <span>Approved: {approved.map((mention) => chatParticipantReference(mention.targetHandle)).join(", ")}</span>
+              <span>{appText(`Approved: ${approved.map((mention) => chatParticipantReference(mention.targetHandle)).join(", ")}`)}</span>
               {canContinueRequester && (
                 <Button variant="outline" size="sm" onClick={() => props.onApproveMentions(message.id, [], true)}>
                   <RefreshCw size={15} />
-                  Continue {author}
+                  {authorName ? `Continue ${authorName}` : "Continue"}
                 </Button>
               )}
             </div>
@@ -574,7 +583,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                     onClick={() => props.onApproveMentions(message.id, [mention.targetParticipantId], false)}
                     key={mention.targetParticipantId}
                   >
-                    Ask {chatParticipantReference(mention.targetHandle)}
+                    {appText(`Ask ${chatParticipantReference(mention.targetHandle)}`)}
                   </Button>
                 ))}
               </div>

@@ -3,11 +3,14 @@ import { MessageSquare, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { ReviewProgress } from "../../../shared/types";
 import { LoadingDot } from "../primitives";
+import { useSessionsViewText } from "../chat/chat-sessions-links";
 
 export function RunStatusLine({ progress }: { progress?: ReviewProgress }): JSX.Element {
+  // The status is the app's words: the sessions view names nobody by handle.
+  const appText = useSessionsViewText();
   return (
     <div className="run-status-line" aria-live="polite">
-      <span className="run-status-text">{progress?.message ?? "Thinking"}</span>
+      <span className="run-status-text">{progress?.message ? appText(progress.message) : "Thinking"}</span>
       <LoadingDot label="In progress" />
     </div>
   );

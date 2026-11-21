@@ -28,6 +28,7 @@ import {
 } from "../components/chat/chat-participant-drafts";
 import { NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID, newChatMainSessionParticipantDraft } from "../components/chat/chat-main-session-draft";
 import { newChatViewFor } from "../../shared/mainSession";
+import { sessionsViewNamesOf, sessionsViewText } from "../../shared/sessionsViewText";
 import {
   type MainSessionProviderChoice,
   type MainSessionProviderOption,
@@ -704,6 +705,10 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     // what it was for, never by the count alone.
     const railViewAtClick = state.railViewRef.current;
     const openRequestAtClick = state.openConversationRequestRef.current;
+    // A refusal said by a notice once she has gone elsewhere is worded by the
+    // chat she forked from (its sessions view names nobody by handle).
+    const source = state.conversation?.id === conversationId ? state.conversation : undefined;
+    const sourceNames = source ? sessionsViewNamesOf(source, state.settings.defaultChatView) : undefined;
     const stillHere = (): boolean =>
       state.railViewRef.current === railViewAtClick &&
       (state.openConversationRequestRef.current === openRequestAtClick || state.openConversationTargetRef.current === conversationId);
@@ -723,7 +728,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       // she has gone elsewhere (an error banner there would be about a chat
       // she is not looking at).
       if (stillHere()) state.setError(cleanIpcError(caught));
-      else toast.error(cleanIpcError(caught));
+      else toast.error(sessionsViewText(cleanIpcError(caught), sourceNames));
       return false;
     } finally {
       notice.end();

@@ -1,4 +1,4 @@
-const ASSET_VERSION = "2026-11-21-fork-to-new-chat-1";
+const ASSET_VERSION = "2026-11-22-sessions-view-no-handles-1";
 // Tied to the marker the documented deploy step bumps, so a new shell really
 // replaces the cached one rather than living beside it.
 const CACHE_NAME = `accordagents-mobile-shell-v73-${ASSET_VERSION}`;

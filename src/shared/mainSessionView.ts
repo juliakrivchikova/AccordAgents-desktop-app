@@ -214,7 +214,10 @@ export function sessionsTaskEntries(
   batch: Pick<ChatParticipantRequestBatch, "items">,
   statusById: ReadonlyMap<string, ChatParticipantRosterStatus>,
   activity: SessionsMemberActivity,
-  messagesById: ReadonlyMap<string, ChatMessage>
+  messagesById: ReadonlyMap<string, ChatMessage>,
+  /** The sessions view's words for what the app wrote (why a task failed),
+   *  without handles (sessionsViewText). */
+  appText: (text: string) => string = (text) => text
 ): SessionsTaskEntry[] {
   return batch.items.map((item) => {
     const memberId = item.targetParticipantId;
@@ -224,7 +227,7 @@ export function sessionsTaskEntries(
     const worked = typeof reply?.metadata?.workedMs === "number" && Number.isFinite(reply.metadata.workedMs) ? reply.metadata.workedMs : undefined;
     const elapsed = item.updatedAt ? Date.parse(item.updatedAt) - Date.parse(item.createdAt) : NaN;
     const line = status === "done" ? sessionsTaskReplyLine(item, messagesById)
-      : status === "failed" ? firstTextLine(item.error) || undefined
+      : status === "failed" ? appText(firstTextLine(item.error)) || undefined
         : status === "stopped" ? SESSIONS_WORK_STATUS_LABELS.stopped : undefined;
     return {
       messageId: message.id,

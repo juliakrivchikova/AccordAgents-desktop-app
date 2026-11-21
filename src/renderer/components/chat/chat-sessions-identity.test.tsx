@@ -71,12 +71,17 @@ test("a member's mark: its avatar in the classic view; its provider's bare glyph
   composer.unmount();
 });
 
-test("an Accord's launch card names its members by handle with the provider's logo in the sessions view; avatars stay in the classic view", () => {
+test("an Accord's launch card names its members by their task with the provider's logo in the sessions view, the main session by its logo alone; avatars and handles stay in the classic view", () => {
   const card = { facilitator: "main", members: ["drew", "gone"], subject: "Ship on Monday?" };
-  const sessions = renderIn(true, <ChatAccordLaunchCard card={card} participants={PARTICIPANTS} />);
+  const links: ChatSessionsLinks = {
+    mainSessionId: MAIN.id, mainHandle: "main",
+    byHandle: new Map([["drew", { id: DREW.id, title: "Fix the logout" }]]), openMember: () => undefined
+  };
+  const sessions = renderIn(true, <ChatSessionsLinksContext.Provider value={links}><ChatAccordLaunchCard card={card} participants={PARTICIPANTS} /></ChatSessionsLinksContext.Provider>);
   assert.equal(sessions.root.findAll(hasClass("chat-accord-launch-avatar")).length, 0, "no avatar pictures");
-  assert.deepEqual(providerKinds(sessions.root), [MAIN.kind, DREW.kind], "led by @main (Claude), with @drew (Codex); @gone has no mark");
-  assert.match(textOf(sessions.root), /Accordled by @mainwith @drew, @gone/);
+  assert.deepEqual(providerKinds(sessions.root), [MAIN.kind, DREW.kind], "led by the main session (Claude), with drew's task (Codex); gone has no mark");
+  assert.match(textOf(sessions.root), /Accordled by with Fix the logout, gone/);
+  assert.doesNotMatch(textOf(sessions.root), /@/, "no handles");
   sessions.unmount();
 
   const classic = renderIn(false, <ChatAccordLaunchCard card={card} participants={PARTICIPANTS} />);

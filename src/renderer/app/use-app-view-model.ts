@@ -17,6 +17,7 @@ import {
 import { buildProjectSessionGroups, compareConversationSummaries, pinnedChatSummaries, recentChatSummaries } from "./conversation-summaries";
 import type { AppState } from "./app-state";
 import { warningDismissScope, warningNoticeEntries } from "./warnings";
+import { sessionsViewNamesOf, sessionsViewText, type SessionsViewNames } from "../../shared/sessionsViewText";
 
 export function useAppViewModel(state: AppState) {
   const openingConversation = state.openingConversationId
@@ -39,7 +40,19 @@ export function useAppViewModel(state: AppState) {
     : [];
   const warningScope = warningDismissScope(state.conversation);
   const dismissedWarningKeys = new Set(state.dismissedWarningKeysByScope[warningScope] ?? []);
-  const visibleWarnings = warningNoticeEntries([...state.warnings, ...conversationMetadataWarnings], dismissedWarningKeys);
+  // The open chat's view words the notices: the sessions view names nobody
+  // by handle (shared/sessionsViewText.ts); the classic view as written.
+  // The names are read from the chat only when a notice names someone.
+  const noticeText = useMemo(() => {
+    const conversation = state.conversation;
+    let names: SessionsViewNames | undefined | null = null;
+    return (text: string): string => {
+      if (!text.includes("@")) return text;
+      if (names === null) names = conversation?.kind === "chat" ? sessionsViewNamesOf(conversation, state.settings.defaultChatView) : undefined;
+      return sessionsViewText(text, names);
+    };
+  }, [state.conversation, state.settings.defaultChatView]);
+  const visibleWarnings = warningNoticeEntries([...state.warnings, ...conversationMetadataWarnings], dismissedWarningKeys, noticeText);
   const chatSummaries = useMemo(() => state.summaries.filter((summary) => summary.kind === "chat"), [state.summaries]);
   const projectSessionGroups = useMemo(() => buildProjectSessionGroups(chatSummaries), [chatSummaries]);
   const pinnedSessions = useMemo(() => pinnedChatSummaries(chatSummaries), [chatSummaries]);
@@ -87,6 +100,7 @@ export function useAppViewModel(state: AppState) {
     conversationRunning,
     warningScope,
     visibleWarnings,
+    noticeText,
     projectSessionGroups,
     pinnedSessions,
     recentSessions,

@@ -36,6 +36,8 @@ await build({
     "renderer/components/chat/chat-sessions-activity.test.tsx",
     "renderer/components/chat/chat-view-switch.test.tsx",
     "shared/mainSessionView.test.ts",
+    "shared/sessionsViewText.test.ts",
+    "renderer/components/chat/chat-sessions-no-handles.test.tsx",
     "renderer/lib/chat-split-sizing.test.ts",
     "renderer/components/artifacts/artifact-drafts.test.tsx",
     "renderer/components/artifacts/artifacts-panel-selection.test.tsx",

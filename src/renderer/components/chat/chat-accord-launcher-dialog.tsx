@@ -20,6 +20,7 @@ import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatMemberMark, ChatSessionsPresentationContext } from "./chat-member-mark";
 import { AccordMergeIcon } from "./accord-merge-icon";
 import { providerLabel } from "./chat-conversation-data";
+import { sessionsViewLabel, type SessionsViewNames } from "../../../shared/sessionsViewText";
 
 export interface ChatAccordLauncherPayload {
   facilitatorParticipantId: string;
@@ -36,11 +37,17 @@ export function ChatAccordLauncherDialog(props: {
   onStart: (payload: ChatAccordLauncherPayload) => Promise<boolean>;
   /** Opened from a chat shown in the sessions view: members by provider logo. */
   sessions?: boolean;
+  /** The sessions view's names (no handles there): a member by its task, the
+   *  main session by its CLI alone. */
+  sessionsNames?: SessionsViewNames;
 }): JSX.Element {
   const participants = React.useMemo(
     () => props.participants.filter((participant) => !isChatAssistantParticipant(participant)),
     [props.participants]
   );
+  const names = props.sessionsNames;
+  const nameOf = (participant: ChatParticipant): string =>
+    names ? sessionsViewLabel(participant.handle, names) : chatParticipantDisplayName(participant);
   const [facilitatorId, setFacilitatorId] = React.useState("");
   const [targetIds, setTargetIds] = React.useState<string[]>([]);
   const [subject, setSubject] = React.useState("");
@@ -185,7 +192,7 @@ export function ChatAccordLauncherDialog(props: {
             <AppSelect
               value={resolvedFacilitatorId}
               options={participants.map((participant) => {
-                const displayName = chatParticipantDisplayName(participant);
+                const displayName = nameOf(participant) || providerLabel(participant.kind);
                 return {
                   value: participant.id,
                   label: displayName,
@@ -204,7 +211,8 @@ export function ChatAccordLauncherDialog(props: {
             <div className="chat-accord-target-list" data-testid="chat-accord-targets">
               {targetOptions.map((participant) => {
                 const checked = targetIds.includes(participant.id);
-                const displayName = chatParticipantDisplayName(participant);
+                const named = nameOf(participant);
+                const displayName = named || providerLabel(participant.kind);
                 return (
                   <label className={`chat-accord-target${checked ? " is-selected" : ""}`} key={participant.id}>
                     <input
@@ -221,7 +229,7 @@ export function ChatAccordLauncherDialog(props: {
                     <ChatMemberMark className="chat-accord-target-avatar" markClassName="is-mini" avatar={avatarForChatParticipant(participant, displayName)} member={participant} tooltip={null} />
                     <span className="chat-accord-target-title" title={props.participantRoleLabel(participant)}>
                       <strong>{displayName}</strong>
-                      <span>- {providerLabel(participant.kind)}</span>
+                      {named && <span>- {providerLabel(participant.kind)}</span>}
                     </span>
                   </label>
                 );

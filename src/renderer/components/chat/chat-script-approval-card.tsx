@@ -10,6 +10,7 @@ import { ChatMemberMark } from "./chat-member-mark";
 import { formatChatTime } from "./chat-format";
 import { ChatAppToolReviewFooter } from "./chat-app-tool-approval-review";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
+import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
 
 function scriptApprovalTitle(handle: string, request: ChatScriptChangeRequest): string {
   const who = chatParticipantReference(handle);
@@ -59,6 +60,11 @@ export function ChatScriptApprovalCard(props: {
   const requesterAvatar = requester
     ? avatarForChatParticipant(requester, requesterLabel)
     : avatarForParticipant(requesterLabel, approval.requesterParticipantId);
+  // The sessions view names members by their task, the main session by
+  // nothing (it is "this chat" where a list must name it).
+  const appText = useSessionsViewText();
+  const nameOf = useSessionsViewLabel();
+  const requesterName = nameOf(requesterLabel);
   const pending = approval.status === "pending";
   // A member on a machine proposed it: the script, its code and its keys
   // live on that machine.
@@ -121,8 +127,11 @@ export function ChatScriptApprovalCard(props: {
   }
 
   const chats = request.permissions.chatIds.map((chatId) => request.chatLabels[chatId] ?? chatId);
-  const members = request.permissions.participantIds.map((participantId) => request.participantLabels[participantId] ?? participantId);
-  const title = scriptApprovalTitle(approval.requesterHandle, request);
+  const members = request.permissions.participantIds.map((participantId) => {
+    const label = request.participantLabels[participantId] ?? participantId;
+    return nameOf(label) || (label.startsWith("@") ? "this chat" : label);
+  });
+  const title = appText(scriptApprovalTitle(approval.requesterHandle, request));
 
   const queuedDecision = approval.machineDecisionPending;
   if (queuedDecision) {
@@ -162,7 +171,7 @@ export function ChatScriptApprovalCard(props: {
       <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
       <div className="chat-app-tool-approval-body">
         <div className="chat-app-tool-approval-meta">
-          <strong>{requesterLabel}</strong>
+          {requesterName && <strong>{requesterName}</strong>}
           <span className="message-provider">Proposes a scheduled task</span>
           <span className="message-when">{formatChatTime(approval.createdAt)}</span>
         </div>
@@ -176,7 +185,7 @@ export function ChatScriptApprovalCard(props: {
           <div className="chat-script-approval-content">
             <h3 className="chat-script-approval-title">{title}</h3>
             {approval.cardRefusals?.length ? (
-              <p className="chat-script-approval-error">Your earlier answer was not applied: {approval.cardRefusals[approval.cardRefusals.length - 1].reason}</p>
+              <p className="chat-script-approval-error">Your earlier answer was not applied: {appText(approval.cardRefusals[approval.cardRefusals.length - 1].reason)}</p>
             ) : null}
             <div className="chat-script-approval-name">{request.name}</div>
             {request.description && <p className="chat-script-approval-description">{request.description}</p>}
