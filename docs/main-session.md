@@ -280,10 +280,14 @@ chat as that chat's main session, with everything it knew
   longer has (its copy would run on another provider), one on a machine
   whose program is older (Upgrade runtime) or has never greeted this
   computer, and one on this computer whose CLI is not ready.
-- On the phone (sessions view) it is in the title's menu: for the main
+- On the phone, in the sessions view it is in the title's menu: for the main
   session on the main timeline (under the chat's view), for a member on its
   own screen (the title opens that menu there; the side panel stays on its
-  icon). Opening the menu reads `GET /v1/phone/new-chat?forkOf=<chat>&
+  icon). In the classic view (a chat from before with its Assistant) it is a
+  small fork action at the end of each member's row in the members sheet, as
+  on the computer's roster card; a tap opens the same item under that member
+  (what it makes, or why not; a phone has no tooltip) and a tap on the item
+  makes the chat. Opening the menu or the item reads `GET /v1/phone/new-chat?forkOf=<chat>&
   participantId=<member>`: the server adds the member and the chat's main
   session as it holds them (never a session a move hands over) and whether
   the member has a finished reply there; the computer's New chat offer

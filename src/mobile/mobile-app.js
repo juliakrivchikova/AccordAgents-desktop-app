@@ -13151,17 +13151,20 @@
   }
 
   // --- Fork to new chat ---------------------------------------------------
-  // A member (the main session, or one it made) copied into a new chat as
-  // that chat's main session, as the computer's member menus make it
-  // (src/shared/forkToNewChat.ts): read from the server when the menu opens
+  // A member (the main session, or one it made, or any member of a classic
+  // chat) copied into a new chat as that chat's main session, as the
+  // computer's member menus and roster cards make it
+  // (src/shared/forkToNewChat.ts): read from the server when its item opens
   // (the member and its chat as the server holds them, with what the
   // computer offers), refused with the computer's words, and made through
   // the same queue as every new chat from the phone. The device that runs
   // the new main session copies the member's session at its first turn.
+  // Its item is in the title's menu in the sessions view, and under the
+  // member in the classic view's members sheet (renderMembersSheetFork).
 
   const FORK_SERVER_OUTDATED = "Your server does not fork chats from the phone yet. It will once AccordAgents on your computer has updated.";
   const FORK_COMPUTER_OUTDATED = "Your computer does not fork chats from the phone yet. Update AccordAgents on your computer.";
-  // What the menu says for the member it was last opened for:
+  // What the item says for the member it was last opened for:
   // { key, status: "checking" | "ready", reason?, plan? }.
   let forkMenu;
   let forkMenuToken = 0;
@@ -13171,14 +13174,16 @@
     return conversationId + "\u0000" + participantId;
   }
 
-  function renderTitleMenuFork(chat, participantId) {
-    const button = document.getElementById("chat-title-fork");
-    const detail = document.getElementById("chat-title-fork-detail");
-    if (!button || !detail) return;
+  /** Whether this phone's shared rules can fork (a page from before cannot). */
+  function forkOffered() {
     const shared = mobileSharedRules();
-    const shown = Boolean(chat && participantId && shared && typeof shared.forkToNewChatReasonFromOffer === "function");
-    if (button.hidden === shown) button.hidden = !shown;
-    if (!shown) return;
+    return Boolean(shared && typeof shared.forkToNewChatReasonFromOffer === "function");
+  }
+
+  /** The Fork to new chat item for a member: what it makes, "Checking…",
+   *  or why not, and whether a tap makes it. */
+  function paintForkItem(button, detail, chat, participantId) {
+    const shared = mobileSharedRules();
     const state = forkMenu && forkMenu.key === forkMenuKey(chat.id, participantId) ? forkMenu : undefined;
     const checking = !state || state.status === "checking";
     const ready = !checking && !state.reason && Boolean(state.plan) && !forkStarting;
@@ -13187,6 +13192,32 @@
     if (button.getAttribute("aria-disabled") !== disabled) button.setAttribute("aria-disabled", disabled);
     button.dataset.forkParticipant = participantId;
     if (detail.textContent !== text) detail.textContent = text;
+  }
+
+  function renderTitleMenuFork(chat, participantId) {
+    const button = document.getElementById("chat-title-fork");
+    const detail = document.getElementById("chat-title-fork-detail");
+    if (!button || !detail) return;
+    const shown = Boolean(chat && participantId && forkOffered());
+    if (button.hidden === shown) button.hidden = !shown;
+    if (!shown) return;
+    paintForkItem(button, detail, chat, participantId);
+  }
+
+  /** Both places the item is: what it says changed (read, starting, failed). */
+  function renderForkItems() {
+    const chat = activeChatRecord();
+    renderChatTitleMenu(chat);
+    renderMembersSheetFork(chat);
+  }
+
+  /** A tap on the item: made only when it was read ready for this member;
+   *  disabled, it stays where it is, its line saying why. */
+  function forkFromItem(button) {
+    const chat = activeChatRecord();
+    const state = forkMenu && chat ? forkMenu : undefined;
+    if (button.getAttribute("aria-disabled") === "true" || !state || state.key !== forkMenuKey(chat.id, button.dataset.forkParticipant || "") || !state.plan) return;
+    void forkMemberToNewChat(state.plan);
   }
 
   /** Reads whether the member can be forked now, and what the new chat is
@@ -13205,7 +13236,7 @@
     }
     if (token !== forkMenuToken) return;
     forkMenu = { key: key, status: "ready", ...forkPlanFrom(answer, failure) };
-    renderChatTitleMenu(activeChatRecord());
+    renderForkItems();
   }
 
   /** Why the member cannot be forked now, by the computer's rule and words,
@@ -13238,7 +13269,7 @@
     const shared = mobileSharedRules();
     if (forkStarting || !shared) return;
     forkStarting = true;
-    renderChatTitleMenu(activeChatRecord());
+    renderForkItems();
     const conversationId = createEventId();
     let listed = false;
     try {
@@ -13279,7 +13310,7 @@
       if (listed) forgetStartedChat(conversationId);
       forkStarting = false;
       if (forkMenu) forkMenu = { ...forkMenu, reason: "Could not start the chat: " + (error && error.message ? error.message : String(error)), plan: undefined };
-      renderChatTitleMenu(activeChatRecord());
+      renderForkItems();
       return;
     }
     forkStarting = false;
@@ -13302,10 +13333,7 @@
       const fork = target ? target.closest("#chat-title-fork") : null;
       if (fork) {
         // Disabled, it stays open: its line says why.
-        const chat = activeChatRecord();
-        const state = forkMenu && chat ? forkMenu : undefined;
-        if (fork.getAttribute("aria-disabled") === "true" || !state || state.key !== forkMenuKey(chat.id, fork.dataset.forkParticipant || "") || !state.plan) return;
-        void forkMemberToNewChat(state.plan);
+        forkFromItem(fork);
         return;
       }
       const item = target ? target.closest("[data-title-view]") : null;
@@ -13351,6 +13379,13 @@
   // member's role and home machine. Nothing is asked of the desktop.
 
   let membersSheetOpen = false;
+  // The member whose Fork to new chat item is open in the classic view's
+  // members sheet; one at a time, closed with the sheet.
+  let membersSheetForkId;
+  // Lucide's git-fork, the computer's roster card icon.
+  const FORK_ICON_PATHS = ["M9 18a3 3 0 1 0 6 0a3 3 0 1 0 -6 0", "M3 6a3 3 0 1 0 6 0a3 3 0 1 0 -6 0", "M15 6a3 3 0 1 0 6 0a3 3 0 1 0 -6 0",
+    "M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9", "M12 12v3"];
+
   // Where a tap on a member in the open chat's members sheet lands: a
   // running member's turn in progress (the rule Activity's Running rows use),
   // any other member's last message. Worked out from the rows the chat's
@@ -13631,11 +13666,13 @@
     const targets = membersSheetTargets.conversationId === conversationId ? membersSheetTargets : undefined;
     // Redrawn only when what it shows changed: a member streaming redraws the
     // chat every second or so, and a row replaced under the finger loses the tap.
-    const signature = JSON.stringify([conversationId, members.map(function (member) {
-      return [member.handle, member.displayName, member.roleLabel, member.kind, memberLocationLabel(member), member.avatarId || "",
-        Boolean(targets && targets.running.has(memberHandleKey(member.handle))), Boolean(memberSheetTarget(member))];
+    const forkable = forkOffered();
+    const signature = JSON.stringify([conversationId, forkable, members.map(function (member) {
+      return [member.id, member.handle, member.displayName, member.roleLabel, member.kind, memberLocationLabel(member), member.avatarId || "",
+        Boolean(targets && targets.running.has(memberHandleKey(member.handle))), Boolean(memberSheetTarget(member)), membersSheetForkId === member.id];
     })]);
     if (signature === lastMembersSheetSignature && list.childElementCount > 0) {
+      renderMembersSheetFork(chat);
       return;
     }
     lastMembersSheetSignature = signature;
@@ -13690,8 +13727,70 @@
         row.setAttribute("role", "button");
         row.tabIndex = 0;
       }
+      // Fork to new chat: a small action on the member, as on the computer's
+      // roster card. A tap opens its item under the member (what it makes,
+      // or why not, read from the server as the sessions view's title menu
+      // reads it); a tap on the item makes the chat.
+      const forkOpen = membersSheetForkId === member.id;
+      if (forkable) row.append(membersSheetForkToggle(member, forkOpen));
       list.append(row);
+      if (forkable && forkOpen) list.append(membersSheetForkItem());
     });
+    renderMembersSheetFork(chat);
+  }
+
+  function membersSheetForkToggle(member, open) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mobile-icon-button is-muted members-sheet-fork-toggle";
+    button.dataset.memberFork = member.id;
+    button.setAttribute("aria-label", "Fork to new chat: " + member.displayName);
+    button.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) button.setAttribute("aria-controls", "members-sheet-fork");
+    button.append(lineIcon(FORK_ICON_PATHS, 18));
+    return button;
+  }
+
+  /** The item itself, as the title's menu draws it; painted by
+   *  renderMembersSheetFork. */
+  function membersSheetForkItem() {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.id = "members-sheet-fork";
+    button.className = "chat-title-menu-item chat-title-menu-fork members-sheet-fork-item";
+    button.setAttribute("aria-disabled", "true");
+    button.setAttribute("aria-describedby", "members-sheet-fork-detail");
+    const copy = document.createElement("span");
+    copy.className = "chat-title-menu-copy";
+    const label = document.createElement("span");
+    label.className = "chat-title-menu-label";
+    label.textContent = mobileSharedRules().FORK_TO_NEW_CHAT_LABEL;
+    const detail = document.createElement("span");
+    detail.id = "members-sheet-fork-detail";
+    detail.className = "chat-title-menu-detail";
+    copy.append(label, detail);
+    button.append(copy);
+    return button;
+  }
+
+  function renderMembersSheetFork(chat) {
+    const button = document.getElementById("members-sheet-fork");
+    const detail = document.getElementById("members-sheet-fork-detail");
+    if (!button || !detail || !chat || !membersSheetForkId || !forkOffered()) return;
+    paintForkItem(button, detail, chat, membersSheetForkId);
+  }
+
+  /** A tap on a member's fork action: its item opens under it and is read
+   *  again from the server, whatever it said before; a second tap closes it. */
+  function toggleMembersSheetFork(participantId) {
+    const chat = activeChatRecord();
+    if (!chat || !participantId) return;
+    membersSheetForkId = membersSheetForkId === participantId ? undefined : participantId;
+    if (membersSheetForkId) {
+      forkMenu = undefined;
+      void readForkPlan(chat, membersSheetForkId);
+    }
+    renderMembersSheet(chat);
   }
 
   function renderMembersSheetIfOpen(chat) {
@@ -13722,6 +13821,7 @@
 
   function closeMembersSheet() {
     membersSheetOpen = false;
+    membersSheetForkId = undefined;
     lastMembersSheetSignature = "";
     renderMembersSheet(undefined);
   }
@@ -13759,6 +13859,17 @@
     // One handler on the list: rows are redrawn as members start and stop.
     document.getElementById("members-sheet-list")?.addEventListener("click", function (event) {
       const target = event.target instanceof Element ? event.target : null;
+      // The classic view's list: a member's Fork to new chat, and its item.
+      const forkToggle = target ? target.closest("[data-member-fork]") : null;
+      if (forkToggle) {
+        toggleMembersSheetFork(forkToggle.dataset.memberFork);
+        return;
+      }
+      const forkItem = target ? target.closest("#members-sheet-fork") : null;
+      if (forkItem) {
+        forkFromItem(forkItem);
+        return;
+      }
       // The sessions view's list: Stop a member, show the members that
       // ended, or open a member's session.
       const stop = target ? target.closest("[data-stop-members]") : null;

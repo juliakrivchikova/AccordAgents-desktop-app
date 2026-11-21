@@ -2,7 +2,9 @@
  * Fork to new chat on the phone (src/shared/forkToNewChat.ts), driven through
  * the real PWA in a browser against a real hub: the title's menu offers it
  * for the main session on the main timeline and for a member on its own
- * screen, as the computer's member menus do, disabled with the computer's
+ * screen, as the computer's member menus do, and in the classic view a small
+ * action on each member's row in the members sheet opens the same item under
+ * it, as the computer's roster card offers it; disabled with the computer's
  * reason (a member that never ran, Antigravity, a machine with an older
  * program, a CLI not ready on the computer, a server or a computer from
  * before); chosen, it makes the new chat on the server as the computer makes
@@ -286,4 +288,120 @@ test("the phone forks a member to a new chat from the title's menu as the comput
   assert.deepEqual(stored?.metadata.participants[0].forkOrigin, forked.forkOrigin, "on the server with where it comes from");
   const source = await hub.storage.getConversation("conv-main");
   assert.equal(source?.metadata.participants.length, 5, "the member and its chat are not touched");
+});
+
+// --- the classic view ---------------------------------------------------
+// A chat from before with its Assistant: no main session, so the phone shows
+// it in the classic view and lists its members in the members sheet.
+const ASSISTANT = member("assistant", { id: "p-assistant", roleConfigId: "administrator", kind: "codex-cli", model: "gpt-5.5", reasoningEffort: "medium",
+  agentMode: "default", permissions: rights({ webAccess: true }) });
+const GERA = member("gera", { id: "p-gera" });
+const SAGE = member("sage", { id: "p-sage", kind: "gemini-cli" });
+
+const sheetRow = (id) => `document.querySelector('#members-sheet-list .members-sheet-row [data-member-fork=${JSON.stringify(id)}]')?.closest(".members-sheet-row")`;
+const sheetFork = `(() => { const node = document.getElementById("members-sheet-fork"); if (!node) return undefined;
+  const row = node.previousElementSibling;
+  return { under: row && row.querySelector("[data-member-fork]") ? row.querySelector("[data-member-fork]").dataset.memberFork : undefined,
+    disabled: node.getAttribute("aria-disabled"), label: node.querySelector(".chat-title-menu-label").textContent,
+    detail: document.getElementById("members-sheet-fork-detail").textContent,
+    open: [...document.querySelectorAll("#members-sheet-list [data-member-fork]")].filter((button) => button.getAttribute("aria-expanded") === "true").map((button) => button.dataset.memberFork) }; })()`;
+
+/** Taps a member's fork action in the members sheet and waits for its item's answer. */
+async function openSheetFork(app, participantId) {
+  await app.evaluate(`${sheetRow(participantId)}.querySelector("[data-member-fork]").click()`);
+  await app.waitFor(`(() => { const node = document.getElementById("members-sheet-fork");
+    return Boolean(node && node.dataset.forkParticipant === ${JSON.stringify(participantId)} &&
+      document.getElementById("members-sheet-fork-detail").textContent !== "Checking…"); })()`, `${participantId}'s fork answer`);
+  return app.evaluate(sheetFork);
+}
+
+test("in the classic view the phone forks a member from a small action on its row in the members sheet, with the same read, words and chat", { timeout: 180_000 }, async (t) => {
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: 8412, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-fork-classic-");
+  const chrome = launchChrome({ port: 9562, profile, url: `${site.origin}/` });
+  let app;
+  t.after(async () => {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  await hub.createChat("conv-old", {
+    title: "Old notes", repoPath: "/Users/u/site", participants: [ASSISTANT, GERA, SAGE], createdAt: at(41),
+    messages: [
+      { id: "u1", role: "user", content: "Sum up the notes", status: "done", createdAt: at(40), metadata: { deliveryTargets: [ASSISTANT.id, SAGE.id] } },
+      { id: "a1", role: "participant", participantId: ASSISTANT.id, participantLabel: "@assistant", content: "Summed up.", status: "done", createdAt: at(39),
+        metadata: { sourceMessageId: "u1" } },
+      { id: "s1", role: "participant", participantId: SAGE.id, participantLabel: "@sage", content: "Read them.", status: "done", createdAt: at(38),
+        metadata: { sourceMessageId: "u1" } }
+    ]
+  });
+  const published = await hub.call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(),
+    roles: { "software-engineer": "Engineer", "main-session": "Main session", administrator: "Assistant" }, prompts: [], skills: [], avatars: {},
+    newChat: { projects: [{ path: "/Users/u/site", label: "site" }], defaultProject: "/Users/u/site", mainSession: OFFERED_MAIN, assistant: OFFERED_MAIN,
+      defaultChatView: "sessions", members: [], fork: FORK_OFFER } } });
+  assert.equal(published.ok, true);
+  app = await attachApp({ port: 9562 });
+  await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+  await openChat(app, "conv-old");
+  await app.waitFor(`${title} === "Old notes"`, "the classic chat");
+  assert.equal(await app.evaluate(visible("#chat-title-chevron")), false, "the classic view: no title menu");
+
+  // The title opens the members; each row ends with its fork action, no item yet.
+  await app.evaluate(`document.getElementById("chat-members-toggle").click()`);
+  await app.waitFor(`${visible("#members-sheet")} && document.querySelectorAll("#members-sheet-list .members-sheet-row").length === 3`, "the members sheet");
+  const actions = await app.evaluate(`[...document.querySelectorAll("#members-sheet-list .members-sheet-row")].map((row) => {
+    const button = row.querySelector("[data-member-fork]"); const box = button.getBoundingClientRect(); const end = row.getBoundingClientRect();
+    return { id: button.dataset.memberFork, label: button.getAttribute("aria-label"), expanded: button.getAttribute("aria-expanded"),
+      atEnd: end.right - box.right <= 12, tappable: box.width >= 40 && box.height >= 40, last: row.lastElementChild === button }; })`);
+  assert.deepEqual(actions, [
+    { id: "p-assistant", label: "Fork to new chat: Chat Assistant", expanded: "false", atEnd: true, tappable: true, last: true },
+    { id: "p-gera", label: "Fork to new chat: @gera", expanded: "false", atEnd: true, tappable: true, last: true },
+    { id: "p-sage", label: "Fork to new chat: @sage", expanded: "false", atEnd: true, tappable: true, last: true }
+  ]);
+  assert.equal(await app.evaluate(`document.getElementById("members-sheet-fork")`), null);
+
+  // A member that never ran: its item, under it, disabled with the computer's words.
+  const gera = await openSheetFork(app, "p-gera");
+  assert.deepEqual(gera, { under: "p-gera", disabled: "true", label: "Fork to new chat", detail: "It has not run yet, so it has no session to copy.", open: ["p-gera"] });
+  // A tap on it makes nothing: the sheet and its line stay.
+  await app.evaluate(`document.getElementById("members-sheet-fork").click()`);
+  assert.equal(await app.evaluate(visible("#members-sheet")), true);
+  assert.equal((await app.evaluate(sheetFork)).detail, "It has not run yet, so it has no session to copy.");
+  // Antigravity: one item at a time, read for that member.
+  assert.deepEqual(await openSheetFork(app, "p-sage"), { under: "p-sage", disabled: "true", label: "Fork to new chat", detail: "Antigravity has no session fork.", open: ["p-sage"] });
+  // A second tap closes it.
+  await app.evaluate(`${sheetRow("p-sage")}.querySelector("[data-member-fork]").click()`);
+  await app.waitFor(`document.getElementById("members-sheet-fork") === null`, "the item closed");
+  // A computer from before says so here too.
+  await rewriteForkAnswers(app, `(body) => ({ ...body, options: { ...body.options, fork: undefined } })`);
+  assert.equal((await openSheetFork(app, "p-assistant")).detail, "Your computer does not fork chats from the phone yet. Update AccordAgents on your computer.");
+  await app.evaluate(`${sheetRow("p-assistant")}.querySelector("[data-member-fork]").click()`);
+  await rewriteForkAnswers(app, "undefined");
+  assert.equal(hub.opsRequests.flatMap((request) => request.ops || []).some((op) => op.kind === "conversation.create"), false, "nothing made yet");
+
+  // The Assistant, forked: the same chat the title's menu makes.
+  const ready = await openSheetFork(app, "p-assistant");
+  assert.deepEqual({ disabled: ready.disabled, detail: ready.detail }, { disabled: "false", detail: "A new chat whose main session starts from a copy of this session" });
+  await app.evaluate(`document.getElementById("members-sheet-fork").click()`);
+  const create = await waitForOp(hub, (op) => op.kind === "conversation.create");
+  assert.equal(create.conversation.title, "Old notes (fork)");
+  assert.equal(create.conversation.repoPath, "/Users/u/site");
+  const [forked, ...others] = create.conversation.metadata.participants;
+  assert.equal(others.length, 0, "the main session alone");
+  assert.deepEqual({ mainSessionParticipantId: create.conversation.metadata.mainSessionParticipantId, chatView: create.conversation.metadata.chatView },
+    { mainSessionParticipantId: forked.id, chatView: "sessions" });
+  assert.deepEqual({ handle: forked.handle, roleConfigId: forked.roleConfigId, kind: forked.kind, model: forked.model, reasoningEffort: forked.reasoningEffort, agentMode: forked.agentMode },
+    { handle: "main", roleConfigId: "main-session", kind: "codex-cli", model: "gpt-5.5", reasoningEffort: "medium", agentMode: "default" });
+  assert.deepEqual(forked.forkOrigin, { conversationId: "conv-old", participantId: ASSISTANT.id, handle: "assistant", conversationTitle: "Old notes", kind: "codex-cli" });
+  const intro = await waitForOp(hub, (op) => op.kind === "message.create" && op.conversationId === create.conversationId && op.message.role === "system");
+  assert.equal(intro.message.content, "Chat started.\nMembers:\n- User\n- @main");
+  // Open at once, the members sheet gone with the chat it was over.
+  await app.waitFor(`document.getElementById("message-list").dataset.conversationId === ${JSON.stringify(create.conversationId)} && ${title} === "Old notes (fork)"`,
+    "the new chat, open");
+  assert.equal(await app.evaluate(visible("#members-sheet")), false);
+  const source = await hub.storage.getConversation("conv-old");
+  assert.equal(source?.metadata.participants.length, 3, "the member and its chat are not touched");
 });
