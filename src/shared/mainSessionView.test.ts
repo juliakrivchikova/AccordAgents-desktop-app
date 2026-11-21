@@ -200,9 +200,9 @@ test("no turn-finished note is on the main timeline of the sessions view, the ma
   assert.ok(!main.includes("note-main") && !main.includes("note-gera"));
 });
 
-test("a task card with several members counts the running ones", () => {
-  assert.equal(sessionsTaskGroupLabel(["running", "done", "running"]), "3 members · 2 running");
-  assert.equal(sessionsTaskGroupLabel(["done", "failed"]), "2 members");
+test("a task card with several tasks counts the running ones, and never says members", () => {
+  assert.equal(sessionsTaskGroupLabel(["running", "done", "running"]), "3 tasks · 2 running");
+  assert.equal(sessionsTaskGroupLabel(["done", "failed"]), "2 tasks");
 });
 
 test("a scheduled task's wake-up of one member is part of that member's session, a wake-up of the main session stays on the timeline", () => {
@@ -283,7 +283,7 @@ test("members are named by their task, not their handle", () => {
   assert.equal(sessionsMemberTitle({ handle: "@drew" }), "drew");
   assert.equal(sessionsMemberDetail({ provider: "Claude Code", model: "opus", roleLabel: "Member", roleConfigId: "generic-participant" }), "Claude Code · opus");
   assert.equal(sessionsMemberDetail({ provider: "Codex CLI", roleLabel: "Reviewer", roleConfigId: "reviewer" }), "Codex CLI · Reviewer");
-  assert.equal(sessionsWaitingText(["Fix the login", "Check logout"]), "Waiting on 2 members: Fix the login, Check logout");
+  assert.equal(sessionsWaitingText(["Fix the login", "Check logout"]), "Waiting on 2 tasks: Fix the login, Check logout");
   assert.equal(sessionsDelegationSummary(1), "Delegated 1 task");
   assert.equal(sessionsDelegationSummary(3), "Delegated 3 tasks");
   assert.equal(withoutLeadingMention("@main Reply to me", "main"), "Reply to me");

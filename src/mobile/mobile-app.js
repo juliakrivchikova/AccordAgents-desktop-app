@@ -3339,6 +3339,9 @@
   let newChatSaid;
   let newChatReading = false;
   let newChatChosen = new Set();
+  // The main session's provider, model and effort the chip chose (sessions
+  // view): { kind, hostId, model, reasoningEffort }; none: as offered.
+  let newChatMainChoice;
   // The project the chat works in: a path the computer offered, or "" for none.
   let newChatProject = "";
   // Pictures for the first message, prepared as the chat's composer prepares them.
@@ -3381,6 +3384,7 @@
     const token = ++newChatToken;
     newChatOffer = undefined;
     newChatChosen = new Set();
+    newChatMainChoice = undefined;
     newChatProject = "";
     newChatReading = true;
     newChatReadingAgain = again;
@@ -3437,7 +3441,7 @@
   function newChatUntouched() {
     if (!newChatOffer) return false;
     const input = document.getElementById("new-chat-input");
-    return newChatChosen.size === 0 && newChatProject === (newChatOffer.options.defaultProject || "") &&
+    return newChatChosen.size === 0 && !newChatMainChoice && newChatProject === (newChatOffer.options.defaultProject || "") &&
       newChatAttachments.length === 0 && newChatPreparing === 0 && !(input && input.value.trim()) &&
       !document.querySelector(".new-chat-picker:not([hidden])");
   }
@@ -3525,7 +3529,7 @@
   }
 
   function closeNewChatPickers() {
-    for (const id of ["new-chat-projects-sheet", "new-chat-members-sheet"]) {
+    for (const id of ["new-chat-projects-sheet", "new-chat-members-sheet", "new-chat-model-sheet"]) {
       const sheet = document.getElementById(id);
       if (sheet) sheet.hidden = true;
     }
@@ -3607,6 +3611,105 @@
 
   function isMainSessionMember(participant) {
     return Boolean(participant) && participant.roleConfigId === MAIN_SESSION_ROLE;
+  }
+
+  /** A new chat that opens in the sessions view (the computer's Settings →
+   *  General; unset: sessions) has no members on New chat: its chip chooses
+   *  the main session's provider, model and effort, as on the computer (the
+   *  User, 2026-11-21: "как в T3, выбираешь просто провайдера и модель"). */
+  function newChatSessionsView(offer) {
+    return Boolean(offer) && offer.defaultChatView !== "classic" && isMainSessionMember(newChatLead(offer));
+  }
+
+  /** The providers the chip offers: the computer's list, else (a computer
+   *  from before) the offered main session's own. */
+  function newChatProviders(offer) {
+    if (offer && Array.isArray(offer.mainSessionProviders) && offer.mainSessionProviders.length > 0) return offer.mainSessionProviders;
+    const lead = newChatLead(offer);
+    return lead ? [{ kind: lead.kind, label: memberKindLabel(lead.kind), defaultModelLabel: memberKindLabel(lead.kind), models: [], efforts: [] }] : [];
+  }
+
+  /** What the chip shows chosen: the choice while the offer still has its
+   *  provider, else the offered main session's provider with its CLI's own
+   *  model and effort. */
+  function newChatMainSelection(offer) {
+    const providers = newChatProviders(offer);
+    const lead = newChatLead(offer);
+    const same = function (item, choice) { return item.kind === choice.kind && (item.hostId || "") === (choice.hostId || ""); };
+    const chosen = newChatMainChoice && providers.find(function (item) { return same(item, newChatMainChoice); });
+    const provider = chosen || (lead && providers.find(function (item) { return same(item, { kind: lead.kind, hostId: lead.hostId }); })) || providers[0];
+    if (!provider) return undefined;
+    const model = chosen && newChatMainChoice.model && provider.models.some(function (item) { return item.id === newChatMainChoice.model; }) ? newChatMainChoice.model : undefined;
+    const modelEntry = model ? provider.models.find(function (item) { return item.id === model; }) : undefined;
+    const efforts = (modelEntry && modelEntry.efforts) || provider.efforts || [];
+    const effort = chosen && newChatMainChoice.reasoningEffort && efforts.some(function (item) { return item.id === newChatMainChoice.reasoningEffort; }) ? newChatMainChoice.reasoningEffort : undefined;
+    return { provider: provider, model: model, modelLabel: modelEntry ? modelEntry.label : provider.defaultModelLabel, efforts: efforts,
+      effort: effort, effortLabel: effort ? (efforts.find(function (item) { return item.id === effort; }) || {}).label : undefined };
+  }
+
+  function newChatOptionRow(options) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "members-sheet-row new-chat-option new-chat-model-option";
+    row.setAttribute("aria-pressed", options.chosen ? "true" : "false");
+    if (options.data) for (const key of Object.keys(options.data)) row.dataset[key] = options.data[key];
+    const copy = document.createElement("span");
+    copy.className = "members-sheet-copy";
+    const name = document.createElement("strong");
+    name.textContent = options.label;
+    copy.append(name);
+    if (options.detail) {
+      const detail = document.createElement("span");
+      detail.className = "members-sheet-location";
+      detail.textContent = options.detail;
+      copy.append(detail);
+    }
+    if (options.mark) row.append(options.mark);
+    row.append(copy, newChatCheck(options.chosen));
+    row.addEventListener("click", options.onClick);
+    return row;
+  }
+
+  /** The chip's sheet: the providers, the chosen one's models (its default
+   *  first) and its efforts. */
+  function renderNewChatModelOptions(offer) {
+    const list = document.getElementById("new-chat-model-options");
+    if (!list) return;
+    list.replaceChildren();
+    const selection = offer && newChatSessionsView(offer) ? newChatMainSelection(offer) : undefined;
+    if (!selection) return;
+    const section = function (text) {
+      const head = document.createElement("div");
+      head.className = "members-sheet-section";
+      head.textContent = text;
+      list.append(head);
+    };
+    const choose = function (patch) {
+      const current = { kind: selection.provider.kind, hostId: selection.provider.hostId, model: selection.model, reasoningEffort: selection.effort };
+      newChatMainChoice = Object.assign(current, patch);
+      renderNewChat();
+    };
+    section("Provider");
+    for (const provider of newChatProviders(offer)) {
+      const chosen = provider.kind === selection.provider.kind && (provider.hostId || "") === (selection.provider.hostId || "");
+      list.append(newChatOptionRow({ label: provider.label, chosen: chosen, mark: providerLogoElement(provider.kind, "is-small"),
+        data: { providerKind: provider.kind, hostId: provider.hostId || "" },
+        // Another provider: its own default model and effort.
+        onClick: function () { choose({ kind: provider.kind, hostId: provider.hostId, model: undefined, reasoningEffort: undefined }); } }));
+    }
+    section("Model");
+    list.append(newChatOptionRow({ label: selection.provider.defaultModelLabel, detail: "Default", chosen: !selection.model, data: { model: "" },
+      onClick: function () { choose({ model: undefined }); } }));
+    for (const model of selection.provider.models) {
+      list.append(newChatOptionRow({ label: model.label, chosen: selection.model === model.id, data: { model: model.id },
+        onClick: function () { choose({ model: model.id }); } }));
+    }
+    section("Effort");
+    list.append(newChatOptionRow({ label: "Default", chosen: !selection.effort, data: { effort: "" }, onClick: function () { choose({ reasoningEffort: undefined }); } }));
+    for (const effort of selection.efforts) {
+      list.append(newChatOptionRow({ label: effort.label, chosen: selection.effort === effort.id, data: { effort: effort.id },
+        onClick: function () { choose({ reasoningEffort: effort.id }); } }));
+    }
   }
 
   function newChatMemberName(participant) {
@@ -3696,10 +3799,11 @@
         projects.append(divider, newChatProjectRow(undefined, !newChatProject));
       }
     }
+    renderNewChatModelOptions(offer);
     const list = document.getElementById("new-chat-members");
     if (list) {
       list.replaceChildren();
-      if (offer) {
+      if (offer && !newChatSessionsView(offer)) {
         list.append(newChatMemberRow(newChatLead(offer), { chosen: true, locked: true }));
         for (const member of newChatVisibleMembers(offer)) {
           const unavailable = member.unavailable || member.machineUnavailable;
@@ -3735,6 +3839,34 @@
       if (projectButton) projectButton.setAttribute("aria-label", "Project: " + projectLabel.textContent);
     }
     const chosen = newChatChosenParticipants(offer);
+    // The sessions view: the model chip instead of the members.
+    const sessionsView = newChatSessionsView(offer);
+    const modelButton = document.getElementById("new-chat-model-button");
+    if (membersButton) membersButton.hidden = sessionsView;
+    if (modelButton) {
+      modelButton.hidden = !sessionsView;
+      modelButton.disabled = !offer;
+      const selection = sessionsView ? newChatMainSelection(offer) : undefined;
+      const label = document.getElementById("new-chat-model-label");
+      const key = selection ? [selection.provider.kind, selection.provider.hostId || "", selection.modelLabel, selection.effortLabel || ""].join("\u0000") : "";
+      if (label && label.dataset.key !== key) {
+        label.dataset.key = key;
+        label.replaceChildren();
+        if (selection) {
+          const model = document.createElement("span");
+          model.className = "new-chat-model-name";
+          model.textContent = selection.modelLabel;
+          label.append(providerLogoElement(selection.provider.kind, "is-chip"), model);
+          if (selection.effortLabel) {
+            const effort = document.createElement("span");
+            effort.className = "new-chat-model-effort";
+            effort.textContent = selection.effortLabel;
+            label.append(effort);
+          }
+        }
+      }
+      modelButton.setAttribute("aria-label", selection ? "Model: " + [selection.provider.label, selection.modelLabel, selection.effortLabel].filter(Boolean).join(", ") : "Model");
+    }
     if (membersButton) {
       membersButton.disabled = !offer;
       membersButton.setAttribute("aria-label", chosen.length ? "Members: " + chosen.map(newChatMemberName).join(", ") : "Members");
@@ -3768,9 +3900,9 @@
     if (start) start.disabled = newChatStarting || newChatPreparing > 0 || !offer || Boolean(offer.unavailable) || !hasMessage;
     // What is being started is what was on the card when Start was tapped.
     if (input) input.readOnly = newChatStarting;
-    for (const id of ["new-chat-project", "new-chat-members-button"]) {
+    for (const id of ["new-chat-project", "new-chat-members-button", "new-chat-model-button"]) {
       const button = document.getElementById(id);
-      const sheet = document.getElementById(id === "new-chat-project" ? "new-chat-projects-sheet" : "new-chat-members-sheet");
+      const sheet = document.getElementById(id === "new-chat-project" ? "new-chat-projects-sheet" : id === "new-chat-model-button" ? "new-chat-model-sheet" : "new-chat-members-sheet");
       if (button) button.setAttribute("aria-expanded", sheet && !sheet.hidden ? "true" : "false");
     }
     if (input) {
@@ -3820,9 +3952,12 @@
     });
     // As on the computer, a picture on its own starts a chat.
     if (!offer || offer.unavailable || (!text && attachments.length === 0) || !shared || newChatStarting) return;
+    // In the sessions view the chat is made with its main session alone, on
+    // what the chip chose: no member is picked, an @ in the text included.
+    const sessionsView = newChatSessionsView(offer);
     // Each member it gets, chosen or named with @, must be one the computer
     // could add now, as the computer's New chat checks them all.
-    const picked = shared.newChatPickedMembers({ members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text });
+    const picked = sessionsView ? [] : shared.newChatPickedMembers({ members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text });
     const blocked = picked.find(function (member) { return member.unavailable || member.machineUnavailable; });
     if (blocked) {
       renderNewChat(blocked.unavailable || blocked.machineUnavailable);
@@ -3846,9 +3981,14 @@
       const createdAt = nowIso();
       // The main session leads, as on the computer (passed under both names
       // the shared rule has known it by).
-      const lead = newChatLead(offer);
+      const offeredLead = newChatLead(offer);
+      const selection = sessionsView ? newChatMainSelection(offer) : undefined;
+      const lead = selection && typeof shared.newChatMainSessionFor === "function"
+        ? shared.newChatMainSessionFor(offeredLead, offer.mainSessionProviders, { kind: selection.provider.kind, hostId: selection.provider.hostId, model: selection.model, reasoningEffort: selection.effort })
+        : offeredLead;
       const participants = shared.newChatParticipants({
-        assistant: lead, mainSession: lead, members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text, newId: createEventId,
+        assistant: lead, mainSession: lead, members: sessionsView ? [] : offer.members, chosenConfigIds: sessionsView ? [] : Array.from(newChatChosen),
+        firstMessage: sessionsView ? "" : text, newId: createEventId,
         // Its rights follow the project as on the computer: it reads the
         // project only when the chat has one.
         project: newChatProject || ""
@@ -3904,6 +4044,7 @@
     }
     newChatStarting = false;
     if (input) input.value = "";
+    newChatMainChoice = undefined;
     newChatAttachments = [];
     renderNewChatAttachments();
     closeNewChat();
@@ -3916,7 +4057,8 @@
    *  member this chat can have, as the computer's New chat lists them. */
   function newChatMentionMembers() {
     const offer = newChatOffer && newChatOffer.options;
-    if (!offer) return [];
+    // The sessions view offers no members to name (the computer's neither).
+    if (!offer || newChatSessionsView(offer)) return [];
     const option = function (participant, configId) {
       return { handle: participant.handle, mentionHandle: participant.handle, displayName: newChatMemberName(participant),
         roleLabel: newChatMemberRoleLine(participant),
@@ -4019,6 +4161,7 @@
     });
     document.getElementById("new-chat-project")?.addEventListener("click", function () { openNewChatPicker("new-chat-projects-sheet"); });
     document.getElementById("new-chat-members-button")?.addEventListener("click", function () { openNewChatPicker("new-chat-members-sheet"); });
+    document.getElementById("new-chat-model-button")?.addEventListener("click", function () { openNewChatPicker("new-chat-model-sheet"); });
     input?.addEventListener("input", function () {
       renderNewChatState();
       renderNewChatMentions();
@@ -12427,7 +12570,7 @@
     text.className = "sessions-waiting-text";
     text.textContent = waiting.text;
     wrap.append(spinner, text);
-    if (waiting.canStop || waiting.stopping) wrap.append(sessionsStopButton(waiting.memberIds, waiting.canStop, waiting.stopping, "Stop the members the main session waits on"));
+    if (waiting.canStop || waiting.stopping) wrap.append(sessionsStopButton(waiting.memberIds, waiting.canStop, waiting.stopping, "Stop the tasks the main session waits on"));
     return wrap;
   }
 
@@ -12442,7 +12585,7 @@
     if (head.status !== "idle") state.append(sessionsStatusElement(head.status));
     if (head.since) state.append(sessionsElapsedElement(head.since));
     wrap.append(providerLogoElement(head.kind), text, state);
-    if (head.canStop || head.stopping) wrap.append(sessionsStopButton([head.participantId], head.canStop, head.stopping, "Stop this member"));
+    if (head.canStop || head.stopping) wrap.append(sessionsStopButton([head.participantId], head.canStop, head.stopping, "Stop this session"));
     return wrap;
   }
 
@@ -12807,17 +12950,20 @@
     const accordOpen = Boolean(state && (state.openAccord || openAccordLaunchId));
     if (dot && dot.hidden === accordOpen) dot.hidden = !accordOpen;
     button.classList.toggle("has-accord", accordOpen);
-    const label = sessionsView ? (running > 0 ? "Members (" + running + " running)" : "Members")
+    // The sessions view never says "members" (the User, 2026-11-21).
+    const label = sessionsView ? (running > 0 ? "Side panel (" + running + " running)" : "Side panel")
       : count === 1 ? "Members: 1 member" : count > 0 ? "Members: " + count + " members" : "Members";
     if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
     syncHeaderSpacer();
   }
 
   /** The sessions view's one panel (the header's icon; the desktop's right
-   *  panel): the main session first (back to its timeline), the chat's
-   *  Accord, then every other member — logo, task, what it does, how long,
-   *  Stop — with Stop all; those that worked and ended under Previous, and
-   *  those no longer in the chat under Removed (their sessions read only). */
+   *  panel), with no title (the User, 2026-11-21): the chat's Accord, then
+   *  the sessions the main session delegated (never the main session, whose
+   *  settings are on the computer's composer chip) — logo, task, what it
+   *  does, how long, Stop — with Stop all; those that worked and ended under
+   *  Previous, and those no longer in the chat under Removed (their sessions
+   *  read only). Nothing is said when there are none. */
   function renderSessionsMembersSheet(state, list, title) {
     const shared = sessionsRules();
     const stopAll = document.getElementById("members-sheet-stop-all");
@@ -12852,38 +12998,17 @@
       return { id: former.id, kind: formerMemberKind(former), name: sessionsMemberTitleOf(state, former.id), detail: sessionsRemovedMemberDetail(),
         status: shared.sessionsFormerMemberStatus(task ? task.item : undefined), former: true };
     });
-    const main = state.mainMember;
-    const mainRow = main ? { kind: main.kind || "", detail: sessionsMemberDetailOf(main) } : undefined;
     const docked = state.openAccord || undefined;
     const accord = docked ? { launchId: docked.launchId, text: docked.progress.title + " · " + shared.accordProgressStatus(docked.progress) } : undefined;
-    const signature = JSON.stringify(["sessions", state.conversationId, mainRow, accord, current, previous, removed, membersPreviousOpen, membersRemovedOpen]);
+    const signature = JSON.stringify(["sessions", state.conversationId, accord, current, previous, removed, membersPreviousOpen, membersRemovedOpen]);
     if (signature === lastMembersSheetSignature && list.childElementCount > 0) return;
     lastMembersSheetSignature = signature;
-    if (title) title.textContent = "Chat";
-    list.replaceChildren();
-    const section = function (text) {
-      const head = document.createElement("div");
-      head.className = "members-sheet-section";
-      head.textContent = text;
-      list.append(head);
-    };
-    if (mainRow) {
-      const item = document.createElement("div");
-      item.className = "members-sheet-row sessions-member-row sessions-main-row is-openable";
-      item.dataset.sheetMain = "1";
-      item.setAttribute("role", "button");
-      item.tabIndex = 0;
-      const copy = document.createElement("span");
-      copy.className = "members-sheet-copy";
-      const name = document.createElement("strong");
-      name.textContent = "Main session";
-      const where = document.createElement("span");
-      where.className = "members-sheet-location";
-      where.textContent = mainRow.detail;
-      copy.append(name, where);
-      item.append(providerLogoElement(mainRow.kind), copy);
-      list.append(item);
+    if (title) {
+      title.textContent = "";
+      title.hidden = true;
     }
+    document.getElementById("members-sheet")?.setAttribute("aria-label", "Side panel");
+    list.replaceChildren();
     if (accord) {
       const item = document.createElement("div");
       item.className = "members-sheet-row sessions-accord-row is-openable";
@@ -12946,14 +13071,6 @@
       list.append(toggle);
       if (open) for (const row of entries) list.append(rowElement(row));
     };
-    if (all.length === 0 && removed.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "members-sheet-empty";
-      empty.textContent = "No other members yet. The main session adds members when it gives them a task.";
-      list.append(empty);
-      return;
-    }
-    section("Members");
     for (const row of current) list.append(rowElement(row));
     if (previous.length > 0) group("Previous", "membersPrevious", membersPreviousOpen, previous);
     if (removed.length > 0) group("Removed", "membersRemoved", membersRemovedOpen, removed);
@@ -12995,7 +13112,9 @@
       return;
     }
     lastMembersSheetSignature = signature;
+    document.getElementById("members-sheet")?.setAttribute("aria-label", "Members");
     if (title) {
+      title.hidden = false;
       title.textContent = members.length === 1 ? "1 member" : members.length + " members";
     }
     list.replaceChildren();

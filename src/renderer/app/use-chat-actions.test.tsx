@@ -133,6 +133,8 @@ test("a new chat is made with its main session first (ordinary member rights, it
   };
   let error: string | undefined;
   const currentSettings = settings();
+  // The classic view's New chat: the members picker adds saved members.
+  currentSettings.defaultChatView = "classic";
   currentSettings.providers = [{ kind: "codex-cli", label: "Codex", enabled: true }];
   currentSettings.assistantProviderKind = "codex-cli";
   currentSettings.chatRoleConfigs = [
@@ -236,6 +238,72 @@ test("a new chat is made with its main session first (ordinary member rights, it
   assert.equal(member?.autoWatch, true);
   renderer.unmount();
 });
+
+for (const scenario of [
+  { name: "Claude Code's own sign-in", choice: { kind: "claude-code" as const }, hostId: undefined },
+  { name: "an added provider (Z.ai GLM on Claude Code)", choice: { kind: "claude-code" as const, hostId: "zai-host" }, hostId: "zai-host" }
+]) {
+  test(`in the sessions view a new chat is made with its main session alone, on the provider the chip chose: ${scenario.name}`, async () => {
+    let createRequest: { participants: ChatParticipantInput[] } | undefined;
+    (globalThis as any).window = {
+      consensus: {
+        createChatConversation: async (request: { participants: ChatParticipantInput[] }) => {
+          createRequest = request;
+          throw new Error("stop after create request");
+        }
+      }
+    };
+    const currentSettings = settings();
+    currentSettings.providers = [
+      { kind: "claude-code", label: "Claude Code", enabled: true },
+      { kind: "codex-cli", label: "Codex", enabled: true }
+    ];
+    currentSettings.assistantProviderKind = "codex-cli";
+    currentSettings.cliProviderHosts = [{ id: "zai-host", label: "Z.ai GLM", cli: "claude-code", vendor: "zai", baseUrl: "https://api.z.ai/api/anthropic", hasApiKey: true, updatedAt: "2026-11-21T00:00:00.000Z" }];
+    currentSettings.chatParticipantConfigs = [{
+      id: "member-codex", handle: "codex", roleConfigId: "engineer", behaviorRuleIds: [], kind: "codex-cli",
+      agentMode: "default", permissions: defaultChatAgentPermissions(), remoteExecution: "local", skipToolchainPreflight: false,
+      autoWatchEnabled: false, updatedAt: "2026-07-13T00:00:00.000Z"
+    }];
+    let error: string | undefined;
+    let providerReset = false;
+    const state = {
+      question: "@codex please look at the login",
+      agents: [readyAgent("claude-code"), readyAgent("codex-cli")],
+      settings: currentSettings,
+      selectedChatParticipantConfigIds: new Set<string>(["member-codex"]),
+      selectedChatParticipantRuntimeOverrides: { "__new-chat-main-session__": { model: "haiku", reasoningEffort: "low" } },
+      newChatMainSessionProvider: scenario.choice,
+      setNewChatMainSessionProvider: () => { providerReset = true; },
+      startingChatRef: { current: false },
+      chatCreationRef: { current: undefined },
+      chatBeforeActivityRef: { current: undefined }, openConversationRequestRef: { current: 0 }, railViewRef: { current: "chats" },
+      repoPath: "",
+      setError: (value: string | undefined) => { error = value; },
+      setWarnings: () => undefined,
+      setCurrentRunId: () => undefined,
+      setBusy: () => undefined
+    } as unknown as AppState;
+    let actions: ChatActions | undefined;
+    function Harness(): null {
+      actions = useChatActions(state, {} as ConversationActions);
+      return null;
+    }
+    const renderer = create(<Harness />);
+    await act(async () => { await actions?.startChat(); });
+    assert.equal(error, "stop after create request");
+    assert.equal(createRequest?.participants.length, 1, "only the main session: no saved member chosen or named with @");
+    const [main] = createRequest?.participants ?? [];
+    assert.equal(main?.roleConfigId, "main-session");
+    assert.equal(main?.kind, "claude-code", "the chip's provider, not Settings → General's Codex");
+    assert.equal(main?.hostId, scenario.hostId);
+    assert.equal(main?.model, "haiku");
+    assert.equal(main?.reasoningEffort, "low");
+    assert.equal(currentSettings.assistantProviderKind, "codex-cli", "the setting is not changed");
+    assert.equal(providerReset, false, "kept while the chat was not made");
+    renderer.unmount();
+  });
+}
 
 test("stale New Chat readiness refresh failure fails closed and preserves the complete draft", async () => {
   let createCalls = 0;

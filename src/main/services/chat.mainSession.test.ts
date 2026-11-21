@@ -905,6 +905,21 @@ test("a combined resume that was made and failed is not made again by a restart"
   assert.equal(debugEvents.some((event) => event.event === "chat.participant-request.auto-resume.recovered"), false);
 });
 
+test("a member's turn that is not a task of the main session does not wake it: the User writing in the member's session", async () => {
+  // The User, 2026-11-21: the main session is woken only when its own tasks
+  // end; what a member does otherwise it reads on its next turn.
+  const main = mainSession("codex-cli", { model: undefined });
+  const worker = member("worker-id", "worker");
+  const conversation = mainSessionChat([main, worker], { participantSessions: [sessionRecord(main, "main-thread")] });
+  const { service, storage, runs, debugEvents } = testService({ conversation });
+  await service.sendMessage({ conversationId: conversation.id, runId: "to-worker", content: "Please also check dark mode", targetParticipantIds: [worker.id] });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.participantId === worker.id && message.status === "done"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(runs.map((run) => run.participant.id), [worker.id], "only the member ran");
+  assert.equal(resumesOf(runs, main.id).length, 0, "the main session is not woken");
+  assert.deepEqual(debugEvents.filter((item) => item.event.endsWith(".error")), []);
+});
+
 test("a task given after its turn ended (a CLI still at work in the background) resumes the main session on its own", async () => {
   const main = mainSession("codex-cli", { model: undefined });
   const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-thread")] });

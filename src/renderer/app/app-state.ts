@@ -16,6 +16,7 @@ import type {
 import type { SettingsSection } from "../components/settings/settings-view";
 import type { ChatMessageFocusRequest } from "../components/chat/chat-conversation-view";
 import type { ChatParticipantDraft, ChatParticipantRuntimeOverride } from "../components/chat/chat-participant-drafts";
+import type { MainSessionProviderChoice } from "../../shared/mainSessionProviders";
 import type { DraftPluginMention } from "../components/chat/chat-composer-draft-utils";
 import type { PendingChatImage } from "../components/chat/use-chat-composer-images";
 import { DEFAULT_SETTINGS } from "./constants";
@@ -117,6 +118,10 @@ export interface AppState {
   setSelectedChatParticipantConfigIds: StateSetter<Set<string>>;
   selectedChatParticipantRuntimeOverrides: Record<string, ChatParticipantRuntimeOverride>;
   setSelectedChatParticipantRuntimeOverrides: StateSetter<Record<string, ChatParticipantRuntimeOverride>>;
+  /** The provider the New chat model chip chose for the next chat's main
+   *  session (sessions view); none: Settings → General's. */
+  newChatMainSessionProvider: MainSessionProviderChoice | undefined;
+  setNewChatMainSessionProvider: StateSetter<MainSessionProviderChoice | undefined>;
   /** Unsent composer text of the open chat; each chat keeps its own. */
   chatMessageDraft: string;
   /** Changes the open chat's unsent text; does nothing when no chat is open. */
@@ -222,6 +227,7 @@ export function useAppState(): AppState {
   const [planCorrectionDraft, setPlanCorrectionDraft] = useState("");
   const [selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds] = useState<Set<string>>(new Set());
   const [selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides] = useState<Record<string, ChatParticipantRuntimeOverride>>({});
+  const [newChatMainSessionProvider, setNewChatMainSessionProvider] = useState<MainSessionProviderChoice | undefined>();
   const openConversationId = conversation?.id;
   const messageDrafts = usePerChatState<string>(openConversationId, NO_DRAFT_TEXT, isEmptyDraftText);
   const skillMentionDrafts = usePerChatState<ChatSkillMention[]>(openConversationId, NO_SKILL_MENTIONS, isEmptyList);
@@ -299,6 +305,7 @@ export function useAppState(): AppState {
     setPendingClarifications, planItemReviewDrafts, setPlanItemReviewDrafts, planCorrectionDraft,
     setPlanCorrectionDraft, selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds,
     selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides,
+    newChatMainSessionProvider, setNewChatMainSessionProvider,
     chatMessageDraft, setChatMessageDraft, setChatMessageDraftForConversation, chatComposerSkillMentions,
     setChatComposerSkillMentions, chatComposerPluginMentions, setChatComposerPluginMentions, chatComposerFileMentions,
     setChatComposerFileMentions, clearChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,

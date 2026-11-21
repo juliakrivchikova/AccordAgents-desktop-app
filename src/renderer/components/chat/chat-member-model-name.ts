@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { cliProviderHostDefaultModelLabel } from "../../../shared/cliProviderHosts";
+import { cliProviderHostDefaultModelLabel, cliProviderHostModelCatalog } from "../../../shared/cliProviderHosts";
 import type { ChatParticipant, ProviderModel, ProviderModelCatalog } from "../../../shared/types";
 import { chatCliProviderLabel } from "./chat-participant-drafts";
 
@@ -8,7 +8,7 @@ type ModelNamedMember = Pick<ChatParticipant, "kind" | "hostId" | "hostLabel" | 
 
 /** A model's name for a chip: its label without the id Codex repeats in
  *  brackets ("GPT-5.5 (gpt-5.5)" reads "GPT-5.5"). */
-function chipModelLabel(model: ProviderModel): string {
+export function chipModelLabel(model: ProviderModel): string {
   const label = model.label.trim() || model.id;
   const repeated = ` (${model.id})`;
   return label.endsWith(repeated) && label.length > repeated.length ? label.slice(0, -repeated.length) : label;
@@ -75,6 +75,38 @@ export function useMemberDefaultModelName(member: ModelNamedMember, enabled: boo
     // The list depends on the CLI and the provider only (its key).
   }, [enabled, key, member.hostVendor]);
   return memberDefaultModelName(member, catalog);
+}
+
+/** What a model chip names: the member's own model by its name in the list
+ *  (T3 Code's "Opus 5.5", not the id), else memberDefaultModelName. */
+export function memberModelName(member: ModelNamedMember & { model?: string }, catalog: ProviderModelCatalog | undefined): string {
+  const explicit = member.model?.trim();
+  if (!explicit) return memberDefaultModelName(member, catalog);
+  const listed = catalog?.models.find((model) => model.id === explicit);
+  return listed ? chipModelLabel(listed) : explicit;
+}
+
+/** memberModelName for a chip: an added provider's fixed list, else the
+ *  CLI's list once known (the model's id or the CLI's name meanwhile). */
+export function useMemberModelName(member: ModelNamedMember & { model?: string }): string {
+  const fixed = member.hostVendor && member.kind !== "gemini-cli"
+    ? cliProviderHostModelCatalog({ vendor: member.hostVendor, cli: member.kind })
+    : undefined;
+  const needsList = !fixed && !(member.hostVendor && !member.model?.trim() && cliProviderHostDefaultModelLabel({ vendor: member.hostVendor }));
+  const { key } = catalogKey(member);
+  const [catalog, setCatalog] = useState<ProviderModelCatalog | undefined>(() => catalogs.get(key)?.value);
+  useEffect(() => {
+    if (!needsList) return;
+    let cancelled = false;
+    void catalogFor(member).then((next) => {
+      if (!cancelled) setCatalog(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // The list depends on the CLI and the provider only (its key).
+  }, [needsList, key]);
+  return memberModelName(member, fixed ?? catalog);
 }
 
 /** Forgets the lists asked so far (tests). */

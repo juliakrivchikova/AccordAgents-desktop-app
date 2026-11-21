@@ -142,12 +142,10 @@ export function ChatSessionsRightPanel(props: {
     );
   }
   if (panel?.kind === "members") {
-    const main = props.participants.find((candidate) => candidate.id === sessions.mainSessionId);
     return (
       <ChatMembersPanel
         accord={props.latestAccord}
         onOpenAccord={props.onOpenAccord}
-        main={main ? { participant: main, detail: memberDetail(main), settings: props.renderMemberSettings?.(main.id) } : undefined}
         rows={sessions.memberRows}
         formerRows={sessions.formerRows}
         activity={sessions.activity}

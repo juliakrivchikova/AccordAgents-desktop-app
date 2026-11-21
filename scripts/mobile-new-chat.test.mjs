@@ -392,3 +392,80 @@ test("when the Assistant runs on another CLI than the saved one, the phone says 
     return { text: node.hidden ? "" : node.textContent, tone: node.dataset.tone || "", start: document.getElementById("new-chat-start").disabled }; })()`),
     { text: assistantNote, tone: "info", start: false }, "said quietly, and nothing is blocked");
 });
+
+test("in the sessions view the phone's New chat has no members: its chip chooses the main session's provider, model and effort, and the chat is made with the main session alone", { timeout: 120_000 }, async (t) => {
+  // The User, 2026-11-21: "как в T3, выбираешь просто провайдера и модель".
+  const hub = await startMobileHub({});
+  const site = await serveMobileShell({ port: 8346, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-new-chat-sessions-");
+  const chrome = launchChrome({ port: 9486, profile, url: `${site.origin}/`, width: 402, height: 874 });
+  let app;
+  t.after(async () => {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  await hub.createChat("conv-old", { title: "Old", participants: [member("drew")] });
+  const mainSession = { id: "main-session", handle: "main", roleConfigId: "main-session", kind: "codex-cli", agentMode: "default",
+    permissions: { repoRead: true, workspaceWrite: false, webAccess: false, requestParticipants: "allow", requestCompaction: "ask", manageRolesParticipants: "allow", shell: { enabled: false, rules: [] } } };
+  const efforts = [{ id: "low", label: "Low" }, { id: "medium", label: "Medium" }, { id: "high", label: "High" }];
+  const newChat = {
+    projects: [], mainSession, assistant: mainSession,
+    members: [{ configId: "c-drew", uses: 4, participant: member("drew", { id: "t-drew", participantConfigId: "c-drew" }) }],
+    mainSessionProviders: [
+      { kind: "claude-code", label: "Claude Code", defaultModelLabel: "Opus 5.5", models: [{ id: "haiku", label: "Haiku 5.5" }], efforts },
+      { kind: "claude-code", hostId: "zai", hostLabel: "Z.ai GLM", hostVendor: "zai", label: "Z.ai GLM", defaultModelLabel: "GLM-5.3", models: [], efforts },
+      { kind: "codex-cli", label: "Codex", defaultModelLabel: "GPT-5.5", models: [{ id: "gpt-5.5-mini", label: "GPT-5.5 mini" }], efforts }
+    ]
+  };
+  const published = await hub.call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(), roles: { "main-session": "Main session" }, prompts: [], skills: [], avatars: {}, newChat } });
+  assert.equal(published.ok, true);
+  app = await attachApp({ port: 9486 });
+  await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+  await app.waitFor(`!document.getElementById("new-chat-button").hidden`, "the New chat button");
+  await app.evaluate(`document.getElementById("new-chat-button").click()`);
+  await app.waitFor(`!document.getElementById("new-chat-model-button").hidden && !document.getElementById("new-chat-model-button").disabled`, "the model chip");
+  const card = () => app.evaluate(`({
+    members: !document.getElementById("new-chat-members-button").hidden,
+    chip: document.getElementById("new-chat-model-label").textContent,
+    glyph: document.querySelector("#new-chat-model-label .provider-logo").dataset.providerKind,
+    bare: document.querySelector("#new-chat-model-label .provider-logo").classList.contains("is-bare"),
+    words: /members?/i.test(document.querySelector(".new-chat-card").innerText)
+  })`);
+  assert.deepEqual(await card(), { members: false, chip: "GPT-5.5", glyph: "codex-cli", bare: true, words: false },
+    "no members: the main session's provider and its CLI's default model, a bare glyph");
+
+  // Choose Claude Code, Haiku 5.5 and Low.
+  await app.evaluate(`document.getElementById("new-chat-model-button").click()`);
+  await app.waitFor(`!document.getElementById("new-chat-model-sheet").hidden`, "the chip's sheet");
+  assert.deepEqual(await app.evaluate(`[...document.querySelectorAll('#new-chat-model-options button[data-provider-kind]')].map((row) => row.textContent)`),
+    ["Claude Code", "Z.ai GLM", "Codex"], "every provider the computer offers");
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-provider-kind="claude-code"][data-host-id=""]').click()`);
+  await app.waitFor(`document.getElementById("new-chat-model-label").textContent === "Opus 5.5"`, "Claude Code's default model");
+  assert.deepEqual(await app.evaluate(`[...document.querySelectorAll('#new-chat-model-options [data-model]')].map((row) => row.textContent)`), ["Opus 5.5Default", "Haiku 5.5"], "its default first");
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-model="haiku"]').click()`);
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-effort="low"]').click()`);
+  await app.waitFor(`document.getElementById("new-chat-model-label").textContent === "Haiku 5.5Low"`, "the chip says what was chosen");
+  await app.evaluate(`document.querySelector('#new-chat-model-sheet [data-new-chat-picker-close]').click()`);
+
+  // An @handle names nobody: no member list, and nobody is added.
+  await app.evaluate(`(() => { const input = document.getElementById("new-chat-input"); input.focus(); input.value = "@dr"; input.setSelectionRange(3, 3); input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await sleep(200);
+  assert.equal(await app.evaluate(`document.getElementById("new-chat-mention-menu").hidden`), true, "no members to name");
+  await app.evaluate(`(() => { const input = document.getElementById("new-chat-input"); input.value = "@drew check the login page"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.getElementById("new-chat-start").click(); })()`);
+  let created;
+  for (let attempt = 0; attempt < 100 && !created; attempt += 1) {
+    created = (await hub.storage.listConversations()).find((summary) => summary.title === "@drew check the login page" || summary.title === "check the login page");
+    if (!created) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.ok(created, "the chat is on the server");
+  const chat = await hub.storage.getConversation(created.id);
+  assert.equal(chat.metadata.participants.length, 1, "the main session alone");
+  const [main] = chat.metadata.participants;
+  assert.deepEqual([main.roleConfigId, main.kind, main.model, main.reasoningEffort, main.hostId], ["main-session", "claude-code", "haiku", "low", undefined]);
+  assert.equal(chat.metadata.mainSessionParticipantId, main.id);
+  assert.equal(chat.metadata.chatView, "sessions");
+});

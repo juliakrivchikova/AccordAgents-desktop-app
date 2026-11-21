@@ -17,7 +17,8 @@ export const NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID = "__new-chat-main-session__";
  *  the rights its role gives a new member (not the Assistant's narrow ones). */
 export function newChatMainSessionParticipantConfig(
   kind: ChatProviderKind,
-  hasProject = true
+  hasProject = true,
+  hostId?: string
 ): ChatParticipantConfig {
   return {
     id: NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID,
@@ -25,6 +26,8 @@ export function newChatMainSessionParticipantConfig(
     roleConfigId: MAIN_SESSION_ROLE_ID,
     behaviorRuleIds: [],
     kind,
+    // An added provider the New chat chip chose for it (sessions view).
+    ...(hostId ? { hostId } : {}),
     agentMode: "default",
     // The rights an ordinary member starts with in this chat (reading its
     // project when it has one), asking members without a card as its role
@@ -36,14 +39,16 @@ export function newChatMainSessionParticipantConfig(
 }
 
 /** What a new chat is made with for its main session, with the settings the
- *  User changed for it on the New chat screen. No saved member is behind it. */
+ *  User changed for it on the New chat screen (and the added provider its
+ *  chip chose). No saved member is behind it. */
 export function newChatMainSessionParticipantDraft(
   kind: ChatProviderKind,
   runtimeOverride: ChatParticipantRuntimeOverride | undefined,
-  hasProject = true
+  hasProject = true,
+  hostId?: string
 ): ChatParticipantDraft {
   const draft = chatParticipantConfigToDraftWithRuntimeOverrides(
-    newChatMainSessionParticipantConfig(kind, hasProject),
+    newChatMainSessionParticipantConfig(kind, hasProject, hostId),
     runtimeOverride ? { [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: runtimeOverride } : {}
   );
   return { ...draft, participantConfigId: undefined };

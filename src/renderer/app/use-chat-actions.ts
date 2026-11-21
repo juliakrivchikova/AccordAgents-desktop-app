@@ -26,6 +26,13 @@ import {
   validateChatStartupDrafts
 } from "../components/chat/chat-participant-drafts";
 import { NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID, newChatMainSessionParticipantDraft } from "../components/chat/chat-main-session-draft";
+import { newChatViewFor } from "../../shared/mainSession";
+import {
+  type MainSessionProviderOption,
+  mainSessionProviderKey,
+  mainSessionProviderOptions,
+  resolveMainSessionProvider
+} from "../../shared/mainSessionProviders";
 import {
   errorText,
   mergeProgressIntoConversation
@@ -116,14 +123,23 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setError("Enter a message or attach an image to start a chat.");
       return false;
     }
-    const resolveProvider = (agents: typeof state.agents) => resolveAssistantProviderKind({
-      agents,
-      providers: state.settings.providers,
-      explicitKind: state.settings.assistantProviderKind
-    });
-    // The main session's CLI the screen showed: settings made for it in the
-    // member list do not carry over to another one.
-    const shownAssistantKind = resolveProvider(state.agents);
+    // In the sessions view the main session runs on what the New chat chip
+    // chose for this chat (else Settings → General's CLI), and the chat is
+    // made with it alone; the classic view's New chat is as before.
+    const sessionsView = newChatViewFor(state.settings.defaultChatView) === "sessions";
+    const resolveProvider = (agents: typeof state.agents): MainSessionProviderOption | undefined => {
+      const kind = resolveAssistantProviderKind({
+        agents,
+        providers: state.settings.providers,
+        explicitKind: state.settings.assistantProviderKind
+      });
+      if (!sessionsView) return kind ? { kind, label: "" } : undefined;
+      const options = mainSessionProviderOptions(agents, state.settings.providers, state.settings.cliProviderHosts);
+      return resolveMainSessionProvider(state.newChatMainSessionProvider, options, kind);
+    };
+    // The main session's provider the screen showed: settings made for it
+    // there do not carry over to another one.
+    const shownProvider = resolveProvider(state.agents);
     let agents = state.agents;
     if (isAgentSnapshotStale(agents)) {
       try {
@@ -133,25 +149,27 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         return false;
       }
     }
-    const assistantProviderKind = resolveProvider(agents);
-    if (!assistantProviderKind) {
+    const mainProvider = resolveProvider(agents);
+    if (!mainProvider) {
       // The saved CLI gives way to any ready one: none is ready.
       state.setError(NO_READY_CLI_MESSAGE);
       return false;
     }
-    const mainSessionRuntimeOverride = assistantProviderKind === shownAssistantKind
+    const mainSessionRuntimeOverride = shownProvider && mainSessionProviderKey(mainProvider) === mainSessionProviderKey(shownProvider)
       ? state.selectedChatParticipantRuntimeOverrides[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]
       : undefined;
     // Every new chat has its main session first, instead of the Chat
-    // Assistant (docs/main-session.md).
+    // Assistant (docs/main-session.md). In the sessions view nobody else:
+    // the main session makes members itself, and an @handle in the first
+    // message picks none.
     const participants = [
-      newChatMainSessionParticipantDraft(assistantProviderKind, mainSessionRuntimeOverride, Boolean(state.repoPath.trim())),
-      ...selectedOrMentionedChatParticipantDrafts(
+      newChatMainSessionParticipantDraft(mainProvider.kind, mainSessionRuntimeOverride, Boolean(state.repoPath.trim()), mainProvider.hostId),
+      ...(sessionsView ? [] : selectedOrMentionedChatParticipantDrafts(
         state.settings.chatParticipantConfigs,
         state.selectedChatParticipantConfigIds,
         initialMessage,
         state.selectedChatParticipantRuntimeOverrides
-      )
+      ))
     ];
     const validation = validateChatStartupDrafts(
       participants,
@@ -231,6 +249,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setNewChatSkillMentions([]);
       state.setNewChatPluginMentions([]);
       state.setSelectedChatParticipantRuntimeOverrides({});
+      // The chip's provider was for that chat only.
+      state.setNewChatMainSessionProvider?.(undefined);
       await conversationActions.refreshConversations().catch(() => undefined);
       return true;
     } catch (caught) {

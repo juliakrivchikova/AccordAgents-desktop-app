@@ -238,13 +238,13 @@ test("a member's open mention approval stays on the main timeline as its message
 
 test("the waiting line names the tasks the main session waits on, and Stop stops their runs", () => {
   const sessions = sessionsOf(sessionsConversation())!;
-  assert.equal(sessions.waitingText, "Waiting on 1 member: Task for drew: fix the drew part");
+  assert.equal(sessions.waitingText, "Waiting on 1 task: Task for drew: fix the drew part");
   const stopped: Array<readonly string[]> = [];
   let renderer: ReturnType<typeof create> | undefined;
   act(() => {
-    renderer = create(<ChatSessionsWaitingLine members={[DREW, GERA]} text="Waiting on 2 members: Fix A, Fix B" runIds={["run-drew"]} onStop={(runIds) => stopped.push(runIds)} />);
+    renderer = create(<ChatSessionsWaitingLine members={[DREW, GERA]} text="Waiting on 2 tasks: Fix A, Fix B" runIds={["run-drew"]} onStop={(runIds) => stopped.push(runIds)} />);
   });
-  assert.match(textOf(renderer!.root), /Waiting on 2 members: Fix A, Fix B/);
+  assert.match(textOf(renderer!.root), /Waiting on 2 tasks: Fix A, Fix B/);
   act(() => renderer!.root.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-sessions-waiting-stop")[0]!.props.onClick());
   assert.deepEqual(stopped, [["run-drew"]]);
   act(() => renderer!.update(<ChatSessionsWaitingLine members={[DREW]} text="Waiting" runIds={[]} onStop={noop} />));
@@ -265,7 +265,7 @@ test("a task the main session titled is named by its short title in its row, the
   const sessions = sessionsOf(sessionsConversation({}, messages))!;
   assert.equal(sessions.memberTitle(DREW.id), "Login button");
   assert.equal(sessions.memberTitle(GERA.id), "Назови столицу Италии", "not the whole task");
-  assert.equal(sessions.waitingText, "Waiting on 1 member: Login button");
+  assert.equal(sessions.waitingText, "Waiting on 1 task: Login button");
   assert.deepEqual(sessions.workByReplyId.get("main-1")?.map((entry) => entry.title), ["Login button", "Назови столицу Италии"]);
 });
 

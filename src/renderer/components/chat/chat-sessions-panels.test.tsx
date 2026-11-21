@@ -7,6 +7,8 @@ import { buildSessionsViewIndex, memberSessionMessages } from "../../../shared/m
 import { latestTaskByMember, sessionsMemberActivity, sessionsMemberRows, sessionsMemberTitle } from "../../../shared/mainSessionView";
 import type { AppSettings, ChatMessage } from "../../../shared/types";
 import { ChatMembersPanel } from "./chat-members-panel";
+import { ChatModelAccessPanel, type ChatModelAccessPatch } from "./chat-model-access-picker";
+import { defaultChatAgentPermissions } from "../../../shared/agentPermissions";
 import { ChatMemberSessionPanel, type ChatMemberSendRequest } from "./chat-member-session-panel";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { DREW, GERA, MAIN, PARTICIPANTS, TAYLOR, sessionsMessages, disclosure } from "./chat-sessions-fixtures.test";
@@ -270,14 +272,13 @@ test("opened at a message, a member's session scrolls to it and marks it for a m
   act(() => renderer!.unmount());
 });
 
-test("the side panel lists the main session first with its settings; a member's session has its settings and its model chip in its composer", () => {
+test("the side panel has no title and no main session row, says nothing when empty; a member's session has its settings and its model chip in its composer", () => {
   const messages = sessionsMessages();
   let renderer: ReturnType<typeof create> | undefined;
   act(() => {
     renderer = create(
       <TooltipProvider>
         <ChatMembersPanel
-          main={{ participant: MAIN, detail: "Claude Code · opus", settings: <span data-testid="main-settings" /> }}
           rows={sessionsMemberRows(PARTICIPANTS, MAIN.id, STATUSES, latestTaskByMember(messages))}
           activity={sessionsMemberActivity(messages)} runIdsByParticipantId={new Map()} memberTitle={() => "A task"} memberDetail={() => ""}
           onOpenMember={noop} onClose={noop}
@@ -285,16 +286,74 @@ test("the side panel lists the main session first with its settings; a member's 
       </TooltipProvider>
     );
   });
-  const main = renderer!.root.find(byTestId("chat-members-main"));
-  assert.match(textOf(main), /Main session/);
-  assert.match(textOf(main), /Claude Code · opus/);
-  assert.equal(main.findAll(byTestId("main-settings")).length, 1, "its settings are reachable from the side panel");
-  assert.equal(renderer!.root.find(byTestId("chat-members-body")).findAll(byTestId("chat-members-row"))[0]?.props["data-participant-id"], DREW.id, "then the members");
+  const panel = renderer!.root.find(byTestId("chat-members-panel"));
+  assert.equal(panel.findAll((node) => node.type === "h2").length, 0, "no title, only the close button");
+  assert.doesNotMatch(textOf(panel), /members?/i, "the sessions view never says members");
+  assert.doesNotMatch(textOf(panel), /Main session/, "the main session is not listed: its settings are its composer chip");
+  assert.equal(renderer!.root.findAll(byTestId("chat-members-main")).length, 0);
+  assert.equal(renderer!.root.find(byTestId("chat-members-body")).findAll(byTestId("chat-members-row"))[0]?.props["data-participant-id"], DREW.id, "the delegated sessions first");
   act(() => renderer!.unmount());
+
+  let empty: ReturnType<typeof create> | undefined;
+  act(() => {
+    empty = create(
+      <TooltipProvider>
+        <ChatMembersPanel rows={{ current: [], previous: [] }} activity={sessionsMemberActivity([])} runIdsByParticipantId={new Map()}
+          memberTitle={() => ""} memberDetail={() => ""} onOpenMember={noop} onClose={noop} />
+      </TooltipProvider>
+    );
+  });
+  assert.equal(textOf(empty!.root.find(byTestId("chat-members-body"))), "", "nothing is said when nothing was delegated");
+  act(() => empty!.unmount());
 
   const session = renderSession({ member: DREW, readOnly: false, settings: <span data-testid="drew-settings" />, chip: <span data-testid="drew-chip" /> });
   assert.equal(session.root.findAll(byTestId("drew-settings")).length, 1, "a gear in its session's header");
   const composer = session.root.find((node) => node.props?.testId === "chat-member-composer");
   assert.equal(composer.props.footerChip.props["data-testid"], "drew-chip", "its model chip in its composer");
   act(() => session.unmount());
+});
+
+test("a member's settings in the sessions view: its model, effort, access in its CLI's terms and Remove from chat behind …; never member rights, auto-watch or a name", async () => {
+  const host = window as unknown as { consensus?: unknown };
+  const previous = host.consensus;
+  host.consensus = {
+    listProviderModels: async () => ({ kind: "codex-cli", authoritative: true, fetchedAt: "2026-11-21T00:00:00.000Z",
+      models: [{ id: "gpt-5.5", label: "GPT-5.5", recommended: true, source: "cli" }, { id: "gpt-5.5-mini", label: "GPT-5.5 mini", source: "cli" }] }),
+    listMachines: async () => ({ machines: [] })
+  };
+  const patches: ChatModelAccessPatch[] = [];
+  let removed = 0;
+  let renderer: ReturnType<typeof create> | undefined;
+  try {
+    await act(async () => {
+      renderer = create(
+        <TooltipProvider>
+          <ChatModelAccessPanel value={{ ...DREW, agentMode: "default", permissions: { ...defaultChatAgentPermissions(), workspaceWrite: false } }}
+            onChange={(patch) => patches.push(patch)} runsOn={{}} actions={[{ label: "Remove from chat", tone: "danger", onSelect: () => { removed += 1; } }]} />
+        </TooltipProvider>
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const root = renderer!.root;
+    const text = textOf(root);
+    assert.doesNotMatch(text, /Request other members|Manage members|Auto-watch|Main session|Provider/, "no rights, no auto-watch, no name; its provider is fixed");
+    assert.doesNotMatch(text, /Runs on/, "where it runs only once a machine exists");
+    assert.deepEqual(root.findAll(byTestId("chat-model-access-model")).map(textOf), ["GPT-5.5Default", "GPT-5.5 mini"]);
+    const modes = root.findAll(byTestId("chat-model-access-mode"));
+    assert.deepEqual(modes.map((row) => textOf(row.findAll((node) => node.props.className === "chat-model-access-row-label")[0]!)),
+      ["Read only", "Workspace write", "Auto-review", "Plan mode"], "Codex's own sandbox and approval terms");
+    assert.equal(modes[0]!.props["aria-checked"], true, "read-only now");
+    await act(async () => { modes[1]!.props.onClick(); });
+    assert.equal(patches.at(-1)?.agentMode, "default");
+    assert.equal(patches.at(-1)?.permissions?.workspaceWrite, true);
+    assert.equal(root.findAll(byTestId("chat-model-access-action")).length, 0, "Remove from chat sits behind …");
+    await act(async () => { root.find((node) => node.type === "button" && node.props["aria-label"] === "More").props.onClick(); });
+    const remove = root.find(byTestId("chat-model-access-action"));
+    assert.equal(textOf(remove), "Remove from chat");
+    await act(async () => { remove.props.onClick(); });
+    assert.equal(removed, 1);
+  } finally {
+    if (renderer) act(() => renderer!.unmount());
+    host.consensus = previous;
+  }
 });

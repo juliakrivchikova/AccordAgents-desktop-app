@@ -9,7 +9,7 @@
  */
 
 import type { ChatAgentMode, ChatAgentPermissions, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind, ChatSkillMention, ChatViewMode } from "./types";
-import type { NewChatMemberOption } from "./newChat";
+import type { NewChatMemberOption, NewChatProviderOffer } from "./newChat";
 import type { MachineProgressFrame } from "./machineProgress";
 import { stableJson } from "./stableJson";
 
@@ -308,6 +308,11 @@ export interface HubNewChatOptions {
   /** The view a new chat opens in, as Settings → General on the computer
    *  says; unset: sessions. */
   defaultChatView?: ChatViewMode;
+  /** What the phone's New chat chip offers for the main session in the
+   *  sessions view: each provider it can run on (the one `mainSession` runs
+   *  on among them), with its models and efforts. A computer from before
+   *  offers none: the chip then shows `mainSession` as it is. */
+  mainSessionProviders?: NewChatProviderOffer[];
   /** The saved members, as the computer would add each. */
   members: NewChatMemberOption[];
   /** Why no chat can be started now, in the computer's words. */

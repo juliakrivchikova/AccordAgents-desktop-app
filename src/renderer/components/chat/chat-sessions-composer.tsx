@@ -4,7 +4,7 @@ import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import type { ChatParticipant } from "../../../shared/types";
 import type { ChatComposerProps } from "./chat-composer";
 import { ChatProviderMark } from "./chat-member-mark";
-import { useMemberDefaultModelName } from "./chat-member-model-name";
+import { useMemberModelName } from "./chat-member-model-name";
 
 const NO_MENTIONS: ChatParticipant[] = [];
 
@@ -54,14 +54,13 @@ export function sessionsComposerProps(
   };
 }
 
-/** What a member's model chip says: its provider's logo, its model, its
- *  reasoning effort ("Haiku 5.5 · Low"). Without a model of its own, the one
- *  its CLI runs on by default, else the CLI's name (memberDefaultModelName). */
-export function ChatMemberModelChipLabel(props: { participant: ChatParticipant; defaultModelLabel?: string }): JSX.Element {
+/** What a member's model chip says: its provider's bare glyph, its model by
+ *  name, its reasoning effort ("✳ Haiku 5.5 Low", T3 Code's). Without a model
+ *  of its own, the one its CLI runs on by default, else the CLI's name
+ *  (memberModelName). */
+export function ChatMemberModelChipLabel(props: { participant: ChatParticipant }): JSX.Element {
   const { participant } = props;
-  const explicit = participant.model?.trim() || props.defaultModelLabel;
-  const cliDefault = useMemberDefaultModelName(participant, !explicit);
-  const model = explicit || cliDefault;
+  const model = useMemberModelName(participant);
   const effort = participant.reasoningEffort ? chatReasoningEffortLabel(participant.reasoningEffort) : undefined;
   return (
     <span className="chat-model-chip-label" data-testid="chat-model-chip-label">

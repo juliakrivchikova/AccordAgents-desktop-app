@@ -121,7 +121,7 @@ export function ChatMemberSessionPanel(props: {
     <section className="chat-thread-panel chat-member-session-panel" aria-label={`${props.title} session`} data-testid="chat-member-session-panel" data-participant-id={member.id} data-read-only={props.readOnly || undefined}>
       <header className="thread-panel-head chat-thread-head chat-member-session-head" data-titlebar>
         <div>
-          <IconButton icon={ArrowLeft} label="Back to members" tooltip="Back to members" data-testid="chat-member-session-back" onClick={props.onBack} />
+          <IconButton icon={ArrowLeft} label="Back" tooltip="Back" data-testid="chat-member-session-back" onClick={props.onBack} />
           {member.kind && <ChatProviderMark member={{ kind: member.kind, hostLabel: member.hostLabel }} />}
           <span className="chat-member-session-title">
             <h2>{props.title}</h2>
@@ -135,7 +135,7 @@ export function ChatMemberSessionPanel(props: {
           {!props.readOnly && props.onStopRuns && props.runIds.length > 0 && (
             <IconButton tone="danger" icon={X} label={`Stop ${props.title}`} tooltip="Stop" data-testid="chat-member-session-stop" onClick={() => props.onStopRuns?.(props.runIds)} />
           )}
-          <IconButton icon={X} label="Close member" tooltip="Close" onClick={props.onClose} />
+          <IconButton icon={X} label="Close" tooltip="Close" onClick={props.onClose} />
         </div>
       </header>
       <div
@@ -203,7 +203,7 @@ function taskFor(message: ChatMessage, participantId: string): { prompt: string;
 /** The task the member was given, folded to one line; opens to the whole. */
 export const ChatMemberTaskFold = memo(function ChatMemberTaskFold(props: { message: ChatMessage; prompt: string; fromMain: boolean }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const label = props.fromMain ? "Task from the main session" : "Task from another member";
+  const label = props.fromMain ? "Task from the main session" : "Task from another session";
   const preview = useMemo(() => firstTextLine(props.prompt), [props.prompt]);
   return (
     <div className={`chat-member-task ${open ? "is-open" : ""}`} data-message-id={props.message.id} data-testid="chat-member-task">

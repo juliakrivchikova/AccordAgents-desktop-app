@@ -42,7 +42,7 @@ export function ChatSessionsTimelineRow(props: {
       </div>
     );
   }
-  const title = message.participantId ? sessions.memberTitle(message.participantId) : "A member";
+  const title = message.participantId ? sessions.memberTitle(message.participantId) : "A session";
   if (sessions.openCardMessageIds.has(message.id) && !isWaitingChoice(message)) {
     // A mention approval: the member's message with its card, named.
     return <ChatMessageItem {...itemProps} presentation="sessions" authorLabel={title} onOpenThread={undefined} />;

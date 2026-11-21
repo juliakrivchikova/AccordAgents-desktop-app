@@ -9,7 +9,16 @@ import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
 import { chatChangeBaseline, diffChatChanges, type ChatChangeBaseline, isSafeChatId } from "./chatChanges";
-import { newChatIntro, newChatProjects, participantConfigUsage, participantConfigUsageCount, type NewChatMemberOption } from "../../shared/newChat";
+import {
+  newChatIntro,
+  newChatProjects,
+  newChatProviderOffer,
+  participantConfigUsage,
+  participantConfigUsageCount,
+  type NewChatMemberOption,
+  type NewChatProviderOffer
+} from "../../shared/newChat";
+import { mainSessionProviderOptions, type MainSessionProviderOption } from "../../shared/mainSessionProviders";
 import { normalizedChatAvatarId } from "../../shared/chatAvatarCatalog";
 import type { HubNewChatOptions } from "../../shared/hubProtocol";
 import { chatChangesToOps, furthestTurnMarks, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
@@ -211,7 +220,9 @@ import {
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../shared/reasoningEffort";
 import {
   cliProviderHostDefaultModel,
+  cliProviderHostDefaultModelLabel,
   cliProviderHostForParticipant,
+  cliProviderHostModelCatalog,
   cliProviderHostRunConfig,
   cliProviderHostRunVersion
 } from "../../shared/cliProviderHosts";
@@ -1925,16 +1936,64 @@ export class ChatService {
     // published again. A phone from before reads `assistant`: it gets the
     // main session there too, and so makes a main-session chat.
     const offeredMainSession = { ...mainSession, id: MAIN_SESSION_ROLE_ID };
+    const mainSessionProviders = unavailable ? [] : await this.newChatProviderOffers(agents, settings);
     return {
       projects,
       ...(defaultProject ? { defaultProject } : {}),
       mainSession: offeredMainSession,
       assistant: offeredMainSession,
       ...(isChatViewMode(settings.defaultChatView) ? { defaultChatView: settings.defaultChatView } : {}),
+      ...(mainSessionProviders.length > 0 ? { mainSessionProviders } : {}),
       members,
       ...(unavailable ? { unavailable } : {}),
       ...(assistantNote ? { assistantNote } : {})
     };
+  }
+
+  /**
+   * What the phone's New chat chip offers for the main session in the
+   * sessions view, as this computer's chip lists it (the User, 2026-11-21):
+   * every provider it can run on now, with its CLI's models and efforts. A
+   * model list that cannot be read in time leaves that provider with its
+   * default model only.
+   */
+  private async newChatProviderOffers(agents: AgentHealth[], settings: AppSettings): Promise<NewChatProviderOffer[]> {
+    const options = mainSessionProviderOptions(agents, settings.providers, settings.cliProviderHosts ?? []);
+    return Promise.all(options.map(async (option) => {
+      const catalog = await this.mainSessionModelCatalog(option, settings).catch(() => undefined);
+      return newChatProviderOffer({
+        ...option,
+        vendorDefaultModelLabel: option.hostVendor ? cliProviderHostDefaultModelLabel({ vendor: option.hostVendor }) : undefined,
+        catalog,
+        providerEfforts: reasoningEffortOptionsForProvider(option.kind)
+      });
+    }));
+  }
+
+  /** A provider's model list, as the computer's model pickers read it
+   *  (settings:list-provider-models): an added provider's fixed list, an
+   *  Antigravity key's own list, else the CLI's. At most 15 seconds. */
+  private async mainSessionModelCatalog(option: MainSessionProviderOption, settings: AppSettings): Promise<ProviderModelCatalog | undefined> {
+    const read = async (): Promise<ProviderModelCatalog | undefined> => {
+      if (option.hostVendor) {
+        const fixed = cliProviderHostModelCatalog({ vendor: option.hostVendor, cli: option.kind });
+        if (fixed) return fixed;
+        if (option.kind === "gemini-cli" && option.hostId) {
+          const secret = await this.settings.getCliProviderHostSecret(option.hostId);
+          return this.cliRunner.listHostModelCatalog(secret && secret.host.cli === option.kind ? secret : undefined);
+        }
+      }
+      if (typeof this.cliRunner.listModelCatalog !== "function") return undefined;
+      const configuredModel = settings.providers.find((provider) => provider.kind === option.kind)?.model;
+      return this.cliRunner.listModelCatalog(option.kind, configuredModel, settings.lastRepoPath);
+    };
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 15_000); });
+    try {
+      return await Promise.race([read(), late]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /** Why this computer starts no chat now, in the words its New chat uses;

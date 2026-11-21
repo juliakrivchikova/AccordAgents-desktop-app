@@ -2986,6 +2986,42 @@ button.mobile-chat-group-title:active {
   flex: 0 0 auto;
 }
 
+/* The sessions view's model chip, T3 Code's way: no border, the provider's
+   bare glyph, the model and a muted effort. */
+.new-chat-model-chip {
+  flex: 0 1 auto;
+  border-color: transparent;
+  background: none;
+  color: var(--fg);
+}
+
+.new-chat-model-chip[hidden] {
+  display: none;
+}
+
+.new-chat-model-label {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.new-chat-model-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.new-chat-model-effort {
+  color: var(--mut);
+}
+
+.new-chat-model-option .provider-logo {
+  margin-right: 2px;
+}
+
 .new-chat-chip-label {
   min-width: 0;
   overflow: hidden;
