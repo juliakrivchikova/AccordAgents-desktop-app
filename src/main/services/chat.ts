@@ -1,7 +1,7 @@
 import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelection } from "../../shared/cloudRunPreparation";
 import {
-  forkedChatTitle, forkedMainSessionPermissions, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatUnavailableReason, localProviderUnavailableReason,
-  memberAsItRunsNow, memberHasForkableSession, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
+  forkedChatTitle, forkedMainSessionPermissions, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatReasonInChat, memberAsItRunsNow,
+  memberHasFinishedReply, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
 } from "../../shared/forkToNewChat";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
 import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
@@ -386,6 +386,9 @@ const MEMBER_ADDITION_RETRY_DELAYS_MS = [5_000, 30_000, 120_000];
  *  again. */
 const MAIN_SESSION_CATALOG_FRESH_MS = 10 * 60_000;
 const MAIN_SESSION_CATALOG_RETRY_MS = 60_000;
+/** The newest messages of a chat a member is forked from that are read:
+ *  its metadata says the rest (forkSourceChat). */
+const FORK_SOURCE_MESSAGES = 40;
 
 /** Whether this desktop can confirm the User's answer behind a machine
  *  member's approved roster change (see ChatService.machineRosterDecision). */
@@ -1877,7 +1880,7 @@ export class ChatService {
         throw new Error("A new chat is started from the User's computer.");
       }
       await this.waitForQueuedSave(forkOf.conversationId);
-      const source = await this.requireChat(forkOf.conversationId);
+      const source = await this.forkSourceChat(forkOf.conversationId);
       const member = this.chatParticipants(source).find((participant) => participant.id === forkOf.participantId);
       if (!member) {
         throw new Error("That member is no longer in its chat.");
@@ -1979,15 +1982,33 @@ export class ChatService {
     agents: AgentHealth[],
     settings: Pick<AppSettings, "providers" | "cliProviderHosts">
   ): string | undefined {
-    const home = chatParticipantHome(running);
-    return forkToNewChatUnavailableReason({
+    return forkToNewChatReasonInChat({
       participant: running,
-      hasSession: memberHasForkableSession(source.metadata, running, source.messages),
-      providerUnavailable: home.kind === "this-machine"
-        ? localProviderUnavailableReason(running, agents, settings.providers ?? [], settings.cliProviderHosts ?? [])
-        : undefined,
-      machineSupport: home.kind === "machine" ? this.machineForkToNewChatSupport?.(home.machineId) ?? "unknown" : undefined
+      conversation: source,
+      agents,
+      providers: settings.providers ?? [],
+      hosts: settings.cliProviderHosts ?? [],
+      machineSupport: (machineId) => this.machineForkToNewChatSupport?.(machineId) ?? "unknown"
     });
+  }
+
+  /**
+   * The chat a member is forked from, without reading all of its messages
+   * (a chat can be thousands of them): its metadata (members, their session
+   * records, the pointers to their last messages) and its newest messages,
+   * as saved. Nothing in it is changed.
+   */
+  private async forkSourceChat(conversationId: string): Promise<Conversation> {
+    if (this.deletedConversationIds.has(conversationId) || await this.storage.conversationTombstones?.().isDeleted(conversationId)) {
+      throw new Error("Chat was permanently deleted.");
+    }
+    const conversation = typeof this.storage.openConversation === "function"
+      ? (await this.storage.openConversation(conversationId, FORK_SOURCE_MESSAGES))?.conversation
+      : await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      throw new Error("Chat conversation was not found.");
+    }
+    return conversation;
   }
 
   private chatCreateLogPayload(conversation: Conversation): Record<string, unknown> {
@@ -12593,16 +12614,16 @@ export class ChatService {
     if (this.participantHasAnswered(conversation, participant.id)) {
       return undefined;
     }
-    // Only the member's chat's session records: that chat can be long.
-    const sourceSessions: unknown[] | undefined = this.storage.conversationParticipantSessions
-      ? await this.storage.conversationParticipantSessions(origin.conversationId).catch(() => undefined)
-      : await this.storage.getConversation(origin.conversationId)
-        .then((source) => source?.kind === "chat" ? this.chatSessions(source) : undefined)
-        .catch(() => undefined);
-    const sourceSession = (sourceSessions ?? []).find((item): item is ChatParticipantSession =>
-      Boolean(item) && typeof item === "object" && (item as { participantId?: unknown }).participantId === origin.participantId);
-    const sessionId = typeof sourceSession?.sessionId === "string" ? sourceSession.sessionId.trim() : undefined;
     const forkable = origin.kind === participant.kind && (participant.kind === "claude-code" || participant.kind === "codex-cli");
+    let read = await this.forkOriginSessionId(origin);
+    // A member that moved here whose session still waits on her server (a
+    // move hands it over at the member's next turn): taken now, as that
+    // turn would take it, so the copy starts from it.
+    if (!read.sessionId && forkable && await this.takeForkOriginHandoff(origin)) {
+      read = await this.forkOriginSessionId(origin);
+    }
+    const sessionId = read.sessionId;
+    const sourceSessions = read.sessions;
     if (!sessionId || !forkable) {
       void this.debugLogs.write("chat.session.fork-to-new-chat.source-missing", {
         conversationId: conversation.id,
@@ -12636,16 +12657,50 @@ export class ChatService {
     return undefined;
   }
 
+  /** The CLI session id of the member a forked main session copies, from
+   *  the session records of the member's chat on this device (only those:
+   *  that chat can be long); `sessions` is undefined when the chat is not
+   *  here. */
+  private async forkOriginSessionId(origin: ChatParticipantForkOrigin): Promise<{ sessionId?: string; sessions?: unknown[] }> {
+    const sessions: unknown[] | undefined = this.storage.conversationParticipantSessions
+      ? await this.storage.conversationParticipantSessions(origin.conversationId).catch(() => undefined)
+      : await this.storage.getConversation(origin.conversationId)
+        .then((source) => source?.kind === "chat" ? this.chatSessions(source) : undefined)
+        .catch(() => undefined);
+    const record = (sessions ?? []).find((item): item is ChatParticipantSession =>
+      Boolean(item) && typeof item === "object" && (item as { participantId?: unknown }).participantId === origin.participantId);
+    const sessionId = typeof record?.sessionId === "string" && record.sessionId.trim() ? record.sessionId.trim() : undefined;
+    return { ...(sessionId ? { sessionId } : {}), ...(sessions ? { sessions } : {}) };
+  }
+
+  /** The member a forked main session copies moved to this device and its
+   *  session waits here on her server: taken (takeSessionHandoff, the same
+   *  step its own next turn takes). True when there was one to take. */
+  private async takeForkOriginHandoff(origin: ChatParticipantForkOrigin): Promise<boolean> {
+    const listed: unknown = typeof this.storage.conversationAccess === "function"
+      ? (await this.storage.conversationAccess(origin.conversationId).catch(() => undefined))?.participants
+      : (await this.storage.getConversation(origin.conversationId).catch(() => undefined))?.metadata.participants;
+    const participants: unknown[] = Array.isArray(listed) ? listed : [];
+    const member = participants.find((item): item is ChatParticipant =>
+      Boolean(item) && typeof item === "object" && (item as { id?: unknown }).id === origin.participantId);
+    if (!member?.sessionHandoff || !this.runsHere(member)) return false;
+    const source = await this.requireChat(origin.conversationId).catch(() => undefined);
+    if (!source) return false;
+    await this.takeSessionHandoff(source, member).catch((error: unknown) => {
+      void this.debugLogs.write("chat.session.fork-to-new-chat.handoff-failed", {
+        sourceConversationId: origin.conversationId,
+        sourceParticipantId: origin.participantId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+    return true;
+  }
+
   /** Whether the member has a finished reply in this chat (a reply still
    *  being written, or a placeholder for one, does not count). The chat's
    *  messages can be a window: its newest message outside it was finished. */
   private participantHasAnswered(conversation: Conversation, participantId: string): boolean {
-    const own = conversation.messages.filter((message) => message.role === "participant" && message.participantId === participantId);
-    if (own.some((message) => message.status !== "pending")) {
-      return true;
-    }
-    const pointer = this.normalizedLastMessageByParticipant(conversation.metadata.lastMessageByParticipant)[participantId];
-    return Boolean(pointer && !own.some((message) => message.id === pointer.messageId));
+    return memberHasFinishedReply(this.normalizedLastMessageByParticipant(conversation.metadata.lastMessageByParticipant), participantId, conversation.messages);
   }
 
   /** The session a main session made by Fork to new chat was copied from,

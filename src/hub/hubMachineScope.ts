@@ -269,10 +269,14 @@ function keepRequestRight(next: ChatParticipant, current: ChatParticipant, given
 
 // --- its own members ----------------------------------------------------------
 
-function withoutHandoff(member: ChatParticipant): ChatParticipant {
-  if (!("sessionHandoff" in member) && !("forkOrigin" in member)) return member;
+/** A member a machine adds without what only the computer writes: a
+ *  session handed over and a forked main session's origin; `removed` names
+ *  the fields it brought. */
+function withoutComputerOnlyFields(member: ChatParticipant): { member: ChatParticipant; removed: string[] } {
+  const removed = (["sessionHandoff", "forkOrigin"] as const).filter((field) => field in member);
+  if (removed.length === 0) return { member, removed };
   const { sessionHandoff: _handoff, forkOrigin: _origin, ...rest } = member;
-  return rest;
+  return { member: rest, removed };
 }
 
 function keepHome(next: ChatParticipant, current: ChatParticipant): ChatParticipant {
@@ -783,8 +787,9 @@ export function scopeMachineConversationUpdate(conversation: Conversation, updat
           // A member a machine adds brings no session with it, nor a copy
           // of another chat's member: only the computer hands a member its
           // session, when it moves it or forks a member to a new chat.
-          let added = withoutHandoff(participant);
-          if (added !== participant) refused.push(`participants.${participant.id}.sessionHandoff`);
+          const stripped = withoutComputerOnlyFields(participant);
+          let added = stripped.member;
+          for (const field of stripped.removed) refused.push(`participants.${participant.id}.${field}`);
           // One added without a card in a chat with a main session says who
           // added it, so every device holds it to the main session's rights
           // at each turn (docs/main-session.md).

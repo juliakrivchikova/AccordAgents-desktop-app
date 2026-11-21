@@ -769,6 +769,8 @@ test("a phone forking a member reads the member and its chat from the server, an
   assert.equal((await read("chat-main", "p-gone")).fork?.member, undefined, "a member the chat no longer has");
   await assert.rejects(read("no-such-chat", "p-made"), /404|chat_not_found/);
   await assert.rejects(client.getJson("/v1/phone/new-chat", { forkOf: "chat-main" }), /400|participantId/);
+  await assert.rejects(read("x".repeat(201), "p-made"), /400|forkOf/, "an id no chat has");
+  await assert.rejects(read("chat-main", "p-\u0001made"), /400|participantId/, "nor a member");
   // Nothing published yet: the offer says so, the chat's part still comes.
   assert.match(forMade.unavailable ?? "", /has not told your server/);
 
@@ -791,6 +793,24 @@ test("a phone forking a member reads the member and its chat from the server, an
   const stored = await h.storage.getConversation(conversationId);
   assert.deepEqual((stored?.metadata.participants as ChatParticipant[])[0]?.forkOrigin, forked.forkOrigin);
   assert.equal(stored?.metadata.mainSessionParticipantId, forked.id);
+  // An archived chat is not the phone's to read, nor to fork from.
+  await ops.write(h.owner, { opId: ops.opId(), kind: "conversation.update", conversationId: "chat-main", metadata: { archived: true } });
+  await assert.rejects(read("chat-main", "p-made"), /404|chat_not_found/);
+});
+
+test("a reply still being written is not a member that ran on the server; an error is", async (t) => {
+  const h = await hub(t);
+  const machine = createDeviceIdentity(new Date().toISOString());
+  const ops = await seedChat(h, machine);
+  const at = new Date().toISOString();
+  const reply = (id: string, status: ChatMessage["status"], metadata?: Record<string, unknown>) =>
+    ({ opId: ops.opId(), kind: "message.create", conversationId: "chat-1", message: { id, role: "participant", participantId: localMember.id, content: "", createdAt: at, status, ...(metadata ? { metadata } : {}) } as ChatMessage }) as HubOp;
+  await ops.write(h.owner, reply("pending-1", "pending"));
+  assert.equal(await h.storage.conversationParticipantAnswered("chat-1", localMember.id), false);
+  await ops.write(h.owner, reply("error-1", "error"));
+  assert.equal(await h.storage.conversationParticipantAnswered("chat-1", localMember.id), true, "its CLI ran");
+  assert.equal(await h.storage.conversationParticipantAnswered("chat-1", machineMember.id), false);
+  assert.equal(await h.storage.conversationParticipantAnswered("no-chat", localMember.id), false);
 });
 
 test("only turns taken by a device that still exists count as running for the phone's chat list", async () => {

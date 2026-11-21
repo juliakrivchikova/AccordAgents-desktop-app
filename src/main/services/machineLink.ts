@@ -15,7 +15,7 @@
 
 import type { MachineMemberRestartSupport } from "../../shared/memberRestart";
 import type { MachineSessionMoveSupport, MachineSessionMoveTarget } from "../../shared/memberSessionMove";
-import type { ForkToNewChatMachineSupport } from "../../shared/forkToNewChat";
+import { forkToNewChatSupportFromHello, type ForkToNewChatMachineSupport } from "../../shared/forkToNewChat";
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
@@ -428,9 +428,7 @@ export class MachineLinkService {
    *  this desktop, connected or not: its program changes only through this
    *  desktop. */
   forkToNewChatSupport(machineId: string): ForkToNewChatMachineSupport {
-    const hello = (this.connections.get(machineId)?.record ?? this.enrolled.get(machineId))?.lastHello;
-    if (!hello) return "unknown";
-    return hello.forkToNewChatSupported === true ? "supported" : "outdated";
+    return forkToNewChatSupportFromHello((this.connections.get(machineId)?.record ?? this.enrolled.get(machineId))?.lastHello);
   }
 
   /** Ask a machine to do something with its scheduled scripts and wait for

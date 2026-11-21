@@ -56,12 +56,17 @@ export interface ForkToNewChatCheck {
   participant: Pick<ChatParticipant, "kind" | "homeMachineId" | "cloudRun" | "remoteExecution">;
   /** It has a CLI session to copy (it ran at least once). */
   hasSession: boolean;
+  /** It runs through an added provider Settings no longer has: its copy
+   *  would run on another provider (wherever it runs). */
+  hostMissing?: boolean;
   /** Why its CLI on this computer cannot run it now (only for a member that
    *  runs here; a machine's member runs on that machine's CLI). */
   providerUnavailable?: string;
   /** For a member on a machine: what that machine's program can do. */
   machineSupport?: ForkToNewChatMachineSupport;
 }
+
+export const FORK_TO_NEW_CHAT_PROVIDER_GONE = "Its provider no longer exists.";
 
 /**
  * Why this member cannot be forked to a new chat now, or undefined when it
@@ -70,6 +75,8 @@ export interface ForkToNewChatCheck {
  * - Antigravity has no fork;
  * - a member waiting for a machine has no session anywhere yet;
  * - a member that never ran has no session to copy;
+ * - a member on an added provider Settings no longer has would run on
+ *   another one;
  * - a member on a machine needs that machine's program to do the fork;
  * - a member on this computer needs its CLI ready here.
  */
@@ -88,6 +95,9 @@ export function forkToNewChatUnavailableReason(check: ForkToNewChatCheck): strin
   if (!check.hasSession) {
     return "It has not run yet, so it has no session to copy.";
   }
+  if (check.hostMissing) {
+    return FORK_TO_NEW_CHAT_PROVIDER_GONE;
+  }
   if (home.kind === "machine") {
     if (check.machineSupport === "outdated") {
       return "Its machine runs an older program. Upgrade its runtime in Settings → Machines.";
@@ -102,27 +112,97 @@ export function forkToNewChatUnavailableReason(check: ForkToNewChatCheck): strin
 
 type SessionsMetadata = Pick<ConversationMetadata, "lastMessageByParticipant"> & { participantSessions?: unknown };
 
+/** A chat message as the rule for "it ran" reads it. */
+export interface ForkMessageView {
+  id?: string;
+  role: string;
+  participantId?: string;
+  status?: string;
+  metadata?: { serverPlaceholder?: unknown } | object;
+}
+
+/** A reply that shows the member ran: finished (an error too: its CLI ran),
+ *  never one still being written nor the placeholder a device shows while
+ *  a turn runs elsewhere. Her server reads its copy of the chat by the same
+ *  rule (StorageService.conversationParticipantAnswered). */
+export function isFinishedMemberReply(message: ForkMessageView, participantId: string): boolean {
+  return message.role === "participant" && message.participantId === participantId && message.status !== "pending" &&
+    (message.metadata as { serverPlaceholder?: unknown } | undefined)?.serverPlaceholder !== true;
+}
+
+/**
+ * Whether the member has a finished reply in the chat, by the messages held
+ * and its last-message pointer: the messages held can be a window, and its
+ * newest message outside it was finished.
+ */
+export function memberHasFinishedReply(
+  pointers: unknown,
+  participantId: string,
+  loadedMessages: ReadonlyArray<ForkMessageView> = []
+): boolean {
+  if (loadedMessages.some((message) => isFinishedMemberReply(message, participantId))) return true;
+  const pointer = pointers && typeof pointers === "object" && !Array.isArray(pointers)
+    ? (pointers as Record<string, unknown>)[participantId] as { messageId?: unknown } | undefined
+    : undefined;
+  if (!pointer || typeof pointer !== "object" || typeof pointer.messageId !== "string") return false;
+  return !loadedMessages.some((message) => message.id === pointer.messageId);
+}
+
 /**
  * Whether the member has a CLI session to copy, as this device knows it: one
  * that runs here by its session record (an id of its own; a fork whose copy
- * was never made has none); one on a machine, whose session only that machine
- * holds, by whether it ever wrote in the chat.
+ * was never made has none) or a session moved here that it has not taken
+ * yet (the fork takes it, startFromForkOrigin); one on a machine, whose
+ * session only that machine holds, by whether it has a finished reply in the
+ * chat (the rule the phone reads from her server).
  */
 export function memberHasForkableSession(
   metadata: SessionsMetadata | undefined,
-  participant: Pick<ChatParticipant, "id" | "homeMachineId" | "cloudRun" | "remoteExecution">,
-  loadedMessages: ReadonlyArray<{ role: string; participantId?: string }> = []
+  participant: Pick<ChatParticipant, "id" | "homeMachineId" | "cloudRun" | "remoteExecution" | "sessionHandoff">,
+  loadedMessages: ReadonlyArray<ForkMessageView> = []
 ): boolean {
   if (chatParticipantHome(participant).kind === "machine") {
-    const pointers = metadata?.lastMessageByParticipant;
-    const pointed = Boolean(pointers && typeof pointers === "object" && !Array.isArray(pointers) &&
-      (pointers as Record<string, unknown>)[participant.id]);
-    return pointed || loadedMessages.some((message) => message.role === "participant" && message.participantId === participant.id);
+    return memberHasFinishedReply(metadata?.lastMessageByParticipant, participant.id, loadedMessages);
   }
+  if (participant.sessionHandoff) return true;
   const sessions: unknown[] = Array.isArray(metadata?.participantSessions) ? metadata!.participantSessions as unknown[] : [];
   return sessions.some((session) => {
     const record = session as { participantId?: unknown; sessionId?: unknown } | null;
     return Boolean(record) && record!.participantId === participant.id && typeof record!.sessionId === "string" && record!.sessionId.trim().length > 0;
+  });
+}
+
+/** What a machine's program can do for Fork to new chat, by the last hello
+ *  it sent this computer (none yet: unknown). */
+export function forkToNewChatSupportFromHello(hello: { forkToNewChatSupported?: boolean } | undefined): ForkToNewChatMachineSupport {
+  if (!hello) return "unknown";
+  return hello.forkToNewChatSupported === true ? "supported" : "outdated";
+}
+
+/**
+ * Why this member of a chat (as it runs now) cannot be forked to a new chat,
+ * judged on this computer: the service refuses with these words and its
+ * menus show them (ChatService.forkToNewChatRefusal, the renderer's
+ * forkToNewChatReasonFor).
+ */
+export function forkToNewChatReasonInChat(input: {
+  participant: ChatParticipant;
+  conversation: { metadata?: SessionsMetadata; messages?: ReadonlyArray<ForkMessageView> };
+  agents: AgentHealth[];
+  providers: Array<Pick<ProviderSettings, "kind" | "enabled">>;
+  hosts: ReadonlyArray<CliProviderHost>;
+  machineSupport: (machineId: string) => ForkToNewChatMachineSupport;
+}): string | undefined {
+  const { participant } = input;
+  const home = chatParticipantHome(participant);
+  return forkToNewChatUnavailableReason({
+    participant,
+    hasSession: memberHasForkableSession(input.conversation.metadata, participant, input.conversation.messages ?? []),
+    hostMissing: Boolean(participant.hostId) && !cliProviderHostForParticipant(participant.kind, participant.hostId, input.hosts),
+    providerUnavailable: home.kind === "this-machine"
+      ? localProviderUnavailableReason(participant, input.agents, input.providers, input.hosts)
+      : undefined,
+    machineSupport: home.kind === "machine" ? input.machineSupport(home.machineId) : undefined
   });
 }
 
@@ -137,7 +217,7 @@ export function localProviderUnavailableReason(
 ): string | undefined {
   if (agents.length === 0) return undefined;
   const host = cliProviderHostForParticipant(participant.kind, participant.hostId, hosts);
-  if (participant.hostId && !host) return "Its provider no longer exists.";
+  if (participant.hostId && !host) return FORK_TO_NEW_CHAT_PROVIDER_GONE;
   const readiness = readinessForParticipant({ kind: participant.kind, host }, agents, providers);
   if (readiness === "sign-in-required" && host) return `${host.label} has no API key. Add one under Local CLI setup in Settings.`;
   if (readiness === "ready") return undefined;
@@ -241,7 +321,29 @@ export function forkLocalProviderUnavailable(
   if (!offer.judged) return undefined;
   const entry = offer.localProviders.find((item) => item.kind === participant.kind && (item.hostId ?? "") === (participant.hostId ?? ""));
   if (entry) return entry.unavailable;
-  return participant.hostId ? "Its provider no longer exists." : undefined;
+  return participant.hostId ? FORK_TO_NEW_CHAT_PROVIDER_GONE : undefined;
+}
+
+/**
+ * Why the member cannot be forked now, judged on the phone from what her
+ * server holds (the member, the chat's main session, whether it has a
+ * finished reply) and what the computer offered: the computer's rule and
+ * words. `running` is the member as it runs (memberAsItRunsNow).
+ */
+export function forkToNewChatReasonFromOffer(input: {
+  running: ChatParticipant;
+  answered: boolean;
+  offer: Pick<ForkToNewChatOffer, "judged" | "localProviders" | "machines">;
+}): string | undefined {
+  const { running, offer } = input;
+  const home = chatParticipantHome(running);
+  return forkToNewChatUnavailableReason({
+    participant: running,
+    hasSession: input.answered,
+    hostMissing: Boolean(running.hostId) && !offer.localProviders.some((item) => item.hostId === running.hostId && item.kind === running.kind),
+    providerUnavailable: home.kind === "this-machine" ? forkLocalProviderUnavailable(running, offer) : undefined,
+    machineSupport: home.kind === "machine" ? offer.machines[home.machineId] ?? "unknown" : undefined
+  });
 }
 
 /**

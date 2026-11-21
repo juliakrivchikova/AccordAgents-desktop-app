@@ -1,12 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { chatParticipantHome } from "../../../shared/chatParticipantHome";
-import {
-  forkToNewChatUnavailableReason,
-  localProviderUnavailableReason,
-  memberHasForkableSession,
-  type ForkToNewChatMachineSupport
-} from "../../../shared/forkToNewChat";
+import { forkToNewChatReasonInChat, forkToNewChatSupportFromHello, type ForkToNewChatMachineSupport } from "../../../shared/forkToNewChat";
 import type { MachineListResult } from "../../../shared/machineLink";
 import type { AgentHealth, AppSettings, ChatParticipant, Conversation } from "../../../shared/types";
 
@@ -15,8 +9,7 @@ import type { AgentHealth, AppSettings, ChatParticipant, Conversation } from "..
 export function machineForkSupportFrom(result: MachineListResult | undefined): Map<string, ForkToNewChatMachineSupport> {
   const support = new Map<string, ForkToNewChatMachineSupport>();
   for (const machine of result?.machines ?? []) {
-    const hello = result?.status.find((item) => item.machineId === machine.id)?.lastHello ?? machine.lastHello;
-    support.set(machine.id, !hello ? "unknown" : hello.forkToNewChatSupported === true ? "supported" : "outdated");
+    support.set(machine.id, forkToNewChatSupportFromHello(result?.status.find((item) => item.machineId === machine.id)?.lastHello ?? machine.lastHello));
   }
   return support;
 }
@@ -44,13 +37,12 @@ export function forkToNewChatReasonFor(
   settings: Pick<AppSettings, "providers" | "cliProviderHosts">,
   machineSupport: ReadonlyMap<string, ForkToNewChatMachineSupport>
 ): string | undefined {
-  const home = chatParticipantHome(participant);
-  return forkToNewChatUnavailableReason({
+  return forkToNewChatReasonInChat({
     participant,
-    hasSession: memberHasForkableSession(conversation.metadata, participant, conversation.messages),
-    providerUnavailable: home.kind === "this-machine"
-      ? localProviderUnavailableReason(participant, agents, settings.providers ?? [], settings.cliProviderHosts ?? [])
-      : undefined,
-    machineSupport: home.kind === "machine" ? machineSupport.get(home.machineId) ?? "unknown" : undefined
+    conversation,
+    agents,
+    providers: settings.providers ?? [],
+    hosts: settings.cliProviderHosts ?? [],
+    machineSupport: (machineId) => machineSupport.get(machineId) ?? "unknown"
   });
 }

@@ -29,6 +29,13 @@ export const HUB_PHONE_PATHS = new Set([
   "/v1/phone/new-chat"
 ]);
 
+/** An id a phone names in its query (a chat's, a member's): present, of a
+ *  sane length, without control characters; undefined otherwise. */
+function idParam(query: URLSearchParams, name: string): string | undefined {
+  const value = query.get(name) ?? "";
+  return value && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value) ? value : undefined;
+}
+
 export const PHONE_ERROR_NO_SCOPE = "phone_scope_missing";
 export const PHONE_ERROR_CHAT_NOT_FOUND = "chat_not_found";
 
@@ -358,11 +365,9 @@ export class HubPhoneApi {
     };
   }
 
-  private conversationParam(scope: HubPhoneScope, query: URLSearchParams): string | Answer {
-    const conversationId = query.get("conversationId") ?? "";
-    if (!conversationId || conversationId.length > 200 || /[\u0000-\u001f\u007f]/.test(conversationId)) {
-      return { status: 400, body: { ok: false, error: "conversationId required" } };
-    }
+  private conversationParam(scope: HubPhoneScope, query: URLSearchParams, name = "conversationId"): string | Answer {
+    const conversationId = idParam(query, name);
+    if (conversationId === undefined) return { status: 400, body: { ok: false, error: `${name} required` } };
     if (!scopeCovers(scope, conversationId)) return { status: 404, body: { ok: false, error: PHONE_ERROR_CHAT_NOT_FOUND } };
     return conversationId;
   }
@@ -532,13 +537,12 @@ export class HubPhoneApi {
    *  holds them: the member and the chat's main session (not the rest of
    *  the chat), and whether the member ever answered there. */
   private async forkSource(scope: HubPhoneScope, query: URLSearchParams): Promise<HubPhoneForkSource | Answer> {
-    const forkOf = query.get("forkOf") ?? "";
-    if (!forkOf || forkOf.length > 200 || /[\u0000-\u001f\u007f]/.test(forkOf)) return { status: 400, body: { ok: false, error: "forkOf invalid" } };
-    if (!scopeCovers(scope, forkOf)) return { status: 404, body: { ok: false, error: PHONE_ERROR_CHAT_NOT_FOUND } };
-    const participantId = query.get("participantId") ?? "";
-    if (!participantId || participantId.length > 200 || /[\u0000-\u001f\u007f]/.test(participantId)) {
-      return { status: 400, body: { ok: false, error: "participantId invalid" } };
-    }
+    // Only a phone paired for every chat gets here (newChat); the chat is
+    // still checked against its pairing, as every read of a chat is.
+    const forkOf = this.conversationParam(scope, query, "forkOf");
+    if (typeof forkOf !== "string") return forkOf;
+    const participantId = idParam(query, "participantId");
+    if (participantId === undefined) return { status: 400, body: { ok: false, error: "participantId required" } };
     const opened = await this.openedRecent(forkOf, 1);
     const conversation = opened?.conversation;
     if (!conversation || conversation.kind !== "chat" || conversation.metadata.archived === true) {
@@ -560,7 +564,8 @@ export class HubPhoneApi {
       ...(conversation.repoPath ? { repoPath: conversation.repoPath } : {}),
       ...(member ? { member } : {}),
       ...(mainSession ? { mainSession } : {}),
-      answered: member ? await this.options.store.conversationParticipantAnswered(forkOf, participantId).catch(() => false) : false
+      // A read that fails is the server's error, not a member that never ran.
+      answered: member ? await this.options.store.conversationParticipantAnswered(forkOf, participantId) : false
     };
   }
 

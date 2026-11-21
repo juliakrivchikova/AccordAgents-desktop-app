@@ -206,7 +206,52 @@ test("the phone forks a member to a new chat from the title's menu as the comput
   await rewriteForkAnswers(app, `(body) => ({ ...body, fork: undefined })`);
   assert.equal((await openForkMenu(app)).detail, "Your server does not fork chats from the phone yet. It will once AccordAgents on your computer has updated.");
   await closeMenu(app);
+  // The member left its chat meanwhile; the computer never told the server
+  // what it offers.
+  await rewriteForkAnswers(app, `(body) => ({ ...body, fork: { ...body.fork, member: undefined } })`);
+  assert.equal((await openForkMenu(app)).detail, "That member is no longer in its chat.");
+  await closeMenu(app);
+  await rewriteForkAnswers(app, `(body) => ({ ok: true, type: "mobile.new-chat", unavailable: "Your computer has not told your server about its projects and members yet.", fork: body.fork })`);
+  assert.equal((await openForkMenu(app)).detail, "Your computer has not told your server about its projects and members yet.");
+  await closeMenu(app);
   await rewriteForkAnswers(app, "undefined");
+  // The chat is gone from the server; the server cannot be reached.
+  for (const [answer, said] of [
+    [`new Response(JSON.stringify({ ok: false, error: "chat_not_found" }), { status: 404, headers: { "content-type": "application/json" } })`, /^This chat is not on your server\.$/],
+    [`Promise.reject(new TypeError("Failed to fetch"))`, /^Could not reach your server/]
+  ]) {
+    await app.evaluate(`(() => { const real = window.__realFetch; window.fetch = function (input, init) {
+      return String(input && input.url || input).indexOf("/v1/phone/new-chat") >= 0 ? ${answer} : real.call(window, input, init); }; })()`);
+    assert.match((await openForkMenu(app)).detail, said);
+    await closeMenu(app);
+  }
+  await app.evaluate(`window.fetch = window.__realFetch`);
+
+  // The phone cannot write its queue: nothing is queued, nothing is listed,
+  // and the menu says why.
+  await openForkMenu(app);
+  await app.evaluate(`(() => { const real = IDBObjectStore.prototype.put; IDBObjectStore.prototype.put = function () {
+      if (this.name !== "outbox") return real.apply(this, arguments);
+      IDBObjectStore.prototype.put = real;
+      throw new Error("QA: the phone's storage is full");
+    };
+    document.getElementById("chat-title-fork").click(); })()`);
+  await app.waitFor(`document.getElementById("chat-title-fork-detail").textContent === "Could not start the chat: QA: the phone's storage is full"`, "the failure, in the menu");
+  assert.equal(await app.evaluate(`localStorage.getItem("accordagents.mobile.startedChats.v1")`), null, "nothing left in the list");
+  assert.equal(hub.opsRequests.flatMap((request) => request.ops || []).some((op) => op.kind === "conversation.create"), false);
+  await closeMenu(app);
+
+  // Open on the main timeline when the screen under it changes without a
+  // tap (here: taylor's session opened by a redraw): read for taylor.
+  await backToMain(app);
+  assert.equal((await openForkMenu(app)).disabled, "false");
+  await app.evaluate(`sessionStorage.setItem("accordagents.mobile.openMemberSessionId.v1", "p-taylor")`);
+  await hub.addMessages("conv-main", [{ id: "u-later", role: "user", content: "Any news?", status: "done", createdAt: new Date().toISOString(), metadata: { deliveryTargets: [MAIN.id] } }]);
+  await app.waitFor(`${title} === "Run the login tests" && document.getElementById("chat-title-fork-detail").textContent === "It has not run yet, so it has no session to copy."`,
+    "the menu read again for the member under it");
+  await closeMenu(app);
+  await backToMain(app);
+  await openMemberFromTimeline(app, "p-drew", "Restyle the login button");
 
   // --- drew, forked ---------------------------------------------------------
   const drewItem = await openForkMenu(app);

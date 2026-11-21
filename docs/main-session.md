@@ -276,9 +276,10 @@ chat as that chat's main session, with everything it knew
   (its settings from its session's gear, and the main session's composer
   chip) and as a fork button on its card in the classic roster. Disabled,
   with the reason, for Antigravity (no fork), a member that never ran (no
-  session), one waiting for a machine, one on a machine whose program is
-  older (Upgrade runtime) or has never greeted this computer, and one on this
-  computer whose CLI is not ready.
+  session), one waiting for a machine, one on an added provider Settings no
+  longer has (its copy would run on another provider), one on a machine
+  whose program is older (Upgrade runtime) or has never greeted this
+  computer, and one on this computer whose CLI is not ready.
 - On the phone (sessions view) it is in the title's menu: for the main
   session on the main timeline (under the chat's view), for a member on its
   own screen (the title opens that menu there; the side panel stays on its
@@ -293,11 +294,13 @@ chat as that chat's main session, with everything it knew
   session with `forkedMainSessionFor` (the computer's own result, checked by
   a test), then queues `conversation.create` and the intro line like its New
   chat and opens the chat at once. A server or computer from before says it
-  must update. One narrow difference: the phone cannot see a member's
-  session record, so it takes "has a finished reply in the chat" for "ran"
-  (the computer's rule for a machine's member); a local member whose session
-  was dropped since is offered, and its fork starts clean with the chat's
-  warning.
+  must update. "Ran" for a member on a machine is one rule everywhere
+  (`isFinishedMemberReply`: a finished reply, an error too; never one still
+  being written nor a placeholder shown for a turn elsewhere), and the
+  server reads its copy of the chat by it. One narrow difference: the phone
+  cannot see a member's session record, so it applies that rule to a member
+  on the computer too; one whose session was dropped since is offered, and
+  its fork starts clean with the chat's warning.
 - The new chat is made through the same path as every new chat
   (`createConversation` with `forkOf`, saved and so put on the User's server):
   titled "<chat> (fork)" until its first reply names it, in the member's
@@ -314,9 +317,12 @@ chat as that chat's main session, with everything it knew
   records) and forks it as a delegated fork does (`forkFrom` with the source
   chat's id). It is told it is the new chat's main session, not a member,
   with the main session's role instructions, and reminded on later turns. A
-  main session that already answered never becomes a copy again. When the
-  member's session is not on that device, it starts clean and the chat says
-  so; when the CLI cannot copy it, the fork's two-strike fallback holds.
+  main session that already answered never becomes a copy again. A member
+  that moved to that device and whose session still waits on her server is
+  taken first, as its own next turn would take it. When the member's session
+  is not on that device, it starts clean and the chat says so; when the CLI
+  cannot copy it, the fork's two-strike fallback holds. The member's chat is
+  read without its messages (its metadata and newest messages).
 - Claude Code 2.1.329 forks a session from another folder as well as from
   its own (checked 2026-11-21); the new chat keeps the member's project so
   the copy works in the folder it knew.

@@ -11,8 +11,9 @@ import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT, CHAT_PARTICIPANT_REQUEST_PR
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
 import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
 import {
-  forkedChatTitle, forkedMainSessionFor, forkedMainSessionPermissions, forkLocalProviderUnavailable, forkToNewChatLocalProviders, forkToNewChatUnavailableReason,
-  localProviderUnavailableReason, memberAsItRunsNow, memberHasForkableSession
+  forkedChatTitle, forkedMainSessionFor, forkedMainSessionPermissions, forkLocalProviderUnavailable, forkToNewChatLocalProviders, forkToNewChatReasonFromOffer,
+  forkToNewChatReasonInChat, forkToNewChatSupportFromHello, forkToNewChatUnavailableReason, localProviderUnavailableReason, memberAsItRunsNow,
+  memberHasForkableSession
 } from "../../shared/forkToNewChat";
 import type {
   AgentHealth,
@@ -488,28 +489,92 @@ test("the phone makes the same main session the computer makes, from what the co
   // give: it is copied as it runs (never above the main session).
   const mainSession: ChatParticipant = { id: "main-src", handle: "main", roleConfigId: MAIN_ROLE.id, kind: "codex-cli", agentMode: "default",
     permissions: permissions({ workspaceWrite: false, webAccess: true, requestParticipants: "allow", shell: { enabled: true, rules: [{ action: "deny", match: "prefix", pattern: "rm" }] } }) };
-  const delegated: ChatParticipant = { ...REVIEWER, delegatedByParticipantId: mainSession.id, agentMode: "auto" };
-  const source = oldChat([mainSession, delegated], {
-    mainSessionParticipantId: mainSession.id,
-    participantSessions: [sessionRecord(delegated, "src-cli-session")]
-  });
-  const { service } = testService({ conversations: [source], agents: READY_AGENTS });
-  const created = await service.createConversation({ participants: [], forkOf: { conversationId: source.id, participantId: delegated.id } });
-  const [desktopMain] = participantsOf(created.conversation);
-  const granted = normalizeChatAgentPermissions(desktopMain!.permissions);
-  assert.equal(granted.workspaceWrite, false, "never above the main session it was made by");
-  assert.equal(desktopMain!.agentMode, "default", "its mode within the main session's");
+  const host = { id: "host-z", label: "Z.ai", cli: "claude-code" as const, vendor: "zai" as never, baseUrl: "https://example.invalid", hasApiKey: true, updatedAt: NOW };
+  const cases: Array<[string, ChatParticipant]> = [
+    ["a member the main session made, on this computer", { ...REVIEWER, delegatedByParticipantId: mainSession.id, agentMode: "auto" }],
+    ["a member on a machine", { ...REVIEWER, id: "boxed", handle: "boxed", homeMachineId: "m-1", remoteExecution: "local" }],
+    ["a Cloud run member on its machine", { ...REVIEWER, id: "cloudy", handle: "cloudy", homeMachineId: "m-1", cloudRun: { instanceId: "i-1" } as never }],
+    ["a member on an added provider", { ...REVIEWER, id: "hosted", handle: "hosted", hostId: host.id, hostLabel: host.label, hostVendor: host.vendor }]
+  ];
+  for (const [label, member] of cases) {
+    const source = oldChat([mainSession, member], {
+      mainSessionParticipantId: mainSession.id,
+      participantSessions: [sessionRecord(member, "src-cli-session")],
+      // Its last reply, older than the messages held.
+      lastMessageByParticipant: { [member.id]: { messageId: `far-${member.id}`, sequence: 1 } }
+    });
+    const { service } = testService({ conversations: [source], agents: READY_AGENTS, machines: [{ id: "m-1", name: "Box" }] });
+    service.setMachineForkToNewChatSupport(() => "supported");
+    const settings = (service as any).settings;
+    const plain = settings.getPublicSettings;
+    for (const read of ["getPublicSettings", "ensureGenericChatParticipantSeeds", "ensureAssistantProviderDefault"]) {
+      settings[read] = async () => ({ ...(await plain()), cliProviderHosts: [host] });
+    }
+    const created = await service.createConversation({ participants: [], forkOf: { conversationId: source.id, participantId: member.id } });
+    const [desktopMain] = participantsOf(created.conversation);
+    const offer = await service.newChatOptions([]);
+    assert.ok(offer?.fork, `${label}: the computer tells the phone what it needs to fork`);
+    const running = memberAsItRunsNow(member, mainSession);
+    assert.equal(forkToNewChatReasonFromOffer({ running, answered: true, offer: offer!.fork! }), undefined, `${label}: offered on the phone too`);
+    const phoneMain = forkedMainSessionFor({
+      mainSession: offer!.mainSession!, basePermissions: offer!.fork!.basePermissions, member: running,
+      source: { id: source.id, title: source.title }, id: desktopMain!.id
+    });
+    assert.deepEqual(clone(phoneMain), clone(desktopMain), `${label}: the same member, rights, place and origin on both`);
+  }
+});
 
+test("a member's copy is never placed on another provider: one whose added provider is gone is refused on the computer and the phone alike", async () => {
+  const hostless = { ...REVIEWER, hostId: "host-gone", hostLabel: "Gone", homeMachineId: "m-1" };
+  const source = oldChat([ASSISTANT, hostless], { lastMessageByParticipant: { [hostless.id]: { messageId: "old-reply", sequence: 1 } } });
+  const { service } = testService({ conversations: [source], agents: READY_AGENTS, machines: [{ id: "m-1", name: "Box" }] });
+  service.setMachineForkToNewChatSupport(() => "supported");
+  await assert.rejects(service.createConversation({ participants: [], forkOf: { conversationId: source.id, participantId: hostless.id } }),
+    /cannot be forked to a new chat: Its provider no longer exists\./);
   const offer = await service.newChatOptions([]);
-  assert.ok(offer?.fork, "the computer tells the phone what it needs to fork");
-  const phoneMain = forkedMainSessionFor({
-    mainSession: offer!.mainSession!,
-    basePermissions: offer!.fork!.basePermissions,
-    member: memberAsItRunsNow(delegated, mainSession),
-    source: { id: source.id, title: source.title },
-    id: desktopMain!.id
-  });
-  assert.deepEqual(clone(phoneMain), clone(desktopMain), "the same member, rights, place and origin on both");
+  assert.equal(forkToNewChatReasonFromOffer({ running: hostless, answered: true, offer: offer!.fork! }), "Its provider no longer exists.");
+  // Nothing detected yet: still refused, rather than run on the CLI's own sign-in.
+  assert.equal(forkToNewChatReasonInChat({ participant: { ...hostless, homeMachineId: undefined }, conversation: source, agents: [], providers: [], hosts: [],
+    machineSupport: () => "supported" }), "Its provider no longer exists.");
+});
+
+test("a member ran when it has a finished reply (an error too), never by a reply still being written or a placeholder shown for a turn elsewhere", () => {
+  const boxed = { ...REVIEWER, homeMachineId: "m-1" };
+  const reply = (status: ChatMessage["status"], metadata?: Record<string, unknown>) =>
+    [{ id: "r", role: "participant", participantId: boxed.id, status, ...(metadata ? { metadata } : {}) }];
+  const pointer = { lastMessageByParticipant: { [boxed.id]: { messageId: "r", sequence: 1 } } };
+  assert.equal(memberHasForkableSession(pointer, boxed, reply("pending")), false, "its first turn still running");
+  assert.equal(memberHasForkableSession(pointer, boxed, reply("done", { serverPlaceholder: true })), false, "the bubble shown while its machine has the turn");
+  assert.equal(memberHasForkableSession(pointer, boxed, reply("error")), true, "its CLI ran");
+  assert.equal(memberHasForkableSession(pointer, boxed, []), true, "its last reply is older than the messages held");
+  assert.equal(memberHasForkableSession({}, boxed, []), false);
+  // A session moved here and not taken yet is a session to copy.
+  const moved = { ...REVIEWER, sessionHandoff: { provider: "claude-code" as const, sessionId: "s", blob: { blobHash: "b" } as never, at: NOW } };
+  assert.equal(memberHasForkableSession({ participantSessions: [] }, moved), true);
+  assert.equal(forkToNewChatSupportFromHello(undefined), "unknown");
+  assert.equal(forkToNewChatSupportFromHello({}), "outdated");
+  assert.equal(forkToNewChatSupportFromHello({ forkToNewChatSupported: true }), "supported");
+});
+
+test("a member moved here whose session still waits on the server is taken before the copy is made from it", async () => {
+  const moved: ChatParticipant = { ...REVIEWER, sessionHandoff: { provider: "claude-code", sessionId: "moved-session", blob: { blobHash: "b" } as never, at: NOW } };
+  const source = oldChat([ASSISTANT, moved], { participantSessions: [] });
+  const { service, storage, runs } = testService({ conversations: [source] });
+  const taken: string[] = [];
+  (service as any).takeSessionHandoff = async (conversation: Conversation, member: ChatParticipant) => {
+    taken.push(`${conversation.id}:${member.id}`);
+    const stored = storage.store.get(conversation.id)!;
+    stored.metadata.participantSessions = [sessionRecord(moved, "moved-session")];
+    storage.store.set(conversation.id, stored);
+  };
+  (service as any).storage.conversationAccess = async (id: string) => {
+    const found = storage.store.get(id);
+    return found ? { kind: found.kind, participants: clone(found.metadata.participants) } : undefined;
+  };
+  const { mainId } = await forkAndSend(service, storage);
+  assert.deepEqual(taken.filter((key) => key.startsWith(`${source.id}:`)), [`${source.id}:${moved.id}`], "taken as its own next turn would take it");
+  assert.equal(runs[0]!.participant.id, mainId);
+  assert.equal(runs[0]!.options.forkFromSessionId, "moved-session");
 });
 
 test("the computer's offer says why each of its CLIs cannot run a forked member, and what each machine's program can do", async () => {

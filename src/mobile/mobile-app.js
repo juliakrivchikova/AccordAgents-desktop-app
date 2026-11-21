@@ -13131,6 +13131,11 @@
       const checked = item.dataset.titleView === view ? "true" : "false";
       if (item.getAttribute("aria-checked") !== checked) item.setAttribute("aria-checked", checked);
     }
+    // Open for a member it has not read yet (the screen under it changed
+    // without a tap: the chat's main session changed, say): read now.
+    if (chatTitleMenuOpen && available && state.forkId && (!forkMenu || forkMenu.key !== forkMenuKey(chat.id, state.forkId))) {
+      void readForkPlan(chat, state.forkId);
+    }
     renderTitleMenuFork(chat, state.forkId);
   }
 
@@ -13140,7 +13145,8 @@
     const chat = activeChatRecord();
     // Opened: whether the member can be forked now is read again.
     const state = chatTitleMenuState(chat);
-    if (chatTitleMenuOpen && !was && state.available && state.forkId) void readForkPlan(chat, state.forkId);
+    // Opened: read again, whatever it said before.
+    if (chatTitleMenuOpen && !was && state.available && state.forkId) forkMenu = undefined;
     renderChatTitleMenu(chat);
   }
 
@@ -13170,7 +13176,7 @@
     const detail = document.getElementById("chat-title-fork-detail");
     if (!button || !detail) return;
     const shared = mobileSharedRules();
-    const shown = Boolean(chat && participantId && shared && typeof shared.forkToNewChatUnavailableReason === "function");
+    const shown = Boolean(chat && participantId && shared && typeof shared.forkToNewChatReasonFromOffer === "function");
     if (button.hidden === shown) button.hidden = !shown;
     if (!shown) return;
     const state = forkMenu && forkMenu.key === forkMenuKey(chat.id, participantId) ? forkMenu : undefined;
@@ -13219,13 +13225,7 @@
     if (!offer.fork || !(offer.mainSession || offer.assistant)) return { reason: FORK_COMPUTER_OUTDATED };
     // As it runs now: a member the main session made never above it.
     const running = shared.memberAsItRunsNow(source.member, source.mainSession);
-    const home = shared.chatParticipantHome(running);
-    const reason = shared.forkToNewChatUnavailableReason({
-      participant: running,
-      hasSession: source.answered === true,
-      providerUnavailable: home.kind === "this-machine" ? shared.forkLocalProviderUnavailable(running, offer.fork) : undefined,
-      machineSupport: home.kind === "machine" ? offer.fork.machines[home.machineId] || "unknown" : undefined
-    });
+    const reason = shared.forkToNewChatReasonFromOffer({ running: running, answered: source.answered === true, offer: offer.fork });
     return reason ? { reason: reason } : { plan: { source: source, running: running, offer: offer, machines: answer.machines || {} } };
   }
 

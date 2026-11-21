@@ -443,7 +443,8 @@ test("a machine never writes the member of another chat a forked main session co
     "its own member keeps what the computer wrote");
   const other = { ...origin, conversationId: "c-secret", participantId: "p-secret" };
   const written = scopeMachineConversationUpdate(chat(), { metadata: { participants: [{ ...desk, forkOrigin: other }, { ...box, forkOrigin: other }] } }, "machine-1");
-  const members = (written.update.metadata?.participants ?? [desk, box]) as Array<{ id: string; forkOrigin?: unknown }>;
+  assert.ok(written.update.metadata?.participants, "its members' write still goes through");
+  const members = written.update.metadata!.participants as Array<{ id: string; forkOrigin?: unknown }>;
   assert.ok(members.every((member) => member.forkOrigin === undefined), "nor one it makes up");
   const manager = { ...box, permissions: { manageRolesParticipants: "allow" } };
   const managed = chat();
@@ -451,7 +452,10 @@ test("a machine never writes the member of another chat a forked main session co
   const added = { id: "p-new", handle: "new", label: "New", roleConfigId: "r", kind: "claude-code", forkOrigin: other };
   const scoped = scopeMachineConversationUpdate(managed, { metadata: { participants: [desk, manager, added] } }, "machine-1");
   const member = (scoped.update.metadata?.participants as Array<{ id: string; forkOrigin?: unknown }>)?.find((item) => item.id === "p-new");
-  if (member) assert.equal(member.forkOrigin, undefined, "a member it adds copies nobody");
+  assert.ok(member, "the member is added");
+  assert.equal(member!.forkOrigin, undefined, "a member it adds copies nobody");
+  assert.ok(scoped.refused.includes("participants.p-new.forkOrigin"), "the server's log names what it left out");
+  assert.equal(scoped.refused.includes("participants.p-new.sessionHandoff"), false, "and only that");
 });
 
 // --- a chat with a main session (docs/main-session.md) ---------------------------
