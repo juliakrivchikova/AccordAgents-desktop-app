@@ -658,8 +658,13 @@ function validateCommandApprovalParams(params: Record<string, unknown>): void {
   assertOnlyKeys(params, [
     "threadId", "turnId", "itemId", "startedAtMs", "approvalId", "environmentId", "reason",
     "networkApprovalContext", "command", "cwd", "commandActions", "additionalPermissions",
-    "proposedExecpolicyAmendment", "proposedNetworkPolicyAmendments", "availableDecisions"
+    "proposedExecpolicyAmendment", "proposedNetworkPolicyAmendments", "availableDecisions", "kind"
   ], "item/commandExecution/requestApproval params");
+  // Codex 0.155.1 says what is under review: a command, or input sent to a
+  // terminal it already runs ("command" when absent, from older servers).
+  if (params.kind !== undefined && params.kind !== null && params.kind !== "command" && params.kind !== "writeStdin") {
+    throw new Error("kind must be \"command\" or \"writeStdin\".");
+  }
   validateV2Identity(params);
   requiredNumber(params.startedAtMs, "startedAtMs");
   requiredNullableString(params.environmentId, "environmentId");

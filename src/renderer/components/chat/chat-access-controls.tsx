@@ -1,4 +1,4 @@
-import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../../shared/agentPermissions";
+import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../../shared/agentPermissions";
 import {
   applyChatAccessOption,
   chatAccessMenuOptions,
@@ -124,8 +124,11 @@ export function accessHeldReason(value: ChatModelAccessValue, option: ChatAccess
   const applied = applyChatAccessOption(option, value.permissions);
   const member = { ...value, id: value.id, roleConfigId: "", agentMode: applied.agentMode, permissions: applied.permissions } as ChatParticipant;
   const running = memberAsItRunsNow(member, mainSession);
+  // What it may do in the mode (Plan edits nothing either way).
+  const edits = (mode: ChatParticipant["agentMode"], permissions: ChatParticipant["permissions"]): boolean =>
+    effectiveChatAgentPermissionsForProvider(value.kind, normalizeChatAgentMode(mode), normalizeChatAgentPermissions(permissions)).workspaceWrite;
   const held = normalizeChatAgentMode(running.agentMode) !== normalizeChatAgentMode(applied.agentMode) ||
-    normalizeChatAgentPermissions(running.permissions).workspaceWrite !== applied.permissions.workspaceWrite;
+    edits(running.agentMode, running.permissions) !== edits(applied.agentMode, applied.permissions);
   if (!held) return undefined;
   const mainMode = selectedChatAccessOption(mainSession.kind, mainSession.agentMode, mainSession.permissions)?.label ?? "Custom";
   return `Not above the main session's mode (${mainMode}).`;

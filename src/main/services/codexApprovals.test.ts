@@ -124,6 +124,12 @@ test("approval correlation requires the active thread and turn", () => {
     "thread-1",
     "turn-1"
   ), /unsupported fields/);
+  // Codex 0.155.1 says what is under review (a command, or input to a
+  // terminal it runs); an Ask for approval escalation carries it.
+  for (const kind of ["command", "writeStdin"]) {
+    assert.equal(validateCodexApprovalCorrelation("item/commandExecution/requestApproval", { ...params, kind }, "thread-1", "turn-1").itemId, "item-1");
+  }
+  assert.throws(() => validateCodexApprovalCorrelation("item/commandExecution/requestApproval", { ...params, kind: "other" }, "thread-1", "turn-1"), /kind must be/);
 });
 
 test("approval display projections redact credentials and expose safe structured context", () => {

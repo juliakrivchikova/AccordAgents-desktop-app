@@ -11,7 +11,7 @@ import { defaultChatAgentPermissions } from "../../../shared/agentPermissions";
 import { chatAccessOptions, selectedChatAccessOption, codexPlanModeOn } from "../../../shared/chatAccessModes";
 import type { ChatAgentMode, ChatParticipant } from "../../../shared/types";
 import { ChatMemberComposerControls, type ChatModelAccessPatch } from "./chat-model-access-picker";
-import { applyChatAccessOptionKeepingPlan } from "./chat-access-controls";
+import { accessHeldReason, applyChatAccessOptionKeepingPlan } from "./chat-access-controls";
 import { ChatMemberActionsMenu } from "./chat-member-model-access";
 import { resetMemberModelCatalogs } from "./chat-member-model-name";
 import { ChatTitleMenuContent, type ChatViewHeaderState } from "./chat-view-switch";
@@ -153,4 +153,14 @@ test("the chat title's menu lists the main session's Restart and Fork to new cha
   act(() => { renderer = create(<ChatTitleMenuContent state={{ ...state, mainSession: undefined }} onPicked={noop} mainSessionBackgroundTasks={0} />); });
   assert.equal(renderer!.root.findAll(byTestId("chat-title-menu-main-session")).length, 0, "a chat without one: the view switch only");
   act(() => renderer!.unmount());
+});
+
+test("a member the main session made is held only above the main session's mode: Plan, below Manual, stays open", () => {
+  const main = { ...CODEX, id: "p-main", kind: "claude-code" as const, agentMode: "default" as ChatAgentMode, permissions: { ...defaultChatAgentPermissions(), workspaceWrite: false, cliApprovals: true as const } };
+  const member = { ...CODEX, id: "p-made", kind: "claude-code" as const, delegatedByParticipantId: "p-main", agentMode: "auto" as ChatAgentMode, permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true, cliApprovals: true as const } };
+  const held = (id: string) => accessHeldReason(member, chatAccessOptions("claude-code").find((option) => option.id === id)!, main);
+  assert.equal(held("manual"), undefined);
+  assert.equal(held("plan"), undefined, "Plan edits nothing: not above Manual");
+  assert.match(held("acceptEdits") ?? "", /Not above the main session's mode \(Manual\)/);
+  assert.match(held("auto") ?? "", /Not above/);
 });

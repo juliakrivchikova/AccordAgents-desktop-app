@@ -23,8 +23,20 @@
   overflow: hidden;
 }
 
-.chat-composer-controls > .composer-menu-trigger:first-child {
-  flex-shrink: 3;
+/* The model keeps its name longest; the effort shortens first, then the
+   mode, the Plan toggle and where it runs. */
+.chat-composer-controls > [data-testid$="-model"] {
+  flex-shrink: 1;
+}
+
+.chat-composer-controls > [data-testid$="-effort"] {
+  flex-shrink: 8;
+}
+
+.chat-composer-controls > [data-testid$="-mode"],
+.chat-composer-controls > [data-testid$="-plan"],
+.chat-composer-controls > [data-testid$="-runs-on"] {
+  flex-shrink: 4;
 }
 
 .composer-menu-trigger .chat-model-chip-label {
@@ -245,4 +257,14 @@
   margin-top: 4px;
   padding-top: 4px;
   border-top: 1px solid var(--app-hairline);
+}
+
+/* In the sessions view a composer may be narrower than its controls'
+   natural width (the main column and the side panel at the smallest
+   window): it shrinks, so its controls shorten instead of pushing Send
+   and the panel's edge out of view. */
+.is-sessions-view .chat-composer,
+.is-sessions-view .chat-composer-shell,
+.is-sessions-view .chat-composer-toolbar {
+  min-width: 0;
 }
