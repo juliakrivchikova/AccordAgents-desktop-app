@@ -76,6 +76,11 @@ export interface ForkToNewChatCheck {
 
 export const FORK_TO_NEW_CHAT_PROVIDER_GONE = "Its provider no longer exists.";
 
+/** The CLIs whose sessions a fork can copy (Claude Code, Codex). */
+export function isForkableSessionKind(kind: ChatProviderKind): kind is "claude-code" | "codex-cli" {
+  return kind === "claude-code" || kind === "codex-cli";
+}
+
 /**
  * Why this member cannot be forked to a new chat now, or undefined when it
  * can. The new chat's main session runs where the member runs (a fork never
@@ -93,7 +98,7 @@ export function forkToNewChatUnavailableReason(check: ForkToNewChatCheck): strin
   if (participant.kind === "gemini-cli") {
     return "Antigravity has no session fork.";
   }
-  if (participant.kind !== "claude-code" && participant.kind !== "codex-cli") {
+  if (!isForkableSessionKind(participant.kind)) {
     return "Only Claude Code and Codex sessions can be forked.";
   }
   const home = chatParticipantHome(participant);

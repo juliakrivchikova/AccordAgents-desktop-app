@@ -44,7 +44,8 @@ import type { ConversationActions } from "./use-conversation-actions";
 import { upsertConversationSummary, withPinnedState } from "./conversation-summaries";
 import { newChatTitle } from "../../shared/newChat";
 import { persistLastViewedAt } from "./storage";
-import { requestComposerFocus } from "./composer-focus-request";
+import { requestComposerFocus, takeComposerFocusRequest } from "./composer-focus-request";
+import { laterLoadingNotice } from "./later-loading-notice";
 import { cleanIpcError } from "../lib/ipc-error";
 import { serializeComposerDraft } from "../components/chat/chat-composer-draft-utils";
 import { revokePendingImageUrls } from "../components/chat/use-chat-composer-images";
@@ -686,6 +687,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     if (state.startingChatRef.current) return false;
     state.startingChatRef.current = true;
     state.setError(undefined);
+    // Checking its CLI can take a moment: said at once, gone once it is made.
+    const notice = laterLoadingNotice("Forking to a new chat…");
     try {
       const result = await window.consensus.createChatConversation({
         runId: crypto.randomUUID(),
@@ -693,17 +696,23 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         skipDefaultParticipants: true,
         forkOf: { conversationId, participantId }
       });
+      notice.end();
       const created = result.conversation;
       requestComposerFocus(created.id);
       state.setSummaries((current) => upsertConversationSummary(current, created));
       state.setRailView("chats");
+      const openRequest = state.openConversationRequestRef.current + 1;
       await conversationActions.openConversation(created.id);
+      // She opened another chat meanwhile: the request must not take the
+      // keyboard whenever she opens this one later.
+      if (state.openConversationRequestRef.current !== openRequest) takeComposerFocusRequest(created.id);
       await conversationActions.refreshConversations().catch(() => undefined);
       return true;
     } catch (caught) {
       state.setError(cleanIpcError(caught));
       return false;
     } finally {
+      notice.end();
       state.startingChatRef.current = false;
     }
   }

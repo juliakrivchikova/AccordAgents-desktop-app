@@ -1,7 +1,7 @@
 import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelection } from "../../shared/cloudRunPreparation";
 import {
-  forkCutFor, forkedChatTitle, forkedMainSessionPermissions, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatReasonInChat, lastMemberTurnEnd,
-  memberAsItRunsNow, memberHasFinishedReply, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
+  forkCutFor, forkedChatTitle, forkedMainSessionPermissions, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatReasonInChat, isForkableSessionKind,
+  lastMemberTurnEnd, memberAsItRunsNow, memberHasFinishedReply, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
 } from "../../shared/forkToNewChat";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
 import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
@@ -1900,10 +1900,10 @@ export class ChatService {
       // ended a turn; the copy ends with that turn. Read first, before the
       // checks below take their time.
       const seen = await this.forkSeenReply(source, member.id);
-      const agents = await this.detectAgentsForReadiness("submit");
+      const running = this.participantForRun(source, member);
+      const agents = await this.forkReadiness(running);
       signal?.throwIfAborted();
       const settings = await this.settings.getPublicSettings();
-      const running = this.participantForRun(source, member);
       const refusal = this.forkToNewChatRefusal(source, running, agents, settings);
       if (refusal) {
         throw new Error(`@${member.handle} cannot be forked to a new chat: ${refusal}`);
@@ -1987,6 +1987,21 @@ export class ChatService {
       }).catch(() => undefined);
       throw error;
     }
+  }
+
+  /**
+   * The CLI readiness a fork is judged by: only what its main session will
+   * run on. A member on this computer needs its own CLI here (its fresh
+   * result reused, else that CLI alone checked); a member on a machine runs
+   * on that machine's CLI, and Antigravity or a member with no place to run
+   * is refused without any (forkToNewChatUnavailableReason). So Fork opens at
+   * once instead of waiting for every CLI's check.
+   */
+  private async forkReadiness(running: ChatParticipant): Promise<AgentHealth[]> {
+    if (chatParticipantHome(running).kind !== "this-machine" || !isForkableSessionKind(running.kind)) {
+      return [];
+    }
+    return this.detectAgentsForReadiness("submit", [running.kind]);
   }
 
   /** Why this member (as it runs now) cannot be forked to a new chat, in the
@@ -15222,11 +15237,15 @@ export class ChatService {
     return `@${participant.handle} cannot start on this computer: ${reason} Fix it in Settings → Local CLI setup, or start the chat on another provider.`;
   }
 
+  /** Every CLI's readiness, or with `kinds` only those CLIs checked (each
+   *  one's fresh result reused; the rest as last read). */
   private async detectAgentsForReadiness(
-    trigger?: "submit"
+    trigger?: "submit",
+    kinds?: readonly ChatProviderKind[]
   ): Promise<AgentHealth[]> {
     try {
-      return await this.cliRunner.detectAgents(trigger ? { trigger } : undefined);
+      const request = trigger ? { trigger } : undefined;
+      return kinds ? await this.cliRunner.detectAgentKinds(kinds, request) : await this.cliRunner.detectAgents(request);
     } catch {
       throw new Error("Could not verify CLI readiness. Check again and retry.");
     }

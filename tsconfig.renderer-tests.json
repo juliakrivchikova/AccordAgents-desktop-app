@@ -16,6 +16,7 @@
     "src/renderer/components/chat/chat-turn-finished-note.test.tsx",
     "src/renderer/components/chat/chat-activity-harness.test.tsx",
     "src/renderer/components/chat/chat-activity-rendering.test.tsx",
+    "src/renderer/components/chat/chat-composer-focus.test.tsx",
     "src/renderer/components/chat/chat-composer-mention-token.test.ts",
     "src/renderer/components/chat/chat-composer-plugin-token.test.ts",
     "src/renderer/components/chat/chat-participant-drafts.test.ts",
