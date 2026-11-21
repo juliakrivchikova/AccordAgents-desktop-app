@@ -6,6 +6,7 @@ import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation, R
 import type { HubNotice } from "../main/services/hubStorage";
 import type { StorageService } from "../main/services/storage";
 import { mobileInterimPosts, timelineAttachmentsFromMessage } from "../main/services/mobileTimeline";
+import { phoneSessionsActivity } from "../shared/sessionsActivity";
 
 /**
  * What the hub works out for the phone, so that the phone needs no other
@@ -101,6 +102,8 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
     // copy without them took them off the phone's row until the next page.
     const interimPosts = mobileInterimPosts(message);
     const attachments = interimPosts.length > 0 ? timelineAttachmentsFromMessage(message) : [];
+    // Its steps so far, as the sessions view's rows show them (short).
+    const activity = phoneSessionsActivity(agent?.activityEvents ?? message.metadata?.activityEvents);
     events.push({
       id: message.id,
       role: "participant",
@@ -111,6 +114,11 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
       content,
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(interimPosts.length > 0 ? { interimPosts } : {}),
+      ...(activity ?? {}),
+      // Its text is where the run stands (a machine's status, the step in
+      // progress), not words of the reply: the sessions view shows it as a
+      // step, not as the reply's text.
+      ...(!partial ? { liveStatus: true } : {}),
       status: "pending",
       createdAt: message.createdAt,
       ...(runId ? { runId } : {}),

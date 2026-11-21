@@ -12,8 +12,9 @@ import { ChatMessageWhen } from "./chat-streaming";
  * earlier, so it is not shown, and the time is with the message's controls
  * on hover (ChatMessageHoverWhen), as in Claude's and Codex's desktop apps.
  * Only a name the view must tell apart (`authorLabel`, the main session in a
- * member's session) stays. A message still being written keeps its live
- * line: "Running 12s" or "Queued".
+ * member's session) stays. A reply still being written has no status line
+ * either: its "Working for …" says it (ChatSessionsRunningReply); one still
+ * queued keeps "Queued".
  */
 export function ChatMessageMeta(props: {
   message: ChatMessage;
@@ -28,7 +29,7 @@ export function ChatMessageMeta(props: {
   inThread?: boolean;
 }): JSX.Element | null {
   const { message, participant, sessions } = props;
-  if (sessions && !props.isStreaming) {
+  if (sessions && (!props.isStreaming || !props.queued)) {
     return props.authorLabel ? <div className="message-meta"><strong>{props.authorLabel}</strong></div> : null;
   }
   return (

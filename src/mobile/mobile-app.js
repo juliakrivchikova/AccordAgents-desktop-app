@@ -559,7 +559,10 @@
       // An Accord the main session started is its card; a turn's worked time
       // heads its delegations.
       Boolean(left.accordLaunchByMainSession) === Boolean(right.accordLaunchByMainSession) &&
-      (left.workedMs || 0) === (right.workedMs || 0);
+      (left.workedMs || 0) === (right.workedMs || 0) &&
+      // A running reply's steps, and what its Worked for opens to.
+      activitySignature(left) === activitySignature(right) &&
+      Boolean(left.liveStatus) === Boolean(right.liveStatus);
   }
 
   function sameMobileEvent(left, right) {
@@ -723,7 +726,11 @@
             ...(Array.isArray(stored.addressees) && !Array.isArray(entry.addressees) ? { addressees: stored.addressees } : {}),
             ...(stored.participantRequest && !entry.participantRequest ? { participantRequest: stored.participantRequest } : {}),
             ...(stored.accordLaunchByMainSession && !entry.accordLaunchByMainSession ? { accordLaunchByMainSession: true } : {}),
-            ...(typeof stored.workedMs === "number" && typeof entry.workedMs !== "number" ? { workedMs: stored.workedMs } : {})
+            ...(typeof stored.workedMs === "number" && typeof entry.workedMs !== "number" ? { workedMs: stored.workedMs } : {}),
+            // Nor one without the reply's steps (a live copy from a server
+            // before it carried them).
+            ...(Array.isArray(stored.activity) && !Array.isArray(entry.activity)
+              ? { activity: stored.activity, ...(stored.activityMore ? { activityMore: stored.activityMore } : {}) } : {})
           };
           // Nor one that holds fewer of the reply's posts (a live copy from a
           // server before it carried them, a page read before the newest
@@ -5064,6 +5071,26 @@
       .map(function (item) { return item.post; });
   }
 
+  // A reply's steps as the sessions view shows them (shared/sessionsActivity.ts),
+  // made short by the server: one row each, the newest last, and how many
+  // earlier ones were left out.
+  const SESSIONS_ACTIVITY_KINDS = new Set(["thinking", "web", "shell", "read", "edit", "tool", "status"]);
+  function activityOfEvent(event) {
+    if (!event || !Array.isArray(event.activity)) return {};
+    const activity = event.activity.filter(function (row) {
+      return row && SESSIONS_ACTIVITY_KINDS.has(row.kind) && typeof row.text === "string" && row.text.trim();
+    }).slice(-24).map(function (row) { return { kind: row.kind, text: row.text.slice(0, 200) }; });
+    if (activity.length === 0) return {};
+    const more = Number.isFinite(event.activityMore) && event.activityMore > 0 ? Math.floor(event.activityMore) : 0;
+    return more > 0 ? { activity: activity, activityMore: more } : { activity: activity };
+  }
+
+  function activitySignature(entry) {
+    return entry && Array.isArray(entry.activity) && entry.activity.length
+      ? JSON.stringify([entry.activity, entry.activityMore || 0])
+      : "";
+  }
+
   function interimPostsSignature(entry) {
     return entry && Array.isArray(entry.interimPosts)
       ? entry.interimPosts.map(function (post) { return post.id; }).join(",")
@@ -5483,6 +5510,7 @@
       const content = typeof event.content === "string" ? event.content.trim() : "";
       const attachments = timelineAttachmentsFromEvent(event);
       const interimPosts = event.role === "participant" ? interimPostsOfEvent(event) : {};
+      const activity = event.role === "participant" ? activityOfEvent(event) : {};
       // A picture with no caption is still a message. Requiring text dropped it.
       if (!content && attachments.length === 0) {
         // A turn that ended with nothing to say travels hidden and empty: it
@@ -5600,6 +5628,10 @@
         // A member's request: its task card and the members list read it.
         ...(role === "participant" ? taskBatchOfEvent(event) : {}),
         ...interimPosts,
+        // Its steps, as the sessions view's rows show them, and whether its
+        // live text is where the run stands rather than words of the reply.
+        ...activity,
+        ...(role === "participant" && status === "pending" && event.liveStatus === true ? { liveStatus: true } : {}),
         // An Accord the main session started: its card, like the User's own.
         ...(role === "participant" && event.accordLaunchByMainSession === true ? { accordLaunchByMainSession: true } : {}),
         // How long the turn worked: the sessions view's "Worked for …".
@@ -9515,6 +9547,9 @@
         ...(Array.isArray(entry.interimPosts) && entry.interimPosts.length ? { interimPosts: entry.interimPosts } : {}),
         ...(entry.accordLaunchByMainSession ? { accordLaunchByMainSession: true } : {}),
         ...(typeof entry.workedMs === "number" ? { workedMs: entry.workedMs } : {}),
+        ...(Array.isArray(entry.activity) && entry.activity.length ? { activity: entry.activity } : {}),
+        ...(entry.activityMore ? { activityMore: entry.activityMore } : {}),
+        ...(entry.liveStatus && entry.status === "pending" ? { liveStatus: true } : {}),
         // A member's "@x is running…" row is still its turn: the sessions
         // view stops it by its run like any running reply.
         ...(isScaffoldingEntry(entry) && entry.participantLabel && entry.participantId && entry.runId ? { memberTurn: true } : {}),
@@ -9959,6 +9994,11 @@
       presentation: entry.presentation,
       authorLabel: entry.authorLabel,
       worked: sessionsView ? entry.workedMs : undefined,
+      // Its steps (a running reply's rows; what its Worked for opens to, and
+      // whether it is open).
+      activity: sessionsView && activitySignature(entry)
+        ? activitySignature(entry) + (openWorkedFolds.has(entry.rowKey || entry.id) ? ":open" : "") : undefined,
+      liveStatus: sessionsView && entry.liveStatus ? true : undefined,
       sessions: sessionsView ? sessionsSpecialSignature(entry) : undefined,
       avatar: entry.author === "agent" && entry.identified !== false && !sessionsView ? avatarSignature(rowAvatar(entry)) : undefined,
       identified: entry.identified,
@@ -10085,6 +10125,8 @@
   }
 
   function messageStatusLabel(entry) {
+    // A running reply of the sessions view says "Working for …" instead.
+    if (isSessionsRunningEntry(entry)) return "";
     // A refused message of the User's says why; one not sent yet is faded
     // and shows its time like any other.
     if (entry.author === "you" && entry.mark) return entry.mark;
@@ -10238,7 +10280,9 @@
 
   function syncMessageStopButton(meta, entry) {
     let button = meta.querySelector(".message-stop");
-    const visible = isCancellableMobileRow(entry);
+    // The sessions view's composer (and a member session's head) stops a
+    // running reply: the reply itself has no Stop, as in T3 Code.
+    const visible = isCancellableMobileRow(entry) && !isSessionsRunningEntry(entry);
     if (!visible) {
       button?.remove();
       return;
@@ -11151,7 +11195,10 @@
       status.textContent = messageStatusLabel(entry);
       const content = document.createElement("div");
       content.className = "message-content";
-      if (isThinkingEntry(entry)) {
+      if (isSessionsRunningEntry(entry)) {
+        // No "Thinking" word: its "Working for …" and its steps say it.
+        renderMessageContentIfChanged(content, sessionsRunningText(entry), entry.author);
+      } else if (isThinkingEntry(entry)) {
         renderThinkingInto(content, entry);
       } else {
         renderMessageContentIfChanged(content, entry.content, entry.author);
@@ -11171,6 +11218,7 @@
       // What the member posted during its turn sits inside the reply, above
       // its final text (shared/interimPosts.ts).
       syncInterimPosts(copy, content, entry);
+      syncSessionsWorking(copy, meta, entry);
       renderAttachmentsInto(attachmentsNodeFor(copy), entry);
       syncAnsweredCards(copy, entry);
       syncPendingCards(copy, entry);
@@ -11643,15 +11691,16 @@
       syncMessageStopButton(meta, entry);
       // A running row drawn again in place (its posts came) keeps "Thinking"
       // as a new row draws it, not the placeholder sentence.
-      if (isThinkingEntry(entry)) {
+      if (isThinkingEntry(entry) && !isSessionsRunningEntry(entry)) {
         delete content.dataset.markdownRaw;
         delete content.dataset.markdownSource;
         renderThinkingInto(content, entry);
       } else {
         delete content.dataset.thinking;
-        renderMessageContentIfChanged(content, entry.content, entry.author);
+        renderMessageContentIfChanged(content, isSessionsRunningEntry(entry) ? sessionsRunningText(entry) : entry.content, entry.author);
       }
       if (content.parentElement) syncInterimPosts(content.parentElement, content, entry);
+      if (content.parentElement) syncSessionsWorking(content.parentElement, meta, entry);
       // Its "Worked for …" (and the tasks its turn gave): a reply that
       // finished on screen gets it as a new row has it.
       if (content.parentElement) syncSessionsWorked(content.parentElement, meta, content, entry);
@@ -12195,6 +12244,9 @@
         base.delegations = {
           key: key, live: live, open: live || openWorkedFolds.has(key),
           workedMs: typeof row.workedMs === "number" ? row.workedMs : undefined,
+          // A finished turn's steps, which its fold opens to with its tasks
+          // (while it runs they are under its "Working for …").
+          ...(!live && Array.isArray(row.activity) && row.activity.length ? { activity: row.activity, activityMore: row.activityMore || 0 } : {}),
           summary: shared.sessionsDelegationSummary(tasks.reduce(function (count, task) {
             return count + (task.metadata.participantRequest ? task.metadata.participantRequest.items.length : 0);
           }, 0)),
@@ -12452,7 +12504,117 @@
   function sessionsWorkedSignature(entry) {
     if (entry.presentation !== "sessions") return "";
     if (entry.delegations && !entry.delegations.standalone) return "delegations:" + JSON.stringify(entry.delegations);
-    return !entry.delegations && entry.status === "Done" && typeof entry.workedMs === "number" ? "worked:" + entry.workedMs : "";
+    if (entry.delegations || entry.status !== "Done") return "";
+    const steps = activitySignature(entry);
+    if (typeof entry.workedMs !== "number" && !steps) return "";
+    return "worked:" + (typeof entry.workedMs === "number" ? entry.workedMs : "") +
+      (steps ? ":" + steps + (openWorkedFolds.has(entry.rowKey || entry.id) ? ":open" : "") : "");
+  }
+
+  // --- a running reply's work (T3 Code's turn in progress) --------------------
+  // The sessions view's running reply (the User, 2026-11-21), as on the
+  // desktop: a quiet "Working for 4s" over a hairline, then one row per step,
+  // an outline icon by its kind and what it is about in muted text, the
+  // newest shimmering. No status label, no "Thinking" word, no Stop on the
+  // reply (the composer's button stops it). Once done, its "Worked for …"
+  // opens to the same rows.
+
+  /** A reply of the sessions view still being written. */
+  function isSessionsRunningEntry(entry) {
+    return Boolean(entry) && entry.presentation === "sessions" && entry.author === "agent" && entry.status === "Running" && !entry.scaffolding;
+  }
+
+  // Outline icons by step (lucide's brain, globe, terminal, file-text, pencil,
+  // wrench and activity), the desktop's own.
+  const SESSIONS_ACTIVITY_ICONS = {
+    thinking: ["M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z", "M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z",
+      "M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4", "M17.599 6.5a3 3 0 0 0 .399-1.375", "M6.003 5.125A3 3 0 0 0 6.401 6.5", "M3.477 10.896a4 4 0 0 1 .585-.396",
+      "M19.938 10.5a4 4 0 0 1 .585.396", "M6 18a4 4 0 0 1-1.967-.516", "M19.967 17.484A4 4 0 0 1 18 18"],
+    web: ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20", "M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20", "M2 12h20"],
+    shell: ["m4 17 6-6-6-6", "M12 19h8"],
+    read: ["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z", "M14 2v4a2 2 0 0 0 2 2h4", "M10 9H8", "M16 13H8", "M16 17H8"],
+    edit: ["M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z", "m15 5 4 4"],
+    tool: ["M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"],
+    status: ["M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"]
+  };
+
+  /** A running reply's own words so far: none while its text is only the
+   *  placeholder or where the run stands (shown as a step instead). */
+  function sessionsRunningText(entry) {
+    return isThinkingEntry(entry) || entry.liveStatus ? "" : entry.content;
+  }
+
+  /** Where a run stands, as its current step, until it has steps of its own
+   *  ("Preparing the workspace" on a machine). */
+  function sessionsRunningStatus(entry) {
+    if (!entry.liveStatus || (Array.isArray(entry.activity) && entry.activity.length) || isThinkingEntry(entry)) return "";
+    const text = String(entry.content || "").replace(/\s+/g, " ").trim();
+    return /^(thinking|running)\b/i.test(text) ? "" : text;
+  }
+
+  /** A reply's steps, one row each; while `live`, the newest is the current one. */
+  function sessionsActivityElement(entry, live) {
+    const list = document.createElement("div");
+    list.className = "sessions-activity";
+    const rows = Array.isArray(entry.activity) ? entry.activity : [];
+    if (entry.activityMore > 0) {
+      const more = document.createElement("div");
+      more.className = "sessions-activity-more";
+      more.textContent = entry.activityMore === 1 ? "1 earlier step" : entry.activityMore + " earlier steps";
+      list.append(more);
+    }
+    rows.forEach(function (row, index) {
+      const line = document.createElement("div");
+      line.className = "sessions-activity-row is-" + row.kind + (live && index === rows.length - 1 ? " is-current" : "");
+      line.dataset.activityKind = row.kind;
+      const icon = lineIcon(SESSIONS_ACTIVITY_ICONS[row.kind] || SESSIONS_ACTIVITY_ICONS.tool, 14);
+      icon.setAttribute("stroke-width", "1.75");
+      icon.classList.add("sessions-activity-icon");
+      const text = document.createElement("span");
+      text.className = "sessions-activity-text";
+      text.textContent = row.text;
+      line.append(icon, text);
+      list.append(line);
+    });
+    return list;
+  }
+
+  /** "Working for 4s" (ticking, startThinkingClock) over a hairline, then
+   *  the reply's steps so far. */
+  function sessionsWorkingElement(entry) {
+    const wrap = document.createElement("div");
+    wrap.className = "sessions-working";
+    const head = document.createElement("div");
+    head.className = "sessions-working-head";
+    head.setAttribute("role", "status");
+    head.append(document.createTextNode("Working for "), sessionsElapsedElement(entry.createdAt || nowIso()));
+    wrap.append(head);
+    const status = sessionsRunningStatus(entry);
+    if (Array.isArray(entry.activity) && entry.activity.length) wrap.append(sessionsActivityElement(entry, true));
+    else if (status) wrap.append(sessionsActivityElement({ activity: [{ kind: "status", text: status }] }, true));
+    return wrap;
+  }
+
+  /** A row updated in place keeps its "Working for …" in step: right under
+   *  its meta while it runs, redrawn when its steps change, gone once done. */
+  function syncSessionsWorking(copy, meta, entry) {
+    const existing = Array.from(copy.children).find(function (child) { return child.classList.contains("sessions-working"); });
+    if (!isSessionsRunningEntry(entry)) {
+      existing?.remove();
+      return;
+    }
+    const signature = (entry.createdAt || "") + "|" + activitySignature(entry) + "|" + sessionsRunningStatus(entry);
+    let node = existing;
+    if (!node || node.dataset.workingSignature !== signature) {
+      node = sessionsWorkingElement(entry);
+      node.dataset.workingSignature = signature;
+      if (existing) existing.replaceWith(node);
+    }
+    if (meta.parentElement === copy) {
+      if (meta.nextSibling !== node) meta.after(node);
+    } else if (copy.firstChild !== node) {
+      copy.prepend(node);
+    }
   }
 
   /** A row updated in place keeps its "Worked for …" and its turn's tasks
@@ -12490,13 +12652,37 @@
   /** "Worked for 44s" above a finished reply of the sessions view that gave
    *  no tasks: muted text, as the fold of one that did. */
   function sessionsWorkedElement(entry) {
-    if (entry.presentation !== "sessions" || entry.delegations || entry.status !== "Done" || typeof entry.workedMs !== "number") return undefined;
+    const steps = Array.isArray(entry.activity) && entry.activity.length > 0;
+    if (entry.presentation !== "sessions" || entry.delegations || entry.status !== "Done" || (typeof entry.workedMs !== "number" && !steps)) return undefined;
+    const label = typeof entry.workedMs === "number" ? "Worked for " + formatWorkedMs(entry.workedMs) : "Worked";
     const wrap = document.createElement("div");
-    wrap.className = "sessions-worked is-plain";
-    const label = document.createElement("span");
-    label.className = "sessions-worked-label";
-    label.textContent = "Worked for " + formatWorkedMs(entry.workedMs);
-    wrap.append(label);
+    if (!steps) {
+      wrap.className = "sessions-worked is-plain";
+      const text = document.createElement("span");
+      text.className = "sessions-worked-label";
+      text.textContent = label;
+      wrap.append(text);
+      return wrap;
+    }
+    // Its steps: the fold opens to the rows its turn showed while it ran.
+    const key = entry.rowKey || entry.id;
+    const open = openWorkedFolds.has(key);
+    wrap.className = "sessions-worked" + (open ? " is-open" : "");
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "sessions-worked-toggle";
+    toggle.dataset.workedFold = key;
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    const text = document.createElement("span");
+    text.textContent = label;
+    toggle.append(text, lineIcon([open ? "m6 9 6 6 6-6" : "m9 18 6-6-6-6"], 14));
+    wrap.append(toggle);
+    if (open) {
+      const body = document.createElement("div");
+      body.className = "sessions-worked-body";
+      body.append(sessionsActivityElement(entry, false));
+      wrap.append(body);
+    }
     return wrap;
   }
 
@@ -12535,6 +12721,8 @@
       summary.append(lineIcon(HAMMER_ICON_PATHS, 14), text);
       const body = document.createElement("div");
       body.className = "sessions-worked-body";
+      // A finished turn's steps first, as they came, then its tasks.
+      if (!delegations.live && Array.isArray(delegations.activity) && delegations.activity.length) body.append(sessionsActivityElement(delegations, false));
       body.append(summary, ...rows);
       wrap.append(body);
     }

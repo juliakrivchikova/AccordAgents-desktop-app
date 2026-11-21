@@ -308,7 +308,7 @@ function renderSessionsRow(message: ChatMessage, sessions: ChatSessionsView, ext
 const hoverWhen = (root: ReactTestInstance): ReactTestInstance[] =>
   root.findAll((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-message-hover-when");
 
-test("a finished message shows no member state, only its time among its hover controls; one still being written keeps its live line", () => {
+test("a finished message shows no member state, only its time among its hover controls; one still being written says how long it works", () => {
   const sessions = sessionsOf(sessionsConversation())!;
   const reply = chatMessage("main-1", "participant", 2, { participantId: MAIN.id, participantLabel: "main", content: "On it." });
   // The main session works on a new turn now: its earlier reply must not say so.
@@ -323,14 +323,16 @@ test("a finished message shows no member state, only its time among its hover co
 
   const streaming = chatMessage("main-2", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-main" } });
   const live = renderSessionsRow(streaming, sessions);
-  assert.equal(textOf(live.find(hasClass("chat-rt-status"))), "Running");
-  assert.equal(live.findAll(hasClass("is-elapsed")).length, 1, "the time it has been running");
+  assert.equal(live.findAll(hasClass("chat-rt-status")).length, 0, "no Running label");
+  assert.match(textOf(live.find((node) => node.props?.["data-testid"] === "chat-sessions-working")), /^Working for \d+(s|m \d+s|h \d+m)$/, "the time it has been working");
   assert.equal(hoverWhen(live).length, 0);
 
   const queued = chatMessage("main-3", "participant", 13, {
     participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-main-2", queuedBehind: { handle: "drew" } }
   } as Partial<ChatMessage>);
-  assert.equal(textOf(renderSessionsRow(queued, sessions).find(hasClass("chat-rt-status"))), "Queued");
+  const queuedRow = renderSessionsRow(queued, sessions);
+  assert.equal(textOf(queuedRow.find(hasClass("chat-rt-status"))), "Queued");
+  assert.equal(queuedRow.findAll((node) => node.props?.["data-testid"] === "chat-sessions-working").length, 0, "not working yet");
 
   // In a member's session the main session's answer keeps its name only.
   const named = renderSessionsRow(reply, sessions, { authorLabel: "Main session" } as Partial<Parameters<typeof ChatMessageItem>[0]>);
