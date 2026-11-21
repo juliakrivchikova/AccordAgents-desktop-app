@@ -13067,7 +13067,7 @@
     // The sessions view keeps no text buttons in its header: its view is
     // picked in the menu under the title (renderChatTitleMenu).
     const sessionsView = Boolean(conversationId) && view === "sessions";
-    renderChatTitleMenu(sessionsView && !onSubscreen, view);
+    renderChatTitleMenu(conversationId ? chat : undefined);
     const shown = Boolean(conversationId) && !onSubscreen && !sessionsView;
     if (group.hidden === shown) group.hidden = !shown;
     if (!shown) {
@@ -13090,9 +13090,28 @@
 
   let chatTitleMenuOpen = false;
 
+  /** What the title's menu holds in the sessions view: on the main timeline
+   *  the chat's view and Fork to new chat for the main session; on a
+   *  member's own screen Fork to new chat for that member, as the computer
+   *  offers it in the member's … menu (a removed member's session reads
+   *  only; an Accord's screen has no menu). */
+  function chatTitleMenuState(chat) {
+    if (!chat || chatViewOf(chat) !== "sessions" || openAccordLaunchId) return { available: false, views: false, forkId: undefined };
+    const open = openMemberSessionId();
+    if (open && open !== chat.mainSessionParticipantId) {
+      const member = chatMembers(chat).find(function (item) { return item.id === open; });
+      return { available: Boolean(member), views: false, forkId: member ? member.id : undefined };
+    }
+    return { available: true, views: true, forkId: sessionsMainSessionIdOf(chat) };
+  }
+
   /** The title's menu in the sessions view: the chat's view, with a check
-   *  by the one it is in. The chevron by the title says it is there. */
-  function renderChatTitleMenu(available, view) {
+   *  by the one it is in, and Fork to new chat. The chevron by the title
+   *  says it is there. */
+  function renderChatTitleMenu(chat) {
+    const state = chatTitleMenuState(chat);
+    const available = state.available;
+    const view = chat ? chatViewOf(chat) : undefined;
     const chevron = document.getElementById("chat-title-chevron");
     const menu = document.getElementById("chat-title-menu");
     const toggle = document.getElementById("chat-members-toggle");
@@ -13105,16 +13124,173 @@
     }
     if (!menu) return;
     menu.hidden = !(available && chatTitleMenuOpen);
+    const label = state.views ? "Chat view" : "Session";
+    if (menu.getAttribute("aria-label") !== label) menu.setAttribute("aria-label", label);
     for (const item of menu.querySelectorAll("[data-title-view]")) {
+      if (item.hidden === state.views) item.hidden = !state.views;
       const checked = item.dataset.titleView === view ? "true" : "false";
       if (item.getAttribute("aria-checked") !== checked) item.setAttribute("aria-checked", checked);
     }
+    renderTitleMenuFork(chat, state.forkId);
   }
 
   function toggleChatTitleMenu(open) {
+    const was = chatTitleMenuOpen;
     chatTitleMenuOpen = open === undefined ? !chatTitleMenuOpen : open;
     const chat = activeChatRecord();
-    renderChatTitleMenu(Boolean(chat) && chatViewOf(chat) === "sessions" && !openMemberSessionId() && !openAccordLaunchId, chatViewOf(chat));
+    // Opened: whether the member can be forked now is read again.
+    const state = chatTitleMenuState(chat);
+    if (chatTitleMenuOpen && !was && state.available && state.forkId) void readForkPlan(chat, state.forkId);
+    renderChatTitleMenu(chat);
+  }
+
+  // --- Fork to new chat ---------------------------------------------------
+  // A member (the main session, or one it made) copied into a new chat as
+  // that chat's main session, as the computer's member menus make it
+  // (src/shared/forkToNewChat.ts): read from the server when the menu opens
+  // (the member and its chat as the server holds them, with what the
+  // computer offers), refused with the computer's words, and made through
+  // the same queue as every new chat from the phone. The device that runs
+  // the new main session copies the member's session at its first turn.
+
+  const FORK_SERVER_OUTDATED = "Your server does not fork chats from the phone yet. It will once AccordAgents on your computer has updated.";
+  const FORK_COMPUTER_OUTDATED = "Your computer does not fork chats from the phone yet. Update AccordAgents on your computer.";
+  // What the menu says for the member it was last opened for:
+  // { key, status: "checking" | "ready", reason?, plan? }.
+  let forkMenu;
+  let forkMenuToken = 0;
+  let forkStarting = false;
+
+  function forkMenuKey(conversationId, participantId) {
+    return conversationId + "\u0000" + participantId;
+  }
+
+  function renderTitleMenuFork(chat, participantId) {
+    const button = document.getElementById("chat-title-fork");
+    const detail = document.getElementById("chat-title-fork-detail");
+    if (!button || !detail) return;
+    const shared = mobileSharedRules();
+    const shown = Boolean(chat && participantId && shared && typeof shared.forkToNewChatUnavailableReason === "function");
+    if (button.hidden === shown) button.hidden = !shown;
+    if (!shown) return;
+    const state = forkMenu && forkMenu.key === forkMenuKey(chat.id, participantId) ? forkMenu : undefined;
+    const checking = !state || state.status === "checking";
+    const ready = !checking && !state.reason && Boolean(state.plan) && !forkStarting;
+    const text = forkStarting ? "Starting the new chat…" : checking ? "Checking…" : state.reason || shared.FORK_TO_NEW_CHAT_DETAIL;
+    const disabled = ready ? "false" : "true";
+    if (button.getAttribute("aria-disabled") !== disabled) button.setAttribute("aria-disabled", disabled);
+    button.dataset.forkParticipant = participantId;
+    if (detail.textContent !== text) detail.textContent = text;
+  }
+
+  /** Reads whether the member can be forked now, and what the new chat is
+   *  made of, from the server: the member and its chat, and what the
+   *  computer last told the server it offers. */
+  async function readForkPlan(chat, participantId) {
+    const key = forkMenuKey(chat.id, participantId);
+    const token = ++forkMenuToken;
+    forkMenu = { key: key, status: "checking" };
+    let answer;
+    let failure;
+    try {
+      answer = await serverPhoneGet("/v1/phone/new-chat", { forkOf: chat.id, participantId: participantId });
+    } catch (error) {
+      failure = error;
+    }
+    if (token !== forkMenuToken) return;
+    forkMenu = { key: key, status: "ready", ...forkPlanFrom(answer, failure) };
+    renderChatTitleMenu(activeChatRecord());
+  }
+
+  /** Why the member cannot be forked now, by the computer's rule and words,
+   *  or what the new chat is made of. */
+  function forkPlanFrom(answer, failure) {
+    const shared = mobileSharedRules();
+    if (failure) {
+      if (failure.serverStatus === 404 && String(failure.serverBody || failure.message || "").indexOf("chat_not_found") >= 0) return { reason: "This chat is not on your server." };
+      if (failure.serverStatus === 404) return { reason: FORK_SERVER_OUTDATED };
+      return { reason: "Could not reach your server: " + unreachableDetail(failure) };
+    }
+    const source = answer && answer.fork;
+    if (!source) return { reason: answer && answer.unavailable && !answer.options ? answer.unavailable : FORK_SERVER_OUTDATED };
+    if (!source.member) return { reason: "That member is no longer in its chat." };
+    const offer = answer.options;
+    if (!offer) return { reason: answer.unavailable || FORK_COMPUTER_OUTDATED };
+    if (!offer.fork || !(offer.mainSession || offer.assistant)) return { reason: FORK_COMPUTER_OUTDATED };
+    // As it runs now: a member the main session made never above it.
+    const running = shared.memberAsItRunsNow(source.member, source.mainSession);
+    const home = shared.chatParticipantHome(running);
+    const reason = shared.forkToNewChatUnavailableReason({
+      participant: running,
+      hasSession: source.answered === true,
+      providerUnavailable: home.kind === "this-machine" ? shared.forkLocalProviderUnavailable(running, offer.fork) : undefined,
+      machineSupport: home.kind === "machine" ? offer.fork.machines[home.machineId] || "unknown" : undefined
+    });
+    return reason ? { reason: reason } : { plan: { source: source, running: running, offer: offer, machines: answer.machines || {} } };
+  }
+
+  /** Makes the new chat on the server as the computer makes it ("<chat>
+   *  (fork)", the member's project, the computer's view for a new chat, one
+   *  main session on the member's provider, model, effort, access and place,
+   *  marked with where it comes from), lists it, and opens it with nothing
+   *  in it: the first message makes the copy. */
+  async function forkMemberToNewChat(plan) {
+    const shared = mobileSharedRules();
+    if (forkStarting || !shared) return;
+    forkStarting = true;
+    renderChatTitleMenu(activeChatRecord());
+    const conversationId = createEventId();
+    let listed = false;
+    try {
+      const createdAt = nowIso();
+      const offer = plan.offer;
+      const mainSession = shared.forkedMainSessionFor({
+        mainSession: offer.mainSession || offer.assistant, basePermissions: offer.fork.basePermissions, member: plan.running,
+        source: { id: plan.source.conversationId, title: plan.source.title }, id: createEventId()
+      });
+      const title = shared.forkedChatTitle(plan.source.title);
+      const repoPath = plan.source.repoPath || undefined;
+      const chatView = offer.defaultChatView === "classic" || offer.defaultChatView === "sessions" ? offer.defaultChatView : "sessions";
+      const sessionsFields = { mainSessionParticipantId: mainSession.id, chatView: chatView };
+      listed = true;
+      saveStartedChats([{
+        id: conversationId, title: title, group: shared.mobileChatGroupLabel(repoPath), snippet: shared.mobileSnippet(""), who: "", updatedAt: createdAt,
+        running: false, startedHere: true, deviceId: (loadPairing() || {}).deviceId, ...sessionsFields, canSwitchView: true,
+        participants: ["@" + mainSession.handle],
+        members: [normalizeMobileMember({ id: mainSession.id, handle: mainSession.handle, mentionHandle: mainSession.handle, displayName: "@" + mainSession.handle,
+          roleLabel: "", roleConfigId: mainSession.roleConfigId, kind: mainSession.kind, homeMachineId: mainSession.homeMachineId,
+          cloudRun: mainSession.cloudRun, participant: mainSession.homeMachineId ? mainSession : undefined,
+          homeMachineName: mainSession.homeMachineId ? plan.machines[mainSession.homeMachineId] : undefined })].filter(Boolean)
+      }].concat(loadStartedChats()));
+      const create = await createOutboxEvent({
+        conversationId: conversationId, kind: "conversation.create", createdAt: createdAt,
+        payload: { conversation: { title: title, kind: "chat", createdAt: createdAt, ...(repoPath ? { repoPath: repoPath } : {}),
+          metadata: { participants: [mainSession], ...sessionsFields } } }
+      });
+      const introId = createEventId();
+      const intro = await createOutboxEvent({
+        eventId: introId, conversationId: conversationId, kind: "message.system", createdAt: createdAt, dependsOn: create.eventId,
+        payload: { message: { id: introId, role: "system", content: shared.newChatIntro([mainSession.handle]),
+          createdAt: createdAt, status: "done", metadata: { threadId: "system" } } }
+      });
+      await putOutboxEntries([create, intro]);
+      listed = false;
+    } catch (error) {
+      if (listed) forgetStartedChat(conversationId);
+      forkStarting = false;
+      if (forkMenu) forkMenu = { ...forkMenu, reason: "Could not start the chat: " + (error && error.message ? error.message : String(error)), plan: undefined };
+      renderChatTitleMenu(activeChatRecord());
+      return;
+    }
+    forkStarting = false;
+    forkMenu = undefined;
+    chatTitleMenuOpen = false;
+    // The new chat, open at once with its composer ready, as on the computer.
+    leaveOpenChat();
+    openAccordLaunchId = undefined;
+    await openConversation(conversationId);
+    document.getElementById("composer-input")?.focus();
+    void sendNow();
   }
 
   function wireChatTitleMenu() {
@@ -13122,7 +13298,17 @@
     if (!menu || menu.dataset.wired === "1") return;
     menu.dataset.wired = "1";
     menu.addEventListener("click", function (event) {
-      const item = event.target instanceof Element ? event.target.closest("[data-title-view]") : null;
+      const target = event.target instanceof Element ? event.target : null;
+      const fork = target ? target.closest("#chat-title-fork") : null;
+      if (fork) {
+        // Disabled, it stays open: its line says why.
+        const chat = activeChatRecord();
+        const state = forkMenu && chat ? forkMenu : undefined;
+        if (fork.getAttribute("aria-disabled") === "true" || !state || state.key !== forkMenuKey(chat.id, fork.dataset.forkParticipant || "") || !state.plan) return;
+        void forkMemberToNewChat(state.plan);
+        return;
+      }
+      const item = target ? target.closest("[data-title-view]") : null;
       const conversationId = selectedConversationId();
       toggleChatTitleMenu(false);
       if (item && conversationId) void setChatViewFromPhone(conversationId, item.dataset.titleView);
@@ -13561,8 +13747,7 @@
     // The title: the members in the classic view; in the sessions view (one
     // way to the members, the icon at the header's end) the view's menu.
     function titleTapped() {
-      const chat = activeChatRecord();
-      if (chat && chatViewOf(chat) === "sessions" && !openMemberSessionId() && !openAccordLaunchId) {
+      if (chatTitleMenuState(activeChatRecord()).available) {
         toggleChatTitleMenu();
         return;
       }

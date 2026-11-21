@@ -7,13 +7,31 @@
 // "fork" tasks do (docs/main-session.md). The member and its chat stay as
 // they were.
 //
-// Shared so the desktop's menus say why it is not offered with the same words
-// the service refuses it with.
+// Shared so the desktop's menus and the phone's say why it is not offered
+// with the same words the service refuses it with, and so the phone makes the
+// new chat's main session as the computer does (bundled for the phone through
+// mobileSharedRules.ts).
 
-import { chatParticipantHome } from "./chatParticipantHome";
+import {
+  clampChatAgentAccess,
+  chatAgentPermissionsEqual,
+  effectiveChatAgentPermissionsForProvider,
+  normalizeChatAgentMode,
+  normalizeChatAgentPermissions
+} from "./agentPermissions";
+import { chatParticipantHome, preservedRemoteExecution } from "./chatParticipantHome";
 import { cliProviderHostForParticipant } from "./cliProviderHosts";
 import { agentReadinessReason, cliProviderMetadata, readinessForParticipant } from "./cliReadiness";
-import type { AgentHealth, ChatParticipant, CliProviderHost, ConversationMetadata, ProviderSettings } from "./types";
+import type {
+  AgentHealth,
+  ChatAgentPermissions,
+  ChatParticipant,
+  ChatParticipantForkOrigin,
+  ChatProviderKind,
+  CliProviderHost,
+  ConversationMetadata,
+  ProviderSettings
+} from "./types";
 
 export const FORK_TO_NEW_CHAT_LABEL = "Fork to new chat";
 
@@ -125,4 +143,140 @@ export function localProviderUnavailableReason(
   if (readiness === "ready") return undefined;
   const label = cliProviderMetadata(participant.kind).label;
   return agentReadinessReason(readiness, label) ?? `${label} is not ready.`;
+}
+
+/**
+ * A member as it runs this turn: one added without a card in a chat with a
+ * main session (delegatedByParticipantId) never above the main session's mode
+ * and rights as they are now (its right to manage members is its own); every
+ * other member as it is. The desktop's turns run it so (ChatService
+ * participantForRun), and a fork copies it so, on the computer and the phone.
+ */
+export function memberAsItRunsNow(participant: ChatParticipant, mainSession: ChatParticipant | undefined): ChatParticipant {
+  if (!participant.delegatedByParticipantId || !mainSession || mainSession.id === participant.id) {
+    return participant;
+  }
+  const mode = normalizeChatAgentMode(mainSession.agentMode);
+  const ceiling = effectiveChatAgentPermissionsForProvider(mainSession.kind, mode, normalizeChatAgentPermissions(mainSession.permissions));
+  const own = normalizeChatAgentPermissions(participant.permissions);
+  const access = clampChatAgentAccess(participant.kind, { agentMode: participant.agentMode, permissions: own }, { agentMode: mode, permissions: ceiling });
+  const { manageRolesParticipants: _manage, ...clamped } = access.permissions;
+  const permissions: ChatAgentPermissions = own.manageRolesParticipants ? { ...clamped, manageRolesParticipants: own.manageRolesParticipants } : clamped;
+  const agentMode = access.agentMode;
+  if (agentMode === normalizeChatAgentMode(participant.agentMode) && chatAgentPermissionsEqual(permissions, own)) {
+    return participant;
+  }
+  return { ...participant, agentMode, permissions };
+}
+
+/**
+ * The new chat's main session's rights: the member's access as it runs now
+ * (what it may read, edit, run and reach, and its CLI's own mode) with the
+ * main session's own say over members (`base`: what its role gives a new
+ * main session). Never more than the member has, besides that say.
+ */
+export function forkedMainSessionPermissions(base: ChatAgentPermissions, memberPermissions: ChatAgentPermissions | undefined): ChatAgentPermissions {
+  const own = normalizeChatAgentPermissions(memberPermissions);
+  const { providerNative: _baseNative, cliApprovals: _baseApprovals, ...rest } = normalizeChatAgentPermissions(base);
+  return {
+    ...rest,
+    repoRead: own.repoRead,
+    workspaceWrite: own.workspaceWrite,
+    webAccess: own.webAccess,
+    shell: { enabled: own.shell.enabled, rules: own.shell.rules.map((rule) => ({ ...rule })) },
+    ...(own.providerNative ? { providerNative: own.providerNative } : {}),
+    ...(own.cliApprovals ? { cliApprovals: true as const } : {})
+  };
+}
+
+/** Where the new chat's main session comes from (ChatParticipant.forkOrigin). */
+export function forkOriginFor(source: { id: string; title: string }, member: Pick<ChatParticipant, "id" | "handle" | "kind">): ChatParticipantForkOrigin {
+  return { conversationId: source.id, participantId: member.id, handle: member.handle, conversationTitle: source.title, kind: member.kind };
+}
+
+/** What the computer tells the phone, with its New chat offer, so the phone
+ *  forks a member as the computer would (HubNewChatOptions.fork). */
+export interface ForkToNewChatOffer {
+  /** Whether the computer could tell which CLIs are ready (it detected
+   *  them); otherwise no member here is refused for its CLI. */
+  judged: boolean;
+  /** Each CLI on the computer a forkable member can run on, with why it
+   *  cannot now (localProviderUnavailableReason); none: it can. */
+  localProviders: Array<{ kind: ChatProviderKind; hostId?: string; unavailable?: string }>;
+  /** Each machine's program, by the last hello it sent the computer. */
+  machines: Record<string, ForkToNewChatMachineSupport>;
+  /** What the main session's role gives a new main session (its say over
+   *  members; what it may read and do is the member's). */
+  basePermissions: ChatAgentPermissions;
+}
+
+/** The computer's CLIs a forked main session can run on, as its New chat
+ *  offer tells the phone: Claude Code and Codex, and each added provider
+ *  that runs through either. */
+export function forkToNewChatLocalProviders(
+  agents: AgentHealth[],
+  providers: Array<Pick<ProviderSettings, "kind" | "enabled">>,
+  hosts: ReadonlyArray<CliProviderHost>
+): Pick<ForkToNewChatOffer, "judged" | "localProviders"> {
+  const kinds: ChatProviderKind[] = ["claude-code", "codex-cli"];
+  const candidates: Array<{ kind: ChatProviderKind; hostId?: string }> = [
+    ...kinds.map((kind) => ({ kind })),
+    ...hosts.filter((host) => (kinds as string[]).includes(host.cli)).map((host) => ({ kind: host.cli as ChatProviderKind, hostId: host.id }))
+  ];
+  return {
+    judged: agents.length > 0,
+    localProviders: candidates.map((candidate) => {
+      const unavailable = localProviderUnavailableReason(candidate, agents, providers, hosts);
+      return { ...candidate, ...(unavailable ? { unavailable } : {}) };
+    })
+  };
+}
+
+/** The phone's reading of localProviderUnavailableReason, from what the
+ *  computer offered: the same words for the same member. */
+export function forkLocalProviderUnavailable(
+  participant: Pick<ChatParticipant, "kind" | "hostId">,
+  offer: Pick<ForkToNewChatOffer, "judged" | "localProviders">
+): string | undefined {
+  if (!offer.judged) return undefined;
+  const entry = offer.localProviders.find((item) => item.kind === participant.kind && (item.hostId ?? "") === (participant.hostId ?? ""));
+  if (entry) return entry.unavailable;
+  return participant.hostId ? "Its provider no longer exists." : undefined;
+}
+
+/**
+ * The new chat's main session as the phone makes it: the main session the
+ * computer prepared for a new chat (`mainSession`: its handle, role and say
+ * over members), on the member's provider, model, effort, access and place,
+ * marked with where it comes from. The computer makes the same one through
+ * its own validation (ChatService.createForkedConversation).
+ */
+export function forkedMainSessionFor(input: {
+  mainSession: ChatParticipant;
+  basePermissions: ChatAgentPermissions;
+  /** The member as it runs now (memberAsItRunsNow). */
+  member: ChatParticipant;
+  source: { id: string; title: string };
+  id: string;
+}): ChatParticipant {
+  const { mainSession, member } = input;
+  const {
+    avatarId: _avatar, model: _model, reasoningEffort: _effort, hostId: _hostId, hostLabel: _hostLabel, hostVendor: _hostVendor,
+    homeMachineId: _home, cloudRun: _cloud, sessionHandoff: _handoff, forkOrigin: _origin, delegatedByParticipantId: _delegated,
+    participantConfigId: _config, ...lead
+  } = mainSession;
+  return {
+    ...lead,
+    id: input.id,
+    kind: member.kind,
+    ...(member.model ? { model: member.model } : {}),
+    ...(member.reasoningEffort ? { reasoningEffort: member.reasoningEffort } : {}),
+    ...(member.hostId ? { hostId: member.hostId, hostLabel: member.hostLabel, hostVendor: member.hostVendor } : {}),
+    agentMode: normalizeChatAgentMode(member.agentMode),
+    permissions: forkedMainSessionPermissions(input.basePermissions, member.permissions),
+    remoteExecution: preservedRemoteExecution(member.remoteExecution),
+    ...(member.homeMachineId ? { homeMachineId: member.homeMachineId } : {}),
+    ...(member.cloudRun ? { cloudRun: member.cloudRun } : {}),
+    forkOrigin: forkOriginFor(input.source, member)
+  };
 }

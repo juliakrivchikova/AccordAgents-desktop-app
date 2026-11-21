@@ -1095,6 +1095,23 @@ export class StorageService {
 
   /** One message of a chat by its id: a single read through the chat's
    *  message-id index, for readers that need nothing around it. */
+  /** Whether a member has a finished reply in a chat: it ran there, so its
+   *  device holds a session to fork (Fork to new chat from the phone). Read
+   *  newest first, stopping at the first; a member that never answered
+   *  reads the chat's messages once (on demand, never per list). */
+  async conversationParticipantAnswered(conversationId: string, participantId: string): Promise<boolean> {
+    await this.init();
+    const rows = await this.queryJson<{ found: number }>(
+      `select 1 as found from conversation_messages
+        where conversation_id = ${sqlString(conversationId)}
+          and json_extract(payload_json, '$.role') = 'participant'
+          and json_extract(payload_json, '$.participantId') = ${sqlString(participantId)}
+          and coalesce(json_extract(payload_json, '$.status'), '') <> 'pending'
+        order by sequence desc limit 1;`
+    );
+    return rows.length > 0;
+  }
+
   async conversationMessageById(conversationId: string, messageId: string): Promise<ChatMessage | undefined> {
     await this.init();
     const rows = await this.queryJson<{ sequence: number; payloadHex: string }>(

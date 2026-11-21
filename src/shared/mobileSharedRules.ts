@@ -78,3 +78,11 @@ export { sessionsMentionPieces } from "./mainSessionView";
 // Which message is an Accord launch card: the User's own launch, and the
 // main session's (accordLaunchByMainSession), by the desktop's rule.
 export { accordLaunchCardForMessage } from "./accordLaunchCard";
+// Fork to new chat from the phone: the same reasons the computer refuses a
+// member with, its rights as it runs now, and the new chat's main session
+// and title as the computer makes them.
+export { chatParticipantHome } from "./chatParticipantHome";
+export {
+  FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL, forkLocalProviderUnavailable, forkToNewChatUnavailableReason, forkedChatTitle, forkedMainSessionFor,
+  memberAsItRunsNow
+} from "./forkToNewChat";

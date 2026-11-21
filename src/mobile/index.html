@@ -12,7 +12,7 @@
          draws a grey letter (the User, 2026-11-01). The Mac app's icon
          (assets/icon.icns), full bleed at 180px: iOS rounds the corners. -->
     <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-    <link rel="stylesheet" href="mobile-app.css?v=2026-11-21-new-chat-access-stop-2" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-11-21-fork-to-new-chat-1" />
   </head>
   <body>
     <div class="mobile-stage">
@@ -110,6 +110,16 @@
             <div id="chat-title-menu" class="chat-title-menu" role="menu" aria-label="Chat view" hidden>
               <button type="button" class="chat-title-menu-item" role="menuitemradio" data-title-view="sessions" aria-checked="false">View: Sessions</button>
               <button type="button" class="chat-title-menu-item" role="menuitemradio" data-title-view="classic" aria-checked="false">View: Classic</button>
+              <!-- Fork to new chat (src/shared/forkToNewChat.ts): the main
+                   session on the main timeline, the member on its own
+                   screen, as the computer's member menus offer it; disabled
+                   with the computer's reason. -->
+              <button id="chat-title-fork" type="button" class="chat-title-menu-item chat-title-menu-fork" role="menuitem" aria-disabled="true" aria-describedby="chat-title-fork-detail" hidden>
+                <span class="chat-title-menu-copy">
+                  <span class="chat-title-menu-label">Fork to new chat</span>
+                  <span id="chat-title-fork-detail" class="chat-title-menu-detail"></span>
+                </span>
+              </button>
             </div>
             <!-- The chat's two views (docs/main-session.md): only a chat with a
                  main session has both; any other shows the switch unavailable. -->
@@ -396,15 +406,15 @@
       </main>
     </div>
     <!-- The database description both the page and the service worker load. -->
-    <script src="mobile-db.js?v=2026-11-21-new-chat-access-stop-2" defer></script>
-    <script src="jsqr.js?v=2026-11-21-new-chat-access-stop-2" defer></script>
+    <script src="mobile-db.js?v=2026-11-21-fork-to-new-chat-1" defer></script>
+    <script src="jsqr.js?v=2026-11-21-fork-to-new-chat-1" defer></script>
     <!-- How the phone talks to the User's server (signed requests carrying
          its operations), and the rules shared with the desktop verbatim
          (avatars, timeline visibility), bundled from src/shared by the mobile
          build. -->
-    <script src="mobile-hub-client.js?v=2026-11-21-new-chat-access-stop-2" defer></script>
-    <script src="mobile-shared.js?v=2026-11-21-new-chat-access-stop-2" defer></script>
-    <script src="mobile-activity.js?v=2026-11-21-new-chat-access-stop-2" defer></script>
-    <script src="mobile-app.js?v=2026-11-21-new-chat-access-stop-2" defer></script>
+    <script src="mobile-hub-client.js?v=2026-11-21-fork-to-new-chat-1" defer></script>
+    <script src="mobile-shared.js?v=2026-11-21-fork-to-new-chat-1" defer></script>
+    <script src="mobile-activity.js?v=2026-11-21-fork-to-new-chat-1" defer></script>
+    <script src="mobile-app.js?v=2026-11-21-fork-to-new-chat-1" defer></script>
   </body>
 </html>

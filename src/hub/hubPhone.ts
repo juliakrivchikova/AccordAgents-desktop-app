@@ -5,7 +5,8 @@ import type { ChatMessage, ChatParticipant, ChatSavedPromptConfig, Conversation,
 import { CHAT_DELIVERY_POLICY_OPTIONS, resolveChatDeliveryTargets } from "../shared/chatDeliveryPolicy";
 import { matchingChatSavedPrompts } from "../shared/chatSavedPrompts";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../shared/deviceEventBlobs";
-import type { HubComposerCatalog, HubDevice, HubPhoneScope } from "../shared/hubProtocol";
+import type { HubComposerCatalog, HubDevice, HubPhoneForkSource, HubPhoneScope } from "../shared/hubProtocol";
+import { mainSessionParticipantId } from "../shared/mainSession";
 import type { HubCard } from "../shared/hubOps";
 import { controlCardFromChoiceMessage, controlCardFromHubCard, type MobileControlCard } from "../shared/mobileControlCards";
 import { buildMobileChatList, buildMobileTimelinePage, mobileChatMembers, mobileListedChats } from "../main/services/mobileChatCatalog";
@@ -210,7 +211,7 @@ export class HubPhoneApi {
       case "/v1/phone/changes": return this.changes(scope, device.deviceId, url.searchParams, response);
       case "/v1/phone/progress": return this.liveProgress(scope, url.searchParams);
       case "/v1/phone/composer": return this.composer(scope, url.searchParams);
-      case "/v1/phone/new-chat": return this.newChat(scope);
+      case "/v1/phone/new-chat": return this.newChat(scope, url.searchParams);
       case "/v1/phone/attachment": return this.attachment(scope, url.searchParams);
       case "/v1/phone/avatar": return this.avatar(scope, url.searchParams);
       case "/v1/phone/notices": return this.notices(scope, device.deviceId, url.searchParams);
@@ -504,19 +505,63 @@ export class HubPhoneApi {
   }
 
   /** What the phone's New chat offers, as the computer published it. A
-   *  phone paired for one chat starts no other. */
-  private async newChat(scope: HubPhoneScope): Promise<Answer> {
+   *  phone paired for one chat starts no other. With `forkOf` and
+   *  `participantId` (Fork to new chat), the member and its chat too. */
+  private async newChat(scope: HubPhoneScope, query: URLSearchParams): Promise<Answer> {
     if (scope.scope !== "device") {
       return { status: 200, body: { ok: true, type: "mobile.new-chat", unavailable: "This phone was paired for one chat, so it does not start new ones." } };
+    }
+    let fork: HubPhoneForkSource | undefined;
+    if (query.has("forkOf")) {
+      const source = await this.forkSource(scope, query);
+      if (!("conversationId" in source)) return source;
+      fork = source;
     }
     const catalog = await this.catalog();
     const options = catalog?.newChat;
     if (!options) {
-      return { status: 200, body: { ok: true, type: "mobile.new-chat", unavailable: "Your computer has not told your server about its projects and members yet. Open AccordAgents on your computer, or update it." } };
+      return { status: 200, body: { ok: true, type: "mobile.new-chat", unavailable: "Your computer has not told your server about its projects and members yet. Open AccordAgents on your computer, or update it.",
+        ...(fork ? { fork } : {}) } };
     }
     // The names the panel shows: each role's, and each machine's a member runs on.
     const machines = await this.options.machineNames().catch(() => new Map<string, string>());
-    return { status: 200, body: { ok: true, type: "mobile.new-chat", options, roles: catalog.roles, machines: Object.fromEntries(machines) } };
+    return { status: 200, body: { ok: true, type: "mobile.new-chat", options, roles: catalog.roles, machines: Object.fromEntries(machines), ...(fork ? { fork } : {}) } };
+  }
+
+  /** The member a phone forks to a new chat, and its chat, as the server
+   *  holds them: the member and the chat's main session (not the rest of
+   *  the chat), and whether the member ever answered there. */
+  private async forkSource(scope: HubPhoneScope, query: URLSearchParams): Promise<HubPhoneForkSource | Answer> {
+    const forkOf = query.get("forkOf") ?? "";
+    if (!forkOf || forkOf.length > 200 || /[\u0000-\u001f\u007f]/.test(forkOf)) return { status: 400, body: { ok: false, error: "forkOf invalid" } };
+    if (!scopeCovers(scope, forkOf)) return { status: 404, body: { ok: false, error: PHONE_ERROR_CHAT_NOT_FOUND } };
+    const participantId = query.get("participantId") ?? "";
+    if (!participantId || participantId.length > 200 || /[\u0000-\u001f\u007f]/.test(participantId)) {
+      return { status: 400, body: { ok: false, error: "participantId invalid" } };
+    }
+    const opened = await this.openedRecent(forkOf, 1);
+    const conversation = opened?.conversation;
+    if (!conversation || conversation.kind !== "chat" || conversation.metadata.archived === true) {
+      return { status: 404, body: { ok: false, error: PHONE_ERROR_CHAT_NOT_FOUND } };
+    }
+    const members = mobileChatMembers(conversation);
+    const mainId = mainSessionParticipantId(conversation.metadata);
+    // A session a move hands over is the device's business, and can be large.
+    const shown = (participant: ChatParticipant | undefined): ChatParticipant | undefined => {
+      if (!participant) return undefined;
+      const { sessionHandoff: _handoff, ...rest } = participant;
+      return rest;
+    };
+    const member = shown(members.find((participant) => participant.id === participantId));
+    const mainSession = mainId && mainId !== participantId ? shown(members.find((participant) => participant.id === mainId)) : undefined;
+    return {
+      conversationId: forkOf,
+      title: conversation.title,
+      ...(conversation.repoPath ? { repoPath: conversation.repoPath } : {}),
+      ...(member ? { member } : {}),
+      ...(mainSession ? { mainSession } : {}),
+      answered: member ? await this.options.store.conversationParticipantAnswered(forkOf, participantId).catch(() => false) : false
+    };
   }
 
   /** What the composer offers after `/`, as the desktop's composer would for

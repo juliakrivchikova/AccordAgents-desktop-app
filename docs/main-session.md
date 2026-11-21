@@ -278,8 +278,26 @@ chat as that chat's main session, with everything it knew
   with the reason, for Antigravity (no fork), a member that never ran (no
   session), one waiting for a machine, one on a machine whose program is
   older (Upgrade runtime) or has never greeted this computer, and one on this
-  computer whose CLI is not ready. The phone has no member menus, so it has
-  no such item.
+  computer whose CLI is not ready.
+- On the phone (sessions view) it is in the title's menu: for the main
+  session on the main timeline (under the chat's view), for a member on its
+  own screen (the title opens that menu there; the side panel stays on its
+  icon). Opening the menu reads `GET /v1/phone/new-chat?forkOf=<chat>&
+  participantId=<member>`: the server adds the member and the chat's main
+  session as it holds them (never a session a move hands over) and whether
+  the member has a finished reply there; the computer's New chat offer
+  carries `fork` (why each of its CLIs cannot run a member now, each
+  machine's program by its last hello, the main session's role's rights).
+  The phone judges with the same `forkToNewChatUnavailableReason` and
+  words, the member as it runs (`memberAsItRunsNow`), and makes the main
+  session with `forkedMainSessionFor` (the computer's own result, checked by
+  a test), then queues `conversation.create` and the intro line like its New
+  chat and opens the chat at once. A server or computer from before says it
+  must update. One narrow difference: the phone cannot see a member's
+  session record, so it takes "has a finished reply in the chat" for "ran"
+  (the computer's rule for a machine's member); a local member whose session
+  was dropped since is offered, and its fork starts clean with the chat's
+  warning.
 - The new chat is made through the same path as every new chat
   (`createConversation` with `forkOf`, saved and so put on the User's server):
   titled "<chat> (fork)" until its first reply names it, in the member's

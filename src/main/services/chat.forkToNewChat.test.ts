@@ -10,7 +10,10 @@ import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT, CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT } from "../../shared/chatParticipantRequests";
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
 import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
-import { forkedChatTitle, forkToNewChatUnavailableReason, memberHasForkableSession } from "../../shared/forkToNewChat";
+import {
+  forkedChatTitle, forkedMainSessionFor, forkedMainSessionPermissions, forkLocalProviderUnavailable, forkToNewChatLocalProviders, forkToNewChatUnavailableReason,
+  localProviderUnavailableReason, memberAsItRunsNow, memberHasForkableSession
+} from "../../shared/forkToNewChat";
 import type {
   AgentHealth,
   AppSettings,
@@ -126,6 +129,7 @@ type RunCall = { participant: ParticipantConfig; prompt: string; options: any };
 function testService(options: {
   conversations: Conversation[];
   agents?: AgentHealth[];
+  machines?: Array<{ id: string; name: string; deviceId?: string }>;
   run?: (participant: ParticipantConfig, prompt: string, options: any) => Promise<any>;
 }) {
   const tempRoot = path.join(tmpdir(), "accordagents-fork-to-new-chat-test");
@@ -182,7 +186,7 @@ function testService(options: {
   const settings = {
     async getPublicSettings() { return publicSettings(); },
     async ensureAssistantProviderDefault() { return publicSettings(); },
-    async listMachines() { return []; },
+    async listMachines() { return options.machines ?? []; },
     async listMachineInstalls() { return []; },
     async ensureGenericChatParticipantSeeds() { return publicSettings(); },
     async recordSuccessfulChatProvider() {},
@@ -472,4 +476,66 @@ test("the member's session record is read without the messages of its chat", asy
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+const READY_AGENTS: AgentHealth[] = [
+  { kind: "claude-code", label: "Claude Code", installed: true },
+  { kind: "codex-cli", label: "Codex CLI", installed: true }
+];
+
+test("the phone makes the same main session the computer makes, from what the computer offers it", async () => {
+  // A member the main session made, with more than the main session may
+  // give: it is copied as it runs (never above the main session).
+  const mainSession: ChatParticipant = { id: "main-src", handle: "main", roleConfigId: MAIN_ROLE.id, kind: "codex-cli", agentMode: "default",
+    permissions: permissions({ workspaceWrite: false, webAccess: true, requestParticipants: "allow", shell: { enabled: true, rules: [{ action: "deny", match: "prefix", pattern: "rm" }] } }) };
+  const delegated: ChatParticipant = { ...REVIEWER, delegatedByParticipantId: mainSession.id, agentMode: "auto" };
+  const source = oldChat([mainSession, delegated], {
+    mainSessionParticipantId: mainSession.id,
+    participantSessions: [sessionRecord(delegated, "src-cli-session")]
+  });
+  const { service } = testService({ conversations: [source], agents: READY_AGENTS });
+  const created = await service.createConversation({ participants: [], forkOf: { conversationId: source.id, participantId: delegated.id } });
+  const [desktopMain] = participantsOf(created.conversation);
+  const granted = normalizeChatAgentPermissions(desktopMain!.permissions);
+  assert.equal(granted.workspaceWrite, false, "never above the main session it was made by");
+  assert.equal(desktopMain!.agentMode, "default", "its mode within the main session's");
+
+  const offer = await service.newChatOptions([]);
+  assert.ok(offer?.fork, "the computer tells the phone what it needs to fork");
+  const phoneMain = forkedMainSessionFor({
+    mainSession: offer!.mainSession!,
+    basePermissions: offer!.fork!.basePermissions,
+    member: memberAsItRunsNow(delegated, mainSession),
+    source: { id: source.id, title: source.title },
+    id: desktopMain!.id
+  });
+  assert.deepEqual(clone(phoneMain), clone(desktopMain), "the same member, rights, place and origin on both");
+});
+
+test("the computer's offer says why each of its CLIs cannot run a forked member, and what each machine's program can do", async () => {
+  const notSignedIn: AgentHealth[] = [
+    { kind: "claude-code", label: "Claude Code", installed: true, detection: "detected", runnable: "ready", authentication: "required" } as AgentHealth,
+    { kind: "codex-cli", label: "Codex CLI", installed: true }
+  ];
+  const { service } = testService({ conversations: [], agents: notSignedIn, machines: [{ id: "m-new", name: "New" }, { id: "m-old", name: "Old" }] });
+  service.setMachineForkToNewChatSupport((machineId) => machineId === "m-new" ? "supported" : "outdated");
+  const offer = await service.newChatOptions([]);
+  assert.deepEqual(offer?.fork?.machines, { "m-new": "supported", "m-old": "outdated" });
+  const providers = [{ kind: "claude-code" as const, enabled: true }, { kind: "codex-cli" as const, enabled: true }];
+  for (const member of [{ kind: "claude-code" as const }, { kind: "codex-cli" as const }, { kind: "claude-code" as const, hostId: "gone" }]) {
+    assert.equal(forkLocalProviderUnavailable(member, offer!.fork!), localProviderUnavailableReason(member, notSignedIn, providers, []),
+      `${member.kind}${member.hostId ? ` (${member.hostId})` : ""}: the computer's words`);
+  }
+  assert.ok(forkLocalProviderUnavailable({ kind: "claude-code" }, offer!.fork!), "a CLI not signed in refuses its member");
+  // Nothing detected yet: nobody is refused for a CLI, as on the computer.
+  const unjudged = forkToNewChatLocalProviders([], providers, []);
+  assert.equal(forkLocalProviderUnavailable({ kind: "claude-code", hostId: "gone" }, unjudged), localProviderUnavailableReason({ kind: "claude-code", hostId: "gone" }, [], providers, []));
+  assert.equal(offer!.fork!.basePermissions.requestParticipants, "allow", "the main session's role's say over members");
+});
+
+test("a forked main session never gets more than the member had, besides the main session's say over members", () => {
+  const base = permissions({ repoRead: true, workspaceWrite: true, webAccess: true, requestParticipants: "allow", cliApprovals: true,
+    providerNative: { "claude-code": { allowedTools: ["Bash(*)"] } }, shell: { enabled: true, rules: [{ action: "allow", match: "prefix", pattern: "rm" }] } });
+  const merged = forkedMainSessionPermissions(base, permissions({ repoRead: false, requestParticipants: "deny" }));
+  assert.deepEqual(merged, permissions({ repoRead: false, requestParticipants: "allow" }));
 });

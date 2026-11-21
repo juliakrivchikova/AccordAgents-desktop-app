@@ -10,6 +10,7 @@
 
 import type { ChatAgentMode, ChatAgentPermissions, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind, ChatSkillMention, ChatViewMode } from "./types";
 import type { NewChatMemberOption, NewChatProviderOffer } from "./newChat";
+import type { ForkToNewChatOffer } from "./forkToNewChat";
 import type { MachineProgressFrame } from "./machineProgress";
 import { stableJson } from "./stableJson";
 
@@ -321,6 +322,28 @@ export interface HubNewChatOptions {
    *  Settings (that one is not ready), the line the computer's New chat
    *  shows. */
   assistantNote?: string;
+  /** Fork to new chat from the phone (src/shared/forkToNewChat.ts): what the
+   *  phone needs to refuse a member with the computer's words and to make
+   *  the new chat's main session as the computer does. A computer from
+   *  before offers none: the phone says the computer must update. */
+  fork?: ForkToNewChatOffer;
+}
+
+/** What GET /v1/phone/new-chat?forkOf=<chat>&participantId=<member> adds to
+ *  the New chat offer: the member and its chat as the server holds them. */
+export interface HubPhoneForkSource {
+  conversationId: string;
+  title: string;
+  repoPath?: string;
+  /** The member (without the session a move hands over): absent when the
+   *  chat no longer has it. */
+  member?: ChatParticipant;
+  /** The chat's main session, whose rights a member it made never goes
+   *  above (memberAsItRunsNow). */
+  mainSession?: ChatParticipant;
+  /** The member has a finished reply in the chat: it ran, so it has a
+   *  session to copy (on its device). */
+  answered: boolean;
 }
 
 /** PUT /v1/member-rules (owner only): the User's rules for what a member may

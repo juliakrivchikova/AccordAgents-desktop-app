@@ -1,5 +1,8 @@
 import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelection } from "../../shared/cloudRunPreparation";
-import { forkedChatTitle, forkToNewChatUnavailableReason, localProviderUnavailableReason, memberHasForkableSession, type ForkToNewChatMachineSupport } from "../../shared/forkToNewChat";
+import {
+  forkedChatTitle, forkedMainSessionPermissions, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatUnavailableReason, localProviderUnavailableReason,
+  memberAsItRunsNow, memberHasForkableSession, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
+} from "../../shared/forkToNewChat";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
 import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
 import { createHash, randomUUID } from "node:crypto";
@@ -239,7 +242,6 @@ import {
   CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
   chatAgentModeWithin,
-  chatAgentPermissionsEqual,
   chatAgentPermissionsWithin,
   chatParticipantRequestPermissionRank,
   clampChatAgentAccess,
@@ -1896,17 +1898,8 @@ export class ChatService {
       // Its access as it is (its CLI's mode and what it may read, edit, run
       // and reach), with the main session's own say over members: it makes
       // and asks them as its role gives.
-      const own = normalizeChatAgentPermissions(running.permissions);
       const base = this.normalizeParticipantPermissionsForRole(role, newChatMemberPermissions(Boolean(repoPath)), true);
-      const permissions: ChatAgentPermissions = {
-        ...base,
-        repoRead: own.repoRead,
-        workspaceWrite: own.workspaceWrite,
-        webAccess: own.webAccess,
-        shell: { enabled: own.shell.enabled, rules: own.shell.rules.map((rule) => ({ ...rule })) },
-        ...(own.providerNative ? { providerNative: own.providerNative } : {}),
-        ...(own.cliApprovals ? { cliApprovals: true as const } : {})
-      };
+      const permissions = forkedMainSessionPermissions(base, running.permissions);
       const [created] = await this.ensureMainSessionParticipant([], running.kind, {
         repoPath,
         requested: {
@@ -1927,16 +1920,7 @@ export class ChatService {
       if (!created) {
         throw new Error("Could not make the new chat's main session.");
       }
-      const mainSession: ChatParticipant = {
-        ...created,
-        forkOrigin: {
-          conversationId: source.id,
-          participantId: member.id,
-          handle: member.handle,
-          conversationTitle: source.title,
-          kind: member.kind
-        }
-      };
+      const mainSession: ChatParticipant = { ...created, forkOrigin: forkOriginFor(source, member) };
       signal?.throwIfAborted();
       const now = new Date().toISOString();
       conversation = {
@@ -2141,6 +2125,7 @@ export class ChatService {
     // main session there too, and so makes a main-session chat.
     const offeredMainSession = { ...mainSession, id: MAIN_SESSION_ROLE_ID };
     const mainSessionProviders = unavailable ? [] : await this.newChatProviderOffers(agents, settings);
+    const fork = this.forkToNewChatOffer(agents, settings, machines);
     return {
       projects,
       ...(defaultProject ? { defaultProject } : {}),
@@ -2150,7 +2135,24 @@ export class ChatService {
       ...(mainSessionProviders.length > 0 ? { mainSessionProviders } : {}),
       members,
       ...(unavailable ? { unavailable } : {}),
-      ...(assistantNote ? { assistantNote } : {})
+      ...(assistantNote ? { assistantNote } : {}),
+      ...(fork ? { fork } : {})
+    };
+  }
+
+  /**
+   * What the phone needs to fork a member to a new chat as this computer
+   * does (src/shared/forkToNewChat.ts): why each CLI here cannot run a
+   * member now, each machine's program by its last hello, and what the main
+   * session's role gives a new main session. Nothing without that role.
+   */
+  private forkToNewChatOffer(agents: AgentHealth[], settings: AppSettings, machines: ReadonlyArray<{ id: string }>): ForkToNewChatOffer | undefined {
+    const role = settings.chatRoleConfigs.find((candidate) => candidate.id === MAIN_SESSION_ROLE_ID);
+    if (!role) return undefined;
+    return {
+      ...forkToNewChatLocalProviders(agents, settings.providers ?? [], settings.cliProviderHosts ?? []),
+      machines: Object.fromEntries(machines.map((machine) => [machine.id, this.machineForkToNewChatSupport?.(machine.id) ?? "unknown"])),
+      basePermissions: this.normalizeParticipantPermissionsForRole(role, newChatMemberPermissions(true), true)
     };
   }
 
@@ -5784,19 +5786,9 @@ export class ChatService {
    *  they are now (its right to manage members is held where it adds one,
    *  requireParticipantManager); every other member as it is. Never saved. */
   private participantForRun(conversation: Conversation, participant: ChatParticipant): ChatParticipant {
-    const ceiling = this.delegatedMemberCeiling(conversation, participant);
-    if (!ceiling) {
-      return participant;
-    }
-    const own = normalizeChatAgentPermissions(participant.permissions);
-    const access = clampChatAgentAccess(participant.kind, { agentMode: participant.agentMode, permissions: own }, { agentMode: ceiling.mode, permissions: ceiling.permissions });
-    const { manageRolesParticipants: _manage, ...clamped } = access.permissions;
-    const permissions: ChatAgentPermissions = own.manageRolesParticipants ? { ...clamped, manageRolesParticipants: own.manageRolesParticipants } : clamped;
-    const agentMode = access.agentMode;
-    if (agentMode === normalizeChatAgentMode(participant.agentMode) && chatAgentPermissionsEqual(permissions, own)) {
-      return participant;
-    }
-    return { ...participant, agentMode, permissions };
+    // The rule is shared (memberAsItRunsNow): the phone forks a member as it
+    // runs here.
+    return memberAsItRunsNow(participant, this.delegatedMemberCeiling(conversation, participant)?.mainSession);
   }
 
   /** In a chat with a main session, a member any member adds without a card
