@@ -366,8 +366,9 @@ chat as that chat's main session, with everything it knew
   that session is not on your computer / the cloud machine @main runs on,
   so it starts a clean session."; when its provider was changed since,
   "@main now runs on Codex, not Claude Code"); when the CLI cannot copy it,
-  the fork's two-strike fallback holds, said the same way. Every notice of
-  a fork (this one, a clean start, the two-strike fallback, the "may
+  the turn starts clean as a delegated fork's does (below: her message
+  still gets its reply), said the same way. Every notice of
+  a fork (this one, a clean start, the "may
   include" line below; a delegated fork's too) is said by `postForkNotice`
   twice over: as a line in the chat (a system message on the "system"
   thread, id `fork-notice-<kind>-<member id>`), which goes to her server
@@ -441,13 +442,18 @@ chat as that chat's main session, with everything it knew
     Claude Code compacted the session after it, Codex could not list the
     turns, the CLI refused the point or does not know the flag), the whole of the
     member's session is copied, as before this rule, and a line in the chat
-    says so as soon as that is decided, before the turn runs (it may last
-    hours, and the app may stop during it): "@main's copy of @x's session
+    says so before the turn's reply (Codex once its copy is made, Claude Code
+    once it has read the transcript; the turn may last hours, and the app may
+    stop during it): "@main's copy of @x's session
     may include what @x did after you tapped Fork: <why>." (`postForkNotice`,
     above: a line in the chat and a warning on the device that ran it).
     Never a clean start: the copy keeps what she saw, the line says what may
     be more. A `/compact` after her last reply that kept it (above) gives
-    no line; a compaction the CLI made itself during a later turn does.
+    no line; a compaction the CLI made itself during a later turn does. A
+    source that is gone gets no copy and no such line, only the clean
+    start's (a Claude Code session whose transcript is on no folder of
+    this device is not said to be copied whole; Codex's "could not list the
+    turns" waits for `thread/fork` to answer).
   - Checked 2026-11-21 on throwaway sessions: Claude Code 2.1.329 forked at
     the first of two turns ("remember APPLE", "remember BANANA") answers
     APPLE only, in one-shot and in stream-json (warm) mode, the source
@@ -493,16 +499,27 @@ chat as that chat's main session, with everything it knew
   2.1.329 and Codex 0.155.1), so the member is told who it is on its first
   turn and reminded on later ones. When the source session is gone (only
   the CLIs' own words: Claude Code "No conversation found", Codex "no
-  rollout found for thread id", `isForkSourceMissingError`): Claude Code's
-  one-shot start falls back to a clean session at once, from a prompt that
-  still carries the member's identity note and its role's instructions;
-  otherwise the next turn tries the fork once more
-  (`forkFrom.failedAttempts`), and when that fails too the member becomes a
-  clean member (fork and its chat-context pointer dropped). Either way the
-  chat says so ("@x could not start from a copy of @main's session, …";
-  `postForkNotice`, above), and the failed reply the main session reads
-  says it too (a forked main session's own failed reply does not: the User
-  asked it, and the notice is hers).
+  rollout found for thread id", `isForkSourceMissingError`), the member
+  starts a clean session in that same turn, from a prompt that still
+  carries its identity note and its role's instructions (Claude Code's
+  one-shot start does it itself), so the message that asked it (the User's,
+  or the main session's task) gets its reply and never fails for the copy.
+  Any other failure of the copy (the CLI exited before it took the message,
+  `thread/fork` failed: `ParticipantRunResult.forkCopyFailed`) is tried once
+  more in that turn, then the turn starts clean. A failure that is not the
+  copy's (a Stop, a project folder gone, a turn that failed after the copy
+  was made, a second message whose process already made the copy) never
+  does. Either way the member is a clean member from then on (fork dropped)
+  and the chat says so, once ("@x could not start from a copy of @main's
+  session, so this turn started a clean session."; `postForkNotice`, above;
+  said before the clean turn runs when the CLI said the source is gone).
+  When the clean start fails too, its chat-context pointer is dropped as
+  well, the id its session was given is not kept when the CLI never took
+  the message, and the failed reply the main session reads says it (a
+  forked main session's own failed reply does not: the User asked it, and
+  the notice is hers). When the clean session cannot start either after an
+  unknown failure, the copy was not the cause: the member stays a fork, its
+  next turn makes the copy, and nothing says it started clean.
 - `ChatParticipantRequestItem.title?`: the main session's short title for
   its task (`app_chat_delegate_task`'s `title`, at most 80 characters).
 - `ChatParticipantRequestBatch.delegation.turnId?`: the main-session turn (its `turnSegmentId`) that gave the task while that
