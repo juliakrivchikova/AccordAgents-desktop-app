@@ -8,7 +8,7 @@
  * only devices on its roster, which the desktop that set it up keeps.
  */
 
-import type { ChatAgentMode, ChatAgentPermissions, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind, ChatSkillMention, ChatViewMode } from "./types";
+import type { ChatAgentMode, ChatAgentPermissions, ChatForkSeenReply, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind, ChatSkillMention, ChatViewMode } from "./types";
 import type { NewChatMemberOption, NewChatProviderOffer } from "./newChat";
 import type { ForkToNewChatOffer } from "./forkToNewChat";
 import type { MachineProgressFrame } from "./machineProgress";
@@ -344,6 +344,10 @@ export interface HubPhoneForkSource {
   /** The member has a finished reply in the chat: it ran, so it has a
    *  session to copy (on its device). */
   answered: boolean;
+  /** The member's last reply that ended a turn of its CLI (forkSeenReplyOf):
+   *  the copy ends with that turn (forkOrigin.seen). Absent when it has
+   *  none, and from a server from before. */
+  seen?: ChatForkSeenReply;
 }
 
 /** PUT /v1/member-rules (owner only): the User's rules for what a member may

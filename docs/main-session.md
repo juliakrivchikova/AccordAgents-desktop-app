@@ -327,10 +327,64 @@ chat as that chat's main session, with everything it knew
   is not on that device, it starts clean and the chat says so; when the CLI
   cannot copy it, the fork's two-strike fallback holds. The member's chat is
   read without its messages (its metadata and newest messages).
+- The copy is what she saw when she tapped Fork. The User, 2026-11-21, on
+  her card "When should a fork copy the member?": "When you tap Fork — Like
+  the CLI: the copy is exactly what you saw at that moment; beta.3 comes out
+  a little later." So the copy ends with the turn of the member's last reply
+  that ended a turn of its CLI, and whatever the member did after the tap is
+  not in it:
+  - Every reply that ends a turn records where its CLI session stood then
+    (`ChatMessageMetadata.sessionCut` `{ sessionId, at }`, written by the
+    device that ran the turn): Claude Code, the uuid of the turn's last
+    assistant message on its stream (not a subagent's); Codex, the turn's
+    id (a goal's last turn).
+  - At the tap the device making the chat records that reply in
+    `forkOrigin.seen` (`{ messageId, sessionCut?, finishedAt? }`,
+    `forkSeenReplyOf`): the member's newest reply that ended a turn
+    (`isMemberTurnEnd`: a finished reply with `workedMs` or `sessionCut`,
+    which only a turn's end sets; never a post, a request or an Accord
+    launch written during a turn, so a turn still running at the tap is
+    left out with what it posted). The computer and her server read it by
+    the same query (`StorageService.conversationLastTurnEnd`); the phone
+    takes her server's (`HubPhoneForkSource.seen`), read when the item
+    opened, and writes the same field through `forkedMainSessionFor`.
+  - At the first turn the device that holds the session names the point
+    (`forkCutFor`): the recorded one when the reply's session is the one
+    copied; for a reply from before `sessionCut`, by time on the clock of
+    the device that ran it (`finishedAt`, its turn's start plus `workedMs`):
+    Claude Code, its last assistant message written by then; Codex, its last
+    finished turn that started before then (Codex's turn ids are UUIDv7),
+    or, for an id that does not say, completed by then to the second.
+  - Claude Code forks with `--resume <member's session> --fork-session
+    --resume-session-at <uuid> --session-id <new>`, after reading the
+    transcript (`claudeForkCut`): nothing of the conversation after the
+    point, no flag (the copy is as it was before this rule); a compaction
+    after it, no point (the CLI does not load a message before a later
+    compaction and refuses it). Codex forks with `thread/fork` `lastTurnId`
+    (inclusive; a later compaction does not stop it), reading the thread's
+    turns newest first (`thread/turns/list`, no items) for a reply from
+    before. Antigravity has no fork.
+  - When no point can be named (no such reply, the session changed after
+    it, it is not in the session on that device, Claude Code compacted the
+    session after it, Codex could not list the turns, the CLI refused the
+    point), the whole session is copied, as before this rule, and once the
+    copy is made the chat says so: "@main's copy of @x's session may include
+    what @x did after you tapped Fork: <why>." Never a clean start: the copy
+    keeps what she saw, the warning says what may be more.
+  - Checked 2026-11-21 on throwaway sessions: Claude Code 2.1.329 forked at
+    the first of two turns ("remember APPLE", "remember BANANA") answers
+    APPLE only, in one-shot and in stream-json (warm) mode, the source
+    untouched; an unknown uuid and a uuid before a later `/compact` are
+    refused ("No message found with message.uuid of: …"). Codex 0.155.1
+    `thread/fork` with `lastTurnId` of the first turn answers APPLE, also
+    after a later compaction; an unknown turn is refused ("turn not found").
 - Claude Code 2.1.329 forks a session from another folder as well as from
   its own (checked 2026-11-21); the new chat keeps the member's project so
   the copy works in the folder it knew.
 - A machine says it can do this in its hello (`forkToNewChatSupported`).
+  The flag is new with this feature (no released runtime carries it), and
+  the program that sends it also cuts the copy, so no machine forks without
+  the cut.
 
 ## Contract (src/shared)
 
@@ -345,6 +399,9 @@ chat as that chat's main session, with everything it knew
   members, no @-parsing for addressees, no fallback.
 - `ChatParticipantSession.forkFrom?: { participantId, sessionId, kind }`: the
   member's first turn forks that session; cleared once it has its own id.
+  Fork to new chat adds `cut` (`{ at? | finishedBy? | unknown? }`, where
+  the copy ends); a delegated fork has none and copies the session as it
+  is.
   `ChatParticipantSession.forkedFromParticipantId` stays: both CLIs keep the
   source's system/developer instructions in a fork (verified on Claude Code
   2.1.329 and Codex 0.155.1), so the member is told who it is on its first

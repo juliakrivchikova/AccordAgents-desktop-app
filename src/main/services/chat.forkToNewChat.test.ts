@@ -11,9 +11,9 @@ import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT, CHAT_PARTICIPANT_REQUEST_PR
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
 import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
 import {
-  forkedChatTitle, forkedMainSessionFor, forkedMainSessionPermissions, forkLocalProviderUnavailable, forkToNewChatLocalProviders, forkToNewChatReasonFromOffer,
-  forkToNewChatReasonInChat, forkToNewChatSupportFromHello, forkToNewChatUnavailableReason, localProviderUnavailableReason, memberAsItRunsNow,
-  memberHasForkableSession
+  forkCutFor, forkedChatTitle, forkedMainSessionFor, forkedMainSessionPermissions, forkLocalProviderUnavailable, forkSeenReplyOf, forkToNewChatLocalProviders,
+  forkToNewChatReasonFromOffer, forkToNewChatReasonInChat, forkToNewChatSupportFromHello, forkToNewChatUnavailableReason, isMemberTurnEnd, lastMemberTurnEnd,
+  localProviderUnavailableReason, memberAsItRunsNow, memberHasForkableSession, memberReplyFinishedAt
 } from "../../shared/forkToNewChat";
 import type {
   AgentHealth,
@@ -32,6 +32,8 @@ import type {
 // session at the new chat's first message.
 
 const NOW = "2026-11-21T12:00:00.000Z";
+/** When the source chat's reply finished, on the clock of the device that ran it. */
+const REPLY_FINISHED = "2026-11-21T12:00:30.000Z";
 
 const MAIN_ROLE: ChatRoleConfig = {
   id: "main-session",
@@ -114,7 +116,10 @@ function oldChat(participants: ChatParticipant[], metadata: Record<string, unkno
     repoPath: "/projects/app",
     messages: [
       { id: "old-user", role: "user", content: "Review the change.", createdAt: NOW, status: "done" },
-      { id: "old-reply", role: "participant", participantId: REVIEWER.id, participantLabel: "@reviewer", content: "Reviewed.", createdAt: NOW, status: "done" }
+      // A reply from before replies recorded where their session stood: it
+      // ended a turn (workedMs) half a minute after it was asked.
+      { id: "old-reply", role: "participant", participantId: REVIEWER.id, participantLabel: "@reviewer", content: "Reviewed.", createdAt: NOW, status: "done",
+        metadata: { workedMs: 30_000 } }
     ],
     findings: [],
     metadata: { participants, participantSessions: [sessionRecord(REVIEWER, "src-cli-session")], ...metadata }
@@ -263,7 +268,8 @@ test("a member of a chat from before becomes the main session of a new sessions-
   assert.equal(granted.cliApprovals, true, "the CLI's own mode, as the member had it");
   assert.deepEqual(granted.shell, { enabled: true, rules: [{ action: "deny", match: "prefix", pattern: "git push" }] });
   assert.equal(granted.requestParticipants, "allow", "it asks members as the main session's role gives, not as the member could");
-  assert.deepEqual(main!.forkOrigin, { conversationId: source.id, participantId: REVIEWER.id, handle: "reviewer", conversationTitle: "Old chat", kind: "claude-code" });
+  assert.deepEqual(main!.forkOrigin, { conversationId: source.id, participantId: REVIEWER.id, handle: "reviewer", conversationTitle: "Old chat", kind: "claude-code",
+    seen: { messageId: "old-reply", finishedAt: REPLY_FINISHED } }, "with the reply she saw last: the copy ends with its turn");
   assert.deepEqual(sessionsOf(chat), [], "nothing runs until the first message");
   assert.deepEqual(chat.messages.map((message) => message.role), ["system"], "it opens empty");
   assert.equal(runs.length, 0);
@@ -284,6 +290,7 @@ test("the new chat's first message forks the member's CLI session; the copy is t
   const first = runs[0]!;
   assert.equal(first.participant.id, mainId);
   assert.equal(first.options.forkFromSessionId, "src-cli-session");
+  assert.deepEqual(first.options.forkCut, { finishedBy: REPLY_FINISHED }, "only up to the reply she saw, by its finish");
   assert.equal(first.options.sessionId || undefined, undefined);
   assert.match(first.prompt, /^You were forked from @reviewer's session in the chat "Old chat": you keep everything it knew, but from now on you are the main session of a new chat, "Old chat \(fork\)"\./);
   assert.match(first.prompt, /You are @main, role: Main session\. The instructions this session started with for @reviewer no longer apply to you/);
@@ -353,10 +360,12 @@ test("a fork the CLI cannot make (its source session gone) uses the two-strike f
   const { id, mainId } = await forkAndSend(service, storage);
   const sessionOf = () => sessionsOf(storage.store.get(id)).find((item) => item.participantId === mainId);
   await waitFor(() => sessionOf()?.forkFrom?.failedAttempts === 1);
-  assert.deepEqual(sessionOf()!.forkFrom, { participantId: codexReviewer.id, sessionId: "src-cli-session", kind: "codex-cli", conversationId: source.id, failedAttempts: 1 });
+  assert.deepEqual(sessionOf()!.forkFrom, { participantId: codexReviewer.id, sessionId: "src-cli-session", kind: "codex-cli", conversationId: source.id,
+    cut: { finishedBy: REPLY_FINISHED }, failedAttempts: 1 }, "the retry ends where the first try was to");
   await service.sendMessage({ conversationId: id, runId: "run-retry", content: "Try again.", targetParticipantIds: [mainId] });
   await waitFor(() => runs.length === 2 && sessionOf()?.forkFrom === undefined);
   assert.equal(runs[1]!.options.forkFromSessionId, "src-cli-session", "the retry forks again");
+  assert.deepEqual(runs[1]!.options.forkCut, { finishedBy: REPLY_FINISHED });
   // The failed turn's own error is a warning too, as for any turn User asked.
   const warning = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so its next turn starts a clean session.";
   await waitFor(() => ((storage.store.get(id)?.metadata.warnings ?? []) as string[]).includes(warning));
@@ -441,7 +450,8 @@ test("the machine that runs the forked main session copies the member's session 
     findings: [],
     metadata: {
       participants: [{ id: "main-id", handle: "main", roleConfigId: MAIN_ROLE.id, kind: "claude-code", homeMachineId: "m-1", agentMode: "default", permissions: permissions(),
-        forkOrigin: { conversationId: source.id, participantId: boxed.id, handle: "reviewer", conversationTitle: "Old chat", kind: "claude-code" } }],
+        forkOrigin: { conversationId: source.id, participantId: boxed.id, handle: "reviewer", conversationTitle: "Old chat", kind: "claude-code",
+          seen: { messageId: "old-reply", sessionCut: { sessionId: "src-cli-session", at: "assistant-uuid-1" } } } }],
       participantSessions: [],
       mainSessionParticipantId: "main-id"
     }
@@ -450,7 +460,8 @@ test("the machine that runs the forked main session copies the member's session 
   (service as any).machineRuntime = true;
   (service as any).hostMachineId = "m-1";
   const state = await (service as any).sessionForParticipant(forked, participantsOf(forked)[0]);
-  assert.deepEqual(state.session.forkFrom, { participantId: boxed.id, sessionId: "src-cli-session", kind: "claude-code", conversationId: source.id });
+  assert.deepEqual(state.session.forkFrom, { participantId: boxed.id, sessionId: "src-cli-session", kind: "claude-code", conversationId: source.id,
+    cut: { at: "assistant-uuid-1" } }, "up to the reply the User saw, at the point the machine recorded");
   assert.equal(state.forkOriginUnavailable, undefined);
 });
 
@@ -516,11 +527,16 @@ test("the phone makes the same main session the computer makes, from what the co
     assert.ok(offer?.fork, `${label}: the computer tells the phone what it needs to fork`);
     const running = memberAsItRunsNow(member, mainSession);
     assert.equal(forkToNewChatReasonFromOffer({ running, answered: true, offer: offer!.fork! }), undefined, `${label}: offered on the phone too`);
+    // Her server reads the reply the User saw by the computer's rule
+    // (StorageService.conversationLastTurnEnd, checked below).
     const phoneMain = forkedMainSessionFor({
       mainSession: offer!.mainSession!, basePermissions: offer!.fork!.basePermissions, member: running,
-      source: { id: source.id, title: source.title }, id: desktopMain!.id
+      source: { id: source.id, title: source.title }, seen: lastMemberTurnEnd(source.messages, member.id), id: desktopMain!.id
     });
     assert.deepEqual(clone(phoneMain), clone(desktopMain), `${label}: the same member, rights, place and origin on both`);
+    if (member.id === REVIEWER.id) {
+      assert.deepEqual(desktopMain!.forkOrigin?.seen, { messageId: "old-reply", finishedAt: REPLY_FINISHED }, `${label}: the same reply she saw, on both`);
+    }
   }
 });
 
@@ -603,4 +619,150 @@ test("a forked main session never gets more than the member had, besides the mai
     providerNative: { "claude-code": { allowedTools: ["Bash(*)"] } }, shell: { enabled: true, rules: [{ action: "allow", match: "prefix", pattern: "rm" }] } });
   const merged = forkedMainSessionPermissions(base, permissions({ repoRead: false, requestParticipants: "deny" }));
   assert.deepEqual(merged, permissions({ repoRead: false, requestParticipants: "allow" }));
+});
+
+/** The source chat after the reply the User saw: she asked again, and the
+ *  member, still running, posted into the chat. */
+function chatWithLaterWork(replyMetadata: Record<string, unknown>): Conversation {
+  const source = oldChat([ASSISTANT, REVIEWER]);
+  const later = "2026-11-21T12:05:00.000Z";
+  source.messages = [
+    source.messages[0]!,
+    { ...source.messages[1]!, metadata: { workedMs: 30_000, ...replyMetadata } },
+    { id: "later-user", role: "user", content: "Now refactor it.", createdAt: later, status: "done" },
+    { id: "later-post", role: "participant", participantId: REVIEWER.id, participantLabel: "@reviewer", content: "Started the refactor.", createdAt: later, status: "done",
+      metadata: { appMessageSource: "app_chat_send_message" } },
+    { id: "later-reply", role: "participant", participantId: REVIEWER.id, participantLabel: "@reviewer", content: "", createdAt: later, status: "pending" }
+  ];
+  return source;
+}
+
+test("the copy ends with the reply the User saw when she tapped Fork: what the member did after, and a turn still running, are not in it", async () => {
+  const cut = { sessionId: "src-cli-session", at: "assistant-uuid-1" };
+  const source = chatWithLaterWork({ sessionCut: cut });
+  const { service, storage, runs } = testService({
+    conversations: [source],
+    run: async (participant, _prompt, runOptions) => {
+      runOptions.onSessionId?.("fork-own-session");
+      return { participant, ok: true, content: "On it.", durationMs: 1, sessionId: "fork-own-session", sessionCut: "fork-assistant-1" };
+    }
+  });
+  const { id, mainId } = await forkAndSend(service, storage);
+  const [main] = participantsOf(storage.store.get(id));
+  assert.deepEqual(main!.forkOrigin?.seen, { messageId: "old-reply", sessionCut: cut, finishedAt: REPLY_FINISHED },
+    "not the post nor the reply still being written");
+  assert.equal(runs[0]!.options.forkFromSessionId, "src-cli-session");
+  assert.deepEqual(runs[0]!.options.forkCut, { at: "assistant-uuid-1" }, "at the point that reply recorded");
+  const reply = storage.store.get(id)!.messages.find((message) => message.participantId === mainId && message.role === "participant")!;
+  assert.deepEqual(reply.metadata?.sessionCut, { sessionId: "fork-own-session", at: "fork-assistant-1" }, "its own reply records where its copy stands");
+  assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], [], "nothing to say: the copy is what she saw");
+});
+
+test("when the point cannot be named the whole session is copied and the chat says so once the copy is made, never a clean start", async () => {
+  const cases: Array<[string, Record<string, unknown>, Record<string, unknown>, string]> = [
+    ["its session changed after the reply", { sessionCut: { sessionId: "older-session", at: "assistant-uuid-1" } }, {}, "its session changed after its last reply"],
+    ["the CLI could not keep the point", { sessionCut: { sessionId: "src-cli-session", at: "assistant-uuid-1" } },
+      { forkCutMissed: "its session was compacted after that reply" }, "its session was compacted after that reply"]
+  ];
+  for (const [label, replyMetadata, answer, reason] of cases) {
+    const { service, storage, runs } = testService({
+      conversations: [chatWithLaterWork(replyMetadata)],
+      run: async (participant, _prompt, runOptions) => {
+        runOptions.onSessionId?.("fork-own-session");
+        return { participant, ok: true, content: "On it.", durationMs: 1, sessionId: "fork-own-session", ...answer };
+      }
+    });
+    const { id } = await forkAndSend(service, storage);
+    assert.equal(runs[0]!.options.forkFromSessionId, "src-cli-session", `${label}: still a copy`);
+    const warning = `@main's copy of @reviewer's session may include what @reviewer did after you tapped Fork: ${reason}.`;
+    await waitFor(() => ((storage.store.get(id)?.metadata.warnings ?? []) as string[]).includes(warning));
+    assert.deepEqual(storage.store.get(id)!.metadata.warnings, [warning], label);
+  }
+  // No cut was asked when there was nothing to name it by.
+  const { service, storage, runs } = testService({ conversations: [chatWithLaterWork({ sessionCut: { sessionId: "older-session", at: "x" } })] });
+  await forkAndSend(service, storage);
+  assert.equal(runs[0]!.options.forkCut, undefined);
+});
+
+test("a fork whose source is gone says only that, not that its copy may hold more", async () => {
+  const codexReviewer: ChatParticipant = { ...REVIEWER, kind: "codex-cli", model: undefined, reasoningEffort: undefined };
+  const source = oldChat([ASSISTANT, codexReviewer], { participantSessions: [sessionRecord(codexReviewer, "src-cli-session")] });
+  const { service, storage } = testService({
+    conversations: [source],
+    run: async (participant) => ({ participant, ok: false, content: "", error: "no rollout found for thread id src-cli-session", durationMs: 1,
+      forkCutMissed: "that reply is not in its session here" })
+  });
+  const { id, mainId } = await forkAndSend(service, storage);
+  await waitFor(() => sessionsOf(storage.store.get(id)).find((item) => item.participantId === mainId)?.forkFrom?.failedAttempts === 1);
+  assert.equal(((storage.store.get(id)?.metadata.warnings ?? []) as string[]).some((warning) => /may include what/.test(warning)), false);
+});
+
+test("a reply that ends a turn records where its CLI session stood; one whose CLI did not say records nothing", async () => {
+  const source = oldChat([ASSISTANT, REVIEWER]);
+  let turn = 0;
+  const { service, storage } = testService({
+    conversations: [source],
+    run: async (participant, _prompt, runOptions) => {
+      turn += 1;
+      runOptions.onSessionId?.("fork-own-session");
+      return { participant, ok: true, content: `Turn ${turn}.`, durationMs: 1, sessionId: "fork-own-session", ...(turn === 1 ? { sessionCut: "turn-1-cut" } : {}) };
+    }
+  });
+  const { id, mainId } = await forkAndSend(service, storage);
+  await service.sendMessage({ conversationId: id, runId: "run-two", content: "Again.", targetParticipantIds: [mainId] });
+  await waitFor(() => (storage.store.get(id)?.messages ?? []).filter((message) => message.participantId === mainId && message.status === "done").length === 2);
+  const replies = storage.store.get(id)!.messages.filter((message) => message.participantId === mainId);
+  assert.deepEqual(replies.map((message) => message.metadata?.sessionCut ?? null), [{ sessionId: "fork-own-session", at: "turn-1-cut" }, null]);
+  assert.ok(replies.every((message) => typeof message.metadata?.workedMs === "number"));
+});
+
+test("the reply the User saw: a finished reply that ended a turn, its point or its finish, and where the copy ends from it", () => {
+  const reply = (patch: Partial<ChatMessage>): ChatMessage => ({ id: "r", role: "participant", participantId: REVIEWER.id, content: "x", createdAt: NOW, status: "done", ...patch });
+  assert.equal(isMemberTurnEnd(reply({ metadata: { workedMs: 5 } }), REVIEWER.id), true);
+  assert.equal(isMemberTurnEnd(reply({ status: "error", metadata: { workedMs: 5 } }), REVIEWER.id), true, "a turn that failed ended too");
+  assert.equal(isMemberTurnEnd(reply({ metadata: { sessionCut: { sessionId: "s", at: "a" } } }), REVIEWER.id), true);
+  assert.equal(isMemberTurnEnd(reply({}), REVIEWER.id), false, "a post, a request or an Accord launch written during a turn");
+  assert.equal(isMemberTurnEnd(reply({ status: "pending", metadata: { workedMs: 5 } }), REVIEWER.id), false);
+  assert.equal(isMemberTurnEnd(reply({ metadata: { workedMs: 5, serverPlaceholder: true } }), REVIEWER.id), false);
+  assert.equal(isMemberTurnEnd(reply({ metadata: { workedMs: 5 } }), ASSISTANT.id), false);
+  // Its finish counts from its own turn's start when it waited behind another.
+  assert.equal(memberReplyFinishedAt(reply({ metadata: { workedMs: 1_000, turnStartedAt: "2026-11-21T12:01:00.000Z" } })), "2026-11-21T12:01:01.000Z");
+  assert.equal(memberReplyFinishedAt(reply({ metadata: { workedMs: 1_000 } })), "2026-11-21T12:00:01.000Z");
+  assert.deepEqual(forkSeenReplyOf(reply({ metadata: { workedMs: 1_000, sessionCut: { sessionId: "s", at: "a", extra: 1 } as never } })),
+    { messageId: "r", sessionCut: { sessionId: "s", at: "a" }, finishedAt: "2026-11-21T12:00:01.000Z" });
+  assert.deepEqual(forkCutFor({ messageId: "r", sessionCut: { sessionId: "s", at: "a" }, finishedAt: REPLY_FINISHED }, "s"), { at: "a" });
+  assert.deepEqual(forkCutFor({ messageId: "r", sessionCut: { sessionId: "old", at: "a" }, finishedAt: REPLY_FINISHED }, "s"), { unknown: "its session changed after its last reply" });
+  assert.deepEqual(forkCutFor({ messageId: "r", finishedAt: REPLY_FINISHED }, "s"), { finishedBy: REPLY_FINISHED });
+  assert.deepEqual(forkCutFor({ messageId: "r" }, "s"), { unknown: "its last reply does not say where it ended in its session" });
+  assert.deepEqual(forkCutFor(undefined, "s"), { unknown: "it had no finished reply when you tapped Fork" });
+});
+
+test("her server and the computer read the reply the User saw by the same rule", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-fork-seen-"));
+  const storage = new StorageService({ dbPath: path.join(directory, "accordagents.sqlite3") });
+  try {
+    const variants: Array<[string, Conversation]> = [
+      ["a recorded point, then a post and a running reply", chatWithLaterWork({ sessionCut: { sessionId: "src-cli-session", at: "assistant-uuid-1" } })],
+      ["an older reply, by its finish", chatWithLaterWork({ turnStartedAt: "2026-11-21T12:00:10.000Z" })],
+      ["a placeholder for a turn elsewhere is not it", (() => {
+        const chat = chatWithLaterWork({});
+        chat.messages.push({ id: "placeholder", role: "participant", participantId: REVIEWER.id, content: "", createdAt: NOW, status: "done", metadata: { workedMs: 1, serverPlaceholder: true } });
+        return chat;
+      })()],
+      ["no reply that ended a turn", (() => {
+        const chat = oldChat([ASSISTANT, REVIEWER]);
+        chat.messages = [chat.messages[0]!, { ...chat.messages[1]!, metadata: undefined }];
+        return chat;
+      })()]
+    ];
+    for (const [label, chat] of variants) {
+      await storage.saveConversation({ ...chat, id: `chat-${label}` });
+      assert.deepEqual(await storage.conversationLastTurnEnd(`chat-${label}`, REVIEWER.id), lastMemberTurnEnd(chat.messages, REVIEWER.id), label);
+    }
+    assert.deepEqual(await storage.conversationLastTurnEnd("chat-an older reply, by its finish", REVIEWER.id), { messageId: "old-reply", finishedAt: "2026-11-21T12:00:40.000Z" });
+    assert.equal(await storage.conversationLastTurnEnd("chat-no reply that ended a turn", REVIEWER.id), undefined);
+    assert.equal(await storage.conversationLastTurnEnd("no-such-chat", REVIEWER.id), undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

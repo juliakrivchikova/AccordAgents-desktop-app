@@ -5,7 +5,12 @@
 // session through the CLI's own fork (Claude Code `--resume <id>
 // --fork-session`, Codex app-server `thread/fork`), as the main session's
 // "fork" tasks do (docs/main-session.md). The member and its chat stay as
-// they were.
+// they were. The copy is what the User saw when she tapped Fork (the User,
+// 2026-11-21: "When you tap Fork — Like the CLI: the copy is exactly what you
+// saw at that moment"): the device that makes the chat records the member's
+// last reply that ended a turn (forkOrigin.seen), and the device that holds
+// the session copies it only up to that turn (Claude Code
+// `--resume-session-at`, Codex `lastTurnId`).
 //
 // Shared so the desktop's menus and the phone's say why it is not offered
 // with the same words the service refuses it with, and so the phone makes the
@@ -25,9 +30,12 @@ import { agentReadinessReason, cliProviderMetadata, readinessForParticipant } fr
 import type {
   AgentHealth,
   ChatAgentPermissions,
+  ChatForkSeenReply,
+  ChatMessageSessionCut,
   ChatParticipant,
   ChatParticipantForkOrigin,
   ChatProviderKind,
+  ChatSessionForkCut,
   CliProviderHost,
   ConversationMetadata,
   ProviderSettings
@@ -128,6 +136,80 @@ export interface ForkMessageView {
 export function isFinishedMemberReply(message: ForkMessageView, participantId: string): boolean {
   return message.role === "participant" && message.participantId === participantId && message.status !== "pending" &&
     (message.metadata as { serverPlaceholder?: unknown } | undefined)?.serverPlaceholder !== true;
+}
+
+/** A reply as the fork's cut reads it. */
+export interface ForkReplyView extends ForkMessageView {
+  id: string;
+  createdAt?: string;
+}
+
+const SESSION_CUT_FIELD_MAX = 200;
+
+/** A recorded cut, when it is one (ChatMessageMetadata.sessionCut). */
+export function sessionCutOf(value: unknown): ChatMessageSessionCut | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const { sessionId, at } = value as { sessionId?: unknown; at?: unknown };
+  const usable = (text: unknown): text is string => typeof text === "string" && text.trim().length > 0 && text.length <= SESSION_CUT_FIELD_MAX;
+  return usable(sessionId) && usable(at) ? { sessionId: sessionId.trim(), at: at.trim() } : undefined;
+}
+
+/** When a reply finished, on the clock of the device that ran its turn:
+ *  workedMs counts from its turn's start (or its creation), as the device
+ *  set both. Undefined for a reply that never ended a turn. */
+export function memberReplyFinishedAt(message: Pick<ForkReplyView, "createdAt" | "metadata">): string | undefined {
+  const metadata = message.metadata as { workedMs?: unknown; turnStartedAt?: unknown } | undefined;
+  const worked = metadata?.workedMs;
+  if (typeof worked !== "number" || !Number.isFinite(worked) || worked < 0) return undefined;
+  const start = Date.parse(typeof metadata?.turnStartedAt === "string" ? metadata.turnStartedAt : message.createdAt ?? "");
+  return Number.isFinite(start) ? new Date(start + worked).toISOString() : undefined;
+}
+
+/**
+ * A finished reply that ended a turn of the member's CLI: its turn recorded
+ * where the session stood (sessionCut) or how long it worked (workedMs, set
+ * only when a turn ends). Never a post, a request or an Accord launch written
+ * during a turn, so a turn still running when the User tapped Fork is left
+ * out with everything it posted. Her server reads its copy of the chat by the
+ * same rule (StorageService.conversationLastTurnEnd).
+ */
+export function isMemberTurnEnd(message: ForkReplyView, participantId: string): boolean {
+  if (!isFinishedMemberReply(message, participantId)) return false;
+  const metadata = message.metadata as { workedMs?: unknown; sessionCut?: unknown } | undefined;
+  return (typeof metadata?.workedMs === "number" && Number.isFinite(metadata.workedMs)) || Boolean(sessionCutOf(metadata?.sessionCut));
+}
+
+/** What the fork keeps of the reply the User saw last: the same fields on
+ *  the computer and the phone (through her server). */
+export function forkSeenReplyOf(message: ForkReplyView): ChatForkSeenReply {
+  const sessionCut = sessionCutOf((message.metadata as { sessionCut?: unknown } | undefined)?.sessionCut);
+  const finishedAt = memberReplyFinishedAt(message);
+  return { messageId: message.id, ...(sessionCut ? { sessionCut } : {}), ...(finishedAt ? { finishedAt } : {}) };
+}
+
+/** The member's newest reply that ended a turn among these messages (oldest
+ *  first), as the fork keeps it. */
+export function lastMemberTurnEnd(messages: ReadonlyArray<ForkReplyView>, participantId: string): ChatForkSeenReply | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (isMemberTurnEnd(message, participantId)) return forkSeenReplyOf(message);
+  }
+  return undefined;
+}
+
+/**
+ * Where the copy of the member's session ends, read on the device that holds
+ * it (`sessionId`: the member's session there): at the CLI's own point its
+ * reply recorded, by the reply's finish for a reply from before that, and
+ * nowhere (the whole session, said in the chat) when neither can be named.
+ */
+export function forkCutFor(seen: ChatForkSeenReply | undefined, sessionId: string): ChatSessionForkCut {
+  if (!seen) return { unknown: "it had no finished reply when you tapped Fork" };
+  if (seen.sessionCut) {
+    return seen.sessionCut.sessionId === sessionId ? { at: seen.sessionCut.at } : { unknown: "its session changed after its last reply" };
+  }
+  if (seen.finishedAt) return { finishedBy: seen.finishedAt };
+  return { unknown: "its last reply does not say where it ended in its session" };
 }
 
 /**
@@ -269,9 +351,18 @@ export function forkedMainSessionPermissions(base: ChatAgentPermissions, memberP
   };
 }
 
-/** Where the new chat's main session comes from (ChatParticipant.forkOrigin). */
-export function forkOriginFor(source: { id: string; title: string }, member: Pick<ChatParticipant, "id" | "handle" | "kind">): ChatParticipantForkOrigin {
-  return { conversationId: source.id, participantId: member.id, handle: member.handle, conversationTitle: source.title, kind: member.kind };
+/** Where the new chat's main session comes from (ChatParticipant.forkOrigin):
+ *  the member, its chat, and the reply the User saw last when she tapped
+ *  Fork (the copy ends with that turn). */
+export function forkOriginFor(
+  source: { id: string; title: string },
+  member: Pick<ChatParticipant, "id" | "handle" | "kind">,
+  seen?: ChatForkSeenReply
+): ChatParticipantForkOrigin {
+  return {
+    conversationId: source.id, participantId: member.id, handle: member.handle, conversationTitle: source.title, kind: member.kind,
+    ...(seen ? { seen } : {})
+  };
 }
 
 /** What the computer tells the phone, with its New chat offer, so the phone
@@ -359,6 +450,9 @@ export function forkedMainSessionFor(input: {
   /** The member as it runs now (memberAsItRunsNow). */
   member: ChatParticipant;
   source: { id: string; title: string };
+  /** The member's last reply that ended a turn, as her server read it when
+   *  the phone offered the fork (HubPhoneForkSource.seen). */
+  seen?: ChatForkSeenReply;
   id: string;
 }): ChatParticipant {
   const { mainSession, member } = input;
@@ -379,6 +473,6 @@ export function forkedMainSessionFor(input: {
     remoteExecution: preservedRemoteExecution(member.remoteExecution),
     ...(member.homeMachineId ? { homeMachineId: member.homeMachineId } : {}),
     ...(member.cloudRun ? { cloudRun: member.cloudRun } : {}),
-    forkOrigin: forkOriginFor(input.source, member)
+    forkOrigin: forkOriginFor(input.source, member, input.seen)
   };
 }

@@ -12,6 +12,12 @@ export interface ParticipantRunResult {
   contextUsage?: AgentContextUsage;
   warnings?: string[];
   appMcpClientFailed?: boolean;
+  /** Where the CLI session stood when this turn ended (Claude Code: its last
+   *  assistant message's uuid; Codex: the turn's id), for Fork to new chat. */
+  sessionCut?: string;
+  /** A fork asked to end at a point (CliAgentRunOptions.forkCut) copied the
+   *  whole session instead: why. */
+  forkCutMissed?: string;
 }
 
 export class ProviderRunner {

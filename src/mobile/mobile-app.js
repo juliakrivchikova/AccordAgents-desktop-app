@@ -13276,9 +13276,11 @@
     try {
       const createdAt = nowIso();
       const offer = plan.offer;
+      // The copy ends with the member's last reply that ended a turn, as her
+      // server read it when the item opened: what the User saw.
       const mainSession = shared.forkedMainSessionFor({
         mainSession: offer.mainSession || offer.assistant, basePermissions: offer.fork.basePermissions, member: plan.running,
-        source: { id: plan.source.conversationId, title: plan.source.title }, id: createEventId()
+        source: { id: plan.source.conversationId, title: plan.source.title }, seen: plan.source.seen || undefined, id: createEventId()
       });
       const title = shared.forkedChatTitle(plan.source.title);
       const repoPath = plan.source.repoPath || undefined;

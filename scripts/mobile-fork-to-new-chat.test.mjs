@@ -55,8 +55,12 @@ function chatMessages() {
           item(SAM.id, "sam", "Read the logs", "running"),
           item(BOX.id, "box", "Build it on the box", "answered", { replyMessageId: "box-reply" })
         ] } } },
+    // drew's reply ended a turn and recorded where its session stood; it
+    // posted again during a later turn, still running.
     { id: "drew-reply", role: "participant", participantId: DREW.id, participantLabel: "@drew", content: "Restyled.", status: "done", createdAt: at(20),
-      metadata: { sourceMessageId: "req" } },
+      metadata: { sourceMessageId: "req", workedMs: 60_000, sessionCut: { sessionId: "s-drew", at: "drew-assistant-1" } } },
+    { id: "drew-post", role: "participant", participantId: DREW.id, participantLabel: "@drew", content: "Now the colors.", status: "done", createdAt: at(10),
+      metadata: { sourceMessageId: "req", appMessageSource: "app_chat_send_message" } },
     { id: "box-reply", role: "participant", participantId: BOX.id, participantLabel: "@box", content: "Built.", status: "done", createdAt: at(19),
       metadata: { sourceMessageId: "req" } }
   ];
@@ -273,7 +277,10 @@ test("the phone forks a member to a new chat from the title's menu as the comput
   assert.deepEqual(forked.permissions, rights({ webAccess: true, requestParticipants: "allow",
     shell: { enabled: false, rules: [{ action: "deny", match: "prefix", pattern: "git push" }] } }),
   "what it may do as it runs (no edits, commands or CLI mode above the main session), with the main session's say over members");
-  assert.deepEqual(forked.forkOrigin, { conversationId: "conv-main", participantId: DREW.id, handle: "drew", conversationTitle: "Login page", kind: "claude-code" });
+  const drewReply = (await hub.storage.getConversation("conv-main"))?.messages.find((message) => message.id === "drew-reply");
+  assert.deepEqual(forked.forkOrigin, { conversationId: "conv-main", participantId: DREW.id, handle: "drew", conversationTitle: "Login page", kind: "claude-code",
+    seen: { messageId: "drew-reply", sessionCut: { sessionId: "s-drew", at: "drew-assistant-1" }, finishedAt: new Date(Date.parse(drewReply.createdAt) + 60_000).toISOString() } },
+  "with the reply she saw last (not the post of the turn still running): the copy ends with its turn");
   const intro = await waitForOp(hub, (op) => op.kind === "message.create" && op.conversationId === create.conversationId && op.message.role === "system");
   assert.equal(intro.message.content, "Chat started.\nMembers:\n- User\n- @main");
   assert.equal((hub.opsRequests.flatMap((request) => request.ops || [])).some((op) => op.conversationId === create.conversationId && op.kind === "message.create" && op.message.role === "user"),
@@ -332,8 +339,10 @@ test("in the classic view the phone forks a member from a small action on its ro
     title: "Old notes", repoPath: "/Users/u/site", participants: [ASSISTANT, GERA, SAGE], createdAt: at(41),
     messages: [
       { id: "u1", role: "user", content: "Sum up the notes", status: "done", createdAt: at(40), metadata: { deliveryTargets: [ASSISTANT.id, SAGE.id] } },
+      // From before replies recorded where their session stood: the copy
+      // ends by its finish.
       { id: "a1", role: "participant", participantId: ASSISTANT.id, participantLabel: "@assistant", content: "Summed up.", status: "done", createdAt: at(39),
-        metadata: { sourceMessageId: "u1" } },
+        metadata: { sourceMessageId: "u1", workedMs: 5_000 } },
       { id: "s1", role: "participant", participantId: SAGE.id, participantLabel: "@sage", content: "Read them.", status: "done", createdAt: at(38),
         metadata: { sourceMessageId: "u1" } }
     ]
@@ -427,7 +436,9 @@ test("in the classic view the phone forks a member from a small action on its ro
     { mainSessionParticipantId: forked.id, chatView: "sessions" });
   assert.deepEqual({ handle: forked.handle, roleConfigId: forked.roleConfigId, kind: forked.kind, model: forked.model, reasoningEffort: forked.reasoningEffort, agentMode: forked.agentMode },
     { handle: "main", roleConfigId: "main-session", kind: "codex-cli", model: "gpt-5.5", reasoningEffort: "medium", agentMode: "default" });
-  assert.deepEqual(forked.forkOrigin, { conversationId: "conv-old", participantId: ASSISTANT.id, handle: "assistant", conversationTitle: "Old notes", kind: "codex-cli" });
+  const summed = (await hub.storage.getConversation("conv-old"))?.messages.find((message) => message.id === "a1");
+  assert.deepEqual(forked.forkOrigin, { conversationId: "conv-old", participantId: ASSISTANT.id, handle: "assistant", conversationTitle: "Old notes", kind: "codex-cli",
+    seen: { messageId: "a1", finishedAt: new Date(Date.parse(summed.createdAt) + 5_000).toISOString() } });
   const intro = await waitForOp(hub, (op) => op.kind === "message.create" && op.conversationId === create.conversationId && op.message.role === "system");
   assert.equal(intro.message.content, "Chat started.\nMembers:\n- User\n- @main");
   // Open at once, the members sheet gone with the chat it was over.

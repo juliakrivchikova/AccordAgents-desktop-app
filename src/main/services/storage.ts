@@ -4,6 +4,7 @@ import path from "node:path";
 import { userDataPath } from "../platform";
 import { SqliteSession } from "./sqliteSession";
 import type {
+  ChatForkSeenReply,
   ChatMessage,
   ChatParticipant,
   ChatRunningMessageTarget,
@@ -30,6 +31,8 @@ import { clearChatRunMetadata, clearParticipantCompactions, readParticipantCompa
 import { normalizeInferredParticipantRequestThreads as normalizeInferredParticipantRequestThreadMetadata } from "../../shared/chatParticipantRequestThreads";
 import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import { sanitizeConversationWarnings } from "../../shared/warnings";
+import { forkSeenReplyOf, isMemberTurnEnd } from "../../shared/forkToNewChat";
+import type { ForkReplyView } from "../../shared/forkToNewChat";
 import { DeviceEventBlobStorage } from "./deviceEventBlobStorage";
 import { HubStorage } from "./hubStorage";
 import { HubOpsStore } from "./hubOpsStore";
@@ -1110,6 +1113,50 @@ export class StorageService {
         order by sequence desc limit 1;`
     );
     return rows.length > 0;
+  }
+
+  /** The member's newest reply that ended a turn of its CLI (the rule of
+   *  isMemberTurnEnd), as Fork to new chat keeps it (forkSeenReplyOf): where
+   *  the copy ends. Read newest first, stopping at the first, and only the
+   *  fields the cut needs (a reply can carry a long transcript). */
+  async conversationLastTurnEnd(conversationId: string, participantId: string): Promise<ChatForkSeenReply | undefined> {
+    await this.init();
+    const rows = await this.queryJson<{ id: string; createdAt?: string; turnStartedAt?: string; workedMs?: number; sessionCut?: string }>(
+      `select message_id as id,
+              json_extract(payload_json, '$.createdAt') as createdAt,
+              json_extract(payload_json, '$.metadata.turnStartedAt') as turnStartedAt,
+              json_extract(payload_json, '$.metadata.workedMs') as workedMs,
+              json_extract(payload_json, '$.metadata.sessionCut') as sessionCut
+         from conversation_messages
+        where conversation_id = ${sqlString(conversationId)}
+          and json_extract(payload_json, '$.role') = 'participant'
+          and json_extract(payload_json, '$.participantId') = ${sqlString(participantId)}
+          and coalesce(json_extract(payload_json, '$.status'), '') <> 'pending'
+          and coalesce(json_extract(payload_json, '$.metadata.serverPlaceholder'), 0) <> 1
+          and (json_type(payload_json, '$.metadata.workedMs') in ('integer', 'real')
+            or json_type(payload_json, '$.metadata.sessionCut') = 'object')
+        order by sequence desc limit 1;`
+    );
+    const row = rows[0];
+    if (!row || typeof row.id !== "string") return undefined;
+    let sessionCut: unknown;
+    try {
+      sessionCut = typeof row.sessionCut === "string" ? JSON.parse(row.sessionCut) : undefined;
+    } catch {
+      sessionCut = undefined;
+    }
+    const view: ForkReplyView = {
+      id: row.id,
+      role: "participant",
+      participantId,
+      ...(typeof row.createdAt === "string" ? { createdAt: row.createdAt } : {}),
+      metadata: {
+        ...(typeof row.turnStartedAt === "string" ? { turnStartedAt: row.turnStartedAt } : {}),
+        ...(typeof row.workedMs === "number" ? { workedMs: row.workedMs } : {}),
+        ...(sessionCut !== undefined ? { sessionCut } : {})
+      }
+    };
+    return isMemberTurnEnd(view, participantId) ? forkSeenReplyOf(view) : undefined;
   }
 
   /** One message of a chat by its id: a single read through the chat's

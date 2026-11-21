@@ -558,6 +558,7 @@ export class HubPhoneApi {
     };
     const member = shown(members.find((participant) => participant.id === participantId));
     const mainSession = mainId && mainId !== participantId ? shown(members.find((participant) => participant.id === mainId)) : undefined;
+    const seen = member ? await this.options.store.conversationLastTurnEnd(forkOf, participantId) : undefined;
     return {
       conversationId: forkOf,
       title: conversation.title,
@@ -565,7 +566,9 @@ export class HubPhoneApi {
       ...(member ? { member } : {}),
       ...(mainSession ? { mainSession } : {}),
       // A read that fails is the server's error, not a member that never ran.
-      answered: member ? await this.options.store.conversationParticipantAnswered(forkOf, participantId) : false
+      answered: member ? await this.options.store.conversationParticipantAnswered(forkOf, participantId) : false,
+      // What the User sees of it now: the copy ends with that turn.
+      ...(seen ? { seen } : {})
     };
   }
 

@@ -3,7 +3,12 @@ import { execFileSync } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants, type Dirent } from "node:fs";
 import { access, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { claudeProjectsDir } from "./memberSessionFiles";
+import { claudeProjectsDir, findClaudeTranscript } from "./memberSessionFiles";
+import {
+  claudeForkCut, codexForkCut, FORK_CUT_NOT_IN_SESSION, FORK_CUT_TRANSCRIPT_UNREADABLE, FORK_CUT_TURNS_UNLISTED, FORK_CUT_UNSUPPORTED, isForkCutMissingError,
+  isForkCutUnsupportedError
+} from "./forkCut";
+import type { CodexTurnSummary, ForkCutDecision, ForkCutRequest } from "./forkCut";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { readCliHelpText } from "./cliHelpText";
@@ -137,6 +142,11 @@ const CLAUDE_WARM_LEGACY_FLUSH_QUIET_MS = 400;
 // step of its own within milliseconds; until it does, the process is not idle.
 const CLAUDE_WARM_SELF_RESUME_EXPECTED_MS = 30_000;
 const CLAUDE_WARM_CANCELLED_MESSAGE = "claude warm process was cancelled";
+// Fork to new chat from a reply from before its turn id was recorded: the
+// source thread's turns are read newest first, a page at a time (the reply
+// is usually among the newest), at most this many.
+const CODEX_FORK_CUT_PAGE_SIZE = 50;
+const CODEX_FORK_CUT_MAX_PAGES = 40;
 const SESSION_LOG_RETRY_MS = 80;
 const SESSION_LOG_RETRIES = 4;
 const MODEL_CATALOG_CACHE_MS = 5 * 60_000;
@@ -348,6 +358,15 @@ export interface CliAgentRunOptions {
    *  developer instructions in the copy (verified on Claude Code 2.1.329 and
    *  Codex 0.155.1), so the caller tells the member who it is in the prompt. */
   forkFromSessionId?: string;
+  /** Fork to new chat: the copy ends with the turn of the reply the User saw
+   *  last (forkCut.ts). Claude Code reads the point from the source's
+   *  transcript and forks with `--resume-session-at`; Codex forks with
+   *  `lastTurnId`. When the point cannot be found the whole session is
+   *  copied and the result says why (forkCutMissed). */
+  forkCut?: ForkCutRequest;
+  /** Claude Code: the assistant message the fork's copy ends at, read from
+   *  forkCut (runClaude); not set by callers. */
+  forkResumeAt?: string;
   compactInstructions?: string;
   clearCompactPrompt?: boolean;
   extraReadableDirs?: string[];
@@ -618,6 +637,9 @@ interface ClaudeWarmReply {
   streamedText: string;
   nextTextBlockStartsBlock: boolean;
   resultEvents: unknown[];
+  /** The uuid of the reply's last assistant message in the session (not a
+   *  subagent's): where its session stood when it ended (sessionCut). */
+  lastAssistantUuid?: string;
   sessionId?: string;
   model?: string;
   usedTokens?: number;
@@ -720,6 +742,7 @@ interface ClaudeOneShotStreamState {
   buffer: string;
   streamedText: string;
   messages: string[];
+  lastAssistantUuid?: string;
   nextTextBlockStartsBlock: boolean;
   resultEvent?: unknown;
   error?: string;
@@ -763,6 +786,9 @@ interface CodexAppServerPendingTurn {
   startedAt: number;
   threadId: string;
   turnId?: string;
+  /** The last of its turns that completed (a goal runs several): where the
+   *  thread stands when the reply ends (sessionCut). */
+  lastCompletedTurnId?: string;
   acceptedByProvider?: boolean;
   messages: string[];
   streamedText: string;
@@ -3472,8 +3498,14 @@ export class CliAgentRunner {
       } catch (error) {
         this.warmAgents.delete(key);
         await this.closeWarmAgent(entry as WarmAgentEntry, signal?.aborted ? "aborted" : "failed");
+        // A fork this turn made whole although it was to end earlier says
+        // so even when the turn itself failed.
+        const forkCutMissed = (error as { forkCutMissed?: unknown } | undefined)?.forkCutMissed;
+        const failed = (): ParticipantRunResult => typeof forkCutMissed === "string"
+          ? { ...this.failed(participant, error), forkCutMissed }
+          : this.failed(participant, error);
         if (signal?.aborted) {
-          return this.failed(participant, error);
+          return failed();
         }
         if (error instanceof CodexAppServerRunError && error.turnAccepted) {
           void this.writeDebugLog("cli-agent-warm-terminal-after-turn-accepted", {
@@ -3483,7 +3515,7 @@ export class CliAgentRunner {
             runtime: "codex-app-server",
             error: this.errorText(error)
           });
-          return this.failed(participant, error);
+          return failed();
         }
         void this.writeDebugLog("cli-agent-warm-failed-without-replay", {
           providerKind: participant.kind,
@@ -3492,7 +3524,7 @@ export class CliAgentRunner {
           runtime: "codex-app-server",
           error: this.errorText(error)
         });
-        return this.failed(participant, error);
+        return failed();
       }
     });
   }
@@ -3552,6 +3584,9 @@ export class CliAgentRunner {
     let threadLoaded = false;
     let initialized = false;
     let activeModel = participant.model;
+    // Fork to new chat: why the fork just made copied the whole thread
+    // instead of ending where it was asked to (the next run reports it).
+    let forkCutMissed: string | undefined;
     const pendingRequests = new Map<number, CodexAppServerPendingRequest>();
     const pendingInboundRequests = new Map<string, CodexAppServerPendingInboundRequest>();
     const pendingGuardianApprovals = new Map<string, CodexAppServerPendingGuardianApproval>();
@@ -3671,6 +3706,56 @@ export class CliAgentRunner {
       initialized = true;
     };
 
+    /** Where a Fork to new chat's copy ends (options.forkCut): the turn its
+     *  reply recorded, or, for a reply from before that, the last turn that
+     *  ended by the reply's finish, read from the thread's turns newest
+     *  first; undefined for all of it (nothing came after, or no point can
+     *  be named: forkCutMissed says why). */
+    const codexForkLastTurnId = async (sourceThreadId: string, timeoutMs?: number): Promise<string | undefined> => {
+      const cut = options.forkCut;
+      if (!cut) return undefined;
+      if (cut.at) return cut.at;
+      if (!cut.finishedBy) return undefined;
+      let decision: ForkCutDecision | undefined;
+      try {
+        const turns: CodexTurnSummary[] = [];
+        let cursor: string | undefined;
+        for (let page = 0; page < CODEX_FORK_CUT_MAX_PAGES && !decision; page += 1) {
+          const listed = this.asRecord(await sendRequest("thread/turns/list", {
+            threadId: sourceThreadId,
+            sortDirection: "desc",
+            limit: CODEX_FORK_CUT_PAGE_SIZE,
+            itemsView: "notLoaded",
+            ...(cursor ? { cursor } : {})
+          }, timeoutMs)) ?? {};
+          for (const item of Array.isArray(listed.data) ? listed.data : []) {
+            const turn = this.asRecord(item);
+            const id = turn ? this.stringField(turn, "id") : undefined;
+            if (!turn || !id) continue;
+            turns.push({
+              id,
+              status: this.stringField(turn, "status"),
+              startedAt: typeof turn.startedAt === "number" ? turn.startedAt : null,
+              completedAt: typeof turn.completedAt === "number" ? turn.completedAt : null
+            });
+          }
+          cursor = typeof listed.nextCursor === "string" && listed.nextCursor ? listed.nextCursor : undefined;
+          decision = codexForkCut(turns, cut.finishedBy, !cursor);
+          if (!cursor) break;
+        }
+      } catch (error) {
+        void this.writeDebugLog("cli-agent-codex-fork-cut-unlisted", { participantId: participant.id, error: this.errorText(error) });
+      }
+      const resolved: ForkCutDecision = decision ?? { kind: "missed", reason: FORK_CUT_TURNS_UNLISTED };
+      void this.writeDebugLog("cli-agent-codex-fork-cut", {
+        participantId: participant.id,
+        decision: resolved.kind,
+        ...(resolved.kind === "missed" ? { reason: resolved.reason } : {})
+      });
+      if (resolved.kind === "missed") forkCutMissed = resolved.reason;
+      return resolved.kind === "cut" ? resolved.at : undefined;
+    };
+
     const ensureThread = async (timeoutMs?: number): Promise<string> => {
       await initialize(timeoutMs);
       if (threadId && threadLoaded) {
@@ -3681,7 +3766,23 @@ export class CliAgentRunner {
         // starts as a copy (Codex 0.155.1 forks a thread another process is
         // still running a turn on). Never the source's id: the member must
         // not write to the session it was copied from.
-        const result = await sendRequest("thread/fork", this.codexAppServerThreadForkParams(options.forkFromSessionId, participant, repoPath, kind, options), timeoutMs) as CodexAppServerThreadStartResult;
+        const sourceThreadId = options.forkFromSessionId;
+        forkCutMissed = undefined;
+        const forkParams = this.codexAppServerThreadForkParams(sourceThreadId, participant, repoPath, kind, options);
+        // Fork to new chat: only through the turn of the reply the User saw
+        // last (Codex 0.155.1 `lastTurnId`, inclusive).
+        const lastTurnId = await codexForkLastTurnId(sourceThreadId, timeoutMs);
+        let result: CodexAppServerThreadStartResult;
+        try {
+          result = await sendRequest("thread/fork", lastTurnId ? { ...forkParams, lastTurnId } : forkParams, timeoutMs) as CodexAppServerThreadStartResult;
+        } catch (error) {
+          if (!lastTurnId || !isForkCutMissingError(this.errorText(error))) throw error;
+          // Codex does not know that turn: the whole thread, and the chat
+          // says so.
+          void this.writeDebugLog("cli-agent-codex-fork-cut-refused", { participantId: participant.id });
+          forkCutMissed = FORK_CUT_NOT_IN_SESSION;
+          result = await sendRequest("thread/fork", forkParams, timeoutMs) as CodexAppServerThreadStartResult;
+        }
         const forkedThreadId = result.thread?.id ?? result.thread?.sessionId;
         if (!forkedThreadId || forkedThreadId === options.forkFromSessionId) {
           throw new Error("codex app-server did not return a thread id for the fork");
@@ -4436,6 +4537,9 @@ export class CliAgentRunner {
         const timeoutMs = nativeGoal ? 0 : (timeoutMsOverride ?? this.runTimeoutMs);
         const currentThreadId = await ensureThread(timeoutMs);
         this.reportSessionId(onSessionId, currentThreadId);
+        // A fork this turn made that copied the whole thread says why.
+        const cutMissed = forkCutMissed;
+        forkCutMissed = undefined;
         const startedAt = Date.now();
         let aborting = false;
         const abort = (): void => {
@@ -4485,12 +4589,22 @@ export class CliAgentRunner {
             reject
           };
         });
+        // Said with the reply, and with a turn that failed or was stopped
+        // (the copy is made either way).
+        const reported = cutMissed
+          ? resultPromise.then(
+            (result) => ({ ...result, forkCutMissed: cutMissed }),
+            (error: unknown) => {
+              throw Object.assign(error instanceof Error ? error : new Error(String(error)), { forkCutMissed: cutMissed });
+            }
+          )
+          : resultPromise;
         if (pendingTurn && timeoutMs > 0) {
           armPendingTurnTimer(pendingTurn, timeoutMs);
         }
         if (signal?.aborted) {
           abort();
-          return resultPromise;
+          return reported;
         }
         signal?.addEventListener("abort", abort, { once: true });
         const codexTurnPrompt = this.codexPrompt(turnPrompt, repoPath, diffMode, kind, options);
@@ -4523,7 +4637,7 @@ export class CliAgentRunner {
         } catch (error) {
           rejectPendingTurn(error instanceof Error ? error : new Error(String(error)));
         }
-        return resultPromise;
+        return reported;
       }
     };
   }
@@ -5045,6 +5159,8 @@ export class CliAgentRunner {
     }
     const status = this.stringField(turn ?? {}, "status");
     this.flushCodexAppServerAgentText(pending);
+    // Where the thread stands when the reply ends (a goal's last turn).
+    if (completedTurnId) pending.lastCompletedTurnId = completedTurnId;
     if (status !== "completed") {
       rejectPendingGuardianApprovals(new Error(`Codex Guardian approval expired because the provider turn ${status ?? "failed"}.`));
       const current = cleanupPending();
@@ -5074,7 +5190,8 @@ export class CliAgentRunner {
       durationMs: Date.now() - current.startedAt,
       sessionId: current.threadId,
       roleRuntime: undefined,
-      contextUsage: current.contextUsage
+      contextUsage: current.contextUsage,
+      ...(current.lastCompletedTurnId ? { sessionCut: current.lastCompletedTurnId } : {})
     });
   }
 
@@ -5117,7 +5234,8 @@ export class CliAgentRunner {
         durationMs: Date.now() - current.startedAt,
         sessionId: current.threadId,
         roleRuntime: undefined,
-        contextUsage: current.contextUsage
+        contextUsage: current.contextUsage,
+        ...(current.lastCompletedTurnId ? { sessionCut: current.lastCompletedTurnId } : {})
       });
       return;
     }
@@ -5643,6 +5761,54 @@ export class CliAgentRunner {
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
+    const { forkCut, ...rest } = options;
+    if (!forkCut || !options.forkFromSessionId || options.sessionId) {
+      return this.runClaudeTurn(participant, prompt, repoPath, kind, signal, rest);
+    }
+    // Fork to new chat: the copy ends with the reply the User saw last.
+    const cut = await this.claudeForkCutFor(options.forkFromSessionId, forkCut);
+    void this.writeDebugLog("cli-agent-claude-fork-cut", {
+      participantId: participant.id,
+      decision: cut.kind,
+      ...(cut.kind === "missed" ? { reason: cut.reason } : {})
+    });
+    if (cut.kind !== "cut") {
+      const result = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, rest);
+      return cut.kind === "missed" ? { ...result, forkCutMissed: cut.reason } : result;
+    }
+    const result = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, { ...rest, forkResumeAt: cut.at });
+    const unsupported = isForkCutUnsupportedError(result.error);
+    if (result.ok || signal?.aborted || (!unsupported && !isForkCutMissingError(result.error))) {
+      return result;
+    }
+    // The CLI did not load that message (one its transcript holds on a branch
+    // it does not follow), or no longer knows the flag: the whole session,
+    // and the chat says so.
+    void this.writeDebugLog("cli-agent-claude-fork-cut-refused", { participantId: participant.id, unsupported });
+    const whole = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, rest);
+    return { ...whole, forkCutMissed: unsupported ? FORK_CUT_UNSUPPORTED : FORK_CUT_NOT_IN_SESSION };
+  }
+
+  /** Where a Claude Code fork of `sessionId` ends, read from its transcript
+   *  on this device (forkCut.ts). */
+  private async claudeForkCutFor(sessionId: string, request: ForkCutRequest): Promise<ForkCutDecision> {
+    try {
+      const file = await findClaudeTranscript(await this.claudeProjectsDirectory(), sessionId);
+      if (!file) return { kind: "missed", reason: FORK_CUT_TRANSCRIPT_UNREADABLE };
+      return claudeForkCut(await readFile(file, "utf8"), request);
+    } catch {
+      return { kind: "missed", reason: FORK_CUT_TRANSCRIPT_UNREADABLE };
+    }
+  }
+
+  private async runClaudeTurn(
+    participant: ParticipantConfig,
+    prompt: string,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    signal?: AbortSignal,
+    options: CliAgentRunOptions = {}
+  ): Promise<ParticipantRunResult> {
     if (options.nativeGoal) {
       // The goal runs in its own process on the same session; the member's
       // warm process must not be writing to that session at the same time.
@@ -5902,6 +6068,7 @@ export class CliAgentRunner {
         content,
         durationMs: Date.now() - startedAt,
         sessionId,
+        ...(streamState?.lastAssistantUuid ? { sessionCut: streamState.lastAssistantUuid } : {}),
         roleRuntime: options.role && !options.sessionId && !options.forkFromSessionId ? "claude-agent" : undefined,
         contextUsage:
           (streamState
@@ -6691,6 +6858,11 @@ export class CliAgentRunner {
       // 2.1.329 reports it on every event); the source session is not
       // written to.
       args.push("--resume", options.forkFromSessionId, "--fork-session");
+      // Fork to new chat: only up to the reply the User saw last (Claude
+      // Code 2.1.329 keeps the session through this assistant message).
+      if (options.forkResumeAt) {
+        args.push("--resume-session-at", options.forkResumeAt);
+      }
       if (newSessionId) {
         args.push("--session-id", newSessionId);
       }
@@ -6852,6 +7024,17 @@ export class CliAgentRunner {
     if (assistantText) {
       reply.messages.push(assistantText);
     }
+    reply.lastAssistantUuid = this.claudeAssistantMessageUuid(event) ?? reply.lastAssistantUuid;
+  }
+
+  /** The session's uuid of a top-level assistant message on the stream (the
+   *  one Claude Code writes to the transcript and `--resume-session-at`
+   *  takes); none for a subagent's. */
+  private claudeAssistantMessageUuid(event: unknown): string | undefined {
+    const record = this.asRecord(event);
+    if (!record || this.stringField(record, "type") !== "assistant") return undefined;
+    if (record.parent_tool_use_id !== undefined && record.parent_tool_use_id !== null) return undefined;
+    return this.stringField(record, "uuid");
   }
 
   private claudeWarmReplyOutput(reply: ClaudeWarmReply): CliAgentOutputCallback | undefined {
@@ -7299,7 +7482,8 @@ export class CliAgentRunner {
       durationMs: Date.now() - reply.startedAt,
       sessionId,
       roleRuntime: reply.roleRuntime,
-      contextUsage
+      contextUsage,
+      ...(reply.lastAssistantUuid ? { sessionCut: reply.lastAssistantUuid } : {})
     };
     for (const raw of reply.resultEvents) {
       result = this.withClaudePermissionDenialWarning(result, raw, participant, "warm");
@@ -7373,6 +7557,7 @@ export class CliAgentRunner {
     if (assistantText) {
       state.messages.push(assistantText);
     }
+    state.lastAssistantUuid = this.claudeAssistantMessageUuid(event) ?? state.lastAssistantUuid;
     if (this.isClaudeWarmResult(event)) {
       state.resultEvent = event;
     }

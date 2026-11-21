@@ -1009,6 +1009,46 @@ export interface ChatParticipantForkOrigin {
   handle: string;
   conversationTitle: string;
   kind: ChatProviderKind;
+  /** What the User saw when she tapped Fork: the member's last reply that
+   *  ended a turn of its CLI (lastMemberTurnEnd). The copy ends with that
+   *  turn (the User, 2026-11-21: "When you tap Fork"). Absent when it had
+   *  none. */
+  seen?: ChatForkSeenReply;
+}
+
+/** A member's reply that ended a turn, as Fork to new chat cuts the copy at
+ *  it (forkSeenReplyOf): the same fields on the computer and the phone. */
+export interface ChatForkSeenReply {
+  messageId: string;
+  /** Where its CLI session stood when that turn ended, as the device that
+   *  ran it recorded (ChatMessageMetadata.sessionCut). */
+  sessionCut?: ChatMessageSessionCut;
+  /** When the reply finished, on the clock of the device that ran its turn
+   *  (its turn's start plus workedMs): a reply from before sessionCut is
+   *  matched to its session by time. */
+  finishedAt?: string;
+}
+
+/** Where a member's CLI session stood when one of its turns ended. */
+export interface ChatMessageSessionCut {
+  sessionId: string;
+  /** Claude Code: the uuid of the turn's last assistant message (what
+   *  `--resume-session-at` takes); Codex: the turn's id (thread/fork
+   *  `lastTurnId`). */
+  at: string;
+}
+
+/** Where a fork's copy ends (a forked main session's first turn), as the
+ *  device that holds the source session reads it (forkCutFor). */
+export interface ChatSessionForkCut {
+  /** The CLI's own point: the copy ends there. */
+  at?: string;
+  /** The reply's finish on the clock of the device that ran it: the copy ends
+   *  with the last turn that finished by then. */
+  finishedBy?: string;
+  /** Why no point can be named: the whole session is copied and the chat
+   *  says so. */
+  unknown?: string;
 }
 
 export interface ChatSessionForkSource {
@@ -1021,6 +1061,10 @@ export interface ChatSessionForkSource {
   /** Turns whose fork failed because the source session could not be read.
    *  After the retry fails too, the member starts a clean session instead. */
   failedAttempts?: number;
+  /** Fork to new chat: where the copy ends (what the User saw when she
+   *  tapped Fork). A delegated fork has none: it copies the session as it
+   *  is. */
+  cut?: ChatSessionForkCut;
 }
 
 export interface ChatParticipantSession {
@@ -1782,6 +1826,11 @@ export interface ChatMessageMetadata {
    *  made: the machine lets the member's held turns go. */
   memberMoveCancelled?: { participantId: string; runId: string };
   workedMs?: number;
+  /** A member's reply that ended a turn: where its CLI session stood then,
+   *  so Fork to new chat copies the session up to it. Written by the device
+   *  that ran the turn, when its CLI said (Claude Code's stream, Codex's
+   *  turn). */
+  sessionCut?: ChatMessageSessionCut;
   queuedBehind?: { handle: string };
   /** The reply waits behind its member's turn before it: the shared word
    *  of `queuedBehind` (which stays on the device), so the phone shows it
