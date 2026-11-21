@@ -158,6 +158,16 @@
   overflow-wrap: anywhere;
 }
 
+/* A disabled item's muted line says why: it stays readable, only the label
+   dims. */
+.chat-model-access-menu .chat-model-access-row:disabled {
+  opacity: 1;
+}
+
+.chat-model-access-menu .chat-model-access-row:disabled .chat-model-access-row-label {
+  color: var(--app-muted);
+}
+
 .chat-model-access .chat-run-location,
 .chat-model-access-section > :not(.chat-model-access-label):not(.chat-model-access-row):not(.chat-model-access-efforts):not(.chat-model-access-note) {
   padding: 0 8px;

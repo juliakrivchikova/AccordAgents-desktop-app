@@ -1,7 +1,7 @@
 import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelection } from "../../shared/cloudRunPreparation";
 import {
-  forkCutFor, forkedChatTitle, forkedMainSessionPermissions, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatReasonInChat, lastMemberTurnEnd,
-  memberAsItRunsNow, memberHasFinishedReply, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
+  forkCutFor, forkedChatTitle, forkedMainSessionPermissions, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatReasonInChat, isForkableSessionKind,
+  lastMemberTurnEnd, memberAsItRunsNow, memberHasFinishedReply, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
 } from "../../shared/forkToNewChat";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
 import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
@@ -1989,14 +1989,10 @@ export class ChatService {
    * once instead of waiting for every CLI's check.
    */
   private async forkReadiness(running: ChatParticipant): Promise<AgentHealth[]> {
-    if (chatParticipantHome(running).kind !== "this-machine" || (running.kind !== "claude-code" && running.kind !== "codex-cli")) {
+    if (chatParticipantHome(running).kind !== "this-machine" || !isForkableSessionKind(running.kind)) {
       return [];
     }
-    try {
-      return await this.cliRunner.detectAgentKinds([running.kind], { trigger: "submit" });
-    } catch {
-      throw new Error("Could not verify CLI readiness. Check again and retry.");
-    }
+    return this.detectAgentsForReadiness("submit", [running.kind]);
   }
 
   /** Why this member (as it runs now) cannot be forked to a new chat, in the
@@ -15203,11 +15199,15 @@ export class ChatService {
     return `@${participant.handle} cannot start on this computer: ${reason} Fix it in Settings → Local CLI setup, or start the chat on another provider.`;
   }
 
+  /** Every CLI's readiness, or with `kinds` only those CLIs checked (each
+   *  one's fresh result reused; the rest as last read). */
   private async detectAgentsForReadiness(
-    trigger?: "submit"
+    trigger?: "submit",
+    kinds?: readonly ChatProviderKind[]
   ): Promise<AgentHealth[]> {
     try {
-      return await this.cliRunner.detectAgents(trigger ? { trigger } : undefined);
+      const request = trigger ? { trigger } : undefined;
+      return kinds ? await this.cliRunner.detectAgentKinds(kinds, request) : await this.cliRunner.detectAgents(request);
     } catch {
       throw new Error("Could not verify CLI readiness. Check again and retry.");
     }

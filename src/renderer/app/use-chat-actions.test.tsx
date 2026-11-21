@@ -9,7 +9,7 @@ import type { AgentHealth, AppSettings, ChatParticipantInput } from "../../share
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 import type { AppState } from "./app-state";
 import { newChatProviderChangedRefusal, useChatActions, type ChatActions } from "./use-chat-actions";
-import { FORK_NOTICE_DELAY_MS } from "./later-loading-notice";
+import { LOADING_NOTICE_DELAY_MS as FORK_NOTICE_DELAY_MS } from "./later-loading-notice";
 import { takeComposerFocusRequest } from "./composer-focus-request";
 import type { ConversationActions } from "./use-conversation-actions";
 
@@ -503,9 +503,11 @@ test("Fork to new chat says it is on its way when making the chat takes a moment
   (globalThis as any).window = { consensus: { createChatConversation: () => makeChat() } };
   let error: string | undefined;
   const opened: string[] = [];
+  let openWhileForking: () => void = () => undefined;
   const state = {
     conversation: { id: "source", kind: "chat", metadata: { participants: [] }, messages: [] },
     startingChatRef: { current: false },
+    openConversationRequestRef: { current: 0 },
     setError: (value: string | undefined) => { error = value; },
     setSummaries: () => undefined,
     setRailView: () => undefined
@@ -513,7 +515,7 @@ test("Fork to new chat says it is on its way when making the chat takes a moment
   let actions: ChatActions | undefined;
   function Harness(): null {
     actions = useChatActions(state, {
-      openConversation: async (id: string) => { opened.push(id); },
+      openConversation: async (id: string) => { state.openConversationRequestRef.current += 1; opened.push(id); openWhileForking(); },
       refreshConversations: async () => undefined
     } as unknown as ConversationActions);
     return null;
@@ -548,6 +550,12 @@ test("Fork to new chat says it is on its way when making the chat takes a moment
   assert.equal(shown(), 0, "gone when it was refused");
   assert.match(String(error), /cannot be forked to a new chat/);
   assert.deepEqual(opened, ["fork-1", "fork-2"], "nothing opened");
+
+  // She opened another chat before the fork's opened: its composer is not asked later.
+  makeChat = async () => ({ conversation: { id: "fork-3" }, warnings: [] });
+  openWhileForking = () => { state.openConversationRequestRef.current += 2; };
+  await act(async () => { assert.equal(await actions!.forkChatParticipantToNewChat("member"), true); });
+  assert.equal(takeComposerFocusRequest("fork-3"), false, "the request was dropped");
   renderer.unmount();
 });
 

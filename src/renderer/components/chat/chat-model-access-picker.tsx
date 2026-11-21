@@ -88,7 +88,7 @@ export function ChatModelAccessPanel(props: {
               {props.actions.map((action) => (
                 <button key={action.label} type="button" role="menuitem" disabled={action.disabled}
                   className={action.tone === "danger" ? "chat-model-access-row is-danger" : "chat-model-access-row"}
-                  data-testid="chat-model-access-action" title={action.detail} onClick={() => { setMenuOpen(false); action.onSelect(); }}>
+                  data-testid="chat-model-access-action" onClick={() => { setMenuOpen(false); action.onSelect(); }}>
                   <span className="chat-model-access-row-label">{action.label}</span>
                   {action.detail && <span className="chat-model-access-row-detail">{action.detail}</span>}
                 </button>

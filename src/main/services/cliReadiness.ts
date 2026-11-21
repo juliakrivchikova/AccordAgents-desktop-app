@@ -73,6 +73,11 @@ export class CliReadinessService {
   /** Each CLI's probe while it runs, alone or in a batch: whoever needs that
    *  CLI waits for this one instead of starting another. */
   private readonly probesInFlight = new Map<ChatProviderKind, InFlightProbe>();
+  /** The generation each CLI's snapshot entry was probed in. invalidate()
+   *  restamps every entry with the new generation; this keeps what the
+   *  result was really read under, so a one-CLI check never reuses a result
+   *  from before the environment changed. */
+  private readonly probedInGeneration = new Map<ChatProviderKind, number>();
 
   private readonly dependencies: CliReadinessDependencies;
 
@@ -136,34 +141,46 @@ export class CliReadinessService {
 
   /**
    * The readiness of these CLIs only (Fork to new chat needs its member's
-   * own): each one's last result while it is fresh, otherwise its probe
-   * alone, or its probe in a batch already running, never the slowest CLI's.
-   * The others stay as the snapshot has them. Without a snapshot of every
-   * CLI yet, the whole batch runs, so callers always get every CLI.
+   * own): each one's last result while it is fresh and was read in this
+   * generation, otherwise its probe alone, or its probe in a batch already
+   * running, never the slowest CLI's. The others stay as the snapshot has
+   * them. Without a snapshot of every CLI yet, the whole batch runs, so
+   * callers always get every CLI. Readiness invalidated while it waited is
+   * checked again once, in the new generation.
    */
   async refreshKinds(kinds: readonly ChatProviderKind[], request: AgentDetectionRequest = {}): Promise<AgentHealth[]> {
-    const known = new Map(this.stableSnapshot.map((health) => [health.kind, health]));
-    if (!CLI_PROVIDER_DISPLAY_ORDER.every((kind) => known.has(kind))) {
-      return this.refresh(request);
-    }
-    const due = [...new Set(kinds)].filter((kind) => request.force || isAgentSnapshotStale([known.get(kind)!]));
-    if (due.length === 0) {
-      return this.currentSnapshot();
-    }
-    const generation = this.generation;
-    const trigger = request.trigger ?? "service";
-    let environment: Promise<ProbeEnvironment> | undefined;
-    await Promise.all(due.map(async (kind) => {
-      const running = this.probesInFlight.get(kind);
-      if (running?.generation === generation) {
-        return running.promise;
+    for (let attempt = 0; ; attempt += 1) {
+      const known = new Map(this.stableSnapshot.map((health) => [health.kind, health]));
+      if (!CLI_PROVIDER_DISPLAY_ORDER.every((kind) => known.has(kind))) {
+        return this.refresh(request);
       }
-      environment ??= this.probeEnvironment();
-      const ready = await environment;
-      // A failed shared prerequisite keeps the last result (sharedFailureSnapshot).
-      return ready.ok ? this.probeKind(kind, generation, trigger, ready) : undefined;
-    }));
-    return this.currentSnapshot();
+      const generation = this.generation;
+      const now = this.dependencies.now().getTime();
+      const due = [...new Set(kinds)].filter((kind) => request.force
+        || this.probedInGeneration.get(kind) !== generation
+        || isAgentSnapshotStale([known.get(kind)!], now));
+      if (due.length === 0) {
+        return this.currentSnapshot();
+      }
+      const trigger = request.trigger ?? "service";
+      let environment: Promise<ProbeEnvironment> | undefined;
+      await Promise.all(due.map(async (kind) => {
+        // A probe already running (a batch's, say) is joined before reading
+        // the environment: waiting for a login shell of its own would bring
+        // back the wait this check exists to avoid.
+        const running = this.probesInFlight.get(kind);
+        if (running?.generation === generation) {
+          return running.promise;
+        }
+        environment ??= this.probeEnvironment();
+        const ready = await environment;
+        // A failed shared prerequisite keeps the last result (sharedFailureSnapshot).
+        return ready.ok ? this.probeKind(kind, generation, trigger, ready) : undefined;
+      }));
+      if (generation === this.generation || attempt > 0) {
+        return this.currentSnapshot();
+      }
+    }
   }
 
   private async runBatch(generation: number, trigger: NonNullable<AgentDetectionRequest["trigger"]>): Promise<AgentHealth[]> {
@@ -206,9 +223,8 @@ export class CliReadinessService {
     const promise = this.probeProvider(CLI_PROVIDER_SETUP[kind], environment.env, environment.checkedAt, generation, trigger)
       .then((health) => {
         if (generation === this.generation) {
-          this.stableSnapshot = this.stableSnapshot.some((entry) => entry.kind === kind)
-            ? this.stableSnapshot.map((entry) => entry.kind === kind ? health : entry)
-            : this.stableSnapshot;
+          this.stableSnapshot = this.stableSnapshot.map((entry) => entry.kind === kind ? health : entry);
+          this.probedInGeneration.set(kind, generation);
         }
         return health;
       })
