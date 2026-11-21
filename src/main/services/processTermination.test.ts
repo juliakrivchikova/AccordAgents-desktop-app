@@ -2,8 +2,10 @@ import { parseLinuxProcessStat } from "./processTermination";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  captureProcessAndParent,
   capturePosixDescendantsFromTable,
   hasLiveCapturedPosixProcesses,
+  readProcessTableOutput,
   terminateCapturedPosixProcesses,
   terminateProcess,
   terminateProcessTreeIfRunning,
@@ -161,4 +163,73 @@ test("Linux process identities use kernel start ticks and boot identity, never w
   assert.equal(row.startedAt, `linux:${boot}:123456789`);
   assert.notEqual(parseLinuxProcessStat(`45 (name) ${fields.join(" ")}`, "22222222-2222-2222-2222-222222222222").startedAt, row.startedAt);
   assert.throws(() => parseLinuxProcessStat("45 broken", boot));
+});
+
+const PS_ROW = "printf '   42     1    42 Ss   Sat Nov 21 13:08:51 2026    \\n'";
+function blockEventLoop(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+test("a process table read survives an event-loop stall longer than its deadline", { skip: process.platform === "win32" }, async () => {
+  // Electron's main thread can hold the loop past the deadline while the
+  // packaged native supervisor starts; the finished output must still count.
+  const reading = readProcessTableOutput("/bin/sh", ["-c", PS_ROW], 100);
+  blockEventLoop(600);
+  const rows = await reading;
+  assert.deepEqual(rows?.get(42), { pid: 42, ppid: 1, pgid: 42, state: "Ss", startedAt: "Sat Nov 21 13:08:51 2026" });
+});
+
+test("a table larger than the pipe buffer is read whole across a stall longer than its deadline", { skip: process.platform === "win32" }, async () => {
+  // About 230 KB: ps blocks on the full pipe during the stall and finishes
+  // only after the loop runs again, past its deadline.
+  const reading = readProcessTableOutput("/bin/sh", ["-c", "i=1; while [ $i -le 5000 ]; do printf '%6d     1 %6d Ss   Sat Nov 21 13:08:51 2026    \\n' $i $i; i=$((i+1)); done"], 100);
+  blockEventLoop(600);
+  const rows = await reading;
+  assert.equal(rows?.size, 5000);
+  assert.equal(rows?.get(5000)?.startedAt, "Sat Nov 21 13:08:51 2026");
+});
+
+test("a table command that keeps printing past its deadline is read whole; one that never ends is cut off at the limit", { skip: process.platform === "win32" }, async () => {
+  const slow = await readProcessTableOutput("/bin/sh", ["-c", `for i in 1 2 3 4; do ${PS_ROW}; sleep 0.15; done`], 200);
+  assert.ok(slow?.has(42), "a command still producing output is not hung");
+  const startedAt = Date.now();
+  const endless = await readProcessTableOutput("/bin/sh", ["-c", `while :; do ${PS_ROW}; sleep 0.05; done`], 200, 800);
+  assert.equal(endless, undefined);
+  assert.ok(Date.now() - startedAt < 3_000, "the whole read is bounded");
+});
+
+test("a table command whose output overflows the buffer yields no table", { skip: process.platform === "win32" }, async () => {
+  assert.equal(await readProcessTableOutput("/bin/sh", ["-c", "head -c 5000000 /dev/zero"], 5_000), undefined);
+});
+
+test("the owner sample is taken again when a table cannot show the process and its parent", async () => {
+  const row = (pid: number, ppid: number): PosixProcessRow => ({ pid, ppid, pgid: pid, state: "S", startedAt: `start-${pid}` });
+  const tables: Array<Map<number, PosixProcessRow> | undefined> = [undefined, new Map(), new Map([[700, row(700, 600)], [600, row(600, 1)]])];
+  const fresh: boolean[] = [];
+  const owner = await captureProcessAndParent(async (isFresh: boolean) => { fresh.push(isFresh); return tables.shift(); }, { pid: 700, ppid: 600 }, 3, 1);
+  assert.deepEqual(owner, { self: { pid: 700, startedAt: "start-700" }, parent: { pid: 600, startedAt: "start-600" } });
+  assert.deepEqual(fresh, [false, true, true], "retries never reuse the shared sample");
+
+  let reads = 0;
+  const missingParent = new Map([[700, row(700, 600)]]);
+  assert.equal(await captureProcessAndParent(async () => { reads += 1; return missingParent; }, { pid: 700, ppid: 600 }, 3, 1), undefined);
+  assert.equal(reads, 3, "a process that cannot see its owner gives up after a bounded number of samples");
+
+  // Reparented (the app died between samples): launchd is never recorded as the owner.
+  const self = { pid: 700, ppid: 600 };
+  const reparented = await captureProcessAndParent(async () => { self.ppid = 1; return new Map([[700, row(700, 1)], [1, row(1, 0)]]); }, self, 3, 1);
+  assert.equal(reparented, undefined);
+  assert.equal(await captureProcessAndParent(async () => new Map([[700, row(700, 1)], [1, row(1, 0)]]), { pid: 700, ppid: 1 }, 3, 1), undefined);
+});
+
+test("a table command still running at its deadline yields no table, never the part it printed", { skip: process.platform === "win32" }, async () => {
+  const startedAt = Date.now();
+  const rows = await readProcessTableOutput("/bin/sh", ["-c", `${PS_ROW}; exec sleep 5`], 200);
+  assert.equal(rows, undefined);
+  assert.ok(Date.now() - startedAt < 3_000, "the hung command was abandoned at its deadline");
+});
+
+test("a table command that fails yields no table, even with rows on stdout", { skip: process.platform === "win32" }, async () => {
+  assert.equal(await readProcessTableOutput("/bin/sh", ["-c", `${PS_ROW}; exit 1`], 1_000), undefined);
+  assert.equal(await readProcessTableOutput("/nonexistent/accord-ps", [], 1_000), undefined);
 });

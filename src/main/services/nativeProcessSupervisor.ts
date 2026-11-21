@@ -10,7 +10,7 @@ import { leaseProcessesGone, NativeProcessRegistry, type NativeProcessLease } fr
 import { openMachinePowerStore } from "./machinePowerStore";
 import { nativeHostIdentity, verifiedNativeHostReboot, type NativeHostIdentity } from "./nativeHostIdentity";
 import {
-  capturePosixDescendantsFromTable, capturePosixProcessIdentity, hasLiveCapturedPosixProcesses,
+  captureProcessAndParent, capturePosixDescendantsFromTable, capturePosixProcessIdentity, hasLiveCapturedPosixProcesses,
   readPosixProcessTableAsync, terminateCapturedPosixProcesses,
   type CapturedPosixProcess, type PosixProcessRow
 } from "./processTermination";
@@ -47,14 +47,14 @@ export /** How long a guardian keeps trying to release its power hold after clos
 const MAINTENANCE_RELEASE_RETRY_MS = 30_000;
 
 async function supervise(config: NativeSupervisorStart, io: SessionIO): Promise<void> {
-  const rows = await processTable();
-  const supervisor = capturePosixProcessIdentity(process.pid, () => rows);
-  const parent = capturePosixProcessIdentity(process.ppid, () => rows);
-  if (!supervisor || !parent || !process.connected) throw new Error("The native supervisor cannot establish its process owner.");
+  const owner = await captureProcessAndParent(processTable);
+  if (!owner || !process.connected) throw new Error("The native supervisor cannot establish its process owner.");
+  const { self: supervisor, parent } = owner;
   await mkdir(path.dirname(config.dbPath), { recursive: true, mode: 0o700 });
   const registry = new NativeProcessRegistry(config.dbPath, config.sqliteExecutable);
   await registry.init();
-  const host = await hostIdentity;
+  // One unreadable sample must not refuse every later session of this guardian.
+  const host = await hostIdentity ?? await (hostIdentity = nativeHostIdentity());
   if (!host) throw new Error("The OS host and boot identities are unavailable; native process ownership cannot be established.");
   await awaitPreviousSupervisor(registry, config.scope, host);
   const acquired = await registry.acquire({ scope: config.scope, token: randomUUID(), supervisor, parent, host, launchGate: 1 });
@@ -285,7 +285,7 @@ function flush(stream: Writable): Promise<void> {
 // All resident sessions share one guardian and one bounded ps sample. No
 // per-token persistence and no additional Node process for each participant.
 let cachedTable: Awaited<ReturnType<typeof readPosixProcessTableAsync>>;
-const hostIdentity = nativeHostIdentity();
+let hostIdentity = nativeHostIdentity();
 let tableAt = 0;
 let readingTable: ReturnType<typeof readPosixProcessTableAsync> | undefined;
 function processTable(fresh = false): ReturnType<typeof readPosixProcessTableAsync> {
