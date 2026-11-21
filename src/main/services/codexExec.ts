@@ -441,8 +441,9 @@ function codexSandboxMode(
   permissions: ChatAgentPermissions,
   remoteSandbox: CodexExecRemoteSandboxOptions | undefined
 ): "read-only" | "workspace-write" | "danger-full-access" {
-  // Codex's Full Access preset (src/shared/chatAccessModes.ts).
-  if (mode === "full-access") {
+  // Codex's Full Access preset (src/shared/chatAccessModes.ts), chosen in
+  // the User's menu (the CLI's own mode); anywhere else no wider than Auto.
+  if (mode === "full-access" && permissions.cliApprovals === true) {
     return "danger-full-access";
   }
   if (remoteSandbox?.dangerFullAccess && permissions.workspaceWrite) {

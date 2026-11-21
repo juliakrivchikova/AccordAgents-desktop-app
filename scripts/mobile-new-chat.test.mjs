@@ -418,7 +418,9 @@ test("in the sessions view the phone's New chat has no members: its chip chooses
       { kind: "claude-code", label: "Claude Code", defaultModelLabel: "Opus 5.5", models: [{ id: "haiku", label: "Haiku 5.5" }], efforts },
       { kind: "claude-code", hostId: "zai", hostLabel: "Z.ai GLM", hostVendor: "zai", label: "Z.ai GLM", defaultModelLabel: "GLM-5.3", models: [], efforts },
       { kind: "codex-cli", label: "Codex", defaultModelLabel: "GPT-5.5", models: [{ id: "gpt-5.5-mini", label: "GPT-5.5 mini" }], efforts }
-    ]
+    ],
+    // A computer that runs Codex's Full Access and Plan mode.
+    cliModes: { machines: {} }
   };
   const published = await hub.call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(), roles: { "main-session": "Main session" }, prompts: [], skills: [], avatars: {}, newChat } });
   assert.equal(published.ok, true);
@@ -454,10 +456,11 @@ test("in the sessions view the phone's New chat has no members: its chip chooses
   assert.deepEqual(codexAccess.map((row) => row.label), ["Ask for approval", "Approve for me", "Full Access"], "Codex's /permissions picker");
   const sections = () => app.evaluate(`[...document.querySelectorAll('#new-chat-model-options .members-sheet-section')].map((head) => head.textContent)`);
   assert.ok((await sections()).includes("Permissions"), "under Codex's own title");
+  assert.ok((await sections()).includes("Plan mode"), "Codex's Plan mode, a choice of its own beside the permissions");
   assert.deepEqual(await app.evaluate(`[...document.querySelectorAll('#new-chat-model-options [data-plan]')].map((row) => [row.querySelector("strong").textContent, row.getAttribute("aria-pressed")])`),
-    [["Plan mode", "false"]], "Codex's Plan mode, a toggle of its own beside the permissions");
-  await app.evaluate(`document.querySelector('#new-chat-model-options [data-plan]').click()`);
-  await app.waitFor(`document.querySelector('#new-chat-model-options [data-plan]').getAttribute("aria-pressed") === "true"`, "Plan mode on");
+    [["Off", "true"], ["On", "false"]], "off until chosen");
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-plan="on"]').click()`);
+  await app.waitFor(`document.querySelector('#new-chat-model-options [data-plan="on"]').getAttribute("aria-pressed") === "true"`, "Plan mode on");
   assert.deepEqual((await accessRows()).filter((row) => row.chosen).map((row) => row.id), ["workspace-write"], "the preset stays under Plan mode");
   assert.equal(await app.evaluate(`document.querySelectorAll('#new-chat-model-options [data-runs-on]').length`), 0, "no Runs on without a machine");
 
@@ -542,7 +545,9 @@ test("on the phone's New chat the main session runs where a machine is chosen, h
     projects: [{ path: "/Users/u/site", label: "site" }, { path: "/Users/u/api", label: "api" }], defaultProject: "/Users/u/site", mainSession, assistant: mainSession,
     // The machine has only the api project (as the computer says for the member there).
     members: [{ configId: "c-boxy", uses: 0, participant: member("boxy", { id: "t-boxy", participantConfigId: "c-boxy", kind: "codex-cli" }), machineId: "m-box", projects: ["/Users/u/api"] }],
-    mainSessionProviders: [{ kind: "codex-cli", label: "Codex", defaultModelLabel: "GPT-5.5", models: [], efforts }]
+    mainSessionProviders: [{ kind: "codex-cli", label: "Codex", defaultModelLabel: "GPT-5.5", models: [], efforts }],
+    // The machine's program is from before Codex's Full Access and Plan mode.
+    cliModes: { machines: { "m-box": false } }
   };
   const published = await hub.call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(), roles: { "main-session": "Main session" }, prompts: [], skills: [], avatars: {}, newChat } });
   assert.equal(published.ok, true);
@@ -557,7 +562,11 @@ test("on the phone's New chat the main session runs where a machine is chosen, h
     row.querySelector("strong").textContent, row.querySelector(".members-sheet-location")?.textContent || "", row.getAttribute("aria-pressed")])`);
   assert.deepEqual(await runsOn(), [["", "This computer", "", "true"], ["m-box", "Cloud box", "Does not have this project", "false"]],
     "a machine exists: where it runs, this computer first; the machine lacks the chosen project");
+  const fullAccessOffered = () => app.evaluate(`Boolean(document.querySelector('#new-chat-model-options [data-access="full-access"]')) || Boolean(document.querySelector('#new-chat-model-options [data-plan]'))`);
+  assert.equal(await fullAccessOffered(), true, "on this computer: Full Access and Plan mode are offered");
   await app.evaluate(`document.querySelector('#new-chat-model-options [data-runs-on="m-box"]').click()`);
+  await app.waitFor(`document.querySelector('#new-chat-model-options [data-runs-on="m-box"]').getAttribute("aria-pressed") === "true"`, "the machine chosen");
+  assert.equal(await fullAccessOffered(), false, "on a machine whose program is older: neither is offered");
   await app.waitFor(`document.querySelector('#new-chat-model-options [data-runs-on="m-box"]').getAttribute("aria-pressed") === "true"`, "the machine chosen");
   await app.evaluate(`document.querySelector('#new-chat-model-sheet [data-new-chat-picker-close]').click()`);
 

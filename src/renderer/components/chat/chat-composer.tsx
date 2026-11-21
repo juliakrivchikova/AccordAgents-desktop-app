@@ -82,7 +82,8 @@ export interface ChatComposerProps {
   /** What a dictation belongs to (a chat, or a thread in it); changing it
    *  drops a dictation in progress. Defaults to the chat. */
   dictationSession?: string;
-  /** The sessions view: the member's model chip, opening its settings. */
+  /** The sessions view: the member's controls (model, effort, permission
+   *  mode, Codex's Plan mode, where it runs), each with its own menu. */
   footerChip?: React.ReactNode;
   /** The sessions view: Stop for the main session's run, in the send
    *  button's place while there is nothing to send. */

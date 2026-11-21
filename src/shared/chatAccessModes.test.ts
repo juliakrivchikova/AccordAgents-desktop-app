@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   chatAgentModeForKind,
+  chatAgentModeFromAgent,
   chatAgentModeWithin,
   chatAgentPermissionsWithin,
   clampChatAgentAccess,
@@ -23,6 +24,7 @@ import {
   chatAccessMenuOptions,
   chatAccessModeSet,
   chatAccessOptions,
+  codexModesUnavailableReason,
   codexPlanModeOn,
   currentChatAccessId,
   defaultChatAccessOption,
@@ -30,6 +32,7 @@ import {
   withClassicChatPermissions,
   withCodexPlanMode
 } from "./chatAccessModes";
+import { forkedMainSessionPermissions } from "./forkToNewChat";
 import { newChatMainSessionFor } from "./newChat";
 import { chatPermissionPromptLines, chatPermissionSummaryLine } from "./permissionPrompt";
 import type { ChatParticipant } from "./types";
@@ -92,14 +95,14 @@ test("Codex's Plan mode is a toggle on top of any preset; only Codex has it", ()
     assert.equal(selectedChatAccessOption("codex-cli", off.agentMode, off.permissions)?.id, id, `${id}: and stays when Plan goes off`);
     assert.equal(codexPlanModeOn("codex-cli", off.agentMode, off.permissions), false);
   }
-  const applied = applyChatAccessOption(chatAccessOptions("codex-cli")[2]!, { ...defaultChatAgentPermissions(), codexPlanMode: true });
+  const applied = applyChatAccessOption(chatAccessOptions("codex-cli")[2]!, { ...defaultChatAgentPermissions(), cliApprovals: true, codexPlanMode: true });
   assert.equal(applied.permissions.codexPlanMode, true, "choosing a preset keeps Plan mode as it was");
   assert.equal(applyChatAccessOptionById("claude-code", "manual", defaultChatAgentPermissions(), true).permissions.codexPlanMode, undefined, "not on another CLI");
   assert.equal(codexPlanModeOn("codex-cli", "default", { ...defaultChatAgentPermissions(), codexPlanMode: true }), false, "only in the CLI's own mode");
   const classic = withClassicChatPermissions(applyChatAccessOptionById("codex-cli", "workspace-write", defaultChatAgentPermissions(), true).permissions, { webAccess: true }, "codex-cli");
   assert.equal(classic.codexPlanMode, undefined, "a classic toggle ends Plan mode with the CLI's own mode");
-  assert.equal(normalizeChatAgentPermissions({ codexPlanMode: true }).codexPlanMode, true);
-  assert.equal(cloneChatAgentPermissions({ ...defaultChatAgentPermissions(), codexPlanMode: true }).codexPlanMode, true);
+  assert.equal(normalizeChatAgentPermissions({ cliApprovals: true, codexPlanMode: true }).codexPlanMode, true);
+  assert.equal(cloneChatAgentPermissions({ ...defaultChatAgentPermissions(), cliApprovals: true, codexPlanMode: true }).codexPlanMode, true);
 });
 
 test("Codex's Full Access is the broadest mode, Codex's alone: a ceiling below it holds it back, another CLI runs Auto", () => {
@@ -235,4 +238,28 @@ test("the classic toggles end a CLI mode chosen in the picker: what is off is re
     assert.equal(selectedChatAccessOption("claude-code", accept.agentMode, classic), undefined, "the picker marks no mode (Custom access)");
   }
   assert.equal(withClassicChatPermissions(accept.permissions, { webAccess: true }).webAccess, true, "the toggle itself applies");
+});
+
+test("Codex's Plan mode lives only in the CLI's own mode: normalising, clamping and forking keep it only there", () => {
+  const own = { ...defaultChatAgentPermissions(), cliApprovals: true as const, codexPlanMode: true as const };
+  assert.equal(normalizeChatAgentPermissions({ ...own, cliApprovals: undefined }).codexPlanMode, undefined, "no Plan flag left over without its own mode");
+  assert.equal(clampChatAgentPermissions(own, { ...defaultChatAgentPermissions(), cliApprovals: true }).codexPlanMode, true);
+  assert.equal(clampChatAgentPermissions(own, defaultChatAgentPermissions()).codexPlanMode, undefined);
+  assert.equal(forkedMainSessionPermissions(defaultChatAgentPermissions(), own).codexPlanMode, true, "a fork keeps it");
+  assert.equal(forkedMainSessionPermissions(defaultChatAgentPermissions(), { ...own, cliApprovals: undefined }).codexPlanMode, undefined);
+});
+
+test("a member or a machine never names Codex's Full Access: only the User's menu does", () => {
+  assert.equal(chatAgentModeFromAgent("full-access"), "auto");
+  assert.equal(chatAgentModeFromAgent("plan"), "plan");
+  assert.equal(chatAgentModeFromAgent("nonsense"), "default");
+});
+
+test("a Codex member on a machine whose program is older is not given Full Access or Plan mode", () => {
+  const member = { kind: "codex-cli" as const, homeMachineId: "m-box" };
+  assert.match(codexModesUnavailableReason(member, { name: "Box", lastHello: {} }) ?? "", /^Box runs an older program: Settings → Machines → Upgrade runtime\.$/);
+  assert.match(codexModesUnavailableReason(member, undefined) ?? "", /Upgrade runtime/, "a machine never heard from");
+  assert.equal(codexModesUnavailableReason(member, { name: "Box", lastHello: { cliModesSupported: true } }), undefined);
+  assert.equal(codexModesUnavailableReason({ kind: "codex-cli" }, undefined), undefined, "on this computer");
+  assert.equal(codexModesUnavailableReason({ kind: "claude-code", homeMachineId: "m-box" }, undefined), undefined, "only Codex has them");
 });

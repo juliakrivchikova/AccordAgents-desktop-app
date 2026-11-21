@@ -327,6 +327,10 @@ export interface HubNewChatOptions {
    *  the new chat's main session as the computer does. A computer from
    *  before offers none: the phone says the computer must update. */
   fork?: ForkToNewChatOffer;
+  /** Codex's Full Access and Plan mode (src/shared/chatAccessModes.ts): set
+   *  by a computer that runs them, with whether each machine's program does.
+   *  A computer from before sets none: the phone does not offer them. */
+  cliModes?: { machines: Record<string, boolean> };
 }
 
 /** What GET /v1/phone/new-chat?forkOf=<chat>&participantId=<member> adds to

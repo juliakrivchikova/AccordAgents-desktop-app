@@ -631,7 +631,9 @@ for (const scenario of [
   { name: "Default", agentMode: "default" as const, workspaceWrite: false, mode: undefined, agentModeSetting: "" },
   { name: "Accept edits", agentMode: "default" as const, workspaceWrite: true, mode: "accept-edits", agentModeSetting: undefined },
   { name: "Auto mode", agentMode: "auto" as const, workspaceWrite: false, mode: "auto", agentModeSetting: undefined },
-  { name: "Plan mode", agentMode: "plan" as const, workspaceWrite: false, mode: "plan", agentModeSetting: undefined }
+  { name: "Plan mode", agentMode: "plan" as const, workspaceWrite: false, mode: "plan", agentModeSetting: undefined },
+  // Codex's Full Access is not an agy mode: agy's Auto, never skipped confirmations.
+  { name: "given Codex's Full Access", agentMode: "full-access" as const, workspaceWrite: true, mode: "auto", agentModeSetting: undefined }
 ]) {
   test(`buildGeminiExecInvocation: agy ${scenario.name} runs in agy's own mode, never skipping its confirmations`, () => {
     const invocation = buildGeminiExecInvocation({

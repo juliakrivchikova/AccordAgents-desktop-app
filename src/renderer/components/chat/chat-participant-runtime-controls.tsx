@@ -26,6 +26,7 @@ import type {
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import {
   CHAT_AGENT_MODE_OPTIONS,
+  chatAgentModeLabel,
   chatCliProviderLabel,
   chatInheritedCliSettingLabel,
   chatModelDefaultLabel
@@ -154,7 +155,10 @@ export function ParticipantRuntimeControls(props: {
             ariaLabel="Mode"
             value={mode}
             disabled={controlsDisabled}
-            options={CHAT_AGENT_MODE_OPTIONS}
+            // Codex's Full Access, set from the sessions view, is shown as it is.
+            options={CHAT_AGENT_MODE_OPTIONS.some((option) => option.value === mode)
+              ? CHAT_AGENT_MODE_OPTIONS
+              : [...CHAT_AGENT_MODE_OPTIONS, { value: mode, label: chatAgentModeLabel(mode) }]}
             onChange={(value) => update({ agentMode: value as ChatAgentMode })}
           />
         </div>

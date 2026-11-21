@@ -30,8 +30,8 @@ import type { ChatAgentMode, ChatAgentPermissions, ChatProviderKind } from "./ty
  * and geminiExec.ts (geminiModeArgs) carry the mapping out.
  */
 export interface ChatAccessOption {
-  /** The CLI's own name for the mode (what the app stores and the phone
-   *  sends). */
+  /** The CLI's own name for the mode (what the phone's New chat sends;
+   *  members store the mode and rights it amounts to). */
   id: string;
   label: string;
   /** The vendor's own description; none where it gives none. */
@@ -105,6 +105,19 @@ const ANTIGRAVITY_ACCESS: ChatAccessModeSet = {
   ],
   note: "Antigravity cannot ask for approval here, so what a mode would prompt for is refused."
 };
+
+/** Why a member cannot be given Codex's Full Access or Plan mode where it
+ *  runs: a machine whose program is from before they existed (its last
+ *  hello says nothing of them) would run Full Access as Ask for approval and
+ *  drop Plan mode. None on this computer or where they run. */
+export function codexModesUnavailableReason(
+  member: { kind: ChatProviderKind; homeMachineId?: string },
+  machine: { name?: string; lastHello?: { cliModesSupported?: boolean } } | undefined
+): string | undefined {
+  if (member.kind !== "codex-cli" || !member.homeMachineId) return undefined;
+  if (machine?.lastHello?.cliModesSupported === true) return undefined;
+  return `${machine?.name ?? "Its machine"} runs an older program: Settings → Machines → Upgrade runtime.`;
+}
 
 /** Ids the app stored before a mode was renamed, and the mode they are now
  *  (Claude Code 2.1.330 calls its Default mode Manual). Codex's Plan mode,

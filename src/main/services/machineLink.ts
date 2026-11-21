@@ -431,6 +431,12 @@ export class MachineLinkService {
     return forkToNewChatSupportFromHello((this.connections.get(machineId)?.record ?? this.enrolled.get(machineId))?.lastHello);
   }
 
+  /** Whether a machine runs Codex's Full Access and Plan mode as the menus
+   *  set them, by the last hello it sent this desktop. */
+  cliModesSupport(machineId: string): boolean {
+    return (this.connections.get(machineId)?.record ?? this.enrolled.get(machineId))?.lastHello?.cliModesSupported === true;
+  }
+
   /** Ask a machine to do something with its scheduled scripts and wait for
    *  the answer. Ephemeral and sealed to that machine: a key value travels
    *  only here, never on the server or in settings. */

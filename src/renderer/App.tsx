@@ -312,8 +312,8 @@ function App(): JSX.Element {
     ? forkToNewChatReasonFor(participant, view.activeChatConversation, state.agents, state.settings, machineForkSupport)
     : "Open its chat first.";
   // The chat's members and their settings: the roster in the classic view's
-  // header; in the sessions view one member's settings, from its session or
-  // its model chip in a composer.
+  // header (the sessions view has a member's controls under its composer and
+  // its … actions instead: sessionsMemberSettings).
   const rosterMenu = (memberId?: string, trigger?: React.ReactNode): JSX.Element | null => view.activeChatConversation ? (
     <ChatParticipantMenu
       participants={view.activeChatParticipants}

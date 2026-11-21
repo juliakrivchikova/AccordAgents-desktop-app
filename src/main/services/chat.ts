@@ -255,7 +255,9 @@ import {
   normalizeChatRoleManagementPermission,
   normalizeOptionalChatParticipantRequestPermission,
   chatParticipantRequestPermissionExceeds,
-  resolveChatManageRolesParticipantsPermission
+  resolveChatManageRolesParticipantsPermission,
+  chatAgentModeFromAgent,
+  chatAgentModeForKind
 } from "../../shared/agentPermissions";
 import { normalizeAgentContextUsage } from "../../shared/agentContext";
 import { nativeGoalObjective, parseNativeGoalCommand } from "../../shared/nativeGoalCommand";
@@ -1343,6 +1345,7 @@ export class ChatService {
   /** Desktop side: whether a machine starts a main session from a copy of a
    *  member's session in another chat (Fork to new chat; its last hello). */
   private machineForkToNewChatSupport?: (machineId: string) => ForkToNewChatMachineSupport;
+  private machineCliModesSupport?: (machineId: string) => boolean;
   /** Members moving (on the computer) or whose session this machine just
    *  handed over: their turns wait for it (memberMoveGate). */
   private readonly memberMoveGates = new Map<string, { done: Promise<void>; release: () => void }>();
@@ -1600,6 +1603,12 @@ export class ChatService {
   /** Desktop side: see machineForkToNewChatSupport. */
   setMachineForkToNewChatSupport(lookup: ((machineId: string) => ForkToNewChatMachineSupport) | undefined): void {
     this.machineForkToNewChatSupport = lookup;
+  }
+
+  /** Desktop side: whether a machine runs Codex's Full Access and Plan mode
+   *  (its last hello), for the phone's New chat offer. */
+  setMachineCliModesSupport(lookup: ((machineId: string) => boolean) | undefined): void {
+    this.machineCliModesSupport = lookup;
   }
 
   /** Desktop side: see beforeRemoteTurn and machineProjectReady. */
@@ -2206,7 +2215,10 @@ export class ChatService {
       members,
       ...(unavailable ? { unavailable } : {}),
       ...(assistantNote ? { assistantNote } : {}),
-      ...(fork ? { fork } : {})
+      ...(fork ? { fork } : {}),
+      // This computer runs Codex's Full Access and Plan mode; each machine as
+      // its program says.
+      cliModes: { machines: Object.fromEntries(machines.map((machine) => [machine.id, this.machineCliModesSupport?.(machine.id) === true])) }
     };
   }
 
@@ -2772,7 +2784,7 @@ export class ChatService {
         reasoningEffort: Object.prototype.hasOwnProperty.call(request, "reasoningEffort")
           ? normalizeChatReasoningEffort(request.reasoningEffort, target.kind)
           : target.reasoningEffort,
-        agentMode: normalizeChatAgentMode(request.agentMode ?? target.agentMode),
+        agentMode: chatAgentModeForKind(target.kind, request.agentMode ?? target.agentMode),
         permissions: request.permissions !== undefined
           ? normalizeChatAgentPermissions(request.permissions)
           : target.permissions,
@@ -4596,7 +4608,8 @@ export class ChatService {
 
     const runPermissions = actor.runPermissions ? normalizeChatAgentPermissions(actor.runPermissions) : undefined;
     const prepared = this.preparePermissionChange(requester, this.normalizePermissionChangeRequest(rawRequest), runPermissions);
-    if (normalizeChatAgentMode(requester.agentMode) === "auto" && prepared.request.kind === "shellRules") {
+    const requesterMode = normalizeChatAgentMode(requester.agentMode);
+    if ((requesterMode === "auto" || requesterMode === "full-access") && prepared.request.kind === "shellRules") {
       // In Auto-review the provider's native auto classifier decides each shell command,
       // so an agent shellRules request needs no User approval and stored app rules are
       // not forwarded as a second hard gate.
@@ -12353,10 +12366,10 @@ export class ChatService {
             "Permission MCP tool: `app_permissions_request_change` is available when Chat Assistant needs approval for web access or another explicitly user-requested non-default capability.",
             "Do not use permission requests for repository access, file editing, or shell commands by default. For code or repository tasks, first suggest adding a generic participant; proceed only if User explicitly asks Chat Assistant to handle it and enables the needed participant permissions."
           ]
-        : agentMode === "auto"
+        : agentMode === "auto" || agentMode === "full-access"
         ? [
             "Permission MCP tool: `app_permissions_request_change` is available when this participant needs approval for blocked capabilities.",
-            "In Auto-review mode, repo read, workspace write, web, and shell commands all run under the provider's native auto review. Do not call `app_permissions_request_change` for these, and do not request shellRules; shell decisions are handled by native auto. Portable repo/web/edit requests return already_granted if called anyway. Only genuinely out-of-preset capabilities need a request, for example `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants or `{ \"kind\": \"githubApp\", \"repository_full_name\": \"owner/repo\", \"permissions\": [\"contents:write\", \"pull_requests:write\"], \"reason\": \"Need to push a branch and open a PR.\" }` for GitHub App repository permissions. After a permission MCP call, inspect the status: pending_user_approval means it is awaiting User approval; already_granted means the capability is available."
+            "In Auto-review and Full Access modes, repo read, workspace write, web, and shell commands all run under the provider's native auto review (in Codex's Full Access, without any review or asking). Do not call `app_permissions_request_change` for these, and do not request shellRules; shell decisions are handled by native auto. Portable repo/web/edit requests return already_granted if called anyway. Only genuinely out-of-preset capabilities need a request, for example `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants or `{ \"kind\": \"githubApp\", \"repository_full_name\": \"owner/repo\", \"permissions\": [\"contents:write\", \"pull_requests:write\"], \"reason\": \"Need to push a branch and open a PR.\" }` for GitHub App repository permissions. After a permission MCP call, inspect the status: pending_user_approval means it is awaiting User approval; already_granted means the capability is available."
           ]
         : [
             "Permission MCP tool: `app_permissions_request_change` is available when this participant needs approval for blocked capabilities.",
@@ -14875,7 +14888,8 @@ export class ChatService {
         reasoningEffort: normalizeChatReasoningEffort(item.reasoningEffort, item.kind as ChatProviderKind),
         avatarId: item.avatarId?.trim() || undefined,
         ...this.participantHostFields(item.kind as ChatProviderKind, item.hostId, hosts),
-        agentMode: normalizeChatAgentMode(item.agentMode),
+        // Codex's Full Access is Codex's alone: another CLI stores Auto.
+        agentMode: chatAgentModeForKind(item.kind as ChatProviderKind, item.agentMode),
         permissions: this.normalizeParticipantPermissionsForRole(role, item.permissions, item.permissions === undefined),
         remoteExecution: preservedRemoteExecution(item.remoteExecution),
         homeMachineId: item.homeMachineId || undefined,
@@ -15461,7 +15475,8 @@ export class ChatService {
             reasoningEffort: normalizeChatReasoningEffort(participantRecord.reasoningEffort, kind),
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
             hostId: typeof participantRecord.hostId === "string" ? participantRecord.hostId.trim() || undefined : undefined,
-            agentMode: normalizeChatAgentMode(participantRecord.agentMode),
+            // Full Access only by the User's own choice, never by a tool's input.
+            agentMode: chatAgentModeFromAgent(participantRecord.agentMode),
             permissions: normalizeChatAgentPermissions(participantRecord.permissions),
             remoteExecution: preservedRemoteExecution(participantRecord.remoteExecution),
             skipToolchainPreflight: participantRecord.skipToolchainPreflight === true,
@@ -15956,7 +15971,8 @@ export class ChatService {
             reasoningEffort: normalizeChatReasoningEffort(participantRecord.reasoningEffort, kind),
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
             hostId: typeof participantRecord.hostId === "string" ? participantRecord.hostId.trim() || undefined : undefined,
-            agentMode: normalizeChatAgentMode(participantRecord.agentMode),
+            // Full Access only by the User's own choice, never by a tool's input.
+            agentMode: chatAgentModeFromAgent(participantRecord.agentMode),
             permissions: permissionsProvided
               ? normalizeChatAgentPermissions(participantRecord.permissions)
               : undefined,
@@ -15987,7 +16003,7 @@ export class ChatService {
       overrides.reasoningEffort = normalizeChatReasoningEffort(record.reasoningEffort);
     }
     if ("agentMode" in record) {
-      overrides.agentMode = normalizeChatAgentMode(record.agentMode);
+      overrides.agentMode = chatAgentModeFromAgent(record.agentMode);
     }
     if ("permissions" in record) {
       overrides.permissions = normalizeChatAgentPermissions(record.permissions);

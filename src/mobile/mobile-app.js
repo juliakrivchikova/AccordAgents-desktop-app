@@ -3655,19 +3655,24 @@
     const effort = chosen && newChatMainChoice.reasoningEffort && efforts.some(function (item) { return item.id === newChatMainChoice.reasoningEffort; }) ? newChatMainChoice.reasoningEffort : undefined;
     // Its CLI's mode in the CLI's own terms, the computer's picker's modes and
     // words (chatAccessModes): the one its CLI starts in until one is chosen.
+    // Where it runs: one of the machines, once there is one; else this computer.
+    const homeMachineId = chosen && newChatMainChoice.homeMachineId && newChatMachineList().some(function (item) { return item.id === newChatMainChoice.homeMachineId; })
+      ? newChatMainChoice.homeMachineId : undefined;
+    // Codex's Full Access and Plan mode only where they run: a computer that
+    // offers them, and a machine whose program does (the computer's offer).
+    const modes = offer && offer.cliModes;
+    const modesHere = Boolean(modes) && (!homeMachineId || Boolean(modes.machines && modes.machines[homeMachineId]));
     const accessSet = newChatAccessSet(provider.kind);
-    const accessOptions = newChatAccessOptions(provider.kind);
+    const accessOptions = newChatAccessOptions(provider.kind).filter(function (item) { return modesHere || item.agentMode !== "full-access"; });
     const defaultAccess = accessOptions.length > 0 ? newChatDefaultAccess(provider.kind) : undefined;
     const access = chosen && newChatMainChoice.access && accessOptions.some(function (item) { return item.id === newChatMainChoice.access; })
       ? newChatMainChoice.access : defaultAccess;
     // Codex's Plan mode: its own toggle beside the permissions, as on the computer.
-    const plan = Boolean(chosen && newChatMainChoice.plan && accessSet && accessSet.plan);
-    // Where it runs: one of the machines, once there is one; else this computer.
-    const homeMachineId = chosen && newChatMainChoice.homeMachineId && newChatMachineList().some(function (item) { return item.id === newChatMainChoice.homeMachineId; })
-      ? newChatMainChoice.homeMachineId : undefined;
+    const planOffered = Boolean(accessSet && accessSet.plan && modesHere);
+    const plan = Boolean(chosen && newChatMainChoice.plan && planOffered);
     return { provider: provider, model: model, modelLabel: modelEntry ? modelEntry.label : provider.defaultModelLabel, efforts: efforts,
       effort: effort, effortLabel: effort ? (efforts.find(function (item) { return item.id === effort; }) || {}).label : undefined,
-      accessOptions: accessOptions, access: access, accessSet: accessSet, plan: plan, homeMachineId: homeMachineId };
+      accessOptions: accessOptions, access: access, accessSet: accessSet, planOffered: planOffered, plan: plan, homeMachineId: homeMachineId };
   }
 
   /** A CLI's modes as its own menu titles them (and Codex's Plan mode, and
@@ -3789,15 +3794,17 @@
         list.append(newChatOptionRow({ label: option.label, detail: option.detail, chosen: selection.access === option.id, data: { access: option.id },
           onClick: function () { choose({ access: option.id }); } }));
       }
-      if (selection.accessSet && selection.accessSet.plan) {
-        list.append(newChatOptionRow({ label: selection.accessSet.plan.label, chosen: selection.plan, data: { plan: selection.plan ? "on" : "off" },
-          onClick: function () { choose({ plan: !selection.plan }); } }));
-      }
       if (selection.accessSet && selection.accessSet.note) {
         const note = document.createElement("p");
         note.className = "members-sheet-note new-chat-access-note";
         note.textContent = selection.accessSet.note;
         list.append(note);
+      }
+      // Codex's Plan mode, a choice of its own beside the permissions.
+      if (selection.planOffered) {
+        section(selection.accessSet.plan.label);
+        list.append(newChatOptionRow({ label: "Off", chosen: !selection.plan, data: { plan: "off" }, onClick: function () { choose({ plan: false }); } }));
+        list.append(newChatOptionRow({ label: "On", chosen: selection.plan, data: { plan: "on" }, onClick: function () { choose({ plan: true }); } }));
       }
     }
     const machines = newChatMachineList();

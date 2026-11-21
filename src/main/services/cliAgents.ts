@@ -35,6 +35,7 @@ import type {
   ProviderModelCatalog
 } from "../../shared/types";
 import { chatAgentModeForKind, effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { codexPlanModeOn, withCodexPlanMode } from "../../shared/chatAccessModes";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
 import { agentEnvironmentKeyValidationError, filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
 import { GEMINI_API_KEY_SETTINGS, geminiApiKeyEnv } from "../../shared/cliProviderHosts";
@@ -211,6 +212,12 @@ export const CLAUDE_CODE_COMMAND_ENV_OPTIONS: CommandEnvironmentOptions = {
   dropProcessEnvKeysAbsentFromLoginShell: CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS
 };
 const CODEX_AUTO_APPROVALS_REVIEWER = "auto_review";
+
+/** Codex refusing `turn/start`'s collaboration mode (a Codex from before it,
+ *  or one that does not know the field). */
+export function isCodexCollaborationModeRefusal(text: string): boolean {
+  return /collaboration[_ ]?mode/i.test(text) && /unknown|invalid|unsupported|not supported|experimental|unexpected/i.test(text);
+}
 // Gemini 3.x models served through Antigravity share a 1M-token context window;
 // used when no model is configured so the context indicator still renders.
 const GEMINI_DEFAULT_CONTEXT_WINDOW_TOKENS = 1_048_576;
@@ -4640,10 +4647,9 @@ export class CliAgentRunner {
             });
           }
           const collaborationMode = this.codexCollaborationMode(participant, kind, options, activeModel);
-          const turn = await sendRequest("turn/start", {
+          const turnParams = {
             threadId: currentThreadId,
             effort: this.codexReasoningEffort(participant.reasoningEffort) ?? null,
-            ...(collaborationMode ? { collaborationMode } : {}),
             input: [
               {
                 type: "text",
@@ -4651,7 +4657,20 @@ export class CliAgentRunner {
                 text_elements: []
               }
             ]
-          }, timeoutMs) as CodexAppServerTurnStartResult;
+          };
+          let turn: CodexAppServerTurnStartResult;
+          try {
+            turn = await sendRequest("turn/start", collaborationMode ? { ...turnParams, collaborationMode } : turnParams, timeoutMs) as CodexAppServerTurnStartResult;
+          } catch (error) {
+            // A Codex that does not take the collaboration mode: its Default
+            // is what it runs anyway, so the turn goes without it; Plan mode
+            // never runs as something else, it fails and says why.
+            if (!collaborationMode || !isCodexCollaborationModeRefusal(this.errorText(error))) throw error;
+            if (collaborationMode.mode === "plan") {
+              throw new Error("This Codex does not take Plan mode from the app. Update Codex, or turn Plan mode off.");
+            }
+            turn = await sendRequest("turn/start", turnParams, timeoutMs) as CodexAppServerTurnStartResult;
+          }
           if (pendingTurn) {
             pendingTurn.acceptedByProvider = true;
             if (!pendingTurn.turnId) {
@@ -4732,11 +4751,15 @@ export class CliAgentRunner {
   private codexRunAccess(kind: ConversationKind, options: CliAgentRunOptions): { mode: ChatAgentMode; permissions: ChatAgentPermissions; plan: boolean } {
     const raw = this.agentModeForRun(kind, options);
     const stored = normalizeChatAgentPermissions(options.permissions);
-    const ownMode = kind === "chat" && stored.cliApprovals === true;
-    const legacyPlan = ownMode && raw === "plan";
-    const mode: ChatAgentMode = legacyPlan ? "default" : raw;
-    const permissions = this.permissionsForRun("codex-cli", mode, legacyPlan ? { ...options, permissions: { ...stored, workspaceWrite: false } } : options);
-    return { mode, permissions, plan: ownMode && (legacyPlan || stored.codexPlanMode === true) };
+    if (kind !== "chat" || stored.cliApprovals !== true) {
+      // Full Access is a mode of Codex's own, chosen in the User's menu (with
+      // `cliApprovals`); anywhere else it is no wider than Auto.
+      const mode: ChatAgentMode = raw === "full-access" ? "auto" : raw;
+      return { mode, permissions: this.permissionsForRun("codex-cli", mode, options), plan: false };
+    }
+    const plan = codexPlanModeOn("codex-cli", raw, stored);
+    const own = withCodexPlanMode(raw, stored, plan);
+    return { mode: own.agentMode, permissions: this.permissionsForRun("codex-cli", own.agentMode, { ...options, permissions: own.permissions }), plan };
   }
 
   /** Codex asks (approval policy on-request, each ask an approval card) in
@@ -4776,7 +4799,7 @@ export class CliAgentRunner {
     kind: ConversationKind,
     options: CliAgentRunOptions,
     threadModel: string | undefined
-  ): Record<string, unknown> | undefined {
+  ): { mode: "plan" | "default"; settings: Record<string, unknown> } | undefined {
     const model = participant.model ?? threadModel;
     if (kind !== "chat" || !model) return undefined;
     const { plan } = this.codexRunAccess(kind, options);
@@ -8762,7 +8785,7 @@ export class CliAgentRunner {
   }
 
   private claudeAutoAllowedAppMcpTools(kind: ConversationKind, options: CliAgentRunOptions, toolConfig: ClaudeToolConfig): string[] {
-    if (kind !== "chat" || this.agentModeForRun(kind, options) !== "auto") {
+    if (kind !== "chat" || chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options)) !== "auto") {
       return [];
     }
     const exposedAppTools = new Set(options.appMcp?.toolNames ?? []);
@@ -8796,7 +8819,7 @@ export class CliAgentRunner {
   }
 
   private claudePermissionPromptTool(kind: ConversationKind, options: CliAgentRunOptions): string | undefined {
-    const agentMode = this.agentModeForRun(kind, options);
+    const agentMode = chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options));
     if (
       kind !== "chat" ||
       (agentMode !== "default" && agentMode !== "auto") ||

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { cliProviderHostDefaultModelLabel, cliProviderHostModelCatalog } from "../../../shared/cliProviderHosts";
 import type { ChatParticipant, ProviderModel, ProviderModelCatalog } from "../../../shared/types";
@@ -91,9 +91,10 @@ export function memberModelName(member: ModelNamedMember & { model?: string }, c
  *  that shows it (catalogFor), so a composer's controls ask nothing more
  *  than its chip did. */
 export function useMemberModelCatalog(member: ModelNamedMember): { catalog: ProviderModelCatalog | undefined; loading: boolean } {
-  const fixed = member.hostVendor && member.kind !== "gemini-cli"
+  // An added provider's fixed list, the same object while its vendor is.
+  const fixed = useMemo(() => member.hostVendor && member.kind !== "gemini-cli"
     ? cliProviderHostModelCatalog({ vendor: member.hostVendor, cli: member.kind })
-    : undefined;
+    : undefined, [member.hostVendor, member.kind]);
   const { key } = catalogKey(member);
   const [state, setState] = useState<{ key: string; catalog: ProviderModelCatalog | undefined; loading: boolean }>(() => {
     const known = catalogs.get(key)?.value;
@@ -102,10 +103,13 @@ export function useMemberModelCatalog(member: ModelNamedMember): { catalog: Prov
   useEffect(() => {
     if (fixed) return;
     let cancelled = false;
+    // Unchanged, nothing renders again.
+    const take = (next: { key: string; catalog: ProviderModelCatalog | undefined; loading: boolean }): void =>
+      setState((current) => current.key === next.key && current.catalog === next.catalog && current.loading === next.loading ? current : next);
     const known = catalogs.get(key)?.value;
-    setState({ key, catalog: known, loading: !known });
+    take({ key, catalog: known, loading: !known });
     void catalogFor(member).then((next) => {
-      if (!cancelled) setState({ key, catalog: next, loading: false });
+      if (!cancelled) take({ key, catalog: next, loading: false });
     });
     return () => {
       cancelled = true;

@@ -4,23 +4,14 @@ import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from 
 import { savedModelId } from "../../../shared/geminiModels";
 import { mainSessionProviderKey, type MainSessionProviderOption } from "../../../shared/mainSessionProviders";
 import type { CloudRunSelection } from "../../../shared/cloudRunPreparation";
-import type { MachineRecord } from "../../../shared/machineLink";
+import type { MachineListResult, MachineRecord } from "../../../shared/machineLink";
 import type { ChatParticipant, ProviderModel, ProviderModelCatalog, ProviderReasoningEffortOption } from "../../../shared/types";
-import {
-  applyChatAccessOption,
-  chatAccessMenuOptions,
-  chatAccessModeSet,
-  codexPlanModeOn,
-  selectedChatAccessOption,
-  withCodexPlanMode,
-  type ChatAccessOption
-} from "../../../shared/chatAccessModes";
-import { memberAsItRunsNow } from "../../../shared/forkToNewChat";
-import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../../shared/agentPermissions";
+import { codexModesUnavailableReason } from "../../../shared/chatAccessModes";
 import { ChatProviderMark } from "./chat-member-mark";
 import { chipModelLabel, memberDefaultModelName, memberModelName, useMemberModelCatalog } from "./chat-member-model-name";
 import { latestAndOlderModels } from "./chat-model-groups";
 import { ComposerMenu, ComposerMenuDisclosure, ComposerMenuItem, ComposerMenuNote, ComposerMenuSection } from "./composer-menu";
+import { ChatAccessControl, ChatCodexPlanToggle, TURN_RUNNING_NOTE } from "./chat-access-controls";
 import { ParticipantRunLocation } from "./participant-run-location";
 
 /** What the composer's controls show and change of a member: its provider
@@ -78,8 +69,11 @@ export function ChatMemberComposerControls(props: {
   // nothing is saved until the User picks one.
   const savedEffort = normalizeChatReasoningEffort(value.reasoningEffort, value.kind);
   const effort = shownEffort(savedEffort, efforts);
-  const machines = useMachines();
+  const machineList = useMachines();
+  const machines = machineList.machines;
   const showRunsOn = Boolean(props.runsOn) && (machines.length > 0 || Boolean(value.homeMachineId || value.cloudRun));
+  // Full Access and Plan mode on a machine whose program is from before them.
+  const modesReason = codexModesUnavailableReason(value, machineOf(machineList, value.homeMachineId));
   // A model chosen without the saved effort: that choice clears it too, so
   // its CLI is never given an effort the model does not have.
   const withEffortFor = (modelId: string | undefined): ChatModelAccessPatch => {
@@ -143,9 +137,9 @@ export function ChatMemberComposerControls(props: {
           )}
         </ComposerMenu>
       )}
-      <ChatAccessControl value={value} mainSession={props.mainSession} disabled={props.disabled} onChange={onChange} testId={prefix} />
+      <ChatAccessControl value={value} mainSession={props.mainSession} disabled={props.disabled} modesReason={modesReason} onChange={onChange} testId={prefix} />
       {value.kind === "codex-cli" && (
-        <ChatCodexPlanToggle value={value} disabled={props.disabled} onChange={onChange} testId={prefix} />
+        <ChatCodexPlanToggle value={value} disabled={props.disabled} modesReason={modesReason} onChange={onChange} testId={prefix} />
       )}
       {showRunsOn && (
         <ComposerMenu
@@ -205,6 +199,7 @@ export function ChatModelMenu(props: {
         </ComposerMenuSection>
       )}
       <ComposerMenuSection label="Model">
+        {props.disabled && <ComposerMenuNote>{TURN_RUNNING_NOTE}</ComposerMenuNote>}
         <ComposerMenuItem testId="chat-model-option" value="" selected={!props.model} disabled={props.disabled} label={props.defaultLabel}
           detail={props.defaultModel?.description ? `Default · ${props.defaultModel.description}` : "Default"} onSelect={() => props.onSelect(undefined)} />
         {latest.map(row)}
@@ -231,6 +226,7 @@ export function ChatEffortMenu(props: {
 }): JSX.Element {
   return (
     <ComposerMenuSection label="Effort">
+      {props.disabled && <ComposerMenuNote>{TURN_RUNNING_NOTE}</ComposerMenuNote>}
       <ComposerMenuItem testId="chat-effort-option" value="" selected={!props.effort} disabled={props.disabled} label="Default" onSelect={() => props.onSelect(undefined)} />
       {props.efforts.map((option) => (
         <ComposerMenuItem key={option.id} testId="chat-effort-option" value={option.id} selected={props.effort === option.id} disabled={props.disabled}
@@ -240,102 +236,16 @@ export function ChatEffortMenu(props: {
   );
 }
 
-/** The permission mode control: the chosen mode by the CLI's name ("Custom"
- *  for rights set in the classic view), opening its CLI's own list. */
-function ChatAccessControl(props: {
-  value: ChatModelAccessValue;
-  mainSession?: ChatParticipant;
-  disabled?: boolean;
-  onChange: (patch: ChatModelAccessPatch) => unknown;
-  testId: string;
-}): JSX.Element {
-  const { value } = props;
-  const set = chatAccessModeSet(value.kind);
-  const access = selectedChatAccessOption(value.kind, value.agentMode, value.permissions);
-  const label = access?.label ?? "Custom";
-  return (
-    <ComposerMenu testId={`${props.testId}-mode`} title={`${set.title}: ${label}`} width={320} align="end"
-      label={<span className="chat-composer-control-text">{label}</span>}>
-      {(close) => (
-        <ChatAccessMenu value={value} mainSession={props.mainSession} disabled={props.disabled}
-          onSelect={(option) => {
-            close();
-            if (option.id === access?.id) return;
-            const applied = applyChatAccessOption(option, value.permissions);
-            props.onChange(applied);
-          }} />
-      )}
-    </ComposerMenu>
-  );
-}
-
-/** A CLI's permission modes under its own title, each with the vendor's
- *  description; one a member is held back from is disabled with the reason. */
-export function ChatAccessMenu(props: {
-  value: ChatModelAccessValue;
-  mainSession?: ChatParticipant;
-  disabled?: boolean;
-  onSelect: (option: ChatAccessOption) => void;
-}): JSX.Element {
-  const { value } = props;
-  const set = chatAccessModeSet(value.kind);
-  const access = selectedChatAccessOption(value.kind, value.agentMode, value.permissions);
-  return (
-    <ComposerMenuSection label={set.title} testId="chat-access-menu">
-      {!access && (
-        <ComposerMenuNote testId="chat-access-custom">Custom access, set in the classic view. Choose a mode to run in the CLI's own.</ComposerMenuNote>
-      )}
-      {chatAccessMenuOptions(value.kind, access).map((option) => {
-        const held = accessHeldReason(value, option, props.mainSession);
-        return (
-          <ComposerMenuItem key={option.id} testId="chat-access-option" value={option.id} selected={option.id === access?.id}
-            disabled={props.disabled || Boolean(held)} label={option.label} detail={held ?? option.detail}
-            onSelect={() => props.onSelect(option)} />
-        );
-      })}
-      {set.note && <ComposerMenuNote testId="chat-access-note">{set.note}</ComposerMenuNote>}
-    </ComposerMenuSection>
-  );
-}
-
-/** Codex's Plan mode, its own toggle beside the permissions (as `/plan` and
- *  Shift+Tab switch it in Codex's terminal); in the CLI's own mode only. */
-function ChatCodexPlanToggle(props: {
-  value: ChatModelAccessValue;
-  disabled?: boolean;
-  onChange: (patch: ChatModelAccessPatch) => unknown;
-  testId: string;
-}): JSX.Element | null {
-  const { value } = props;
-  const plan = chatAccessModeSet("codex-cli").plan;
-  if (!plan || !selectedChatAccessOption(value.kind, value.agentMode, value.permissions)) return null;
-  const on = codexPlanModeOn(value.kind, value.agentMode, value.permissions);
-  return (
-    <button type="button" className={on ? "chat-model-chip chat-composer-toggle is-on" : "chat-model-chip chat-composer-toggle"}
-      data-testid={`${props.testId}-plan`} aria-pressed={on} title={plan.label} disabled={props.disabled}
-      onClick={() => props.onChange(withCodexPlanMode(value.agentMode, value.permissions, !on))}>
-      <span className="chat-composer-control-text">{plan.label}</span>
-    </button>
-  );
-}
-
-/** Why a member cannot have this mode: one the main session made never runs
- *  above the main session's mode and rights as they are now
- *  (memberAsItRunsNow); none otherwise. */
-export function accessHeldReason(value: ChatModelAccessValue, option: ChatAccessOption, mainSession: ChatParticipant | undefined): string | undefined {
-  if (!value.delegatedByParticipantId || !mainSession || !value.id || mainSession.id === value.id) return undefined;
-  const applied = applyChatAccessOption(option, value.permissions);
-  const member = { ...value, id: value.id, roleConfigId: "", agentMode: applied.agentMode, permissions: applied.permissions } as ChatParticipant;
-  const running = memberAsItRunsNow(member, mainSession);
-  const held = normalizeChatAgentMode(running.agentMode) !== normalizeChatAgentMode(applied.agentMode) ||
-    normalizeChatAgentPermissions(running.permissions).workspaceWrite !== applied.permissions.workspaceWrite;
-  if (!held) return undefined;
-  const mainMode = selectedChatAccessOption(mainSession.kind, mainSession.agentMode, mainSession.permissions)?.label ?? "Custom";
-  return `Not above the main session's mode (${mainMode}).`;
-}
-
 function labelOf(efforts: readonly ProviderReasoningEffortOption[], id: string): string {
   return efforts.find((option) => option.id === id)?.label ?? id;
+}
+
+/** A machine by its id, with its last hello (connected or not). */
+function machineOf(list: MachineListResult, machineId: string | undefined): { name?: string; lastHello?: MachineRecord["lastHello"] } | undefined {
+  if (!machineId) return undefined;
+  const record = list.machines.find((machine) => machine.id === machineId);
+  const status = list.status.find((item) => item.machineId === machineId);
+  return record || status ? { name: record?.name ?? status?.name, lastHello: status?.lastHello ?? record?.lastHello } : undefined;
 }
 
 function runsOnLabel(value: ChatModelAccessValue, machines: readonly MachineRecord[]): string {
@@ -368,17 +278,33 @@ function effortOptions(kind: ChatParticipant["kind"], catalog: ProviderModelCata
   return listed?.supportedReasoningEfforts?.length ? listed.supportedReasoningEfforts : reasoningEffortOptionsForProvider(kind);
 }
 
-/** The machines set up (cloud machines, other computers): only then does a
- *  composer offer where a member runs. */
-function useMachines(): MachineRecord[] {
-  const [machines, setMachines] = useState<MachineRecord[]>([]);
+const NO_MACHINES: MachineListResult = { machines: [], status: [] };
+
+/** The machines set up (cloud machines, other computers) and their last
+ *  hellos: only then does a composer offer where a member runs, and a
+ *  machine's program says what it can run. Kept as it was when an update
+ *  changes nothing the controls read. */
+function useMachines(): MachineListResult {
+  const [machines, setMachines] = useState<MachineListResult>(NO_MACHINES);
   useEffect(() => {
     const bridge = typeof window === "undefined" ? undefined : window.consensus;
     if (!bridge?.listMachines) return;
     let alive = true;
-    void bridge.listMachines().then((result) => { if (alive) setMachines(result.machines); }).catch(() => undefined);
-    const off = bridge.onMachinesUpdated?.((result) => setMachines(result.machines));
+    const take = (answer: Partial<MachineListResult> | undefined): void => {
+      const result: MachineListResult = { machines: answer?.machines ?? [], status: answer?.status ?? [] };
+      setMachines((current) => machinesKey(current) === machinesKey(result) ? current : result);
+    };
+    void bridge.listMachines().then((result) => { if (alive) take(result); }).catch(() => undefined);
+    const off = bridge.onMachinesUpdated?.((result) => take(result));
     return () => { alive = false; off?.(); };
   }, []);
   return machines;
+}
+
+function machinesKey(list: MachineListResult): string {
+  const supports = (hello: MachineRecord["lastHello"] | undefined): string => (hello?.cliModesSupported === true ? "1" : "0");
+  return [
+    ...list.machines.map((machine) => `${machine.id}:${machine.name}:${supports(machine.lastHello)}`),
+    ...list.status.map((item) => `${item.machineId}:${item.name}:${supports(item.lastHello)}`)
+  ].join("|");
 }

@@ -59,7 +59,8 @@ export function cloneChatAgentPermissions(permissions: ChatAgentPermissions): Ch
     },
     ...(providerNative ? { providerNative } : {}),
     ...(permissions.cliApprovals === true ? { cliApprovals: true as const } : {}),
-    ...(permissions.codexPlanMode === true ? { codexPlanMode: true as const } : {})
+    // Codex's Plan mode lives only in the CLI's own mode.
+    ...(permissions.cliApprovals === true && permissions.codexPlanMode === true ? { codexPlanMode: true as const } : {})
   };
 }
 
@@ -74,6 +75,14 @@ export function normalizeChatAgentMode(value: unknown): ChatAgentMode {
 export function chatAgentModeForKind(kind: ChatProviderKind | undefined, mode: ChatAgentMode | undefined): ChatAgentMode {
   const normalized = normalizeChatAgentMode(mode);
   return normalized === "full-access" && kind !== "codex-cli" ? "auto" : normalized;
+}
+
+/** A mode a member or a machine names (a tool's input, a member it adds or
+ *  changes): never Codex's Full Access, which only the User chooses (her
+ *  menus); Auto at most. */
+export function chatAgentModeFromAgent(value: unknown): ChatAgentMode {
+  const mode = normalizeChatAgentMode(value);
+  return mode === "full-access" ? "auto" : mode;
 }
 
 export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissions {
@@ -98,7 +107,8 @@ export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissi
     },
     ...(providerNative ? { providerNative } : {}),
     ...(record.cliApprovals === true ? { cliApprovals: true as const } : {}),
-    ...(record.codexPlanMode === true ? { codexPlanMode: true as const } : {})
+    // Codex's Plan mode lives only in the CLI's own mode.
+    ...(record.cliApprovals === true && record.codexPlanMode === true ? { codexPlanMode: true as const } : {})
   };
 }
 

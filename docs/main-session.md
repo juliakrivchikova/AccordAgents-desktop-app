@@ -165,7 +165,22 @@ chat without a main session is always `classic`; its switch is disabled.
     Plan entry (Plan as a permission) is Read Only with Plan mode on. Codex's
     Full Access is Codex's alone: a member on another CLI handed it (a Codex
     main session's mode for a member it makes) runs Auto
-    (`chatAgentModeForKind`). Settings from the classic controls are no
+    (`chatAgentModeForKind`), and only the User chooses it: a mode a member
+    or a machine names (a tool's input, a member it adds) is Auto at most
+    (`chatAgentModeFromAgent`); her server adds a member in Full Access
+    without a card only for a main session in it, which hands its mode to
+    the members it makes; and it runs only in the CLI's own mode
+    (`cliApprovals`), else as Auto. Codex's Plan mode exists only in the
+    CLI's own mode (normalising drops it otherwise), stays as it is when a
+    preset is chosen (a member saved in Plan from before too), is not handed
+    to a member the main session makes, and fails a turn rather than running
+    without it on a Codex that refuses the collaboration mode (Default then
+    goes without it). A machine runs both only when its program says so in
+    its hello (`cliModesSupported`): on an older one Full Access and turning
+    Plan mode on are disabled with "<machine> runs an older program:
+    Settings → Machines → Upgrade runtime." (`codexModesUnavailableReason`),
+    and the phone's New chat offers them only from a computer that runs them
+    and for a machine whose program does (`HubNewChatOptions.cliModes`). Settings from the classic controls are no
     mode: the mode control says "Custom", its menu says so, and a classic
     toggle (Read Files, Edit Files, Run Shell, Access Web) ends a mode
     chosen in its menu and Codex's Plan mode with it

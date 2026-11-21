@@ -626,6 +626,7 @@ export class MachineHostService {
       memberRestartSupported: true,
       sessionMoveSupported: true,
       forkToNewChatSupported: true,
+      cliModesSupported: true,
       ...(this.options.scripts ? {
         scriptsSupported: true,
         keepAwake: this.options.scripts.keepsHostAwake(),

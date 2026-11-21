@@ -27,6 +27,7 @@ import {
 import { CommandError, ensureLoginShellEnvPrimed } from "./command";
 import type { CodexServerRequestDelivery } from "./codexApprovals";
 import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
+import { isCodexCollaborationModeRefusal } from "./cliAgents";
 import type { ParticipantRunResult } from "./providers";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 import { APP_TOOL_PERMISSION_WAIT_MS } from "../../shared/appMcpToolContracts";
@@ -7118,7 +7119,33 @@ test("Codex's Plan mode is its collaboration mode, said on every turn (a thread 
   assert.equal(runner.codexCollaborationMode(participant, "code-review", planned, "m"), undefined, "chat turns only");
 });
 
-test("Codex's Full Access is not a Claude Code or Antigravity mode: they run Auto", () => {
+test("Codex's Full Access is not a Claude Code or Antigravity mode: a Claude member given it launches exactly as in Auto", () => {
   const runner = makeRunner() as any;
-  assert.equal(runner.claudeToolConfig("chat", "/repo", [], ownModeOptions("full-access", false)).permissionMode, "auto");
+  const full = ownModeOptions("full-access", false);
+  const auto = ownModeOptions("auto", false);
+  assert.equal(runner.claudeToolConfig("chat", "/repo", [], full).permissionMode, "auto");
+  assert.deepEqual(runner.claudePermissionPromptArgs("chat", full), runner.claudePermissionPromptArgs("chat", auto), "its asks still reach the app's cards");
+  assert.equal(runner.shouldPassClaudeAllowedTools("chat", full), runner.shouldPassClaudeAllowedTools("chat", auto));
+  const config = runner.claudeToolConfig("chat", "/repo", [], full);
+  assert.deepEqual(runner.claudeAutoAllowedAppMcpTools("chat", full, config), runner.claudeAutoAllowedAppMcpTools("chat", auto, runner.claudeToolConfig("chat", "/repo", [], auto)),
+    "its app tools are pre-approved as in Auto");
+});
+
+test("Codex's Full Access runs only as the User's menu sets it (the CLI's own mode); anywhere else no wider than Auto", () => {
+  const runner = makeRunner() as any;
+  const participant = { kind: "codex-cli", label: "@codex", model: undefined };
+  const classic = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", chatOptions({ agentMode: "full-access", workspaceWrite: false }));
+  assert.notEqual(classic.sandbox, "danger-full-access", "never outside the sandbox without her menu's choice");
+  assert.equal(classic.sandbox, "workspace-write");
+  const exec = buildCodexExecInvocation({ participant: participant as any, prompt: "p", outputPath: "/tmp/o", repoPath: "/tmp/r", kind: "chat", options: { agentMode: "full-access", permissions: { ...defaultChatAgentPermissions(), cliApprovals: true } } });
+  assert.equal(exec.args[exec.args.indexOf("--sandbox") + 1], "danger-full-access", "codex exec: Full Access in its own mode");
+  const execClassic = buildCodexExecInvocation({ participant: participant as any, prompt: "p", outputPath: "/tmp/o", repoPath: "/tmp/r", kind: "chat", options: { agentMode: "full-access", permissions: defaultChatAgentPermissions() } });
+  assert.notEqual(execClassic.args[execClassic.args.indexOf("--sandbox") + 1], "danger-full-access", "codex exec: not without it");
+});
+
+test("a Codex that refuses the collaboration mode is told apart from other errors", () => {
+  assert.equal(isCodexCollaborationModeRefusal("Invalid params: unknown field `collaborationMode`"), true);
+  assert.equal(isCodexCollaborationModeRefusal("collaboration_mode is experimental and requires experimentalApi"), true);
+  assert.equal(isCodexCollaborationModeRefusal("turn not found"), false);
+  assert.equal(isCodexCollaborationModeRefusal("invalid model gpt-x"), false);
 });

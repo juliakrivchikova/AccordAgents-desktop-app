@@ -18,6 +18,7 @@ import { Check, ChevronDown, ChevronRight } from "lucide-react";
 const MENU_GAP = 6;
 const VIEWPORT_MARGIN = 8;
 const ITEM_SELECTOR = "[role='menuitemradio']:not(:disabled), [role='menuitem']:not(:disabled), [role='menuitemcheckbox']:not(:disabled)";
+const FIELD_SELECTOR = "select:not(:disabled), input:not(:disabled), button:not(:disabled)";
 
 interface MenuPlace {
   left: number;
@@ -25,6 +26,10 @@ interface MenuPlace {
   bottom?: number;
   maxHeight: number;
   maxWidth: number;
+}
+
+function samePlace(a: MenuPlace, b: MenuPlace): boolean {
+  return a.left === b.left && a.top === b.top && a.bottom === b.bottom && a.maxHeight === b.maxHeight && a.maxWidth === b.maxWidth;
 }
 
 export function ComposerMenu(props: {
@@ -69,19 +74,39 @@ export function ComposerMenu(props: {
       const openAbove = above >= Math.min(menuHeight, 240) || above >= below;
       const wantedLeft = props.align === "end" ? trigger.right - menuWidth : trigger.left;
       const left = Math.round(Math.min(Math.max(wantedLeft, VIEWPORT_MARGIN), viewportWidth - VIEWPORT_MARGIN - menuWidth));
-      setPlace(openAbove
+      const next: MenuPlace = openAbove
         ? { left, bottom: Math.round(viewportHeight - trigger.top + MENU_GAP), maxHeight: Math.max(0, Math.floor(above)), maxWidth }
-        : { left, top: Math.round(trigger.bottom + MENU_GAP), maxHeight: Math.max(0, Math.floor(below)), maxWidth });
+        : { left, top: Math.round(trigger.bottom + MENU_GAP), maxHeight: Math.max(0, Math.floor(below)), maxWidth };
+      // Unchanged, nothing renders again (a streaming timeline scrolls often).
+      setPlace((current) => current && samePlace(current, next) ? current : next);
     };
     update();
-    // The menu's own size is known after it is laid out once.
-    const frame = typeof requestAnimationFrame === "function" ? requestAnimationFrame(update) : undefined;
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
+    // Once per frame at most: the menu's own size is known after it is laid
+    // out once, and changes when its list does (the models arrive, More
+    // models opens) or the side panel is dragged.
+    let frame: number | undefined;
+    const schedule = (): void => {
+      if (frame !== undefined || typeof requestAnimationFrame !== "function") return;
+      frame = requestAnimationFrame(() => { frame = undefined; update(); });
+    };
+    schedule();
+    const onScroll = (event: Event): void => {
+      // The menu's own list scrolling does not move it.
+      if (event.target instanceof Node && menuRef.current?.contains(event.target)) return;
+      schedule();
+    };
+    window.addEventListener("resize", schedule);
+    window.addEventListener("scroll", onScroll, true);
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(schedule) : undefined;
+    if (observer) {
+      if (menuRef.current) observer.observe(menuRef.current);
+      if (triggerRef.current) observer.observe(triggerRef.current);
+    }
     return () => {
       if (frame !== undefined) cancelAnimationFrame(frame);
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", schedule);
+      window.removeEventListener("scroll", onScroll, true);
+      observer?.disconnect();
     };
   }, [open, props.align, width]);
 
@@ -96,18 +121,22 @@ export function ComposerMenu(props: {
     return () => document.removeEventListener("mousedown", onPointerDown);
   }, [open]);
 
-  // The keyboard lands on the chosen item (else the first) once it opens.
+  // The keyboard lands on the chosen item (else the first, else the menu's
+  // first field: where it runs) once it opens, and it is scrolled into view.
   useEffect(() => {
     if (!open || !place) return;
     const menu = menuRef.current;
     if (!menu || typeof menu.querySelector !== "function") return;
-    const chosen = menu.querySelector<HTMLElement>("[aria-checked='true']:not(:disabled)") ?? menu.querySelector<HTMLElement>(ITEM_SELECTOR);
+    const chosen = menu.querySelector<HTMLElement>("[aria-checked='true']:not(:disabled)") ??
+      menu.querySelector<HTMLElement>(ITEM_SELECTOR) ?? menu.querySelector<HTMLElement>(FIELD_SELECTOR);
     chosen?.focus({ preventScroll: true });
+    chosen?.scrollIntoView?.({ block: "nearest" });
     // Only when it opens, not on every move of the window.
   }, [open, Boolean(place)]);
 
   const onMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
-    if (event.key === "Escape") {
+    // Tab leaves the menu: it closes and the keyboard goes back to its control.
+    if (event.key === "Escape" || event.key === "Tab") {
       event.preventDefault();
       event.stopPropagation();
       setOpen(false);

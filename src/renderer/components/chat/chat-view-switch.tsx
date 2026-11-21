@@ -67,13 +67,13 @@ export function chatMembersButtonLabel(runningCount: number): string {
   return runningCount > 0 ? `Side panel (${runningCount} running)` : "Side panel";
 }
 
-/** What the open chat puts into the header: its view switch and, in the
- *  sessions view, the toggle of its side panel. */
 /** The main session's … actions (Restart, Fork to new chat), made for the
  *  title's menu: `close` closes it, `backgroundTaskCount` is the main
  *  session's background work (a restart stops it). */
 export type MainSessionActions = (participantId: string, close: () => void, backgroundTaskCount: number) => ChatModelAccessAction[];
 
+/** What the open chat puts into the header: its view switch and, in the
+ *  sessions view, the toggle of its side panel. */
 export interface ChatViewHeaderState {
   view: ChatViewMode;
   canSwitch: boolean;
@@ -147,22 +147,34 @@ export function ChatViewTitleMenu(): JSX.Element | null {
   if (!state || state.view !== "sessions") {
     return null;
   }
-  const main = state.mainSession;
-  const mainActions = main ? main.actions(main.id, () => setOpen(false), (backgroundTasks.get(main.id) ?? []).length) : [];
+  const mainTasks = state.mainSession ? (backgroundTasks.get(state.mainSession.id) ?? []).length : 0;
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <IconButton size="xs" icon={ChevronDown} label="Chat menu" tooltip="Chat menu" data-testid="chat-title-menu" />
       </PopoverTrigger>
       <PopoverContent align="start" sideOffset={6} className="chat-title-menu" data-testid="chat-title-menu-content">
-        <ChatViewMenuItems state={state} onPicked={() => setOpen(false)} />
-        {mainActions.length > 0 && (
-          <div className="chat-title-menu-group" data-testid="chat-title-menu-main-session">
-            <ChatMemberActionItems label="Main session" actions={mainActions} />
-          </div>
-        )}
+        <ChatTitleMenuContent state={state} onPicked={() => setOpen(false)} mainSessionBackgroundTasks={mainTasks} />
       </PopoverContent>
     </Popover>
+  );
+}
+
+/** What the title's menu holds: the view switch, then the main session's …
+ *  actions (Restart, Fork to new chat) under "Main session". */
+export function ChatTitleMenuContent(props: { state: ChatViewHeaderState; onPicked: () => void; mainSessionBackgroundTasks: number }): JSX.Element {
+  const main = props.state.mainSession;
+  const mainActions = main ? main.actions(main.id, props.onPicked, props.mainSessionBackgroundTasks) : [];
+  return (
+    <>
+      <ChatViewMenuItems state={props.state} onPicked={props.onPicked} />
+      {mainActions.length > 0 && (
+        <div className="chat-title-menu-group" data-testid="chat-title-menu-main-session">
+          <div className="chat-title-menu-label">Main session</div>
+          <ChatMemberActionItems actions={mainActions} />
+        </div>
+      )}
+    </>
   );
 }
 

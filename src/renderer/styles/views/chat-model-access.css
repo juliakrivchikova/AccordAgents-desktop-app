@@ -4,13 +4,32 @@
    laid over the window. Tiny muted section titles, each choice's name with
    the vendor's description wrapped under it, a check on the chosen one. */
 
+/* One quiet row: in a narrow composer every control shortens (its text cut
+   with an ellipsis, the model's first), never wraps into a column nor paints
+   outside its chip. */
 .chat-composer-controls {
   display: inline-flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
   gap: 2px;
   min-width: 0;
+  flex: 0 1 auto;
+}
+
+.chat-composer-controls > .chat-model-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chat-composer-controls > .composer-menu-trigger:first-child {
+  flex-shrink: 3;
+}
+
+.composer-menu-trigger .chat-model-chip-label {
+  min-width: 0;
+  overflow: hidden;
 }
 
 .chat-composer-controls[aria-disabled="true"] .chat-model-chip {
@@ -43,6 +62,11 @@
 .composer-menu-trigger:disabled,
 .chat-composer-toggle:disabled {
   cursor: default;
+}
+
+.chat-composer-toggle:disabled:hover {
+  background: transparent;
+  color: var(--app-text-secondary);
 }
 
 .composer-menu-chevron {
@@ -89,7 +113,7 @@
    room on its side of its control (composer-menu.tsx sets both). */
 .composer-menu {
   position: fixed;
-  z-index: 60;
+  z-index: var(--z-menu);
   display: grid;
   gap: 2px;
   min-width: 200px;

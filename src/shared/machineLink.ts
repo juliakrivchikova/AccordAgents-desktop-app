@@ -100,6 +100,10 @@ export interface MachineHelloBody {
    *  new chat); absent before that existed, when that main session would
    *  start clean without a word. */
   forkToNewChatSupported?: boolean;
+  /** This runtime runs Codex's Full Access and Plan mode as the sessions
+   *  view's menus set them (src/shared/chatAccessModes.ts); absent before,
+   *  when Full Access ran as Ask for approval and Plan mode was dropped. */
+  cliModesSupported?: boolean;
   /** An enabled scheduled script keeps this machine from stopping when idle.
    *  Not a run: the desktop's update gate does not wait on it. */
   keepAwake?: boolean;
