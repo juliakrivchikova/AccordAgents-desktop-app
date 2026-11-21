@@ -13,6 +13,7 @@ import { chatMessageAddressees } from "../../shared/mainSession";
 import { firstTextLine, sessionsTaskTitle } from "../../shared/mainSessionView";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
 import { chatInterimPostsOf } from "../../shared/interimPosts";
+import { phoneSessionsActivity, type SessionsActivityRow } from "../../shared/sessionsActivity";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
 import { accordClosedLaunchId, accordClosedLineTitle } from "../../shared/accordProgress";
 import {
@@ -172,6 +173,11 @@ export interface MobileTimelineEvent {
    *  reply above its final text (shared/interimPosts.ts). Their pictures are
    *  among the reply's attachments. */
   interimPosts?: MobileInterimPost[];
+  /** A member's reply: its newest steps as the sessions view's rows show
+   *  them (shared/sessionsActivity.ts), short; how many earlier ones there
+   *  were besides. */
+  activity?: SessionsActivityRow[];
+  activityMore?: number;
 }
 
 export interface MobileInterimPost {
@@ -258,7 +264,8 @@ export function phoneActivityEvents(conversation: Conversation, now = Date.now()
     // Activity shows the text: no pictures, no task card or addressees, no
     // posts made during the turn (the chat's page carries them), and no
     // Accord launch mark or working time.
-    const { attachments: _attachments, participantRequest: _request, addressees: _addressees, interimPosts: _posts, accordLaunchByMainSession: _launch, workedMs: _worked, ...event } =
+    const { attachments: _attachments, participantRequest: _request, addressees: _addressees, interimPosts: _posts, accordLaunchByMainSession: _launch, workedMs: _worked,
+      activity: _activity, activityMore: _activityMore, ...event } =
       timelineEventFromMessage(message, message.id, conversation, threadRoots);
     const short = { ...event, content: event.content.slice(0, PHONE_ACTIVITY_CONTENT_CHARS) };
     // Messages are oldest first: a later one of the same run or member wins.
@@ -373,6 +380,7 @@ function timelineEventFromMessage(
   const addressees = message.role === "user" ? chatMessageAddressees(message).slice(0, PHONE_ADDRESSEES_MAX) : [];
   const request = message.role === "participant" && !hidden ? mobileTaskBatch(message.metadata?.participantRequest) : undefined;
   const interimPosts = message.role === "participant" && !hidden ? mobileInterimPosts(message) : [];
+  const activity = message.role === "participant" && !hidden && !midTurn ? phoneSessionsActivity(message.metadata?.activityEvents) : undefined;
   return {
     id: message.id,
     ...(threadRootId && threadRootId !== message.id ? { threadRootId } : {}),
@@ -406,6 +414,7 @@ function timelineEventFromMessage(
       : pendingParticipantContent(message.participantLabel),
     ...(attachments.length > 0 ? { attachments } : {}),
     ...(interimPosts.length > 0 ? { interimPosts } : {}),
+    ...(activity ?? {}),
     status: message.status ?? "done",
     createdAt: message.createdAt,
     runId,

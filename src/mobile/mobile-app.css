@@ -5193,3 +5193,80 @@ button.card-row:focus-visible {
 .sessions-member-row.is-former {
   opacity: 0.75;
 }
+
+/* A running reply of the sessions view (T3 Code's turn in progress): a quiet
+   "Working for 4s" over a hairline, then one muted row per step with its
+   outline icon, the newest shimmering. Its "Worked for …" opens to the same
+   rows once it is done. */
+.message-row.is-sessions .message-status:empty {
+  display: none;
+}
+
+.message-row.is-sessions[data-status="Running"] .message-meta:not(:has(> :not(:empty))) {
+  display: none;
+}
+
+.sessions-working {
+  margin: 2px 0 6px;
+}
+
+.sessions-working-head {
+  padding: 2px 0 7px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--bd);
+  color: var(--mut);
+  font: 400 13px var(--sans);
+  font-variant-numeric: tabular-nums;
+}
+
+.sessions-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sessions-activity-row,
+.sessions-activity-more {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 24px;
+  color: var(--mut);
+  font: 400 13px var(--sans);
+}
+
+.sessions-activity-icon {
+  flex: 0 0 auto;
+}
+
+.sessions-activity-text {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessions-activity-row.is-current .sessions-activity-text {
+  background: linear-gradient(90deg, var(--mut) 0%, var(--mut) 35%, var(--fg1) 50%, var(--mut) 65%, var(--mut) 100%);
+  background-size: 230% 100%;
+  background-position: 120% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: thinking-transfusion 2.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessions-activity-row.is-current .sessions-activity-text {
+    background: none;
+    color: var(--mut);
+    -webkit-text-fill-color: currentColor;
+    animation: none;
+  }
+}
+
+.sessions-worked-body > .sessions-activity {
+  margin-bottom: 4px;
+}

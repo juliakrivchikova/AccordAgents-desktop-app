@@ -114,11 +114,30 @@ chat without a main session is always `classic`; its switch is disabled.
     the task), marked for a moment. A task whose reply is not loaded is one
     such row of its own. While the main session waits there is a line
     "Waiting on N members: <tasks> · Stop";
+  - a reply still being written reads as T3 Code's turn in progress (the
+    User, 2026-11-21), on the desktop and the phone, on the main timeline
+    and in a member's session: a quiet "Working for 4s" (live) over a
+    hairline, then one muted line per step with an outline icon by its kind
+    and what it is about (`sessionsActivityRow`, from the activity events
+    the run already reports): thinking (brain), web search (globe, the
+    query), shell (terminal, the command), file read (file, the path), edit
+    (pencil, the path), any other tool (wrench, its label); the newest one
+    shimmers (still for reduced motion). The member's words and its posts
+    stay its words, in order between the rows; its turn's tasks follow as
+    their rows. No status label, no "Thinking" word, no grouped boxes, no
+    Stop or copy on the reply itself (the composer's button is Stop; a
+    member's session head stops the member). A run on a machine shows
+    where it stands ("Preparing the workspace") as its current step until
+    its first own step. The phone gets a reply's newest 12 steps, each one
+    line of at most 120 characters, with how many earlier ones there were
+    (`phoneSessionsActivity`; the live copy marks text that is only where
+    the run stands, `liveStatus`);
   - every finished reply says how long it worked T3 Code's quiet way,
     on the main timeline and in a member's session: muted "Worked for 44s"
-    and a chevron, no pill; the chevron of a reply that gave tasks opens
-    them, of any other reply its full stream (the phone has none: there
-    the muted text alone); the classic view keeps its pill;
+    and a chevron, no pill; the chevron opens, in place, the same rows its
+    turn showed while it ran (and the words it wrote between them, which
+    its final text does not repeat), then its tasks; a reply with neither
+    is the muted text alone; the classic view keeps its pill;
   - one icon at the top right opens the side panel (a running count on it,
     a dot while an Accord is open); the view switch is in the chat title's
     menu and the roster's popover is not shown. The side panel lists the
@@ -133,7 +152,8 @@ chat without a main session is always `classic`; its switch is disabled.
     main session's answer to a member's question is in that member's
     session from its first token (placed by the request it answers);
   - a finished message shows no member state; its time is with its controls
-    on hover. A message still being written keeps "Running 12s" or "Queued";
+    on hover. A reply still being written has its "Working for …" (above),
+    one still queued keeps "Queued";
   - a task's state is not taken from the member's earlier stopped or failed
     turn while the task waits (queued, a machine preparing);
   - no turn-finished note ("<X> finished answering"), the main session's

@@ -441,6 +441,39 @@ test("a desktop member's live progress reaches the phone by a post the server ke
   assert.equal(await h.storage.hubOps().head(), before, "nothing of it went into the order");
 });
 
+test("a running reply's steps reach the phone as the sessions view's short rows, newest kept, its status-only text marked", async (t) => {
+  const h = await hub(t);
+  const machine = createDeviceIdentity(new Date().toISOString());
+  const { opId, write } = await seedChat(h, machine);
+  const { client } = await pairPhone(h);
+  const runId = "turn-run-steps-1";
+  const pending: ChatMessage = { id: "bubble-steps", role: "participant", participantId: localMember.id, participantLabel: "@mac", content: "", createdAt: new Date().toISOString(), status: "pending", metadata: { runId } as ChatMessage["metadata"] };
+  await write(h.owner, { opId: opId(), kind: "message.create", conversationId: "chat-1", message: pending });
+  const at = new Date().toISOString();
+  const steps = [
+    { id: "s1", sequence: 1, kind: "web" as const, label: "Using web search", detail: "EUR to USD", createdAt: at },
+    ...Array.from({ length: 14 }, (_, index) => ({ id: `c${index}`, sequence: index + 2, kind: "command" as const, label: "Running command", detail: `npm test ${index}\nmore`, createdAt: at })),
+    { id: "long", sequence: 20, kind: "tool" as const, label: "Reading file", detail: `src/${"a".repeat(300)}.ts`, createdAt: at }
+  ];
+  const progress: ReviewProgress = { runId, phase: "debate", message: "working", createdAt: at,
+    agentProgress: { participantId: localMember.id, participantLabel: "@mac", state: "running", messageId: "bubble-steps", activity: "Reading file", activityEvents: steps } } as ReviewProgress;
+  const frame = encodeMachineProgress(undefined, progress, { conversationId: "chat-1", streamId: "stream-steps", sequence: 1 });
+  assert.equal((await h.call(h.owner, "POST", "/v1/progress", { frames: [frame] })).status, 200);
+  const live = await client.getJson<{ events: Array<{ id: string; content: string; liveStatus?: boolean; activity?: Array<{ kind: string; text: string }>; activityMore?: number }> }>(
+    "/v1/phone/progress", { conversationId: "chat-1" });
+  const [event] = live.events;
+  assert.equal(event?.content, "Reading file");
+  assert.equal(event?.liveStatus, true, "its text is where the run stands, not words of the reply");
+  assert.equal(event?.activity?.length, 12, "the newest steps only");
+  assert.equal(event?.activityMore, 4);
+  assert.deepEqual(event?.activity?.[0], { kind: "shell", text: "npm test 3" }, "the command's first line");
+  const last = event!.activity![11]!;
+  assert.equal(last.kind, "read");
+  assert.equal(last.text.length, 120, "a row stays one short line");
+  assert.ok(last.text.endsWith("…"));
+  assert.ok(JSON.stringify(event).length < 4_000, "a reply that ran many tools stays small on the wire");
+});
+
 test("a certificate is refused when anything in it was changed, or its owner is not the issuer", async (t) => {
   const h = await hub(t);
   const { answer } = await pairPhone(h);
