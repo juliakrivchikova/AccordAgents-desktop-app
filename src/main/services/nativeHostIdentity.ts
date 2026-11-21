@@ -1,6 +1,6 @@
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { readCommandOutput } from "./processTermination";
 
 export interface NativeHostIdentity { machine: string; boot: string; }
 
@@ -30,7 +30,10 @@ export function verifiedNativeHostReboot(previous?: NativeHostIdentity, current?
   return Boolean(previous && current && previous.machine === current.machine && previous.boot !== current.boot);
 }
 
-function command(executable: string, args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => execFile(executable, args, { encoding: "utf8", timeout: 2000, maxBuffer: 256 * 1024 },
-    (error, stdout) => error ? reject(error) : resolve(stdout)));
+// Read when the native supervisor starts, inside Electron's startup stall: a
+// plain execFile timer could kill the finished command and lose its output.
+async function command(executable: string, args: string[]): Promise<string> {
+  const output = await readCommandOutput(executable, args, { timeoutMs: 2000, maxBytes: 256 * 1024 });
+  if (output === undefined) throw new Error(`${executable} gave no answer.`);
+  return output;
 }

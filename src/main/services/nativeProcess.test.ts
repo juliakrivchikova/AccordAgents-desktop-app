@@ -369,3 +369,12 @@ function sql(dbPath: string, input: string): Promise<void> {
     child.stdin!.end(input);
   });
 }
+
+test("the host identity is read across an event-loop stall longer than its command deadline", { skip: process.platform !== "darwin" }, async () => {
+  // The guardian reads it while Electron's startup holds the loop.
+  const reading = nativeHostIdentity();
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_500);
+  const identity = await reading;
+  assert.match(identity?.machine ?? "", /^[a-f0-9]{64}$/);
+  assert.match(identity?.boot ?? "", /^[a-f0-9-]{32,36}$/);
+});
