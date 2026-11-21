@@ -6576,6 +6576,18 @@
    *  is protocol, and the User should read the sentence before it instead. Her
    *  own messages and the app's are left exactly as they are, as the desktop
    *  leaves them. */
+  /** A sessions-view chat's subtitle: when its newest message is a reply the
+   *  app ended (its lines start with its member's own handle: "@main stopped
+   *  before it returned a response."), those words name nobody by handle, as
+   *  in the chat (sessionsViewReplyText); a member's own words stay. */
+  function sessionsViewSnippet(chat, text) {
+    const who = typeof chat.who === "string" ? chat.who.trim().replace(/:$/, "") : "";
+    if (!who || /^(you|system)$/i.test(who) || typeof text !== "string" || text.indexOf("@") < 0) return text;
+    const shared = sessionsRules();
+    const names = sessionsViewNamesFor(chat.id);
+    return names && shared && typeof shared.sessionsViewReplyText === "function" ? shared.sessionsViewReplyText(text, who, names) : text;
+  }
+
   function snippetDisplayText(chat) {
     const snippet = typeof chat.snippet === "string" ? chat.snippet : "";
     const who = typeof chat.who === "string" ? chat.who.trim().toLowerCase() : "";
@@ -6840,7 +6852,7 @@
       snippet.append(who);
     }
     const snippetText = document.createElement("span");
-    snippetText.textContent = snippetDisplayText(chat);
+    snippetText.textContent = sessionsViewSnippet(chat, snippetDisplayText(chat));
     snippet.append(snippetText);
     copy.append(titleLine, snippet);
     const when = document.createElement("div");
@@ -8021,14 +8033,20 @@
     // label: Activity and a chat's cards ask for every row.
     const known = sessionsNamesCache.get(conversationId);
     if (known && cachedChatList && known.list === cachedChatList && known.state === open) return known.names;
-    const names = sessionsViewNamesUncached(shared, conversationId);
+    // A chat not open now names its members by the tasks it had when it was
+    // last open here (titles are read from its messages, which only an open
+    // chat has); a member it had no task for, by its handle as a plain word.
+    const titled = open ? undefined : sessionsTitledNames.get(conversationId);
+    const names = sessionsViewNamesUncached(shared, conversationId, titled);
     if (cachedChatList) sessionsNamesCache.set(conversationId, { list: cachedChatList, state: open, names: names });
+    if (open && names) sessionsTitledNames.set(conversationId, names);
     return names;
   }
 
   const sessionsNamesCache = new Map();
+  const sessionsTitledNames = new Map();
 
-  function sessionsViewNamesUncached(shared, conversationId) {
+  function sessionsViewNamesUncached(shared, conversationId, titled) {
     const chat = loadChats().find(function (item) { return item.id === conversationId; });
     if (!chat || chatViewOf(chat) !== "sessions") return undefined;
     const members = chatMembers(chat);
@@ -8042,7 +8060,7 @@
     }
     members.forEach(function (member) {
       if (member === main || !member.handle) return;
-      const title = state ? sessionsMemberTitleOf(state, member) : String(member.handle).replace(/^@/, "");
+      const title = state ? sessionsMemberTitleOf(state, member) : (titled && titled.titleOf(member.handle)) || String(member.handle).replace(/^@/, "");
       titles.push([member.handle, title]);
       if (member.mentionHandle && member.mentionHandle !== member.handle) titles.push([member.mentionHandle, title]);
     });
@@ -8727,6 +8745,12 @@
     const avatar = document.createElement("span");
     avatar.className = "mobile-chat-avatar act-avatar";
     paintAvatar(avatar, activityAvatarFor(conversationId, handle), conversationId);
+    // Its name is read out as the row names it: no handle in the sessions view.
+    const who = sessionsViewLabelFor(conversationId, handle);
+    if (who !== handle && avatar.hasAttribute("aria-label")) {
+      if (who) avatar.setAttribute("aria-label", who);
+      else avatar.removeAttribute("aria-label");
+    }
     return avatar;
   }
 
@@ -12362,6 +12386,8 @@
     state.viewNames = typeof shared.sessionsViewNames === "function"
       ? shared.sessionsViewNames(state.mainHandle, [...state.mentions.byHandle].map(function (pair) { return [pair[0], pair[1].title]; }))
       : undefined;
+    // Remembered for Activity and the chat list once the chat is closed.
+    if (state.viewNames) sessionsTitledNames.set(conversationId, state.viewNames);
     return state;
   }
 
