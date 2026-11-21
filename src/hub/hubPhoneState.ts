@@ -5,7 +5,8 @@ import { machineWakeRequest, webCryptoMachineWake, type MachineWakeSubtleCrypto 
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "../shared/types";
 import type { HubNotice } from "../main/services/hubStorage";
 import type { StorageService } from "../main/services/storage";
-import { mobileInterimPosts, timelineAttachmentsFromMessage } from "../main/services/mobileTimeline";
+import { mobileInterimPosts, phoneTurnTiming, timelineAttachmentsFromMessage } from "../main/services/mobileTimeline";
+import { chatViewFor } from "../shared/mainSession";
 import { phoneSessionsActivity } from "../shared/sessionsActivity";
 
 /**
@@ -85,6 +86,7 @@ export class HubProgress {
  *  and the progress the desktop and the machines report. */
 export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgress[]): Array<Record<string, unknown>> {
   const byRun = new Map(runs.map((progress) => [progress.runId, progress]));
+  const sessionsView = chatViewFor(conversation.metadata) === "sessions";
   const events: Array<Record<string, unknown>> = [];
   for (const message of conversation.messages) {
     if (message.role !== "participant" || message.status !== "pending") continue;
@@ -102,8 +104,9 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
     // copy without them took them off the phone's row until the next page.
     const interimPosts = mobileInterimPosts(message);
     const attachments = interimPosts.length > 0 ? timelineAttachmentsFromMessage(message) : [];
-    // Its steps so far, as the sessions view's rows show them (short).
-    const activity = phoneSessionsActivity(agent?.activityEvents ?? message.metadata?.activityEvents);
+    // Its steps so far, as the sessions view's rows show them (short); a
+    // classic chat shows none.
+    const activity = sessionsView ? phoneSessionsActivity(agent?.activityEvents ?? message.metadata?.activityEvents) : undefined;
     events.push({
       id: message.id,
       role: "participant",
@@ -119,6 +122,8 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
       // progress), not words of the reply: the sessions view shows it as a
       // step, not as the reply's text.
       ...(!partial ? { liveStatus: true } : {}),
+      // Queued behind the member's turn before it, or when its own run began.
+      ...phoneTurnTiming(message, agent?.remoteRunStatus ?? message.metadata?.remoteRunStatus),
       status: "pending",
       createdAt: message.createdAt,
       ...(runId ? { runId } : {}),

@@ -270,3 +270,48 @@ test("a card published by the desktop is answered on the phone and survives a re
     await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
+
+test("in a sessions-view chat a card names the main session without its handle, cut with an ellipsis, never off the screen", { timeout: 180_000 }, async (t) => {
+  const chatChanges = require("../dist/main/main/services/chatChanges.js");
+  for (const key of ["mainSessionParticipantId", "chatView"]) {
+    if (!chatChanges.SHARED_CONVERSATION_METADATA_KEYS.includes(key)) chatChanges.SHARED_CONVERSATION_METADATA_KEYS.push(key);
+  }
+  const main = member("main", { id: "p-main", roleConfigId: "main-session" });
+  const sessionsChat = "conv-cards-sessions";
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: 8166, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-cards-sessions-");
+  // A narrow phone: the label must still fit.
+  const chrome = launchChrome({ port: 9356, profile, url: `${site.origin}/`, width: 360, height: 800 });
+  let app;
+  t.after(async () => {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  await hub.createChat(sessionsChat, { title: "Sessions cards", participants: [main], metadata: { mainSessionParticipantId: main.id, chatView: "sessions" },
+    messages: [{ id: "u1", role: "user", content: "Run the tests", status: "done", createdAt: new Date(Date.now() - 60_000).toISOString(), metadata: { deliveryTargets: [main.id] } }] });
+  await hub.raiseApproval(sessionsChat, {
+    ...approval, id: "card-sessions-1", conversationId: sessionsChat, requesterParticipantId: main.id, requesterHandle: "main", requesterRoleConfigId: "main-session",
+    toolName: "app_tool_permission", capability: "permissions.request", machineName: undefined, codexDecisionId: undefined,
+    request: { kind: "toolPermission", toolName: "Bash", toolInput: { command: "npm test -- --grep 'the login page keeps the session after a reload'" } },
+    summary: "Use Bash: npm test -- --grep 'the login page keeps the session after a reload'"
+  }, { participantId: main.id });
+  app = await attachApp({ port: 9356 });
+  await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+  await openChat(app, sessionsChat);
+  await app.waitFor(`Boolean(document.querySelector('[data-card-id="card-sessions-1"] .control-card-who'))`, "the card with who raised it");
+  const who = await app.evaluate(`(() => {
+    const node = document.querySelector('[data-card-id="card-sessions-1"] .control-card-who');
+    const style = getComputedStyle(node);
+    const box = node.getBoundingClientRect();
+    return { text: node.textContent, overflow: style.textOverflow, wrap: style.whiteSpace, hidden: style.overflow,
+      inside: box.right <= document.documentElement.clientWidth + 0.5 && box.left >= 0,
+      cardInside: node.closest(".control-card").getBoundingClientRect().right <= document.documentElement.clientWidth + 0.5 };
+  })()`);
+  assert.deepEqual(who, { text: "Main session", overflow: "ellipsis", wrap: "nowrap", hidden: "hidden", inside: true, cardInside: true },
+    "no handle in the sessions view; cut with an ellipsis rather than pushed off the screen");
+  assert.doesNotMatch(await app.evaluate(`document.querySelector('[data-card-id="card-sessions-1"] .control-card-head').textContent`), /@main/);
+});

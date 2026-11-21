@@ -147,3 +147,83 @@ test("a running reply on the phone: Working for, one row per step, the newest sh
   assert.equal(await app.evaluate(`${row("r0")}.querySelector(".sessions-worked-toggle").textContent`), "Worked for 4s");
 
 });
+
+async function waitForOp(hub, matches, timeoutMs = 15_000) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    for (const request of hub.opsRequests) {
+      const op = (request.ops || []).find(matches);
+      if (op) return op;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("the phone did not send the operation");
+}
+
+test("a queued reply on the phone says Queued and is taken back from its own ×; a running one works for the time its own run took; a member's session stops that member", { timeout: 240_000 }, async (t) => {
+  const DREW = member("drew", { id: "p-drew", kind: "codex-cli" });
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: 8396, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-sessions-queued-");
+  const chrome = launchChrome({ port: 9546, profile, url: `${site.origin}/` });
+  let app;
+  t.after(async () => {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  const runStarted = at(0.05);
+  await hub.createChat("conv-queued", {
+    title: "Queued", participants: [MAIN, DREW], createdAt: at(31),
+    metadata: { mainSessionParticipantId: MAIN.id, chatView: "sessions" },
+    messages: [
+      { id: "u1", role: "user", content: "Fix the login page", status: "done", createdAt: at(3), metadata: { deliveryTargets: [MAIN.id] } },
+      // Made two minutes ago, its run on a machine began seconds ago.
+      running({ createdAt: at(2), metadata: { remoteRunStatus: { phase: "waiting-for-response", label: "Working", startedAt: runStarted, updatedAt: runStarted } } }),
+      { id: "u2", role: "user", content: "And the signup page", status: "done", createdAt: at(1), metadata: { deliveryTargets: [MAIN.id] } },
+      { id: "q1", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "", status: "pending", createdAt: at(0.9),
+        metadata: { runId: "run-queued", sourceMessageId: "u2", queuedBehind: { handle: "main" } } },
+      { id: "u3", role: "user", content: "Check the tests", status: "done", createdAt: at(0.8), metadata: { deliveryTargets: [DREW.id] } },
+      { id: "d1", role: "participant", participantId: DREW.id, participantLabel: "@drew", content: "", status: "pending", createdAt: at(0.7),
+        metadata: { runId: "run-drew", sourceMessageId: "u3" } }
+    ]
+  });
+  app = await attachApp({ port: 9546 });
+  await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+  await openChat(app, "conv-queued");
+  await app.waitFor(`Boolean(${row("r1")}?.querySelector(".sessions-working")) && Boolean(${row("q1")})`, "the running reply and the queued one");
+
+  // --- its Working for counts from when its own run began, not when it was made
+  const seconds = await app.evaluate(`Number((${row("r1")}.querySelector(".sessions-working-head").textContent.match(/(\\d+)s$/) || [])[1])`);
+  assert.ok(Number.isFinite(seconds) && seconds < 60, `Working for ${seconds}s: from its run's start, not the two minutes since it was made`);
+
+  // --- queued: "Queued", no Working for, a small × to take it back ----------
+  const queued = await app.evaluate(`(() => { const node = ${row("q1")}; const cancel = node.querySelector(".message-stop");
+    const box = cancel ? cancel.getBoundingClientRect() : { width: 0, height: 0 };
+    return { status: node.querySelector(".message-status").textContent, working: node.querySelectorAll(".sessions-working").length,
+      cancel: cancel ? [cancel.textContent, cancel.getAttribute("aria-label"), cancel.classList.contains("is-queued-cancel")] : null,
+      target: box.width >= 32 && box.height >= 32, shown: Boolean(cancel) && getComputedStyle(node.querySelector(".message-meta")).display !== "none" }; })()`);
+  assert.deepEqual(queued, { status: "Queued", working: 0, cancel: ["×", "Cancel this queued reply", true], target: true, shown: true });
+  assert.equal(await app.evaluate(`${row("r1")}.querySelectorAll(".message-stop").length`), 0, "the running reply still has no Stop of its own (the composer stops it)");
+  await app.evaluate(`${row("q1")}.querySelector(".message-stop").click()`);
+  const cancelled = await waitForOp(hub, (op) => op.kind === "turn.stop" && op.messageId === "u2");
+  assert.equal(cancelled.participantId, MAIN.id, "the queued turn, named by the message it answers");
+
+  // --- a member's session: its composer stops that member, typed or not -----
+  await app.evaluate(`document.getElementById("chat-members-button").click()`);
+  await app.waitFor(`Boolean(document.querySelector('#members-sheet-list .sessions-member-row[data-member-session="p-drew"]'))`, "drew in the side panel");
+  await app.evaluate(`document.querySelector('#members-sheet-list .sessions-member-row[data-member-session="p-drew"]').click()`);
+  await app.waitFor(`Boolean(document.querySelector('#message-list .message-row[data-thread-root="d1"]'))`, "drew's session");
+  const sendMode = `document.getElementById("send-button").dataset.mode`;
+  await app.waitFor(`${sendMode} === "stop"`, "the member's composer is its Stop");
+  assert.equal(await app.evaluate(`document.getElementById("send-button").getAttribute("aria-label")`), "Stop this member");
+  await app.evaluate(`(() => { const input = document.getElementById("composer-input"); input.value = "also the e2e ones"; input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  assert.deepEqual(await app.evaluate(`(() => { const node = document.getElementById("composer-stop-button"); return [!node.hidden, node.getAttribute("aria-label"), document.getElementById("send-button").dataset.mode]; })()`),
+    [true, "Stop this member", "send"], "Stop beside Send for the member, Send still sends");
+  await app.evaluate(`(() => { const input = document.getElementById("composer-input"); input.value = ""; input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await app.evaluate(`document.getElementById("send-button").dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true }))`);
+  const stopDrew = await waitForOp(hub, (op) => op.kind === "turn.stop" && op.participantId === DREW.id);
+  assert.equal(stopDrew.messageId, "u3", "the member's run, named by the message it answers");
+});

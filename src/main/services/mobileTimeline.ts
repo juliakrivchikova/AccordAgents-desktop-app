@@ -9,7 +9,8 @@ import type {
   ChatViewMode,
   Conversation
 } from "../../shared/types";
-import { chatMessageAddressees } from "../../shared/mainSession";
+import { chatMessageAddressees, chatViewFor } from "../../shared/mainSession";
+import { remoteRunStreamingStartedAt } from "../../shared/remoteRunStreaming";
 import { firstTextLine, sessionsTaskTitle } from "../../shared/mainSessionView";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
 import { chatInterimPostsOf } from "../../shared/interimPosts";
@@ -117,6 +118,11 @@ export interface MobileTimelineEvent {
   attachments?: MobileTimelineAttachment[];
   status: "pending" | "done" | "error";
   createdAt: string;
+  /** A running reply still waiting behind its member's turn before it. */
+  queued?: true;
+  /** When a running reply's own turn began, when not when it was made (a
+   *  run on a machine); its "Working for …" counts from it. */
+  startedAt?: string;
   runId?: string;
   messageId?: string;
   mobileEventId?: string;
@@ -380,7 +386,11 @@ function timelineEventFromMessage(
   const addressees = message.role === "user" ? chatMessageAddressees(message).slice(0, PHONE_ADDRESSEES_MAX) : [];
   const request = message.role === "participant" && !hidden ? mobileTaskBatch(message.metadata?.participantRequest) : undefined;
   const interimPosts = message.role === "participant" && !hidden ? mobileInterimPosts(message) : [];
-  const activity = message.role === "participant" && !hidden && !midTurn ? phoneSessionsActivity(message.metadata?.activityEvents) : undefined;
+  // A reply's step rows are the sessions view's (docs/main-session.md); a
+  // classic chat's phone shows none, as its desktop does.
+  const activity = message.role === "participant" && !hidden && !midTurn && conversation && chatViewFor(conversation.metadata) === "sessions"
+    ? phoneSessionsActivity(message.metadata?.activityEvents) : undefined;
+  const turnTiming = message.role === "participant" && message.status === "pending" ? phoneTurnTiming(message) : {};
   return {
     id: message.id,
     ...(threadRootId && threadRootId !== message.id ? { threadRootId } : {}),
@@ -415,12 +425,29 @@ function timelineEventFromMessage(
     ...(attachments.length > 0 ? { attachments } : {}),
     ...(interimPosts.length > 0 ? { interimPosts } : {}),
     ...(activity ?? {}),
+    ...turnTiming,
     status: message.status ?? "done",
     createdAt: message.createdAt,
     runId,
     messageId: message.id,
     ...(mobileEventId ? { mobileEventId } : {})
   };
+}
+
+/**
+ * When a running reply's own turn began, for its "Working for …": while it
+ * waits behind the member's turn before it, it is only queued (the desktop
+ * shows "Queued" and no time); a run on a machine counts from when that run
+ * started, as the desktop's remoteRunStreamingStartedAt reads it. The live
+ * copy (hub/hubPhoneState.ts liveTimelineEvents) says the same.
+ */
+export function phoneTurnTiming(
+  message: Pick<ChatMessage, "createdAt" | "metadata">,
+  remoteRunStatus = message.metadata?.remoteRunStatus
+): { queued?: true; startedAt?: string } {
+  if (message.metadata?.queuedBehind) return { queued: true };
+  const startedAt = remoteRunStreamingStartedAt(message.createdAt, remoteRunStatus);
+  return startedAt && startedAt !== message.createdAt ? { startedAt } : {};
 }
 
 /** A reply's posts as the phone draws them: the words and which of the

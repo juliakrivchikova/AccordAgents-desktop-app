@@ -316,10 +316,16 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
     input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
   await app.waitFor(`${sendMode} === "stop"`, "the composer's Stop");
   assert.equal(await app.evaluate(`document.getElementById("send-button").getAttribute("aria-label")`), "Stop the main session");
+  const sideStop = `(() => { const node = document.getElementById("composer-stop-button");
+    return { shown: !node.hidden && getComputedStyle(node).display !== "none", label: node.getAttribute("aria-label"), disabled: node.disabled }; })()`;
+  assert.equal((await app.evaluate(sideStop)).shown, false, "nothing typed: the send button itself is Stop, nothing beside it");
   await typeIn("one more thing");
   assert.equal(await app.evaluate(sendMode), "send", "typing turns it back into Send");
+  assert.deepEqual(await app.evaluate(sideStop), { shown: true, label: "Stop the main session", disabled: false },
+    "with something typed Stop stands beside Send: the CLI interrupts whatever is in the prompt");
   await typeIn("");
   assert.equal(await app.evaluate(sendMode), "stop");
+  assert.equal((await app.evaluate(sideStop)).shown, false);
   // A picture is something to send too: picking one with nothing typed
   // turns Stop into Send, and taking it off brings Stop back.
   await app.evaluate(`(() => {
@@ -335,9 +341,14 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   await app.evaluate(`document.querySelector("#composer-attachments .composer-attachment-remove").click()`);
   await app.waitFor(`document.querySelectorAll("#composer-attachments .composer-attachment-chip").length === 0`, "the picture is taken off");
   assert.equal(await app.evaluate(sendMode), "stop", "with nothing left to send, Stop again");
-  await app.evaluate(`document.getElementById("send-button").dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true }))`);
+  // Stop beside Send stops the run and leaves what is typed to be sent.
+  await typeIn("keep this for later");
+  await app.evaluate(`document.getElementById("composer-stop-button").click()`);
   const stopMain = await waitForOp(hub, (op) => op.kind === "turn.stop" && op.participantId === MAIN.id);
   assert.equal(stopMain.messageId, "drew-q", "the main session's run, named by the message it answers");
+  assert.equal(await app.evaluate(`document.getElementById("composer-input").value`), "keep this for later", "what is typed stays");
+  assert.equal(await app.evaluate(sendMode), "send", "still Send: the words are for sending");
+  await typeIn("");
   // Back before a member's session is drawn is back: the reply its chip
   // leads to does not open that session again once the rows are read.
   await app.evaluate(`(() => { document.querySelector('#message-list .sessions-member-chip[data-open-member="p-drew"]').click(); document.getElementById("back-to-timeline").click(); })()`);

@@ -595,3 +595,41 @@ test("the phone's chat list says which chats have a main session and the view ea
   const fallback = new Map((await buildMobileChatList(store, { ...options, defaultChatView: "classic" })).map((row) => [row.id, row]));
   assert.equal(fallback.get("sessions")?.chatView, "classic", "a chat without a view of its own opens in the default");
 });
+
+test("a reply's step rows travel to the phone only for a chat in the sessions view; a classic chat's reply carries none", () => {
+  const steps = [
+    { id: "s1", sequence: 1, kind: "command" as const, label: "Running command", detail: "npm test", createdAt: "2026-11-20T10:03:00Z" },
+    { id: "s2", sequence: 2, kind: "tool" as const, label: "Reading file", detail: "src/a.ts", createdAt: "2026-11-20T10:03:10Z" }
+  ];
+  const withReply = (metadata: Record<string, unknown>): Conversation => {
+    const conversation = requestConversation("Task", 1);
+    conversation.metadata = { ...conversation.metadata, ...metadata };
+    conversation.messages.push({ id: "worked", role: "participant", participantId: "main", participantLabel: "@main", content: "Done.",
+      createdAt: "2026-11-20T10:04:00Z", status: "done", metadata: { workedMs: 9_000, activityEvents: steps } });
+    return conversation;
+  };
+  const rowsOf = (conversation: Conversation) => timelineEventsFromSnapshot(conversation).find((event) => event.id === "worked");
+  assert.deepEqual(rowsOf(withReply({ chatView: "sessions" }))?.activity, [{ kind: "shell", text: "npm test" }, { kind: "read", text: "src/a.ts" }]);
+  const classic = rowsOf(withReply({ chatView: "classic" }));
+  assert.equal(classic?.activity, undefined, "the classic view shows no step rows");
+  assert.equal(classic?.activityMore, undefined);
+  const old = rowsOf(withReply({ mainSessionParticipantId: undefined, participants: [{ id: "admin", handle: "admin", kind: "claude-code", roleConfigId: "administrator" }] }));
+  assert.equal(old?.activity, undefined, "a chat without a main session is always classic");
+});
+
+test("a running reply waiting behind its member's turn travels as queued; a machine's run with when its own run began", () => {
+  const conversation = requestConversation("Task", 1);
+  const startedAt = "2026-11-20T10:05:30Z";
+  conversation.messages.push(
+    { id: "queued", role: "participant", participantId: "main", participantLabel: "@main", content: "", createdAt: "2026-11-20T10:05:00Z", status: "pending",
+      metadata: { runId: "run-q", queuedBehind: { handle: "main" } } },
+    { id: "remote", role: "participant", participantId: "main", participantLabel: "@main", content: "", createdAt: "2026-11-20T10:04:00Z", status: "pending",
+      metadata: { runId: "run-r", remoteRunStatus: { phase: "waiting-for-response", label: "Working", startedAt, updatedAt: startedAt } } },
+    { id: "local", role: "participant", participantId: "main", participantLabel: "@main", content: "", createdAt: "2026-11-20T10:06:00Z", status: "pending",
+      metadata: { runId: "run-l" } }
+  );
+  const byId = new Map(timelineEventsFromSnapshot(conversation).map((event) => [event.id, event]));
+  assert.deepEqual([byId.get("queued")?.queued, byId.get("queued")?.startedAt], [true, undefined]);
+  assert.deepEqual([byId.get("remote")?.queued, byId.get("remote")?.startedAt], [undefined, startedAt]);
+  assert.deepEqual([byId.get("local")?.queued, byId.get("local")?.startedAt], [undefined, undefined], "a local turn counts from its reply");
+});

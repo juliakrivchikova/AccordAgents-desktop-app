@@ -3510,6 +3510,9 @@
 
   function closeNewChat() {
     newChatToken += 1;
+    // What the chip chose was for that chat: closed without sending, it is
+    // gone, as on the computer.
+    newChatMainChoice = undefined;
     // Left, New chat reads nothing more until it is opened again, and then
     // from the first pause.
     clearTimeout(newChatRetryTimer);
@@ -3650,8 +3653,55 @@
     const modelEntry = model ? provider.models.find(function (item) { return item.id === model; }) : undefined;
     const efforts = (modelEntry && modelEntry.efforts) || provider.efforts || [];
     const effort = chosen && newChatMainChoice.reasoningEffort && efforts.some(function (item) { return item.id === newChatMainChoice.reasoningEffort; }) ? newChatMainChoice.reasoningEffort : undefined;
+    // Its CLI's mode in the CLI's own terms, the computer's picker's modes and
+    // words (chatAccessModes): the one its CLI starts in until one is chosen.
+    const accessOptions = newChatAccessOptions(provider.kind);
+    const defaultAccess = accessOptions.length > 0 ? newChatDefaultAccess(provider.kind) : undefined;
+    const access = chosen && newChatMainChoice.access && accessOptions.some(function (item) { return item.id === newChatMainChoice.access; })
+      ? newChatMainChoice.access : defaultAccess;
+    // Where it runs: one of the machines, once there is one; else this computer.
+    const homeMachineId = chosen && newChatMainChoice.homeMachineId && newChatMachineList().some(function (item) { return item.id === newChatMainChoice.homeMachineId; })
+      ? newChatMainChoice.homeMachineId : undefined;
     return { provider: provider, model: model, modelLabel: modelEntry ? modelEntry.label : provider.defaultModelLabel, efforts: efforts,
-      effort: effort, effortLabel: effort ? (efforts.find(function (item) { return item.id === effort; }) || {}).label : undefined };
+      effort: effort, effortLabel: effort ? (efforts.find(function (item) { return item.id === effort; }) || {}).label : undefined,
+      accessOptions: accessOptions, access: access, homeMachineId: homeMachineId };
+  }
+
+  /** The modes the computer's picker lists for this CLI (one shared list). */
+  function newChatAccessOptions(kind) {
+    const shared = mobileSharedRules();
+    return shared && typeof shared.chatAccessOptions === "function" ? shared.chatAccessOptions(kind) : [];
+  }
+
+  function newChatDefaultAccess(kind) {
+    const shared = mobileSharedRules();
+    const option = shared && typeof shared.defaultChatAccessOption === "function" ? shared.defaultChatAccessOption(kind) : undefined;
+    return option ? option.id : undefined;
+  }
+
+  /** The machines the server knows, by name: where a main session can run
+   *  besides this computer. None: New chat does not ask where it runs. */
+  function newChatMachineList() {
+    const machines = newChatOffer && newChatOffer.machines ? newChatOffer.machines : {};
+    return Object.keys(machines).map(function (id) { return { id: id, name: machines[id] || "Machine" }; });
+  }
+
+  /** The projects a machine has, as the computer said for the members that
+   *  run there (none known: it is not held to a project). */
+  function newChatMachineProjects(machineId) {
+    const offer = newChatOffer && newChatOffer.options;
+    const member = offer && (offer.members || []).find(function (item) {
+      return Array.isArray(item.projects) && (item.machineId || (item.participant && item.participant.homeMachineId)) === machineId;
+    });
+    return member ? member.projects : undefined;
+  }
+
+  /** Whether a machine has the chat's project (or the chat has none), by the
+   *  rule members on machines are held to. */
+  function newChatMachineFitsProject(machineId) {
+    const shared = mobileSharedRules();
+    if (!machineId || !shared || typeof shared.newChatMemberFitsProject !== "function") return true;
+    return shared.newChatMemberFitsProject({ projects: newChatMachineProjects(machineId) }, newChatProject);
   }
 
   function newChatOptionRow(options) {
@@ -3692,17 +3742,22 @@
       list.append(head);
     };
     const choose = function (patch) {
-      const current = { kind: selection.provider.kind, hostId: selection.provider.hostId, model: selection.model, reasoningEffort: selection.effort };
+      const current = { kind: selection.provider.kind, hostId: selection.provider.hostId, model: selection.model, reasoningEffort: selection.effort,
+        access: selection.access, homeMachineId: selection.homeMachineId };
       newChatMainChoice = Object.assign(current, patch);
-      renderNewChat();
+      renderNewChat("");
     };
     section("Provider");
     for (const provider of newChatProviders(offer)) {
       const chosen = provider.kind === selection.provider.kind && (provider.hostId || "") === (selection.provider.hostId || "");
       list.append(newChatOptionRow({ label: provider.label, chosen: chosen, mark: providerLogoElement(provider.kind, "is-small"),
         data: { providerKind: provider.kind, hostId: provider.hostId || "" },
-        // Another provider: its own default model and effort.
-        onClick: function () { choose({ kind: provider.kind, hostId: provider.hostId, model: undefined, reasoningEffort: undefined }); } }));
+        // Another provider: its own default model, effort and mode, as the
+        // computer drops what was chosen for the one before.
+        onClick: function () {
+          if (chosen) return;
+          choose({ kind: provider.kind, hostId: provider.hostId, model: undefined, reasoningEffort: undefined, access: undefined, homeMachineId: undefined });
+        } }));
     }
     section("Model");
     list.append(newChatOptionRow({ label: selection.provider.defaultModelLabel, detail: "Default", chosen: !selection.model, data: { model: "" },
@@ -3716,6 +3771,24 @@
     for (const effort of selection.efforts) {
       list.append(newChatOptionRow({ label: effort.label, chosen: selection.effort === effort.id, data: { effort: effort.id },
         onClick: function () { choose({ reasoningEffort: effort.id }); } }));
+    }
+    if (selection.accessOptions.length > 0) {
+      section("Access");
+      for (const option of selection.accessOptions) {
+        list.append(newChatOptionRow({ label: option.label, detail: option.detail, chosen: selection.access === option.id, data: { access: option.id },
+          onClick: function () { choose({ access: option.id }); } }));
+      }
+    }
+    const machines = newChatMachineList();
+    if (machines.length > 0) {
+      section("Runs on");
+      list.append(newChatOptionRow({ label: "This computer", chosen: !selection.homeMachineId, data: { runsOn: "" },
+        onClick: function () { choose({ homeMachineId: undefined }); } }));
+      for (const machine of machines) {
+        list.append(newChatOptionRow({ label: machine.name, chosen: selection.homeMachineId === machine.id, data: { runsOn: machine.id },
+          detail: newChatMachineFitsProject(machine.id) ? undefined : "Does not have this project",
+          onClick: function () { choose({ homeMachineId: machine.id }); } }));
+      }
     }
   }
 
@@ -3970,6 +4043,14 @@
       renderNewChat(blocked.unavailable || blocked.machineUnavailable);
       return;
     }
+    // The main session on a machine that does not have this project would
+    // wait for the computer to copy it there, as a member would.
+    const mainChoice = sessionsView ? newChatMainSelection(offer) : undefined;
+    if (mainChoice && mainChoice.homeMachineId && !newChatMachineFitsProject(mainChoice.homeMachineId)) {
+      const machineName = (newChatMachineList().find(function (item) { return item.id === mainChoice.homeMachineId; }) || {}).name || "That machine";
+      renderNewChat(machineName + " does not have this project. Choose a project it has, No project, or This computer.");
+      return;
+    }
     // Named with @, a member whose machine does not have this project would
     // wait for the computer to copy it there.
     const elsewhere = picked.find(function (member) { return !shared.newChatMemberFitsProject(member, newChatProject); });
@@ -3991,7 +4072,8 @@
       const offeredLead = newChatLead(offer);
       const selection = sessionsView ? newChatMainSelection(offer) : undefined;
       const lead = selection && typeof shared.newChatMainSessionFor === "function"
-        ? shared.newChatMainSessionFor(offeredLead, offer.mainSessionProviders, { kind: selection.provider.kind, hostId: selection.provider.hostId, model: selection.model, reasoningEffort: selection.effort })
+        ? shared.newChatMainSessionFor(offeredLead, offer.mainSessionProviders, { kind: selection.provider.kind, hostId: selection.provider.hostId,
+          model: selection.model, reasoningEffort: selection.effort, access: selection.access, homeMachineId: selection.homeMachineId })
         : offeredLead;
       const participants = shared.newChatParticipants({
         assistant: lead, mainSession: lead, members: sessionsView ? [] : offer.members, chosenConfigIds: sessionsView ? [] : Array.from(newChatChosen),
@@ -5632,6 +5714,11 @@
         // live text is where the run stands rather than words of the reply.
         ...activity,
         ...(role === "participant" && status === "pending" && event.liveStatus === true ? { liveStatus: true } : {}),
+        // Waiting behind its member's turn before it, or when its own run
+        // began: its "Queued", and where its "Working for …" counts from.
+        ...(role === "participant" && status === "pending" && event.queued === true ? { queued: true } : {}),
+        ...(role === "participant" && status === "pending" && typeof event.startedAt === "string" && !Number.isNaN(Date.parse(event.startedAt))
+          ? { startedAt: event.startedAt } : {}),
         // An Accord the main session started: its card, like the User's own.
         ...(role === "participant" && event.accordLaunchByMainSession === true ? { accordLaunchByMainSession: true } : {}),
         // How long the turn worked: the sessions view's "Worked for …".
@@ -7620,7 +7707,7 @@
 
   /** What a card is drawn from, so an unchanged card is not drawn again. */
   function controlCardSignature(card) {
-    return JSON.stringify([card.id, card.kind, card.status, card.waiting === true, card.outcome || "", card.title, card.summary, card.requesterLabel,
+    return JSON.stringify([card.id, card.kind, card.status, card.waiting === true, card.outcome || "", card.title, card.summary, cardRequesterLabel(card),
       card.machineName, card.options, card.recommendedOptionId, card.allowsCustomAnswer, card.allowsCancel,
       isCardLocked(card.id) || controlCardAnswering.has(card.id), controlCardErrors.get(card.id) || "",
       cardSentText(card.id), cardOutcome(card.id) || "", card.signInUrl || ""]);
@@ -7672,7 +7759,7 @@
    *  scrolling cannot answer for her. */
   function choiceCardBody(wrap, card, sent) {
     const draft = choiceDraft(card);
-    const who = card.requesterLabel || "the member";
+    const who = cardRequesterLabel(card) || "the member";
     const list = document.createElement("div");
     list.className = "control-card-choices";
     list.setAttribute("role", "radiogroup");
@@ -7883,6 +7970,36 @@
     if (active && node.contains(active) && typeof active.blur === "function") active.blur();
   }
 
+  /** Who raised a card, beside its title: the member's handle, except in a
+   *  sessions-view chat, where no handle is shown (docs/main-session.md): the
+   *  main session reads "Main session", a member its task's title. The label
+   *  is cut with an ellipsis rather than pushed off the screen. */
+  function appendCardWho(head, card) {
+    const requester = cardRequesterLabel(card);
+    if (!requester && !card.machineName) return;
+    const who = document.createElement("span");
+    who.className = "control-card-who";
+    who.textContent = [requester, card.machineName].filter(Boolean).join(" · ");
+    who.title = who.textContent;
+    head.append(who);
+  }
+
+  function cardRequesterLabel(card) {
+    const label = card.requesterLabel;
+    if (!label) return label;
+    const chat = loadChats().find(function (item) { return item.id === card.conversationId; });
+    if (!chat || chatViewOf(chat) !== "sessions") return label;
+    const handle = String(label).replace(/^@/, "").toLowerCase();
+    const member = chatMembers(chat).find(function (item) {
+      return String(item.mentionHandle || item.handle || "").replace(/^@/, "").toLowerCase() === handle;
+    });
+    if (member && (member.id === chat.mainSessionParticipantId || member.roleConfigId === MAIN_SESSION_ROLE)) return "Main session";
+    const state = lastSessionsState && lastSessionsState.conversationId === card.conversationId ? lastSessionsState : undefined;
+    if (member && state) return sessionsMemberTitleOf(state, member.id);
+    // A member this phone has no task for yet: its handle as a plain word.
+    return handle || label;
+  }
+
   function controlCardElement(card) {
     if (card.waiting === true) {
       // Answered and not done yet: what was approved and what it waits for.
@@ -7908,12 +8025,7 @@
     title.className = "control-card-title";
     title.textContent = card.title || (card.kind === "permission" ? "Permission request" : "Choice");
     head.append(title);
-    if (card.requesterLabel || card.machineName) {
-      const who = document.createElement("span");
-      who.className = "control-card-who";
-      who.textContent = [card.requesterLabel, card.machineName].filter(Boolean).join(" · ");
-      head.append(who);
-    }
+    appendCardWho(head, card);
     wrap.append(head);
 
     if (card.summary) {
@@ -8244,29 +8356,43 @@
     keepingReaderAtLatest(applyDock);
   }
 
-  // The sessions view's main timeline the composer last drew its button for.
+  // The sessions view the composer last drew its button for, and whose run
+  // it stops: the main session's on the main timeline, a member's in its
+  // session.
   let composerStopState;
+  let composerStopIds = [];
 
-  /** The sessions view's main composer, as the desktop's: while the main
-   *  session itself runs and nothing is written, its send button stops that
-   *  run (T3 Code's and Claude's Stop); writing turns it back into Send.
-   *  Members are stopped from the Waiting line and the panel. */
-  function syncComposerStop(state) {
+  /** The sessions view's composer, as the desktop's: while the session it
+   *  writes to runs (the main session on the main timeline, the member in
+   *  its session) and nothing is written, its send button stops that run
+   *  (T3 Code's and Claude's Stop); with something written it is Send again
+   *  and Stop stands beside it, since the CLI interrupts whatever is typed.
+   *  Members are stopped from the Waiting line and the panel too. */
+  function syncComposerStop(state, memberId) {
     composerStopState = state;
+    if (memberId !== undefined || !state) composerStopIds = state && memberId ? [memberId] : [];
+    else composerStopIds = state.mainId ? [state.mainId] : [];
     const button = document.getElementById("send-button");
     const input = document.getElementById("composer-input");
     if (!button || !input) return;
     const empty = !input.value.trim() && pendingAttachments.length === 0 && attachmentsPreparing === 0;
-    const ids = state && state.mainId ? [state.mainId] : [];
+    const ids = composerStopIds;
     const canStop = ids.length > 0 && sessionsCanStop(state, ids);
     const stopping = ids.length > 0 && !canStop && sessionsStopping(state, ids);
+    const side = document.getElementById("composer-stop-button");
+    if (side) {
+      side.hidden = empty || (!canStop && !stopping);
+      side.disabled = !canStop;
+      side.setAttribute("aria-label", stopping ? "Stopping" : ids[0] && state && ids[0] === state.mainId ? "Stop the main session" : "Stop this member");
+    }
     const mode = empty && canStop ? "stop" : empty && stopping ? "stopping" : "send";
+    const whose = ids[0] && state && ids[0] === state.mainId ? "the main session" : "this member";
+    button.setAttribute("aria-label", mode === "send" ? "Send message" : mode === "stop" ? "Stop " + whose : "Stopping " + whose);
     if ((button.dataset.mode || "send") === mode) return;
     button.dataset.mode = mode;
     button.classList.toggle("is-stop", mode !== "send");
     button.type = mode === "send" ? "submit" : "button";
     button.disabled = mode === "stopping";
-    button.setAttribute("aria-label", mode === "send" ? "Send message" : mode === "stop" ? "Stop the main session" : "Stopping the main session");
     if (mode === "send") {
       const icon = lineIcon(["M12 19V5M5 12l7-7 7 7"], 19);
       icon.setAttribute("stroke-width", "2.1");
@@ -9550,6 +9676,11 @@
         ...(Array.isArray(entry.activity) && entry.activity.length ? { activity: entry.activity } : {}),
         ...(entry.activityMore ? { activityMore: entry.activityMore } : {}),
         ...(entry.liveStatus && entry.status === "pending" ? { liveStatus: true } : {}),
+        // Waiting behind the member's turn before it: "Queued", and its
+        // "Working for …" starts once its own turn does (startedAt), as on
+        // the desktop.
+        ...(entry.queued && entry.status === "pending" ? { queued: true } : {}),
+        ...(typeof entry.startedAt === "string" && entry.startedAt ? { startedAt: entry.startedAt } : {}),
         // A member's "@x is running…" row is still its turn: the sessions
         // view stops it by its run like any running reply.
         ...(isScaffoldingEntry(entry) && entry.participantLabel && entry.participantId && entry.runId ? { memberTurn: true } : {}),
@@ -9643,7 +9774,7 @@
     const finalHeading = sessionMember ? sessionsMemberName(sessionMember) : accordScreen ? "Accord" : openThread ? "Thread" : activeChat?.title || "AccordAgents";
     if (title && title.textContent !== finalHeading) title.textContent = finalHeading;
     renderThreadHeader(openThread, sessionMember, Boolean(accordScreen));
-    syncComposerStop(sessions && !sessionMember && !accordScreen ? sessions : undefined);
+    syncComposerStop(sessions && !accordScreen && !readOnlyScreen ? sessions : undefined, sessionMember ? sessionMember.id : undefined);
     renderChatViewSwitch(activeId, activeChat, Boolean(openThread || sessionMember || accordScreen));
     renderMembersButton(activeId, activeChat);
     renderMembersSheetIfOpen(activeChat);
@@ -9999,6 +10130,8 @@
       activity: sessionsView && activitySignature(entry)
         ? activitySignature(entry) + (openWorkedFolds.has(entry.rowKey || entry.id) ? ":open" : "") : undefined,
       liveStatus: sessionsView && entry.liveStatus ? true : undefined,
+      queued: sessionsView && entry.queued ? true : undefined,
+      startedAt: sessionsView ? entry.startedAt : undefined,
       sessions: sessionsView ? sessionsSpecialSignature(entry) : undefined,
       avatar: entry.author === "agent" && entry.identified !== false && !sessionsView ? avatarSignature(rowAvatar(entry)) : undefined,
       identified: entry.identified,
@@ -10125,8 +10258,9 @@
   }
 
   function messageStatusLabel(entry) {
-    // A running reply of the sessions view says "Working for …" instead.
-    if (isSessionsRunningEntry(entry)) return "";
+    // A running reply of the sessions view says "Working for …" instead;
+    // one still waiting behind the member's turn before it, "Queued".
+    if (isSessionsRunningEntry(entry)) return entry.queued ? "Queued" : "";
     // A refused message of the User's says why; one not sent yet is faded
     // and shows its time like any other.
     if (entry.author === "you" && entry.mark) return entry.mark;
@@ -10281,11 +10415,21 @@
   function syncMessageStopButton(meta, entry) {
     let button = meta.querySelector(".message-stop");
     // The sessions view's composer (and a member session's head) stops a
-    // running reply: the reply itself has no Stop, as in T3 Code.
-    const visible = isCancellableMobileRow(entry) && !isSessionsRunningEntry(entry);
+    // running reply: the reply itself has no Stop, as in T3 Code. A reply
+    // still queued is taken back from its own row (a small ×), as on the
+    // desktop.
+    // A queued member's turn is still "@x is running…" text: its run is what
+    // is taken back, as the sessions view stops any member's turn.
+    const queuedInSessions = isSessionsRunningEntry(entry) && entry.queued === true && Boolean(entry.runId) &&
+      (entry.cancellable !== false || entry.memberTurn === true);
+    const visible = queuedInSessions || (isCancellableMobileRow(entry) && !isSessionsRunningEntry(entry));
     if (!visible) {
       button?.remove();
       return;
+    }
+    if (button && button.classList.contains("is-queued-cancel") !== queuedInSessions) {
+      button.remove();
+      button = null;
     }
     if (!button) {
       button = document.createElement("button");
@@ -10299,15 +10443,22 @@
           return;
         }
         button.disabled = true;
-        button.textContent = "Stopping…";
+        if (!button.classList.contains("is-queued-cancel")) button.textContent = "Stopping…";
         void stopRunFromPhone(targetRunId, undefined, { messageId: button.dataset.turnMessageId, participantId: button.dataset.participantId });
       });
+      if (queuedInSessions) button.classList.add("is-queued-cancel");
       meta.append(button);
     }
     button.dataset.runId = entry.runId;
     button.dataset.turnMessageId = entry.sourceMessageId || "";
     button.dataset.participantId = entry.participantId || "";
     button.disabled = entry.stopRequested === true;
+    if (queuedInSessions) {
+      button.textContent = "\u00d7";
+      button.setAttribute("aria-label", "Cancel this queued reply");
+      button.title = "Cancel";
+      return;
+    }
     button.textContent = entry.stopRequested ? "Stopping…" : "Stop";
     button.setAttribute("aria-label", "Stop response from " + rowHandleText(entry));
   }
@@ -11516,7 +11667,7 @@
     const outcome = card.outcome || "Answered";
     const when = card.decidedAt ? formatClockTime(card.decidedAt) : "";
     const row = cardRowElement("article", lineIcon(CHOICE_ROW_PATHS, 14), card.title || "Choice",
-      [card.requesterLabel, outcome + (when ? " " + when : "")].filter(Boolean).join(" · "), false);
+      [cardRequesterLabel(card), outcome + (when ? " " + when : "")].filter(Boolean).join(" · "), false);
     row.classList.add("control-card-answered");
     row.querySelector(".card-row-outcome").title = outcome;
     row.dataset.cardId = card.id;
@@ -11539,12 +11690,7 @@
     // Headed as the live card is, now that a permission folds as well.
     title.textContent = card.title || (card.kind === "permission" ? "Permission request" : "Choice");
     head.append(title);
-    if (card.requesterLabel || card.machineName) {
-      const who = document.createElement("span");
-      who.className = "control-card-who";
-      who.textContent = [card.requesterLabel, card.machineName].filter(Boolean).join(" · ");
-      head.append(who);
-    }
+    appendCardWho(head, card);
     wrap.append(head);
     if (card.summary) {
       const summary = document.createElement("p");
@@ -12587,7 +12733,9 @@
     const head = document.createElement("div");
     head.className = "sessions-working-head";
     head.setAttribute("role", "status");
-    head.append(document.createTextNode("Working for "), sessionsElapsedElement(entry.createdAt || nowIso()));
+    // From the turn's own start (a machine's run, once it started), not from
+    // when the reply was queued, as on the desktop.
+    head.append(document.createTextNode("Working for "), sessionsElapsedElement(entry.startedAt || entry.createdAt || nowIso()));
     wrap.append(head);
     const status = sessionsRunningStatus(entry);
     if (Array.isArray(entry.activity) && entry.activity.length) wrap.append(sessionsActivityElement(entry, true));
@@ -12599,11 +12747,12 @@
    *  its meta while it runs, redrawn when its steps change, gone once done. */
   function syncSessionsWorking(copy, meta, entry) {
     const existing = Array.from(copy.children).find(function (child) { return child.classList.contains("sessions-working"); });
-    if (!isSessionsRunningEntry(entry)) {
+    // Queued: its meta says so; it works for nothing yet.
+    if (!isSessionsRunningEntry(entry) || entry.queued) {
       existing?.remove();
       return;
     }
-    const signature = (entry.createdAt || "") + "|" + activitySignature(entry) + "|" + sessionsRunningStatus(entry);
+    const signature = (entry.startedAt || entry.createdAt || "") + "|" + activitySignature(entry) + "|" + sessionsRunningStatus(entry);
     let node = existing;
     if (!node || node.dataset.workingSignature !== signature) {
       node = sessionsWorkingElement(entry);
@@ -14391,13 +14540,24 @@
       if (sendButton) {
         sendButton.addEventListener("pointerup", function (event) {
           event.preventDefault();
-          // Nothing written while the main session runs: Stop, not Send.
+          // Nothing written while the session runs: Stop, not Send.
           if (sendButton.dataset.mode === "stop" && composerStopState) {
-            void stopMembersFromPhone([composerStopState.mainId]);
+            void stopMembersFromPhone(composerStopIds.slice());
             return;
           }
           if (sendButton.dataset.mode === "stopping") return;
           void sendComposer();
+        });
+      }
+      // Stop beside Send: the run stops, what is written stays to be sent.
+      const sideStop = document.getElementById("composer-stop-button");
+      if (sideStop) {
+        keepFieldFocusedOnTap(sideStop);
+        sideStop.addEventListener("click", function (event) {
+          event.preventDefault();
+          if (sideStop.disabled || !composerStopState || composerStopIds.length === 0) return;
+          sideStop.disabled = true;
+          void stopMembersFromPhone(composerStopIds.slice());
         });
       }
       form.addEventListener("submit", function (event) {
